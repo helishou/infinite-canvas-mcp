@@ -2,6 +2,7 @@
 
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { backendConnection } from "@/lib/backend-connection";
+import { coalesceInFlightRequest } from "@/lib/in-flight-request";
 import { nanoid } from "nanoid";
 import type { CanvasGenerationCommand, CanvasGenerationStartResult, CanvasLoopPrepare } from "@basketikun/canvas-agent/generation-contract";
 import { CANVAS_GENERATION_PATH, CANVAS_LOOP_PREPARE_PATH, CANVAS_TASKS_PATH, canvasTaskActionPath, canvasTaskPath, h3ConfirmationPath } from "@basketikun/canvas-agent/generation-api";
@@ -66,6 +67,11 @@ export async function request<T = unknown>(method: string, path: string, body?: 
         throw new BackendApiError(`Backend ${method} ${path} failed: HTTP ${res.status} ${extra}`.trim(), res.status, data && typeof data === "object" ? data as Record<string, unknown> : {});
     }
     return data;
+}
+
+function sharedGet<T>(path: string): Promise<T> {
+    const key = `${getBackendUrl()}\u0000${getBackendTokenShared()}\u0000GET\u0000${path}`;
+    return coalesceInFlightRequest(key, () => request<T>("GET", path));
 }
 
 export type BackendRuntimeTask = {
@@ -247,6 +253,9 @@ export type ApprovedSharedAsset = { id: string; assetId: string; dramaId: string
 export type SharedAssetUpdate = { id: string; assetId: string; approvedId: string; status: string; error?: string };
 export function fetchProductionSharedAssets(owner: ProductionTarget) { return request<{ ok: boolean; assets: ApprovedSharedAsset[]; versions: ApprovedSharedAsset[]; updates: SharedAssetUpdate[] }>("GET", `${productionPath(owner)}/shared-assets`); }
 export function adoptProductionSharedAsset(owner: ProductionTarget, input: { assetId: string; approvedId: string; expectedRevision: number; operationId: string }) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(owner)}/shared-assets/adopt`, input); }
+export type SharedAssetPromotionPreview = { episodeId: string; episodeRevision: number; publishedVersion: number; sourceHash: string; sourceCanvasId: string; sourceCanvasRevision: number; sourceNodeId: string; assetId: string; assetName: string; storageKey: string; sha256: string; evidence: string; sourceGenerationTaskId: string; dramaId: string; sharedCanvasId: string | null; sharedCanvasRevision: number | null; targetNodeId: string; approvedId: string | null; eligible: true };
+export function previewProductionSharedAssetPromotion(owner: ProductionTarget, assetId: string, expectedRevision: number) { return request<{ ok: boolean; preview: SharedAssetPromotionPreview; mediaSubmitted: false }>("POST", `${productionPath(owner)}/shared-assets/promotions/preview`, { assetId, expectedRevision }); }
+export function promoteExistingProductionSharedAsset(owner: ProductionTarget, input: { assetId: string; expectedRevision: number; expectedSourceCanvasRevision: number; expectedSharedCanvasRevision: number | null; operationId: string }) { return request<{ ok: boolean; promotion: { approvedId: string; canvasId: string; nodeId: string; replayed: boolean }; mediaSubmitted: false }>("POST", `${productionPath(owner)}/shared-assets/promotions`, input); }
 export function retryProductionSharedUpdate(owner: ProductionTarget, id: string, expectedRevision: number) { return request("POST", `${productionPath(owner)}/shared-assets/updates/${encodeURIComponent(id)}/retry`, { expectedRevision }); }
 const productionPath = (target: ProductionTarget) => typeof target === "string"
     ? `/drama/episodes/${encodeURIComponent(target)}/production`
@@ -264,8 +273,8 @@ export type ProductionReadinessTarget = { id: string; targetId: string; kind: "a
 export type ProductionPresentation = { key: string; workId: string; owner: { kind: "canvas" | "episode"; id: string }; aliases?: string[]; workspace: "overview" | "story" | "assets" | "shots" | "production" | "advanced"; action: "author" | "compile" | "produce" | "review" | "deliver" | "blocked"; targetKind?: string; targetId?: string; canvasId?: string; nodeId?: string; segmentId?: string; runId?: string; taskId?: string; status: "ready" | "working" | "needs_review" | "blocked" | "complete"; reason?: string };
 export type ProductionReadiness = { revision: number; publishedVersion: number; source: "draft" | "published"; targets: ProductionReadinessTarget[]; modules: Record<string, unknown>; unresolved: string[]; nextAction: string; presentation?: ProductionPresentation };
 export type ProductionBatch = { runId: string; episodeId: string; version: number; sourceRevision: number; idempotencyKey: string; status: string; targets: string[]; plan: NonNullable<EpisodeProduction["impact"]>; engine: Record<string, unknown> | null; settings: Record<string, unknown>; submitted: Array<{ kind: "image" | "h3"; id: string; taskId: string; projectId?: string; nodeId?: string; segmentId?: string; status?: "running" | "succeeded" | "failed" }>; error: string | null; pauseRequested: boolean; createdAt: string; updatedAt: string };
-export function fetchProductionReadiness(target: ProductionTarget, options?: { runId?: string }) { return request<{ ok: boolean; readiness: ProductionReadiness }>("GET", `${productionPath(target)}/readiness${options?.runId ? `?runId=${encodeURIComponent(options.runId)}` : ""}`); }
-export function fetchProductionBatches(target: ProductionTarget) { return request<{ ok: boolean; runs: ProductionBatch[] }>("GET", `${productionPath(target)}/batches`); }
+export function fetchProductionReadiness(target: ProductionTarget, options?: { runId?: string }) { return sharedGet<{ ok: boolean; readiness: ProductionReadiness }>(`${productionPath(target)}/readiness${options?.runId ? `?runId=${encodeURIComponent(options.runId)}` : ""}`); }
+export function fetchProductionBatches(target: ProductionTarget) { return sharedGet<{ ok: boolean; runs: ProductionBatch[] }>(`${productionPath(target)}/batches`); }
 export function startProductionRun(target: ProductionTarget, input: { runId: string; idempotencyKey: string; workId?: string; expectedRevision: number; version: number; targets: string[]; scope?: "selected" | "all_ready" }) { return request<{ ok: boolean; run: ProductionBatch }>("POST", `${productionPath(target)}/runs`, input); }
 export function fetchProductionBatch(target: ProductionTarget, runId: string) { return request<{ ok: boolean; run: ProductionBatch | null }>("GET", `${productionPath(target)}/batches/${encodeURIComponent(runId)}`); }
 export function pauseProductionBatch(target: ProductionTarget, runId: string) { return request<{ ok: boolean; run: ProductionBatch }>("POST", `${productionPath(target)}/batches/${encodeURIComponent(runId)}/pause`, {}); }

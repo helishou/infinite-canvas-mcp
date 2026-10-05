@@ -25,6 +25,8 @@ const episode = { id: 'ep', title: '第一集', episodeNumber: 1, canvasId: 'lin
 projects.push({ id: 'retry', title: '重试画布', nodes: [], connections: [], updatedAt: '2026-10-01T00:00:00Z' });
 const records = new Map(); const requests = []; const turnRequests = []; const runStarts = []; const runRecords = new Map(); let creationCount = 0; let loseCreationResponse = true; let loseRunStartResponse = true; let failRead = true;
 let recoveredTurnFixture = "";
+let runtimeStateFixture;
+let runtimeStateUnavailable = false;
 const record = id => {
     const owner = id === 'linked' ? 'ep' : id;
     if (!records.has(owner)) records.set(owner, { episodeId: owner, revision: 0, publishedVersion: 0, published: null, updatedAt: '', draft: { director: undefined, scenes: [], shots: [], keyframes: {}, keyframeReviews: {}, clipGroups: [], settings: { mode: 'manual', imageModel: '', h3Model: '', imageModels: {}, h3Models: {} }, legacyImports: [] } });
@@ -59,6 +61,10 @@ try {
         if (method === 'OPTIONS') return route.fulfill({ status: 204, headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': '*' } });
         requests.push({ pathname, method }); let data = { ok: true };
         if (pathname === '/agent/codex/turn' && method === 'POST') { turnRequests.push(request.postDataJSON()); data = { ok: true, threadId: 'workbench-thread' }; }
+        else if (pathname === '/agent/codex/state') {
+            if (runtimeStateUnavailable) return route.fulfill({ status: 503, json: { error: 'fixture state unavailable' }, headers: { 'access-control-allow-origin': '*' } });
+            data = { ok: true, ...(runtimeStateFixture ? { runtime: runtimeStateFixture } : {}) };
+        }
         else if (pathname === '/agent/codex/skills') data = { ok: true, data: [
             { name: 'acheng-director', description: 'Personal Acheng Director', path: 'C:/Users/wxy/.codex/skills/acheng-director/SKILL.md', scope: 'user', enabled: true, managed: true },
             { name: 'canvas-video-production-sop', description: 'Canvas production adapter', path: 'E:/workspace/.agents/skills/canvas-video-production-sop/SKILL.md', scope: 'repo', enabled: true, managed: true },
@@ -129,6 +135,82 @@ try {
         else if (/\/canvas\/projects\/[^/]+$/.test(pathname)) data.project = projects.find(p => p.id === decodeURIComponent(pathname.split('/')[3]));
         return route.fulfill({ json: data, headers: { 'access-control-allow-origin': '*' } });
     });
+    const verifyRuntimeSync = async () => {
+        await page.goto(`http://127.0.0.1:${testPort}/tests/director-navigation.html?start=%2Fcanvas%2Fstandalone`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.getByRole('heading', { name: '独立角色制作', exact: true }).waitFor();
+        await page.evaluate(async () => (await import('/src/stores/use-agent-store.ts')).useAgentStore.setState({ enabled: true, connected: false, url: 'http://127.0.0.1:17370/agent', token: 'fixture' }));
+        await page.waitForFunction(async () => Boolean(window.__directorTestEventSource) && (await import('/src/stores/use-agent-store.ts')).useAgentStore.getState().connected);
+    recoveredTurnFixture = 'lost-completion';
+    await page.evaluate(async () => {
+        const { useAgentStore } = await import('/src/stores/use-agent-store.ts');
+        useAgentStore.setState({ activeThreadId: 'workbench-thread', activeTurnId: 'lost-completion', waiting: true, sending: false, connected: true });
+        window.dispatchEvent(new Event('focus'));
+    });
+    await page.waitForFunction(async () => { const state = (await import('/src/stores/use-agent-store.ts')).useAgentStore.getState(); return !state.waiting && !state.activeTurnId && state.messages.some(item => item.title === '本轮已中断'); });
+    recoveredTurnFixture = '';
+    await page.evaluate(async () => {
+        const { useAgentStore } = await import('/src/stores/use-agent-store.ts');
+        useAgentStore.setState({ activeThreadId: 'workbench-thread', activeTurnId: 'still-running', waiting: true, sending: false });
+    });
+    const liveHistory = page.waitForResponse(response => new URL(response.url()).pathname === '/agent/codex/threads/workbench-thread');
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await liveHistory;
+    assert.equal(await page.evaluate(async () => (await import('/src/stores/use-agent-store.ts')).useAgentStore.getState().waiting), true, 'history without the active turn must not clear a real running turn');
+    await page.evaluate(async () => (await import('/src/stores/use-agent-store.ts')).useAgentStore.setState({ activeTurnId: '', waiting: false }));
+    const runtime = await page.evaluate(async () => {
+        const state = (await import('/src/stores/use-agent-store.ts')).useAgentStore.getState();
+        return { instanceId: 'runtime-fixture', revision: 10, heartbeatIntervalMs: 15000, conversation: { ...state.conversation, threadId: 'workbench-thread', status: 'running', revision: state.conversation.revision + 1 }, codex: { busy: true, threadId: 'workbench-thread', turnId: 'heartbeat-turn' }, pendingApprovals: [] };
+    });
+    const pushRuntime = async (type, snapshot) => page.evaluate(({ type, snapshot }) => window.__directorTestEventSource.dispatchEvent({ type, data: JSON.stringify(type === 'ping' ? { time: Date.now(), runtime: snapshot } : snapshot) }), { type, snapshot });
+    await pushRuntime('runtime_state', runtime);
+    await page.waitForFunction(async () => (await import('/src/stores/use-agent-store.ts')).useAgentStore.getState().activeTurnId === 'heartbeat-turn');
+    recoveredTurnFixture = 'heartbeat-turn';
+    const terminal = { ...runtime, revision: 11, conversation: { ...runtime.conversation, revision: runtime.conversation.revision + 1, status: 'ready' }, codex: { ...runtime.codex, busy: false } };
+    await pushRuntime('ping', terminal); // Simulate a lost one-off completion event with the page continuously visible.
+    await page.waitForFunction(async () => !(await import('/src/stores/use-agent-store.ts')).useAgentStore.getState().waiting);
+    const next = { ...runtime, revision: 12, conversation: { ...runtime.conversation, revision: terminal.conversation.revision + 1 }, codex: { ...runtime.codex, turnId: 'next-turn' } };
+    await pushRuntime('runtime_state', next);
+    await page.waitForFunction(async () => (await import('/src/stores/use-agent-store.ts')).useAgentStore.getState().activeTurnId === 'next-turn');
+    await pushRuntime('runtime_state', { ...terminal, revision: 13 });
+    await pushRuntime('codex_state', terminal.codex);
+    assert.equal(await page.evaluate(async () => (await import('/src/stores/use-agent-store.ts')).useAgentStore.getState().activeTurnId), 'next-turn', 'late old terminal events cannot stop the new turn');
+    recoveredTurnFixture = 'next-turn';
+    runtimeStateFixture = { ...terminal, revision: 13, conversation: { ...terminal.conversation, revision: next.conversation.revision + 1 }, codex: { ...next.codex, busy: false } };
+    const reconciled = page.waitForResponse(response => new URL(response.url()).pathname === '/agent/codex/state');
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await reconciled;
+    await page.waitForFunction(async () => !(await import('/src/stores/use-agent-store.ts')).useAgentStore.getState().waiting);
+    const disconnectedStream = { ...next, revision: 14, conversation: { ...next.conversation, revision: runtimeStateFixture.conversation.revision + 1 }, codex: { ...next.codex, turnId: 'http-only-turn' } };
+    await pushRuntime('runtime_state', disconnectedStream);
+    await page.waitForFunction(async () => (await import('/src/stores/use-agent-store.ts')).useAgentStore.getState().activeTurnId === 'http-only-turn');
+    recoveredTurnFixture = 'http-only-turn';
+    runtimeStateFixture = { ...disconnectedStream, revision: 15, conversation: { ...disconnectedStream.conversation, revision: disconnectedStream.conversation.revision + 1, status: 'ready' }, codex: { ...disconnectedStream.codex, busy: false } };
+    await page.waitForFunction(async () => !(await import('/src/stores/use-agent-store.ts')).useAgentStore.getState().waiting, undefined, { timeout: 20000 }); // No focus or stream event: the advertised cadence must reconcile it.
+    const unverified = { ...disconnectedStream, revision: 16, conversation: { ...disconnectedStream.conversation, revision: runtimeStateFixture.conversation.revision + 1 }, codex: { ...disconnectedStream.codex, turnId: 'unverified-turn' } };
+    await pushRuntime('runtime_state', unverified);
+    await page.waitForFunction(async () => (await import('/src/stores/use-agent-store.ts')).useAgentStore.getState().activeTurnId === 'unverified-turn');
+    runtimeStateUnavailable = true;
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await page.waitForFunction(async () => Boolean((await import('/src/stores/use-agent-store.ts')).useAgentStore.getState().connectError));
+    assert.equal(await page.evaluate(async () => (await import('/src/stores/use-agent-store.ts')).useAgentStore.getState().waiting), true, 'a failed state check cannot fabricate completion');
+    runtimeStateUnavailable = false;
+    recoveredTurnFixture = 'unverified-turn';
+    runtimeStateFixture = { ...unverified, revision: 17, conversation: { ...unverified.conversation, revision: unverified.conversation.revision + 1, status: 'ready' }, codex: { ...unverified.codex, busy: false } };
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await page.waitForFunction(async () => !(await import('/src/stores/use-agent-store.ts')).useAgentStore.getState().waiting);
+    const beforeRestart = { ...unverified, revision: 18, conversation: { ...unverified.conversation, revision: runtimeStateFixture.conversation.revision + 1 }, codex: { ...unverified.codex, turnId: 'before-restart' } };
+    await pushRuntime('runtime_state', beforeRestart);
+    await page.waitForFunction(async () => (await import('/src/stores/use-agent-store.ts')).useAgentStore.getState().activeTurnId === 'before-restart');
+    runtimeStateFixture = { ...beforeRestart, instanceId: 'restarted-runtime', revision: 1, conversation: { ...beforeRestart.conversation, revision: 1, status: 'ready' }, codex: { ...beforeRestart.codex, busy: false, turnId: '' } };
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await page.waitForFunction(async () => !(await import('/src/stores/use-agent-store.ts')).useAgentStore.getState().waiting);
+    await pushRuntime('runtime_state', { ...beforeRestart, revision: 999 });
+    assert.equal(await page.evaluate(async () => (await import('/src/stores/use-agent-store.ts')).useAgentStore.getState().waiting), false, 'old process snapshots cannot resurrect a turn after restart');
+    };
+    if (process.argv.includes('--runtime-state')) {
+        await verifyRuntimeSync(); assert.deepEqual(errors, []);
+        console.log(JSON.stringify({ passed: true, scope: 'authoritative runtime snapshot, lost completion, stale old turn, heartbeat and active HTTP reconciliation, failed checks preserve running state; no model requests' }));
+    } else {
     await page.goto(`http://127.0.0.1:${testPort}/tests/director-navigation.html?start=%2Fproduction`, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.getByRole('heading', { name: '制作工作室', exact: true }).waitFor();
     assert.ok(await page.getByRole('link', { name: '制作', exact: true }).count());
@@ -368,23 +450,8 @@ try {
     await returnToProduction.click();
     await page.waitForFunction(() => document.querySelector('output[aria-label="location"]')?.textContent?.includes('/canvas/standalone?') && document.querySelector('output[aria-label="location"]')?.textContent?.includes('workspace=story'));
     assert.equal(await page.locator('#canvas-director-dialog').isVisible(), false, 'resuming focus does not open the conversation');
-    recoveredTurnFixture = 'lost-completion';
-    await page.evaluate(async () => {
-        const { useAgentStore } = await import('/src/stores/use-agent-store.ts');
-        useAgentStore.setState({ activeThreadId: 'workbench-thread', activeTurnId: 'lost-completion', waiting: true, sending: false, connected: true });
-        window.dispatchEvent(new Event('focus'));
-    });
-    await page.waitForFunction(async () => { const state = (await import('/src/stores/use-agent-store.ts')).useAgentStore.getState(); return !state.waiting && !state.activeTurnId && state.messages.some(item => item.title === '本轮已中断'); });
-    recoveredTurnFixture = '';
-    await page.evaluate(async () => {
-        const { useAgentStore } = await import('/src/stores/use-agent-store.ts');
-        useAgentStore.setState({ activeThreadId: 'workbench-thread', activeTurnId: 'still-running', waiting: true, sending: false });
-    });
-    const liveHistory = page.waitForResponse(response => new URL(response.url()).pathname === '/agent/codex/threads/workbench-thread');
-    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
-    await liveHistory;
-    assert.equal(await page.evaluate(async () => (await import('/src/stores/use-agent-store.ts')).useAgentStore.getState().waiting), true, 'history without the active turn must not clear a real running turn');
-    await page.evaluate(async () => (await import('/src/stores/use-agent-store.ts')).useAgentStore.setState({ activeTurnId: '', waiting: false }));
+    await verifyRuntimeSync();
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ passed: true, creationCount, scope: 'unified production entry and object views, creative entry handoff, legacy routes, independent canvas, episode alias, shared draft, canvas shortcut, new production, Agent disconnected draft protection, runId receipt recovery, active-target duplicate prevention, follow presentation, manual pause and return, mobile navigation, no media generation' }));
-} catch (error) { console.error("Production requests:", JSON.stringify(requests.filter(item => /production/.test(item.pathname)))); console.error("Rendered page:", await page?.locator("body").innerText()); throw error; } finally { await browser?.close(); await server.close(); if (path.dirname(cache) === os.tmpdir() && path.basename(cache).startsWith('director-entry-')) fs.rmSync(cache, { recursive: true, force: true }); }
+    }
+} catch (error) { console.error("Agent state:", await page?.evaluate(async () => { const s = (await import('/src/stores/use-agent-store.ts')).useAgentStore.getState(); return { url: s.url, enabled: s.enabled, connected: s.connected, waiting: s.waiting, activeTurnId: s.activeTurnId, conversation: s.conversation, error: s.connectError }; })); console.error("Agent requests:", JSON.stringify(requests.filter(item => /codex/.test(item.pathname)).slice(-20))); console.error("Production requests:", JSON.stringify(requests.filter(item => /production/.test(item.pathname)))); console.error("Rendered page:", await page?.locator("body").innerText()); throw error; } finally { await browser?.close(); await server.close(); if (path.dirname(cache) === os.tmpdir() && path.basename(cache).startsWith('director-entry-')) fs.rmSync(cache, { recursive: true, force: true }); }

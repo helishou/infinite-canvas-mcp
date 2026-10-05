@@ -817,7 +817,7 @@ export function diffCanvasProject(base: CanvasProject, next: CanvasProject): Arr
         const previousSegments = isH3 && Array.isArray(previousMetadata.segments) ? previousMetadata.segments as Array<Record<string, unknown>> : [];
         const nextSegments = isH3 && Array.isArray(nextMetadata.segments) ? nextMetadata.segments as Array<Record<string, unknown>> : [];
         const backendTaskActive = !isH3 && Boolean(previousMetadata.runtimeTaskId || nextMetadata.runtimeTaskId);
-        const metadataKeysToSkip = new Set<string>();
+        const metadataKeysToSkip = new Set<string>(["productionImageInput"]);
         if (isH3) metadataKeysToSkip.add("segments");
         for (const key of new Set([...Object.keys(previousMetadata), ...Object.keys(nextMetadata)])) {
             if (metadataKeysToSkip.has(key)) continue;

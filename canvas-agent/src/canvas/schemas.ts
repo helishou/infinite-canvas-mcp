@@ -1,3 +1,5 @@
+import { nodePatchSchema } from "./edit-validation.js";
+export { validateNodeUpdate, validateH3Edit, validateH3Metadata } from "./edit-validation.js";
 import { z } from "zod";
 import { productionWorkspaceSchemas, productionWorkspaceDescriptions, productionWorkspaceToolNames } from "../drama/production-workspace-contract.js";
 import { productionEditSchema, productionPreflightSchema, productionContractQuerySchema, productionCompileSchema, productionApplyCompilationSchema, productionReadSchema } from "../drama/production-contract.js";
@@ -102,6 +104,7 @@ export const toolNames = [
   "production_get_contract",
   ...productionWorkspaceToolNames,
   "production_compile",
+  "production_get_compilation",
   "production_apply_compilation",
   "production_diagnose_bindings",
   "canvas_preflight_production",
@@ -162,14 +165,15 @@ export const canvasOpSchema = z.discriminatedUnion("type", [
     .object({
       type: z.literal("update_node"),
       id: z.string().describe("目标节点 ID，必填"),
-      patch: recordSchema
+      patch: nodePatchSchema
         .optional()
         .describe("节点字段子集，如 { x: 300, y: 200, title: '新标题' }"),
+      metadataDelete: z.array(z.string().min(1)).optional(),
       metadata: recordSchema
         .optional()
-        .describe("整段覆盖节点 metadata；只想改部分字段请用 patch"),
+        .describe("按字段合并 metadata；节点基础字段放 patch，插件字段放 metadata"),
     })
-    .passthrough(),
+    .strict(),
   z
     .object({
       type: z.literal("move_h3_segment"),
@@ -532,13 +536,13 @@ export const toolInputSchemas = {
   }),
   canvas_update_node: canvasProjectSchema.extend({
     id: z.string().describe("目标节点 ID，必填"),
-    patch: recordSchema
+    patch: nodePatchSchema
       .optional()
       .describe("节点字段子集，如 { x: 300, y: 200, title: '新标题' }"),
     metadata: recordSchema
       .optional()
-      .describe("整段覆盖节点 metadata；只想改部分字段请用 patch"),
-  }),
+      .describe("按字段合并 metadata；节点基础字段放 patch，插件字段放 metadata"),
+  }).strict(),
   canvas_update_node_text: canvasProjectSchema.extend({
     id: z.string().describe("文本节点 ID，必填"),
     text: z.string().describe("新的文本内容，必填"),
@@ -836,7 +840,8 @@ export const toolInputSchemas = {
   drama_get_production: productionReadSchema.extend({ episodeId: z.string().min(1) }),
   production_get_contract: productionContractQuerySchema,
   ...productionWorkspaceSchemas,
-  production_compile: productionCompileSchema.extend({ kind: z.enum(["canvas", "episode"]), id: z.string().min(1) }),
+  production_compile: productionCompileSchema.extend({ kind: z.enum(["canvas", "episode"]), id: z.string().min(1), operationId: z.string().min(1) }),
+  production_get_compilation: z.object({ kind: z.enum(["canvas", "episode"]), id: z.string().min(1), operationId: z.string().min(1), view: z.enum(["status", "targets", "diagnostics"]).default("status"), offset: z.number().int().nonnegative().default(0), pageSize: z.number().int().positive().optional() }).strict(),
   production_apply_compilation: productionApplyCompilationSchema.extend({ kind: z.enum(["canvas", "episode"]), id: z.string().min(1) }),
   production_diagnose_bindings: z.object({ kind: z.enum(["canvas", "episode"]), id: z.string().min(1) }),
   canvas_preflight_production: productionPreflightSchema.extend({ projectId: z.string().min(1) }),
@@ -844,8 +849,8 @@ export const toolInputSchemas = {
   canvas_get_production: productionReadSchema.extend({ projectId: z.string().min(1) }),
   drama_get_workflow_readiness: z.object({ episodeId: z.string().min(1) }),
   canvas_get_workflow_readiness: z.object({ projectId: z.string().min(1) }),
-  drama_start_production_run: z.object({ episodeId: z.string().min(1), runId: z.string().min(1), idempotencyKey: z.string().min(1), expectedRevision: z.number().int().min(0), version: z.number().int().min(1), targets: z.array(z.string().min(1)).min(1), scope: z.enum(["selected", "all_ready"]).optional().describe("selected 固定为明确目标；all_ready 授权按依赖扩展当前就绪范围并在审核后沿同一 runId 继续") }),
-  canvas_start_production_run: z.object({ projectId: z.string().min(1), runId: z.string().min(1), idempotencyKey: z.string().min(1), expectedRevision: z.number().int().min(0), version: z.number().int().min(1), targets: z.array(z.string().min(1)).min(1), scope: z.enum(["selected", "all_ready"]).optional().describe("selected 固定为明确目标；all_ready 授权按依赖扩展当前就绪范围并在审核后沿同一 runId 继续") }),
+  drama_start_production_run: z.object({ episodeId: z.string().min(1), runId: z.string().min(1), idempotencyKey: z.string().min(1), workId: z.string().min(1).optional(), expectedRevision: z.number().int().min(0), version: z.number().int().min(1), targets: z.array(z.string().min(1)).min(1), scope: z.enum(["selected", "all_ready"]).optional().describe("selected 固定为明确目标；all_ready 授权按依赖扩展当前就绪范围并在审核后沿同一 runId 继续") }),
+  canvas_start_production_run: z.object({ projectId: z.string().min(1), runId: z.string().min(1), idempotencyKey: z.string().min(1), workId: z.string().min(1).optional(), expectedRevision: z.number().int().min(0), version: z.number().int().min(1), targets: z.array(z.string().min(1)).min(1), scope: z.enum(["selected", "all_ready"]).optional().describe("selected 固定为明确目标；all_ready 授权按依赖扩展当前就绪范围并在审核后沿同一 runId 继续") }),
   drama_get_production_batch: z.object({ episodeId: z.string().min(1), runId: z.string().min(1) }),
   canvas_get_production_batch: z.object({ projectId: z.string().min(1), runId: z.string().min(1) }),
   drama_pause_production_run: z.object({ episodeId: z.string().min(1), runId: z.string().min(1) }),
@@ -915,7 +920,7 @@ export const toolDescriptions: Record<ToolName, string> = {
   canvas_set_generation_references:
     "替换指定生成节点的参考资源。会删除该节点现有的图片、视频、音频等参考输入，保留文本提示词输入，再按 referenceNodeIds 的顺序重新连接；适合第二次生成或重做分镜时清理旧参考图。例：{ nodeId: 'n-h3-1', referenceNodeIds: ['n-char-1', 'n-outfit-2', 'n-scene-1'] }",
   canvas_update_node:
-    "更新节点基础字段或 metadata；只想改部分字段用 patch，整段覆盖用 metadata。例：{ id: 'n1', patch: { title: '沈昭宁小传', x: 300 } }",
+    "更新节点基础字段用 patch，插件字段用 metadata；metadata 按字段合并。例：{ id: 'n1', patch: { title: '沈昭宁小传', x: 300 } }",
   canvas_update_node_text:
     "更新文本节点内容和标题。例：{ id: 'n-text-1', text: '新内容', title: '新标题（可选）' }",
   canvas_move_nodes:
@@ -976,16 +981,17 @@ export const toolDescriptions: Record<ToolName, string> = {
   drama_get_production: "默认读取制作摘要与版本；view=source 读取一个 snapshot 的完整源稿；view=artifacts 可用 targetIds 定向读取完整正文；view=full 返回原完整记录。",
   production_get_contract: "查询完整制作操作 schema、合法示例、前置条件和固定引擎源稿模板；指定 runtimeId 后不回退其他版本。",
   ...productionWorkspaceDescriptions,
-  production_compile: "由 Backend 对当前 revision 或完整候选稿运行制作对象固定 Acheng 编译器；冻结正文、参考哈希与回执，返回 preparedId 和逐目标诊断。只准备，不编辑、发布或生成。",
+  production_compile: "后台运行固定 Acheng 编译器；operationId 必填，立即返回持久短回执。通过 production_get_compilation 查询原 operationId，succeeded 后应用 preparedId。blocked/failed 按短诊断修改编译前源稿再重新编译，不读取或审核编译正文；超时不换 ID 重提。不编辑、发布或生成媒体。",
+  production_get_compilation: "按 owner 和原 operationId 查询后台编译状态及应用回执；默认仅返回短状态，诊断/目标列表需 view 和 pageSize。只读，不重跑编译。",
   production_apply_compilation: "用精确 preparedId 原子接入 Backend 编译产物；沿用冻结的 expectedRevision/operationId，重复调用恢复原回执，源稿或绑定冲突拒绝覆盖。保存草稿，不发布或生成。",
   production_diagnose_bindings: "只读核对源资产版本、草稿绑定、发布版本绑定、节点活动媒体、归档字节哈希与消费者；明确指出新旧版本或活动媒体不一致，不修改数据。",
-  canvas_preflight_production: "只读检查画布 edit/publish/generate 正式请求；返回错误路径、目标和版本，不提交编辑或生成。",
-  drama_preflight_production: "只读检查分集 edit/publish/generate 正式请求；返回错误路径、目标和版本，不提交编辑或生成。",
+  canvas_preflight_production: "只读检查画布 edit/publish/compile/generate 正式请求；返回全部已识别缺项、目标占用、版本和 nextActions，不提交编辑或生成。",
+  drama_preflight_production: "只读检查分集 edit/publish/compile/generate 正式请求；返回全部已识别缺项、目标占用、版本和 nextActions，不提交编辑或生成。",
   canvas_get_production: "默认读取制作摘要与版本；view=source 读取一个 snapshot 的完整源稿；view=artifacts 可用 targetIds 定向读取完整正文；view=full 返回原完整记录。",
   drama_get_workflow_readiness: "按 Acheng 目标读取分集制作的依赖就绪、缺项与下一步；无关模块的 partial 不会阻塞可执行目标。",
   canvas_get_workflow_readiness: "按 Acheng 目标读取画布制作的依赖就绪、缺项与下一步；无关模块的 partial 不会阻塞可执行目标。",
-  drama_start_production_run: "以稳定 runId/idempotencyKey 对指定已发布分集目标启动媒体生产；仅调用此工具才授权所选范围生成。",
-  canvas_start_production_run: "以稳定 runId/idempotencyKey 对指定已发布画布目标启动媒体生产；仅调用此工具才授权所选范围生成。",
+  drama_start_production_run: "以稳定 runId/idempotencyKey 对指定已发布分集目标启动媒体生产；仅调用此工具才授权所选范围生成。 自动预检未通过时返回 status=blocked、阻塞 runId/taskIds 和 nextActions，不提交任务；不可将暂停当作结束或换 runId 盲试。",
+  canvas_start_production_run: "以稳定 runId/idempotencyKey 对指定已发布画布目标启动媒体生产；仅调用此工具才授权所选范围生成。 自动预检未通过时返回 status=blocked、阻塞 runId/taskIds 和 nextActions，不提交任务；不可将暂停当作结束或换 runId 盲试。",
   drama_get_production_batch: "读取分集生产批次状态、固定引擎版本、范围与精确任务 ID。",
   canvas_get_production_batch: "读取画布生产批次状态、固定引擎版本、范围与精确任务 ID。",
   drama_pause_production_run: "暂停分集生产批次；已提交任务不会被重复提交。",

@@ -1,9 +1,12 @@
+import { buildProductionClip, clipInputHash, CLIP_PROJECTION_FIELDS } from "./clip-inputs.js";
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 import type { BackendDatabase } from "../db.js";
 import type { BackendEventBus } from "../events.js";
 import type { Stores } from "../stores/types.js";
 import type { EpisodeProductionService } from "./production.js";
 import { productionCanvasContext } from "./production-canvas.js";
+import { verifyImageInput } from "./image-inputs.js";
+import { productionImageInput } from "@basketikun/canvas-agent/reference-contract";
 
 export type NativeProductionTarget = {
     owner: { kind: "canvas" | "episode"; id: string }; version: number; sourceHash: string;
@@ -34,22 +37,36 @@ export class NativeProductionGeneration {
             kind = "segment"; targetId = selected.id;
         } else if (command.mode === "image") {
             const node = (this.db.getCanvasProject(command.projectId)?.nodes as Record<string, any>[] || []).find(node => node.id === command.nodeId);
-            const match = Object.entries(director.assets).find(([id, asset]) => asset.nodeId === command.nodeId && (!node?.metadata?.productionAssetId || node.metadata.productionAssetId === id));
+            const projected = productionImageInput(node);
+            const match = Object.entries(director.assets).find(([id, asset]) => (asset.nodeId === command.nodeId || projected?.targetId === id && projected.sourceNodeId === command.nodeId) && (!node?.metadata?.productionAssetId || node.metadata.productionAssetId === id));
             if (!match) return { command };
             if (match[1].sharedSource) throw new Error("共享引用只能在源资产画布编辑");
             const shotId = Object.entries(director.shotInputs).find(([, input]) => input.keyframeAssetId === match[0])?.[0];
             kind = shotId ? "keyframe" : "asset"; targetId = shotId || match[0]; targets = [{ targetId }];
             const artifact = current.published?.director?.artifacts.find(artifact => artifact.kind === "image" && artifact.targetId === match[0]);
-            if (current.published?.director?.assets[match[0]]?.nodeId !== command.nodeId) throw new Error("当前图像节点映射尚未发布");
+            const targetNodeId = match[1].nodeId!;
+            if (current.published?.director?.assets[match[0]]?.nodeId !== targetNodeId) throw new Error("当前图像节点映射尚未发布");
             if (!artifact || command.prompt !== artifact.prompt) throw new Error("节点提示词与正式图像产物不一致，请先编译并发布当前输入");
             const expected = artifact.references.map(ref => ref.storageKey);
-            if (command.references?.length && JSON.stringify(command.references.map(ref => ref.storageKey)) !== JSON.stringify(expected)) throw new Error("节点参考已变化，请重新编译正式图像输入");
-            command = { ...command, references: artifact.references.map(ref => ({ storageKey: ref.storageKey, sourceNodeId: ref.nodeId, role: ref.role, type: "image" as const })), params: { ...command.params, writeBackToTarget: true } };
+            if (command.references && JSON.stringify(command.references.map(ref => ref.storageKey)) !== JSON.stringify(expected)) throw new Error("节点参考已变化，请重新编译正式图像输入");
+            const input = verifyImageInput(this.db.getCanvasProject(command.projectId)!, current.published!.director!, artifact, targetNodeId);
+            command = { ...command, nodeId: targetNodeId, sourceNodeId: input.sourceNodeId,
+                references: input.references.map(ref => ({ storageKey: ref.storageKey, sourceNodeId: ref.nodeId, role: ref.role, type: "image" as const })), params: { ...command.params, productionImageInput: input, writeBackToTarget: true } };
         } else return { command };
         if (!current.published?.director || current.published.director.sourceHash !== director.sourceHash) throw new Error("请先发布当前制作输入");
         if (kind === "segment" && targets.some(target => !current.published!.clipGroups.some(group => group.id === target.targetId && group.nodeId === command.nodeId && group.segmentId === target.segmentId))) throw new Error("当前 Clip 映射尚未发布");
         const artifactIds = kind === "keyframe" ? [director.shotInputs[targetId].keyframeAssetId!] : targets.map(target => target.targetId);
         service.validateExecution(owner.id, current.publishedVersion, artifactIds);
+        if (kind === "segment") {
+            const project = this.db.getCanvasProject(command.projectId!)!;
+            const node = (project.nodes as Record<string, any>[] || []).find(node => node.id === command.nodeId);
+            for (const target of targets) {
+                const group = current.published!.clipGroups.find(group => group.id === target.targetId)!;
+                const clip = (node?.metadata?.segments || []).find((clip: any) => clip.id === target.segmentId);
+                const expected = buildProductionClip(project, current.published!, group, target.segmentId!);
+                if (!clip || clipInputHash(clip) !== clipInputHash(expected) || clip.productionClipProjection?.inputHash !== clipInputHash(clip)) throw new Error(`CLIP_INPUT_MISMATCH: ${target.targetId} 的引用或编译投影不一致 (${CLIP_PROJECTION_FIELDS.filter(key => JSON.stringify(clip?.[key] ?? null) !== JSON.stringify(expected[key] ?? null)).join(",") || "projectionHash"})，请准备当前正式目标后再生成`);
+            }
+        }
         return { command, context: { owner, version: current.publishedVersion, sourceHash: director.sourceHash, projectId: command.projectId!, nodeId: command.nodeId!, kind, targetId, targets } };
     }
     submitted(taskId: string, raw: unknown) {

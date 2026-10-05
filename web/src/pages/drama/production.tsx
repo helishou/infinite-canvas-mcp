@@ -24,7 +24,8 @@ import {
   fetchProductionReadiness, pauseProductionBatch, publishEpisodeProduction, restoreEpisodeProduction,
   resumeProductionBatch, startProductionRun, type DramaEpisode, type EpisodeProduction,
   type ProductionBatch, type ProductionReadiness, type ProductionTarget, type ProductionCanvasContext, ensureEpisodeCanvas,
-  prepareProductionTargets, arrangeProductionScene, adoptProductionSharedAsset,
+  prepareProductionTargets, arrangeProductionScene, adoptProductionSharedAsset, ensureSharedAssetCanvas, fetchProductionCanvasContext,
+  previewProductionSharedAssetPromotion, promoteExistingProductionSharedAsset,
   backendMediaUrl, startCanvasGeneration, fetchBackendTasks, type BackendRuntimeTask,
 } from "@/services/backend-api";
 import { DirectorPanel, type DirectorWorkspace, type AssetReview } from "./director-panel";
@@ -93,6 +94,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
   const { message, modal } = App.useApp();
   const [title, setTitle] = useState("");
   const [canvasId, setCanvasId] = useState(projectId);
+  const [productionContext, setProductionContext] = useState<ProductionCanvasContext | null>(null);
   const [episode, setEpisode] = useState<DramaEpisode | null>(null);
   const [canvasNodes, setCanvasNodes] = useState<Array<{ id: string; title?: string; type?: string; metadata?: Record<string, unknown> }>>([]);
   const [production, setProduction] = useState<EpisodeProduction | null>(null);
@@ -144,8 +146,12 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
 
   const load = useCallback(async (isActive: () => boolean = () => true, preserveBrief = false) => {
     const contextRequest = projectId
-      ? Promise.all([fetchBackendProject(projectId), fetchBackendCanvasDrama(projectId)]).then(([canvas, relation]) => ({ canvas: canvas.project, episode: relation.episode }))
-      : fetchBackendDramaEpisode(episodeId);
+      ? Promise.all([fetchBackendProject(projectId), fetchBackendCanvasDrama(projectId), fetchProductionCanvasContext(projectId)]).then(([canvas, relation, ownership]) => ({ canvas: canvas.project, episode: relation.episode, productionContext: ownership.context }))
+      : fetchBackendDramaEpisode(episodeId).then(result => {
+        if (!result.episode) throw new Error(t("director.loadFailed"));
+        const episode = result.episode;
+        return { ...result, productionContext: { role: "episode" as const, canvasId: episode.canvasId || "", episodeId: episode.id, dramaId: episode.dramaId, owner: { kind: "episode" as const, id: episode.id } } };
+      });
     const [context, prod, old, history, ready, runHistory] = await Promise.all([
       contextRequest, fetchEpisodeProduction(target), fetchEpisodeProductionLegacy(target), fetchEpisodeProductionVersions(target),
       fetchProductionReadiness(target), fetchProductionBatches(target),
@@ -155,6 +161,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
     const tasks = resolvedCanvasId && taskNodes.length ? (await fetchBackendTasks({ projectId: resolvedCanvasId, nodeIds: taskNodes })).tasks || [] : [];
     if (!isActive()) return null;
     setEpisode(context.episode || null);
+    setProductionContext(context.productionContext);
     setTitle(context.episode?.title || String(context.canvas?.title || ""));
     setCanvasId(projectId || context.episode?.canvasId || "");
     setCanvasNodes((context.canvas?.nodes || []) as Array<{ id: string; title?: string; type?: string; metadata?: Record<string, unknown> }>);
@@ -167,7 +174,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
     if (!preserveBrief) setBriefDraft(String(prod.production.draft.director?.source.brief || ""));
     setLoadError("");
     return context.episode?.id || (projectId ? `canvas:${projectId}` : episodeId);
-  }, [target, projectId, episodeId]);
+  }, [target, projectId, episodeId, t]);
 
   useEffect(() => {
     if (embedded && production) useProductionWorkspaceStore.getState().setSnapshot(owner!.id, production, readiness);
@@ -459,6 +466,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
     setProduction(currentProduction);
     const director = currentProduction.draft.director;
     if (!director) return message.error(t("director.workspace.engineUnavailable"));
+    const storyboardImageMode = currentProduction.draft.settings.storyboardImageMode;
     if (String(director.source.brief || "") !== requestedBrief) return message.error(t("director.workspace.briefSaveFailed"));
     const agent = useAgentStore.getState();
     if (!agent.enabled || !agent.connected || !["ready", "warning"].includes(agent.conversation.status)) {
@@ -490,6 +498,8 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
       `Backend 正式 revision：${currentProduction.revision}；已发布版本：${currentProduction.publishedVersion}`,
       `固定引擎：${director.engine.version} / ${director.engine.runtimeId} / commit ${director.engine.commit}`,
       `本次工作区：${scope.workspace}；调用模块：${selectedModules}`,
+      `分镜图模式：${storyboardImageMode || "尚未设置"}`,
+      "若本对象尚未开始镜头设计且分镜图模式尚未设置，先通过正式 workflow.pendingDecisions 询问用户生成分镜图或跳过图片、只保留文字分镜；将答复写入正式 settings.storyboardImageMode（generate/skip）后再继续。skip 时保留文字 Shot、Segment 和 H3 提示词，所有 shotInputs.keyframePolicy 设为 none，不登记、准备或生成关键帧图片；角色、场景、道具等其他资产仍按制作需要处理。",
       `内容交付模式：${director.workflow.contentDeliveryMode || "auto_file_batch"}；媒体生产模式：${director.workflow.mediaProductionMode || "per_item"}`,
       `选中目标：${targetObject ? `${targetObject.kind}:${targetObject.targetId}` : scope.targetId || "当前工作区缺项"}`,
       `当前就绪回执：${targetObject ? `${targetObject.status}；${targetObject.blockers.join("；")}` : readinessNow.nextAction}`,
@@ -730,6 +740,36 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
   }, [embedded, owner?.kind, owner?.id, production, canvasId, busy, draftKey, briefDraft, sourceDrafts, remoteRevision, pendingRunStart, batches, navigate, t]);
   const regroupSegment = async (segmentId: string, shotIds: string[], removeSegmentIds: string[]) => edit([{ type: "set_director_segment_group", segmentId, shotIds, removeSegmentIds }]);
   const patchSource = async (entity: "style" | "scene" | "asset" | "shot" | "segment", id: string | undefined, patch: Record<string, unknown>) => edit([{ type: "patch_director_source", entity, ...(id ? { id } : {}), patch }]);
+  const openSharedAsset = async (assetId: string, assetTitle: string) => {
+    if (!productionContext?.dramaId) throw new Error(t("director.workspace.sharedCanvasUnavailable"));
+    const { project, context } = await ensureSharedAssetCanvas(productionContext.dramaId);
+    if (!context.owner) throw new Error(t("director.workspace.sharedCanvasUnavailable"));
+    const sharedCanvasId = String(project.id || "");
+    if (!sharedCanvasId) throw new Error(t("director.workspace.sharedCanvasUnavailable"));
+    navigate(productionObjectPath({ owner: context.owner, canvasId: sharedCanvasId, workspace: "assets", targetKind: "asset", targetId: assetId, title: assetTitle }));
+  };
+  const promoteExistingSharedAsset = async (assetId: string, assetTitle: string) => {
+    if (!production || productionContext?.role !== "episode") throw new Error(t("director.workspace.sharedCanvasUnavailable"));
+    const { preview } = await previewProductionSharedAssetPromotion(target, assetId, production.revision);
+    if (preview.approvedId) {
+      message.info(t("director.workspace.sharedAssetAlreadyRegistered"));
+      await openSharedAsset(assetId, assetTitle);
+      return;
+    }
+    const operationId = nanoid();
+    modal.confirm({
+      title: t("director.workspace.promoteSharedAssetTitle", { title: preview.assetName }),
+      content: <div className="space-y-2"><p>{t("director.workspace.promoteSharedAssetSource", { version: preview.publishedVersion, nodeId: preview.sourceNodeId })}</p><p className="break-all text-xs text-muted-foreground">{preview.storageKey} · SHA-256 {preview.sha256}</p><p className="text-sm">{preview.evidence}</p><p className="text-xs text-muted-foreground">{t("director.workspace.promoteSharedAssetPreserves")}</p></div>,
+      okText: t("director.workspace.promoteExistingSharedAsset"),
+      cancelText: t("common.cancel"),
+      onOk: async () => {
+        await promoteExistingProductionSharedAsset(target, { assetId, expectedRevision: production.revision, expectedSourceCanvasRevision: preview.sourceCanvasRevision,
+          expectedSharedCanvasRevision: preview.sharedCanvasRevision, operationId });
+        message.success(t("director.workspace.promoteSharedAssetComplete"));
+        await openSharedAsset(assetId, assetTitle);
+      },
+    });
+  };
   const saveSceneDrafts = async (ids: string[]) => {
     const fields = ids.flatMap(id => sourceDrafts[`scene:${id}:text`] !== undefined ? [{ id, key: `scene:${id}:text`, value: sourceDrafts[`scene:${id}:text`] }] : []);
     if (!fields.length) return true;
@@ -830,14 +870,15 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
             </nav>
           </aside>}
           <section aria-label={t(`director.workspace.tab.${workspace}`)} className="min-w-0 py-6">
-            {embedded && workspace === "assets" && !/^(asset|frame):/.test(routeTarget) && <SharedAssetsPicker />}
+            {embedded && workspace === "assets" && (!/^(asset|frame):/.test(routeTarget) || productionContext?.role === "shared-assets") && <SharedAssetsPicker />}
             <DirectorPanel
               embedded={embedded} compact={dialog} onSaveScript={saveSceneDrafts}
               workspace={workspace} director={production.draft.director} production={production} readiness={readiness || undefined} run={run} batches={batches} runtimeTasks={runtimeTasks}
-              canvasNodes={canvasNodes} legacy={legacy} versions={versions} busy={busy} canvasId={canvasId} focusTarget={routeTarget}
+              canvasNodes={canvasNodes} legacy={legacy} versions={versions} busy={busy} canvasId={canvasId} canvasRole={productionContext?.role || (projectId ? "ordinary" : "episode")} focusTarget={routeTarget}
               sourceDrafts={sourceDrafts} onSourceDraftChange={setSourceDraft}
               briefDraft={briefDraft} onBriefDraftChange={setBriefDraft}
               onBrief={saveBrief} onPatch={patchSource} onRegroup={regroupSegment} onWorkflow={setWorkflow} onSettings={patch => void edit([{ type: 'set_settings', patch }])} onBindAsset={(assetId, nodeId) => void bindAsset(assetId, nodeId)}
+              onOpenSharedAsset={(assetId, title) => void openSharedAsset(assetId, title).catch(fail)} onPromoteExistingSharedAsset={(assetId, title) => void promoteExistingSharedAsset(assetId, title).catch(fail)}
               onBoundary={setBoundary} onReview={reviewAsset} onPublish={() => void publish()}
               onReplace={value => void replaceDirector(value)} onAskDirector={scope => void askDirector(scope)} onNavigate={navigateWorkspace}
               onLocateTarget={(kind, id) => {

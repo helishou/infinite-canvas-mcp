@@ -1,10 +1,11 @@
+import crypto from "node:crypto";
 import type { Router } from "express";
 import { ZodError } from "zod";
 
 import { EpisodeProductionService, ProductionConflictError } from "../drama/production.js";
 import type { EpisodeProductionRunner } from "../drama/production-runner.js";
 import { getProductionContract } from "@basketikun/canvas-agent/skills/acheng";
-import { productionContractQuerySchema } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionWorkspaceSchemas, productionContractQuerySchema } from "@basketikun/canvas-agent/drama/production-contract";
 import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
 import { productionCompileSchema, productionApplyCompilationSchema, productionReadSchema, projectProductionRead } from "@basketikun/canvas-agent/drama/production-contract";
 import { ProductionCompilationService } from "../drama/compilation.js";
@@ -14,17 +15,24 @@ import { z } from "zod";
 
 export function registerDramaProductionRoutes(router: Router, service: EpisodeProductionService, runner?: EpisodeProductionRunner, base = "/drama/episodes/:episodeId/production") {
     const compilations = new ProductionCompilationService(service, path.join(DATA_DIR, "production-compilations"));
+    compilations.recover(base);
     const handle = (res: { status: (code: number) => { json: (body: unknown) => void } }, error: unknown) => {
-        if (error instanceof ProductionValidationError) return res.status(400).json({ ok: false, error: error.message, diagnostics: error.diagnostics });
+        if (error instanceof ProductionValidationError) return res.status(400).json({ ok: false, code: error.diagnostics[0]?.code || "PRODUCTION_BLOCKED", error: error.message, diagnostics: error.diagnostics, nextActions: error.diagnostics.flatMap(item => item.nextAction ? [item.nextAction] : []) });
         if (error instanceof ZodError) return res.status(400).json({ ok: false, error: error.message, diagnostics: error.issues.map(issue => ({ code: "INVALID_SCHEMA", path: issue.path.join("."), message: issue.message, severity: "error" })) });
-        if (error instanceof ProductionConflictError) return res.status(409).json({ ok: false, error: error.message, current: error.current });
+        if (error instanceof ProductionConflictError) return res.status(409).json({ ok: false, code: "REVISION_CONFLICT", error: error.message, current: error.current, diagnostics: [{ code: "REVISION_CONFLICT", path: "request.expectedRevision", message: error.message, severity: "error" }], nextActions: [{ action: "refresh", message: "回读当前制作对象并核对 revision 后继续；不要重复原写入请求。" }] });
         return res.status(error instanceof ZodError ? 400 : /不存在|找不到/.test(String(error)) ? 404 : 400)
             .json({ ok: false, error: error instanceof Error ? error.message : String(error) });
     };
     router.post<Record<string, string>>(`${base}/compile`, (req, res) => {
         try {
-            const input = productionCompileSchema.parse(req.body);
-            res.json({ ok: true, compilation: compilations.prepare(req.params.episodeId, base, input.expectedRevision, input.director) });
+            const input = productionCompileSchema.extend({ operationId: z.string().min(1).optional() }).parse(req.body);
+            res.json({ ok: true, compilation: input.operationId ? compilations.enqueue(req.params.episodeId, base, input.operationId, input.expectedRevision, input.director) : compilations.prepare(req.params.episodeId, base, input.expectedRevision, input.director) });
+        } catch (error) { handle(res, error); }
+    });
+    router.get<Record<string, string>>(`${base}/compilations/:operationId`, (req, res) => {
+        try {
+            const query = z.object({ view: z.enum(["status", "targets", "diagnostics"]).default("status"), offset: z.coerce.number().int().nonnegative().default(0), pageSize: z.coerce.number().int().positive().optional() }).strict().parse(req.query);
+            res.json({ ok: true, compilation: compilations.getCompilation(req.params.episodeId, base, req.params.operationId, query.view, query.offset, query.pageSize) });
         } catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/apply-compilation`, (req, res) => {
@@ -41,19 +49,39 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         try { const input = productionContractQuerySchema.parse(req.query); res.json({ ok: true, contract: getProductionContract(input.runtimeId, input.operationType) }); }
         catch (error) { handle(res, error); }
     });
-    router.post<Record<string, string>>(`${base}/preflight`, (req, res) => {
-        try { res.json({ ok: true, preflight: service.preflight(req.params.episodeId, req.body) }); }
+    router.post<Record<string, string>>(`${base}/preflight`, async (req, res) => {
+        try {
+            if (req.body?.action === "compile") {
+                const input = productionCompileSchema.parse(req.body.request);
+                res.json({ ok: true, preflight: await compilations.preflight(req.params.episodeId, input.expectedRevision, input.director) });
+            } else res.json({ ok: true, preflight: service.preflight(req.params.episodeId, req.body) });
+        }
         catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/prepare-targets`, (req, res) => {
         try {
-            const input = z.object({ expectedRevision: z.number().int().nonnegative(), operationId: z.string().min(1), targets: z.array(z.string().min(1)).min(1) }).parse(req.body);
+            const input = productionWorkspaceSchemas.production_prepare_targets.omit({ kind: true, id: true }).parse(req.body);
             if (!runner) throw new Error("制作执行器不可用");
-            res.json({ ok: true, production: runner.prepareTargets(req.params.episodeId, input.expectedRevision, input.targets, input.operationId), mediaSubmitted: false });
+            const prepared: ReturnType<EpisodeProductionRunner["prepareTargets"]> = runner.prepareTargets(req.params.episodeId, input.expectedRevision, input.targets, input.operationId);
+            const { layoutReceipt, ...production } = prepared;
+            res.json({ ok: true, production, ...(layoutReceipt ? { layoutReceipt } : {}), mediaSubmitted: false });
         } catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/shared-assets`, (req, res) => {
         try { res.json({ ok: true, ...service.sharedAssets(req.params.episodeId) }); } catch (error) { handle(res, error); }
+    });
+    router.post<Record<string, string>>(`${base}/shared-assets/promotions/preview`, (req, res) => {
+        try {
+            const input = z.object({ assetId: z.string().min(1), expectedRevision: z.number().int().nonnegative() }).parse(req.body);
+            res.json({ ok: true, preview: service.previewSharedAssetPromotion(req.params.episodeId, input.assetId, input.expectedRevision), mediaSubmitted: false });
+        } catch (error) { handle(res, error); }
+    });
+    router.post<Record<string, string>>(`${base}/shared-assets/promotions`, (req, res) => {
+        try {
+            const input = z.object({ assetId: z.string().min(1), expectedRevision: z.number().int().nonnegative(), expectedSourceCanvasRevision: z.number().int().nonnegative(),
+                expectedSharedCanvasRevision: z.number().int().nonnegative().nullable(), operationId: z.string().min(1) }).parse(req.body);
+            res.json({ ok: true, promotion: service.promoteExistingSharedAsset(req.params.episodeId, input), mediaSubmitted: false });
+        } catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/arrange-scene`, (req, res) => {
         try {
@@ -77,7 +105,7 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             const production = service.get(req.params.episodeId);
             // Existing Web consumers still receive the full record unless selecting a view.
             const query = productionReadSchema.parse({ ...req.query, view: req.query.view || "full", targetIds: typeof req.query.targetIds === "string" ? req.query.targetIds.split(",") : req.query.targetIds });
-            res.json({ ok: true, production: projectProductionRead(production, query) });
+            res.json({ ok: true, production: projectProductionRead(production, query, value => crypto.createHash("sha256").update(value).digest("hex")) });
         } catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/readiness`, (req, res) => {

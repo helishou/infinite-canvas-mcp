@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
+import type { ProductionDiagnostic, ProductionNextAction } from "../drama/production-contract.js";
 
 import type { RuntimeTask, RuntimeTaskEvent } from "./types.js";
 import type {
@@ -34,6 +35,8 @@ export class BackendClientError extends Error {
   readonly conflictTargets?: string[];
   readonly committed?: boolean;
   readonly snapshotAvailable?: boolean;
+  readonly diagnostics?: ProductionDiagnostic[];
+  readonly nextActions?: ProductionNextAction[];
 
   constructor(
     message: string,
@@ -49,6 +52,8 @@ export class BackendClientError extends Error {
       conflictTargets?: string[];
       committed?: boolean;
       snapshotAvailable?: boolean;
+      diagnostics?: ProductionDiagnostic[];
+      nextActions?: ProductionNextAction[];
       cause?: unknown;
     },
   ) {
@@ -65,6 +70,8 @@ export class BackendClientError extends Error {
     this.conflictTargets = details.conflictTargets;
     this.committed = details.committed;
     this.snapshotAvailable = details.snapshotAvailable;
+    this.diagnostics = details.diagnostics;
+    this.nextActions = details.nextActions;
   }
 }
 
@@ -96,6 +103,8 @@ function errorPayload(value: unknown) {
     conflictTargets: Array.isArray(body.conflictTargets) ? body.conflictTargets.map(String) : undefined,
     committed: typeof body.committed === "boolean" ? body.committed : undefined,
     snapshotAvailable: typeof body.snapshotAvailable === "boolean" ? body.snapshotAvailable : undefined,
+    diagnostics: Array.isArray(body.diagnostics) ? body.diagnostics as ProductionDiagnostic[] : undefined,
+    nextActions: Array.isArray(body.nextActions) ? body.nextActions as ProductionNextAction[] : undefined,
   };
 }
 
@@ -166,6 +175,8 @@ export class BackendClient {
           conflictTargets: details.conflictTargets,
           committed: details.committed,
           snapshotAvailable: details.snapshotAvailable,
+          diagnostics: details.diagnostics,
+          nextActions: details.nextActions,
         },
       );
     }

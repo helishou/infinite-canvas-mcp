@@ -413,7 +413,9 @@ export const CanvasNodeViewportItem = React.memo(function CanvasNodeViewportItem
     const adaptiveImageSize = isAspectLockedImage ? imageNaturalSize(props.data) : null;
     const adaptiveImageWidth = adaptiveImageSize?.width;
     const adaptiveImageHeight = adaptiveImageSize?.height;
+    const productionLayoutManaged = typeof props.data.metadata?.productionLayoutUnitId === "string";
     useEffect(() => {
+        if (productionLayoutManaged) return;
         if (!adaptiveImageWidth || !adaptiveImageHeight) {
             autoFitImageRef.current = "";
             return;
@@ -434,7 +436,7 @@ export const CanvasNodeViewportItem = React.memo(function CanvasNodeViewportItem
                 y: props.data.position.y + (props.data.height - height) / 2,
             },
         });
-    }, [adaptiveImageHeight, adaptiveImageWidth, props.data.height, props.data.id, props.data.position.x, props.data.position.y, props.data.width, props.onResizeEnd]);
+    }, [adaptiveImageHeight, adaptiveImageWidth, productionLayoutManaged, props.data.height, props.data.id, props.data.position.x, props.data.position.y, props.data.width, props.onResizeEnd]);
     const screenShortSide = Math.min(resolvedProps.data.width, resolvedProps.data.height) * resolvedProps.scale;
     const detailModeRef = useRef(screenShortSide > NODE_OVERVIEW_MODE_ENTER_SCREEN_SIZE);
     if (screenShortSide >= NODE_DETAIL_MODE_ENTER_SCREEN_SIZE) detailModeRef.current = true;

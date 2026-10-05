@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { resolveCharacterImageKeys } from "@basketikun/canvas-agent/reference-contract";
+import { productionImageInput, resolveCharacterImageKeys } from "@basketikun/canvas-agent/reference-contract";
 import { FileText, Image as ImageIcon, Music2, Plus, Puzzle, Video, X } from "lucide-react";
 import { Popover } from "antd";
 import { useTranslation } from "react-i18next";
@@ -24,7 +24,12 @@ export function CanvasNodeReferenceBar({ nodeId, nodes, connectedNodes, historyR
     const [overSourceId, setOverSourceId] = useState<string | null>(null);
     const targetNode = nodes.find((node) => node.id === nodeId);
     const characterSelections = targetNode?.metadata?.characterReferences || {};
-    const references: ReferenceEntry[] = connectedNodes.flatMap((sourceNode) => (sourceNode.type === CanvasNodeType.Group ? getGroupResourceNodes(sourceNode.id, nodes) : [sourceNode]).flatMap((node): ReferenceEntry[] => {
+    const formal = productionImageInput(targetNode);
+    const references: ReferenceEntry[] = formal ? formal.references.map((ref, index) => ({
+        node: { ...(nodes.find(node => node.id === ref.nodeId) || { id: ref.nodeId, position: { x: 0, y: 0 }, width: 48, height: 48 }), type: CanvasNodeType.Image, metadata: {},
+            title: `${ref.label} · ${ref.assetId} · ${ref.assetVersion} · ${ref.role}` }, sourceNodeId: ref.nodeId, index,
+        resource: { kind: "image", storageKey: ref.storageKey },
+    })) : connectedNodes.flatMap((sourceNode) => (sourceNode.type === CanvasNodeType.Group ? getGroupResourceNodes(sourceNode.id, nodes) : [sourceNode]).flatMap((node): ReferenceEntry[] => {
         if (node.type === CanvasNodeType.Character) return [{ node, sourceNodeId: sourceNode.id, index: 0, character: true }];
         return nodeResourceItems(node).map((resource, index) => ({ node, resource, index, sourceNodeId: sourceNode.id }));
     }));
@@ -78,14 +83,14 @@ export function CanvasNodeReferenceBar({ nodeId, nodes, connectedNodes, historyR
                                 sourceIsAudioGeneration={isAudioGenerationNode(targetNode)}
                                 sourceIsTextGeneration={isTextGenerationNode(targetNode)}
                                 suppressPreview={dragging}
-                                onRemove={() => onDisconnect?.(reference.sourceNodeId, nodeId)}
+                            onRemove={() => onDisconnect?.(reference.sourceNodeId, formal?.sourceNodeId || nodeId)}
                             />
                         ) : (
-                            <ReferenceItem node={reference.node} resource={reference.resource!} suppressPreview={dragging} onRemove={() => onDisconnect?.(reference.sourceNodeId, nodeId)} />
+                            <ReferenceItem node={reference.node} resource={reference.resource!} suppressPreview={dragging} onRemove={() => onDisconnect?.(reference.sourceNodeId, formal?.sourceNodeId || nodeId)} />
                         )}
                     </div>
                 ))}
-                <button type="button" className="grid size-12 shrink-0 place-items-center rounded-xl border bg-transparent transition hover:opacity-70" style={{ borderColor: theme.toolbar.border, color: theme.node.muted }} title={t("canvas.references.select")} onClick={() => { if (historyReferences !== undefined) onClearHistoryReferences?.(); onStartSelection?.(nodeId); }}>
+                <button type="button" className="grid size-12 shrink-0 place-items-center rounded-xl border bg-transparent transition hover:opacity-70" style={{ borderColor: theme.toolbar.border, color: theme.node.muted }} title={t("canvas.references.select")} onClick={() => { if (historyReferences !== undefined) onClearHistoryReferences?.(); onStartSelection?.(formal?.sourceNodeId || nodeId); }}>
                     <Plus className="size-4" />
                 </button>
             </div>

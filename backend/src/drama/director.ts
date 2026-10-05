@@ -5,6 +5,8 @@ import type { BackendDatabase } from "../db.js";
 import { resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
 import { resolveAchengRuntime } from "@basketikun/canvas-agent/skills/acheng";
 import { ref2vaPromptDiagnostics, ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
+import { assertImageReferenceCoverage } from "./image-inputs.js";
+import { productionCanvasContext } from "./production-canvas.js";
 
 export function assertDirectorEngine(engine: DirectorProduction["engine"]) {
     const runtime = resolveAchengRuntime(engine.runtimeId);
@@ -34,7 +36,8 @@ export function projectDirector(data: EpisodeProductionData) {
         const assetNodeIds = (input?.assetIds || []).flatMap(id => d.assets[id]?.nodeId ? [d.assets[id]!.nodeId!] : []);
         const duration = (Number(s.end_frame) - Number(s.start_frame)) / fps;
         return { id: String(s.id), sceneId: String(s.scene_id), title: String(s.title || s.id), duration: Number.isFinite(duration) && duration > 0 ? duration : 0,
-            visual: prose(s.visual), camera: prose(s.camera), openingState: prose(s.state_in), endingState: prose(s.state_out), sound: prose({ dialogues: s.dialogues, audio: s.audio }), assetNodeIds, keyframePolicy: input?.keyframePolicy || "none" };
+            visual: prose(s.visual), camera: prose(s.camera), openingState: prose(s.state_in), endingState: prose(s.state_out), sound: prose({ dialogues: s.dialogues, audio: s.audio }), assetNodeIds,
+            keyframePolicy: data.settings.storyboardImageMode === "skip" ? "none" : input?.keyframePolicy || "none" };
     });
     const prior = new Map(data.clipGroups.map(g => [g.id, g]));
     const shotIds = new Set(shots.map(s => String(s.id)));
@@ -56,6 +59,7 @@ export function projectDirector(data: EpisodeProductionData) {
 export function validateDirectorMedia(db: BackendDatabase, projectId: string, d: DirectorProduction, targetIds?: string[]) {
     const nodes = db.getCanvasProject(projectId)?.nodes as Array<Record<string, any>> | undefined;
     if (!nodes) throw new Error("画布不存在");
+    const canvasRole = productionCanvasContext(db, projectId).role;
     const plan = new Map(list(d.source.asset_plan).map(a => [String(a.asset_id || a.id), a]));
     const visiting = new Set<string>(), visited = new Set<string>();
     const visit = (id: string) => {
@@ -69,9 +73,19 @@ export function validateDirectorMedia(db: BackendDatabase, projectId: string, d:
     const selected = targetIds ? new Set(targetIds) : undefined;
     const artifacts = d.artifacts.filter(a => a.status === "ready" && (!selected || selected.has(a.targetId)));
     for (const artifact of artifacts) {
+        if (canvasRole === "shared-assets" && artifact.kind === "h3") throw new Error("剧目共享资产画布不能生产分集视频 Clip");
+        if (canvasRole === "shared-assets" && artifact.kind === "image" && Object.values(d.shotInputs).some(input => input.keyframeAssetId === artifact.targetId)) throw new Error("关键帧属于本集，不能在剧目共享资产画布生产");
+        if (artifact.kind === "image") assertImageReferenceCoverage(d, artifact);
         const dependencies = artifact.kind === "image" ? plan.get(artifact.targetId)?.depends_on || []
             : list(d.source.shots).filter(s => list(d.source.segments).find(seg => seg.id === artifact.targetId)?.shot_ids?.includes(s.id)).flatMap(s => s.required_assets || []);
         for (const id of dependencies) visit(String(id));
+        const consumedAssets = [...new Set([...dependencies, ...(artifact.kind === "image" ? [artifact.targetId] : [])])];
+        for (const id of consumedAssets) {
+            const scope = String(plan.get(String(id))?.canvas_scope || (d.assets[String(id)]?.sharedSource || canvasRole === "shared-assets" ? "shared" : "episode"));
+            if (!["shared", "episode"].includes(scope)) throw new Error(`资产 ${id} 的画布归属无效：${scope}`);
+            if (canvasRole === "shared-assets" && scope !== "shared") throw new Error(`资产 ${id} 标记为本集专用，不能在剧目共享资产画布生产`);
+            if (canvasRole !== "shared-assets" && scope === "shared" && !d.assets[String(id)]?.sharedSource) throw new Error(`共享资产 ${id} 尚未采用同剧目已批准版本；请先在共享资产画布制作并审核，再回到分集采用`);
+        }
         for (const id of dependencies) {
             const asset = d.assets[String(id)];
             if (asset?.inputOutdated) throw new Error(`依赖 ${id} 的媒体来自旧共享输入，请明确处理后继续`);

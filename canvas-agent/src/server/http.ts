@@ -1,7 +1,10 @@
+import { ZodError } from "zod";
+import { toolInputSchemas } from "../canvas/schemas.js";
 import { spawn } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import fs from "node:fs";
 import { productionWorkspaceRequest } from "../drama/production-workspace-contract.js";
+import { productionToolPreflight } from "../drama/production-tool-preflight.js";
 import path from "node:path";
 import express, {
   type NextFunction,
@@ -330,6 +333,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     // 不再把浏览器快照从 Agent 侧全量覆盖回 Backend。
     res.json({ ok: true });
   });
+  app.get(agentRoute("/codex/state"), (_req, res) => res.json({ ok: true, runtime: session.runtimeStateSnapshot }));
   app.post("/canvas/activate", (req, res) => {
     session.activateClient(String(req.query.clientId || ""));
     res.json({ ok: true });
@@ -648,7 +652,11 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     "/api/tools",
     route(async (req, res) => {
       const name = String(req.body?.name || "");
-      const input = objectBody(req.body?.input);
+      const rawInput = objectBody(req.body?.input);
+      const schema = toolInputSchemas[name as keyof typeof toolInputSchemas];
+      const input = schema ? schema.parse(rawInput) as Record<string, unknown> : rawInput;
+      const blockedProduction = await productionToolPreflight(backend, name, input);
+      if (blockedProduction) return void res.json({ ok: true, result: blockedProduction });
       const workspaceRequest = productionWorkspaceRequest(name, input);
       if (workspaceRequest) return void res.json({ ok: true, result: workspaceRequest.method === "GET" ? await backend.get(workspaceRequest.path) : await backend.post(workspaceRequest.path, workspaceRequest.body) });
       if (isCollaborationTool(name))
@@ -721,11 +729,13 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         if (input.operationType) query.set("operationType", String(input.operationType));
         return void res.json({ ok: true, result: await backend.get(`/production/contract?${query}`) });
       }
-      if (["production_compile", "production_apply_compilation", "production_diagnose_bindings"].includes(name)) {
+      if (["production_compile", "production_get_compilation", "production_apply_compilation", "production_diagnose_bindings"].includes(name)) {
         const base = input.kind === "canvas" ? `/canvas/projects/${encodeURIComponent(String(input.id))}/production` : `/drama/episodes/${encodeURIComponent(String(input.id))}/production`;
-        const result = name === "production_diagnose_bindings" ? await backend.get(`${base}/bindings`)
+        const params = new URLSearchParams({ view: String(input.view || "status"), offset: String(input.offset || 0), ...(input.pageSize ? { pageSize: String(input.pageSize) } : {}) });
+        const result = name === "production_get_compilation" ? await backend.get(`${base}/compilations/${encodeURIComponent(String(input.operationId))}?${params}`)
+          : name === "production_diagnose_bindings" ? await backend.get(`${base}/bindings`)
           : name === "production_apply_compilation" ? await backend.post(`${base}/apply-compilation`, { preparedId: input.preparedId })
-          : await backend.post(`${base}/compile`, { expectedRevision: input.expectedRevision, director: input.director });
+          : await backend.post(`${base}/compile`, { operationId: input.operationId, expectedRevision: input.expectedRevision, director: input.director });
         return void res.json({ ok: true, result });
       }
       if (name === "canvas_preflight_production" || name === "drama_preflight_production") {
@@ -736,7 +746,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         const path = `/drama/episodes/${encodeURIComponent(String(input.episodeId || ""))}/production`;
         const result = name === "drama_get_production" ? await backend.get(path + productionReadQuery(input))
           : name === "drama_get_workflow_readiness" ? await backend.get(`${path}/readiness`)
-          : name === "drama_start_production_run" ? await backend.post(`${path}/runs`, { runId: input.runId, idempotencyKey: input.idempotencyKey, expectedRevision: input.expectedRevision, version: input.version, targets: input.targets, scope: input.scope })
+          : name === "drama_start_production_run" ? await backend.post(`${path}/runs`, { runId: input.runId, idempotencyKey: input.idempotencyKey, workId: input.workId, expectedRevision: input.expectedRevision, version: input.version, targets: input.targets, scope: input.scope })
           : name === "drama_get_production_batch" ? await backend.get(`${path}/batches/${encodeURIComponent(String(input.runId || ""))}`)
           : name === "drama_pause_production_run" ? await backend.post(`${path}/batches/${encodeURIComponent(String(input.runId || ""))}/pause`, {})
           : name === "drama_resume_production_run" ? await backend.post(`${path}/batches/${encodeURIComponent(String(input.runId || ""))}/resume`, {})
@@ -756,7 +766,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         const path = `/canvas/projects/${encodeURIComponent(String(input.projectId || ""))}/production`;
         const result = name === "canvas_get_production" ? await backend.get(path + productionReadQuery(input))
           : name === "canvas_get_workflow_readiness" ? await backend.get(`${path}/readiness`)
-          : name === "canvas_start_production_run" ? await backend.post(`${path}/runs`, { runId: input.runId, idempotencyKey: input.idempotencyKey, expectedRevision: input.expectedRevision, version: input.version, targets: input.targets, scope: input.scope })
+          : name === "canvas_start_production_run" ? await backend.post(`${path}/runs`, { runId: input.runId, idempotencyKey: input.idempotencyKey, workId: input.workId, expectedRevision: input.expectedRevision, version: input.version, targets: input.targets, scope: input.scope })
           : name === "canvas_get_production_batch" ? await backend.get(`${path}/batches/${encodeURIComponent(String(input.runId || ""))}`)
           : name === "canvas_pause_production_run" ? await backend.post(`${path}/batches/${encodeURIComponent(String(input.runId || ""))}/pause`, {})
           : name === "canvas_resume_production_run" ? await backend.post(`${path}/batches/${encodeURIComponent(String(input.runId || ""))}/resume`, {})
@@ -1429,6 +1439,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
       return void res
         .status(error.statusCode)
         .json({ ok: false, error: error.message });
+    if (error instanceof ZodError) return void res.status(400).json({ ok: false, code: "INVALID_SCHEMA", diagnostics: error.issues.map(issue => ({ code: "INVALID_SCHEMA", path: issue.path.join("."), message: issue.message, severity: "error" })), nextAction: "按字段路径修正请求；无需读取完整 Schema" });
     res.status(500).json({ ok: false, error: error.message });
   });
 

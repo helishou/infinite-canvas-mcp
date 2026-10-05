@@ -11,6 +11,7 @@ import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, Mous
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ExternalLink, Group, History, MessageSquare, Pencil, Video } from "lucide-react";
 import { isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
+import { productionImageInput } from "@basketikun/canvas-agent/reference-contract";
 import copyToClipboard from "copy-to-clipboard";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
@@ -413,11 +414,6 @@ function InfiniteCanvasPage() {
     const productionContext = useProductionWorkspaceStore(state => state.context);
     const productionRecord = useProductionWorkspaceStore(state => state.production);
     const productionCommandBusy = useProductionWorkspaceStore(state => state.commandBusy);
-    const localAgentConnected = useAgentStore((state) => state.connected);
-    const localAgentActivity = useAgentStore((state) => state.activity);
-    const localAgentEnabled = useAgentStore((state) => state.enabled);
-    const agentPanelOpen = useAgentStore((state) => state.panelOpen);
-    const toggleAgentPanel = useAgentStore((state) => state.togglePanel);
     const containerRef = useRef<HTMLDivElement>(null);
     const canvasRectRef = useRef<{ left: number; top: number; width: number; height: number } | null>(null);
     const imageInputRef = useRef<HTMLInputElement>(null);
@@ -1400,7 +1396,7 @@ function InfiniteCanvasPage() {
         window.dispatchEvent(new CustomEvent("production-node-action", { detail: { owner: toolbarObject.owner, object: toolbarObject, action } }));
     };
     const productionPrimaryActions = toolbarObject ? [
-        { ...productionToolbarItems[0], title: t(toolbarSharedSource ? "productionCanvas.source" : "productionCanvas.modify"), label: t(toolbarSharedSource ? "productionCanvas.source" : "productionCanvas.modify"), onClick: toolbarSharedSource ? () => { navigate(`/canvas/${encodeURIComponent(toolbarSharedSource.sourceProjectId)}?workspace=assets&edit=1&nodeId=${encodeURIComponent(toolbarSharedSource.sourceNodeId)}&target=asset%3A${encodeURIComponent(toolbarSharedSource.assetId)}`); useProductionWorkspaceStore.getState().setPanelTab("object"); useAgentStore.getState().openPanel(); } : productionToolbarItems[0].onClick },
+        { ...productionToolbarItems[0], title: t(toolbarSharedSource ? "productionCanvas.source" : "productionCanvas.editObject"), label: t(toolbarSharedSource ? "productionCanvas.source" : "productionCanvas.editObject"), onClick: toolbarSharedSource ? () => { navigate(`/canvas/${encodeURIComponent(toolbarSharedSource.sourceProjectId)}?workspace=assets&edit=1&nodeId=${encodeURIComponent(toolbarSharedSource.sourceNodeId)}&target=asset%3A${encodeURIComponent(toolbarSharedSource.assetId)}`); useProductionWorkspaceStore.getState().setPanelTab("object"); useAgentStore.getState().openPanel(); } : productionToolbarItems[0].onClick },
         ...(toolbarObject.targetKind === "asset" || toolbarObject.targetKind === "shot" ? [
             ...(toolbarState?.canReview && ["needs_review", "outdated"].includes(toolbarState.status) ? [{ id: "production-use", title: t("productionCanvas.useImage"), label: t("productionCanvas.useImage"), disabled: productionActionBusy, icon: <Pencil className="size-4" />, onClick: () => nodeAction("review") }] : []),
             ...(!toolbarSharedSource ? [{ id: "production-redo", title: t(toolbarNode?.metadata?.storageKey ? "productionCanvas.redo" : "productionCanvas.generateImage"), label: t(toolbarNode?.metadata?.storageKey ? "productionCanvas.redo" : "productionCanvas.generateImage"), disabled: productionActionBusy, icon: <Pencil className="size-4" />, onClick: () => nodeAction("generate") }] : []),
@@ -1614,9 +1610,13 @@ function InfiniteCanvasPage() {
     }, [clearActiveImageHistory]);
 
     const reorderNodeReferences = useCallback((toNodeId: string, fromNodeId: string, overNodeId: string) => {
-        setConnections((prev) => reorderCanvasReferenceConnections(prev, toNodeId, fromNodeId, overNodeId));
+        const formalSourceId = productionImageInput(nodesRef.current.find(node => node.id === toNodeId))?.sourceNodeId || toNodeId;
+        setConnections((prev) => reorderCanvasReferenceConnections(prev, formalSourceId, fromNodeId, overNodeId));
     }, []);
-    const directReferenceSourceIds = useCallback((toNodeId: string) => new Set(connections.filter((connection) => connection.toNodeId === toNodeId).map((connection) => connection.fromNodeId)), [connections]);
+    const directReferenceSourceIds = useCallback((toNodeId: string) => {
+        const sourceId = productionImageInput(nodesRef.current.find(node => node.id === toNodeId))?.sourceNodeId || toNodeId;
+        return new Set(connections.filter(connection => connection.toNodeId === sourceId).map(connection => connection.fromNodeId));
+    }, [connections]);
 
     const startNodeReferenceSelection = useCallback((nodeId: string) => {
         setReferencePickerNodeId(nodeId);
@@ -4961,7 +4961,7 @@ function InfiniteCanvasPage() {
                     const count = getGenerationCount(generationConfig.count);
                     const isImageNode = initialNode?.type === CanvasNodeType.Image;
                     const sourceReference =
-                        isImageNode && !loopContext && initialNode?.metadata?.content
+                        isImageNode && !loopContext && initialNode?.metadata?.content && !productionImageInput(initialNode)
                             ? [{ id: initialNode.id, name: `${initialNode.title || initialNode.id}.png`, type: initialNode.metadata.mimeType || "image/png", dataUrl: initialNode.metadata.content, storageKey: initialNode.metadata.storageKey }]
                             : [];
                     const referenceImages = activeImageHistory
@@ -6001,9 +6001,6 @@ function InfiniteCanvasPage() {
                     onOpenPlugins={() => setPluginManagerOpen(true)}
                     onUndo={undoCanvas}
                     onRedo={redoCanvas}
-                    agentOpen={agentPanelOpen}
-                    compactAgentStatus={{ connected: localAgentConnected, enabled: localAgentEnabled, activity: localAgentActivity }}
-                    onToggleAgent={toggleAgentPanel}
                     projectId={projectId}
                     onOpenGenerationLogs={() => setGenerationLogsOpen(true)}
                     collaborators={collaborators}

@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import type { BackendDatabase } from "../db.js";
+import type { ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionSharedProjectionNodeId } from "./production-layout-geometry.js";
 import type { BackendEventBus } from "../events.js";
 import type { EpisodeProductionService } from "./production.js";
 import type { compileAchengDirector } from "@basketikun/canvas-agent/skills/acheng";
@@ -44,6 +46,7 @@ export function registerApprovedSharedAsset(db: BackendDatabase, projectId: stri
     const character = node.type === "character";
     const snapshot = { title: node.title || assetId, type: character ? "character" : "image", width: node.width || 340, height: node.height || 260,
         version: asset.version, content: asset.storageKey, metadata: { storageKey: asset.storageKey, naturalWidth: media.width, naturalHeight: media.height, mimeType: media.mimeType,
+            ...(node.metadata?.sharedPromotionOrigin ? { sharedPromotionOrigin: structuredClone(node.metadata.sharedPromotionOrigin) } : {}),
             ...(character ? { characterName: node.metadata?.characterName || node.title, characterDescription: node.metadata?.characterDescription || "", characterEnglishName: node.metadata?.characterEnglishName || "",
                 characterImages: (Array.isArray(node.metadata?.characterImages) ? node.metadata.characterImages : []).filter((image: any) => image.storageKey === asset.storageKey), characterPrimaryIndex: 0 } : {}) } };
     db.db.prepare(`INSERT OR IGNORE INTO drama_asset_versions
@@ -80,23 +83,27 @@ export function validateSharedAssetSource(db: BackendDatabase, projectId: string
 }
 
 /** Only this path creates the local projection; callers cannot register arbitrary media. */
-export function prepareSharedAssetProjection(db: BackendDatabase, episodeId: string, targetId: string, approvedId: string) {
+export function prepareSharedAssetProjection(db: BackendDatabase, episodeId: string, targetId: string, approvedId: string, layout: ProductionLayoutPlan) {
     const approved = approvedSharedAsset(db, approvedId);
     const episode = db.getDramaEpisode(episodeId);
     if (!episode?.canvasId || episode.dramaId !== approved.dramaId) throw new Error("只能采用同剧目的共享资产");
-    const nodeId = sharedProjectionNodeId(episodeId, targetId);
+    const unit = layout.units.find(item => item.targets.includes(`asset:${targetId}`) && item.members.some(member => member.role === "asset"));
+    const member = unit?.members.find(item => item.role === "asset");
+    const nodeId = member?.nodeId;
+    if (!unit || !member || !nodeId || layout.canvasId !== episode.canvasId) throw new Error(`共享资产 ${targetId} 缺少正式布局预留`);
     const project = db.getCanvasProject(episode.canvasId)!;
     const node = (project.nodes as Record<string, any>[] || []).find(item => item.id === nodeId);
     if (node && node.metadata?.sharedAssetOrigin?.assetId !== approved.assetId) throw new Error("共享引用身份冲突，不能替换已有资产");
     const origin = { dramaId: approved.dramaId, assetId: approved.assetId, approvedId, sourceProjectId: approved.sourceProjectId, sourceNodeId: approved.sourceNodeId };
     const metadata = { ...approved.snapshot.metadata, productionAssetId: targetId, sharedAssetOrigin: origin };
-    const operations = node ? [{ type: "update_node", id: nodeId, patch: { content: approved.storageKey }, metadata }]
-        : [{ type: "add_node", id: nodeId, nodeType: approved.snapshot.type, title: approved.snapshot.title, position: { x: 0, y: (project.nodes as unknown[] || []).length * 300 }, width: approved.snapshot.width, height: approved.snapshot.height, content: approved.storageKey, metadata }];
+    const layoutMetadata = { ...metadata, productionLayoutUnitId: unit.id, productionLayoutBounds: member.size };
+    const operations = node ? [{ type: "update_node", id: nodeId, patch: { content: approved.storageKey }, metadata: layoutMetadata }]
+        : [{ type: "add_node", id: nodeId, nodeType: approved.snapshot.type, title: approved.snapshot.title, position: member.position, width: member.size.width, height: member.size.height, content: approved.storageKey, metadata: layoutMetadata }];
     const same = node?.metadata?.sharedAssetOrigin?.approvedId === approvedId && node?.metadata?.storageKey === approved.storageKey;
     if (!same) db.applyCanvasProjectOperations(episode.canvasId, Number(project.revision || 0), operations, { runtimeWrite: true, source: { kind: "system", clientId: "production:shared-assets", label: "采用共享批准资产" } });
     return { nodeId, approved, origin };
 }
-export const sharedProjectionNodeId = (episodeId: string, targetId: string) => `shared-ref-${stable(episodeId, targetId).slice(0, 24)}`;
+export const sharedProjectionNodeId = productionSharedProjectionNodeId;
 
 export class SharedAssetCoordinator {
     private processing = false;
@@ -133,7 +140,9 @@ export class SharedAssetCoordinator {
                         const current = this.service.get(job.episode_id);
                         const prior = revised.get(job.episode_id);
                         if (current.revision !== job.expected_revision && !(prior && prior.initial === job.expected_revision && prior.current === current.revision)) throw new Error("制作源稿发生并发编辑，共享资产更新需核对当前草稿");
-                        const projection = prepareSharedAssetProjection(this.db, job.episode_id, job.target_asset_id, job.approved_id);
+                        const currentPlan = this.service.get(job.episode_id);
+                        const layout = this.service.ensureLayoutPlan(job.episode_id, currentPlan);
+                        const projection = prepareSharedAssetProjection(this.db, job.episode_id, job.target_asset_id, job.approved_id, layout);
                         this.service.edit(job.episode_id, { operationId: job.id, expectedRevision: current.revision,
                             ops: [{ type: "adopt_shared_asset", assetId: job.target_asset_id, approvedId: job.approved_id, nodeId: projection.nodeId }] });
                         this.db.db.prepare("UPDATE drama_asset_adoptions SET status='compiling', expected_revision=?, updated_at=? WHERE id=?")

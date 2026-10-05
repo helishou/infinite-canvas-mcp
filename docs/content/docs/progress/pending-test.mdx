@@ -5,6 +5,18 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Unified formal keyframe references
+
+- Reference cards, connections, automatic production and manual regeneration use the same numbered list of approved media, roles and versions. Previous outputs and other character outfits are excluded. Preparing targets or applying compilation synchronizes the canvas; check multiple characters, the final style slot and repeat preparation.
+- Adding, removing or reordering canvas references updates formal reference cards and dependencies atomically, invalidates compilation and requires recompilation and publication. Unregistered/unapproved additions preserve the original draft on rejection. Removing required characters or scenes blocks generation, as do mismatched upload counts, order, media versions or hashes.
+- Updates preserve frozen task inputs and historical approvals without automatically regenerating media. Directors still need to check prose for unregistered subjects; engineering tests do not replace visual acceptance of a new generation.
+- A legacy node's manual prompt difference preserves that node and its approval history without blocking unrelated workflow, settings or review updates. The affected target still requires merging and preparation before generation; existing prompts are never silently overwritten.
+
+## Production node layout
+
+- Backend persists a complete production layout plan shared by the web app, Agent, MCP and executor. Check the asset-purpose regions, scene scripts and shot units, video region, and the top-level `layoutReceipt` with plan hash, created/reused nodes and conflict diagnostics.
+- Prepare the same targets in different orders, batches, concurrently and by replay; positions and unit identities must stay stable. Targets blocked on references still reserve positions. User-moved or resized nodes remain anchors and new targets avoid them; text, review and generation state changes do not push nodes. Image loading and expanded smart panels must not rewrite new node anchor geometry. Check shared-H3 Segment deduplication, rollback, restart recovery and canvas aliases.
+
 ## Director chat queue and inserted guidance
 
 - The composer stays editable while Agent is running: Enter or “Queue next” snapshots the current prompt, attachments, canvas references, Skill and permission mode, then sends queued instructions in submission order. The queue shows its count and per-item status above the conversation and each item can be removed. A queued instruction appears only in its queue card; it enters the conversation timeline when it is actually submitted.
@@ -12,9 +24,38 @@ description: Implemented changes that still need manual verification
 - Queues are per conversation, so switching or deleting a conversation affects only its own items. An item whose canvas references were removed or whose canvas changed is marked failed and can be retried instead of being silently dropped. The queue lives in page memory only and is not restored after a refresh or reconnect; sending uses the snapshotted content and attachment data, not temporary links released later.
 - Check: queue two instructions while running via both Enter and “Queue next” and confirm send order; insert during a run and confirm the new instruction is sent first after the interrupt; a duplicate idle snapshot must not resend; pause and resume after Stop; both languages, light/dark themes and narrow layouts.
 
+## Background confirmation reminders
+
+- The confirmation-reminder switch is in the director popup header, available in both the conversation and creative welcome view, and requests browser notification permission only on click. Once allowed and enabled, background pages can notify about approvals, registered director decisions, per-item media reviews and H3 upscale/face-refinement confirmations even with the director collapsed. Existing task-center events and queries supply task states without extra polling.
+- State refreshes, reconnection and refreshing the current tab do not repeat the same reminder. New media/first-pass snapshots or confirmation requests can notify again. Returning or resolving an item closes its notification; grouped reminders keep remaining items, and replaced/resolved notifications cannot act on stale clicks.
+- Clicking restores the original canvas, confirmation dialog or H3 Clip and preserves unsent drafts without answering, reviewing or submitting tasks. Denied/unsupported/failed notifications retain tab-title and badge indicators. Check both languages, themes and narrow screens. Browser/OS settings govern banners and sound; closed pages do not receive push notifications.
+
+## Image concurrency in the production Skill
+
+- After multiple images are authorized, start independent runs for ready assets and keyframes before tracking their results. Images sharing an approved reference can proceed together; missing references or pending review block only dependent targets.
+- Preserve single-image trials, prompt-only work and explicit item-by-item confirmation. Keep each run's idempotent receipt and task records, do not split existing runs, and use existing executor capacity. Check that characters and scenes are submitted together after style approval, and failures or unknown receipts do not cause duplicate generation elsewhere.
+
+## Description entry and compact editor
+
+- Select a formal production node and open “Edit description” from its review toolbar. The top bar no longer repeats this entry. Shared references still use “View source asset” to edit the source.
+- The asset editor shows a larger preview and one description field. The desktop preview is 280px wide and up to 420px tall; narrow screens stack the preview above the editor. Click the preview to view the original; expand version, dependencies and image binding as needed without repeating the description field. Adoption and rejection remain in the review toolbar. Check draft recovery, light/dark themes and narrow layouts.
+
+## Automatic production preflight and actionable blockers
+
+- Compilation and generation starts automatically check their prerequisites. Story-only input, incomplete asset plans, missing style bindings, prompt-only mode and targets awaiting review return field paths and next actions without compiler packets or new media tasks. Independent identified issues appear together; planned style anchors and video drafts with missing references retain their existing compilation contract.
+- Exact idempotent replays recover the original receipt after revisions change; conflicting keys identify the original run. Preflight does not mutate production or task records, final submission revalidates, and execution races or infrastructure faults remain real failures. Check equivalent behavior in HTTP MCP and the embedded Agent.
+
+## Production image parameters
+
+- Asset and keyframe generation forwards workflow parameters and image size from the bound node. Verify that landscape settings reach the submitted ComfyUI graph and archived output. Editing a node after task creation must not change submitted parameters.
+
+## Regenerating production targets awaiting review
+
+- Starting an already generated target awaiting review explains how to inspect, review or reject its result, and that pausing retains ownership. Retrying after pause cannot create another task; regeneration requires formal rejection and a settled prior batch without in-flight tasks.
+
 ## Interrupted director turns
 
-- Interrupted turns retain completed tool calls and show an interruption notice. When the page regains focus, authoritative history covering the current turn clears the stale waiting indicator and stop button; live turns keep their running state. Recovery does not automatically resend prompts or repeat writes.
+- Interrupted turns retain completed tool calls and show an interruption notice. Runtime changes push a full authoritative snapshot immediately; the existing 15-second heartbeat and a lightweight HTTP check at the advertised heartbeat cadence reconcile missed or stalled streams while a turn is active. Reconnect and focus also reconcile state. Instance, revision and exact turn identity reject stale responses; failed checks never imply completion. Recovery fetches final history once, without resending prompts or repeating writes. Tool completion is described as awaiting the next response, without guessing model activity.
 
 ## Director promotional output removed
 
@@ -31,6 +72,8 @@ description: Implemented changes that still need manual verification
 - Separate Production and Canvas navigation: Production starts in a drama list or overview; ordinary canvases use native nodes without automatically opening the production SOP. Home offers distinct drama and free-canvas entries. Legacy standalone production links remain accessible.
 - Drama planning confirms the overall story, requirements, general image model, category models for characters/outfits, scenes, props, style and storyboards/keyframes, plus video model and aspect ratio. Defaults seed newly started production; existing episode settings and submitted inputs remain intact. Object overrides precede category defaults, which precede the general model.
 - A dedicated shared-asset card appears in the drama overview alongside episode entries. Canvases return directly to their drama; URLs retain the selected drama across refresh and navigation. Concurrent planning edits are rejected while the dialog draft remains available. Database upgrades create a backup and preserve previous outlines and bindings.
+- Director asset cards save drama-shared or episode-only ownership. Shared assets are produced and approved under the drama shared canvas's formal record; episodes continue after adopting the latest approved same-drama version. Unadopted shared assets cannot be generated in an episode, and shared canvases reject keyframes, video Clips and episode-only assets. Legacy drafts without ownership retain their existing episode path. Verify adoption replay, no false outdated status when media bytes are unchanged, and downstream invalidation when inputs change.
+- Already approved episode assets provide a “Promote approved media” preview and confirmation. Backend checks the published episode revision, node binding, archived byte digest and shared-canvas revision, reuses the existing media to register a shared approved version, and preserves source episode/node/task/review provenance. The source node and task stay intact, and promotion submits no generation. Verify repeat/unknown-receipt recovery, concurrent-edit rejection, refusal to replace a newer shared version with old media, and unchanged source records.
 - Episode production opens its fixed canvas. Unbound episodes and drama shared assets prepare their canvas idempotently on entry. Established bindings cannot be reassigned; ordinary canvas deletion protects bound objects.
 - Production opens with the full canvas. A lower-right director bubble opens a floating conversation; closing it preserves connection, input and messages. “Find a frame” opens the directory, while descriptions, scripts, tasks and history use an on-demand editor dialog. Drafts, unknown command receipts, legacy sources and version recovery remain available.
 - One drama/episode menu switches between episodes and the shared asset canvas and marks the current choice. Selected formal nodes expose editing, image adoption, regeneration and the shot's video action; other tools appear under “More.” Image adoption previews the original before formal version review. Video actions focus the corresponding H3 Clip; shots covered by multiple Clips require an explicit choice.
@@ -2332,6 +2375,10 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 
 ## Acheng object-oriented Director Workbench
 
+- In a Director reply containing a Markdown table, click its copy icon and verify the Markdown table reaches the clipboard in a `writeText`-only browser context. Confirm the success toast appears only after a successful copy, and a rejected/blocked clipboard reports failure.
+
+- In drama planning, choose “Generate storyboard images” and confirm new episodes inherit the choice. Then choose “Skip images; keep text storyboards” on a separate drama; verify written Shots, Segments and H3 prompts remain, no keyframe targets are ready or prepared, and video targets can still be ready without keyframe images. On a standalone Director video kickoff with no saved mode, confirm the Agent asks before story/shot design and records `storyboardImageMode` in formal settings.
+
 - Verify `.agents/skills/acheng-director` is an editable Git submodule pointing to the helishou fork. Build pinned runtimes from committed HEAD; check mode preserves source HEAD, and runtime rollback preserves source edits. Initialization, commit and push remain explicit Git operations; the updater does not commit or push automatically.
 - In the local Agent's site-workspace Skill manager, confirm Project scope lists both `acheng-director` and `canvas-video-production-sop`. This workspace mirror follows the active runtime, and creative/stage requests should select it while retaining the Canvas adapter for Backend/MCP. After a Skill refresh, simulate a runtime update and local file edits: update untouched files, preserve user edits, and exclude generated runtime output and `.git` metadata from the site workspace; the repository copy is separately pinned by the upstream manifest.
 - Confirm the only production entry opens one object browser with Canvas Projects and Series & Episodes views, and the idea-first creative entry appears there rather than in the Canvas library. Legacy `/director` and `/drama` paths should open the matching view; opening an object's workbench and then its Canvas must retain the same project, and the workbench Back action should return to the originating object view.
@@ -2351,3 +2398,13 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 - Confirm the next Segment may receive a tail-frame still, but never an automatically submitted previous MP4. An explicitly selected ordinary video reference remains available. Keep full prompts and actual references visible in Production & Delivery.
 - Type a chat message and retain an attachment/reference, then launch a scoped Director task. Verify the workbench sends a separate request without clearing composer content, associates the resulting conversation, and stops with a useful reason when Agent is disconnected or busy.
 - In Advanced & History, inspect legacy text read-only, ask the director to connect it to Acheng without regenerating historical media, import/edit JSON and restore a prior revision. Check Chinese and English on desktop and mobile.
+
+### Production compilation and reference receipts
+
+- Refreshing context for the same canvas owner preserves the loaded production snapshot and editor state. Leaving the canvas or changing ownership clears it, preventing an empty lookup directory after a context refresh.
+
+- Preparing formal H3 Clips, applying compiler packets and publication sync share one input projection with per-target reference readiness. Missing approvals, stale sources, edit conflicts and active execution retain existing inputs.
+- Production, node and H3 edits validate fields and types. Metadata merges by field; compiled formal Clip fields are updated by editing the source and recompiling.
+- MCP compilation uses an operationId and a persistent serial background queue. Query the original receipt after an unknown response to recover compilation, failure, interruption and application results without duplicate execution.
+- Reads support artifact indexes, source sections, version-bound pagination and UTF-8 chunks. The normal Agent workflow consumes compact status and diagnostics without reading or reviewing compiled prompts.
+- Verified historical pagination/chunk integrity, the loaded MCP contracts and live production-page lookup, object history, H3 selection and delivery download. Checks preserved formal records, canvas data and media bindings; user acceptance remains pending.

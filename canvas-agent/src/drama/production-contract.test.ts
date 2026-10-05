@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { productionOperationContract, ref2vaPromptDiagnostics } from "./production-validation.js";
-import { productionEditSchema, productionSettingsSchema, type DirectorProduction } from "./production-contract.js";
+import { applyDirectorSourcePatch, productionOperationContract, ref2vaPromptDiagnostics } from "./production-validation.js";
+import { dramaProductionPlanSchema, productionEditSchema, productionSettingsSchema, type DirectorProduction } from "./production-contract.js";
 import { toolInputSchemas } from "../canvas/schemas.js";
 
 test("all published operation examples use the actual edit contract", () => {
@@ -25,6 +25,19 @@ test("MCP edit schemas reject formerly opaque invalid operations", () => {
     }
 });
 
+test("asset canvas scope is a formal, validated source field that invalidates old compile receipts", () => {
+    const director = productionOperationContract("set_director_production").operations[0].example.director as DirectorProduction;
+    director.source.asset_plan = [{ asset_id: "ROLE", canvas_scope: "episode" }];
+    const priorHash = director.sourceHash;
+    applyDirectorSourcePatch(director, "asset", "ROLE", { canvas_scope: "shared" });
+    assert.equal((director.source.asset_plan as Array<Record<string, unknown>>)[0].canvas_scope, "shared");
+    assert.notEqual(director.sourceHash, priorHash);
+    assert.equal(director.artifacts.every(artifact => artifact.status === "stale"), true);
+    assert.throws(() => applyDirectorSourcePatch(director, "asset", "ROLE", { canvas_scope: "other" }), /shared 或 episode/);
+    director.assets.ROLE = { version: "v1", status: "approved", sharedSource: { dramaId: "drama", assetId: "ROLE", approvedId: "approved-v1", sourceProjectId: "shared", sourceNodeId: "source-role" } };
+    assert.throws(() => applyDirectorSourcePatch(director, "asset", "ROLE", { canvas_scope: "episode" }), /必须保留 shared/);
+});
+
 test("video aspect kickoff distinguishes an explicit canvas-inherit choice from an unanswered setting", () => {
     const inherited = productionSettingsSchema.safeParse({ mode: "manual", imageModel: "", h3Model: "", videoAspectRatio: null, videoAspectRatioConfirmed: true });
     assert.equal(inherited.success, true);
@@ -36,6 +49,14 @@ test("video aspect kickoff distinguishes an explicit canvas-inherit choice from 
     assert.equal(selected.success, true);
     const unanswered = productionSettingsSchema.parse({ mode: "manual", imageModel: "", h3Model: "" });
     assert.equal(unanswered.videoAspectRatioConfirmed, undefined);
+});
+
+test("storyboard image mode is an explicit production and drama-plan setting", () => {
+    const settings = productionSettingsSchema.safeParse({ mode: "manual", imageModel: "", h3Model: "", storyboardImageMode: "skip" });
+    assert.equal(settings.success, true);
+    assert.equal(productionSettingsSchema.safeParse({ mode: "manual", imageModel: "", h3Model: "", storyboardImageMode: "sometimes" }).success, false);
+    assert.equal(dramaProductionPlanSchema.parse({ storyboardImageMode: "skip" }).storyboardImageMode, "skip");
+    assert.equal(productionEditSchema.safeParse({ operationId: "storyboard-mode", expectedRevision: 0, ops: [{ type: "set_settings", patch: { storyboardImageMode: "generate" } }] }).success, true);
 });
 
 test("new word policy accepts 2901 and 6500 words without truncation, while the historical policy retains its ceiling", () => {
@@ -62,7 +83,9 @@ test("Ref2VA CRLF validation counts the same words while preserving prompt bytes
 });
 
 test("production compilation tools have explicit owner, revision and frozen handle contracts", () => {
-    assert.ok(toolInputSchemas.production_compile.safeParse({ kind: "canvas", id: "canvas", expectedRevision: 1 }).success);
+    assert.ok(toolInputSchemas.production_compile.safeParse({ kind: "canvas", id: "canvas", expectedRevision: 1, operationId: "compile-1" }).success);
     assert.equal(toolInputSchemas.production_compile.safeParse({ kind: "canvas", id: "canvas" }).success, false);
     assert.equal(toolInputSchemas.production_apply_compilation.safeParse({ kind: "episode", id: "episode", preparedId: "../../packet" }).success, false);
+    assert.ok(toolInputSchemas.drama_preflight_production.safeParse({ episodeId: "episode", action: "compile", request: { expectedRevision: 1 } }).success);
+    assert.ok((productionOperationContract().requests.compile as any).required.includes("operationId"));
 });

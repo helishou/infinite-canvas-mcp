@@ -25,6 +25,7 @@ export type ConversationState = {
 };
 type McpInventoryItem = { name: string; authStatus?: string };
 export const AGENT_PROTOCOL_VERSION = 6;
+const RUNTIME_HEARTBEAT_INTERVAL_MS = 15000;
 
 const SITE_TOOLS = new Set<ToolName>([
     "site_navigate",
@@ -54,6 +55,9 @@ export class CanvasSession {
     private boundClientId = "";
     private focusSequence = 0;
     private codexState: CodexState = { busy: false, threadId: "", turnId: "" };
+    private readonly runtimeInstanceId = crypto.randomUUID();
+    private runtimeRevision = 1;
+    private terminalTurnScope?: { threadId: string; turnId: string };
     private conversationState: ConversationState;
     private conversationInventoryComplete = false;
     private preparedConversationThreadId = "";
@@ -95,6 +99,18 @@ export class CanvasSession {
     /** Return a copy that callers can restore after a temporary Codex operation. */
     get codexStateSnapshot(): CodexState {
         return { ...this.codexState };
+    }
+
+    /** One authoritative snapshot for live events, reconnect, heartbeat and HTTP reconciliation. */
+    get runtimeStateSnapshot() {
+        const codex = this.codexStateSnapshot;
+        if (!codex.busy && !codex.turnId && this.terminalTurnScope?.threadId === codex.threadId) codex.turnId = this.terminalTurnScope.turnId;
+        return { instanceId: this.runtimeInstanceId, revision: this.runtimeRevision, heartbeatIntervalMs: RUNTIME_HEARTBEAT_INTERVAL_MS, conversation: this.conversationStateSnapshot, codex, pendingApprovals: this.codexPendingApprovals };
+    }
+
+    private publishRuntimeState() {
+        this.runtimeRevision++;
+        this.emitAll("runtime_state", this.runtimeStateSnapshot);
     }
 
     /** 返回站点级对话的权威快照。 */
@@ -231,11 +247,13 @@ export class CanvasSession {
         if (type === "codex_approval" && requestId) this.pendingApprovals.set(requestId, payload);
         if (type === "codex_approval_resolved" && requestId) this.pendingApprovals.delete(requestId);
         if (type === "agent_error") this.pendingApprovals.clear();
+        if (["codex_approval", "codex_approval_resolved", "agent_error"].includes(type)) this.publishRuntimeState();
     }
 
     /** 更新并广播 Codex 运行状态；静默后台活动可保留上一 turn 的断线重放。 */
     setCodexState(patch: Partial<CodexState>, options: { preserveReplay?: boolean } = {}) {
         const next = { ...this.codexState, ...patch };
+        if (this.codexState.busy && this.codexState.turnId && !next.busy) this.terminalTurnScope = { threadId: this.codexState.threadId, turnId: this.codexState.turnId };
         const threadChanged = next.threadId !== this.codexState.threadId;
         const turnChanged = Boolean(this.codexState.turnId && next.turnId && next.turnId !== this.codexState.turnId);
         const nextTurnStarted = !this.codexState.busy && next.busy;
@@ -250,6 +268,7 @@ export class CanvasSession {
         this.codexState = next;
         logger.debug("Codex state changed", this.codexState);
         this.emitAll("codex_state", this.codexState);
+        this.publishRuntimeState();
     }
 
     /** 权威历史已覆盖指定 turn 后，清理其断线重放事件。 */
@@ -280,9 +299,9 @@ export class CanvasSession {
                 this.clientFocusOrder.set(clientId, ++this.focusSequence);
             }
         }
-        sendEvent(res, "hello", { ok: true, protocolVersion: AGENT_PROTOCOL_VERSION, clientId, workspace: { activeThreadId }, conversation: this.conversationStateSnapshot, codex: this.codexState, pendingApprovals: this.codexPendingApprovals });
+        sendEvent(res, "hello", { ok: true, protocolVersion: AGENT_PROTOCOL_VERSION, clientId, workspace: { activeThreadId }, conversation: this.conversationStateSnapshot, codex: this.codexState, pendingApprovals: this.codexPendingApprovals, runtime: this.runtimeStateSnapshot });
         if (!statusOnly && activeThreadId && this.codexState.threadId === activeThreadId) this.codexReplayEvents.forEach((event) => sendEvent(res, event.type, event.payload));
-        const timer = setInterval(() => sendEvent(res, "ping", { time: Date.now() }), 15000);
+        const timer = setInterval(() => sendEvent(res, "ping", { time: Date.now(), runtime: this.runtimeStateSnapshot }), RUNTIME_HEARTBEAT_INTERVAL_MS);
         res.on("close", () => {
             clearInterval(timer);
             logger.info("SSE client disconnected", { clientId, statusOnly });
@@ -303,6 +322,7 @@ export class CanvasSession {
         this.conversationState = { ...this.conversationState, ...patch, revision: this.conversationState.revision + 1 };
         const snapshot = this.conversationStateSnapshot;
         this.emitAll("conversation_changed", snapshot);
+        this.publishRuntimeState();
         return snapshot;
     }
 

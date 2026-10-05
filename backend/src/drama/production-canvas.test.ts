@@ -1,3 +1,4 @@
+import { clipInputHash } from "./clip-inputs.js";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -10,7 +11,7 @@ import { BackendEventBus } from "../events.js";
 import { EpisodeProductionService } from "./production.js";
 import { EpisodeProductionRunner } from "./production-runner.js";
 import { ensureProductionCanvas, productionCanvasContext } from "./production-canvas.js";
-import { SharedAssetCoordinator, listApprovedSharedAssets, validateSharedAssetSource } from "./shared-assets.js";
+import { SharedAssetCoordinator, listApprovedSharedAssets, sharedProjectionNodeId, validateSharedAssetSource } from "./shared-assets.js";
 import { directorHash, promptHash } from "./director.js";
 import { NativeProductionGeneration } from "./native-generation.js";
 import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
@@ -104,6 +105,36 @@ test("formal script edits update the same text node and document while preservin
     runner.prepareTargets("ep", revision, ["scene:morning"], "prepare-script-nodes");
     runner.prepareTargets("ep", revision, ["scene:morning"], "prepare-script-nodes");
     assert.deepEqual(f.db.getCanvasProject(canvasId), project);
+});
+
+test("asset preparation follows its declared canvas and rejects the wrong owner without reserving the operation", t => {
+    const f = fixture(t), episodeCanvas = ensureProductionCanvas(f.db, "episode", "ep").project.id;
+    const episodeDirector = director();
+    (episodeDirector.source.asset_plan as Array<Record<string, unknown>>)[0].canvas_scope = "shared";
+    episodeDirector.sourceHash = directorHash(episodeDirector.source);
+    episodeDirector.artifacts = episodeDirector.artifacts.map(item => ({ ...item, status: "stale" }));
+    save(f.episode, "ep", episodeDirector);
+    const sharedTarget = f.episode.workflowReadiness("ep").targets.find(item => item.id === "asset:ROLE")!;
+    assert.match(sharedTarget.blockers.join(";"), /共享资产 ROLE 尚未采用/);
+    const published = publish(f.episode, "ep"), blockedRun = { runId: "unadopted-shared", idempotencyKey: "unadopted-shared", expectedRevision: f.episode.get("ep").revision, version: published.publishedVersion, targets: ["asset:ROLE"] };
+    const generationPreflight = f.episode.preflight("ep", { action: "generate", request: blockedRun });
+    assert.equal(generationPreflight.valid, false);
+    assert.match(generationPreflight.diagnostics.map(item => item.message).join(";"), /共享资产 ROLE 尚未采用/);
+    assert.equal(f.episode.getBatch("ep", blockedRun.runId), null);
+    const episodeRunner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+    assert.throws(() => episodeRunner.prepareTargets("ep", f.episode.get("ep").revision, ["asset:ROLE"], "wrong-episode-owner"), /属于剧目共享/);
+    assert.equal(f.db.db.prepare("SELECT 1 FROM production_preparations WHERE operation_id=?").get("wrong-episode-owner"), undefined);
+    assert.ok(f.db.getCanvasProject(episodeCanvas));
+
+    const sharedCanvas = ensureProductionCanvas(f.db, "shared-assets", "drama").project.id;
+    const sharedDirector = director();
+    (sharedDirector.source.asset_plan as Array<Record<string, unknown>>)[0].canvas_scope = "episode";
+    sharedDirector.sourceHash = directorHash(sharedDirector.source);
+    sharedDirector.artifacts = sharedDirector.artifacts.map(item => ({ ...item, status: "stale" }));
+    save(f.shared, sharedCanvas, sharedDirector);
+    const sharedRunner = new EpisodeProductionRunner(f.shared, f.stores, {} as CanvasGenerationService);
+    assert.throws(() => sharedRunner.prepareTargets(sharedCanvas, f.shared.get(sharedCanvas).revision, ["asset:ROLE"], "wrong-shared-owner"), /属于本集专用/);
+    assert.equal(f.db.db.prepare("SELECT 1 FROM production_preparations WHERE operation_id=?").get("wrong-shared-owner"), undefined);
 });
 
 function historyFixture(t: test.TestContext) {
@@ -237,31 +268,96 @@ test("approved shared versions propagate without a browser and retain historical
     const first = approve(f, assetCanvas, 1);
     const episodeCanvas = ensureProductionCanvas(f.db, "episode", "ep").project.id;
     ensureProductionCanvas(f.db, "episode", "ep2");
-    save(f.episode, "ep", director()); save(f.episode, "ep2", director());
+    const framePath = path.join(f.directory, "existing-frame.png"), frameBytes = Buffer.from("existing frame bytes");
+    fs.writeFileSync(framePath, frameBytes);
+    const frameStorageKey = "image:existing-frame", frameHash = crypto.createHash("sha256").update(frameBytes).digest("hex");
+    f.db.upsertMediaFile({ storageKey: frameStorageKey, filePath: framePath, bytes: frameBytes.length, mimeType: "image/png", width: 8, height: 8, durationMs: null, createdAt: new Date().toISOString() });
+    f.db.applyCanvasProjectOperations(episodeCanvas, Number(f.db.getCanvasProject(episodeCanvas)!.revision), [
+        { type: "add_node", id: "existing-role", nodeType: "image", title: "Existing character", position: { x: 0, y: 0 }, width: 300, height: 300, metadata: { storageKey: first.storageKey } },
+        { type: "add_node", id: "existing-frame", nodeType: "image", title: "Existing frame", position: { x: 400, y: 0 }, width: 300, height: 300, metadata: { storageKey: frameStorageKey } },
+    ]);
+    const episodeDirector = director();
+    episodeDirector.assets.ROLE = { nodeId: "existing-role", version: "v1", storageKey: first.storageKey, sha256: first.sha256, status: "approved", evidence: "Existing image reviewed before shared adoption" };
+    episodeDirector.assets.FRAME = { nodeId: "existing-frame", version: "v1", storageKey: frameStorageKey, sha256: frameHash, status: "approved", evidence: "Existing frame" };
+    save(f.episode, "ep", episodeDirector); save(f.episode, "ep2", director());
+    assert.equal((f.db.getCanvasProject(episodeCanvas)!.nodes as any[]).some(node => node.id === sharedProjectionNodeId("ep", "ROLE")), false);
     const adopted = f.episode.adoptSharedAsset("ep", { assetId: "ROLE", approvedId: first.id, expectedRevision: f.episode.get("ep").revision, operationId: "adopt-1" });
     const adoptedNode = adopted.draft.director!.assets.ROLE.nodeId!;
+    const adoptedCanvas = f.db.getCanvasProject(episodeCanvas)!;
+    const adoptedLayoutUnit = f.db.getProductionLayoutPlan(episodeCanvas)!.units.find(unit => unit.targets.includes("asset:ROLE"))!;
+    const adoptedMember = adoptedLayoutUnit.members.find(member => member.nodeId === adoptedNode)!;
+    const adoptedCanvasNode = (adoptedCanvas.nodes as any[]).find(node => node.id === adoptedNode);
+    assert.deepEqual(adoptedCanvasNode.position, adoptedMember.position);
+    assert.equal(adoptedCanvasNode.metadata.productionLayoutUnitId, adoptedLayoutUnit.id);
     const historical = structuredClone(adopted.draft.director!.assets.ROLE);
+    assert.equal((adopted.draft.director!.source.asset_plan as Array<Record<string, unknown>>)[0].canvas_scope, "shared");
+    assert.equal(adopted.draft.director!.assets.FRAME.inputOutdated, undefined, "unchanged media stays usable when ownership is adopted");
+    assert.equal(adopted.draft.director!.artifacts.every(item => item.status === "stale"), true);
     assert.equal(f.episode.adoptSharedAsset("ep", { assetId: "ROLE", approvedId: first.id, expectedRevision: 1, operationId: "adopt-1" }).replayed, true);
     assert.throws(() => f.db.applyCanvasProjectOperations(episodeCanvas, Number(f.db.getCanvasProject(episodeCanvas)!.revision), [{ type: "update_node", id: adoptedNode, metadata: { storageKey: "image:forged" } }]), /共享引用内容/);
+    let compiled = 0;
+    const compiler = ((d: DirectorProduction) => {
+        compiled++; const next = structuredClone(d); next.sourceHash = directorHash(next.source);
+        for (const artifact of next.artifacts) { artifact.status = "ready"; artifact.sourceHash = next.sourceHash; artifact.receipt.sourceHash = next.sourceHash; if (artifact.targetId === "FRAME" || artifact.kind === "h3") artifact.references = [{ label: "<Picture 1>", nodeId: next.assets.ROLE.nodeId!, storageKey: next.assets.ROLE.storageKey!, sha256: next.assets.ROLE.sha256!, role: "character_identity" }]; }
+        return { director: next, diagnostics: [], audit: {}, sourceAdjustments: [] };
+    }) as unknown as typeof compileAchengDirector;
+    const coordinator = new SharedAssetCoordinator(f.db, f.episode, f.events, undefined, compiler);
+    coordinator.drain();
+    assert.equal(f.episode.get("ep").draft.director!.assets.FRAME.inputOutdated, undefined, "unchanged media remains valid after reference recompilation");
     const second = approve(f, assetCanvas, 2);
     assert.notEqual(second.id, first.id); assert.equal(historical.storageKey, first.storageKey);
     assert.equal(f.db.db.prepare("SELECT COUNT(*) AS count FROM drama_asset_adoptions WHERE status='pending'").get()?.count, 1);
-    let compiled = 0;
-    const compiler = ((d: DirectorProduction) => {
-        compiled++; const next = structuredClone(d);
-        for (const artifact of next.artifacts) { artifact.status = "ready"; if (artifact.kind === "h3") artifact.references = [{ label: "<Picture 1>", nodeId: next.assets.ROLE.nodeId!, storageKey: next.assets.ROLE.storageKey!, sha256: next.assets.ROLE.sha256!, role: "character_identity" }]; }
-        return { director: next, diagnostics: [], audit: {}, sourceAdjustments: [] };
-    }) as unknown as typeof compileAchengDirector;
-    new SharedAssetCoordinator(f.db, f.episode, f.events, undefined, compiler).drain();
+    coordinator.drain();
     const current = f.episode.get("ep");
     assert.equal(current.draft.director!.assets.ROLE.sharedSource?.approvedId, second.id);
     assert.equal(current.draft.director!.assets.ROLE.nodeId, adoptedNode);
-    assert.equal(f.db.db.prepare("SELECT status FROM drama_asset_adoptions WHERE approved_id=?").get(second.id)?.status, "applied");
-    assert.equal(compiled, 1); assert.equal(f.episode.get("ep2").draft.director!.assets.ROLE.status, "planned");
+    assert.equal(current.draft.director!.assets.FRAME.inputOutdated, true, "a changed shared media version invalidates dependent media");
+    const adoption = f.db.db.prepare("SELECT status, error FROM drama_asset_adoptions WHERE approved_id=?").get(second.id);
+    assert.equal(adoption?.status, "applied", String(adoption?.error || ""));
+    assert.equal(compiled, 2); assert.equal(f.episode.get("ep2").draft.director!.assets.ROLE.status, "planned");
     assert.equal(JSON.parse(String(f.db.db.prepare("SELECT snapshot_json FROM drama_asset_versions WHERE id=?").get(first.id)?.snapshot_json)).content, first.storageKey);
     assert.throws(() => validateSharedAssetSource(f.db, episodeCanvas, { ...current.draft.director!.assets.ROLE, sharedSource: { ...current.draft.director!.assets.ROLE.sharedSource!, dramaId: "foreign" } }), /剧目.*不一致/);
     fs.writeFileSync(path.join(f.directory, "role-2.png"), "changed bytes");
     assert.throws(() => validateSharedAssetSource(f.db, episodeCanvas, current.draft.director!.assets.ROLE), /摘要/);
+});
+
+test("promoting an already reviewed episode asset preserves its source and adds a provenance-backed shared approval", t => {
+    const f = fixture(t), sourceCanvas = ensureProductionCanvas(f.db, "episode", "ep").project.id;
+    const filePath = path.join(f.directory, "promoted-role.png"), bytes = Buffer.from("previously reviewed role image");
+    fs.writeFileSync(filePath, bytes);
+    const storageKey = "image:promoted-role", sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+    f.db.upsertMediaFile({ storageKey, filePath, bytes: bytes.length, mimeType: "image/png", width: 8, height: 8, durationMs: null, createdAt: new Date().toISOString() });
+    f.db.applyCanvasProjectOperations(sourceCanvas, Number(f.db.getCanvasProject(sourceCanvas)!.revision), [{ type: "add_node", id: "episode-role", nodeType: "image", title: "Character", position: { x: 80, y: 120 }, width: 300, height: 300, metadata: { storageKey } }]);
+    const d = director();
+    (d.source.asset_plan as Array<Record<string, unknown>>)[0].canvas_scope = "shared";
+    d.sourceHash = directorHash(d.source);
+    d.artifacts = d.artifacts.map(item => ({ ...item, status: "stale" }));
+    d.assets.ROLE = { nodeId: "episode-role", version: "v8", storageKey, sha256, status: "generated", selectedResult: { taskId: "original-image-task" } };
+    save(f.episode, "ep", d);
+    const published = publish(f.episode, "ep");
+    const reviewed = f.episode.edit("ep", { operationId: "review-before-promotion", expectedRevision: f.episode.get("ep").revision, ops: [{ type: "review_director_asset",
+        assetId: "ROLE", version: published.publishedVersion, sourceHash: d.sourceHash, nodeId: "episode-role", storageKey, sha256, verdict: "approved", evidence: "Reviewed the original archived character image" }] });
+    const originalNodeBefore = structuredClone((f.db.getCanvasProject(sourceCanvas)!.nodes as any[]).find(node => node.id === "episode-role"));
+    const preview = f.episode.previewSharedAssetPromotion("ep", "ROLE", reviewed.revision);
+    assert.equal(preview.storageKey, storageKey); assert.equal(preview.sha256, sha256); assert.equal(preview.sharedCanvasId, null);
+    assert.equal(preview.sourceGenerationTaskId, "original-image-task");
+    const promoted = f.episode.promoteExistingSharedAsset("ep", { assetId: "ROLE", expectedRevision: reviewed.revision, expectedSourceCanvasRevision: preview.sourceCanvasRevision,
+        expectedSharedCanvasRevision: preview.sharedCanvasRevision, operationId: "promote-role" });
+    assert.equal(promoted.replayed, false);
+    const sharedProject = f.db.getCanvasProject(promoted.canvasId!)!;
+    const importedNode = (sharedProject.nodes as any[]).find(node => node.id === promoted.nodeId);
+    assert.equal(importedNode.metadata.storageKey, storageKey);
+    assert.deepEqual(importedNode.metadata.sharedPromotionOrigin, { episodeId: "ep", sourceCanvasId: sourceCanvas, sourceNodeId: "episode-role", sourceVersion: published.publishedVersion,
+        sourceGenerationTaskId: "original-image-task", sourceStorageKey: storageKey, sourceSha256: sha256 });
+    assert.throws(() => f.db.applyCanvasProjectOperations(promoted.canvasId!, Number(sharedProject.revision), [{ type: "update_node", id: promoted.nodeId, metadata: { sharedPromotionOrigin: {} } }]), /接入来源由 Backend 登记/);
+    const approved = listApprovedSharedAssets(f.db, "drama").find(asset => asset.assetId === "ROLE")!;
+    assert.equal(approved.storageKey, storageKey); assert.equal(approved.sha256, sha256);
+    assert.equal(approved.snapshot.metadata.sharedPromotionOrigin.sourceNodeId, "episode-role");
+    assert.deepEqual((f.db.getCanvasProject(sourceCanvas)!.nodes as any[]).find(node => node.id === "episode-role"), originalNodeBefore);
+    assert.equal(f.episode.promoteExistingSharedAsset("ep", { assetId: "ROLE", expectedRevision: reviewed.revision, expectedSourceCanvasRevision: preview.sourceCanvasRevision,
+        expectedSharedCanvasRevision: preview.sharedCanvasRevision, operationId: "promote-role" }).replayed, true);
+    approve(f, promoted.canvasId!, 2);
+    assert.throws(() => f.episode.previewSharedAssetPromotion("ep", "ROLE", reviewed.revision), /其他媒体版本/);
 });
 
 test("shared adoption conflicts preserve edits and can be resumed after explicit review", t => {
@@ -356,7 +452,12 @@ test("native H3 tracking follows the active Clip while a pending decision keeps 
     d.sourceHash = directorHash(d.source); d.artifacts.forEach(artifact => { artifact.sourceHash = d.sourceHash; artifact.receipt.sourceHash = d.sourceHash; });
     save(f.episode, "ep", d);
     const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
-    runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1", "segment:seg2"], "prepare-h3");
+    const clipReady = runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1", "segment:seg2"], "prepare-h3");
+    assert.equal(clipReady.referenceSync?.[0].status, "ready", JSON.stringify(clipReady.referenceSync));
+    const preparedGroup = clipReady.draft.clipGroups[0];
+    const storedClip = (f.db.getCanvasProject(projectId)!.nodes as any[]).find(node => node.id === preparedGroup.nodeId).metadata.segments.find((clip: any) => clip.id === preparedGroup.segmentId);
+    assert.ok(storedClip.productionClipProjection);
+    assert.equal(storedClip.productionClipProjection.inputHash, clipInputHash(storedClip), JSON.stringify(clipReady.referenceSync));
     const current = publish(f.episode, "ep"), groups = current.published!.clipGroups;
     const nodeId = groups[0].nodeId!, first = groups[0].segmentId!, second = groups[1].segmentId!;
     const observer = new NativeProductionGeneration(f.db, f.stores, f.episode, f.shared, f.events);
@@ -379,17 +480,206 @@ test("native H3 tracking follows the active Clip while a pending decision keeps 
     assert.equal(decisionPresentation.taskId, undefined, "the active native task must not take focus from a formal decision");
 });
 
-test("version 23 installations gain preparation receipts and native bindings without rewriting shared versions", t => {
+test("version 23 installations gain layout plans, preparation receipts and native bindings without rewriting shared versions", t => {
     const f = fixture(t), sharedId = ensureProductionCanvas(f.db, "shared-assets", "drama").project.id;
     const approved = approve(f, sharedId, 1);
     f.db.db.exec("DELETE FROM schema_migrations WHERE version>=24; DROP TABLE production_preparations; DROP TABLE production_task_bindings; ALTER TABLE drama_projects DROP COLUMN production_plan_json");
     const upgraded = new BackendDatabase(f.file);
     try {
-        assert.equal(upgraded.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, 25);
+        assert.equal(upgraded.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, 29);
         assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE name='production_preparations'").get());
         assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE name='production_task_bindings'").get());
+        assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE name='production_layout_plans'").get());
         assert.equal(listApprovedSharedAssets(upgraded, "drama")[0].id, approved.id);
         assert.equal(upgraded.listCanvasFolders().find(folder => folder.id === "drama")?.sharedAssetCanvasId, sharedId);
-        assert.ok(fs.readdirSync(f.directory).some(name => name.includes('pre-schema-v23-to-v25')));
+        assert.ok(fs.readdirSync(f.directory).some(name => name.includes('pre-schema-v23-to-v29')));
     } finally { upgraded.close(); }
+});
+
+
+test("asset preparation uses a compact zone and repeat preparation preserves manually moved nodes", t => {
+    const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
+    const d = director();
+    d.source.script_scenes = Array.from({ length: 12 }, (_, i) => ({ id: `block-${i}`, scene_id: "room", scene_name: `Scene ${i}`, text: `Script ${i}`, beat_ids: [`b${i}`] }));
+    d.sourceHash = directorHash(d.source);
+    d.artifacts = d.artifacts.map(artifact => ({ ...artifact, status: "stale" }));
+    save(f.episode, "ep", d);
+    const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+    runner.prepareTargets("ep", f.episode.get("ep").revision, ["asset:ROLE"], "compact-asset");
+    const nodeId = f.episode.get("ep").draft.director!.assets.ROLE.nodeId;
+    const node = () => (f.db.getCanvasProject(projectId)!.nodes as any[]).find(node => node.id === nodeId);
+    assert.deepEqual(node().position, f.db.getProductionLayoutPlan(projectId)!.units.find(unit => unit.id === "asset:ROLE")!.members[0].position);
+    f.db.applyCanvasProjectOperations(projectId, undefined, [{ type: "update_node", id: nodeId, patch: { position: { x: 200, y: 100 }, width: 480 } }]);
+    runner.prepareTargets("ep", f.episode.get("ep").revision, ["asset:ROLE"], "compact-asset-again");
+    assert.deepEqual(node().position, { x: 200, y: 100 });
+    assert.equal(node().width, 480);
+    assert.equal((f.db.getCanvasProject(projectId)!.nodes as any[]).filter(node => node.id === nodeId).length, 1);
+});
+
+
+test("scene arrangement fits resized images and attached prompts and replays without moving other scenes", t => {
+    const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
+    save(f.episode, "ep", director());
+    const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+    runner.prepareTargets("ep", f.episode.get("ep").revision, ["frame:s1"], "layout-frame");
+    const project = f.db.getCanvasProject(projectId)!, frame = (project.nodes as any[]).find(node => node.metadata?.productionShotId === "s1");
+    f.db.applyCanvasProjectOperations(projectId, undefined, [{ type: "update_node", id: frame.id, patch: { width: 900, height: 900 } }, { type: "add_node", id: "frame-prompt", nodeType: "config", width: 520, height: 300, metadata: { prompt: "keep this prompt", productionShotId: "s1", groupId: frame.metadata.groupId } }]);
+    const otherScripts = (f.db.getCanvasProject(projectId)!.nodes as any[]).filter(node => node.metadata?.productionScriptId).map(node => [node.id, node.position]);
+    const revision = f.episode.get("ep").revision;
+    runner.arrangeScene("ep", "morning", revision, "layout-arrange");
+    const after = f.db.getCanvasProject(projectId)!, nodes = after.nodes as any[], image = nodes.find(node => node.id === frame.id), prompt = nodes.find(node => node.id === "frame-prompt"), group = nodes.find(node => node.id === frame.metadata.groupId);
+    assert.equal(prompt.position.x, image.position.x);
+    assert.ok(prompt.position.y >= image.position.y + image.height + 60);
+    assert.ok(prompt.position.y + prompt.height <= group.position.y + group.height);
+    assert.ok(image.position.x + image.width <= group.position.x + group.width);
+    assert.equal(prompt.metadata.prompt, "keep this prompt");
+    assert.deepEqual(nodes.filter(node => node.metadata?.productionScriptId).map(node => [node.id, node.position]), otherScripts);
+    runner.arrangeScene("ep", "morning", revision, "layout-arrange");
+    assert.equal(f.db.getCanvasProject(projectId)!.revision, after.revision);
+});
+
+test("whole-plan layout stays stable when formal targets are prepared in different orders", async t => {
+    const scenarios: Array<{ order: string[]; nodes: Record<string, { x: number; y: number }> }> = [];
+    for (const [index, order] of [["asset-first", ["asset:ROLE", "frame:s1"]], ["frame-first", ["frame:s1", "asset:ROLE"]]] as Array<[string, string[]]>) {
+        const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
+        const d = director();
+        d.source.script_scenes = [{ id: "morning", scene_id: "room", scene_name: "Morning", text: "Morning".repeat(400), beat_ids: ["b1"] }, { id: "night", scene_id: "room", scene_name: "Night", text: "Night".repeat(400), beat_ids: ["b2"] }];
+        d.sourceHash = directorHash(d.source);
+        d.artifacts = d.artifacts.map(artifact => ({ ...artifact, status: "stale" }));
+        save(f.episode, "ep", d);
+        const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+        for (const [step, target] of order.entries()) {
+            const prepared = runner.prepareTargets("ep", f.episode.get("ep").revision, [target], `${index}:${step}:${target}`);
+            assert.ok(prepared.layoutReceipt?.planHash);
+            assert.ok(prepared.layoutReceipt?.algorithmVersion);
+            assert.ok(prepared.layoutReceipt!.canvasRevision >= 0);
+        }
+        const layout = f.db.getProductionLayoutPlan(projectId)!;
+        const role = f.episode.get("ep").draft.director!.assets.ROLE.nodeId!;
+        const frame = f.episode.get("ep").draft.director!.assets.FRAME.nodeId!;
+        assert.ok(layout.units.some(unit => unit.id === "keyframe-asset:FRAME" && unit.targets.includes("frame:s1") && unit.members.some(member => member.role === "keyframe")));
+        assert.ok(layout.units.some(unit => unit.id === "frame-prompt:s1" && unit.members.some(member => member.role === "prompt")));
+        const roleNode = (f.db.getCanvasProject(projectId)!.nodes as any[]).find(node => node.id === role);
+        const frameNode = (f.db.getCanvasProject(projectId)!.nodes as any[]).find(node => node.id === frame);
+        assert.ok(roleNode.metadata.productionLayoutUnitId);
+        assert.ok(frameNode.metadata.productionLayoutUnitId);
+        scenarios.push({ order, nodes: { ROLE: roleNode.position, FRAME: frameNode.position } });
+        assert.equal(f.stores.tasks.list().length, 0, "layout preparation must not submit media");
+    }
+    assert.deepEqual(scenarios[0].nodes, scenarios[1].nodes);
+});
+
+test("scene preparation receipts include its projected script units", t => {
+    const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
+    const d = director();
+    d.source.script_scenes = [{ id: "morning", scene_id: "room", scene_name: "Morning", text: "New script projection", beat_ids: ["b1"] }];
+    d.sourceHash = directorHash(d.source);
+    d.artifacts = d.artifacts.map(artifact => ({ ...artifact, status: "stale" }));
+    save(f.episode, "ep", d);
+    const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+    const prepared = runner.prepareTargets("ep", f.episode.get("ep").revision, ["scene:morning"], "prepare-scene-receipt");
+    const projected = (f.db.getCanvasProject(projectId)!.nodes as any[]).filter(node => node.metadata?.productionScriptId);
+    assert.ok(projected.length > 0);
+    assert.ok([...prepared.layoutReceipt!.created, ...prepared.layoutReceipt!.reused].some(item => item.target === "scene:morning" && projected.some(node => item.nodeIds.includes(node.id))));
+});
+
+function referenceClipFixture(t: test.TestContext) {
+    const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
+    const file = path.join(f.directory, "approved.png"); fs.writeFileSync(file, "approved identity");
+    const sha256 = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+    f.db.upsertMediaFile({ storageKey: "approved.png", filePath: file, mimeType: "image/png", bytes: 17, width: 8, height: 8, durationMs: null, createdAt: new Date().toISOString() });
+    f.stores.projects.applyOperations(projectId, 0, [{ type: "add_node", id: "identity", nodeType: "image", metadata: { storageKey: "approved.png" } }], { runtimeWrite: true });
+    const d = director(); d.assets.ROLE = { nodeId: "identity", storageKey: "approved.png", sha256, version: "v1", status: "approved", evidence: "Reviewed identity" };
+    Object.values(d.shotInputs).forEach(input => { input.keyframePolicy = "none"; delete input.keyframeAssetId; });
+    (d.source.segments as any[])[0].mode = "I2VA";
+    d.sourceHash = directorHash(d.source);
+    d.artifacts.forEach(artifact => { artifact.sourceHash = d.sourceHash; artifact.receipt.sourceHash = d.sourceHash; });
+    const artifact = d.artifacts.find(a => a.targetId === "seg1")!;
+    artifact.prompt = artifact.prompt.replace("Complete seg1", "<Picture 1> Complete seg1"); artifact.sha256 = promptHash(artifact.prompt); artifact.receipt.promptHash = artifact.sha256;
+    artifact.references = [{ label: "<Picture 1>", nodeId: "identity", storageKey: "approved.png", sha256, role: "reference" }];
+    save(f.episode, "ep", d);
+    const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+    return { ...f, projectId, runner, d, file };
+}
+test("first and repeated Clip preparation persist approved references and identical frozen receipts", t => {
+    const f = referenceClipFixture(t), revision = f.episode.get("ep").revision;
+    const first = f.runner.prepareTargets("ep", revision, ["segment:seg1"], "reference-first");
+    assert.equal(first.referenceSync?.[0].status, "ready", JSON.stringify(first.referenceSync));
+    assert.equal(first.referenceSync?.[0].referenceCount, 1);
+    const group = first.draft.clipGroups.find(group => group.id === "seg1")!;
+    const read = () => (f.db.getCanvasProject(f.projectId)!.nodes as any[]).find(node => node.id === group.nodeId).metadata.segments.find((clip: any) => clip.id === group.segmentId);
+    assert.equal(read().referenceBindings[0].storageKey, "approved.png");
+    assert.equal(read().productionClipProjection.inputHash, clipInputHash(read()));
+    assert.deepEqual(f.runner.prepareTargets("ep", revision, ["segment:seg1"], "reference-first").referenceSync, first.referenceSync);
+    assert.equal(f.runner.prepareTargets("ep", first.revision, ["segment:seg1"], "reference-again").referenceSync?.[0].status, "ready");
+    const canvas = f.db.getCanvasProject(f.projectId)!;
+    assert.throws(() => f.stores.projects.applyOperations(f.projectId, Number(canvas.revision), [{ type: "update_h3_segment", nodeId: group.nodeId, segmentId: group.segmentId, patch: { prompt: "hand rewritten" } }], { operationId: "wrong-edit" }), /修改编译前源稿/);
+    assert.equal(f.db.getCanvasProject(f.projectId)!.revision, canvas.revision);
+});
+test("unapproved references remain explicitly blocked and applying a new compiled input repairs an existing Clip", t => {
+    const f = referenceClipFixture(t);
+    const candidate = structuredClone(f.d); candidate.assets.ROLE.status = "generated";
+    save(f.episode, "ep", candidate);
+    const draft = f.runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1"], "reference-blocked");
+    assert.equal(draft.referenceSync?.[0].status, "blocked");
+    const group = draft.draft.clipGroups.find(group => group.id === "seg1")!;
+    const read = () => (f.db.getCanvasProject(f.projectId)!.nodes as any[]).find(node => node.id === group.nodeId).metadata.segments.find((clip: any) => clip.id === group.segmentId);
+    assert.deepEqual(read().referenceBindings, []);
+    candidate.assets.ROLE.status = "approved"; save(f.episode, "ep", candidate);
+    assert.equal(read().referenceBindings.length, 1, "compilation/source apply projects existing Clip in the same transaction");
+    const before = structuredClone(read());
+    f.stores.projects.applyOperations(f.projectId, Number(f.db.getCanvasProject(f.projectId)!.revision), [{ type: "update_h3_segment", nodeId: group.nodeId, segmentId: group.segmentId, patch: { status: "running" } }], { runtimeWrite: true });
+    const busy = f.runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1"], "reference-busy");
+    assert.equal(busy.referenceSync?.[0].status, "blocked"); assert.equal(read().prompt, before.prompt);
+    assert.deepEqual(read().referenceBindings, before.referenceBindings);
+});
+test("a late invalid node or H3 field rolls back a mixed batch and its revision", t => {
+    const f = referenceClipFixture(t); const project = f.db.getCanvasProject(f.projectId)!;
+    assert.throws(() => f.stores.projects.applyOperations(f.projectId, Number(project.revision), [
+        { type: "update_node", id: "identity", patch: { title: "must roll back" } },
+        { type: "update_node", id: "identity", patch: { widht: 100 } },
+    ], { operationId: "late-invalid" }));
+    assert.equal(f.db.getCanvasProject(f.projectId)!.revision, project.revision);
+    assert.deepEqual(f.db.getCanvasProject(f.projectId)!.nodes, project.nodes);
+});
+
+test("manual Clip conflicts preserve edits and can be reconciled through the authored source", t => {
+    const f = referenceClipFixture(t);
+    const prepared = f.runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1"], "conflict-prepare");
+    const group = prepared.draft.clipGroups.find(group => group.id === "seg1")!;
+    f.stores.projects.applyOperations(f.projectId, Number(f.db.getCanvasProject(f.projectId)!.revision), [{ type: "update_h3_segment", nodeId: group.nodeId, segmentId: group.segmentId, patch: { title: "Reviewed entrance" } }], { operationId: "manual-title" });
+    const blocked = f.runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1"], "conflict-read");
+    assert.equal(blocked.referenceSync?.[0].status, "blocked");
+    const candidate = structuredClone(f.episode.get("ep").draft.director!);
+    (candidate.source.shots as any[])[0].title = "Reviewed entrance"; candidate.sourceHash = directorHash(candidate.source);
+    candidate.artifacts.forEach(a => { a.sourceHash = candidate.sourceHash; a.receipt.sourceHash = candidate.sourceHash; });
+    save(f.episode, "ep", candidate);
+    const ready = f.runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1"], "conflict-resolved");
+    assert.equal(ready.referenceSync?.[0].status, "ready", JSON.stringify(ready.referenceSync));
+});
+
+test("a new approved reference version projects only current Clips and retains the published input", t => {
+    const f = referenceClipFixture(t);
+    const prepared = f.runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1"], "version-first");
+    const original = publish(f.episode, "ep");
+    const file = path.join(f.directory, "identity-v2.png"); fs.writeFileSync(file, "new reviewed identity");
+    const sha256 = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+    f.db.upsertMediaFile({ storageKey: "identity-v2.png", filePath: file, mimeType: "image/png", bytes: 21, width: 8, height: 8, durationMs: null, createdAt: new Date().toISOString() });
+    f.stores.projects.applyOperations(f.projectId, Number(f.db.getCanvasProject(f.projectId)!.revision), [{ type: "update_node", id: "identity", metadata: { storageKey: "identity-v2.png" } }]);
+    const candidate = structuredClone(f.episode.get("ep").draft.director!);
+    (candidate.source.asset_plan as any[]).find(plan => plan.asset_id === "ROLE").version = "v2";
+    candidate.assets.ROLE = { ...candidate.assets.ROLE, version: "v2", storageKey: "identity-v2.png", sha256 };
+    candidate.sourceHash = directorHash(candidate.source);
+    candidate.artifacts.forEach(a => { a.sourceHash = candidate.sourceHash; a.receipt.sourceHash = candidate.sourceHash; });
+    const artifact = candidate.artifacts.find(a => a.targetId === "seg1")!;
+    artifact.references[0] = { ...artifact.references[0], storageKey: "identity-v2.png", sha256 };
+    save(f.episode, "ep", candidate);
+    const group = prepared.draft.clipGroups.find(group => group.id === "seg1")!;
+    const clip = (f.db.getCanvasProject(f.projectId)!.nodes as any[]).find(node => node.id === group.nodeId).metadata.segments.find((clip: any) => clip.id === group.segmentId);
+    assert.equal(clip.referenceBindings[0].storageKey, "identity-v2.png");
+    assert.equal(f.episode.version("ep", original.publishedVersion).snapshot.director!.artifacts.find(a => a.targetId === "seg1")!.references[0].storageKey, "approved.png");
+    candidate.artifacts.forEach(a => { a.status = "stale"; }); save(f.episode, "ep", candidate);
+    const stale = f.runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1"], "version-stale");
+    assert.equal(stale.referenceSync?.[0].status, "blocked");
+    assert.equal(clip.referenceBindings[0].storageKey, "identity-v2.png");
 });

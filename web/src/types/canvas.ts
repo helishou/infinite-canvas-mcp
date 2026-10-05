@@ -1,4 +1,5 @@
 import type { CanvasGenerationMode } from "@basketikun/canvas-agent/generation-contract";
+import type { ProductionImageInput } from "@basketikun/canvas-agent/reference-contract";
 
 export type { CanvasGenerationMode } from "@basketikun/canvas-agent/generation-contract";
 
@@ -88,7 +89,12 @@ export type CanvasNodeModeResult = {
 };
 
 export type CanvasNodeMetadata = {
+    productionImageInput?: ProductionImageInput;
+    productionLayoutUnitId?: string;
     productionSceneId?: string;
+    /** Formal screenplay block and scene identities projected by Backend. */
+    productionScriptId?: string;
+    productionScriptSceneId?: string;
     sharedAssetOrigin?: { dramaId: string; assetId: string; approvedId: string; sourceProjectId: string; sourceNodeId: string };
     content?: string;
     url?: string;

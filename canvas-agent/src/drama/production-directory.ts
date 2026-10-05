@@ -20,17 +20,27 @@ export function productionScriptGroups(blocks: Record<string, any>[]): Productio
     return groups;
 }
 
+/**
+ * A shot names its script occurrence explicitly, or is mapped through story beats.
+ * `shot.scene_id` is an environment registry reference and never identifies the occurrence on its own:
+ * one environment legitimately carries several script occurrences, so matching on it alone silently drops shots.
+ */
+function shotNamesSceneOccurrence(shot: Record<string, any>, group: { key: string; sceneId: string; blocks: Record<string, any>[] }): boolean {
+    const named = String(shot.source_scene_id || "");
+    if (named) return named === group.key || named === group.sceneId;
+    const beats = new Set(group.blocks.flatMap(block => Array.isArray(block.beat_ids) ? block.beat_ids.map(String) : []));
+    return beats.size > 0 && (shot.story_beat_ids || []).some((id: unknown) => beats.has(String(id)));
+}
+
 /** Script occurrences and environment registry identities are deliberately separate. */
 export function productionSceneEntries(source: Source) {
     const shots = entries(source.shots);
     const scripts = entries(source.script_scenes);
     const registry = entries(source.scene_registry);
     const groups = productionScriptGroups(scripts);
-    return scripts.length ? groups.map(group => {
-        const beats = new Set(group.blocks.flatMap(scene => Array.isArray(scene.beat_ids) ? scene.beat_ids.map(String) : []));
-        const matching = shots.filter(shot => beats.size ? (shot.story_beat_ids || []).some((id: unknown) => beats.has(String(id)))
-            : groups.filter(item => item.sceneId === group.sceneId).length === 1 && shot.scene_id === group.sceneId);
-        return { id: group.key, environmentId: group.sceneId, title: group.title || String(registry.find(item => item.id === group.sceneId)?.name || group.key),
-            text: group.blocks.map(scene => String(scene.text || "")).join("\n\n"), shotIds: [...new Set(matching.map(shot => String(shot.id)))] };
-    }) : registry.map(scene => ({ id: String(scene.id), environmentId: String(scene.id), title: String(scene.name || scene.id), text: "", shotIds: shots.filter(shot => shot.scene_id === scene.id).map(shot => String(shot.id)) }));
+    return scripts.length ? groups.map(group => ({
+        id: group.key, environmentId: group.sceneId, title: group.title || String(registry.find(item => item.id === group.sceneId)?.name || group.key),
+        text: group.blocks.map(scene => String(scene.text || "")).join("\n\n"),
+        shotIds: shots.filter(shot => shotNamesSceneOccurrence(shot, group)).map(shot => String(shot.id)),
+    })) : registry.map(scene => ({ id: String(scene.id), environmentId: String(scene.id), title: String(scene.name || scene.id), text: "", shotIds: shots.filter(shot => String(shot.scene_id || "") === String(scene.id)).map(shot => String(shot.id)) }));
 }

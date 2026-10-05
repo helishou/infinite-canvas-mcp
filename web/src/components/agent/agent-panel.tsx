@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import { Badge, Button, Modal } from "antd";
-import { LoaderCircle, MessageSquare, X } from "lucide-react";
+import { Badge, Button, Modal, Tooltip } from "antd";
+import { Bell, BellOff, LoaderCircle, MessageSquare, X } from "lucide-react";
+import { useConfirmationReminders } from "./use-confirmation-reminders";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { LocalAgentPanel } from "./local-agent-panel";
@@ -23,7 +24,7 @@ export function AgentPanel() {
     const panelOpen = useAgentStore(state => state.panelOpen);
     const panelMounted = useAgentStore(state => state.panelMounted);
     const busy = useAgentStore(state => state.sending || state.waiting);
-    const approvalCount = useAgentStore(state => state.pendingApprovals.length + (state.pendingTool ? 1 : 0));
+    const reminders = useConfirmationReminders();
     const closePanel = useAgentStore(state => state.closePanel);
     const context = useProductionWorkspaceStore(state => state.context);
     const production = useProductionWorkspaceStore(state => state.production);
@@ -79,6 +80,11 @@ export function AgentPanel() {
         useProductionWorkspaceStore.getState().setPanelTab("director");
         if (chatOpen) closePanel(); else useAgentStore.getState().openPanel();
     };
+    const reminderControl = <Tooltip title={reminders.hint} placement="bottom">
+        <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" loading={reminders.requesting}
+            aria-label={t("confirmationReminders.button")} aria-pressed={reminders.enabled}
+            icon={reminders.enabled ? <Bell className="size-3.5" /> : <BellOff className="size-3.5" />} onClick={() => void reminders.toggle()} />
+    </Tooltip>;
     return <>
         <div className="fixed bottom-4 right-4 z-[80] flex max-w-[calc(100vw-32px)] flex-col items-end gap-2" data-canvas-shortcuts-ignore>
             {homePage && !chatOpen && !welcomeDismissed && <div data-director-welcome-bubble className="relative flex max-w-[calc(100vw-32px)] items-center gap-1 rounded-xl border px-2 py-1.5 shadow-sm" style={{ background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }}>
@@ -96,18 +102,16 @@ export function AgentPanel() {
                 {recoveryPending ? t("productionCanvas.recovery") : <>{label ? `${label} · ` : ""}{t(`productionCanvas.progress.${current!.status}`)}</>}
             </button>}
             {!chatOpen && followTarget?.kind && followTarget.id && (!following || pending) && <Button type="text" onClick={() => useProductionFollowStore.getState().resume()}>{t("productionHub.follow.return")}</Button>}
-            <div className="flex items-center gap-2">
-                <Badge count={approvalCount} size="small">
-                    <Button type={chatOpen ? "default" : "primary"} shape="round" className="!h-11 !px-4" aria-label={t("productionCanvas.openChat")} aria-expanded={chatOpen} aria-controls="canvas-director-dialog" icon={busy ? <LoaderCircle className="size-4 animate-spin" /> : <MessageSquare className="size-4" />} onClick={openChat}>{t("productionCanvas.director")}</Button>
-                </Badge>
-            </div>
+            <Badge count={reminders.count} size="small">
+                <Button type={chatOpen ? "default" : "primary"} shape="round" className="!h-11 !px-4" aria-label={t("productionCanvas.openChat")} aria-expanded={chatOpen} aria-controls="canvas-director-dialog" icon={busy ? <LoaderCircle className="size-4 animate-spin" /> : <MessageSquare className="size-4" />} onClick={openChat}>{t("productionCanvas.director")}</Button>
+            </Badge>
         </div>
         <section id="canvas-director-dialog" role="dialog" aria-label={t("productionCanvas.chatDialog")} aria-hidden={!chatOpen} inert={!chatOpen}
             data-canvas-shortcuts-ignore data-canvas-no-zoom
             className="fixed bottom-20 right-4 z-[75] flex w-[min(460px,calc(100vw-32px))] flex-col overflow-hidden rounded-2xl border shadow-xl"
             style={{ height: "min(640px, calc(100dvh - 112px))", background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text, visibility: chatOpen ? "visible" : "hidden", pointerEvents: chatOpen ? "auto" : "none" }}>
-            <AgentCreativeWelcome active={welcomeOpen} onShowChat={() => setCreativeEntryOpen(false)} onClose={closePanel} />
-            <LocalAgentPanel embedded compact headless={!panelMounted || welcomeOpen} autoConnect />
+            <AgentCreativeWelcome active={welcomeOpen} onShowChat={() => setCreativeEntryOpen(false)} onClose={closePanel} headerAction={reminderControl} />
+            <LocalAgentPanel embedded compact headless={!panelMounted || welcomeOpen} autoConnect headerAction={reminderControl} />
         </section>
         {owner && <Modal open={objectOpen} forceRender title={objectTitle || t("productionCanvas.object")} onCancel={closePanel} footer={null} width={/^(asset|frame|shot|segment):/.test(new URLSearchParams(search).get("target") || "") ? "min(800px, calc(100vw - 32px))" : "min(1120px, calc(100vw - 32px))"} centered styles={{ body: { maxHeight: "calc(100dvh - 160px)", overflow: "auto" } }}>
             <Suspense fallback={null}><ProductionEditor key={`${owner.kind}:${owner.id}`} owner={owner} embedded dialog /></Suspense>

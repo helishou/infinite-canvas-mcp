@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { directorProductionSchema, canonicalProduction, productionContractVersion, productionPreflightRequestSchema, type DirectorProduction, type ProductionDiagnostic, type ProductionPreflight } from "../drama/production-contract.js";
 import { productionOperationContract, schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch, ref2vaPromptDiagnostics } from "../drama/production-validation.js";
@@ -57,6 +58,10 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
     const plans = (Array.isArray(director.source.asset_plan) ? director.source.asset_plan : []) as Array<Record<string, any>>;
     const style = director.source.style_lock as Record<string, any> | undefined;
     const sourceAdjustments: Array<{ path: string; before: string; after: string; reason: string }> = [];
+    if (style?.approved_file && path.isAbsolute(style.approved_file) && resolveReferenceFile) {
+        const frozen = resolveReferenceFile(style.anchor_asset_id, "asset");
+        if (frozen && frozen !== style.approved_file) { sourceAdjustments.push({ path: "style_lock.approved_file", before: style.approved_file, after: frozen, reason: "Use frozen verified style input" }); style.approved_file = frozen; }
+    }
     if (style?.approved_file && !path.isAbsolute(style.approved_file)) {
         const anchor = plans.find(p => p.id === style.anchor_asset_id);
         const original = anchor?.file && path.isAbsolute(anchor.file) ? anchor.file : resolveReferenceFile?.(style.anchor_asset_id, "asset");
@@ -73,6 +78,10 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
             }
         }
     }
+    for (const plan of plans) if (plan.file && path.isAbsolute(plan.file) && resolveReferenceFile) {
+        const original = resolveReferenceFile(String(plan.id || plan.asset_id), "asset");
+        if (original && original !== plan.file) { sourceAdjustments.push({ path: `asset_plan.${plan.id || plan.asset_id}.file`, before: plan.file, after: original, reason: "Use frozen verified compilation input" }); plan.file = original; }
+    }
     for (const plan of plans) if (plan.file && !path.isAbsolute(plan.file)) {
         const original = resolveReferenceFile?.(plan.id, "asset");
         const destination = path.resolve(directory, plan.file);
@@ -81,10 +90,15 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
     }
     for (const card of (Array.isArray(director.source.asset_cards) ? director.source.asset_cards : []) as Array<Record<string, any>>) {
         for (const ref of card.references || []) {
-            if (!ref.file || path.isAbsolute(ref.file)) continue;
+            if (!ref.file) continue;
+            if (path.isAbsolute(ref.file)) {
+                const frozen = (ref.asset_id ? resolveReferenceFile?.(ref.asset_id, "asset") : undefined) || resolveReferenceFile?.(card.id, ref.label || `<Picture ${ref.image}>`);
+                if (frozen && frozen !== ref.file) { sourceAdjustments.push({ path: `asset_cards.${card.id}.references.${ref.label || ref.image}.file`, before: ref.file, after: frozen, reason: "Use frozen verified compilation input" }); ref.file = frozen; }
+                continue;
+            }
             const destination = path.resolve(directory, ref.file);
             if (!destination.startsWith(directory + path.sep)) throw new Error("Reference path escapes the compilation directory");
-            const original = resolveReferenceFile?.(card.id, ref.label || `<Picture ${ref.image}>`);
+            const original = (ref.asset_id ? resolveReferenceFile?.(ref.asset_id, "asset") : undefined) || resolveReferenceFile?.(card.id, ref.label || `<Picture ${ref.image}>`);
             if (original) { fs.mkdirSync(path.dirname(destination), { recursive: true }); fs.copyFileSync(original, destination); }
         }
     }
@@ -125,7 +139,12 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
                     diagnostics.push({ code: "MISSING_REFERENCE_BINDING", path: `artifacts.${kind}-${targetId}.references`, targetId, message: `No matching Canvas media binding for ${label}`, severity: "error" });
                     ready = false; continue;
                 }
-                references.push({ label, nodeId: binding.nodeId, storageKey: binding.storageKey, sha256: digest, role: ref.role || old?.role || "reference" });
+                const assetId = ref.asset_id || Object.keys(director.assets).find(id => director.assets[id].nodeId === binding.nodeId && director.assets[id].storageKey === binding.storageKey);
+                const card = (director.source.asset_cards as Array<Record<string, any>> || []).find(card => card.id === targetId);
+                const sourceRef = card?.references?.find((item: Record<string, any>) => item.image === ref.image);
+                references.push({ label, nodeId: binding.nodeId, storageKey: binding.storageKey, sha256: digest, role: ref.role || old?.role || "reference",
+                    ...(assetId ? { assetId, assetVersion: director.assets[assetId]?.version } : {}),
+                    ...(sourceRef?.preserve !== undefined ? { preserve: sourceRef.preserve } : {}), ...(sourceRef?.exclude !== undefined ? { exclude: sourceRef.exclude } : {}) });
             }
             director.artifacts.push({ id: `${kind}-${targetId}`, kind, targetId, prompt, sha256, sourceHash: director.sourceHash, status: ready ? "ready" : "draft", references,
                 receipt: { sourceHash: director.sourceHash, promptHash: sha256, engineRuntimeId: runtime.runtimeId, validator: onlyAssets ? "compile_assets/validate_asset_entries" : "compile_h3/validate_package",
@@ -189,6 +208,52 @@ export function assertAchengSource(director: DirectorProduction, stage: "edit" |
     if (diagnostics.length) throw new ProductionValidationError(diagnostics);
 }
 
+/** Stage-aware, read-only compilation checks; the pinned compiler still validates final output. */
+export function preflightCompilationDirector(raw: unknown, resolveReferenceFile?: (targetId: string, label: string) => string | undefined): ProductionPreflight {
+    const parsed = directorProductionSchema.safeParse(raw);
+    // Previous receipts are replaced by compilation, so their staleness must not block rebuilding.
+    const result = preflightDirector(parsed.success ? { ...parsed.data, artifacts: [] } : raw, "edit");
+    result.compileReady = false;
+    if (result.diagnostics.some(item => ["INVALID_SCHEMA", "ENGINE_UNAVAILABLE", "ENGINE_MISMATCH"].includes(item.code))) return result;
+    const director = directorProductionSchema.parse(structuredClone(raw));
+    if (JSON.stringify(director.source).includes('"legacy_fixture"')) {
+        result.diagnostics.push({ code: "COMPILE_HISTORICAL_FIXTURE", path: "director.source", message: "历史示例不能作为新制作输入；请使用本次实际撰写的源稿。", severity: "error" });
+        result.valid = false;
+        return result;
+    }
+    const runtime = resolveAchengRuntime(director.engine.runtimeId);
+    const source = director.source;
+    const plans = (Array.isArray(source.asset_plan) ? source.asset_plan : []).filter(plan => plan && typeof plan === "object") as Array<Record<string, any>>;
+    for (const plan of plans) if (typeof plan.file === "string" && plan.file && !path.isAbsolute(plan.file)) {
+        const file = resolveReferenceFile?.(String(plan.id || plan.asset_id), "asset");
+        if (file) plan.file = file;
+    }
+    const style = source.style_lock as Record<string, any> | undefined;
+    if (typeof style?.approved_file === "string" && style.approved_file && !path.isAbsolute(style.approved_file)) {
+        const anchor = plans.find(plan => plan.id === style.anchor_asset_id);
+        const file = anchor?.file && path.isAbsolute(anchor.file) ? anchor.file : resolveReferenceFile?.(style.anchor_asset_id, "asset");
+        if (file) style.approved_file = file;
+    }
+    for (const card of (Array.isArray(source.asset_cards) ? source.asset_cards : []).filter(card => card && typeof card === "object") as Array<Record<string, any>>) {
+        for (const ref of Array.isArray(card.references) ? card.references : []) if (ref && typeof ref.file === "string" && ref.file && !path.isAbsolute(ref.file)) {
+            const file = resolveReferenceFile?.(card.id, ref.label || `<Picture ${ref.image}>`);
+            if (file) ref.file = file;
+        }
+    }
+    try {
+        const response = runAchengPython(["-B", "-X", "utf8", fileURLToPath(new URL("./compile-preflight.py", import.meta.url)), runtime.path], {
+            cwd: runtime.path, windowsHide: true, encoding: "utf8", input: JSON.stringify({ source }),
+        });
+        result.diagnostics.push(...JSON.parse(response).diagnostics);
+    } catch (error) {
+        result.diagnostics.push({ code: "COMPILE_PREFLIGHT_UNAVAILABLE", path: "director.engine", message: error instanceof Error ? error.message : String(error), severity: "error" });
+    }
+    result.valid = !result.diagnostics.some(item => item.severity === "error");
+    result.compileReady = result.valid;
+    result.nextActions = result.diagnostics.filter(item => item.severity === "error").map(item => item.nextAction || { action: "correct_source", message: item.message });
+    return result;
+}
+
 /** Shared file/Backend check. File checks cannot establish online ownership. */
 export function preflightDirector(raw: unknown, stage: "edit" | "publish" | "generate" = "edit"): ProductionPreflight {
     const diagnostics = schemaDiagnostics(directorProductionSchema, raw, "director");
@@ -218,6 +283,7 @@ export function preflightProductionRequest(raw: unknown, production?: { revision
     if (production && input.request.expectedRevision !== production.revision) diagnostics.push({ code: "REVISION_CONFLICT", path: "request.expectedRevision", message: `Snapshot revision is ${production.revision}`, severity: "error" });
     let director = structuredClone(input.action === "generate" ? production?.published?.director : production?.draft.director);
     if (input.action === "generate" && production && production.publishedVersion !== input.request.version) diagnostics.push({ code: "VERSION_CONFLICT", path: "request.version", message: "Published snapshot version differs", severity: "error" });
+    if (input.action === "compile" && input.request.director) director = structuredClone(input.request.director);
     if (input.action === "edit") for (const [index, operation] of input.request.ops.entries()) {
         try {
             if (operation.type === "set_director_production") director = structuredClone(operation.director);
@@ -230,8 +296,9 @@ export function preflightProductionRequest(raw: unknown, production?: { revision
         } catch (error) { diagnostics.push({ code: "INVALID_OPERATION", path: `request.ops.${index}`, targetId: "id" in operation ? String(operation.id) : undefined, message: error instanceof Error ? error.message : String(error), severity: "error" }); break; }
     }
     if (!diagnostics.some(item => item.severity === "error") && director) {
-        const checked = preflightDirector(director, input.action === "edit" ? "edit" : input.action === "publish" ? "publish" : "generate");
+        const checked = input.action === "compile" ? preflightCompilationDirector(director) : preflightDirector(director, input.action === "edit" ? "edit" : input.action === "publish" ? "publish" : "generate");
         diagnostics.push(...checked.diagnostics); result.engine = checked.engine;
+        result.compileReady = input.action === "compile" && checked.compileReady;
     } else diagnostics.push({ code: "ONLINE_CONTEXT_UNVERIFIED", path: "production", message: "Current production and Backend checks remain unverified", severity: "unverified" });
     result.valid = !diagnostics.some(item => item.severity === "error");
     return result;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { App, Button, Tooltip } from "antd";
 import dayjs from "dayjs";
@@ -133,7 +133,7 @@ function conversationBootstrapView(conversation: AgentConversationState) {
     return { bootstrapStatus, mcpStartupStatuses };
 }
 
-export function LocalAgentPanel({ embedded, headless, autoConnect, compact }: { embedded?: boolean; headless?: boolean; autoConnect?: boolean; compact?: boolean }) {
+export function LocalAgentPanel({ embedded, headless, autoConnect, compact, headerAction }: { embedded?: boolean; headless?: boolean; autoConnect?: boolean; compact?: boolean; headerAction?: ReactNode }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { message, modal } = App.useApp();
@@ -1692,9 +1692,9 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact }: { 
                 theme={theme}
                 leading={
                     <div className="flex items-center gap-1">
-                        <span className="grid size-8 place-items-center">
+                        {headerAction || <span className="grid size-8 place-items-center">
                             <Bot className="size-4" />
-                        </span>
+                        </span>}
                         <div className={compact ? "text-sm font-medium" : "hidden text-base font-semibold leading-5 @min-[560px]:block"}>{compact ? t("productionCanvas.director") : "Agent"}</div>
                         <Tooltip title={t("agent.panel.connectionSettings", { status: connectionStatus })} placement="bottom">
                             <Button size="small" type="text" className="!h-8 !w-8 !min-w-8 !px-0 @min-[560px]:!w-auto @min-[560px]:!min-w-0 @min-[560px]:!px-[7px]" aria-label={t("agent.panel.connectionSettingsLabel", { status: connectionStatus })} icon={<PlugZap className="size-3.5" style={{ color: connectionStatusColor }} />} onClick={() => setAgentState({ activeTab: "setup" })}>

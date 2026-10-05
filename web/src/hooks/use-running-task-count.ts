@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { fetchBackendTasks, type BackendRuntimeTask } from "@/services/backend-api";
 import { taskProgress } from "@/lib/canvas/task-progress";
 import { useBackendStore } from "@/stores/use-backend-store";
+import { useTaskConfirmationStore } from "@/stores/use-task-confirmation-store";
+import { taskConfirmationReminders } from "@/lib/confirmation-reminders";
 
 const POLL_INTERVAL_MS = 15000;
 
@@ -36,10 +38,13 @@ export function groupActiveTasks(tasks: BackendRuntimeTask[]): ActiveTaskGroup[]
 export function useRunningTaskCount(projectId: string) {
     const connected = useBackendStore((state) => state.connected);
     const [active, setActive] = useState<Map<string, BackendRuntimeTask>>(() => new Map());
+    const activeRef = useRef(active);
     const [progressHistory, setProgressHistory] = useState<Record<string, number>>({});
+    useEffect(() => () => useTaskConfirmationStore.getState().clear(projectId), [projectId]);
 
     useEffect(() => {
         if (!connected || !projectId) {
+            activeRef.current = new Map();
             setActive(new Map());
             return undefined;
         }
@@ -56,7 +61,9 @@ export function useRunningTaskCount(projectId: string) {
                 for (const task of running.tasks || []) next.set(task.id, task);
                 for (const task of queued.tasks || []) next.set(task.id, task);
                 for (const task of awaiting.tasks || []) next.set(task.id, task);
+                activeRef.current = next;
                 setActive(next);
+                useTaskConfirmationStore.getState().setSnapshot(projectId, taskConfirmationReminders([...next.values()], projectId));
             } catch {
                 // 轮询失败保留上一次结果，避免网络抖动让角标闪烁归零
             }
@@ -67,12 +74,11 @@ export function useRunningTaskCount(projectId: string) {
             const detail = (event as CustomEvent).detail as { type?: string; entityId?: string; payload?: BackendRuntimeTask } | undefined;
             const payload = detail?.payload;
             if (!detail?.type?.startsWith("task.") || !detail.entityId || !payload || payload.projectId !== projectId) return;
-            setActive((current) => {
-                const next = new Map(current);
-                if (isActiveStatus(payload.status)) next.set(payload.id, payload);
-                else next.delete(payload.id);
-                return next;
-            });
+            const next = new Map(activeRef.current);
+            if (isActiveStatus(payload.status)) next.set(payload.id, payload);
+            else next.delete(payload.id);
+            activeRef.current = next; setActive(next);
+            useTaskConfirmationStore.getState().setSnapshot(projectId, taskConfirmationReminders([...next.values()], projectId));
         };
         window.addEventListener("backend-event", onEvent);
         return () => {

@@ -1,15 +1,41 @@
 import { z } from "zod";
 export { productionSceneEntries, productionScriptGroups } from "./production-directory.js";
 export { productionWorkspaceSchemas, productionWorkspaceDescriptions, productionWorkspaceToolNames, productionWorkspaceRequest } from "./production-workspace-contract.js";
+export { productionToolPreflightRequest, productionToolPreflight } from "./production-tool-preflight.js";
 
 const id = z.string().trim().min(1);
 
 export const productionContractVersion = "2";
+export const productionLayoutPointSchema = z.object({ x: z.number().finite(), y: z.number().finite() });
+export const productionLayoutSizeSchema = z.object({ width: z.number().positive().finite(), height: z.number().positive().finite() });
+export const productionLayoutRoleSchema = z.enum(["asset", "script", "scene", "keyframe", "prompt", "video"]);
+export const productionLayoutMemberSchema = z.object({
+    role: productionLayoutRoleSchema, nodeId: id, nodeType: id, position: productionLayoutPointSchema, size: productionLayoutSizeSchema,
+});
+export const productionLayoutUnitSchema = z.object({
+    id, area: productionLayoutRoleSchema, targets: z.array(id), sceneId: id.optional(),
+    bounds: z.object({ position: productionLayoutPointSchema, size: productionLayoutSizeSchema }), members: z.array(productionLayoutMemberSchema),
+    status: z.enum(["reserved", "materialized"]),
+});
+export const productionLayoutRegionSchema = z.object({ id, area: productionLayoutRoleSchema, bounds: z.object({ position: productionLayoutPointSchema, size: productionLayoutSizeSchema }) });
+export const productionLayoutPlanSchema = z.object({
+    schemaVersion: z.number().int().positive(), algorithmVersion: id, canvasId: id, owner: z.object({ kind: z.enum(["canvas", "episode"]), id }),
+    structureHash: z.string().regex(/^[a-f0-9]{64}$/), geometryHash: z.string().regex(/^[a-f0-9]{64}$/),
+    planHash: z.string().regex(/^[a-f0-9]{64}$/), regions: z.array(productionLayoutRegionSchema), units: z.array(productionLayoutUnitSchema),
+    diagnostics: z.array(z.object({ code: id, target: id.optional(), message: z.string() })),
+});
+export type ProductionLayoutMember = z.infer<typeof productionLayoutMemberSchema>;
+export type ProductionLayoutUnit = z.infer<typeof productionLayoutUnitSchema>;
+export type ProductionLayoutPlan = z.infer<typeof productionLayoutPlanSchema>;
+export type ProductionLayoutReceipt = {
+    planHash: string; algorithmVersion: string; canvasRevision: number; created: Array<{ target: string; nodeIds: string[] }>;
+    reused: Array<{ target: string; nodeIds: string[] }>; diagnostics: Array<{ code: string; target?: string; message: string }>;
+};
 export const directorPatchFields = {
     brief: ["value"],
     style: ["style_policy", "style_policy_reason", "anchor_asset_id"],
     scene: ["scene_name", "heading", "location", "time_of_day", "text"],
-    asset: ["asset_name", "name", "title", "kind", "description", "prompt", "depends_on", "role", "version", "reference_role"],
+    asset: ["asset_name", "name", "title", "kind", "description", "prompt", "depends_on", "role", "version", "reference_role", "canvas_scope"],
     shot: ["title", "visual", "camera", "start_frame", "end_frame", "state_in", "state_out", "dialogues", "audio", "required_assets", "description", "shot_type"],
     segment: ["shot_ids", "start_frame", "end_frame", "generation_clip_duration", "mode", "audio", "sound", "overall_soundscape", "non_diegetic_music", "references", "execution_gate"],
 } as const;
@@ -72,7 +98,7 @@ export const directorProductionSchema = z.object({
     workflow: directorWorkflowSchema.default({}),
 }).passthrough();
 export type DirectorProduction = z.infer<typeof directorProductionSchema>;
-export const productionCompileSchema = z.object({ expectedRevision: z.number().int().nonnegative(), director: directorProductionSchema.optional() }).strict();
+export const productionCompileSchema = z.object({ operationId: id.optional(), expectedRevision: z.number().int().nonnegative(), director: directorProductionSchema.optional() }).strict();
 export const productionApplyCompilationSchema = z.object({ preparedId: z.string().uuid() }).strict();
 export { productionReadSchema, productionReadQuery, projectProductionRead, productionWriteReceipt } from "./production-read.js";
 
@@ -126,6 +152,7 @@ export const clipGroupSchema = z.object({
 export const productionSettingsSchema = z.object({
     videoAspectRatio: z.string().regex(/^[1-9]\d*:[1-9]\d*$/).nullable().optional(),
     videoAspectRatioConfirmed: z.boolean().optional(),
+    storyboardImageMode: z.enum(["generate", "skip"]).optional(),
     mode: z.enum(["manual", "auto"]),
     imageModel: z.string(),
     h3Model: z.string(),
@@ -143,6 +170,7 @@ export const dramaProductionPlanSchema = z.object({
     imageModelsByKind: productionSettingsSchema.shape.imageModelsByKind,
     h3Model: z.string().default(""),
     videoAspectRatio: productionSettingsSchema.shape.videoAspectRatio,
+    storyboardImageMode: productionSettingsSchema.shape.storyboardImageMode,
     confirmedOutline: z.string().default(""),
     confirmedAt: z.string().datetime().optional(),
 }).strict();
@@ -169,49 +197,51 @@ export const episodeProductionDataSchema = z.object({
 });
 
 export const productionOperationSchema = z.discriminatedUnion("type", [
-    z.object({ type: z.literal("set_director_production"), director: directorProductionSchema }),
-    z.object({ type: z.literal("set_director_brief"), brief: z.string() }),
-    z.object({ type: z.literal("patch_director_source"), entity: z.enum(["brief", "style", "scene", "asset", "shot", "segment"]), id: id.optional(), patch: z.record(z.unknown()) }),
-    z.object({ type: z.literal("set_director_workflow"), patch: directorWorkflowSchema.partial() }),
-    z.object({ type: z.literal("bind_director_asset"), assetId: id, nodeId: id }),
-    z.object({ type: z.literal("adopt_shared_asset"), assetId: id, approvedId: id, nodeId: id }),
-    z.object({ type: z.literal("bind_director_segment"), targetId: id, nodeId: id, segmentId: id }),
-    z.object({ type: z.literal("set_director_boundary"), boundary: directorBoundarySchema }),
-    z.object({ type: z.literal("set_director_segment_group"), segmentId: id, shotIds: z.array(id).min(1), removeSegmentIds: z.array(id).default([]) }),
-    z.object({ type: z.literal("review_director_asset"), assetId: id, version: z.number().int().min(1), sourceHash: hash, nodeId: id, storageKey: id, sha256: hash, verdict: z.enum(["approved", "rejected"]), evidence: z.string().trim().min(1) }),
-    z.object({ type: z.literal("select_director_result"), targetKind: z.enum(["asset", "keyframe", "segment"]), targetId: id, nodeId: id, generationLogId: id, storageKey: id, canvasRevision: z.number().int().nonnegative() }),
-    z.object({ type: z.literal("upsert_scene"), scene: productionSceneSchema }),
-    z.object({ type: z.literal("delete_scene"), id }),
-    z.object({ type: z.literal("reorder_scenes"), ids: z.array(id) }),
-    z.object({ type: z.literal("upsert_script_block"), sceneId: id, block: scriptBlockSchema, beforeBlockId: id.optional() }),
-    z.object({ type: z.literal("delete_script_block"), sceneId: id, id }),
-    z.object({ type: z.literal("reorder_script_blocks"), sceneId: id, ids: z.array(id) }),
-    z.object({ type: z.literal("upsert_shot"), shot: productionShotSchema }),
-    z.object({ type: z.literal("delete_shot"), id }),
-    z.object({ type: z.literal("reorder_shots"), sceneId: id, ids: z.array(id) }),
-    z.object({ type: z.literal("set_keyframe"), shotId: id, nodeId: id.nullable() }),
-    z.object({ type: z.literal("set_clip_group"), group: clipGroupSchema }),
-    z.object({ type: z.literal("delete_clip_group"), id }),
-    z.object({ type: z.literal("set_settings"), patch: productionSettingsSchema.partial() }),
-    z.object({ type: z.literal("import_legacy"), source: z.enum(["fullPlot", "script.md", "storyboard.md"]) }),
-    z.object({ type: z.literal("review_keyframe"), shotId: id, verdict: z.enum(["auto-accepted", "needs-redo"]), evidence: z.string().min(1) }),
+    z.object({ type: z.literal("set_director_production"), director: directorProductionSchema }).strict(),
+    z.object({ type: z.literal("set_director_brief"), brief: z.string() }).strict(),
+    z.object({ type: z.literal("patch_director_source"), entity: z.enum(["brief", "style", "scene", "asset", "shot", "segment"]), id: id.optional(), patch: z.record(z.unknown()) }).strict(),
+    z.object({ type: z.literal("set_director_workflow"), patch: directorWorkflowSchema.partial() }).strict(),
+    z.object({ type: z.literal("bind_director_asset"), assetId: id, nodeId: id }).strict(),
+    z.object({ type: z.literal("adopt_shared_asset"), assetId: id, approvedId: id, nodeId: id }).strict(),
+    z.object({ type: z.literal("bind_director_segment"), targetId: id, nodeId: id, segmentId: id }).strict(),
+    z.object({ type: z.literal("set_director_boundary"), boundary: directorBoundarySchema }).strict(),
+    z.object({ type: z.literal("set_director_segment_group"), segmentId: id, shotIds: z.array(id).min(1), removeSegmentIds: z.array(id).default([]) }).strict(),
+    z.object({ type: z.literal("review_director_asset"), assetId: id, version: z.number().int().min(1), sourceHash: hash, nodeId: id, storageKey: id, sha256: hash, verdict: z.enum(["approved", "rejected"]), evidence: z.string().trim().min(1) }).strict(),
+    z.object({ type: z.literal("select_director_result"), targetKind: z.enum(["asset", "keyframe", "segment"]), targetId: id, nodeId: id, generationLogId: id, storageKey: id, canvasRevision: z.number().int().nonnegative() }).strict(),
+    z.object({ type: z.literal("upsert_scene"), scene: productionSceneSchema }).strict(),
+    z.object({ type: z.literal("delete_scene"), id }).strict(),
+    z.object({ type: z.literal("reorder_scenes"), ids: z.array(id) }).strict(),
+    z.object({ type: z.literal("upsert_script_block"), sceneId: id, block: scriptBlockSchema, beforeBlockId: id.optional() }).strict(),
+    z.object({ type: z.literal("delete_script_block"), sceneId: id, id }).strict(),
+    z.object({ type: z.literal("reorder_script_blocks"), sceneId: id, ids: z.array(id) }).strict(),
+    z.object({ type: z.literal("upsert_shot"), shot: productionShotSchema }).strict(),
+    z.object({ type: z.literal("delete_shot"), id }).strict(),
+    z.object({ type: z.literal("reorder_shots"), sceneId: id, ids: z.array(id) }).strict(),
+    z.object({ type: z.literal("set_keyframe"), shotId: id, nodeId: id.nullable() }).strict(),
+    z.object({ type: z.literal("set_clip_group"), group: clipGroupSchema }).strict(),
+    z.object({ type: z.literal("delete_clip_group"), id }).strict(),
+    z.object({ type: z.literal("set_settings"), patch: productionSettingsSchema.partial() }).strict(),
+    z.object({ type: z.literal("import_legacy"), source: z.enum(["fullPlot", "script.md", "storyboard.md"]) }).strict(),
+    z.object({ type: z.literal("review_keyframe"), shotId: id, verdict: z.enum(["auto-accepted", "needs-redo"]), evidence: z.string().min(1) }).strict(),
 ]);
 
-export const productionEditSchema = z.object({ operationId: id, expectedRevision: z.number().int().min(0), ops: z.array(productionOperationSchema).min(1) });
-export const productionPublishSchema = z.object({ operationId: id, expectedRevision: z.number().int().min(0), stage: z.enum(["script", "shots", "director"]) });
-export const directorRunStartSchema = z.object({ runId: id, idempotencyKey: id, workId: id.optional(), expectedRevision: z.number().int().min(0), version: z.number().int().min(1), targets: z.array(id).min(1), scope: z.enum(["selected", "all_ready"]).default("selected") });
-export const directorRunControlSchema = z.object({ runId: id });
-export const productionContractQuerySchema = z.object({ runtimeId: id.optional(), operationType: id.optional() });
+export const productionEditSchema = z.object({ operationId: id, expectedRevision: z.number().int().min(0), ops: z.array(productionOperationSchema).min(1) }).strict();
+export const productionPublishSchema = z.object({ operationId: id, expectedRevision: z.number().int().min(0), stage: z.enum(["script", "shots", "director"]) }).strict();
+export const directorRunStartSchema = z.object({ runId: id, idempotencyKey: id, workId: id.optional(), expectedRevision: z.number().int().min(0), version: z.number().int().min(1), targets: z.array(id).min(1), scope: z.enum(["selected", "all_ready"]).default("selected") }).strict();
+export const directorRunControlSchema = z.object({ runId: id }).strict();
+export const productionContractQuerySchema = z.object({ runtimeId: id.optional(), operationType: id.optional() }).strict();
 // Keep requests unparsed at this boundary so invalid inputs produce diagnostics,
 // rather than disappearing into a transport-level schema error.
-export const productionPreflightSchema = z.object({ action: z.enum(["edit", "publish", "generate"]), request: z.record(z.unknown()) });
+export const productionPreflightSchema = z.object({ action: z.enum(["edit", "publish", "compile", "generate"]), request: z.record(z.unknown()) }).strict();
 export const productionPreflightRequestSchema = z.discriminatedUnion("action", [
     z.object({ action: z.literal("edit"), request: productionEditSchema }),
     z.object({ action: z.literal("publish"), request: productionPublishSchema }),
+    z.object({ action: z.literal("compile"), request: productionCompileSchema }),
     z.object({ action: z.literal("generate"), request: directorRunStartSchema }),
 ]);
-export type ProductionDiagnostic = { code: string; path: string; targetId?: string; message: string; severity: "error" | "warning" | "unverified" };
-export type ProductionPreflight = { valid: boolean; contractVersion: string; engine: DirectorProduction["engine"] | null; revision: number | null; diagnostics: ProductionDiagnostic[]; generationReady: boolean };
+export type ProductionNextAction = { action: "correct_source" | "refresh" | "configure" | "read_run" | "review" | "wait"; message: string; tool?: string; input?: Record<string, unknown> };
+export type ProductionDiagnostic = { code: string; path: string; targetId?: string; message: string; severity: "error" | "warning" | "unverified"; blockingRun?: { runId: string; status: string; taskIds: string[] }; nextAction?: ProductionNextAction };
+export type ProductionPreflight = { valid: boolean; contractVersion: string; engine: DirectorProduction["engine"] | null; revision: number | null; diagnostics: ProductionDiagnostic[]; generationReady: boolean; compileReady?: boolean; replayed?: boolean; nextActions?: ProductionNextAction[] };
 export type DirectorRunStart = z.infer<typeof directorRunStartSchema>;
 
 export type ProductionScene = z.infer<typeof productionSceneSchema>;

@@ -3,7 +3,7 @@
   "data/module-registry.json": "a7c05783e3c93576724b2ea3d9b01703ac67de0dad69e6c5fa5a2fb46910c303",
   "references/90-production-contract.md": "db69bb156286b1075a885d6218f7f464b223f474dc7431e8ddfe312c44193288",
   "scripts/h3_contract.py": "2d1270dc7836978f3d531012c5c2991ddb2f7122cdaa5cc77d8f3d3214c437fb",
-  "scripts/h3_final_format.py": "7d1ce2a329da4044d01c8a366e521383549a45c52019253633ee9247ccf8a15b",
+  "scripts/h3_final_format.py": "3968b66ebc9885220b8c4fbb2a3129154ac5e45c4b2293fbbeb8afadc3f23529",
   "scripts/style_anchor.py": "5f499b332a82aec02ecb6f0e17a592fc50b133cf2bd89605d402686fc77fb543",
   "scripts/director_pipeline.py": "99efe1af422b223f51e0c7d2e34e0790b432e5be167e8babd5e2ff3a51514707",
   "scripts/compile_h3.py": "5cc8d5ecb97894707802994039968346baf6c06901619569c2d6e3c6c6ccf643",

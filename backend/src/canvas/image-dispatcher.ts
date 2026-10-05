@@ -29,7 +29,8 @@ import {
 } from "./executor-registry.js";
 import { prepareCanvasGenerationTarget } from "./generation-target.js";
 import { commandFingerprint } from "./collaboration.js";
-import { generationSettingsSnapshot } from "./generation-settings.js";
+import { generationSettingsSnapshot, workflowGenerationSettingsSnapshot } from "./generation-settings.js";
+import type { ProductionImageInput } from "@basketikun/canvas-agent/reference-contract";
 
 export type CanvasImageReference = {
   id?: string;
@@ -38,6 +39,7 @@ export type CanvasImageReference = {
   url?: string;
   storageKey?: string;
   mimeType?: string;
+  sha256?: string;
 };
 
 export type CanvasImageGenerationInput = {
@@ -118,7 +120,7 @@ export class CanvasImageDispatcher {
   }
 
   start(input: CanvasImageGenerationInput, hooks?: DispatcherHooks) {
-    let plan = this.plan(this.prepareReferences(input));
+    let plan = this.plan(this.prepareFrozenReferences(this.prepareReferences(input)));
     const taskId = plan.input.clientTaskId || `canvas-${crypto.randomUUID()}`;
     const existing = this.stores.tasks.get(taskId);
     if (existing)
@@ -142,6 +144,7 @@ export class CanvasImageDispatcher {
         storageKey: reference.storageKey,
         url: reference.url,
         mimeType: reference.mimeType,
+        sha256: reference.sha256,
       })) || [];
     const task = this.stores.tasks.create(
       taskId,
@@ -177,6 +180,15 @@ export class CanvasImageDispatcher {
       throw error;
     }
     // 画布生成日志：开始（running）+ 成功/失败。仅当调用方传入 projectId 时才记录。
+    const currentWorkflowFields = plan.workflow ? this.workflows.getConfig?.(plan.workflow)?.fields || [] : [];
+    const currentWorkflowFieldIds = new Set(currentWorkflowFields.map((field) => field.id));
+    const staleWorkflowFieldIds = plan.executor === "comfy-workflow"
+      ? Object.keys(normalized.params || {}).filter((key) => key.startsWith("f_") && !currentWorkflowFieldIds.has(key))
+      : [];
+    const historicalWorkflowFields = staleWorkflowFieldIds.length
+      ? this.workflows.getFieldDefinitionsByIds?.(staleWorkflowFieldIds) || []
+      : [];
+    const workflowFields = [...currentWorkflowFields, ...historicalWorkflowFields];
     const logId = normalized.projectId
       ? this.logs.create({
           projectId: normalized.projectId,
@@ -207,14 +219,16 @@ export class CanvasImageDispatcher {
               normalized.size ||
               `${normalized.width || 1024}x${normalized.height || 1024}`,
             quality: normalized.quality || "auto",
-            generationSettings: generationSettingsSnapshot(normalized.params, {
-              size: normalized.size || `${normalized.width || 1024}x${normalized.height || 1024}`,
-              ...(normalized.width ? { width: normalized.width } : {}),
-              ...(normalized.height ? { height: normalized.height } : {}),
-              quality: normalized.quality || "auto",
-              count: Math.max(1, Math.min(4, Math.floor(normalized.count || 1))),
-              executor: plan.executor,
-            }, plan.workflow ? this.workflows.getConfig(plan.workflow)?.fields || [] : []),
+            generationSettings: plan.executor === "comfy-workflow"
+              ? workflowGenerationSettingsSnapshot(normalized.params, workflowFields)
+              : generationSettingsSnapshot(normalized.params, {
+                  size: normalized.size || `${normalized.width || 1024}x${normalized.height || 1024}`,
+                  ...(normalized.width ? { width: normalized.width } : {}),
+                  ...(normalized.height ? { height: normalized.height } : {}),
+                  quality: normalized.quality || "auto",
+                  count: Math.max(1, Math.min(4, Math.floor(normalized.count || 1))),
+                  executor: plan.executor,
+                }, workflowFields),
             ...(normalized.loopInputImages?.length ? { loopInputImages: normalized.loopInputImages.map((image) => ({ name: image.name, mimeType: image.mimeType, storageKey: image.storageKey, url: image.url })) } : {}),
           },
         }).id
@@ -504,6 +518,25 @@ export class CanvasImageDispatcher {
     return project;
   }
 
+  /** Saved node workflow fields are authoritative defaults when a caller omits them. */
+  private canvasComfyParams(input: CanvasImageGenerationInput): Record<string, unknown> {
+    if (!input.projectId) return {};
+    const project = this.stores.projects.get(input.projectId);
+    if (!project) return {};
+    const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
+    const nodeIds = [input.sourceNodeId, input.nodeId].filter((id): id is string => Boolean(id));
+    for (const nodeId of nodeIds) {
+      const node = nodes.find((candidate) => String(candidate.id || "") === nodeId);
+      const metadata = node?.metadata;
+      if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) continue;
+      const params = (metadata as Record<string, unknown>).comfyParams;
+      if (params && typeof params === "object" && !Array.isArray(params) && Object.keys(params).length) {
+        return params as Record<string, unknown>;
+      }
+    }
+    return {};
+  }
+
   private plan(input: CanvasImageGenerationInput): CanvasImageExecutionPlan {
     const selectedModel = String(input.model || "").trim();
     const model = modelOptionName(selectedModel).trim();
@@ -529,7 +562,6 @@ export class CanvasImageDispatcher {
         throw new Error(
           `${workflowResolutionMessage(resolved)}（模型=${input.model}）`,
         );
-      const planInput = { ...normalized, params: { ...resolved.params, ...params } };
       if (resolved.binding.provider === "runninghub") {
         if (!this.runningHub)
           throw new Error(
@@ -537,10 +569,14 @@ export class CanvasImageDispatcher {
           );
         return {
           executor: "runninghub-workflow",
-          input: planInput,
+          input: { ...normalized, params: { ...resolved.params, ...params } },
           runninghubProfileId: resolved.binding.profileId,
         };
       }
+      const planInput = {
+        ...normalized,
+        params: { ...resolved.params, ...this.canvasComfyParams(input), ...params },
+      };
       return {
         executor: "comfy-workflow",
         input: planInput,
@@ -562,8 +598,13 @@ export class CanvasImageDispatcher {
     }
 
     const workflow = builtinWorkflowName(model);
-    if (executor === "comfy-workflow" && workflow)
-      return { executor, input: normalized, workflow };
+    if (executor === "comfy-workflow" && workflow) {
+      const savedParams = this.canvasComfyParams(input);
+      const workflowInput = Object.keys(savedParams).length
+        ? { ...normalized, params: { ...savedParams, ...params } }
+        : normalized;
+      return { executor, input: workflowInput, workflow };
+    }
     throw new Error(`画布图片执行计划不完整：${model}`);
   }
 
@@ -571,6 +612,7 @@ export class CanvasImageDispatcher {
     plan: CanvasImageExecutionPlan,
     taskId: string,
   ): Promise<CanvasImageGenerationResult> {
+    plan = { ...plan, input: this.prepareFrozenReferences(plan.input) };
     if (plan.executor === "direct-image")
       return this.dispatchDirect(plan.input, taskId);
     const count = Math.max(1, Math.min(4, Math.floor(plan.input.count || 1)));
@@ -875,7 +917,7 @@ export class CanvasImageDispatcher {
       media = this.stores.media.store(data, { name: `${reference.name || "reference"}.png`, mimeType: "image/png", category: "input", storageKey });
     }
     this.stores.tasks.addEvent(taskId, "reference_rasterized", { sourceStorageKey: reference.storageKey, sourceName: reference.name, submittedStorageKey: storageKey, mimeType: "image/png" });
-    return { ...reference, name: `${reference.name || "reference"}.png`, storageKey, url: this.stores.media.url(media), mimeType: "image/png", dataUrl: undefined };
+    return { ...reference, name: `${reference.name || "reference"}.png`, storageKey, url: this.stores.media.url(media), mimeType: "image/png", dataUrl: undefined, sha256: undefined };
   }
 
   private assertNotCancelled(taskId: string) {
@@ -909,7 +951,10 @@ export class CanvasImageDispatcher {
   private async materializeReference(reference: CanvasImageReference) {
     if (reference.storageKey) {
       const media = this.stores.media.meta(reference.storageKey);
-      if (media) return media;
+      if (media) {
+        if (reference.sha256) await this.readReferenceBuffer(reference);
+        return media;
+      }
     }
     const data = await this.readReferenceBuffer(reference);
     return this.stores.media.store(data, {
@@ -921,8 +966,12 @@ export class CanvasImageDispatcher {
   }
 
   private async readReferenceBuffer(reference: CanvasImageReference) {
-    if (reference.storageKey && this.stores.media.meta(reference.storageKey))
-      return this.stores.media.read(reference.storageKey);
+    if (reference.storageKey && this.stores.media.meta(reference.storageKey)) {
+      const bytes = await this.stores.media.read(reference.storageKey);
+      if (reference.sha256 && crypto.createHash("sha256").update(bytes).digest("hex") !== reference.sha256) throw new Error(`参考媒体字节在提交前变化：${reference.name || reference.storageKey}`);
+      return bytes;
+    }
+    if (reference.sha256) throw new Error("正式批准参考必须从 Backend 归档媒体读取");
     const dataUrl = /^data:([^;,]+);base64,(.+)$/s.exec(
       String(reference.dataUrl || ""),
     );
@@ -941,6 +990,18 @@ export class CanvasImageDispatcher {
         `读取参考图失败（HTTP ${response.status}）：${reference.name || reference.id || "unknown"}`,
       );
     return Buffer.from(await response.arrayBuffer());
+  }
+
+  private prepareFrozenReferences(input: CanvasImageGenerationInput): CanvasImageGenerationInput {
+    const frozen = input.params?.productionImageInput as ProductionImageInput | undefined;
+    if (!frozen) return input;
+    if (input.loopInputImages?.length || !Array.isArray(frozen.references) || frozen.references.length !== (input.references?.length || 0)) throw new Error("实际图片输入数量与正式参考快照不一致");
+    const references = frozen.references.map((ref, index) => {
+      const actual = input.references![index];
+      if (actual.storageKey !== ref.storageKey || actual.dataUrl || actual.sha256 && actual.sha256 !== ref.sha256) throw new Error(`实际参考图 ${index + 1} 与正式顺序/摘要不一致`);
+      return { ...actual, name: actual.name || `${ref.label} · ${ref.assetId}`, sha256: ref.sha256 };
+    });
+    return { ...input, references };
   }
 
   private canvasHooks(input: CanvasImageGenerationInput): DispatcherHooks {

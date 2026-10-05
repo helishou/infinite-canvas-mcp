@@ -20,6 +20,14 @@ test("HTTP MCP v2 exposes the new contracts, compact asset reads, idempotent wri
   const largeProduction = { episodeId: "large", revision: 1, publishedVersion: 1, draft: { director: { engine: { runtimeId: "pinned" }, sourceHash: "full-source-hash", modules: {}, workflow: {}, assets: {}, source: { brief: "sample", script: largePrompt }, artifacts: [{ id: "h3-segment", targetId: "segment", prompt: largePrompt, sha256: "prompt-hash" }] }, scenes: [], shots: [], clipGroups: [] } };
   backend.get("/canvas/projects/large/production", (req, res) => res.json({ ok: true, production: projectProductionRead(largeProduction, req.query) }));
   backend.post("/canvas/projects/large/production/ops", (_req, res) => res.json({ ok: true, production: { ...largeProduction, revision: 2, replayed: false } }));
+  let productionBlocked = true, productionSubmissions = 0, simulateProductionRace = false;
+  const productionIssue = { code: "TARGET_AWAITING_REVIEW", path: "request.targets", message: "Original image needs review", severity: "error", blockingRun: { runId: "original", status: "awaiting_review", taskIds: ["original-task"] }, nextAction: { action: "review", message: "Read the existing run", tool: "drama_get_production_batch", input: { episodeId: "guarded", runId: "original" } } };
+  backend.post(["/drama/episodes/guarded/production/preflight", "/canvas/projects/guarded/production/preflight"], (_req, res) => res.json({ ok: true, preflight: { valid: !productionBlocked, diagnostics: productionBlocked ? [productionIssue] : [], nextActions: productionBlocked ? [productionIssue.nextAction] : [] } }));
+  backend.post(["/drama/episodes/guarded/production/compile", "/drama/episodes/guarded/production/runs", "/canvas/projects/guarded/production/runs"], (_req, res) => {
+    productionSubmissions++;
+    if (simulateProductionRace) return void res.status(400).json({ ok: false, code: productionIssue.code, error: productionIssue.message, diagnostics: [productionIssue], nextActions: [productionIssue.nextAction] });
+    res.json({ ok: true, compilation: { preparedId: "prepared" }, run: { runId: "new" } });
+  });
   registerMcpCommandTestRoutes(backend, db);
   backend.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [{ id: "minimax-h3", enabled: true, version: KNOWN_FIRST_PARTY["minimax-h3"].version, tools: [] }] }));
   backend.post("/mcp/observability/events", (req, res) => { db.createMcpObservabilityEvent(req.body); res.json({ ok: true }); });
@@ -56,8 +64,35 @@ test("HTTP MCP v2 exposes the new contracts, compact asset reads, idempotent wri
   const tool = (name: string) => catalog.tools.find(entry => entry.name === name)!;
   assert.ok(tool("mcp_get_command_receipt"));
   assert.ok(tool("assets_get"));
-  for (const name of ["production_compile", "production_apply_compilation", "production_diagnose_bindings"]) assert.ok(tool(name));
+  for (const name of ["production_compile", "production_get_compilation", "production_apply_compilation", "production_diagnose_bindings"]) assert.ok(tool(name));
   assert.ok((tool("production_compile").inputSchema as any).required.includes("expectedRevision"));
+  const productionCalls = [
+    { name: "production_compile", arguments: { kind: "episode", id: "guarded", expectedRevision: 1, operationId: "compile-original" } },
+    { name: "drama_start_production_run", arguments: { episodeId: "guarded", expectedRevision: 1, version: 1, runId: "new", idempotencyKey: "new", targets: ["asset:STYLE_MOTHER"] } },
+    { name: "canvas_start_production_run", arguments: { projectId: "guarded", expectedRevision: 1, version: 1, runId: "new", idempotencyKey: "new", targets: ["asset:STYLE_MOTHER"] } },
+  ];
+  for (const call of productionCalls.slice(1)) {
+    const result = await client.callTool(call);
+    assert.equal(result.isError, undefined);
+    const blocked = JSON.parse(textOf(result));
+    assert.equal(blocked.status, "blocked");
+    assert.equal(blocked.mediaSubmitted, false);
+    assert.deepEqual(blocked.preflight.nextActions[0].input, { episodeId: "guarded", runId: "original" });
+  }
+  assert.equal(productionSubmissions, 0, "blocked preflights must never reach a compile/start endpoint");
+  productionBlocked = false;
+  const prepared = await client.callTool(productionCalls[0]);
+  assert.equal(JSON.parse(textOf(prepared)).compilation.preparedId, "prepared");
+  assert.equal(productionSubmissions, 1);
+  simulateProductionRace = true;
+  const raced = await client.callTool(productionCalls[1]);
+  assert.equal(raced.isError, true, "execution races remain real failures rather than fabricated successful runs");
+  const race = JSON.parse(textOf(raced));
+  assert.equal(race.error.code, "TARGET_AWAITING_REVIEW");
+  assert.equal(race.error.issues[0].path, "request.targets");
+  assert.equal(race.error.issues[0].blockingRun.runId, "original");
+  assert.equal(race.suggestedAction.tool, "drama_get_production_batch");
+  assert.equal(productionSubmissions, 2);
   assert.ok((tool("production_apply_compilation").inputSchema as any).required.includes("preparedId"));
   const largeRead = await client.callTool({ name: "canvas_get_production", arguments: { projectId: "large" } });
   assert.equal(largeRead.isError, undefined);

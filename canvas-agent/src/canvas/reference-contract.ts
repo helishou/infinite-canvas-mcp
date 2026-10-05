@@ -1,4 +1,5 @@
 import { validateH3CharacterGroups } from "./character-reference-contract.js";
+export { productionImageInput, type ProductionImageInput, type ProductionImageReference } from "./production-image-input.js";
 export { characterImageKey, resolveCharacterImageKeys, characterReferenceUpdates, h3CharacterSourceFromNode, syncH3CharacterGroupSource, type CharacterImageSelection, type H3CharacterSource } from "./character-image-selection.js";
 
 import { orderStoryboardReferencesFirst, remapPictureTags } from "./storyboard-reference-order.js";

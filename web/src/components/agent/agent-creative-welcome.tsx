@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { App, Button } from "antd";
 import { ArrowLeft, ArrowUp, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -8,7 +8,7 @@ import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { findProjectAchengDirectorSkill } from "@/lib/agent/creative-launch";
 
 /** Kept mounted with the director runtime so closing the popup retains the creative draft. */
-export function AgentCreativeWelcome({ active, onShowChat, onClose }: { active: boolean; onShowChat: () => void; onClose: () => void }) {
+export function AgentCreativeWelcome({ active, onShowChat, onClose, headerAction }: { active: boolean; onShowChat: () => void; onClose: () => void; headerAction?: ReactNode }) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -89,7 +89,10 @@ export function AgentCreativeWelcome({ active, onShowChat, onClose }: { active: 
 
     return <div hidden={!active} className="h-full min-h-0" data-director-creative-entry>
         <section aria-labelledby="production-creative-title" className="flex h-full min-h-0 flex-col">
-            <header className="flex shrink-0 items-center justify-between gap-2 border-b border-border px-4 py-3"><Button type="text" size="small" icon={<ArrowLeft className="size-4" />} onClick={onShowChat}>{t("productionCanvas.currentConversation")}</Button><Button type="text" size="small" aria-label={t("agent.panel.collapseLabel")} icon={<X className="size-4" />} onClick={onClose} /></header>
+            <header className="flex shrink-0 items-center justify-between gap-2 border-b border-border px-4 py-3">
+                <Button type="text" size="small" icon={<ArrowLeft className="size-4" />} onClick={onShowChat}>{t("productionCanvas.currentConversation")}</Button>
+                <div className="flex shrink-0 items-center gap-1">{headerAction}<Button type="text" size="small" aria-label={t("agent.panel.collapseLabel")} icon={<X className="size-4" />} onClick={onClose} /></div>
+            </header>
             <form onSubmit={startCreativeConversation} className="flex min-h-0 flex-1 flex-col overflow-y-auto p-5">
                 <h2 id="production-creative-title" className="text-xl font-semibold">{t("landing.ideaTitle")}</h2>
                 <p className="mt-2 text-sm opacity-70">{t("landing.conversationHint")}</p>

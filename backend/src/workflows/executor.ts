@@ -4,6 +4,7 @@ import { collectOutputMedia } from "../comfyui/bridge.js";
 import type { MediaStore, TaskStore } from "../stores/types.js";
 import type { BackendEventBus } from "../events.js";
 import { redactInlineMedia } from "../runtime/redact-inline-media.js";
+import { workflowGenerationSettingsSnapshot } from "../canvas/generation-settings.js";
 
 type RunParams = Record<string, unknown>;
 type FieldValues = Record<string, unknown>;
@@ -570,6 +571,23 @@ export class WorkflowExecutor {
         private readonly db?: BackendDatabase,
     ) {}
 
+    private updateCanvasImageWorkflowSettingsLog(parentTaskId: string | undefined, workflowName: string | undefined, fields: WorkflowField[], values: FieldValues) {
+        if (!parentTaskId || !workflowName || !this.db) return;
+        const log = this.db.listGenerationLogs({ runtimeTaskId: parentTaskId, platform: "canvas-image", limit: 1 })[0];
+        if (!log || log.workflow !== workflowName) return;
+        const currentFieldIds = new Set(fields.map((field) => field.id));
+        const staleFieldIds = Object.keys(values).filter((key) => key.startsWith("f_") && !currentFieldIds.has(key));
+        const historicalFields = this.db.getWorkflowFieldDefinitionsByIds(staleFieldIds)
+            .map(({ workflowName: sourceWorkflow, field }) => ({ ...field, sourceWorkflow }));
+        const params = log.params && typeof log.params === "object" ? log.params : {};
+        this.db.updateGenerationLog(log.id, {
+            params: {
+                ...params,
+                generationSettings: workflowGenerationSettingsSnapshot(values, [...fields, ...historicalFields]),
+            },
+        });
+    }
+
     /**
      * 准备一次工作流运行：应用默认值、上传媒体、注入参数、裁剪、校验、创建任务。
      * 同步部分（媒体上传 + 校验）可能抛错，由调用方捕获。
@@ -625,6 +643,7 @@ export class WorkflowExecutor {
                 processedValues[field.id] = Math.floor(Math.random() * 1125899906842624);
             }
         }
+        this.updateCanvasImageWorkflowSettingsLog(parentTaskId, name, config.fields || [], processedValues);
 
         // 处理多节点字段（node 含逗号，如 Flux2-Klein 的 width/height 需同时注入到 152 和 156）
         const multiNodeParams: RunParams = {};

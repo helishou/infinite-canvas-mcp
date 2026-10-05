@@ -4,6 +4,8 @@ import { applyDirectorSourcePatch } from "@basketikun/canvas-agent/drama/product
 import type { BackendDatabase } from "../db.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
 import { projectDirector } from "./director.js";
+import { productionNodePosition } from "./production-layout-geometry.js";
+import type { ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/production-contract";
 
 type Owner = { kind: "canvas" | "episode"; id: string };
 const nodes = (project: Record<string, any>) => (project.nodes || []) as Record<string, any>[];
@@ -22,12 +24,21 @@ export function productionScriptNodes(data: EpisodeProductionData, owner: Owner)
 }
 
 /** Source-to-canvas projection; called inside the production transaction, never during GET. */
-export function scriptNodeOperations(project: Record<string, any>, data: EpisodeProductionData, owner: Owner, previous?: EpisodeProductionData): CanvasOperation[] {
+export function scriptNodeOperations(project: Record<string, any>, data: EpisodeProductionData, owner: Owner, previous?: EpisodeProductionData, layout?: ProductionLayoutPlan): CanvasOperation[] {
     const prior = new Map(previous ? productionScriptNodes(previous, owner).map(item => [item.id, item]) : []);
+    const occupied = [...nodes(project)];
     return productionScriptNodes(data, owner).flatMap((script, index): CanvasOperation[] => {
         const node = nodes(project).find(node => node.id === script.id);
-        if (!node) return [{ type: "add_node", id: script.id, nodeType: "text", title: script.title, position: { x: -640, y: 350 + index * 360 }, width: 560, height: 320,
-            metadata: { content: script.content, status: "success", productionScriptId: script.scriptId, productionScriptSceneId: script.sceneId } }];
+        if (!node) {
+            const unit = layout?.units.find(unit => unit.targets.includes(`script:${script.scriptId}`));
+            const member = unit?.members.find(member => member.nodeId === script.id);
+            const planned = member?.position;
+            const position = planned || productionNodePosition(occupied, { x: -640, y: 350 + index * 440 }, 560, 320, 1);
+            occupied.push({ id: script.id, position, width: 560, height: 320 });
+            return [{ type: "add_node", id: script.id, nodeType: "text", title: script.title, position, width: 560, height: 320,
+                metadata: { content: script.content, status: "success", productionScriptId: script.scriptId, productionScriptSceneId: script.sceneId,
+                    ...(unit ? { productionLayoutUnitId: unit.id, productionLayoutBounds: unit.bounds.size } : {}) } }];
+        }
         if (node.type !== "text" || node.metadata?.productionScriptId !== script.scriptId) throw new Error("剧本文本节点身份冲突，未覆盖原节点");
         const content = String(node.metadata?.content || "");
         if (content === script.content) return [];

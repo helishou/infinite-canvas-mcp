@@ -38,11 +38,43 @@ function doc(count = 2): DirectorProduction {
         artifacts: segments.map(s => { const prompt = `integrated_multimodal_description:\n[Shot 1] ${s.id} performs the complete authored action.\n\noverall_soundscape:\nN/A\n\nnon_diegetic_music:\nN/A\n`; const sha256 = promptHash(prompt); return { id: s.id, kind: "h3", targetId: s.id, prompt, sha256, sourceHash, status: "ready", references: [], receipt: { sourceHash, promptHash: sha256, engineRuntimeId: engine.runtimeId, validator: "test-fixture" } }; }),
         executionAuthorized: false, unresolved: [], workflow: { cursor: "done" } };
 }
-function publish(service: EpisodeProductionService, director: DirectorProduction, id = "ep") {
+function publish(service: EpisodeProductionService, director: DirectorProduction, id = "ep", storyboardImageMode?: "generate" | "skip") {
     const current = service.get(id);
-    service.edit(id, { operationId: `edit-${current.revision}`, expectedRevision: current.revision, ops: [{ type: "set_director_production", director }, { type: "set_settings", patch: { mode: "auto" } }] });
+    service.edit(id, { operationId: `edit-${current.revision}`, expectedRevision: current.revision, ops: [{ type: "set_director_production", director }, { type: "set_settings", patch: { mode: "auto", ...(storyboardImageMode ? { storyboardImageMode } : {}) } }] });
     return service.publish(id, { operationId: `publish-${current.revision}`, expectedRevision: current.revision + 1, stage: "director" });
 }
+
+test("skipping storyboard images retains written shots and allows ready H3 segments", async t => {
+    const { service, stores } = fixture(t);
+    const d = doc(1);
+    const keyframeId = "FRAME-S0";
+    d.source.asset_plan = [{ asset_id: keyframeId, kind: "keyframe", name: "s0 frame" }];
+    d.shotInputs = {};
+    d.assets[keyframeId] = { version: "v1", status: "planned" };
+    const imagePrompt = "A clear storyboard keyframe for s0";
+    const imageDigest = promptHash(imagePrompt);
+    d.sourceHash = directorHash(d.source);
+    d.artifacts = [...d.artifacts.map(artifact => ({ ...artifact, sourceHash: d.sourceHash, receipt: { ...artifact.receipt, sourceHash: d.sourceHash } })), {
+        id: "frame-artifact", kind: "image", targetId: keyframeId, prompt: imagePrompt, sha256: imageDigest, sourceHash: d.sourceHash, status: "ready", references: [],
+        receipt: { sourceHash: d.sourceHash, promptHash: imageDigest, engineRuntimeId: d.engine.runtimeId, validator: "test-fixture" },
+    }];
+    const published = publish(service, d, "ep", "skip");
+    assert.equal(published.published?.shots[0].visual, "authored 0");
+    assert.equal(published.published?.shots[0].keyframePolicy, "none");
+    assert.deepEqual(published.published?.clipGroups[0].shotIds, ["s0"]);
+    const readiness = service.workflowReadiness("ep", "published");
+    assert.equal(readiness.targets.some(target => target.id === "frame:s0" || target.id === `asset:${keyframeId}`), false);
+    assert.equal(readiness.targets.find(target => target.id === "segment:seg0")?.status, "ready", readiness.targets.find(target => target.id === "segment:seg0")?.blockers.join("; "));
+    const runner = new EpisodeProductionRunner(service, stores, {} as CanvasGenerationService);
+    assert.throws(() => runner.prepareTargets("ep", service.get("ep").revision, ["frame:s0"], "prepare-skipped-frame"), /跳过分镜图/);
+    assert.throws(() => runner.prepareTargets("ep", service.get("ep").revision, [`asset:${keyframeId}`], "prepare-skipped-frame-asset"), /跳过分镜图/);
+    await runner.syncClips("ep", published.publishedVersion);
+    const synced = service.get("ep").published!;
+    const group = synced.clipGroups[0];
+    const node = (stores.projects.get("canvas")?.nodes as Array<{ id: string; metadata?: Record<string, unknown> }>).find(item => item.id === group.nodeId);
+    const clip = (node?.metadata?.segments as Array<Record<string, unknown>>).find(item => item.id === group.segmentId);
+    assert.equal(Object.hasOwn(clip || {}, "storyboardShots"), false);
+});
 
 test('Clip sync loads saved defaults, persists episode aspect and keeps existing user parameters and history', async t => {
     const { db, stores, service } = fixture(t);
@@ -215,7 +247,7 @@ test("version 16 migration backs up data and creates run history without rewriti
     const reopened = new BackendDatabase(file);
     assert.equal(reopened.getDramaEpisode("ep")?.title, "Episode");
     assert.ok(reopened.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='canvas_production_batches'").get());
-    assert.ok(readdirSync(dir).some(n => n.includes("pre-schema-v16-to-v24"))); reopened.close();
+    assert.ok(readdirSync(dir).some(n => n.includes("pre-schema-v16-to-v29"))); reopened.close();
 });
 
 test("version 21 databases add production batch storage in schema version 22", t => {
@@ -223,7 +255,7 @@ test("version 21 databases add production batch storage in schema version 22", t
     db.db.exec("DELETE FROM schema_migrations WHERE version>=22; DROP TABLE canvas_production_batches; DROP TABLE episode_production_batches");
     const upgraded = new BackendDatabase(file);
     const version = upgraded.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number };
-    assert.equal(version.version, 24);
+    assert.equal(version.version, 29);
     assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='episode_production_batches'").get());
     assert.equal(upgraded.getDramaEpisode("ep")?.title, "Episode");
     upgraded.close();
@@ -319,6 +351,31 @@ test("automatic dependency runs pause for review, then continue the same runId w
     assert.equal(submitted, 1); assert.equal(service.getBatch("ep", batch.runId)?.status, "awaiting_review");
     assert.equal(service.get("ep").published!.director!.assets.STYLE_MOTHER.status, "generated");
     assert.equal(service.get("ep").published!.director!.assets.STYLE_MOTHER.storageKey, "image:style_mother");
+    const duplicateReviewTarget = () => service.startBatch("ep", { runId: "style-rerun", idempotencyKey: "style-rerun", expectedRevision: service.get("ep").revision, version: 1, targets: ["asset:STYLE_MOTHER"], scope: "selected" });
+    assert.throws(duplicateReviewTarget, /暂停不会释放目标.*退回旧结果/);
+    const pausedReview = service.pauseBatch("ep", batch.runId);
+    assert.equal(pausedReview.status, "awaiting_review");
+    assert.equal(pausedReview.pauseRequested, true);
+    assert.throws(duplicateReviewTarget, /暂停不会释放目标.*退回旧结果/);
+    assert.equal(service.getBatch("ep", "style-rerun"), null);
+    assert.equal(submitted, 1, "a paused review must not resubmit the same generated target");
+    service.edit("ep", { operationId: "prompt-only-preflight", expectedRevision: service.get("ep").revision, ops: [{ type: "set_director_workflow", patch: { mediaProductionMode: "prompt_only" } }] });
+    const beforePreflight = JSON.stringify({ production: service.get("ep"), batch: service.getBatch("ep", batch.runId) });
+    const blocked = service.preflight("ep", { action: "generate", request: { runId: "another-run", idempotencyKey: "another-key", expectedRevision: service.get("ep").revision, version: 1, targets: ["asset:STYLE_MOTHER"] } });
+    assert.equal(blocked.valid, false);
+    assert.ok(blocked.diagnostics.some(item => item.code === "MEDIA_MODE_PROMPT_ONLY"));
+    const occupied = blocked.diagnostics.find(item => item.code === "TARGET_AWAITING_REVIEW");
+    assert.equal(occupied?.blockingRun?.runId, batch.runId);
+    assert.equal(occupied?.blockingRun?.taskIds.length, 1);
+    assert.deepEqual(occupied?.nextAction?.input, { episodeId: "ep", runId: batch.runId });
+    assert.equal(JSON.stringify({ production: service.get("ep"), batch: service.getBatch("ep", batch.runId) }), beforePreflight);
+    const replayInput = { runId: batch.runId, idempotencyKey: batch.idempotencyKey, expectedRevision: batch.sourceRevision, version: 1, targets: ["asset:STYLE_MOTHER"], scope: "all_ready" };
+    assert.equal(service.preflight("ep", { action: "generate", request: replayInput }).valid, true, "a stale-revision replay must still recover the original receipt");
+    assert.equal(service.startBatch("ep", replayInput).runId, batch.runId);
+    const collision = service.preflight("ep", { action: "generate", request: { ...replayInput, runId: "wrong-run", targets: ["asset:CHAR"] } });
+    assert.equal(collision.diagnostics[0].code, "IDEMPOTENCY_CONFLICT");
+    assert.equal(collision.nextActions?.[0].input?.runId, batch.runId);
+    service.edit("ep", { operationId: "restore-automatic-preflight", expectedRevision: service.get("ep").revision, ops: [{ type: "set_director_workflow", patch: { mediaProductionMode: "automatic" } }] });
     const sha256 = styleMediaHash;
     const current = service.get("ep");
     assert.throws(() => service.edit("ep", { operationId: "bad-review", expectedRevision: current.revision, ops: [{ type: "review_director_asset", assetId: "STYLE_MOTHER", version: 2, sourceHash: d.sourceHash, nodeId: "style", storageKey: "image:style_mother", sha256, verdict: "approved", evidence: "checked" }] }), /审核目标不属于/);

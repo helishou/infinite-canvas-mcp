@@ -14,7 +14,6 @@ import { useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { productionObjectPath } from "@/lib/production-object";
 import { backendMediaUrl } from "@/services/backend-api";
 
 export function useCanvasProductionContext(projectId: string) {
@@ -23,7 +22,7 @@ export function useCanvasProductionContext(projectId: string) {
     const productionKind = query.get("productionKind"), productionId = query.get("productionId");
     useEffect(() => {
         let active = true;
-        useProductionWorkspaceStore.getState().setContext(null);
+        if (useProductionWorkspaceStore.getState().context?.canvasId !== projectId) useProductionWorkspaceStore.getState().setContext(null);
         useCanvasSidePanelStore.setState({ panelOpen: false, panelMounted: false, panelClosing: false });
         const agent = useAgentStore.getState();
         if (!agent.creativeLaunch && !agent.sending && !agent.waiting && !agent.prompt.trim() && !agent.attachments.length && !agent.canvasReferences.length) agent.closePanel();
@@ -37,16 +36,16 @@ export function useCanvasProductionContext(projectId: string) {
                 useAgentStore.getState().openPanel();
             }
         }).catch(error => { if (active) message.error(String(error)); });
-        return () => {
-            active = false;
-            if (useProductionWorkspaceStore.getState().context?.canvasId === projectId) useProductionWorkspaceStore.getState().setContext(null);
-        };
+        return () => { active = false; };
     }, [projectId, productionKind, productionId, message]);
+    // Release the snapshot on canvas departure, not on same-canvas context refreshes.
+    useEffect(() => () => {
+        if (useProductionWorkspaceStore.getState().context?.canvasId === projectId) useProductionWorkspaceStore.getState().setContext(null);
+    }, [projectId]);
 }
 
 export function CanvasProductionToolbar() {
     const context = useProductionWorkspaceStore(state => state.context);
-    const selectedObject = useProductionWorkspaceStore(state => state.selectedObject);
     const { t } = useTranslation();
     const { message } = App.useApp();
     const navigate = useNavigate();
@@ -80,15 +79,12 @@ export function CanvasProductionToolbar() {
         } catch (error) { message.error(String(error)); }
         finally { setSwitching(false); }
     };
-    const editWorkspace = (workspace: string, selected = false) => {
+    const editWorkspace = (workspace: string) => {
         setDirectoryOpen(false);
         useAgentStore.getState().closePanel();
-        if (selected && selectedObject) navigate(productionObjectPath(selectedObject));
-        else {
-            const next = new URLSearchParams(query); next.set("workspace", workspace);
-            next.delete("target"); next.delete("nodeId"); next.delete("segmentId");
-            navigate({ search: next.toString() }, { replace: true });
-        }
+        const next = new URLSearchParams(query); next.set("workspace", workspace);
+        next.delete("target"); next.delete("nodeId"); next.delete("segmentId");
+        navigate({ search: next.toString() }, { replace: true });
         useProductionWorkspaceStore.getState().setPanelTab("object");
         useAgentStore.getState().openPanel();
     };
@@ -105,7 +101,6 @@ export function CanvasProductionToolbar() {
             <span className="truncate">{context.role === "shared-assets" ? t("productionCanvas.sharedCanvas") : episodes.find(episode => episode.id === context.episodeId) ? t("productionCanvas.episode", { number: episodes.find(episode => episode.id === context.episodeId)!.episodeNumber }) : t("productionCanvas.loadingEpisodes")}</span><ChevronDown className="size-3.5 shrink-0" />
         </button></Dropdown>}
         <Button type="text" size="small" icon={<Search className="size-3.5" />} aria-label={t("productionCanvas.find")} onClick={() => { useAgentStore.getState().closePanel(); useCanvasSidePanelStore.getState().closePanel(); setDirectoryOpen(true); }}><span className="hidden sm:inline">{t("productionCanvas.find")}</span></Button>
-        {selectedObject && <span className="hidden md:inline-flex"><Button type="text" size="small" icon={<Pencil className="size-3.5" />} aria-label={t("productionCanvas.editObject")} onClick={() => editWorkspace(selectedObject.workspace, true)}><span className="hidden lg:inline">{t("productionCanvas.editObject")}</span></Button></span>}
         <span className="hidden md:inline-flex"><Button type="text" size="small" icon={<Settings2 className="size-3.5" />} aria-label={t("productionCanvas.advanced")} onClick={() => editWorkspace("advanced")} /></span>
         <Modal title={t("productionCanvas.find")} open={directoryOpen} onCancel={() => setDirectoryOpen(false)} footer={null} width={520} styles={{ body: { maxHeight: "calc(100dvh - 220px)", overflow: "auto", color: theme.node.text } }}>
             <Input allowClear prefix={<Search className="size-4" />} value={filter} onChange={event => setFilter(event.target.value)} placeholder={t("productionCanvas.findPlaceholder")} aria-label={t("productionCanvas.findPlaceholder")} />

@@ -1,3 +1,4 @@
+import { validateH3Edit } from "../../canvas/edit-validation.js";
 import { H3_PARAM_KEYS } from "./runtime-params.js";
 import type { AgentCanvasNode, McpToolHandler, PluginMcpContext, PluginMcpModule, PluginMcpToolWire } from "../../server/plugin-mcp.js";
 import { H3_PLUGIN_VERSION } from "./version.js";
@@ -63,6 +64,8 @@ export function buildH3BatchUpdates(project: Record<string, unknown>, node: Agen
     for (const raw of rawUpdates) {
         if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("updates 每项必须为对象");
         const item = raw as Record<string, unknown>;
+        const unknown = Object.keys(item).filter(key => !["segmentId", "patch", "edits"].includes(key));
+        if (unknown.length) throw new Error(`INVALID_CLIP_FIELD: updates.${unknown[0]} 不属于更新请求字段`);
         const segmentId = item.segmentId;
         if (typeof segmentId !== "string" || !segmentId || seen.has(segmentId)) throw new Error(`segmentId 缺失或重复:${String(segmentId)}`);
         seen.add(segmentId);
@@ -80,6 +83,8 @@ export function buildH3BatchUpdates(project: Record<string, unknown>, node: Agen
         if (Object.hasOwn(patch, "duration") && (typeof patch.duration !== "number" || !Number.isFinite(patch.duration) || patch.duration <= 0)) throw new Error(`Clip ${segmentId} 的 duration 必须为正数`);
         for (const key of ["title", "prompt"]) if (Object.hasOwn(patch, key) && typeof patch[key] !== "string") throw new Error(`Clip ${segmentId} 的 ${key} 必须为字符串`);
         for (const key of ["referenceBindings", "subjects", "timeline"]) if (Object.hasOwn(patch, key) && !Array.isArray(patch[key])) throw new Error(`Clip ${segmentId} 的 ${key} 必须为数组`);
+        validateH3Edit(patch);
+        if (target.productionClipProjection && ["prompt", "referenceBindings", "directorEngine", "directorSourceHash", "storyboardShots"].some(key => Object.hasOwn(patch, key))) throw new Error("FORMAL_CLIP_OWNED: 请修改编译前源稿后重新编译");
         assertH3ClipPatch(project, target, patch, true);
         operations.push({ type: "update_h3_segment", nodeId: node.id, segmentId, patch });
         entries.push({ segmentId, segmentIndex, updatedFields: Object.keys(patch), ...(edited ? { editSummary: edited.summary } : {}) });

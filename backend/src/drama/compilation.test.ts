@@ -16,7 +16,7 @@ function fixture(t: test.TestContext) {
     db.createCanvasProject({ id: "canvas", title: "Canvas", nodes: [], connections: [] });
     db.upsertDramaEpisode({ id: "episode", dramaId: "drama", episodeNumber: 1, title: "Episode", synopsis: "", fullPlot: "", canvasId: "canvas" });
     const service = new EpisodeProductionService(db, undefined, root, false, () => {});
-    const source = { brief: "Preserve the sample", shots: [], segments: [], asset_plan: [] };
+    const source = { brief: "Preserve the sample", shots: [], segments: [], asset_plan: [], asset_cards: [{ id: "STYLE", prompt: "The authored image prompt" }] };
     const director: DirectorProduction = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "fixture", runtimeId: "fixture", version: "fixture" }, source, sourceHash: directorHash(source), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
     service.edit("episode", { operationId: "seed", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
     const compiler = (input: DirectorProduction) => ({ director: input, exitCode: 0, diagnostics: [], audit: { status: "PASS" }, sourceAdjustments: [], acceptance: {} });
@@ -42,7 +42,7 @@ test("changed revision, engine and owner cannot silently overwrite a production"
     const { service, compilations, director } = fixture(t);
     const prepared = compilations.prepare("episode", "episode", 1);
     assert.throws(() => compilations.prepare("episode", "episode", 0), ProductionConflictError);
-    assert.throws(() => compilations.prepare("episode", "episode", 1, { ...director, engine: { ...director.engine, runtimeId: "other" } }), /pinned engine/);
+    assert.throws(() => compilations.prepare("episode", "episode", 1, { ...director, engine: { ...director.engine, runtimeId: "other" } }), (error: any) => error.diagnostics?.some((item: any) => item.code === "ENGINE_MISMATCH"));
     assert.throws(() => compilations.apply("episode", "canvas", prepared.preparedId), /different production/);
     service.edit("episode", { operationId: "concurrent", expectedRevision: 1, ops: [{ type: "set_director_brief", brief: "Another window's edit" }] });
     assert.throws(() => compilations.apply("episode", "episode", prepared.preparedId), ProductionConflictError);
@@ -74,4 +74,24 @@ test("binding diagnostics expose source, draft and published versions separately
     assert.ok(result.assets[0].issues.includes("SOURCE_BINDING_VERSION_MISMATCH"));
     assert.ok(result.assets[0].issues.includes("MISSING_NODE"));
     assert.equal(service.get("episode").revision, 2);
+});
+
+test("story-only compile is blocked before a compiler packet or task is created", t => {
+    const { root, service, director, db } = fixture(t);
+    director.source.asset_cards = [];
+    director.sourceHash = directorHash(director.source);
+    service.edit("episode", { operationId: "story-only", expectedRevision: 1, ops: [{ type: "set_director_production", director }] });
+    let compilerCalls = 0;
+    const compiler = (input: DirectorProduction) => { compilerCalls++; return { director: input, exitCode: 0, diagnostics: [], audit: {}, sourceAdjustments: [], acceptance: {} }; };
+    const packets = path.join(root, "packets");
+    const compilations = new ProductionCompilationService(service, packets, compiler);
+    const before = service.get("episode");
+    const checked = service.preflight("episode", { action: "compile", request: { expectedRevision: 2 } });
+    assert.equal(checked.valid, false); assert.equal(checked.compileReady, false);
+    assert.equal(checked.diagnostics[0].code, "COMPILE_STAGE_NOT_READY");
+    assert.throws(() => compilations.prepare("episode", "episode", 2), (error: any) => error.diagnostics?.some((item: any) => item.code === "COMPILE_STAGE_NOT_READY"));
+    assert.equal(compilerCalls, 0);
+    assert.equal(fs.existsSync(packets), false);
+    assert.deepEqual(service.get("episode"), before);
+    assert.equal(db.db.prepare("SELECT count(*) n FROM sqlite_master WHERE name='runtime_tasks'").get()?.n, 0);
 });

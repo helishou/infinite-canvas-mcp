@@ -10,6 +10,14 @@ Acheng Director 本身就是 Skill，完整上游文件和模块位于项目 `.a
 
 Canvas 兼容层仅应用于候选运行包，不写回源码。Docker 镜像通过显式 `ACHENG_SOURCE` 使用持久卷中的可写 Git 克隆，其他校验与运行包行为一致；不因开发子模块缺失而退回隐藏源码副本。
 
+### 编译后由程序承接
+
+Agent 负责编译前的创作、源稿编辑、依赖与批准版本登记。`production_compile` 携带稳定 `operationId`，立即返回后台编译状态；沿同一 ID 使用 `production_get_compilation` 查询，超时不能换 ID 重提。只有 `succeeded` 才应用 `preparedId`，其余状态按分页短诊断处理；`interrupted` 已确认未完成，不自动重跑。
+
+编译器与 Backend 的校验回执是编译结果的技术依据。Agent 默认不读取、复查、润色或重写编译正文，也不整段回读 Clip 对照正文。需要调整时修改正式源稿并重新编译，禁止直接编辑正式 Clip 的编译正文、参考或引擎身份。媒体批准与生成授权仍沿既有合同。
+
+准备和应用编译包会自动投影引用，消费短回执的 `referenceSync`；`blocked` 表示缺少依赖、批准媒体、当前编译或存在编辑冲突，不能当作可生成。源稿使用 `sourceSection`、`targetIds` 定向读取；产物默认读取 `artifact_index`。长列表用 `pageSize`/`cursor`，单个长对象显式用 `chunkBytes`；游标过期时从新版本读取，不拼接不同版本。编译诊断与目标索引使用 `view`、`offset` 和 `pageSize`，不回传全量 audit 或正文。
+
 ### Acheng 编译脚本做什么
 
 编译输入是已保存的结构化制作源稿、Shot/Segment、资产资料和实际参考绑定。只有资产时运行 `compile_assets.py`；包含视频片段时运行 `compile_h3.py`。脚本按对应 Skill 规则产出独立、完整的图像或 H3 提示词文件、索引、逐目标诊断、参考映射和哈希回执；缺少依赖的目标保留为 draft，不伪造 ready。Backend 再核对当前制作 revision、媒体归属和执行条件。
@@ -36,7 +44,9 @@ Acheng 的纯提示词限制适用于创作职责；用户授权实际生成时�
 
 进入制作前调用 `production_get_contract`，恢复旧稿时传原 `runtimeId`；可用 `operationType` 查询单项操作。返回共享 JSON Schema、合法示例、patch 字段及本机锁定版本的制作源稿模板。示例中的 ID、引擎标识与哈希必须替换成当前真实数据，不把示例视为发布或生成依据。
 
-正式提交前调用 `canvas_preflight_production` 或 `drama_preflight_production`，传所属 ID、`action: edit/publish/generate` 与原正式 `request`。预检只读，返回 revision、引擎与 `code/path/targetId/message/severity`。计划稿缺项可保存；发布和生成按各自条件检查。预检通过后仍以正式提交的 revision、幂等与媒体校验为准。
+正式提交前调用 `canvas_preflight_production` 或 `drama_preflight_production`，传所属 ID、`action: edit/publish/compile/generate` 与原正式 `request`。预检只读，返回 revision、固定引擎、已识别缺项的 `code/path/targetId/message/severity`、阻塞运行及 `nextActions`。计划稿缺项可保存；编译、发布和生成按各自阶段检查。只有故事正文、没有资产卡或视频段落时不要调用编译器；编译预检按固定版本检查资产计划、风格参考和提示词卡，并保留合法缺图草案的交付能力。
+
+`production_compile` 和 `*_start_production_run` 在 HTTP MCP 与页面内 Agent 中自动执行同一预检。返回 `status: blocked` 表示条件检查完成、本次没有执行编译或提交媒体，不等于已经生成或得到 preparedId；按 `preflight.diagnostics` 一次补齐已识别缺项，再按 `nextActions` 回读精确对象、运行和任务。相同源稿/revision/运行状态没有变化时，不重复同一请求，不通过换 runId、幂等键或暂停绕过占用。`replayed: true` 的有效预检只允许恢复原幂等回执，不授权新生成。预检通过后正式提交仍重新检查 revision、幂等与媒体归属；网络、引擎故障或提交竞态仍作为真实失败处理，按返回的稳定代码和下一步恢复。
 
 用 `node scripts/acheng/export-canvas.mjs production.json canvas-mapping.json <新输出目录>` 调用本次制作锁定的 Acheng 编译脚本，生成包含完整提示词产物与回执的 `director.json`。mapping 包含 assets、shotInputs、boundaries、modules 与按 targetId/label 索引的 references（nodeId/storageKey/role）；首次使用当前激活版本，恢复时传入原运行 `engine.path`。该命令只处理离线文件，不调用画布或图像/视频模型。
 
@@ -62,7 +72,7 @@ assets 映射保存实际 nodeId、assetId、storageKey、sha256、version 和�
 
 创意对话确认对象后，先保存 brief 与 `workflow.currentWork`，回读 Backend `workflow/readiness`，再通过 `site_navigate({ production: { kind, id, workId, runId? } })` 呈现正式画布目标；无节点时打开对象编辑面板。需要节点时用 `production_prepare_targets` 幂等准备 asset/frame/segment，不把准备或跟随视为生成授权。推进同一制作沿用 workId；待决定项绑定源哈希，用户答复先保存再继续，不凭聊天文字或同名节点推断导航位置。
 
-跨集共享素材在资产画布经真实媒体审核后登记批准版本；分集调用 `production_get_shared_assets`、`production_adopt_shared_asset` 采用。Backend 对新批准版本持久传播并重新编译校验，保留历史与在途任务输入；发生冲突先回读草稿和更新原因，用户核对后用 `production_retry_shared_update` 恢复。输入变化的旧媒体不自动重做。画布权威和版本边界见画布数据契约，跟随与手动接管见画布交互约束。
+为每项资产在源稿中保存 `canvas_scope`：全剧可复用的风格母图、主要角色、常驻场景和道具设为 `shared`；单集造型、镜头关键帧和临时构图设为 `episode`。新制作按实际复用范围决定，不按资产名称猜测。缺少此字段的旧稿沿原分集生产路径兼容。共享资产必须在共享画布自己的正式制作记录中准备、编译、生成和审核；不可在分集画布生成后直接把它当成共享资产。已有分集素材只有处于本集发布版、真实媒体哈希匹配且已批准时，才可从资产卡“接入已有审核素材”；先读取来源与共享目标版本，在确认窗口后沿 Backend 事务接入同一归档媒体，保存来源分集、原节点、原任务及审核证据，不重新生成。接入后分集调用 `production_get_shared_assets`、`production_adopt_shared_asset` 采用当前批准版本，再重新编译受影响提示词。Backend 按当前 production owner 校验归属；共享画布拒绝本集资产、关键帧和视频 Clip，分集拒绝未采用的共享资产。新批准版本持久传播到采用方；相同媒体与参考语义只更新归属时保留旧媒体有效状态，实际输入变化则保留历史并标记下游过期。在冲突时回读草稿及更新原因，再按原 adoption ID 恢复。画布权威和版本边界见画布数据契约，跟随与手动接管见画布交互约束。
 
 早期 brief 和 partial 可保存，且不要求先创建全部画布节点。首次需求使用 `set_director_brief` 写入 `source.brief`；常见场景、风格策略、资产、Shot 与 Segment 编辑使用 `patch_director_source`，只改声明的源字段并保留其他 Acheng 字段；边界用 `set_director_boundary`，工作模式、稳定 workId、currentWork 和待决定事项用 `set_director_workflow`，资产节点映射用 `bind_director_asset`。完整模块回包仍可使用 `set_director_production`，但常见 UI 编辑不能整稿覆盖。`currentWork` 绑定源 revision/hash；用户决定卡绑定同一 workId 和源哈希，答复先保存再交回导演。
 
@@ -71,6 +81,30 @@ assets 映射保存实际 nodeId、assetId、storageKey、sha256、version 和�
 内容交付模式为自动文件批处理或逐 Segment 互动；媒体生产模式为仅提示词、逐项生成或按依赖自动生产。只有用户点击生产目标，或调用 `*_start_production_run` 时才授权媒体生成。每批使用稳定 `runId`/`idempotencyKey`，保存范围、发布版本、设置、引擎和 taskId；重复请求返回原批次。自动范围在审核后继续同一 runId 时，只扩展至当前依赖刚就绪的目标；逐项范围不扩张。`*_pause_production_run` 在当前任务边界暂停，`*_resume_production_run` 继续相同 runId；失败或退回的目标不能因恢复而重新提交，重生成须明确新开 runId。
 
 生成成功的图片/关键帧仍是待审核。`review_director_asset` 必须绑定发布版本、项目节点、归档 storageKey、媒体摘要和审核理由；Backend 自己校验实际文件后才将资产或关键帧标为 approved/rejected。未批准的依赖只阻塞其下游目标。旧稿在兼容区原样查看，接入 Acheng 时只补本轮缺项，不能自动重做历史媒体。
+
+### 关键帧参考核对
+
+编写或修改关键帧前，逐镜对照完整画面描述登记出场对象，包含前景、远处和背景中明确身份的角色，以及场景、道具和风格参考。对齐 `shots.required_assets`、`shotInputs.assetIds`、关键帧资产的 `depends_on` 与编号 `asset_cards.references`；身份图只保留登记特征，参考卡明确 preserve/exclude。画面正文新增对象时重新核对，不能把未入镜的身份图缺失当作纯显示问题。程序校验登记清单的覆盖，不能可靠发现自然语言中的所有漏登角色；这一步由导演逐镜核查。
+
+正式图片沿 `production_prepare_targets` 准备，回读 Backend 的正式图片输入投影及参考连线后再提交；缺失、过期或顺序不一致时先修正式源并重编译。不能另拼临时 references 掩盖空面板，也不能把生成结果自身或角色节点的全部服装图混入编号参考。画布增删/排序参考会回写正式源并使编译过期，已有任务继续使用自己的冻结清单。
+
+### 图片并发调度
+
+- 用户授权多张资产图或关键帧后，从正式 readiness 和资产依赖中找出授权范围内的 `ready` 目标，先提交这些目标，再统一跟踪结果。共同依赖同一已批准风格母图或角色图的目标可并发；风格母图、身份或服装参考尚未批准，只阻塞消费它的下游，不阻塞其他已就绪分支。任务成功不代替审核，不能为并发虚写 approved 或删去依赖。
+- 当前 Backend 的单个 run 会等待一张图片结束才提交下一张，不重叠目标的不同 run 可同时推进。新图片请求为每个就绪目标建立独立、稳定的 `runId`/`idempotencyKey`，通过 `*_start_production_run` 使用单目标 `targets` 和 `scope: selected`；收到启动回执后继续提交下一个独立目标，不先轮询当前任务终态。独立运行不使用 `all_ready` 自动扩展，以免后续范围与其他运行重叠。已有运行保持原范围，不拆分、暂停或换键重提。
+- 制作写入与运行启动按顺序提交，不能用同一个旧 `expectedRevision` 并发写同一制作记录。每次启动前回读当前 revision、发布版本和目标状态；携带 `workId` 时先沿同一 workId 把 `currentWork` 指向该目标，再用更新后的 revision 启动。游标展示一个当前目标，多任务进度以各自正式 run/task 记录汇总，不能把最后一个游标当全部任务。
+- `mediaProductionMode: per_item` 限制每个 run 的目标数量，不代表多张图片必须逐张等待。用户明确选择逐项确认或单张试跑时才按该节奏推进；`prompt_only` 不提交媒体。保持用户授权范围和现有模式，不为实现并发改成自动全项目生产。
+- 各目标保留独立回执和 taskId，提交阶段结束后统一回读运行/任务并查看已完成图片。某目标缺依赖、待审核、被占用、失败或回执未知时，只处理其原运行及受影响下游，继续推进无关就绪目标；只有全局源稿/编译版本失效等共同阻塞才停止同源后续提交。按已批准输入重算受影响提示词、发布并回读 readiness 后，启动下一批刚就绪目标。实际并发由模型渠道与执行器已有容量控制，不提高并发上限、不绕过队列、不重复付费提交。
+
+例如：风格母图未批准时先生成母图；批准后，依赖母图的角色 A、角色 B 和场景可同时启动；角色 A 的新服装图等待角色 A 批准，角色 B 或场景不为这条服装依赖等待。
+
+### 制作画布布局
+
+布局位置由 Backend 持久化的整批布局计划决定，Skill 不自行计算坐标、不在节点创建后批量补排。正式目标登记后调用 `production_prepare_targets`，并读取响应顶层 `layoutReceipt` 中的 planHash、算法版本、创建/复用节点和冲突诊断。资产按用途进入资产区；剧本按正式场次顺序排列；镜头图片与提示词及场次组保持关联；共享同一 H3 节点的多个 Segment 只占一个单元。缺少参考、待审核或尚未生成的目标也预留位置，依赖状态和生成完成顺序不改变坐标。
+
+Backend 将已有节点的真实位置与尺寸作为固定锚点，新目标只在所属区域分配空位；用户移动/调整的节点不被挪动。保存文案、审核状态或任务进度不触发布局变化；新增目标只扩展其预留位置。只有布局回执报告身份或占位冲突时，按正式目标 ID 和诊断继续处理，不按名称猜关联，也不以普通画布 ops 覆写编译位置。用户明确要求整理当前画布时，才另行按指定范围执行整理。
+
+同目标新运行被旧 runId 占用时，先用 `*_get_production_batch` 回读精确运行及 taskId。暂停只保留原运行，不结束它，也不释放目标；不得以“暂停后换新 runId 再试”处理占用。旧运行处于 `awaiting_review` 且媒体任务成功时，先查看真实结果，沿用则完成审核，用户要求重做则用正式审核操作退回并记录原因；回读确认无在途任务且旧批次已结束后，才在已有生成授权范围内启动新 runId。在途任务保持占用，不重复提交，不自行批准媒体或扩大生成范围。
 
 ## 生成参数与交付规格
 

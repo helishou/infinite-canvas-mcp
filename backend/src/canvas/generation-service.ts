@@ -22,6 +22,7 @@ import { CanvasAudioDispatcher } from "./audio-dispatcher.js";
 import { CanvasBrowserScriptDispatcher } from "./browser-script-dispatcher.js";
 import { decodeChannelModel, modelOptionName, resolveModelScript } from "./model-workflow.js";
 import type { Stores } from "../stores/types.js";
+import { productionImageInput } from "@basketikun/canvas-agent/reference-contract";
 
 /**
  * 画布生成唯一编排入口。
@@ -186,6 +187,14 @@ export class CanvasGenerationService {
         const sourceNodeId = command.sourceNodeId || command.nodeId;
         if (!sourceNodeId) return command;
         const sourceNode = nodes.find((node) => String(node.id || "") === sourceNodeId);
+        const formal = command.mode === "image" && productionImageInput(sourceNode);
+        if (formal) {
+            const frozen = command.params?.productionImageInput;
+            if (formal.stale || !frozen || JSON.stringify(frozen) !== JSON.stringify(formal)) throw new Error("正式图像参考清单未验证或已变化，请重新编译并准备节点");
+            const expected = formal.references.map(ref => ref.storageKey);
+            if (JSON.stringify(command.references?.map(ref => ref.storageKey)) !== JSON.stringify(expected)) throw new Error("正式参考图上传数量或顺序与编译清单不一致");
+            return command;
+        }
         const sourceMetadata = recordOf(sourceNode?.metadata);
         const commandMetadata = recordOf(command);
         const explicitReferenceNodeIds = Array.isArray(commandMetadata.referenceNodeIds)

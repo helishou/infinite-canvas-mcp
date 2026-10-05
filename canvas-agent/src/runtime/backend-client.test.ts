@@ -9,6 +9,20 @@ import { createBackendClient } from "./comfy-client.js";
 
 const client = new BackendClient("http://backend.test", "test-token");
 
+test("production rejection diagnostics and concrete next actions survive HTTP transport", async () => {
+  const diagnostic = { code: "TARGET_AWAITING_REVIEW", path: "request.targets", message: "Review the original result", severity: "error", blockingRun: { runId: "original", status: "awaiting_review", taskIds: ["task"] } };
+  const nextAction = { action: "review", message: "Read the original run", tool: "drama_get_production_batch", input: { episodeId: "episode", runId: "original" } };
+  await withFetch(async () => new Response(JSON.stringify({ code: diagnostic.code, error: diagnostic.message, diagnostics: [diagnostic], nextActions: [nextAction] }), { status: 400 }), async () => {
+    await assert.rejects(() => client.post("/drama/episodes/episode/production/runs", {}), (error: unknown) => {
+      assert.ok(error instanceof BackendClientError);
+      assert.equal(error.code, diagnostic.code);
+      assert.deepEqual(error.diagnostics, [diagnostic]);
+      assert.deepEqual(error.nextActions, [nextAction]);
+      return true;
+    });
+  });
+});
+
 test("createBackendClient reads the Backend token from its configured data directory", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "canvas-backend-client-config-"));
   try {

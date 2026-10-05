@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { BookOpen, Bot, Download, FileText, Home, Images, LoaderCircle, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Sparkles, Trash2, Undo2, Upload, UsersRound } from "lucide-react";
+import { Download, FileText, Home, Images, LoaderCircle, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Trash2, Undo2, Upload, UsersRound } from "lucide-react";
 import { Button, Dropdown, Modal, Popover, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 import { Link, useSearchParams } from "react-router-dom";
@@ -9,12 +9,8 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
-import { useAgentStore } from "@/stores/use-agent-store";
-import { DOCS_URL } from "@/constant/env";
 import type { CanvasCollaborator } from "@/stores/canvas/use-canvas-store";
-import { CanvasDraftsButton } from "./canvas-drafts-button";
 import { CanvasTaskCenterButton } from "./canvas-task-center";
-import { CanvasTextSuggestionsButton } from "./canvas-text-suggestions-button";
 import { CanvasProductionToolbar } from "@/components/production/canvas-production-workspace";
 
 export function CanvasTopBar({
@@ -39,9 +35,6 @@ export function CanvasTopBar({
     onOpenPlugins,
     onUndo,
     onRedo,
-    agentOpen,
-    compactAgentStatus,
-    onToggleAgent,
     onOpenGenerationLogs,
     collaborators,
 }: {
@@ -66,9 +59,6 @@ export function CanvasTopBar({
     onOpenPlugins: () => void;
     onUndo: () => void;
     onRedo: () => void;
-    agentOpen: boolean;
-    compactAgentStatus: { connected: boolean; enabled: boolean; activity: string };
-    onToggleAgent: () => void;
     onOpenGenerationLogs: () => void;
     collaborators: CanvasCollaborator[];
 }) {
@@ -83,7 +73,6 @@ export function CanvasTopBar({
     const toggleSidePanel = useCanvasSidePanelStore((state) => state.togglePanel);
     const productionOwner = useProductionWorkspaceStore(state => state.context?.owner);
     const productionDramaId = useProductionWorkspaceStore(state => state.context?.dramaId);
-
     useEffect(() => {
         if (!isTitleEditing) return;
         const close = (event: PointerEvent) => {
@@ -114,7 +103,6 @@ export function CanvasTopBar({
                             items: [
                                 ...(productionDramaId ? [{ key: "drama", icon: <Images className="size-4" />, label: <Link to={`/production?dramaId=${encodeURIComponent(productionDramaId)}`}>{t("productionCanvas.backDrama")}</Link> }] : []),
                                 { key: "home", icon: <Home className="size-4" />, label: t("productionCanvas.backHome"), onClick: onHome },
-                                { key: "docs", icon: <BookOpen className="size-4" />, label: t("canvas.docs"), onClick: () => window.open(DOCS_URL, "_blank", "noopener,noreferrer") },
                                 { key: "projects", icon: <Images className="size-4" />, label: t("canvas.projects"), onClick: onProjects },
                                 { type: "divider" },
                                 { key: "new", icon: <Plus className="size-4" />, label: t("canvas.create"), onClick: onCreateProject },
@@ -159,15 +147,14 @@ export function CanvasTopBar({
                         )}
                     </div>
                     {productionOwner && <CanvasProductionToolbar />}
-                    {!productionOwner && <CompactAgentStatus status={compactAgentStatus} onClick={onToggleAgent} />}
                     <CanvasCollaborators collaborators={collaborators} />
-                    {!productionOwner && <><CanvasDraftsButton /><CanvasTextSuggestionsButton projectId={projectId} /></>}
                 </div>
 
                 <div className="pointer-events-auto flex shrink-0 items-center gap-1.5">
-                    {productionOwner ? <Popover trigger="click" content={<div className="flex max-w-80 flex-col gap-3"><CompactAgentStatus status={compactAgentStatus} onClick={() => { useProductionWorkspaceStore.getState().setPanelTab("director"); useAgentStore.getState().openPanel(); }} /><CanvasDraftsButton /><CanvasTextSuggestionsButton projectId={projectId} /><CanvasTaskCenterButton projectId={projectId} /><button type="button" onClick={onOpenGenerationLogs}>{t("productionCanvas.generationLogs")}</button><UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} /></div>}><button type="button" className="grid size-8 place-items-center" aria-label={t("productionCanvas.tools")}><Menu className="size-4" /></button></Popover>
+                    {productionOwner ? <Popover trigger="click" content={<div className="flex max-w-80 flex-col gap-3"><UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} /></div>}><button type="button" className="grid size-8 place-items-center" aria-label={t("productionCanvas.tools")}><Menu className="size-4" /></button></Popover>
                         : <UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} />}
-                    {!productionOwner && <><Tooltip title={t("productionCanvas.generationLogs")}><button type="button" aria-label={t("productionCanvas.generationLogs")} className="grid size-8 place-items-center rounded-lg transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={onOpenGenerationLogs}><FileText className="size-4" /></button></Tooltip><CanvasTaskCenterButton projectId={projectId} /></>}
+                    <Tooltip title={t("productionCanvas.generationLogs")}><button type="button" aria-label={t("productionCanvas.generationLogs")} className="grid size-8 place-items-center rounded-lg transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={onOpenGenerationLogs}><FileText className="size-4" /></button></Tooltip>
+                    <CanvasTaskCenterButton projectId={projectId} />
                 </div>
             </div>
             <Modal title={t("canvas.shortcuts")} open={shortcutsOpen} onCancel={() => setShortcutsOpen(false)} footer={null} centered>
@@ -228,20 +215,6 @@ function MenuLabel({ text, shortcut }: { text: string; shortcut: string }) {
             <span>{text}</span>
             <span className="text-xs opacity-45">{shortcut}</span>
         </span>
-    );
-}
-
-function CompactAgentStatus({ status, onClick }: { status: { connected: boolean; enabled: boolean; activity: string }; onClick: () => void }) {
-    const colorTheme = useThemeStore((state) => state.theme);
-    const theme = canvasThemes[colorTheme];
-    const { t } = useTranslation();
-    const label = status.connected ? t("canvas.agentConnected") : status.enabled ? t("canvas.agentConnecting", { activity: status.activity || t("canvas.connecting") }) : t("canvas.agentDisconnected");
-    const dotColor = status.connected ? "#22c55e" : status.enabled ? "#f59e0b" : theme.node.muted;
-    return (
-        <button type="button" className="flex h-8 items-center gap-1.5 text-xs transition hover:opacity-75" style={{ color: status.connected ? "#16a34a" : status.enabled ? "#d97706" : theme.node.muted }} onClick={onClick} title={t("canvas.openAgent")}>
-            <span className="size-2 rounded-full" style={{ background: dotColor }} />
-            <span className="max-w-[140px] truncate">{label}</span>
-        </button>
     );
 }
 

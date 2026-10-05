@@ -31,7 +31,7 @@ const initial: DirectorProduction = {
   source, sourceHash: hash,
   modules: Object.fromEntries(directorModules.map(module => [module, { status: module === "story" ? "committed" : "partial", evidence: [], unresolved: [] }])),
   assets: {
-    STYLE_MOTHER: { nodeId: "image-style", storageKey: "style-mock", sha256: hash, version: "v1", status: "generated", evidence: "" },
+    STYLE_MOTHER: { nodeId: "image-style", storageKey: "style-mock", sha256: hash, version: "v1", status: "approved", evidence: "Existing approval retained for shared-promotion preview." },
     KF1: { nodeId: "image-frame", storageKey: "frame-mock", sha256: hash, version: "v1", status: "generated", evidence: "" },
   },
   shotInputs: { s1: { keyframePolicy: "new", assetIds: ["STYLE_MOTHER"], keyframeAssetId: "KF1" }, s2: { keyframePolicy: "none", assetIds: ["STYLE_MOTHER"] } },
@@ -56,9 +56,9 @@ const data: EpisodeProduction["draft"] = {
 };
 const initialProduction: EpisodeProduction = { episodeId: "fixture", revision: 4, draft: data, published: structuredClone(data), publishedVersion: 1, updatedAt: new Date().toISOString() };
 const initialReadiness: ProductionReadiness = {
-  revision: 4, publishedVersion: 1, source: "draft", modules: {}, unresolved: [], nextAction: "待审核：STYLE_MOTHER · 码头晨雾",
+  revision: 4, publishedVersion: 1, source: "draft", modules: {}, unresolved: [], nextAction: "待审核：信使确认封口 · 关键帧",
   targets: [
-    { id: "asset:STYLE_MOTHER", targetId: "STYLE_MOTHER", kind: "asset", title: "STYLE_MOTHER · 码头晨雾", status: "needs_review", blockers: ["查看真实媒体并批准或退回后继续"] },
+    { id: "asset:STYLE_MOTHER", targetId: "STYLE_MOTHER", kind: "asset", title: "STYLE_MOTHER · 码头晨雾", status: "complete", blockers: [] },
     { id: "frame:s1", targetId: "s1", kind: "keyframe", title: "信使确认封口", status: "needs_review", blockers: ["关键帧等待审核"] },
     { id: "segment:SEG1", targetId: "SEG1", kind: "segment", title: "SEG1", status: "ready", blockers: [], executionTargets: ["segment:SEG1", "segment:SEG2"], notice: "Motion Context 使用同一连续组运行" },
     { id: "segment:SEG2", targetId: "SEG2", kind: "segment", title: "SEG2", status: "ready", blockers: [] },
@@ -121,7 +121,8 @@ function Harness() {
       workspace={workspace} director={director} production={production} readiness={readiness} run={activeRun} batches={batches}
       canvasNodes={[{ id: "image-style", title: "STYLE_MOTHER output", type: "image" }, { id: "image-frame", title: "Keyframe output", type: "image" }]}
       legacy={[{ source: "script.md", sha256: hash, text: "旧剧本文本：完整台词和历史事实。" }]} versions={[{ version: 1, stage: "director", createdAt: new Date(0).toISOString() }]}
-      busy={false} canvasId="fixture" sourceDrafts={sourceDrafts} runStartPending={false} activeTargetIds={[...new Set(batches.filter(item => ["pending", "running", "paused", "awaiting_review"].includes(item.status)).flatMap(item => item.targets))]}
+      busy={false} canvasId="fixture" canvasRole="episode" onOpenSharedAsset={() => undefined} onPromoteExistingSharedAsset={() => setAsks(n => n + 1)} sourceDrafts={sourceDrafts} runStartPending={false} activeTargetIds={[...new Set(batches.filter(item => ["pending", "running", "paused", "awaiting_review"].includes(item.status)).flatMap(item => item.targets))]}
+      briefDraft={String(director.source.brief || "")} onBriefDraftChange={brief => { updateDirector({ ...director, source: { ...director.source, brief } }); }}
       onSourceDraftChange={(key, value) => setSourceDrafts(current => { if (value === undefined) { const next = { ...current }; delete next[key]; return next; } return { ...current, [key]: value }; })}
       onBrief={brief => updateDirector({ ...director, source: { ...director.source, brief } })}
       onPatch={patch} onRegroup={regroup} onWorkflow={workflow => updateDirector({ ...director, workflow: { ...director.workflow, ...workflow } })}

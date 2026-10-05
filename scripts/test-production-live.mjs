@@ -92,7 +92,7 @@ try {
         await page.getByRole('dialog', { name: '找画面', exact: true }).waitFor({ state: 'hidden' });
         await page.locator(`[data-node-id="${asset[1].nodeId}"]`).click();
         await dock.waitFor();
-        await dock.getByRole('button', { name: '修改', exact: true }).click();
+        await dock.getByRole('button', { name: '编辑说明', exact: true }).click();
         await page.locator('[data-production-object-editor]').waitFor({ state: 'visible' });
         assert.equal(await page.locator('[data-production-dialog] nav').count(), 0);
         await closeEditor(page);

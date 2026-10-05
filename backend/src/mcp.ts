@@ -3,6 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { productionToolPreflight } from "@basketikun/canvas-agent/drama/production-contract";
 import { productionEditSchema, productionReadQuery, productionWriteReceipt, productionWorkspaceRequest, productionWorkspaceToolNames } from "@basketikun/canvas-agent/drama/production-contract";
 import crypto from "node:crypto";
 import {
@@ -421,6 +422,7 @@ const BACKEND_OWNED_TOOL_NAMES = new Set<string>([
   "drama_delete_episode",
   "drama_get_production",
   "production_compile",
+  "production_get_compilation",
   "production_apply_compilation",
   "production_diagnose_bindings",
   "canvas_get_production",
@@ -1829,10 +1831,15 @@ function registerBackendCanvasTools(
       return textResult(request.method === "GET" ? await backendApi.get(request.path) : await backendApi.post(request.path, request.body));
     });
   }
-  for (const name of ["production_compile", "production_apply_compilation", "production_diagnose_bindings"] as const) {
+  for (const name of ["production_compile", "production_get_compilation", "production_apply_compilation", "production_diagnose_bindings"] as const) {
     server.registerTool(name, { description: toolDescriptions[name], inputSchema: toolInputSchemas[name] }, async (rawInput: Record<string, unknown>) => {
       const input = toolInputSchemas[name].parse(rawInput);
       const base = input.kind === "canvas" ? `/canvas/projects/${encodeURIComponent(input.id)}/production` : productionPath(input.id);
+      if (name === "production_get_compilation") {
+        const query = toolInputSchemas.production_get_compilation.parse(rawInput);
+        const params = new URLSearchParams({ view: query.view, offset: String(query.offset), ...(query.pageSize ? { pageSize: String(query.pageSize) } : {}) });
+        return textResult(await backendApi.get(`${base}/compilations/${encodeURIComponent(query.operationId)}?${params}`));
+      }
       if (name === "production_diagnose_bindings") return textResult(await backendApi.get(`${base}/bindings`));
       if (name === "production_apply_compilation") {
         const apply = toolInputSchemas.production_apply_compilation.parse(rawInput);
@@ -1840,7 +1847,7 @@ function registerBackendCanvasTools(
       }
       if (name === "production_compile") {
         const compile = toolInputSchemas.production_compile.parse(rawInput);
-        return textResult(await backendApi.post(`${base}/compile`, { expectedRevision: compile.expectedRevision, director: compile.director }));
+        return textResult(await backendApi.post(`${base}/compile`, { operationId: compile.operationId, expectedRevision: compile.expectedRevision, director: compile.director }));
       }
       throw new Error("Invalid compilation request");
     });
@@ -1875,10 +1882,12 @@ function registerBackendCanvasTools(
     return textResult(await backendApi.get(`${productionPath(episodeId)}/readiness`));
   });
   server.registerTool("drama_start_production_run", {
-    description: "以稳定 runId 对指定已发布目标启动媒体生产；此工具调用明确授权所选范围生成。",
-    inputSchema: productionIdSchema.extend({ runId: z.string().min(1), idempotencyKey: z.string().min(1), expectedRevision: z.number().int().min(0), version: z.number().int().min(1), targets: z.array(z.string().min(1)).min(1), scope: z.enum(["selected", "all_ready"]).optional() }),
+    description: toolDescriptions.drama_start_production_run,
+    inputSchema: toolInputSchemas.drama_start_production_run,
   }, async (rawInput: Record<string, unknown>) => {
     const { episodeId, ...input } = rawInput;
+    const blocked = await productionToolPreflight(backendApi, "drama_start_production_run", rawInput);
+    if (blocked) return textResult(blocked);
     return textResult(await backendApi.post(`${productionPath(String(episodeId))}/runs`, input));
   });
   server.registerTool("drama_get_production_batch", {
@@ -1990,10 +1999,12 @@ function registerBackendCanvasTools(
     return textResult(await backendApi.get(`${productionPath(projectId)}/readiness`));
   });
   server.registerTool("canvas_start_production_run", {
-    description: "以稳定 runId 对指定已发布目标启动媒体生产；此工具调用明确授权所选范围生成。",
-    inputSchema: productionIdSchema.extend({ runId: z.string().min(1), idempotencyKey: z.string().min(1), expectedRevision: z.number().int().min(0), version: z.number().int().min(1), targets: z.array(z.string().min(1)).min(1), scope: z.enum(["selected", "all_ready"]).optional() }),
+    description: toolDescriptions.canvas_start_production_run,
+    inputSchema: toolInputSchemas.canvas_start_production_run,
   }, async (rawInput: Record<string, unknown>) => {
     const { projectId, ...input } = rawInput;
+    const blocked = await productionToolPreflight(backendApi, "canvas_start_production_run", rawInput);
+    if (blocked) return textResult(blocked);
     return textResult(await backendApi.post(`${productionPath(String(projectId))}/runs`, input));
   });
   server.registerTool("canvas_get_production_batch", {
@@ -3636,7 +3647,9 @@ function classifyToolError(
   const conflict =
     backendError.code === "REVISION_CONFLICT" || /revision|冲突|基线/.test(message);
   const invalidInput = error instanceof z.ZodError || backendError.code === "INVALID_INPUT";
-  const domainCode = ["REFERENCE_INVALID", "MEDIA_IDENTITY_MISMATCH", "IDEMPOTENCY_CONFLICT"].includes(backendError.code || "") ? backendError.code : undefined;
+  const productionDiagnostics = Array.isArray(recordOf(error).diagnostics) ? recordOf(error).diagnostics as Array<Record<string, unknown>> : [];
+  const productionNextActions = Array.isArray(recordOf(error).nextActions) ? recordOf(error).nextActions as Array<Record<string, unknown>> : [];
+  const domainCode = productionDiagnostics.length || ["REFERENCE_INVALID", "MEDIA_IDENTITY_MISMATCH", "IDEMPOTENCY_CONFLICT"].includes(backendError.code || "") ? backendError.code : undefined;
   const commandCode = ["OPERATION_ID_REUSED", "MCP_COMMAND_MISMATCH", "MCP_COMMAND_REJECTED", "RECEIPT_UNAVAILABLE", "MCP_CALL_CANCELLED", "ASSET_NOT_FOUND", "EDIT_TARGET_MISMATCH"].includes(backendError.code || "") ? backendError.code : undefined;
   const authFailure = backendError.status === 401 || backendError.status === 403;
   const timeout = backendError.kind === "timeout";
@@ -3681,7 +3694,7 @@ function classifyToolError(
                           : "CANVAS_TOOL_FAILED";
   const taskIds = inputTaskIds(input);
   const projectId = String(input.projectId || state.activeProjectId || "");
-  const suggestedAction = commandCode === "OPERATION_ID_REUSED" || commandCode === "MCP_COMMAND_MISMATCH" || commandCode === "RECEIPT_UNAVAILABLE"
+  const suggestedAction = productionNextActions.length ? productionNextActions[0] : commandCode === "OPERATION_ID_REUSED" || commandCode === "MCP_COMMAND_MISMATCH" || commandCode === "RECEIPT_UNAVAILABLE"
     ? { tool: "mcp_get_command_receipt", input: { operationId: String(input.operationId || "") } }
     : cancelled
     ? { action: "本次等待已停止，后台任务不会被取消；可用原 taskId/taskIds 继续查询。" }
@@ -3720,11 +3733,11 @@ function classifyToolError(
           : authFailure
             ? { action: "检查 Backend 地址、Token 和权限后再重试" }
             : { action: "检查 errorContext 后修正输入或连接；不要重复提交完全相同的失败请求" };
-  const recoverable = selectionRequired || missingProject || missingTask || missingNode || missingSegment || missingModel || conflict || timeout || payloadOverflow || cancelled;
-  const issueSource = error && typeof error === "object" ? (error as Record<string, unknown>).issues : undefined;
+  const recoverable = productionDiagnostics.length > 0 || selectionRequired || missingProject || missingTask || missingNode || missingSegment || missingModel || conflict || timeout || payloadOverflow || cancelled;
+  const issueSource = error && typeof error === "object" ? (error as Record<string, unknown>).issues || productionDiagnostics : undefined;
   const issues = Array.isArray(issueSource) ? issueSource.map((issue) => {
     const item = recordOf(issue);
-    return { code: String(item.code || "validation_error"), message: safeErrorMessage(new Error(String(item.message || ""))), ...(Array.isArray(item.path) ? { path: item.path } : {}), ...(typeof item.bindingId === "string" ? { bindingId: item.bindingId } : {}), ...(Array.isArray(item.allowedFields) ? { allowedFields: item.allowedFields.filter((field) => typeof field === "string") } : {}) };
+    return { code: String(item.code || "validation_error"), message: safeErrorMessage(new Error(String(item.message || ""))), ...(Array.isArray(item.path) ? { path: item.path } : typeof item.path === "string" ? { path: item.path } : {}), ...(typeof recordOf(item.blockingRun).runId === "string" ? { blockingRun: item.blockingRun } : {}), ...(typeof item.bindingId === "string" ? { bindingId: item.bindingId } : {}), ...(Array.isArray(item.allowedFields) ? { allowedFields: item.allowedFields.filter((field) => typeof field === "string") } : {}) };
   }) : [];
   const retryPolicy = commandCode === "OPERATION_ID_REUSED" || commandCode === "RECEIPT_UNAVAILABLE" ? "never_with_same_id" : domainCode || invalidInput ? "after_input_change" : undefined;
   return {
@@ -3735,7 +3748,7 @@ function classifyToolError(
     issues,
     handlerInvoked: typeof recordOf(error).handlerInvoked === "boolean" ? recordOf(error).handlerInvoked as boolean : undefined,
     suggestedAction,
-    suggestedTool: "tool" in suggestedAction ? suggestedAction.tool : undefined,
+    suggestedTool: "tool" in suggestedAction && typeof suggestedAction.tool === "string" ? suggestedAction.tool : undefined,
   };
 }
 

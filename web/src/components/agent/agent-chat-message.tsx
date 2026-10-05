@@ -1,7 +1,7 @@
-import { Fragment, useEffect, useId, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useId, useState, type MouseEvent, type ReactNode } from "react";
 import { App, Button, Image, Modal, Popover } from "antd";
 import { Brain, CheckCircle2, ChevronDown, ChevronRight, Circle, CircleAlert, Copy, ExternalLink, FilePenLine, FileText, FolderOpen, ListChecks, LoaderCircle, Search, ShieldAlert, TerminalSquare, Wrench, XCircle } from "lucide-react";
-import { Streamdown, type LinkSafetyModalProps } from "streamdown";
+import { extractTableDataFromElement, Streamdown, tableDataToMarkdown, type LinkSafetyModalProps } from "streamdown";
 import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
@@ -18,7 +18,7 @@ const streamdownProps = () => ({
     linkSafety: { enabled: true, renderModal: (props: LinkSafetyModalProps) => <AgentLinkModal {...props} /> },
     lineNumbers: false,
     translations: {
-        close: tr("close"), copied: tr("copied"), copyCode: tr("copyCode"), copyLink: tr("copyLink"), externalLinkWarning: tr("externalWarning"), openExternalLink: tr("openExternal"), openLink: tr("continueOpen"),
+        close: tr("close"), copied: tr("copied"), copyCode: tr("copyCode"), copyLink: tr("copyLink"), copyTable: tr("copyTable"), externalLinkWarning: tr("externalWarning"), openExternalLink: tr("openExternal"), openLink: tr("continueOpen"),
     },
 } as const);
 const streamdownAnimation = { duration: 20, stagger: 0, sep: "word" } as const;
@@ -129,13 +129,30 @@ export function AgentChatMessage({ item, theme, onRejectTool, onApproveTool }: {
                 {isUser ? (
                     <AgentUserMessageContent text={item.text} references={item.canvasReferences || []} skill={item.skill} theme={theme} />
                 ) : (
-                    <Streamdown {...streamdownProps()} animated={streamdownAnimation} isAnimating={!!item.streamId}>{item.text}</Streamdown>
+                    <AgentAssistantMessageContent text={item.text} isAnimating={!!item.streamId} />
                 )}
                 {item.attachments?.length ? <AgentMessageAttachments attachments={item.attachments} alignRight={isUser} /> : null}
                 {item.meta ? <div className={`mt-1 text-[11px] tabular-nums opacity-55 ${isUser ? "text-right" : ""}`}>{item.meta}</div> : null}
             </div>
         </div>
     );
+}
+
+function AgentAssistantMessageContent({ text, isAnimating }: { text: string; isAnimating: boolean }) {
+    const copyText = useCopyText();
+    const copyTable = (event: MouseEvent<HTMLDivElement>) => {
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+        const button = target.closest("button");
+        if (!button || button.title !== tr("copyTable")) return;
+        const table = button.closest('[data-streamdown="table-wrapper"]')?.querySelector("table");
+        if (!(table instanceof HTMLTableElement)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        copyText(tableDataToMarkdown(extractTableDataFromElement(table)), tr("copied"));
+    };
+
+    return <div onClickCapture={copyTable}><Streamdown {...streamdownProps()} animated={streamdownAnimation} isAnimating={isAnimating}>{text}</Streamdown></div>;
 }
 
 function AgentUserMessageContent({ text, references, skill, theme }: { text: string; references: AgentCanvasReference[]; skill?: AgentSkillReference; theme: (typeof canvasThemes)[keyof typeof canvasThemes] }) {

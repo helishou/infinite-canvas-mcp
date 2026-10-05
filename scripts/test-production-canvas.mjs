@@ -51,7 +51,9 @@ const director = { schemaVersion: 1, engine, source, sourceHash, modules: { stor
     artifacts: ["ROLE", "FRAME", "seg1", "seg2"].map(id => { const prompt = `integrated_multimodal_description:\n[Shot 1] ${id}.\n\noverall_soundscape:\nN/A\n\nnon_diegetic_music:\nN/A\n`; const sha256 = promptHash(prompt); return { id, targetId: id, kind: id.startsWith("seg") ? "h3" : "image", status: "ready", prompt, sha256, sourceHash, references: [], receipt: { sourceHash, promptHash: sha256, engineRuntimeId: engine.runtimeId, validator: "fixture" } }; }),
     workflow: { currentWork: { workId: "work", module: "assets", action: "author", targetKind: "asset", targetId: "ROLE", inputRevision: 1, sourceHash }, mediaProductionMode: "per_item" } };
 episodeService.edit("ep", { operationId: "source", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
-runner.prepareTargets("ep", 1, ["asset:ROLE", "frame:s1", "segment:seg1", "segment:seg2"], "prepare");
+const layoutPreparation = runner.prepareTargets("ep", 1, ["asset:ROLE", "frame:s1", "segment:seg1", "segment:seg2"], "prepare");
+assert.ok(layoutPreparation.layoutReceipt?.planHash, "preparation should return the frozen layout plan receipt");
+assert.equal(submissions, 0, "layout preparation must not submit media");
 const prepared = episodeService.get("ep");
 const roleNodeId = prepared.draft.director.assets.ROLE.nodeId;
 const h3NodeId = prepared.draft.clipGroups[0].nodeId;
@@ -222,6 +224,12 @@ try {
     await page.waitForURL(`**/canvas/${episodeCanvas}**`, { waitUntil: "domcontentloaded" });
     await page.getByRole("button", { name: "找画面", exact: true }).waitFor();
     await page.locator(`[data-node-id="${roleNodeId}"]`).waitFor();
+    const layoutMember = episodeService.layoutPlan("ep")?.units.find(unit => unit.targets.includes('asset:ROLE'))?.members.find(member => member.nodeId === roleNodeId);
+    assert.ok(layoutMember?.size.width && layoutMember.size.height, "formal asset should have a reserved display frame");
+    const beforeImageFit = await page.locator(`[data-node-id="${roleNodeId}"]`).evaluate(node => ({ width: node.style.width, height: node.style.height, transform: node.style.transform }));
+    await page.waitForFunction(id => { const node = document.querySelector(`[data-node-id="${id}"]`); const image = node?.querySelector('img'); return image?.complete && image.naturalWidth > 0; }, roleNodeId);
+    const afterImageFit = await page.locator(`[data-node-id="${roleNodeId}"]`).evaluate(node => ({ width: node.style.width, height: node.style.height, transform: node.style.transform }));
+    assert.deepEqual(afterImageFit, beforeImageFit, "loading the image must not change its planned canvas position or reserved size");
     assert.equal(await page.locator('#canvas-director-dialog').isVisible(), false);
     assert.equal(await page.evaluate(async () => (await import('/src/stores/use-canvas-side-panel-store.ts')).useCanvasSidePanelStore.getState().panelOpen), false);
     await page.screenshot({ path: path.join(artifacts, 'clean-entry.png') });
@@ -255,7 +263,7 @@ try {
     assert.equal(episodeService.get('ep').published.director.assets.ROLE.status, 'approved');
     await actions.locator('[data-production-node-status]').filter({ hasText: '已采用' }).waitFor();
     assert.equal(await actions.getByRole('button', { name: '采用这张', exact: true }).count(), 0);
-    await actions.getByRole('button', { name: '修改', exact: true }).click();
+    await actions.getByRole('button', { name: '编辑说明', exact: true }).click();
     await page.locator('[data-production-object-editor]').waitFor({ state: 'visible' });
     await page.waitForFunction(() => Array.from(document.querySelectorAll('.ant-modal')).some(modal => modal.getClientRects().length && modal.querySelector('[data-production-object-editor]') && !/ant-zoom-(enter|appear|leave)/.test(modal.className) && Number(getComputedStyle(modal).opacity) === 1));
     assert.equal(await page.locator('[data-production-dialog] nav').count(), 0);
@@ -310,7 +318,7 @@ try {
     await page.evaluate(async () => (await import('/src/stores/use-production-workspace-store.ts')).useProductionWorkspaceStore.getState().setCommandBusy('ep', true));
     assert.equal(await actions.getByRole('button', { name: '生成视频', exact: true }).isDisabled(), true);
     await page.evaluate(async () => (await import('/src/stores/use-production-workspace-store.ts')).useProductionWorkspaceStore.getState().setCommandBusy('ep', false));
-    await actions.getByRole('button', { name: '修改', exact: true }).click();
+    await actions.getByRole('button', { name: '编辑说明', exact: true }).click();
     await page.locator('[data-production-object-editor]').waitFor({ state: 'visible' });
     assert.equal(await page.locator('[data-production-dialog] nav').count(), 0);
     assert.equal(await page.getByText('片段规划', { exact: true }).isVisible(), false);
@@ -335,7 +343,7 @@ try {
     await page.evaluate(async () => { window.__productionTest = { follow: (await import('/src/stores/use-production-follow-store.ts')).useProductionFollowStore, view: (await import('/src/stores/canvas/plugin-node-view.ts')).getPluginNodeView, workspace: (await import('/src/stores/use-production-workspace-store.ts')).useProductionWorkspaceStore }; });
     await page.locator(`.minimax-tl-clip[data-segment-id="${clip2}"]`).click();
     await page.waitForFunction(async ({ projectId, nodeId, segmentId }) => (await import('/src/stores/canvas/plugin-node-view.ts')).getPluginNodeView(projectId, nodeId).getSnapshot().selectedSegmentId === segmentId, { projectId: episodeCanvas, nodeId: h3NodeId, segmentId: clip2 });
-    await actions.getByRole('button', { name: '修改', exact: true }).click();
+    await actions.getByRole('button', { name: '编辑说明', exact: true }).click();
     await page.locator('[data-production-object-editor]').waitFor({ state: 'visible' });
     assert.equal(await page.locator('[data-production-dialog] nav').count(), 0);
     await page.screenshot({ path: path.join(artifacts, 'clip-object-editor.png'), animations: 'disabled' });

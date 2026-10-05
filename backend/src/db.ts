@@ -6,7 +6,9 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { DB_FILE, MEDIA_DIR, ensureDataDirs } from "./config.js";
 import { prepareDatabaseUpgrade, DATABASE_SCHEMA_VERSION } from "./database-upgrade.js";
 import { syncScriptNodeEdits } from "./drama/script-nodes.js";
+import { syncImageReferenceEdits } from "./drama/image-inputs.js";
 import { dramaProductionPlanSchema, type DramaProductionPlan } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionLayoutPlanSchema, type ProductionLayoutPlan, type ProductionLayoutReceipt } from "@basketikun/canvas-agent/drama/production-contract";
 import { normalizeSceneAsset } from "./canvas/asset-contract.js";
 import { completedImageSlots, dropImageSlots, imageSourceStatus } from "./canvas/image-result-slots.js";
 import { applyCanvasProjectOperations, canonicalizeH3References, isH3CanvasNode, registerH3ReferenceAssets, type CanvasOperation } from "./canvas/project-ops.js";
@@ -695,11 +697,114 @@ export class BackendDatabase {
         if (currentVersion < 25) {
             this.db.exec("BEGIN IMMEDIATE");
             try {
-                this.db.exec("ALTER TABLE drama_projects ADD COLUMN production_plan_json TEXT");
+                if (!this.hasColumn("drama_projects", "production_plan_json")) this.db.exec("ALTER TABLE drama_projects ADD COLUMN production_plan_json TEXT");
                 this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (25, ?)").run(new Date().toISOString());
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }
+        if (currentVersion < 26) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                this.db.exec(`CREATE TABLE IF NOT EXISTS production_layout_plans (
+                    project_id TEXT PRIMARY KEY REFERENCES canvas_projects(id) ON DELETE CASCADE,
+                    plan_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )`);
+                const columns = this.db.prepare("PRAGMA table_info(production_preparations)").all() as Array<{ name: string }>;
+                if (!columns.some(column => column.name === "layout_plan_json")) this.db.exec("ALTER TABLE production_preparations ADD COLUMN layout_plan_json TEXT");
+                if (!columns.some(column => column.name === "layout_receipt_json")) this.db.exec("ALTER TABLE production_preparations ADD COLUMN layout_receipt_json TEXT");
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (26, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
+        if (currentVersion < 27) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                // A scene instance is one script occurrence, not an environment: scene_registry ids are only a reference.
+                this.db.exec(`CREATE TABLE IF NOT EXISTS drama_scene_instances (
+                    id TEXT PRIMARY KEY,
+                    drama_id TEXT NOT NULL REFERENCES drama_projects(folder_id) ON DELETE CASCADE,
+                    episode_id TEXT REFERENCES drama_episodes(id) ON DELETE SET NULL,
+                    source_scene_key TEXT NOT NULL,
+                    environment_id TEXT,
+                    scene_order INTEGER NOT NULL DEFAULT 0,
+                    title TEXT NOT NULL DEFAULT '',
+                    source_hash TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(drama_id, source_scene_key)
+                );
+                CREATE TABLE IF NOT EXISTS drama_scene_canvases (
+                    scene_id TEXT PRIMARY KEY REFERENCES drama_scene_instances(id) ON DELETE CASCADE,
+                    canvas_id TEXT NOT NULL REFERENCES canvas_projects(id) ON DELETE RESTRICT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(canvas_id)
+                );
+                CREATE INDEX IF NOT EXISTS drama_scene_instances_episode ON drama_scene_instances(episode_id);
+                CREATE INDEX IF NOT EXISTS drama_scene_instances_environment ON drama_scene_instances(environment_id);
+                CREATE INDEX IF NOT EXISTS drama_scene_instances_order ON drama_scene_instances(drama_id, scene_order);`);
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (27, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
+        if (currentVersion < 28) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                this.db.exec(`CREATE TABLE IF NOT EXISTS scene_productions (
+                    scene_id TEXT PRIMARY KEY REFERENCES drama_scene_instances(id) ON DELETE CASCADE,
+                    revision INTEGER NOT NULL DEFAULT 0,
+                    draft_json TEXT NOT NULL,
+                    published_json TEXT,
+                    published_version INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS scene_production_operations (
+                    operation_id TEXT PRIMARY KEY,
+                    scene_id TEXT NOT NULL REFERENCES drama_scene_instances(id) ON DELETE CASCADE,
+                    request_hash TEXT NOT NULL,
+                    receipt_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS scene_production_operations_scene ON scene_production_operations(scene_id);
+                CREATE TABLE IF NOT EXISTS scene_production_versions (
+                    scene_id TEXT NOT NULL REFERENCES drama_scene_instances(id) ON DELETE CASCADE,
+                    version INTEGER NOT NULL,
+                    stage TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL,
+                    impact_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (scene_id, version)
+                );
+                CREATE TABLE IF NOT EXISTS scene_production_runs (
+                    scene_id TEXT NOT NULL REFERENCES drama_scene_instances(id) ON DELETE CASCADE,
+                    version INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    plan_json TEXT NOT NULL,
+                    submitted_json TEXT NOT NULL DEFAULT '[]',
+                    error TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (scene_id, version)
+                );`);
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (28, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
+        if (currentVersion < 29) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                // Shared assets stay owned by the drama; an adoption names exactly one episode or one scene.
+                if (!this.hasColumn("drama_asset_adoptions", "scene_id")) this.db.exec("ALTER TABLE drama_asset_adoptions ADD COLUMN scene_id TEXT REFERENCES drama_scene_instances(id) ON DELETE CASCADE");
+                this.db.exec("CREATE INDEX IF NOT EXISTS drama_asset_adoptions_scene ON drama_asset_adoptions(scene_id)");
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (29, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
+    }
+
+    /** A rolled-back schema_migrations row leaves its column behind, so every ADD COLUMN must be checked first. */
+    private hasColumn(table: string, column: string): boolean {
+        return (this.db.prepare(`PRAGMA table_info(${table.replaceAll("\"", "\"\"")})`).all() as Array<{ name: string }>).some(entry => entry.name === column);
     }
 
     private backupBeforeH3Migration(version = "v13") {
@@ -1705,6 +1810,12 @@ export class BackendDatabase {
             }
             // getCanvasProject parses a fresh snapshot for this transaction; it has no shared owner.
             const project = current as Record<string, unknown>;
+            const formalImageNodes = !context?.runtimeWrite ? (project.nodes as Record<string, any>[] || []).filter(node => node.metadata?.productionImageInput) : [];
+            const formalSourceIds = new Set(formalImageNodes.map(node => node.metadata.productionImageInput.sourceNodeId));
+            const imageInputBaseline = formalImageNodes.length ? structuredClone({
+                nodes: formalImageNodes.map(node => ({ id: node.id, metadata: { productionImageInput: node.metadata.productionImageInput } })),
+                connections: (project.connections as Record<string, any>[] || []).filter(edge => formalSourceIds.has(edge.toNodeId)),
+            }) : undefined;
             const scriptBaseline = context?.source?.clientId !== "production:scripts" ? { nodes: structuredClone((Array.isArray(project.nodes) ? project.nodes as Record<string, any>[] : []).filter(node => node.metadata?.productionScriptId)) } : undefined;
             if (!this.db.prepare("SELECT 1 FROM canvas_collaboration_checkpoints WHERE project_id = ?").get(id)) {
                 this.db.prepare("INSERT INTO canvas_collaboration_checkpoints (project_id, revision, data_json) VALUES (?, ?, ?)").run(id, currentRevision, JSON.stringify(current));
@@ -1714,6 +1825,14 @@ export class BackendDatabase {
                 if (!context?.runtimeWrite) {
                     const node = (Array.isArray(project.nodes) ? project.nodes as Record<string, any>[] : []).find(item => item.id === (operation.id || operation.nodeId));
                     const metadata = operation.metadata as Record<string, unknown> | undefined;
+                    const patched = (operation.patch as Record<string, any> | undefined)?.metadata;
+                    const layoutKeys = ["productionLayoutUnitId", "productionLayoutBounds"];
+                    for (const change of [metadata, patched].filter(Boolean)) for (const key of layoutKeys) {
+                        if (Object.hasOwn(change, key) && commandFingerprint(change[key]) !== commandFingerprint(node?.metadata?.[key] ?? null)) throw new Error("制作布局标识由 Backend 管理");
+                    }
+                    if ((operation.metadataDelete as string[] || []).some(key => layoutKeys.includes(key))) throw new Error("制作布局标识不能直接删除");
+                    for (const change of [metadata, patched].filter(Boolean)) if (Object.hasOwn(change, "productionImageInput") && commandFingerprint(change.productionImageInput) !== commandFingerprint(node?.metadata?.productionImageInput || null)) throw new Error("正式图片输入清单由 Backend 编译登记，不能直接修改");
+                    if ((operation.metadataDelete as string[] || []).includes("productionImageInput")) throw new Error("正式图片输入清单不能直接删除");
                     if (metadata?.sharedAssetOrigin && commandFingerprint(metadata.sharedAssetOrigin) !== commandFingerprint(node?.metadata?.sharedAssetOrigin || null)) throw new Error("共享资产来源由 Backend 登记，不能直接修改");
                     if (node?.metadata?.sharedAssetOrigin && operation.type === "update_node") {
                         const protectedKeys = ["content", "storageKey", "sharedAssetOrigin", "characterImages", "characterPrimaryIndex", "sceneImages", "resultStorageKey", "imageResults"];
@@ -1761,6 +1880,14 @@ export class BackendDatabase {
                 return result;
             });
             const productionUpdates = scriptBaseline ? syncScriptNodeEdits(this, id, scriptBaseline, project) : [];
+            if (imageInputBaseline) {
+                const synced = syncImageReferenceEdits(this, id, imageInputBaseline, project);
+                productionUpdates.push(...synced.updates);
+                for (const operation of synced.operations) {
+                    const result = applyCanvasProjectOperations(project, [operation]);
+                    committedOperations.push(operation); operationResults.push(...result);
+                }
+            }
             const revision = currentRevision + 1;
             project.revision = revision;
             project.updatedAt = new Date().toISOString();
@@ -2246,6 +2373,48 @@ export class BackendDatabase {
         try { return stripCanvasLocalViewState(JSON.parse(row.data_json) as Record<string, unknown>) as unknown as CanvasProject; } catch { return null; }
     }
 
+    getProductionLayoutPlan(projectId: string): ProductionLayoutPlan | null {
+        const row = this.db.prepare("SELECT plan_json FROM production_layout_plans WHERE project_id=?").get(projectId) as { plan_json: string } | undefined;
+        return row ? productionLayoutPlanSchema.parse(JSON.parse(row.plan_json)) : null;
+    }
+
+    saveProductionLayoutPlan(projectId: string, plan: ProductionLayoutPlan): void {
+        const parsed = productionLayoutPlanSchema.parse(plan);
+        if (parsed.canvasId !== projectId) throw new Error("布局计划画布归属不一致");
+        const existing = this.getProductionLayoutPlan(projectId);
+        if (existing?.planHash === parsed.planHash) return;
+        this.db.prepare(`INSERT INTO production_layout_plans (project_id, plan_json, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(project_id) DO UPDATE SET plan_json=excluded.plan_json, updated_at=excluded.updated_at`)
+            .run(projectId, JSON.stringify(parsed), new Date().toISOString());
+    }
+
+    getProductionPreparationLayout(operationId: string): { plan: ProductionLayoutPlan; receipt: ProductionLayoutReceipt; expectedCanvasRevision: number } | null {
+        const row = this.db.prepare("SELECT layout_plan_json, layout_receipt_json FROM production_preparations WHERE operation_id=?").get(operationId) as { layout_plan_json: string | null; layout_receipt_json: string | null } | undefined;
+        if (!row?.layout_plan_json || !row.layout_receipt_json) return null;
+        const frozen = JSON.parse(row.layout_receipt_json) as { receipt: ProductionLayoutReceipt; expectedCanvasRevision: number };
+        return { plan: productionLayoutPlanSchema.parse(JSON.parse(row.layout_plan_json)), receipt: frozen.receipt, expectedCanvasRevision: frozen.expectedCanvasRevision };
+    }
+
+    freezeProductionPreparationLayout(operationId: string, expectedCanvasRevision: number, plan: ProductionLayoutPlan, receipt: ProductionLayoutReceipt) {
+        const parsed = productionLayoutPlanSchema.parse(plan);
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            const preparation = this.db.prepare("SELECT layout_plan_json, layout_receipt_json FROM production_preparations WHERE operation_id=?").get(operationId) as { layout_plan_json: string | null; layout_receipt_json: string | null } | undefined;
+            if (!preparation) throw new Error("找不到待提交的布局准备操作");
+            if (preparation.layout_plan_json) {
+                const prior = this.getProductionPreparationLayout(operationId)!;
+                this.db.exec("COMMIT");
+                return { ...prior, replayed: true };
+            }
+            if (this.getCanvasProjectRevision(parsed.canvasId) !== expectedCanvasRevision) throw new Error("画布版本已变化，须按原 operationId 重新读取并恢复准备");
+            this.saveProductionLayoutPlan(parsed.canvasId, parsed);
+            this.db.prepare("UPDATE production_preparations SET layout_plan_json=?, layout_receipt_json=? WHERE operation_id=?")
+                .run(JSON.stringify(parsed), JSON.stringify({ receipt, expectedCanvasRevision }), operationId);
+            this.db.exec("COMMIT");
+            return { plan: parsed, receipt, expectedCanvasRevision, replayed: false };
+        } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    }
+
     getCanvasProjectRevision(id: string): number | null {
         const row = this.db.prepare("SELECT CASE WHEN json_valid(data_json) THEN COALESCE(json_extract(data_json, '$.revision'), 0) END AS revision FROM canvas_projects WHERE id = ?").get(id) as { revision?: number | null } | undefined;
         return row?.revision === undefined || row.revision === null ? null : Number(row.revision);
@@ -2296,6 +2465,36 @@ export class BackendDatabase {
                 updatedAt: String(row.updated_at),
             };
         } catch { return null; }
+    }
+
+    /** Resolve persisted field IDs against stored workflow definitions so log labels survive workflow routing/version changes. */
+    getWorkflowFieldDefinitionsByIds(ids: string[]): Array<{ workflowName: string; field: WorkflowField }> {
+        const requested = new Set(ids.filter((id) => typeof id === "string" && id));
+        if (!requested.size) return [];
+        const rows = this.db.prepare("SELECT name, fields_json FROM workflow_configs").all() as Array<{ name: string; fields_json: string }>;
+        const matches = new Map<string, Map<string, { workflowName: string; field: WorkflowField }>>();
+        for (const row of rows) {
+            let fields: unknown;
+            try { fields = JSON.parse(row.fields_json || "[]"); } catch { continue; }
+            if (!Array.isArray(fields)) continue;
+            for (const candidate of fields) {
+                if (!candidate || typeof candidate !== "object") continue;
+                const field = candidate as WorkflowField;
+                if (!requested.has(field.id)) continue;
+                const signature = JSON.stringify([field.name || "", field.input || "", field.node || "", field.type || ""]);
+                let definitions = matches.get(field.id);
+                if (!definitions) {
+                    definitions = new Map();
+                    matches.set(field.id, definitions);
+                }
+                if (!definitions.has(signature)) definitions.set(signature, { workflowName: row.name, field });
+            }
+        }
+        return [...requested].flatMap((id) => {
+            const definitions = matches.get(id);
+            // A field ID reused for conflicting definitions has no trustworthy display name.
+            return definitions?.size === 1 ? [...definitions.values()] : [];
+        });
     }
 
     upsertWorkflowConfig(name: string, config: {
