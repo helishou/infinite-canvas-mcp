@@ -35,6 +35,8 @@ Agent 只负责编译前的源稿与批准依赖。编译使用稳定 operationI
 
 导演工作台以正式 `workflow.currentWork` 和 `workflow/readiness.presentation` 为阶段与导航依据。新阶段沿用同一 workId 并调用结构化 `site_navigate`；待用户回答的问题登记为 `workflow.pendingDecisions`，绑定源哈希，收到明确答复后保存并继续。实际媒体运行须使用真实 runId、taskId 与节点/Clip映射，不能只依据助手消息或批次文字切页。
 
+编译前逐项评估每对相邻 Segment 的尾帧参考与 Motion Context，并记录承接或断链的具体事实。不能用统一“独立剪切”理由把整批关闭，也不能因为同场景而整批开启；缺失决定不按 false 处理。规则及旧成片恢复条件见适配合同的连续性边界。
+
 默认 Clip 完成条件是任务终态、媒体归档/可访问、活动结果绑定及 taskId/storageKey 可追溯；不增加默认质量检查或自动返修。用户限定仅提示词、单张试跑、指定镜头或逐项确认时按其范围执行。
 
 ## 维护归属

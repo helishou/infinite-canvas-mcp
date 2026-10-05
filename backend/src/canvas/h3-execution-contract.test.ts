@@ -141,3 +141,18 @@ test('a frozen batch keeps its default snapshot after a settings update; a speci
     assert.equal(submitted.length, 1);
     assert.equal(stores.tasks.get(parent.id)!.result!.media instanceof Array, true);
 });
+
+test("outgoing motion flags form a complete latent chain including the closing Clip without creating tasks", t => {
+    const { stores, runner } = fixture(t);
+    stores.projects.applyOperations("p", undefined, [
+        { type: "update_h3_segment", nodeId: "n", segmentId: "a", patch: { motionContextEnabled: true } },
+        { type: "update_h3_segment", nodeId: "n", segmentId: "b", patch: { motionContextEnabled: true } },
+        { type: "add_h3_segment", nodeId: "n", segment: { id: "c", prompt: "The bell stops.", motionContextEnabled: false } },
+    ]);
+    const input = { projectId: "p", nodeId: "n", runFromCurrent: true, skipCompleted: false };
+    const before = JSON.stringify(stores.projects.get("p"));
+    const plans = (runner as any).plansFor(input);
+    assert.deepEqual(plans.map((plan: any) => plan.continuation?.index), [1, 2, 3]);
+    assert.equal(new Set(plans.map((plan: any) => plan.continuation?.group)).size, 1);
+    assert.equal(stores.tasks.list().length, 0); assert.equal(JSON.stringify(stores.projects.get("p")), before);
+});

@@ -3,7 +3,7 @@ import { create } from "zustand";
 import type { ProductionPresentation } from "@/services/backend-api";
 
 export type ProductionFollowTarget = {
-    kind?: "canvas" | "episode";
+    kind?: "canvas" | "episode" | "scene";
     id?: string;
     workId: string;
     runId?: string;

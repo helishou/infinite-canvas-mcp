@@ -1,5 +1,7 @@
 import { create } from "zustand";
 import { backendHealth, discoverBackendToken, getBackendUrl, probeBackendBusinessApi } from "@/services/backend-api";
+import { runBackendConnectionMonitorCycle } from "@/lib/backend-connection-monitor";
+import { startSingleFlightPoller } from "@/lib/single-flight-poll";
 import { getBackendTokenShared, setBackendToken } from "@/lib/backend-token";
 import { persistBackendConnection } from "@/lib/backend-connection";
 
@@ -24,6 +26,7 @@ const seenBackendEventIds = new Set<string>();
 let backendEventCursor = "";
 let backendEventCursorUrl = "";
 let activeCanvasProjectId = "";
+let backendMonitorStarted = false;
 
 // 本地总后台（127.0.0.1/localhost:17370）在浏览器直连时会经过系统代理，
 // 而代理会截断长连接 SSE（net::ERR_INCOMPLETE_CHUNKED_ENCODING）。
@@ -159,12 +162,35 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
 
 /** 启动时自动检测总后台连接。 */
 export function initBackendConnection() {
-    if (typeof window === "undefined") return;
+    if (typeof window === "undefined" || backendMonitorStarted) return;
+    backendMonitorStarted = true;
     void useBackendStore.getState().checkConnection();
-    // 周期性检测：已连接状态也必须持续探活，才能感知后台运行中途崩溃。
-    setInterval(() => {
-        void useBackendStore.getState().checkConnection();
-    }, 10_000);
+
+    let forceFullCheck = false;
+    const poller = startSingleFlightPoller({
+        intervalMs: 10_000,
+        initiallyPaused: document.hidden,
+        poll: async () => {
+            const result = await runBackendConnectionMonitorCycle(useBackendStore.getState(), forceFullCheck, {
+                healthCheck: backendHealth,
+                fullCheck: () => useBackendStore.getState().checkConnection(),
+                markDisconnected: () => {
+                    stopBackendEvents();
+                    structuredSettingsHydrated = false;
+                    useBackendStore.setState({ connected: false, checking: false, businessError: "", error: `无法连接总后台 ${getBackendUrl()}` });
+                },
+            });
+            if (result === "full") forceFullCheck = false;
+        },
+    });
+    const onAuthFailure = () => {
+        if (useBackendStore.getState().checking) return;
+        forceFullCheck = true;
+        poller.refreshNow();
+    };
+    const onVisibilityChange = () => document.hidden ? poller.pause() : poller.resume();
+    window.addEventListener("backend-auth-failed", onAuthFailure);
+    document.addEventListener("visibilitychange", onVisibilityChange);
 }
 
 /** 当前项目交给 WebSocket 房间，避免 SSE 再次应用同一份画布增量。 */

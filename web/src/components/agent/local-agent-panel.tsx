@@ -1108,7 +1108,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
             return;
         }
         try {
-            const input: { ops?: CanvasAgentOp[]; path?: string; production?: { kind?: "canvas" | "episode"; id?: string; workId?: string; runId?: string } } = payload.input || {};
+            const input: { ops?: CanvasAgentOp[]; path?: string; production?: { kind?: "canvas" | "episode" | "scene"; id?: string; workId?: string; runId?: string } } = payload.input || {};
             addEventLog(toolName(payload.name), payload, payload);
             let result: unknown;
             let appliedOps = input.ops || [];

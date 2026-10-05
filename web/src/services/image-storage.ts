@@ -4,7 +4,6 @@ import i18n from "@/i18n";
 import { createImageThumbnail } from "@/lib/image-thumbnail";
 import { uploadBackendMedia, deleteBackendMedia, backendMediaUrl, resolveComfyMediaUrl } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
-import { withLocalProxy } from "@/stores/use-config-store";
 
 export type UploadedImage = {
     url: string;
@@ -93,7 +92,7 @@ async function fetchImageBlob(url: string, options?: ImageReadOptions) {
         controller.abort();
     }, IMAGE_DOWNLOAD_TIMEOUT_MS);
     try {
-        const response = await fetch(withLocalProxy(url), { signal: controller.signal });
+        const response = await fetch(url, { signal: controller.signal });
         if (!response.ok) throw namedError(IMAGE_RESPONSE_ERROR);
         return await response.blob();
     } catch (error) {

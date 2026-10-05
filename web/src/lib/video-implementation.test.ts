@@ -5,9 +5,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { initialVideoParamValues, videoParamKey } from "./video-implementation";
+import { initialVideoParamValues, resolveVideoImplementation, videoParamKey } from "./video-implementation";
 import { resolveModelWorkflow } from "@/stores/use-config-store";
 import { resolveWorkflowBindingForModel } from "@basketikun/canvas-agent/model-workflow";
+import type { RunningHubWorkflowProfile } from "@/services/api/runninghub";
 import type { WorkflowField } from "@/services/api/workflows";
 
 const CHANNEL_ID = "local-comfyui";
@@ -80,6 +81,32 @@ test("只挂 RunningHub 绑定时解析为云端实现，不因没有本地工�
     const binding = resolveWorkflowBindingForModel(config, `${CHANNEL_ID}::云端生视频`, 0);
     assert.equal(binding.ok, true);
     assert.deepEqual(binding.ok && binding.binding, { provider: "runninghub", profileId: PROFILE_ID });
+});
+
+test("RunningHub 的提示词字段由上方提示词输入框提供，不应显示为工作流参数", async () => {
+    const profile: RunningHubWorkflowProfile = {
+        id: PROFILE_ID,
+        name: "云端生视频",
+        workflowId: "workflow-1",
+        fields: [
+            { nodeId: "263", fieldName: "text", source: "prompt", fieldType: "text", enabled: true },
+            { nodeId: "263", fieldName: "steps", source: "constant", fieldValue: 20, fieldType: "number", enabled: true },
+            { nodeId: "12", fieldName: "image", source: "image", fieldType: "image", enabled: true },
+        ],
+    };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => Response.json({ workflows: [profile] });
+    try {
+        const implementation = await resolveVideoImplementation(
+            config([{ name: "云端生视频", capability: "video", workflowBindings: { text: { provider: "runninghub", profileId: PROFILE_ID } } }]),
+            `${CHANNEL_ID}::云端生视频`,
+            0,
+        );
+        assert.equal(implementation?.provider, "runninghub");
+        assert.deepEqual(implementation?.fields.map((item) => item.id), ["263::steps"]);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
 });
 
 test("参数键按模型与实现隔离", () => {

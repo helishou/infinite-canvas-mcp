@@ -1,12 +1,11 @@
 import { nanoid } from "nanoid";
 import { uploadBackendMedia, uploadBackendCharacterVoice, deleteBackendMedia, backendMediaUrl } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
-import { withLocalProxy } from "@/stores/use-config-store";
 
 export type UploadedFile = { url: string; storageKey: string; bytes: number; mimeType: string; width?: number; height?: number; durationMs?: number; compression?: { originalBytes: number; originalStorageKey: string; thresholdBytes: number } };
 
 export async function uploadMediaFile(input: string | Blob, prefix = "file", category: "input" | "output" | "library" = "input", options?: { characterVoiceCompression?: boolean }): Promise<UploadedFile> {
-    const blob = typeof input === "string" ? await (await fetch(withLocalProxy(input))).blob() : input;
+    const blob = typeof input === "string" ? await (await fetch(input)).blob() : input;
     if (!useBackendStore.getState().connected) throw new Error("总后台未连接，无法上传媒体");
     const url = URL.createObjectURL(blob);
     const meta = blob.type.startsWith("video/") ? await readVideoMeta(url) : blob.type.startsWith("audio/") ? await readAudioMeta(url) : {} as { width?: number; height?: number; durationMs?: number };

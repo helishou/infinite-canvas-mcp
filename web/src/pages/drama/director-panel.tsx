@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Alert, App, Button, Image as AntdImage, Input, Modal, Select, Switch, Tag } from "antd";
-import { ArrowRight, ArrowLeft, Check, Pause, Play, RotateCcw, WandSparkles, Users, MapPin, Image as ImageIcon, Film, Pencil, BookOpen, Search } from "lucide-react";
+import { ArrowRight, ArrowLeft, Check, Pause, Play, RotateCcw, WandSparkles, Users, MapPin, Image as ImageIcon, Film, Pencil, BookOpen, Search, ChevronDown } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { directorModules, directorProductionSchema, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import { backendMediaUrl, type BackendRuntimeTask, type EpisodeProduction, type ProductionBatch, type ProductionReadiness } from "@/services/backend-api";
@@ -156,7 +156,7 @@ export function DirectorPanel({
   compact?: boolean;
   onSaveScript?: (ids: string[]) => Promise<boolean>;
   batches: ProductionBatch[]; canvasNodes: CanvasNodeOption[]; legacy: LegacySource[]; versions: ProductionVersion[]; busy: boolean; canvasId: string;
-  canvasRole: "ordinary" | "episode" | "shared-assets" | "standalone";
+  canvasRole: "ordinary" | "episode" | "shared-assets" | "standalone" | "scene";
   onOpenSharedAsset: (assetId: string, title: string) => void;
   onPromoteExistingSharedAsset: (assetId: string, title: string) => void;
   runtimeTasks?: BackendRuntimeTask[];
@@ -194,6 +194,7 @@ export function DirectorPanel({
   const [assetSearch, setAssetSearch] = useState('');
   const [selectedReviewAssetId, setSelectedReviewAssetId] = useState('');
   const [selectedShot, setSelectedShot] = useState('');
+  const [shotSearch, setShotSearch] = useState("");
   const [json, setJson] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [evidence, setEvidence] = useState<Record<string, string>>({});
@@ -507,30 +508,74 @@ export function DirectorPanel({
     </Modal>
   </div>;
 
-  const renderShots = () => <div className="space-y-6">
-    <header className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-2xl font-semibold">{t("director.studio.storyboard")}</h2><p className="mt-1 text-sm text-muted-foreground">{t("director.studio.shotsSummary", { shots: sourceShots.length, clips: segments.length, seconds: formatSeconds((timelineEnd - timelineStart) / fps) })}</p></div><Button icon={<WandSparkles className="size-4" />} disabled={busy} onClick={() => onAskDirector({ workspace: "shots" })}>{t("director.studio.collaborate")}</Button></header>
-    {displayedShots.length ? <div className={displayedShots.length === 1 ? "grid gap-4" : "grid gap-4 sm:grid-cols-2 xl:grid-cols-3"}>{displayedShots.map((shot, index) => {
-      const id = String(shot.id || ""); const input = d?.shotInputs[id]; const segment = segments.find(item => Array.isArray(item.shot_ids) && item.shot_ids.map(String).includes(id)); const linkedFrame = frameForShot(id);
-      const referenceId = input?.assetIds?.find(assetId => assetCategory(assetId) === "frames" && d?.assets[assetId]?.storageKey);
-      const image = linkedFrame || (referenceId ? d?.assets[referenceId]?.storageKey : undefined);
-      const expanded = selectedShot === id;
-      return <article key={id} data-production-target={`shot:${id}`} className={`min-w-0 overflow-hidden rounded-xl border bg-card ${expanded ? "border-foreground/40 sm:col-span-2 xl:col-span-3" : "border-border"}`}>
-        <button type="button" aria-label={t("director.studio.openShot", { number: index + 1 })} aria-expanded={expanded} onClick={() => setSelectedShot(expanded ? "" : id)} className="block w-full text-left">
-          <div className={`${expanded ? "h-48" : "aspect-video"} relative flex items-center justify-center overflow-hidden bg-muted/40`}>
-            {image ? <img className="h-full w-full object-contain" src={backendMediaUrl(image)} alt={shotTitle(id)} loading="lazy" /> : <div className="space-y-2 text-center text-muted-foreground"><Film className="mx-auto size-7 opacity-40" /><p className="text-xs">{t("director.studio.missingFrame")}</p></div>}
-            {image && <span className="absolute top-2 left-2 rounded bg-background/90 px-2 py-1 text-xs">{t(linkedFrame ? "director.studio.keyframe" : "director.studio.referenceImage")}</span>}
-            <span className="absolute bottom-2 left-2 rounded bg-background/90 px-2 py-1 text-xs font-medium">{t("director.studio.shotNumber", { number: index + 1 })}</span><span className="absolute bottom-2 right-2 rounded bg-background/90 px-2 py-1 text-xs">{formatSeconds((Number(shot.end_frame) - Number(shot.start_frame)) / fps)}s</span>
-          </div>
-          <div className="p-4"><h3 className="font-semibold">{shotTitle(id)}</h3><p className="mt-1 text-xs text-muted-foreground">{[nameMap[shot.scene_id], segment ? segmentTitle(String(segment.id)) : t("director.studio.ungrouped")].filter(Boolean).join(" · ")}</p><p className="mt-3 line-clamp-3 text-sm leading-6 text-muted-foreground">{shotDisplayText(shot) || t("director.studio.noVisual")}</p></div>
-        </button>
-        {expanded && <div className="space-y-4 border-t border-border p-5">
-          <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-medium">{t("director.studio.editShot")}</p><div className="flex gap-2">{(input?.keyframeAssetId || referenceId) && <Button size="small" onClick={() => onNavigate("assets", { kind: input?.keyframeAssetId ? "frame" : "asset", id: input?.keyframeAssetId ? id : referenceId! })}>{t("director.studio.viewFrame")}</Button>}<Button size="small" onClick={() => onAskDirector({ workspace: "shots", targetId: id, instruction: t("director.workspace.reviseShot") })}>{t("director.studio.revise")}</Button></div></div>
-          <div className="grid gap-4 md:grid-cols-2">{(["visual", "camera", "state_in", "state_out"] as const).map(field => <label key={field} className="grid gap-2 text-xs text-muted-foreground"><span>{t(`director.studio.shotField.${field}`)}</span><SourceField value={proseOf(shot[field])} draftValue={sourceDrafts[`shot:${id}:${field}`]} onDraftChange={value => onSourceDraftChange(`shot:${id}:${field}`, value)} multiline rows={3} disabled={busy} placeholder={(field === "state_in" || field === "state_out") && shot[field] && !proseOf(shot[field]) ? t("director.studio.structuredState") : undefined} onCommit={value => onPatch("shot", id, { [field]: patchProse(shot[field], value) })} /></label>)}</div>
-          <div className="flex flex-wrap gap-2">{input?.assetIds?.map(assetId => <button key={assetId} type="button" className="rounded border border-border px-2 py-1 text-xs" onClick={() => onNavigate("assets", { kind: "asset", id: assetId })}>{assetName(assetId)}</button>)}</div>
-          <details className="border-t border-border pt-3"><summary className="cursor-pointer text-xs text-muted-foreground">{t("director.studio.exactTiming")}</summary><div className="mt-3 grid gap-3 sm:grid-cols-2">{(["start_frame", "end_frame"] as const).map(field => <label key={field} className="grid gap-1 text-xs text-muted-foreground"><span>{t(field === "start_frame" ? "director.workspace.startFrame" : "director.workspace.endFrame")}</span><SourceField value={shot[field]} draftValue={sourceDrafts[`shot:${id}:${field}`]} onDraftChange={value => onSourceDraftChange(`shot:${id}:${field}`, value)} numeric disabled={busy} onCommit={value => onPatch("shot", id, { [field]: value })} /></label>)}</div></details>
-        </div>}
-      </article>;
-    })}</div> : <Alert type="info" message={t("director.workspace.noShots")} description={t("director.workspace.noShotsHint")} />}
+  const renderShotDetails = (shot: Record<string, any>) => {
+    const id = String(shot.id || "");
+    const input = d?.shotInputs[id];
+    const segment = segments.find(item => (item.shot_ids || []).includes(id));
+    const boundary = segment && d?.boundaries.find(item => item.from === segment.id);
+    return <div className="space-y-5" data-shot-reading={id}>
+      <section className="space-y-2">
+        <h4 className="text-xs font-medium text-muted-foreground">{t("director.studio.readingSummary")}</h4>
+        <p className="whitespace-pre-wrap text-sm leading-7">{shotDisplayText(shot) || t("director.studio.noVisual")}</p>
+      </section>
+      <section className="space-y-2">
+        <h4 className="text-xs font-medium text-muted-foreground">{t("director.studio.dialogue")}</h4>
+        {records(shot.dialogues).length ? <dl className="space-y-3">{records(shot.dialogues).map((dialogue, index) => {
+          const speakerId = String(dialogue.character_id || dialogue.speaker || "");
+          const speaker = speakerId === "NARRATOR" ? t("director.studio.narration") : nameMap[speakerId] || humanName(dialogue.speaker, "", t("director.studio.speaker"));
+          return <div key={String(dialogue.id || index)} className="flex gap-3"><dt className="w-16 shrink-0 pt-1 text-xs text-muted-foreground">{speaker}</dt><dd className="min-w-0 whitespace-pre-wrap text-sm leading-7">{dialogueBody({ ...dialogue, speaker })}</dd></div>;
+        })}</dl> : <p className="text-sm text-muted-foreground">{t("director.studio.noDialogue")}</p>}
+      </section>
+      <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
+        <Button size="small" type="text" icon={<WandSparkles className="size-3.5" />} disabled={busy} onClick={() => onAskDirector({ workspace: "shots", targetId: id, instruction: t("director.workspace.reviseShot") })}>{t("productionCanvas.discussObject")}</Button>
+        {input?.keyframeAssetId && <Button size="small" type="text" icon={<ImageIcon className="size-3.5" />} onClick={() => onNavigate("assets", { kind: "frame", id })}>{t("director.studio.viewFrame")}</Button>}
+        {segment && <Button size="small" type="text" icon={<Film className="size-3.5" />} onClick={() => onNavigate("production", { kind: "segment", id: String(segment.id) })}>{segmentTitle(String(segment.id))}<ArrowRight className="ml-1 size-3" /></Button>}
+      </div>
+      {boundary && <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted-foreground" data-shot-continuity>
+        <span>{t("director.studio.tailFrameLabel")} · {t(boundary.tailFrame ? "director.studio.flagOn" : "director.studio.flagOff")}</span>
+        <span>{t("director.studio.motionContextLabel")} · {t(boundary.motionContext ? "director.studio.flagOn" : "director.studio.flagOff")}</span>
+      </div>}
+      <details className="border-t border-border pt-3" data-shot-source-details>
+        <summary className="cursor-pointer text-xs text-muted-foreground">{t("director.studio.sourceDetails")}</summary>
+        <div className="mt-4 space-y-4">{(["visual", "camera", "state_in", "state_out"] as const).map(field => <label key={field} className="grid gap-2 text-xs text-muted-foreground"><span>{t(`director.studio.shotField.${field}`)}</span><SourceField value={proseOf(shot[field])} draftValue={sourceDrafts[`shot:${id}:${field}`]} onDraftChange={value => onSourceDraftChange(`shot:${id}:${field}`, value)} multiline rows={3} disabled={busy} placeholder={(field === "state_in" || field === "state_out") && shot[field] && !proseOf(shot[field]) ? t("director.studio.structuredState") : undefined} onCommit={value => onPatch("shot", id, { [field]: patchProse(shot[field], value) })} /></label>)}</div>
+        <div className="mt-4 flex flex-wrap gap-2">{input?.assetIds?.map(assetId => <button key={assetId} type="button" className="rounded border border-border px-2 py-1 text-xs" onClick={() => onNavigate("assets", { kind: "asset", id: assetId })}>{assetName(assetId)}</button>)}</div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">{(["start_frame", "end_frame"] as const).map(field => <label key={field} className="grid gap-1 text-xs text-muted-foreground"><span>{t(field === "start_frame" ? "director.workspace.startFrame" : "director.workspace.endFrame")}</span><SourceField value={shot[field]} draftValue={sourceDrafts[`shot:${id}:${field}`]} onDraftChange={value => onSourceDraftChange(`shot:${id}:${field}`, value)} numeric disabled={busy} onCommit={value => onPatch("shot", id, { [field]: value })} /></label>)}</div>
+      </details>
+    </div>;
+  };
+
+  const renderShots = () => {
+    const sceneForShot = (shot: Record<string, any>) => sceneGroups.find(group => group.key === shot.source_scene_id || group.blocks.some(block => block.id === shot.source_scene_id)) || sceneGroups.find(group => group.sceneId === shot.scene_id);
+    const visible = displayedShots.filter(shot => !shotSearch.trim() || `${shot.id} ${shotTitle(String(shot.id))} ${shotDisplayText(shot)} ${sceneForShot(shot)?.title || nameMap[shot.scene_id] || ""}`.toLocaleLowerCase().includes(shotSearch.trim().toLocaleLowerCase()));
+    return <div className="space-y-4" data-storyboard-view>
+    <header className="space-y-3 border-b border-border pb-4">
+      <div className="flex flex-wrap items-center justify-between gap-3"><div>{!compact && <h2 className="text-xl font-semibold">{t("director.studio.storyboard")}</h2>}<p className="text-xs text-muted-foreground">{t("director.studio.shotsSummary", { shots: sourceShots.length, clips: segments.length, seconds: formatSeconds((timelineEnd - timelineStart) / fps) })}</p></div><Button type="text" size="small" icon={<WandSparkles className="size-3.5" />} disabled={busy} onClick={() => onAskDirector({ workspace: "shots" })}>{t("director.studio.collaborate")}</Button></div>
+      <Input allowClear prefix={<Search className="size-3.5 text-muted-foreground" />} value={shotSearch} onChange={event => setShotSearch(event.target.value)} placeholder={t("director.studio.searchShots")} aria-label={t("director.studio.searchShots")} />
+    </header>
+    {displayedShots.length ? <div className="divide-y divide-border">{visible.map((shot, index) => {
+      const id = String(shot.id || ""), number = sourceShots.findIndex(item => item.id === shot.id) + 1;
+      const scene = sceneForShot(shot), sceneKey = String(shot.source_scene_id || shot.scene_id || "");
+      const previous = visible[index - 1];
+      const startScene = !previous || sceneKey !== String(previous.source_scene_id || previous.scene_id || "");
+      const input = d?.shotInputs[id], segment = segments.find(item => (item.shot_ids || []).includes(id));
+      const linkedFrame = frameForShot(id), referenceId = input?.assetIds?.find(assetId => assetCategory(assetId) === "frames" && d?.assets[assetId]?.storageKey);
+      const image = linkedFrame || (referenceId ? d?.assets[referenceId]?.storageKey : undefined), expanded = selectedShot === id;
+      return <div key={id}>
+        {startScene && <div className="flex items-center gap-2 px-3 pt-5 pb-2 text-xs font-medium text-muted-foreground" data-storyboard-scene={sceneKey}><MapPin className="size-3.5" /><span>{scene?.title || nameMap[shot.scene_id] || sceneKey}</span></div>}
+        <article data-production-target={`shot:${id}`} data-storyboard-row className={expanded ? "bg-muted/20" : ""}>
+          <button type="button" aria-label={t("director.studio.openShot", { number })} aria-expanded={expanded} onClick={() => setSelectedShot(expanded ? "" : id)} className="flex w-full items-start gap-3 rounded px-3 py-3 text-left transition-colors hover:bg-muted/40">
+            <span className="w-6 shrink-0 pt-1 text-xs tabular-nums text-muted-foreground">{String(number).padStart(2, "0")}</span>
+            <span className="relative hidden h-12 w-20 shrink-0 items-center justify-center overflow-hidden rounded bg-muted/40 sm:flex">{image ? <img className="h-full w-full object-contain" src={backendMediaUrl(image)} alt={shotTitle(id)} loading="lazy" /> : <Film className="size-4 text-muted-foreground/50" />}</span>
+            <span className="min-w-0 flex-1"><span className="flex flex-wrap items-center gap-x-3 gap-y-1"><strong className="text-sm font-medium">{shotTitle(id)}</strong><span className="text-xs tabular-nums text-muted-foreground">{formatSeconds((Number(shot.end_frame) - Number(shot.start_frame)) / fps)}s</span>{segment && <span className="text-xs text-muted-foreground">{segmentTitle(String(segment.id))}</span>}</span>{!expanded && <span className="mt-1 block text-sm leading-6 text-muted-foreground line-clamp-2">{shotDisplayText(shot) || t("director.studio.noVisual")}</span>}</span>
+            <ChevronDown className={`mt-1 size-4 shrink-0 text-muted-foreground transition-transform ${expanded ? "rotate-180" : ""}`} />
+          </button>
+          {expanded && <div className="px-3 pb-5 sm:pl-12">{renderShotDetails(shot)}</div>}
+        </article>
+      </div>;
+    })}{!visible.length && <p className="px-3 py-8 text-center text-sm text-muted-foreground">{t("director.studio.emptyShotSearch")}</p>}</div> : <Alert type="info" message={t("director.workspace.noShots")} description={t("director.workspace.noShotsHint")} />}
+    <details className="border-t border-border pt-4" data-storyboard-arrangement>
+      <summary className="cursor-pointer text-sm font-medium">{t("director.studio.arrangementDetails")}</summary>
+      <div className="mt-4 space-y-6">
     <section className="space-y-3"><div><h3 className="font-semibold">{t("director.workspace.segmentsTitle")}</h3><p className="mt-1 text-sm text-muted-foreground">{t("director.workspace.segmentsHint")}</p></div>
       {segments.length ? segments.map((segment, index) => { const id = String(segment.id || index); const draftKey = `segment:${id}:shot_ids`; return <article key={id} data-production-target={`segment:${id}`} className="rounded-xl border border-border bg-card p-4"><div className="flex flex-wrap items-center justify-between gap-2"><div><h4 className="font-semibold">{segmentTitle(id)}</h4><p className="mt-1 text-sm text-muted-foreground">{(segment.shot_ids || []).map((shotId: string) => shotTitle(String(shotId))).join(" → ") || t("director.workspace.noShotInSegment")}</p></div><Tag color="blue">{String(segment.generation_clip_duration || "—")}s</Tag></div><div className="mt-3 flex flex-wrap gap-2"><Tag>{String(segment.mode || "H3")}</Tag><span className="text-xs text-muted-foreground">{formatSeconds(Number(segment.start_frame) / fps)}–{formatSeconds(Number(segment.end_frame) / fps)}s</span></div><SegmentGroupEditor segment={segment} shots={sourceShots} segments={segments} fps={Number(source.fps_num || 24) / Number(source.fps_den || 1)} draftValue={sourceDrafts[draftKey]} onDraftChange={value => onSourceDraftChange(draftKey, value)} disabled={busy} onSave={onRegroup} /></article>; }) : <Alert type="info" message={t("director.workspace.noSegments")} />}
     </section>
@@ -539,7 +584,10 @@ export function DirectorPanel({
       const draftKey = `boundary:${from}:${to}`;
       return <BoundaryCard key={from} from={from} to={to} fromLabel={segmentTitle(from)} toLabel={segmentTitle(to)} boundary={d.boundaries.find(item => item.from === from && item.to === to)} draftValue={sourceDrafts[draftKey]} onDraftChange={value => onSourceDraftChange(draftKey, value)} disabled={busy} onSave={onBoundary} />;
     })}</section>}
+      </div>
+    </details>
   </div>;
+  };
 
   const renderProduction = () => <div className="space-y-5">
     <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">{t("director.workspace.tab.production")}</h2><p className="mt-1 text-sm text-muted-foreground">{t("director.studio.productionSummary")}</p></div><div className="flex flex-wrap items-center gap-2"><label className="flex items-center gap-2 text-xs text-muted-foreground"><Switch checked={includeGeneratedMedia} disabled={exporting} onChange={setIncludeGeneratedMedia} />{t("director.workspace.includeGeneratedMedia")}</label><Button size="small" loading={exporting} disabled={!d || exporting} onClick={() => void onExport(includeGeneratedMedia)}>{t("director.workspace.exportBundle")}</Button><Button size="small" disabled={busy || !d} onClick={() => onAskDirector({ workspace: "production", targetId: readiness?.targets.find(item => item.status === "blocked")?.targetId, instruction: t("director.workspace.validateCompileCurrent") })}>{t("director.workspace.validateCompile")}</Button><Button size="small" onClick={onRefresh}>{t("director.workspace.refresh")}</Button><Button type="primary" disabled={busy || !d} onClick={onPublish}>{t("drama.production.directorPublish")}</Button></div></div>
@@ -603,12 +651,17 @@ export function DirectorPanel({
     <Modal open={Boolean(mediaPreview)} title={mediaPreview?.title} footer={null} width={960} onCancel={() => setMediaPreview(null)}>{mediaPreview && <img className="max-h-[72dvh] w-full object-contain" src={backendMediaUrl(mediaPreview.storageKey)} alt={mediaPreview.title} onLoad={() => setViewedMedia(current => ({ ...current, [`${mediaPreview.assetId}:${mediaPreview.sha256}:${mediaPreview.storageKey}`]: true }))} onError={() => setError(t("director.workspace.mediaReadFailed"))} />}</Modal>
     {error && <Alert type="error" message={error} />}
   </section>;
-  if (compact && workspace === "shots" && focusedShot) return <section data-production-object-editor className="space-y-4">
-    {frameForShot(focusedId) && <img className="max-h-[32dvh] w-full object-contain" src={backendMediaUrl(frameForShot(focusedId)!)} alt={shotTitle(focusedId)} />}
-    <label className="grid gap-2 text-sm">{t("director.studio.shotField.visual")}<SourceField value={proseOf(focusedShot.visual)} draftValue={sourceDrafts[`shot:${focusedId}:visual`]} onDraftChange={value => onSourceDraftChange(`shot:${focusedId}:visual`, value)} multiline disabled={busy} onCommit={value => onPatch("shot", focusedId, { visual: patchProse(focusedShot.visual, value) })} /></label>
-    <Button type="text" disabled={busy} onClick={() => onAskDirector({ workspace: "shots", targetId: focusedId, instruction: t("director.workspace.reviseShot") })}>{t("productionCanvas.discussObject")}</Button>
-    <details className="border-t border-border pt-3"><summary className="cursor-pointer text-sm text-muted-foreground">{t("productionCanvas.objectDetails")}</summary><div className="mt-3 grid gap-3">{(["camera", "state_in", "state_out"] as const).map(field => <label key={field} className="grid gap-2 text-sm">{t(`director.studio.shotField.${field}`)}<SourceField value={proseOf(focusedShot[field])} draftValue={sourceDrafts[`shot:${focusedId}:${field}`]} onDraftChange={value => onSourceDraftChange(`shot:${focusedId}:${field}`, value)} multiline disabled={busy} onCommit={value => onPatch("shot", focusedId, { [field]: patchProse(focusedShot[field], value) })} /></label>)}</div></details>
-  </section>;
+  if (compact && workspace === "shots" && focusedShot) {
+    const index = sourceShots.findIndex(shot => shot.id === focusedShot.id);
+    return <section data-production-object-editor className="space-y-5">
+      <header className="flex flex-wrap items-start justify-between gap-3 border-b border-border pb-4">
+        <div><p className="text-xs text-muted-foreground">{t("director.studio.shotNumber", { number: index + 1 })} · {formatSeconds((Number(focusedShot.end_frame) - Number(focusedShot.start_frame)) / fps)}s</p><h2 className="mt-1 text-lg font-semibold">{shotTitle(focusedId)}</h2></div>
+        <div className="flex items-center gap-1"><Button size="small" type="text" onClick={() => { setSelectedShot(""); onNavigate("shots"); }}>{t("director.studio.allShots")}</Button><Button size="small" type="text" aria-label={t("director.studio.previousShot")} icon={<ArrowLeft className="size-3.5" />} disabled={index <= 0} onClick={() => onNavigate("shots", { kind: "shot", id: String(sourceShots[index - 1].id) })} /><Button size="small" type="text" aria-label={t("director.studio.nextShot")} icon={<ArrowRight className="size-3.5" />} disabled={index >= sourceShots.length - 1} onClick={() => onNavigate("shots", { kind: "shot", id: String(sourceShots[index + 1].id) })} /></div>
+      </header>
+      {renderShotDetails(focusedShot)}
+      {frameForShot(focusedId) && <details className="border-t border-border pt-3"><summary className="cursor-pointer text-xs text-muted-foreground">{t("director.studio.viewFrame")}</summary><img className="mt-3 max-h-[32dvh] w-full object-contain" src={backendMediaUrl(frameForShot(focusedId)!)} alt={shotTitle(focusedId)} /></details>}
+    </section>;
+  }
   if (compact && workspace === "production" && focusedSegment) {
     const group = production.draft.clipGroups.find(group => group.id === focusedId);
     const node = canvasNodes.find(node => node.id === group?.nodeId);

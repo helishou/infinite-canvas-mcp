@@ -30,7 +30,6 @@ export function AgentPanel() {
     const production = useProductionWorkspaceStore(state => state.production);
     const readiness = useProductionWorkspaceStore(state => state.readiness);
     const panelTab = useProductionWorkspaceStore(state => state.panelTab);
-    const selectedObject = useProductionWorkspaceStore(state => state.selectedObject);
     const recoveryPending = useProductionWorkspaceStore(state => state.recoveryPending);
     const followTarget = useProductionFollowStore(state => state.target);
     const following = useProductionFollowStore(state => state.following);
@@ -38,10 +37,7 @@ export function AgentPanel() {
     const presentation = useProductionFollowStore(state => state.presentation);
     const canvasPage = /^\/canvas\/[^/]+/.test(pathname);
     const owner = canvasPage ? context?.owner : undefined;
-    const sceneTextTarget = new URLSearchParams(search).get("workspace") === "story" && new URLSearchParams(search).get("target")?.startsWith("scene:");
-    const objectOpen = Boolean(owner && panelOpen && panelTab === "object" && !sceneTextTarget);
-    const tasksOpen = new URLSearchParams(search).get("workspace") === "production" && !new URLSearchParams(search).has("target");
-    const objectTitle = tasksOpen ? t("productionCanvas.tasks") : selectedObject?.targetKind === "segment" && selectedObject.clipIndex ? t("productionCanvas.clip", { number: selectedObject.clipIndex }) : selectedObject?.title;
+    const objectOpen = Boolean(owner && panelOpen && panelTab === "object");
     const chatOpen = panelOpen && (!canvasPage || panelTab !== "object");
     const homePage = pathname === "/" || ["/production", "/drama"].includes(pathname) && !new URLSearchParams(search).has("dramaId");
     const [welcomeDismissed, setWelcomeDismissed] = useState(false);
@@ -92,16 +88,6 @@ export function AgentPanel() {
                 <button type="button" className="px-2 py-1.5 text-sm" onClick={() => { setWelcomeDismissed(true); setCreativeEntryOpen(true); useProductionWorkspaceStore.getState().setPanelTab("director"); useAgentStore.getState().openPanel(); }}>{t("landing.ideaTitle")}</button>
                 <button type="button" className="grid size-6 shrink-0 place-items-center rounded hover:bg-black/5 dark:hover:bg-white/10" aria-label={t("productionCanvas.dismissWelcome")} onClick={() => setWelcomeDismissed(true)}><X className="size-3.5" /></button>
             </div>}
-            {!chatOpen && canvasPage && owner && (current || recoveryPending) && <button type="button" className="max-w-[min(340px,calc(100vw-32px))] truncate bg-transparent text-xs" style={{ color: theme.node.muted }} onClick={() => {
-                const query = new URLSearchParams(search); query.set("workspace", "production"); query.delete("target"); query.delete("nodeId"); query.delete("segmentId");
-                navigate({ search: query.toString() }, { replace: true });
-                useProductionWorkspaceStore.getState().setSelectedObject(null);
-                useProductionWorkspaceStore.getState().setPanelTab("object");
-                useAgentStore.getState().openPanel();
-            }} aria-label={t("productionCanvas.tasks")}>
-                {recoveryPending ? t("productionCanvas.recovery") : <>{label ? `${label} · ` : ""}{t(`productionCanvas.progress.${current!.status}`)}</>}
-            </button>}
-            {!chatOpen && followTarget?.kind && followTarget.id && (!following || pending) && <Button type="text" onClick={() => useProductionFollowStore.getState().resume()}>{t("productionHub.follow.return")}</Button>}
             <Badge count={reminders.count} size="small">
                 <Button type={chatOpen ? "default" : "primary"} shape="round" className="!h-11 !px-4" aria-label={t("productionCanvas.openChat")} aria-expanded={chatOpen} aria-controls="canvas-director-dialog" icon={busy ? <LoaderCircle className="size-4 animate-spin" /> : <MessageSquare className="size-4" />} onClick={openChat}>{t("productionCanvas.director")}</Button>
             </Badge>
@@ -110,10 +96,24 @@ export function AgentPanel() {
             data-canvas-shortcuts-ignore data-canvas-no-zoom
             className="fixed bottom-20 right-4 z-[75] flex w-[min(460px,calc(100vw-32px))] flex-col overflow-hidden rounded-2xl border shadow-xl"
             style={{ height: "min(640px, calc(100dvh - 112px))", background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text, visibility: chatOpen ? "visible" : "hidden", pointerEvents: chatOpen ? "auto" : "none" }}>
-            <AgentCreativeWelcome active={welcomeOpen} onShowChat={() => setCreativeEntryOpen(false)} onClose={closePanel} headerAction={reminderControl} />
-            <LocalAgentPanel embedded compact headless={!panelMounted || welcomeOpen} autoConnect headerAction={reminderControl} />
+            {(canvasPage && owner && (current || recoveryPending) || followTarget?.kind && followTarget.id && (!following || pending)) && <div className="flex shrink-0 flex-wrap items-center justify-between gap-1 border-b border-border px-3 py-2" data-director-production-controls>
+                {canvasPage && owner && (current || recoveryPending) && <button type="button" className="min-w-0 flex-1 truncate rounded px-1 py-1 text-left text-xs hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.muted }} onClick={() => {
+                    const query = new URLSearchParams(search); query.set("workspace", "production"); query.delete("target"); query.delete("nodeId"); query.delete("segmentId");
+                    navigate({ search: query.toString() }, { replace: true });
+                    useProductionWorkspaceStore.getState().setSelectedObject(null);
+                    useProductionWorkspaceStore.getState().setPanelTab("object");
+                    useAgentStore.getState().openPanel();
+                }} aria-label={t("productionCanvas.tasks")}>
+                    {recoveryPending ? t("productionCanvas.recovery") : <>{label ? `${label} · ` : ""}{t(`productionCanvas.progress.${current!.status}`)}</>}
+                </button>}
+                {followTarget?.kind && followTarget.id && (!following || pending) && <Button type="text" size="small" onClick={() => useProductionFollowStore.getState().resume()}>{t("productionHub.follow.return")}</Button>}
+            </div>}
+            <div className="flex min-h-0 flex-1 flex-col">
+                <AgentCreativeWelcome active={welcomeOpen} onShowChat={() => setCreativeEntryOpen(false)} onClose={closePanel} headerAction={reminderControl} />
+                <LocalAgentPanel embedded compact headless={!panelMounted || welcomeOpen} autoConnect headerAction={reminderControl} />
+            </div>
         </section>
-        {owner && <Modal open={objectOpen} forceRender title={objectTitle || t("productionCanvas.object")} onCancel={closePanel} footer={null} width={/^(asset|frame|shot|segment):/.test(new URLSearchParams(search).get("target") || "") ? "min(800px, calc(100vw - 32px))" : "min(1120px, calc(100vw - 32px))"} centered styles={{ body: { maxHeight: "calc(100dvh - 160px)", overflow: "auto" } }}>
+        {owner && <Modal open={objectOpen} forceRender title={t("productionCanvas.object")} onCancel={closePanel} footer={null} width="min(1120px, calc(100vw - 32px))" centered styles={{ body: { maxHeight: "calc(100dvh - 160px)", overflow: "auto" } }}>
             <Suspense fallback={null}><ProductionEditor key={`${owner.kind}:${owner.id}`} owner={owner} embedded dialog /></Suspense>
         </Modal>}
     </>;

@@ -60,6 +60,7 @@ export async function request<T = unknown>(method: string, path: string, body?: 
         throw new BackendApiError(`无法连接 Backend：${method} ${path} → ${backendUrl}（${reason}）。请确认 Backend 已启动且端口可访问。`, 0, { method, path, backendUrl, cause: reason });
     }
     const data = (await res.json().catch(() => ({}))) as T & { ok?: boolean; error?: string };
+    if (res.status === 401 && typeof window !== "undefined") window.dispatchEvent(new Event("backend-auth-failed"));
     if (!res.ok) {
         // 把后端返回的 error 字符串完整透传（之前 30 字符截断导致 500 错看不到）
         const errText = (data && typeof data === "object" && "error" in data && typeof data.error === "string") ? data.error : "";
@@ -102,7 +103,7 @@ export async function startCanvasGeneration(input: CanvasGenerationCommand, sign
         const context = useProductionWorkspaceStore.getState().context;
         if (context && context.canvasId === input.projectId && context.owner) {
             const owner = context.owner;
-            const { readiness } = await fetchProductionReadiness(owner.kind === "canvas" ? { projectId: owner.id } : owner.id);
+            const { readiness } = await fetchProductionReadiness(owner.kind === "canvas" ? { projectId: owner.id } : owner.kind === "scene" ? { sceneId: owner.id } : owner.id);
             if (readiness.presentation?.taskId === result.taskId) {
                 useProductionFollowStore.getState().setTarget({ ...owner, workId: readiness.presentation.workId });
                 useProductionFollowStore.getState().setPresentation(readiness.presentation);
@@ -221,6 +222,21 @@ export function fetchBackendDramaEpisodes(dramaId: string) {
     return request<{ ok: boolean; dramaId: string; episodes?: DramaEpisode[] }>("GET", `/drama/projects/${encodeURIComponent(dramaId)}/episodes`);
 }
 
+export type SceneInstance = { id: string; dramaId: string; episodeId: string | null; sourceSceneKey: string; environmentId: string | null; sceneOrder: number; title: string; sourceHash: string; status: "active" | "orphaned"; createdAt: string; updatedAt: string; canvasId?: string | null };
+export function fetchBackendDramaScenes(dramaId: string, episodeId?: string) {
+    const query = episodeId ? `?episodeId=${encodeURIComponent(episodeId)}` : "";
+    return request<{ ok: boolean; scenes: SceneInstance[] }>("GET", `/dramas/${encodeURIComponent(dramaId)}/scenes${query}`);
+}
+export function backfillBackendDramaScenes(dramaId: string) {
+    return request<{ ok: boolean; dramas: number; created: number; skipped: number; scenes: SceneInstance[] }>("POST", `/dramas/${encodeURIComponent(dramaId)}/scenes/backfill`, {});
+}
+export function fetchBackendScene(sceneId: string) {
+    return request<{ ok: boolean; scene: SceneInstance; canvas: { id: string; createdAt: string; context: ProductionCanvasContext } | null }>("GET", `/drama/scenes/${encodeURIComponent(sceneId)}`);
+}
+export function ensureSceneCanvas(sceneId: string) {
+    return request<{ ok: boolean; project: Record<string, unknown>; context: ProductionCanvasContext; created: boolean }>("POST", `/drama/scenes/${encodeURIComponent(sceneId)}/canvas/ensure`, {});
+}
+
 export function fetchBackendDramaEpisode(episodeId: string) {
     return request<{ ok: boolean; episode?: DramaEpisode; canvas?: Record<string, unknown> | null }>("GET", `/drama/episodes/${encodeURIComponent(episodeId)}`);
 }
@@ -242,8 +258,8 @@ export function deleteBackendDramaEpisode(episodeId: string) {
 }
 
 export type EpisodeProduction = { episodeId: string; revision: number; draft: EpisodeProductionData; published: EpisodeProductionData | null; publishedVersion: number; updatedAt: string; impact?: { changedSceneIds: string[]; affectedShotIds: string[]; imageShotIds: string[]; clipGroupIds: string[]; missingAssetNodeIds: string[]; assetIds?: string[] }; replayed?: boolean };
-export type ProductionTarget = string | { projectId: string };
-export type ProductionCanvasContext = { role: "ordinary" | "episode" | "shared-assets" | "standalone"; canvasId: string; dramaId?: string; episodeId?: string; owner?: { kind: "episode" | "canvas"; id: string }; sharedAssetCanvasId?: string | null };
+export type ProductionTarget = string | { projectId: string } | { sceneId: string };
+export type ProductionCanvasContext = { role: "ordinary" | "episode" | "scene" | "shared-assets" | "standalone"; canvasId: string; dramaId?: string; episodeId?: string; sceneId?: string; owner?: { kind: "episode" | "canvas" | "scene"; id: string }; sharedAssetCanvasId?: string | null };
 export function fetchProductionCanvasContext(id: string) { return request<{ ok: boolean; context: ProductionCanvasContext }>("GET", `/canvas/projects/${encodeURIComponent(id)}/production-context`); }
 export function ensureEpisodeCanvas(id: string) { return request<{ ok: boolean; project: Record<string, unknown>; context: ProductionCanvasContext }>("POST", `/drama/episodes/${encodeURIComponent(id)}/canvas/ensure`, {}); }
 export function ensureSharedAssetCanvas(id: string) { return request<{ ok: boolean; project: Record<string, unknown>; context: ProductionCanvasContext }>("POST", `/drama/projects/${encodeURIComponent(id)}/asset-canvas/ensure`, {}); }
@@ -259,7 +275,9 @@ export function promoteExistingProductionSharedAsset(owner: ProductionTarget, in
 export function retryProductionSharedUpdate(owner: ProductionTarget, id: string, expectedRevision: number) { return request("POST", `${productionPath(owner)}/shared-assets/updates/${encodeURIComponent(id)}/retry`, { expectedRevision }); }
 const productionPath = (target: ProductionTarget) => typeof target === "string"
     ? `/drama/episodes/${encodeURIComponent(target)}/production`
-    : `/canvas/projects/${encodeURIComponent(target.projectId)}/production`;
+    : "sceneId" in target
+        ? `/drama/scenes/${encodeURIComponent(target.sceneId)}/production`
+        : `/canvas/projects/${encodeURIComponent(target.projectId)}/production`;
 export function fetchEpisodeProduction(episodeId: ProductionTarget) { return request<{ ok: boolean; production: EpisodeProduction }>("GET", productionPath(episodeId)); }
 export function fetchEpisodeProductionLegacy(episodeId: ProductionTarget) { return request<{ ok: boolean; sources: Array<{ source: "fullPlot" | "script.md" | "storyboard.md"; sha256: string; text: string }> }>("GET", `${productionPath(episodeId)}/legacy`); }
 export function editEpisodeProduction(episodeId: ProductionTarget, expectedRevision: number, ops: ProductionOperation[], operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/ops`, { operationId, expectedRevision, ops }); }
@@ -270,7 +288,7 @@ export function restoreEpisodeProduction(episodeId: ProductionTarget, expectedRe
 export function syncEpisodeProductionClips(episodeId: ProductionTarget) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/sync-clips`); }
 export function fetchEpisodeProductionRun(episodeId: ProductionTarget, version: number) { return request<{ ok: boolean; run: { status: string; submitted: Array<{ kind: "image" | "h3"; id: string; taskId: string }>; error: string | null } | null }>("GET", `${productionPath(episodeId)}/runs/${version}`); }
 export type ProductionReadinessTarget = { id: string; targetId: string; kind: "asset" | "keyframe" | "segment"; title: string; status: "ready" | "blocked" | "needs_review" | "complete"; blockers: string[]; artifactId?: string; executionTargets?: string[]; notice?: string };
-export type ProductionPresentation = { key: string; workId: string; owner: { kind: "canvas" | "episode"; id: string }; aliases?: string[]; workspace: "overview" | "story" | "assets" | "shots" | "production" | "advanced"; action: "author" | "compile" | "produce" | "review" | "deliver" | "blocked"; targetKind?: string; targetId?: string; canvasId?: string; nodeId?: string; segmentId?: string; runId?: string; taskId?: string; status: "ready" | "working" | "needs_review" | "blocked" | "complete"; reason?: string };
+export type ProductionPresentation = { key: string; workId: string; owner: { kind: "canvas" | "episode" | "scene"; id: string }; aliases?: string[]; workspace: "overview" | "story" | "assets" | "shots" | "production" | "advanced"; action: "author" | "compile" | "produce" | "review" | "deliver" | "blocked"; targetKind?: string; targetId?: string; canvasId?: string; nodeId?: string; segmentId?: string; runId?: string; taskId?: string; status: "ready" | "working" | "needs_review" | "blocked" | "complete"; reason?: string };
 export type ProductionReadiness = { revision: number; publishedVersion: number; source: "draft" | "published"; targets: ProductionReadinessTarget[]; modules: Record<string, unknown>; unresolved: string[]; nextAction: string; presentation?: ProductionPresentation };
 export type ProductionBatch = { runId: string; episodeId: string; version: number; sourceRevision: number; idempotencyKey: string; status: string; targets: string[]; plan: NonNullable<EpisodeProduction["impact"]>; engine: Record<string, unknown> | null; settings: Record<string, unknown>; submitted: Array<{ kind: "image" | "h3"; id: string; taskId: string; projectId?: string; nodeId?: string; segmentId?: string; status?: "running" | "succeeded" | "failed" }>; error: string | null; pauseRequested: boolean; createdAt: string; updatedAt: string };
 export function fetchProductionReadiness(target: ProductionTarget, options?: { runId?: string }) { return sharedGet<{ ok: boolean; readiness: ProductionReadiness }>(`${productionPath(target)}/readiness${options?.runId ? `?runId=${encodeURIComponent(options.runId)}` : ""}`); }
@@ -618,7 +636,8 @@ export function fetchBackendTasks(options: { projectId?: string; nodeIds?: strin
     if (options.limit) params.set("limit", String(options.limit));
     if (options.offset) params.set("offset", String(options.offset));
     const qs = params.toString();
-    return request<{ ok: boolean; tasks?: BackendRuntimeTask[] }>("GET", `${CANVAS_TASKS_PATH}${qs ? `?${qs}` : ""}`);
+    const path = `${CANVAS_TASKS_PATH}${qs ? `?${qs}` : ""}`;
+    return sharedGet<{ ok: boolean; tasks?: BackendRuntimeTask[] }>(path);
 }
 
 export function createBackendTask(kind: string, input: Record<string, unknown> = {}, params: Record<string, unknown> = {}, clientTaskId?: string) {

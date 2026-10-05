@@ -1,7 +1,9 @@
 import type { ProductionPresentation, ProductionTarget } from "@/services/backend-api";
 
 export function productionTarget(owner: ProductionPresentation["owner"]): ProductionTarget {
-    return owner.kind === "canvas" ? { projectId: owner.id } : owner.id;
+    if (owner.kind === "canvas") return { projectId: owner.id };
+    if (owner.kind === "scene") return { sceneId: owner.id };
+    return owner.id;
 }
 
 export function productionPresentationPath(presentation: ProductionPresentation) {
@@ -22,9 +24,11 @@ export function productionPresentationPath(presentation: ProductionPresentation)
 
     const base = presentation.owner.kind === "canvas"
         ? `/director/${encodeURIComponent(presentation.owner.id)}`
-        : `/drama/episodes/${encodeURIComponent(presentation.owner.id)}/production`;
+        : presentation.owner.kind === "scene"
+            ? `/drama/scenes/${encodeURIComponent(presentation.owner.id)}/production`
+            : `/drama/episodes/${encodeURIComponent(presentation.owner.id)}/production`;
     const query = new URLSearchParams();
-    if (presentation.owner.kind === "episode") query.set("from", "dramas");
+    if (presentation.owner.kind === "episode" || presentation.owner.kind === "scene") query.set("from", "dramas");
     query.set("workspace", presentation.workspace);
     if (presentation.targetKind && presentation.targetId) query.set("target", `${presentation.targetKind}:${presentation.targetId}`);
     query.set("workId", presentation.workId);

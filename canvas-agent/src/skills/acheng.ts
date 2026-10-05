@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { directorProductionSchema, canonicalProduction, productionContractVersion, productionPreflightRequestSchema, type DirectorProduction, type ProductionDiagnostic, type ProductionPreflight } from "../drama/production-contract.js";
-import { productionOperationContract, schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch, ref2vaPromptDiagnostics } from "../drama/production-validation.js";
+import { productionOperationContract, schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch, ref2vaPromptDiagnostics, continuityBoundaryDiagnostics } from "../drama/production-validation.js";
 
 let discoveredPython: string | undefined;
 /** Resolve once; a configured executable never silently falls back. */
@@ -48,6 +48,15 @@ function runAchengPython(args: string[], options: ExecFileSyncOptionsWithStringE
 }
 
 /** Compile the pinned source with its original compiler; never call a media model. */
+/** Compiler prompts stay inside the package; media may use only exact verified resolver paths. */
+export function readCompilationReference(output: string, filename: string, verifiedFiles: Array<string | undefined>) {
+    const resolved = path.resolve(output, filename);
+    const canonical = (file: string) => process.platform === "win32" ? path.resolve(file).toLowerCase() : path.resolve(file);
+    const inside = canonical(resolved).startsWith(canonical(output) + path.sep);
+    if (!inside && !verifiedFiles.some(file => file && canonical(file) === canonical(resolved))) throw new Error("Compiler reference path is not in the package or verified media snapshot");
+    return fs.readFileSync(resolved);
+}
+
 export function compileAchengDirector(input: DirectorProduction, directory: string, resolveReferenceFile?: (targetId: string, label: string) => string | undefined) {
     const director = directorProductionSchema.parse(structuredClone(input));
     const runtime = resolveAchengRuntime(director.engine.runtimeId);
@@ -102,6 +111,17 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
             if (original) { fs.mkdirSync(path.dirname(destination), { recursive: true }); fs.copyFileSync(original, destination); }
         }
     }
+    // Every segment must name the same frozen file as its approved asset plan.
+    // Matching bytes with different paths would otherwise become a blocked draft.
+    for (const segment of (Array.isArray(director.source.segments) ? director.source.segments : []) as Array<Record<string, any>>) {
+        for (const ref of segment.references || []) {
+            const frozen = (ref.asset_id ? resolveReferenceFile?.(ref.asset_id, "asset") : undefined) || resolveReferenceFile?.(segment.id, ref.label || `<Picture ${ref.image}>`);
+            if (frozen && ref.file !== frozen) {
+                sourceAdjustments.push({ path: `segments.${segment.id}.references.${ref.label || ref.image}.file`, before: String(ref.file || ""), after: frozen, reason: "Keep approved asset and segment reference on the same verified frozen file" });
+                ref.file = frozen;
+            }
+        }
+    }
     director.sourceHash = crypto.createHash("sha256").update(canonicalProduction(director.source)).digest("hex");
     fs.writeFileSync(sourceFile, JSON.stringify(director.source), "utf8");
     const onlyAssets = !Array.isArray(director.source.segments) || !director.source.segments.length;
@@ -131,7 +151,8 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
             for (const ref of entry.references || entry.binding_snapshot?.references || []) {
                 if (!ref.file) continue;
                 const label = ref.label || `<Picture ${ref.image}>`;
-                const digest = crypto.createHash("sha256").update(readFile(ref.file)).digest("hex");
+                const bytes = readCompilationReference(output, ref.file, [ref.asset_id ? resolveReferenceFile?.(ref.asset_id, "asset") : undefined, resolveReferenceFile?.(targetId, label)]);
+                const digest = crypto.createHash("sha256").update(bytes).digest("hex");
                 const asset = ref.asset_id ? director.assets[ref.asset_id] : undefined;
                 const old = prior.find(a => a.targetId === targetId && a.kind === kind)?.references.find(r => r.label === label && r.sha256 === digest);
                 const binding = asset?.nodeId && asset.storageKey && asset.sha256 === digest ? asset : old;
@@ -196,11 +217,11 @@ export function validateAchengSource(director: DirectorProduction, stage: "edit"
     if (runtime.commit !== director.engine.commit || runtime.patchVersion !== director.engine.patchVersion || runtime.version !== director.engine.version) {
         return [{ code: "ENGINE_MISMATCH", path: "director.engine", message: "Pinned runtime identity differs from the production receipt", severity: "error" }];
     }
-    if (!runtime.sourceContract) return [...ref2vaPromptDiagnostics(director, 2900), { code: "SOURCE_CONTRACT_UNAVAILABLE", path: "director.engine", message: "Historical runtime: source checks remain with its original compiler", severity: "unverified" }];
+    if (!runtime.sourceContract) return [...ref2vaPromptDiagnostics(director, 2900), ...continuityBoundaryDiagnostics(director, stage), { code: "SOURCE_CONTRACT_UNAVAILABLE", path: "director.engine", message: "Historical runtime: source checks remain with its original compiler", severity: "unverified" }];
     const response = runAchengPython(["-B", "-X", "utf8", path.join(runtime.path, "scripts", "canvas_source_contract.py")], {
         cwd: runtime.path, windowsHide: true, encoding: "utf8", input: JSON.stringify({ source: director.source, artifacts: director.artifacts || [], stage }),
     });
-    return JSON.parse(response).diagnostics;
+    return [...JSON.parse(response).diagnostics, ...continuityBoundaryDiagnostics(director, stage)];
 }
 
 export function assertAchengSource(director: DirectorProduction, stage: "edit" | "publish" | "generate") {
@@ -214,6 +235,12 @@ export function preflightCompilationDirector(raw: unknown, resolveReferenceFile?
     // Previous receipts are replaced by compilation, so their staleness must not block rebuilding.
     const result = preflightDirector(parsed.success ? { ...parsed.data, artifacts: [] } : raw, "edit");
     result.compileReady = false;
+    if (parsed.success) {
+        const decisions = continuityBoundaryDiagnostics(parsed.data, "compile");
+        result.diagnostics = result.diagnostics.filter(item => !decisions.some(issue => issue.code === item.code && issue.targetId === item.targetId));
+        result.diagnostics.push(...decisions);
+    }
+    if (result.diagnostics.some(item => item.severity === "error" && /CONTINUITY/.test(item.code))) { result.valid = false; result.nextActions = [{ action: "correct_source", message: "先逐项登记连续性边界，再重新编译源稿。" }]; return result; }
     if (result.diagnostics.some(item => ["INVALID_SCHEMA", "ENGINE_UNAVAILABLE", "ENGINE_MISMATCH"].includes(item.code))) return result;
     const director = directorProductionSchema.parse(structuredClone(raw));
     if (JSON.stringify(director.source).includes('"legacy_fixture"')) {

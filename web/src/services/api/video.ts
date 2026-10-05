@@ -7,7 +7,7 @@ import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { readImageMeta } from "@/lib/image-utils";
 import { resolveH3VideoSettings } from "@/lib/h3-video-settings";
-import { boolConfig, buildApiUrl, modelOptionName, modelWorkflowMissingMessage, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, resolveModelWorkflow, withLocalProxy, type AiConfig } from "@/stores/use-config-store";
+import { boolConfig, buildApiUrl, modelOptionName, modelWorkflowMissingMessage, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, resolveModelWorkflow, type AiConfig } from "@/stores/use-config-store";
 import { runModelPlugin } from "./model-plugin";
 import { runComfyTask, resolveComfyEndpoint, type LocalReference } from "./comfyui";
 import { fetchWorkflowDetail, isWorkflowImageField, runWorkflow, pollWorkflowTask } from "./workflows";
@@ -255,7 +255,7 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
 
 async function videoResultFromUrl(url: string, options?: RequestOptions): Promise<VideoGenerationResult> {
     try {
-        const response = await axios.get<Blob>(withLocalProxy(url), { responseType: "blob", signal: options?.signal });
+        const response = await axios.get<Blob>(url, { responseType: "blob", signal: options?.signal });
         await assertVideoBlob(response.data);
         return { blob: response.data };
     } catch (error) {

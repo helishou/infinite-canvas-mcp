@@ -1834,7 +1834,9 @@ function registerBackendCanvasTools(
   for (const name of ["production_compile", "production_get_compilation", "production_apply_compilation", "production_diagnose_bindings"] as const) {
     server.registerTool(name, { description: toolDescriptions[name], inputSchema: toolInputSchemas[name] }, async (rawInput: Record<string, unknown>) => {
       const input = toolInputSchemas[name].parse(rawInput);
-      const base = input.kind === "canvas" ? `/canvas/projects/${encodeURIComponent(input.id)}/production` : productionPath(input.id);
+      const base = input.kind === "canvas" ? `/canvas/projects/${encodeURIComponent(input.id)}/production`
+        : input.kind === "scene" ? `/drama/scenes/${encodeURIComponent(input.id)}/production`
+        : productionPath(input.id);
       if (name === "production_get_compilation") {
         const query = toolInputSchemas.production_get_compilation.parse(rawInput);
         const params = new URLSearchParams({ view: query.view, offset: String(query.offset), ...(query.pageSize ? { pageSize: String(query.pageSize) } : {}) });

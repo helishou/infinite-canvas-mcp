@@ -110,8 +110,9 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
     });
     router.get<Record<string, string>>(`${base}/readiness`, (req, res) => {
         try {
+            const source = z.enum(["draft", "published"]).default("draft").parse(req.query.source);
             const runId = typeof req.query.runId === "string" ? req.query.runId : undefined;
-            res.json({ ok: true, readiness: service.workflowReadiness(req.params.episodeId, "draft", runId) });
+            res.json({ ok: true, readiness: service.workflowReadiness(req.params.episodeId, source, runId) });
         } catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/legacy`, (req, res) => {

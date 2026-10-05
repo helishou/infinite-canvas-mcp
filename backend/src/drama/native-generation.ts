@@ -14,6 +14,12 @@ export type NativeProductionTarget = {
     targets: Array<{ targetId: string; segmentId?: string }>;
 };
 
+/** A scene canvas has no production record service yet, so native generation must refuse it instead of guessing. */
+function formalProductionOwner(owner: { kind: "canvas" | "episode" | "scene"; id: string }): NativeProductionTarget["owner"] {
+    if (owner.kind === "scene") throw new Error("SCENE_PRODUCTION_NOT_READY: 制作场次尚未接入正式制作记录，请先完成场次制作记录与运行链");
+    return { kind: owner.kind, id: owner.id };
+}
+
 /** Native controls keep the same execution service; only verified production bindings are attached. */
 export class NativeProductionGeneration {
     private binding = new Set<string>();
@@ -24,7 +30,7 @@ export class NativeProductionGeneration {
         if (!command.projectId || !command.nodeId || !["image", "video"].includes(command.mode)) return { command };
         const owner = productionCanvasContext(this.db, command.projectId).owner;
         if (!owner) return { command };
-        const service = this.service(owner), current = service.get(owner.id), director = current.draft.director;
+        const service = this.service(formalProductionOwner(owner)), current = service.get(owner.id), director = current.draft.director;
         if (!director) return { command };
         let kind: NativeProductionTarget["kind"], targetId: string;
         let targets: NativeProductionTarget["targets"] = [];
@@ -64,10 +70,11 @@ export class NativeProductionGeneration {
                 const group = current.published!.clipGroups.find(group => group.id === target.targetId)!;
                 const clip = (node?.metadata?.segments || []).find((clip: any) => clip.id === target.segmentId);
                 const expected = buildProductionClip(project, current.published!, group, target.segmentId!);
+                for (const field of ["tailFrameContinuation", "motionContextEnabled"]) if (Object.hasOwn(command.params || {}, field) && command.params![field] !== expected[field]) throw new Error(`DIRECTOR_CONTINUITY_CHANGED: ${target.targetId}.${field} 必须沿正式源稿决定，不能被本次运行参数覆盖`);
                 if (!clip || clipInputHash(clip) !== clipInputHash(expected) || clip.productionClipProjection?.inputHash !== clipInputHash(clip)) throw new Error(`CLIP_INPUT_MISMATCH: ${target.targetId} 的引用或编译投影不一致 (${CLIP_PROJECTION_FIELDS.filter(key => JSON.stringify(clip?.[key] ?? null) !== JSON.stringify(expected[key] ?? null)).join(",") || "projectionHash"})，请准备当前正式目标后再生成`);
             }
         }
-        return { command, context: { owner, version: current.publishedVersion, sourceHash: director.sourceHash, projectId: command.projectId!, nodeId: command.nodeId!, kind, targetId, targets } };
+        return { command, context: { owner: formalProductionOwner(owner), version: current.publishedVersion, sourceHash: director.sourceHash, projectId: command.projectId!, nodeId: command.nodeId!, kind, targetId, targets } };
     }
     submitted(taskId: string, raw: unknown) {
         const context = raw as NativeProductionTarget;

@@ -337,7 +337,7 @@ export const toolInputSchemas = {
   site_navigate: z.object({
     path: z.string().optional().describe("通用页面路径。进入制作对象时请优先使用 production 结构化目标。"),
     production: z.object({
-      kind: z.enum(["canvas", "episode"]).describe("制作对象类型：独立画布项目或剧目分集。"),
+      kind: z.enum(["canvas", "episode", "scene"]).describe("制作对象类型：独立画布项目、剧目分集或剧目制作场次。"),
       id: z.string().min(1).describe("Backend 返回的真实制作对象 ID。"),
       workId: z.string().min(1).describe("当前正式 currentWork 的稳定 workId，用于防止打开过期或错误阶段。"),
       runId: z.string().min(1).optional().describe("当前目标的生产 runId；用于并行运行时精确呈现所选批次。"),
@@ -840,10 +840,10 @@ export const toolInputSchemas = {
   drama_get_production: productionReadSchema.extend({ episodeId: z.string().min(1) }),
   production_get_contract: productionContractQuerySchema,
   ...productionWorkspaceSchemas,
-  production_compile: productionCompileSchema.extend({ kind: z.enum(["canvas", "episode"]), id: z.string().min(1), operationId: z.string().min(1) }),
-  production_get_compilation: z.object({ kind: z.enum(["canvas", "episode"]), id: z.string().min(1), operationId: z.string().min(1), view: z.enum(["status", "targets", "diagnostics"]).default("status"), offset: z.number().int().nonnegative().default(0), pageSize: z.number().int().positive().optional() }).strict(),
-  production_apply_compilation: productionApplyCompilationSchema.extend({ kind: z.enum(["canvas", "episode"]), id: z.string().min(1) }),
-  production_diagnose_bindings: z.object({ kind: z.enum(["canvas", "episode"]), id: z.string().min(1) }),
+  production_compile: productionCompileSchema.extend({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1), operationId: z.string().min(1) }),
+  production_get_compilation: z.object({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1), operationId: z.string().min(1), view: z.enum(["status", "targets", "diagnostics"]).default("status"), offset: z.number().int().nonnegative().default(0), pageSize: z.number().int().positive().optional() }).strict(),
+  production_apply_compilation: productionApplyCompilationSchema.extend({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1) }),
+  production_diagnose_bindings: z.object({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1) }),
   canvas_preflight_production: productionPreflightSchema.extend({ projectId: z.string().min(1) }),
   drama_preflight_production: productionPreflightSchema.extend({ episodeId: z.string().min(1) }),
   canvas_get_production: productionReadSchema.extend({ projectId: z.string().min(1) }),

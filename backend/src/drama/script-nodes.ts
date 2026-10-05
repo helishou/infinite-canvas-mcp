@@ -7,7 +7,7 @@ import { projectDirector } from "./director.js";
 import { productionNodePosition } from "./production-layout-geometry.js";
 import type { ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/production-contract";
 
-type Owner = { kind: "canvas" | "episode"; id: string };
+type Owner = { kind: "canvas" | "episode" | "scene"; id: string };
 const nodes = (project: Record<string, any>) => (project.nodes || []) as Record<string, any>[];
 const scriptNodeId = (owner: Owner, id: string) => `production-script-${crypto.createHash("sha256").update(`${owner.kind}\0${owner.id}\0${id}`).digest("hex").slice(0, 24)}`;
 

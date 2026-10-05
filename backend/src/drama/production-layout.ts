@@ -5,7 +5,7 @@ import { productionNodePosition, productionLayoutStableId, productionSharedProje
 export { productionAssetPosition, productionNodePosition, productionOutputPosition, productionSceneLayout } from "./production-layout-geometry.js";
 
 type Node = Record<string, any>;
-type Owner = { kind: "episode" | "canvas"; id: string };
+type Owner = { kind: "episode" | "canvas" | "scene"; id: string };
 type Input = { canvasId: string; owner: Owner; production: EpisodeProductionData; project: Record<string, any>; previous?: ProductionLayoutPlan | null };
 type Member = ProductionLayoutUnit["members"][number];
 type DraftUnit = { id: string; area: ProductionLayoutUnit["area"]; targets: string[]; sceneId?: string; bounds: { position: Position; size: { width: number; height: number } }; members: Member[]; status?: ProductionLayoutUnit["status"] };

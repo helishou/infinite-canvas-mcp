@@ -38,6 +38,7 @@ import type { CanvasCommit } from "../canvas/collaboration.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
 import { approvedSharedAsset, listApprovedSharedAssets, prepareSharedAssetProjection, registerApprovedSharedAsset, sharedAssetHistory, sharedProjectionNodeId, validateSharedAssetSource, type ApprovedSharedAsset } from "./shared-assets.js";
 import { ensureProductionCanvas, productionCanvasContext } from "./production-canvas.js";
+import { syncSceneInstances } from "./scene-instances.js";
 import { scriptNodeOperations } from "./script-nodes.js";
 import { compileProductionLayout, productionAssetPosition } from "./production-layout.js";
 import { assertImageReferenceCoverage, imageInputOperations, verifyImageInput } from "./image-inputs.js";
@@ -55,7 +56,7 @@ export type ProductionBatch = {
 };
 export type DirectorReadinessTarget = { id: string; targetId: string; kind: "asset" | "keyframe" | "segment"; title: string; status: "ready" | "blocked" | "needs_review" | "complete"; blockers: string[]; artifactId?: string; executionTargets?: string[]; notice?: string };
 export type DirectorPresentation = {
-    key: string; workId: string; owner: { kind: "canvas" | "episode"; id: string }; aliases?: string[]; workspace: "overview" | "story" | "assets" | "shots" | "production" | "advanced";
+    key: string; workId: string; owner: { kind: "canvas" | "episode" | "scene"; id: string }; aliases?: string[]; workspace: "overview" | "story" | "assets" | "shots" | "production" | "advanced";
     action: "author" | "compile" | "produce" | "review" | "deliver" | "blocked"; targetKind?: string; targetId?: string; canvasId?: string;
     nodeId?: string; segmentId?: string; runId?: string; taskId?: string; status: "ready" | "working" | "needs_review" | "blocked" | "complete"; reason?: string;
 };
@@ -69,8 +70,24 @@ export class ProductionConflictError extends Error {
     constructor(readonly current: ProductionRecord) { super("制作稿版本已变化，请核对当前版本后重试"); }
 }
 
+/**
+ * Formal production storage per owner kind. The SQL in this class is written in episode wording, so the
+ * mapping is explicit rather than a string rewrite: a scene table is a third word shape, not a synonym.
+ */
+const PRODUCTION_TABLES = {
+    episode: { productions: "episode_productions", operations: "episode_production_operations", versions: "episode_production_versions", runs: "episode_production_runs", batches: "episode_production_batches", key: "episode_id" },
+    scene: { productions: "scene_productions", operations: "scene_production_operations", versions: "scene_production_versions", runs: "scene_production_runs", batches: "scene_production_batches", key: "scene_id" },
+    canvas: { productions: "canvas_productions", operations: "canvas_production_operations", versions: "canvas_production_versions", runs: "canvas_production_runs", batches: "canvas_production_batches", key: "project_id" },
+} as const;
+
 export class EpisodeProductionService {
     constructor(private readonly db: BackendDatabase, private readonly events?: BackendEventBus, private readonly legacyDataDir = DATA_DIR, private readonly projectScope = false, private readonly checkEngine = assertDirectorEngine) {}
+
+    /** Scene ownership is opt-in; the existing boolean keeps every current construction site working. */
+    private sceneScope = false;
+    withSceneScope() { const service = new EpisodeProductionService(this.db, this.events, this.legacyDataDir, this.projectScope, this.checkEngine); service.sceneScope = true; return service; }
+    private get ownerKind(): keyof typeof PRODUCTION_TABLES { return this.sceneScope ? "scene" : this.projectScope ? "canvas" : "episode"; }
+    private get ownerKey() { return PRODUCTION_TABLES[this.ownerKind].key; }
 
     isSharedAssetCanvas(id: string) {
         return this.projectScope && productionCanvasContext(this.db, id).role === "shared-assets";
@@ -85,8 +102,22 @@ export class EpisodeProductionService {
         return { service: new EpisodeProductionService(this.db, this.events, this.legacyDataDir, false, this.checkEngine), id: row.id };
     }
 
+    /** Rewrites the episode wording of one statement to the active owner's tables; only known production tables are allowed. */
     private prepare(sql: string) {
-        return this.db.db.prepare(this.projectScope ? sql.replaceAll("episode_production", "canvas_production").replaceAll("episode_id", "project_id") : sql);
+        if (this.ownerKind === "episode") return this.db.db.prepare(sql);
+        const tables = PRODUCTION_TABLES[this.ownerKind];
+        // Any production-worded table outside every known owner set is refused before it reaches SQLite.
+        const known = new Set<string>(Object.values(PRODUCTION_TABLES).flatMap(entry => Object.values(entry)));
+        for (const match of sql.matchAll(/\b(episode_[a-z_]+|canvas_[a-z_]+|scene_[a-z_]+)\b/g)) if (!known.has(match[1])) throw new Error(`制作存储映射不包含表 ${match[1]}`);
+        const rewritten = sql
+            .replaceAll("episode_production_batches", tables.batches)
+            .replaceAll("episode_production_operations", tables.operations)
+            .replaceAll("episode_production_versions", tables.versions)
+            .replaceAll("episode_production_runs", tables.runs)
+            .replaceAll("episode_productions", tables.productions)
+            .replaceAll("episode_id", tables.key);
+        if (/episode_production|episode_id/.test(rewritten)) throw new Error(`制作存储映射不完整：${sql}`);
+        return this.db.db.prepare(rewritten);
     }
 
     episodeInfo(episodeId: string): { id: string; canvasId?: string | null; fullPlot?: string | null } { const linked = this.linked(episodeId); return linked ? linked.service.episodeInfo(linked.id) : this.episode(episodeId); }
@@ -124,7 +155,7 @@ export class EpisodeProductionService {
         if (!production.draft.director || !project) throw new Error("布局编译缺少正式制作稿或画布快照");
         const canvasId = this.episodeInfo(id).canvasId;
         if (!canvasId) throw new Error("制作对象尚未关联画布");
-        const owner = { kind: this.projectScope ? "canvas" as const : "episode" as const, id };
+        const owner = { kind: this.ownerKind, id };
         const plan = compileProductionLayout({ canvasId, owner, production: production.draft, project, previous: this.db.getProductionLayoutPlan(canvasId) });
         this.db.saveProductionLayoutPlan(canvasId, plan);
         return plan;
@@ -138,7 +169,7 @@ export class EpisodeProductionService {
     }
 
     beginPreparation(id: string, operationId: string, request: unknown, validateFresh?: () => void): { bindings?: Record<string, unknown>[]; receipt?: ProductionRecord & { layoutReceipt?: ProductionLayoutReceipt } } {
-        const ownerKey = `${this.projectScope ? "canvas" : "episode"}:${id}`;
+        const ownerKey = `${this.ownerKind}:${id}`;
         const hash = fingerprint(request);
         const row = this.db.db.prepare("SELECT * FROM production_preparations WHERE operation_id=?").get(operationId) as Record<string, any> | undefined;
         if (row) {
@@ -166,11 +197,11 @@ export class EpisodeProductionService {
                 if (canvasPreparation.operations.length) this.db.applyCanvasProjectOperations(canvasPreparation.projectId, canvasPreparation.expectedCanvasRevision, canvasPreparation.operations,
                     { operationId: canvasPreparation.operationId, runtimeWrite: true, withinTransaction: true, deferredCommits: canvasCommits, source: { kind: "system", clientId: "production:layout", label: "准备制作布局" } });
                 const projectedProject = this.db.getCanvasProject(canvasPreparation.projectId)!;
-                const scriptOps = [...scriptNodeOperations(projectedProject, result.draft, { kind: this.projectScope ? "canvas" : "episode", id }, result.draft, frozenPlan), ...(projectionLayout ? imageInputOperations(projectedProject, result.draft, id, result.draft, projectionLayout) : [])];
+                const scriptOps = [...scriptNodeOperations(projectedProject, result.draft, { kind: this.ownerKind, id }, result.draft, frozenPlan), ...(projectionLayout ? imageInputOperations(projectedProject, result.draft, id, result.draft, projectionLayout) : [])];
                 if (scriptOps.length) this.db.applyCanvasProjectOperations(canvasPreparation.projectId, Number(projectedProject.revision || 0), scriptOps,
                     { operationId: `${operationId}:scripts`, runtimeWrite: true, withinTransaction: true, deferredCommits: canvasCommits, source: { kind: "system", clientId: "production:scripts", label: "准备剧本文本节点" } });
                 const updatedProject = this.db.getCanvasProject(canvasPreparation.projectId)!;
-                if (result.draft.director) this.db.saveProductionLayoutPlan(canvasPreparation.projectId, compileProductionLayout({ canvasId: canvasPreparation.projectId, owner: { kind: this.projectScope ? "canvas" : "episode", id }, production: result.draft, project: updatedProject, previous: frozenPlan || null }));
+                if (result.draft.director) this.db.saveProductionLayoutPlan(canvasPreparation.projectId, compileProductionLayout({ canvasId: canvasPreparation.projectId, owner: { kind: this.ownerKind, id }, production: result.draft, project: updatedProject, previous: frozenPlan || null }));
                 this.db.db.exec("COMMIT");
                 canvasCommits.forEach(commit => this.db.notifyCanvasCommit(commit));
             } catch (error) { this.db.db.exec("ROLLBACK"); throw error; }
@@ -178,7 +209,7 @@ export class EpisodeProductionService {
             if (result.revision !== expectedRevision) throw new ProductionConflictError(result);
             const canvas = canvasId && this.db.getCanvasProject(canvasId);
             if (canvas) {
-                const operations = [...scriptNodeOperations(canvas, result.draft, { kind: this.projectScope ? "canvas" : "episode", id }, result.draft, frozenPlan), ...(projectionLayout ? imageInputOperations(canvas, result.draft, id, result.draft, projectionLayout) : [])];
+                const operations = [...scriptNodeOperations(canvas, result.draft, { kind: this.ownerKind, id }, result.draft, frozenPlan), ...(projectionLayout ? imageInputOperations(canvas, result.draft, id, result.draft, projectionLayout) : [])];
                 if (operations.length) this.db.applyCanvasProjectOperations(canvasId!, Number(canvas.revision || 0), operations, { operationId: `${operationId}:scripts`, runtimeWrite: true, source: { kind: "system", clientId: "production:scripts", label: "准备剧本文本节点" } });
             }
         }
@@ -189,7 +220,7 @@ export class EpisodeProductionService {
     }
 
     previewSharedAssetPromotion(id: string, assetId: string, expectedRevision: number) {
-        if (this.projectScope) throw new Error("只能从分集制作预览已有素材的共享接入");
+        if (this.ownerKind !== "episode") throw new Error("当前仅支持从分集预览已有素材的共享接入");
         const episode = this.db.getDramaEpisode(id);
         if (!episode?.canvasId || !episode.dramaId) throw new Error("分集尚未绑定剧目画布");
         const current = this.get(id);
@@ -232,7 +263,7 @@ export class EpisodeProductionService {
     }
 
     promoteExistingSharedAsset(id: string, input: { assetId: string; expectedRevision: number; expectedSourceCanvasRevision: number; expectedSharedCanvasRevision: number | null; operationId: string }) {
-        if (this.projectScope) throw new Error("只能从分集制作接入已有素材");
+        if (this.ownerKind !== "episode") throw new Error("当前仅支持从分集接入已有共享素材");
         if (!input.operationId.trim()) throw new Error("共享接入缺少稳定 operationId");
         const preview = this.previewSharedAssetPromotion(id, input.assetId, input.expectedRevision);
         if (preview.sourceCanvasRevision !== input.expectedSourceCanvasRevision) throw new Error("分集画布已变化，请重新预览接入来源");
@@ -300,12 +331,15 @@ export class EpisodeProductionService {
         const linked = this.linked(id); if (linked) return linked.service.sharedAssets(linked.id);
         const canvasId = this.episodeInfo(id).canvasId;
         const context = canvasId ? productionCanvasContext(this.db, canvasId) : undefined;
-        return { assets: context?.dramaId ? listApprovedSharedAssets(this.db, context.dramaId) : [], versions: context?.dramaId ? sharedAssetHistory(this.db, context.dramaId) : [], updates: this.projectScope ? [] : this.db.db.prepare("SELECT id, approved_id AS approvedId, target_asset_id AS assetId, status, error FROM drama_asset_adoptions WHERE episode_id=? ORDER BY rowid DESC").all(id) };
+        const updates = this.ownerKind === "canvas" ? [] : this.ownerKind === "scene"
+            ? this.db.db.prepare("SELECT id, approved_id AS approvedId, target_asset_id AS assetId, status, error FROM drama_asset_adoptions WHERE scene_id=? ORDER BY rowid DESC").all(id)
+            : this.db.db.prepare("SELECT id, approved_id AS approvedId, target_asset_id AS assetId, status, error FROM drama_asset_adoptions WHERE episode_id=? ORDER BY rowid DESC").all(id);
+        return { assets: context?.dramaId ? listApprovedSharedAssets(this.db, context.dramaId) : [], versions: context?.dramaId ? sharedAssetHistory(this.db, context.dramaId) : [], updates };
     }
 
     adoptSharedAsset(id: string, input: { assetId: string; approvedId: string; expectedRevision: number; operationId: string }): ProductionRecord & { replayed?: boolean; impact?: ProductionImpact } {
         const linked = this.linked(id); if (linked) return linked.service.adoptSharedAsset(linked.id, input);
-        if (this.projectScope) throw new Error("共享资产只能采用到剧目分集");
+        if (this.ownerKind !== "episode") throw new Error("共享资产采用目前仅支持剧目分集，场次级采用链尚未启用");
         const prior = this.prepare("SELECT receipt_json FROM episode_production_operations WHERE operation_id=?").get(input.operationId) as { receipt_json: string } | undefined;
         if (prior) {
             const priorRecord = JSON.parse(prior.receipt_json) as ProductionRecord;
@@ -342,6 +376,7 @@ export class EpisodeProductionService {
 
     retrySharedUpdate(id: string, adoptionId: string, expectedRevision: number): ReturnType<EpisodeProductionService["sharedAssets"]> {
         const linked = this.linked(id); if (linked) return linked.service.retrySharedUpdate(linked.id, adoptionId, expectedRevision);
+        if (this.ownerKind !== "episode") throw new Error("共享资产更新恢复目前仅支持剧目分集，场次级采用链尚未启用");
         const current = this.get(id);
         if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
         const job = this.db.db.prepare("SELECT * FROM drama_asset_adoptions WHERE id=? AND episode_id=? AND status='blocked'").get(adoptionId, id) as Record<string, any> | undefined;
@@ -494,7 +529,8 @@ export class EpisodeProductionService {
         const row = this.prepare("SELECT * FROM episode_productions WHERE episode_id = ?").get(episodeId) as Row | undefined;
         if (row) return this.fromRow(episodeId, row);
         const draft = emptyEpisodeProduction();
-        const dramaId = this.projectScope ? undefined : this.db.getDramaEpisode(episodeId)?.dramaId;
+        const scene = this.ownerKind === "scene" ? this.db.db.prepare("SELECT drama_id FROM drama_scene_instances WHERE id=?").get(episodeId) as { drama_id: string } | undefined : undefined;
+        const dramaId = this.projectScope ? undefined : this.ownerKind === "scene" ? scene?.drama_id : this.db.getDramaEpisode(episodeId)?.dramaId;
         const drama = this.db.listCanvasFolders().find(folder => this.projectScope ? folder.sharedAssetCanvasId === episodeId : folder.id === dramaId);
         const plan = drama?.productionPlan;
         if (plan?.confirmedAt && plan.confirmedOutline === drama?.outline) Object.assign(draft.settings, {
@@ -513,6 +549,11 @@ export class EpisodeProductionService {
         if (diagnostics.length) { result.nextActions = [{ action: "correct_source", message: "按诊断路径修正请求字段后重新预检。" }]; return result; }
         const input = productionPreflightRequestSchema.parse(raw);
         if (input.action === "generate") {
+            if (this.ownerKind === "scene") {
+                result.diagnostics.push({ code: "SCENE_GENERATION_NOT_READY", path: "request", message: "制作场次已接入独立制作稿与固定画布；场次媒体生成运行链尚未启用。", severity: "error" });
+                result.nextActions = [{ action: "correct_source", message: "当前可继续编辑、发布和准备场次节点；不要提交媒体生成。" }];
+                return result;
+            }
             const prior = this.prepare("SELECT run_id, request_hash FROM episode_production_batches WHERE episode_id=? AND idempotency_key=?").get(episodeId, input.request.idempotencyKey) as { run_id: string; request_hash: string } | undefined;
             if (prior) {
                 if (prior.request_hash === batchRequestHash(input.request)) return { ...result, valid: true, generationReady: false, replayed: true, nextActions: [] };
@@ -574,7 +615,7 @@ export class EpisodeProductionService {
         } };
         const director = data.director;
         if (!director) {
-            const owner = { kind: this.projectScope ? "canvas" as const : "episode" as const, id: episodeId };
+            const owner = { kind: this.ownerKind, id: episodeId };
             const canvasId = this.episodeInfo(episodeId).canvasId || (this.projectScope ? episodeId : undefined);
             const aliases = [...new Set([current.episodeId, canvasId].filter((id): id is string => Boolean(id) && id !== owner.id))];
             const workId = `legacy:${current.episodeId}`;
@@ -805,7 +846,7 @@ export class EpisodeProductionService {
     }
 
     private directorPresentation(episodeId: string, current: ProductionRecord, director: DirectorProduction, targets: DirectorReadinessTarget[], requestedRunId?: string): DirectorPresentation | undefined {
-        const owner = { kind: this.projectScope ? "canvas" as const : "episode" as const, id: episodeId };
+        const owner = { kind: this.ownerKind, id: episodeId };
         const canvasId = this.episodeInfo(episodeId).canvasId || undefined;
         const canonicalId = current.episodeId;
         const aliases = [...new Set([canonicalId, canvasId].filter((id): id is string => Boolean(id) && id !== owner.id))];
@@ -930,7 +971,7 @@ export class EpisodeProductionService {
             if (!nodeId && group) { nodeId = group.nodeId || undefined; segmentId = group.segmentId || undefined; }
         }
         if (work.taskId && work.action === "produce" && status !== "blocked" && !director.workflow.pendingDecisions?.some(decision => decision.workId === work.workId && decision.status === "pending")) {
-            const native = this.db.db.prepare("SELECT * FROM production_task_bindings WHERE task_id=? AND owner_kind=? AND owner_id=?").get(work.taskId, this.projectScope ? "canvas" : "episode", episodeId) as Record<string, any> | undefined;
+            const native = this.db.db.prepare("SELECT * FROM production_task_bindings WHERE task_id=? AND owner_kind=? AND owner_id=?").get(work.taskId, this.ownerKind, episodeId) as Record<string, any> | undefined;
             const task = native && this.db.getTask(work.taskId);
             if (native && task) {
                 taskId = task.id; nodeId = native.node_id;
@@ -1044,6 +1085,7 @@ export class EpisodeProductionService {
 
     startBatch(episodeId: string, raw: unknown): ProductionBatch {
         const linked = this.linked(episodeId); if (linked) return linked.service.startBatch(linked.id, raw);
+        if (this.ownerKind === "scene") throw new Error("SCENE_GENERATION_NOT_READY: 场次媒体生成运行链尚未启用");
         const input = directorRunStartSchema.parse(raw);
         const requestHash = batchRequestHash(input);
         this.db.db.exec("BEGIN IMMEDIATE");
@@ -1118,6 +1160,7 @@ export class EpisodeProductionService {
 
     resumeBatch(episodeId: string, runId: string): ProductionBatch {
         const linked = this.linked(episodeId); if (linked) return linked.service.resumeBatch(linked.id, runId);
+        if (this.ownerKind === "scene") throw new Error("SCENE_GENERATION_NOT_READY: 场次媒体生成运行链尚未启用");
         const batch = this.getBatch(episodeId, runId);
         if (!batch) throw new Error(`找不到生产运行 ${runId}`);
         if (!["paused", "pending", "awaiting_review"].includes(batch.status)) throw new Error(`该生产运行不能继续：${batch.status}`);
@@ -1246,7 +1289,7 @@ export class EpisodeProductionService {
                     }
                     if (operation.patch.currentWork.taskId) {
                         const binding = this.db.db.prepare("SELECT owner_kind, owner_id FROM production_task_bindings WHERE task_id=?").get(operation.patch.currentWork.taskId);
-                        if (!binding || binding.owner_id !== episodeId || binding.owner_kind !== (this.projectScope ? "canvas" : "episode")) throw new Error("工作游标中的原生任务不属于当前制作对象");
+                        if (!binding || binding.owner_id !== episodeId || binding.owner_kind !== (this.ownerKind)) throw new Error("工作游标中的原生任务不属于当前制作对象");
                     }
                 }
                 if (operation.patch.pendingDecisions) for (const decision of operation.patch.pendingDecisions) {
@@ -1515,12 +1558,15 @@ export class EpisodeProductionService {
             if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
             beforeMutation?.(current, scriptCommits);
             const next = mutate(current);
-            const projectionOperationId = `production:${this.projectScope ? "canvas" : "episode"}:${episodeId}:${operationId}:projection`;
+            if (this.ownerKind === "episode" && next.draft.director && this.db.getDramaEpisode(episodeId)?.dramaId) {
+                syncSceneInstances(this.db, { kind: "episode", id: episodeId }, next.draft.director.source);
+            }
+            const projectionOperationId = `production:${this.ownerKind}:${episodeId}:${operationId}:projection`;
             const canvasId = this.episode(episodeId).canvasId;
             const canvas = canvasId && this.db.getCanvasProject(canvasId);
             if (canvas) {
                 if (next.draft.director) {
-                    const owner = { kind: this.projectScope ? "canvas" as const : "episode" as const, id: episodeId };
+                    const owner = { kind: this.ownerKind, id: episodeId };
                     const layout = compileProductionLayout({ canvasId: canvas.id, owner, production: next.draft, project: canvas, previous: this.db.getProductionLayoutPlan(canvas.id) });
                     this.db.saveProductionLayoutPlan(canvas.id, layout);
                     const clips = clipInputOperations(canvas, next.draft, layout);
@@ -1533,7 +1579,7 @@ export class EpisodeProductionService {
                     const operations = [...scriptNodeOperations(canvas, next.draft, owner, current.draft, layout), ...imageInputOperations(canvas, next.draft, episodeId, current.draft, layout), ...clips.operations.filter(op => readyClips.has((op.patch as any).productionClipProjection.targetId))];
                     if (operations.length) this.db.applyCanvasProjectOperations(canvasId!, Number(canvas.revision || 0), operations, { operationId: projectionOperationId, runtimeWrite: true, withinTransaction: true, deferredCommits: scriptCommits, source: { kind: "system", clientId: "production:scripts", label: "同步正式制作节点输入" } });
                 } else {
-                    const operations = scriptNodeOperations(canvas, next.draft, { kind: this.projectScope ? "canvas" : "episode", id: episodeId }, current.draft);
+                    const operations = scriptNodeOperations(canvas, next.draft, { kind: this.ownerKind, id: episodeId }, current.draft);
                     if (operations.length) this.db.applyCanvasProjectOperations(canvasId!, Number(canvas.revision || 0), operations, { operationId: projectionOperationId, runtimeWrite: true, withinTransaction: true, deferredCommits: scriptCommits, source: { kind: "system", clientId: "production:scripts", label: "同步正式制作节点输入" } });
                 }
             }
@@ -1550,7 +1596,7 @@ export class EpisodeProductionService {
 
     private batchFromRow(row: Record<string, any>): ProductionBatch {
         return {
-            runId: String(row.run_id), episodeId: String(row.episode_id || row.project_id), version: Number(row.version),
+            runId: String(row.run_id), episodeId: String(row.scene_id || row.episode_id || row.project_id), version: Number(row.version),
             sourceRevision: Number(row.source_revision), idempotencyKey: String(row.idempotency_key), status: String(row.status),
             targets: JSON.parse(String(row.targets_json)) as string[], plan: JSON.parse(String(row.plan_json)) as ProductionImpact,
             engine: row.engine_json ? JSON.parse(String(row.engine_json)) as Record<string, unknown> : null,
@@ -1565,6 +1611,13 @@ export class EpisodeProductionService {
     }
 
     private episode(episodeId: string) {
+        // A scene owner is a script occurrence, not an episode: it carries its own canvas and title while inheriting its drama context.
+        if (this.ownerKind === "scene") {
+            const scene = this.db.db.prepare("SELECT s.id, s.title, s.drama_id, s.episode_id, c.canvas_id FROM drama_scene_instances s LEFT JOIN drama_scene_canvases c ON c.scene_id = s.id WHERE s.id=?").get(episodeId) as { id: string; title: string; drama_id: string; episode_id: string | null; canvas_id: string | null } | undefined;
+            if (!scene) throw new Error("制作场次不存在");
+            const parent = scene.episode_id ? this.db.getDramaEpisode(scene.episode_id) : null;
+            return { id: scene.id, canvasId: scene.canvas_id, fullPlot: parent?.fullPlot || "", title: scene.title, dramaId: scene.drama_id || parent?.dramaId || "", episodeNumber: parent?.episodeNumber || 0, synopsis: parent?.synopsis || "", episodeId: scene.episode_id };
+        }
         const episode = this.projectScope
             ? (this.db.getCanvasProject(episodeId) ? { id: episodeId, canvasId: episodeId, fullPlot: "", title: "", dramaId: "", episodeNumber: 0, synopsis: "" } : null)
             : this.db.getDramaEpisode(episodeId);
@@ -1596,7 +1649,7 @@ export class EpisodeProductionService {
         if (!task || task.status !== "succeeded") throw new Error("历史结果缺少可核验的成功任务");
         const taskId = String(task.parentTaskId || record(task.params).parentTaskId || task.id);
         const binding = this.db.db.prepare("SELECT * FROM production_task_bindings WHERE task_id=? AND owner_kind=? AND owner_id=?")
-            .get(taskId, this.projectScope ? "canvas" : "episode", episodeId) as Record<string, any> | undefined;
+            .get(taskId, this.ownerKind, episodeId) as Record<string, any> | undefined;
         if (!binding || binding.project_id !== canvasId || binding.node_id !== op.nodeId || binding.target_kind !== op.targetKind || binding.status === "submitted") throw new Error("历史任务不属于当前正式制作对象，或尚未完成结果绑定");
         const outputs = [...task.outputs, ...(Array.isArray(record(task.result).media) ? record(task.result).media as Record<string, any>[] : [])];
         const output = outputs.find(output => output.storageKey === op.storageKey);

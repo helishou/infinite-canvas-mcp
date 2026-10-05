@@ -106,3 +106,41 @@ export function applyDirectorSourcePatch(director: DirectorProduction, entity: k
         director.artifacts = director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));
         director.executionAuthorized = false;
     }
+
+/** Continuation decisions belong to the authored adjacent edges, not inferred Clip defaults. */
+export function continuityBoundaryDiagnostics(director: DirectorProduction, stage: "edit" | "compile" | "publish" | "generate" = "compile"): ProductionDiagnostic[] {
+    const segments = (Array.isArray(director.source.segments) ? director.source.segments : []) as Array<Record<string, any>>;
+    const boundaries = Array.isArray(director.boundaries) ? director.boundaries : [];
+    const ids = segments.map(segment => String(segment.id || ""));
+    const expected = ids.slice(0, -1).map((from, index) => ({ from, to: ids[index + 1] }));
+    const severity = stage === "edit" ? "warning" as const : "error" as const;
+    const diagnostics: ProductionDiagnostic[] = [];
+    const issue = (code: string, from: string, message: string) => diagnostics.push({ code, path: "director.boundaries", targetId: from, severity, message });
+    for (const pair of expected) {
+        const rows = boundaries.filter(edge => edge.from === pair.from && edge.to === pair.to);
+        if (rows.length !== 1) issue(rows.length ? "DUPLICATE_CONTINUITY_BOUNDARY" : "MISSING_CONTINUITY_BOUNDARY", pair.from, `${pair.from} → ${pair.to} 必须登记唯一的尾帧与潜空间决定；缺项不能当作关闭`);
+        else if (typeof rows[0].tailFrame !== "boolean" || typeof rows[0].motionContext !== "boolean") issue("MISSING_CONTINUITY_FLAGS", pair.from, `${pair.from} → ${pair.to} 两项开关必须显式为 true 或 false`);
+        else if (typeof rows[0].reason !== "string" || !rows[0].reason.trim()) issue("CONTINUITY_REASON_REQUIRED", pair.from, `${pair.from} → ${pair.to} 需要说明承接的动作/状态或断链的叙事事实`);
+    }
+    for (const edge of boundaries) if (!expected.some(pair => pair.from === edge.from && pair.to === edge.to)) issue("NON_ADJACENT_CONTINUITY_BOUNDARY", edge.from, `${edge.from} → ${edge.to} 不是当前相邻 Segment，不能连接旧边界或末段`);
+    if (expected.length > 1 && !diagnostics.length && boundaries.every(edge => !edge.tailFrame && !edge.motionContext)) {
+        const normalizedReasons = boundaries.map(edge => {
+            let reason = edge.reason.trim().toLocaleLowerCase().replace(/\s+/g, " ");
+            for (const id of ids) reason = reason.split(id.toLocaleLowerCase()).join("<segment>");
+            return reason;
+        });
+        if (new Set(normalizedReasons).size === 1) issue("CONTINUITY_DECISIONS_UNREVIEWED", ids[0], "所有相邻边界被同一模板理由关闭；请逐边界说明尾态→初态、时间/场景变化及两项独立决定，不自动全开或用硬切作为统一理由");
+    }
+    return diagnostics;
+}
+
+export function outgoingDirectorBoundary(director: DirectorProduction, segmentId: string) {
+    const segments = (Array.isArray(director.source.segments) ? director.source.segments : []) as Array<Record<string, any>>;
+    const index = segments.findIndex(segment => segment.id === segmentId);
+    if (index < 0) throw new Error(`Segment 未登记：${segmentId}`);
+    if (index === segments.length - 1) return undefined;
+    const to = String(segments[index + 1].id);
+    const matches = director.boundaries.filter(edge => edge.from === segmentId);
+    if (matches.length !== 1 || matches[0].to !== to || typeof matches[0].tailFrame !== "boolean" || typeof matches[0].motionContext !== "boolean" || typeof matches[0].reason !== "string" || !matches[0].reason.trim()) throw new Error(`MISSING_CONTINUITY_DECISION: ${segmentId} → ${to} 缺少明确的相邻边界决定，请修正编译前源稿`);
+    return matches[0];
+}

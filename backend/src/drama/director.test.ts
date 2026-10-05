@@ -247,7 +247,7 @@ test("version 16 migration backs up data and creates run history without rewriti
     const reopened = new BackendDatabase(file);
     assert.equal(reopened.getDramaEpisode("ep")?.title, "Episode");
     assert.ok(reopened.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='canvas_production_batches'").get());
-    assert.ok(readdirSync(dir).some(n => n.includes("pre-schema-v16-to-v29"))); reopened.close();
+    assert.ok(readdirSync(dir).some(n => n.includes("pre-schema-v16-to-v30"))); reopened.close();
 });
 
 test("version 21 databases add production batch storage in schema version 22", t => {
@@ -255,7 +255,7 @@ test("version 21 databases add production batch storage in schema version 22", t
     db.db.exec("DELETE FROM schema_migrations WHERE version>=22; DROP TABLE canvas_production_batches; DROP TABLE episode_production_batches");
     const upgraded = new BackendDatabase(file);
     const version = upgraded.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number };
-    assert.equal(version.version, 29);
+    assert.equal(version.version, 30);
     assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='episode_production_batches'").get());
     assert.equal(upgraded.getDramaEpisode("ep")?.title, "Episode");
     upgraded.close();

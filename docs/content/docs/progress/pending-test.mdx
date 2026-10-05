@@ -5,6 +5,28 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Director conversation production controls
+
+- Production status and Return to current production appear inside the director conversation. Collapsing the conversation hides both controls while preserving the session. Open it to inspect the current clip/status, open Tasks & Deliveries, or explicitly resume production follow. Check recovery states, both themes, narrow screens and draft preservation.
+
+## Local proxy removal
+
+- Settings no longer show a Local proxy tab. Import an old configuration with its proxy enabled, then export it: provider credentials and model settings must remain, while retired proxy fields are absent. Requests must not use the old proxy address. Canvas generation continues through Backend; independent media pages retain their existing provider requests. Check both languages and themes.
+
+## Home media loading
+
+- Home and director project cards reuse the canvas's browser thumbnail cache and load images or videos when visible. A large image without a cached preview still needs its original download once; after caching, reload or return to home should show the thumbnail directly. Explicit previews use the original. Clearing browser cache allows thumbnails to be rebuilt.
+- Project covers appear as their individual queries finish, so one slow request does not block others. Returning to the page reuses the existing query cache. Check grid/list views, scrolling, failed media, explicit previews, both languages and both themes.
+
+## Baidu Translate
+
+- Configure the Baidu Translate APP ID and secret under connection settings, then right-click a canvas text node and translate it to Chinese or English. The translated text is added as a new node, preserving the source. Text longer than 1,000 characters is split at sentence boundaries and sent sequentially at Baidu Standard's one-request-per-second rate. Verify missing credentials, invalid-signature errors, long-text chunk boundaries, and confirm the secret is not returned to the browser.
+
+## Reading and editing text storyboards
+
+- The production dialog retains one workspace tab row for Overview, Script, Characters & Assets, Storyboard, Generate & Deliver and Settings & History. Focused scenes, shots, assets and clips retain that row and the same dialog size. Scene-grouped storyboard rows show shot numbers, titles, durations, linked clips and picture summaries; small thumbnails leave room for reading. Searching shots, scenes or action retains the original shot numbers and reports empty results clearly.
+- Expand a shot to read picture details, dialogue and the clip link. A focused shot offers previous, next and all-shot navigation. Generation descriptions and camera settings, storyboard images, clip arrangement and tail-frame/Motion Context settings are collapsed by default, retaining existing save controls. Check both themes, narrow screens, draft preservation and that search, expansion and navigation neither save source content nor start generation.
+
 ## Unified formal keyframe references
 
 - Reference cards, connections, automatic production and manual regeneration use the same numbered list of approved media, roles and versions. Previous outputs and other character outfits are excluded. Preparing targets or applying compilation synchronizes the canvas; check multiple characters, the final style slot and repeat preparation.
@@ -1958,7 +1980,7 @@ The current release needs manual verification in these areas:
 
 + 本地工作流参数面板：选择带默认字段的本地自定义工作流，确认首次打开画布图片节点设置时文本、数字、布尔和下拉参数均显示默认值；确认质量、尺寸、宽高比三组通用设置不再显示，透明背景和生成张数仍可用。
 
-+ 本地代理与配置链接导入：在终端执行 `node canvas-proxy/index.js`，设置→本地代理开启开关并测试连接，应显示代理版本；配置真实外部渠道后确认模型拉取、文本/图像/视频/音频请求都可经过代理完成，本地 Backend 与本机 ComfyUI 仍直连。使用两条不同 Base URL 的配置链接导入，确认同 Base URL 仅更新该渠道的 Key，陌生 Base URL 新增渠道，不覆盖其他渠道。
++ 配置链接导入：使用两条不同 Base URL 的配置链接导入，确认同 Base URL 仅更新该渠道的 Key，陌生 Base URL 新增渠道，不覆盖其他渠道。
 
 + 素材下载 Blob 优先级：对后端已存储的图片、视频和音频分别点击下载，确认下载成功且文件可播放/打开；将原始远程 URL 设为不可访问后再次下载，仍应使用 `storageKey` 的 Backend 媒体成功保存。
 
@@ -2408,3 +2430,9 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 - MCP compilation uses an operationId and a persistent serial background queue. Query the original receipt after an unknown response to recover compilation, failure, interruption and application results without duplicate execution.
 - Reads support artifact indexes, source sections, version-bound pagination and UTF-8 chunks. The normal Agent workflow consumes compact status and diagnostics without reading or reviewing compiled prompts.
 - Verified historical pagination/chunk integrity, the loaded MCP contracts and live production-page lookup, object history, H3 selection and delivery download. Checks preserved formal records, canvas data and media bindings; user acceptance remains pending.
+
+### Production continuity decision checks
+
+- Each adjacent Segment must explicitly choose tail-frame and Motion Context behavior with a concrete handoff or cut reason before compilation. Drafts remain saveable; missing, duplicate or non-adjacent edges, empty reasons and a repeated all-off template produce diagnostics for compilation, publication and new generation.
+- Formal Clip flags are projected from the source and cannot be overwritten by defaults, ordinary Clip edits or run overrides. Terminal Clips close outgoing edges, and latent chains include their closing Clip. Updating the source never regenerates old media automatically.
+- Background compilation accepts only exact external reference paths verified by the formal resolver and keeps asset-plan and Segment frozen file identities consistent. Arbitrary package escapes remain rejected; missing-reference drafts remain blocked.

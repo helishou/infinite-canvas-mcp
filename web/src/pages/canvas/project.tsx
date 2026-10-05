@@ -27,6 +27,7 @@ import { runCanvasVideoTask } from "@/services/api/canvas-video";
 import { runCanvasAudioTask } from "@/services/api/canvas-audio";
 import { runCanvasTextTask } from "@/services/api/canvas-text-task";
 import { getCanvasTextSession, replaceCanvasText } from "@/services/api/canvas-text";
+import { translateWithBaidu } from "@/services/api/baidu-translate";
 import { kickCanvasBrowserTask } from "@/services/api/canvas-browser-task";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { nanoid } from "nanoid";
@@ -6341,6 +6342,7 @@ function InfiniteCanvasPage() {
                         canCaptureVideoFrame={contextMenuNode?.type === CanvasNodeType.Video && Boolean(contextMenuNode.metadata?.content)}
                         canGroup={contextMenu.type === "node" && selectedNodeIds.has(contextMenu.nodeId) && groupableSelectedCount > 1}
                         canCopyContent={Boolean(contextMenuText)}
+                        canTranslate={Boolean(contextMenuNode?.type === CanvasNodeType.Text && contextMenuText)}
 
                         onClose={() => setContextMenu(null)}
                         onCaptureVideoFrame={(position) => {
@@ -6359,6 +6361,21 @@ function InfiniteCanvasPage() {
                         onCopyContent={() => {
                             if (contextMenuText) copyText(contextMenuText);
                             setContextMenu(null);
+                        }}
+                        onTranslate={(target) => {
+                            const source = contextMenuNode;
+                            const sourceText = contextMenuText;
+                            setContextMenu(null);
+                            if (!source || !sourceText) return;
+                            void translateWithBaidu(sourceText, target).then(({ translatedText }) => {
+                                const translated = createCanvasNode(CanvasNodeType.Text, { x: source.position.x + 48, y: source.position.y + 48 });
+                                translated.title = target === "zh-CN" ? `${source.title || "文本"}（中文）` : `${source.title || "文本"}（English）`;
+                                translated.metadata = { ...translated.metadata, content: translatedText, status: NODE_STATUS_SUCCESS };
+                                setNodes((prev) => [...prev, translated]);
+                                setSelectedNodeIds(new Set([translated.id]));
+                                setSelectedConnectionId(null);
+                                message.success(target === "zh-CN" ? "已创建中文译文文本节点" : "已创建英文译文文本节点");
+                            }).catch((error) => message.error(error instanceof Error ? error.message : "翻译失败"));
                         }}
 
                         onDuplicate={() => {

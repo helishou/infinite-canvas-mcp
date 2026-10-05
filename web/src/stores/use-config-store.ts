@@ -93,8 +93,6 @@ export type AiConfig = {
     background: string;
     count: string;
     canvasImageCount: string;
-    proxyEnabled: boolean;
-    proxyUrl: string;
 };
 
 export type WebdavSyncConfig = {
@@ -104,15 +102,13 @@ export type WebdavSyncConfig = {
     directory: string;
     lastSyncedAt: string;
 };
-export type ConfigTabKey = "channels" | "local-proxy" | "preferences" | "prompt-sources" | "webdav" | "local-storage" | "connection";
+export type ConfigTabKey = "channels" | "preferences" | "prompt-sources" | "webdav" | "local-storage" | "connection";
 export type ChannelCredentialsImportResult = { status: "created" | "updated" | "missing-base-url" | "invalid-base-url"; channelName?: string };
 
 export const CONFIG_STORE_KEY = "infinite-canvas:ai_config_store";
 const CHANNEL_MODEL_SEPARATOR = "::";
 const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
-export const LOCAL_PROXY_PACKAGE = "@basketikun/canvas-proxy";
-export const DEFAULT_LOCAL_PROXY_URL = "http://127.0.0.1:23210";
 
 export const defaultConfig: AiConfig = {
     localComfyuiEnabled: true,
@@ -157,8 +153,6 @@ export const defaultConfig: AiConfig = {
     background: "",
     count: "1",
     canvasImageCount: "3",
-    proxyEnabled: false,
-    proxyUrl: DEFAULT_LOCAL_PROXY_URL,
 };
 
 export const defaultWebdavSyncConfig: WebdavSyncConfig = {
@@ -316,7 +310,9 @@ function syncWebdavToBackend(webdav: WebdavSyncConfig) {
 }
 
 function normalizeConfig(input: Partial<AiConfig>): AiConfig {
-    const config = { ...defaultConfig, ...input };
+    // Discard retired proxy settings when loading Backend data or importing old exports.
+    const { proxyEnabled: _proxyEnabled, proxyUrl: _proxyUrl, ...current } = input as Partial<AiConfig> & { proxyEnabled?: unknown; proxyUrl?: unknown };
+    const config = { ...defaultConfig, ...current };
     if (!Array.isArray(input.channels)) config.channels = [];
     const channels = normalizeChannels(config);
     return {
@@ -341,8 +337,6 @@ function normalizeConfig(input: Partial<AiConfig>): AiConfig {
         videoWatermark: config.videoWatermark || "false",
         imageAlign16: config.imageAlign16 !== false,
         canvasImageCount: config.canvasImageCount || "3",
-        proxyEnabled: Boolean(config.proxyEnabled),
-        proxyUrl: normalizeLocalProxyUrl(config.proxyUrl || DEFAULT_LOCAL_PROXY_URL) || DEFAULT_LOCAL_PROXY_URL,
     };
 }
 
@@ -713,31 +707,5 @@ export function buildApiUrl(baseUrl: string, path: string) {
     const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
     const lowerBaseUrl = normalizedBaseUrl.toLowerCase();
     const apiBaseUrl = lowerBaseUrl.endsWith("/v1") ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`;
-    return withLocalProxy(`${apiBaseUrl}${path}`);
-}
-
-export function normalizeLocalProxyUrl(value: string) {
-    const trimmed = value.trim().replace(/\/+$/, "");
-    if (!trimmed) return "";
-    return /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
-}
-
-/** Routes external provider traffic through the optional loopback proxy, never through itself or the local backend. */
-export function withLocalProxy(url: string) {
-    const { proxyEnabled, proxyUrl } = useConfigStore.getState().config;
-    if (!proxyEnabled || !/^https?:\/\//i.test(url)) return url;
-    const base = normalizeLocalProxyUrl(proxyUrl);
-    if (!base) return url;
-    try {
-        const target = new URL(url);
-        const proxy = new URL(base);
-        if (target.origin === proxy.origin || isLoopbackHost(target.hostname)) return url;
-    } catch {
-        return url;
-    }
-    return `${base}/${url}`;
-}
-
-function isLoopbackHost(hostname: string) {
-    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
+    return `${apiBaseUrl}${path}`;
 }

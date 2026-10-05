@@ -785,7 +785,27 @@ export class BackendDatabase {
                     error TEXT,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (scene_id, version)
-                );`);
+                );
+                CREATE TABLE IF NOT EXISTS scene_production_batches (
+                    run_id TEXT PRIMARY KEY,
+                    scene_id TEXT NOT NULL REFERENCES drama_scene_instances(id) ON DELETE CASCADE,
+                    idempotency_key TEXT NOT NULL,
+                    request_hash TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    source_revision INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    targets_json TEXT NOT NULL,
+                    plan_json TEXT NOT NULL,
+                    engine_json TEXT,
+                    settings_json TEXT NOT NULL,
+                    submitted_json TEXT NOT NULL DEFAULT '[]',
+                    error TEXT,
+                    pause_requested INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (scene_id, idempotency_key)
+                );
+                CREATE INDEX IF NOT EXISTS scene_production_batches_status ON scene_production_batches(status, updated_at);`);
                 this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (28, ?)").run(new Date().toISOString());
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
@@ -796,7 +816,53 @@ export class BackendDatabase {
                 // Shared assets stay owned by the drama; an adoption names exactly one episode or one scene.
                 if (!this.hasColumn("drama_asset_adoptions", "scene_id")) this.db.exec("ALTER TABLE drama_asset_adoptions ADD COLUMN scene_id TEXT REFERENCES drama_scene_instances(id) ON DELETE CASCADE");
                 this.db.exec("CREATE INDEX IF NOT EXISTS drama_asset_adoptions_scene ON drama_asset_adoptions(scene_id)");
+                // A scene canvas is as fixed as an episode canvas: the existing role triggers only know
+                // about the shared and standalone tables, so scene ownership needs its own guards.
+                this.db.exec(`CREATE TRIGGER IF NOT EXISTS fixed_scene_canvas BEFORE UPDATE OF canvas_id ON drama_scene_canvases
+                    WHEN OLD.canvas_id IS NOT NULL AND NEW.canvas_id IS NOT OLD.canvas_id
+                    BEGIN SELECT RAISE(ABORT, '场次画布已固定，不允许改绑'); END;
+                CREATE TRIGGER IF NOT EXISTS episode_canvas_role_scene_insert BEFORE INSERT ON drama_episodes
+                    WHEN NEW.canvas_id IS NOT NULL AND EXISTS(SELECT 1 FROM drama_scene_canvases WHERE canvas_id=NEW.canvas_id)
+                    BEGIN SELECT RAISE(ABORT, '画布已属于制作场次，不能覆盖'); END;
+                CREATE TRIGGER IF NOT EXISTS episode_canvas_role_scene_update BEFORE UPDATE OF canvas_id ON drama_episodes
+                    WHEN NEW.canvas_id IS NOT NULL AND NEW.canvas_id IS NOT OLD.canvas_id AND EXISTS(SELECT 1 FROM drama_scene_canvases WHERE canvas_id=NEW.canvas_id)
+                    BEGIN SELECT RAISE(ABORT, '画布已属于制作场次，不能覆盖'); END;
+                CREATE TRIGGER IF NOT EXISTS shared_canvas_role_scene BEFORE UPDATE OF shared_asset_canvas_id ON drama_projects
+                    WHEN NEW.shared_asset_canvas_id IS NOT NULL AND EXISTS(SELECT 1 FROM drama_scene_canvases WHERE canvas_id=NEW.shared_asset_canvas_id)
+                    BEGIN SELECT RAISE(ABORT, '画布已属于制作场次'); END;
+                CREATE TRIGGER IF NOT EXISTS scene_cannot_be_episode_canvas BEFORE INSERT ON drama_scene_canvases
+                    WHEN EXISTS(SELECT 1 FROM drama_episodes WHERE canvas_id=NEW.canvas_id)
+                        OR EXISTS(SELECT 1 FROM drama_projects WHERE shared_asset_canvas_id=NEW.canvas_id)
+                    BEGIN SELECT RAISE(ABORT, '画布已属于分集或共享资产，不能改绑给场次'); END;`);
                 this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (29, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
+        if (currentVersion < 30) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                // Databases that applied schema 28 before scene batches were added need this forward migration.
+                this.db.exec(`CREATE TABLE IF NOT EXISTS scene_production_batches (
+                    run_id TEXT PRIMARY KEY,
+                    scene_id TEXT NOT NULL REFERENCES drama_scene_instances(id) ON DELETE CASCADE,
+                    idempotency_key TEXT NOT NULL,
+                    request_hash TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    source_revision INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    targets_json TEXT NOT NULL,
+                    plan_json TEXT NOT NULL,
+                    engine_json TEXT,
+                    settings_json TEXT NOT NULL,
+                    submitted_json TEXT NOT NULL DEFAULT '[]',
+                    error TEXT,
+                    pause_requested INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (scene_id, idempotency_key)
+                );
+                CREATE INDEX IF NOT EXISTS scene_production_batches_status ON scene_production_batches(status, updated_at);`);
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (30, ?)").run(new Date().toISOString());
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }

@@ -31,7 +31,7 @@ function editableFields(detail: WorkflowDetail | null): WorkflowField[] {
 /** RunningHub 档案的字段按同一口径过滤；媒体槽由平台映射决定，不在这里暴露。 */
 function runningHubFields(profile: RunningHubWorkflowProfile): WorkflowField[] {
     const config = runningHubProfileToConfig(profile);
-    return config.fields.filter((field) => field.type !== "image" && field.type !== "video" && field.type !== "audio");
+    return config.fields.filter((field) => field.type !== "image" && field.type !== "video" && field.type !== "audio" && !field.isPrompt);
 }
 
 /**

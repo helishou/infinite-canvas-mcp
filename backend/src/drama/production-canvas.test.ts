@@ -1,4 +1,5 @@
-import { clipInputHash } from "./clip-inputs.js";
+import { resolveH3Runtime } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
+import { buildProductionClip, clipInputHash } from "./clip-inputs.js";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -486,13 +487,13 @@ test("version 23 installations gain layout plans, preparation receipts and nativ
     f.db.db.exec("DELETE FROM schema_migrations WHERE version>=24; DROP TABLE production_preparations; DROP TABLE production_task_bindings; ALTER TABLE drama_projects DROP COLUMN production_plan_json");
     const upgraded = new BackendDatabase(f.file);
     try {
-        assert.equal(upgraded.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, 29);
+        assert.equal(upgraded.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, 30);
         assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE name='production_preparations'").get());
         assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE name='production_task_bindings'").get());
         assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE name='production_layout_plans'").get());
         assert.equal(listApprovedSharedAssets(upgraded, "drama")[0].id, approved.id);
         assert.equal(upgraded.listCanvasFolders().find(folder => folder.id === "drama")?.sharedAssetCanvasId, sharedId);
-        assert.ok(fs.readdirSync(f.directory).some(name => name.includes('pre-schema-v23-to-v29')));
+        assert.ok(fs.readdirSync(f.directory).some(name => name.includes('pre-schema-v23-to-v30')));
     } finally { upgraded.close(); }
 });
 
@@ -682,4 +683,25 @@ test("a new approved reference version projects only current Clips and retains t
     const stale = f.runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1"], "version-stale");
     assert.equal(stale.referenceSync?.[0].status, "blocked");
     assert.equal(clip.referenceBindings[0].storageKey, "identity-v2.png");
+});
+
+test("formal outgoing flags survive projection and defaults; terminal Clip closes the chain", t => {
+    const f = referenceClipFixture(t), candidate = structuredClone(f.d);
+    candidate.boundaries[0] = { from: "seg1", to: "seg2", tailFrame: true, motionContext: true, reason: "Continue the held egg and uninterrupted hand action" };
+    save(f.episode, "ep", candidate);
+    const current = f.episode.get("ep"), project = f.db.getCanvasProject(f.projectId)!;
+    const head = buildProductionClip(project, current.draft, current.draft.clipGroups[0], "head");
+    const tail = buildProductionClip(project, current.draft, current.draft.clipGroups[1], "tail");
+    assert.equal(head.tailFrameContinuation, true); assert.equal(head.motionContextEnabled, true);
+    const resolved = resolveH3Runtime({ ...head, h3ParameterPolicy: "defaults" }, {}, { motionContextEnabled: false, tailFrameContinuation: false }, { motionContextEnabled: false, tailFrameContinuation: false });
+    assert.equal(resolved.params.motionContextEnabled, true); assert.equal(resolved.params.tailFrameContinuation, true);
+    const prepared = f.runner.prepareTargets("ep", current.revision, ["segment:seg1", "segment:seg2"], "enabled-flags");
+    const group = prepared.draft.clipGroups[0]; publish(f.episode, "ep");
+    const observer = new NativeProductionGeneration(f.db, f.stores, f.episode, f.shared, f.events);
+    assert.throws(() => observer.prepare({ mode: "video", operation: "h3-run", projectId: f.projectId, nodeId: group.nodeId!, segmentId: group.segmentId!, params: { motionContextEnabled: false } }), /DIRECTOR_CONTINUITY_CHANGED/);
+    assert.equal(tail.tailFrameContinuation, false); assert.equal(tail.motionContextEnabled, false);
+    candidate.boundaries = []; save(f.episode, "ep", candidate);
+    const blocked = f.runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1"], "missing-boundary");
+    assert.equal(blocked.referenceSync?.[0].status, "blocked");
+    assert.match(blocked.referenceSync![0].diagnostics[0].message, /MISSING_CONTINUITY_DECISION/);
 });

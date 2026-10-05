@@ -66,7 +66,7 @@ export function prepareClientCanvasOperation(project: Record<string, unknown>, o
     const protectFormal = (previous: Record<string, unknown>, incoming: Record<string, unknown>, deleted?: unknown) => {
         if (Object.hasOwn(incoming, "productionClipProjection") && commandFingerprint(incoming.productionClipProjection) !== commandFingerprint(previous.productionClipProjection) || Array.isArray(deleted) && deleted.includes("productionClipProjection")) throw collaborationError("FORMAL_CLIP_OWNED", "制作投影摘要由 Backend 管理");
         if (!previous.productionClipProjection) return;
-        for (const field of ["prompt", "referenceBindings", "directorEngine", "directorSourceHash", "h3CharacterGroups", "storyboardShots"]) if (Array.isArray(deleted) && deleted.includes(field) || Object.hasOwn(incoming, field) && commandFingerprint(incoming[field]) !== commandFingerprint(previous[field])) throw collaborationError("FORMAL_CLIP_OWNED", `字段 ${field} 属于正式编译产物，请修改编译前源稿后重新编译`);
+        for (const field of ["prompt", "referenceBindings", "directorEngine", "directorSourceHash", "h3CharacterGroups", "storyboardShots", "tailFrameContinuation", "motionContextEnabled"]) if (Array.isArray(deleted) && deleted.includes(field) || Object.hasOwn(incoming, field) && commandFingerprint(incoming[field]) !== commandFingerprint(previous[field])) throw collaborationError("FORMAL_CLIP_OWNED", `字段 ${field} 属于正式编译产物，请修改编译前源稿后重新编译`);
     };
     const preserveSegments = (incoming: unknown) => {
         if (!Array.isArray(incoming)) return;
@@ -77,7 +77,7 @@ export function prepareClientCanvasOperation(project: Record<string, unknown>, o
             protectFormal(previous, segment);
             if (previous.productionClipProjection) {
                 segment.productionClipProjection = structuredClone(previous.productionClipProjection);
-                for (const field of ["prompt", "referenceBindings", "directorEngine", "directorSourceHash", "h3CharacterGroups", "storyboardShots"]) if (!Object.hasOwn(segment, field) && Object.hasOwn(previous, field)) segment[field] = structuredClone(previous[field]);
+                for (const field of ["prompt", "referenceBindings", "directorEngine", "directorSourceHash", "h3CharacterGroups", "storyboardShots", "tailFrameContinuation", "motionContextEnabled"]) if (!Object.hasOwn(segment, field) && Object.hasOwn(previous, field)) segment[field] = structuredClone(previous[field]);
             }
             checkPatch(previous, segment, undefined, H3_RUNTIME_SEGMENT_FIELDS);
             // 重排/完整替换可以省略只读字段，必须按稳定 ID 从后台继承，不能丢掉结果。

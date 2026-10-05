@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useQueries } from "@tanstack/react-query";
 import { fetchBackendDramaEpisodes, fetchBackendGenerationLogs, fetchBackendTasks, request, type BackendGenerationLog, type BackendRuntimeTask } from "@/services/backend-api";
 import { saveSettings, type FrontendSettings } from "@/services/settings-api";
 import { useBackendStore } from "@/stores/use-backend-store";
@@ -18,34 +19,18 @@ export function useStableProjectCovers(candidates: Array<{ key: string; media: W
 export function useProjectCoverResults(projectVersions: Array<[string, string]>) {
     const connected = useBackendStore((state) => state.connected);
     const backendUrl = useBackendStore((state) => state.url);
-    const key = JSON.stringify(projectVersions);
-    const [cache, setCache] = useState<Record<string, WorkbenchMedia | null>>({});
-    useEffect(() => {
-        if (!connected) return;
-        let disposed = false;
-        const versions = JSON.parse(key) as Array<[string, string]>;
-        const missing = versions.filter(([id, version]) => !Object.hasOwn(cache, JSON.stringify([backendUrl, id, version])));
-        if (!missing.length) return;
-        void Promise.allSettled(
-            missing.map(async ([id, version]) => {
+    const results = useQueries({
+        queries: projectVersions.map(([id, version]) => ({
+            queryKey: ["project-cover", backendUrl, id, version],
+            enabled: connected,
+            queryFn: async () => {
                 const logs = (await fetchBackendGenerationLogs({ projectId: id, status: "success", limit: 1 })).logs || [];
-                const media = collectOutputs(logs).find((output) => output.kind !== "audio") || null;
-                return { key: JSON.stringify([backendUrl, id, version]), media };
-            }),
-        ).then((results) => {
-            if (disposed) return;
-            const next: Record<string, WorkbenchMedia | null> = {};
-            results.forEach((result, index) => {
-                const [id, version] = missing[index];
-                next[JSON.stringify([backendUrl, id, version])] = result.status === "fulfilled" ? result.value.media : null;
-            });
-            setCache((current) => ({ ...current, ...next }));
-        });
-        return () => {
-            disposed = true;
-        };
-    }, [connected, backendUrl, key, cache]);
-    return (id: string, version: string) => cache[JSON.stringify([backendUrl, id, version])] || null;
+                return collectOutputs(logs).find((output) => output.kind !== "audio") || null;
+            },
+        })),
+    });
+    const covers = new Map(projectVersions.map(([id, version], index) => [JSON.stringify([id, version]), results[index].data]));
+    return (id: string, version: string) => covers.get(JSON.stringify([id, version])) || null;
 }
 
 export function useWorkbenchData() {

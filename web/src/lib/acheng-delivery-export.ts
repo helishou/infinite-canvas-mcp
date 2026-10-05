@@ -6,7 +6,7 @@ type RecordValue = Record<string, unknown>;
 type CanvasNode = { id: string; title?: string; type?: string; metadata?: Record<string, unknown> };
 type BinaryEntry = Omit<MediaEntry, "included" | "requested" | "missingReason">;
 type ExportOptions = {
-    owner: { kind: "canvas" | "episode"; id: string };
+    owner: { kind: "canvas" | "episode" | "scene"; id: string };
     title: string;
     production: EpisodeProduction;
     readiness: ProductionReadiness;

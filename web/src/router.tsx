@@ -53,6 +53,7 @@ export const router = createBrowserRouter([
             { path: "/canvas/:id", element: lazyPage(CanvasProjectPage) },
             { path: "/drama", element: lazyPage(ProductionHubPage) },
             { path: "/drama/episodes/:episodeId/production", element: lazyPage(EpisodeProductionPage) },
+            { path: "/drama/scenes/:sceneId/production", element: lazyPage(EpisodeProductionPage) },
             { path: "/workflows", element: lazyPage(WorkflowsPage) },
             { path: "/config", element: lazyPage(ConfigPage) },
             { path: "/diagnostics/mcp", element: lazyPage(McpObservabilityPage) },

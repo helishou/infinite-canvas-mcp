@@ -1,3 +1,4 @@
+import { outgoingDirectorBoundary } from "@basketikun/canvas-agent/drama/production-validation";
 import { BASE_H3_NODE_METADATA } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import crypto from "node:crypto";
 import { buildCharacterGroupFromExistingNode } from "@basketikun/canvas-agent/plugins/minimax-h3/character-groups";
@@ -44,7 +45,7 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
     const taskMode = ({ T2VA: "t2v", I2VA: "i2v", FL2VA: "fl2v", L2VA: "l2v", Ref2VA: "ref2va" } as Record<string, string>)[String(planned.mode)];
     if (!taskMode) throw new Error(`未知 Acheng 模式 ${planned.mode}`);
     const prompt = authored.prompt;
-    const boundary = d.boundaries.find(b => b.from === group.id);
+    const boundary = outgoingDirectorBoundary(d, group.id);
     // A partial set of opening anchors is not a per-shot storyboard table.
     // The compiled prompt retains those scoped anchors and the complete motion timeline.
     const storyboardShots = taskMode !== "t2v" && settings.storyboardImageMode !== "skip" && shots.every(shot => d.shotInputs[shot.id]?.keyframeAssetId && d.shotInputs[shot.id]?.keyframePolicy !== "none") ? shots.map(shot => {
