@@ -16,7 +16,8 @@ export function AgentChatQueue({ items, paused, canInsert, theme, onRemove, onIn
     onResume: () => void;
 }) {
     const { t } = useTranslation();
-    if (!items.length && !paused) return null;
+    // 队列为空时不占位；暂停标记只在有内容需要恢复时才提示。
+    if (!items.length) return null;
     return (
         <section aria-label={t("agent.queue.title", { count: items.length })} className="mx-3 mb-2 max-h-40 shrink-0 overflow-y-auto rounded-xl border px-3 py-2" style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel }}>
             <header className="mb-2 flex items-center justify-between gap-2 text-xs">

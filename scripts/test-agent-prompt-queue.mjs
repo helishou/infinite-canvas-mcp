@@ -127,6 +127,12 @@ try {
     await page.waitForFunction(() => window.__agentPromptQueueTest.calls.filter((call) => call.path === "/agent/codex/turn" && call.method === "POST").length === 4);
     assert.match(JSON.stringify((await turnBodies())[3]), /queued instruction C/);
 
+    await page.evaluate(() => window.__agentPromptQueueTest.setQueuePaused(true));
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal((await snapshot()).queue.length, 0, "every queued instruction must have been dispatched");
+    assert.equal(await page.getByTestId("agent-queued-prompt").count(), 0, "an empty queue must not render the queue panel even when paused");
+    assert.equal(await page.getByText("队列已暂停", { exact: true }).count(), 0, "an empty queue must not show the paused notice");
+
     const writes = (await calls()).filter((call) => call.method !== "GET" && !["/agent/codex/turn", "/agent/codex/interrupt"].includes(call.path));
     assert.deepEqual(writes, [], "the isolated harness must not issue unrelated writes");
     assert.deepEqual(errors, [], `the page must not throw; bad responses: ${JSON.stringify(badResponses)}`);

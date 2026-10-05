@@ -67,6 +67,10 @@ Object.assign(window, {
             return { queue: state.queuedPrompts.map((item) => ({ id: item.id, status: item.status, text: item.payload.messageText, attachments: item.payload.attachments.map(({ id, url, dataUrl }) => ({ id, url, dataUrl })) })), paused: state.pausedPromptQueueScopes.length > 0, users: state.messages.filter((item) => item.role === "user").map((item) => ({ id: item.id, clientMessageId: item.clientMessageId, text: item.text })) };
         },
         setInterruptStatus(status: number) { interruptStatus = status; },
+        setQueuePaused(paused: boolean) {
+            const state = useAgentStore.getState();
+            state.setPromptQueuePaused(state.activeThreadId, state.conversation.conversationId, paused);
+        },
         setLanguage(language: string) { return i18n.changeLanguage(language); },
         setAttachmentFixture() {
             const dataUrl = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1' height='1'/%3E";
