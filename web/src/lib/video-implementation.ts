@@ -6,6 +6,7 @@
 import { fetchWorkflowDetail, isWorkflowImageField, isWorkflowVideoField, isWorkflowAudioField, type WorkflowDetail, type WorkflowField } from "@/services/api/workflows";
 import { fetchRunningHubWorkflows, type RunningHubWorkflowProfile } from "@/services/api/runninghub";
 import { resolveModelWorkflow, resolveModelWorkflowParams, modelScenarioUnsupported, type AiConfig } from "@/stores/use-config-store";
+import { resolveWorkflowBindingForModel } from "@basketikun/canvas-agent/model-workflow";
 import { runningHubProfileToConfig } from "@/pages/workflows/runninghub-run-adapter";
 
 export type VideoImplementation = {
@@ -42,23 +43,26 @@ export async function resolveVideoImplementation(
     model: string,
     referenceCount: number,
 ): Promise<VideoImplementation | null> {
-    // RunningHub 绑定优先：本地工作流名解析不到时，档案 id 才是真实执行目标。
-    const localName = resolveModelWorkflow(config, model, referenceCount);
-    if (localName) {
+    // 必须先问绑定版解析：它知道 provider。旧的 resolveModelWorkflow 只读本地
+    // 工作流名，对 RunningHub 绑定模型一律返回空，会让云端分支永远走不到。
+    const binding = resolveWorkflowBindingForModel(config, model, referenceCount);
+    if (!binding.ok) return null;
+    if (binding.binding.provider === "runninghub") {
+        const profileId = binding.binding.profileId;
         try {
-            const detail = await fetchWorkflowDetail(localName);
-            return { id: localName, provider: "comfyui", name: detail.config?.title || localName, fields: editableFields(detail) };
+            const { workflows } = await fetchRunningHubWorkflows();
+            const profile = workflows.find((item) => item.id === profileId);
+            if (!profile) return null;
+            return { id: profile.id, provider: "runninghub", name: profile.name, fields: runningHubFields(profile) };
         } catch {
             return null;
         }
     }
-    const profileId = resolveRunningHubProfileId(config, model, referenceCount);
-    if (!profileId) return null;
+    const localName = binding.binding.workflow || resolveModelWorkflow(config, model, referenceCount);
+    if (!localName) return null;
     try {
-        const { workflows } = await fetchRunningHubWorkflows();
-        const profile = workflows.find((item) => item.id === profileId);
-        if (!profile) return null;
-        return { id: profile.id, provider: "runninghub", name: profile.name, fields: runningHubFields(profile) };
+        const detail = await fetchWorkflowDetail(localName);
+        return { id: localName, provider: "comfyui", name: detail.config?.title || localName, fields: editableFields(detail) };
     } catch {
         return null;
     }
@@ -89,27 +93,4 @@ export function initialVideoParamValues(config: AiConfig, model: string, referen
 /** 参数键按「模型::实现」隔离，避免同名字段在不同工作流之间串值。 */
 export function videoParamKey(model: string, implementationId: string) {
     return `${model}::${implementationId}`;
-}
-
-/**
- * 取出该模型在本次输入场景下命中的 RunningHub 档案 id。
- * 显式绑定优先，其次旧 routing（只可能是本地文件名，不构成 RH 绑定）。
- */
-function resolveRunningHubProfileId(config: AiConfig, model: string, referenceCount: number): string {
-    const separator = model.indexOf("::");
-    const channelId = separator >= 0 ? model.slice(0, separator) : "";
-    const modelName = separator >= 0 ? model.slice(separator + 2) : model;
-    const channel = config.channels.find((item) => item.id === channelId);
-    const entry = channel?.models?.find((item) => item.name === modelName);
-    const bindings = entry?.workflowBindings || {};
-    const order = referenceCount <= 0 ? "text" : referenceCount === 1 ? "single" : "multi";
-    const bound = bindings[order];
-    if (bound?.provider === "runninghub") return bound.profileId;
-    // 未显式绑定时，若任一场景绑了 RH 且当前场景没绑本地实现，仍按 RH 处理。
-    if (!bound) {
-        for (const value of Object.values(bindings)) {
-            if (value?.provider === "runninghub") return value.profileId;
-        }
-    }
-    return "";
 }

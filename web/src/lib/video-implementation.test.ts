@@ -6,6 +6,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { initialVideoParamValues, videoParamKey } from "./video-implementation";
+import { resolveModelWorkflow } from "@/stores/use-config-store";
+import { resolveWorkflowBindingForModel } from "@basketikun/canvas-agent/model-workflow";
 import type { WorkflowField } from "@/services/api/workflows";
 
 const CHANNEL_ID = "local-comfyui";
@@ -45,6 +47,39 @@ test("渠道未配该场景时全部取字段默认值", () => {
 test("字段没有默认值时不出现在初始值里，交给用户填", () => {
     const values = initialVideoParamValues(config([]), "任意模型", 0, [field("seed")]);
     assert.equal("seed" in values, false);
+});
+
+test("只挂 RunningHub 绑定时解析为云端实现，不因没有本地工作流名而落空", () => {
+    // 复现 bug：先调只认本地工作流名的解析器时，这个模型会被判成「没有实现」，
+    // 于是面板退回通用项，RunningHub 档案的自定义字段永远不显示。
+    const config = {
+        channels: [
+            {
+                id: CHANNEL_ID,
+                name: "本地 ComfyUI",
+                kind: "comfyui",
+                models: [
+                    {
+                        name: "云端生视频",
+                        capability: "video",
+                        workflows: null,
+                        workflowRouting: null,
+                        workflowBindings: {
+                            text: { provider: "runninghub", profileId: PROFILE_ID },
+                            single: { provider: "runninghub", profileId: PROFILE_ID },
+                            multi: { provider: "runninghub", profileId: PROFILE_ID },
+                        },
+                    },
+                ],
+            },
+        ],
+    } as never;
+    // 只有绑定、没有任何本地工作流名时，旧解析器返回空字符串。
+    assert.equal(resolveModelWorkflow(config, `${CHANNEL_ID}::云端生视频`, 0), "");
+    // 绑定版解析必须认出这是云端实现。
+    const binding = resolveWorkflowBindingForModel(config, `${CHANNEL_ID}::云端生视频`, 0);
+    assert.equal(binding.ok, true);
+    assert.deepEqual(binding.ok && binding.binding, { provider: "runninghub", profileId: PROFILE_ID });
 });
 
 test("参数键按模型与实现隔离", () => {
