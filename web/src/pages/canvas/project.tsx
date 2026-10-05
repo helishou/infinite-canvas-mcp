@@ -1,5 +1,6 @@
 import { CanvasBatchRename } from "@/components/canvas/canvas-batch-rename";
-import { CanvasProductionToolbar, useCanvasProductionContext } from "@/components/production/canvas-production-workspace";
+import { useCanvasProductionContext } from "@/components/production/canvas-production-workspace";
+import { productionObjectForNode, productionObjectPath, productionObjectState, type ProductionObject } from "@/lib/production-object";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
 import { H3_LOCAL_VIEW_DEFAULTS } from "../../../../plugins/canvas/minimax-h3/src/hooks/useH3LocalView";
@@ -7,8 +8,8 @@ import { viewportForCanvasNodes } from "@/lib/canvas/canvas-navigation";
 import { createCanvasGraphIndexSelector } from "@/lib/canvas/canvas-graph-index";
 import { startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { Group, Video } from "lucide-react";
+import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { ExternalLink, Group, History, MessageSquare, Pencil, Video } from "lucide-react";
 import { isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import copyToClipboard from "copy-to-clipboard";
 import { saveAs } from "file-saver";
@@ -359,6 +360,14 @@ function dispatchCanvasReferenceDrag(
     window.dispatchEvent(new CustomEvent(name, { detail }));
 }
 
+function canvasFocusWidth(rect: Pick<DOMRect, "width" | "left">) {
+    const dialog = document.getElementById("canvas-director-dialog");
+    if (!dialog || dialog.getAttribute("aria-hidden") !== "false") return rect.width;
+    const width = dialog.getBoundingClientRect().left - rect.left - 16;
+    // Narrow floating conversations temporarily guard automatic focus instead.
+    return width >= 320 ? Math.min(rect.width, width) : rect.width;
+}
+
 export default function CanvasPage() {
     const { id } = useParams();
     const [mounted, setMounted] = useState(false);
@@ -398,15 +407,17 @@ function InfiniteCanvasPage() {
     const params = useParams<{ id: string }>();
     const navigate = useNavigate();
     const [searchParams] = useSearchParams();
+    const location = useLocation();
     const projectId = params.id || "";
     useCanvasProductionContext(projectId);
+    const productionContext = useProductionWorkspaceStore(state => state.context);
+    const productionRecord = useProductionWorkspaceStore(state => state.production);
+    const productionCommandBusy = useProductionWorkspaceStore(state => state.commandBusy);
     const localAgentConnected = useAgentStore((state) => state.connected);
     const localAgentActivity = useAgentStore((state) => state.activity);
     const localAgentEnabled = useAgentStore((state) => state.enabled);
-    const fragmentBootstrap = useAgentStore((state) => state.fragmentBootstrap);
     const agentPanelOpen = useAgentStore((state) => state.panelOpen);
     const toggleAgentPanel = useAgentStore((state) => state.togglePanel);
-    const openAgentPanel = useAgentStore((state) => state.openPanel);
     const containerRef = useRef<HTMLDivElement>(null);
     const canvasRectRef = useRef<{ left: number; top: number; width: number; height: number } | null>(null);
     const imageInputRef = useRef<HTMLInputElement>(null);
@@ -527,6 +538,12 @@ function InfiniteCanvasPage() {
     const [nodeImageSettingsOpen, setNodeImageSettingsOpen] = useState(false);
     const [dialogNodeId, setDialogNodeId] = useState<string | null>(null);
     const [generationLogsOpen, setGenerationLogsOpen] = useState(false);
+    const [objectHistory, setObjectHistory] = useState<ProductionObject | null>(null);
+    useEffect(() => {
+        const selected = (event: Event) => { if ((event as CustomEvent<{ canvasId: string }>).detail?.canvasId === projectId) setObjectHistory(null); };
+        window.addEventListener("production-history-selected", selected);
+        return () => window.removeEventListener("production-history-selected", selected);
+    }, [projectId]);
     const [infoNodeId, setInfoNodeId] = useState<string | null>(null);
     const [pluginManagerOpen, setPluginManagerOpen] = useState(false);
     const [cropNodeId, setCropNodeId] = useState<string | null>(null);
@@ -788,11 +805,6 @@ function InfiniteCanvasPage() {
             restoreGenerationRef.current += 1;
         };
     }, [hydrated, message, openProject, projectId, projectLoadAttempt, commitViewport]);
-
-    useEffect(() => {
-        if (!projectLoaded || !["new", "recent", "choose"].includes(searchParams.get("mode") || "")) return;
-        if (!searchParams.has("agentUrl") && !localAgentEnabled && !fragmentBootstrap) openAgentPanel();
-    }, [fragmentBootstrap, localAgentEnabled, openAgentPanel, projectLoaded, searchParams]);
 
     useEffect(() => {
         if (!dialogNodeId) setNodeImageSettingsOpen(false);
@@ -1093,7 +1105,9 @@ function InfiniteCanvasPage() {
     // The toolbar follows a single selected node selected by click, creation, marquee, or keyboard.
     // It stays hidden for multi-selection and while isNodeDragging is true.
     const singleSelectedNodeId = selectedNodeIds.size === 1 ? Array.from(selectedNodeIds)[0] : null;
-    const toolbarNode = (toolbarNodeId ? nodeById.get(toolbarNodeId) || null : null) || (singleSelectedNodeId ? nodeById.get(singleSelectedNodeId) || null : null);
+    const selectedToolbarNode = singleSelectedNodeId ? nodeById.get(singleSelectedNodeId) || null : null;
+    const selectedProductionObject = selectedToolbarNode && productionContext && productionRecord ? productionObjectForNode(productionContext, productionRecord, selectedToolbarNode, String(getPluginNodeView(projectId, selectedToolbarNode.id).getSnapshot().selectedSegmentId || "")) : null;
+    const toolbarNode = selectedProductionObject ? selectedToolbarNode : (toolbarNodeId ? nodeById.get(toolbarNodeId) || null : null) || selectedToolbarNode;
     const toolbarNodeView = getPluginNodeView(projectId, toolbarNode?.id || "__toolbar-empty__");
     const toolbarEditing = useSyncExternalStore(
         toolbarNodeView.subscribe,
@@ -1363,6 +1377,58 @@ function InfiniteCanvasPage() {
         applyAgentOps,
     });
     const pluginToolbarItems = useMemo(() => (toolbarNode ? buildNodeToolbarItems(toolbarNode) : undefined), [buildNodeToolbarItems, toolbarEditing, toolbarNode]);
+    const toolbarObject = toolbarNode && productionContext && productionRecord ? productionObjectForNode(productionContext, productionRecord, toolbarNode, String(getPluginNodeView(projectId, toolbarNode.id).getSnapshot().selectedSegmentId || "")) : null;
+    const toolbarAssetId = toolbarObject?.targetKind === "shot" ? productionRecord?.draft.director?.shotInputs[toolbarObject.targetId || ""]?.keyframeAssetId : toolbarObject?.targetId;
+    const toolbarSharedSource = toolbarAssetId ? productionRecord?.draft.director?.assets[toolbarAssetId]?.sharedSource : undefined;
+    const toolbarState = toolbarObject && productionRecord && toolbarNode ? productionObjectState(productionRecord, toolbarObject, toolbarNode) : undefined;
+    const productionActionBusy = productionCommandBusy || Boolean(toolbarState?.working);
+    const productionToolbarItems = toolbarObject ? [
+        { id: "production-edit", title: t("productionCanvas.editObject"), label: t("productionCanvas.editObject"), icon: <Pencil className="size-4" />, onClick: () => {
+            useProductionWorkspaceStore.getState().setSelectedObject(toolbarObject);
+            useProductionWorkspaceStore.getState().setPanelTab("object");
+            navigate(productionObjectPath(toolbarObject));
+            useAgentStore.getState().openPanel();
+        } },
+        { id: "production-chat", title: t("productionCanvas.discussObject"), label: t("productionCanvas.discussObject"), icon: <MessageSquare className="size-4" />, onClick: () => {
+            useProductionWorkspaceStore.getState().setSelectedObject(toolbarObject);
+            useProductionWorkspaceStore.getState().setPanelTab("director");
+            useAgentStore.getState().openPanel();
+        } },
+    ] : [];
+    const nodeAction = (action: "review" | "reject" | "source" | "generate" | "video") => {
+        if (!toolbarObject) return;
+        useProductionWorkspaceStore.getState().setSelectedObject(toolbarObject);
+        window.dispatchEvent(new CustomEvent("production-node-action", { detail: { owner: toolbarObject.owner, object: toolbarObject, action } }));
+    };
+    const productionPrimaryActions = toolbarObject ? [
+        { ...productionToolbarItems[0], title: t(toolbarSharedSource ? "productionCanvas.source" : "productionCanvas.modify"), label: t(toolbarSharedSource ? "productionCanvas.source" : "productionCanvas.modify"), onClick: toolbarSharedSource ? () => { navigate(`/canvas/${encodeURIComponent(toolbarSharedSource.sourceProjectId)}?workspace=assets&edit=1&nodeId=${encodeURIComponent(toolbarSharedSource.sourceNodeId)}&target=asset%3A${encodeURIComponent(toolbarSharedSource.assetId)}`); useProductionWorkspaceStore.getState().setPanelTab("object"); useAgentStore.getState().openPanel(); } : productionToolbarItems[0].onClick },
+        ...(toolbarObject.targetKind === "asset" || toolbarObject.targetKind === "shot" ? [
+            ...(toolbarState?.canReview && ["needs_review", "outdated"].includes(toolbarState.status) ? [{ id: "production-use", title: t("productionCanvas.useImage"), label: t("productionCanvas.useImage"), disabled: productionActionBusy, icon: <Pencil className="size-4" />, onClick: () => nodeAction("review") }] : []),
+            ...(!toolbarSharedSource ? [{ id: "production-redo", title: t(toolbarNode?.metadata?.storageKey ? "productionCanvas.redo" : "productionCanvas.generateImage"), label: t(toolbarNode?.metadata?.storageKey ? "productionCanvas.redo" : "productionCanvas.generateImage"), disabled: productionActionBusy, icon: <Pencil className="size-4" />, onClick: () => nodeAction("generate") }] : []),
+        ] : []),
+        ...(toolbarObject.targetKind === "shot" ? [{ id: "production-video", title: t("productionCanvas.generateVideo"), label: t("productionCanvas.generateVideo"), disabled: productionActionBusy, icon: <Video className="size-4" />, onClick: () => nodeAction("video") }] : []),
+        ...(toolbarObject.targetKind === "segment" ? [{ id: "production-redo-video", title: t(toolbarState?.storageKey ? "productionCanvas.redo" : "productionCanvas.generateVideo"), label: t(toolbarState?.storageKey ? "productionCanvas.redo" : "productionCanvas.generateVideo"), disabled: productionActionBusy, icon: <Video className="size-4" />, onClick: () => nodeAction("generate") }] : []),
+    ] : undefined;
+    const productionMoreActions = toolbarObject ? [
+        ...productionToolbarItems.slice(1),
+        { id: "production-history", title: t("productionCanvas.objectHistory"), label: t("productionCanvas.objectHistory"), icon: <History className="size-4" />, onClick: () => setObjectHistory(toolbarObject) },
+        { id: "production-source", title: t("productionCanvas.objectSource"), label: t("productionCanvas.objectSource"), icon: <ExternalLink className="size-4" />, onClick: toolbarSharedSource ? productionPrimaryActions![0].onClick : () => nodeAction("source") },
+        ...(toolbarState?.canReview ? [{ id: "production-reject", title: t("productionCanvas.returnImage"), label: t("productionCanvas.returnImage"), icon: <Pencil className="size-4" />, disabled: productionActionBusy, onClick: () => nodeAction("reject") }] : []),
+    ] : [];
+    useEffect(() => {
+        const node = selectedNodeIds.size === 1 ? nodesRef.current.find(node => selectedNodeIds.has(node.id)) : undefined;
+        const view = node && isH3NodeType(node.type) ? getPluginNodeView(projectId, node.id) : null;
+        let previousSegment: unknown = Symbol("initial");
+        const sync = () => {
+            const segment = view?.getSnapshot().selectedSegmentId;
+            if (segment === previousSegment) return;
+            previousSegment = segment;
+            const object = node && productionContext && productionRecord ? productionObjectForNode(productionContext, productionRecord, node, typeof segment === "string" ? segment : undefined) : null;
+            useProductionWorkspaceStore.getState().setSelectedObject(object);
+        };
+        sync();
+        return view?.subscribe(sync);
+    }, [selectedNodeIds, productionContext, productionRecord, projectId]);
     const createNode = useCallback(
         (type: CanvasNodeTypeId, position?: Position) => {
             const targetPosition = position || getCanvasCenter();
@@ -1880,8 +1946,8 @@ function InfiniteCanvasPage() {
         }
         const current = liveViewportRef.current;
         const rect = containerRef.current?.getBoundingClientRect();
-        const available = rect ? { width: rect.width, height: rect.height } : size;
-        const topInset = useProductionWorkspaceStore.getState().context?.owner ? 112 : 64;
+        const available = rect ? { width: canvasFocusWidth(rect), height: rect.height } : size;
+        const topInset = 64;
         const screen = { left: node.position.x * current.k + current.x, top: node.position.y * current.k + current.y, right: (node.position.x + node.width) * current.k + current.x, bottom: (node.position.y + node.height) * current.k + current.y };
         const isH3 = String(node.type).includes("minimax-h3");
         const view = isH3 ? getPluginNodeView(projectId, nodeId).getSnapshot() : {};
@@ -1919,7 +1985,8 @@ function InfiniteCanvasPage() {
             return node.type.includes("minimax-h3") && segments.some(item => String(item.id || "") === requestedSegmentId);
         })?.id || "" : "";
         const targetNodeId = nodeId || segmentNodeId;
-        const key = `${projectId}:${targetNodeId}:${requestedSegmentId}`;
+        // A new navigation can explicitly select the same target after the user has deselected it.
+        const key = `${location.key}:${projectId}:${targetNodeId}:${requestedSegmentId}`;
         if (!projectLoaded || !targetNodeId || deepLinkFocusRef.current === key || !nodes.some((node) => node.id === targetNodeId)) return;
         deepLinkFocusRef.current = key;
         focusNode(targetNodeId, { automatic: true });
@@ -1928,7 +1995,7 @@ function InfiniteCanvasPage() {
             view.update({ selectedSegmentId: requestedSegmentId, h3FocusRequest: Number(view.getSnapshot().h3FocusRequest || 0) + 1 });
             h3FocusTicketRef.current = { nodeId: targetNodeId, requestId: Number(view.getSnapshot().h3FocusRequest), epoch: focusEpochRef.current };
         }
-    }, [focusNode, nodes, projectId, projectLoaded, searchParams]);
+    }, [focusNode, location.key, nodes, projectId, projectLoaded, searchParams]);
 
     useEffect(() => () => void (focusAnimRef.current && cancelAnimationFrame(focusAnimRef.current)), []);
 
@@ -1956,8 +2023,8 @@ function InfiniteCanvasPage() {
             const rect = preview.getBoundingClientRect(), nodeRect = el.getBoundingClientRect(), k = liveViewportRef.current.k;
             if (rect.width <= 0 || rect.height <= 0) return;
             h3FocusTicketRef.current = null;
-            const topInset = useProductionWorkspaceStore.getState().context?.owner ? 112 : 64;
-            const target = viewportForCanvasNodes([{ ...node, position: { x: node.position.x + (rect.left - nodeRect.left) / k, y: node.position.y + (rect.top - nodeRect.top) / k }, width: rect.width / k, height: rect.height / k }], { width: viewportRect.width, height: Math.max(1, viewportRect.height - topInset) });
+            const topInset = 64;
+            const target = viewportForCanvasNodes([{ ...node, position: { x: node.position.x + (rect.left - nodeRect.left) / k, y: node.position.y + (rect.top - nodeRect.top) / k }, width: rect.width / k, height: rect.height / k }], { width: canvasFocusWidth(viewportRect), height: Math.max(1, viewportRect.height - topInset) });
             if (target) { target.y += topInset; animateFocus(target); }
         };
         const onSelectClip = (event: Event) => {
@@ -2070,6 +2137,7 @@ function InfiniteCanvasPage() {
     // Selection-only logic shared by the bubbling drag entry point and outer capture handler.
     // Returns the single target ID after the click, or null for multi-selection or deselection, to sync the toolbar.
     const selectNodeByEvent = useCallback((event: Pick<ReactMouseEvent, "shiftKey" | "metaKey" | "ctrlKey">, nodeId: string) => {
+        if (!selectedNodeIdsRef.current.has(nodeId)) window.dispatchEvent(new CustomEvent("production-manual-selection", { detail: { projectId, nodeId } }));
         const follow = useProductionFollowStore.getState();
         if (follow.presentation?.nodeId && follow.presentation.nodeId !== nodeId) {
             focusEpochRef.current++;
@@ -5913,7 +5981,6 @@ function InfiniteCanvasPage() {
         <main className="flex h-full min-h-0 overflow-hidden" style={{ background: theme.canvas.background, color: theme.node.text }}>
             <CanvasSidePanel onSelectionChange={selectCanvasNodes} projectId={projectId} nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNode} onPreviewNode={setPreviewNodeId} onInsertAsset={handleAssetInsert} />
             <section className="relative min-w-0 flex-1 overflow-hidden">
-                <div className="absolute inset-x-0 top-16 z-[55]"><CanvasProductionToolbar /></div>
                 <CanvasTopBar
                     title={currentProject?.title || t("canvas.projectPage.untitledCanvas")}
                     titleDraft={titleDraft}
@@ -6195,7 +6262,11 @@ function InfiniteCanvasPage() {
                 <CanvasNodeHoverToolbar
                     node={isNodeDragging || isNodeResizing || nodeImageSettingsOpen || expandedBatchNodeIds.has(toolbarNode?.id || "") ? null : toolbarNode}
                     viewport={viewport}
-                    extraTools={pluginToolbarItems}
+                    extraTools={[...productionMoreActions, ...(pluginToolbarItems || [])]}
+                    productionActions={productionPrimaryActions}
+                    productionStatus={toolbarState ? t(`productionCanvas.nodeStatus.${toolbarState.status}`) : undefined}
+                    productionSelected={Boolean(toolbarNode && selectedNodeIds.has(toolbarNode.id))}
+                    canvasSize={size}
                     onKeep={keepNodeToolbar}
                     onLeave={hideNodeToolbar}
                     onInfo={(node) => setInfoNodeId(node.id)}
@@ -6267,6 +6338,7 @@ function InfiniteCanvasPage() {
 
                 <CanvasZoomControls onFitAll={fitAllNodes} scale={viewport.k} onScaleChange={setZoomScale} onReset={resetViewport} isMiniMapOpen={isMiniMapOpen} onToggleMiniMap={() => setIsMiniMapOpen((value) => !value)} />
                 <CanvasGenerationLogDialog open={generationLogsOpen} projectId={projectId} onClose={() => setGenerationLogsOpen(false)} />
+                {objectHistory && <CanvasGenerationLogDialog open projectId={objectHistory.canvasId} nodeId={objectHistory.nodeId} segmentId={objectHistory.segmentId} objectTitle={objectHistory.clipIndex ? t("productionCanvas.clip", { number: objectHistory.clipIndex }) : objectHistory.title} currentStorageKey={String(productionRecord && nodes.find(node => node.id === objectHistory.nodeId) ? productionObjectState(productionRecord, objectHistory, nodes.find(node => node.id === objectHistory.nodeId)!).storageKey || "" : "")} onSelectResult={(log, output) => window.dispatchEvent(new CustomEvent("production-node-action", { detail: { owner: objectHistory.owner, object: objectHistory, action: "select-result", history: { generationLogId: log.id, storageKey: output.storageKey, mimeType: output.mimeType } } }))} onClose={() => setObjectHistory(null)} />}
 
                 {contextMenu ? (
                     <CanvasNodeContextMenu

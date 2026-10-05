@@ -25,7 +25,10 @@ export function createProjectStore(db: BackendDatabase): CanvasProjectStore {
                         const latest = db.db.prepare("SELECT id FROM drama_asset_versions WHERE drama_id=? AND asset_id=? ORDER BY rowid DESC LIMIT 1").get(source.dramaId, source.assetId);
                         return latest?.id === source.approvedId;
                     })),
-                    storyboardRequired: group.shotIds.some((id: string) => snapshot.director?.shotInputs?.[id]?.keyframeAssetId),
+                    storyboardRequired: group.shotIds.length > 0 && group.shotIds.every((id: string) => {
+                        const input = snapshot.director?.shotInputs?.[id];
+                        return input?.keyframeAssetId && input.keyframePolicy !== "none";
+                    }),
                     sourceHash: snapshot.director?.sourceHash,
                     literalDialogues: h3ExpectedDialogues(snapshot.director?.source || {}, group.shotIds),
                     promptContentHash: (() => { const artifact = snapshot.director?.artifacts?.find((item: any) => item.kind === 'h3' && item.targetId === group.id); return artifact ? createHash('sha256').update(h3PromptContent(artifact.prompt)).digest('hex') : undefined; })(),

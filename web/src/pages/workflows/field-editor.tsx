@@ -1,13 +1,16 @@
 import type { WorkflowField } from "@/types/workflow";
 
-/** RunningHub 值来源选项。constant=运行时填写，其余为注入来源。 */
+/**
+ * RunningHub 值来源。与本地 ComfyUI 的对应关系：
+ * constant ↔ 普通字段（表单填值），prompt ↔ isPrompt，image/video/audio ↔ 媒体字段。
+ * 没有「H3 参数」这一类——H3 专用 RunningHub 路径已移除，task.params 不再带 H3 参数。
+ */
 export const RH_SOURCES = [
-    { value: "constant", label: "运行时填写" },
-    { value: "prompt", label: "工作流提示词" },
-    { value: "image", label: "图片上传" },
-    { value: "video", label: "视频上传" },
-    { value: "audio", label: "音频上传" },
-    { value: "param", label: "H3 参数" },
+    { value: "constant", label: "固定值" },
+    { value: "prompt", label: "本轮提示词" },
+    { value: "image", label: "参考图片" },
+    { value: "video", label: "参考视频" },
+    { value: "audio", label: "参考音频" },
 ] as const;
 
 const label = "mb-0.5 block text-[10px] text-stone-500";
@@ -155,12 +158,7 @@ export function FieldEditor({
                     <label className="flex cursor-pointer items-center gap-2 text-[11px]">
                         <input type="checkbox" checked={field.required === true} onChange={(e) => onUpdate({ required: e.target.checked })} className="size-3" />必填
                     </label>
-                    {field.rhSource === "param" ? (
-                        <div>
-                            <label className={label}>H3 参数名</label>
-                            <input value={field.rhParamKey || ""} onChange={(e) => onUpdate({ rhParamKey: e.target.value })} className={input} placeholder="duration / seed / steps" />
-                        </div>
-                    ) : ["image", "video", "audio"].includes(field.rhSource || "") ? (
+                    {["image", "video", "audio"].includes(field.rhSource || "") ? (
                         <div>
                             <label className={label}>素材序号</label>
                             <input type="number" min={1} value={field.rhIndex ?? ""} onChange={(e) => onUpdate({ rhIndex: e.target.value === "" ? undefined : parseInt(e.target.value, 10) })} className={input} placeholder="按字段顺序" />

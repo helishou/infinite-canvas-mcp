@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 import { fetchSettings, saveSettings } from "@/services/settings-api";
+import { useAgentStore } from "@/stores/use-agent-store";
 
 export const CANVAS_SIDE_PANEL_MOTION_MS = 500;
 export const CANVAS_SIDE_PANEL_MIN_WIDTH = 220;
@@ -37,6 +38,7 @@ export const useCanvasSidePanelStore = create<CanvasSidePanelStore>((set, get) =
         saveTimer = setTimeout(() => { saveTimer = null; void saveSettings({ canvasSidePanelWidth: clamped }); }, 500);
     },
     openPanel: () => {
+        useAgentStore.getState().closePanel();
         set({ panelOpen: true, panelMounted: true, panelClosing: false });
         void saveSettings({ canvasSidePanelOpen: true });
     },
@@ -64,7 +66,7 @@ async function hydrateCanvasSidePanelSettings() {
     if (settings.canvasSidePanelWidth) {
         patch.width = Math.min(CANVAS_SIDE_PANEL_MAX_WIDTH, Math.max(CANVAS_SIDE_PANEL_MIN_WIDTH, settings.canvasSidePanelWidth));
     }
-    if (settings.canvasSidePanelOpen !== undefined) {
+    if (settings.canvasSidePanelOpen !== undefined && !/^\/canvas\/[^/]+/.test(window.location.pathname)) {
         patch.panelOpen = settings.canvasSidePanelOpen;
         patch.panelMounted = settings.canvasSidePanelOpen;
         patch.panelClosing = false;

@@ -14,7 +14,7 @@ import { RunningHubProfileActions } from "./runninghub-profile-actions";
 import { RunningHubGraphPanel } from "./runninghub-graph-panel";
 import { runningHubProfileToConfig, runningHubValuesFromForm } from "./runninghub-run-adapter";
 import { runRunningHubWorkflow, cancelRunningHubTask } from "@/services/api/runninghub";
-import { fetchRunningHubWorkflows, fetchRunningHubStatus, type RunningHubWorkflowProfile } from "@/services/api/runninghub";
+import { fetchRunningHubWorkflows, fetchRunningHubStatus, saveRunningHubWorkflow, type RunningHubWorkflowProfile } from "@/services/api/runninghub";
 import { useConfigStore } from "@/stores/use-config-store";
 import { ComfyChannelsPanel, ComfyRuntimePanel } from "./comfy-management-panels";
 import "../../styles/workflow-graph.css";
@@ -352,6 +352,26 @@ export default function WorkflowsPage() {
         handleSaveConfig(updatedConfig);
     };
 
+    /**
+     * 节点图里改的档案映射立刻落盘，行为与本地字段编辑一致。
+     * 先更新本地选中项让浮窗马上反映新状态，再 PUT 回档案；
+     * 保存失败要回滚，否则界面显示的映射和平台档案会长期不一致。
+     */
+    const handleProfileFieldsChange = async (nextFields: RunningHubWorkflowProfile["fields"]) => {
+        if (!selectedProfile) return;
+        const previous = selectedProfile;
+        const next = { ...selectedProfile, fields: nextFields };
+        setSelectedProfile(next);
+        try {
+            const { workflow } = await saveRunningHubWorkflow(next);
+            setSelectedProfile(workflow);
+            setProfiles((current) => current.map((item) => (item.id === next.id ? workflow : item)));
+        } catch (err) {
+            setSelectedProfile(previous);
+            message.error(err instanceof Error ? err.message : "保存 RunningHub 映射失败");
+        }
+    };
+
     /** 本地工作流库列表项：标题取配置标题，副标题是文件名，徽标是字段数。 */
     const libraryItems = useMemo<WorkflowLibraryItem[]>(
         () =>
@@ -422,13 +442,15 @@ export default function WorkflowsPage() {
                     </>
                 ) : (
                     <>
-                        <RunningHubProfileActions
-                            profiles={profiles}
-                            selected={selectedProfile}
-                            onChanged={fetchProfiles}
-                            onSelected={setSelectedProfile}
-                            usedByModels={usedByModels}
-                        />
+                        <div className="shrink-0 px-3 pt-2.5">
+                            <RunningHubProfileActions
+                                profiles={profiles}
+                                selected={selectedProfile}
+                                onChanged={fetchProfiles}
+                                onSelected={setSelectedProfile}
+                                usedByModels={usedByModels}
+                            />
+                        </div>
                         <WorkflowLibraryList
                             items={profileItems}
                             selectedId={selectedProfile?.id}
@@ -472,58 +494,50 @@ export default function WorkflowsPage() {
                                 </div>
                             </div>
                         ) : (
-                            <>
-                                <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
-                                    <div className="min-w-0">
-                                        <h2 className="truncate">{selectedProfile.name}</h2>
-                                        <p className="text-xs text-stone-500">
-                                            {selectedProfile.workflowId} · RunningHub 云端执行
-                                        </p>
-                                    </div>
-                                    <WorkflowWorkbench
-                                        activeTab={rhTab}
-                                        onTabChange={setRhTab}
-                                        historyCount={0}
-                                        title={<span className="text-sm font-medium">节点图 / 运行</span>}
-                                        graph={
-                                            <RunningHubGraphPanel
-                                                workflowId={selectedProfile.workflowId}
-                                                workflow={selectedProfile.workflowJson}
-                                                fields={selectedProfile.fields || []}
-                                                baseUrl={rhBaseUrl}
-                                            />
-                                        }
-                                        run={
-                                            <RunTab
-                                                config={runningHubProfileToConfig(selectedProfile)}
-                                                onRun={(form) => void handleRunProfile(form)}
-                                                running={rhRunning}
-                                                result={rhResult}
-                                                runLabel="提交到 RunningHub"
-                                                emptyText="该档案没有启用任何输入映射，点档案的「重新同步」读取字段后在运行环境配置映射"
-                                                hint="表单里的参数只影响本次运行，不会写回档案；媒体按档案里 image/video/audio 字段的顺序注入"
-                                                statusText="已提交 RunningHub，等待云端完成…"
-                                                onCancel={rhTaskId ? () => { void cancelRunningHubTask(rhTaskId); setRhRunning(false); } : undefined}
-                                                outputPicker={
-                                                    <OutputNodePicker
-                                                        graph={(selectedProfile.workflowJson || {}) as never}
-                                                        value={outputNodes}
-                                                        onChange={handleOutputNodesChange}
-                                                    />
-                                                }
-                                            />
-                                        }
-                                        history={
-                                            <RunHistoryList
-                                                entries={[]}
-                                                loading={false}
-                                                onRefresh={() => undefined}
-                                                hint="RunningHub 档案的运行历史在 Backend 任务记录里，可通过任务查询查看"
+                            <WorkflowWorkbench
+                                activeTab={rhTab}
+                                onTabChange={setRhTab}
+                                historyCount={0}
+                                title={selectedProfile.name}
+                                subtitle={`${selectedProfile.workflowId} · RunningHub 云端执行`}
+                                graph={
+                                    <RunningHubGraphPanel
+                                        workflowId={selectedProfile.workflowId}
+                                        workflow={selectedProfile.workflowJson}
+                                        fields={selectedProfile.fields || []}
+                                        baseUrl={rhBaseUrl}
+                                        onFieldsChange={(next) => void handleProfileFieldsChange(next)}
+                                    />
+                                }
+                                run={
+                                    <RunTab
+                                        config={runningHubProfileToConfig(selectedProfile)}
+                                        onRun={(form) => void handleRunProfile(form)}
+                                        running={rhRunning}
+                                        result={rhResult}
+                                        runLabel="提交到 RunningHub"
+                                        emptyText="该档案没有启用任何输入映射，点档案的「重新同步」读取字段后在运行环境配置映射"
+                                        hint="表单里的参数只影响本次运行，不会写回档案；媒体按档案里 image/video/audio 字段的顺序注入"
+                                        statusText="已提交 RunningHub，等待云端完成…"
+                                        onCancel={rhTaskId ? () => { void cancelRunningHubTask(rhTaskId); setRhRunning(false); } : undefined}
+                                        outputPicker={
+                                            <OutputNodePicker
+                                                graph={(selectedProfile.workflowJson || {}) as never}
+                                                value={outputNodes}
+                                                onChange={handleOutputNodesChange}
                                             />
                                         }
                                     />
-                                </div>
-                            </>
+                                }
+                                history={
+                                    <RunHistoryList
+                                        entries={[]}
+                                        loading={false}
+                                        onRefresh={() => undefined}
+                                        hint="RunningHub 档案的运行历史在 Backend 任务记录里，可通过任务查询查看"
+                                    />
+                                }
+                            />
                         )}
                     </div>
                     {libraryColumn}

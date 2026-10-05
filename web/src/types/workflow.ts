@@ -1,7 +1,7 @@
 export type WorkflowFieldType = 'text' | 'number' | 'slider' | 'boolean' | 'dropdown' | 'image' | 'audio' | 'video';
 
-/** RunningHub 的值来源：constant=运行时填写，其余表示由提示词/素材/H3 参数注入。 */
-export type WorkflowFieldSource = 'constant' | 'prompt' | 'image' | 'video' | 'audio' | 'param';
+/** RunningHub 的值来源：constant=固定值，其余表示由提示词/素材注入。 */
+export type WorkflowFieldSource = 'constant' | 'prompt' | 'image' | 'video' | 'audio';
 
 /**
  * 字段模型只有这一份，本地 ComfyUI 与 RunningHub 共用。
@@ -25,8 +25,6 @@ export type WorkflowField = {
     required?: boolean;
     /** RunningHub 值来源。undefined 表示本地 ComfyUI 字段（不显示来源控件）。 */
     rhSource?: WorkflowFieldSource;
-    /** rhSource=param 时的 H3 参数名。 */
-    rhParamKey?: string;
     /** 素材字段的序号（1 起）。 */
     rhIndex?: number;
 };

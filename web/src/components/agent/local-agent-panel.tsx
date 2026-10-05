@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { App, Button, Tooltip } from "antd";
 import dayjs from "dayjs";
-import { Bot, History, MessageSquare, PanelRightClose, PlugZap, Plus, Sparkles, Terminal } from "lucide-react";
+import { Bot, History, LocateFixed, MessageSquare, Minus, PanelRightClose, PlugZap, Plus, Sparkles, Terminal } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
@@ -25,6 +25,8 @@ import { useBackendStore } from "@/stores/use-backend-store";
 import { discoverBackendToken, editEpisodeProduction, fetchEpisodeProduction, fetchProductionReadiness } from "@/services/backend-api";
 import { productionPresentationPath, productionTarget } from "@/lib/production-navigation";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
+import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
+import { productionObjectForPresentation, productionObjectPath, productionObjectPrompt } from "@/lib/production-object";
 import { type CanvasAgentOp, type CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 import { isSiteTool, runSiteTool } from "@/lib/agent/agent-site-tools";
 import { acknowledgeCodexHistory, activateAgentClient, AgentApiError, fetchAgentJson, interruptCodexTurn, postCodexApproval, postState, postToolResult } from "@/services/api/canvas-agent";
@@ -127,7 +129,7 @@ function conversationBootstrapView(conversation: AgentConversationState) {
     return { bootstrapStatus, mcpStartupStatuses };
 }
 
-export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?: boolean; headless?: boolean; autoConnect?: boolean }) {
+export function LocalAgentPanel({ embedded, headless, autoConnect, compact }: { embedded?: boolean; headless?: boolean; autoConnect?: boolean; compact?: boolean }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { message, modal } = App.useApp();
@@ -174,6 +176,14 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
     const productionFollow = useProductionFollowStore(state => state.target);
     const productionPresentation = useProductionFollowStore(state => state.presentation);
     const followingProduction = useProductionFollowStore(state => state.following);
+    const draftObject = useAgentStore(state => state.productionDraftObject);
+    const turnObject = useAgentStore(state => state.productionTurnObject);
+    const unscopedDraft = useAgentStore(state => !state.productionDraftObject && Boolean(state.prompt.trim() || state.attachments.length || state.canvasReferences.length));
+    const hasCanvasSelection = useAgentStore(state => Boolean(state.canvasContext?.snapshot.selectedNodeIds.length));
+    const selectedObject = useProductionWorkspaceStore(state => state.selectedObject);
+    const workspacePresentation = useProductionWorkspaceStore(state => state.readiness?.presentation);
+    const workspaceProduction = useProductionWorkspaceStore(state => state.production);
+    const chatObject = draftObject || ((sending || waiting) ? turnObject : null) || (!unscopedDraft ? selectedObject || (!hasCanvasSelection && workspacePresentation ? productionObjectForPresentation(workspacePresentation, workspaceProduction) : null) : null);
     const conversationReady = conversation.status === "ready" || conversation.status === "warning";
     const conversationCanAcceptInput = conversationReady || conversation.status === "running";
     const conversationBusy = conversation.status === "preparing" || conversation.status === "running";
@@ -661,7 +671,15 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             setAgentState({ canvasReferences });
             message.warning(rt(canvasReferences.length ? "someCanvasReferencesMissing" : "canvasReferencesMissing"));
         }
-        const requestPrompt = scopedTaskInput ? text : promptWithCanvasReferences(promptWithAttachments(launch ? creativeLaunchPrompt(launch) : text, files), canvasReferences);
+        const workspace = useProductionWorkspaceStore.getState();
+        const hasDraft = Boolean(currentState.prompt.trim() || currentState.attachments.length || currentState.canvasReferences.length);
+        const object = !scopedTaskInput && !launch ? currentState.productionDraftObject || (!hasDraft ? workspace.selectedObject || (workspace.readiness?.presentation ? productionObjectForPresentation(workspace.readiness.presentation, workspace.production) : null) : null) : null;
+        if (object && object.canvasId !== currentState.canvasContext?.snapshot.projectId) {
+            message.warning(t("productionCanvas.returnToDraft"));
+            return false;
+        }
+        const basePrompt = scopedTaskInput ? text : promptWithCanvasReferences(promptWithAttachments(launch ? creativeLaunchPrompt(launch) : text, files), canvasReferences);
+        const requestPrompt = object ? `${basePrompt}\n\n${productionObjectPrompt(object)}` : basePrompt;
         if (!currentState.connected || !requestPrompt || currentState.sending || currentState.waiting || currentState.loadingThreads || !["ready", "warning"].includes(currentState.conversation.status) || ((launch || scopedTaskInput) && !selectedSkill)) return false;
         let referenceImages: AgentAttachment[] = [];
         if (canvasReferences.some((item) => item.kind === "image")) {
@@ -697,7 +715,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
         loadThreadsSequenceRef.current += 1;
         const currentBeforeSend = useAgentStore.getState();
         const requestThreadId = currentBeforeSend.activeThreadId;
-        setAgentState({ ...(scopedTaskInput ? {} : { prompt: "", attachments: [], canvasReferences: [] }), activity: rt("sending"), sending: true, loadingThreads: false, activeTurnId: "", messages: currentBeforeSend.messages });
+        setAgentState({ ...(scopedTaskInput ? {} : { prompt: "", attachments: [], canvasReferences: [] }), productionTurnObject: object, activity: rt("sending"), sending: true, loadingThreads: false, activeTurnId: "", messages: currentBeforeSend.messages });
         addMessage({ id: messageId, itemId: "synthetic:user", clientMessageId: messageId, threadId: requestThreadId, turnId: "", role: "user", text: userText, attachments: files, canvasReferences: messageReferences, skill: messageSkill });
         let threadId = scopedTaskInput?.threadId || requestThreadId;
         try {
@@ -751,7 +769,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                 if (next.length !== messages.length) threadMessagesRef.current.set(cachedThreadId, next);
             });
             const ownsCurrentThread = state.activeThreadId === (threadId || requestThreadId);
-            const restoreDraft = scopedTaskInput || state.prompt || state.attachments.length || state.canvasReferences.length ? {} : { prompt, attachments: files, canvasReferences };
+            const restoreDraft = scopedTaskInput || state.prompt || state.attachments.length || state.canvasReferences.length ? {} : { prompt, attachments: files, canvasReferences, productionDraftObject: object };
             if (scopedTaskInput) setAgentState({ scopedTask: null, scopedTaskResult: { id: scopedTaskInput.id, status: "failed", threadId: threadId || undefined, error: text } });
             if (ownsCurrentThread) {
                 setAgentState({
@@ -1468,7 +1486,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
     const connectionStatusColor = connectError ? "#dc2626" : connected ? "#16a34a" : enabled ? "#d97706" : theme.node.muted;
     const content = (
         <>
-            {productionFollow && <div className="flex min-w-0 items-center justify-between gap-2 border-b px-3 py-2 text-xs" style={{ borderColor: theme.node.stroke, background: theme.node.panel }}>
+            {!compact && productionFollow && <div className="flex min-w-0 items-center justify-between gap-2 border-b px-3 py-2 text-xs" style={{ borderColor: theme.node.stroke, background: theme.node.panel }}>
                 <div className="min-w-0"><p className="font-medium">{t("productionHub.follow.current")}</p><p className="truncate text-[11px] opacity-75">{productionPresentation?.reason || productionPresentation?.targetId || productionFollow.id || productionFollow.workId}</p></div>
                 <Button size="small" type="text" onClick={() => followingProduction ? useProductionFollowStore.getState().pause("用户手动暂停自动跟随") : useProductionFollowStore.getState().resume()}>{followingProduction ? t("productionHub.follow.pause") : t("productionHub.follow.return")}</Button>
             </div>}
@@ -1480,7 +1498,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                         <span className="grid size-8 place-items-center">
                             <Bot className="size-4" />
                         </span>
-                        <div className="hidden text-base font-semibold leading-5 @min-[560px]:block">Agent</div>
+                        <div className={compact ? "text-sm font-medium" : "hidden text-base font-semibold leading-5 @min-[560px]:block"}>{compact ? t("productionCanvas.director") : "Agent"}</div>
                         <Tooltip title={t("agent.panel.connectionSettings", { status: connectionStatus })} placement="bottom">
                             <Button size="small" type="text" className="!h-8 !w-8 !min-w-8 !px-0 @min-[560px]:!w-auto @min-[560px]:!min-w-0 @min-[560px]:!px-[7px]" aria-label={t("agent.panel.connectionSettingsLabel", { status: connectionStatus })} icon={<PlugZap className="size-3.5" style={{ color: connectionStatusColor }} />} onClick={() => setAgentState({ activeTab: "setup" })}>
                                 <span className="hidden @min-[560px]:inline">{connectionStatus}</span>
@@ -1506,11 +1524,18 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                             </Button>
                         </Tooltip>
                         <Tooltip title={t("agent.panel.collapse")}>
-                            <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" aria-label={t("agent.panel.collapseLabel")} style={{ color: theme.node.muted }} icon={<PanelRightClose className="size-4" />} onClick={closePanel} />
+                            <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" aria-label={t("agent.panel.collapseLabel")} style={{ color: theme.node.muted }} icon={compact ? <Minus className="size-4" /> : <PanelRightClose className="size-4" />} onClick={closePanel} />
                         </Tooltip>
                     </>
                 }
             />
+
+            {compact && chatObject && <div className="shrink-0 px-3 pt-3"><button type="button" className="inline-flex max-w-full items-center gap-2 rounded-md border px-2 py-1.5 text-xs" style={{ color: theme.node.text, borderColor: theme.node.stroke, background: theme.toolbar.panel }} aria-label={t("productionCanvas.locateChatObject")} onClick={() => {
+                const path = productionObjectPath(chatObject);
+                useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"));
+                navigate(path);
+                closePanel();
+            }}><span className="min-w-0 truncate">{chatObject.targetKind === "segment" ? chatObject.clipIndex ? t("productionCanvas.h3Context", { number: chatObject.clipIndex }) : t("productionCanvas.videoTarget") : chatObject.title || t("productionCanvas.object")}</span><LocateFixed className="size-3.5 shrink-0" /></button></div>}
 
             {activeTab === "setup" ? (
                 <AgentConnectView
@@ -1564,7 +1589,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                             ? t("agent.panel.mcpInitializing")
                             : conversation.status === "failed"
                                 ? t("agent.panel.initFailed")
-                                : t("agent.panel.placeholder")}
+                                : t(compact ? "productionCanvas.chatPlaceholder" : "agent.panel.placeholder")}
                         theme={theme}
                         onPromptChange={(prompt) => setAgentState({ prompt })}
                         onSubmit={sendPrompt}

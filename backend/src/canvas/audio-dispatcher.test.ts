@@ -33,10 +33,12 @@ test("本地 IndexTTS 音频通过 ComfyUI 执行且不读取 API Key", async (t
         return stores.tasks.get(id)!;
     }, cancel: () => {} };
     const dispatcher = new CanvasAudioDispatcher(stores, undefined, comfy as never);
-    dispatcher.start({ projectId: "p", nodeId: "config", model: "local::IndexTTS 2.5 配音", prompt: "你好", speed: "1.25", executor: "comfyui", referenceAudio: "C:/media/reference.wav", clientTaskId: "canvas-audio-local" });
+    dispatcher.start({ projectId: "p", nodeId: "config", model: "local::IndexTTS 2.5 配音", prompt: "你好", voice: "温暖女声", format: "wav", speed: "1.25", instructions: "自然、温柔", params: { emotion: "calm" }, executor: "comfyui", referenceAudio: "C:/media/reference.wav", clientTaskId: "canvas-audio-local" });
     for (let index = 0; index < 20 && ["queued", "running"].includes(db.getTask("canvas-audio-local")!.status); index++) await new Promise((resolve) => setTimeout(resolve, 5));
-    assert.deepEqual(received, { preset: "indextts-2.5", input: { prompt: "你好", referenceAudio: "C:/media/reference.wav" }, params: { speed: "1.25" } });
+    assert.deepEqual(received, { preset: "indextts-2.5", input: { prompt: "你好", referenceAudio: "C:/media/reference.wav" }, params: { emotion: "calm", speed: "1.25" } });
     assert.equal(db.getTask("canvas-audio-local")!.status, "succeeded");
+    const log = stores.logs.list({ runtimeTaskId: "canvas-audio-local" })[0];
+    assert.deepEqual(log?.params.generationSettings, { emotion: "calm", voice: "温暖女声", format: "wav", speed: "1.25", instructions: "自然、温柔", executor: "comfyui" });
 });
 
 test("音频取消后提供方迟到成功不回写画布", async (t: TestContext) => {
@@ -52,6 +54,7 @@ test("音频取消后提供方迟到成功不回写画布", async (t: TestContex
     dispatcher.start({ projectId: "p", nodeId: "config", model: "cloud::tts", prompt: "你好", clientTaskId: "canvas-audio-late" });
     await new Promise((resolve) => setImmediate(resolve));
     dispatcher.cancel("canvas-audio-late");
+    assert.equal(db.listGenerationLogs({ runtimeTaskId: "canvas-audio-late" })[0]?.status, "cancelled");
     const before = db.getCanvasProject("p");
     stores.tasks.update("audio-child-canvas-audio-late", {
         status: "succeeded",

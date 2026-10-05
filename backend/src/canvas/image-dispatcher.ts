@@ -29,6 +29,7 @@ import {
 } from "./executor-registry.js";
 import { prepareCanvasGenerationTarget } from "./generation-target.js";
 import { commandFingerprint } from "./collaboration.js";
+import { generationSettingsSnapshot } from "./generation-settings.js";
 
 export type CanvasImageReference = {
   id?: string;
@@ -206,6 +207,14 @@ export class CanvasImageDispatcher {
               normalized.size ||
               `${normalized.width || 1024}x${normalized.height || 1024}`,
             quality: normalized.quality || "auto",
+            generationSettings: generationSettingsSnapshot(normalized.params, {
+              size: normalized.size || `${normalized.width || 1024}x${normalized.height || 1024}`,
+              ...(normalized.width ? { width: normalized.width } : {}),
+              ...(normalized.height ? { height: normalized.height } : {}),
+              quality: normalized.quality || "auto",
+              count: Math.max(1, Math.min(4, Math.floor(normalized.count || 1))),
+              executor: plan.executor,
+            }, plan.workflow ? this.workflows.getConfig(plan.workflow)?.fields || [] : []),
             ...(normalized.loopInputImages?.length ? { loopInputImages: normalized.loopInputImages.map((image) => ({ name: image.name, mimeType: image.mimeType, storageKey: image.storageKey, url: image.url })) } : {}),
           },
         }).id

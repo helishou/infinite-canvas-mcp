@@ -45,6 +45,10 @@ test("单独运行下一段追加尾帧参考，保留保存模式且不启用�
     assert.equal((log.params.submission as Record<string, any>).authoredPrompt, "The next shot follows its own camera plan.");
     assert.equal((log.params.submission as Record<string, any>).continuation.requestedMode, "t2v");
     assert.equal((log.params.submission as Record<string, any>).continuation.runtimeMode, "ref2va");
+    const generationSettings = log.params.generationSettings as Record<string, unknown>;
+    assert.equal(generationSettings.mode, "ref2va");
+    assert.equal(generationSettings.motionContextEnabled, false);
+    assert.equal(generationSettings.workflow, "MiniMax H3");
     const next = (stores.projects.get("tail-project")!.nodes as any[])[0].metadata.segments[1];
     assert.equal(next.mode, "t2v");
     assert.equal(next.prompt, "The next shot follows its own camera plan.");

@@ -4,6 +4,9 @@ import type { CanvasOperation, CanvasOperationResult } from "./project-ops.js";
 export type CanvasCommandContext = {
     /** 仅限进程内任务执行器传入；HTTP/MCP 入参不得透传此权限。 */
     runtimeWrite?: boolean;
+    /** Trusted production commands may include canvas ops in their outer transaction. Never accept from HTTP/MCP. */
+    withinTransaction?: boolean;
+    deferredCommits?: CanvasCommit[];
     operationId?: string;
     source?: Record<string, unknown>;
     /** 与旧 expectedRevision 的整图 CAS 分离：新协议按写入字段检查并发。 */

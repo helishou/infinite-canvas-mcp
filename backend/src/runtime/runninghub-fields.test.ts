@@ -37,7 +37,7 @@ test("映射发现只列可填写输入，连线输入不会变成可覆写字�
     assert.equal(fields.find((field) => field.nodeId === "38" && field.fieldName === "device")?.fieldType, "text");
 });
 
-test("保存映射时拒绝重复目标、缺节点字段和缺参数名的映射", () => {
+test("保存映射时拒绝重复目标、缺节点字段和失效来源的映射", () => {
     const backend = new RunningHubBackend(fakeTasks(), fakeSettings());
     const base = { id: "p1", name: "测试", workflowId: "2104986810811240449" };
     assert.throws(
@@ -52,13 +52,32 @@ test("保存映射时拒绝重复目标、缺节点字段和缺参数名的映�
         () => backend.saveWorkflowProfile({ ...base, fields: [{ nodeId: "", fieldName: "image", enabled: true }] }),
         /nodeId/,
     );
+    // source=param 随 H3 专用路径一起移除，不能再作为可写入来源。
     assert.throws(
-        () => backend.saveWorkflowProfile({ ...base, fields: [{ nodeId: "6", fieldName: "seed", enabled: true, source: "param" }] }),
-        /参数名/,
+        () => backend.saveWorkflowProfile({ ...base, fields: [{ nodeId: "6", fieldName: "seed", enabled: true, source: "param" as never, paramKey: "seed" }] }),
+        /来源无效/,
     );
-    const saved = backend.saveWorkflowProfile({ ...base, fields: [{ nodeId: "6", fieldName: "seed", enabled: true, source: "param", paramKey: "seed" }] });
+    const saved = backend.saveWorkflowProfile({ ...base, fields: [{ nodeId: "6", fieldName: "seed", enabled: true, source: "constant", fieldValue: 42 }] });
     assert.equal(backend.listWorkflowProfiles().length, 1, "合法映射应能落盘");
-    assert.equal(saved.fields[0].paramKey, "seed");
+    assert.equal(saved.fields[0].fieldValue, 42);
+});
+
+test("老档案里的 source=param 降级成 constant，档案不会整个读不出来", () => {
+    const backend = new RunningHubBackend(fakeTasks(), fakeSettings());
+    const settings = backend as unknown as { settings: { set: (k: string, v: unknown) => void } };
+    settings.settings.set("runninghub.workflows", [{
+        id: "old", name: "老档案", workflowId: "123",
+        fields: [
+            { nodeId: "6", fieldName: "seed", enabled: true, source: "param", paramKey: "seed", fieldValue: 7 },
+            { nodeId: "7", fieldName: "value", enabled: true, source: "prompt" },
+        ],
+    }]);
+    const profiles = backend.listWorkflowProfiles();
+    assert.equal(profiles.length, 1, "老档案必须还能被读到，否则列表里静默消失");
+    assert.equal(profiles[0].fields[0].source, "constant", "param 应降级成 constant");
+    assert.equal(profiles[0].fields[0].paramKey, undefined, "paramKey 不该留下");
+    assert.equal(profiles[0].fields[0].fieldValue, 7, "固定值必须保留");
+    assert.equal(profiles[0].fields[1].source, "prompt", "其它来源不受影响");
 });
 
 test("正向与负面提示词各取自己的值，不被同一个 input.prompt 覆盖", async () => {

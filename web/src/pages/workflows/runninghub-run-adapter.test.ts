@@ -21,8 +21,8 @@ const profile: RunningHubWorkflowProfile = {
         { nodeId: "12", fieldName: "prompt", source: "prompt", fieldType: "text", label: "正向提示词", enabled: true },
         { nodeId: "49", fieldName: "image", source: "image", fieldType: "image", label: "首帧", enabled: true, index: 1 },
         { nodeId: "51", fieldName: "image", source: "image", fieldType: "image", label: "尾帧", enabled: true, index: 2 },
-        { nodeId: "60", fieldName: "duration", source: "param", paramKey: "duration", fieldValue: 5, fieldType: "number", enabled: true },
-        { nodeId: "61", fieldName: "cfg", source: "param", paramKey: "cfg", fieldValue: 0.5, fieldType: "slider", enabled: true },
+        { nodeId: "60", fieldName: "duration", source: "constant", fieldValue: 5, fieldType: "number", enabled: true },
+        { nodeId: "61", fieldName: "cfg", source: "constant", fieldValue: 0.5, fieldType: "slider", enabled: true },
         { nodeId: "62", fieldName: "vae_name", source: "constant", fieldValue: "h3_vae.safetensors", fieldType: "text", enabled: false },
     ],
 };
@@ -30,8 +30,8 @@ const profile: RunningHubWorkflowProfile = {
 test("启用字段才进入运行表单，禁用字段保留在档案里不参与提交", () => {
     const config = runningHubProfileToConfig(profile);
     const ids = config.fields.map((field) => field.id);
-    assert.deepEqual(ids, ["prompt", "image", "image", "duration", "cfg"]);
-    assert.equal(ids.includes("vae_name"), false);
+    assert.deepEqual(ids, ["12::prompt", "49::image", "51::image", "60::duration", "61::cfg"]);
+    assert.equal(ids.includes("62::vae_name"), false);
 });
 
 test("source=prompt 标为 isPrompt，生成时注入提示词正文", () => {
@@ -40,14 +40,15 @@ test("source=prompt 标为 isPrompt，生成时注入提示词正文", () => {
     assert.equal(field?.type, "text");
 });
 
-test("source=param 用 paramKey 作字段 id，填写的值原样回到平台节点", () => {
+test("固定值字段 id 用 nodeId::fieldName，同节点两个输入不会撞车", () => {
     const duration = runningHubFieldToLocal(profile.fields[3]);
     const cfg = runningHubFieldToLocal(profile.fields[4]);
-    assert.equal(duration?.id, "duration");
+    assert.equal(duration?.id, "60::duration");
     assert.equal(duration?.input, "duration");
     assert.equal(duration?.default, 5);
-    assert.equal(cfg?.id, "cfg");
+    assert.equal(cfg?.id, "61::cfg");
     assert.equal(cfg?.type, "slider");
+    assert.notEqual(runningHubFieldToLocal(profile.fields[1])?.id, runningHubFieldToLocal(profile.fields[2])?.id, "首帧与尾帧必须是两个字段");
 });
 
 test("媒体字段不填默认值，避免用档案旧图覆盖本次请求", () => {

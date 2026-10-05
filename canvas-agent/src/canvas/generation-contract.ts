@@ -8,6 +8,13 @@ export type H3ExecutionPreview = {
 };
 
 export const h3ExecutionModeSchema = z.enum(["auto", "local", "runninghub"]);
+/**
+ * 值来源：constant=固定值（表单填），prompt=本轮提示词，image/video/audio=按序注入参考素材。
+ * 没有 H3 参数这一类——H3 专用 RunningHub 路径已移除（commit be2388ad），
+ * task.params 再也不会带 H3 参数，param 映射运行必失败，所以不再作为可写入值。
+ * paramKey 同理：保留 zod 读取兼容，老档案里已存的 param 映射能解析出来并降级成
+ * constant（见 runninghub.ts 的 normalizeRunningHubFieldSources），不会整个档案读不出来。
+ */
 export const runningHubFieldSchema = z.object({
   id: z.string().optional(), nodeId: z.string().min(1), fieldName: z.string().min(1),
   fieldValue: z.unknown().optional(), fieldType: z.string().optional(), label: z.string().optional(),

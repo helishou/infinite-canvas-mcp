@@ -11,9 +11,12 @@ const examples: Record<string, unknown> = {
     patch_director_source: { entity: "asset", id: "character-1", patch: { description: "Authored character appearance." } },
     set_director_workflow: { patch: { mediaProductionMode: "per_item" } },
     bind_director_asset: { assetId: "character-1", nodeId: "image-1" },
+    adopt_shared_asset: { assetId: "character-1", approvedId: "approved-version-1", nodeId: "shared-reference-1" },
+    bind_director_segment: { targetId: "SEG001", nodeId: "h3-1", segmentId: "clip-1" },
     set_director_boundary: { boundary: { from: "SEG001", to: "SEG002", tailFrame: true, motionContext: false, reason: "Continue the held state." } },
     set_director_segment_group: { segmentId: "SEG001", shotIds: ["shot-1"] },
     review_director_asset: { assetId: "character-1", version: 1, sourceHash: "0".repeat(64), nodeId: "image-1", storageKey: "media-1", sha256: "0".repeat(64), verdict: "approved", evidence: "Compared appearance against the reference." },
+    select_director_result: { targetKind: "asset", targetId: "character-1", nodeId: "image-1", generationLogId: "log-1", storageKey: "media-1", canvasRevision: 0 },
     upsert_scene: { scene }, delete_scene: { id: scene.id }, reorder_scenes: { ids: [scene.id] },
     upsert_script_block: { sceneId: scene.id, block }, delete_script_block: { sceneId: scene.id, id: block.id }, reorder_script_blocks: { sceneId: scene.id, ids: [block.id] },
     upsert_shot: { shot: { id: "shot-1", sceneId: scene.id, title: "Arrival", duration: 5, visual: "The traveller enters.", camera: "Static", openingState: "Door closed", endingState: "Door open", sound: "Door creaks", assetNodeIds: [], keyframePolicy: "none" } },
@@ -35,6 +38,7 @@ export function productionOperationContract(operationType?: string) {
             const type = option.shape.type.value;
             return { type, example: option.parse({ type, ...examples[type] as object }), preconditions: type === "patch_director_source"
                 ? ["Director exists; scene/asset/shot/segment require an existing stable ID; patch uses allowed fields; brief/style accept no ID; brief accepts only string value."]
+                : type === "select_director_result" ? ["Successful archived output must belong to the original formal task and exact node/Clip; both revisions must match; active generation and shared reference replacement are rejected. Images require review after selection. No media generation or prompt/timeline replacement occurs."]
                 : type === "set_director_production" ? ["Example is schema-valid only; replace hashes and engine with actual validated receipts."]
                 : ["Target IDs, ownership, revision and production stage are checked against the current production."] };
         }),

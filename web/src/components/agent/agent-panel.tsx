@@ -1,93 +1,98 @@
-import { lazy, Suspense, useEffect, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { motion } from "motion/react";
+import { lazy, Suspense, useEffect } from "react";
+import { Badge, Button, Modal } from "antd";
+import { LoaderCircle, MessageSquare } from "lucide-react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-
 import { LocalAgentPanel } from "./local-agent-panel";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { CANVAS_AGENT_PANEL_MOTION_MS, useAgentStore } from "@/stores/use-agent-store";
+import { productionObjectForPresentation } from "@/lib/production-object";
+import { useAgentStore } from "@/stores/use-agent-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
-const ProductionEditor = lazy(() => import("@/pages/drama/production").then(module => ({ default: module.ProductionEditor })));
+import { useProductionFollowStore } from "@/stores/use-production-follow-store";
+import { useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
 
-const PANEL_MOTION_SECONDS = CANVAS_AGENT_PANEL_MOTION_MS / 1000;
+const ProductionEditor = lazy(() => import("@/pages/drama/production").then(module => ({ default: module.ProductionEditor })));
 
 export function AgentPanel() {
     const { t } = useTranslation();
-    const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    const width = useAgentStore((state) => state.width);
-    const [resizing, setResizing] = useState(false);
-    const panelMounted = useAgentStore((state) => state.panelMounted);
-    const panelOpen = useAgentStore((state) => state.panelOpen);
-    const panelClosing = useAgentStore((state) => state.panelClosing);
-    const setAgentState = useAgentStore((state) => state.setAgentState);
-    const closePanel = useAgentStore((state) => state.closePanel);
-    const owner = useProductionWorkspaceStore(state => state.context?.owner);
+    const { pathname, search } = useLocation();
+    const navigate = useNavigate();
+    const theme = canvasThemes[useThemeStore(state => state.theme)];
+    const panelOpen = useAgentStore(state => state.panelOpen);
+    const panelMounted = useAgentStore(state => state.panelMounted);
+    const busy = useAgentStore(state => state.sending || state.waiting);
+    const approvalCount = useAgentStore(state => state.pendingApprovals.length + (state.pendingTool ? 1 : 0));
+    const closePanel = useAgentStore(state => state.closePanel);
+    const context = useProductionWorkspaceStore(state => state.context);
+    const production = useProductionWorkspaceStore(state => state.production);
+    const readiness = useProductionWorkspaceStore(state => state.readiness);
     const panelTab = useProductionWorkspaceStore(state => state.panelTab);
-    const [narrow, setNarrow] = useState(() => typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches);
+    const selectedObject = useProductionWorkspaceStore(state => state.selectedObject);
+    const recoveryPending = useProductionWorkspaceStore(state => state.recoveryPending);
+    const followTarget = useProductionFollowStore(state => state.target);
+    const following = useProductionFollowStore(state => state.following);
+    const pending = useProductionFollowStore(state => state.pendingPresentation);
+    const presentation = useProductionFollowStore(state => state.presentation);
+    const canvasPage = /^\/canvas\/[^/]+/.test(pathname);
+    const owner = canvasPage ? context?.owner : undefined;
+    const objectOpen = Boolean(owner && panelOpen && panelTab === "object");
+    const scriptOpen = new URLSearchParams(search).get("workspace") === "story";
+    const tasksOpen = new URLSearchParams(search).get("workspace") === "production" && !new URLSearchParams(search).has("target");
+    const objectTitle = tasksOpen ? t("productionCanvas.tasks") : selectedObject?.targetKind === "segment" && selectedObject.clipIndex ? t("productionCanvas.clip", { number: selectedObject.clipIndex }) : selectedObject?.title;
+    const chatOpen = panelOpen && !objectOpen;
+    const current = readiness?.presentation || (presentation?.canvasId === context?.canvasId ? presentation : null);
+    const currentObject = current && productionObjectForPresentation(current, production);
+    const label = currentObject?.targetKind === "segment" ? currentObject.clipIndex ? t("productionCanvas.clip", { number: currentObject.clipIndex }) : t("productionCanvas.videoTarget") : currentObject?.title;
+
+    useEffect(() => {
+        if (panelOpen) useCanvasSidePanelStore.getState().closePanel();
+    }, [panelOpen]);
     useEffect(() => {
         const media = window.matchMedia("(max-width: 767px)");
-        const update = () => setNarrow(media.matches);
-        update();
-        media.addEventListener("change", update);
-        return () => media.removeEventListener("change", update);
-    }, []);
+        const sync = () => useProductionFollowStore.getState().setGuardReason("director-popup", chatOpen && canvasPage && media.matches ? t("productionCanvas.chatCoversCanvas") : "");
+        sync(); media.addEventListener("change", sync);
+        return () => { media.removeEventListener("change", sync); useProductionFollowStore.getState().setGuardReason("director-popup", ""); };
+    }, [chatOpen, canvasPage, t]);
     useEffect(() => {
-        if (!narrow || !panelOpen) return;
-        const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") closePanel(); };
-        window.addEventListener("keydown", closeOnEscape);
-        return () => window.removeEventListener("keydown", closeOnEscape);
-    }, [narrow, panelOpen, closePanel]);
-    const startResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
-        event.preventDefault();
-        const startX = event.clientX;
-        const startWidth = width;
-        let nextWidth = startWidth;
-        const onMove = (moveEvent: PointerEvent) => {
-            nextWidth = Math.min(760, Math.max(360, startWidth + startX - moveEvent.clientX));
-            setAgentState({ width: nextWidth });
+        if (!panelOpen) return;
+        const onEscape = (event: KeyboardEvent) => {
+            if (event.key === "Escape" && !objectOpen && !document.querySelector('.ant-modal-wrap:not(.ant-modal-hidden)')) closePanel();
         };
-        const onUp = () => {
-            window.removeEventListener("pointermove", onMove);
-            window.removeEventListener("pointerup", onUp);
-            setResizing(false);
-        };
-        setResizing(true);
-        window.addEventListener("pointermove", onMove);
-        window.addEventListener("pointerup", onUp);
-    };
+        window.addEventListener("keydown", onEscape);
+        return () => window.removeEventListener("keydown", onEscape);
+    }, [panelOpen, objectOpen, closePanel]);
 
-    return (
-        <motion.div
-            className={narrow ? "fixed inset-0 z-[70] flex h-dvh items-end justify-center" : "relative z-[70] flex h-full shrink-0"}
-            initial={{ width: 0, opacity: 0 }}
-            animate={{ width: panelOpen ? (narrow ? window.innerWidth : width + 1) : 0, opacity: panelOpen ? 1 : 0 }}
-            transition={{ duration: resizing ? 0 : PANEL_MOTION_SECONDS, ease: [0.22, 1, 0.36, 1] }}
-            onClick={event => { if (narrow && event.target === event.currentTarget) closePanel(); }}
-            style={{ overflow: "clip", maxWidth: "100dvw", pointerEvents: panelOpen && !panelClosing ? undefined : "none", background: narrow && panelOpen ? "rgba(0,0,0,.48)" : "transparent" }}
-        >
-            <motion.aside
-                className={`relative flex shrink-0 flex-col border-l ${narrow ? "max-h-[88dvh] self-end rounded-t-2xl border-l-0 border-t" : "h-full"}`}
-                data-canvas-shortcuts-ignore
-                role={narrow && panelOpen ? "dialog" : undefined}
-                aria-modal={narrow && panelOpen ? true : undefined}
-                aria-label={narrow && panelOpen ? "Agent" : undefined}
-                aria-hidden={!panelOpen}
-                inert={!panelOpen}
-                initial={{ x: 48 }}
-                animate={{ x: panelClosing ? 28 : 0 }}
-                transition={{ duration: resizing ? 0 : PANEL_MOTION_SECONDS, ease: [0.22, 1, 0.36, 1] }}
-                style={{ width: narrow ? Math.min(window.innerWidth, 600) : width, height: narrow ? Math.min(window.innerHeight * .88, 720) : "100%", maxWidth: "100dvw", display: panelMounted || panelClosing ? "flex" : "none", background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }}
-            >
-                {!narrow && <button type="button" className="absolute inset-y-0 left-0 z-40 w-4 -translate-x-1/2 cursor-col-resize" onPointerDown={startResize} aria-label={t("agent.panel.resize")} />}
-                {owner && <div className="flex shrink-0 items-center gap-4 border-b px-3 py-2" style={{ borderColor: theme.node.stroke }}>
-                    {(["director", "object"] as const).map(tab => <button key={tab} type="button" aria-pressed={panelTab === tab} className="text-sm hover:opacity-80" style={{ opacity: panelTab === tab ? 1 : .55 }} onClick={() => useProductionWorkspaceStore.getState().setPanelTab(tab)}>{t(`productionCanvas.${tab}`)}</button>)}
-                    <button type="button" className="ml-auto text-xs" onClick={closePanel}>{t("productionCanvas.close")}</button>
-                </div>}
-                <div className="min-h-0 flex-1 flex-col" style={{ display: !owner || panelTab === "director" ? "flex" : "none" }}><LocalAgentPanel embedded headless={!panelMounted} autoConnect /></div>
-                {owner && <div className="min-h-0 flex-1 overflow-auto" style={{ display: panelTab === "object" ? "block" : "none" }}>
-                    <Suspense fallback={null}><ProductionEditor key={`${owner.kind}:${owner.id}`} owner={owner} embedded /></Suspense>
-                </div>}
-            </motion.aside>
-        </motion.div>
-    );
+    const openChat = () => {
+        useProductionWorkspaceStore.getState().setPanelTab("director");
+        if (chatOpen) closePanel(); else useAgentStore.getState().openPanel();
+    };
+    return <>
+        <div className="fixed bottom-4 right-4 z-[80] flex max-w-[calc(100vw-32px)] flex-col items-end gap-2" data-canvas-shortcuts-ignore>
+            {!chatOpen && canvasPage && owner && (current || recoveryPending) && <button type="button" className="max-w-[min(340px,calc(100vw-32px))] truncate bg-transparent text-xs" style={{ color: theme.node.muted }} onClick={() => {
+                const query = new URLSearchParams(search); query.set("workspace", "production"); query.delete("target"); query.delete("nodeId"); query.delete("segmentId");
+                navigate({ search: query.toString() }, { replace: true });
+                useProductionWorkspaceStore.getState().setSelectedObject(null);
+                useProductionWorkspaceStore.getState().setPanelTab("object");
+                useAgentStore.getState().openPanel();
+            }} aria-label={t("productionCanvas.tasks")}>
+                {recoveryPending ? t("productionCanvas.recovery") : <>{label ? `${label} · ` : ""}{t(`productionCanvas.progress.${current!.status}`)}</>}
+            </button>}
+            {!chatOpen && followTarget?.kind && followTarget.id && (!following || pending) && <Button type="text" onClick={() => useProductionFollowStore.getState().resume()}>{t("productionHub.follow.return")}</Button>}
+            <div className="flex items-center gap-2">
+                <Badge count={approvalCount} size="small">
+                    <Button type={chatOpen ? "default" : "primary"} shape="round" className="!h-11 !px-4" aria-label={t("productionCanvas.openChat")} aria-expanded={chatOpen} aria-controls="canvas-director-dialog" icon={busy ? <LoaderCircle className="size-4 animate-spin" /> : <MessageSquare className="size-4" />} onClick={openChat}>{t("productionCanvas.director")}</Button>
+                </Badge>
+            </div>
+        </div>
+        <section id="canvas-director-dialog" role="dialog" aria-label={t("productionCanvas.chatDialog")} aria-hidden={!chatOpen} inert={!chatOpen}
+            data-canvas-shortcuts-ignore data-canvas-no-zoom
+            className="fixed bottom-20 right-4 z-[75] flex w-[min(460px,calc(100vw-32px))] flex-col overflow-hidden rounded-2xl border shadow-xl"
+            style={{ height: "min(640px, calc(100dvh - 112px))", background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text, visibility: chatOpen ? "visible" : "hidden", pointerEvents: chatOpen ? "auto" : "none" }}>
+            <LocalAgentPanel embedded compact headless={!panelMounted} autoConnect />
+        </section>
+        {owner && <Modal open={objectOpen} forceRender title={scriptOpen ? t("productionCanvas.script") : objectTitle || t("productionCanvas.object")} onCancel={closePanel} footer={null} width={scriptOpen || /^(asset|frame|shot|segment):/.test(new URLSearchParams(search).get("target") || "") ? "min(800px, calc(100vw - 32px))" : "min(1120px, calc(100vw - 32px))"} centered styles={{ body: { maxHeight: "calc(100dvh - 160px)", overflow: "auto" } }}>
+            <Suspense fallback={null}><ProductionEditor key={`${owner.kind}:${owner.id}`} owner={owner} embedded dialog /></Suspense>
+        </Modal>}
+    </>;
 }

@@ -5,6 +5,8 @@ import { getBackendUrl } from "@/services/backend-api";
 import { fetchSettings, saveSettings, type FrontendSettings } from "@/services/settings-api";
 import type { CanvasAgentOp, CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { productionObjectForPresentation, type ProductionObject } from "@/lib/production-object";
+import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
 
 export type AgentChatRole = "user" | "assistant" | "system" | "tool" | "error";
 export type AgentAttachment = { id: string; name: string; type: string; size: number; width: number; height: number; url: string; dataUrl: string };
@@ -63,6 +65,8 @@ type AgentStore = {
     silentConnect: boolean;
     fragmentBootstrap: boolean;
     prompt: string;
+    productionDraftObject: ProductionObject | null;
+    productionTurnObject: ProductionObject | null;
     attachments: AgentAttachment[];
     canvasReferences: CanvasResourceReference[];
     sending: boolean;
@@ -133,6 +137,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     silentConnect: false,
     fragmentBootstrap: false,
     prompt: "",
+    productionDraftObject: null,
+    productionTurnObject: null,
     attachments: [],
     canvasReferences: [],
     sending: false,
@@ -159,7 +165,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     pendingTool: null,
     pendingApprovals: [],
     setAgentState: (patch) => {
-        set(patch);
+        const before = get(), after = { ...before, ...patch };
+        const draft = after.prompt.trim() || after.attachments.length || after.canvasReferences.length;
+        const hadDraft = before.prompt.trim() || before.attachments.length || before.canvasReferences.length;
+        let object = after.productionDraftObject;
+        if (!draft) object = null;
+        else if (!hadDraft && !object && !after.creativeLaunch && !after.scopedTask) {
+            const workspace = useProductionWorkspaceStore.getState();
+            object = workspace.selectedObject || (!after.canvasContext?.snapshot.selectedNodeIds.length && workspace.readiness?.presentation ? productionObjectForPresentation(workspace.readiness.presentation, workspace.production) : null);
+        }
+        set({ ...patch, productionDraftObject: object });
         // Debounced 持久化到 backend settings
         debouncedSaveAgentSettings(patch);
     },

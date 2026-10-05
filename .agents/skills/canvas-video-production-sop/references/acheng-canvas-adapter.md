@@ -54,7 +54,7 @@ assets 映射保存实际 nodeId、assetId、storageKey、sha256、version 和�
 
 导演工作台按制作对象展示「总览、故事、风格与资产、镜头与片段、生产与交付」，JSON、旧稿接入、引擎和版本恢复集中在高级与历史。七模块仍是内部职责；不要把页面标签、partial 或模块顺序解释为必须依次通过的生产关卡。首页、独立画布和单集入口引用同一 Backend 制作记录。
 
-产品导航只有一个「制作」入口，创意入口也放在这里；分别浏览独立画布与剧目分集。进入具体制作对象默认打开固定画布：每集一个制作画布，每个剧目一个共享资产画布，场次只做集内目录和分组。故事、资产、镜头、生产与历史在画布对象面板编辑，仍使用原 Backend 制作记录。已有绑定不改绑；首次进入未绑定对象调用 `production_ensure_canvas`，需要识别画布归属时调用 `production_get_canvas_context`。历史 `/director` 与分集制作地址保留为画布兼容入口，恢复原草稿与回执。
+产品导航只有一个「制作」入口，创意入口也放在这里；分别浏览独立画布与剧目分集。进入具体制作对象默认打开固定画布：每集一个制作画布，每个剧目一个共享资产画布，场次只做集内目录和分组。导演对话由右下角气泡展开，目录与对象编辑按需打开；交互约束统一见 `.agents/rules/canvas-ui.md`。故事、资产、镜头、生产与历史仍使用原 Backend 制作记录。已有绑定不改绑；首次进入未绑定对象调用 `production_ensure_canvas`，需要识别画布归属时调用 `production_get_canvas_context`。历史 `/director` 与分集制作地址保留为画布兼容入口，恢复原草稿与回执。
 
 创意对话确认对象后，先保存 brief 与 `workflow.currentWork`，回读 Backend `workflow/readiness`，再通过 `site_navigate({ production: { kind, id, workId, runId? } })` 呈现正式画布目标；无节点时打开对象编辑面板。需要节点时用 `production_prepare_targets` 幂等准备 asset/frame/segment，不把准备或跟随视为生成授权。推进同一制作沿用 workId；待决定项绑定源哈希，用户答复先保存再继续，不凭聊天文字或同名节点推断导航位置。
 

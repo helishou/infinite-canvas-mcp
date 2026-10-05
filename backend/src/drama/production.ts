@@ -29,6 +29,7 @@ import { DATA_DIR } from "../config.js";
 import { resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
 import type { BackendDatabase } from "../db.js";
 import type { BackendEventBus } from "../events.js";
+import type { CanvasCommit } from "../canvas/collaboration.js";
 import { approvedSharedAsset, listApprovedSharedAssets, prepareSharedAssetProjection, registerApprovedSharedAsset, sharedAssetHistory, sharedProjectionNodeId, validateSharedAssetSource, type ApprovedSharedAsset } from "./shared-assets.js";
 import { productionCanvasContext } from "./production-canvas.js";
 import type { NativeProductionTarget } from "./native-generation.js";
@@ -571,6 +572,8 @@ export class EpisodeProductionService {
                 ...(requestedRunId || run?.runId ? { runId: requestedRunId || run!.runId } : {}),
             };
         }
+        const pendingDecision = director.workflow.pendingDecisions?.find(decision => decision.workId === work!.workId && decision.status === "pending");
+        if (pendingDecision) work = { ...work, module: pendingDecision.module, action: "author", targetKind: pendingDecision.targetKind, targetId: pendingDecision.targetId };
         const targetKey = (kind?: string, id?: string) => {
             if (!id) return undefined;
             if (id.includes(":")) return id;
@@ -605,7 +608,7 @@ export class EpisodeProductionService {
         let taskId: string | undefined;
         const matchesWork = (item: ProductionRun["submitted"][number]) => !declaredWork?.targetId || item.id === declaredWork.targetId || `${item.kind === "h3" ? "segment" : "asset"}:${item.id}` === keyForWork || `frame:${item.id}` === keyForWork;
         if (target?.status === "needs_review") { workspace = target.kind === "segment" ? "production" : "assets"; action = "review"; status = "needs_review"; reason = target.blockers[0] || target.notice || "查看真实媒体并完成审核"; }
-        if (run && status !== "blocked") {
+        if (run && status !== "blocked" && !pendingDecision && (work.action !== "author" || !declaredWork)) {
             if (run.status === "awaiting_review") {
                 const reviewTarget = run.targets.map(id => targets.find(item => item.id === id)).find(item => item?.status === "needs_review" && (!declaredWork?.targetId || item.id === keyForWork));
                 const imageTask = [...run.submitted].reverse().find(item => item.kind === "image" && matchesWork(item) && (!reviewTarget || item.id === reviewTarget.targetId));
@@ -916,12 +919,15 @@ export class EpisodeProductionService {
         });
     }
 
-    private editedCandidate(episodeId: string, record: ProductionRecord, input: ProductionEdit) {
+    private editedCandidate(episodeId: string, record: ProductionRecord, input: ProductionEdit, canvasCommits?: CanvasCommit[]) {
             const draft = structuredClone(record.draft);
             const published = record.published ? structuredClone(record.published) : null;
             for (const [index, operation] of input.ops.entries()) {
                 try {
-                if (operation.type === "review_director_asset") {
+                if (operation.type === "select_director_result") {
+                    if (!published) throw new Error("尚无可选用历史结果的发布版本");
+                    this.selectDirectorResult(episodeId, record, draft, published, operation, input.operationId, canvasCommits);
+                } else if (operation.type === "review_director_asset") {
                     if (!published) throw new Error("尚无可审核的发布版本");
                     this.applyDirectorAssetReview(episodeId, draft, published, operation, record.publishedVersion);
                 } else this.apply(episodeId, draft, operation, record.publishedVersion);
@@ -977,8 +983,9 @@ export class EpisodeProductionService {
     edit(episodeId: string, raw: unknown): ProductionRecord & { replayed?: boolean; impact?: ProductionImpact } {
         const linked = this.linked(episodeId); if (linked) return linked.service.edit(linked.id, raw);
         const input = productionEditSchema.parse(raw);
-        return this.commit(episodeId, input.operationId, input.expectedRevision, fingerprint(input), (record) => {
-            const { draft, published } = this.editedCandidate(episodeId, record, input);
+        const canvasCommits: CanvasCommit[] = [];
+        const result = this.commit(episodeId, input.operationId, input.expectedRevision, fingerprint(input), (record) => {
+            const { draft, published } = this.editedCandidate(episodeId, record, input, canvasCommits);
             if (this.projectScope && published?.director) for (const operation of input.ops) {
                 if (operation.type === "review_director_asset" && operation.verdict === "approved") registerApprovedSharedAsset(this.db, episodeId, record.publishedVersion, operation.assetId, published.director);
             }
@@ -989,9 +996,11 @@ export class EpisodeProductionService {
                     .run(record.revision + 1, new Date().toISOString(), input.operationId);
             }
             if (published && input.ops.some(operation => operation.type === "review_director_asset" || operation.type === "review_keyframe")) this.finishRejectedBatches(episodeId, published);
-            if (published && input.ops.some((operation) => operation.type === "review_keyframe" || operation.type === "review_director_asset")) this.prepare("UPDATE episode_production_versions SET snapshot_json=? WHERE episode_id=? AND version=?").run(JSON.stringify(published), episodeId, record.publishedVersion);
+            if (published && input.ops.some((operation) => operation.type === "review_keyframe" || operation.type === "review_director_asset" || operation.type === "select_director_result")) this.prepare("UPDATE episode_production_versions SET snapshot_json=? WHERE episode_id=? AND version=?").run(JSON.stringify(published), episodeId, record.publishedVersion);
             return { ...record, revision: record.revision + 1, draft, published, updatedAt: new Date().toISOString() };
         });
+        canvasCommits.forEach(commit => this.db.notifyCanvasCommit(commit));
+        return result;
     }
 
     /** A returned result requires a new run, so a settled old run must release its targets. */
@@ -1242,6 +1251,68 @@ export class EpisodeProductionService {
         if (!directory.startsWith(`${base}${path.sep}`)) throw new Error("制作目录路径无效");
         const file = path.join(directory, source);
         return fs.existsSync(file) && fs.statSync(file).isFile() ? fs.readFileSync(file, "utf8") : "";
+    }
+
+    private selectDirectorResult(episodeId: string, current: ProductionRecord, draft: EpisodeProductionData, published: EpisodeProductionData,
+        op: Extract<ProductionOperation, { type: "select_director_result" }>, operationId: string, canvasCommits?: CanvasCommit[]) {
+        const canvasId = this.episode(episodeId).canvasId;
+        const project = canvasId && this.db.getCanvasProject(canvasId);
+        const node = project && (project.nodes as Record<string, any>[]).find(node => node.id === op.nodeId);
+        const log = this.db.getGenerationLog(op.generationLogId);
+        if (!node || !log || log.status !== "success" || log.projectId !== canvasId || log.nodeId !== op.nodeId) throw new Error("历史结果不属于当前制作节点，或尚未成功归档");
+        if (Number(project!.revision) !== op.canvasRevision) throw new Error("画布已变化，请刷新历史后重新选择");
+        const director = published.director;
+        if (!director || !draft.director || director.sourceHash !== draft.director.sourceHash) throw new Error("制作稿尚未发布，请先完成当前版本发布");
+        const task = log.runtimeTaskId && this.db.getTask(log.runtimeTaskId);
+        if (!task || task.status !== "succeeded") throw new Error("历史结果缺少可核验的成功任务");
+        const taskId = String(task.parentTaskId || record(task.params).parentTaskId || task.id);
+        const binding = this.db.db.prepare("SELECT * FROM production_task_bindings WHERE task_id=? AND owner_kind=? AND owner_id=?")
+            .get(taskId, this.projectScope ? "canvas" : "episode", episodeId) as Record<string, any> | undefined;
+        if (!binding || binding.project_id !== canvasId || binding.node_id !== op.nodeId || binding.target_kind !== op.targetKind || binding.status === "submitted") throw new Error("历史任务不属于当前正式制作对象，或尚未完成结果绑定");
+        const outputs = [...task.outputs, ...(Array.isArray(record(task.result).media) ? record(task.result).media as Record<string, any>[] : [])];
+        const output = outputs.find(output => output.storageKey === op.storageKey);
+        const media = this.db.getMediaFile(op.storageKey);
+        if (!output || !log.outputs.some(output => output.storageKey === op.storageKey) || !media || !fs.existsSync(media.filePath)) throw new Error("历史任务、日志和归档媒体不一致");
+        const sha256 = promptHashBytes(media.filePath);
+        if (output.sha256 && output.sha256 !== sha256) throw new Error("历史归档媒体摘要不一致");
+        const metadata = record(node.metadata);
+        const active = String(metadata.runtimeTaskId || "");
+        if (["queued", "loading", "awaiting_confirmation"].includes(String(metadata.status)) || active && ["queued", "running", "awaiting_confirmation"].includes(this.db.getTask(active)?.status || "")) throw new Error("节点正在生成，不能替换活动结果");
+        const selectedResult = { generationLogId: log.id, taskId, sourceVersion: Number(binding.version), sourceHash: String(binding.source_hash) };
+        const staleInput = binding.source_hash !== director.sourceHash;
+        let operations: Array<Record<string, unknown> & { type: string }>;
+        if (op.targetKind === "segment") {
+            const group = published.clipGroups.find(group => group.id === op.targetId);
+            const draftGroup = draft.clipGroups.find(group => group.id === op.targetId);
+            const targets = JSON.parse(String(binding.targets_json)) as Array<{ targetId: string; segmentId?: string }>;
+            if (!group || !draftGroup || group.nodeId !== op.nodeId || draftGroup.nodeId !== op.nodeId || group.segmentId !== draftGroup.segmentId || log.segmentId !== group.segmentId || !targets.some(target => target.targetId === op.targetId && target.segmentId === group.segmentId)) throw new Error("历史视频不属于这个正式 Clip");
+            const clip = (Array.isArray(metadata.segments) ? metadata.segments as Record<string, unknown>[] : []).find(clip => clip.id === group.segmentId);
+            if (!clip || ["queued", "loading", "awaiting_confirmation"].includes(String(clip.status))) throw new Error("Clip 正在生成，不能替换活动结果");
+            if (!String(media.mimeType).startsWith("video/")) throw new Error("Clip 历史结果必须是视频");
+            operations = [{ type: "restore_h3_output", nodeId: op.nodeId, segmentId: group.segmentId, generationLogId: log.id, storageKey: op.storageKey, settings: {} }];
+            Object.assign(group, { selectedResult, inputOutdated: staleInput }); Object.assign(draftGroup, { selectedResult, inputOutdated: staleInput });
+        } else {
+            if (binding.target_id !== op.targetId || !String(media.mimeType).startsWith("image/")) throw new Error("历史图片不属于这个正式资产或关键帧");
+            const assetId = op.targetKind === "keyframe" ? director.shotInputs[op.targetId]?.keyframeAssetId : op.targetId;
+            const asset = assetId && director.assets[assetId];
+            const local = assetId && draft.director.assets[assetId];
+            if (!assetId || !asset || !local || asset.nodeId !== op.nodeId || local.nodeId !== op.nodeId || asset.sharedSource || local.sharedSource) throw new Error("请在原资产画布选择版本，不能修改共享引用");
+            const priorKey = asset.storageKey;
+            const selected = { ...asset, storageKey: op.storageKey, sha256, status: "generated" as const, evidence: "", inputOutdated: staleInput, selectedResult };
+            director.assets[assetId] = selected; draft.director.assets[assetId] = structuredClone(selected);
+            if (op.targetKind === "keyframe") {
+                published.keyframes[op.targetId] = { nodeId: op.nodeId, storageKey: op.storageKey, sourceVersion: selectedResult.sourceVersion };
+                draft.keyframes[op.targetId] = structuredClone(published.keyframes[op.targetId]);
+                delete published.keyframeReviews[op.targetId]; delete draft.keyframeReviews[op.targetId];
+            }
+            for (const production of [director, draft.director]) for (const artifact of production.artifacts) if (priorKey !== op.storageKey && artifact.references.some(ref => ref.nodeId === op.nodeId || ref.storageKey === priorKey)) artifact.status = "stale";
+            const images = Array.isArray(metadata.images) ? metadata.images as Record<string, unknown>[] : [];
+            const imageId = images.find(image => image.storageKey === op.storageKey)?.id || `history:${log.id}:${op.storageKey}`;
+            const image = { id: imageId, status: "success", storageKey: op.storageKey, content: `/media/${encodeURIComponent(op.storageKey)}`, naturalWidth: media.width || 0, naturalHeight: media.height || 0, bytes: media.bytes, mimeType: media.mimeType };
+            const { id: selectedImageId, ...imageMetadata } = image;
+            operations = [{ type: "update_node", id: op.nodeId, metadata: { ...imageMetadata, url: image.content, images: images.some(image => image.storageKey === op.storageKey) ? images : [...images, image], primaryImageId: selectedImageId, runtimeTaskId: "", runProgress: 1, errorDetails: "" } }];
+        }
+        if (canvasCommits) this.db.applyCanvasProjectOperations(canvasId!, op.canvasRevision, operations, { operationId: `${operationId}:result:${op.targetKind}:${op.targetId}`, runtimeWrite: true, withinTransaction: true, deferredCommits: canvasCommits, source: { kind: "system", clientId: "production:history", label: "选用制作历史结果" } });
     }
 
     private applyDirectorAssetReview(episodeId: string, draft: EpisodeProductionData, published: EpisodeProductionData, op: Extract<ProductionOperation, { type: "review_director_asset" }>, version: number) {

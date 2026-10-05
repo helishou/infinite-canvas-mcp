@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { Button } from "antd";
 import { useTranslation } from "react-i18next";
 
 import { productionPresentationPath, productionTarget, productionLocationKey } from "@/lib/production-navigation";
 import { fetchProductionReadiness } from "@/services/backend-api";
-import { useAgentStore } from "@/stores/use-agent-store";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 
@@ -14,10 +12,10 @@ export function ProductionFollowController() {
     const navigate = useNavigate();
     const location = useLocation();
     const connected = useBackendStore(state => state.connected);
-    const panelOpen = useAgentStore(state => state.panelOpen);
     const target = useProductionFollowStore(state => state.target);
     const following = useProductionFollowStore(state => state.following);
     const pending = useProductionFollowStore(state => state.pendingPresentation);
+    const guardReason = useProductionFollowStore(state => state.guardReason);
     const currentPath = productionLocationKey(location.pathname, location.search);
     const priorPath = useRef("");
     const requestSequence = useRef(0);
@@ -130,16 +128,7 @@ export function ProductionFollowController() {
 
     useEffect(() => {
         if (following && pending && !useProductionFollowStore.getState().guardReason) void refreshPresentation();
-    }, [following, pending?.key, refreshPresentation]);
+    }, [following, pending?.key, guardReason, refreshPresentation]);
 
-    const returnToWork = () => {
-        useProductionFollowStore.getState().resume();
-        useAgentStore.getState().openPanel();
-        void refreshPresentation();
-    };
-    return target?.kind && target.id && !panelOpen ? (
-        <Button className="bottom-4 right-4 z-[80] shadow-lg" style={{ position: "fixed" }} type="primary" onClick={returnToWork}>
-            {following && !pending ? t("productionHub.follow.openAgent") : t("productionHub.follow.return")}
-        </Button>
-    ) : null;
+    return null;
 }

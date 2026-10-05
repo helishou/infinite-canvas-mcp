@@ -82,6 +82,7 @@ export type CanvasNodeToolbarItem = {
     onClick: () => void;
     active?: boolean;
     danger?: boolean;
+    disabled?: boolean;
 };
 
 export type CanvasAssetPickerImage = { kind: "image"; dataUrl: string; title: string; storageKey?: string };

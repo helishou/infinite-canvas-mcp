@@ -1,18 +1,11 @@
 /** Read-only presentation helpers. They never rewrite the production source. */
+import { productionScriptGroups } from "@basketikun/canvas-agent/drama/production-contract";
 export type DirectorRecord = Record<string, any>;
 export type ScriptSceneGroup = { key: string; sceneId: string; title: string; blocks: DirectorRecord[] };
 export const records = (value: unknown): DirectorRecord[] => Array.isArray(value) ? value.filter(item => item && typeof item === 'object' && !Array.isArray(item)) : [];
 
 export function groupScriptScenes(blocks: DirectorRecord[]): ScriptSceneGroup[] {
-    const groups: ScriptSceneGroup[] = [];
-    for (const block of blocks) {
-        const sceneId = String(block.scene_id || block.id || '');
-        const prior = groups[groups.length - 1];
-        // Returning to a location later in the story starts another scene.
-        if (prior && prior.sceneId === sceneId && !Array.isArray(block.beat_ids) && !Array.isArray(prior.blocks[0].beat_ids)) prior.blocks.push(block);
-        else groups.push({ key: String(block.id || `${sceneId}:${groups.length}`), sceneId, title: String(block.scene_name || block.heading || ''), blocks: [block] });
-    }
-    return groups;
+    return productionScriptGroups(blocks);
 }
 
 export function dialogueBody(block: DirectorRecord) {

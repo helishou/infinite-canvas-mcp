@@ -12,6 +12,7 @@ import { builtinWorkflowName, decodeChannelModel, findChannelModel, modelOptionN
 import type { CanvasImageReference } from "./image-dispatcher.js";
 import { DirectVideoBackend } from "../runtime/direct-video.js";
 import { prepareCanvasGenerationTarget, prepareCanvasVideoTrimTarget } from "./generation-target.js";
+import { generationSettingsSnapshot } from "./generation-settings.js";
 
 export const CANVAS_VIDEO_CONCAT_MODEL = "__local_video_concat__";
 export const CANVAS_VIDEO_TRIM_MODEL = "__local_video_trim__";
@@ -86,7 +87,23 @@ export class CanvasVideoDispatcher {
             this.stores.tasks.update(task.id, { status: "failed", error: messageOf(error) });
             throw error;
         }
-        void this.execute(plan, task).catch((error) => this.fail(task, input, error));
+        const startedAt = Date.now();
+        const references = [
+            ...(input.references || []).map((reference) => ({ ...reference, type: "image" })),
+            ...(input.videoReferences || []).map((reference) => ({ ...reference, type: "video" })),
+            ...(input.audioReferences || []).map((reference) => ({ ...reference, type: "audio" })),
+        ].map(({ id, name, mimeType, storageKey, type }) => ({ id, name, mimeType, storageKey, type }));
+        const logId = input.projectId && !input.params?.parentTaskId ? this.stores.logs.create({
+            projectId: input.projectId, nodeId: input.nodeId, status: "running", platform: "canvas-video", workflow: plan.workflow || "",
+            model: input.model, taskMode: input.references?.length ? "i2v" : "t2v", prompt: input.prompt, references,
+            inputCounts: { image: input.references?.length || 0, video: input.videoReferences?.length || 0, audio: input.audioReferences?.length || 0 },
+            runtimeTaskId: task.id, startedAt: new Date(startedAt).toISOString(), durationMs: 0, outputs: [],
+            params: { generationSettings: generationSettingsSnapshot(input.params, {
+                size: input.size, seconds: input.seconds, resolution: input.resolution, width: input.width, height: input.height,
+                executor: plan.kind, ...(input.workflowReferenceCount !== undefined ? { workflowReferenceCount: input.workflowReferenceCount } : {}),
+            }, plan.workflow ? this.workflows.getConfig(plan.workflow)?.fields || [] : []) },
+        }).id : null;
+        void this.execute(plan, task, logId, startedAt).catch((error) => this.fail(task, input, error, logId, startedAt));
         return { taskId: task.id, executor: plan.kind };
     }
 
@@ -113,7 +130,9 @@ export class CanvasVideoDispatcher {
                 if (String(child.params?.parentTaskId || "") !== task.id || !["queued", "running"].includes(child.status)) continue;
                 try { this.runningHub?.resume(child.id); } catch {}
             }
-            void this.execute(plan, task).catch((error) => this.fail(task, input, error));
+            const log = this.stores.logs.list({ runtimeTaskId: task.id, limit: 1 })[0];
+            const startedAt = log ? Date.parse(log.startedAt) : Date.now();
+            void this.execute(plan, task, log?.id || null, startedAt).catch((error) => this.fail(task, input, error, log?.id || null, startedAt));
         } catch (error) { this.fail(task, input, error); }
     }
 
@@ -129,11 +148,13 @@ export class CanvasVideoDispatcher {
         }
         const cancelled = this.stores.tasks.cancel(id);
         const input = task.input as CanvasVideoGenerationInput;
+        const log = this.stores.logs.list({ runtimeTaskId: id, limit: 1 })[0];
+        if (log) this.stores.logs.update(log.id, { status: "cancelled", finishedAt: new Date().toISOString(), durationMs: Math.max(0, Date.now() - Date.parse(log.startedAt)) });
         if (input.projectId && input.nodeId) this.stores.projects.markCanvasVideoTaskFailed(cancelled, input as Required<Pick<CanvasVideoGenerationInput, "projectId" | "nodeId">>, "");
         return cancelled;
     }
 
-    private async execute(plan: Plan, task: RuntimeTask) {
+    private async execute(plan: Plan, task: RuntimeTask, logId: string | null, startedAt: number) {
         this.stores.tasks.update(task.id, { status: "running", progress: 0.02 });
         const media = await this.dispatch(plan, task.id);
         if (this.stores.tasks.get(task.id)?.status === "cancelled") return;
@@ -145,6 +166,7 @@ export class CanvasVideoDispatcher {
         if (this.stores.tasks.get(task.id)?.status === "cancelled") return;
         this.stores.tasks.update(task.id, { status: "succeeded", progress: 1, result: { media: [media] } });
         this.stores.tasks.addEvent(task.id, "result", { media: [media] });
+        if (logId) this.stores.logs.update(logId, { status: "success", outputs: [media], finishedAt: new Date().toISOString(), durationMs: Math.max(0, Date.now() - startedAt) });
     }
 
     private async dispatch(plan: Plan, taskId: string): Promise<Record<string, unknown>> {
@@ -335,11 +357,13 @@ export class CanvasVideoDispatcher {
     private assertActive(taskId: string) { if (this.stores.tasks.get(taskId)?.status === "cancelled") throw new Error("视频任务已取消，未启动子执行器"); }
     private track(parent: string, child: string) { const set = this.children.get(parent) || new Set<string>(); set.add(child); this.children.set(parent, set); }
     private untrack(parent: string, child: string) { const set = this.children.get(parent); set?.delete(child); if (!set?.size) this.children.delete(parent); }
-    private fail(task: RuntimeTask, input: CanvasVideoGenerationInput, error: unknown) {
+    private fail(task: RuntimeTask, input: CanvasVideoGenerationInput, error: unknown, logId?: string | null, startedAt?: number) {
         const current = this.stores.tasks.get(task.id);
         if (!current || current.status === "cancelled") return;
         const message = messageOf(error);
         const failed = this.stores.tasks.update(task.id, { status: "failed", error: message });
+        const log = logId ? this.stores.logs.get(logId) : this.stores.logs.list({ runtimeTaskId: task.id, limit: 1 })[0];
+        if (log) this.stores.logs.update(log.id, { status: "failed", error: message, finishedAt: new Date().toISOString(), durationMs: Math.max(0, Date.now() - (startedAt || Date.parse(log.startedAt))) });
         if (input.projectId && input.nodeId) this.stores.projects.markCanvasVideoTaskFailed(failed, input as Required<Pick<CanvasVideoGenerationInput, "projectId" | "nodeId">>, message);
     }
 }

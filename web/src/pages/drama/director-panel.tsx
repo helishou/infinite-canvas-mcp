@@ -3,9 +3,10 @@ import { Alert, App, Button, Image as AntdImage, Input, Modal, Select, Switch, T
 import { ArrowRight, ArrowLeft, Check, Pause, Play, RotateCcw, WandSparkles, Users, MapPin, Image as ImageIcon, Film, Pencil, BookOpen, Search } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { directorModules, directorProductionSchema, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
-import { backendMediaUrl, type EpisodeProduction, type ProductionBatch, type ProductionReadiness } from "@/services/backend-api";
+import { backendMediaUrl, type BackendRuntimeTask, type EpisodeProduction, type ProductionBatch, type ProductionReadiness } from "@/services/backend-api";
 import { groupScriptScenes, dialogueBody, readableText, humanName, records, formatSeconds, shotDisplayText } from "./director-display";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
+import { saveAs } from "file-saver";
 
 export type DirectorWorkspace = "overview" | "story" | "assets" | "shots" | "production" | "advanced";
 type CanvasNodeOption = { id: string; title?: string; type?: string; metadata?: Record<string, unknown> };
@@ -45,8 +46,9 @@ function patchProse(value: unknown, text: unknown) {
     : text;
 }
 
-function SourceField({ value, draftValue, onDraftChange, multiline, rows = 3, numeric, placeholder, disabled, onCommit }: {
+function SourceField({ value, draftValue, onDraftChange, multiline, rows = 3, numeric, placeholder, disabled, onCommit, commitOnBlur = true }: {
   value: unknown; draftValue?: string; onDraftChange?: (value: string | undefined) => void; multiline?: boolean; rows?: number; numeric?: boolean; placeholder?: string; disabled?: boolean; onCommit: (value: unknown) => Promise<boolean | void> | boolean | void;
+  commitOnBlur?: boolean;
 }) {
   const source = textOf(value);
   const [draft, setDraft] = useState(draftValue ?? source);
@@ -60,8 +62,8 @@ function SourceField({ value, draftValue, onDraftChange, multiline, rows = 3, nu
     } else if (await onCommit(draft) !== false) onDraftChange?.(undefined);
   };
   return multiline
-    ? <Input.TextArea value={draft} autoSize={{ minRows: rows, maxRows: 12 }} disabled={disabled} placeholder={placeholder} onChange={event => { setDraft(event.target.value); onDraftChange?.(event.target.value); }} onBlur={() => void save()} />
-    : <Input value={draft} disabled={disabled} placeholder={placeholder} onChange={event => { setDraft(event.target.value); onDraftChange?.(event.target.value); }} onBlur={() => void save()} />;
+    ? <Input.TextArea value={draft} autoSize={{ minRows: rows, maxRows: 12 }} disabled={disabled} placeholder={placeholder} onChange={event => { setDraft(event.target.value); onDraftChange?.(event.target.value); }} onBlur={() => { if (commitOnBlur) void save(); }} />
+    : <Input value={draft} disabled={disabled} placeholder={placeholder} onChange={event => { setDraft(event.target.value); onDraftChange?.(event.target.value); }} onBlur={() => { if (commitOnBlur) void save(); }} />;
 }
 
 function BoundaryCard({ from, to, fromLabel, toLabel, boundary, draftValue, onDraftChange, disabled, onSave }: {
@@ -141,13 +143,20 @@ function SegmentGroupEditor({ segment, shots, segments, fps, draftValue, onDraft
 }
 
 export function DirectorPanel({
-  workspace, director, production, readiness, run, batches, canvasNodes, legacy, versions, busy, canvasId, focusTarget, embedded = false,
-  onBrief, onPatch, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onReview, onPublish, onReplace, onAskDirector, onAnswerDecision, onNavigate, onStart, onPause, onResume, onRestore, onRefresh, onExport, exporting, runStartPending, activeTargetIds,
+  workspace, director, production, readiness, run, batches, runtimeTasks = [], canvasNodes, legacy, versions, busy, canvasId, focusTarget, embedded = false,
+  briefDraft, onBriefDraftChange,
+  compact = false, onSaveScript,
+  onBrief, onPatch, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onReview, onPublish, onReplace, onAskDirector, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRestore, onRefresh, onExport, exporting, runStartPending, activeTargetIds,
 }: {
   workspace: DirectorWorkspace; director?: DirectorProduction; production: EpisodeProduction; readiness?: ProductionReadiness; run?: ProductionBatch | null;
   focusTarget?: string;
   embedded?: boolean;
+  briefDraft: string;
+  onBriefDraftChange: (value: string) => void;
+  compact?: boolean;
+  onSaveScript?: (ids: string[]) => Promise<boolean>;
   batches: ProductionBatch[]; canvasNodes: CanvasNodeOption[]; legacy: LegacySource[]; versions: ProductionVersion[]; busy: boolean; canvasId: string;
+  runtimeTasks?: BackendRuntimeTask[];
   onBrief: (brief: string) => Promise<void> | void;
   onPatch: (entity: "style" | "scene" | "asset" | "shot" | "segment", id: string | undefined, patch: Record<string, unknown>) => Promise<boolean> | void;
   onRegroup: (segmentId: string, shotIds: string[], removeSegmentIds: string[]) => Promise<boolean> | void;
@@ -163,6 +172,7 @@ export function DirectorPanel({
   onAskDirector: (scope: { workspace: DirectorWorkspace; targetId?: string; instruction?: string; brief?: string }) => void;
   onAnswerDecision: (decisionId: string, answer: string) => Promise<boolean> | boolean;
   onNavigate: (workspace: DirectorWorkspace, target?: { kind: string; id: string }) => void;
+  onLocateTarget?: (kind: string, id: string) => void;
   onStart: (targetIds: string[], scope?: "selected" | "all_ready") => void;
   onPause: (runId: string) => void;
   onResume: (runId: string) => void;
@@ -181,7 +191,6 @@ export function DirectorPanel({
   const [assetSearch, setAssetSearch] = useState('');
   const [selectedReviewAssetId, setSelectedReviewAssetId] = useState('');
   const [selectedShot, setSelectedShot] = useState('');
-  const [briefDraft, setBriefDraft] = useState("");
   const [json, setJson] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [evidence, setEvidence] = useState<Record<string, string>>({});
@@ -231,7 +240,6 @@ export function DirectorPanel({
   const mode = d?.workflow.mediaProductionMode || "per_item";
   const delivery = d?.workflow.contentDeliveryMode || "auto_file_batch";
   const publishedDirector = production.published?.director;
-  useEffect(() => setBriefDraft(String(source.brief || "")), [source.brief]);
   useEffect(() => {
     const reason = json !== null ? t("productionHub.follow.modalOpen")
       : mediaPreview ? t("productionHub.follow.modalOpen")
@@ -347,12 +355,12 @@ export function DirectorPanel({
     const canReview = Boolean(media.nodeId && media.storageKey && publishedMedia?.nodeId === media.nodeId && publishedMedia?.storageKey === media.storageKey && production.publishedVersion && media.status === "generated" && viewedMedia[viewedKey]);
     const field = item?.description !== undefined || item?.prompt === undefined ? "description" : "prompt";
     return <article key={`${assetId}:${keyframeShot || "asset"}`} data-production-target={keyframeShot ? `frame:${keyframeShot}` : `asset:${assetId}`} className="min-w-0 overflow-hidden rounded-xl border border-border bg-card">
-      <button type="button" disabled={!media.storageKey} aria-label={t("director.studio.previewAsset", { title })} onClick={() => setMediaPreview({ assetId, title, storageKey: media.storageKey, sha256: media.sha256 })} className="flex aspect-[4/3] w-full items-center justify-center overflow-hidden bg-muted/40">
+      <button type="button" disabled={!media.storageKey} aria-label={t("director.studio.previewAsset", { title })} onClick={() => setMediaPreview({ assetId, title, storageKey: media.storageKey, sha256: media.sha256 })} className={`flex w-full items-center justify-center overflow-hidden bg-muted/40 ${compact ? "h-[min(32dvh,280px)]" : "aspect-[4/3]"}`}>
         {media.storageKey && /\.(mp4|webm|mov)(?:$|\?)/i.test(media.storageKey) ? <Film className="size-10 text-muted-foreground" /> : media.storageKey ? <img className="h-full w-full object-contain" src={backendMediaUrl(media.storageKey)} alt={title} loading="lazy" /> : <div className="space-y-2 text-center text-muted-foreground"><ImageIcon className="mx-auto size-8 opacity-40" /><span className="text-xs">{t("director.studio.noImage")}</span></div>}
       </button>
-      <div className="p-4"><div className="flex items-start justify-between gap-2"><div className="min-w-0"><h3 className="text-base font-semibold">{title}</h3><p className="mt-1 text-xs text-muted-foreground">{t(`director.studio.filter.${assetCategory(assetId)}`)}</p></div><Tag color={media.status === "approved" ? "green" : media.status === "generated" ? "blue" : media.status === "rejected" ? "red" : "default"}>{t(`director.workspace.assetStatus.${media.status}`)}</Tag></div>
-      {proseOf(item?.description || item?.prompt || item?.visual || item?.purpose) && <p className="mt-3 line-clamp-3 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{proseOf(item?.description || item?.prompt || item?.visual || item?.purpose)}</p>}
-      {media.evidence && <p className="mt-3 text-xs leading-5 text-muted-foreground">{media.evidence}</p>}
+      <div className="p-4"><div className="flex items-start justify-between gap-2"><div className="min-w-0">{!compact && <h3 className="text-base font-semibold">{title}</h3>}<p className="mt-1 text-xs text-muted-foreground">{t(`director.studio.filter.${assetCategory(assetId)}`)}</p></div><Tag color={media.status === "approved" ? "green" : media.status === "generated" ? "blue" : media.status === "rejected" ? "red" : "default"}>{t(`director.workspace.assetStatus.${media.status}`)}</Tag></div>
+      {compact && item ? <label className="mt-4 grid gap-2 text-sm">{t("director.workspace.description")}<SourceField value={proseOf(item[field] ?? item.visual ?? item.purpose)} draftValue={sourceDrafts[`asset:${assetId}:${field}`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:${field}`, value)} multiline disabled={busy || Boolean(media.asset?.sharedSource)} onCommit={value => onPatch("asset", assetId, { [field]: patchProse(item[field], value) })} /></label> : proseOf(item?.description || item?.prompt || item?.visual || item?.purpose) && <p className="mt-3 line-clamp-3 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{proseOf(item?.description || item?.prompt || item?.visual || item?.purpose)}</p>}
+      {media.evidence && (!compact || media.status === "rejected") && <p className="mt-3 text-xs leading-5 text-muted-foreground">{media.evidence}</p>}
       <div className="mt-4 flex flex-wrap gap-2">{media.storageKey && <Button size="small" onClick={() => setMediaPreview({ assetId, title, storageKey: media.storageKey, sha256: media.sha256 })}>{t("director.workspace.viewOriginal")}</Button>}<Button icon={<WandSparkles className="size-3" />} size="small" onClick={() => onAskDirector({ workspace: "assets", targetId: assetId, instruction: t("director.workspace.reviseAssetContract") })}>{t("director.studio.collaborate")}</Button></div>
       <details className="mt-3 border-t border-border pt-3"><summary className="cursor-pointer text-xs text-muted-foreground">{t("director.studio.assetDetails")}</summary><div className="mt-3 space-y-3">
         {item && <><label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.description")}<SourceField value={proseOf(item[field] ?? item.visual ?? item.purpose)} draftValue={sourceDrafts[`asset:${assetId}:${field}`] ?? sourceDrafts[`asset:${assetId}:visual`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:${field}`, value)} multiline rows={3} disabled={busy} onCommit={async value => { const saved = await onPatch("asset", assetId, { [field]: patchProse(item[field], value) }); if (saved !== false) onSourceDraftChange(`asset:${assetId}:visual`, undefined); return saved; }} /></label><label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.assetVersion")}<SourceField value={item.version || item.asset_version || "v1"} draftValue={sourceDrafts[`asset:${assetId}:version`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:version`, value)} disabled={busy} onCommit={value => onPatch("asset", assetId, { version: String(value) })} /></label><label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.assetDependencies")}<Select mode="multiple" value={dependencies} disabled={busy} options={assetPlan.filter(value => assetIdOf(value) !== assetId).map(value => ({ value: assetIdOf(value), label: assetName(assetIdOf(value)) }))} onChange={value => void onPatch("asset", assetId, { depends_on: value })} /></label></>}
@@ -394,7 +402,7 @@ export function DirectorPanel({
     <div className="grid gap-4">
       <details id="director-current-brief" open={!d ? true : undefined} className="rounded-2xl border border-border bg-card p-5"><summary className="cursor-pointer text-sm font-medium">{t("director.studio.creativeNotes")}</summary>
       <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs uppercase tracking-wide text-muted-foreground">{t("director.workspace.currentBrief")}</p><h2 className="mt-1 text-xl font-semibold">{t("director.briefTitle")}</h2></div><div className="flex gap-2"><Tag color="blue">{t("director.workspace.revision", { revision: production.revision })}</Tag><Button size="small" onClick={onRefresh}>{t("director.workspace.refresh")}</Button></div></div>
-        <Input.TextArea className="mt-4" value={briefDraft} disabled={busy} autoSize={{ minRows: 4, maxRows: 10 }} placeholder={t("director.briefPlaceholder")} onChange={event => setBriefDraft(event.target.value)} />
+        <Input.TextArea className="mt-4" value={briefDraft} disabled={busy} autoSize={{ minRows: 4, maxRows: 10 }} placeholder={t("director.briefPlaceholder")} onChange={event => onBriefDraftChange(event.target.value)} />
         <div className="mt-3 flex flex-wrap gap-2"><Button disabled={busy || briefDraft === String(source.brief || "")} onClick={() => void onBrief(briefDraft)}>{t("director.workspace.saveBrief")}</Button></div>
       </details>
       <section className="rounded-2xl border border-border bg-card p-5">
@@ -419,12 +427,12 @@ export function DirectorPanel({
     <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4"><span className="text-xs text-muted-foreground">{t("director.workspace.overview.footerHint")}</span><Button type="primary" icon={<WandSparkles className="size-4" />} disabled={busy || !briefDraft.trim()} onClick={async () => { if (briefDraft !== String(source.brief || "")) await onBrief(briefDraft); onAskDirector({ workspace: presentationWorkspace, targetId: presentation?.targetId, brief: briefDraft, instruction: t("director.workspace.continueInstruction") }); }}>{t("director.workspace.progressCurrent")}</Button></footer>
   </div>;
 
-  const renderStory = () => <div className="space-y-6">
+  const renderStoryWorkspace = () => <div className="space-y-6">
     <header className="flex flex-wrap items-center justify-between gap-3">
       <div><h2 className="text-2xl font-semibold tracking-tight">{t("director.studio.script")}</h2><p className="mt-1 text-sm text-muted-foreground">{t("director.studio.scriptSummary", { scenes: sceneGroups.length, characters: characters.length })}</p></div>
       <div className="flex gap-2"><Button icon={editingScript ? <BookOpen className="size-4" /> : <Pencil className="size-4" />} disabled={!activeScene} onClick={() => setEditingScript(value => !value)}>{t(editingScript ? "director.studio.readScript" : "director.studio.editScript")}</Button><Button icon={<WandSparkles className="size-4" />} disabled={busy} onClick={() => onAskDirector({ workspace: "story", targetId: activeScene?.key })}>{t("director.studio.collaborate")}</Button></div>
     </header>
-    <details className="border-b border-border pb-4"><summary className="cursor-pointer text-sm font-medium">{t("director.studio.creativeNotes")}</summary><div className="mt-3 space-y-3"><Input.TextArea aria-label={t("director.studio.creativeNotes")} value={briefDraft} disabled={busy} autoSize={{ minRows: 4, maxRows: 10 }} onChange={event => setBriefDraft(event.target.value)} /><Button disabled={busy || briefDraft === String(source.brief || "")} onClick={() => void onBrief(briefDraft)}>{t("director.workspace.saveBrief")}</Button></div></details>
+    <details className="border-b border-border pb-4"><summary className="cursor-pointer text-sm font-medium">{t("director.studio.creativeNotes")}</summary><div className="mt-3 space-y-3"><Input.TextArea aria-label={t("director.studio.creativeNotes")} value={briefDraft} disabled={busy} autoSize={{ minRows: 4, maxRows: 10 }} onChange={event => onBriefDraftChange(event.target.value)} /><Button disabled={busy || briefDraft === String(source.brief || "")} onClick={() => void onBrief(briefDraft)}>{t("director.workspace.saveBrief")}</Button></div></details>
     {!d ? <Alert type="info" message={t("director.workspace.storyStartsFromBrief")} /> : !activeScene ? <Alert type="info" message={t("director.workspace.storyNotDrafted")} description={t("director.workspace.storyNotDraftedHint")} /> : <div className="grid items-start gap-6 md:grid-cols-[190px_minmax(0,1fr)] xl:grid-cols-[190px_minmax(0,1fr)_190px]">
       <nav aria-label={t("director.studio.sceneDirectory")} className="min-w-0 md:sticky md:top-4"><h3 className="mb-3 text-xs font-medium text-muted-foreground">{t("director.studio.sceneDirectory")}</h3><div className="flex gap-2 overflow-x-auto pb-2 md:flex-col md:overflow-visible">
         {sceneGroups.map((group, index) => <button key={group.key} type="button" aria-current={group.key === activeScene.key ? "true" : undefined} onClick={() => setActiveSceneKey(group.key)} className={`flex min-w-40 items-start gap-3 rounded-lg px-3 py-3 text-left transition-colors md:min-w-0 ${group.key === activeScene.key ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"}`}><span className="pt-0.5 text-xs tabular-nums">{String(index + 1).padStart(2, "0")}</span><span className="min-w-0"><strong className="block text-sm font-medium">{sceneTitle(group, index)}</strong><span className="mt-1 block text-xs">{t("director.studio.blockCount", { count: group.blocks.length })}</span></span></button>)}
@@ -463,12 +471,13 @@ export function DirectorPanel({
     </section></details>}
     <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex flex-wrap gap-1">{["all", "characters", "locations", "props", "frames"].map(filter => <button type="button" key={filter} aria-pressed={assetFilter === filter} className={`rounded-lg px-3 py-2 text-sm ${assetFilter === filter ? "bg-muted font-medium" : "text-muted-foreground hover:bg-muted/50"}`} onClick={() => setAssetFilter(filter)}>{t(`director.studio.filter.${filter}`)}</button>)}</div><Input className="max-w-60" prefix={<Search className="size-4 text-muted-foreground" />} placeholder={t("director.studio.searchAssets")} aria-label={t("director.studio.searchAssets")} value={assetSearch} onChange={event => setAssetSearch(event.target.value)} /></div>
     {!d ? <Alert type="info" message={t("director.workspace.assetsNeedDirector")} /> : allAssetIds.length ? (() => {
-      const visibleAssetIds = allAssetIds.filter(id => (assetFilter === "all" || assetCategory(id) === assetFilter) && assetName(id).toLowerCase().includes(assetSearch.toLowerCase()));
+      const visibleAssetIds = allAssetIds.filter(id => (!embedded || !focusTarget?.startsWith("asset:") || id === focusedId) && (assetFilter === "all" || assetCategory(id) === assetFilter) && assetName(id).toLowerCase().includes(assetSearch.toLowerCase()));
       const shotForAsset = (id: string) => Object.entries(d.shotInputs).find(([, input]) => input.keyframeAssetId === id)?.[0];
       const isPendingReview = (id: string) => mediaForAsset(id, shotForAsset(id)).status === "generated";
       const orderedAssetIds = [...visibleAssetIds].sort((a, b) => Number(isPendingReview(b)) - Number(isPendingReview(a)) || visibleAssetIds.indexOf(a) - visibleAssetIds.indexOf(b));
       const activeAssetId = orderedAssetIds.includes(selectedReviewAssetId) ? selectedReviewAssetId : orderedAssetIds.find(isPendingReview) || orderedAssetIds[0];
       const activeShotId = activeAssetId ? shotForAsset(activeAssetId) : undefined;
+      if (embedded && focusTarget?.startsWith("asset:") && activeAssetId) return renderAssetCard(activeAssetId, assetPlan.find(value => assetIdOf(value) === activeAssetId), activeShotId);
       return <div className="grid min-h-[28rem] gap-4 lg:grid-cols-[minmax(15rem,0.8fr)_minmax(0,1.6fr)]">
         <nav aria-label={t("director.workspace.reviewQueue")} className="overflow-hidden rounded-xl border border-border bg-card">
           <div className="flex items-center justify-between border-b border-border px-4 py-3"><h3 className="font-semibold">{t("director.workspace.reviewQueue")}</h3><Tag>{orderedAssetIds.filter(isPendingReview).length}</Tag></div>
@@ -496,7 +505,7 @@ export function DirectorPanel({
 
   const renderShots = () => <div className="space-y-6">
     <header className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-2xl font-semibold">{t("director.studio.storyboard")}</h2><p className="mt-1 text-sm text-muted-foreground">{t("director.studio.shotsSummary", { shots: sourceShots.length, clips: segments.length, seconds: formatSeconds((timelineEnd - timelineStart) / fps) })}</p></div><Button icon={<WandSparkles className="size-4" />} disabled={busy} onClick={() => onAskDirector({ workspace: "shots" })}>{t("director.studio.collaborate")}</Button></header>
-    {displayedShots.length ? <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">{displayedShots.map((shot, index) => {
+    {displayedShots.length ? <div className={displayedShots.length === 1 ? "grid gap-4" : "grid gap-4 sm:grid-cols-2 xl:grid-cols-3"}>{displayedShots.map((shot, index) => {
       const id = String(shot.id || ""); const input = d?.shotInputs[id]; const segment = segments.find(item => Array.isArray(item.shot_ids) && item.shot_ids.map(String).includes(id)); const linkedFrame = frameForShot(id);
       const referenceId = input?.assetIds?.find(assetId => assetCategory(assetId) === "frames" && d?.assets[assetId]?.storageKey);
       const image = linkedFrame || (referenceId ? d?.assets[referenceId]?.storageKey : undefined);
@@ -548,6 +557,7 @@ export function DirectorPanel({
 
   const renderAdvanced = () => <div className="space-y-5">
     <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">{t("director.workspace.advancedTitle")}</h2><p className="mt-1 text-sm text-muted-foreground">{t("director.workspace.advancedHint")}</p></div><details><summary className="cursor-pointer text-sm text-muted-foreground">{t("director.advanced")}</summary><Button className="mt-2" disabled={!d} onClick={() => { setJson(JSON.stringify(d || {}, null, 2)); setError(""); }}>{t("director.workspace.editJson")}</Button></details></div>
+    {compact && <details className="border-b border-border pb-4"><summary className="cursor-pointer font-medium">{t("productionCanvas.productionSettings")}</summary><div className="mt-4">{renderProduction()}</div></details>}
     {d && <section className="rounded-2xl border border-border bg-card p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs uppercase tracking-wide text-muted-foreground">{t("director.workspace.internalModules")}</p><h2 className="mt-1 text-lg font-semibold">{t("director.workspace.moduleRoles")}</h2></div><span className="text-xs text-muted-foreground">{t("director.workspace.modulesNotGates")}</span></div><div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">{directorModules.map(module => <div key={module} className="rounded-lg border border-border p-3"><div className="flex items-center justify-between gap-2"><strong>{t(`director.workspace.moduleName.${module}`)}</strong><Tag color={d.modules[module]?.status === "committed" ? "green" : d.modules[module]?.status === "blocked" ? "red" : undefined}>{t(`director.workspace.moduleStatus.${d.modules[module]?.status || "planned"}`)}</Tag></div>{d.modules[module]?.unresolved.length ? <p className="mt-2 text-xs text-amber-600">{d.modules[module]?.unresolved[0]}</p> : null}</div>)}</div></section>}
     {d && <section className="rounded-xl border border-border bg-card p-4"><h3 className="font-semibold">{t("director.workspace.engineVersion")}</h3><p className="mt-2 break-all text-sm text-muted-foreground">Acheng {d.engine.version} · {d.engine.commit} · {d.engine.patchVersion} · {d.engine.runtimeId}</p></section>}
     {d && <details className="rounded-xl border border-border bg-card p-4"><summary className="cursor-pointer font-medium">{t("director.studio.rawSource")}</summary><pre className="mt-4 max-h-[36rem] overflow-auto whitespace-pre-wrap break-words text-xs">{JSON.stringify({ revision: production.revision, localEdits: sourceDrafts, source: d.source, assets: d.assets, shotInputs: d.shotInputs, boundaries: d.boundaries, artifacts: d.artifacts, run, readiness }, null, 2)}</pre></details>}
@@ -563,6 +573,65 @@ export function DirectorPanel({
     </Modal>
   </div>;
 
+  const renderStory = () => !compact ? renderStoryWorkspace() : <div data-production-scene-editor className="mx-auto max-w-3xl space-y-5">
+    {!activeScene ? <div className="space-y-4"><p className="text-sm text-muted-foreground">{t("productionCanvas.scriptEmpty")}</p><Input.TextArea aria-label={t("productionCanvas.story")} value={briefDraft} onChange={event => onBriefDraftChange(event.target.value)} autoSize={{ minRows: 5, maxRows: 12 }} disabled={busy} /><div className="flex justify-end gap-2"><Button disabled={busy} onClick={() => onAskDirector({ workspace: "story", brief: briefDraft })}>{t("productionCanvas.discussObject")}</Button><Button type="primary" disabled={busy || !briefDraft.trim()} onClick={() => void onBrief(briefDraft)}>{t("director.workspace.saveBrief")}</Button></div></div> : <>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
+        <Select variant="borderless" aria-label={t("productionCanvas.chooseScene")} value={activeScene.key} onChange={key => { setActiveSceneKey(key); onNavigate("story", { kind: "scene", id: key }); }} className="min-w-44 max-w-full" options={sceneGroups.map((group, index) => ({ value: group.key, label: `${t("director.studio.sceneNumber", { number: index + 1 })} · ${sceneTitle(group, index)}` }))} />
+        <Button type="text" icon={editingScript ? <BookOpen className="size-4" /> : <Pencil className="size-4" />} onClick={() => setEditingScript(value => !value)}>{t(editingScript ? "director.studio.readScript" : "director.studio.editScript")}</Button>
+      </div>
+      {(activeScene.blocks[0].location || activeScene.blocks[0].time_of_day) && <p className="text-sm text-muted-foreground">{[readableText(activeScene.blocks[0].location, nameMap), readableText(activeScene.blocks[0].time_of_day)].filter(Boolean).join(" · ")}</p>}
+      <div className="space-y-5 py-3">{activeScene.blocks.map((block, index) => {
+        const id = String(block.id || block.scene_id || ""), dialogue = Boolean(block.speaker) || block.kind === "dialogue" || block.type === "dialogue";
+        return <div key={`${id}:${index}`} data-production-target={`scene:${id}`}>
+          {dialogue && <p className="mb-2 font-medium">{nameMap[block.speaker] || block.speaker || t("director.studio.dialogue")}</p>}
+          {editingScript ? <SourceField value={block.text || ""} draftValue={sourceDrafts[`scene:${id}:text`]} onDraftChange={value => onSourceDraftChange(`scene:${id}:text`, value)} multiline rows={4} commitOnBlur={false} disabled={busy} onCommit={() => false} /> : <p className="whitespace-pre-wrap break-words text-base leading-8">{sourceDrafts[`scene:${id}:text`] ?? (dialogue ? dialogueBody(block) : String(block.text || ""))}</p>}
+        </div>;
+      })}</div>
+      <div className="flex justify-end gap-2 border-t border-border pt-4"><Button type="text" disabled={busy} onClick={() => onAskDirector({ workspace: "story", targetId: activeScene.key, instruction: t("director.workspace.reviseScene") })}>{t("director.studio.reviseScene")}</Button>{editingScript && <Button type="primary" disabled={busy} onClick={async () => { if (await onSaveScript?.(activeScene.blocks.map(block => String(block.id || block.scene_id || "")))) setEditingScript(false); }}>{t("productionCanvas.saveScript")}</Button>}</div>
+    </>}
+  </div>;
+
+  const focusedAsset = focusTarget?.startsWith("asset:") ? focusedId : focusTarget?.startsWith("frame:") ? d?.shotInputs[focusedId]?.keyframeAssetId : undefined;
+  const focusedShot = focusTarget?.startsWith("shot:") ? sourceShots.find(shot => String(shot.id) === focusedId) : undefined;
+  const focusedSegment = focusTarget?.startsWith("segment:") ? segments.find(segment => String(segment.id) === focusedId) : undefined;
+  if (compact && workspace === "assets" && focusedAsset) return <section data-production-object-editor className="space-y-4">
+    {renderAssetCard(focusedAsset, assetPlan.find(item => assetIdOf(item) === focusedAsset), focusTarget?.startsWith("frame:") ? focusedId : undefined)}
+    <Modal open={Boolean(mediaPreview)} title={mediaPreview?.title} footer={null} width={960} onCancel={() => setMediaPreview(null)}>{mediaPreview && <img className="max-h-[72dvh] w-full object-contain" src={backendMediaUrl(mediaPreview.storageKey)} alt={mediaPreview.title} onLoad={() => setViewedMedia(current => ({ ...current, [`${mediaPreview.assetId}:${mediaPreview.sha256}:${mediaPreview.storageKey}`]: true }))} onError={() => setError(t("director.workspace.mediaReadFailed"))} />}</Modal>
+    {error && <Alert type="error" message={error} />}
+  </section>;
+  if (compact && workspace === "shots" && focusedShot) return <section data-production-object-editor className="space-y-4">
+    {frameForShot(focusedId) && <img className="max-h-[32dvh] w-full object-contain" src={backendMediaUrl(frameForShot(focusedId)!)} alt={shotTitle(focusedId)} />}
+    <label className="grid gap-2 text-sm">{t("director.studio.shotField.visual")}<SourceField value={proseOf(focusedShot.visual)} draftValue={sourceDrafts[`shot:${focusedId}:visual`]} onDraftChange={value => onSourceDraftChange(`shot:${focusedId}:visual`, value)} multiline disabled={busy} onCommit={value => onPatch("shot", focusedId, { visual: patchProse(focusedShot.visual, value) })} /></label>
+    <Button type="text" disabled={busy} onClick={() => onAskDirector({ workspace: "shots", targetId: focusedId, instruction: t("director.workspace.reviseShot") })}>{t("productionCanvas.discussObject")}</Button>
+    <details className="border-t border-border pt-3"><summary className="cursor-pointer text-sm text-muted-foreground">{t("productionCanvas.objectDetails")}</summary><div className="mt-3 grid gap-3">{(["camera", "state_in", "state_out"] as const).map(field => <label key={field} className="grid gap-2 text-sm">{t(`director.studio.shotField.${field}`)}<SourceField value={proseOf(focusedShot[field])} draftValue={sourceDrafts[`shot:${focusedId}:${field}`]} onDraftChange={value => onSourceDraftChange(`shot:${focusedId}:${field}`, value)} multiline disabled={busy} onCommit={value => onPatch("shot", focusedId, { [field]: patchProse(focusedShot[field], value) })} /></label>)}</div></details>
+  </section>;
+  if (compact && workspace === "production" && focusedSegment) {
+    const group = production.draft.clipGroups.find(group => group.id === focusedId);
+    const node = canvasNodes.find(node => node.id === group?.nodeId);
+    const clips = Array.isArray(node?.metadata?.segments) ? node.metadata.segments as Record<string, unknown>[] : [];
+    const clip = clips.find(clip => clip.id === group?.segmentId);
+    const media = String(clip?.resultStorageKey || "");
+    const target = readiness?.targets.find(target => target.id === `segment:${focusedId}`);
+    return <section data-production-object-editor className="space-y-4">
+      {media ? <video className="max-h-[32dvh] w-full" src={backendMediaUrl(media)} controls preload="metadata" /> : <p className="text-sm text-muted-foreground">{t("director.studio.noResults")}</p>}
+      {target && <div><Tag>{t(`director.workspace.targetStatus.${target.status}`)}</Tag>{target.blockers[0] && <p className="mt-2 text-sm text-muted-foreground">{humanMessage(target.blockers[0])}</p>}</div>}
+      {sourceShots.filter(shot => (focusedSegment.shot_ids || []).includes(String(shot.id))).map(shot => <div key={shot.id}><h3 className="text-sm font-medium">{shotTitle(String(shot.id))}</h3><p className="mt-2 whitespace-pre-wrap text-sm leading-7">{shotDisplayText(shot)}</p></div>)}
+      <Button type="text" disabled={busy} onClick={() => onAskDirector({ workspace: "production", targetId: focusedId })}>{t("productionCanvas.discussObject")}</Button>
+      <details className="border-t border-border pt-3"><summary className="cursor-pointer text-sm text-muted-foreground">{t("productionCanvas.objectDetails")}</summary>{target?.blockers.slice(1).map(reason => <p key={reason} className="mt-2 text-sm text-muted-foreground">{humanMessage(reason)}</p>)}<SegmentGroupEditor segment={focusedSegment} shots={sourceShots} segments={segments} fps={fps} draftValue={sourceDrafts[`segment:${focusedId}:shot_ids`]} onDraftChange={value => onSourceDraftChange(`segment:${focusedId}:shot_ids`, value)} disabled={busy} onSave={onRegroup} /></details>
+    </section>;
+  }
+  const batchTasks = new Set(batches.flatMap(batch => batch.submitted.map(task => task.taskId)));
+  const standaloneTasks = runtimeTasks.filter(task => !task.parentTaskId && !batchTasks.has(task.id));
+  const currentTaskKeys = new Set<string>();
+  const currentTasks = standaloneTasks.filter(task => { const key = `${task.nodeId || task.input?.nodeId}:${task.segmentId || task.input?.segmentId || ""}`; if (currentTaskKeys.has(key)) return false; currentTaskKeys.add(key); return true; });
+  if (compact && workspace === "production" && !focusTarget) return <section data-production-tasks-panel className="space-y-6">
+    <div className="flex flex-wrap items-center justify-between gap-2"><span /><div className="flex gap-2"><Button size="small" type="text" onClick={onRefresh}>{t("director.workspace.refresh")}</Button><Button size="small" type="text" onClick={() => onNavigate("advanced")}>{t("productionCanvas.advanced")}</Button></div></div>
+    {batches.length > 0 && <div className="space-y-3">{batches.map(batch => <article key={batch.runId} className="rounded-lg border border-border p-4"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{t(`director.studio.runStatus.${batch.status}`, { defaultValue: batch.status })}</span><div className="flex gap-2">{["pending", "running"].includes(batch.status) && <Button size="small" onClick={() => onPause(batch.runId)}>{t("director.workspace.pause")}</Button>}{["paused", "awaiting_review"].includes(batch.status) && <Button size="small" onClick={() => onResume(batch.runId)}>{t("director.workspace.resume")}</Button>}</div></div><p className="mt-2 text-xs text-muted-foreground">{t("productionCanvas.taskCount", { count: batch.targets.length, submitted: batch.submitted.length })}</p>{batch.error && <p className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">{humanMessage(batch.error)}</p>}<div className="mt-3 flex flex-wrap gap-2">{batch.targets.map(key => { const [kind, ...ids] = key.split(":"); const id = ids.join(":"); return <Button key={key} size="small" type="text" onClick={() => onLocateTarget?.(kind, id)}>{targetName(kind === "frame" ? "keyframe" : kind, id)}</Button>; })}</div></article>)}</div>}
+    {currentTasks.map(task => { const nodeId = String(task.nodeId || task.input?.nodeId || ""), segmentId = String(task.segmentId || task.input?.segmentId || ""); const group = production.draft.clipGroups.find(group => group.nodeId === nodeId && group.segmentId === segmentId); const frame = Object.entries(production.draft.keyframes).find(([, frame]) => frame.nodeId === nodeId); const asset = Object.entries(d?.assets || {}).find(([, asset]) => asset.nodeId === nodeId); const kind = group ? "segment" : frame ? "keyframe" : "asset", id = group?.id || frame?.[0] || asset?.[0]; return <article key={task.id} className="rounded-lg border border-border p-4"><div className="flex flex-wrap items-center justify-between gap-2"><span>{id ? targetName(kind, id) : t("productionCanvas.videoTarget")}</span><Tag>{t(`productionCanvas.historyStatus.${task.status === "succeeded" ? "success" : task.status === "awaiting_confirmation" ? "confirmation" : task.status}`)}</Tag></div>{task.status === "running" && <p className="mt-2 text-xs text-muted-foreground">{Math.round((task.progress || 0) * 100)}%</p>}{task.error && <p className="mt-2 whitespace-pre-wrap text-sm text-muted-foreground">{humanMessage(task.error)}</p>}{id && <Button className="mt-2" type="text" size="small" onClick={() => onLocateTarget?.(kind, id)}>{t("productionCanvas.locateResult")}</Button>}</article>; })}
+    {!batches.length && !currentTasks.length && <p className="text-sm text-muted-foreground">{t("productionCanvas.noTasks")}</p>}
+    {readiness?.targets.some(target => ["blocked", "needs_review"].includes(target.status)) && <details className="border-t border-border pt-4"><summary className="cursor-pointer text-sm">{t("productionCanvas.needsAttention")}</summary><div className="mt-3 space-y-3">{readiness.targets.filter(target => ["blocked", "needs_review"].includes(target.status)).map(target => <div key={target.id}><Button size="small" type="text" onClick={() => onLocateTarget?.(target.kind, target.targetId)}>{targetName(target.kind, target.targetId, target.title)}</Button><p className="mt-1 text-sm text-muted-foreground">{humanMessage(target.blockers[0] || target.notice || t(`director.workspace.targetStatus.${target.status}`))}</p></div>)}</div></details>}
+    <section className="space-y-3 border-t border-border pt-4"><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-medium">{t("productionCanvas.deliveries")}</h3><Button size="small" loading={exporting} disabled={!d || exporting} onClick={() => void onExport(true)}>{t("productionCanvas.downloadPackage")}</Button></div>{deliveredClips.length ? deliveredClips.map(({ group, storageKey }) => <article key={`${group.id}:${storageKey}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border p-3"><span>{segmentTitle(group.id)}</span><div className="flex gap-2"><Button size="small" type="text" onClick={() => onLocateTarget?.("segment", group.id)}>{t("productionCanvas.locateResult")}</Button><Button size="small" aria-label={t("common.download")} onClick={() => { void fetch(backendMediaUrl(storageKey)).then(async response => { if (!response.ok) throw new Error(t("director.workspace.mediaReadFailed")); saveAs(await response.blob(), `${segmentTitle(group.id).replace(/[\\/:*?"<>|]/g, "_")}.${response.headers.get("content-type")?.includes("webm") ? "webm" : "mp4"}`); }).catch(error => message.error(String(error))); }}>{t("common.download")}</Button></div></article>) : <p className="text-sm text-muted-foreground">{t("productionCanvas.noDeliveries")}</p>}</section>
+  </section>;
   return <section className="space-y-4">
     {workspace === "overview" && renderOverview()}
     {workspace === "story" && renderStory()}

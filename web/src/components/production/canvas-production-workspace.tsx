@@ -1,16 +1,20 @@
-import { useEffect, useState } from "react";
-import { App, Button, Image, Select, Tag } from "antd";
+import { useEffect, useRef, useState } from "react";
+import { App, Button, Dropdown, Image, Input, Modal, Select, Tag } from "antd";
+import { Check, ChevronDown, Clapperboard, FileText, Pencil, Search, Settings2 } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { productionSceneEntries } from "@basketikun/canvas-agent/drama/production-contract";
 import { fetchProductionCanvasContext, fetchBackendDramaEpisodes, ensureSharedAssetCanvas, fetchProductionSharedAssets, retryProductionSharedUpdate,
-    type ApprovedSharedAsset, type SharedAssetUpdate, type DramaEpisode } from "@/services/backend-api";
+    fetchBackendCanvasFolders, type ApprovedSharedAsset, type SharedAssetUpdate, type DramaEpisode } from "@/services/backend-api";
 import { productionTarget } from "@/lib/production-navigation";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import { useThemeStore } from "@/stores/use-theme-store";
+import { canvasThemes } from "@/lib/canvas-theme";
+import { productionObjectPath } from "@/lib/production-object";
 import { backendMediaUrl } from "@/services/backend-api";
 
 export function useCanvasProductionContext(projectId: string) {
@@ -20,11 +24,17 @@ export function useCanvasProductionContext(projectId: string) {
     useEffect(() => {
         let active = true;
         useProductionWorkspaceStore.getState().setContext(null);
+        useCanvasSidePanelStore.setState({ panelOpen: false, panelMounted: false, panelClosing: false });
+        const agent = useAgentStore.getState();
+        if (!agent.creativeLaunch && !agent.sending && !agent.waiting && !agent.prompt.trim() && !agent.attachments.length && !agent.canvasReferences.length) agent.closePanel();
         void fetchProductionCanvasContext(projectId).then(({ context }) => {
             if (!active) return;
             if (!context.owner && productionKind === "canvas" && productionId === projectId) context = { ...context, role: "standalone", owner: { kind: "canvas", id: projectId } };
             useProductionWorkspaceStore.getState().setContext(context);
-            if (context.owner) { useCanvasSidePanelStore.getState().openPanel(); useAgentStore.getState().openPanel(); }
+            if (context.owner && query.get("edit") === "1") {
+                useProductionWorkspaceStore.getState().setPanelTab("object");
+                useAgentStore.getState().openPanel();
+            }
         }).catch(error => { if (active) message.error(String(error)); });
         return () => {
             active = false;
@@ -35,43 +45,97 @@ export function useCanvasProductionContext(projectId: string) {
 
 export function CanvasProductionToolbar() {
     const context = useProductionWorkspaceStore(state => state.context);
-    const presentation = useProductionWorkspaceStore(state => state.readiness?.presentation);
-    const following = useProductionFollowStore(state => state.following);
-    const followTarget = useProductionFollowStore(state => state.target);
+    const selectedObject = useProductionWorkspaceStore(state => state.selectedObject);
     const { t } = useTranslation();
     const { message } = App.useApp();
     const navigate = useNavigate();
+    const [query] = useSearchParams();
+    const theme = canvasThemes[useThemeStore(state => state.theme)];
+    const [directoryOpen, setDirectoryOpen] = useState(false);
+    const [filter, setFilter] = useState("");
     const [episodes, setEpisodes] = useState<DramaEpisode[]>([]);
+    const [dramaName, setDramaName] = useState("");
+    const [switching, setSwitching] = useState(false);
+    const scriptSelectionChanged = useRef(false);
     useEffect(() => {
-        let active = true; setEpisodes([]);
-        if (context?.dramaId) void fetchBackendDramaEpisodes(context.dramaId).then(result => { if (active) setEpisodes(result.episodes || []); }).catch(error => { if (active) message.error(String(error)); });
+        scriptSelectionChanged.current = false;
+        const selected = (event: Event) => {
+            const detail = (event as CustomEvent<{ projectId: string; segmentId?: string }>).detail;
+            if (detail?.projectId === context?.canvasId && (!detail.segmentId || detail.segmentId !== useProductionWorkspaceStore.getState().selectedObject?.segmentId)) scriptSelectionChanged.current = true;
+        };
+        window.addEventListener("production-manual-selection", selected);
+        window.addEventListener("minimax-h3-select-clip", selected);
+        return () => { window.removeEventListener("production-manual-selection", selected); window.removeEventListener("minimax-h3-select-clip", selected); };
+    }, [context?.canvasId]);
+    const folderName = useCanvasStore(state => state.folders.find(folder => folder.id === context?.dramaId)?.name);
+    useEffect(() => {
+        let active = true; setEpisodes([]); setDramaName(folderName || "");
+        if (context?.dramaId) {
+            void fetchBackendDramaEpisodes(context.dramaId).then(result => { if (active) setEpisodes(result.episodes || []); }).catch(error => { if (active) message.error(String(error)); });
+            if (!folderName) void fetchBackendCanvasFolders().then(result => { if (active) setDramaName(String(result.folders?.find(folder => folder.id === context.dramaId)?.name || "")); }).catch(error => { if (active) message.error(String(error)); });
+        }
         return () => { active = false; };
-    }, [context?.dramaId, message]);
+    }, [context?.dramaId, folderName, message]);
     if (!context?.owner) return null;
     const switchCanvas = async (id: string) => {
+        if (switching || id === context.episodeId || id === "shared" && context.role === "shared-assets") return;
+        setSwitching(true);
         useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"));
+        useAgentStore.getState().closePanel();
         try {
             if (id === "shared") {
                 const { project } = await ensureSharedAssetCanvas(context.dramaId!);
                 navigate(`/canvas/${encodeURIComponent(String(project.id))}`);
             } else navigate(`/drama/episodes/${encodeURIComponent(id)}/production`);
         } catch (error) { message.error(String(error)); }
+        finally { setSwitching(false); }
     };
-    return <div className="flex min-h-10 shrink-0 flex-wrap items-center gap-3 px-3 text-xs" data-canvas-shortcuts-ignore>
-        {context.dramaId && <Select size="small" variant="borderless" aria-label={t("productionCanvas.switchCanvas")} value={context.role === "shared-assets" ? "shared" : context.episodeId}
-            options={[{ value: "shared", label: t("productionCanvas.sharedCanvas") }, ...episodes.map(episode => ({ value: episode.id, label: `${t("productionCanvas.episode", { number: episode.episodeNumber })} · ${episode.title}` }))]}
-            onChange={id => void switchCanvas(id)} />}
-        <span className="min-w-0 flex-1 truncate">{presentation?.reason || presentation?.targetId || t("productionCanvas.ready")}</span>
-        <Button type="text" size="small" onClick={() => {
-            if (following) useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"));
-            else if (followTarget?.id === context.owner!.id) useProductionFollowStore.getState().resume();
-            else if (presentation) { useProductionFollowStore.getState().setTarget({ ...context.owner!, workId: presentation.workId, runId: presentation.runId }); }
-        }}>{t(following && followTarget?.id === context.owner.id ? "productionCanvas.pauseFollow" : "productionCanvas.follow")}</Button>
-        <Button type="text" size="small" onClick={() => { useProductionWorkspaceStore.getState().setPanelTab("object"); useAgentStore.getState().openPanel(); const query = new URLSearchParams(window.location.search); query.set("workspace", "production"); navigate({ search: query.toString() }, { replace: true }); }}>{t("productionCanvas.tasks")}</Button>
+    const editWorkspace = (workspace: string, selected = false) => {
+        setDirectoryOpen(false);
+        useAgentStore.getState().closePanel();
+        if (selected && selectedObject) navigate(productionObjectPath(selectedObject));
+        else {
+            const next = new URLSearchParams(query); next.set("workspace", workspace);
+            next.delete("target"); next.delete("nodeId"); next.delete("segmentId");
+            if (workspace === "story") {
+                const source = useProductionWorkspaceStore.getState().production?.draft.director?.source;
+                const scenes = productionSceneEntries(source || {});
+                const selectedScene = selectedObject?.targetKind === "scene" ? scenes.find(scene => scene.id === selectedObject.targetId) : scenes.find(scene => scene.shotIds.includes(selectedObject?.targetId || ""));
+                const segment = useProductionWorkspaceStore.getState().production?.draft.clipGroups.find(group => group.id === selectedObject?.targetId);
+                const currentScene = query.get("workspace") === "story" && query.get("target")?.startsWith("scene:") ? scenes.find(scene => `scene:${scene.id}` === query.get("target")) : undefined;
+                const objectScene = selectedScene || scenes.find(scene => segment?.shotIds.some(id => scene.shotIds.includes(id)));
+                const scene = scriptSelectionChanged.current ? objectScene || currentScene || scenes[0] : currentScene || objectScene || scenes[0];
+                scriptSelectionChanged.current = false;
+                if (scene) next.set("target", `scene:${scene.id}`);
+            }
+            navigate({ search: next.toString() }, { replace: true });
+        }
+        useProductionWorkspaceStore.getState().setPanelTab("object");
+        useAgentStore.getState().openPanel();
+    };
+    return <div className="flex min-w-0 items-center gap-1 text-xs" data-canvas-shortcuts-ignore>
+        {context.dramaId && <Dropdown trigger={["click"]} menu={{ selectedKeys: [context.role === "shared-assets" ? "shared" : context.episodeId || ""], items: [
+            { key: "drama-name", label: dramaName || t("productionCanvas.drama"), disabled: true },
+            { key: "shared", label: t("productionCanvas.sharedCanvas"), icon: context.role === "shared-assets" ? <Check className="size-4" /> : undefined, onClick: () => void switchCanvas("shared") },
+            { type: "divider" },
+            ...episodes.map(episode => ({ key: episode.id, label: `${t("productionCanvas.episode", { number: episode.episodeNumber })} · ${episode.title}`, icon: episode.id === context.episodeId ? <Check className="size-4" /> : undefined, onClick: () => void switchCanvas(episode.id) })),
+            { type: "divider" }, { key: "history", label: t("productionCanvas.advanced"), onClick: () => editWorkspace("advanced") },
+        ] }}><button type="button" disabled={switching} data-production-canvas-picker aria-label={t("productionCanvas.switchCanvas")} className="inline-flex min-w-0 max-w-[200px] items-center gap-2 px-2 py-1.5 text-sm hover:bg-black/5 sm:max-w-[420px] dark:hover:bg-white/10" style={{ color: theme.node.text }}>
+            <Clapperboard className="size-4 shrink-0" /><span className="hidden max-w-48 truncate sm:inline">{dramaName || t("productionCanvas.drama")}</span><span className="hidden opacity-40 sm:inline">/</span>
+            <span className="truncate">{context.role === "shared-assets" ? t("productionCanvas.sharedCanvas") : episodes.find(episode => episode.id === context.episodeId) ? t("productionCanvas.episode", { number: episodes.find(episode => episode.id === context.episodeId)!.episodeNumber }) : t("productionCanvas.loadingEpisodes")}</span><ChevronDown className="size-3.5 shrink-0" />
+        </button></Dropdown>}
+        <Button type="text" size="small" icon={<Search className="size-3.5" />} aria-label={t("productionCanvas.find")} onClick={() => { useAgentStore.getState().closePanel(); useCanvasSidePanelStore.getState().closePanel(); setDirectoryOpen(true); }}><span className="hidden sm:inline">{t("productionCanvas.find")}</span></Button>
+        <Button type="text" size="small" icon={<FileText className="size-3.5" />} aria-label={t("productionCanvas.script")} onClick={() => editWorkspace("story")}><span className="hidden lg:inline">{t("productionCanvas.script")}</span></Button>
+        {selectedObject && <span className="hidden md:inline-flex"><Button type="text" size="small" icon={<Pencil className="size-3.5" />} aria-label={t("productionCanvas.editObject")} onClick={() => editWorkspace(selectedObject.workspace, true)}><span className="hidden lg:inline">{t("productionCanvas.editObject")}</span></Button></span>}
+        <span className="hidden md:inline-flex"><Button type="text" size="small" icon={<Settings2 className="size-3.5" />} aria-label={t("productionCanvas.advanced")} onClick={() => editWorkspace("advanced")} /></span>
+        <Modal title={t("productionCanvas.find")} open={directoryOpen} onCancel={() => setDirectoryOpen(false)} footer={null} width={520} styles={{ body: { maxHeight: "calc(100dvh - 220px)", overflow: "auto", color: theme.node.text } }}>
+            <Input allowClear prefix={<Search className="size-4" />} value={filter} onChange={event => setFilter(event.target.value)} placeholder={t("productionCanvas.findPlaceholder")} aria-label={t("productionCanvas.findPlaceholder")} />
+            <ProductionDirectory filter={filter} onLocate={() => setDirectoryOpen(false)} />
+        </Modal>
     </div>;
 }
 
-export function ProductionDirectory() {
+export function ProductionDirectory({ filter = "", onLocate }: { filter?: string; onLocate?: () => void } = {}) {
     const { context, production, readiness } = useProductionWorkspaceStore();
     const { t } = useTranslation();
     const navigate = useNavigate();
@@ -81,7 +145,7 @@ export function ProductionDirectory() {
     if (!context?.owner || !production?.draft.director) return <div className="p-3 text-xs">{t("productionCanvas.ready")}</div>;
     const director = production.draft.director;
     const scenes = productionSceneEntries(director.source);
-    const select = (workspace: string, kind: string, id: string) => {
+    const select = (workspace: string, kind: string, id: string, edit = false) => {
         useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"));
         const next = new URLSearchParams(query);
         next.set("workspace", workspace); next.set("target", `${kind}:${id}`); next.delete("nodeId"); next.delete("segmentId");
@@ -91,15 +155,18 @@ export function ProductionDirectory() {
         if (nodeId) next.set("nodeId", nodeId);
         if (group?.segmentId && nodeId === group.nodeId) next.set("segmentId", group.segmentId);
         navigate({ search: next.toString() }, { replace: true });
-        useProductionWorkspaceStore.getState().setPanelTab("object"); useAgentStore.getState().openPanel();
+        onLocate?.();
+        if (edit || !nodeId || kind === "story" || kind === "scene") { useProductionWorkspaceStore.getState().setPanelTab("object"); useAgentStore.getState().openPanel(); }
     };
-    const prepare = (id: string) => window.dispatchEvent(new CustomEvent("production-workspace-command", { detail: { owner: context.owner, command: { kind: "prepare", targets: [id] } } }));
+    const prepare = (id: string) => { onLocate?.(); window.dispatchEvent(new CustomEvent("production-workspace-command", { detail: { owner: context.owner, command: { kind: "prepare", targets: [id] } } })); };
     const row = (kind: string, id: string, title: string, workspace: string, prepareId?: string) => {
+        if (filter.trim() && !`${id} ${title}`.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase())) return null;
         const status = readiness?.targets.find(item => item.id === `${kind === "shot" ? "frame" : kind}:${id}`)?.status;
         return <div key={`${kind}:${id}`} className="flex min-w-0 items-center gap-1 py-1" data-production-directory-target={`${kind}:${id}`}>
             <button type="button" className="min-w-0 flex-1 truncate rounded px-2 py-1 text-left text-xs hover:bg-black/5 dark:hover:bg-white/10" aria-current={query.get("target") === `${kind}:${id}` ? "true" : undefined} onClick={() => select(workspace, kind, id)}>{title}</button>
             {status && <span className="text-[10px] opacity-60">{t(`director.workspace.targetStatus.${status}`, { defaultValue: status })}</span>}
             {prepareId && <Button size="small" type="text" disabled={busy} onClick={() => void prepare(prepareId)}>{t("productionCanvas.prepare")}</Button>}
+            {!prepareId && <Button size="small" type="text" icon={<Pencil className="size-3" />} aria-label={t("productionCanvas.editNamed", { name: title })} onClick={() => select(workspace, kind, id, true)} />}
         </div>;
     };
     const plan = Array.isArray(director.source.asset_plan) ? director.source.asset_plan as Record<string, any>[] : [];
@@ -112,9 +179,9 @@ export function ProductionDirectory() {
             <Button type="text" size="small" disabled={busy} onClick={event => { event.preventDefault(); event.stopPropagation(); window.dispatchEvent(new CustomEvent("production-workspace-command", { detail: { owner: context.owner, command: { kind: "arrange", sceneId: scene.id } } })); }}>{t("productionCanvas.arrange")}</Button></summary>
             {row("scene", scene.id, t("productionCanvas.script"), "story")}
             {scene.shotIds.map(id => row("shot", id, production.draft.shots.find(shot => shot.id === id)?.title || id, "shots", director.shotInputs[id]?.keyframeAssetId && !director.assets[director.shotInputs[id].keyframeAssetId!]?.nodeId ? `frame:${id}` : undefined))}
-            {production.draft.clipGroups.filter(group => group.shotIds.some(id => scene.shotIds.includes(id))).map(group => row("segment", group.id, group.id, "production", `segment:${group.id}`))}
+            {production.draft.clipGroups.filter(group => group.shotIds.some(id => scene.shotIds.includes(id))).map(group => row("segment", group.id, t("productionCanvas.clip", { number: production.draft.clipGroups.indexOf(group) + 1 }), "production", `segment:${group.id}`))}
         </details>)}
-        {!scenes.length && production.draft.clipGroups.map(group => row("segment", group.id, group.id, "production", `segment:${group.id}`))}
+        {!scenes.length && production.draft.clipGroups.map((group, index) => row("segment", group.id, t("productionCanvas.clip", { number: index + 1 }), "production", `segment:${group.id}`))}
         {row("story", "advanced", t("productionCanvas.advanced"), "advanced")}
     </div>;
 }

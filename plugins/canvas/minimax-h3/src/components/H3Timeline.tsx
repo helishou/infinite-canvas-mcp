@@ -332,6 +332,10 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${target}px)`;
         persistScroll(target);
     }, [persistScroll]);
+    const selectTimelineClip = (segment: H3Segment) => {
+        window.dispatchEvent(new CustomEvent("minimax-h3-select-clip", { detail: { projectId: ctx.projectId, nodeId: ctx.node.id, segmentId: segment.id } }));
+        ctx.updateMetadata({ selectedSegmentId: segment.id, playhead: Number(segment.start || 0) });
+    };
     const focusRequest = Number(ctx.node.metadata?.h3FocusRequest || 0);
     useLayoutEffect(() => {
         if (!focusRequest || !selected) return;
@@ -580,7 +584,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         const width = Math.max(100, Number(segment.duration || 1) * 100);
         // i2v / fl2v 只有 1~2 个固定语义槽位（首帧 / 首尾帧）。这里特判成"整条 Refs 轨一格撑满"
         // （repeat(slotCount) 列 + 单行 1fr），让首帧/尾帧这类单图占满整条参考轨、保持大图预览。
-        return <div key={segment.id} data-segment-id={segment.id} className={`minimax-ref-grid ${slotCount === 0 ? "is-disabled" : ""} ${segment.id === selected?.id ? "active" : ""} ${storyboardLaneVisible ? "has-storyboard-row" : ""}`} style={{ left: `${left}px`, width: `${width}px`, ...(storyboardLaneVisible ? { top: "70px" } : {}), ...(slotCount > 0 && slotCount <= 3 ? { gridTemplateColumns: `repeat(${slotCount}, minmax(0, 1fr))`, gridTemplateRows: "minmax(0, 1fr)" } : {}) }} onClick={(event) => { event.stopPropagation(); ctx.updateMetadata({ selectedSegmentId: segment.id, playhead: Number(segment.start || 0) }); }}>{slotCount === 0 ? <span className="minimax-ref-empty-label">无需参考素材</span> : Array.from({ length: slotCount }).map((_, index) => {
+        return <div key={segment.id} data-segment-id={segment.id} className={`minimax-ref-grid ${slotCount === 0 ? "is-disabled" : ""} ${segment.id === selected?.id ? "active" : ""} ${storyboardLaneVisible ? "has-storyboard-row" : ""}`} style={{ left: `${left}px`, width: `${width}px`, ...(storyboardLaneVisible ? { top: "70px" } : {}), ...(slotCount > 0 && slotCount <= 3 ? { gridTemplateColumns: `repeat(${slotCount}, minmax(0, 1fr))`, gridTemplateRows: "minmax(0, 1fr)" } : {}) }} onClick={(event) => { event.stopPropagation(); selectTimelineClip(segment); }}>{slotCount === 0 ? <span className="minimax-ref-empty-label">无需参考素材</span> : Array.from({ length: slotCount }).map((_, index) => {
             const entry = refs[index];
             const ref = entry?.ref;
             const refIndex = entry?.index ?? allRefs.length;
@@ -633,7 +637,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                 title={enabled ? "关闭当前 Clip 的分镜时间轨" : "开启当前 Clip 的分镜时间轨"}
                 onClick={(event) => { event.stopPropagation(); onSegmentChange(setStoryboardMode(segment, !enabled)); }}
             >{enabled ? "分镜轨 · 开" : "分镜轨 · 关"}</button> : null}
-            {enabled || !hasStoryboards ? <div className="minimax-storyboard-lane" data-segment-id={segment.id} style={{ left: `${left}px`, width: `${width}px` }} onClick={(event) => { event.stopPropagation(); ctx.updateMetadata({ selectedSegmentId: segment.id, playhead: Number(segment.start || 0) }); }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setTimelineMenu({ kind: "storyboard", segmentId: segment.id, x: event.clientX, y: event.clientY }); }}>
+            {enabled || !hasStoryboards ? <div className="minimax-storyboard-lane" data-segment-id={segment.id} style={{ left: `${left}px`, width: `${width}px` }} onClick={(event) => { event.stopPropagation(); selectTimelineClip(segment); }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setTimelineMenu({ kind: "storyboard", segmentId: segment.id, x: event.clientX, y: event.clientY }); }}>
                 {projected.length ? projected.map((item, index) => {
                     const start = cursor;
                     cursor += item.duration;

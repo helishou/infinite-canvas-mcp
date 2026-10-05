@@ -16,6 +16,7 @@ import { CanvasCollaborativeText } from "./canvas-collaborative-text";
 import { CanvasDraftsButton } from "./canvas-drafts-button";
 import { CanvasTaskCenterButton } from "./canvas-task-center";
 import { CanvasTextSuggestionsButton } from "./canvas-text-suggestions-button";
+import { CanvasProductionToolbar } from "@/components/production/canvas-production-workspace";
 
 export function CanvasTopBar({
     projectId,
@@ -84,6 +85,7 @@ export function CanvasTopBar({
     const sidePanelOpen = useCanvasSidePanelStore((state) => state.panelOpen);
     const toggleSidePanel = useCanvasSidePanelStore((state) => state.togglePanel);
     const productionOwner = useProductionWorkspaceStore(state => state.context?.owner);
+    const productionDramaId = useProductionWorkspaceStore(state => state.context?.dramaId);
 
     useEffect(() => {
         if (!isTitleEditing) return;
@@ -97,7 +99,7 @@ export function CanvasTopBar({
     return (
         <>
             <div className="pointer-events-none absolute left-0 right-0 top-0 z-50 flex h-16 items-center justify-between pl-1 pr-4">
-                <div className="pointer-events-auto flex min-w-0 flex-1 items-center gap-2 whitespace-nowrap">
+                <div className={`pointer-events-auto flex min-w-0 flex-1 items-center whitespace-nowrap ${productionOwner ? "gap-1 sm:gap-2" : "gap-2"}`}>
                     <Tooltip title={sidePanelOpen ? t("canvas.collapsePanel") : t("canvas.expandPanel")}>
                         <button
                             type="button"
@@ -109,12 +111,12 @@ export function CanvasTopBar({
                             {sidePanelOpen ? <PanelLeftClose className="size-4" /> : <PanelLeftOpen className="size-4" />}
                         </button>
                     </Tooltip>
-                    {productionOwner ? <button type="button" className="grid size-7 shrink-0 place-items-center hover:bg-black/5 dark:hover:bg-white/10" aria-label={t("productionCanvas.object")} onClick={() => { useProductionWorkspaceStore.getState().setPanelTab("object"); useAgentStore.getState().openPanel(); }}><Sparkles className="size-4" /></button>
-                        : <Link to={`/director/${encodeURIComponent(projectId)}${productionOrigin}`} className="flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-xs hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }}><Sparkles className="size-4" />{t("director.open")}</Link>}
+                    {!productionOwner && <Link to={`/director/${encodeURIComponent(projectId)}${productionOrigin}`} className="flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-xs hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }}><Sparkles className="size-4" />{t("director.open")}</Link>}
                     <Dropdown
                         trigger={["click"]}
                         menu={{
                             items: [
+                                ...(productionOwner ? [{ key: "production", icon: <Images className="size-4" />, label: <Link to="/production">{t("productionCanvas.backHome")}</Link> }] : []),
                                 { key: "home", icon: <Home className="size-4" />, label: t("canvas.home"), onClick: onHome },
                                 { key: "docs", icon: <BookOpen className="size-4" />, label: t("canvas.docs"), onClick: () => window.open(DOCS_URL, "_blank", "noopener,noreferrer") },
                                 { key: "projects", icon: <Images className="size-4" />, label: t("canvas.projects"), onClick: onProjects },
@@ -135,7 +137,7 @@ export function CanvasTopBar({
                         </button>
                     </Dropdown>
 
-                    <div ref={titleRef} className="flex min-w-0 items-center gap-2">
+                    <div ref={titleRef} className={`${productionDramaId ? "hidden" : "flex"} min-w-0 items-center gap-2`}>
                         {isTitleEditing ? (
                             <input
                                 autoFocus
@@ -152,7 +154,7 @@ export function CanvasTopBar({
                         ) : (
                             <button
                                 type="button"
-                                className="max-w-[280px] truncate border-b border-dashed border-transparent text-left text-lg font-semibold tracking-normal transition hover:border-current"
+                                className={`${productionOwner ? "max-w-[100px] sm:max-w-[180px] lg:max-w-[280px]" : "max-w-[280px]"} truncate border-b border-dashed border-transparent text-left text-lg font-semibold tracking-normal transition hover:border-current`}
                                 onDoubleClick={onStartTitleEditing}
                                 title={t("canvas.renameHint")}
                             >
@@ -160,6 +162,7 @@ export function CanvasTopBar({
                             </button>
                         )}
                     </div>
+                    {productionOwner && <CanvasProductionToolbar />}
                     {!productionOwner && <CompactAgentStatus status={compactAgentStatus} onClick={onToggleAgent} />}
                     <CanvasCollaborators collaborators={collaborators} />
                     {!productionOwner && <><CanvasDraftsButton /><CanvasTextSuggestionsButton projectId={projectId} /></>}
@@ -169,7 +172,7 @@ export function CanvasTopBar({
                         content={<div className="w-80"><CanvasCollaborativeText projectId={projectId} target={{ field: "globalPrompt" }} placeholder={t("canvas.globalPromptPlaceholder")} /></div>}
                     >
                         <Tooltip title={t("canvas.globalPromptHint")}>
-                                <button type="button" aria-label={t("canvas.globalPrompt")} className="flex h-8 items-center gap-1 rounded-lg px-2 text-xs transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: globalPrompt.trim() ? theme.node.text : theme.node.muted }}>
+                                <button type="button" aria-label={t("canvas.globalPrompt")} className={`${productionOwner ? "hidden sm:flex" : "flex"} h-8 items-center gap-1 rounded-lg px-2 text-xs transition hover:bg-black/5 dark:hover:bg-white/10`} style={{ color: globalPrompt.trim() ? theme.node.text : theme.node.muted }}>
                                 <Sparkles className="size-3.5" />
                                 {!productionOwner && <span>{t("canvas.globalPrompt")}</span>}
                             </button>
@@ -178,20 +181,9 @@ export function CanvasTopBar({
                 </div>
 
                 <div className="pointer-events-auto flex shrink-0 items-center gap-1.5">
-                    {productionOwner ? <Popover trigger="click" content={<div className="flex max-w-80 flex-col gap-3"><CompactAgentStatus status={compactAgentStatus} onClick={onToggleAgent} /><CanvasDraftsButton /><CanvasTextSuggestionsButton projectId={projectId} /><UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} /></div>}><button type="button" className="grid size-8 place-items-center" aria-label={t("productionCanvas.tools")}><Menu className="size-4" /></button></Popover>
+                    {productionOwner ? <Popover trigger="click" content={<div className="flex max-w-80 flex-col gap-3"><CompactAgentStatus status={compactAgentStatus} onClick={() => { useProductionWorkspaceStore.getState().setPanelTab("director"); useAgentStore.getState().openPanel(); }} /><CanvasDraftsButton /><CanvasTextSuggestionsButton projectId={projectId} /><CanvasTaskCenterButton projectId={projectId} /><button type="button" onClick={onOpenGenerationLogs}>{t("productionCanvas.generationLogs")}</button><UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} /></div>}><button type="button" className="grid size-8 place-items-center" aria-label={t("productionCanvas.tools")}><Menu className="size-4" /></button></Popover>
                         : <UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} />}
-                    <Tooltip title="生成日志"><button type="button" aria-label="生成日志" className="grid size-8 place-items-center rounded-lg transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={onOpenGenerationLogs}><FileText className="size-4" /></button></Tooltip>
-                    <CanvasTaskCenterButton projectId={projectId} />
-                    <span className="h-6 w-px" style={{ background: theme.toolbar.border }} />
-                    <Button
-                        type="text"
-                        className="!h-10 !rounded-xl !px-3 !font-medium"
-                        style={{ background: agentOpen ? theme.toolbar.activeBg : productionOwner ? "transparent" : theme.toolbar.panel, color: theme.node.text, boxShadow: productionOwner ? "none" : "0 10px 30px rgba(28,25,23,.10)" }}
-                        icon={<Bot className="size-4" />}
-                        onClick={onToggleAgent}
-                    >
-                        {productionOwner ? t("productionCanvas.director") : "Agent"}
-                    </Button>
+                    {!productionOwner && <><Tooltip title={t("productionCanvas.generationLogs")}><button type="button" aria-label={t("productionCanvas.generationLogs")} className="grid size-8 place-items-center rounded-lg transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={onOpenGenerationLogs}><FileText className="size-4" /></button></Tooltip><CanvasTaskCenterButton projectId={projectId} /></>}
                 </div>
             </div>
             <Modal title={t("canvas.shortcuts")} open={shortcutsOpen} onCancel={() => setShortcutsOpen(false)} footer={null} centered>

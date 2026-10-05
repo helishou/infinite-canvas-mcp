@@ -5,6 +5,7 @@ import type { DirectAudioBackend, DirectAudioInput } from "../runtime/direct-aud
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
 import type { Stores } from "../stores/types.js";
 import { prepareCanvasGenerationTarget } from "./generation-target.js";
+import { generationSettingsSnapshot } from "./generation-settings.js";
 import type { CanvasOperation } from "./project-ops.js";
 
 export type CanvasAudioGenerationInput = DirectAudioInput & {
@@ -53,7 +54,22 @@ export class CanvasAudioDispatcher {
                 throw error;
             }
         }
-        void this.execute(task, input).catch((error) => this.fail(task, input, error));
+        const startedAt = Date.now();
+        const logId = input.projectId ? this.stores.logs.create({
+            projectId: input.projectId, nodeId: input.nodeId, status: "running", platform: "canvas-audio", model: input.model,
+            taskMode: "tts", prompt: input.prompt,
+            references: input.referenceAudio ? [{ type: "audio", name: "referenceAudio" }] : [],
+            inputCounts: { audio: input.referenceAudio ? 1 : 0 }, runtimeTaskId: task.id,
+            startedAt: new Date(startedAt).toISOString(), durationMs: 0, outputs: [],
+            params: { generationSettings: generationSettingsSnapshot(input.params, {
+                voice: input.voice ?? input.params?.voice ?? (executor === "direct-audio" ? "alloy" : undefined),
+                format: input.format ?? input.params?.format ?? (executor === "direct-audio" ? "mp3" : undefined),
+                speed: input.speed ?? input.params?.speed ?? (executor === "direct-audio" ? "1" : undefined),
+                instructions: input.instructions ?? input.params?.instructions,
+                executor, ...(input.referenceAudio ? { referenceAudio: input.referenceAudio } : {}),
+            }) },
+        }).id : null;
+        void this.execute(task, input, logId, startedAt).catch((error) => this.fail(task, input, error, logId, startedAt));
         return { taskId: task.id, executor };
     }
 
@@ -72,7 +88,8 @@ export class CanvasAudioDispatcher {
             const project = this.target(input);
             const node = project && (project.nodes as Array<Record<string, any>>).find((item) => item.id === input.nodeId);
             if (project && node?.metadata?.runtimeTaskId !== task.id) throw new Error("音频任务已失去节点绑定，不恢复旧任务");
-            void this.execute(task, input).catch((error) => this.fail(task, input, error));
+            const logId = this.stores.logs.list({ runtimeTaskId: task.id, limit: 1 })[0]?.id || null;
+            void this.execute(task, input, logId, Date.parse(this.stores.logs.get(logId || "")?.startedAt || task.createdAt)).catch((error) => this.fail(task, input, error, logId, Date.parse(task.createdAt)));
         } catch (error) { this.fail(task, input, error); }
     }
 
@@ -83,11 +100,13 @@ export class CanvasAudioDispatcher {
         if (child) try { task.executor === "comfyui" ? this.comfy?.cancel(child) : this.directAudio?.cancel(child); } catch {}
         const cancelled = this.stores.tasks.cancel(id);
         const input = task.input as CanvasAudioGenerationInput;
+        const log = this.stores.logs.list({ runtimeTaskId: id, limit: 1 })[0];
+        if (log) this.stores.logs.update(log.id, { status: "cancelled", finishedAt: new Date().toISOString(), durationMs: Math.max(0, Date.now() - Date.parse(log.startedAt)) });
         if (input.projectId && input.nodeId) this.stores.projects.markCanvasAudioTaskFailed(cancelled, { projectId: input.projectId, nodeId: input.nodeId }, "");
         return cancelled;
     }
 
-    private async execute(task: RuntimeTask, input: CanvasAudioGenerationInput) {
+    private async execute(task: RuntimeTask, input: CanvasAudioGenerationInput, logId: string | null, startedAt: number) {
         this.stores.tasks.update(task.id, { status: "running", progress: 0.05 });
         const childId = `audio-child-${task.id}`;
         this.children.set(task.id, childId);
@@ -108,6 +127,7 @@ export class CanvasAudioDispatcher {
                     if (this.stores.tasks.get(task.id)?.status === "cancelled") return;
                     this.stores.tasks.update(task.id, { status: "succeeded", progress: 1, result: { media: [media] } });
                     this.stores.tasks.addEvent(task.id, "result", { media: [media] });
+                    if (logId) this.stores.logs.update(logId, { status: "success", outputs: [media], finishedAt: new Date().toISOString(), durationMs: Math.max(0, Date.now() - startedAt) });
                     return;
                 }
                 if (["failed", "cancelled"].includes(current.status)) throw new Error(current.error || `音频任务${current.status}`);
@@ -132,11 +152,13 @@ export class CanvasAudioDispatcher {
         return this.stores.tasks.list({ kind: "canvas-audio", projectId: input.projectId, limit: 500 }).find((task) => ["queued", "running"].includes(task.status) && ((task.input as CanvasAudioGenerationInput).sourceNodeId || task.nodeId) === source) || null;
     }
 
-    private fail(task: RuntimeTask, input: CanvasAudioGenerationInput, error: unknown) {
+    private fail(task: RuntimeTask, input: CanvasAudioGenerationInput, error: unknown, logId?: string | null, startedAt?: number) {
         const current = this.stores.tasks.get(task.id);
         if (!current || current.status === "cancelled") return;
         const message = messageOf(error);
         const failed = this.stores.tasks.update(task.id, { status: "failed", error: message });
+        const log = logId ? this.stores.logs.get(logId) : this.stores.logs.list({ runtimeTaskId: task.id, limit: 1 })[0];
+        if (log) this.stores.logs.update(log.id, { status: "failed", error: message, finishedAt: new Date().toISOString(), durationMs: Math.max(0, Date.now() - (startedAt || Date.parse(log.startedAt))) });
         if (input.projectId && input.nodeId) this.stores.projects.markCanvasAudioTaskFailed(failed, { projectId: input.projectId, nodeId: input.nodeId }, message);
     }
 }

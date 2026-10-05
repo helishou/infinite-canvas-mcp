@@ -1,5 +1,5 @@
 import { z } from "zod";
-export { productionSceneEntries } from "./production-directory.js";
+export { productionSceneEntries, productionScriptGroups } from "./production-directory.js";
 export { productionWorkspaceSchemas, productionWorkspaceDescriptions, productionWorkspaceToolNames, productionWorkspaceRequest } from "./production-workspace-contract.js";
 
 const id = z.string().trim().min(1);
@@ -120,6 +120,7 @@ export const clipGroupSchema = z.object({
     sourceVersion: z.number().int().min(0),
     continuityReason: z.string().optional(),
     inputOutdated: z.boolean().optional(),
+    selectedResult: z.object({ generationLogId: id, taskId: id, sourceVersion: z.number().int().min(1), sourceHash: hash }).optional(),
 });
 
 export const productionSettingsSchema = z.object({
@@ -157,6 +158,7 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("set_director_boundary"), boundary: directorBoundarySchema }),
     z.object({ type: z.literal("set_director_segment_group"), segmentId: id, shotIds: z.array(id).min(1), removeSegmentIds: z.array(id).default([]) }),
     z.object({ type: z.literal("review_director_asset"), assetId: id, version: z.number().int().min(1), sourceHash: hash, nodeId: id, storageKey: id, sha256: hash, verdict: z.enum(["approved", "rejected"]), evidence: z.string().trim().min(1) }),
+    z.object({ type: z.literal("select_director_result"), targetKind: z.enum(["asset", "keyframe", "segment"]), targetId: id, nodeId: id, generationLogId: id, storageKey: id, canvasRevision: z.number().int().nonnegative() }),
     z.object({ type: z.literal("upsert_scene"), scene: productionSceneSchema }),
     z.object({ type: z.literal("delete_scene"), id }),
     z.object({ type: z.literal("reorder_scenes"), ids: z.array(id) }),

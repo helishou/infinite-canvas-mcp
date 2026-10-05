@@ -1467,9 +1467,13 @@ export class BackendDatabase {
         return { ...canonical, textSuggestion: suggestion };
     }
 
-    private restoreH3OutputOperation(projectId: string, project: Record<string, unknown>, operation: CanvasOperation): CanvasOperation {
+    private restoreH3OutputOperation(projectId: string, project: Record<string, unknown>, operation: CanvasOperation, formalSelection = false): CanvasOperation {
         const nodeId = String(operation.nodeId || "");
         const segmentId = String(operation.segmentId || "");
+        if (!formalSelection) {
+            const owners = [...this.db.prepare("SELECT p.draft_json FROM episode_productions p JOIN drama_episodes e ON e.id=p.episode_id WHERE e.canvas_id=?").all(projectId), ...this.db.prepare("SELECT draft_json FROM canvas_productions WHERE project_id=?").all(projectId)] as Array<{ draft_json: string }>;
+            if (owners.some(owner => { const draft = JSON.parse(owner.draft_json); return draft.director && draft.clipGroups?.some((group: Record<string, unknown>) => group.nodeId === nodeId && group.segmentId === segmentId); })) throw new Error("正式制作片段请通过节点的历史版本选用结果，以同步核验制作记录");
+        }
         const log = this.getGenerationLog(String(operation.generationLogId || ""));
         if (!log || log.projectId !== projectId || log.nodeId !== nodeId) throw new Error("历史输出不属于当前 H3 节点");
         const node = (Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : []).find((item) => String(item.id) === nodeId);
@@ -1632,11 +1636,14 @@ export class BackendDatabase {
     }
 
     applyCanvasProjectOperations(id: string, expectedRevision: number | undefined, inputOperations: CanvasOperation[], context?: CanvasCommandContext) {
+        const beginSql = context?.withinTransaction ? "SAVEPOINT production_canvas_ops" : "BEGIN IMMEDIATE";
+        const commitSql = context?.withinTransaction ? "RELEASE SAVEPOINT production_canvas_ops" : "COMMIT";
+        const rollbackSql = context?.withinTransaction ? "ROLLBACK TO SAVEPOINT production_canvas_ops; RELEASE SAVEPOINT production_canvas_ops" : "ROLLBACK";
         const operationId = context?.operationId || crypto.randomUUID();
         const fingerprint = commandFingerprint({ id, expectedRevision, baseRevision: context?.baseRevision, operations: inputOperations });
         const operations = structuredClone(inputOperations);
         let commit: CanvasCommit;
-        this.db.exec("BEGIN IMMEDIATE");
+        this.db.exec(beginSql);
         try {
             if (context?.mcpCommand) {
                 const identityHash = commandFingerprint({ tool: context.mcpCommand.tool, targetId: context.mcpCommand.targetId, request: context.mcpCommand.request });
@@ -1665,7 +1672,7 @@ export class BackendDatabase {
                     if (existing.projectId !== id || existing.requestHash !== fingerprint) throw collaborationError("OPERATION_ID_REUSED", "operationId 已用于不同请求，请勿修改重试请求内容");
                     if (existing.operationsJson === null || existing.resultsJson === null) throw Object.assign(collaborationError("RECEIPT_UNAVAILABLE", "操作已提交，历史快照已清理；请读取最新画布确认同步"), { committed: true, revision: Number(existing.revision), snapshotAvailable: false });
                     const project = this.canvasProjectAt(id, Number(existing.revision));
-                    this.db.exec("COMMIT");
+                    this.db.exec(commitSql);
                     return { project, revision: Number(existing.revision), operationId, operationResults: JSON.parse(existing.resultsJson), operations: JSON.parse(existing.operationsJson), duplicated: true };
                 }
                 // Legacy batches without a request hash must never be executed again.
@@ -1708,7 +1715,7 @@ export class BackendDatabase {
                 delete operation.textSuggestion;
                 const isSuggestion = operation.type === "save_text_suggestion" || operation.type === "resolve_text_suggestion";
                 const isText = isSuggestion || operation.type === "text_update" || operation.type === "text_replace";
-                if (operation.type === "restore_h3_output") operations[index] = this.restoreH3OutputOperation(id, project, operation);
+                if (operation.type === "restore_h3_output") operations[index] = this.restoreH3OutputOperation(id, project, operation, context?.withinTransaction === true && context.runtimeWrite === true);
                 if (isSuggestion) operations[index] = this.applyTextSuggestion(id, project, operation);
                 else if (isText) operations[index] = this.applyCanvasTextOperation(id, project, operation);
                 if (!context?.runtimeWrite && operation.type !== "restore_h3_output") prepareClientCanvasOperation(project, operations[index]);
@@ -1755,15 +1762,19 @@ export class BackendDatabase {
                 if (!command || command.tool !== context.mcpCommand.tool || command.target_id !== context.mcpCommand.targetId || command.project_id !== id) throw collaborationError("MCP_COMMAND_MISMATCH", "MCP 冻结命令与画布提交不匹配");
                 this.completeMcpCommand(operationId, revision, committedOperations);
             }
-            this.db.exec("COMMIT");
+            this.db.exec(commitSql);
             commit = { projectId: id, operationId, baseRevision: currentRevision, revision, operations: committedOperations, operationResults, source, updatedAt: String(project.updatedAt) };
         } catch (error) {
-            this.db.exec("ROLLBACK");
+            this.db.exec(rollbackSql);
             throw error;
         }
         // 已提交的数据不能因为通知失败而被报告成事务失败，更不能尝试 ROLLBACK。
-        try { this.canvasCommitListener?.(commit); } catch (error) { console.error("画布提交成功，但实时通知失败", error); }
+        if (context?.withinTransaction) context.deferredCommits?.push(commit); else this.notifyCanvasCommit(commit);
         return { project: this.getCanvasProject(id)!, revision: commit.revision, operationId, operationResults: commit.operationResults, operations: commit.operations, duplicated: false };
+    }
+
+    notifyCanvasCommit(commit: CanvasCommit) {
+        try { this.canvasCommitListener?.(commit); } catch (error) { console.error("画布提交成功，但实时通知失败", error); }
     }
 
     writeBackH3Task(

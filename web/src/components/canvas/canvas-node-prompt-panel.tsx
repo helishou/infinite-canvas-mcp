@@ -15,6 +15,7 @@ import { getNodeImageReferenceCount } from "./canvas-node-image-reference-count"
 import { CanvasPromptLibrary } from "./canvas-prompt-library";
 import { CanvasCollaborativeText } from "./canvas-collaborative-text";
 import { CanvasNodeType, type CanvasGenerationMode, type CanvasNodeData } from "@/types/canvas";
+import { resolveCanvasNodePromptField } from "./canvas-node-prompt-field";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 
 import { CanvasNodeReferenceBar } from "./canvas-node-reference-bar";
@@ -50,7 +51,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
     const hasImageContent = mode === "image" && Boolean(canvasNodeImage(node) || (node.type === CanvasNodeType.Loop && node.metadata?.content));
     const isEditingExistingContent = hasTextContent || hasImageContent;
     const { id: projectId = "" } = useParams();
-    const field = node.type === CanvasNodeType.Config || isEditingExistingContent ? "composerContent" : "prompt";
+    const field = resolveCanvasNodePromptField(node.type, isEditingExistingContent);
     const target = useMemo<CanvasTextTarget>(() => ({ nodeId: node.id, field }), [node.id, field]);
     const session = useMemo(() => getCanvasTextSession(projectId, target), [projectId, target]);
     const textStatus = useSyncExternalStore(session.subscribe, session.getSnapshot);

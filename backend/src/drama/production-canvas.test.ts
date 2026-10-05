@@ -52,6 +52,75 @@ function save(service: EpisodeProductionService, id: string, d: DirectorProducti
 function publish(service: EpisodeProductionService, id: string) {
     return service.publish(id, { operationId: crypto.randomUUID(), expectedRevision: service.get(id).revision, stage: "director" });
 }
+
+function historyFixture(t: test.TestContext) {
+    const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
+    save(f.episode, "ep", director());
+    const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+    runner.prepareTargets("ep", f.episode.get("ep").revision, ["asset:ROLE", "frame:s1", "segment:seg1", "segment:seg2"], "history-prepare");
+    const published = publish(f.episode, "ep");
+    function result(kind: "asset" | "keyframe" | "segment", targetId: string, storageKey: string) {
+        const nodeId = kind === "segment" ? published.draft.clipGroups.find(group => group.id === targetId)!.nodeId! : kind === "keyframe" ? published.draft.director!.assets.FRAME.nodeId! : published.draft.director!.assets.ROLE.nodeId!;
+        const segmentId = kind === "segment" ? published.draft.clipGroups.find(group => group.id === targetId)!.segmentId! : undefined;
+        const mimeType = kind === "segment" ? "video/mp4" : "image/png";
+        const filePath = path.join(f.directory, `${targetId}.media`); fs.writeFileSync(filePath, storageKey);
+        f.db.upsertMediaFile({ storageKey, filePath, mimeType, bytes: storageKey.length, width: 8, height: 8, durationMs: kind === "segment" ? 5000 : null, createdAt: new Date().toISOString() });
+        const task = f.db.createTask(`history:${targetId}`, "fixture", { projectId, nodeId, segmentId }, {});
+        f.db.updateTask(task.id, { status: "succeeded", result: { media: [{ storageKey, mimeType }] } });
+        f.db.db.prepare("INSERT INTO production_task_bindings(task_id,owner_kind,owner_id,version,source_hash,project_id,node_id,target_kind,target_id,targets_json,status) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+            .run(task.id, "episode", "ep", published.publishedVersion, published.draft.director!.sourceHash, projectId, nodeId, kind, targetId, JSON.stringify([{ targetId, segmentId }]), "bound");
+        const log = f.db.createGenerationLog({ projectId, nodeId, segmentId, status: "success", platform: kind === "segment" ? "h3" : "image", model: "fixture", runtimeTaskId: task.id, references: [], inputCounts: {}, startedAt: new Date().toISOString(), durationMs: 0, outputs: [{ storageKey, mimeType }], params: {} });
+        return { type: "select_director_result" as const, targetKind: kind, targetId, nodeId, storageKey, generationLogId: log.id, canvasRevision: Number(f.db.getCanvasProject(projectId)!.revision) };
+    }
+    return { ...f, projectId, result };
+}
+
+test("history selection atomically restores one formal result, preserves task inputs and replays without notification", t => {
+    const f = historyFixture(t), op = f.result("asset", "ROLE", "image:old");
+    const request = { operationId: "select-old", expectedRevision: f.episode.get("ep").revision, ops: [op] };
+    const originalTask = f.db.getTask("history:ROLE");
+    const canvasBefore = f.db.getCanvasProject(f.projectId);
+    assert.equal(f.episode.preflight("ep", { action: "edit", request }).valid, true);
+    assert.deepEqual(f.db.getCanvasProject(f.projectId), canvasBefore, "preflight is read-only");
+    let notifications = 0; f.db.onCanvasCommit(() => { notifications++; assert.equal(f.episode.get("ep").draft.director!.assets.ROLE.storageKey, "image:old"); });
+    const selected = f.episode.edit("ep", request);
+    assert.equal(selected.draft.director!.assets.ROLE.status, "generated");
+    assert.equal(selected.published!.director!.assets.ROLE.storageKey, "image:old");
+    assert.equal((f.db.getCanvasProject(f.projectId)!.nodes as any[]).find(node => node.id === op.nodeId).metadata.storageKey, "image:old");
+    assert.equal(notifications, 1); assert.deepEqual(f.db.getTask("history:ROLE"), originalTask);
+    assert.equal(f.episode.edit("ep", request).replayed, true); assert.equal(notifications, 1);
+});
+
+test("history selection rolls back canvas, production and receipts when a later operation fails", t => {
+    const f = historyFixture(t), op = f.result("asset", "ROLE", "image:rollback");
+    const project = f.db.getCanvasProject(f.projectId), record = f.episode.get("ep"); let notifications = 0; f.db.onCanvasCommit(() => notifications++);
+    assert.throws(() => f.episode.edit("ep", { operationId: "failed-select", expectedRevision: record.revision, ops: [op, { type: "bind_director_asset", assetId: "MISSING", nodeId: "missing" }] }));
+    assert.deepEqual(f.db.getCanvasProject(f.projectId), project); assert.deepEqual(f.episode.get("ep"), record); assert.equal(notifications, 0);
+    assert.equal(f.db.getCanvasOperationReceipt(f.projectId, "failed-select:result:asset:ROLE").committed, false);
+});
+
+test("history selection rejects mismatched tasks and Clips, active generation and stale canvas revisions", t => {
+    const f = historyFixture(t), image = f.result("asset", "ROLE", "image:valid");
+    const select = (op: Record<string, unknown>) => f.episode.edit("ep", { operationId: crypto.randomUUID(), expectedRevision: f.episode.get("ep").revision, ops: [op] });
+    assert.throws(() => select({ ...image, storageKey: "image:forged" }), /不一致/);
+    assert.throws(() => select({ ...image, canvasRevision: image.canvasRevision + 1 }), /画布已变化/);
+    const video = f.result("segment", "seg1", "video:old");
+    assert.throws(() => select({ ...video, targetId: "seg2" }), /Clip/);
+    const nodeId = video.nodeId;
+    f.db.applyCanvasProjectOperations(f.projectId, Number(f.db.getCanvasProject(f.projectId)!.revision), [{ type: "update_h3_segment", nodeId, segmentId: f.episode.get("ep").draft.clipGroups[0].segmentId, patch: { status: "loading" } }], { runtimeWrite: true });
+    assert.throws(() => select({ ...video, canvasRevision: Number(f.db.getCanvasProject(f.projectId)!.revision) }), /正在生成/);
+});
+
+test("history selection restores the exact Clip without changing authored timing or continuity", t => {
+    const f = historyFixture(t), op = f.result("segment", "seg2", "video:second");
+    const before = f.episode.get("ep");
+    const selected = f.episode.edit("ep", { operationId: "select-clip", expectedRevision: before.revision, ops: [op] });
+    const clips = (f.db.getCanvasProject(f.projectId)!.nodes as any[]).find(node => node.id === op.nodeId).metadata.segments;
+    assert.equal(clips[1].resultStorageKey, "video:second"); assert.equal(clips[0].resultStorageKey, undefined);
+    assert.deepEqual(selected.draft.director!.source, before.draft.director!.source); assert.deepEqual(selected.draft.director!.boundaries, before.draft.director!.boundaries);
+    assert.equal(selected.draft.clipGroups[1].selectedResult?.generationLogId, op.generationLogId);
+    assert.throws(() => f.db.applyCanvasProjectOperations(f.projectId, Number(f.db.getCanvasProject(f.projectId)!.revision), [{ type: "restore_h3_output", nodeId: op.nodeId, segmentId: before.draft.clipGroups[1].segmentId, generationLogId: op.generationLogId, storageKey: op.storageKey, settings: {} }]), /正式制作片段/);
+});
 function approve(f: ReturnType<typeof fixture>, projectId: string, revision: number) {
     const storageKey = `image:role-${revision}`, filePath = path.join(f.directory, `role-${revision}.png`);
     fs.writeFileSync(filePath, Buffer.from(`reference bytes ${revision}`));
@@ -224,7 +293,7 @@ test("native image controls use the original node and expose an exact task for p
     unsubscribe();
 });
 
-test("native H3 tracking follows the active Clip of its exact parent task", t => {
+test("native H3 tracking follows the active Clip while a pending decision keeps presentation priority", t => {
     const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
     const d = director();
     (d.source.shots as any[]).forEach(shot => { shot.required_assets = []; });
@@ -245,6 +314,14 @@ test("native H3 tracking follows the active Clip of its exact parent task", t =>
     ], { runtimeWrite: true });
     const presentation = f.episode.workflowReadiness("ep").presentation!;
     assert.equal(presentation.taskId, task.id); assert.equal(presentation.segmentId, second); assert.equal(presentation.targetId, "seg2");
+    const decisionInput = f.episode.get("ep");
+    const work = decisionInput.draft.director!.workflow.currentWork!;
+    f.episode.edit("ep", { operationId: "pending-decision", expectedRevision: decisionInput.revision, ops: [{ type: "set_director_workflow", patch: {
+        pendingDecisions: [{ id: "identity-choice", workId: work.workId, module: "assets", targetKind: "asset", targetId: "ROLE", prompt: "Choose the identity reference", choices: ["Keep", "Replace"], sourceHash: decisionInput.draft.director!.sourceHash, sourceRevision: decisionInput.revision, status: "pending" }],
+    } }] });
+    const decisionPresentation = f.episode.workflowReadiness("ep").presentation!;
+    assert.equal(decisionPresentation.targetId, "ROLE"); assert.equal(decisionPresentation.action, "author");
+    assert.equal(decisionPresentation.taskId, undefined, "the active native task must not take focus from a formal decision");
 });
 
 test("version 23 installations gain preparation receipts and native bindings without rewriting shared versions", t => {

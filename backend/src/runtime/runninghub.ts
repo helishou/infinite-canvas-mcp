@@ -72,7 +72,10 @@ export class RunningHubBackend {
     listWorkflowProfiles() {
         const stored = this.settings.get("runninghub.workflows");
         return (Array.isArray(stored) ? stored : []).flatMap((value) => {
-            const parsed = runningHubWorkflowProfileSchema.safeParse(value);
+            // 必须先降级再解析：契约为兼容老档案仍接受 source=param，
+            // 直接 parse 会成功并把 param 原样放行，降级分支永远走不到。
+            const parsed = runningHubWorkflowProfileSchema.safeParse(normalizeRunningHubFieldSources(value));
+            // 解析失败会让整个档案静默消失（列表里看不到、也报不出原因），所以这里只能跳过。
             return parsed.success ? [parsed.data] : [];
         });
     }
@@ -237,10 +240,6 @@ export class RunningHubBackend {
             if (source === "prompt") {
                 value = Object.hasOwn(configured, key) ? String(configured[key] ?? "") : String(task.input.prompt ?? "");
                 hasPrompt = true;
-            }
-            else if (source === "param") {
-                value = task.params[field.paramKey || ""];
-                if (value === undefined) throw new Error(`H3 参数 ${field.paramKey || "(未指定)"} 没有值，请调整 RunningHub 映射`);
             } else if (source === "image" || source === "video" || source === "audio") {
                 const index = field.index === undefined ? cursors[source]++ : field.index - 1;
                 cursors[source] = Math.max(cursors[source], index + 1);
@@ -271,12 +270,6 @@ export class RunningHubBackend {
         for (const kind of ["image", "video", "audio"] as const) {
             const supplied = media[kind].filter(Boolean).length;
             if (used[kind].size !== supplied) throw new Error(`RunningHub ${kind}输入映射未覆盖本轮全部 ${supplied} 个参考素材`);
-        }
-        if (task.params.h3ExecutionContract) {
-            const critical = ['modelName', 'textEncoder', 'videoVae', 'audioVae', 'aspectRatio', 'megapixels', 'sampler', 'scheduler', 'loraSlots', 'latentUpscaleEnabled'];
-            if (task.params.latentUpscaleEnabled === true) critical.push('latentUpscaleModel', 'latentUpscaleMegapixels', 'h3FirstSteps', 'h3SecondSteps', 'h3FullSigma');
-            const missing = critical.filter(key => !fields.some(field => field.enabled !== false && fieldSource(field) === 'param' && field.paramKey === key));
-            if (missing.length) throw new Error(`RunningHub 映射无法证明冻结参数生效：${missing.join('、')}；请补齐映射后再提交`);
         }
         return values;
     }
@@ -647,13 +640,34 @@ function validateFields(fields: RunningHubField[]) {
     for (const field of fields) {
         if (field.enabled === false) continue;
         if (!field.nodeId || !field.fieldName) throw new Error("RunningHub 启用的映射必须指定节点 ID 和输入字段");
-        if (field.source && !["constant", "prompt", "image", "video", "audio", "param"].includes(field.source)) throw new Error("RunningHub 映射来源无效");
-        if (field.source === "param" && !field.paramKey?.trim()) throw new Error("RunningHub H3 参数映射缺少参数名");
-        if (field.index !== undefined && (!Number.isSafeInteger(field.index) || field.index < 1)) throw new Error("参考素材序号必须为正整数");
+        if (field.source && !["constant", "prompt", "image", "video", "audio"].includes(field.source)) throw new Error("RunningHub 映射来源无效");
         const target = `${field.nodeId}::${field.fieldName}`;
         if (targets.has(target)) throw new Error(`RunningHub 映射重复：${target}`);
         targets.add(target);
     }
+}
+
+/**
+ * 老档案里 source=param 的映射降级成 constant。
+ *
+ * H3 专用 RunningHub 路径已删除（commit be2388ad），task.params 不再带 H3 参数，
+ * param 映射运行必然报「没有值」。这里把它读成固定值：至少映射本身还在、输入仍可覆写，
+ * 用户在浮窗里改一下来源即可，不需要重新读平台。
+ * 只改 source/paramKey，其余字段（fieldValue、type、index 等）一律原样保留。
+ */
+export function normalizeRunningHubFieldSources(value: unknown): unknown {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const fields = (value as Record<string, unknown>).fields;
+    if (!Array.isArray(fields)) return value;
+    return {
+        ...(value as Record<string, unknown>),
+        fields: fields.map((field) => {
+            if (!field || typeof field !== "object" || Array.isArray(field)) return field;
+            const record_ = field as Record<string, unknown>;
+            if (record_.source !== "param") return field;
+            return { ...record_, source: "constant", paramKey: undefined };
+        }),
+    };
 }
 /** 连线型输入（["38", 0]）不属于可填写输入，必须排除，否则映射可覆盖掉节点连线。 */
 function isRunningHubLinkValue(value: unknown) {

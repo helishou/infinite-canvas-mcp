@@ -491,14 +491,14 @@ function EpisodeCard({ episode, project, index, onOpen, onProduce, onEdit, onDel
     return <article className={cn("group relative flex min-h-48 flex-col justify-between overflow-hidden rounded-2xl border border-stone-200 bg-background p-5 text-left transition dark:border-stone-800", canOpen ? "hover:-translate-y-0.5 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-950/5 dark:hover:border-orange-900" : "opacity-70")}>
         <div className="absolute right-0 top-0 h-24 w-24 translate-x-8 -translate-y-8 rounded-full border border-orange-200/70 transition group-hover:scale-125 dark:border-orange-950/60" />
         <div className="relative flex items-start justify-between gap-3">
-            <button type="button" className="text-left text-xs font-medium uppercase tracking-[0.14em] text-orange-600 dark:text-orange-400" onClick={() => { if (project) onOpen(project); }} disabled={!canOpen}>{t("drama.scene")} {String(index + 1).padStart(2, "0")} · {t("drama.episodeLabel", { number: episode.episodeNumber })}</button>
+            <button type="button" className="text-left text-xs font-medium text-orange-600 dark:text-orange-400" onClick={onProduce}>{t("drama.episodeLabel", { number: episode.episodeNumber })}</button>
             <div className="flex items-center gap-1">
-                <Button size="small" onClick={onProduce}>{t("drama.production.open")}</Button>
+                <Button size="small" onClick={onProduce}>{t("productionCanvas.enter")}</Button>
                 <Button type="text" size="small" className="!px-1.5 !text-stone-400 hover:!text-stone-900 dark:hover:!text-stone-100" onClick={onEdit} aria-label={t("drama.editEpisode")}><PencilLine className="size-4" /></Button>
                 <Button type="text" size="small" danger className="!px-1.5" onClick={onDelete} aria-label={t("drama.deleteEpisodeTitle")}><Trash2 className="size-4" /></Button>
             </div>
         </div>
-        <button type="button" className="relative mt-6 min-w-0 text-left" onClick={() => { if (project) onOpen(project); }} disabled={!canOpen}>
+        <button type="button" className="relative mt-6 min-w-0 text-left" onClick={onProduce}>
             <h3 className="truncate text-lg font-semibold">{episode.title || t("drama.episodeLabel", { number: episode.episodeNumber })}</h3>
             <p className="mt-2 line-clamp-3 whitespace-pre-line text-sm leading-6 text-stone-500 dark:text-stone-400">{episode.synopsis || t("drama.noEpisodeSynopsis")}</p>
         </button>
