@@ -27,9 +27,15 @@ function fixture(t: TestContext, pending = false) {
         },
         cancel: (id: string) => { stores.tasks.cancel(id); rejects.get(id)?.(new Error("已取消")); },
     };
-    const workflows = { get: async () => ({ workflow: {}, config: { title: "movie", backend: "", operation: "", description: "", fields: [] } }) };
+    // start() 会读 getConfig 取字段名，用于把实际提交参数记进生成日志；
+    // 与 get 返回同一份配置，避免两处对工作流元数据的认知不一致。
+    const workflowConfig = { title: "movie", backend: "", operation: "", description: "", fields: [] };
+    const workflows = {
+        get: async () => ({ workflow: {}, config: workflowConfig }),
+        getConfig: () => workflowConfig,
+    };
     const dispatcher = new CanvasVideoDispatcher(stores, { cancel: () => {} } as never, workflows as never, executor as never, { cancel: () => {} } as never);
-    const input = { projectId: "p", nodeId: "video", sourceNodeId: "source", model: "local::movie", prompt: "电影", clientTaskId: "outer" };
+    const input = { projectId: "p", nodeId: "video", sourceNodeId: "source", model: "local::movie", prompt: "电影", size: "1920x1080", seconds: "8", resolution: "1080p", params: { ratio: "16:9", generateAudio: true, watermark: false }, clientTaskId: "outer" };
     const node = (id: string) => (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).find((item) => item.id === id)!;
     return { db, stores, dispatcher, input, node, calls: () => calls };
 }
@@ -47,6 +53,7 @@ test("普通 Comfy 视频绑定父任务，结果经 ops 原地回写并保留�
     await settle(db);
     assert.equal(calls(), 1);
     assert.equal(db.getTask("outer")!.status, "succeeded");
+    assert.deepEqual(db.listGenerationLogs({ runtimeTaskId: "outer" })[0]?.params.generationSettings, { ratio: "16:9", generateAudio: true, watermark: false, size: "1920x1080", seconds: "8", resolution: "1080p", executor: "workflow" });
     assert.equal(node("video").metadata.content, "video.mp4");
     assert.deepEqual(node("video").position, { x: 900, y: 500 });
     assert.equal(node("video").width, 777);
@@ -61,6 +68,7 @@ test("普通视频取消覆盖子任务，迟到失败不覆盖取消；重试�
     await new Promise((resolve) => setImmediate(resolve));
     dispatcher.cancel("outer");
     await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(db.listGenerationLogs({ runtimeTaskId: "outer" })[0]?.status, "cancelled");
     assert.equal(db.getTask("outer")!.status, "cancelled");
     assert.equal(node("video").metadata.status, "cancelled");
     assert.equal(node("video").metadata.runtimeTaskId, undefined);
@@ -68,6 +76,7 @@ test("普通视频取消覆盖子任务，迟到失败不覆盖取消；重试�
     assert.match(retried.id, /^canvas-video-retry-/);
     assert.equal(node("video").metadata.runtimeTaskId, retried.id);
     dispatcher.cancel(retried.id);
+    await new Promise((resolve) => setImmediate(resolve));
 });
 
 test("视频恢复只认原绑定；已成功子任务直接采用，不二次运行工作流", async (t) => {
