@@ -51,7 +51,7 @@ export type AgentQueuedPromptPayload = {
     text: string;
     messageText: string;
     attachments: AgentAttachment[];
-    canvasReferences: AgentCanvasReference[];
+    canvasReferences: CanvasResourceReference[];
     canvasProjectId: string;
     skill?: AgentSkillReference;
     model: string;
@@ -60,6 +60,7 @@ export type AgentQueuedPromptPayload = {
     productionObject: ProductionObject | null;
 };
 export type AgentQueuedPrompt = AgentPromptQueueItem<AgentQueuedPromptPayload>;
+export type AgentCodexRuntime = { instanceId: string; revision: number; busy: boolean; threadId: string; turnId: string };
 
 let agentSource: EventSource | null = null;
 
@@ -88,6 +89,7 @@ type AgentStore = {
     messages: AgentChatItem[];
     queuedPrompts: AgentQueuedPrompt[];
     pausedPromptQueueScopes: string[];
+    codexRuntime: AgentCodexRuntime;
     tokenUsage: AgentTokenUsage | null;
     eventLogs: AgentEventLog[];
     threads: AgentThreadSummary[];
@@ -108,15 +110,17 @@ type AgentStore = {
     connectError: string;
     pendingTool: AgentPendingToolCall | null;
     pendingApprovals: AgentPendingApproval[];
-    setAgentState: (patch: Partial<Omit<AgentStore, "setAgentState" | "connectAgent" | "disconnectAgent" | "addMessage" | "addEventLog" | "clearEventLogs" | "openPanel" | "closePanel" | "togglePanel" | "setCanvasContext" | "updatePromptQueue" | "setPromptQueuePaused">>) => void;
+    setAgentState: (patch: Partial<Omit<AgentStore, "setAgentState" | "connectAgent" | "disconnectAgent" | "addMessage" | "addEventLog" | "clearEventLogs" | "openPanel" | "closePanel" | "togglePanel" | "setCanvasContext" | "updatePromptQueue" | "setPromptQueuePaused" | "clearPromptQueueForThread" | "setCodexRuntime">>) => void;
     openPanel: () => void;
     closePanel: () => void;
     togglePanel: () => void;
     setCanvasContext: (context: AgentCanvasContext | null) => void;
     updatePromptQueue: (update: (queue: AgentQueuedPrompt[]) => AgentQueuedPrompt[]) => void;
     setPromptQueuePaused: (threadId: string, conversationId: string, paused: boolean) => void;
+    clearPromptQueueForThread: (threadId: string) => void;
+    setCodexRuntime: (codexRuntime: AgentCodexRuntime) => void;
     connectAgent: (options?: { silent?: boolean }) => void;
-    disconnectAgent: (patch?: Partial<Omit<AgentStore, "setAgentState" | "connectAgent" | "disconnectAgent" | "addMessage" | "addEventLog" | "clearEventLogs" | "openPanel" | "closePanel" | "togglePanel" | "setCanvasContext" | "updatePromptQueue" | "setPromptQueuePaused">>) => void;
+    disconnectAgent: (patch?: Partial<Omit<AgentStore, "setAgentState" | "connectAgent" | "disconnectAgent" | "addMessage" | "addEventLog" | "clearEventLogs" | "openPanel" | "closePanel" | "togglePanel" | "setCanvasContext" | "updatePromptQueue" | "setPromptQueuePaused" | "clearPromptQueueForThread" | "setCodexRuntime">>) => void;
     addMessage: (item: AgentChatItem) => void;
     addEventLog: (item: AgentEventLog) => void;
     clearEventLogs: () => void;
@@ -164,6 +168,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     messages: [],
     queuedPrompts: [],
     pausedPromptQueueScopes: [],
+    codexRuntime: { instanceId: "", revision: 0, busy: false, threadId: "", turnId: "" },
     tokenUsage: null,
     eventLogs: [],
     threads: [],
@@ -220,6 +225,19 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         if (alreadyPaused === paused) return state;
         return { pausedPromptQueueScopes: paused ? [...state.pausedPromptQueueScopes, key] : state.pausedPromptQueueScopes.filter((item) => item !== key) };
     }),
+    clearPromptQueueForThread: (threadId) => set((state) => {
+        const queuedPrompts = state.queuedPrompts.filter((item) => item.threadId !== threadId);
+        const pausedPromptQueueScopes = state.pausedPromptQueueScopes.filter((scope) => {
+            try {
+                return JSON.parse(scope)[0] !== threadId;
+            } catch {
+                return true;
+            }
+        });
+        if (queuedPrompts.length === state.queuedPrompts.length && pausedPromptQueueScopes.length === state.pausedPromptQueueScopes.length) return state;
+        return { queuedPrompts, pausedPromptQueueScopes };
+    }),
+    setCodexRuntime: (codexRuntime) => set({ codexRuntime }),
     connectAgent: (options) => {
         const silent = options?.silent ?? false;
         const endpoint = get().url.trim().replace(/\/$/, "");

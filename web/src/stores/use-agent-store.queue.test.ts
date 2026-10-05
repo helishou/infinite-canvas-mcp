@@ -51,10 +51,15 @@ test("updating the queue does not alter the composer draft or production draft o
     assert.deepEqual(state.queuedPrompts.map((item) => item.id), ["queued-1"]);
 });
 
-test("queue pause is scoped to one conversation", () => {
-    useAgentStore.setState({ pausedPromptQueueScopes: [] });
-    useAgentStore.getState().setPromptQueuePaused("thread-1", "conversation-1", true);
-    useAgentStore.getState().setPromptQueuePaused("thread-2", "conversation-2", true);
-    useAgentStore.getState().setPromptQueuePaused("thread-1", "conversation-1", false);
-    assert.deepEqual(useAgentStore.getState().pausedPromptQueueScopes, [JSON.stringify(["thread-2", "conversation-2"])]);
+test("deleting a thread clears only that thread's queued prompts and pause scopes", () => {
+    useAgentStore.setState({
+        queuedPrompts: [queueItem("a", "thread-1", "conversation-1"), queueItem("b", "thread-2", "conversation-2")],
+        pausedPromptQueueScopes: [JSON.stringify(["thread-1", "conversation-1"]), JSON.stringify(["thread-1", "old-conversation"]), JSON.stringify(["thread-2", "conversation-2"])],
+    });
+
+    useAgentStore.getState().clearPromptQueueForThread("thread-1");
+
+    const state = useAgentStore.getState();
+    assert.deepEqual(state.queuedPrompts.map((item) => item.id), ["b"]);
+    assert.deepEqual(state.pausedPromptQueueScopes, [JSON.stringify(["thread-2", "conversation-2"])]);
 });

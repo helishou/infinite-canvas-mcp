@@ -5,6 +5,13 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Director chat queue and inserted guidance
+
+- The composer stays editable while Agent is running: Enter or “Queue next” snapshots the current prompt, attachments, canvas references, Skill and permission mode, then sends queued instructions in submission order. The queue shows its count and per-item status above the conversation and each item can be removed. A queued instruction appears only in its queue card; it enters the conversation timeline when it is actually submitted.
+- “Insert and guide” promotes an item to the front of the current conversation queue. If that conversation is running, the current turn is interrupted first and the instruction is sent only after authoritative state for the same conversation reports idle; a rejected interrupt or unconfirmed idle keeps the item and never submits twice. Ordinary “Stop” pauses that conversation's queue, and the queue offers “Resume queue”.
+- Queues are per conversation, so switching or deleting a conversation affects only its own items. An item whose canvas references were removed or whose canvas changed is marked failed and can be retried instead of being silently dropped. The queue lives in page memory only and is not restored after a refresh or reconnect; sending uses the snapshotted content and attachment data, not temporary links released later.
+- Check: queue two instructions while running via both Enter and “Queue next” and confirm send order; insert during a run and confirm the new instruction is sent first after the interrupt; a duplicate idle snapshot must not resend; pause and resume after Stop; both languages, light/dark themes and narrow layouts.
+
 ## Interrupted director turns
 
 - Interrupted turns retain completed tool calls and show an interruption notice. When the page regains focus, authoritative history covering the current turn clears the stale waiting indicator and stop button; live turns keep their running state. Recovery does not automatically resend prompts or repeat writes.
