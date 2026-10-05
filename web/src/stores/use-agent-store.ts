@@ -6,6 +6,7 @@ import { fetchSettings, saveSettings, type FrontendSettings } from "@/services/s
 import type { CanvasAgentOp, CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { productionObjectForPresentation, type ProductionObject } from "@/lib/production-object";
+import type { AgentPromptQueueItem } from "@/lib/agent/agent-prompt-queue";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
 
 export type AgentChatRole = "user" | "assistant" | "system" | "tool" | "error";
@@ -46,6 +47,19 @@ export type AgentPanelTab = "chat" | "setup" | "history" | "skills" | "log";
 export type AgentCreativeLaunch = { id: string; mode: "asset" | "drama"; text: string; phase: "reset" | "resetting" | "send" | "sending" };
 export type AgentScopedTask = { id: string; text: string; threadId?: string; productionId: string; revision: number; engineRuntimeId: string };
 export type AgentScopedTaskResult = { id: string; status: "sent" | "failed"; threadId?: string; error?: string };
+export type AgentQueuedPromptPayload = {
+    text: string;
+    messageText: string;
+    attachments: AgentAttachment[];
+    canvasReferences: AgentCanvasReference[];
+    canvasProjectId: string;
+    skill?: AgentSkillReference;
+    model: string;
+    reasoningEffort: AgentReasoningEffort | "";
+    permissionMode: AgentPermissionMode;
+    productionObject: ProductionObject | null;
+};
+export type AgentQueuedPrompt = AgentPromptQueueItem<AgentQueuedPromptPayload>;
 
 let agentSource: EventSource | null = null;
 
@@ -72,6 +86,8 @@ type AgentStore = {
     sending: boolean;
     waiting: boolean;
     messages: AgentChatItem[];
+    queuedPrompts: AgentQueuedPrompt[];
+    pausedPromptQueueScopes: string[];
     tokenUsage: AgentTokenUsage | null;
     eventLogs: AgentEventLog[];
     threads: AgentThreadSummary[];
@@ -92,13 +108,15 @@ type AgentStore = {
     connectError: string;
     pendingTool: AgentPendingToolCall | null;
     pendingApprovals: AgentPendingApproval[];
-    setAgentState: (patch: Partial<Omit<AgentStore, "setAgentState" | "connectAgent" | "disconnectAgent" | "addMessage" | "addEventLog" | "clearEventLogs" | "openPanel" | "closePanel" | "togglePanel" | "setCanvasContext">>) => void;
+    setAgentState: (patch: Partial<Omit<AgentStore, "setAgentState" | "connectAgent" | "disconnectAgent" | "addMessage" | "addEventLog" | "clearEventLogs" | "openPanel" | "closePanel" | "togglePanel" | "setCanvasContext" | "updatePromptQueue" | "setPromptQueuePaused">>) => void;
     openPanel: () => void;
     closePanel: () => void;
     togglePanel: () => void;
     setCanvasContext: (context: AgentCanvasContext | null) => void;
+    updatePromptQueue: (update: (queue: AgentQueuedPrompt[]) => AgentQueuedPrompt[]) => void;
+    setPromptQueuePaused: (threadId: string, conversationId: string, paused: boolean) => void;
     connectAgent: (options?: { silent?: boolean }) => void;
-    disconnectAgent: (patch?: Partial<Omit<AgentStore, "setAgentState" | "connectAgent" | "disconnectAgent" | "addMessage" | "addEventLog" | "clearEventLogs" | "openPanel" | "closePanel" | "togglePanel" | "setCanvasContext">>) => void;
+    disconnectAgent: (patch?: Partial<Omit<AgentStore, "setAgentState" | "connectAgent" | "disconnectAgent" | "addMessage" | "addEventLog" | "clearEventLogs" | "openPanel" | "closePanel" | "togglePanel" | "setCanvasContext" | "updatePromptQueue" | "setPromptQueuePaused">>) => void;
     addMessage: (item: AgentChatItem) => void;
     addEventLog: (item: AgentEventLog) => void;
     clearEventLogs: () => void;
@@ -144,6 +162,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     sending: false,
     waiting: false,
     messages: [],
+    queuedPrompts: [],
+    pausedPromptQueueScopes: [],
     tokenUsage: null,
     eventLogs: [],
     threads: [],
@@ -193,6 +213,13 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     },
     togglePanel: () => (get().panelOpen ? get().closePanel() : get().openPanel()),
     setCanvasContext: (canvasContext) => set({ canvasContext }),
+    updatePromptQueue: (update) => set((state) => ({ queuedPrompts: update(state.queuedPrompts) })),
+    setPromptQueuePaused: (threadId, conversationId, paused) => set((state) => {
+        const key = JSON.stringify([threadId, conversationId]);
+        const alreadyPaused = state.pausedPromptQueueScopes.includes(key);
+        if (alreadyPaused === paused) return state;
+        return { pausedPromptQueueScopes: paused ? [...state.pausedPromptQueueScopes, key] : state.pausedPromptQueueScopes.filter((item) => item !== key) };
+    }),
     connectAgent: (options) => {
         const silent = options?.silent ?? false;
         const endpoint = get().url.trim().replace(/\/$/, "");
