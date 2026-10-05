@@ -12,7 +12,7 @@ export function resolveH3Runtime(segment: Record<string, unknown>, override: Rec
     const values: Record<string, unknown> = {};
     const layers: Array<[H3ParameterSource, Record<string, unknown>]> = [['request', override], ['clip', segment], ['node', metadata], ['nodeParams', nodeParams], ['defaults', defaults], ['builtIn', BASE_H3_NODE_METADATA]];
     for (const key of H3_PARAM_KEYS) {
-        const selected = layers.find(([source, layer]) => !(useDefaults && !plannedKeys.has(key) && ['clip', 'node', 'nodeParams'].includes(source)) && layer[key] !== undefined && layer[key] !== null);
+        const selected = layers.find(([source, layer]) => !(useDefaults && !plannedKeys.has(key) && ['clip', 'node', 'nodeParams'].includes(source)) && layer[key] !== undefined && (key === 'styleTemplateId' || layer[key] !== null));
         if (selected) { values[key] = selected[1][key]; sources[key] = selected[0]; }
     }
     // steps is an execution alias; videoSteps is the persisted domain field.
@@ -95,7 +95,7 @@ function record(value: unknown): Record<string, unknown> { return value && typeo
 export const H3_PARAM_KEYS = [
     "minimaxEngine",
     "selectedVideoModelEnabled", "selectedVideoModel", "selectedVideoModelFieldValues",
-    "mode", "taskMode", "duration", "aspectRatio", "megapixels", "videoSteps", "steps", "denoise", "noiseSeedMode", "noiseSeed", "seed",
+    "mode", "taskMode", "styleTemplateId", "duration", "aspectRatio", "megapixels", "videoSteps", "steps", "denoise", "noiseSeedMode", "noiseSeed", "seed",
     "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile", "sizeMultiple", "sampler", "scheduler",
     "loraSlots", "constantTriggerWord", "lockAudio", "audioDrive", "audioDriveFile", "audioDriveMarkers", "audioDriveSegmentImages", "audioDriveSegmentStoryboards", "audioDriveCreative", "audioDriveExclude", "audioDriveStart", "audioDriveEnd",
     "solAttnEnabled", "solAttnTau", "solAttnThresholdType", "solAttnExactMode", "solAttnDenseSteps", "solAttnStepOff", "solAttnSinkTokens",

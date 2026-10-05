@@ -868,7 +868,7 @@ export class CanvasH3Runner {
         const { compilation, composite, editableReferences } = compileH3Submission(project, segment, taskMode);
         assertReferenceCompilation(compilation);
         const scenePrompt = segment.directorEngine ? compilation.compiledPrompt : appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
-        const styleTemplateId = segment.styleTemplateId === undefined ? styleTemplateFromPrompt(scenePrompt, taskMode) : segment.styleTemplateId;
+        const styleTemplateId = params.styleTemplateId === undefined ? styleTemplateFromPrompt(scenePrompt, taskMode) : params.styleTemplateId;
         if (styleTemplateId && !isH3StyleTemplateId(styleTemplateId)) throw new Error(`无效的 H3 视觉风格模板：${styleTemplateId}`);
         params.styleTemplateId = styleTemplateId || null;
         // 实时预览节点靠 target_node_id 把帧推回画布上的 H3 节点；不传就是空串，

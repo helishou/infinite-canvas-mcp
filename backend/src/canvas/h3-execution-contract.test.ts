@@ -18,13 +18,18 @@ function fixture(t: test.TestContext) {
 }
 
 test('defaults policy ignores stale generation overrides but preserves planned aspect, duration and boundaries', () => {
-    const resolved = resolveH3Runtime({ h3ParameterPolicy: 'defaults', aspectRatio: '9:16', duration: 7.5, sampler: 'res_multistep', latentUpscaleEnabled: false, motionContextEnabled: false }, {}, { megapixels: 0.4 }, { aspectRatio: '16:9', megapixels: 0.6, sampler: 'er_sde', latentUpscaleEnabled: true, loraSlots: [{ name: 'turbo', enabled: true, strength: 0.75 }] });
+    const resolved = resolveH3Runtime({ h3ParameterPolicy: 'defaults', aspectRatio: '9:16', duration: 7.5, sampler: 'res_multistep', latentUpscaleEnabled: false, motionContextEnabled: false, styleTemplateId: 'modern-korean' }, {}, { megapixels: 0.4 }, { aspectRatio: '16:9', megapixels: 0.6, sampler: 'er_sde', latentUpscaleEnabled: true, loraSlots: [{ name: 'turbo', enabled: true, strength: 0.75 }], styleTemplateId: 'soft-light' });
     assert.equal(resolved.params.aspectRatio, '9:16');
     assert.equal(resolved.params.duration, 7.5);
     assert.equal(resolved.params.motionContextEnabled, false);
     assert.equal(resolved.params.latentUpscaleEnabled, true);
     assert.equal(resolved.params.sampler, 'er_sde');
     assert.equal(resolved.sources.sampler, 'defaults');
+    assert.equal(resolved.params.styleTemplateId, 'soft-light');
+    assert.equal(resolved.sources.styleTemplateId, 'defaults');
+    const cleared = resolveH3Runtime({ styleTemplateId: null }, {}, {}, { styleTemplateId: 'soft-light' });
+    assert.equal(cleared.params.styleTemplateId, null);
+    assert.equal(cleared.sources.styleTemplateId, 'clip');
     assert.equal(resolveH3Runtime({ sampler: 'euler' }, {}, {}, { sampler: 'er_sde' }).params.sampler, 'euler');
 });
 

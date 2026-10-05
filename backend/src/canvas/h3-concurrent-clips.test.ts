@@ -53,6 +53,35 @@ test("同一 H3 节点的两个 Clip 可同时运行，并各自保存父任务�
     assert.equal(segment("clip-b").parentTaskId, "");
 });
 
+test("Backend 保存的视觉风格模板默认值进入实际 H3 提示词", async (t: TestContext) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "style-default", nodes: [{ id: "n", type: "minimax-h3", metadata: { segments: [
+        { id: "clip", mode: "t2v", taskMode: "t2v", prompt: "integrated_multimodal_description:\n人物在夜色中走过桥。", duration: 5 },
+    ] } }], connections: [] });
+    const stores = createStores(db);
+    stores.settings.set("plugin:minimax-h3:defaults:v1", { megapixels: 0.6, styleTemplateId: "soft-light" });
+    const submitted: Array<{ input: Record<string, unknown>; params: Record<string, unknown> }> = [];
+    const comfy = {
+        async status() { return { connected: false }; },
+        async run(_preset: string, input: Record<string, unknown>, params: Record<string, unknown>, _url?: string, id?: string, onCreated?: (task: ReturnType<typeof stores.tasks.create>) => void) {
+            const child = stores.tasks.create(id || "style-child", "comfyui:minimax-h3", input, params);
+            onCreated?.(child);
+            submitted.push({ input, params });
+            return stores.tasks.update(child.id, { status: "failed", error: "测试仅捕获实际提交输入" });
+        },
+        cancel() {},
+    };
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, localProvider() as never);
+    const parent = runner.start({ projectId: "style-default", nodeId: "n", segmentId: "clip" }, "style-parent");
+    for (let i = 0; i < 100 && submitted.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(submitted.length, 1);
+    assert.equal(submitted[0].params.styleTemplateId, "soft-light");
+    assert.match(String(submitted[0].input.prompt), /gentle photographic diffusion/);
+    for (let i = 0; i < 100 && !["failed", "succeeded", "cancelled"].includes(db.getTask(parent.id)?.status || ""); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(db.getTask(parent.id)?.status, "failed");
+});
+
 test("父任务失败只清理自己仍在 loading 的 Clip，另一 Clip 可继续完成", async (t: TestContext) => {
     const db = new BackendDatabase(":memory:");
     t.after(() => db.close());
