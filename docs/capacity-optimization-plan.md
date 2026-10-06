@@ -405,23 +405,13 @@ node --import tsx --test src/canvas/history-maintenance.test.ts
 2. ~~`prune-runtime-history --apply`~~ **已执行（2026-10-06）**：生产库删 202 任务
    （succeeded 187 + cancelled 15）、0 日志、写 202 tombstone、task_events 级联
    874（38940→38066）；orphanEventsFromTombstones=0。tasks 5662→5460。
-3. re-baseline 准入诊断（2026-10-06 只读，生产库）：23 项目
-   - **8 healthy**（无需 re-baseline）
-   - **8 eligible**（可 re-baseline，删 batches + 重建 checkpoint）：
-     | 项目 | 诊断码 | batches |
-     |---|---|---:|
-     | `fQiJ4cR16K8tLsCB_iWV2` | HISTORY_REPLAY_MISMATCH | 57,821 |
-     | `JQrB0Mx2q0_XOfOY6ufm4` | HISTORY_REPLAY_MISMATCH | 7,058 |
-     | `wr_ilwtpTgcnQQ3CpFJdt` | HISTORY_REPLAY_MISMATCH | 2,470 |
-     | `hswj-ep1-img` | HISTORY_CHAIN_GAP | 1,042 |
-     | `KwSyhgXQ4DGUwkzWYvaEA` | HISTORY_REPLAY_MISMATCH | 623 |
-     | `Fm36VPfht6SXfivHbHJzn` | HISTORY_REPLAY_MISMATCH | 378 |
-     | `8o8GDjt_exVKx7S9Sx8gC` | HISTORY_REPLAY_MISMATCH | 371 |
-     | `974e472c24774c279378e4ae67abd68d` | MISSING_CHECKPOINT | 0 |
-   - **7 不 eligible**（UNKNOWN：`segment id 已存在`，re-baseline 不能处理，
-     需先修数据完整性）
-   合计 eligible batches ≈ 69,763（占 `canvas_operation_batches` 71,227 的 98%）。
-   执行需 `--write-plan` → 审阅 → `--apply-plan --accept-history-loss`，
-   每项目独立，旧 revision 快照恢复范围损失（RECEIPT_UNAVAILABLE）。
+3. ~~re-baseline~~ **已执行（2026-10-06）**：7 项目 apply 成功
+   - 删 68,721 batches（71,227→2,506），checkpoints 23，FK 0，integrity ok
+   - 每项目独立备份（7 个 `.rebaseline-*.sqlite`）
+   - 跳过 `hswj-ep1-img`（batch 缺 `request_hash` 凭据，门禁拦截）
+   - 跳过 7 个 UNKNOWN（`segment id 已存在`，需先修数据完整性）
+   - 旧 revision 快照恢复范围不可用（RECEIPT_UNAVAILABLE），命令身份保留
+   - 前置修复：删 2 条孤儿 `task_events`（`probe-extract-frames-001`，
+     9/26 探针任务不存在），清除 FK 违例
 4. `VACUUM` 压缩：维护窗口执行，backend 停机。
 5. 每步独立提交、独立验收；不合并无关工作区变更。
