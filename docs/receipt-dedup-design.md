@@ -1,6 +1,10 @@
 # episode_production_operations receipt 去重设计
 
-> 状态：设计稿，未实施。
+> 状态：**已实施（2026-10-06）**。
+> 代码提交 `16df354c`（模块 + 测试 + 迁移脚本 + 本设计稿）。
+> `production.ts` 3 处调用点 + `package.json` 注册因混入 Acheng WIP 未独立提交。
+> 生产库已迁移：144 行去重，省 28.95MB；VACUUM 后 607.1→574.0MB（释放 33.1MB）。
+> backend 已用新代码重启（dist 重建）。integrity ok，FK 0。
 > GPT 审核（2026-10-06）：8.5/10，按 6 条修正后 9.5/10 可安全上线。
 > 修正：`__receiptDedupV1` 带版本、`$ref` 对象格式、missing path 抛错、迁移事务内、API assert、adoptSharedAsset 不改。
 > 基于 2026-10-06 生产库**实测**（非推断）：269 行、207.11MB receipt。
