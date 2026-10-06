@@ -866,6 +866,16 @@ export class BackendDatabase {
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }
+        if (currentVersion < 31) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                // mcp_observability_events 只增不减（纯遥测），保留期清理 CLI 需要按 created_at 范围删除；
+                // 现有两个索引的首列是 trace_id / tool，时间范围删除会全表扫。加单列索引。
+                this.db.exec("CREATE INDEX IF NOT EXISTS mcp_observability_created_at ON mcp_observability_events(created_at);");
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (31, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
     }
 
     /** A rolled-back schema_migrations row leaves its column behind, so every ADD COLUMN must be checked first. */
