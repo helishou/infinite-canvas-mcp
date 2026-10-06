@@ -2763,10 +2763,10 @@ export class BackendDatabase {
             JSON.stringify(input.outputs || []), input.error || null,
             JSON.stringify(input.params || {}), now, now,
         );
-        // 每项目保留最近 500 条
-        this.db.prepare(
-            "DELETE FROM generation_logs WHERE project_id = ? AND id NOT IN (SELECT id FROM generation_logs WHERE project_id = ? ORDER BY created_at DESC LIMIT 500)"
-        ).run(input.projectId, input.projectId);
+        // 原「每项目保留最近 500 条」写入时自动 DELETE 已移除（capacity-optimization-plan v3 §1.5）：
+        // 该删除无保护条件，会删掉被正式绑定/活动节点/恢复依赖引用的日志。
+        // 数量整理改由手动 CLI `prune-runtime-history --log-count-policy=existing-500` 执行，
+        // 受保护、非终态、关联任务未到期的记录允许超过目标。
         return this.getGenerationLog(id)!;
     }
 
