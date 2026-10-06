@@ -233,9 +233,6 @@ async function startBackendHttpServer() {
   const canvasProduction = new EpisodeProductionService(runtime.db, runtime.events, undefined, true);
   const canvasProductionRunner = new EpisodeProductionRunner(canvasProduction, runtime.stores, canvasGeneration);
   registerDramaProductionRoutes(app, canvasProduction, canvasProductionRunner, "/canvas/projects/:episodeId/production");
-  const sceneProduction = episodeProduction.withSceneScope();
-  const sceneProductionRunner = new EpisodeProductionRunner(sceneProduction, runtime.stores, canvasGeneration);
-  registerDramaProductionRoutes(app, sceneProduction, sceneProductionRunner, "/drama/scenes/:episodeId/production");
   const nativeProductionGeneration = new NativeProductionGeneration(runtime.db, runtime.stores, episodeProduction, canvasProduction, runtime.events);
   nativeProductionGeneration.start();
   canvasGeneration.observeProduction(nativeProductionGeneration);

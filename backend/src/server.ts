@@ -7,8 +7,7 @@ import express, {
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { ensureProductionCanvas, ensureSceneProductionCanvas, productionCanvasContext } from "./drama/production-canvas.js";
-import { backfillSceneInstances, getSceneInstance, listSceneInstances } from "./drama/scene-instances.js";
+import { ensureProductionCanvas, productionCanvasContext } from "./drama/production-canvas.js";
 
 import {
   type ResolvedConfig,
@@ -671,37 +670,6 @@ export function startServer(
   app.post("/drama/projects/:dramaId/asset-canvas/ensure", (req, res) => {
     try { res.json({ ok: true, ...ensureProductionCanvas(db, "shared-assets", req.params.dramaId, events) }); }
     catch (error) { res.status(409).json({ ok: false, error: String(error) }); }
-  });
-  app.get("/dramas/:dramaId/scenes", (req, res) => {
-    try {
-      const includeOrphaned = req.query.includeOrphaned === "true";
-      const scenes = listSceneInstances(db, { dramaId: req.params.dramaId, episodeId: typeof req.query.episodeId === "string" ? req.query.episodeId : undefined, includeOrphaned });
-      res.json({
-        ok: true,
-        scenes: scenes.map(scene => ({
-          ...scene,
-          canvasId: db.db.prepare("SELECT canvas_id FROM drama_scene_canvases WHERE scene_id=?").get(scene.id)?.canvas_id || null,
-        })),
-      });
-    } catch (error) { res.status(404).json({ ok: false, error: String(error) }); }
-  });
-  app.get("/drama/scenes/:sceneId", (req, res) => {
-    try {
-      const scene = getSceneInstance(db, req.params.sceneId);
-      if (!scene) { res.status(404).json({ ok: false, error: "制作场次不存在" }); return; }
-      const binding = db.db.prepare("SELECT canvas_id, created_at FROM drama_scene_canvases WHERE scene_id=?").get(scene.id) as { canvas_id: string; created_at: string } | undefined;
-      res.json({ ok: true, scene, canvas: binding ? { id: binding.canvas_id, createdAt: binding.created_at, context: productionCanvasContext(db, binding.canvas_id) } : null });
-    } catch (error) { res.status(404).json({ ok: false, error: String(error) }); }
-  });
-  app.post("/drama/scenes/:sceneId/canvas/ensure", (req, res) => {
-    try { res.json({ ok: true, ...ensureSceneProductionCanvas(db, req.params.sceneId, events) }); }
-    catch (error) { res.status(409).json({ ok: false, error: String(error) }); }
-  });
-  app.post("/dramas/:dramaId/scenes/backfill", (req, res) => {
-    try {
-      const result = backfillSceneInstances(db, req.params.dramaId);
-      res.json({ ok: true, ...result, scenes: listSceneInstances(db, { dramaId: req.params.dramaId, includeOrphaned: true }) });
-    } catch (error) { res.status(409).json({ ok: false, error: String(error) }); }
   });
   app.get("/canvas/projects/:id/changes", (req, res) => {
     try {

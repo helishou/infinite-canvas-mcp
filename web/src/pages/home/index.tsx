@@ -41,14 +41,19 @@ export default function IndexPage() {
     const folderById = useMemo(() => new Map(folders.map((f) => [f.id, f])), [folders]);
     const folderFor = (p: CanvasProject) => folderById.get(data.episodeFolders[p.id] || p.folderId || "");
     const isDrama = (p: CanvasProject) => Boolean(data.episodeFolders[p.id] || folderFor(p)?.isDrama);
-    const sorted = useMemo(() => [...projects].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)), [projects]);
-    const filtered = sorted.filter((p) => p.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()) && (filter === "all" || (filter === "pinned" ? data.settings[`homePinnedProject:${p.id}`] : filter === "drama" ? isDrama(p) : !isDrama(p))));
+    const sharedDramaCanvasIds = new Set(folders.filter((f) => f.isDrama).map((f) => f.sharedAssetCanvasId));
+    const sorted = [...projects].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+    const ordinaryProjects = sorted.filter((p) => !isDrama(p) && !sharedDramaCanvasIds.has(p.id));
+    const entries = [
+        ...ordinaryProjects.map((project) => ({ kind: "canvas" as const, id: project.id, title: project.title, updatedAt: project.updatedAt, project })),
+        ...folders.filter((folder) => folder.isDrama).map((folder) => ({ kind: "drama" as const, id: folder.id, title: folder.name, updatedAt: folder.updatedAt || folder.createdAt, folder })),
+    ].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+    const filtered = entries.filter((entry) => entry.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()) && (filter === "all" || (filter === "pinned" ? entry.kind === "canvas" && data.settings[`homePinnedProject:${entry.id}`] : entry.kind === filter)));
     const latest = sorted[0];
     const projectIds = new Set(projects.map((p) => p.id));
     const date = (value: string) => (Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString(i18n.resolvedLanguage, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—");
-    const stats = (p: CanvasProject) => t("canvas.project.stats", { nodes: p.summary?.nodeCount ?? p.nodes.length, connections: p.summary?.connectionCount ?? p.connections.length });
     const openProject = (id: string) => navigate(`/canvas/${encodeURIComponent(id)}`);
-    const visibleProjects = filtered.slice(0, visibleCount);
+    const visibleProjects = (data.dramaReady ? filtered.slice(0, visibleCount) : []).flatMap((entry) => entry.kind === "canvas" ? [entry.project] : []);
     const coverProjects = latest && !visibleProjects.some((p) => p.id === latest.id) ? [latest, ...visibleProjects] : visibleProjects;
     const extraCover = useProjectCoverResults(coverProjects.filter((p) => !projectCover(p, outputs, folderFor(p))).map((p) => [p.id, p.updatedAt]));
     const coverKey = (p: CanvasProject) => JSON.stringify([data.backendUrl, p.id, p.updatedAt]);
@@ -132,13 +137,13 @@ export default function IndexPage() {
                     <div className={cn(surface, "flex min-h-60 min-w-0 overflow-hidden")}>
                         {!hydrated ? <div className="w-full p-5"><Skeleton active paragraph={{rows:3}} /></div> : latest ? <>
                             <button type="button" className="relative w-2/5 shrink-0 overflow-hidden bg-muted/30" onClick={() => openProject(latest.id)} aria-label={t("landing.openCanvasNamed",{name:latest.title})}><div className="absolute inset-0"><WorkbenchMediaPreview media={cover(latest)} label={cover(latest) ? latest.title : t("landing.noPreview")} /></div></button>
-                            <div className="flex min-w-0 flex-1 flex-col items-start justify-center gap-3 p-5 sm:p-6"><span className="text-xs text-muted-foreground">{t("home.workbench.lastEdited")}</span><h2 className="line-clamp-3 text-xl font-semibold leading-snug">{latest.title}</h2><p className="text-xs text-muted-foreground">{date(latest.updatedAt)}</p><Button icon={<ArrowRight className="size-4" />} iconPlacement="end" onClick={() => openProject(latest.id)}>{t("home.workbench.continue")}</Button>{isDrama(latest) && <Link to={`/production?dramaId=${encodeURIComponent(folderFor(latest)?.id || "")}`} className="text-xs text-muted-foreground hover:text-foreground">{t("productionCanvas.backDrama")}<ArrowRight className="ml-1 inline size-3" /></Link>}</div>
+                            <div className="flex min-w-0 flex-1 flex-col items-start justify-center gap-3 p-5 sm:p-6"><span className="text-xs text-muted-foreground">{t("home.workbench.lastEdited")}</span><h2 className="line-clamp-3 text-xl font-semibold leading-snug">{latest.title}</h2><p className="text-xs text-muted-foreground">{date(latest.updatedAt)}</p><Button icon={<ArrowRight className="size-4" />} iconPlacement="end" onClick={() => openProject(latest.id)}>{t("home.workbench.continue")}</Button><div className="h-4">{isDrama(latest) && <Link to={`/production?dramaId=${encodeURIComponent(folderFor(latest)?.id || "")}`} className="text-xs text-muted-foreground hover:text-foreground">{t("productionCanvas.backDrama")}<ArrowRight className="ml-1 inline size-3" /></Link>}</div></div>
                         </> : <div className="flex flex-col items-start justify-center p-6"><Workflow className="mb-4 size-8 text-muted-foreground" /><h2 className="text-lg font-medium">{t("home.workbench.firstProject")}</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">{t("home.workbench.firstProjectHint")}</p></div>}
                     </div>
                 </section>
                 <section aria-label={t("home.workbench.recentProjects")}>
                     <div className="mb-4 flex flex-wrap items-center gap-3">
-                        <h2 className="mr-1 text-lg font-semibold">{t("landing.yourCanvases")}</h2>
+                        <h2 className="mr-1 text-lg font-semibold">{t("home.workbench.projects")}</h2>
                         <Segmented
                             value={filter}
                             options={["all", "canvas", "drama", "pinned"].map((value) => ({ value, label: t(`home.workbench.${value}`) }))}
@@ -180,15 +185,39 @@ export default function IndexPage() {
                             ))}
                         </div>
                     </div>
-                    {!hydrated ? (
-                        <Skeleton active paragraph={{ rows: 5 }} />
+                    {!hydrated || (!data.dramaReady && !data.dramaError) ? (
+                        <div aria-busy="true" data-testid="home-projects-loading" className={cn(view === "grid" ? "grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3" : "flex flex-col gap-2")}>
+                            {Array.from({ length: 3 }, (_, index) => <div key={index} className={cn(surface, "overflow-hidden", view === "list" && "flex items-center")}>
+                                <div className={cn("shrink-0 animate-pulse bg-muted", view === "grid" ? "aspect-[16/9] w-full" : "h-24 w-24 sm:w-36")} />
+                                <div className="flex-1 p-3.5"><Skeleton active title={{ width: "60%" }} paragraph={{ rows: 2 }} /></div>
+                            </div>)}
+                        </div>
+                    ) : !data.dramaReady ? (
+                        <div className={cn(surface, "py-10")}><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("home.workbench.loadFailed", { sections: t("home.workbench.drama") })} /></div>
                     ) : !filtered.length ? (
                         <div className={cn(surface, "py-10")}>
                             <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t(query || filter !== "all" ? "home.workbench.noMatches" : "home.workbench.noProjects")} />
                         </div>
                     ) : (
                         <div className={cn(view === "grid" ? "grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3" : "flex flex-col gap-2")}>
-                            {filtered.slice(0, visibleCount).map((p) => {
+                            {filtered.slice(0, visibleCount).map((entry) => {
+                                if (entry.kind === "drama") {
+                                    const folder = entry.folder;
+                                    return (
+                                        <Link key={`drama:${folder.id}`} to={`/production?dramaId=${encodeURIComponent(folder.id)}`} className={cn(surface, "group overflow-hidden text-foreground transition-colors hover:border-foreground/30", view === "list" && "flex items-center")}>
+                                            <div className={cn("relative shrink-0 overflow-hidden bg-muted", view === "grid" ? "aspect-[16/9] w-full" : "h-24 w-24 sm:w-36")}>
+                                                <WorkbenchMediaPreview media={folder.coverStorageKey ? { kind: "image", storageKey: folder.coverStorageKey } : null} label={folder.name} />
+                                                {view === "grid" && <span className="absolute left-3 top-3 rounded bg-background/95 px-2 py-1 text-[11px]">{t("home.workbench.drama")}</span>}
+                                            </div>
+                                            <div className="min-w-0 flex-1 p-3.5">
+                                                <h3 className="line-clamp-2 text-base font-semibold" title={folder.name}>{folder.name}</h3>
+                                                <p className="mt-1.5 truncate text-xs text-muted-foreground">{t("home.workbench.drama")}</p>
+                                                <p className="mt-1 text-xs text-muted-foreground">{date(entry.updatedAt)}</p>
+                                            </div>
+                                        </Link>
+                                    );
+                                }
+                                const p = entry.project;
                                 const pinned = Boolean(data.settings[`homePinnedProject:${p.id}`]);
                                 return (
                                     <article key={p.id} className={cn(surface, "group overflow-hidden transition-colors hover:border-foreground/30", view === "list" && "flex flex-wrap items-center")}>
@@ -199,14 +228,14 @@ export default function IndexPage() {
                                             aria-label={t("landing.openCanvasNamed", { name: p.title })}
                                         >
                                             <WorkbenchMediaPreview media={cover(p)} label={cover(p) ? p.title : t("landing.noPreview")} />
-                                            {view === "grid" && <span className="absolute left-3 top-3 rounded bg-background/95 px-2 py-1 text-[11px] text-foreground">{t(isDrama(p) ? "home.workbench.drama" : "home.workbench.canvas")}</span>}
+                                            {view === "grid" && <span className="absolute left-3 top-3 rounded bg-background/95 px-2 py-1 text-[11px] text-foreground">{t("home.workbench.canvas")}</span>}
                                         </button>
                                         <div className="flex min-w-0 flex-1 items-center gap-2 p-3.5">
                                             <button type="button" className="min-w-0 flex-1 cursor-pointer text-left" onClick={() => openProject(p.id)}>
                                                 <h3 className="line-clamp-2 text-base font-semibold" title={p.title}>
                                                     {p.title}
                                                 </h3>
-                                                <p className="mt-1.5 truncate text-xs text-muted-foreground">{folderFor(p)?.name || t(isDrama(p) ? "home.workbench.drama" : "home.workbench.canvas")}</p>
+                                                <p className="mt-1.5 truncate text-xs text-muted-foreground">{folderFor(p)?.name || t("home.workbench.canvas")}</p>
                                                 <p className="mt-1 text-xs text-muted-foreground">{date(p.updatedAt)}</p>
                                             </button>
                                             <Tooltip title={t(pinned ? "home.workbench.unpin" : "home.workbench.pin")}>

@@ -15,12 +15,6 @@ export type NativeProductionTarget = {
     targets: Array<{ targetId: string; segmentId?: string }>;
 };
 
-/** A scene canvas has no production record service yet, so native generation must refuse it instead of guessing. */
-function formalProductionOwner(owner: { kind: "canvas" | "episode" | "scene"; id: string }): NativeProductionTarget["owner"] {
-    if (owner.kind === "scene") throw new Error("SCENE_PRODUCTION_NOT_READY: 制作场次尚未接入正式制作记录，请先完成场次制作记录与运行链");
-    return { kind: owner.kind, id: owner.id };
-}
-
 /** Native controls keep the same execution service; only verified production bindings are attached. */
 export class NativeProductionGeneration {
     private binding = new Set<string>();
@@ -31,7 +25,7 @@ export class NativeProductionGeneration {
         if (!command.projectId || !command.nodeId || !["image", "video"].includes(command.mode)) return { command };
         const owner = productionCanvasContext(this.db, command.projectId).owner;
         if (!owner) return { command };
-        const service = this.service(formalProductionOwner(owner)), current = service.get(owner.id), director = current.draft.director;
+        const service = this.service({ kind: owner.kind, id: owner.id }), current = service.get(owner.id), director = current.draft.director;
         if (!director) return { command };
         let kind: NativeProductionTarget["kind"], targetId: string;
         let targets: NativeProductionTarget["targets"] = [];
@@ -80,7 +74,7 @@ export class NativeProductionGeneration {
                 if (!clip || clipInputHash(clip) !== clipInputHash(expected) || clip.productionClipProjection?.inputHash !== clipInputHash(clip)) throw new Error(`CLIP_INPUT_MISMATCH: ${target.targetId} 的引用或编译投影不一致 (${CLIP_PROJECTION_FIELDS.filter(key => JSON.stringify(clip?.[key] ?? null) !== JSON.stringify(expected[key] ?? null)).join(",") || "projectionHash"})，请准备当前正式目标后再生成`);
             }
         }
-        return { command, context: { owner: formalProductionOwner(owner), version: current.publishedVersion, sourceHash: director.sourceHash, projectId: command.projectId!, nodeId: command.nodeId!, kind, targetId, targets } };
+        return { command, context: { owner: { kind: owner.kind, id: owner.id }, version: current.publishedVersion, sourceHash: director.sourceHash, projectId: command.projectId!, nodeId: command.nodeId!, kind, targetId, targets } };
     }
     submitted(taskId: string, raw: unknown) {
         const context = raw as NativeProductionTarget;

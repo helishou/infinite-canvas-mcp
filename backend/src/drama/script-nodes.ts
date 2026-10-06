@@ -4,7 +4,7 @@ import { applyDirectorSourcePatch } from "@basketikun/canvas-agent/drama/product
 import type { BackendDatabase } from "../db.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
 import { projectDirector } from "./director.js";
-import { productionNodePosition } from "./production-layout-geometry.js";
+import { productionLayoutStableId, productionNodePosition } from "./production-layout-geometry.js";
 import type { ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/production-contract";
 
 type Owner = { kind: "canvas" | "episode" | "scene"; id: string };
@@ -37,13 +37,19 @@ export function scriptNodeOperations(project: Record<string, any>, data: Episode
             occupied.push({ id: script.id, position, width: 560, height: 320 });
             return [{ type: "add_node", id: script.id, nodeType: "text", title: script.title, position, width: 560, height: 320,
                 metadata: { content: script.content, status: "success", productionScriptId: script.scriptId, productionScriptSceneId: script.sceneId,
+                    groupId: productionLayoutStableId("production-scene", owner.id, script.sceneId),
                     ...(unit ? { productionLayoutUnitId: unit.id, productionLayoutBounds: unit.bounds.size } : {}) } }];
         }
         if (node.type !== "text" || node.metadata?.productionScriptId !== script.scriptId) throw new Error("剧本文本节点身份冲突，未覆盖原节点");
         const content = String(node.metadata?.content || "");
-        if (content === script.content) return [];
-        if (!prior.has(script.id) || prior.get(script.id)!.content !== content) throw new Error("剧本文本已被修改，请回读后再保存制作稿");
-        return [{ type: "update_node", id: node.id, metadata: { content: script.content } }];
+        const metadata: Record<string, unknown> = {};
+        const groupId = productionLayoutStableId("production-scene", owner.id, script.sceneId);
+        if (node.metadata?.groupId !== groupId) metadata.groupId = groupId;
+        if (content !== script.content) {
+            if (!prior.has(script.id) || prior.get(script.id)!.content !== content) throw new Error("剧本文本已被修改，请回读后再保存制作稿");
+            metadata.content = script.content;
+        }
+        return Object.keys(metadata).length ? [{ type: "update_node", id: node.id, metadata }] : [];
     });
 }
 

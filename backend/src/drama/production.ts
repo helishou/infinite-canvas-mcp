@@ -6,7 +6,6 @@ import {
     emptyEpisodeProduction,
     productionImageModel,
     productionSceneEntries,
-    productionScriptGroups,
     episodeProductionDataSchema,
     directorRunStartSchema,
     directorModules,
@@ -20,6 +19,7 @@ import {
     productionContractVersion,
     type ProductionLayoutPlan,
     type ProductionLayoutReceipt,
+    type ProductionLayoutUnit,
     directorPatchFields,
     type ProductionEdit,
     type DirectorRunStart,
@@ -29,7 +29,9 @@ import {
     type DirectorProduction,
     type ProductionOperation,
 } from "@basketikun/canvas-agent/drama/production-contract";
-import { BASE_H3_NODE_METADATA, isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
+import { BASE_H3_NODE_METADATA, createH3NodeMetadata, isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
+import { H3_DEFAULTS_KEY } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
+import { H3_RUNTIME_NODE_FIELDS, H3_RUNTIME_SEGMENT_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
 import { resolveAchengEngine, resolveAchengRuntime } from "@basketikun/canvas-agent/skills/acheng";
 import { assertAchengSource, auditAchengContinuity, validateAchengSource, preflightCompilationDirector } from "@basketikun/canvas-agent/skills/acheng";
 import { schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch } from "@basketikun/canvas-agent/drama/production-validation";
@@ -43,11 +45,11 @@ import type { CanvasCommit } from "../canvas/collaboration.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
 import { approvedSharedAsset, listApprovedSharedAssets, prepareSharedAssetProjection, registerApprovedSharedAsset, sharedAssetHistory, sharedProjectionNodeId, validateSharedAssetSource, type ApprovedSharedAsset } from "./shared-assets.js";
 import { ensureProductionCanvas, productionCanvasContext } from "./production-canvas.js";
-import { syncSceneInstances } from "./scene-instances.js";
 import { scriptNodeOperations } from "./script-nodes.js";
-import { compileProductionLayout, productionAssetPosition } from "./production-layout.js";
+import { compileProductionLayout, productionAssetPosition, productionSceneIdsForShots } from "./production-layout.js";
+import { productionLayoutStableId, productionNodePosition } from "./production-layout-geometry.js";
 import { assertImageReferenceCoverage, imageInputOperations, verifyImageInput } from "./image-inputs.js";
-import { clipInputOperations, type ReferenceSync } from "./clip-inputs.js";
+import { clipInputOperations, productionClipProjection, type ReferenceSync } from "./clip-inputs.js";
 import { continuityTargetBlockers, ProductionContinuityReports } from "./continuity-reports.js";
 import { dedupReceipt, resolveReceiptDedup, assertPublicReceipt } from "./receipt-dedup.js";
 import type { NativeProductionTarget } from "./native-generation.js";
@@ -83,17 +85,13 @@ export class ProductionConflictError extends Error {
  */
 const PRODUCTION_TABLES = {
     episode: { productions: "episode_productions", operations: "episode_production_operations", versions: "episode_production_versions", runs: "episode_production_runs", batches: "episode_production_batches", key: "episode_id" },
-    scene: { productions: "scene_productions", operations: "scene_production_operations", versions: "scene_production_versions", runs: "scene_production_runs", batches: "scene_production_batches", key: "scene_id" },
     canvas: { productions: "canvas_productions", operations: "canvas_production_operations", versions: "canvas_production_versions", runs: "canvas_production_runs", batches: "canvas_production_batches", key: "project_id" },
 } as const;
 
 export class EpisodeProductionService {
     constructor(private readonly db: BackendDatabase, private readonly events?: BackendEventBus, private readonly legacyDataDir = DATA_DIR, private readonly projectScope = false, private readonly checkEngine = assertDirectorEngine) {}
 
-    /** Scene ownership is opt-in; the existing boolean keeps every current construction site working. */
-    private sceneScope = false;
-    withSceneScope() { const service = new EpisodeProductionService(this.db, this.events, this.legacyDataDir, this.projectScope, this.checkEngine); service.sceneScope = true; return service; }
-    private get ownerKind(): keyof typeof PRODUCTION_TABLES { return this.sceneScope ? "scene" : this.projectScope ? "canvas" : "episode"; }
+    private get ownerKind(): keyof typeof PRODUCTION_TABLES { return this.projectScope ? "canvas" : "episode"; }
     private get ownerKey() { return PRODUCTION_TABLES[this.ownerKind].key; }
 
     isSharedAssetCanvas(id: string) {
@@ -447,8 +445,7 @@ export class EpisodeProductionService {
         const linked = this.linked(id); if (linked) return linked.service.sharedAssets(linked.id);
         const canvasId = this.episodeInfo(id).canvasId;
         const context = canvasId ? productionCanvasContext(this.db, canvasId) : undefined;
-        const updates = this.ownerKind === "canvas" ? [] : this.ownerKind === "scene"
-            ? this.db.db.prepare("SELECT id, approved_id AS approvedId, target_asset_id AS assetId, status, error FROM drama_asset_adoptions WHERE scene_id=? ORDER BY rowid DESC").all(id)
+        const updates = this.ownerKind === "canvas" ? []
             : this.db.db.prepare("SELECT id, approved_id AS approvedId, target_asset_id AS assetId, status, error FROM drama_asset_adoptions WHERE episode_id=? ORDER BY rowid DESC").all(id);
         return { assets: context?.dramaId ? listApprovedSharedAssets(this.db, context.dramaId) : [], versions: context?.dramaId ? sharedAssetHistory(this.db, context.dramaId) : [], updates };
     }
@@ -648,25 +645,10 @@ export class EpisodeProductionService {
         const row = this.prepare("SELECT * FROM episode_productions WHERE episode_id = ?").get(episodeId) as Row | undefined;
         if (row) return this.fromRow(episodeId, row);
         const draft = emptyEpisodeProduction();
-        const scene = this.ownerKind === "scene" ? this.db.db.prepare("SELECT drama_id, episode_id FROM drama_scene_instances WHERE id=?").get(episodeId) as { drama_id: string; episode_id: string | null } | undefined : undefined;
-        let inheritedEpisodeSettings = false;
-        if (scene?.episode_id) {
-            const parentRow = this.db.db.prepare("SELECT * FROM episode_productions WHERE episode_id = ?").get(scene.episode_id) as Row | undefined;
-            if (parentRow) {
-                const parent = this.fromRow(scene.episode_id, parentRow);
-                draft.settings = structuredClone(parent.draft.settings);
-                inheritedEpisodeSettings = true;
-                const scopedDirector = sceneScopedDirector(parent.draft.director, episodeId);
-                if (scopedDirector) {
-                    draft.director = scopedDirector;
-                    projectDirector(draft);
-                }
-            }
-        }
-        const dramaId = this.projectScope ? undefined : this.ownerKind === "scene" ? scene?.drama_id : this.db.getDramaEpisode(episodeId)?.dramaId;
+        const dramaId = this.projectScope ? undefined : this.db.getDramaEpisode(episodeId)?.dramaId;
         const drama = this.db.listCanvasFolders().find(folder => this.projectScope ? folder.sharedAssetCanvasId === episodeId : folder.id === dramaId);
         const plan = drama?.productionPlan;
-        if (!inheritedEpisodeSettings && plan?.confirmedAt && plan.confirmedOutline === drama?.outline) Object.assign(draft.settings, {
+        if (plan?.confirmedAt && plan.confirmedOutline === drama?.outline) Object.assign(draft.settings, {
             imageModel: plan.imageModel, imageModelsByKind: structuredClone(plan.imageModelsByKind), h3Model: plan.h3Model,
             ...(plan.storyboardImageMode ? { storyboardImageMode: plan.storyboardImageMode } : {}),
             ...(plan.videoAspectRatio !== undefined ? { videoAspectRatio: plan.videoAspectRatio, videoAspectRatioConfirmed: true } : {}),
@@ -682,11 +664,6 @@ export class EpisodeProductionService {
         if (diagnostics.length) { result.nextActions = [{ action: "correct_source", message: "按诊断路径修正请求字段后重新预检。" }]; return result; }
         const input = productionPreflightRequestSchema.parse(raw);
         if (input.action === "generate") {
-            if (this.ownerKind === "scene") {
-                result.diagnostics.push({ code: "SCENE_GENERATION_NOT_READY", path: "request", message: "制作场次已接入独立制作稿与固定画布；场次媒体生成运行链尚未启用。", severity: "error" });
-                result.nextActions = [{ action: "correct_source", message: "当前可继续编辑、发布和准备场次节点；不要提交媒体生成。" }];
-                return result;
-            }
             const prior = this.prepare("SELECT run_id, request_hash FROM episode_production_batches WHERE episode_id=? AND idempotency_key=?").get(episodeId, input.request.idempotencyKey) as { run_id: string; request_hash: string } | undefined;
             if (prior) {
                 if (prior.request_hash === batchRequestHash(input.request)) return { ...result, valid: true, generationReady: false, replayed: true, nextActions: [] };
@@ -933,6 +910,8 @@ export class EpisodeProductionService {
                 blockers.push(...continuityTargetBlockers(continuityReport, [segmentId]).map(item => `${item.code}: ${item.message}`));
             }
             const group = data.clipGroups.find(item => item.id === segmentId);
+            const sceneIds = productionSceneIdsForShots(productionSceneEntries(director.source), shotIds);
+            if (!group?.nodeId && sceneIds.length !== 1) blockers.push(sceneIds.length ? "Segment 跨越多个正式场次；先按场次拆分" : "Segment 未映射到唯一正式场次；无法分配场次 H3 节点");
             if (!h3ModelFor(segmentId, group?.nodeId ?? undefined)) blockers.push("缺少 H3 模型；请在现有模型设置中选择模型");
             if (!shotIds.length) blockers.push("Segment 尚未编入 Shot");
             const fps = Number(director.source.fps_num || 24) / Number(director.source.fps_den || 1);
@@ -1239,7 +1218,6 @@ export class EpisodeProductionService {
 
     startBatch(episodeId: string, raw: unknown): ProductionBatch {
         const linked = this.linked(episodeId); if (linked) return linked.service.startBatch(linked.id, raw);
-        if (this.ownerKind === "scene") throw new Error("SCENE_GENERATION_NOT_READY: 场次媒体生成运行链尚未启用");
         const input = directorRunStartSchema.parse(raw);
         const requestHash = batchRequestHash(input);
         this.db.db.exec("BEGIN IMMEDIATE");
@@ -1314,7 +1292,6 @@ export class EpisodeProductionService {
 
     resumeBatch(episodeId: string, runId: string): ProductionBatch {
         const linked = this.linked(episodeId); if (linked) return linked.service.resumeBatch(linked.id, runId);
-        if (this.ownerKind === "scene") throw new Error("SCENE_GENERATION_NOT_READY: 场次媒体生成运行链尚未启用");
         const batch = this.getBatch(episodeId, runId);
         if (!batch) throw new Error(`找不到生产运行 ${runId}`);
         if (!["paused", "pending", "awaiting_review"].includes(batch.status)) throw new Error(`该生产运行不能继续：${batch.status}`);
@@ -1472,6 +1449,7 @@ export class EpisodeProductionService {
             return { draft, published };
     }
 
+
     edit(episodeId: string, raw: unknown, canvasPreparation?: { projectId: string; expectedCanvasRevision: number; operationId: string; operations: CanvasOperation[] }): ProductionRecord & { replayed?: boolean; impact?: ProductionImpact } {
         const linked = this.linked(episodeId); if (linked) return linked.service.edit(linked.id, raw, canvasPreparation);
         const input = productionEditSchema.parse(raw);
@@ -1490,13 +1468,15 @@ export class EpisodeProductionService {
             if (published && input.ops.some(operation => operation.type === "review_director_asset" || operation.type === "review_keyframe")) this.finishRejectedBatches(episodeId, published);
             if (published && input.ops.some((operation) => operation.type === "review_keyframe" || operation.type === "review_director_asset" || operation.type === "select_director_result")) this.prepare("UPDATE episode_production_versions SET snapshot_json=? WHERE episode_id=? AND version=?").run(JSON.stringify(published), episodeId, record.publishedVersion);
             return { ...record, revision: record.revision + 1, draft, published, updatedAt: new Date().toISOString() };
-        }, canvasPreparation ? (_record, commits) => {
-            const ownerCanvasId = this.episodeInfo(episodeId).canvasId;
-            if (ownerCanvasId !== canvasPreparation.projectId) throw new Error("布局准备画布不属于当前制作对象");
-            if (this.db.getCanvasProjectRevision(canvasPreparation.projectId) !== canvasPreparation.expectedCanvasRevision) throw new Error("画布版本已变化，按同一 operationId 回读并恢复布局准备");
-            if (canvasPreparation.operations.length) this.db.applyCanvasProjectOperations(canvasPreparation.projectId, canvasPreparation.expectedCanvasRevision, canvasPreparation.operations, {
-                operationId: canvasPreparation.operationId, runtimeWrite: true, withinTransaction: true, deferredCommits: commits, source: { kind: "system", clientId: "production:layout", label: "准备制作布局" },
-            });
+        }, canvasPreparation ? (record, commits) => {
+            if (canvasPreparation) {
+                const ownerCanvasId = this.episodeInfo(episodeId).canvasId;
+                if (ownerCanvasId !== canvasPreparation.projectId) throw new Error("布局准备画布不属于当前制作对象");
+                if (this.db.getCanvasProjectRevision(canvasPreparation.projectId) !== canvasPreparation.expectedCanvasRevision) throw new Error("画布版本已变化，按同一 operationId 回读并恢复布局准备");
+                if (canvasPreparation.operations.length) this.db.applyCanvasProjectOperations(canvasPreparation.projectId, canvasPreparation.expectedCanvasRevision, canvasPreparation.operations, {
+                    operationId: canvasPreparation.operationId, runtimeWrite: true, withinTransaction: true, deferredCommits: commits, source: { kind: "system", clientId: "production:layout", label: "准备制作布局" },
+                });
+            }
         } : undefined);
         canvasCommits.forEach(commit => this.db.notifyCanvasCommit(commit));
         return result;
@@ -1724,9 +1704,6 @@ export class EpisodeProductionService {
             if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
             beforeMutation?.(current, scriptCommits);
             const next = mutate(current);
-            if (this.ownerKind === "episode" && next.draft.director && this.db.getDramaEpisode(episodeId)?.dramaId) {
-                syncSceneInstances(this.db, { kind: "episode", id: episodeId }, next.draft.director.source);
-            }
             const projectionOperationId = `production:${this.ownerKind}:${episodeId}:${operationId}:projection`;
             const canvasId = this.episode(episodeId).canvasId;
             const canvas = canvasId && this.db.getCanvasProject(canvasId);
@@ -1777,13 +1754,6 @@ export class EpisodeProductionService {
     }
 
     private episode(episodeId: string) {
-        // A scene owner is a script occurrence, not an episode: it carries its own canvas and title while inheriting its drama context.
-        if (this.ownerKind === "scene") {
-            const scene = this.db.db.prepare("SELECT s.id, s.title, s.drama_id, s.episode_id, c.canvas_id FROM drama_scene_instances s LEFT JOIN drama_scene_canvases c ON c.scene_id = s.id WHERE s.id=?").get(episodeId) as { id: string; title: string; drama_id: string; episode_id: string | null; canvas_id: string | null } | undefined;
-            if (!scene) throw new Error("制作场次不存在");
-            const parent = scene.episode_id ? this.db.getDramaEpisode(scene.episode_id) : null;
-            return { id: scene.id, canvasId: scene.canvas_id, fullPlot: parent?.fullPlot || "", title: scene.title, dramaId: scene.drama_id || parent?.dramaId || "", episodeNumber: parent?.episodeNumber || 0, synopsis: parent?.synopsis || "", episodeId: scene.episode_id };
-        }
         const episode = this.projectScope
             ? (this.db.getCanvasProject(episodeId) ? { id: episodeId, canvasId: episodeId, fullPlot: "", title: "", dramaId: "", episodeNumber: 0, synopsis: "" } : null)
             : this.db.getDramaEpisode(episodeId);
@@ -2339,39 +2309,4 @@ function reorder<T extends { id: string }>(items: T[], ids: string[]) {
 }
 function orderShotsByScene(draft: EpisodeProductionData) {
     return draft.scenes.flatMap((scene) => draft.shots.filter((shot) => shot.sceneId === scene.id));
-}
-
-function sceneScopedDirector(parent: DirectorProduction | undefined, sceneId: string): DirectorProduction | null {
-    if (!parent) return null;
-    const source = structuredClone(parent.source) as Record<string, any>;
-    const entry = productionSceneEntries(source).find(item => item.id === sceneId);
-    const scriptBlocks = Array.isArray(source.script_scenes) ? source.script_scenes.filter((item: unknown) => item && typeof item === "object") as Record<string, any>[] : [];
-    const group = productionScriptGroups(scriptBlocks).find(item => item.key === sceneId);
-    if (!entry || !group) return null;
-
-    const shotIds = new Set(entry.shotIds);
-    const selectedShots = Array.isArray(source.shots) ? source.shots.filter((shot: Record<string, any>) => shotIds.has(String(shot.id))) : [];
-    const selectedSegments = Array.isArray(source.segments) ? source.segments.filter((segment: Record<string, any>) => {
-        const ids = Array.isArray(segment.shot_ids) ? segment.shot_ids.map(String) : [];
-        return ids.length > 0 && ids.every((id: string) => shotIds.has(id));
-    }) : [];
-    const environmentIds = new Set([entry.environmentId, ...selectedShots.map((shot: Record<string, any>) => String(shot.scene_id || ""))].filter(Boolean));
-    source.script_scenes = group.blocks;
-    source.shots = selectedShots;
-    source.segments = selectedSegments;
-    if (Array.isArray(source.scene_registry)) source.scene_registry = source.scene_registry.filter((item: Record<string, any>) => environmentIds.has(String(item.id || "")));
-
-    const director = structuredClone(parent);
-    director.source = source;
-    director.sourceHash = directorHash(source);
-    director.assets = {};
-    director.shotInputs = Object.fromEntries([...shotIds].map(id => [id, { keyframePolicy: parent.shotInputs[id]?.keyframePolicy || "none", assetIds: [] }]));
-    director.boundaries = [];
-    director.artifacts = [];
-    const workflow = { ...director.workflow };
-    delete workflow.currentWork;
-    delete workflow.pendingDecisions;
-    delete workflow.agentThreadId;
-    director.workflow = workflow;
-    return directorProductionSchema.parse(director);
 }

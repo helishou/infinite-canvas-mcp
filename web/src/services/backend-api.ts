@@ -103,7 +103,7 @@ export async function startCanvasGeneration(input: CanvasGenerationCommand, sign
         const context = useProductionWorkspaceStore.getState().context;
         if (context && context.canvasId === input.projectId && context.owner) {
             const owner = context.owner;
-            const { readiness } = await fetchProductionReadiness(owner.kind === "canvas" ? { projectId: owner.id } : owner.kind === "scene" ? { sceneId: owner.id } : owner.id);
+            const { readiness } = await fetchProductionReadiness(owner.kind === "canvas" ? { projectId: owner.id } : owner.id);
             if (readiness.presentation?.taskId === result.taskId) {
                 useProductionFollowStore.getState().setTarget({ ...owner, workId: readiness.presentation.workId });
                 useProductionFollowStore.getState().setPresentation(readiness.presentation);
@@ -220,21 +220,6 @@ export type DramaEpisode = {
 
 export function fetchBackendDramaEpisodes(dramaId: string) {
     return request<{ ok: boolean; dramaId: string; episodes?: DramaEpisode[] }>("GET", `/drama/projects/${encodeURIComponent(dramaId)}/episodes`);
-}
-
-export type SceneInstance = { id: string; dramaId: string; episodeId: string | null; sourceSceneKey: string; environmentId: string | null; sceneOrder: number; title: string; sourceHash: string; status: "active" | "orphaned"; createdAt: string; updatedAt: string; canvasId?: string | null };
-export function fetchBackendDramaScenes(dramaId: string, episodeId?: string) {
-    const query = episodeId ? `?episodeId=${encodeURIComponent(episodeId)}` : "";
-    return request<{ ok: boolean; scenes: SceneInstance[] }>("GET", `/dramas/${encodeURIComponent(dramaId)}/scenes${query}`);
-}
-export function backfillBackendDramaScenes(dramaId: string) {
-    return request<{ ok: boolean; dramas: number; created: number; skipped: number; scenes: SceneInstance[] }>("POST", `/dramas/${encodeURIComponent(dramaId)}/scenes/backfill`, {});
-}
-export function fetchBackendScene(sceneId: string) {
-    return request<{ ok: boolean; scene: SceneInstance; canvas: { id: string; createdAt: string; context: ProductionCanvasContext } | null }>("GET", `/drama/scenes/${encodeURIComponent(sceneId)}`);
-}
-export function ensureSceneCanvas(sceneId: string) {
-    return request<{ ok: boolean; project: Record<string, unknown>; context: ProductionCanvasContext; created: boolean }>("POST", `/drama/scenes/${encodeURIComponent(sceneId)}/canvas/ensure`, {});
 }
 
 export function fetchBackendDramaEpisode(episodeId: string) {

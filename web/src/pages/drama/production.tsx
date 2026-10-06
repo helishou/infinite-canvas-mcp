@@ -20,11 +20,11 @@ import { applyBackendCanvasEvent, useCanvasStore } from "@/stores/canvas/use-can
 import { SharedAssetsPicker } from "@/components/production/canvas-production-workspace";
 import {
   BackendApiError, editEpisodeProduction, previewEpisodeProductionImpact,
-  fetchBackendCanvasDrama, fetchBackendDramaEpisode, fetchBackendProject, fetchBackendScene, ensureSceneCanvas, fetchEpisodeProduction,
+  fetchBackendCanvasDrama, fetchBackendDramaEpisode, fetchBackendProject, fetchEpisodeProduction,
   fetchEpisodeProductionLegacy, fetchEpisodeProductionVersions, fetchProductionBatch, fetchProductionBatches,
   fetchProductionReadiness, pauseProductionBatch, publishEpisodeProduction, restoreEpisodeProduction,
   checkProductionContinuity, fetchProductionContinuity, previewProductionContinuityUpgrade, type ProductionContinuity,
-  resumeProductionBatch, startProductionRun, type DramaEpisode, type EpisodeProduction, type SceneInstance,
+  resumeProductionBatch, startProductionRun, type DramaEpisode, type EpisodeProduction,
   type ProductionBatch, type ProductionReadiness, type ProductionTarget, type ProductionCanvasContext,
   prepareProductionTargets, arrangeProductionScene, adoptProductionSharedAsset, ensureSharedAssetCanvas, fetchProductionCanvasContext,
   previewProductionSharedAssetPromotion, promoteExistingProductionSharedAsset,
@@ -55,7 +55,7 @@ const workspaces: Array<{ key: DirectorWorkspace; icon: typeof ListChecks }> = [
 ];
 
 export default function ProductionRoute() {
-  const { episodeId, projectId, sceneId } = useParams();
+  const { episodeId, projectId } = useParams();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const [error, setError] = useState("");
@@ -68,14 +68,9 @@ export default function ProductionRoute() {
     void (async () => {
       await ensureCanvasDraftLease();
       let canvasId = projectId || "";
-      let productionKind: "canvas" | "episode" | "scene" = projectId ? "canvas" : "episode";
+      let productionKind: "canvas" | "episode" = projectId ? "canvas" : "episode";
       let productionId = projectId || episodeId || "";
-      if (sceneId) {
-        const result = await ensureSceneCanvas(sceneId);
-        canvasId = String(result.project.id || result.context.canvasId);
-        productionKind = "scene";
-        productionId = sceneId;
-      } else if (episodeId && !projectId) {
+      if (episodeId && !projectId) {
         const result = await fetchBackendDramaEpisode(episodeId);
         if (!result.episode) throw new Error(t("director.loadFailed"));
         if (!result.episode.canvasId) {
@@ -90,7 +85,7 @@ export default function ProductionRoute() {
       query.set("productionId", productionId);
       if (searchParams.has("workspace") && !searchParams.has("nodeId") && !searchParams.has("segmentId")) query.set("edit", "1");
       if (!query.has("workspace") && !query.has("target") && !query.has("nodeId")) {
-        const owner: ProductionTarget = productionKind === "scene" ? { sceneId: productionId } : productionKind === "canvas" ? { projectId: productionId } : productionId;
+        const owner: ProductionTarget = productionKind === "canvas" ? { projectId: productionId } : productionId;
         const { readiness } = await fetchProductionReadiness(owner);
         if (readiness.presentation?.canvasId === canvasId) {
           const resolved = new URL(productionPresentationPath(readiness.presentation), window.location.origin);
@@ -100,22 +95,21 @@ export default function ProductionRoute() {
       if (active) navigate(`/canvas/${encodeURIComponent(canvasId)}?${query}`, { replace: true });
     })().catch(value => { if (active) setError(String(value)); });
     return () => { active = false; };
-  }, [episodeId, projectId, sceneId, navigate, searchParams, t]);
+  }, [episodeId, projectId, navigate, searchParams, t]);
   if (directEpisodeEditor) return <ProductionEditor />;
   return error ? <Alert type="error" message={t("director.loadFailed")} description={error} /> : <div className="p-4">{t("drama.production.loading")}</div>;
 }
 
 export function ProductionEditor({ owner, embedded = false, dialog = false }: { owner?: ProductionCanvasContext["owner"]; embedded?: boolean; dialog?: boolean }) {
   const params = useParams();
-  const sceneId = owner?.kind === "scene" ? owner.id : owner ? "" : params.sceneId || "";
   const episodeId = owner?.kind === "episode" ? owner.id : owner ? "" : params.episodeId || "";
   const projectId = owner?.kind === "canvas" ? owner.id : owner ? "" : params.projectId || "";
-  const contextProjectId = projectId || (owner?.kind === "scene" ? params.projectId || "" : "");
+  const contextProjectId = projectId;
   const [searchParams, setSearchParams] = useSearchParams();
-  const returnToDramas = searchParams.get("from") === "dramas" || Boolean(episodeId || sceneId);
+  const returnToDramas = searchParams.get("from") === "dramas" || Boolean(episodeId);
   const backPath = returnToDramas ? "/production?view=dramas" : "/production?view=canvases";
-  const target = useMemo<ProductionTarget>(() => sceneId ? { sceneId } : projectId ? { projectId } : episodeId, [sceneId, projectId, episodeId]);
-  const productionOwner = useMemo(() => owner || (sceneId ? { kind: "scene" as const, id: sceneId } : projectId ? { kind: "canvas" as const, id: projectId } : { kind: "episode" as const, id: episodeId }), [owner, sceneId, projectId, episodeId]);
+  const target = useMemo<ProductionTarget>(() => projectId ? { projectId } : episodeId, [projectId, episodeId]);
+  const productionOwner = useMemo(() => owner || (projectId ? { kind: "canvas" as const, id: projectId } : { kind: "episode" as const, id: episodeId }), [owner, projectId, episodeId]);
   const navigate = useNavigate();
   const { t } = useTranslation();
   const { message, modal } = App.useApp();
@@ -123,7 +117,6 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
   const [canvasId, setCanvasId] = useState(projectId);
   const [productionContext, setProductionContext] = useState<ProductionCanvasContext | null>(null);
   const [episode, setEpisode] = useState<DramaEpisode | null>(null);
-  const [scene, setScene] = useState<SceneInstance | null>(null);
   const [canvasNodes, setCanvasNodes] = useState<Array<{ id: string; title?: string; type?: string; metadata?: Record<string, unknown> }>>([]);
   const [production, setProduction] = useState<EpisodeProduction | null>(null);
   const [readiness, setReadiness] = useState<ProductionReadiness | null>(null);
@@ -175,20 +168,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
   const selectWorkspace = (next: DirectorWorkspace) => navigateWorkspace(next);
 
   const load = useCallback(async (isActive: () => boolean = () => true, preserveBrief = false) => {
-    const contextRequest = sceneId
-      ? (async () => {
-        const source = await fetchBackendScene(sceneId);
-        let boundCanvasId = source.canvas?.id || "";
-        if (!boundCanvasId) boundCanvasId = String((await ensureSceneCanvas(sceneId)).project.id);
-        if (contextProjectId && contextProjectId !== boundCanvasId) throw new Error("场次画布与固定绑定不一致");
-        const [canvas, relation, ownership, parent] = await Promise.all([
-          fetchBackendProject(boundCanvasId), fetchBackendCanvasDrama(boundCanvasId), fetchProductionCanvasContext(boundCanvasId),
-          source.scene.episodeId ? fetchBackendDramaEpisode(source.scene.episodeId) : Promise.resolve(null),
-        ]);
-        if (ownership.context.owner?.kind !== "scene" || ownership.context.owner.id !== sceneId) throw new Error("画布不属于当前制作场次");
-        return { canvas: canvas.project, episode: parent?.episode || relation.episode || null, scene: source.scene, productionContext: ownership.context };
-      })()
-      : projectId
+    const contextRequest = projectId
         ? Promise.all([fetchBackendProject(projectId), fetchBackendCanvasDrama(projectId), fetchProductionCanvasContext(projectId)]).then(([canvas, relation, ownership]) => ({ canvas: canvas.project, episode: relation.episode, scene: null, productionContext: ownership.context }))
         : fetchBackendDramaEpisode(episodeId).then(result => {
           if (!result.episode) throw new Error(t("director.loadFailed"));
@@ -199,14 +179,13 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
       contextRequest, fetchEpisodeProduction(target), fetchEpisodeProductionLegacy(target), fetchEpisodeProductionVersions(target),
       fetchProductionReadiness(target), fetchProductionBatches(target), fetchProductionContinuity(target),
     ]);
-    const resolvedCanvasId = sceneId ? context.productionContext.canvasId || context.scene?.canvasId || "" : projectId || context.episode?.canvasId || "";
+    const resolvedCanvasId = projectId || context.episode?.canvasId || "";
     const taskNodes = [...new Set([...(prod.production.draft.clipGroups || []).map(group => group.nodeId), ...Object.values(prod.production.draft.director?.assets || {}).map(asset => asset.nodeId)].filter((id): id is string => Boolean(id)))];
     const tasks = resolvedCanvasId && taskNodes.length ? (await fetchBackendTasks({ projectId: resolvedCanvasId, nodeIds: taskNodes })).tasks || [] : [];
     if (!isActive()) return null;
     setEpisode(context.episode || null);
-    setScene(context.scene || null);
     setProductionContext(context.productionContext);
-    setTitle(context.scene?.title || context.episode?.title || String(context.canvas?.title || ""));
+    setTitle(context.episode?.title || String(context.canvas?.title || ""));
     setCanvasId(resolvedCanvasId);
     setCanvasNodes((context.canvas?.nodes || []) as Array<{ id: string; title?: string; type?: string; metadata?: Record<string, unknown> }>);
     setProduction(prod.production);
@@ -218,8 +197,8 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
     setRuntimeTasks(tasks);
     if (!preserveBrief) setBriefDraft(String(prod.production.draft.director?.source.brief || ""));
     setLoadError("");
-    return context.scene ? `scene:${context.scene.id}` : context.episode?.id || (projectId ? `canvas:${projectId}` : episodeId);
-  }, [target, projectId, contextProjectId, episodeId, sceneId, t]);
+    return context.episode?.id || (projectId ? `canvas:${projectId}` : episodeId);
+  }, [target, projectId, contextProjectId, episodeId, t]);
 
   useEffect(() => {
     if (embedded && production) useProductionWorkspaceStore.getState().setSnapshot(productionOwner.id, production, readiness);
@@ -628,7 +607,6 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
   };
 
   const startRun = async (targets: string[], scope: "selected" | "all_ready" = "selected") => {
-    if (productionOwner.kind === "scene") return void message.info(t("director.workspace.sceneGenerationUnavailable"));
     if (!production || !targets.length) return;
     if (startingRunRef.current) return;
     if (pendingRunStartRef.current) return void message.warning(t("director.workspace.runReceiptUnknown"));
@@ -974,7 +952,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
   return <main ref={editorRootRef} data-production-inspector={embedded && !dialog || undefined} data-production-dialog={dialog || undefined} className={embedded ? "min-h-full bg-background p-3 text-foreground" : "min-h-full bg-background px-4 py-4 text-foreground sm:px-6 lg:px-8"}>
     <div className="mx-auto max-w-[1440px]">
       {!embedded && <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-3"><Button type="text" icon={<ArrowLeft className="size-4" />} onClick={() => navigate(backPath)}>{t("director.back")}</Button><div><h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{title || t("director.title")}</h1><p className="mt-1 text-xs text-muted-foreground">{scene ? `${episode ? t("drama.episodeLabel", { number: episode.episodeNumber }) : ""} · ${t("drama.sceneNumberLabel", { number: scene.sceneOrder + 1 })}` : episode ? t("director.episodeContext", { number: episode.episodeNumber }) : t("director.canvasContext")}</p></div></div>
+        <div className="flex flex-wrap items-center gap-3"><Button type="text" icon={<ArrowLeft className="size-4" />} onClick={() => navigate(backPath)}>{t("director.back")}</Button><div><h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{title || t("director.title")}</h1><p className="mt-1 text-xs text-muted-foreground">{episode ? t("director.episodeContext", { number: episode.episodeNumber }) : t("director.canvasContext")}</p></div></div>
         <div className="flex flex-wrap items-center gap-2"><span className="text-xs text-muted-foreground">{t(Object.keys(sourceDrafts).length ? "director.studio.localDraft" : "director.studio.saved")}</span>{production.publishedVersion > 0 && <Tag>{t("director.studio.published", { number: production.publishedVersion })}</Tag>}{canvasId && <Button icon={<ExternalLink className="size-4" />} onClick={() => navigate(`/canvas/${encodeURIComponent(canvasId)}`)}>{t("drama.production.openCanvas")}</Button>}</div>
       </div>}
       {agentError && <Alert className="mb-4" type="warning" showIcon message={agentError} closable onClose={() => setAgentError("")} />}
@@ -1000,7 +978,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
             <DirectorPanel
               embedded={embedded} compact={dialog} generationSupported={productionOwner.kind !== "scene"} onSaveScript={saveSceneDrafts}
               workspace={workspace} director={production.draft.director} production={production} readiness={readiness || undefined} continuityReport={continuityReport} run={run} batches={batches} runtimeTasks={runtimeTasks}
-              canvasNodes={canvasNodes} legacy={legacy} versions={versions} busy={busy} canvasId={canvasId} canvasRole={productionContext?.role || (projectId ? "ordinary" : sceneId ? "scene" : "episode")} focusTarget={routeTarget}
+              canvasNodes={canvasNodes} legacy={legacy} versions={versions} busy={busy} canvasId={canvasId} canvasRole={productionContext?.role || (projectId ? "ordinary" : "episode")} focusTarget={routeTarget}
               sourceDrafts={sourceDrafts} onSourceDraftChange={setSourceDraft}
               briefDraft={briefDraft} onBriefDraftChange={setBriefDraft}
               onBrief={saveBrief} onPatch={patchSource} onRegroup={regroupSegment} onWorkflow={setWorkflow} onSettings={patch => void edit([{ type: 'set_settings', patch }])} onBindAsset={(assetId, nodeId) => void bindAsset(assetId, nodeId)}

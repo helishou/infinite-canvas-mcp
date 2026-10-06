@@ -27,7 +27,7 @@ description: 以本机 Acheng Director 七模块主导影视制作，适配画�
 
 用户授权多张图片时，资产图与关键帧按真实依赖并发推进：先提交授权范围内全部已就绪、互不依赖的目标，再统一跟踪各自 runId/taskId，不等一张完成或审核后才启动另一张无关图片。当前 Backend 单个 run 内逐项等待，因此新任务按适配合同的[图片并发调度](references/acheng-canvas-adapter.md#图片并发调度)建立不重叠的独立运行；执行器按既有容量排队。前置媒体未批准只阻塞其下游。仅提示词、单张试跑或用户明确要求逐项确认时保留原范围和节奏。
 
-节点坐标由 Backend 持久化的整批布局编译计划统一分配。Skill 只登记正式目标及已知用途/关联，调用 `production_prepare_targets` 后检查顶层 `layoutReceipt`；不自行算坐标、不创建后补排。资产按用途分区，剧本按场次排列，镜头图片和提示词成组，H3 按物理节点去重；目标即使依赖未就绪也预留位置。已有节点位置与尺寸固定为锚点，布局只增量分配新目标。详见[制作画布布局](references/acheng-canvas-adapter.md#制作画布布局)。
+节点坐标由 Backend 持久化的整批布局编译计划统一分配。Skill 只登记正式目标及已知用途/关联，调用 `production_prepare_targets` 后检查顶层 `layoutReceipt`；不自行算坐标、不创建后补排。每集按正式场次制作：每个场次有独立区域，剧本、镜头图片与提示词及一个 H3 Clips 节点放在同一区域；该场次内的 Segment 共用该 H3 节点，不跨场次合并。新 Segment 必须只属于一个正式场次，跨场次时先按场次拆分。已有明确节点绑定与位置固定为锚点，布局只增量分配新目标。详见[制作画布布局](references/acheng-canvas-adapter.md#制作画布布局)。
 
 Agent 只负责编译前的源稿与批准依赖。编译使用稳定 operationId 在后台执行，通过 `production_get_compilation` 读取短状态/诊断；成功应用编译包后，依据程序 `referenceSync` 回执继续。默认不读取或审核编译正文，不直接修改正式 Clip 的编译字段；调整必须回到源稿并重新编译。具体恢复与定向读取规则见适配合同。
 

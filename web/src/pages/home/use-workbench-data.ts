@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { useQueries } from "@tanstack/react-query";
+import { useQueries, useQueryClient } from "@tanstack/react-query";
 import { fetchBackendDramaEpisodes, fetchBackendGenerationLogs, fetchBackendTasks, request, type BackendGenerationLog, type BackendRuntimeTask } from "@/services/backend-api";
 import { saveSettings, type FrontendSettings } from "@/services/settings-api";
 import { useBackendStore } from "@/stores/use-backend-store";
@@ -46,10 +46,29 @@ export function useWorkbenchData() {
     const [logCount, setLogCount] = useState(30);
     const [hasMore, setHasMore] = useState(false);
     const [refreshKey, setRefreshKey] = useState(0);
-    const [episodeFolders, setEpisodeFolders] = useState<Record<string, string>>({});
-    const [dramaError, setDramaError] = useState(false);
+    const queryClient = useQueryClient();
+    const dramas = folders.filter((folder) => folder.isDrama);
+    const ownershipQueries = useQueries({
+        queries: dramas.flatMap((folder) => [
+            {
+                queryKey: ["canvas-library-episodes", backendUrl, folder.id],
+                enabled: connected,
+                queryFn: async () => ((await fetchBackendDramaEpisodes(folder.id)).episodes || []).map((episode) => episode.canvasId || ""),
+            },
+        ]),
+    });
+    const episodeFolders: Record<string, string> = {};
+    ownershipQueries.forEach((result, index) => {
+        for (const id of result.data || []) if (id) episodeFolders[id] = dramas[index].id;
+    });
+    for (const folder of dramas) if (folder.sharedAssetCanvasId) episodeFolders[folder.sharedAssetCanvasId] = folder.id;
+    const dramaReady = ownershipQueries.every((result) => result.data !== undefined);
+    const dramaError = ownershipQueries.some((result) => result.isError);
     const [pinning, setPinning] = useState(false);
-    const refresh = useCallback(() => setRefreshKey((value) => value + 1), []);
+    const refresh = useCallback(() => {
+        setRefreshKey((value) => value + 1);
+        void queryClient.invalidateQueries({ predicate: (query) => query.queryKey[1] === backendUrl && query.queryKey[0] === "canvas-library-episodes" });
+    }, [backendUrl, queryClient]);
     useEffect(() => {
         setLogs([]);
         setTasks([]);
@@ -122,23 +141,6 @@ export function useWorkbenchData() {
             window.removeEventListener("backend-connected", onReconnect);
         };
     }, [connected, backendUrl, logCount, refreshKey]);
-    useEffect(() => {
-        let disposed = false;
-        setEpisodeFolders({});
-        setDramaError(false);
-        if (!connected) return;
-        const dramas = folders.filter((folder) => folder.isDrama);
-        void Promise.allSettled(dramas.map(async (folder) => ({ id: folder.id, episodes: (await fetchBackendDramaEpisodes(folder.id)).episodes || [] }))).then((results) => {
-            if (disposed) return;
-            const byCanvas: Record<string, string> = {};
-            for (const result of results) if (result.status === "fulfilled") for (const episode of result.value.episodes) if (episode.canvasId) byCanvas[episode.canvasId] = result.value.id;
-            setEpisodeFolders(byCanvas);
-            setDramaError(results.some((result) => result.status === "rejected"));
-        });
-        return () => {
-            disposed = true;
-        };
-    }, [folders, connected, backendUrl, refreshKey]);
     const togglePin = async (projectId: string) => {
         if (pinning || !settingsReady || !connected) return;
         const key = `homePinnedProject:${projectId}` as const,
@@ -151,5 +153,5 @@ export function useWorkbenchData() {
             setPinning(false);
         }
     };
-    return { connected, backendUrl, logs, tasks, settings, settingsReady, loading, errors, hasMore, refresh, episodeFolders, dramaError, pinning, togglePin, loadMore: () => setLogCount((count) => count + 30) };
+    return { connected, backendUrl, logs, tasks, settings, settingsReady, loading, errors, hasMore, refresh, episodeFolders, dramaReady, dramaError, pinning, togglePin, loadMore: () => setLogCount((count) => count + 30) };
 }

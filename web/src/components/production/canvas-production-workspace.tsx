@@ -66,6 +66,9 @@ export function CanvasProductionToolbar() {
         return () => { active = false; };
     }, [context?.dramaId, folderName, message]);
     if (!context?.owner) return null;
+    const currentEpisode = episodes.find(episode => episode.id === context.episodeId);
+    const canvasLabel = context.role === "shared-assets" ? t("productionCanvas.sharedCanvas")
+        : currentEpisode ? t("productionCanvas.episode", { number: currentEpisode.episodeNumber }) : t("productionCanvas.loadingEpisodes");
     const switchCanvas = async (id: string) => {
         if (switching || id === context.episodeId || id === "shared" && context.role === "shared-assets") return;
         setSwitching(true);
@@ -91,14 +94,13 @@ export function CanvasProductionToolbar() {
     return <div className="flex min-w-0 items-center gap-1 text-xs" data-canvas-shortcuts-ignore>
         {context.dramaId && <Link to={`/production?dramaId=${encodeURIComponent(context.dramaId)}`} aria-label={t("productionCanvas.backDrama")} title={t("productionCanvas.backDrama")} className="grid size-7 shrink-0 place-items-center rounded hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={() => useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"))}><ArrowLeft className="size-4" /></Link>}
         {context.dramaId && <Dropdown trigger={["click"]} menu={{ selectedKeys: [context.role === "shared-assets" ? "shared" : context.episodeId || ""], items: [
-            { key: "drama-name", label: t("productionCanvas.dramaOverview", { name: dramaName || t("productionCanvas.drama") }), onClick: () => navigate(`/production?dramaId=${encodeURIComponent(context.dramaId!)}`) },
             { key: "shared", label: t("productionCanvas.sharedCanvas"), icon: context.role === "shared-assets" ? <Check className="size-4" /> : undefined, onClick: () => void switchCanvas("shared") },
             { type: "divider" },
             ...episodes.map(episode => ({ key: episode.id, label: `${t("productionCanvas.episode", { number: episode.episodeNumber })} · ${episode.title}`, icon: episode.id === context.episodeId ? <Check className="size-4" /> : undefined, onClick: () => void switchCanvas(episode.id) })),
-            { type: "divider" }, { key: "all-dramas", label: t("drama.libraryTitle"), onClick: () => navigate("/production") }, { key: "history", label: t("productionCanvas.advanced"), onClick: () => editWorkspace("advanced") },
+            { type: "divider" }, { key: "history", label: t("productionCanvas.advanced"), onClick: () => editWorkspace("advanced") },
         ] }}><button type="button" disabled={switching} data-production-canvas-picker aria-label={t("productionCanvas.switchCanvas")} className="inline-flex min-w-0 max-w-[200px] items-center gap-2 px-2 py-1.5 text-sm hover:bg-black/5 sm:max-w-[420px] dark:hover:bg-white/10" style={{ color: theme.node.text }}>
             <Clapperboard className="size-4 shrink-0" /><span className="hidden max-w-48 truncate sm:inline">{dramaName || t("productionCanvas.drama")}</span><span className="hidden opacity-40 sm:inline">/</span>
-            <span className="truncate">{context.role === "shared-assets" ? t("productionCanvas.sharedCanvas") : episodes.find(episode => episode.id === context.episodeId) ? t("productionCanvas.episode", { number: episodes.find(episode => episode.id === context.episodeId)!.episodeNumber }) : t("productionCanvas.loadingEpisodes")}</span><ChevronDown className="size-3.5 shrink-0" />
+            <span className="truncate">{canvasLabel}</span><ChevronDown className="size-3.5 shrink-0" />
         </button></Dropdown>}
         <Button type="text" size="small" icon={<Search className="size-3.5" />} aria-label={t("productionCanvas.find")} onClick={() => { useAgentStore.getState().closePanel(); useCanvasSidePanelStore.getState().closePanel(); setDirectoryOpen(true); }}><span className="hidden sm:inline">{t("productionCanvas.find")}</span></Button>
         <span className="hidden md:inline-flex"><Button type="text" size="small" icon={<Settings2 className="size-3.5" />} aria-label={t("productionCanvas.advanced")} onClick={() => editWorkspace("advanced")} /></span>

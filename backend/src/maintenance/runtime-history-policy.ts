@@ -120,13 +120,13 @@ const SOURCE_MANIFEST = {
         "runtimeTaskId", "generationTaskId", "sourceRuntimeTaskId",
         "baseGenerationTaskId", "sourceTaskId", "concatTaskId", "correctedClip4TaskId",
     ] as const,
-    // 正式制作表（动态映射：episode/scene/canvas 三组同构表）
+    // 正式制作表（动态映射：episode/canvas 两组同构表）
     productionTables: [
-        "episode_productions", "canvas_productions", "scene_productions",
-        "episode_production_operations", "canvas_production_operations", "scene_production_operations",
-        "episode_production_versions", "canvas_production_versions", "scene_production_versions",
-        "episode_production_runs", "canvas_production_runs", "scene_production_runs",
-        "episode_production_batches", "canvas_production_batches", "scene_production_batches",
+        "episode_productions", "canvas_productions",
+        "episode_production_operations", "canvas_production_operations",
+        "episode_production_versions", "canvas_production_versions",
+        "episode_production_runs", "canvas_production_runs",
+        "episode_production_batches", "canvas_production_batches",
     ] as const,
     // 命令/操作回执表
     receiptTables: [

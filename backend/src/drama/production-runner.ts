@@ -13,7 +13,7 @@ import { directorArtifact, validateDirectorMedia } from "./director.js";
 import { EpisodeProductionService, type ProductionRecord, type ProductionRun } from "./production.js";
 import { verifyImageInput } from "./image-inputs.js";
 import { productionClipProjection, clipInputHash, type ReferenceSync } from "./clip-inputs.js";
-import { productionSceneLayout } from "./production-layout.js";
+import { productionSceneIdsForShots, productionSceneLayout } from "./production-layout.js";
 
 const stableId = (kind: string, ...parts: string[]) => `${kind}-${crypto.createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24)}`;
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -63,7 +63,15 @@ export class EpisodeProductionRunner {
                     if (!plan) throw new Error(`正式源稿中不存在资产 ${targetId}`);
                     const scope = String(plan.canvas_scope || (director.assets[targetId]?.sharedSource || sharedOwner ? "shared" : "episode"));
                     if (scope !== (sharedOwner ? "shared" : "episode")) throw new Error(sharedOwner ? `资产 ${targetId} 属于本集专用，不能在共享资产画布准备` : `资产 ${targetId} 属于剧目共享；请在共享资产画布准备源资产，再由本集采用批准版本`);
-                } else if (sharedOwner && ["frame", "segment"].includes(kind)) {
+                } else if (kind === "segment") {
+                    if (sharedOwner) throw new Error("剧目共享资产画布只准备可复用资产；关键帧和视频 Clip 应在分集画布准备");
+                    const group = fresh.draft.clipGroups.find(item => item.id === targetId);
+                    const planned = (Array.isArray(director.source.segments) ? director.source.segments : []).map(object).find(item => item.id === targetId);
+                    if (!group || !planned) throw new Error("Segment 未登记到正式源稿");
+                    const scenes = productionSceneEntries(director.source);
+                    const sceneIds = productionSceneIdsForShots(scenes, group.shotIds);
+                    if (!group.nodeId && sceneIds.length !== 1) throw new Error(sceneIds.length ? `Segment ${targetId} 跨越多个场次；请先按场次拆分` : `Segment ${targetId} 未映射到唯一正式场次，无法准备场次 H3 节点`);
+                } else if (sharedOwner && kind === "frame") {
                     throw new Error("剧目共享资产画布只准备可复用资产；关键帧和视频 Clip 应在分集画布准备");
                 }
             }
@@ -112,6 +120,7 @@ export class EpisodeProductionRunner {
                 const unit = locate(target, "video");
                 if (!unit) throw new Error(`正式布局中缺少视频目标 ${target}`);
                 add(unit);
+                if (unit.sceneId) { sceneIds.add(unit.sceneId); add(locate(`scene:${unit.sceneId}`, "scene")); }
             } else throw new Error("准备目标必须为 scene、asset、frame 或 segment");
         }
         for (const sceneId of sceneIds) for (const unit of compiled.units) if (unit.area === "script" && unit.sceneId === sceneId) add(unit);
@@ -188,7 +197,10 @@ export class EpisodeProductionRunner {
                 if (existing) {
                     if (projected.segment && (clipInputHash(existing) !== clipInputHash(segment) || !existing.productionClipProjection)) canvasOps.push({ type: "update_h3_segment", nodeId: member.nodeId, segmentId, patch: segment });
                 } else if (existingNode || plannedNodeIds.has(member.nodeId)) canvasOps.push({ type: "add_h3_segment", nodeId: member.nodeId, segment });
-                else canvasOps.push({ type: "add_node", id: member.nodeId, nodeType: member.nodeType, title: "H3 Clips", position: member.position, width: member.size.width, height: member.size.height, metadata: { ...createH3NodeMetadata(object(this.stores.settings.get(H3_DEFAULTS_KEY)), { segments: [segment] }), productionLayoutUnitId: unit.id, productionLayoutBounds: unit.bounds.size } });
+                else {
+                    const scene = unit.sceneId ? productionSceneEntries(director.source).find(item => item.id === unit.sceneId) : undefined;
+                    canvasOps.push({ type: "add_node", id: member.nodeId, nodeType: member.nodeType, title: `${scene?.title || "场次"} · H3 Clips`, position: member.position, width: member.size.width, height: member.size.height, metadata: { ...createH3NodeMetadata(object(this.stores.settings.get(H3_DEFAULTS_KEY)), { segments: [segment] }), ...(scene ? { groupId: stableId("production-scene", id, scene.id) } : {}), productionLayoutUnitId: unit.id, productionLayoutBounds: unit.bounds.size } });
+                }
                 plannedNodeIds.add(member.nodeId);
                 if (group.nodeId !== member.nodeId || group.segmentId !== (group.segmentId || stableId("clip", id, group.id))) bindings.push({ type: "bind_director_segment", targetId: group.id, nodeId: member.nodeId, segmentId });
             }
@@ -198,6 +210,10 @@ export class EpisodeProductionRunner {
             if (target.startsWith("scene:")) {
                 const sceneId = target.slice("scene:".length);
                 return requestedUnits.filter(unit => unit.sceneId === sceneId && (unit.area === "script" || unit.members.some(member => member.role === "scene")));
+            }
+            if (target.startsWith("segment:")) {
+                const sceneId = requestedUnits.find(unit => unit.targets.includes(target) && unit.members.some(member => member.role === "video"))?.sceneId;
+                if (sceneId) return requestedUnits.filter(unit => unit.sceneId === sceneId && (unit.area === "script" || unit.members.some(member => member.role === "scene") || unit.targets.includes(target)));
             }
             return requestedUnits.filter(unit => unit.targets.includes(target) || (target.startsWith("frame:") && unit.targets.includes(`frame-prompt:${target.slice(6)}`)));
         };
@@ -261,22 +277,46 @@ export class EpisodeProductionRunner {
     }
 
     syncClips(episodeId: string, version: number, groupIds?: string[], runSettings?: Record<string, unknown>) {
-        const production = this.service.get(episodeId);
+        let production = this.service.get(episodeId);
         if (production.publishedVersion !== version || !production.published?.shots.length) throw new Error("只能同步当前已发布镜头表");
-        const published = production.published;
-        const groups = published.clipGroups.filter((group) => !groupIds || groupIds.includes(group.id));
-        const readiness = this.service.workflowReadiness(episodeId, "published");
+        let published = production.published;
+        let groups = published.clipGroups.filter((group) => !groupIds || groupIds.includes(group.id));
+        let readiness = this.service.workflowReadiness(episodeId, "published");
         const blocked = groups.map(group => readiness.targets.find(item => item.id === `segment:${group.id}`)).filter(item => !item || item.status !== "ready");
         if (blocked.length) throw new Error(blocked.flatMap(item => item?.blockers || ["Segment 缺少就绪视图"] ).join("；"));
         this.service.validateExecution(episodeId, version, groups.map(group => group.id));
         const episode = this.storesEpisode(episodeId);
         if (!episode.canvasId) throw new Error("分集尚未绑定画布");
-        const layoutPlan = this.service.ensureLayoutPlan(episodeId, production, this.stores.projects.get(episode.canvasId));
+        let project = this.stores.projects.get(episode.canvasId);
+        if (!project) throw new Error("分集画布不存在");
+        let layoutPlan = this.service.ensureLayoutPlan(episodeId, production, project);
+        const needsLayoutTargets = groups.filter(group => {
+            const unit = layoutPlan.units.find(item => item.targets.includes(`segment:${group.id}`) && item.members.some(member => member.role === "video"));
+            const video = unit?.members.find(member => member.role === "video");
+            if (!unit || !video || !nodesOf(project!).some(node => node.id === (group.nodeId || video.nodeId))) return true;
+            return Boolean(unit.sceneId && !nodesOf(project!).some(node => object(node.metadata).productionSceneId === unit.sceneId));
+        }).map(group => `segment:${group.id}`);
+        if (needsLayoutTargets.length) {
+            const latest = this.service.get(episodeId), currentProject = this.stores.projects.get(episode.canvasId);
+            if (!currentProject) throw new Error("分集画布不存在");
+            const layoutOperationId = stableId("production-scene-sync-layout", episodeId, String(version), String(latest.revision), String(currentProject.revision || 0), ...needsLayoutTargets);
+            this.prepareTargets(episodeId, latest.revision, needsLayoutTargets, layoutOperationId);
+            production = this.service.get(episodeId);
+            if (production.publishedVersion !== version || !production.published) throw new Error("准备场次节点期间发布版本已变化");
+            published = production.published;
+            groups = published.clipGroups.filter(group => !groupIds || groupIds.includes(group.id));
+            readiness = this.service.workflowReadiness(episodeId, "published");
+            const nowBlocked = groups.map(group => readiness.targets.find(item => item.id === `segment:${group.id}`)).filter(item => !item || item.status !== "ready");
+            if (nowBlocked.length) throw new Error(nowBlocked.flatMap(item => item?.blockers || ["Segment 缺少就绪视图"] ).join("；"));
+            this.service.validateExecution(episodeId, version, groups.map(group => group.id));
+            project = this.stores.projects.get(episode.canvasId);
+            if (!project) throw new Error("分集画布不存在");
+            layoutPlan = this.service.ensureLayoutPlan(episodeId, production, project);
+        }
         for (const group of groups) {
-            const project = this.stores.projects.get(episode.canvasId);
+            project = this.stores.projects.get(episode.canvasId);
             if (!project) throw new Error("分集画布不存在");
             const nodes = nodesOf(project);
-            const nodeId = group.nodeId || stableId("production-h3", episodeId);
             const segmentId = group.segmentId || stableId("clip", episodeId, group.id);
             const shots = group.shotIds.map((id) => published.shots.find((shot) => shot.id === id)).filter((shot): shot is NonNullable<typeof shot> => !!shot);
             const settings = runSettings || published.settings as unknown as Record<string, unknown>;
@@ -285,9 +325,13 @@ export class EpisodeProductionRunner {
             const authored = directorArtifact(published, "h3", group.id);
             const d = published.director!;
             const planned = (d.source.segments as Array<Record<string, any>>).find(s => s.id === group.id)!;
+            const sceneIds = productionSceneIdsForShots(productionSceneEntries(d.source), group.shotIds);
+            if (!group.nodeId && sceneIds.length !== 1) throw new Error(sceneIds.length ? `Segment ${group.id} 跨越多个场次；请先按场次拆分` : `Segment ${group.id} 未映射到唯一正式场次，无法同步场次 H3 节点`);
             const layoutUnit = layoutPlan.units.find(unit => unit.targets.includes(`segment:${group.id}`) && unit.members.some(member => member.role === "video"));
             const layoutMember = layoutUnit?.members.find(member => member.role === "video");
             if (!layoutUnit || !layoutMember) throw new Error(`布局计划缺少 H3 节点：${group.id}`);
+            const nodeId = group.nodeId || layoutMember.nodeId;
+            const scene = layoutUnit.sceneId ? productionSceneEntries(d.source).find(item => item.id === layoutUnit.sceneId) : undefined;
             const existingClip = (object(nodes.find(item => item.id === nodeId)?.metadata).segments as Record<string, any>[] || []).find(item => item.id === segmentId);
             const projected = productionClipProjection(project, { ...published, settings: runSettings ? { ...published.settings, ...runSettings } : published.settings }, group, segmentId, existingClip);
             if (!projected.segment) throw new Error(projected.result.diagnostics.map(item => item.message).join("；"));
@@ -299,7 +343,7 @@ export class EpisodeProductionRunner {
             const operations = exists
                 ? [{ type: "update_h3_segment", nodeId, segmentId, patch: { ...segment } }]
                 : node ? [{ type: "add_h3_segment", nodeId, segment }]
-                : [{ type: "add_node", id: nodeId, nodeType: "minimax-h3:video", title: `单集 H3 Clips`, position: layoutMember.position, width: layoutMember.size.width, height: layoutMember.size.height, metadata: { ...createH3NodeMetadata(object(this.stores.settings.get(H3_DEFAULTS_KEY)), { segments: [segment] }), productionLayoutUnitId: layoutUnit.id, productionLayoutBounds: layoutUnit.bounds.size } }];
+                : [{ type: "add_node", id: nodeId, nodeType: "minimax-h3:video", title: `${scene?.title || "场次"} · H3 Clips`, position: layoutMember.position, width: layoutMember.size.width, height: layoutMember.size.height, metadata: { ...createH3NodeMetadata(object(this.stores.settings.get(H3_DEFAULTS_KEY)), { segments: [segment] }), ...(scene ? { groupId: stableId("production-scene", episodeId, scene.id) } : {}), productionLayoutUnitId: layoutUnit.id, productionLayoutBounds: layoutUnit.bounds.size } }];
             this.stores.projects.applyOperations(episode.canvasId, Number(project.revision || 0), operations, { operationId: stableId("production-sync", episodeId, String(version), group.id, String(project.revision || 0), crypto.createHash("sha256").update(prompt + JSON.stringify(bindings)).digest("hex")), runtimeWrite: true, source: { clientId: "episode-production", kind: "system", label: "同步单集 Clip" } });
             this.service.bindRuntime(episodeId, version, { groupId: group.id, nodeId, segmentId });
         }

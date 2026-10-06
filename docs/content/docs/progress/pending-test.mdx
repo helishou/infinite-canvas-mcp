@@ -5,6 +5,12 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Home dramas and canvases
+
+- Home lists one card per drama alongside standalone canvases. Drama cards open the drama page; episode, scene and shared asset canvases are excluded from both home and the canvas library. Library folders, counts and bulk actions only include standalone canvases, and move menus exclude dramas. Check dramas with no canvases, search, filters, grid/list views, both languages and themes.
+
+- Home’s Last updated card selects the latest canvas across all projects, including drama canvases, and Continue editing opens that canvas. The catalog waits for drama ownership before rendering and reuses cached ownership on refresh and return. Delay episode/scene responses to verify the resume title, cover region and catalog remain stable; failed ownership reads report an error and can be retried.
+
 ## Director conversation production controls
 
 - Production status and Return to current production appear inside the director conversation. Collapsing the conversation hides both controls while preserving the session. Open it to inspect the current clip/status, open Tasks & Deliveries, or explicitly resume production follow. Check recovery states, both themes, narrow screens and draft preservation.
@@ -37,7 +43,8 @@ description: Implemented changes that still need manual verification
 ## Production node layout
 
 - Backend persists a complete production layout plan shared by the web app, Agent, MCP and executor. Check the asset-purpose regions, scene scripts and shot units, video region, and the top-level `layoutReceipt` with plan hash, created/reused nodes and conflict diagnostics.
-- Prepare the same targets in different orders, batches, concurrently and by replay; positions and unit identities must stay stable. Targets blocked on references still reserve positions. User-moved or resized nodes remain anchors and new targets avoid them; text, review and generation state changes do not push nodes. Image loading and expanded smart panels must not rewrite new node anchor geometry. Check shared-H3 Segment deduplication, rollback, restart recovery and canvas aliases.
+- Each episode is divided into formal scene areas. A scene's script, shot images/prompts and one H3 Clips node occupy the same area; Segments in that scene share that H3 node, while separate scenes use separate nodes. Preparing a new Segment that crosses scenes is blocked until the source is split; mappings use formal scene occurrences rather than shared environment IDs.
+- Prepare the same targets in different orders, batches, concurrently and by replay; positions and unit identities must stay stable. Targets blocked on references still reserve positions. User-moved or resized nodes remain anchors and new targets avoid them; text, review and generation state changes do not push nodes. Image loading and expanded smart panels must not rewrite new node anchor geometry. Check that legacy manual bindings remain intact, plus rollback, restart recovery and canvas aliases.
 
 ## Director chat queue and inserted guidance
 
@@ -2445,3 +2452,10 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 - Repair an issue in the workspace, save, recheck, and verify it clears only after the fresh report returns. Editing never writes derived snapshots or submits media. Refresh and browser history must retain the selected view, object, shot and issue without replacing an unsaved edit.
 - Inspect a legacy draft in diagnostic-only mode. Review the proposed v2 ledger, target runtime, source revision, equivalent conversions, historical-only fields, semantic gaps, unapplied suggestions, diagnostics and active runs; only an explicit preview-bound upgrade may switch the draft, and historical projections and media remain available.
 - Check Chinese/English, light/dark themes, narrow-screen details, read-only published snapshots, event updates during an unsaved form, and navigation back to the originating shot, story or asset.
+
+- For an existing episode whose Segments share one H3 node, explicitly migrate the draft and verify one H3 node per formal scene, old Clips/media/task history retained in an archive area, published version unchanged, new Clips idle, no generation submitted, active tasks and stale revisions blocked, and duplicate operation replayed without a second mutation.
+
+### Canvas episode switcher
+
+- From an episode canvas, confirm the switcher identifies the current episode and lists episode canvases by episode number and title. Selecting another episode opens that episode's canvas; shared assets remain available.
+- Confirm the switcher no longer offers Drama overview or All dramas entries. Check the selected episode marker, narrow screens, and Chinese/English labels.

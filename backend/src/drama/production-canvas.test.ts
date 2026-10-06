@@ -1,5 +1,7 @@
 import { resolveH3Runtime } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
-import { buildProductionClip, clipInputHash } from "./clip-inputs.js";
+import { buildProductionClip, clipInputHash, productionClipProjection } from "./clip-inputs.js";
+import { productionLayoutStableId } from "./production-layout-geometry.js";
+import { createH3NodeMetadata } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -200,8 +202,11 @@ test("history selection restores the exact Clip without changing authored timing
     const f = historyFixture(t), op = f.result("segment", "seg2", "video:second");
     const before = f.episode.get("ep");
     const selected = f.episode.edit("ep", { operationId: "select-clip", expectedRevision: before.revision, ops: [op] });
-    const clips = (f.db.getCanvasProject(f.projectId)!.nodes as any[]).find(node => node.id === op.nodeId).metadata.segments;
-    assert.equal(clips[1].resultStorageKey, "video:second"); assert.equal(clips[0].resultStorageKey, undefined);
+    const nodes = f.db.getCanvasProject(f.projectId)!.nodes as any[];
+    const clips = nodes.flatMap(node => node.type === "minimax-h3:video" ? node.metadata.segments : []);
+    const restoredClip = nodes.find(node => node.id === op.nodeId).metadata.segments[0];
+    assert.equal(restoredClip.resultStorageKey, "video:second");
+    assert.equal(clips.filter((clip: any) => clip.resultStorageKey).length, 1);
     assert.deepEqual(selected.draft.director!.source, before.draft.director!.source); assert.deepEqual(selected.draft.director!.boundaries, before.draft.director!.boundaries);
     assert.equal(selected.draft.clipGroups[1].selectedResult?.generationLogId, op.generationLogId);
     assert.throws(() => f.db.applyCanvasProjectOperations(f.projectId, Number(f.db.getCanvasProject(f.projectId)!.revision), [{ type: "restore_h3_output", nodeId: op.nodeId, segmentId: before.draft.clipGroups[1].segmentId, generationLogId: op.generationLogId, storageKey: op.storageKey, settings: {} }]), /正式制作片段/);
@@ -252,9 +257,10 @@ test("target preparation is recoverable, preserves layout, reuses frame IDs, and
     const revision = f.episode.get("ep").revision;
     const prepared = runner.prepareTargets("ep", revision, ["frame:s1", "segment:seg1", "segment:seg2"], "prepare-1");
     const nodes = f.db.getCanvasProject(project.id)!.nodes as any[];
-    assert.equal(nodes.filter(node => node.type === "minimax-h3:video").length, 1);
+    assert.equal(nodes.filter(node => node.type === "minimax-h3:video").length, 2);
     assert.equal(nodes.filter(node => node.metadata?.productionSceneId === "morning").length, 1);
-    assert.equal(nodes.filter(node => node.metadata?.productionSceneId === "night").length, 0);
+    assert.equal(nodes.filter(node => node.metadata?.productionSceneId === "night").length, 1);
+    assert.notEqual(prepared.draft.clipGroups[0].nodeId, prepared.draft.clipGroups[1].nodeId);
     const frame = nodes.find(node => node.id === prepared.draft.director!.assets.FRAME.nodeId);
     assert.equal(frame.metadata.model, "frame-model");
     f.db.applyCanvasProjectOperations(project.id, Number(f.db.getCanvasProject(project.id)!.revision), [{ type: "update_node", id: frame.id, patch: { position: { x: 123, y: 456 }, width: 222 } }]);
@@ -448,6 +454,7 @@ test("native image controls use the original node and expose an exact task for p
 test("native H3 tracking follows the active Clip while a pending decision keeps presentation priority", t => {
     const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
     const d = director();
+    d.source.script_scenes = [{ id: "sequence", scene_id: "room", scene_name: "Sequence", text: "Both shots share this scene", beat_ids: ["b1", "b2"] }];
     (d.source.shots as any[]).forEach(shot => { shot.required_assets = []; });
     Object.values(d.shotInputs).forEach(input => { input.assetIds = []; input.keyframePolicy = "none"; delete input.keyframeAssetId; });
     d.sourceHash = directorHash(d.source); d.artifacts.forEach(artifact => { artifact.sourceHash = d.sourceHash; artifact.receipt.sourceHash = d.sourceHash; });
@@ -481,19 +488,84 @@ test("native H3 tracking follows the active Clip while a pending decision keeps 
     assert.equal(decisionPresentation.taskId, undefined, "the active native task must not take focus from a formal decision");
 });
 
+test("each formal scene owns one H3 node and keeps its scripts, frames and clips in the same area", t => {
+    const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
+    save(f.episode, "ep", director());
+    const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+    const prepared = runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1", "segment:seg2"], "scene-h3-layout");
+    const groups = prepared.draft.clipGroups;
+    assert.notEqual(groups[0].nodeId, groups[1].nodeId, "two scene occurrences sharing one environment still need separate H3 nodes");
+    const nodes = f.db.getCanvasProject(projectId)!.nodes as any[];
+    const scenes = new Map(["morning", "night"].map(sceneId => [sceneId, nodes.find(node => node.metadata?.productionSceneId === sceneId)]));
+    for (const [index, sceneId] of ["morning", "night"].entries()) {
+        const group = scenes.get(sceneId)!;
+        const h3 = nodes.find(node => node.id === groups[index].nodeId);
+        assert.ok(group, `scene group ${sceneId} is materialized`);
+        assert.equal(h3.metadata.groupId, group.id);
+        assert.ok(h3.position.x >= group.position.x && h3.position.y >= group.position.y);
+        assert.ok(h3.position.x + h3.width <= group.position.x + group.width);
+        assert.ok(h3.position.y + h3.height <= group.position.y + group.height);
+        assert.match(h3.title, sceneId === "morning" ? /Morning/ : /Night/);
+        const script = nodes.find(node => node.metadata?.productionScriptId === sceneId);
+        assert.equal(script.metadata.groupId, group.id);
+        assert.ok(script.position.x >= group.position.x && script.position.y >= group.position.y);
+    }
+    assert.equal(f.stores.tasks.list().length, 0, "scene H3 layout preparation must not generate media");
+});
+
+test("Clip synchronization also assigns unbound segments to their scene H3 nodes", t => {
+    const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
+    const d = director();
+    (d.source.shots as any[]).forEach(shot => { shot.required_assets = []; });
+    Object.values(d.shotInputs).forEach(input => { input.assetIds = []; input.keyframePolicy = "none"; delete input.keyframeAssetId; });
+    d.sourceHash = directorHash(d.source);
+    d.artifacts.forEach(artifact => { artifact.sourceHash = d.sourceHash; artifact.receipt.sourceHash = d.sourceHash; });
+    save(f.episode, "ep", d);
+    const published = publish(f.episode, "ep"), runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+    runner.syncClips("ep", published.publishedVersion);
+    const synced = f.episode.get("ep").published!.clipGroups;
+    assert.notEqual(synced[0].nodeId, synced[1].nodeId);
+    const nodes = f.db.getCanvasProject(projectId)!.nodes as any[];
+    for (const group of synced) {
+        const sceneId = group.id === "seg1" ? "morning" : "night";
+        const sceneGroup = nodes.find(item => item.metadata?.productionSceneId === sceneId);
+        const node = nodes.find(item => item.id === group.nodeId);
+        const expectedGroupId = `production-scene-${crypto.createHash("sha256").update(`ep\0${sceneId}`).digest("hex").slice(0, 24)}`;
+        assert.ok(sceneGroup);
+        assert.equal(node.metadata.groupId, expectedGroupId);
+        assert.equal(node.metadata.groupId, sceneGroup.id);
+    }
+});
+
+test("new Segment preparation rejects a scene-spanning clip until it is split", t => {
+    const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
+    const d = director();
+    (d.source.segments as any[])[0].shot_ids = ["s1", "s2"];
+    d.sourceHash = directorHash(d.source);
+    d.artifacts = d.artifacts.map(artifact => ({ ...artifact, status: "stale" }));
+    save(f.episode, "ep", d);
+    const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+    const readiness = f.episode.workflowReadiness("ep").targets.find(target => target.id === "segment:seg1")!;
+    assert.match(readiness.blockers.join("; "), /跨越多个正式场次/);
+    assert.throws(() => runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1"], "cross-scene-segment"), /跨越多个场次/);
+    assert.equal(f.db.db.prepare("SELECT 1 FROM production_preparations WHERE operation_id=?").get("cross-scene-segment"), undefined);
+    assert.ok(f.db.getCanvasProject(projectId));
+});
+
+
 test("version 23 installations gain layout plans, preparation receipts and native bindings without rewriting shared versions", t => {
     const f = fixture(t), sharedId = ensureProductionCanvas(f.db, "shared-assets", "drama").project.id;
     const approved = approve(f, sharedId, 1);
     f.db.db.exec("DELETE FROM schema_migrations WHERE version>=24; DROP TABLE production_preparations; DROP TABLE production_task_bindings; ALTER TABLE drama_projects DROP COLUMN production_plan_json");
     const upgraded = new BackendDatabase(f.file);
     try {
-        assert.equal(upgraded.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, 30);
+        assert.equal(upgraded.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, 32);
         assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE name='production_preparations'").get());
         assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE name='production_task_bindings'").get());
         assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE name='production_layout_plans'").get());
         assert.equal(listApprovedSharedAssets(upgraded, "drama")[0].id, approved.id);
         assert.equal(upgraded.listCanvasFolders().find(folder => folder.id === "drama")?.sharedAssetCanvasId, sharedId);
-        assert.ok(fs.readdirSync(f.directory).some(name => name.includes('pre-schema-v23-to-v30')));
+        assert.ok(fs.readdirSync(f.directory).some(name => name.includes('pre-schema-v23-to-v32')));
     } finally { upgraded.close(); }
 });
 
@@ -525,7 +597,7 @@ test("scene arrangement fits resized images and attached prompts and replays wit
     runner.prepareTargets("ep", f.episode.get("ep").revision, ["frame:s1"], "layout-frame");
     const project = f.db.getCanvasProject(projectId)!, frame = (project.nodes as any[]).find(node => node.metadata?.productionShotId === "s1");
     f.db.applyCanvasProjectOperations(projectId, undefined, [{ type: "update_node", id: frame.id, patch: { width: 900, height: 900 } }, { type: "add_node", id: "frame-prompt", nodeType: "config", width: 520, height: 300, metadata: { prompt: "keep this prompt", productionShotId: "s1", groupId: frame.metadata.groupId } }]);
-    const otherScripts = (f.db.getCanvasProject(projectId)!.nodes as any[]).filter(node => node.metadata?.productionScriptId).map(node => [node.id, node.position]);
+    const otherScripts = (f.db.getCanvasProject(projectId)!.nodes as any[]).filter(node => node.metadata?.productionScriptId && node.metadata?.productionScriptSceneId !== "morning").map(node => [node.id, node.position]);
     const revision = f.episode.get("ep").revision;
     runner.arrangeScene("ep", "morning", revision, "layout-arrange");
     const after = f.db.getCanvasProject(projectId)!, nodes = after.nodes as any[], image = nodes.find(node => node.id === frame.id), prompt = nodes.find(node => node.id === "frame-prompt"), group = nodes.find(node => node.id === frame.metadata.groupId);
@@ -534,7 +606,7 @@ test("scene arrangement fits resized images and attached prompts and replays wit
     assert.ok(prompt.position.y + prompt.height <= group.position.y + group.height);
     assert.ok(image.position.x + image.width <= group.position.x + group.width);
     assert.equal(prompt.metadata.prompt, "keep this prompt");
-    assert.deepEqual(nodes.filter(node => node.metadata?.productionScriptId).map(node => [node.id, node.position]), otherScripts);
+    assert.deepEqual(nodes.filter(node => node.metadata?.productionScriptId && node.metadata?.productionScriptSceneId !== "morning").map(node => [node.id, node.position]), otherScripts);
     runner.arrangeScene("ep", "morning", revision, "layout-arrange");
     assert.equal(f.db.getCanvasProject(projectId)!.revision, after.revision);
 });

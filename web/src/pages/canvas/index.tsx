@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { App, Button, Dropdown, Select } from "antd";
 import { Download, FileUp, Folder, FolderInput, FolderPlus, Plus } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { useQueries } from "@tanstack/react-query";
 
 import { readZip } from "@/lib/zip";
 import { setMediaBlob } from "@/services/file-storage";
@@ -41,54 +42,36 @@ export default function CanvasPage() {
     const renameFolder = useCanvasStore((state) => state.renameFolder);
     const deleteFolder = useCanvasStore((state) => state.deleteFolder);
     const moveProjectsToFolder = useCanvasStore((state) => state.moveProjectsToFolder);
-    const selectedIds = useCanvasUiStore((state) => state.selectedProjectIds);
+    const storedSelectedIds = useCanvasUiStore((state) => state.selectedProjectIds);
     const setDeleteIds = useCanvasUiStore((state) => state.setDeleteProjectIds);
     const [folderFilter, setFolderFilter] = useState<string | null>(null);
-    const [dramaCanvasFolderByProjectId, setDramaCanvasFolderByProjectId] = useState<Record<string, string>>({});
     const backendConnected = useBackendStore((state) => state.connected);
+    const backendUrl = useBackendStore((state) => state.url);
 
     const mode = searchParams.get("mode");
     const agentMode = mode === "new" || mode === "recent" || mode === "choose";
     const agentQuery = agentMode ? `?${searchParams.toString()}` : "";
-    useEffect(() => {
-        if (!hydrated || !backendConnected) {
-            setDramaCanvasFolderByProjectId({});
-            return;
-        }
-        const dramaFolders = folders.filter((folder) => folder.isDrama);
-        if (!dramaFolders.length) {
-            setDramaCanvasFolderByProjectId({});
-            return;
-        }
-        let disposed = false;
-        void Promise.all(dramaFolders.map(async (folder) => {
-            try {
-                const result = await fetchBackendDramaEpisodes(folder.id);
-                return [folder.id, result.episodes || []] as const;
-            } catch {
-                return [folder.id, []] as const;
-            }
-        })).then((entries) => {
-            if (disposed) return;
-            const next: Record<string, string> = {};
-            for (const [folderId, episodes] of entries) {
-                for (const episode of episodes) {
-                    if (episode.canvasId) next[episode.canvasId] = folderId;
-                }
-            }
-            setDramaCanvasFolderByProjectId(next);
-        });
-        return () => { disposed = true; };
-    }, [backendConnected, folders, hydrated]);
-    const getProjectFolderId = (project: CanvasProject) => project.folderId || dramaCanvasFolderByProjectId[project.id] || null;
-    const visibleProjects = useMemo(() => {
-        if (folderFilter === null) return projects;
-        if (folderFilter === UNFILED_FOLDER) return projects.filter((project) => !getProjectFolderId(project));
-        return projects.filter((project) => getProjectFolderId(project) === folderFilter);
-    }, [dramaCanvasFolderByProjectId, folderFilter, projects]);
-    const folderCounts = (folderId: string | null) => folderId === null
-        ? projects.filter((project) => !getProjectFolderId(project)).length
-        : projects.filter((project) => getProjectFolderId(project) === folderId).length;
+    const dramaFolders = folders.filter((folder) => folder.isDrama);
+    const ordinaryFolders = folders.filter((folder) => !folder.isDrama);
+    const ownershipQueries = useQueries({
+        queries: dramaFolders.flatMap((folder) => [
+            {
+                queryKey: ["canvas-library-episodes", backendUrl, folder.id],
+                enabled: hydrated && backendConnected,
+                queryFn: async () => ((await fetchBackendDramaEpisodes(folder.id)).episodes || []).map((episode) => episode.canvasId || ""),
+            },
+        ]),
+    });
+    const ownershipLoading = backendConnected && ownershipQueries.some((result) => result.isPending);
+    const dramaFolderIds = new Set(dramaFolders.map((folder) => folder.id));
+    const dramaCanvasIds = new Set(dramaFolders.map((folder) => folder.sharedAssetCanvasId));
+    for (const result of ownershipQueries) {
+        for (const id of result.data || []) if (id) dramaCanvasIds.add(id);
+    }
+    const ordinaryProjects = projects.filter((project) => !dramaFolderIds.has(project.folderId || "") && !dramaCanvasIds.has(project.id));
+    const selectedIds = ownershipLoading ? [] : storedSelectedIds.filter((id) => ordinaryProjects.some((project) => project.id === id));
+    const visibleProjects = folderFilter === null ? ordinaryProjects : ordinaryProjects.filter((project) => folderFilter === UNFILED_FOLDER ? !project.folderId : project.folderId === folderFilter);
+    const folderCounts = (folderId: string | null) => ordinaryProjects.filter((project) => (project.folderId || null) === folderId).length;
     const createAndSelectFolder = () => setFolderFilter(createFolder());
     const renameFolderFromPrompt = (id: string, name: string) => {
         const next = window.prompt(t("canvas.folder.rename"), name);
@@ -153,11 +136,11 @@ export default function CanvasPage() {
     };
 
     useEffect(() => {
-        if (!hydrated || autoOpenRef.current || (mode !== "new" && mode !== "recent")) return;
+        if (!hydrated || ownershipLoading || autoOpenRef.current || (mode !== "new" && mode !== "recent")) return;
         autoOpenRef.current = true;
-        const recentProject = projects.find((project) => (project.summary?.nodeCount ?? project.nodes.length) > 0) || projects[0];
+        const recentProject = ordinaryProjects.find((project) => (project.summary?.nodeCount ?? project.nodes.length) > 0) || ordinaryProjects[0];
         enterProject(mode === "new" ? createProject(t("canvas.defaultTitle", { count: projects.length + 1 })) : recentProject?.id || createProject(t("canvas.defaultTitle", { count: projects.length + 1 })));
-    }, [createProject, hydrated, mode, projects, t]);
+    }, [createProject, hydrated, mode, ordinaryProjects, ownershipLoading, projects.length, t]);
 
     if (hydrated && (mode === "new" || mode === "recent")) return <main className="flex h-full items-center justify-center bg-background text-sm text-stone-500">{t("canvas.opening")}</main>;
 
@@ -173,14 +156,14 @@ export default function CanvasPage() {
                     </div>
                     <div className="space-y-1">
                         <button type="button" className={cn("flex w-full items-center justify-between rounded-md px-2 py-2 text-left text-sm transition-colors hover:bg-stone-100 dark:hover:bg-stone-900", folderFilter === null && "bg-stone-100 font-medium dark:bg-stone-900")} onClick={() => setFolderFilter(null)}>
-                            <span>{t("canvas.folder.all")}</span><span className="text-xs text-stone-400">{projects.length}</span>
+                            <span>{t("canvas.folder.all")}</span><span className="text-xs text-stone-400">{ownershipLoading ? "—" : ordinaryProjects.length}</span>
                         </button>
                         <button type="button" className={cn("flex w-full items-center justify-between rounded-md px-2 py-2 text-left text-sm transition-colors hover:bg-stone-100 dark:hover:bg-stone-900", folderFilter === UNFILED_FOLDER && "bg-stone-100 font-medium dark:bg-stone-900")} onClick={() => setFolderFilter(UNFILED_FOLDER)}>
-                            <span>{t("canvas.folder.unfiled")}</span><span className="text-xs text-stone-400">{folderCounts(null)}</span>
+                            <span>{t("canvas.folder.unfiled")}</span><span className="text-xs text-stone-400">{ownershipLoading ? "—" : folderCounts(null)}</span>
                         </button>
                     </div>
                     <div className="mt-2 min-h-0 flex-1 space-y-1 overflow-y-auto">
-                        {folders.map((folder) => (
+                        {ordinaryFolders.map((folder) => (
                             <div key={folder.id} className={cn("group flex items-center gap-1 rounded-md px-2 py-1 transition-colors hover:bg-stone-100 dark:hover:bg-stone-900", folderFilter === folder.id && "bg-stone-100 dark:bg-stone-900")}>
                                 <button type="button" className="flex min-w-0 flex-1 items-center gap-2 py-1 text-left text-sm" onClick={() => setFolderFilter(folder.id)}>
                                     <Folder className="size-4 shrink-0 text-stone-400" />
@@ -207,18 +190,18 @@ export default function CanvasPage() {
                             <div>
                                 <p className="text-xs text-stone-500">{t("canvas.library")}</p>
                                 <h1 className="mt-3 text-3xl font-semibold">{t("canvas.title")}</h1>
-                                <Select className="mt-3 w-52 md:hidden" value={folderFilter ?? "__all__"} options={[{ value: "__all__", label: t("canvas.folder.all") }, { value: UNFILED_FOLDER, label: t("canvas.folder.unfiled") }, ...folders.map((folder) => ({ value: folder.id, label: folder.name }))]} onChange={(value) => setFolderFilter(value === "__all__" ? null : value)} />
+                                <Select className="mt-3 w-52 md:hidden" value={folderFilter ?? "__all__"} options={[{ value: "__all__", label: t("canvas.folder.all") }, { value: UNFILED_FOLDER, label: t("canvas.folder.unfiled") }, ...ordinaryFolders.map((folder) => ({ value: folder.id, label: folder.name }))]} onChange={(value) => setFolderFilter(value === "__all__" ? null : value)} />
                             </div>
                             <div className="flex flex-wrap items-center justify-end gap-2">
                                 {selectedIds.length ? (
                                     <>
-                                        <Button loading={exporting} disabled={!hydrated || transfer !== null} icon={<Download className="size-4" />} onClick={() => void exportCanvasProjects(projects.filter((project) => selectedIds.includes(project.id)), `${t("canvas.title")}-${selectedIds.length}`)}>
+                                        <Button loading={exporting} disabled={!hydrated || transfer !== null} icon={<Download className="size-4" />} onClick={() => void exportCanvasProjects(ordinaryProjects.filter((project) => selectedIds.includes(project.id)), `${t("canvas.title")}-${selectedIds.length}`)}>
                                             {t("canvas.exportSelected")}
                                         </Button>
-                                        {folders.length ? (
+                                        {ordinaryFolders.length ? (
                                             <Dropdown trigger={["click"]} menu={{ items: [
                                                 { key: "root", label: t("canvas.folder.moveRoot"), onClick: () => moveSelectedToFolder(null) },
-                                                ...folders.map((folder) => ({ key: folder.id, label: folder.name, onClick: () => moveSelectedToFolder(folder.id) })),
+                                                ...ordinaryFolders.map((folder) => ({ key: folder.id, label: folder.name, onClick: () => moveSelectedToFolder(folder.id) })),
                                             ] }}>
                                                 <Button disabled={!hydrated} icon={<FolderInput className="size-4" />}>{t("canvas.folder.move")}</Button>
                                             </Dropdown>
@@ -232,7 +215,7 @@ export default function CanvasPage() {
                             </div>
                         </header>
 
-                        {!hydrated ? (
+                        {!hydrated || ownershipLoading ? (
                             <section className="flex min-h-[360px] items-center justify-center border-y border-stone-200 text-sm text-stone-500 dark:border-stone-800">{t("canvas.loading")}</section>
                         ) : visibleProjects.length ? (
                             <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">

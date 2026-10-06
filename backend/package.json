@@ -23,6 +23,7 @@
     "rebalance-canvas-history": "tsx src/maintenance/rebalance-canvas-history.ts",
     "prune-runtime-history": "tsx src/maintenance/prune-runtime-history.ts",
     "dedup-production-receipts": "tsx src/maintenance/dedup-production-receipts.ts",
+    "purge-scene-productions": "tsx src/maintenance/purge-scene-productions.ts",
     "test": "node ../scripts/test.mjs",
     "start": "node dist/index.js",
     "prepack": "npm run build"

@@ -29,7 +29,7 @@ function fixture(t: test.TestContext) {
 }
 function doc(count = 2): DirectorProduction {
     const engine = { commit: "a".repeat(40), patchVersion: "patch", runtimeId: "engine-test", version: "4.3.9" };
-    const shots = Array.from({ length: count }, (_, i) => ({ id: `s${i}`, scene_id: "scene", start_frame: i * 120, end_frame: (i + 1) * 120, visual: `authored ${i}`, camera: { description: "static" }, state_in: {}, state_out: {}, dialogues: [], audio: {} }));
+    const shots = Array.from({ length: count }, (_, i) => ({ id: `s${i}`, scene_id: "scene", source_scene_id: "scene-block", start_frame: i * 120, end_frame: (i + 1) * 120, visual: `authored ${i}`, camera: { description: "static" }, state_in: {}, state_out: {}, dialogues: [], audio: {} }));
     const segments = shots.map((s, i) => ({ id: `seg${i}`, shot_ids: [s.id], start_frame: s.start_frame, end_frame: s.end_frame, generation_clip_duration: 5, mode: "T2VA" }));
     const source = { fps_num: 24, fps_den: 1, script_scenes: [{ id: "scene-block", scene_id: "scene", text: "Original full text" }], shots, segments, extra_preserved: { detail: "never summarized" } };
     const sourceHash = directorHash(source);
@@ -93,7 +93,7 @@ test('Clip sync loads saved defaults, persists episode aspect and keeps existing
     assert.equal(node().metadata.latentUpscaleEnabled, true);
     db.applyCanvasProjectOperations('canvas', undefined, [{ type: 'update_h3_segment', nodeId: group.nodeId!, segmentId: group.segmentId!, patch: { modelName: 'user-model', sampler: 'euler', loraSlots: [{ name: 'user-lora', strength: 0.4, enabled: true }] } }]);
     db.applyCanvasProjectOperations('canvas', undefined, [{ type: 'update_h3_segment', nodeId: group.nodeId!, segmentId: group.segmentId!, patch: { resultStorageKey: 'old-result' } }], { runtimeWrite: true });
-    await runner.syncClips('ep', 1);
+    assert.throws(() => runner.syncClips('ep', 1), /CLIP_EDIT_CONFLICT/);
     assert.equal(node().metadata.segments[0].modelName, 'user-model');
     assert.equal(node().metadata.segments[0].sampler, 'euler');
     assert.equal(node().metadata.segments[0].resultStorageKey, 'old-result');
@@ -247,15 +247,15 @@ test("version 16 migration backs up data and creates run history without rewriti
     const reopened = new BackendDatabase(file);
     assert.equal(reopened.getDramaEpisode("ep")?.title, "Episode");
     assert.ok(reopened.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='canvas_production_batches'").get());
-    assert.ok(readdirSync(dir).some(n => n.includes("pre-schema-v16-to-v30"))); reopened.close();
+    assert.ok(readdirSync(dir).some(n => n.includes("pre-schema-v16-to-v32"))); reopened.close();
 });
 
-test("version 21 databases add production batch storage in schema version 22", t => {
+test("version 21 databases upgrade to the current schema and retain production batch storage", t => {
     const { db, file } = fixture(t);
     db.db.exec("DELETE FROM schema_migrations WHERE version>=22; DROP TABLE canvas_production_batches; DROP TABLE episode_production_batches");
     const upgraded = new BackendDatabase(file);
     const version = upgraded.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number };
-    assert.equal(version.version, 30);
+    assert.equal(version.version, 32);
     assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='episode_production_batches'").get());
     assert.equal(upgraded.getDramaEpisode("ep")?.title, "Episode");
     upgraded.close();

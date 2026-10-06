@@ -4,6 +4,19 @@ import { productionScriptNodes } from "./script-nodes.js";
 import { productionNodePosition, productionLayoutStableId, productionSharedProjectionNodeId, type Position } from "./production-layout-geometry.js";
 export { productionAssetPosition, productionNodePosition, productionOutputPosition, productionSceneLayout } from "./production-layout-geometry.js";
 
+/** Resolve the formal scene occurrences consumed by a shot set; unmapped shots cannot inherit a guess. */
+export function productionSceneIdsForShots(scenes: ReturnType<typeof productionSceneEntries>, shotIds: readonly string[]) {
+    const ids = [...new Set(shotIds.map(String).filter(Boolean))];
+    if (!ids.length) return [];
+    const matched = new Set<string>();
+    for (const shotId of ids) {
+        const owners = scenes.filter(scene => scene.shotIds.includes(shotId));
+        if (!owners.length) return [];
+        owners.forEach(scene => matched.add(scene.id));
+    }
+    return scenes.filter(scene => matched.has(scene.id)).map(scene => scene.id);
+}
+
 type Node = Record<string, any>;
 type Owner = { kind: "episode" | "canvas" | "scene"; id: string };
 type Input = { canvasId: string; owner: Owner; production: EpisodeProductionData; project: Record<string, any>; previous?: ProductionLayoutPlan | null };
@@ -27,6 +40,21 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
     const scenes = director ? productionSceneEntries(director.source) : [];
     const sceneByShot = new Map<string, string>();
     for (const scene of scenes) for (const shotId of scene.shotIds) if (!sceneByShot.has(shotId)) sceneByShot.set(shotId, scene.id);
+    const videoGroups = production.clipGroups.map(group => {
+        const sceneIds = productionSceneIdsForShots(scenes, group.shotIds);
+        const sceneId = sceneIds.length === 1 ? sceneIds[0] : undefined;
+        return { group, sceneId, nodeId: String(group.nodeId || (sceneId ? productionLayoutStableId("production-h3-scene", owner.id, sceneId) : productionLayoutStableId("production-h3", owner.id))) };
+    });
+    const scenesByVideoNode = new Map<string, Set<string>>();
+    for (const item of videoGroups) {
+        const scenesForNode = scenesByVideoNode.get(item.nodeId) || new Set<string>();
+        if (item.sceneId) scenesForNode.add(item.sceneId);
+        else scenesForNode.add("");
+        scenesByVideoNode.set(item.nodeId, scenesForNode);
+    }
+    const videoNodeScene = new Map([...scenesByVideoNode].map(([nodeId, sceneIds]) => [nodeId, sceneIds.size === 1 && !sceneIds.has("") ? [...sceneIds][0] : undefined]));
+    const videoNodesByScene = new Map<string, string[]>();
+    for (const [nodeId, sceneId] of videoNodeScene) if (sceneId) videoNodesByScene.set(sceneId, [...(videoNodesByScene.get(sceneId) || []), nodeId]);
     const scriptByScene = new Map<string, typeof scripts>();
     for (const script of scripts) scriptByScene.set(script.sceneId, [...(scriptByScene.get(script.sceneId) || []), script]);
     const inputAssetByShot = director?.shotInputs || {};
@@ -98,26 +126,35 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
         const sceneId = sceneByShot.get(shotId); if (!sceneId) continue;
         sceneFrameAssets.set(sceneId, [...(sceneFrameAssets.get(sceneId) || []), shotId]);
     }
-    const sceneGeometry = new Map<string, { y: number; height: number; width: number }>();
+    const sceneGeometry = new Map<string, { position: Position; height: number; width: number; framesTopOffset: number; videoTopOffset: number; videoNodeHeights: number[] }>();
     for (const scene of scenes) {
         const sceneScripts = scriptByScene.get(scene.id) || [], frameShots = sceneFrameAssets.get(scene.id) || [];
-        const height = Math.max(900, sceneScripts.length * 440, Math.ceil(frameShots.length / 3) * 1000 + 130);
-        sceneGeometry.set(scene.id, { y: sceneY, height, width: 2160 });
         const groupId = productionLayoutStableId("production-scene", owner.id, scene.id), groupNode = nodeById.get(groupId), priorGroup = oldUnits.get(`scene:${scene.id}`);
         const groupPosition = groupNode?.position ? { x: Number(groupNode.position.x), y: Number(groupNode.position.y) } : priorGroup?.bounds.position || { x: 0, y: sceneY };
-        const requiredGroupSize = { width: Math.max(2160, size(groupNode?.width, 2160)), height: Math.max(height, size(groupNode?.height, height)) };
+        const framesTopOffset = 70 + sceneScripts.length * 380 + (frameShots.length ? 40 : 0);
+        const frameBottomOffset = frameShots.length ? framesTopOffset + Math.ceil(frameShots.length / 3) * 1000 + 780 : framesTopOffset;
+        const videoTopOffset = frameBottomOffset + 120;
+        const videoHeights = (videoNodesByScene.get(scene.id) || []).map(nodeId => {
+            const node = nodeById.get(nodeId);
+            return size(node?.height, 1080);
+        });
+        const videoStackHeight = videoHeights.reduce((total, videoHeight) => total + videoHeight, 0) + Math.max(0, videoHeights.length - 1) * 100;
+        const height = Math.max(900, videoHeights.length ? videoTopOffset + videoStackHeight + 80 : frameBottomOffset + 80, sceneScripts.length ? 70 + sceneScripts.length * 380 + 80 : 0);
+        const width = Math.max(2160, ...((videoNodesByScene.get(scene.id) || []).map(nodeId => size(nodeById.get(nodeId)?.width, 1960) + 80)));
+        const requiredGroupSize = { width: Math.max(width, size(groupNode?.width, width)), height: Math.max(height, size(groupNode?.height, height)) };
+        sceneGeometry.set(scene.id, { position: groupPosition, height: requiredGroupSize.height, width: requiredGroupSize.width, framesTopOffset, videoTopOffset, videoNodeHeights: videoHeights });
         const sceneUnit = createUnit(`scene:${scene.id}`, "scene", [`scene:${scene.id}`], scene.id, groupPosition, requiredGroupSize,
             [{ role: "scene", nodeId: groupId, nodeType: "group", position: groupPosition, size: requiredGroupSize }]);
-        sceneUnit.bounds.size = { width: Math.max(2160, size(groupNode?.width, 2160)), height: Math.max(height, size(groupNode?.height, height)) };
+        sceneUnit.bounds.size = requiredGroupSize;
         sceneUnit.members[0].size = sceneUnit.bounds.size;
         for (let index = 0; index < sceneScripts.length; index++) {
-            const script = sceneScripts[index], node = nodeById.get(script.id), preferred = { x: -700, y: sceneY + index * 380 };
+            const script = sceneScripts[index], node = nodeById.get(script.id), preferred = { x: groupPosition.x + 40, y: groupPosition.y + 70 + index * 380 };
             createUnit(`script:${script.scriptId}`, "script", [`script:${script.scriptId}`], scene.id, node?.position || preferred,
                 { width: size(node?.width, 560), height: size(node?.height, 320) }, [{ role: "script", nodeId: script.id, nodeType: "text", position: node?.position || preferred, size: { width: size(node?.width, 560), height: size(node?.height, 320) } }]);
         }
         for (let index = 0; index < frameShots.length; index++) {
             const shotId = frameShots[index], assetId = String(inputAssetByShot[shotId]?.keyframeAssetId), nodeId = String(production.keyframes[shotId]?.nodeId || director?.assets[assetId]?.nodeId || productionLayoutStableId("production-asset", owner.id, assetId));
-            const cell = { x: groupPosition.x + 20 + index % 3 * 720, y: groupPosition.y + 70 + Math.floor(index / 3) * 1000 };
+            const cell = { x: groupPosition.x + 20 + index % 3 * 720, y: groupPosition.y + framesTopOffset + Math.floor(index / 3) * 1000 };
             const existing = nodeById.get(nodeId), sharedShots = shotsByKeyframeAsset.get(assetId) || [], multiScene = new Set(sharedShots.map(id => sceneByShot.get(id)).filter(Boolean)).size > 1;
             const assetIndex = assetOrder.indexOf(assetId), assetCell = { x: assetIndex % 3 * 720, y: assetAreaTop + Math.floor(assetIndex / 3) * 840 };
             const imagePosition = existing?.position || (multiScene ? { x: assetCell.x + 140, y: assetCell.y + 80 } : { x: cell.x + 140, y: cell.y });
@@ -136,11 +173,17 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
         sceneY += height + 120;
     }
 
-    const videoNodeIds = [...new Set(production.clipGroups.map(group => String(group.nodeId || productionLayoutStableId("production-h3", owner.id))))];
+    const videoNodeIds = [...new Set(videoGroups.map(item => item.nodeId))];
     for (let index = 0; index < videoNodeIds.length; index++) {
-        const nodeId = videoNodeIds[index], existing = nodeById.get(nodeId), position = existing?.position || { x: 0, y: sceneY + index * 1240 };
-        const targets = production.clipGroups.filter(group => String(group.nodeId || productionLayoutStableId("production-h3", owner.id)) === nodeId).map(group => `segment:${group.id}`);
-        createUnit(`video:${nodeId}`, "video", targets, undefined, position, { width: size(existing?.width, 1960), height: size(existing?.height, 1080) }, [{ role: "video", nodeId, nodeType: "minimax-h3:video", position, size: { width: size(existing?.width, 1960), height: size(existing?.height, 1080) } }]);
+        const nodeId = videoNodeIds[index], existing = nodeById.get(nodeId), sceneId = videoNodeScene.get(nodeId);
+        const geometry = sceneId ? sceneGeometry.get(sceneId) : undefined;
+        const sceneVideoIds = sceneId ? videoNodesByScene.get(sceneId) || [] : [];
+        const videoIndex = sceneVideoIds.indexOf(nodeId);
+        const heightBefore = sceneVideoIds.slice(0, videoIndex).reduce((total, priorNodeId) => total + size(nodeById.get(priorNodeId)?.height, 1080) + 100, 0);
+        const position = existing?.position || (geometry ? { x: geometry.position.x + 40, y: geometry.position.y + geometry.videoTopOffset + heightBefore } : { x: 0, y: sceneY + index * 1240 });
+        const width = size(existing?.width, 1960), height = size(existing?.height, 1080);
+        const targets = videoGroups.filter(item => item.nodeId === nodeId).map(item => `segment:${item.group.id}`);
+        createUnit(`video:${nodeId}`, "video", targets, sceneId, position, { width, height }, [{ role: "video", nodeId, nodeType: "minimax-h3:video", position, size: { width, height } }]);
     }
 
     // Old materialized nodes remain layout anchors even if their source object was later removed.

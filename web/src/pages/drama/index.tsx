@@ -8,7 +8,7 @@ import type { TFunction } from "i18next";
 
 import { loadCanvasProjectPage } from "@/lib/canvas-project-loader";
 import { cn } from "@/lib/utils";
-import { backendMediaUrl, createBackendDramaEpisode, deleteBackendDramaAsset, deleteBackendDramaEpisode, fetchBackendDramaAssets, fetchBackendDramaEpisodes, updateBackendDramaEpisode, uploadBackendDramaAsset, ensureSharedAssetCanvas, fetchBackendDramaScenes, backfillBackendDramaScenes, ensureSceneCanvas, type DramaCustomAsset, type DramaEpisode, type SceneInstance } from "@/services/backend-api";
+import { backendMediaUrl, createBackendDramaEpisode, deleteBackendDramaAsset, deleteBackendDramaEpisode, fetchBackendDramaAssets, fetchBackendDramaEpisodes, updateBackendDramaEpisode, uploadBackendDramaAsset, ensureSharedAssetCanvas, type DramaCustomAsset, type DramaEpisode } from "@/services/backend-api";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { useCanvasStore, type CanvasFolder, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { dramaProductionPlanSchema, type DramaProductionPlan } from "@basketikun/canvas-agent/drama/production-contract";
@@ -74,10 +74,6 @@ export default function DramaPage({ embedded = false }: { embedded?: boolean }) 
     const [episodeEditorOpen, setEpisodeEditorOpen] = useState(false);
     const [episodeDraft, setEpisodeDraft] = useState<EpisodeDraft | null>(null);
     const [episodeSaving, setEpisodeSaving] = useState(false);
-    const [sceneChooserEpisode, setSceneChooserEpisode] = useState<DramaEpisode | null>(null);
-    const [sceneChoices, setSceneChoices] = useState<SceneInstance[]>([]);
-    const [loadingSceneChoices, setLoadingSceneChoices] = useState(false);
-    const [openingSceneId, setOpeningSceneId] = useState<string | null>(null);
     const [assetsByDrama, setAssetsByDrama] = useState<Record<string, DramaCustomAsset[]>>({});
     const [uploadingAssets, setUploadingAssets] = useState(false);
     const coverInputRef = useRef<HTMLInputElement>(null);
@@ -124,41 +120,6 @@ export default function DramaPage({ embedded = false }: { embedded?: boolean }) 
         return () => { disposed = true; };
     }, [activeFolder?.id, message]);
     const visibleEpisodes = activeFolder ? (episodesByDrama[activeFolder.id] || []) : [];
-
-    const openSceneChooser = async (episode: DramaEpisode) => {
-        setSceneChooserEpisode(episode);
-        setSceneChoices([]);
-        setLoadingSceneChoices(true);
-        try {
-            let result = await fetchBackendDramaScenes(episode.dramaId, episode.id);
-            let scenes = result.scenes || [];
-            if (!scenes.some(scene => scene.status === "active")) {
-                await backfillBackendDramaScenes(episode.dramaId);
-                result = await fetchBackendDramaScenes(episode.dramaId, episode.id);
-                scenes = result.scenes || [];
-            }
-            setSceneChoices(scenes.filter(scene => scene.status === "active").sort((a, b) => a.sceneOrder - b.sceneOrder));
-        } catch (error) {
-            message.error(error instanceof Error ? error.message : t("drama.sceneLoadFailed"));
-        } finally {
-            setLoadingSceneChoices(false);
-        }
-    };
-    const openSceneWorkspace = async (scene: SceneInstance) => {
-        if (openingSceneId) return;
-        setOpeningSceneId(scene.id);
-        try {
-            const result = await ensureSceneCanvas(scene.id);
-            const canvasId = String(result.project.id || result.context.canvasId || "");
-            if (!canvasId) throw new Error(t("drama.sceneCanvasPrepareFailed"));
-            setSceneChooserEpisode(null);
-            navigate(`/canvas/${encodeURIComponent(canvasId)}?${new URLSearchParams({ productionKind: "scene", productionId: scene.id, from: "dramas", workspace: "story", edit: "1" })}`);
-        } catch (error) {
-            message.error(error instanceof Error ? error.message : t("drama.sceneCanvasPrepareFailed"));
-        } finally {
-            setOpeningSceneId(null);
-        }
-    };
 
     const createDrama = () => {
         const name = window.prompt(t("drama.createProjectPrompt"), t("drama.defaultProjectName"));
@@ -436,7 +397,7 @@ export default function DramaPage({ embedded = false }: { embedded?: boolean }) 
                             </div>
                             {visibleEpisodes.length ? (
                                 <div className="grid gap-4 sm:grid-cols-2">
-                                    {visibleEpisodes.map((episode, index) => <EpisodeCard key={episode.id} episode={episode} project={episode.canvasId ? projects.find((item) => item.id === episode.canvasId) : undefined} index={index} onOpen={openProject} onProduce={() => navigate(`/drama/episodes/${encodeURIComponent(episode.id)}/production?from=dramas`)} onSceneProduction={() => void openSceneChooser(episode)} onEdit={() => openEpisodeEditor(episode)} onDelete={() => removeEpisode(episode)} t={t} />)}
+                                    {visibleEpisodes.map((episode, index) => <EpisodeCard key={episode.id} episode={episode} project={episode.canvasId ? projects.find((item) => item.id === episode.canvasId) : undefined} index={index} onOpen={openProject} onProduce={() => navigate(`/drama/episodes/${encodeURIComponent(episode.id)}/production?from=dramas`)} onEdit={() => openEpisodeEditor(episode)} onDelete={() => removeEpisode(episode)} t={t} />)}
                                 </div>
                             ) : (
                                 <div className="flex min-h-60 flex-col items-center justify-center rounded-2xl border border-dashed border-stone-300 px-6 text-center dark:border-stone-700">
@@ -474,28 +435,6 @@ export default function DramaPage({ embedded = false }: { embedded?: boolean }) 
                     </div>
                 )}
             </div>
-            <Modal width={680} title={t("drama.scenePickerTitle")} open={Boolean(sceneChooserEpisode)} onCancel={() => { if (!openingSceneId) setSceneChooserEpisode(null); }} footer={null}>
-                <div className="space-y-4">
-                    {sceneChooserEpisode ? <p className="text-sm text-stone-500">{sceneChooserEpisode.title}</p> : null}
-                    {loadingSceneChoices ? <div className="py-8 text-center text-sm text-stone-500" role="status">{t("drama.production.loading")}</div> : sceneChoices.length ? (
-                        <div className="space-y-2">
-                            {sceneChoices.map(scene => <div key={scene.id} className="flex items-center justify-between gap-3 rounded-xl border border-stone-200 px-4 py-3 dark:border-stone-800">
-                                <div className="min-w-0"><Tag className="m-0">{t("drama.sceneNumberLabel", { number: scene.sceneOrder + 1 })}</Tag><p className="mt-2 truncate text-sm font-medium">{scene.title}</p></div>
-                                <Button type="primary" icon={<ArrowUpRight className="size-4" />} loading={openingSceneId === scene.id} disabled={Boolean(openingSceneId && openingSceneId !== scene.id)} onClick={() => void openSceneWorkspace(scene)}>{t("drama.openSceneProduction")}</Button>
-                            </div>)}
-                        </div>
-                    ) : (
-                        <div className="rounded-xl border border-dashed border-stone-300 px-5 py-8 text-center dark:border-stone-700">
-                            <p className="text-sm text-stone-500">{t("drama.scenePickerEmpty")}</p>
-                            <Button className="mt-4" onClick={() => {
-                                const id = sceneChooserEpisode?.id;
-                                setSceneChooserEpisode(null);
-                                if (id) navigate(`/drama/episodes/${encodeURIComponent(id)}/production?from=dramas`);
-                            }}>{t("drama.editEpisodeDirector")}</Button>
-                        </div>
-                    )}
-                </div>
-            </Modal>
             <Modal width={720} title={episodeDraft?.id ? t("drama.editEpisode") : t("drama.newEpisode")} open={episodeEditorOpen} onCancel={() => { if (!episodeSaving) { setEpisodeEditorOpen(false); setEpisodeDraft(null); } }} onOk={() => void saveEpisode()} okText={t("drama.saveEpisode")} cancelText={t("common.cancel")} confirmLoading={episodeSaving}>
                 {episodeDraft ? <div className="max-h-[70vh] space-y-5 overflow-y-auto pr-1">
                     <div className="grid gap-5 sm:grid-cols-[140px_minmax(0,1fr)]">
@@ -579,14 +518,13 @@ function DramaCard({ folder, episodes, transitioning, onOpen, t }: { folder: Can
     </button>;
 }
 
-function EpisodeCard({ episode, project, index, onOpen, onProduce, onSceneProduction, onEdit, onDelete, t }: { episode: DramaEpisode; project?: CanvasProject; index: number; onOpen: (project: CanvasProject) => void; onProduce: () => void; onSceneProduction: () => void; onEdit: () => void; onDelete: () => void; t: TFunction }) {
+function EpisodeCard({ episode, project, index, onOpen, onProduce, onEdit, onDelete, t }: { episode: DramaEpisode; project?: CanvasProject; index: number; onOpen: (project: CanvasProject) => void; onProduce: () => void; onEdit: () => void; onDelete: () => void; t: TFunction }) {
     const canOpen = Boolean(project);
     return <article className={cn("group relative flex min-h-48 flex-col justify-between overflow-hidden rounded-2xl border border-stone-200 bg-background p-5 text-left transition dark:border-stone-800", canOpen ? "hover:-translate-y-0.5 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-950/5 dark:hover:border-orange-900" : "opacity-70")}>
         <div className="absolute right-0 top-0 h-24 w-24 translate-x-8 -translate-y-8 rounded-full border border-orange-200/70 transition group-hover:scale-125 dark:border-orange-950/60" />
         <div className="relative flex items-start justify-between gap-3">
             <button type="button" className="text-left text-xs font-medium text-orange-600 dark:text-orange-400" onClick={onProduce}>{t("drama.episodeLabel", { number: episode.episodeNumber })}</button>
             <div className="flex flex-wrap items-center gap-1">
-                <Button size="small" type="primary" onClick={onSceneProduction}>{t("drama.sceneProduction")}</Button>
                 <Button size="small" onClick={onProduce}>{t("drama.editEpisodeDirector")}</Button>
                 <Button type="text" size="small" className="!px-1.5 !text-stone-400 hover:!text-stone-900 dark:hover:!text-stone-100" onClick={onEdit} aria-label={t("drama.editEpisode")}><PencilLine className="size-4" /></Button>
                 <Button type="text" size="small" danger className="!px-1.5" onClick={onDelete} aria-label={t("drama.deleteEpisodeTitle")}><Trash2 className="size-4" /></Button>
