@@ -402,7 +402,26 @@ node --import tsx --test src/canvas/history-maintenance.test.ts
 ### 11.4 第 6 步执行授权清单（未执行，待用户点头）
 
 1. 生产库 v32 迁移已随 backend 重启自动完成（schema 32，tombstone 表已建）。
-2. `prune-runtime-history --apply`：先在 §11.1 快照副本上 apply 验收（删 201 任务 + 0 日志 + 写 201 tombstone），再经授权对生产库执行。
-3. re-baseline：按项目显式选择，先副本准入诊断，列出旧快照恢复损失。
+2. ~~`prune-runtime-history --apply`~~ **已执行（2026-10-06）**：生产库删 202 任务
+   （succeeded 187 + cancelled 15）、0 日志、写 202 tombstone、task_events 级联
+   874（38940→38066）；orphanEventsFromTombstones=0。tasks 5662→5460。
+3. re-baseline 准入诊断（2026-10-06 只读，生产库）：23 项目
+   - **8 healthy**（无需 re-baseline）
+   - **8 eligible**（可 re-baseline，删 batches + 重建 checkpoint）：
+     | 项目 | 诊断码 | batches |
+     |---|---|---:|
+     | `fQiJ4cR16K8tLsCB_iWV2` | HISTORY_REPLAY_MISMATCH | 57,821 |
+     | `JQrB0Mx2q0_XOfOY6ufm4` | HISTORY_REPLAY_MISMATCH | 7,058 |
+     | `wr_ilwtpTgcnQQ3CpFJdt` | HISTORY_REPLAY_MISMATCH | 2,470 |
+     | `hswj-ep1-img` | HISTORY_CHAIN_GAP | 1,042 |
+     | `KwSyhgXQ4DGUwkzWYvaEA` | HISTORY_REPLAY_MISMATCH | 623 |
+     | `Fm36VPfht6SXfivHbHJzn` | HISTORY_REPLAY_MISMATCH | 378 |
+     | `8o8GDjt_exVKx7S9Sx8gC` | HISTORY_REPLAY_MISMATCH | 371 |
+     | `974e472c24774c279378e4ae67abd68d` | MISSING_CHECKPOINT | 0 |
+   - **7 不 eligible**（UNKNOWN：`segment id 已存在`，re-baseline 不能处理，
+     需先修数据完整性）
+   合计 eligible batches ≈ 69,763（占 `canvas_operation_batches` 71,227 的 98%）。
+   执行需 `--write-plan` → 审阅 → `--apply-plan --accept-history-loss`，
+   每项目独立，旧 revision 快照恢复范围损失（RECEIPT_UNAVAILABLE）。
 4. `VACUUM` 压缩：维护窗口执行，backend 停机。
 5. 每步独立提交、独立验收；不合并无关工作区变更。
