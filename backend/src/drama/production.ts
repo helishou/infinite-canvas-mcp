@@ -49,6 +49,7 @@ import { compileProductionLayout, productionAssetPosition } from "./production-l
 import { assertImageReferenceCoverage, imageInputOperations, verifyImageInput } from "./image-inputs.js";
 import { clipInputOperations, type ReferenceSync } from "./clip-inputs.js";
 import { continuityTargetBlockers, ProductionContinuityReports } from "./continuity-reports.js";
+import { dedupReceipt, resolveReceiptDedup, assertPublicReceipt } from "./receipt-dedup.js";
 import type { NativeProductionTarget } from "./native-generation.js";
 
 type Row = { revision: number; draft_json: string; published_json: string | null; published_version: number; updated_at: string };
@@ -506,7 +507,10 @@ export class EpisodeProductionService {
     operationReceipt(id: string, operationId: string): ProductionRecord | undefined {
         const linked = this.linked(id); if (linked) return linked.service.operationReceipt(linked.id, operationId);
         const row = this.prepare("SELECT receipt_json FROM episode_production_operations WHERE episode_id=? AND operation_id=?").get(id, operationId) as { receipt_json: string } | undefined;
-        return row ? JSON.parse(row.receipt_json) : undefined;
+        if (!row) return undefined;
+        const record = resolveReceiptDedup(JSON.parse(row.receipt_json) as ProductionRecord);
+        assertPublicReceipt(record);
+        return record;
     }
 
     validateClipMedia(id: string, director: DirectorProduction, targetId: string): void {
@@ -1712,7 +1716,9 @@ export class EpisodeProductionService {
             if (prior) {
                 if (prior.owner_id !== episodeId || prior.request_hash !== requestHash) throw new Error("operationId 已用于不同制作稿操作");
                 this.db.db.exec("COMMIT");
-                return { ...JSON.parse(prior.receipt_json) as ProductionRecord & { impact?: ProductionImpact }, replayed: true };
+                const replayed = resolveReceiptDedup(JSON.parse(prior.receipt_json) as ProductionRecord & { impact?: ProductionImpact });
+                assertPublicReceipt(replayed);
+                return { ...replayed, replayed: true };
             }
             const current = this.get(episodeId);
             if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
@@ -1746,7 +1752,7 @@ export class EpisodeProductionService {
             this.prepare("INSERT INTO episode_productions (episode_id, revision, draft_json, published_json, published_version, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(episode_id) DO UPDATE SET revision = excluded.revision, draft_json = excluded.draft_json, published_json = excluded.published_json, published_version = excluded.published_version, updated_at = excluded.updated_at")
                 .run(episodeId, next.revision, JSON.stringify(next.draft), next.published ? JSON.stringify(next.published) : null, next.publishedVersion, next.updatedAt);
             this.prepare("INSERT INTO episode_production_operations (operation_id, episode_id, request_hash, receipt_json, created_at) VALUES (?, ?, ?, ?, ?)")
-                .run(operationId, episodeId, requestHash, JSON.stringify(next), next.updatedAt);
+                .run(operationId, episodeId, requestHash, JSON.stringify(dedupReceipt(next)), next.updatedAt);
             this.db.db.exec("COMMIT");
             this.events?.publish({ type: "drama-production.updated", entityId: episodeId, payload: { revision: next.revision, publishedVersion: next.publishedVersion } });
             scriptCommits.forEach(commit => this.db.notifyCanvasCommit(commit));
