@@ -413,5 +413,7 @@ node --import tsx --test src/canvas/history-maintenance.test.ts
    - 旧 revision 快照恢复范围不可用（RECEIPT_UNAVAILABLE），命令身份保留
    - 前置修复：删 2 条孤儿 `task_events`（`probe-extract-frames-001`，
      9/26 探针任务不存在），清除 FK 违例
-4. `VACUUM` 压缩：维护窗口执行，backend 停机。
+4. ~~`VACUUM` 压缩~~ **已执行（2026-10-06）**：停 backend → VACUUM（7.3s）
+   → 770.6MB → **606.9MB**（释放 163.7MB）→ integrity ok、FK 0 → 重启
+   backend（pid 52796）。
 5. 每步独立提交、独立验收；不合并无关工作区变更。
