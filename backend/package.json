@@ -20,6 +20,7 @@
     "redact-inline-media": "tsx src/maintenance/redact-inline-media.ts",
     "prune-canvas-batches": "tsx src/maintenance/prune-canvas-batches.ts",
     "prune-observability": "tsx src/maintenance/prune-observability.ts",
+    "rebalance-canvas-history": "tsx src/maintenance/rebalance-canvas-history.ts",
     "test": "node ../scripts/test.mjs",
     "start": "node dist/index.js",
     "prepack": "npm run build"
