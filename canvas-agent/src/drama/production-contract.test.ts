@@ -6,7 +6,7 @@ import { toolInputSchemas } from "../canvas/schemas.js";
 
 test("all published operation examples use the actual edit contract", () => {
     const contract = productionOperationContract();
-    assert.equal(contract.operations.length, 26);
+    assert.equal(contract.operations.length, 28);
     for (const item of contract.operations) {
         assert.equal(productionEditSchema.safeParse({ operationId: "example", expectedRevision: 0, ops: [item.example] }).success, true);
     }

@@ -6,7 +6,8 @@ import path from "node:path";
 import { BackendDatabase } from "../db.js";
 import { EpisodeProductionService, ProductionConflictError } from "./production.js";
 import { ProductionCompilationService } from "./compilation.js";
-import { directorHash } from "./director.js";
+import { directorHash, promptHash } from "./director.js";
+import { ProductionContinuityReports } from "./continuity-reports.js";
 import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 
 function fixture(t: test.TestContext) {
@@ -58,6 +59,39 @@ test("tampered compiler packet is rejected without a revision change", t => {
     fs.writeFileSync(file, JSON.stringify(packet));
     assert.throws(() => compilations.apply("episode", "episode", prepared.preparedId), /bytes changed/);
     assert.equal(service.get("episode").revision, 1);
+});
+
+test("continuity issues downgrade only their H3 target and another covered target can be applied and published", t => {
+    const { root, service, director } = fixture(t);
+    director.source = { ...director.source, ledger: { contract_version: 2 }, segments: [{ id: "SEG01" }, { id: "SEG02" }] };
+    director.sourceHash = directorHash(director.source);
+    service.edit("episode", { operationId: "ledger-v2", expectedRevision: 1, ops: [{ type: "set_director_production", director }] });
+    const owner = { kind: "episode", id: "episode" };
+    new ProductionContinuityReports(path.join(root, "production-compilations", "continuity")).persist(owner, "check-partial", "check-request", {
+        owner, snapshot: "draft", snapshotVersion: 0, sourceHash: director.sourceHash, runtimeId: director.engine.runtimeId, revision: 2,
+        verdict: "blocked", selectedTargets: ["SEG01", "SEG02"], checkedAt: "2026-10-06T00:00:00.000Z",
+        diagnostics: [{ code: "CONTINUITY_COVERAGE_MISSING", message: "SEG02 is missing coverage", severity: "error", affectedTargets: ["SEG02"] }],
+    });
+    const prompt = "compiled H3 prompt";
+    const compiler = (input: DirectorProduction) => ({
+        director: { ...structuredClone(input), artifacts: ["SEG01", "SEG02"].map(targetId => ({ id: `h3-${targetId}`, kind: "h3" as const, targetId, prompt, sha256: promptHash(prompt), sourceHash: input.sourceHash, status: "ready" as const, references: [], receipt: { sourceHash: input.sourceHash, promptHash: promptHash(prompt), engineRuntimeId: input.engine.runtimeId, validator: "fixture" } })) },
+        exitCode: 0, diagnostics: [], audit: { status: "PASS" }, sourceAdjustments: [], acceptance: {},
+    });
+    const compilations = new ProductionCompilationService(service, path.join(root, "packets"), compiler);
+    const preflight = service.preflight("episode", { action: "compile", request: { expectedRevision: 2 } });
+    assert.equal(preflight.valid, true);
+    assert.ok(preflight.diagnostics.some(item => item.targetId === "SEG02" && item.code === "CONTINUITY_BLOCKED"));
+    const prepared = compilations.prepare("episode", "episode", 2);
+    assert.deepEqual(prepared.targets.map(item => [item.targetId, item.status]), [["SEG01", "ready"], ["SEG02", "draft"]]);
+    assert.ok(prepared.diagnostics.some(item => item.targetId === "SEG02" && item.code === "CONTINUITY_BLOCKED"));
+    const applied = compilations.apply("episode", "episode", prepared.preparedId);
+    assert.equal(applied.mediaSubmitted, false);
+    const current = service.get("episode");
+    assert.equal(current.draft.director?.artifacts.find(item => item.targetId === "SEG01")?.status, "ready");
+    assert.equal(current.draft.director?.artifacts.find(item => item.targetId === "SEG02")?.status, "draft");
+    const published = service.publish("episode", { operationId: "publish-partial-continuity", expectedRevision: current.revision, stage: "director" });
+    assert.equal(published.published?.director?.artifacts.find(item => item.targetId === "SEG01")?.status, "ready");
+    assert.equal(published.published?.director?.artifacts.find(item => item.targetId === "SEG02")?.status, "draft");
 });
 
 test("binding diagnostics expose source, draft and published versions separately", t => {

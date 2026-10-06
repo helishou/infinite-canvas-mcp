@@ -140,12 +140,15 @@ export class BackendClient {
     body?: unknown,
     signal?: AbortSignal,
   ): Promise<T> {
-    const url = `${this.backendUrl}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(this.backendToken)}`;
+    const url = `${this.backendUrl}${path}`;
     let res: Response;
     try {
       res = await fetch(url, {
         method,
-        headers: body ? { "content-type": "application/json" } : {},
+        headers: {
+          authorization: `Bearer ${this.backendToken}`,
+          ...(body ? { "content-type": "application/json" } : {}),
+        },
         body: body ? JSON.stringify(body) : undefined,
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000),
       });

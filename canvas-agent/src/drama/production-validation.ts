@@ -9,6 +9,8 @@ const examples: Record<string, unknown> = {
     set_director_production: { director: { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "example", runtimeId: "a".repeat(40) + "-" + "b".repeat(16), version: "example" }, source: {}, sourceHash: "0".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], unresolved: [] } },
     set_director_brief: { brief: "A traveller returns home." },
     patch_director_source: { entity: "asset", id: "character-1", patch: { description: "Authored character appearance." } },
+    patch_director_continuity: { ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } },
+    upgrade_director_continuity: { fromSourceHash: "0".repeat(64), previewRevision: 0, previewHash: "0".repeat(64), toRuntimeId: "runtime-v2", ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } },
     set_director_workflow: { patch: { mediaProductionMode: "per_item" } },
     bind_director_asset: { assetId: "character-1", nodeId: "image-1" },
     adopt_shared_asset: { assetId: "character-1", approvedId: "approved-version-1", nodeId: "shared-reference-1" },
@@ -69,6 +71,10 @@ const record = (value: unknown): Record<string, any> => value && typeof value ==
 
 export function applyDirectorSourcePatch(director: DirectorProduction, entity: keyof typeof directorPatchFields, id: string | undefined, patch: Record<string, unknown>) {
         if (!Object.keys(patch).length) throw new Error("源字段修改内容为空");
+        if (entity === "continuity") {
+            if (id || Object.keys(patch).some(key => key !== "ledger") || !patch.ledger || typeof patch.ledger !== "object" || Array.isArray(patch.ledger)) throw new Error("连续性修改只接受无 ID 的 ledger 对象");
+            director.source.ledger = patch.ledger;
+        } else
         if (entity === "brief") {
             if (id || Object.keys(patch).some(key => key !== "value") || typeof patch.value !== "string") throw new Error("需求字段只接受不带 ID 的字符串 value");
             director.source.brief = patch.value;

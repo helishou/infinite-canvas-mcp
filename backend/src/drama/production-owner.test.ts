@@ -50,9 +50,36 @@ test("each owner reads and writes only its own production table", t => {
     assert.equal(f.db.db.prepare("SELECT revision FROM episode_productions WHERE episode_id='ep'").get()!.revision, 1);
 });
 
-test("editing an episode director synchronizes stable scene instances inside the production transaction", t => {
+test("continuity upgrade preview sees in-flight native media tasks for its exact owner", t => {
     const f = fixture(t);
-    const source = { fps_num: 24, fps_den: 1, script_scenes: [{ id: "NEW_SCENE", scene_id: "LOC1", scene_name: "Second", text: "Only the new source occurrence" }], shots: [], asset_plan: [], segments: [] };
+    const now = new Date().toISOString();
+    f.db.db.prepare(`INSERT INTO tasks (id, kind, status, progress, input_json, params_json, created_at, updated_at)
+        VALUES (?, 'canvas-h3-run', 'awaiting_confirmation', 0, '{}', '{}', ?, ?)`).run("native-active", now, now);
+    f.db.db.prepare(`INSERT INTO production_task_bindings
+        (task_id, owner_kind, owner_id, version, source_hash, target_kind, target_id, project_id, node_id, targets_json, status)
+        VALUES (?, 'episode', 'ep', 1, ?, 'segment', 'SEG01', 'canvas', 'h3-node', ?, 'submitted')`).run("native-active", "a".repeat(64), JSON.stringify([{ targetId: "SEG01", segmentId: "clip-1" }]));
+    f.db.db.prepare(`INSERT INTO tasks (id, kind, status, progress, input_json, params_json, created_at, updated_at)
+        VALUES (?, 'canvas-h3-run', 'running', 0, '{}', '{}', ?, ?)`).run("other-owner-active", now, now);
+    f.db.db.prepare(`INSERT INTO production_task_bindings
+        (task_id, owner_kind, owner_id, version, source_hash, target_kind, target_id, project_id, node_id, targets_json, status)
+        VALUES (?, 'episode', 'elsewhere', 1, ?, 'segment', 'SEG99', 'other', 'h3-node', ?, 'submitted')`).run("other-owner-active", "b".repeat(64), JSON.stringify([{ targetId: "SEG99", segmentId: "clip-99" }]));
+    assert.deepEqual(f.episode.continuityUpgradeActiveRuns("ep"), [{ runId: "native-active", status: "awaiting_confirmation", targets: [{ targetId: "SEG01", segmentId: "clip-1" }] }]);
+});
+
+test("editing an episode director synchronizes scene instances and seeds isolated scene source drafts", t => {
+    const f = fixture(t);
+    const source = {
+        fps_num: 24, fps_den: 1,
+        script_scenes: [
+            { id: "SC_A", scene_id: "LOC1", scene_name: "First", kind: "action", beat_ids: ["b1"], text: "Only scene A" },
+            { id: "SC_B", scene_id: "LOC2", scene_name: "Second", kind: "action", beat_ids: ["b2"], text: "Only scene B" },
+        ],
+        shots: [
+            { id: "SH_A", scene_id: "LOC1", source_scene_id: "SC_A" },
+            { id: "SH_B", scene_id: "LOC2", source_scene_id: "SC_B" },
+        ],
+        asset_plan: [], segments: [{ id: "SEG_A", shot_ids: ["SH_A"] }, { id: "SEG_MIX", shot_ids: ["SH_A", "SH_B"] }],
+    };
     const director = directorProductionSchema.parse({
         schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test-engine", version: "1" },
         source, sourceHash: directorHash(source),
@@ -61,9 +88,22 @@ test("editing an episode director synchronizes stable scene instances inside the
     });
     const edited = f.episode.edit("ep", { operationId: "sync-scenes-from-production", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
     assert.equal(edited.revision, 1);
-    assert.equal(getSceneInstance(f.db, "NEW_SCENE")?.episodeId, "ep");
-    assert.equal(getSceneInstance(f.db, "NEW_SCENE")?.status, "active");
+    assert.equal(getSceneInstance(f.db, "SC_A")?.episodeId, "ep");
+    assert.equal(getSceneInstance(f.db, "SC_A")?.status, "active");
     assert.equal(getSceneInstance(f.db, "SC01")?.status, "orphaned");
+
+    const sceneDraft = f.scene.get("SC_A").draft.director!;
+    const sceneSource = sceneDraft.source as Record<string, any>;
+    assert.deepEqual(sceneSource.script_scenes.map((item: any) => item.id), ["SC_A"]);
+    assert.deepEqual(sceneSource.shots.map((item: any) => item.id), ["SH_A"]);
+    assert.deepEqual(sceneSource.segments.map((item: any) => item.id), ["SEG_A"]);
+    assert.deepEqual(sceneDraft.assets, {});
+    assert.equal(f.db.db.prepare("SELECT COUNT(*) AS n FROM scene_productions").get()!.n, 0, "reading a scene seeds its source without persisting or generating media");
+
+    const sceneEdit = f.scene.edit("SC_A", { operationId: "edit-only-scene-a", expectedRevision: 0, ops: [{ type: "set_director_brief", brief: "Scene A only" }] });
+    assert.equal(sceneEdit.revision, 1);
+    assert.equal(f.scene.get("SC_B").revision, 0);
+    assert.equal(f.episode.get("ep").revision, 1, "scene edits do not write back to the episode owner");
 });
 
 test("the canvas owner keeps its own project-keyed table", t => {

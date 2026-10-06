@@ -4,7 +4,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
-import { directorProductionSchema, canonicalProduction, productionContractVersion, productionPreflightRequestSchema, type DirectorProduction, type ProductionDiagnostic, type ProductionPreflight } from "../drama/production-contract.js";
+import { directorModules, directorProductionSchema, canonicalProduction, productionContractVersion, productionPreflightRequestSchema, type DirectorProduction, type ProductionDiagnostic, type ProductionPreflight } from "../drama/production-contract.js";
 import { productionOperationContract, schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch, ref2vaPromptDiagnostics, continuityBoundaryDiagnostics } from "../drama/production-validation.js";
 
 let discoveredPython: string | undefined;
@@ -205,11 +205,33 @@ export function resolveAchengRuntime(runtimeId: string, home = process.env.CODEX
     return { runtimeId, commit: manifest.commit, patchVersion: manifest.patchVersion, version: manifest.version, path: directory, skillPath: path.join(directory, "SKILL.md"), sourceContract };
 }
 
-export function getProductionContract(runtimeId?: string, operationType?: string) {
+export function getProductionContract(runtimeId?: string, operationType?: string, moduleId?: typeof directorModules[number]) {
     const runtime = runtimeId ? resolveAchengRuntime(runtimeId) : resolveAchengEngine();
+    const moduleRegistryPath = path.join(runtime.path, "data", "module-registry.json");
+    const moduleRegistry = JSON.parse(fs.readFileSync(moduleRegistryPath, "utf8"));
+    const moduleRow = moduleId ? moduleRegistry.modules.find((item: any) => item.id === moduleId) : undefined;
+    if (moduleId && !moduleRow) throw new Error(`Pinned Acheng runtime does not define module ${moduleId}`);
+    const moduleFiles = moduleRow ? [moduleRow.entry, ...moduleRow.reads].map((relative: string) => {
+        const file = path.resolve(runtime.path, relative);
+        if (!file.startsWith(`${path.resolve(runtime.path)}${path.sep}`)) throw new Error("Pinned module resource escaped its runtime");
+        const bytes = fs.readFileSync(file);
+        return { path: relative, sha256: crypto.createHash("sha256").update(bytes).digest("hex"), content: bytes.toString("utf8") };
+    }) : undefined;
     return { ...productionOperationContract(operationType), engine: { runtimeId: runtime.runtimeId, commit: runtime.commit, patchVersion: runtime.patchVersion, version: runtime.version },
         sourceContract: runtime.sourceContract, ref2vaMaximumWords: runtime.sourceContract ? runtime.sourceContract.ref2vaMaximumWords : 2900,
+        ...(moduleRow ? { module: { id: moduleRow.id, owns: moduleRow.owns, checks_with: moduleRow.checks_with, check_focus: moduleRow.check_focus, files: moduleFiles } } : {}),
         ...(runtime.sourceContract ? {} : { notice: "This pinned historical runtime has no machine-readable Canvas source contract; its original compiler remains authoritative." }) };
+}
+
+/** Deterministic ledger report from the immutable runtime selected by this production. */
+export function auditAchengContinuity(director: DirectorProduction, targetIds?: string[], diagnosticOnly = false) {
+    const runtime = diagnosticOnly ? resolveAchengEngine() : resolveAchengRuntime(director.engine.runtimeId);
+    if (!diagnosticOnly && (runtime.commit !== director.engine.commit || runtime.patchVersion !== director.engine.patchVersion || runtime.version !== director.engine.version))
+        throw new Error("Pinned runtime identity differs from the production receipt");
+    const response = runAchengPython(["-B", "-X", "utf8", path.join(runtime.path, "scripts", "continuity_v2.py")], {
+        cwd: runtime.path, windowsHide: true, encoding: "utf8", input: JSON.stringify({ source: director.source, target_ids: targetIds }),
+    });
+    return { ...JSON.parse(response), validatorRuntimeId: runtime.runtimeId, diagnosticOnly };
 }
 
 export function validateAchengSource(director: DirectorProduction, stage: "edit" | "publish" | "generate"): ProductionDiagnostic[] {
@@ -221,7 +243,11 @@ export function validateAchengSource(director: DirectorProduction, stage: "edit"
     const response = runAchengPython(["-B", "-X", "utf8", path.join(runtime.path, "scripts", "canvas_source_contract.py")], {
         cwd: runtime.path, windowsHide: true, encoding: "utf8", input: JSON.stringify({ source: director.source, artifacts: director.artifacts || [], stage }),
     });
-    return [...JSON.parse(response).diagnostics, ...continuityBoundaryDiagnostics(director, stage)];
+    const sourceDiagnostics: ProductionDiagnostic[] = JSON.parse(response).diagnostics;
+    // Continuity readiness is target-scoped and comes from the persisted Backend
+    // report. Source validation keeps a partial authored draft editable/publishable.
+    for (const item of sourceDiagnostics) if (String(item.code).startsWith("CONTINUITY_")) item.severity = "warning";
+    return [...sourceDiagnostics, ...continuityBoundaryDiagnostics(director, stage)];
 }
 
 export function assertAchengSource(director: DirectorProduction, stage: "edit" | "publish" | "generate") {

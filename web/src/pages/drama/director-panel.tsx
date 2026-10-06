@@ -7,8 +7,9 @@ import { backendMediaUrl, type BackendRuntimeTask, type EpisodeProduction, type 
 import { groupScriptScenes, dialogueBody, readableText, humanName, records, formatSeconds, shotDisplayText } from "./director-display";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { saveAs } from "file-saver";
+import { ContinuityPanel } from "./continuity-panel";
 
-export type DirectorWorkspace = "overview" | "story" | "assets" | "shots" | "production" | "advanced";
+export type DirectorWorkspace = "overview" | "story" | "assets" | "shots" | "continuity" | "production" | "advanced";
 type CanvasNodeOption = { id: string; title?: string; type?: string; metadata?: Record<string, unknown> };
 type LegacySource = { source: "fullPlot" | "script.md" | "storyboard.md"; text: string; sha256?: string };
 type ProductionVersion = { version: number; stage: string; createdAt: string };
@@ -18,7 +19,8 @@ const objectWorkspaces: Array<{ key: Exclude<DirectorWorkspace, "overview" | "ad
   { key: "story", modules: ["story"], targetKinds: [] },
   { key: "assets", modules: ["assets"], targetKinds: ["asset", "keyframe"] },
   { key: "shots", modules: ["shots", "performance", "effects"], targetKinds: [] },
-  { key: "production", modules: ["model", "continuity"], targetKinds: ["segment"] },
+  { key: "continuity", modules: ["continuity"], targetKinds: ["segment"] },
+  { key: "production", modules: ["model"], targetKinds: ["segment"] },
 ];
 
 function Image({ src, alt, className }: { src: string; alt: string; className?: string }) {
@@ -143,17 +145,19 @@ function SegmentGroupEditor({ segment, shots, segments, fps, draftValue, onDraft
 }
 
 export function DirectorPanel({
-  workspace, director, production, readiness, run, batches, runtimeTasks = [], canvasNodes, legacy, versions, busy, canvasId, canvasRole, focusTarget, embedded = false,
+  workspace, director, production, readiness, run, batches, runtimeTasks = [], canvasNodes, legacy, versions, busy, canvasId, canvasRole, focusTarget, embedded = false, continuityReport,
   briefDraft, onBriefDraftChange, onOpenSharedAsset, onPromoteExistingSharedAsset,
-  compact = false, onSaveScript,
-  onBrief, onPatch, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onReview, onPublish, onReplace, onAskDirector, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRestore, onRefresh, onExport, exporting, runStartPending, activeTargetIds,
+  compact = false, onSaveScript, generationSupported = true,
+  onBrief, onPatch, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onReview, onPublish, onReplace, onAskDirector, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRestore, onRefresh, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onPreviewContinuityUpgrade, onCheckContinuity, onContinuitySnapshot,
 }: {
   workspace: DirectorWorkspace; director?: DirectorProduction; production: EpisodeProduction; readiness?: ProductionReadiness; run?: ProductionBatch | null;
+  continuityReport?: import("@/services/backend-api").ProductionContinuity;
   focusTarget?: string;
   embedded?: boolean;
   briefDraft: string;
   onBriefDraftChange: (value: string) => void;
   compact?: boolean;
+  generationSupported?: boolean;
   onSaveScript?: (ids: string[]) => Promise<boolean>;
   batches: ProductionBatch[]; canvasNodes: CanvasNodeOption[]; legacy: LegacySource[]; versions: ProductionVersion[]; busy: boolean; canvasId: string;
   canvasRole: "ordinary" | "episode" | "shared-assets" | "standalone" | "scene";
@@ -169,10 +173,14 @@ export function DirectorPanel({
   onSettings: (patch: Partial<EpisodeProduction['draft']['settings']>) => void;
   onBindAsset: (assetId: string, nodeId: string) => void;
   onBoundary: (boundary: DirectorProduction["boundaries"][number]) => void;
+  onSaveContinuity?: (ledger: Record<string, unknown>, upgradePreview?: Record<string, any>) => Promise<boolean>;
+  onPreviewContinuityUpgrade?: (ledger: Record<string, unknown>, fromSourceHash: string) => Promise<Record<string, any>>;
+  onCheckContinuity?: () => Promise<void>;
+  onContinuitySnapshot?: (value: "draft" | "published") => void;
   onReview: (review: AssetReview) => void;
   onPublish: () => void;
   onReplace: (value: DirectorProduction) => void;
-  onAskDirector: (scope: { workspace: DirectorWorkspace; targetId?: string; instruction?: string; brief?: string }) => void;
+  onAskDirector: (scope: { workspace: DirectorWorkspace; targetId?: string; instruction?: string; brief?: string; workId?: string }) => void;
   onAnswerDecision: (decisionId: string, answer: string) => Promise<boolean> | boolean;
   onNavigate: (workspace: DirectorWorkspace, target?: { kind: string; id: string }) => void;
   onLocateTarget?: (kind: string, id: string) => void;
@@ -274,8 +282,17 @@ export function DirectorPanel({
           : presentation?.action === "deliver" ? t("director.workspace.overview.deliverFocus", { target: presentationTargetName || t("director.workspace.overview.currentTarget") })
             : presentation ? t("director.workspace.overview.continueFocus", { module: t(`director.workspace.moduleName.${presentationModule || "story"}`) })
               : readiness?.nextAction || t("director.workspace.noNextAction");
+  const moduleViewStatus = (module: (typeof directorModules)[number]) => {
+    const verified = String((readiness?.modules?.[module] as Record<string, unknown> | undefined)?.verifiedStatus || "");
+    if (module === "continuity" && verified === "passed") return "continuity_passed";
+    if (module === "continuity" && verified === "diagnosticOnly") return "diagnostic_only";
+    if (verified === "passed") return "committed";
+    if (verified === "partial" || verified === "evidence_incomplete" || verified === "diagnosticOnly") return "partial";
+    if (verified === "blocked" || verified === "unresolved" || verified === "stale") return "blocked";
+    return "unchecked";
+  };
   const objectRows = objectWorkspaces.map(item => {
-    const states = item.modules.map(module => d?.modules[module]).filter(Boolean);
+    const states = item.modules.map(module => d?.modules[module] ? { ...d.modules[module], status: moduleViewStatus(module) } : undefined).filter(Boolean);
     const targets = readiness?.targets.filter(target => item.targetKinds.includes(target.kind)) || [];
     const unresolved = states.flatMap(state => state?.unresolved || []);
     const current = presentationWorkspace === item.key;
@@ -288,7 +305,7 @@ export function DirectorPanel({
         total: targets.length,
         review: targets.filter(target => target.status === "needs_review").length,
         blocked: targets.filter(target => target.status === "blocked").length,
-      }) : item.modules.map(module => `${t(`director.workspace.moduleName.${module}`)} · ${t(`director.workspace.moduleStatus.${d.modules[module]?.status || "planned"}`)}`).join(" / "));
+      }) : item.modules.map(module => `${t(`director.workspace.moduleName.${module}`)} · ${t(`director.workspace.moduleStatus.${moduleViewStatus(module)}`)}`).join(" / "));
     return { ...item, current, status, summary };
   });
 
@@ -589,6 +606,12 @@ export function DirectorPanel({
   </div>;
   };
 
+  const continuitySource = continuityReport?.snapshot === "published" ? (production.published?.director || d) : d;
+  const renderContinuity = () => <ContinuityPanel ledger={continuitySource?.source.ledger as Record<string, unknown> | undefined} sourceHash={continuitySource?.sourceHash || ""} editable={continuityReport?.snapshot !== "published"}
+    workId={readiness?.presentation?.workId || continuitySource?.workflow.currentWork?.workId}
+    scenes={Array.isArray(continuitySource?.source.script_scenes) ? records(continuitySource.source.script_scenes) : scriptScenes} shots={Array.isArray(continuitySource?.source.shots) ? records(continuitySource.source.shots) : sourceShots} segments={Array.isArray(continuitySource?.source.segments) ? records(continuitySource.source.segments) : segments} boundaries={continuitySource?.boundaries || []} characters={Array.isArray(continuitySource?.source.character_registry) ? records(continuitySource.source.character_registry) : characters} assets={Array.isArray(continuitySource?.source.asset_plan) ? records(continuitySource.source.asset_plan) : assetPlan} report={continuityReport} busy={busy}
+    onSave={onSaveContinuity || (async () => false)} onPreviewUpgrade={onPreviewContinuityUpgrade || (async () => ({}))} onCheck={onCheckContinuity || (async () => undefined)} onBoundary={value => onBoundary(value as DirectorProduction["boundaries"][number])} onLocate={(kind, id) => onLocateTarget?.(kind, id)} onAskDirector={onAskDirector} onSnapshot={onContinuitySnapshot} />;
+
   const renderProduction = () => <div className="space-y-5">
     <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">{t("director.workspace.tab.production")}</h2><p className="mt-1 text-sm text-muted-foreground">{t("director.studio.productionSummary")}</p></div><div className="flex flex-wrap items-center gap-2"><label className="flex items-center gap-2 text-xs text-muted-foreground"><Switch checked={includeGeneratedMedia} disabled={exporting} onChange={setIncludeGeneratedMedia} />{t("director.workspace.includeGeneratedMedia")}</label><Button size="small" loading={exporting} disabled={!d || exporting} onClick={() => void onExport(includeGeneratedMedia)}>{t("director.workspace.exportBundle")}</Button><Button size="small" disabled={busy || !d} onClick={() => onAskDirector({ workspace: "production", targetId: readiness?.targets.find(item => item.status === "blocked")?.targetId, instruction: t("director.workspace.validateCompileCurrent") })}>{t("director.workspace.validateCompile")}</Button><Button size="small" onClick={onRefresh}>{t("director.workspace.refresh")}</Button><Button type="primary" disabled={busy || !d} onClick={onPublish}>{t("drama.production.directorPublish")}</Button></div></div>
     <details className="border-b border-border pb-4"><summary className="cursor-pointer text-sm text-muted-foreground">{t("director.studio.settings")}</summary><div className="mt-3 space-y-3">    <section className="rounded-xl border border-border bg-card p-4">
@@ -598,19 +621,20 @@ export function DirectorPanel({
     </section>
     {d && <section className="grid gap-3 rounded-2xl border border-border bg-card p-4 md:grid-cols-2"><label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.contentDelivery")}</span><Select value={delivery} disabled={busy} options={[{ value: "auto_file_batch", label: t("director.workspace.autoFileBatch") }, { value: "interactive_segment", label: t("director.workspace.interactiveSegment") }]} onChange={value => onWorkflow({ contentDeliveryMode: value })} /></label><label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.mediaProduction")}</span><Select value={mode} disabled={busy} options={[{ value: "prompt_only", label: t("director.workspace.promptOnly") }, { value: "per_item", label: t("director.workspace.perItem") }, { value: "automatic", label: t("director.workspace.automatic") }]} onChange={value => onWorkflow({ mediaProductionMode: value })} /></label><p className="text-xs text-muted-foreground md:col-span-2">{t("director.workspace.settingsNextRun")}</p></section>}
 </div></details>
+    {!generationSupported && <Alert type="info" showIcon message={t("director.workspace.sceneGenerationUnavailable")} />}
     {run && <section className="rounded-2xl border border-border bg-card p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs uppercase tracking-wide text-muted-foreground">{t("director.workspace.activeRun")}</p><h3 className="mt-1 font-semibold">{t(`director.studio.runStatus.${run.status}`, { defaultValue: run.status })}</h3></div><div className="flex gap-2">{["pending", "running"].includes(run.status) && <Button size="small" icon={<Pause className="size-3" />} onClick={() => onPause(run.runId)}>{t("director.workspace.pause")}</Button>}{["paused", "awaiting_review"].includes(run.status) && <Button size="small" type="primary" icon={<Play className="size-3" />} onClick={() => onResume(run.runId)}>{t("director.workspace.resume")}</Button>}</div></div><p className="mt-2 text-sm text-muted-foreground">{t("director.studio.runSummary", { version: run.version, count: run.targets.length })}</p>{run.error && <Alert className="mt-3" type={run.status === "failed" ? "error" : "warning"} showIcon message={run.error} />}</section>}
     {deliveredClips.length > 0 && <section className="space-y-3"><div><h3 className="font-semibold">{t("director.workspace.deliveredVideos")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("director.workspace.technicalCloseout")}</p></div><div className="grid gap-3 md:grid-cols-2">{deliveredClips.map(({ group, storageKey }) => <article key={`${group.id}:${storageKey}`} className="rounded-xl border border-border bg-card p-3"><video className="w-full rounded-lg bg-black" controls preload="metadata" src={backendMediaUrl(storageKey)} /><p className="mt-2 text-sm font-medium">{segmentTitle(group.id)}</p></article>)}</div></section>}
     {!deliveredClips.length && <div className="flex min-h-36 flex-col items-center justify-center rounded-xl border border-dashed border-border bg-muted/20 p-6 text-center"><Film className="mb-3 size-7 text-muted-foreground" /><h3 className="font-medium">{t("director.studio.noResults")}</h3><p className="mt-2 text-sm text-muted-foreground">{t("director.studio.noResultsHint")}</p></div>}
-    {mode === "automatic" && <Button icon={<Play className="size-4" />} disabled={busy || runStartPending || !readiness?.targets.some(item => item.status === "ready" && !activeTargetIds.includes(item.id))} onClick={() => onStart((readiness?.targets || []).filter(item => item.status === "ready" && !activeTargetIds.includes(item.id)).map(item => item.id), "all_ready")}>{t("director.workspace.startAutomatic")}</Button>}
+    {mode === "automatic" && <Button icon={<Play className="size-4" />} disabled={!generationSupported || busy || runStartPending || !readiness?.targets.some(item => item.status === "ready" && !activeTargetIds.includes(item.id))} onClick={() => onStart((readiness?.targets || []).filter(item => item.status === "ready" && !activeTargetIds.includes(item.id)).map(item => item.id), "all_ready")}>{t("director.workspace.startAutomatic")}</Button>}
     {mode === "prompt_only" && <Alert type="info" showIcon message={t("director.workspace.promptOnlyHint")} />}
-    {readiness?.targets.length ? <section className="space-y-2"><h3 className="font-semibold">{t("director.workspace.productionTargets")}</h3>{readiness.targets.map(target => <article key={target.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card p-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><strong>{targetName(target.kind, target.targetId, target.title)}</strong><Tag>{t(`director.workspace.targetKind.${target.kind}`)}</Tag><Tag color={target.status === "ready" ? "green" : target.status === "blocked" ? "red" : target.status === "needs_review" ? "orange" : "default"}>{t(`director.workspace.targetStatus.${target.status}`)}</Tag></div>{target.blockers.length > 0 && <p className="mt-1 text-sm text-amber-600">{humanMessage(target.blockers.join("；"))}</p>}{target.notice && <p className="mt-1 text-xs text-muted-foreground">{humanMessage(target.notice)}</p>}{activeTargetIds.includes(target.id) && <p className="mt-1 text-xs text-amber-600">{t("director.workspace.runTargetActiveInline")}</p>}</div>{target.status === "ready" && mode !== "prompt_only" && mode !== "automatic" && <Button size="small" disabled={busy || runStartPending || activeTargetIds.includes(target.id)} onClick={() => onStart([target.id])}>{target.kind === "segment" ? t("director.workspace.generateClip") : t("director.workspace.generateItem")}</Button>}</article>)}</section> : <Alert type="info" message={readiness?.nextAction || t("director.workspace.noReadiness")} />}
+    {readiness?.targets.length ? <section className="space-y-2"><h3 className="font-semibold">{t("director.workspace.productionTargets")}</h3>{readiness.targets.map(target => <article key={target.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card p-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><strong>{targetName(target.kind, target.targetId, target.title)}</strong><Tag>{t(`director.workspace.targetKind.${target.kind}`)}</Tag><Tag color={target.status === "ready" ? "green" : target.status === "blocked" ? "red" : target.status === "needs_review" ? "orange" : "default"}>{t(`director.workspace.targetStatus.${target.status}`)}</Tag></div>{target.blockers.length > 0 && <p className="mt-1 text-sm text-amber-600">{humanMessage(target.blockers.join("；"))}</p>}{target.notice && <p className="mt-1 text-xs text-muted-foreground">{humanMessage(target.notice)}</p>}{activeTargetIds.includes(target.id) && <p className="mt-1 text-xs text-amber-600">{t("director.workspace.runTargetActiveInline")}</p>}</div>{target.status === "ready" && mode !== "prompt_only" && mode !== "automatic" && <Button size="small" disabled={!generationSupported || busy || runStartPending || activeTargetIds.includes(target.id)} onClick={() => onStart([target.id])}>{target.kind === "segment" ? t("director.workspace.generateClip") : t("director.workspace.generateItem")}</Button>}</article>)}</section> : <Alert type="info" message={readiness?.nextAction || t("director.workspace.noReadiness")} />}
     {d && <section className="space-y-2"><h3 className="font-semibold">{t("director.workspace.completePrompts")}</h3>{d.artifacts.map(artifact => <details key={artifact.id} className="rounded-xl border border-border bg-card p-4"><summary className="cursor-pointer font-medium">{targetName(artifact.kind === "h3" ? "segment" : "asset", artifact.targetId)}</summary><div className="mt-3 space-y-3"><pre className="max-h-[32rem] overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted/40 p-3 text-sm">{artifact.prompt}</pre>{artifact.references.length > 0 && <div className="space-y-2"><p className="text-sm font-medium">{t("director.workspace.actualReferences")}</p>{artifact.references.map(ref => <div key={`${artifact.id}:${ref.label}:${ref.storageKey}`} className="flex flex-wrap items-center gap-2 rounded-lg border border-border p-2 text-xs"><Image className="max-h-16 max-w-20 rounded object-contain" src={backendMediaUrl(ref.storageKey)} alt={ref.label} /><span>{ref.label}</span><Tag>{ref.role}</Tag></div>)}</div>}</div></details>)}</section>}
   </div>;
 
   const renderAdvanced = () => <div className="space-y-5">
     <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">{t("director.workspace.advancedTitle")}</h2><p className="mt-1 text-sm text-muted-foreground">{t("director.workspace.advancedHint")}</p></div><details><summary className="cursor-pointer text-sm text-muted-foreground">{t("director.advanced")}</summary><Button className="mt-2" disabled={!d} onClick={() => { setJson(JSON.stringify(d || {}, null, 2)); setError(""); }}>{t("director.workspace.editJson")}</Button></details></div>
     {compact && <details className="border-b border-border pb-4"><summary className="cursor-pointer font-medium">{t("productionCanvas.productionSettings")}</summary><div className="mt-4">{renderProduction()}</div></details>}
-    {d && <section className="rounded-2xl border border-border bg-card p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs uppercase tracking-wide text-muted-foreground">{t("director.workspace.internalModules")}</p><h2 className="mt-1 text-lg font-semibold">{t("director.workspace.moduleRoles")}</h2></div><span className="text-xs text-muted-foreground">{t("director.workspace.modulesNotGates")}</span></div><div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">{directorModules.map(module => <div key={module} className="rounded-lg border border-border p-3"><div className="flex items-center justify-between gap-2"><strong>{t(`director.workspace.moduleName.${module}`)}</strong><Tag color={d.modules[module]?.status === "committed" ? "green" : d.modules[module]?.status === "blocked" ? "red" : undefined}>{t(`director.workspace.moduleStatus.${d.modules[module]?.status || "planned"}`)}</Tag></div>{d.modules[module]?.unresolved.length ? <p className="mt-2 text-xs text-amber-600">{d.modules[module]?.unresolved[0]}</p> : null}</div>)}</div></section>}
+    {d && <section className="rounded-2xl border border-border bg-card p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs uppercase tracking-wide text-muted-foreground">{t("director.workspace.internalModules")}</p><h2 className="mt-1 text-lg font-semibold">{t("director.workspace.moduleRoles")}</h2></div><span className="text-xs text-muted-foreground">{t("director.workspace.modulesNotGates")}</span></div><div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">{directorModules.map(module => <div key={module} className="rounded-lg border border-border p-3"><div className="flex items-center justify-between gap-2"><strong>{t(`director.workspace.moduleName.${module}`)}</strong><Tag color={["committed", "continuity_passed"].includes(moduleViewStatus(module)) ? "green" : moduleViewStatus(module) === "blocked" ? "red" : undefined}>{t(`director.workspace.moduleStatus.${moduleViewStatus(module)}`)}</Tag></div><p className="mt-1 text-xs text-muted-foreground">{t("director.workspace.declaredModuleStatus", { status: t(`director.workspace.moduleStatus.${d.modules[module]?.status || "planned"}`) })}</p>{d.modules[module]?.unresolved.length ? <p className="mt-2 text-xs text-amber-600">{d.modules[module]?.unresolved[0]}</p> : null}</div>)}</div></section>}
     {d && <section className="rounded-xl border border-border bg-card p-4"><h3 className="font-semibold">{t("director.workspace.engineVersion")}</h3><p className="mt-2 break-all text-sm text-muted-foreground">Acheng {d.engine.version} · {d.engine.commit} · {d.engine.patchVersion} · {d.engine.runtimeId}</p></section>}
     {d && <details className="rounded-xl border border-border bg-card p-4"><summary className="cursor-pointer font-medium">{t("director.studio.rawSource")}</summary><pre className="mt-4 max-h-[36rem] overflow-auto whitespace-pre-wrap break-words text-xs">{JSON.stringify({ revision: production.revision, localEdits: sourceDrafts, source: d.source, assets: d.assets, shotInputs: d.shotInputs, boundaries: d.boundaries, artifacts: d.artifacts, run, readiness }, null, 2)}</pre></details>}
     <section className="space-y-2"><h3 className="font-semibold">{t("director.workspace.history")}</h3>{versions.length ? versions.map(item => <article key={item.version} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-card p-3"><span>v{item.version} · {item.stage} · {new Date(item.createdAt).toLocaleString()}</span><Button size="small" icon={<RotateCcw className="size-3" />} disabled={busy} onClick={() => onRestore(item.version)}>{t("director.workspace.restore")}</Button></article>) : <p className="text-sm text-muted-foreground">{t("director.workspace.noHistory")}</p>}</section>
@@ -694,6 +718,7 @@ export function DirectorPanel({
     {workspace === "story" && renderStory()}
     {workspace === "assets" && renderAssets()}
     {workspace === "shots" && renderShots()}
+    {workspace === "continuity" && renderContinuity()}
     {workspace === "production" && renderProduction()}
     {workspace === "advanced" && renderAdvanced()}
   </section>;

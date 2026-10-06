@@ -5,6 +5,8 @@ import path from "node:path";
 import {
     emptyEpisodeProduction,
     productionImageModel,
+    productionSceneEntries,
+    productionScriptGroups,
     episodeProductionDataSchema,
     directorRunStartSchema,
     directorModules,
@@ -12,6 +14,9 @@ import {
     productionEditSchema,
     productionPublishSchema,
     productionPreflightRequestSchema,
+    productionContinuityReadSchema,
+    productionContinuityCheckSchema,
+    productionContinuityUpgradePreviewSchema,
     productionContractVersion,
     type ProductionLayoutPlan,
     type ProductionLayoutReceipt,
@@ -25,8 +30,8 @@ import {
     type ProductionOperation,
 } from "@basketikun/canvas-agent/drama/production-contract";
 import { BASE_H3_NODE_METADATA, isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
-import { resolveAchengEngine } from "@basketikun/canvas-agent/skills/acheng";
-import { assertAchengSource, validateAchengSource, preflightCompilationDirector } from "@basketikun/canvas-agent/skills/acheng";
+import { resolveAchengEngine, resolveAchengRuntime } from "@basketikun/canvas-agent/skills/acheng";
+import { assertAchengSource, auditAchengContinuity, validateAchengSource, preflightCompilationDirector } from "@basketikun/canvas-agent/skills/acheng";
 import { schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch } from "@basketikun/canvas-agent/drama/production-validation";
 
 import { directorHash, projectDirector, validateDirectorMedia, assertDirectorEngine } from "./director.js";
@@ -43,6 +48,7 @@ import { scriptNodeOperations } from "./script-nodes.js";
 import { compileProductionLayout, productionAssetPosition } from "./production-layout.js";
 import { assertImageReferenceCoverage, imageInputOperations, verifyImageInput } from "./image-inputs.js";
 import { clipInputOperations, type ReferenceSync } from "./clip-inputs.js";
+import { continuityTargetBlockers, ProductionContinuityReports } from "./continuity-reports.js";
 import type { NativeProductionTarget } from "./native-generation.js";
 
 type Row = { revision: number; draft_json: string; published_json: string | null; published_version: number; updated_at: string };
@@ -56,7 +62,7 @@ export type ProductionBatch = {
 };
 export type DirectorReadinessTarget = { id: string; targetId: string; kind: "asset" | "keyframe" | "segment"; title: string; status: "ready" | "blocked" | "needs_review" | "complete"; blockers: string[]; artifactId?: string; executionTargets?: string[]; notice?: string };
 export type DirectorPresentation = {
-    key: string; workId: string; owner: { kind: "canvas" | "episode" | "scene"; id: string }; aliases?: string[]; workspace: "overview" | "story" | "assets" | "shots" | "production" | "advanced";
+    key: string; workId: string; owner: { kind: "canvas" | "episode" | "scene"; id: string }; aliases?: string[]; workspace: "overview" | "story" | "assets" | "shots" | "continuity" | "production" | "advanced";
     action: "author" | "compile" | "produce" | "review" | "deliver" | "blocked"; targetKind?: string; targetId?: string; canvasId?: string;
     nodeId?: string; segmentId?: string; runId?: string; taskId?: string; status: "ready" | "working" | "needs_review" | "blocked" | "complete"; reason?: string;
 };
@@ -122,6 +128,115 @@ export class EpisodeProductionService {
 
     episodeInfo(episodeId: string): { id: string; canvasId?: string | null; fullPlot?: string | null } { const linked = this.linked(episodeId); return linked ? linked.service.episodeInfo(linked.id) : this.episode(episodeId); }
     compilationRoot() { return path.join(this.legacyDataDir, "production-compilations"); }
+    private continuityReports() { return new ProductionContinuityReports(path.join(this.compilationRoot(), "continuity")); }
+
+    getContinuity(id: string, raw: unknown = {}): Record<string, any> {
+        const linked = this.linked(id); if (linked) return linked.service.getContinuity(linked.id, raw);
+        const query = productionContinuityReadSchema.parse(raw);
+        const current = this.get(id);
+        const selected = query.snapshot === "published" ? current.published : current.draft;
+        const director = selected?.director;
+        const legacy = Boolean(director?.source.ledger && (director.source.ledger as any).contract_version !== 2);
+        if (!director) return { owner: { kind: this.ownerKind, id }, snapshot: query.snapshot, revision: current.revision, publishedVersion: current.publishedVersion,
+            status: "missing", coverageStatus: "unchecked", semanticDiscovery: "not_performed", checkedAt: null, diagnostics: { total: 1, blocked: 1, unresolved: 1 }, items: [], total: 0, nextCursor: null };
+        const reports = this.continuityReports();
+        let projected = reports.get({ kind: this.ownerKind, id }, query.snapshot,
+            { sourceHash: director.sourceHash, runtimeId: director.engine.runtimeId, snapshotVersion: current.publishedVersion }, query.view, query.targetId, query.objectId, query.pageSize, query.cursor);
+        if (query.snapshot === "published" && !projected.report && director.source.ledger && (director.source.ledger as any).contract_version === 2) {
+            const draftReport = reports.get({ kind: this.ownerKind, id }, "draft", { sourceHash: director.sourceHash, runtimeId: director.engine.runtimeId }, query.view, query.targetId, query.objectId, query.pageSize, query.cursor);
+            if (draftReport.report && draftReport.status !== "stale") projected = { ...draftReport, report: { ...draftReport.report, snapshot: "published", snapshotVersion: current.publishedVersion } };
+        }
+        const items = projected.items as any[];
+        const allSegments = ((director.source.segments || []) as any[]).map(item => String(item.id || ""));
+        const checkedTargets = projected.report?.selectedTargets as string[] | undefined;
+        const effectiveStatus = projected.status === "passed" && checkedTargets?.length && allSegments.some(target => !checkedTargets.includes(target)) ? "partial" : projected.status;
+        const legacyIssue = legacy && !projected.report ? [{ code: "LEGACY_CONTINUITY_UNCHECKED", message: "旧版草稿尚未运行只读诊断；诊断结果不会授权新门禁。" }] : [];
+        return { owner: { kind: this.ownerKind, id }, snapshot: query.snapshot, revision: current.revision, publishedVersion: current.publishedVersion,
+            sourceHash: director.sourceHash, runtime: director.engine, status: legacy ? "diagnosticOnly" : effectiveStatus,
+            coverageStatus: projected.report?.coverageStatus || "unchecked", semanticDiscovery: "not_performed", checkedAt: projected.report?.checkedAt || null,
+            diagnostics: { total: (projected.report?.diagnostics?.length || 0) + legacyIssue.length, blocked: legacy ? 0 : (projected.report?.diagnostics || []).filter((item: any) => item.severity !== "warning").length,
+                unresolved: (projected.report?.diagnostics || []).filter((item: any) => /UNKNOWN|UNRESOLVED|MISSING/.test(String(item.code))).length },
+            items: [...legacyIssue, ...items], total: projected.total + legacyIssue.length, nextCursor: projected.nextCursor, ...(projected.report ? { report: projected.report } : {}) };
+    }
+
+    continuityForDirector(id: string, director: NonNullable<EpisodeProductionData["director"]>, snapshot: "draft" | "published" = "draft") {
+        const current = this.get(id);
+        const formal = snapshot === "published" ? current.published?.director : current.draft.director;
+        if (!formal || formal.sourceHash !== director.sourceHash || formal.engine.runtimeId !== director.engine.runtimeId) {
+            return { status: "stale", sourceHash: director.sourceHash, runtime: director.engine, report: null };
+        }
+        return this.getContinuity(id, { snapshot, view: "summary" });
+    }
+
+    continuityUpgradeActiveRuns(id: string) {
+        const batches = this.listBatches(id).filter(batch => ["pending", "running", "paused", "awaiting_review"].includes(batch.status))
+            .map(batch => ({ runId: batch.runId, status: batch.status, targets: batch.targets }));
+        const legacyRuns = this.pendingRuns().filter(run => run.episodeId === id)
+            .map(run => ({ runId: run.runId || `legacy-v${run.version}`, status: run.status, targets: run.targets || run.plan.clipGroupIds }));
+        const nativeTasks = this.db.db.prepare(`SELECT b.task_id, b.targets_json, t.status FROM production_task_bindings b
+            JOIN tasks t ON t.id=b.task_id WHERE b.owner_kind=? AND b.owner_id=? AND b.status='submitted'
+            AND t.status IN ('queued','running','awaiting_confirmation')`).all(this.ownerKind, id) as Array<{ task_id: string; targets_json: string; status: string }>;
+        const active = [...batches, ...legacyRuns, ...nativeTasks.map(task => ({ runId: task.task_id, status: task.status, targets: JSON.parse(task.targets_json) }))];
+        return active.filter((run, index) => active.findIndex(item => item.runId === run.runId) === index);
+    }
+
+    checkContinuity(id: string, raw: unknown): Record<string, any> {
+        const linked = this.linked(id); if (linked) return linked.service.checkContinuity(linked.id, raw);
+        const input = productionContinuityCheckSchema.parse(raw);
+        const owner = { kind: this.ownerKind, id };
+        const requestHash = fingerprint({ owner, expectedRevision: input.expectedRevision, snapshot: input.snapshot, targetIds: input.targetIds || [] });
+        const reports = this.continuityReports();
+        const prior = reports.operation(owner, input.operationId);
+        if (prior) {
+            if (prior.requestHash !== requestHash) throw new Error("IDEMPOTENCY_CONFLICT: operationId 已用于不同连续性检查");
+            return { ...prior.result, replayed: true };
+        }
+        const current = this.get(id);
+        if (current.revision !== input.expectedRevision) throw new ProductionConflictError(current);
+        const selected = input.snapshot === "published" ? current.published : current.draft;
+        const director = selected?.director;
+        if (!director) throw new Error("CONTINUITY_SOURCE_MISSING: 缺少正式 Acheng 制作稿");
+        const legacy = director.source.ledger && (director.source.ledger as any).contract_version !== 2;
+        const segments = new Set(((director.source.segments || []) as any[]).map(item => String(item.id || "")));
+        if ((input.targetIds || []).some(target => !segments.has(target))) throw new Error("连续性检查目标必须属于当前制作稿 Segment");
+        const engineReport = auditAchengContinuity(director, input.targetIds, Boolean(legacy));
+        const report = { ...engineReport, verdict: legacy ? "diagnosticOnly" : engineReport.status, owner, snapshot: input.snapshot, snapshotVersion: current.publishedVersion, sourceHash: director.sourceHash,
+            runtimeId: director.engine.runtimeId, revision: current.revision, checkedAt: new Date().toISOString(), operationId: input.operationId,
+            selectedTargets: input.targetIds || (segments.size ? [...segments] : []) };
+        const persisted = reports.persist(owner, input.operationId, requestHash, report);
+        this.events?.publish({ type: "drama-production.updated", entityId: id, payload: { revision: current.revision, continuitySourceHash: director.sourceHash, continuitySnapshot: input.snapshot } });
+        return { ...persisted, revision: current.revision };
+    }
+
+    previewContinuityUpgrade(id: string, raw: unknown): Record<string, any> {
+        const linked = this.linked(id); if (linked) return linked.service.previewContinuityUpgrade(linked.id, raw);
+        const input = productionContinuityUpgradePreviewSchema.parse(raw);
+        const current = this.get(id);
+        if (current.revision !== input.expectedRevision) throw new ProductionConflictError(current);
+        const director = current.draft.director;
+        if (!director) throw new Error("CONTINUITY_SOURCE_MISSING: 缺少正式 Acheng 制作稿");
+        if (director.sourceHash !== input.fromSourceHash) throw new Error("CONTINUITY_UPGRADE_PREVIEW_STALE: 回读当前源稿后重新预览");
+        if ((director.source.ledger as any)?.contract_version === 2) throw new Error("连续性账本已经升级到 v2");
+        if (input.ledger.contract_version !== 2) throw new Error("升级预览必须明确声明 contract_version: 2");
+        const target = resolveAchengEngine();
+        const targetEngine = { commit: target.commit, patchVersion: target.patchVersion, runtimeId: target.runtimeId, version: target.version };
+        const candidate = structuredClone(director);
+        candidate.source = { ...candidate.source, legacyContinuityProjection: candidate.source.ledger ?? null, ledger: structuredClone(input.ledger) };
+        candidate.engine = targetEngine;
+        candidate.sourceHash = directorHash(candidate.source);
+        const report = auditAchengContinuity(candidate);
+        const previewHash = fingerprint({ owner: { kind: this.ownerKind, id }, expectedRevision: current.revision,
+            fromSourceHash: director.sourceHash, targetRuntimeId: target.runtimeId, ledger: input.ledger });
+        const activeRuns = this.continuityUpgradeActiveRuns(id);
+        const affectedTargets = Array.isArray(director.source.segments) ? director.source.segments.map((item: any) => String(item.id || "")) : [];
+        return { owner: { kind: this.ownerKind, id }, revision: current.revision, fromSourceHash: director.sourceHash,
+            fromRuntime: director.engine, targetRuntime: targetEngine, previewHash, candidateSourceHash: candidate.sourceHash,
+            migrationClass: "retained_legacy_projection",
+            changeClassification: { equivalentConversions: [], historicalProjection: director.source.ledger ? ["legacyContinuityProjection"] : [],
+                semanticGaps: report.diagnostics || [], speculativeSuggestions: [] },
+            report, affectedTargets,
+            activeRuns };
+    }
 
     registerNativeTask(id: string, taskId: string, target: NativeProductionTarget): ProductionRecord {
         const linked = this.linked(id); if (linked) return linked.service.registerNativeTask(linked.id, taskId, target);
@@ -529,11 +644,25 @@ export class EpisodeProductionService {
         const row = this.prepare("SELECT * FROM episode_productions WHERE episode_id = ?").get(episodeId) as Row | undefined;
         if (row) return this.fromRow(episodeId, row);
         const draft = emptyEpisodeProduction();
-        const scene = this.ownerKind === "scene" ? this.db.db.prepare("SELECT drama_id FROM drama_scene_instances WHERE id=?").get(episodeId) as { drama_id: string } | undefined : undefined;
+        const scene = this.ownerKind === "scene" ? this.db.db.prepare("SELECT drama_id, episode_id FROM drama_scene_instances WHERE id=?").get(episodeId) as { drama_id: string; episode_id: string | null } | undefined : undefined;
+        let inheritedEpisodeSettings = false;
+        if (scene?.episode_id) {
+            const parentRow = this.db.db.prepare("SELECT * FROM episode_productions WHERE episode_id = ?").get(scene.episode_id) as Row | undefined;
+            if (parentRow) {
+                const parent = this.fromRow(scene.episode_id, parentRow);
+                draft.settings = structuredClone(parent.draft.settings);
+                inheritedEpisodeSettings = true;
+                const scopedDirector = sceneScopedDirector(parent.draft.director, episodeId);
+                if (scopedDirector) {
+                    draft.director = scopedDirector;
+                    projectDirector(draft);
+                }
+            }
+        }
         const dramaId = this.projectScope ? undefined : this.ownerKind === "scene" ? scene?.drama_id : this.db.getDramaEpisode(episodeId)?.dramaId;
         const drama = this.db.listCanvasFolders().find(folder => this.projectScope ? folder.sharedAssetCanvasId === episodeId : folder.id === dramaId);
         const plan = drama?.productionPlan;
-        if (plan?.confirmedAt && plan.confirmedOutline === drama?.outline) Object.assign(draft.settings, {
+        if (!inheritedEpisodeSettings && plan?.confirmedAt && plan.confirmedOutline === drama?.outline) Object.assign(draft.settings, {
             imageModel: plan.imageModel, imageModelsByKind: structuredClone(plan.imageModelsByKind), h3Model: plan.h3Model,
             ...(plan.storyboardImageMode ? { storyboardImageMode: plan.storyboardImageMode } : {}),
             ...(plan.videoAspectRatio !== undefined ? { videoAspectRatio: plan.videoAspectRatio, videoAspectRatioConfirmed: true } : {}),
@@ -578,6 +707,17 @@ export class EpisodeProductionService {
                     diagnostics.push(...checked.diagnostics.filter(item => item.code !== "ONLINE_CONTEXT_UNVERIFIED"));
                 } else if (!(Array.isArray(director.source.asset_cards) && director.source.asset_cards.length) && !(Array.isArray(director.source.segments) && director.source.segments.length)) {
                     diagnostics.push({ code: "COMPILE_STAGE_NOT_READY", path: "director.source.asset_cards", message: "当前只有剧情规划，尚无资产提示词卡或视频段落可编译。", severity: "error" });
+                }
+                if ((director.source.ledger as any)?.contract_version === 2) {
+                    const continuity = this.continuityForDirector(episodeId, director);
+                    const targetIds = [...new Set([
+                        ...(Array.isArray(director.source.segments) ? director.source.segments.map((segment: any) => String(segment.id || "")) : []),
+                        ...director.artifacts.filter(artifact => artifact.kind === "h3").map(artifact => artifact.targetId),
+                    ].filter(Boolean))];
+                    for (const targetId of targetIds) for (const blocker of continuityTargetBlockers(continuity, [targetId])) diagnostics.push({
+                        code: blocker.code, path: `director.segments.${targetId}.continuity`, targetId, message: blocker.message, severity: "warning",
+                        nextAction: { action: "correct_source", message: "在连续性工作区补齐覆盖证据或解决本片段问题，再重新检查。" },
+                    });
                 }
                 candidate = { ...current.draft, director };
             } else { this.batchCandidate(episodeId, current, input.request); candidate = current.published!; }
@@ -690,7 +830,13 @@ export class EpisodeProductionService {
         const project = canvasId ? this.db.getCanvasProject(canvasId) : null;
         const canvasRole = canvasId ? productionCanvasContext(this.db, canvasId).role : "ordinary";
         const nodes = project?.nodes as Array<Record<string, any>> | undefined;
-        const moduleStates = Object.fromEntries(Object.entries(director.modules).map(([name, item]) => [name, { status: item.status, unresolved: item.unresolved, cursor: item.cursor }]));
+        const continuityReport = this.getContinuity(episodeId, { snapshot: source, view: "summary" });
+        const hasContinuityV2 = (director.source.ledger as any)?.contract_version === 2;
+        const moduleStates = Object.fromEntries(Object.entries(director.modules).map(([name, item]) => [name, {
+            status: item.status, declaredStatus: item.status,
+                verifiedStatus: name === "continuity" ? (hasContinuityV2 ? continuityReport.status : "diagnosticOnly") : (item.evidence.length ? "evidence_incomplete" : "unchecked"),
+            unresolved: item.unresolved, cursor: item.cursor,
+        }]));
         const groupedShotIds = new Set(segments.flatMap(segment => Array.isArray(segment.shot_ids) ? segment.shot_ids.map(String) : []));
         const ungroupedShotIssues = shots.filter(shot => shot.id && !groupedShotIds.has(String(shot.id))).map(shot => `Shot ${String(shot.id)} 尚未编入 Segment`);
         const targets: DirectorReadinessTarget[] = [];
@@ -779,6 +925,9 @@ export class EpisodeProductionService {
             const shotIds = Array.isArray(segment.shot_ids) ? segment.shot_ids.map(String) : [];
             const artifact = artifactFor("h3", segmentId);
             const blockers = [...(canvasRole === "shared-assets" ? ["剧目共享资产画布不能生产分集视频 Clip"] : []), ...compiled(artifact, `Segment ${segmentId}`)];
+            if (hasContinuityV2) {
+                blockers.push(...continuityTargetBlockers(continuityReport, [segmentId]).map(item => `${item.code}: ${item.message}`));
+            }
             const group = data.clipGroups.find(item => item.id === segmentId);
             if (!h3ModelFor(segmentId, group?.nodeId ?? undefined)) blockers.push("缺少 H3 模型；请在现有模型设置中选择模型");
             if (!shotIds.length) blockers.push("Segment 尚未编入 Shot");
@@ -906,7 +1055,8 @@ export class EpisodeProductionService {
         let workspace: DirectorPresentation["workspace"] = work.module === "story" ? "story"
             : work.module === "assets" ? "assets"
                 : ["shots", "performance", "effects"].includes(work.module) ? "shots"
-                    : ["model", "continuity"].includes(work.module) ? "production" : "overview";
+            : work.module === "continuity" ? "continuity"
+                : work.module === "model" ? "production" : "overview";
         let action = work.action;
         let status: DirectorPresentation["status"] = action === "blocked" ? "blocked" : "ready";
         let reason = inferredReason;
@@ -1261,6 +1411,7 @@ export class EpisodeProductionService {
             const published = record.published ? structuredClone(record.published) : null;
             for (const [index, operation] of input.ops.entries()) {
                 try {
+                if (operation.type === "upgrade_director_continuity" && operation.previewRevision !== record.revision) throw new Error("CONTINUITY_UPGRADE_PREVIEW_STALE: 制作修订已变化，请重新预览");
                 if (operation.type === "select_director_result") {
                     if (!published) throw new Error("尚无可选用历史结果的发布版本");
                     this.selectDirectorResult(episodeId, record, draft, published, operation, input.operationId, canvasCommits);
@@ -1379,6 +1530,15 @@ export class EpisodeProductionService {
         const input = productionPublishSchema.parse(raw);
         return this.commit(episodeId, input.operationId, input.expectedRevision, fingerprint(input), (record) => {
             const candidate = this.publishedCandidate(record, input.stage);
+            if (input.stage === "director" && candidate.director && (candidate.director.source.ledger as any)?.contract_version === 2) {
+                const readySegments = candidate.director.artifacts.filter(artifact => artifact.kind === "h3" && artifact.status === "ready");
+                if (readySegments.length) {
+                    const continuity = this.continuityForDirector(episodeId, candidate.director);
+                    const targetIds = readySegments.map(artifact => String(artifact.targetId || artifact.id));
+                    const blockers = continuityTargetBlockers(continuity, targetIds);
+                    if (blockers.length) throw new Error(`${blockers[0].code}: 发布 ready H3 产物前需通过当前目标的连续性门禁：${blockers.map(item => item.message).join("；")}`);
+                }
+            }
             const impact = this.publicationImpact(record, candidate, episodeId, input.stage);
             const publishedVersion = record.publishedVersion + 1;
             if (input.stage === "director" && record.published?.director && candidate.director) {
@@ -1476,8 +1636,8 @@ export class EpisodeProductionService {
         data.director = {
             schemaVersion: 1,
             engine: { commit: runtime.commit, patchVersion: runtime.patchVersion, runtimeId: runtime.runtimeId, version: runtime.version },
-            source,
-            sourceHash: directorHash(source),
+            source: { ...source, ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } },
+            sourceHash: directorHash({ ...source, ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } }),
             modules: Object.fromEntries(directorModules.map(module => [module, { status: "planned" as const, evidence: [], unresolved: [] }])),
             artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [],
             workflow: { contentDeliveryMode: "auto_file_batch", mediaProductionMode: "per_item" },
@@ -1787,6 +1947,36 @@ export class EpisodeProductionService {
         if (op.type === "patch_director_source") {
             if (!draft.director) throw new Error("缺少 Acheng 制作稿");
             this.patchDirectorSource(draft.director, op.entity, op.id, op.patch);
+            projectDirector(draft);
+            return;
+        }
+        if (op.type === "patch_director_continuity") {
+            if (!draft.director) throw new Error("缺少 Acheng 制作稿");
+            if ((draft.director.source.ledger as any)?.contract_version !== 2) throw new Error("LEGACY_CONTINUITY_UPGRADE_REQUIRED: 旧版账本必须通过显式升级操作切换合同");
+            this.patchDirectorSource(draft.director, "continuity", undefined, { ledger: op.ledger });
+            projectDirector(draft);
+            return;
+        }
+        if (op.type === "upgrade_director_continuity") {
+            if (!draft.director) throw new Error("缺少 Acheng 制作稿");
+            if (draft.director.sourceHash !== op.fromSourceHash) throw new Error("CONTINUITY_UPGRADE_PREVIEW_STALE: 源稿变化，请重新预览后升级");
+            if ((draft.director.source.ledger as any)?.contract_version === 2) throw new Error("连续性账本已经升级到 v2");
+            if (op.ledger.contract_version !== 2) throw new Error("升级包必须明确声明 contract_version: 2");
+            const activeRuns = this.continuityUpgradeActiveRuns(episodeId);
+            if (activeRuns.length) throw new Error(`CONTINUITY_UPGRADE_WAIT: 活动生成任务仍在占用版本：${activeRuns.map(run => run.runId).join(", ")}`);
+            const target = resolveAchengEngine();
+            if (target.runtimeId !== op.toRuntimeId) throw new Error("CONTINUITY_UPGRADE_RUNTIME_STALE: 固定运行版本已变化，请重新预览");
+            const expectedPreview = fingerprint({ owner: { kind: this.ownerKind, id: episodeId }, expectedRevision: op.previewRevision,
+                fromSourceHash: op.fromSourceHash, targetRuntimeId: op.toRuntimeId, ledger: op.ledger });
+            if (op.previewHash !== expectedPreview) throw new Error("CONTINUITY_UPGRADE_PREVIEW_STALE: 预览内容与升级输入不一致");
+            const legacyLedger = draft.director.source.ledger;
+            this.patchDirectorSource(draft.director, "continuity", undefined, { ledger: op.ledger });
+            draft.director.source.legacyContinuityProjection = legacyLedger ?? null;
+            const engine = resolveAchengRuntime(op.toRuntimeId);
+            draft.director.engine = { commit: engine.commit, patchVersion: engine.patchVersion, runtimeId: engine.runtimeId, version: engine.version };
+            draft.director.sourceHash = directorHash(draft.director.source);
+            draft.director.executionAuthorized = false;
+            draft.director.artifacts = draft.director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));
             projectDirector(draft);
             return;
         }
@@ -2143,4 +2333,39 @@ function reorder<T extends { id: string }>(items: T[], ids: string[]) {
 }
 function orderShotsByScene(draft: EpisodeProductionData) {
     return draft.scenes.flatMap((scene) => draft.shots.filter((shot) => shot.sceneId === scene.id));
+}
+
+function sceneScopedDirector(parent: DirectorProduction | undefined, sceneId: string): DirectorProduction | null {
+    if (!parent) return null;
+    const source = structuredClone(parent.source) as Record<string, any>;
+    const entry = productionSceneEntries(source).find(item => item.id === sceneId);
+    const scriptBlocks = Array.isArray(source.script_scenes) ? source.script_scenes.filter((item: unknown) => item && typeof item === "object") as Record<string, any>[] : [];
+    const group = productionScriptGroups(scriptBlocks).find(item => item.key === sceneId);
+    if (!entry || !group) return null;
+
+    const shotIds = new Set(entry.shotIds);
+    const selectedShots = Array.isArray(source.shots) ? source.shots.filter((shot: Record<string, any>) => shotIds.has(String(shot.id))) : [];
+    const selectedSegments = Array.isArray(source.segments) ? source.segments.filter((segment: Record<string, any>) => {
+        const ids = Array.isArray(segment.shot_ids) ? segment.shot_ids.map(String) : [];
+        return ids.length > 0 && ids.every((id: string) => shotIds.has(id));
+    }) : [];
+    const environmentIds = new Set([entry.environmentId, ...selectedShots.map((shot: Record<string, any>) => String(shot.scene_id || ""))].filter(Boolean));
+    source.script_scenes = group.blocks;
+    source.shots = selectedShots;
+    source.segments = selectedSegments;
+    if (Array.isArray(source.scene_registry)) source.scene_registry = source.scene_registry.filter((item: Record<string, any>) => environmentIds.has(String(item.id || "")));
+
+    const director = structuredClone(parent);
+    director.source = source;
+    director.sourceHash = directorHash(source);
+    director.assets = {};
+    director.shotInputs = Object.fromEntries([...shotIds].map(id => [id, { keyframePolicy: parent.shotInputs[id]?.keyframePolicy || "none", assetIds: [] }]));
+    director.boundaries = [];
+    director.artifacts = [];
+    const workflow = { ...director.workflow };
+    delete workflow.currentWork;
+    delete workflow.pendingDecisions;
+    delete workflow.agentThreadId;
+    director.workflow = workflow;
+    return directorProductionSchema.parse(director);
 }

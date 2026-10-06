@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { App, ConfigProvider, theme } from "antd";
 import { createRoot } from "react-dom/client";
 import { directorModules, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
-import type { EpisodeProduction, ProductionBatch, ProductionReadiness } from "../src/services/backend-api";
+import type { EpisodeProduction, ProductionBatch, ProductionContinuity, ProductionReadiness } from "../src/services/backend-api";
 import { DirectorPanel, type DirectorWorkspace } from "../src/pages/drama/director-panel";
 import { exportAchengDeliveryBundle } from "../src/lib/acheng-delivery-export";
 import i18n from "../src/i18n";
@@ -14,12 +14,15 @@ const h3Prompt = "integrated_multimodal_description:\n[Picture 1] Dockside at da
 const source = {
   brief: "一封未拆开的信改变了码头上的交易。",
   fps_num: 24, fps_den: 1,
-  script_scenes: [{ id: "line1", scene_id: "scene1", scene_name: "旧码头", text: "信使：你确定要把它交给我？\n守门人：我只答应把信带到。" }],
+  script_scenes: [{ id: "line1", scene_id: "scene1", scene_name: "旧码头", text: "信使：你确定要把它交给我？\n守门人：我只答应把信带到。", blocks: [{ id: "B01", kind: "action", text: "信使仍穿蓝色外套。" }] }],
+  character_registry: [{ id: "C_MESSENGER", name: "信使" }],
+  scene_registry: [{ id: "scene1", name: "旧码头" }],
+  ledger: { contract_version: 2, facts: [{ id: "F_COAT", object_kind: "character", object_id: "C_MESSENGER", allowed_values: ["blue", "red"] }], timelines: [{ id: "main" }], initial: [{ timeline_id: "main", fact_id: "F_COAT", value: "blue" }], events: [], requirements: [{ id: "R1", timeline_id: "main", shot_id: "s1", fact_id: "F_COAT", kind: "hold", value: "blue" }, { id: "R2", timeline_id: "main", shot_id: "s2", fact_id: "F_COAT", kind: "hold", value: "blue" }], coverage: [] },
   asset_plan: [{ id: "STYLE_MOTHER", kind: "style", name: "STYLE_MOTHER · 码头晨雾", description: "低饱和蓝灰和薄雾，纸面质感克制。", depends_on: [] }, { id: "KF1", kind: "keyframe", name: "镜头 s1 关键帧", description: "信使确认封口，守门人保持警觉。", depends_on: ["STYLE_MOTHER"] }],
   style_lock: { anchor_asset_id: "STYLE_MOTHER" },
   shots: [
-    { id: "s1", scene_id: "scene1", title: "信使确认封口", start_frame: 0, end_frame: 120, visual: "信使拇指压住封蜡，目光先看信，再抬向守门人。", camera: { description: "胸像近景，缓慢推近" }, state_in: "信件仍未拆封", state_out: "信使确认封口无破损", dialogues: [{ speaker: "信使", text: "你确定要把它交给我？" }], audio: {} },
-    { id: "s2", scene_id: "scene1", title: "守门人不松手", start_frame: 120, end_frame: 240, visual: "守门人没有放开信封，观察信使的眼神。", camera: { description: "过肩中近景" }, state_in: "守门人握着信封", state_out: "守门人仍扣住信封一角", dialogues: [{ speaker: "守门人", text: "我只答应把信带到。" }], audio: {} },
+    { id: "s1", scene_id: "scene1", timeline_id: "main", story_order: 0, continuity_facts: ["F_COAT"], title: "信使确认封口", start_frame: 0, end_frame: 120, visual: "信使拇指压住封蜡，目光先看信，再抬向守门人。", camera: { description: "胸像近景，缓慢推近" }, state_in: "信件仍未拆封", state_out: "信使确认封口无破损", characters: [{ id: "C_MESSENGER" }], dialogues: [{ speaker: "信使", text: "你确定要把它交给我？" }], audio: {} },
+    { id: "s2", scene_id: "scene1", timeline_id: "main", story_order: 1, continuity_facts: ["F_COAT"], title: "守门人不松手", start_frame: 120, end_frame: 240, visual: "守门人没有放开信封，观察信使的眼神。", camera: { description: "过肩中近景" }, state_in: "守门人握着信封", state_out: "守门人仍扣住信封一角", characters: [{ id: "C_MESSENGER" }], dialogues: [{ speaker: "守门人", text: "我只答应把信带到。" }], audio: {} },
   ],
   segments: [
     { id: "SEG1", shot_ids: ["s1"], start_frame: 0, end_frame: 120, generation_clip_duration: 5, mode: "Ref2VA", execution_gate: "Reconfirm references and sound after regrouping" },
@@ -60,8 +63,8 @@ const initialReadiness: ProductionReadiness = {
   targets: [
     { id: "asset:STYLE_MOTHER", targetId: "STYLE_MOTHER", kind: "asset", title: "STYLE_MOTHER · 码头晨雾", status: "complete", blockers: [] },
     { id: "frame:s1", targetId: "s1", kind: "keyframe", title: "信使确认封口", status: "needs_review", blockers: ["关键帧等待审核"] },
-    { id: "segment:SEG1", targetId: "SEG1", kind: "segment", title: "SEG1", status: "ready", blockers: [], executionTargets: ["segment:SEG1", "segment:SEG2"], notice: "Motion Context 使用同一连续组运行" },
-    { id: "segment:SEG2", targetId: "SEG2", kind: "segment", title: "SEG2", status: "ready", blockers: [] },
+    { id: "segment:SEG1", targetId: "SEG1", kind: "segment", title: "SEG1", status: "blocked", blockers: ["CONTINUITY_COVERAGE_MISSING：剧本块 B01 尚无覆盖证据。"], executionTargets: ["segment:SEG1", "segment:SEG2"] },
+    { id: "segment:SEG2", targetId: "SEG2", kind: "segment", title: "SEG2", status: "blocked", blockers: ["CONTINUITY_COVERAGE_MISSING：剧本块 B01 尚无覆盖证据。"] },
   ],
 };
 
@@ -72,6 +75,7 @@ function Harness() {
   const [saves, setSaves] = useState(0), [published, setPublished] = useState(0), [asks, setAsks] = useState(0);
   const [exporting, setExporting] = useState(false);
   const [batches, setBatches] = useState<ProductionBatch[]>([]);
+  const [continuityReport, setContinuityReport] = useState<ProductionContinuity>({ owner: { kind: "episode", id: "fixture" }, snapshot: "draft", revision: 4, publishedVersion: 1, sourceHash: hash, status: "blocked", coverageStatus: "incomplete", semanticDiscovery: "not_performed", checkedAt: new Date().toISOString(), diagnostics: { total: 1, blocked: 1, unresolved: 1 }, items: [], total: 1, nextCursor: null, report: { status: "blocked", coverageStatus: "incomplete", semanticDiscovery: "not_performed", selectedTargets: ["SEG1", "SEG2"], diagnostics: [{ code: "CONTINUITY_COVERAGE_MISSING", path: "source.script_scenes.line1.blocks.B01", targetId: "s1", affectedTargets: ["SEG1", "SEG2"], severity: "error", message: "剧本块 B01 尚无连续性覆盖证据" }], trajectories: { s1: { timelineId: "main", storyOrder: 0, start: { F_COAT: "blue" }, end: { F_COAT: "blue" } }, s2: { timelineId: "main", storyOrder: 1, start: { F_COAT: "blue" }, end: { F_COAT: "blue" } } } } });
   const updateDirector = (next: DirectorProduction) => { setDirector(next); setProduction(current => ({ ...current, revision: current.revision + 1, draft: { ...current.draft, director: next } })); setSaves(n => n + 1); };
   const patch = (entity: "style" | "scene" | "asset" | "shot" | "segment", id: string | undefined, fields: Record<string, unknown>) => {
     if (entity === "style") {
@@ -116,9 +120,9 @@ function Harness() {
   };
   return <ConfigProvider theme={{ algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm }}><App><main className="p-6">
     <div className="mb-4 flex gap-2"><button onClick={() => setDark(!dark)}>theme</button><button onClick={() => { const next = locale === "zh-CN" ? "en-US" : "zh-CN"; setLocale(next); void i18n.changeLanguage(next); }}>language</button></div>
-    <nav className="mb-4 flex flex-wrap gap-2">{(["overview", "story", "assets", "shots", "production", "advanced"] as DirectorWorkspace[]).map(key => <button key={key} onClick={() => setWorkspace(key)}>{i18n.t(`director.workspace.tab.${key}`)}</button>)}</nav>
+    <nav className="mb-4 flex flex-wrap gap-2">{(["overview", "story", "assets", "shots", "continuity", "production", "advanced"] as DirectorWorkspace[]).map(key => <button key={key} onClick={() => setWorkspace(key)}>{i18n.t(`director.workspace.tab.${key}`)}</button>)}</nav>
     <DirectorPanel
-      workspace={workspace} director={director} production={production} readiness={readiness} run={activeRun} batches={batches}
+      workspace={workspace} director={director} production={production} readiness={readiness} continuityReport={continuityReport} run={activeRun} batches={batches}
       canvasNodes={[{ id: "image-style", title: "STYLE_MOTHER output", type: "image" }, { id: "image-frame", title: "Keyframe output", type: "image" }]}
       legacy={[{ source: "script.md", sha256: hash, text: "旧剧本文本：完整台词和历史事实。" }]} versions={[{ version: 1, stage: "director", createdAt: new Date(0).toISOString() }]}
       busy={false} canvasId="fixture" canvasRole="episode" onOpenSharedAsset={() => undefined} onPromoteExistingSharedAsset={() => setAsks(n => n + 1)} sourceDrafts={sourceDrafts} runStartPending={false} activeTargetIds={[...new Set(batches.filter(item => ["pending", "running", "paused", "awaiting_review"].includes(item.status)).flatMap(item => item.targets))]}
@@ -128,6 +132,10 @@ function Harness() {
       onPatch={patch} onRegroup={regroup} onWorkflow={workflow => updateDirector({ ...director, workflow: { ...director.workflow, ...workflow } })}
       onBindAsset={(assetId, nodeId) => updateDirector({ ...director, assets: { ...director.assets, [assetId]: { ...(director.assets[assetId] || { version: "v1", status: "planned" as const }), nodeId } } })}
       onBoundary={boundary => updateDirector({ ...director, boundaries: [...boundaries.filter(item => item.from !== boundary.from), boundary] })}
+      onSaveContinuity={async (ledger, preview) => { if (preview) return false; updateDirector({ ...director, source: { ...director.source, ledger } }); return true; }}
+      onPreviewContinuityUpgrade={async ledger => ({ revision: 4, fromSourceHash: hash, previewHash: hash, targetRuntime: { runtimeId: "test-runtime-v2", version: "4.4.0" }, report: { status: "blocked", diagnostics: [{ code: "CONTINUITY_COVERAGE_MISSING" }] }, affectedTargets: ["SEG1", "SEG2"] })}
+      onCheckContinuity={async () => { const ledger = director.source.ledger as Record<string, any>; const scoped = (ledger.coverage || []).some((item: any) => item.source_anchor?.block_id === "B01" && ["s1", "s2"].every(id => item.shot_ids?.includes(id)) && item.evidence_kind === "explicit_hold"); setContinuityReport(current => ({ ...current, status: scoped ? "passed" : "blocked", coverageStatus: scoped ? "registered" : "incomplete", checkedAt: new Date().toISOString(), diagnostics: { total: scoped ? 0 : 1, blocked: scoped ? 0 : 1, unresolved: scoped ? 0 : 1 }, report: { ...current.report, status: scoped ? "passed" : "blocked", coverageStatus: scoped ? "registered" : "incomplete", diagnostics: scoped ? [] : current.report?.diagnostics || [] } })); setReadiness(current => ({ ...current, targets: current.targets.map(item => item.id.startsWith("segment:") ? { ...item, status: scoped ? "ready" : "blocked", blockers: scoped ? [] : item.blockers } : item) })); }}
+      onContinuitySnapshot={snapshot => setContinuityReport(current => ({ ...current, snapshot }))}
       onReview={review => { updateDirector({ ...director, assets: { ...director.assets, [review.assetId]: { ...director.assets[review.assetId], status: review.verdict, evidence: review.evidence } } }); setReadiness(current => ({ ...current, targets: current.targets.map(item => item.id === `asset:${review.assetId}` ? { ...item, status: review.verdict === "approved" ? "complete" : "ready", blockers: [] } : item) })); }}
       onPublish={() => setPublished(n => n + 1)} onReplace={updateDirector} onAskDirector={() => setAsks(n => n + 1)} onNavigate={setWorkspace}
       onAnswerDecision={() => true} onExport={downloadBundle} exporting={exporting}
@@ -136,7 +144,7 @@ function Harness() {
       onResume={runId => setBatches(current => current.map(item => item.runId === runId ? { ...item, status: "pending" } : item))}
       onRestore={() => setSaves(n => n + 1)} onRefresh={() => setSaves(n => n + 1)}
     />
-    <output aria-label="evidence">{JSON.stringify({ saves, published, asks, director, production, readiness, batches })}</output>
+    <output aria-label="evidence">{JSON.stringify({ saves, published, asks, director, production, readiness, batches, continuityReport })}</output>
   </main></App></ConfigProvider>;
 }
 createRoot(document.getElementById("root")!).render(<Harness />);

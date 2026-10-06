@@ -4,6 +4,17 @@ import re
 import sys
 from pathlib import Path
 from fractions import Fraction
+import importlib.util
+
+continuity_path = Path(__file__).with_name("continuity_v2.py")
+if not continuity_path.is_file():
+    repository = Path(__file__).resolve().parents[2]
+    continuity_path = repository / ".agents/skills/acheng-director/scripts/continuity_v2.py"
+continuity_spec = importlib.util.spec_from_file_location("continuity_v2", continuity_path)
+continuity_module = importlib.util.module_from_spec(continuity_spec)
+sys.modules["continuity_v2"] = continuity_module
+continuity_spec.loader.exec_module(continuity_module)
+audit_continuity_v2, continuity_v2_contract = continuity_module.audit, continuity_module.contract
 
 RECIPES = ("portrait", "dark", "fantasy", "hard_surface", "ink", "monochrome", "product", "clean_slate", "style")
 MODES = ("T2VA", "I2VA", "FL2VA", "L2VA", "Ref2VA")
@@ -25,6 +36,7 @@ def contract():
             "style_lock": {"type": "object", "properties": {field: {"type": "array", "minItems": 1, "items": prose} for field in ("preserve_scope", "exclude_scope")}, "required": ["preserve_scope", "exclude_scope"]}}},
         "relationships": ["segments[].mode_lock must equal mode", "Full creative and file contracts remain owned by Acheng audit/compiler; this schema covers Canvas source fields."],
         "templates": {"segment": {"mode": "Ref2VA", "mode_lock": "Ref2VA", "mode_selection_reason": "Use approved identity and scene references."}, "asset_card": {"recipe": "portrait"}, "style_scope": {"preserve_scope": ["Preserve the approved lighting and palette."], "exclude_scope": ["Do not copy the anchor subject identity."]}},
+        "continuityLedger": continuity_v2_contract(),
     }
 
 
@@ -56,11 +68,17 @@ def validate(source, stage="edit"):
                 if field in value:
                     check(value[field], child, f"{path}.{field}".strip("."), target)
     check(source, contract()["jsonSchema"], "")
+    continuity_issues = []
+    if isinstance(source, dict) and isinstance(source.get("ledger"), dict) and source["ledger"].get("contract_version") == 2:
+        report = audit_continuity_v2(source)
+        for diagnostic in report["diagnostics"]:
+            item = {**diagnostic, "severity": "warning" if stage == "edit" else "error"}
+            continuity_issues.append(item)
     if isinstance(source, dict):
         for i, seg in enumerate(source.get("segments", []) if isinstance(source.get("segments", []), list) else []):
             if isinstance(seg, dict) and "mode_lock" in seg and "mode" in seg and seg["mode_lock"] != seg["mode"]:
                 issue(f"segments.{i}.mode_lock", "mode_lock must equal mode", seg.get("id"))
-    return issues
+    return issues + continuity_issues
 
 
 def main():

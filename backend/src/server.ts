@@ -699,7 +699,7 @@ export function startServer(
   });
   app.post("/dramas/:dramaId/scenes/backfill", (req, res) => {
     try {
-      const result = backfillSceneInstances(db);
+      const result = backfillSceneInstances(db, req.params.dramaId);
       res.json({ ok: true, ...result, scenes: listSceneInstances(db, { dramaId: req.params.dramaId, includeOrphaned: true }) });
     } catch (error) { res.status(409).json({ ok: false, error: String(error) }); }
   });

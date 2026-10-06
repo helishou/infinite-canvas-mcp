@@ -7,6 +7,7 @@ import type { EpisodeProductionService } from "./production.js";
 import { productionCanvasContext } from "./production-canvas.js";
 import { verifyImageInput } from "./image-inputs.js";
 import { productionImageInput } from "@basketikun/canvas-agent/reference-contract";
+import { continuityTargetBlockers } from "./continuity-reports.js";
 
 export type NativeProductionTarget = {
     owner: { kind: "canvas" | "episode"; id: string }; version: number; sourceHash: string;
@@ -61,6 +62,11 @@ export class NativeProductionGeneration {
         } else return { command };
         if (!current.published?.director || current.published.director.sourceHash !== director.sourceHash) throw new Error("请先发布当前制作输入");
         if (kind === "segment" && targets.some(target => !current.published!.clipGroups.some(group => group.id === target.targetId && group.nodeId === command.nodeId && group.segmentId === target.segmentId))) throw new Error("当前 Clip 映射尚未发布");
+        if (kind === "segment" && (current.published!.director!.source.ledger as any)?.contract_version === 2) {
+            const continuity = service.getContinuity(owner.id, { snapshot: "published", view: "summary" });
+            const blockers = continuityTargetBlockers(continuity, targets.map(target => target.targetId));
+            if (blockers.length) throw new Error(`${blockers[0].code}: ${blockers.map(item => item.message).join("；")}`);
+        }
         const artifactIds = kind === "keyframe" ? [director.shotInputs[targetId].keyframeAssetId!] : targets.map(target => target.targetId);
         service.validateExecution(owner.id, current.publishedVersion, artifactIds);
         if (kind === "segment") {

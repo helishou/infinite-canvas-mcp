@@ -4,7 +4,7 @@ import type { CanvasNodeData } from "@/types/canvas";
 export type ProductionObject = {
     owner: NonNullable<ProductionCanvasContext["owner"]>;
     canvasId: string;
-    workspace: "story" | "assets" | "shots" | "production" | "overview";
+    workspace: "story" | "assets" | "shots" | "continuity" | "production" | "overview";
     targetKind?: string;
     targetId?: string;
     nodeId?: string;

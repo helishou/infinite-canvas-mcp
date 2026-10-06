@@ -33,10 +33,11 @@ export type ProductionLayoutReceipt = {
 };
 export const directorPatchFields = {
     brief: ["value"],
+    continuity: ["ledger"],
     style: ["style_policy", "style_policy_reason", "anchor_asset_id"],
     scene: ["scene_name", "heading", "location", "time_of_day", "text"],
     asset: ["asset_name", "name", "title", "kind", "description", "prompt", "depends_on", "role", "version", "reference_role", "canvas_scope"],
-    shot: ["title", "visual", "camera", "start_frame", "end_frame", "state_in", "state_out", "dialogues", "audio", "required_assets", "description", "shot_type"],
+    shot: ["title", "visual", "camera", "start_frame", "end_frame", "dialogues", "audio", "required_assets", "description", "shot_type", "timeline_id", "story_order", "continuity_facts"],
     segment: ["shot_ids", "start_frame", "end_frame", "generation_clip_duration", "mode", "audio", "sound", "overall_soundscape", "non_diegetic_music", "references", "execution_gate"],
 } as const;
 
@@ -200,6 +201,8 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("set_director_production"), director: directorProductionSchema }).strict(),
     z.object({ type: z.literal("set_director_brief"), brief: z.string() }).strict(),
     z.object({ type: z.literal("patch_director_source"), entity: z.enum(["brief", "style", "scene", "asset", "shot", "segment"]), id: id.optional(), patch: z.record(z.unknown()) }).strict(),
+    z.object({ type: z.literal("patch_director_continuity"), ledger: z.record(z.unknown()) }).strict(),
+    z.object({ type: z.literal("upgrade_director_continuity"), fromSourceHash: hash, previewRevision: z.number().int().nonnegative(), previewHash: hash, toRuntimeId: id, ledger: z.record(z.unknown()) }).strict(),
     z.object({ type: z.literal("set_director_workflow"), patch: directorWorkflowSchema.partial() }).strict(),
     z.object({ type: z.literal("bind_director_asset"), assetId: id, nodeId: id }).strict(),
     z.object({ type: z.literal("adopt_shared_asset"), assetId: id, approvedId: id, nodeId: id }).strict(),
@@ -229,7 +232,10 @@ export const productionEditSchema = z.object({ operationId: id, expectedRevision
 export const productionPublishSchema = z.object({ operationId: id, expectedRevision: z.number().int().min(0), stage: z.enum(["script", "shots", "director"]) }).strict();
 export const directorRunStartSchema = z.object({ runId: id, idempotencyKey: id, workId: id.optional(), expectedRevision: z.number().int().min(0), version: z.number().int().min(1), targets: z.array(id).min(1), scope: z.enum(["selected", "all_ready"]).default("selected") }).strict();
 export const directorRunControlSchema = z.object({ runId: id }).strict();
-export const productionContractQuerySchema = z.object({ runtimeId: id.optional(), operationType: id.optional() }).strict();
+export const productionContractQuerySchema = z.object({ runtimeId: id.optional(), operationType: id.optional(), moduleId: z.enum(directorModules).optional() }).strict();
+export const productionContinuityReadSchema = z.object({ snapshot: z.enum(["draft", "published"]).default("draft"), view: z.enum(["summary", "issues", "timeline", "shot"]).default("summary"), targetId: id.optional(), objectId: id.optional(), pageSize: z.coerce.number().int().positive().optional(), cursor: z.string().optional() }).strict();
+export const productionContinuityCheckSchema = z.object({ expectedRevision: z.number().int().nonnegative(), operationId: id, snapshot: z.enum(["draft", "published"]).default("draft"), targetIds: z.array(id).optional() }).strict();
+export const productionContinuityUpgradePreviewSchema = z.object({ expectedRevision: z.number().int().nonnegative(), operationId: id, fromSourceHash: hash, ledger: z.record(z.unknown()) }).strict();
 // Keep requests unparsed at this boundary so invalid inputs produce diagnostics,
 // rather than disappearing into a transport-level schema error.
 export const productionPreflightSchema = z.object({ action: z.enum(["edit", "publish", "compile", "generate"]), request: z.record(z.unknown()) }).strict();

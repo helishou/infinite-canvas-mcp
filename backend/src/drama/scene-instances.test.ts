@@ -103,6 +103,39 @@ test("shot edits change the instance content hash without touching identity", t 
     assert.notEqual(after.sourceHash, before.sourceHash, "content change is visible to downstream");
 });
 
+test("backfill can be scoped to one drama without seeding sibling dramas", t => {
+    const db = fixture(t);
+    db.db.exec(`INSERT INTO canvas_folders (id, name, created_at) VALUES ('drama-2', 'Drama 2', '2026-01-01');
+        INSERT INTO drama_projects (folder_id, outline, description, cover_storage_key, tags_json, updated_at)
+            VALUES ('drama-2', '', '', NULL, '[]', '2026-01-01');
+        INSERT INTO drama_episodes (id, drama_id, episode_number, title, synopsis, full_plot, canvas_id, created_at, updated_at)
+            VALUES ('ep-2', 'drama-2', 1, 'Ep 2', '', '', NULL, '2026-01-01', '2026-01-01');`);
+    const first = JSON.stringify({ director: { source: source() } });
+    const secondSource = source();
+    secondSource.script_scenes = secondSource.script_scenes.map((scene, index) => ({ ...scene, id: `SC1${index}` }));
+    secondSource.shots = secondSource.shots.map((shot, index) => ({ ...shot, source_scene_id: `SC1${index === 0 ? 0 : 2}` }));
+    const second = JSON.stringify({ director: { source: secondSource } });
+    const insert = db.db.prepare("INSERT INTO episode_productions (episode_id, revision, draft_json, published_json, published_version, updated_at) VALUES (?, 1, ?, NULL, 0, '2026-01-01')");
+    insert.run("ep", first);
+    insert.run("ep-2", second);
+
+    assert.deepEqual(backfillSceneInstances(db, "drama"), { dramas: 1, created: 3, skipped: 0 });
+    assert.equal(listSceneInstances(db, { dramaId: "drama" }).length, 3);
+    assert.equal(listSceneInstances(db, { dramaId: "drama-2" }).length, 0);
+    assert.deepEqual(backfillSceneInstances(db, "drama-2"), { dramas: 1, created: 3, skipped: 0 });
+    assert.equal(listSceneInstances(db, { dramaId: "drama-2" }).length, 3);
+});
+
+test("environment registry entries do not become production scenes without authored occurrences", t => {
+    const db = fixture(t);
+    const result = syncSceneInstances(db, { kind: "episode", id: "ep" }, {
+        script_scenes: [], scene_registry: [{ id: "ENV_ROOM", name: "A room" }],
+        shots: [{ id: "SH1", scene_id: "ENV_ROOM" }],
+    });
+    assert.deepEqual(result.created, []);
+    assert.equal(listSceneInstances(db, { dramaId: "drama" }).length, 0);
+});
+
 test("a canvas owner has no drama, so nothing is invented for it", t => {
     const db = fixture(t);
     const result = syncSceneInstances(db, { kind: "canvas", id: "some-canvas" }, source());

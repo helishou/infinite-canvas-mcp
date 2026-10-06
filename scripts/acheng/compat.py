@@ -33,6 +33,8 @@ def apply(root):
     # The upstream floor guard remains; no maximum guard is added.
     bridge = Path(__file__).with_name("source-contract.py")
     (root / "scripts/canvas_source_contract.py").write_bytes(bridge.read_bytes())
+    if not (root / "scripts/continuity_v2.py").is_file():
+        raise RuntimeError("Pinned Acheng source is missing scripts/continuity_v2.py")
     import importlib.util
     spec = importlib.util.spec_from_file_location("canvas_source_contract", bridge)
     module = importlib.util.module_from_spec(spec)

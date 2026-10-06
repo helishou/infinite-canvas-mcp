@@ -153,10 +153,10 @@ export class AchengEngine {
       if (changedCodeContracts.length) {
         const fixes = ['SKILL.md', 'scripts/h3_contract.py', 'scripts/h3_final_format.py', 'scripts/style_anchor.py'];
         if (changedCodeContracts.some(file => !fixes.includes(file))) throw new Error(`Upstream contract changed: ${changedContracts.join(', ')}. Review compatibility before activation. Candidate retained: ${candidate}`);
-        // Retire the local overlay only if the real upstream behavior already
-        // satisfies its tests; a failed textual patch is never evidence of a fix.
-        run(python, ['-B', '-X', 'utf8', path.join(scripts, 'acheng', 'verify.py'), directory]);
-        upstreamFixed = true;
+        // The Canvas contract probe imports the compatibility source schema, so
+        // it cannot run against the raw archive. Apply the reviewed overlay and
+        // validate the composed candidate below; never infer overlay retirement
+        // from a raw upstream-only verification attempt.
       }
       run(python, ['-B', '-X', 'utf8', path.join(scripts, 'acheng', 'restore-source-bytes.py'), directory]);
       // Verify the unchanged upstream suite first; its historical fixtures have

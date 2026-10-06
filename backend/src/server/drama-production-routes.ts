@@ -45,8 +45,20 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         try { res.json({ ok: true, bindings: service.diagnoseBindings(req.params.episodeId) }); }
         catch (error) { handle(res, error); }
     });
+    router.get<Record<string, string>>(`${base}/continuity`, (req, res) => {
+        try { res.json({ ok: true, continuity: service.getContinuity(req.params.episodeId, req.query) }); }
+        catch (error) { handle(res, error); }
+    });
+    router.post<Record<string, string>>(`${base}/continuity/check`, (req, res) => {
+        try { res.json({ ok: true, check: service.checkContinuity(req.params.episodeId, req.body) }); }
+        catch (error) { handle(res, error); }
+    });
+    router.post<Record<string, string>>(`${base}/continuity/upgrade-preview`, (req, res) => {
+        try { res.json({ ok: true, preview: service.previewContinuityUpgrade(req.params.episodeId, req.body) }); }
+        catch (error) { handle(res, error); }
+    });
     if (base === "/drama/episodes/:episodeId/production") router.get("/production/contract", (req, res) => {
-        try { const input = productionContractQuerySchema.parse(req.query); res.json({ ok: true, contract: getProductionContract(input.runtimeId, input.operationType) }); }
+        try { const input = productionContractQuerySchema.parse(req.query); res.json({ ok: true, contract: getProductionContract(input.runtimeId, input.operationType, input.moduleId) }); }
         catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/preflight`, async (req, res) => {

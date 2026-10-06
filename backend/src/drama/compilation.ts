@@ -6,10 +6,11 @@ import { compileAchengDirector } from "@basketikun/canvas-agent/skills/acheng";
 import { canonicalProduction, directorProductionSchema, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import { EpisodeProductionService, ProductionConflictError } from "./production.js";
 import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
+import { continuityTargetBlockers } from "./continuity-reports.js";
 
 const hash = (value: unknown) => crypto.createHash("sha256").update(canonicalProduction(value)).digest("hex");
 type Compiler = typeof compileAchengDirector;
-type CompilationJob = { operationId: string; owner: string; id: string; expectedRevision: number; requestHash: string; baselineHash: string; preparedId: string; director: DirectorProduction; references: Record<string, string>; status: "queued" | "running" | "succeeded" | "blocked" | "failed" | "interrupted"; diagnostics: any[]; result?: any; application?: any; createdAt: string };
+type CompilationJob = { operationId: string; owner: string; id: string; expectedRevision: number; requestHash: string; baselineHash: string; preparedId: string; director: DirectorProduction; references: Record<string, string>; status: "queued" | "running" | "succeeded" | "blocked" | "failed" | "interrupted"; diagnostics: any[]; result?: any; continuityReceipt?: any; application?: any; createdAt: string };
 const pending: Array<{ work: () => Promise<void>; createdAt: string }> = [];
 let draining = false;
 function schedule(work: () => Promise<void>, createdAt: string) {
@@ -27,6 +28,7 @@ function schedule(work: () => Promise<void>, createdAt: string) {
     });
 }
 const activeJobs = new Set<string>();
+const hasFatalCompilationError = (diagnostics: Array<{ severity?: string; targetId?: string }>) => diagnostics.some(item => item.severity === "error" && !item.targetId);
 
 /** Frozen compiler packets are sidecar files; only the existing ops transaction edits production. */
 export class ProductionCompilationService {
@@ -45,7 +47,7 @@ export class ProductionCompilationService {
     getCompilation(id: string, owner: string, operationId: string, view: "status" | "targets" | "diagnostics" = "status", offset = 0, count?: number) {
         const job = this.loadJob(operationId);
         if (!job || job.id !== id || job.owner !== owner) throw new Error("编译回执不存在或不属于当前制作对象");
-        const base = { operationId, status: job.status, expectedRevision: job.expectedRevision, sourceHash: job.result?.sourceHash || job.director.sourceHash, ...(job.status === "succeeded" ? { preparedId: job.preparedId } : {}), application: job.application || this.applicationReceipt(job), mediaSubmitted: false };
+        const base = { operationId, status: job.status, verdict: job.diagnostics.some((item: any) => item.severity === "error") ? "blocked" : "passed", expectedRevision: job.expectedRevision, sourceHash: job.result?.sourceHash || job.director.sourceHash, ...(job.status === "succeeded" ? { preparedId: job.preparedId } : {}), ...(job.continuityReceipt ? { continuityReceipt: job.continuityReceipt } : {}), application: job.application || this.applicationReceipt(job), mediaSubmitted: false };
         if (view === "status") return { ...base, diagnosticCount: job.diagnostics.length, targetCount: job.result?.targets?.length || 0 };
         const items = view === "diagnostics" ? job.diagnostics : job.result?.targets || [];
         if (!count) throw new Error("查询编译列表必须指定 pageSize");
@@ -113,7 +115,7 @@ export class ProductionCompilationService {
                 if (fs.existsSync(this.file(job.preparedId))) {
                     const { packetHash, ...packet } = JSON.parse(fs.readFileSync(this.file(job.preparedId), "utf8"));
                     if (hash(packet) === packetHash && packet.owner === owner && packet.id === job.id) {
-                        job.result = this.shortResult(job.preparedId, packet); job.diagnostics = packet.diagnostics; job.status = job.diagnostics.some(d => d.severity === "error") ? "blocked" : "succeeded";
+                        job.result = this.shortResult(job.preparedId, packet); job.diagnostics = packet.diagnostics; job.continuityReceipt = packet.continuityReceipt; job.status = hasFatalCompilationError(job.diagnostics) ? "blocked" : "succeeded";
                     } else { job.status = "interrupted"; job.diagnostics = [{ code: "INVALID_COMPILATION_PACKET", severity: "error", message: "恢复的编译包完整性校验失败" }]; }
                 } else { job.status = "interrupted"; job.diagnostics = [{ code: "COMPILATION_INTERRUPTED", severity: "error", message: "服务重启中断编译；已确认未完成，不自动重跑" }]; }
                 this.saveJob(job);
@@ -122,6 +124,21 @@ export class ProductionCompilationService {
     }
     private shortResult(preparedId: string, packet: any) {
         return { preparedId, sourceHash: packet.director.sourceHash, targets: packet.director.artifacts.map((a: any) => ({ id: a.id, targetId: a.targetId, kind: a.kind, status: a.status, sha256: a.sha256, referenceCount: a.references.length })) };
+    }
+    private applyContinuityGate(id: string, director: DirectorProduction, diagnostics: any[]) {
+        if ((director.source.ledger as any)?.contract_version !== 2) return undefined;
+        const continuity = this.service.continuityForDirector(id, director);
+        for (const artifact of director.artifacts.filter(item => item.kind === "h3" && item.status === "ready")) {
+            const blockers = continuityTargetBlockers(continuity, [artifact.targetId]);
+            if (!blockers.length) continue;
+            artifact.status = "draft";
+            artifact.receipt = { ...artifact.receipt, continuityDiagnostics: blockers };
+            diagnostics.push(...blockers.map(blocker => ({ code: blocker.code, path: `artifacts.${artifact.targetId}.continuity`, targetId: artifact.targetId,
+                message: blocker.message, severity: "error" })));
+        }
+        return { sourceHash: director.sourceHash, runtimeId: director.engine.runtimeId, reportSourceHash: continuity.report?.sourceHash || null,
+            reportRuntimeId: continuity.report?.runtimeId || null, reportOperationId: continuity.report?.operationId || null,
+            checkedAt: continuity.report?.checkedAt || null, status: continuity.status };
     }
     private scheduleJob(job: CompilationJob) {
         const key = this.jobFile(job.operationId);
@@ -147,12 +164,14 @@ export class ProductionCompilationService {
                     worker.once("exit", code => { if (!delivered) reject(new Error(`编译执行单元退出 (${code})`)); });
                 });
                 if (compiled.director.workflow.currentWork) compiled.director.workflow.currentWork = { ...compiled.director.workflow.currentWork, inputRevision: job.expectedRevision, sourceHash: compiled.director.sourceHash };
-                const packet = { owner: job.owner, id: job.id, expectedRevision: job.expectedRevision, baselineHash: job.baselineHash, operationId: `compilation:${job.preparedId}`, resultHash: hash(compiled.director), ...compiled };
+                const continuityReceipt = this.applyContinuityGate(job.id, compiled.director, compiled.diagnostics);
+                job.continuityReceipt = continuityReceipt;
+                const packet = { owner: job.owner, id: job.id, expectedRevision: job.expectedRevision, baselineHash: job.baselineHash, operationId: `compilation:${job.preparedId}`, resultHash: hash(compiled.director), ...compiled, continuityReceipt };
                 fs.mkdirSync(directory, { recursive: true });
                 const temporary = this.file(job.preparedId) + ".tmp";
                 fs.writeFileSync(temporary, JSON.stringify({ ...packet, packetHash: hash(packet) }), "utf8"); fs.renameSync(temporary, this.file(job.preparedId));
                 job.result = this.shortResult(job.preparedId, packet); job.diagnostics = compiled.diagnostics;
-                job.status = compiled.diagnostics.some(d => d.severity === "error") ? "blocked" : "succeeded";
+                job.status = hasFatalCompilationError(compiled.diagnostics) ? "blocked" : "succeeded";
             } catch (error) {
                 job.status = error instanceof ProductionValidationError ? "blocked" : "failed";
                 job.diagnostics = error instanceof ProductionValidationError ? error.diagnostics : [{ code: "COMPILATION_FAILED", path: "compile", message: error instanceof Error ? error.message : String(error), severity: "error" }];
@@ -177,14 +196,15 @@ export class ProductionCompilationService {
         const preparedId = crypto.randomUUID();
         const directory = path.join(this.root, preparedId);
         const compiled = this.compiler(director, directory, (targetId, label) => this.service.compilationReferenceFile(id, director, targetId, label));
+        const continuityReceipt = this.applyContinuityGate(id, compiled.director, compiled.diagnostics);
         if (compiled.director.workflow.currentWork) {
             compiled.director.workflow.currentWork = { ...compiled.director.workflow.currentWork, inputRevision: expectedRevision, sourceHash: compiled.director.sourceHash };
         }
         if (hash(this.service.get(id).draft.director) !== hash(current.draft.director) || this.service.get(id).revision !== expectedRevision) throw new ProductionConflictError(this.service.get(id));
-        const packet = { owner, id, expectedRevision, baselineHash: hash(current.draft.director), operationId: `compilation:${preparedId}`, resultHash: hash(compiled.director), ...compiled };
+        const packet = { owner, id, expectedRevision, baselineHash: hash(current.draft.director), operationId: `compilation:${preparedId}`, resultHash: hash(compiled.director), ...compiled, continuityReceipt };
         fs.mkdirSync(directory, { recursive: true });
         fs.writeFileSync(this.file(preparedId), JSON.stringify({ ...packet, packetHash: hash(packet) }), { encoding: "utf8", flag: "wx" });
-        return { preparedId, operationId: packet.operationId, expectedRevision, sourceHash: compiled.director.sourceHash, engine: director.engine, diagnostics: compiled.diagnostics,
+        return { preparedId, operationId: packet.operationId, expectedRevision, sourceHash: compiled.director.sourceHash, engine: director.engine, continuityReceipt, diagnostics: compiled.diagnostics,
             audit: compiled.audit, sourceAdjustments: compiled.sourceAdjustments, targets: compiled.director.artifacts.map(a => ({ id: a.id, targetId: a.targetId, kind: a.kind, status: a.status, sha256: a.sha256, references: a.references, diagnostics: a.receipt.diagnostics })), mediaSubmitted: false };
     }
 
@@ -193,12 +213,22 @@ export class ProductionCompilationService {
         if (hash(packet) !== packetHash) throw new Error("Frozen compilation bytes changed");
         if (packet.owner !== owner || packet.id !== id) throw new Error("Compilation belongs to a different production");
         if (hash(packet.director) !== packet.resultHash) throw new Error("Frozen compilation bytes changed");
-        if (packet.diagnostics.some((d: { severity: string }) => d.severity === "error")) throw new Error("Compilation has unresolved errors; correct its source and prepare a new packet");
+        if (hasFatalCompilationError(packet.diagnostics)) throw new Error("Compilation has unresolved global errors; correct its source and prepare a new packet");
         const current = this.service.get(id);
         // Let the ops service recover an already committed operation before its revision check.
         if (current.revision === packet.expectedRevision) {
             if (hash(current.draft.director) !== packet.baselineHash) throw new ProductionConflictError(current);
             this.service.verifyCompilationBindings(id, packet.director);
+            if (packet.continuityReceipt) {
+                const readyTargets = packet.director.artifacts.filter((item: any) => item.kind === "h3" && item.status === "ready").map((item: any) => item.targetId);
+                if (readyTargets.length) {
+                    const continuity = this.service.continuityForDirector(id, packet.director);
+                    if (continuity.report?.sourceHash !== packet.continuityReceipt.reportSourceHash || continuity.report?.runtimeId !== packet.continuityReceipt.reportRuntimeId ||
+                        (continuity.report?.operationId || null) !== packet.continuityReceipt.reportOperationId) throw new Error("CONTINUITY_PACKET_STALE: 连续性检查回执在编译后已变化，请重新编译");
+                    const blockers = continuityTargetBlockers(continuity, readyTargets);
+                    if (blockers.length) throw new Error(`CONTINUITY_PACKET_BLOCKED: ${blockers.map(item => item.message).join("；")}`);
+                }
+            }
         }
         const result = this.service.edit(id, { operationId: packet.operationId, expectedRevision: packet.expectedRevision, ops: [{ type: "set_director_production", director: packet.director }] });
         const receipt = { referenceSync: result.referenceSync, revision: result.revision, replayed: result.replayed === true, publishedVersion: result.publishedVersion, sourceHash: result.draft.director?.sourceHash, operationId: packet.operationId, mediaSubmitted: false };

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, App, Button, Input, Tag } from "antd";
-import { ArrowLeft, Clapperboard, ExternalLink, FileText, Image, ListChecks, PackageOpen, Settings2 } from "lucide-react";
+import { Activity, ArrowLeft, Clapperboard, ExternalLink, FileText, Image, ListChecks, PackageOpen, Settings2 } from "lucide-react";
 import localforage from "localforage";
 import { nanoid } from "nanoid";
 import { useTranslation } from "react-i18next";
@@ -23,6 +23,7 @@ import {
   fetchBackendCanvasDrama, fetchBackendDramaEpisode, fetchBackendProject, fetchBackendScene, ensureSceneCanvas, fetchEpisodeProduction,
   fetchEpisodeProductionLegacy, fetchEpisodeProductionVersions, fetchProductionBatch, fetchProductionBatches,
   fetchProductionReadiness, pauseProductionBatch, publishEpisodeProduction, restoreEpisodeProduction,
+  checkProductionContinuity, fetchProductionContinuity, previewProductionContinuityUpgrade, type ProductionContinuity,
   resumeProductionBatch, startProductionRun, type DramaEpisode, type EpisodeProduction, type SceneInstance,
   type ProductionBatch, type ProductionReadiness, type ProductionTarget, type ProductionCanvasContext,
   prepareProductionTargets, arrangeProductionScene, adoptProductionSharedAsset, ensureSharedAssetCanvas, fetchProductionCanvasContext,
@@ -49,7 +50,7 @@ function writeLocalDraft(key: string, value: LocalDraft | null) {
 }
 const workspaces: Array<{ key: DirectorWorkspace; icon: typeof ListChecks }> = [
   { key: "overview", icon: ListChecks }, { key: "story", icon: FileText },
-  { key: "assets", icon: PackageOpen }, { key: "shots", icon: Clapperboard },
+  { key: "assets", icon: PackageOpen }, { key: "shots", icon: Clapperboard }, { key: "continuity", icon: Activity },
   { key: "production", icon: Image }, { key: "advanced", icon: Settings2 },
 ];
 
@@ -62,6 +63,8 @@ export default function ProductionRoute() {
   const { t } = useTranslation();
   useEffect(() => {
     let active = true;
+    setDirectEpisodeEditor(false);
+    setError("");
     void (async () => {
       await ensureCanvasDraftLease();
       let canvasId = projectId || "";
@@ -124,6 +127,8 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
   const [canvasNodes, setCanvasNodes] = useState<Array<{ id: string; title?: string; type?: string; metadata?: Record<string, unknown> }>>([]);
   const [production, setProduction] = useState<EpisodeProduction | null>(null);
   const [readiness, setReadiness] = useState<ProductionReadiness | null>(null);
+  const [continuityReport, setContinuityReport] = useState<ProductionContinuity | undefined>();
+  const [continuitySnapshot, setContinuitySnapshot] = useState<"draft" | "published">("draft");
   const [legacy, setLegacy] = useState<LegacySource[]>([]);
   const [versions, setVersions] = useState<VersionItem[]>([]);
   const [batches, setBatches] = useState<ProductionBatch[]>([]);
@@ -190,9 +195,9 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
           const episode = result.episode;
           return { ...result, scene: null, productionContext: { role: "episode" as const, canvasId: episode.canvasId || "", episodeId: episode.id, dramaId: episode.dramaId, owner: { kind: "episode" as const, id: episode.id } } };
         });
-    const [context, prod, old, history, ready, runHistory] = await Promise.all([
+    const [context, prod, old, history, ready, runHistory, continuity] = await Promise.all([
       contextRequest, fetchEpisodeProduction(target), fetchEpisodeProductionLegacy(target), fetchEpisodeProductionVersions(target),
-      fetchProductionReadiness(target), fetchProductionBatches(target),
+      fetchProductionReadiness(target), fetchProductionBatches(target), fetchProductionContinuity(target),
     ]);
     const resolvedCanvasId = sceneId ? context.productionContext.canvasId || context.scene?.canvasId || "" : projectId || context.episode?.canvasId || "";
     const taskNodes = [...new Set([...(prod.production.draft.clipGroups || []).map(group => group.nodeId), ...Object.values(prod.production.draft.director?.assets || {}).map(asset => asset.nodeId)].filter((id): id is string => Boolean(id)))];
@@ -206,13 +211,14 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
     setCanvasNodes((context.canvas?.nodes || []) as Array<{ id: string; title?: string; type?: string; metadata?: Record<string, unknown> }>);
     setProduction(prod.production);
     setReadiness(ready.readiness);
+    setContinuityReport(continuity.continuity);
     setLegacy(old.sources);
     setVersions(history.versions);
     setBatches(runHistory.runs);
     setRuntimeTasks(tasks);
     if (!preserveBrief) setBriefDraft(String(prod.production.draft.director?.source.brief || ""));
     setLoadError("");
-    return context.scene?.id || context.episode?.id || (projectId ? `canvas:${projectId}` : episodeId);
+    return context.scene ? `scene:${context.scene.id}` : context.episode?.id || (projectId ? `canvas:${projectId}` : episodeId);
   }, [target, projectId, contextProjectId, episodeId, sceneId, t]);
 
   useEffect(() => {
@@ -303,17 +309,18 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
   const refreshRemote = useCallback(async () => {
     const sequence = ++remoteSequence.current;
     const taskNodes = [...new Set([...(production?.draft.clipGroups || []).map(group => group.nodeId), ...Object.values(production?.draft.director?.assets || {}).map(asset => asset.nodeId)].filter((id): id is string => Boolean(id)))];
-    const [prod, ready, history, runHistory, canvas, tasks] = await Promise.all([
+    const [prod, ready, history, runHistory, canvas, tasks, continuity] = await Promise.all([
       fetchEpisodeProduction(target), fetchProductionReadiness(target), fetchEpisodeProductionVersions(target), fetchProductionBatches(target),
-      canvasId ? fetchBackendProject(canvasId).then(value => value.project) : Promise.resolve(null),
+      fetchBackendProject(canvasId).then(value => value.project).catch(() => null),
       canvasId && taskNodes.length ? fetchBackendTasks({ projectId: canvasId, nodeIds: taskNodes }).then(value => value.tasks || []) : Promise.resolve([]),
+      fetchProductionContinuity(target, { snapshot: continuitySnapshot }),
     ]);
     if (sequence !== remoteSequence.current) return prod.production;
-    setProduction(prod.production); setReadiness(ready.readiness); setVersions(history.versions); setBatches(runHistory.runs);
+    setProduction(prod.production); setReadiness(ready.readiness); setContinuityReport(continuity.continuity); setVersions(history.versions); setBatches(runHistory.runs);
     setRuntimeTasks(tasks);
     if (canvas) setCanvasNodes((canvas.nodes || []) as Array<{ id: string; title?: string; type?: string; metadata?: Record<string, unknown> }>);
     return prod.production;
-  }, [target, canvasId, production?.draft.clipGroups, production?.draft.director?.assets]);
+  }, [target, canvasId, continuitySnapshot, production?.draft.clipGroups, production?.draft.director?.assets]);
 
   useEffect(() => {
     const onProductionEvent = (event: Event) => {
@@ -557,7 +564,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
     if (agent.sending || agent.waiting || agent.loadingThreads || ["preparing", "running"].includes(agent.conversation.status)) return message.warning(t("director.workspace.agentBusy"));
     const moduleForWorkspace: Record<DirectorWorkspace, Array<(typeof directorModules)[number]>> = {
       overview: ["story", "assets", "shots", "performance", "effects", "model", "continuity"],
-      story: ["story"], assets: ["assets"], shots: ["shots", "performance", "effects"], production: ["model", "continuity"], advanced: ["continuity"],
+      story: ["story"], assets: ["assets"], shots: ["shots", "performance", "effects"], continuity: ["continuity"], production: ["model"], advanced: ["continuity"],
     };
     const readinessNow = await fetchProductionReadiness(target).then(result => result.readiness);
     setReadiness(readinessNow);
@@ -565,19 +572,20 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
     const cursors = Object.fromEntries(moduleForWorkspace[scope.workspace].map(module => [module, director.modules[module]?.cursor ?? null]));
     const selectedModules = moduleForWorkspace[scope.workspace].join(", ");
     const drama = useCanvasStore.getState().folders.find(folder => folder.id === episode?.dramaId || folder.sharedAssetCanvasId === canvasId);
-    const key = projectId || episodeId;
+    const key = productionOwner.id;
     const id = nanoid();
-    const ownerKind = projectId ? "canvas" : "episode";
+    const ownerKind = productionOwner.kind;
     const followTarget = useProductionFollowStore.getState().target;
     const workId = scope.workId || (followTarget?.kind === ownerKind && followTarget.id === key ? followTarget.workId : nanoid());
     const text = [
       "$acheng-director",
       "这是导演工作台发起的独立阶段任务。按 Acheng 七模块规范完成本次范围，不把七个模块当成顺序关卡，不启动其他代理。涉及画布数据或媒体时，先读取项目 Skill canvas-video-production-sop 作为 Backend 与原生 MCP 适配；适配层不替代 Acheng 创作权属。",
       ACHENG_CANVAS_LANGUAGE_RULE,
-      `制作对象：${key}；对象类型：${projectId ? "canvas" : "episode"}`,
+      `制作对象：${key}；对象类型：${ownerKind}`,
       `Backend 正式 revision：${currentProduction.revision}；已发布版本：${currentProduction.publishedVersion}`,
       `固定引擎：${director.engine.version} / ${director.engine.runtimeId} / commit ${director.engine.commit}`,
       `本次工作区：${scope.workspace}；调用模块：${selectedModules}`,
+      ...(scope.workspace === "continuity" ? ["开始 continuity 写入前，调用 production_get_contract({runtimeId: 固定引擎 runtimeId, moduleId: \"continuity\"})，实际读取返回的模块入口与必读合同，再按该回执的 owner 规则修改源稿。当前 scope 必须有源哈希匹配的连续性覆盖及重放回执；诊断旧版只读，不自动迁移。"] : []),
       `分镜图模式：${storyboardImageMode || "尚未设置"}`,
       "若本对象尚未开始镜头设计且分镜图模式尚未设置，先通过正式 workflow.pendingDecisions 询问用户生成分镜图或跳过图片、只保留文字分镜；将答复写入正式 settings.storyboardImageMode（generate/skip）后再继续。skip 时保留文字 Shot、Segment 和 H3 提示词，所有 shotInputs.keyframePolicy 设为 none，不登记、准备或生成关键帧图片；角色、场景、道具等其他资产仍按制作需要处理。",
       `内容交付模式：${director.workflow.contentDeliveryMode || "auto_file_batch"}；媒体生产模式：${director.workflow.mediaProductionMode || "per_item"}`,
@@ -620,6 +628,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
   };
 
   const startRun = async (targets: string[], scope: "selected" | "all_ready" = "selected") => {
+    if (productionOwner.kind === "scene") return void message.info(t("director.workspace.sceneGenerationUnavailable"));
     if (!production || !targets.length) return;
     if (startingRunRef.current) return;
     if (pendingRunStartRef.current) return void message.warning(t("director.workspace.runReceiptUnknown"));
@@ -643,7 +652,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
       const focussedProduction = await fetchEpisodeProduction(target).then(value => value.production);
       setProduction(focussedProduction);
       setReadiness((await fetchProductionReadiness(target)).readiness);
-      useProductionFollowStore.getState().setTarget({ kind: projectId ? "canvas" : "episode", id: projectId || episodeId, workId, threadId: focussedProduction.draft.director?.workflow.agentThreadId || useAgentStore.getState().activeThreadId || undefined });
+      useProductionFollowStore.getState().setTarget({ ...productionOwner, workId, threadId: focussedProduction.draft.director?.workflow.agentThreadId || useAgentStore.getState().activeThreadId || undefined });
       const request: PendingRunStart = { runId, idempotencyKey: runId, workId, expectedRevision: focussedProduction.revision, version: focussedProduction.publishedVersion, targets: [...targets], scope };
       setPendingRun(request);
       pendingRunStartRef.current = request;
@@ -820,6 +829,43 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
   }, [embedded, owner?.kind, owner?.id, production, canvasId, busy, draftKey, briefDraft, sourceDrafts, remoteRevision, pendingRunStart, batches, navigate, t]);
   const regroupSegment = async (segmentId: string, shotIds: string[], removeSegmentIds: string[]) => edit([{ type: "set_director_segment_group", segmentId, shotIds, removeSegmentIds }]);
   const patchSource = async (entity: "style" | "scene" | "asset" | "shot" | "segment", id: string | undefined, patch: Record<string, unknown>) => edit([{ type: "patch_director_source", entity, ...(id ? { id } : {}), patch }]);
+  const saveContinuity = async (ledger: Record<string, unknown>, upgradePreview?: Record<string, any>) => {
+    if (!production) return false;
+    const agentState = useAgentStore.getState();
+    if (upgradePreview && (agentState.sending || agentState.waiting || ["preparing", "running"].includes(agentState.conversation.status))) {
+      message.warning(t("director.workspace.continuity.upgradeWaitAgent"));
+      return false;
+    }
+    if (upgradePreview?.activeRuns?.length) {
+      message.warning(t("director.workspace.continuity.upgradeWaitRuns", { count: upgradePreview.activeRuns.length }));
+      return false;
+    }
+    if (upgradePreview) return await new Promise<boolean>(resolve => modal.confirm({
+      title: t("director.workspace.continuity.confirmUpgradeTitle"), content: t("director.workspace.continuity.confirmUpgradeBody"),
+      okText: t("director.workspace.continuity.applyUpgrade"), cancelText: t("common.cancel"),
+      onOk: async () => resolve(await edit([{ type: "upgrade_director_continuity", fromSourceHash: String(upgradePreview.fromSourceHash), previewRevision: Number(upgradePreview.revision), previewHash: String(upgradePreview.previewHash), toRuntimeId: String(upgradePreview.targetRuntime?.runtimeId), ledger }])),
+      onCancel: () => resolve(false),
+    }));
+    return edit([{ type: "patch_director_continuity", ledger }]);
+  };
+  const previewContinuityUpgrade = async (ledger: Record<string, unknown>, fromSourceHash: string) => {
+    if (!production) throw new Error(t("director.loadFailed"));
+    return (await previewProductionContinuityUpgrade(target, { expectedRevision: production.revision, operationId: nanoid(), fromSourceHash, ledger })).preview;
+  };
+  const checkContinuity = async () => {
+    if (!production || busy || pendingCommandRef.current) return;
+    setBusy(true);
+    try {
+      await checkProductionContinuity(target, { expectedRevision: production.revision, operationId: nanoid(), snapshot: continuitySnapshot });
+      const [continuity, ready] = await Promise.all([fetchProductionContinuity(target, { snapshot: continuitySnapshot }), fetchProductionReadiness(target)]);
+      setContinuityReport(continuity.continuity); setReadiness(ready.readiness);
+    } catch (error) { fail(error); }
+    finally { setBusy(false); }
+  };
+  const changeContinuitySnapshot = (snapshot: "draft" | "published") => {
+    setContinuitySnapshot(snapshot);
+    void fetchProductionContinuity(target, { snapshot }).then(value => setContinuityReport(value.continuity)).catch(fail);
+  };
   const openSharedAsset = async (assetId: string, assetTitle: string) => {
     if (!productionContext?.dramaId) throw new Error(t("director.workspace.sharedCanvasUnavailable"));
     const { project, context } = await ensureSharedAssetCanvas(productionContext.dramaId);
@@ -928,7 +974,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
   return <main ref={editorRootRef} data-production-inspector={embedded && !dialog || undefined} data-production-dialog={dialog || undefined} className={embedded ? "min-h-full bg-background p-3 text-foreground" : "min-h-full bg-background px-4 py-4 text-foreground sm:px-6 lg:px-8"}>
     <div className="mx-auto max-w-[1440px]">
       {!embedded && <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-3"><Button type="text" icon={<ArrowLeft className="size-4" />} onClick={() => navigate(backPath)}>{t("director.back")}</Button><div><h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{title || t("director.title")}</h1><p className="mt-1 text-xs text-muted-foreground">{episode ? t("director.episodeContext", { number: episode.episodeNumber }) : t("director.canvasContext")}</p></div></div>
+        <div className="flex flex-wrap items-center gap-3"><Button type="text" icon={<ArrowLeft className="size-4" />} onClick={() => navigate(backPath)}>{t("director.back")}</Button><div><h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{title || t("director.title")}</h1><p className="mt-1 text-xs text-muted-foreground">{scene ? `${episode ? t("drama.episodeLabel", { number: episode.episodeNumber }) : ""} · ${t("drama.sceneNumberLabel", { number: scene.sceneOrder + 1 })}` : episode ? t("director.episodeContext", { number: episode.episodeNumber }) : t("director.canvasContext")}</p></div></div>
         <div className="flex flex-wrap items-center gap-2"><span className="text-xs text-muted-foreground">{t(Object.keys(sourceDrafts).length ? "director.studio.localDraft" : "director.studio.saved")}</span>{production.publishedVersion > 0 && <Tag>{t("director.studio.published", { number: production.publishedVersion })}</Tag>}{canvasId && <Button icon={<ExternalLink className="size-4" />} onClick={() => navigate(`/canvas/${encodeURIComponent(canvasId)}`)}>{t("drama.production.openCanvas")}</Button>}</div>
       </div>}
       {agentError && <Alert className="mb-4" type="warning" showIcon message={agentError} closable onClose={() => setAgentError("")} />}
@@ -952,14 +998,14 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
           <section aria-label={t(`director.workspace.tab.${workspace}`)} className="min-w-0 py-6">
             {embedded && workspace === "assets" && (!/^(asset|frame):/.test(routeTarget) || productionContext?.role === "shared-assets") && <SharedAssetsPicker />}
             <DirectorPanel
-              embedded={embedded} compact={dialog} onSaveScript={saveSceneDrafts}
-              workspace={workspace} director={production.draft.director} production={production} readiness={readiness || undefined} run={run} batches={batches} runtimeTasks={runtimeTasks}
-              canvasNodes={canvasNodes} legacy={legacy} versions={versions} busy={busy} canvasId={canvasId} canvasRole={productionContext?.role || (projectId ? "ordinary" : "episode")} focusTarget={routeTarget}
+              embedded={embedded} compact={dialog} generationSupported={productionOwner.kind !== "scene"} onSaveScript={saveSceneDrafts}
+              workspace={workspace} director={production.draft.director} production={production} readiness={readiness || undefined} continuityReport={continuityReport} run={run} batches={batches} runtimeTasks={runtimeTasks}
+              canvasNodes={canvasNodes} legacy={legacy} versions={versions} busy={busy} canvasId={canvasId} canvasRole={productionContext?.role || (projectId ? "ordinary" : sceneId ? "scene" : "episode")} focusTarget={routeTarget}
               sourceDrafts={sourceDrafts} onSourceDraftChange={setSourceDraft}
               briefDraft={briefDraft} onBriefDraftChange={setBriefDraft}
               onBrief={saveBrief} onPatch={patchSource} onRegroup={regroupSegment} onWorkflow={setWorkflow} onSettings={patch => void edit([{ type: 'set_settings', patch }])} onBindAsset={(assetId, nodeId) => void bindAsset(assetId, nodeId)}
               onOpenSharedAsset={(assetId, title) => void openSharedAsset(assetId, title).catch(fail)} onPromoteExistingSharedAsset={(assetId, title) => void promoteExistingSharedAsset(assetId, title).catch(fail)}
-              onBoundary={setBoundary} onReview={reviewAsset} onPublish={() => void publish()}
+              onBoundary={setBoundary} onReview={reviewAsset} onPublish={() => void publish()} onSaveContinuity={saveContinuity} onPreviewContinuityUpgrade={previewContinuityUpgrade} onCheckContinuity={checkContinuity} onContinuitySnapshot={changeContinuitySnapshot}
               onReplace={value => void replaceDirector(value)} onAskDirector={scope => void askDirector(scope)} onNavigate={navigateWorkspace}
               onLocateTarget={(kind, id) => {
                 const group = production.draft.clipGroups.find(group => group.id === id);

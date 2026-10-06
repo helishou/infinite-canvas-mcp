@@ -102,6 +102,8 @@ export const toolNames = [
   "drama_delete_episode",
   "drama_get_production",
   "production_get_contract",
+  "production_get_continuity",
+  "production_check_continuity",
   ...productionWorkspaceToolNames,
   "production_compile",
   "production_get_compilation",

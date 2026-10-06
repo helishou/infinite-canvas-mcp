@@ -6,8 +6,32 @@ import test from "node:test";
 
 import { BackendClient, BackendClientError } from "./backend-client.js";
 import { createBackendClient } from "./comfy-client.js";
+import { productionContractQuerySchema } from "../drama/production-contract.js";
 
 const client = new BackendClient("http://backend.test", "test-token");
+
+test("API authentication leaves strict production queries clean and preserves JSON requests", async () => {
+  const requests: string[] = [];
+  await withFetch(async (input, init) => {
+    const url = new URL(String(input));
+    const headers = new Headers(init?.headers);
+    assert.equal(headers.get("authorization"), "Bearer test-token");
+    assert.equal(url.searchParams.has("token"), false);
+    requests.push(url.pathname);
+    if (init?.method === "GET") {
+      productionContractQuerySchema.parse(Object.fromEntries(url.searchParams));
+    } else {
+      assert.equal(headers.get("content-type"), "application/json");
+      assert.deepEqual(JSON.parse(String(init?.body)), { value: 1 });
+    }
+    return Response.json({ ok: true });
+  }, async () => {
+    await client.get("/production/contract?");
+    await client.get("/production/contract?runtimeId=pinned&operationType=set_settings");
+    await client.post("/example", { value: 1 });
+  });
+  assert.equal(requests.length, 3);
+});
 
 test("production rejection diagnostics and concrete next actions survive HTTP transport", async () => {
   const diagnostic = { code: "TARGET_AWAITING_REVIEW", path: "request.targets", message: "Review the original result", severity: "error", blockingRun: { runId: "original", status: "awaiting_review", taskIds: ["task"] } };
@@ -139,7 +163,7 @@ test("BackendClient reads one project by id without listing every canvas", async
     async () => {
       const project = await client.getCanvasProject("project/1");
       assert.deepEqual(project, { id: "project/1", revision: 4 });
-      assert.match(requestedUrl, /\/canvas\/projects\/project%2F1\?/);
+      assert.equal(new URL(requestedUrl).pathname, "/canvas/projects/project%2F1");
     },
   );
 });

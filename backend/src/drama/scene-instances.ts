@@ -52,7 +52,7 @@ export function syncSceneInstances(db: BackendDatabase, owner: { kind: "episode"
     if (owner.kind !== "episode") return { created: [], updated: [], renamed: [], reordered: [], unchanged: 0, orphaned: [] };
     const episode = db.getDramaEpisode(owner.id);
     if (!episode?.dramaId) throw new Error("分集不属于任何剧目，无法登记制作场次");
-    const entries = productionSceneEntries(source);
+    const entries = Array.isArray(source.script_scenes) && source.script_scenes.length ? productionSceneEntries(source) : [];
     const now = new Date().toISOString();
     const created: string[] = [], updated: string[] = [], renamed: string[] = [], reordered: string[] = [], orphaned: string[] = [];
     let unchanged = 0;
@@ -88,11 +88,12 @@ export function syncSceneInstances(db: BackendDatabase, owner: { kind: "episode"
 }
 
 /** Seed every occurrence that existing episode productions already authored, without touching their canvases or media. */
-export function backfillSceneInstances(db: BackendDatabase): { dramas: number; created: number; skipped: number } {
+export function backfillSceneInstances(db: BackendDatabase, requestedDramaId?: string): { dramas: number; created: number; skipped: number } {
     const touched = new Set<string>();
     let created = 0, skipped = 0;
-    const productions = db.db.prepare(`SELECT p.episode_id AS owner_id, p.draft_json AS draft_json FROM episode_productions p
-        JOIN drama_episodes e ON e.id = p.episode_id WHERE e.drama_id IS NOT NULL`).all() as Array<{ owner_id: string; draft_json: string }>;
+    const sql = `SELECT p.episode_id AS owner_id, p.draft_json AS draft_json FROM episode_productions p
+        JOIN drama_episodes e ON e.id = p.episode_id WHERE e.drama_id IS NOT NULL${requestedDramaId ? " AND e.drama_id = ?" : ""}`;
+    const productions = (requestedDramaId ? db.db.prepare(sql).all(requestedDramaId) : db.db.prepare(sql).all()) as Array<{ owner_id: string; draft_json: string }>;
     db.db.exec("BEGIN IMMEDIATE");
     try {
         for (const row of productions) {

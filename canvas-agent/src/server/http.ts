@@ -727,6 +727,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         const query = new URLSearchParams();
         if (input.runtimeId) query.set("runtimeId", String(input.runtimeId));
         if (input.operationType) query.set("operationType", String(input.operationType));
+        if (input.moduleId) query.set("moduleId", String(input.moduleId));
         return void res.json({ ok: true, result: await backend.get(`/production/contract?${query}`) });
       }
       if (["production_compile", "production_get_compilation", "production_apply_compilation", "production_diagnose_bindings"].includes(name)) {
