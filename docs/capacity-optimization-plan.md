@@ -1,7 +1,7 @@
 # Infinite Canvas 数据库容量优化 — 最终实施方案 v3
 
-> 状态：方案定稿，未实施。所有删除、迁移、故障注入和文件压缩先在一致性副本验证；真实库维护及服务停止另行授权。
-> 代码核验基线：`8c8ea394`，数据库 schema v31。实施前重新核对 HEAD、schema、工作树和实际运行路径，保护已有修改。
+> 状态：**已全部实施（2026-10-06）**。代码第 1~4 步落地（schema v32）；真实库维护第 6 步执行完毕：prune 202 任务 + re-baseline 7 项目删 68,721 batches + VACUUM 770.6→606.9MB。详见 §11。
+> 代码核验基线：`8c8ea394`，数据库 schema v31 → 实施后 v32。
 > 本方案只处理数据库记录及其回收；不删除媒体、用户 outbox、冲突草稿、制作稿或版本，不自动提交生成任务。
 
 ## 1. 最终决策
@@ -399,7 +399,7 @@ node --import tsx --test src/canvas/history-maintenance.test.ts
 1. `canvas_operation_batches` 130.8 MB —— 需按项目 re-baseline（第 2 步 CLI 已就绪，22 项目全 blocked，需逐个诊断准入）。
 2. `episode_production_operations` 280.9 MB —— receipt 双份/大字段，压缩/去重另立方案（§后续）。
 
-### 11.4 第 6 步执行授权清单（未执行，待用户点头）
+### 11.4 第 6 步执行记录（2026-10-06 全部执行完毕）
 
 1. 生产库 v32 迁移已随 backend 重启自动完成（schema 32，tombstone 表已建）。
 2. ~~`prune-runtime-history --apply`~~ **已执行（2026-10-06）**：生产库删 202 任务
