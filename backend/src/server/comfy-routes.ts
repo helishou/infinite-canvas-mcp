@@ -39,11 +39,18 @@ export function registerComfyRoutes(ctx: { app: import("express").Express; store
     app.get(routePath("/comfy/presets"), (_req, res) => res.json({ ok: true, data: bridge.presets() }));
 
     app.post(routePath("/comfy/tasks"), async (req, res) => {
-        const task = await bridge.run(
-            String(req.body?.preset || ""), objectBody(req.body?.input), objectBody(req.body?.params),
-            typeof req.body?.comfyUrl === "string" ? req.body.comfyUrl : undefined,
-            typeof req.body?.clientTaskId === "string" && req.body.clientTaskId ? req.body.clientTaskId : undefined,
-        );
+        let task;
+        try {
+            task = await bridge.run(
+                String(req.body?.preset || ""), objectBody(req.body?.input), objectBody(req.body?.params),
+                typeof req.body?.comfyUrl === "string" ? req.body.comfyUrl : undefined,
+                typeof req.body?.clientTaskId === "string" && req.body.clientTaskId ? req.body.clientTaskId : undefined,
+            );
+        } catch (error) {
+            const e = error as { code?: string };
+            if (e.code === "TASK_HISTORY_PRUNED") return void res.status(410).json({ ok: false, code: "TASK_HISTORY_PRUNED", retryable: false, taskId: typeof req.body?.clientTaskId === "string" ? req.body.clientTaskId : null, error: "任务历史已被容量清理，不能复用已清理 ID" });
+            throw error;
+        }
         ctx.events?.publish({ type: "task.created", entityId: task.id, payload: task });
         res.status(202).json({
             ok: true,
@@ -54,7 +61,13 @@ export function registerComfyRoutes(ctx: { app: import("express").Express; store
     app.get(routePath("/comfy/tasks/:id"), (req, res) => {
         const taskId = String(req.params.id);
         const task = stores.tasks.get(taskId);
-        if (!task || (!task.kind.startsWith("comfyui:") && task.kind !== "workflow")) return void res.status(404).json({ ok: false, error: "task not found", code: "TASK_NOT_FOUND" });
+        if (!task) {
+            // 已清理任务：返回 410 历史不可用，不是 404 不存在
+            const tombstone = stores.tasks.getTombstone(taskId);
+            if (tombstone) return void res.status(410).json({ ok: false, code: "TASK_HISTORY_PRUNED", retryable: false, taskId, terminalStatus: tombstone.terminalStatus, prunedAt: tombstone.prunedAt, error: "任务历史已被容量清理，原始结果不可恢复" });
+            return void res.status(404).json({ ok: false, error: "task not found", code: "TASK_NOT_FOUND" });
+        }
+        if (!task.kind.startsWith("comfyui:") && task.kind !== "workflow") return void res.status(404).json({ ok: false, error: "task not found", code: "TASK_NOT_FOUND" });
         // backend 重启后遗留的 running 任务在此懒恢复（用 events 里的 promptId 重新挂观察循环）
         if ((task.status === "running" || task.status === "queued") && task.kind.startsWith("comfyui:")) bridge.resume(task.id);
         res.json({ ok: true, task, preview: bridge.getLivePreview(taskId) || null, events: stores.tasks.events(taskId, Number(req.query.after || 0)) });

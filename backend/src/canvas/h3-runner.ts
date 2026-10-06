@@ -157,6 +157,7 @@ export class CanvasH3Runner {
             }
             return existing;
         }
+        if (clientTaskId && this.stores.tasks.getTombstone?.(clientTaskId)) throw Object.assign(new Error(`TASK_HISTORY_PRUNED: ${clientTaskId}`), { code: "TASK_HISTORY_PRUNED", retryable: false });
         if (normalized.params?.confirmSecondPass === true) throw new Error("请通过 H3 确认接口继续原任务，不能另建二采任务");
         const project = this.stores.projects.get(normalized.projectId);
         if (!project) throw new Error(`画布不存在: ${normalized.projectId}`);

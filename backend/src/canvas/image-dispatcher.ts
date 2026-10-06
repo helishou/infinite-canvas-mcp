@@ -125,6 +125,7 @@ export class CanvasImageDispatcher {
     const existing = this.stores.tasks.get(taskId);
     if (existing)
       return { taskId: existing.id, logId: undefined, executor: plan.executor };
+    if (this.stores.tasks.getTombstone?.(taskId)) throw Object.assign(new Error(`TASK_HISTORY_PRUNED: ${taskId}`), { code: "TASK_HISTORY_PRUNED", retryable: false });
     const active = this.findActiveTask(plan.input);
     if (active)
       return {

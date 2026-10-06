@@ -31,6 +31,7 @@ export class CanvasAudioDispatcher {
         const taskId = input.clientTaskId || `canvas-audio-${crypto.randomUUID()}`;
         const existing = this.stores.tasks.get(taskId);
         if (existing) return { taskId: existing.id, executor };
+        if (this.stores.tasks.getTombstone?.(taskId)) throw Object.assign(new Error(`TASK_HISTORY_PRUNED: ${taskId}`), { code: "TASK_HISTORY_PRUNED", retryable: false });
         const active = this.findActive(input);
         if (active) return { taskId: active.id, executor: String(active.executor || "direct-audio") };
         const prepared = prepareCanvasGenerationTarget(this.stores, { ...input, mode: "audio" }, taskId);

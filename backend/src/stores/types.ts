@@ -115,6 +115,8 @@ export type TaskStore = {
      */
     create(kindOrId: string, inputOrKind: string | Record<string, unknown>, paramsOrInput: Record<string, unknown>, maybeParams?: Record<string, unknown>): RuntimeTask;
     get(id: string): RuntimeTask | null;
+    /** 查询已清理任务 ID 的凭据；不存在返回 null。入口在副作用前调用。 */
+    getTombstone(id: string): { taskId: string; terminalStatus: string; prunedAt: string } | null;
     list(filter?: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number }): RuntimeTask[];
     update(id: string, patch: TaskPatch): RuntimeTask;
     transitionH3(id: string, expectedStatus: RuntimeTaskStatus, expectedRevision: number, patch: TaskPatch & { status: RuntimeTaskStatus; result: Record<string, unknown> }, event: { type: string; payload: Record<string, unknown> }): RuntimeTask | null;

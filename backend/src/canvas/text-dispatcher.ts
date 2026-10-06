@@ -60,6 +60,7 @@ export class CanvasTextDispatcher {
         const taskId = input.clientTaskId || `canvas-text-${crypto.randomUUID()}`;
         const existing = this.stores.tasks.get(taskId);
         if (existing) return { taskId: existing.id, executor };
+        if (this.stores.tasks.getTombstone?.(taskId)) throw Object.assign(new Error(`TASK_HISTORY_PRUNED: ${taskId}`), { code: "TASK_HISTORY_PRUNED", retryable: false });
         const active = this.findActiveTask(input);
         if (active) return { taskId: active.id, executor: active.executor || executor };
         let project = this.canvasTarget(input);

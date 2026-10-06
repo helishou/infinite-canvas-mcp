@@ -62,6 +62,7 @@ export class CanvasVideoDispatcher {
             throw new Error("视频裁剪任务 ID 已用于不同输入");
         }
         if (existing) return { taskId: existing.id, executor: plan.kind };
+        if (this.stores.tasks.getTombstone?.(taskId)) throw Object.assign(new Error(`TASK_HISTORY_PRUNED: ${taskId}`), { code: "TASK_HISTORY_PRUNED", retryable: false });
         const active = this.findActive(input);
         if (active) return { taskId: active.id, executor: String(active.executor || plan.kind) };
         const prepared = (plan.kind === "trim" ? prepareCanvasVideoTrimTarget : prepareCanvasGenerationTarget)(this.stores, { ...input, mode: "video" }, taskId);
