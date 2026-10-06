@@ -417,3 +417,33 @@ node --import tsx --test src/canvas/history-maintenance.test.ts
    → 770.6MB → **606.9MB**（释放 163.7MB）→ integrity ok、FK 0 → 重启
    backend（pid 52796）。
 5. 每步独立提交、独立验收；不合并无关工作区变更。
+
+## 12. 剩余项诊断结论（2026-10-06 只读）
+
+### 12.1 hswj-ep1-img：91 个 receipt 的 `request_hash` 为空字符串
+
+- 1042 个 batch 全部有 receipt 行（0 行缺失）。
+- 91 个 receipt（revision 57~157）的 `request_hash` 为**空字符串**（非 NULL）。
+- `request_hash` 不是 `sha256(source_json)`——无法从现有数据回填。
+- 这些 operation 创建时未记录请求 hash（早期版本行为）。
+- **处置**：re-baseline 门禁正确拦截（无法验证幂等性）。无安全修复路径
+  （不能凭空补 hash）。1,042 batches 保留原样。
+
+### 12.2 7 个 `segment id 已存在` 项目：当前数据无重复
+
+- 7 个项目的当前 `data_json` 中 **0 个**重复 segment ID。
+- 7 个项目的 `operations_json` 中也 **0 个**重复 add_node。
+- "segment id 已存在"是回放逻辑的 quirk（回放时遇到已存在的 ID），
+  不是数据完整性问题。
+- **处置**：当前状态健康，不需要 re-baseline。re-baseline 门禁正确拒绝
+  （reasonCode=UNKNOWN 不在准入列表）。
+
+### 12.3 episode_production_operations：39.47MB 纯重复
+
+- 269 行、207MB receipt。
+- 174 个大 receipt（>100KB）中 `draft.director.artifacts` 和
+  `published.director.artifacts` **逐字节相同**（各 ~853KB），
+  `draft.shots` 和 `published.shots` 也相同（各 ~476KB）。
+- **合计 39.47MB 纯重复**（去掉一份可省）。
+- v3 方案明确：操作回执不裁字段，压缩/去重作为后续独立事项。
+- **处置**：记录发现，待独立方案（需改读取合同，非本轮范围）。
