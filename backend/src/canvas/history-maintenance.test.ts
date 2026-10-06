@@ -183,6 +183,8 @@ test("opening a v15 database backs it up and preserves original request receipts
             DROP TABLE canvas_production_versions;
             DROP TABLE canvas_production_operations;
             DROP TABLE canvas_productions;
+            DROP TRIGGER IF EXISTS episode_canvas_role_insert;
+            DROP TRIGGER IF EXISTS episode_canvas_role_update;
             DELETE FROM schema_migrations WHERE version >= 16;
             COMMIT;`);
         db.close(); db = undefined;
