@@ -876,6 +876,42 @@ export class BackendDatabase {
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }
+        if (currentVersion < 32) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                // 任务 ID 永久保留凭据：硬删除 tasks 前先把已清理 ID 记入 tombstone，
+                // 拒绝复用已清理 ID 再次提交生成（capacity-optimization-plan v3 §4）。
+                // 凭据不保存大正文、不关联 tasks FK、不按 TTL 删除。
+                this.db.exec(`
+                    CREATE TABLE IF NOT EXISTS task_history_tombstones (
+                        task_id TEXT PRIMARY KEY,
+                        kind TEXT NOT NULL,
+                        terminal_status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        terminal_at TEXT NOT NULL,
+                        pruned_at TEXT NOT NULL,
+                        policy_version INTEGER NOT NULL
+                    );
+                `);
+                // 数据库级防 ID 复用：已清理的 task ID 再次 INSERT 直接拒绝。
+                // 应用侧仍须在入口提前检查（见 createTask），触发器是并发/旁路下的最后防线。
+                this.db.exec(`
+                    CREATE TRIGGER IF NOT EXISTS task_history_tombstone_guard
+                    BEFORE INSERT ON tasks
+                    WHEN EXISTS (SELECT 1 FROM task_history_tombstones WHERE task_id = NEW.id)
+                    BEGIN
+                        SELECT RAISE(ABORT, 'task id already pruned (tombstone)');
+                    END;
+                `);
+                // 统一保留策略的候选头查询按状态 + 更新时间筛选。
+                this.db.exec(`
+                    CREATE INDEX IF NOT EXISTS tasks_status_updated ON tasks(status, updated_at);
+                    CREATE INDEX IF NOT EXISTS generation_logs_status_updated ON generation_logs(status, updated_at);
+                `);
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (32, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
     }
 
     /** A rolled-back schema_migrations row leaves its column behind, so every ADD COLUMN must be checked first. */
@@ -3249,6 +3285,37 @@ export class BackendDatabase {
         };
     }
 
+    // ── task history tombstones ───────────────────────────────────────────
+
+    /** 查询已清理任务 ID 的凭据；不存在返回 null。 */
+    getTaskTombstone(taskId: string): { taskId: string; kind: string; terminalStatus: string; createdAt: string; terminalAt: string; prunedAt: string; policyVersion: number } | null {
+        const row = this.db.prepare(
+            "SELECT task_id, kind, terminal_status, created_at, terminal_at, pruned_at, policy_version FROM task_history_tombstones WHERE task_id = ?"
+        ).get(taskId) as Record<string, unknown> | undefined;
+        if (!row) return null;
+        return {
+            taskId: String(row.task_id),
+            kind: String(row.kind),
+            terminalStatus: String(row.terminal_status),
+            createdAt: String(row.created_at),
+            terminalAt: String(row.terminal_at),
+            prunedAt: String(row.pruned_at),
+            policyVersion: Number(row.policy_version),
+        };
+    }
+
+    /**
+     * 记录已清理任务 ID 的凭据（幂等）。在任务族删除事务内、删除任务之前调用。
+     * 凭据永久保留：不关联 tasks FK、不按 TTL 删除。
+     */
+    recordTaskTombstone(taskId: string, kind: string, terminalStatus: string, createdAt: string, terminalAt: string, policyVersion: number): void {
+        this.db.prepare(
+            "INSERT INTO task_history_tombstones (task_id, kind, terminal_status, created_at, terminal_at, pruned_at, policy_version) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?) " +
+            "ON CONFLICT(task_id) DO UPDATE SET terminal_status = excluded.terminal_status, pruned_at = excluded.pruned_at, policy_version = excluded.policy_version"
+        ).run(taskId, kind, terminalStatus, createdAt, terminalAt, new Date().toISOString(), policyVersion);
+    }
+
     // ── tasks ─────────────────────────────────────────────────────────────
 
     createTask(idOrKind: string, inputOrKindOrInput?: string | Record<string, unknown>, paramsOrInput?: Record<string, unknown>, paramsOrParams?: Record<string, unknown>): RuntimeTask {
@@ -3282,6 +3349,15 @@ export class BackendDatabase {
             // 客户端传来的 id 已存在（重试 / 多标签）→ 直接复用该任务，让新请求接上同一行记录。
             const existing = this.getTask(id);
             if (existing) return existing;
+            // id 不在 tasks 但存在于 tombstone → 该 ID 已被容量清理删除，
+            // 不能当作不存在而新建同 ID（会重新执行/收费）。返回明确的历史不可用语义。
+            const tombstone = this.getTaskTombstone(id);
+            if (tombstone) {
+                const err = new Error(`TASK_HISTORY_PRUNED: ${id}`);
+                (err as unknown as { code: string; retryable: boolean }).code = "TASK_HISTORY_PRUNED";
+                (err as unknown as { retryable: boolean }).retryable = false;
+                throw err;
+            }
             throw error;
         }
         return this.getTask(id)!;
