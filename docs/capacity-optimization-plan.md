@@ -14,7 +14,7 @@
 6. 500 条保留为每项目日志的整理目标；受保护、非终态、关联任务未到期的记录可使数量超过目标。数量整理由手动 CLI 显式选择，不新增定时器或后台自动清理。
 7. 在删除任务前保留轻量任务 ID 凭据，拒绝使用已清理 ID 再次提交生成；历史正文不可用必须明确返回，不能伪造完整 RuntimeTask。
 8. 健康画布历史沿现有严格 prune 处理。坏历史 re-baseline 独立执行，绑定具体数据摘要并保留所有命令身份；不是对任意 blocked 原因的通用删除开关。
-9. 操作回执不裁字段、不做 TTL 删除。完整压缩/去重作为后续独立事项，本轮不改读取合同。
+9. 操作回执不裁字段、不做 TTL 删除。完整压缩/去重作为后续独立事项，本轮不改读取合同。**（已于 2026-10-06 独立实施：`docs/receipt-dedup-design.md`，生产库 144 行去重省 28.95MB，读取合同未变——写入 `$ref`、读取透明展开。）**
 10. 收益由副本 dry-run、实际删除和压缩后的测量确定，不承诺固定缩库比例。
 
 ## 2. 已核事实和旧快照测量
@@ -338,7 +338,7 @@ node --import tsx --test src/canvas/history-maintenance.test.ts
 | 4 | prune-runtime-history 的事务 apply | 1+3 已完成；明确保留政策；副本删除、重放和回滚验收 |
 | 5 | 真实库 dry-run 和可审阅维护计划 | 只读；列出保护原因、真实候选、恢复损失及空间需求 |
 | 6 | 真实库清理、压缩切换 | 用户明确授权具体计划/历史损失/服务动作；空闲维护窗口；实际加载和回退验收 |
-| 后续 | 完整操作回执压缩/去重调查 | 独立方案，不裁字段，不把 published 视为不可变 |
+| 后续 | ~~完整操作回执压缩/去重调查~~ **已实施**（`docs/receipt-dedup-design.md`，144 行省 28.95MB，读取合同未变） | 独立方案，不裁字段，不把 published 视为不可变 |
 
 每项按文件提交，禁止 git add -A；不合并或纳入无关工作区变更。完成实施后才更新 pending-test 和 CHANGELOG，用户确认后再归入 features。
 
@@ -438,12 +438,17 @@ node --import tsx --test src/canvas/history-maintenance.test.ts
 - **处置**：当前状态健康，不需要 re-baseline。re-baseline 门禁正确拒绝
   （reasonCode=UNKNOWN 不在准入列表）。
 
-### 12.3 episode_production_operations：39.47MB 纯重复
+### 12.3 episode_production_operations：receipt 去重（已实施 2026-10-06）
 
-- 269 行、207MB receipt。
-- 174 个大 receipt（>100KB）中 `draft.director.artifacts` 和
-  `published.director.artifacts` **逐字节相同**（各 ~853KB），
-  `draft.shots` 和 `published.shots` 也相同（各 ~476KB）。
-- **合计 39.47MB 纯重复**（去掉一份可省）。
-- v3 方案明确：操作回执不裁字段，压缩/去重作为后续独立事项。
-- **处置**：记录发现，待独立方案（需改读取合同，非本轮范围）。
+- 初测 269 行、207MB receipt，174 个大 receipt 中 `draft.director.artifacts` 与
+  `published.director.artifacts` 逐字节相同（各 ~853KB），`draft.shots` 与
+  `published.shots` 也相同（各 ~476KB）。
+- **已独立实施**：见 `docs/receipt-dedup-design.md`（GPT 审核 9.5/10）。
+  写入时 `published.director`/`published.shots` 与 draft 侧 JSON 序列化相同时
+  替换为 `$ref` 引用，读取时透明展开，**读取合同不变**（调用方仍拿到完整
+  `ProductionRecord`）。
+- 生产库实测（>10KB 阈值）：**144 行去重，省 28.95MB**（211.57→182.63MB），
+  全通过 deepEqual 验证；VACUUM 后 607.1→574.0MB。
+- 代码提交 `16df354c`（模块+测试+迁移 CLI）、`be1d12df`（production.ts 接入）。
+- 注：初测 39.47MB 是"无阈值 union"口径；脚本按 >10KB 阈值过滤后 144 行/28.95MB
+  为准（过滤掉 86 行 <10KB 的小 shots）。
