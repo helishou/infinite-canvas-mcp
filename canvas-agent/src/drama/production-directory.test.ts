@@ -45,6 +45,17 @@ test("shots are never attributed by environment alone, because one environment c
     assert.deepEqual(productionSceneEntries({ ...source, script_scenes: occurrences.map(o => ({ ...o, beat_ids: [o.id] })), shots: [{ id: "shot", scene_id: "gray", story_beat_ids: ["casting"] }] }).map(scene => scene.shotIds), [["shot"], []]);
 });
 
+test("a single-occurrence environment attributes its unannotated shots, because no other occurrence can own them", () => {
+    // Real single-scene shape: one script occurrence per environment, shots carry only the environment id.
+    const source = {
+        script_scenes: [{ id: "scene", scene_id: "yard", text: "Three characters in the courtyard" }],
+        shots: [{ id: "SH001", scene_id: "yard" }, { id: "SH002", scene_id: "yard" }],
+    };
+    assert.deepEqual(productionSceneEntries(source).map(scene => scene.shotIds), [["SH001", "SH002"]]);
+    // An unrelated environment's shots must not be swept into the only occurrence.
+    assert.deepEqual(productionSceneEntries({ ...source, shots: [{ id: "SH001", scene_id: "yard" }, { id: "SH003", scene_id: "street" }] }).map(scene => scene.shotIds), [["SH001"]]);
+});
+
 test("an explicitly named occurrence keeps its shots even when the environment registry disagrees", () => {
     // Real production shape: script occurrences are SC01..SC06 while shots reference ENV_YARD/ENV_ROOM.
     const blocks = ["SC01", "SC02", "SC03"].map(id => ({ id, scene_id: id, heading: id, location: "", time_of_day: "", blocks: [] }));

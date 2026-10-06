@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { BackendDatabase } from "../db.js";
+import { DATABASE_SCHEMA_VERSION } from "../database-upgrade.js";
 import { EpisodeProductionService } from "./production.js";
 import { dramaProductionPlanSchema, productionImageModel } from "@basketikun/canvas-agent/drama/production-contract";
 
@@ -37,19 +38,23 @@ test("confirmed category models persist, seed new production, and leave existing
     assert.equal(Object.hasOwn(renamed, "expectedPlanningUpdatedAt"), false);
 });
 
-test("version 24 migration creates a verified backup and preserves existing outlines", t => {
+test("a v24 database upgrades to the current schema, snapshots first and preserves existing outlines", t => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "drama-plan-upgrade-"));
     t.after(() => { assert.equal(path.dirname(directory), os.tmpdir()); fs.rmSync(directory, { recursive: true, force: true }); });
     const file = path.join(directory, "db.sqlite");
     let db = new BackendDatabase(file);
     db.upsertCanvasFolder({ id: "drama", name: "Drama", isDrama: true, outline: "Preserved", createdAt: "2026-01-01" });
-    db.db.exec("ALTER TABLE drama_projects DROP COLUMN production_plan_json; DELETE FROM schema_migrations WHERE version=25;");
+    // Simulate a genuine v24 database: nothing above v24 recorded and the v25 column absent.
+    // Dropping only the v25 row would leave MAX(version) at the current schema and skip every migration.
+    db.db.exec(`ALTER TABLE drama_projects DROP COLUMN production_plan_json`);
+    db.db.exec(`DELETE FROM schema_migrations WHERE version > 24`);
     db.close();
     db = new BackendDatabase(file);
     try {
         assert.equal(db.listCanvasFolders()[0].outline, "Preserved");
         assert.equal(db.listCanvasFolders()[0].productionPlan, undefined);
-        assert.equal(db.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, 25);
-        assert.equal(fs.readdirSync(directory).filter(name => name.includes(".pre-schema-v24-to-v25-")).length, 1);
+        assert.equal(db.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, DATABASE_SCHEMA_VERSION);
+        assert.equal((db.db.prepare("PRAGMA table_info(drama_projects)").all() as Array<Record<string, unknown>>).some(column => column.name === "production_plan_json"), true);
+        assert.equal(fs.readdirSync(directory).filter(name => name.includes(`.pre-schema-v24-to-v${DATABASE_SCHEMA_VERSION}-`)).length, 1);
     } finally { db.close(); }
 });
