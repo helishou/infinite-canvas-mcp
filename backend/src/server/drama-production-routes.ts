@@ -182,7 +182,7 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             const query = productionReadSchema.parse({ ...req.query, view: req.query.view || "full", targetIds: typeof req.query.targetIds === "string" ? req.query.targetIds.split(",") : req.query.targetIds });
             const owner = base.startsWith("/canvas") ? { projectId: req.params.episodeId } : base.startsWith("/drama/scenes") ? { sceneId: req.params.episodeId } : {};
             const selected = projectProductionRead(query.view === "full" ? production : { ...production, ...owner }, query, value => crypto.createHash("sha256").update(value).digest("hex"));
-            if (query.targetIds?.length && query.view !== "summary" && !query.chunkBytes) { (selected as any).targetStatus = service.targetOccupancy(req.params.episodeId, query.targetIds); (selected as any).canvasInputs = service.canvasEditorialState(req.params.episodeId, query.targetIds); }
+            if (!(selected as any).unchanged && query.targetIds?.length && query.view !== "summary" && !query.chunkBytes) { (selected as any).targetStatus = service.targetOccupancy(req.params.episodeId, query.targetIds); (selected as any).canvasInputs = service.canvasEditorialState(req.params.episodeId, query.targetIds); }
             res.json({ ok: true, production: selected });
         } catch (error) { handle(res, error); }
     });

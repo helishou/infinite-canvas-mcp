@@ -1,4 +1,4 @@
-import { resolveH3Runtime } from "../../../../../canvas-agent/src/plugins/minimax-h3/runtime-params";
+import { resolveH3Runtime } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { readDefaultParams } from "../services/h3-defaults";
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { CanvasNodeContext, CanvasVideoModelField, CanvasVideoModelSchema } from "@infinite-canvas/plugin-sdk";
@@ -192,7 +192,7 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, patch: save
             {selectedVideoModelSchema?.error ? <div className="nfh3-hint" role="alert">{h3Label(locale, "selectedVideoModelModeWarning")} {selectedVideoModelSchema.error}</div> : null}
             <div className="nfh3-control-grid">
                 {control("视觉风格模板", <H3Dropdown values={H3_STYLE_TEMPLATES.map((template) => template.id)} value={styleTemplateId || undefined} onChange={(value) => patch({ styleTemplateId: value ? String(value) : null })} format={(value) => H3_STYLE_TEMPLATES.find((template) => template.id === value)?.label || String(value)} placeholder="不加模板" searchable allowClear />, true)}
-                {control("尾帧参考（传给下一段）", <Switch checked={segment.tailFrameContinuation === true} onChange={(checked) => patch({ tailFrameContinuation: checked })} />, false, "下一段运行时截取本段尾帧，追加到已有图片参考最后，作为下一段的首帧状态基准。" )}
+                {control("尾帧参考（传给下一段）", <Switch checked={segment.tailFrameContinuation === true} onChange={(checked) => patch({ tailFrameContinuation: checked, ...(checked ? { motionContextEnabled: false } : {}) })} />, false, "下一段运行时截取本段尾帧，追加到已有图片参考最后，作为下一段的首帧状态基准。" )}
             </div>
             {!selectedVideoModelLoading && !selectedVideoModelError && selectedVideoModelSchema && !selectedModelFields.length ? <div className="nfh3-hint">{h3Label(locale, "selectedVideoModelNoFields")}</div> : null}
             {selectedModelFields.length ? <div className="nfh3-control-grid">{selectedModelFields.map((item) => <div key={item.id} className="nfh3-dynamic-model-field">{renderSelectedModelField(item)}</div>)}</div> : null}
@@ -283,8 +283,8 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, patch: save
             {mode !== "t2v" ? choice("参考图最长边", refLongEdgeChoices, segment.referenceLongEdge || 1920, (value) => patch({ referenceLongEdge: Number(value) })) : null}
         </div>)}
         {section("continuation", "续段衔接", continuationSummary, <div className="nfh3-control-grid">
-            {control("尾帧参考（传给下一段）", <Switch checked={segment.tailFrameContinuation === true} onChange={(checked) => patch({ tailFrameContinuation: checked })} />, false, "下一段运行时截取本段尾帧，自动追加到已有图片参考的最后一张，作为下一段首帧状态基准，继承姿态、持物、动作进度和场景状态；机位、景别可改变，不能把动作重置。保留素材和引用编号；运行时使用多参考模式接收尾帧，保存的模式不改写。") }
-            {control("潜空间续写到下一段 Motion Context（V15）", <Switch checked={segment.motionContextEnabled === true} onChange={(checked) => patch({ motionContextEnabled: checked })} />, false, "尾帧参考传递图片，决定下一段首帧的物理状态。潜空间续写：开启本段开关后，本段的 AV latent 与所设上下文参数传给紧邻的下一段；关闭处断链。请从连续组首段使用「运行当前及后续分镜」，不能跳过组内已完成片段。单独运行本段不会建立跨任务续写。")}
+            {control("尾帧参考（传给下一段）", <Switch checked={segment.tailFrameContinuation === true} onChange={(checked) => patch({ tailFrameContinuation: checked, ...(checked ? { motionContextEnabled: false } : {}) })} />, false, "下一段运行时截取本段尾帧，自动追加到已有图片参考的最后一张，作为下一段首帧状态基准，继承姿态、持物、动作进度和场景状态；机位、景别可改变，不能把动作重置。保留素材和引用编号；运行时使用多参考模式接收尾帧，保存的模式不改写。") }
+            {control("潜空间续写到下一段 Motion Context（V15）", <Switch checked={segment.motionContextEnabled === true} onChange={(checked) => patch({ motionContextEnabled: checked, ...(checked ? { tailFrameContinuation: false } : {}) })} />, false, "尾帧参考传递图片，决定下一段首帧的物理状态。潜空间续写：开启本段开关后，本段的 AV latent 与所设上下文参数传给紧邻的下一段；关闭处断链。请从连续组首段使用「运行当前及后续分镜」，不能跳过组内已完成片段。单独运行本段不会建立跨任务续写。")}
             {segment.motionContextEnabled ? <>
                 {choice("传给下一段的视频上下文帧数", ["22", "5", "39", "56"], segment.contextLength || "22", (value) => patch({ contextLength: String(value) }))}
                 {control("传给下一段的音频上下文帧数", <InputNumber style={field} min={0} max={240} value={segment.audioContextLength ?? 24} onChange={(value) => patch({ audioContextLength: value ?? undefined })} />)}

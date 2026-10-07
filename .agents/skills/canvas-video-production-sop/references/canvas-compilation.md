@@ -4,6 +4,10 @@
 
 分集与独立画布统一调用 `production_get/production_edit/production_publish`，显式传 `kind:episode/canvas` 与 `id`。通过 `set_director_production` 提交完整导演稿：schemaVersion、engine、source、sourceHash、modules、artifacts、assets、shotInputs、boundaries、workflow、unresolved、executionAuthorized。
 
+已有导演稿的局部修改优先在一次 `production_edit` 中合并已确定的 `patch_director_source`（brief/style/scene/asset/shot/segment）或 `patch_director_continuity` 操作；Backend 保留其余源稿并重算 sourceHash。只有首次创建或用户明确整稿替换才回传完整导演稿。同一候选 source 对象计算一次哈希并复用，已保存稿采用读取或写回执返回的 sourceHash。
+
+按对象、snapshot、读取范围和 revision 复用已完整读取的内容；仅核验版本时携带 `ifRevision`，返回 `unchanged` 后继续使用原内容。不能把写回执的新 revision 当成尚未读过的数据版本，也不能把第一页当全集；续页沿原 cursor 完成，不带 ifRevision。冲突或版本改变时只补读任务涉及的章节／目标；任务状态使用 readiness 或精确 runId/taskId 查询。成功写回执已确认保存，nextRead 是缺字段时的入口，不要求保存后整稿回读；编译可直接消费已保存稿。
+
 source 原样保存 Acheng production 数据。sourceHash 是递归键排序、无空白、UTF-8 JSON 的 SHA-256；MCP 提交完整源稿对象时使用 `production_hash_source`，脚本复用项目导出工具，不另写 canonical 算法或凭记忆拼哈希。artifacts 每项包含独立 prompt 字节、sha256、源哈希、参考标签/节点/storageKey/媒体哈希/职责及编译回执；draft 和 partial 不标 ready。接入包不填造 PASS，先执行本机当前激活版本的真实离线编译与校验，再由 Backend 核对源与媒体。
 
 ### 编译后由程序承接
@@ -20,9 +24,27 @@ Agent 负责编译前的创作、源稿编辑、依赖与批准版本登记。`p
 
 脚本不调用媒体模型。源稿、提示词、实际参考或镜头边界变化后重算受影响产物，已生成媒体不会自动重做。
 
+## 批次复核与回执复用
+
+每场或本次选定范围定稿后，集中复核时长、逐字对白、镜头与表演、声音、参考职责及连续性，再保存源稿并编译受影响目标。不在每项局部修改后重做整项目复核。连续性复核覆盖相关 timeline 的 facts、initial、events、requirements、逐剧本块 coverage 和相邻 Segment 边界；缺口返回对应字段 owner，不用批量“不变”或补造事件填平。时长与边界仍按适配核心和 Clip 参考执行。
+
+| 变化 | 复核及编译范围 |
+|---|---|
+| 某段提示词源字段 | 该目标；涉及初态、尾态或声音承接时包括受影响边界及依赖目标 |
+| 镜头、动作、帧窗或结尾状态 | 所属时间线中受影响镜头及依赖其状态的后续目标 |
+| 资产文件、版本或引用绑定 | 实际消费该资产的目标及受影响依赖 |
+| 跨场事实或剧情顺序 | 完整相关时间线及受影响跨场边界 |
+| 内容及依赖未变 | 查询正式目标状态，复用仍有效的回执和产物 |
+
+检查上下文可以包含上游和后续镜头，但不因此扩大编译输出、发布或生成范围。定稿范围内合并已识别缺项后发起一次编译；只在源稿、依赖改变或真实诊断需要时再次编译，不同时跑离线脚本和在线编译来重复获得同一产物。
+
+复用核对哈希关联，不要求不同对象的哈希数值相等：产物登记的 sourceHash 对应其有效源稿，Clip 正文哈希及有序参考映射对应有效产物，任务冻结输入对应本轮有效目标。同时核对回执适用范围、revision、编译版本和实际参考媒体版本。sourceHash 未变不是单独的复用依据；revision 改变也不由 Agent 自行判定全部失效或手工改回执，以 Backend 的目标有效性和诊断为准。历史产物保留原编译版本，新编译请求使用当前激活版本。
+
+分场或选定目标沿“保存源稿 → 编译成功 → 应用编译包并检查 referenceSync → 预览发布影响 → 发布”推进，制作写入按 revision 顺序串行执行。消费正式短回执，不再额外逐 Clip 手工同步正文和参考；referenceSync 阻塞时按诊断修依赖。已有有效发布与同步结果直接复用。媒体提交另沿运行参考处理。
+
 ## 预检与发布
 
-正式提交前调用 `production_preflight` 或 `production_preflight`，显式传 `kind:episode/canvas`、`id`、`action: edit/publish/compile/generate` 与原正式 `request`。预检只读，返回 revision、当前激活引擎、已识别缺项的 `code/path/targetId/message/severity`、阻塞运行及 `nextActions`。计划稿缺项可保存；编译、发布和生成按各自阶段检查。只有故事正文、没有资产卡或视频段落时不要调用编译器；编译预检按当前激活版本检查资产计划、风格参考和提示词卡，并保留合法缺图草案的交付能力。
+需要提前收集缺项或预览影响时调用 `production_preflight`，显式传 `kind:episode/canvas`、`id`、`action: edit/publish/compile/generate` 与原正式 `request`。已有自动预检且输入和状态未变时，不额外调用同一预检来重复证明就绪。预检只读，返回 revision、当前激活引擎、已识别缺项的 `code/path/targetId/message/severity`、阻塞运行及 `nextActions`。计划稿缺项可保存；编译、发布和生成按各自阶段检查，人工批次复核不替代这些正式检查。只有故事正文、没有资产卡或视频段落时不要调用编译器；编译预检按当前激活版本检查资产计划、风格参考和提示词卡，并保留合法缺图草案的交付能力。
 
 `production_compile` 和 `*_start_production_run` 在 HTTP MCP 与页面内 Agent 中自动执行同一预检。返回 `status: blocked` 表示条件检查完成、本次没有执行编译或提交媒体，不等于已经生成或得到 preparedId；按 `preflight.diagnostics` 一次补齐已识别缺项，再按 `nextActions` 回读精确对象、运行和任务。相同源稿/revision/运行状态没有变化时，不重复同一请求，不通过换 runId、幂等键或暂停绕过占用。`replayed: true` 的有效预检只允许恢复原幂等回执，不授权新生成。预检通过后正式提交仍重新检查 revision、幂等与媒体归属；网络、引擎故障或提交竞态仍作为真实失败处理，按返回的稳定代码和下一步恢复。
 

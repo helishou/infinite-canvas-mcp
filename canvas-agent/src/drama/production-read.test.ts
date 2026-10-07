@@ -26,6 +26,52 @@ test("source selection is complete and query serializes selectors", () => {
     assert.ok(productionReadQuery({ view: "source", sourceSection: "segments", targetIds: ["seg2"], chunkBytes: 100 }).includes("sourceSection=segments"));
 });
 
+test("conditional reads reuse a complete revision and return new source after edits", () => {
+    const production = record();
+    const query = { view: "source", sourceSection: "segments", targetIds: ["seg2"] };
+    const initial: any = projectProductionRead(production, query);
+    const cached: any = projectProductionRead(production, { ...query, ifRevision: initial.revision });
+    assert.equal(cached.unchanged, true);
+    assert.equal(cached.source, undefined);
+    assert.equal(cached.sourceHash, production.draft.director.sourceHash);
+    assert.ok(JSON.stringify(cached).length < 500);
+    const changed = structuredClone(production);
+    changed.revision++;
+    changed.draft.director.source.segments[2].action = "新的镜头内容";
+    const refreshed: any = projectProductionRead(changed, { ...query, ifRevision: initial.revision });
+    assert.equal(refreshed.unchanged, undefined);
+    assert.equal(refreshed.source[0].action, "新的镜头内容");
+    assert.match(productionReadQuery({ ...query, ifRevision: 0 }), /ifRevision=0/);
+    const full: any = projectProductionRead(production, { view: "full", ifRevision: production.revision });
+    assert.equal(full.unchanged, true);
+    assert.equal(full.draft, undefined);
+    assert.equal(projectProductionRead(production, { view: "full", ifRevision: 0 }), production);
+});
+
+test("conditional checks never hide unread pages or bypass expired cursor validation", () => {
+    const production = record();
+    const query = { view: "source", sourceSection: "segments", pageSize: 1 };
+    const first: any = projectProductionRead(production, query);
+    const next: any = projectProductionRead(production, { ...query, ifRevision: production.revision, cursor: first.source.nextCursor });
+    assert.equal(next.unchanged, undefined);
+    assert.equal(next.source.items[0].id, "seg1");
+    assert.throws(() => projectProductionRead({ ...production, revision: 4 }, { ...query, ifRevision: 4, cursor: first.source.nextCursor }), /READ_CURSOR_EXPIRED/);
+});
+
+test("repeated full checks preserve content while reducing total UTF-8 response bytes", () => {
+    const production = record();
+    const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
+    const reads = 18;
+    const previousBytes = reads * bytes(projectProductionRead(production, { view: "full" }));
+    const newBytes = bytes(projectProductionRead(production, { view: "full" }))
+        + (reads - 1) * bytes(projectProductionRead(production, { view: "full", ifRevision: production.revision }));
+    assert.ok(newBytes < previousBytes / 10);
+    console.log(`same task: ${reads} checks, UTF-8 bytes ${previousBytes} -> ${newBytes}`);
+    const receipt: any = productionWriteReceipt({ ok: true, production }, { tool: "production_edit", input: { kind: "episode", id: "e", operationId: "saved" } });
+    assert.equal(receipt.readPolicy.nextReadRequired, false);
+    assert.equal(receipt.production.sourceHash, production.draft.director.sourceHash);
+});
+
 test("workspace write receipts retain layout, identity and conflicts without repeating source or prompt data", () => {
     const production = record();
     const result: any = productionWriteReceipt({ ok: true, production: { ...production, referenceSync: [{ targetId: "seg2", status: "blocked", diagnostics: [{ code: "CLIP_EDIT_CONFLICT" }] }] }, layoutReceipt: { planHash: "layout", created: [{ nodeIds: ["node"] }] }, mediaSubmitted: false });

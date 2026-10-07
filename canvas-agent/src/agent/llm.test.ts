@@ -9,6 +9,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
+import { directorSubagentSchema } from "./delegation.js";
 import { LlmAgent, readAgentFile, type LlmSettings } from "./llm.js";
 import { configuredLlmProviders, llmHistoryForProvider, parseLlmReply, requestLlm, type Json, type LlmProvider } from "./llm-provider.js";
 
@@ -31,6 +32,24 @@ function sse(response: http.ServerResponse, values: Json[]) {
     for (const value of values) response.write(`data: ${JSON.stringify(value)}\r\n\r\n`);
     response.end("data: [DONE]\r\n\r\n");
 }
+
+test("structured image review encodes verified local files at the API boundary and fails before requesting missing media", async t => {
+    let requests = 0;
+    const url = await modelServer(t, (body, response) => {
+        requests++;
+        const parts = body.messages.flatMap((message: Json) => Array.isArray(message.content) ? message.content : []);
+        assert.ok(parts.some((part: Json) => part.type === "image_url" && part.image_url.url === "data:image/png;base64,cG5n"));
+        sse(response, [{ choices: [{ delta: { content: '{"status":"complete"}' }, finish_reason: "stop" }] }]);
+    });
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "worker-images-"));
+    t.after(() => fs.rm(root, { recursive: true }));
+    const file = path.join(root, "image.png"); await fs.writeFile(file, "png");
+    const { store } = settings(config(url)), agent = new LlmAgent(store, url, "");
+    const request = { cwd: root, prompt: "inspect", schema: { type: "object", required: ["status"] }, onThread: () => {} };
+    await agent.structured({ ...request, images: [file] });
+    await assert.rejects(agent.structured({ ...request, images: [path.join(root, "missing.png")] }), /ENOENT/);
+    assert.equal(requests, 1);
+});
 const provider = (baseUrl: string, apiFormat: LlmProvider["apiFormat"] = "openai-chat"): LlmProvider => ({ id: "a::model", model: "model", name: "a / model", baseUrl, apiKey: "secret-test-key", apiFormat, systemPrompt: "" });
 const config = (baseUrl: string, apiFormat = "openai-chat") => ({ textModel: "a::model", channels: [{ id: "a", name: "A", baseUrl, apiKey: "secret-test-key", apiFormat, models: [{ name: "model", capability: "text" }] }] });
 
@@ -90,6 +109,33 @@ test("streamed tool arguments execute exactly once through MCP and persist for r
     assert.ok(restored.messages.some(message => message.role === "assistant" && message.text === "已完成"));
     assert.equal(JSON.stringify(data.get(`agent.llm.thread:${thread.id}`)).includes("secret-test-key"), false);
     assert.throws(() => agent.read(thread.id, path.join(cwd, "other")), /工作空间/);
+});
+
+test("API delegation binds the actual parent/channel and preserves an explicit canvas over the active canvas", async t => {
+    let requests = 0, delegated: Json | undefined;
+    const url = await modelServer(t, (_body, response) => {
+        requests++;
+        if (requests === 1) sse(response, [{ choices: [{ delta: { tool_calls: [{ index: 0, id: "delegate-1", function: { name: "director_subagent", arguments: JSON.stringify({ action: "spawn", projectId: "requested-canvas", parentThreadId: "wrong-director", operationId: "one", title: "核对分镜", role: "shots", prompt: "确认覆盖范围" }) } }] }, finish_reason: "tool_calls" }] }]);
+        else sse(response, [{ choices: [{ delta: { content: "已派发，等待结果" }, finish_reason: "stop" }] }]);
+    });
+    const { store } = settings(config(url));
+    const connect = async () => {
+        const server = new McpServer({ name: "fixture", version: "1" });
+        server.registerTool("canvas_set_active_project", { inputSchema: { id: z.string() } }, async () => ({ content: [{ type: "text", text: "bound" }] }));
+        server.registerTool("director_subagent", { inputSchema: directorSubagentSchema }, async input => { delegated = input; return { content: [{ type: "text", text: JSON.stringify({ taskId: "child-1", status: "queued" }) }] }; });
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        await server.connect(serverTransport);
+        const client = new Client({ name: "fixture", version: "1" }); await client.connect(clientTransport); return client;
+    };
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "director-delegate-api-"));
+    t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+    const agent = new LlmAgent(store, url, "", connect), thread = agent.startThread(cwd);
+    await agent.run("派一个分镜子代理", () => {}, [], { threadId: thread.id, cwd }, "real-canvas");
+    assert.equal(delegated?.projectId, "requested-canvas", "explicit project identity is never silently replaced by the active canvas");
+    assert.equal(delegated?.parentThreadId, thread.id);
+    assert.ok(delegated?.parentTurnId);
+    assert.equal(delegated?.model, thread.model);
+    assert.equal(requests, 2);
 });
 
 test("truncated tool stream cannot execute tools; upstream credentials are not exposed", async t => {

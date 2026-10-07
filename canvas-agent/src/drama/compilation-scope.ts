@@ -51,6 +51,10 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     projected.source.script_scenes = rows(source.script_scenes).filter(item => sceneIds.has(String(item.id || item.scene_id)));
     const ledger = source.ledger as Record<string, any> | undefined;
     if (ledger?.contract_version === 2) {
+        // Replay may reference registered assets outside the output scope.
+        // Retain their identities as lookup context, without adding media,
+        // cards or output targets to this compilation.
+        projected.source._canvas_continuity_asset_registry = plans.map(item => ({ id: key(item) }));
         // Coverage belongs to authored blocks, which may span several Clips. Keep
         // its validation dependencies without adding those Clips to output targets.
         const contextShots = new Set(shots);
@@ -94,7 +98,11 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     ]);
     const inputAssets = Object.fromEntries(Object.entries(projected.assets).filter(([id]) => referenced.has(id) || Boolean(scene && !shots.size)).map(([id, asset]) => [id, { nodeId: asset.nodeId, assetId: asset.assetId, version: asset.version, storageKey: asset.storageKey, sha256: asset.sha256, sharedSource: asset.sharedSource }]));
     const bindings = Object.fromEntries(Object.entries(projected.assets).map(([id, asset]) => [id, { nodeId: asset.nodeId ?? null, assetId: asset.assetId ?? null }]));
-    const inputs = { source: projected.source, assets: inputAssets, bindings, shotInputs: projected.shotInputs, boundaries: projected.boundaries };
+    const hashSource = { ...projected.source };
+    // This derived identity lookup is checked by the fresh continuity report;
+    // it is not a model input and must preserve historical scoped receipt hashes.
+    delete hashSource._canvas_continuity_asset_registry;
+    const inputs = { source: hashSource, assets: inputAssets, bindings, shotInputs: projected.shotInputs, boundaries: projected.boundaries };
     const inputHash = compilationHash(inputs);
     const legacyInputHash = compilationHash({ ...inputs, engine: projected.engine });
     return { director: projected, inputHash, legacyInputHash, targetIds };

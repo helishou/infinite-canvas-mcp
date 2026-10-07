@@ -3525,13 +3525,14 @@ export class BackendDatabase {
         return rows.map((row) => this.taskFromRow(row));
     }
 
-    listTasks(filter: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number } = {}): RuntimeTask[] {
+    listTasks(filter: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; parentThreadId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number } = {}): RuntimeTask[] {
         const clauses: string[] = [];
         const values: Array<string | number> = [];
         if (filter.status) { clauses.push("status = ?"); values.push(filter.status); }
         if (filter.kind) { clauses.push("kind = ?"); values.push(filter.kind); }
         if (filter.model) { clauses.push("model = ?"); values.push(filter.model); }
         if (filter.projectId) { clauses.push("project_id = ?"); values.push(filter.projectId); }
+        if (filter.parentThreadId) { clauses.push("json_extract(input_json, '$.parentThreadId') = ?"); values.push(filter.parentThreadId); }
         if (filter.scope === "canvas") clauses.push("project_id IS NOT NULL");
         if (filter.scope === "image") clauses.push("is_image = 1");
         if (filter.scope === "video") clauses.push("is_video = 1");

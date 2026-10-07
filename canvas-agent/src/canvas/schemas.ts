@@ -1,3 +1,4 @@
+import { directorSubagentSchema, directorSubagentDescription } from "../agent/delegation.js";
 import { productionToolNames, productionToolSchemas, productionToolDescriptions } from "../drama/production-tools.js";
 import { nodePatchSchema } from "./edit-validation.js";
 export { validateNodeUpdate, validateH3Edit, validateH3Metadata } from "./edit-validation.js";
@@ -104,6 +105,7 @@ export const toolNames = [
   "production_check_continuity",
   ...productionWorkspaceToolNames,
   ...productionToolNames,
+  "director_subagent",
   "production_compile",
   "production_get_compilation",
   "production_apply_compilation",
@@ -793,6 +795,7 @@ export const toolInputSchemas = {
   production_get_contract: productionContractQuerySchema,
   ...productionWorkspaceSchemas,
   ...productionToolSchemas,
+  director_subagent: directorSubagentSchema,
   production_compile: productionCompileSchema.extend({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1), operationId: z.string().min(1) }),
   production_get_compilation: z.object({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1), operationId: z.string().min(1), view: z.enum(["status", "targets", "diagnostics"]).default("status"), offset: z.number().int().nonnegative().default(0), pageSize: z.number().int().positive().optional() }).strict(),
   production_apply_compilation: productionApplyCompilationSchema.extend({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1) }),
@@ -904,6 +907,7 @@ export const toolDescriptions: Record<ToolName, string> = {
   production_get_contract: "查询完整制作操作 schema、合法示例、前置条件和本机当前激活引擎的源稿模板；runtimeId 已弃用，保留参数兼容但不选择执行版本。",
   ...productionWorkspaceDescriptions,
   ...productionToolDescriptions,
+  director_subagent: directorSubagentDescription,
   production_compile: "后台运行固定 Acheng 编译器；operationId 必填，立即返回持久短回执。通过 production_get_compilation 查询原 operationId，succeeded 后应用 preparedId。blocked/failed 按短诊断修改编译前源稿再重新编译，不读取或审核编译正文；超时不换 ID 重提。不编辑、发布或生成媒体。",
   production_get_compilation: "按 owner 和原 operationId 查询后台编译状态及应用回执；默认仅返回短状态，诊断/目标列表需 view 和 pageSize。只读，不重跑编译。",
   production_apply_compilation: "用精确 preparedId 原子接入 Backend 编译产物；沿用冻结的 expectedRevision/operationId，重复调用恢复原回执，源稿或绑定冲突拒绝覆盖。保存草稿，不发布或生成。",

@@ -17,7 +17,7 @@
         "dev:agent": "node scripts/dev-agent.mjs",
         "predev:web": "npm run build:plugins && npm run build --workspace canvas-agent",
         "dev:web": "npm run dev --workspace web",
-        "predev:services": "npm run build:plugins && npm run build --workspace canvas-agent",
+        "predev:services": "node scripts/prepare-dev-services.mjs",
         "dev:services": "concurrently -n backend,agent,web \"npm run dev --workspace backend\" \"npm run dev:agent\" \"npm run dev --workspace web\"",
         "dev:local": "scripts\\dev-local.bat",
         "dev:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-local-stop.ps1",

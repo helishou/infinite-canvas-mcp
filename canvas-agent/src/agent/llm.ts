@@ -28,6 +28,10 @@ export class LlmAgent {
     provider(id?: string) { return resolveLlmProvider(this.settings.get("ai.config"), id || this.defaultModel()); }
     rememberCodexThread(id: string, model: string) { this.settings.set(`agent.codex.channel-model:${id}`, model); }
     codexThreadModel(id: string) { const model = this.settings.get(`agent.codex.channel-model:${id}`); return typeof model === "string" && this.providers().some(provider => provider.id === model && provider.kind === "codex-cli") ? model : undefined; }
+    delegationModel(parentThreadId: string, requested?: string) {
+        if (requested) return requested;
+        return isLlmThread(parentThreadId) ? this.load(parentThreadId).model : this.codexThreadModel(parentThreadId) || this.defaultModel();
+    }
     nativeWorkerModel(model?: string, threadId?: string) {
         if (threadId && !isLlmThread(threadId) && !model) return undefined;
         if (model && !model.includes("::")) return model;
@@ -161,7 +165,7 @@ export class LlmAgent {
             this.save(thread); options.onThread?.(thread.id); options.onTurn?.(turn.id); event("turn.started");
             const skills = await this.skills(cwd);
             const selected = options.skill ? await this.resolveSkill(cwd, options.skill, true) : undefined;
-            const instructions = `${AGENT_PROMPT}\n\n可用 Skills（需要时先调用 agent_read_file 读取，继续读取相对引用）：\n${JSON.stringify(skills.skills.filter(skill => skill.enabled))}${selected ? `\n\n本轮用户调用的 Skill：\n${await fs.readFile(selected.path, "utf8")}` : ""}`;
+            const instructions = `${AGENT_PROMPT}\n\n导演委派上下文：parentThreadId=${thread.id}，parentTurnId=${turn.id}，projectId=${projectId || "未绑定"}。调用 director_subagent 时使用这些身份，子代理只返回建议，结果由你核对后保存。\n\n可用 Skills（需要时先调用 agent_read_file 读取，继续读取相对引用）：\n${JSON.stringify(skills.skills.filter(skill => skill.enabled))}${selected ? `\n\n本轮用户调用的 Skill：\n${await fs.readFile(selected.path, "utf8")}` : ""}`;
             client = await this.connect();
             if (projectId) {
                 const scope = await client.callTool({ name: "canvas_set_active_project", arguments: { id: projectId } }, undefined, { signal: controller.signal });
@@ -188,6 +192,11 @@ export class LlmAgent {
                     let result: unknown;
                     try {
                         const input = JSON.parse(call.arguments);
+                        if (call.name === "director_subagent") {
+                            input.parentThreadId = thread.id;
+                            if (input.action === "spawn") { input.parentTurnId = turn.id; input.model ||= thread.model; input.effort ||= options.effort; }
+                            if (projectId && !input.projectId) input.projectId = projectId;
+                        }
                         const previous = turn.messages.find(message => message.role === "tool" && message.callId === call.id);
                         if (previous) result = JSON.parse(textOf(previous));
                         else if (call.name === readTool.name) result = { content: [{ type: "text", text: await readAgentFile(cwd, String(input.path || "")) }] };

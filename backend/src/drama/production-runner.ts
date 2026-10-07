@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import type { CanvasExecutionTarget } from "./canvas-inputs.js";
+import { inputHash, type CanvasExecutionTarget } from "./canvas-inputs.js";
 import { createH3NodeMetadata } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { H3_DEFAULTS_KEY } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
@@ -13,7 +13,7 @@ import type { Stores } from "../stores/types.js";
 import { directorArtifact, validateDirectorMedia } from "./director.js";
 import { EpisodeProductionService, type ProductionRecord, type ProductionRun } from "./production.js";
 import { verifyImageInput } from "./image-inputs.js";
-import { productionClipProjection, clipInputHash, type ReferenceSync } from "./clip-inputs.js";
+import { productionClipProjection, clipInputHash, CLIP_PROJECTION_FIELDS, type ReferenceSync } from "./clip-inputs.js";
 import { productionSceneIdsForShots, productionSceneLayout } from "./production-layout.js";
 
 const stableId = (kind: string, ...parts: string[]) => `${kind}-${crypto.createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24)}`;
@@ -205,7 +205,14 @@ export class EpisodeProductionRunner {
                     catch (error) { projected = { result: { targetId: group.id, status: "blocked", referenceCount: 0, diagnostics: [{ code: "REFERENCE_NOT_APPROVED", message: String(error) }] } }; }
                 }
                 referenceSync.push(projected.result);
-                const segment = projected.segment || { id: segmentId, title: group.id, duration: Number(planned.generation_clip_duration || 5), prompt: "", referenceBindings: [], status: "idle", taskMode: ({ T2VA: "t2v", I2VA: "i2v", FL2VA: "fl2v", L2VA: "l2v", Ref2VA: "ref2va" } as Record<string, string>)[String(planned.mode)] || "ref2va" };
+                const segment: Record<string, any> = projected.segment || { id: segmentId, title: group.id, duration: Number(planned.generation_clip_duration || 5), prompt: "", referenceBindings: [], status: "idle", taskMode: ({ T2VA: "t2v", I2VA: "i2v", FL2VA: "fl2v", L2VA: "l2v", Ref2VA: "ref2va" } as Record<string, string>)[String(planned.mode)] || "ref2va" };
+                if (!projected.segment && !existing) {
+                    // This empty input was created by preparation, not authored by a
+                    // user. Preserve its baseline so later compilation can fill it.
+                    segment.productionClipProjection = { targetId: group.id, sourceHash: director.sourceHash,
+                        fieldHashes: Object.fromEntries(CLIP_PROJECTION_FIELDS.map(key => [key, inputHash(segment[key])])) };
+                    segment.productionClipProjection.inputHash = clipInputHash(segment);
+                }
                 if (existing) {
                     if (projected.segment && (clipInputHash(existing) !== clipInputHash(segment) || !existing.productionClipProjection)) canvasOps.push({ type: "update_h3_segment", nodeId: member.nodeId, segmentId, patch: segment });
                 } else if (existingNode || plannedNodeIds.has(member.nodeId)) canvasOps.push({ type: "add_h3_segment", nodeId: member.nodeId, segment });
@@ -299,7 +306,7 @@ export class EpisodeProductionRunner {
         const syncReceipt = { updated: 0, skipped: 0, bound: 0, reordered: 0 };
         let groups = published.clipGroups.filter((group) => !groupIds || groupIds.includes(group.id));
         let readiness = this.service.workflowReadiness(episodeId, "published");
-        const blocked = groups.map(group => readiness.targets.find(item => item.id === `segment:${group.id}`)).filter(item => !item || item.status !== "ready");
+        const blocked = groups.map(group => readiness.targets.find(item => item.id === `segment:${group.id}`)).filter(item => !item || !["ready", "complete"].includes(item.status));
         if (blocked.length) throw new Error(blocked.flatMap(item => item?.blockers || ["Segment 缺少就绪视图"] ).join("；"));
         this.service.validateExecution(episodeId, version, groups.map(group => group.id));
         const episode = this.storesEpisode(episodeId);

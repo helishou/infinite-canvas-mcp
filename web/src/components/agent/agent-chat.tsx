@@ -1,3 +1,4 @@
+import { AgentSubagents } from "./agent-subagents";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, useSpring, useTransform } from "motion/react";
 import { useTranslation } from "react-i18next";
@@ -83,6 +84,7 @@ export function AgentChatTimeline({
                     {timeline.map((entry) => entry.type === "commands"
                         ? <AgentCommandGroupRow key={entry.id} items={entry.items} theme={theme} />
                         : <AgentChatMessageRow key={entry.item.id} item={entry.item} theme={theme} />)}
+                    <AgentSubagents theme={theme} />
                     {pendingTool ? (
                         <AgentPendingToolCard
                             summary={summarizeCanvasAgentOps(pendingTool.input?.ops || []) || toolName(pendingTool.name)}

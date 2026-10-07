@@ -91,6 +91,9 @@ export const directorSceneWorkSchema = z.object({
     status: z.enum(["pending", "running", "awaiting_media", "awaiting_review", "blocked", "failed", "paused", "succeeded"]),
     stage: z.enum(["create", "assets", "review", "compile", "produce", "complete"]),
     agentTurnId: id.optional(), recoveryPending: z.boolean().optional(), agentThreadId: id.optional(), compilationId: id.optional(), runIds: z.array(id).default([]),
+    workPackage: z.record(z.unknown()).optional(), workArtifacts: z.array(z.record(z.unknown())).optional(),
+    workAdoptions: z.record(hash, z.object({ operationId: id, revision: z.number().int().nonnegative(), sourceHash: hash, opsHash: hash, artifactHash: hash }).strict()).optional(),
+    reviewPackages: z.record(id, z.record(z.unknown())).optional(), reviewArtifacts: z.array(z.record(z.unknown())).optional(),
     artifactIds: z.array(id).default([]), cursor: z.string().optional(), error: z.string().nullable().optional(),
     review: directorSceneReviewSchema.optional(), assetReviews: z.array(directorSceneReviewSchema).optional(), policy: directorReviewPolicySchema,
     model: z.string().optional(), effort: z.string().optional(), updatedAt: z.string().datetime(),
@@ -273,7 +276,7 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("review_keyframe"), shotId: id, verdict: z.enum(["auto-accepted", "needs-redo"]), evidence: z.string().min(1) }).strict(),
 ]);
 
-export const productionEditSchema = z.object({ operationId: id, expectedRevision: z.number().int().min(0), ops: z.array(productionOperationSchema).min(1) }).strict();
+export const productionEditSchema = z.object({ operationId: id, expectedRevision: z.number().int().min(0), ops: z.array(productionOperationSchema).min(1), adoptions: z.array(z.object({ taskId: id, artifactHash: hash }).strict()).min(1).optional() }).strict();
 export const productionPublishSchema = z.object({ operationId: id, expectedRevision: z.number().int().min(0), stage: z.enum(["script", "shots", "director"]), scope: productionCompilationScopeSchema.optional() }).strict();
 export const directorRunStartSchema = z.object({ runId: id, idempotencyKey: id, workId: id.optional(), expectedRevision: z.number().int().min(0), version: z.number().int().min(0).default(0), inputBasis: z.enum(["canvas", "published"]).default("canvas"), expectedCanvasRevision: z.number().int().nonnegative().optional(), expectedPlanHash: hash.optional(), targets: z.array(id).min(1), scope: z.enum(["selected", "all_ready"]).default("selected") }).strict();
 export const directorRunControlSchema = z.object({ runId: id }).strict();

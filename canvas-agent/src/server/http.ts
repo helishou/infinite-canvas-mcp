@@ -1,3 +1,4 @@
+import { executeDirectorSubagentTool } from "../agent/delegation.js";
 import { isProductionTool, executeProductionTool } from "../drama/production-tools.js";
 import { removedToolNotice, migrateToolGuidance } from "../canvas/tool-migrations.js";
 export { CanvasSession } from "../canvas/session.js";
@@ -672,6 +673,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
       const input = schema ? schema.parse(rawInput) as Record<string, unknown> : rawInput;
       const blockedProduction = await productionToolPreflight(backend, name, input);
       if (blockedProduction) return void res.json({ ok: true, result: blockedProduction });
+      if (name === "director_subagent") return void res.json({ ok: true, result: await executeDirectorSubagentTool(backend, input) });
       if (isProductionTool(name)) return void res.json({ ok: true, result: await executeProductionTool(backend, name, input) });
       const workspaceRequest = productionWorkspaceRequest(name, input);
       if (workspaceRequest) return void res.json({ ok: true, result: migrateToolGuidance(workspaceRequest.method === "GET" ? await backend.get(workspaceRequest.path) : productionWriteReceipt(await backend.post(workspaceRequest.path, workspaceRequest.body), { tool: name, input })) });
@@ -1125,7 +1127,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
       if (!clientId || !session.hasClient(clientId))
         return res
           .status(409)
-          .json({ ok: false, error: "发起任务的网页已断开，请重新连接后再试" });
+          .json({ ok: false, code: "CLIENT_DISCONNECTED", error: "发起任务的网页已断开，请重新连接后再试" });
       const requestedThreadId = String(req.body?.threadId || "");
       const activeThreadId = workspace.activeThreadId || "";
       const conversation = session.conversationStateSnapshot;

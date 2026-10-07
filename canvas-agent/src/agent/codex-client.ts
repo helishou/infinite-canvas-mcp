@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 import { createAgentLogWriter } from "../utils/agent-runtime.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -34,7 +35,8 @@ export class CodexReportedError extends Error {
 /** 封装 Codex app-server 的 JSON-RPC 通信与事件转换。 */
 export class CodexAppClient {
     private nextId = 1;
-    private buffer = "";
+    private buffer: string[] = [];
+    private outputDecoder = new StringDecoder("utf8");
     private currentThreadId = "";
     private currentTurnId = "";
     private turnRequestStartedAt = new Map<string, number>();
@@ -80,7 +82,7 @@ export class CodexAppClient {
             stopped = true;
             onExit();
         };
-        child.stdout?.on("data", (chunk) => client.read(chunk.toString()));
+        child.stdout?.on("data", (chunk) => client.read(chunk));
         const stderr = createAgentLogWriter((text) => {
             logger.warn("Codex app-server stderr", { text });
             emit("agent_log", { text });
@@ -340,7 +342,7 @@ export class CodexAppClient {
         const pendingStart: PendingTurnStart = { threadId, prompt, messageText, onTurn };
         this.pendingTurnStart = pendingStart;
         try {
-            const { turn } = await this.request("turn/start", { threadId, input: codexInput(prompt, images, skill), ...(outputSchema ? skillDraftTurnSettings() : turnSettings(permissionMode)), ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(outputSchema ? { outputSchema } : {}) }, Boolean(outputSchema));
+            const { turn } = await this.request("turn/start", { threadId, input: [...codexInput(prompt, images, skill), ...(!outputSchema ? [{ type: "text" as const, text: `导演委派上下文：parentThreadId=${threadId}${model ? `，model=${model}` : ""}。director_subagent 使用本线程身份与当前画布 projectId；子代理返回建议，由主导演核对后保存。`, text_elements: [] as [] }] : [])], ...(outputSchema ? skillDraftTurnSettings() : turnSettings(permissionMode)), ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(outputSchema ? { outputSchema } : {}) }, Boolean(outputSchema));
             const turnId = turn.id;
             if (!turnId) throw new Error("Codex app-server 没有返回 turn id");
             pendingStart.turnId = turnId;
@@ -446,11 +448,22 @@ export class CodexAppClient {
     }
 
     /** 按行解析 app-server 标准输出。 */
-    private read(chunk: string) {
-        this.buffer += chunk;
-        const lines = this.buffer.split(/\r?\n/);
-        this.buffer = lines.pop() || "";
-        lines.filter(Boolean).forEach((line) => {
+    private read(chunk: string | Buffer) {
+        const text = typeof chunk === "string" ? chunk : this.outputDecoder.write(chunk);
+        let start = 0;
+        let end: number;
+        // 仅扫描新到的块；长 JSON 响应未结束时不反复拼接和扫描完整前缀。
+        while ((end = text.indexOf("\n", start)) >= 0) {
+            const fragment = text.slice(start, end);
+            let line = fragment;
+            if (this.buffer.length) {
+                this.buffer.push(fragment);
+                line = this.buffer.join("");
+                this.buffer = [];
+            }
+            start = end + 1;
+            if (line.endsWith("\r")) line = line.slice(0, -1);
+            if (!line) continue;
             try {
                 this.handle(JSON.parse(line) as JsonRecord);
             } catch (error) {
@@ -459,7 +472,8 @@ export class CodexAppClient {
                     this.emit("agent_log", { text: line });
                 }
             }
-        });
+        }
+        if (start < text.length) this.buffer.push(text.slice(start));
     }
 
     /** 分派单条 JSON-RPC 响应、请求或通知。 */
@@ -1017,7 +1031,7 @@ function parseMaybeJson(value: unknown) {
 
 function productionThreadSettings(cwd: string) {
     return { ...skillDraftThreadSettings(cwd), ephemeral: false,
-        developerInstructions: "你是场次制作或导演审核工作者。只返回请求的结构化结果；不修改文件，不调用生成工具，不改变共同资产或其他场次。源事实来自输入工作包。完整创作字段不得用摘要代替。证据缺失返回未决项，审核不能猜测通过。" };
+        developerInstructions: "你是场次制作或导演审核工作者。只返回请求的结构化结果；不修改文件，不调用生成工具，不创建或委派其他代理，不改变共同资产或其他场次。源事实来自输入工作包。完整创作字段不得用摘要代替。证据缺失返回未决项，审核不能猜测通过。" };
 }
 
 function isPaginatedThreadReadError(error: unknown) {

@@ -9,19 +9,19 @@ export const productionReadSchema = z.object({
     pageSize: z.coerce.number().int().positive().optional(),
     cursor: z.string().optional(),
     chunkBytes: z.coerce.number().int().positive().optional(),
+    ifRevision: z.coerce.number().int().nonnegative().optional().describe("仅当已完整持有同一对象、snapshot、view 和筛选范围的数据时传其读取 revision；相同则返回 unchanged 短确认。分页续读 cursor 不使用此参数。写回执 revision 不能替代已读内容的版本。"),
 });
 export function productionReadQuery(raw: unknown) {
     const input = productionReadSchema.parse(raw);
     const query = new URLSearchParams({ view: input.view, snapshot: input.snapshot });
     if (input.targetIds) query.set("targetIds", input.targetIds.join(","));
-    for (const key of ["sourceSection", "pageSize", "cursor", "chunkBytes"] as const) if (input[key] !== undefined) query.set(key, String(input[key]));
+    for (const key of ["sourceSection", "pageSize", "cursor", "chunkBytes", "ifRevision"] as const) if (input[key] !== undefined) query.set(key, String(input[key]));
     return `?${query}`;
 }
 
 /** MCP reads select one complete payload instead of repeating source/prompts/history. */
 export function projectProductionRead(production: any, raw: unknown = {}, digest?: (value: string) => string, fullValue: unknown = production) {
     const input = productionReadSchema.parse(raw);
-    if (input.view === "full" && !input.chunkBytes) return fullValue;
     const header = { episodeId: production.episodeId, ...(production.sceneId ? { sceneId: production.sceneId } : {}), ...(production.projectId ? { projectId: production.projectId } : {}), revision: production.revision, publishedVersion: production.publishedVersion, updatedAt: production.updatedAt };
     const selected = production[input.snapshot];
     const d = selected?.director;
@@ -33,6 +33,11 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
         if (cursor.selection !== selection) throw new Error("READ_CURSOR_EXPIRED: 读取对象或版本已变化，请从当前版本重新读取");
         offset = z.number().int().nonnegative().parse(cursor.offset);
     }
+    // 续页仍须返回未读部分；不能让条件读取把同版本的下一页吞掉。
+    if (!input.cursor && input.ifRevision !== undefined && input.ifRevision === production.revision) {
+        return { ...header, snapshot: input.snapshot, view: input.view, sourceHash: d?.sourceHash, unchanged: true };
+    }
+    if (input.view === "full" && !input.chunkBytes) return fullValue;
     const next = (index: number) => encodeURIComponent(JSON.stringify({ selection, offset: index }));
     const paginate = (items: any[]) => {
         if (input.cursor && !input.pageSize && !input.chunkBytes) throw new Error("游标读取必须携带 pageSize 或 chunkBytes");
@@ -141,6 +146,7 @@ export function productionWriteReceipt(result: any, context: { tool?: string; in
             blocked: sync.filter((item: any) => item.status === "blocked").length,
             conflicts: sync.filter((item: any) => (item.diagnostics || []).some((d: any) => String(d.code).includes("CONFLICT"))).length, referenceSync: sync.length },
         warnings: { count: sync.reduce((n: number, item: any) => n + count(item.diagnostics), 0) + count(layout.diagnostics), codes: diagnosticCodes },
+        ...(["production_edit", "production_publish", "production_restore", "production_sync_clips"].includes(context.tool || "") ? { readPolicy: { nextReadRequired: false, guidance: "成功回执已给出 revision/sourceHash；复用已知输入。仅缺少任务所需字段或遇到冲突时定向读取，不整稿回读或对已保存源稿重复计算哈希。" } } : {}),
         ...(result.project ? { nextRead: { tool: "production_get_canvas_context", input: { projectId: result.project.id } } } : ownerId ? { nextRead: { tool: context.tool?.includes("scene_work") || context.tool === "production_start_shared_review" ? "production_get_scene_work" : tool,
             input: context.tool?.includes("scene_work") || context.tool === "production_start_shared_review" ? { kind, id: ownerId } : readInput } } : {}) });
 }

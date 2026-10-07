@@ -1,11 +1,12 @@
 import React, { useState } from "react";
-import { App, ConfigProvider, theme } from "antd";
+import { App, ConfigProvider } from "antd";
 import { createRoot } from "react-dom/client";
 import { directorModules, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import type { EpisodeProduction, ProductionBatch, ProductionContinuity, ProductionReadiness } from "../src/services/backend-api";
 import { DirectorPanel, type DirectorWorkspace } from "../src/pages/drama/director-panel";
 import { exportAchengDeliveryBundle } from "../src/lib/acheng-delivery-export";
 import i18n from "../src/i18n";
+import { getAntThemeConfig } from "../src/lib/app-theme";
 import "../src/styles/globals.css";
 
 const hash = "a".repeat(64);
@@ -74,6 +75,8 @@ const initialReadiness: ProductionReadiness = {
   ],
 };
 
+if (clipScenario === "ready") initialReadiness.targets = initialReadiness.targets.map(target => target.id === "segment:SEG1" ? { ...target, status: "ready", blockers: [] } : target);
+
 function Harness() {
   const [director, setDirector] = useState(initial), [production, setProduction] = useState(initialProduction), [readiness, setReadiness] = useState(initialReadiness);
   const [sourceDrafts, setSourceDrafts] = useState<Record<string, string>>({});
@@ -126,7 +129,7 @@ function Harness() {
       anchor.href = url; anchor.download = "fixture-acheng.zip"; document.body.appendChild(anchor); anchor.click(); anchor.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 1500);
     } finally { setExporting(false); }
   };
-  return <ConfigProvider theme={{ algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm }}><App><main className="p-6">
+  return <ConfigProvider theme={getAntThemeConfig(dark)}><App><main className={`${dark ? "dark " : ""}min-h-screen bg-background p-6 text-foreground`}>
     <div className="mb-4 flex gap-2"><button onClick={() => setDark(!dark)}>theme</button><button onClick={() => { const next = locale === "zh-CN" ? "en-US" : "zh-CN"; setLocale(next); void i18n.changeLanguage(next); }}>language</button></div>
     <button onClick={() => { setWorkspace("production"); setFocusTarget("segment:SEG1"); }}>Edit Clip style</button>
     <nav className="mb-4 flex flex-wrap gap-2">{(["overview", "story", "assets", "shots", "continuity", "production", "advanced"] as DirectorWorkspace[]).map(key => <button key={key} onClick={() => setWorkspace(key)}>{i18n.t(`director.workspace.tab.${key}`)}</button>)}</nav>

@@ -92,7 +92,7 @@ export function buildPublishedProductionClip(project: Record<string, any>, publi
     const settings = Object.fromEntries(H3_PARAM_KEYS.filter(key => !contentKeys.has(key) && runtime[key] !== undefined).map(key => [key, runtime[key]]));
     if (runtime.steps !== undefined) settings.videoSteps = runtime.steps;
     delete settings.steps;
-    const segment = { ...authored, ...settings, h3ParameterPolicy: "overrides" };
+    const segment: Record<string, any> = { ...authored, ...settings, h3ParameterPolicy: "overrides" };
     segment.productionClipProjection.fieldHashes.modelName = clipFieldHash(segment.modelName);
     segment.productionClipProjection.inputHash = clipInputHash(segment);
     return segment;

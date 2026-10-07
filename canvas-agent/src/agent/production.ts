@@ -22,6 +22,7 @@ export class WorkPool {
     }
 }
 
+/** images always contains verified local file paths; channel adapters perform encoding. */
 export type ProductionAgentRequest = { workId: string; prompt: string; cwd: string; schema: Record<string, unknown>; threadId?: string; model?: string; effort?: CodexReasoningEffort; review?: boolean; recoverOutput?: boolean; turnId?: string; onTurn?: (turnId: string) => void; images?: string[]; readRoots?: string[]; onThread: (threadId: string) => void; emit?: AgentEmit };
 type ApiWorker = { canRun(request: ProductionAgentRequest): boolean; run(request: ProductionAgentRequest): Promise<{ threadId: string; output: unknown }> };
 type ProductionClient = Pick<CodexAppClient, "resumeProductionThread" | "startProductionThread" | "generateProductionOutput" | "stopProductionClient"> & Partial<Pick<CodexAppClient, "recoverProductionOutput">>;

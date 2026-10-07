@@ -60,6 +60,36 @@ test("同一批并发事件只产生一次落盘", async (context) => {
     assert.equal((await new CodexEventHistory(file).readThread("thread-1")).items.length, 200);
 });
 
+test("历史序列化期间事件循环可继续处理请求，且 Unicode 字节数与文件一致", async (context) => {
+    const { file, history } = await withStore(context);
+    await history.readThread("thread-1");
+    const stringify = JSON.stringify;
+    let heartbeat = false;
+    let lastEntrySawHeartbeat = false;
+    // 只观测实际 JSON 编码，不替换编码结果；首次条目开始时模拟等待处理的请求。
+    JSON.stringify = ((value: unknown) => stringify(value, (_key, current) => {
+        if (current?.itemId === "item-0") setImmediate(() => { heartbeat = true; });
+        if (current?.itemId === "item-199") lastEntrySawHeartbeat = heartbeat;
+        return current;
+    })) as typeof JSON.stringify;
+    try {
+        await Promise.all(Array.from({ length: 200 }, (_, index) => history.record({
+            ...item(index), item: { text: "画布历史🌟".repeat(1000) },
+        })));
+    } finally {
+        JSON.stringify = stringify;
+    }
+    assert.equal(lastEntrySawHeartbeat, true, "整份历史不能连续占用主线程直到最后一个条目编码完成");
+    const restored = await new CodexEventHistory(file).readThread("thread-1");
+    assert.equal(restored.items.length, 200);
+    assert.equal(restored.items[199].item.text, "画布历史🌟".repeat(1000));
+
+    let reportedBytes = 0;
+    const observed = new CodexEventHistory(file, { onFlush: bytes => { reportedBytes = bytes; } });
+    await observed.recordTurn({ threadId: "thread-1", turnId: "turn-0", turn: { status: "completed" } });
+    assert.equal(reportedBytes, (await fs.stat(file)).size);
+});
+
 test("记录终态后返回的 Promise 之前，数据必须已经可被新实例读到", async (context) => {
     const { file, history } = await withStore(context);
     await history.record(item(1));

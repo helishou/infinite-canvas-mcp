@@ -5,6 +5,74 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Director production orchestration
+
+- Image reviews pass local media paths to API/Codex adapters. Missing images cannot be approved or regenerated. Verify actual provider image visibility.
+- Bound subtasks freeze draft scope, dependencies, media identities and professional contracts. The director adopts complete suggestions through transactional `production_edit.adoptions`; verify unrelated edits, stale inputs, rollback and operation replay.
+- Partial outputs continue on the original task/thread with immutable artifacts. Startup reconciles all director tasks; recovery only reads the original completed turn. Verify more than ten tasks, missing turns and existing delivery modes.
+- The roster distinguishes incomplete content, pending review, stale inputs, adopted suggestions and execution failures. Verify artifact/adoption details, recovery, themes, languages, refresh, reconnection and conversation isolation. Execution success does not establish media acceptance.
+
+## Parallel production blocker handoff
+
+- Failed or blocked scene work, review or paused work with errors, shared review errors, and rejected requests show a prominent error panel. Resolve with director opens the existing director flow with the original error, production owner, revision, scene and work identity. Ordinary review waits without errors remain unchanged. Verify Chinese and English, both themes, correct scene handoff and no generation, resume or review approval from the handoff button.
+
+## Director chat connection recovery
+
+- Rebuilding or unmounting the chat connection immediately clears its connected state. If submission is rejected because the initiating page is disconnected, the page reconnects and retains the original draft; it does not automatically resend the task. Verify reconnecting after a Backend restart and navigating away and back, including queued prompts and attachments.
+
+## Reusing production source reads
+
+- `production_get` accepts `ifRevision` when complete content for the same owner, snapshot, view and selection is already held. An unchanged version returns a compact confirmation; changed versions return fresh content. Continuations omit it and expired cursors still fail. Read live task state through readiness/run/task endpoints. Verify shared HTTP MCP, Agent compatibility and intervening edits.
+- Agent/SOP guidance reuses read versions and treats successful write receipts' `nextRead` as optional. Existing director documents use source/continuity patches with Backend-computed hashes. Verify long tasks avoid repeated full reads and repeated hashing of identical candidates. Reduced response bytes do not establish reduced Agent call counts without a real comparison run.
+
+## Production compilation reuse and failed-target recovery
+
+- Compilation can reuse unchanged artifacts with valid receipts, prompt digests and compiler identity. Within a selected scope, edits compile invalid targets and their required dependencies while retaining other artifacts' provenance. Each binding verification reads a given media digest once while independently checking every binding's ownership and declared digest. Check full and scoped requests, changed reference files, engine changes, continuity blockers and idempotent recovery; reuse retains formal media and version checks.
+- Clip completion no longer depends on parallel scenes or the entire batch succeeding. A successful Clip in a failed batch still requires its successful task, accessible archived output, active binding and matching inputs. Check failed-target-only retries, changed inputs, manual parameters, repeated synchronization and Motion Context recovery; completed independent Clips should not be submitted again.
+- Newly prepared system placeholder Clips retain their empty input baseline so valid compilation can populate prompts and references. Manual edits and existing content without a baseline remain protected. Check preparation before compilation, progress across scenes, manual edits and preparation/application replays. Technical completion does not imply visual approval.
+
+## H3 continuation switches
+
+- Enabling tail-frame reference or Motion Context automatically disables the other option in the same Clip. Turning an option off allows both to remain off. Switches reflect Backend saved values instead of concealing legacy conflicts. Repair old double-enabled settings through an explicit saved edit. Backend transactions save and broadcast both fields; repeated requests recover the same receipt. Group planning uses the same parameters and reports conflicting saved values explicitly. Verify switching in both directions, saved state after refresh, and the tail-frame switch with a selected video model.
+
+## Large supplemental Agent history and backend connectivity
+
+- Codex stdout scans only incoming chunks for newlines and joins each completed message once, avoiding repeated full-prefix scans during long history responses. Byte fragments preserve Chinese text, emoji and CRLF. Verify large/consecutive messages, incomplete tails and backend responsiveness when opening long conversations.
+
+- Supplemental history retains its JSON format and atomic replacement. Saving serializes entries individually, yields to the event loop and writes a temporary file with stream backpressure, without clearing or truncating history. Verify health/business responsiveness during large saves, concurrent events, terminal turns, rollback and restart recovery.
+- The disconnected banner explains that the backend may be stopped or busy instead of treating every connection failure as a stopped service. Check both languages and banner dismissal after recovery.
+
+## Acheng subject bindings and continuity prose
+
+- Scoped compilation validates timelines and asset needs for actual output requests while retaining preceding Shots for full continuity replay. Exact frame-derived float durations are normalized only in the validator copy; genuine mismatches still fail. Verify inserted Shots, fractional-second clips and unchanged authored source.
+
+- With the newly activated engine, Ref2VA references that reuse character identity, environments or props require Subjects covering the entity, source media and visible Shots. Frame and composition anchors may remain Pictures. Missing bindings retain a draft with specific blockers and cannot pass delivery.
+- Full replay snapshots remain in continuity reports. Prompt prose uses authored shot states and actions; additional visible constraints use `continuity_cues` with a registered fact, start/end phase, exact state value and complete description. State mismatches block acceptance. Verify repaired Subject coverage, prop end states, unchanged dialogue and quoted visible text. Historical bundles and in-flight tasks retain their original version. Structural acceptance does not replace story, prose consistency or visual review.
+
+## Director subagents and conversation display
+
+- The subagent roster follows the compact Hermes status-row pattern: hide the entire section when empty, including error-only discovery; start collapsed with a one-line header; select a task to read results or failures, preserving collapse and selection across progress and same-session refresh.
+
+
+- The director can use director_subagent to delegate story, shots, assets, continuity and review suggestions with the parent channel and frozen task context. Waiting reuses canvas_wait_tasks; results support explicit full reads and UTF-8 chunk recovery. The same operationId replays its receipt, rejects changed intent, and never reruns failed or pruned tasks. Subtasks share the existing three worker slots and return suggestions without modifying source, generating media or delegating further; the main director reviews and saves through existing tools. The chat displays scoped tasks, live status, failures and expandable results, restores summaries after refresh and rejects late responses after switching conversations. Stopping the main conversation does not cancel submitted tasks; service restarts retain failed records for unfinished tasks. Verify API/Codex CLI channels, languages, themes, narrow screens and existing scene parallelism.
+
+## MCP v3 tool consolidation
+
+- Production tools now require explicit kind/id and share 17 entry points. The 34 old production names plus image-prompt flow, single-Clip update and unversioned text update are removed from discovery and execution. Verify migrated workflows, existing operation/run recovery, two-session owner isolation and TOOL_REMOVED failures without side effects. Backend Web REST behavior and historical telemetry remain unchanged. See the repository docs/mcp-v3-migration.md for the complete mapping.
+
+## Parallel continuation and visible feedback
+
+- Advance to H3 continues existing scene work waiting for review during creation, grants missing media authorization, and fills a missing worker channel from the explicitly selected channel. Already-authorized work awaiting review can be explicitly retried. Running workers and manual pauses are preserved; completed scenes are not regenerated. Buttons show submission progress and receipts, rejections remain visible, and existing-work-only selections explain how to review or resume. Shared and scene reviews remain required; request acceptance does not claim video generation has started.
+
+## Readable clip view in generation and delivery
+
+- A focused clip shows duration, video results, status, visual style, action and dialogue first. Camera and start/end states use reading labels; complete source, references, raw parameters and adjacent-clip settings are collapsed. Ready clips can generate using the current production mode, with duplicate submissions disabled while active. Verify first, middle and single clips, both languages and themes, and narrow screens. Opening details does not save or generate; source edits and boundary saving remain available.
+
+## Reuse verified builds during local service startup
+
+- Before `dev:local` / `dev:services` starts services, file-content checks cover plugin and shared Agent sources, dependency configuration, and build outputs. Unchanged builds are reused; first runs, source or dependency changes, and missing or modified outputs rebuild the affected group. Verify that a second startup skips builds and that source edits or deleted outputs trigger a rebuild. Build failures prevent service startup.
+- The Backend startup success log records total process startup time and stages for imports, configuration and locking, database initialization, workflows, Agent setup, and recovery. Inspect these fields on the next normal startup to distinguish build delays from Backend initialization. Process startup time excludes npm build steps before Backend launch.
+
 ## Director H3 parameters match the Clip UI
 
 - Formal director Clips use the parameters currently saved in the UI. Preview and submission reject request overrides that change models, sampling, dimensions, LoRAs, or second-pass settings and list the differing fields. Save changes to the Clip before submitting. Historical and running tasks retain their original inputs.
@@ -187,8 +255,8 @@ description: Implemented changes that still need manual verification
 ## Director chat queue and inserted guidance
 
 - The composer stays editable while Agent is running: Enter or “Queue next” snapshots the current prompt, attachments, canvas references, Skill and permission mode, then sends queued instructions in submission order. The queue shows its count and per-item status above the conversation and each item can be removed. A queued instruction appears only in its queue card; it enters the conversation timeline when it is actually submitted.
-- “Insert and guide” promotes an item to the front of the current conversation queue. If that conversation is running, the current turn is interrupted first and the instruction is sent only after authoritative state for the same conversation reports idle; a rejected interrupt or unconfirmed idle keeps the item and never submits twice. Ordinary “Stop” pauses that conversation's queue, and the queue offers “Resume queue”.
-- Queues are per conversation, so switching or deleting a conversation affects only its own items. An item whose canvas references were removed or whose canvas changed is marked failed and can be retried instead of being silently dropped. The queue lives in page memory only and is not restored after a refresh or reconnect; sending uses the snapshotted content and attachment data, not temporary links released later.
+- “Insert and guide” promotes an item to the front of the current conversation queue. If that conversation is running, the current turn is interrupted first and the instruction is sent only after authoritative state for the same conversation reports idle; a rejected interrupt or unconfirmed idle keeps the item and never submits twice. Ordinary “Stop” pauses that conversation's queue, and the queue offers “Resume queue”. If the queue is paused and the conversation is idle, inserting resumes this conversation queue and prioritizes the instruction immediately. A running insertion resumes only after a successful interrupt and authoritative idle; failure preserves the original pause.
+- Queues are per conversation, so switching or deleting a conversation affects only its own items. An item whose canvas references were removed or whose canvas changed is marked failed and can be retried instead of being silently dropped. The queue is saved in this tab’s browser storage and restores queued items and pause state after refresh; sending uses the snapshotted content and attachment data, not temporary links released later.
 - Check: queue two instructions while running via both Enter and “Queue next” and confirm send order; insert during a run and confirm the new instruction is sent first after the interrupt; a duplicate idle snapshot must not resend; pause and resume after Stop; both languages, light/dark themes and narrow layouts.
 
 ## Background confirmation reminders
@@ -302,7 +370,7 @@ description: Implemented changes that still need manual verification
 ## Production contracts and read-only preflight
 
 - HTTP MCP `tools/list` should expose the complete production operation union. `production_get_contract` accepts an optional operationType; runtimeId remains accepted but no longer selects a compiler and returns schemas, valid examples and source templates. Contracts always use the locally active version and report unavailable active engines.
-- Call `canvas_preflight_production` or `drama_preflight_production` with action and the original formal request. Invalid brief types, missing entity, invalid module states, missing patch targets and malformed source fields should return diagnostic paths. Preflight must not change revision, receipts, tasks or execution authorization.
+- Call `production_preflight` or `production_preflight` with action and the original formal request. Invalid brief types, missing entity, invalid module states, missing patch targets and malformed source fields should return diagnostic paths. Preflight must not change revision, receipts, tasks or execution authorization.
 - Incomplete planning drafts remain editable; publication and generation enforce their own requirements. A revision change after preflight must still reject the stale formal request. Formal request replay remains idempotent.
 - After building the shared package, run `node scripts/acheng/preflight.mjs director.json edit` for offline checks; publish/generate stages are also supported. Online ownership and model configuration remain unverified, so offline checks cannot establish generation readiness. Canvas exports retain preflight.json and compiler diagnostics.
 - Build and activate the new compatibility runtime through the runtime manager. Ref2VA prompts above 2900 words should retain all bytes and pass length checks when their minimum detail requirements are met. Historical prompts and receipts retain their original provenance; subsequent compiler/validator requests use the locally active runtime to rebuild affected artifacts. No production version upgrade is required. No source is rewritten and no media is generated by this step.
@@ -999,7 +1067,7 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 
 ## H3 MCP 输出瘦身
 
-- 调用 `h3_write_storyboard_prompt`、`h3_apply_video_plan`、`h3_update_clip`、参考绑定及 H3 任务工具，确认成功响应只返回标识、计数、变更字段或任务结果摘要。调用 `h3_get_clip` 确认只返回轻量总览，再分别用 `h3_get_clip_prompt`、`h3_get_clip_references`、`h3_get_clip_runtime` 按需读取详细内容；工具列表中不再出现 `h3_prepare_clip`。
+- 调用 `h3_write_storyboard_prompt`、`h3_apply_video_plan`、`h3_update_clips`、参考绑定及 H3 任务工具，确认成功响应只返回标识、计数、变更字段或任务结果摘要。调用 `h3_get_clip` 确认只返回轻量总览，再分别用 `h3_get_clip_prompt`、`h3_get_clip_references`、`h3_get_clip_runtime` 按需读取详细内容；工具列表保留 `h3_prepare_clip` 的联合准备能力；旧单段更新入口已移除。
 
 ## H3 Clip 重排参考保护
 
@@ -1962,13 +2030,13 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 
 - H3「还原 Clip」回归：生成一个带提示词和多张图片/视频参考的 Clip，修改当前段的提示词与参考素材后，在输出素材库点击「还原 Clip」；确认提示词、`refItems` 及 `refs` 槽位恢复为该输出生成时的内容，刷新页面后再次还原仍然有效。
 
-- 在 H3「显存与卸载」中确认「连续生成模式（保留模型缓存）」默认开启；关闭时日志仍出现起始/条件阶段释放，开启后连续运行两个 Clip 时不再执行跨 Clip 起始释放，并复用已加载模型。确认开启后单段峰值显存仍可完成，关闭开关后恢复原有释放行为；前端、MCP `h3_update_clip` 与任务执行使用同一 `keepModelCache` 参数。
+- 在 H3「显存与卸载」中确认「连续生成模式（保留模型缓存）」默认开启；关闭时日志仍出现起始/条件阶段释放，开启后连续运行两个 Clip 时不再执行跨 Clip 起始释放，并复用已加载模型。确认开启后单段峰值显存仍可完成，关闭开关后恢复原有释放行为；前端、MCP `h3_update_clips` 与任务执行使用同一 `keepModelCache` 参数。
 
 ## 画布同步与 H3 稳定片段定位
 
-- H3 MCP 参数与前端面板一致性：通过 MCP `h3_update_clip` 修改一个或多个 Clip 的模型、百万像素、RTX、采样、VAE 等参数，确认对应片段和节点面板同时显示新值；修改后不自动启动生成、不覆盖提示词、参考图、运行状态或结果历史。确认 BF16 H3 模型出现在模型下拉框，实际提交使用 `h3\\minimax_h3_hybrid_fl2va_ref2va_b25-49-bf16.safetensors`。
+- H3 MCP 参数与前端面板一致性：通过 MCP `h3_update_clips` 修改一个或多个 Clip 的模型、百万像素、RTX、采样、VAE 等参数，确认对应片段和节点面板同时显示新值；修改后不自动启动生成、不覆盖提示词、参考图、运行状态或结果历史。确认 BF16 H3 模型出现在模型下拉框，实际提交使用 `h3\\minimax_h3_hybrid_fl2va_ref2va_b25-49-bf16.safetensors`。
 - 让网页保留一个旧 H3 本地快照，再通过 MCP 更新同一项目的 duration / prompt / refs；确认页面收到更高 revision 后直接显示远端值，不会自动把旧快照重新提交。确认远端推进后本地确实新编辑的字段仍能进入冲突/rebase 流程。
-- 重排 Clip 后用 MCP `h3_update_clip(segmentId=...)` 更新指定片段，确认仍命中原片段；前端按钮、MCP 单段运行和 Backend 任务回写均使用同一 `segmentId`，不因数组下标变化而错写，也不提交整段 `metadata.segments`。
+- 重排 Clip 后用 MCP `h3_update_clips(updates=[{segmentId,patch}],operationId,expectedRevision)` 更新指定片段，确认仍命中原片段；前端按钮、MCP 单段运行和 Backend 任务回写均使用同一 `segmentId`，不因数组下标变化而错写，也不提交整段 `metadata.segments`。
 
 ## 视频拼接与后台能力端点
 
@@ -1997,7 +2065,7 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 + 自定义工作流媒体持久化：用带图片字段的工作流生成一次，检查 `workflow` 子任务的 `input.fields` 和生成日志 `params.fields` 不包含 `data:`、`base64` 或原始图片内容，同时 ComfyUI 执行仍能收到图片；连续生成多段后 SQLite 任务记录大小不应按图片 Base64 线性膨胀。
 + 历史媒体脱敏维护：确认 `runtime.sqlite.before-inline-media-redaction-*.sqlite` 备份存在；检查任务和生成日志中不再出现内联 Base64，画布项目、媒体文件和任务状态保持不变；确认 Backend 重启后仍可正常查询历史任务与生成日志。
 + 画布图片任务幂等与媒体句柄：对同一个配置/源节点连续快速点击生成，确认只创建一个运行中的 `canvas-image` 任务，不会因每次点击新建结果节点而重复调用模型；检查 Backend 任务 `input.references` 与生成日志只包含 `storageKey`/URL 等句柄，不包含 `dataUrl` 或大段 Base64。生成完成后再点击应允许发起新一轮任务；前端按钮、MCP 和页面刷新恢复都应保持同一行为。
-+ H3 段粒度写路径回归：H3 节点编辑某一段 prompt 时只产 `update_h3_segment`，不再带整 segments 数组；同节点上另一段被任务回写完成时，本地编辑不应被 409 拦下；MCP `h3_update_clip` 与 `h3_apply_video_plan` 也走细粒度 op。`update_node.metadata.segments` 路径被严格校验，只有「同长同 id 集合」的完整替换才放行。
++ H3 段粒度写路径回归：H3 节点编辑某一段 prompt 时只产 `update_h3_segment`，不再带整 segments 数组；同节点上另一段被任务回写完成时，本地编辑不应被 409 拦下；MCP `h3_update_clips` 与 `h3_apply_video_plan` 也走细粒度 op。`update_node.metadata.segments` 路径被严格校验，只有「同长同 id 集合」的完整替换才放行。
 + H3 自动播放（React StrictMode 修复后）回归：dev 模式下 StrictMode 会让 useEffect 在 mount 时跑两次，原 `skipFirstPlayRequestRef` 在第二次跑时已失效，导致视频自动起播。新方案用 H3Workbench 本地 `playToken` 作 trigger，metadata 残留值不触发播放。回归路径：①H3 节点无任何点击、双击、刷新后进入画布，视频不应自动播放；②上次播放后 metadata 有 `h3PlayRequest > 0`，重新进入画布也不应自动播放；③点工具栏「连续播放全部 Clip」仍能正常起播，连续播放到下一段时也不应卡住；④换段 / MCP 改 `h3PlayRequest` 不应触发自动播放。
 + H3 「设为当前 Clip」覆盖回归：本地刚同步的 segment 字段（包括 restore / 手动改 prompt / mode 等）被 MCP 再次覆盖时，画布应弹冲突提示让用户「保留我的 / 采用远端」二选一，而不是悄悄被远端值覆盖。同时 `h3_apply_video_plan` replace 路径写回新 plan 后 `selectedSegmentId` 应落在新 plan 的对应段（按旧选中索引/兜底首段），不应跳到 `segments[0]` 看上去"换回之前的 clip"。
 + 冲突弹窗「保留我的 N 个操作」按钮回归：触发一次真实冲突（让 MCP/任务回写抢在本地前面），冲突弹窗里点「保留我的 N 个操作」后：①弹窗应立即关闭；②400ms 内 `pendingOps` 应按新 revision 自动重提并落到后端；③不再因「用户不再编辑就没人重提」而反复弹窗。

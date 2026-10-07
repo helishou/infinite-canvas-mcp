@@ -56,6 +56,11 @@ test("embedded Agent creates, runs and restores a channel conversation without s
     };
     const models = await json("/codex/models");
     assert.deepEqual(models.data.map((item: any) => item.model), ["channel::fixture"]);
+    const disconnected = await fetch(`${url}/agent/codex/turn`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientId: "disconnected-client", prompt: "must not execute" }) });
+    assert.equal(disconnected.status, 409);
+    assert.equal((await disconnected.json() as any).code, "CLIENT_DISCONNECTED");
+    assert.equal(requests, 0);
+    assert.equal(agent.session.codexBusy, false);
     const events = new AbortController();
     const response = await fetch(`${url}/agent/events?clientId=fixture-client`, { signal: events.signal });
     assert.equal(response.status, 200);

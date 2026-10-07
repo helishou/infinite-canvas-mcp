@@ -44,6 +44,15 @@ test("HTTP MCP defaults stay compact while historic source and model catalog rem
         return JSON.parse(result.content[0].text);
     };
     const tools = await client.listTools();
+    assert.ok((tools.tools.find(tool => tool.name === "production_get")!.inputSchema.properties as any).ifRevision);
+    const cachedProduction: any = await (await fetch(`${config.url}/drama/episodes/ep/production`)).json();
+    const conditional = await call("production_get", { kind: "episode", id: "ep", view: "full", ifRevision: cachedProduction.production.revision });
+    assert.equal(conditional.production.unchanged, true);
+    assert.equal(conditional.production.draft, undefined);
+    assert.ok(Buffer.byteLength(JSON.stringify(conditional)) < 2000);
+    const staleRead = await call("production_get", { kind: "episode", id: "ep", view: "full", ifRevision: 0, chunkBytes: 100000 });
+    assert.equal(staleRead.production.unchanged, undefined);
+    assert.ok(staleRead.production.chunk.text.length > 0);
     const contractTool = tools.tools.find(tool => tool.name === "production_get_contract")!;
     assert.match((contractTool.inputSchema.properties as any).runtimeId.description, /Deprecated/);
     const contract = await call("production_get_contract", { runtimeId: "historical-runtime-no-longer-installed" });

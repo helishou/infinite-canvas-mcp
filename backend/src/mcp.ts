@@ -1,3 +1,4 @@
+import { executeDirectorSubagentTool } from "@basketikun/canvas-agent/agent/delegation";
 import { productionToolNames, executeProductionTool } from "@basketikun/canvas-agent/drama/production-tools";
 import { removedToolNotice, migrateToolGuidance } from "@basketikun/canvas-agent/tool-migrations";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -275,7 +276,9 @@ export function registerBackendMcpHttpRoutes(
     const sessionId = sessionIdOf(req);
     const existing = sessionId ? sessions.get(sessionId) : undefined;
     if (existing) {
-      const notice = req.body?.method === "tools/call" ? removedToolNotice(String(req.body.params?.name || "")) : undefined;
+      const validToolRequest = req.body?.jsonrpc === "2.0" && req.body?.method === "tools/call" && typeof req.body.params?.name === "string"
+        && ["number", "string"].includes(typeof req.body.id);
+      const notice = validToolRequest ? removedToolNotice(req.body.params.name) : undefined;
       if (notice && req.body.id !== undefined) {
         res.json({ jsonrpc: "2.0", id: req.body.id, error: { code: -32602, message: notice.error, data: notice } });
         return;
@@ -1058,8 +1061,8 @@ function registerBackendCanvasTools(
           traceId,
           event: "tool.started",
           tool: name,
-          projectId: optionalText(rawInput.projectId || state.activeProjectId),
-          nodeId: optionalText(rawInput.nodeId || rawInput.id),
+          projectId: optionalText(mcpInputProjectId(rawInput, state)),
+          nodeId: optionalText(mcpInputNodeId(rawInput)),
           inputSummary,
         });
         try {
@@ -1094,8 +1097,8 @@ function registerBackendCanvasTools(
             traceId,
             event: "tool.failed",
             tool: name,
-            projectId: optionalText(rawInput.projectId || state.activeProjectId),
-            nodeId: optionalText(rawInput.nodeId || rawInput.id),
+            projectId: optionalText(mcpInputProjectId(rawInput, state)),
+            nodeId: optionalText(mcpInputNodeId(rawInput)),
             durationMs: Date.now() - startedAt,
             errorCode: details.code,
             recoverable: details.recoverable,
@@ -1840,6 +1843,7 @@ function registerBackendCanvasTools(
     if (input.operationType) query.set("operationType", input.operationType);
     return textResult(await backendApi.get(`/production/contract?${query}`));
   });
+  server.registerTool("director_subagent", { description: toolDescriptions.director_subagent, inputSchema: toolInputSchemas.director_subagent }, async raw => { const value = await executeDirectorSubagentTool(backendApi, raw); enforceToolOutputLimit("director_subagent", value); return textResult(value); });
   for (const name of productionToolNames) {
     server.registerTool(name, { description: toolDescriptions[name], inputSchema: toolInputSchemas[name] }, async (raw: Record<string, unknown>) => {
       const input = toolInputSchemas[name].parse(raw);
@@ -3140,7 +3144,7 @@ class McpPayloadOverflowError extends Error {
   readonly limitBytes: number;
   constructor(bytes: number, chars: number, limitBytes: number, tool: string) {
     super(
-      `工具 ${tool} 的返回体为 ${bytes} 字节（${chars} 字符），超过单次输出上限 ${limitBytes} 字节。${tool === "h3_list_models" ? "使用 view: entries、categories、query 和显式 pageSize 分页读取。" : /production|scene_version/.test(tool) ? "使用 view: summary 获取概况；source/artifacts 通过 sourceSection、targetIds、pageSize/cursor 或 chunkBytes 定向读取。" : tool === "canvas_get_state" ? "使用 nodeIds 定向读取，或 nodeLimit/nodeOffset 分页；H3 正文使用 h3_get_clip 定向工具。" : "请使用该工具 schema 支持的定向读取参数缩小范围。"}`,
+      `工具 ${tool} 的返回体为 ${bytes} 字节（${chars} 字符），超过单次输出上限 ${limitBytes} 字节。${tool === "h3_list_models" ? "使用 view: entries、categories、query 和显式 pageSize 分页读取。" : tool === "director_subagent" ? "使用 action:get、view:summary 获取状态；完整结果通过 view:result、chunkBytes/cursor 分块读取。" : /production|scene_version/.test(tool) ? "使用 view: summary 获取概况；source/artifacts 通过 sourceSection、targetIds、pageSize/cursor 或 chunkBytes 定向读取。" : tool === "canvas_get_state" ? "使用 nodeIds 定向读取，或 nodeLimit/nodeOffset 分页；H3 正文使用 h3_get_clip 定向工具。" : "请使用该工具 schema 支持的定向读取参数缩小范围。"}`,
     );
     this.name = "McpPayloadOverflowError";
     this.bytes = bytes;
@@ -3303,6 +3307,16 @@ function errorOperationId(error: unknown, input: Record<string, unknown>) {
   return optionalText(value.operationId || input.operationId);
 }
 
+function mcpInputProjectId(input: Record<string, unknown>, state: McpSessionState) {
+  if (input.projectId) return input.projectId;
+  if (input.kind === "canvas") return input.id;
+  if (input.kind === "episode" || input.kind === "scene") return undefined;
+  return state.activeProjectId;
+}
+function mcpInputNodeId(input: Record<string, unknown>) {
+  return input.nodeId || (["episode", "canvas", "scene"].includes(String(input.kind)) ? undefined : input.id);
+}
+
 function mcpToolErrorContext(
   error: unknown,
   input: Record<string, unknown>,
@@ -3323,8 +3337,8 @@ function mcpToolErrorContext(
       return result;
     }, {});
   return {
-    projectId: optionalText(value.projectId || input.projectId || state.activeProjectId),
-    nodeId: optionalText(value.nodeId || input.nodeId || input.id),
+    projectId: optionalText(value.projectId || mcpInputProjectId(input, state)),
+    nodeId: optionalText(value.nodeId || mcpInputNodeId(input)),
     operationId,
     taskId: optionalText(taskIds[0] || input.taskId),
     outputSummary: {
@@ -3425,13 +3439,13 @@ function classifyToolError(
                           ? `BACKEND_HTTP_${backendError.status}`
                           : "CANVAS_TOOL_FAILED";
   const taskIds = inputTaskIds(input);
-  const projectId = String(input.projectId || state.activeProjectId || "");
+  const projectId = String(mcpInputProjectId(input, state) || "");
   const suggestedAction = productionNextActions.length ? productionNextActions[0] : commandCode === "OPERATION_ID_REUSED" || commandCode === "MCP_COMMAND_MISMATCH" || commandCode === "RECEIPT_UNAVAILABLE"
     ? { tool: "mcp_get_command_receipt", input: { operationId: String(input.operationId || "") } }
     : cancelled
     ? { action: "本次等待已停止，后台任务不会被取消；可用原 taskId/taskIds 继续查询。" }
     : domainCode === "REFERENCE_INVALID"
-    ? { tool: "h3_get_clip_references", input: { projectId: String(input.projectId || state.activeProjectId || ""), nodeId: String(input.nodeId || ""), segmentId: String(input.segmentId || "") } }
+    ? { tool: "h3_get_clip_references", input: { projectId: String(mcpInputProjectId(input, state) || ""), nodeId: String(input.nodeId || ""), segmentId: String(input.segmentId || "") } }
     : domainCode === "MEDIA_IDENTITY_MISMATCH"
       ? { action: "按精确 Clip 和原 taskId 核对归档媒体；不要使用目录最新文件，也不要重提生成" }
     : domainCode === "IDEMPOTENCY_CONFLICT"
@@ -3453,11 +3467,11 @@ function classifyToolError(
       ? {
           tool: "canvas_inspect",
           input: {
-            projectId: String(input.projectId || state.activeProjectId || "") || undefined,
+            projectId: String(mcpInputProjectId(input, state) || "") || undefined,
           },
         }
       : missingSegment
-        ? { tool: "h3_get_node", input: { projectId: String(input.projectId || state.activeProjectId || ""), nodeId: String(input.nodeId || "") } }
+        ? { tool: "h3_get_node", input: { projectId: String(mcpInputProjectId(input, state) || ""), nodeId: String(input.nodeId || "") } }
       : missingModel
         ? { tool: "models_list", input: {} }
         : timeout && taskIds.length
@@ -3521,8 +3535,8 @@ function installMcpToolObservability(
         traceId,
         event: "tool.started",
         tool: name,
-        projectId: optionalText(input.projectId || state.activeProjectId),
-        nodeId: optionalText(input.nodeId || input.id),
+        projectId: optionalText(mcpInputProjectId(input, state)),
+        nodeId: optionalText(mcpInputNodeId(input)),
         inputSummary,
       });
       try {
@@ -3556,8 +3570,8 @@ function installMcpToolObservability(
             traceId,
             event: "tool.failed",
             tool: name,
-            projectId: optionalText(input.projectId || state.activeProjectId),
-            nodeId: optionalText(input.nodeId || input.id),
+            projectId: optionalText(mcpInputProjectId(input, state)),
+            nodeId: optionalText(mcpInputNodeId(input)),
             durationMs: Date.now() - startedAt,
             errorCode: optionalText(errorRecord.code) || details.code,
             recoverable:
@@ -3595,8 +3609,8 @@ function installMcpToolObservability(
           traceId,
           event: "tool.failed",
           tool: name,
-          projectId: optionalText(input.projectId || state.activeProjectId),
-          nodeId: optionalText(input.nodeId || input.id),
+          projectId: optionalText(mcpInputProjectId(input, state)),
+          nodeId: optionalText(mcpInputNodeId(input)),
           durationMs: Date.now() - startedAt,
           errorCode: details.code,
           recoverable: details.recoverable,
@@ -3675,8 +3689,8 @@ function summarizeMcpToolInput(input: Record<string, unknown>) {
   return {
     parameterKeys: Object.keys(input).sort(),
     inputChars: serializedChars(input),
-    hasProjectId: Boolean(input.projectId),
-    hasNodeId: Boolean(input.nodeId || input.id),
+    hasProjectId: Boolean(input.projectId || input.kind === "canvas" && input.id),
+    hasNodeId: Boolean(mcpInputNodeId(input)),
     hasTaskId: Boolean(input.taskId),
     hasOperationId: Boolean(input.operationId),
     expectedRevision: typeof input.expectedRevision === "number" ? input.expectedRevision : undefined,
@@ -3713,8 +3727,8 @@ function mcpToolResultContext(
     : [];
   const timings = Object.fromEntries(Object.entries(recordOf(result.timings)).filter(([key, value]) => /^(projectReadMs|compileMs|applyMs|promptBuildMs|queueMs|modelRunMs|archiveMs|elapsedMs)$/.test(key) && typeof value === "number" && Number.isFinite(value)));
   return {
-    projectId: optionalText(result.projectId || input.projectId || state.activeProjectId),
-    nodeId: optionalText(firstTask.nodeId || result.nodeId || input.nodeId || input.id),
+    projectId: optionalText(result.projectId || mcpInputProjectId(input, state)),
+    nodeId: optionalText(firstTask.nodeId || result.nodeId || mcpInputNodeId(input)),
     operationId: optionalText(result.operationId),
     taskId: optionalText(firstTask.taskId || result.taskId),
     outputSummary: {

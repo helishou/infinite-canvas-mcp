@@ -14,6 +14,7 @@ import { resolveH3Runtime } from "@basketikun/canvas-agent/plugins/minimax-h3/ru
 import { directorHash, promptHash } from "./director.js";
 import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import { compilationScopeInput } from "@basketikun/canvas-agent/drama/compilation-scope";
+import { effectiveTargetInput, inputHash } from "./canvas-inputs.js";
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 import type { CanvasGenerationService } from "../canvas/generation-service.js";
 import express from "express";
@@ -70,6 +71,81 @@ test("parallel H3 completion requires terminal task, active archived output and 
     const taskId = service.getBatch("ep", batch.runId)!.submitted[0].taskId;
     stores.tasks.update(taskId, { result: null });
     assert.equal(service.workflowReadiness("ep", "published").targets.find(target => target.id === "segment:seg0")?.status, "ready", "node-only output cannot establish completion");
+});
+
+test("independent successful Clips remain complete in a failed batch without parallelScenes", async t => {
+    const { service, stores, db, dir } = fixture(t), director = doc(2);
+    director.workflow.mediaProductionMode = "automatic";
+    publish(service, director, "ep", "skip");
+    const commands: CanvasGenerationCommand[] = [];
+    let failSecond = true;
+    const fake = { start: async (command: CanvasGenerationCommand) => {
+        commands.push(command);
+        const task = stores.tasks.create(command.idempotencyKey!, "canvas-h3-run", command, {});
+        if (command.segmentId === service.get("ep").published!.clipGroups[1].segmentId && failSecond) {
+            stores.tasks.update(task.id, { status: "failed", error: "fetch failed" });
+        } else {
+            const storageKey = `video:${task.id}`, filePath = join(dir, `${task.id}.mp4`);
+            writeFileSync(filePath, "archived-video");
+            db.upsertMediaFile({ storageKey, filePath, mimeType: "video/mp4", bytes: 14, width: 16, height: 9, durationMs: 5000, createdAt: new Date().toISOString() });
+            db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_h3_segment", nodeId: command.nodeId, segmentId: command.segmentId!, patch: { resultStorageKey: storageKey } }], { runtimeWrite: true });
+            stores.tasks.update(task.id, { status: "succeeded", result: { media: [{ storageKey }] } });
+        }
+        return { taskId: task.id };
+    } } as unknown as CanvasGenerationService;
+    const runner = new EpisodeProductionRunner(service, stores, fake);
+    const start = (runId: string, targets: string[]) => service.startBatch("ep", { inputBasis: "canvas", runId, idempotencyKey: runId,
+        expectedRevision: service.get("ep").revision, version: service.get("ep").publishedVersion, targets });
+    await runner.syncClips("ep", service.get("ep").publishedVersion);
+    db.applyCanvasProjectOperations("canvas", undefined, service.get("ep").published!.clipGroups.map(group => ({ type: "update_h3_segment", nodeId: group.nodeId!, segmentId: group.segmentId!,
+        patch: { modelName: "test-model", h3ParameterPolicy: "overrides", h3ParameterOverrides: { modelName: "test-model" } } })));
+    await runner.runBatch("ep", start("mixed", ["segment:seg0", "segment:seg1"]).runId);
+    assert.equal(service.getBatch("ep", "mixed")!.status, "failed");
+    const mixed = service.getBatch("ep", "mixed")!;
+    assert.equal(mixed.submitted.find(item => item.id === "segment:seg0")?.status, "succeeded", mixed.error || "");
+    const first = mixed.executionSnapshot!.targets[0], firstTask = stores.tasks.get(mixed.submitted[0].taskId)!;
+    assert.equal(firstTask.projectId, "canvas");
+    assert.equal(firstTask.nodeId, first.nodeId);
+    const firstNode = (db.getCanvasProject("canvas")!.nodes as any[]).find(node => node.id === first.nodeId);
+    const firstClip = firstNode.metadata.segments.find((clip: any) => clip.id === first.segmentId);
+    assert.equal(firstClip.resultStorageKey, (firstTask.result!.media as any[])[0].storageKey);
+    assert.equal(inputHash(effectiveTargetInput(db.getCanvasProject("canvas")!, first.nodeId, first.segmentId, db.getSetting("plugin:minimax-h3:defaults:v1") as any)), first.inputHash);
+    const states = () => service.workflowReadiness("ep", "published").targets.filter(target => target.kind === "segment").map(target => target.status);
+    assert.deepEqual(states(), ["complete", "ready"]);
+    await runner.syncClips("ep", service.get("ep").publishedVersion, ["seg0"]);
+    assert.equal(commands.length, 2, "resynchronizing a complete Clip does not submit a new task");
+    failSecond = false;
+    await runner.runBatch("ep", start("retry-failed", ["segment:seg1"]).runId);
+    assert.equal(service.getBatch("ep", "retry-failed")!.status, "succeeded", service.getBatch("ep", "retry-failed")!.error || "");
+    const retry = service.getBatch("ep", "retry-failed")!, frozen = retry.executionSnapshot!, target = frozen.targets[0];
+    assert.equal(inputHash(effectiveTargetInput(db.getCanvasProject("canvas")!, target.nodeId, target.segmentId, db.getSetting("plugin:minimax-h3:defaults:v1") as any)), target.inputHash);
+    assert.deepEqual(states(), ["complete", "complete"]);
+    assert.equal(commands.length, 3, "only the failed target is regenerated");
+    const group = service.get("ep").published!.clipGroups[0];
+    const project = db.getCanvasProject("canvas")!;
+    const node = (project.nodes as any[]).find(node => node.id === group.nodeId);
+    const clip = node.metadata.segments.find((clip: any) => clip.id === group.segmentId);
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_h3_segment", nodeId: group.nodeId!, segmentId: group.segmentId!, patch: { prompt: clip.prompt + " Changed saved input." } }]);
+    assert.deepEqual(states(), ["ready", "complete"], "historical success cannot complete a changed current input");
+});
+
+for (const edited of [false, true]) test(`compilation fills a prepared empty Clip and preserves user input: edited=${edited}`, t => {
+    const { service, stores, db } = fixture(t), director = doc(1);
+    service.edit("ep", { operationId: "draft-without-prompt", expectedRevision: 0, ops: [
+        { type: "set_director_production", director: { ...director, artifacts: [] } },
+        { type: "set_settings", patch: { storyboardImageMode: "skip" } },
+    ] });
+    const runner = new EpisodeProductionRunner(service, stores, {} as CanvasGenerationService);
+    runner.prepareTargets("ep", service.get("ep").revision, ["segment:seg0"], "prepare-empty");
+    const group = service.get("ep").draft.clipGroups[0];
+    const clip = () => (db.getCanvasProject("canvas")!.nodes as any[]).find(node => node.id === group.nodeId).metadata.segments.find((clip: any) => clip.id === group.segmentId);
+    assert.equal(clip().prompt, "");
+    assert.equal(clip().productionClipProjection.targetId, "seg0");
+    if (edited) db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_h3_segment", nodeId: group.nodeId!, segmentId: group.segmentId!, patch: { prompt: "User authored replacement" } }]);
+    const applied = service.edit("ep", { operationId: "apply-compiled-prompt", expectedRevision: service.get("ep").revision, ops: [{ type: "set_director_production", director }] });
+    assert.equal(clip().prompt, edited ? "User authored replacement" : director.artifacts[0].prompt);
+    assert.ok(applied.referenceSync?.some(item => item.targetId === "seg0" && item.status === "ready"));
+    if (edited) assert.ok(clip().productionClipProjection.conflicts.includes("prompt"));
 });
 
 test("skipping storyboard images retains written shots and allows ready H3 segments", async t => {
@@ -230,6 +306,8 @@ test("early Acheng planning drafts save without node bindings and readiness scop
     assert.equal(edited.draft.director?.assets.STYLE_MOTHER.nodeId, undefined);
     assert.match(service.workflowReadiness("ep").targets.find(item => item.id === "asset:STYLE_MOTHER")?.blockers.join(" ") || "", /未绑定画布/);
     const patched = service.edit("ep", { operationId: "patch-scene", expectedRevision: edited.revision, ops: [{ type: "patch_director_source", entity: "scene", id: "scene1", patch: { text: "修订后的逐字对白。" } }] });
+    assert.notEqual(patched.draft.director!.sourceHash, edited.draft.director!.sourceHash);
+    assert.equal(patched.draft.director!.sourceHash, directorHash(patched.draft.director!.source), "局部编辑由 Backend 重算完整源哈希，不需要 Agent 回读整稿再算哈希");
     assert.equal((patched.draft.director!.source.extension as any).authored, true);
     assert.equal((patched.draft.director!.source.script_scenes as any[])[0].text, "修订后的逐字对白。");
     assert.equal((patched.draft.director!.modules.story!.cursor as any).scene, "scene1");
@@ -427,7 +505,7 @@ test("automatic dependency runs pause for review, then continue the same runId w
     const occupied = blocked.diagnostics.find(item => item.code === "TARGET_AWAITING_REVIEW");
     assert.equal(occupied?.blockingRun?.runId, batch.runId);
     assert.equal(occupied?.blockingRun?.taskIds.length, 1);
-    assert.deepEqual(occupied?.nextAction?.input, { episodeId: "ep", runId: batch.runId });
+    assert.deepEqual(occupied?.nextAction?.input, { kind: "episode", id: "ep", runId: batch.runId });
     assert.equal(JSON.stringify({ production: service.get("ep"), batch: service.getBatch("ep", batch.runId) }), beforePreflight);
     const replayInput = { inputBasis: "published" as const, runId: batch.runId, idempotencyKey: batch.idempotencyKey, expectedRevision: batch.sourceRevision, version: 1, targets: ["asset:STYLE_MOTHER"], scope: "all_ready" };
     assert.equal(service.preflight("ep", { action: "generate", request: replayInput }).valid, true, "a stale-revision replay must still recover the original receipt");

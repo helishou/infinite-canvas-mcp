@@ -385,6 +385,38 @@ test("explicit media continuation preserves the original work identity and other
     const revision = service.get("ep").revision; coordinator.start("ep", input); assert.equal(service.get("ep").revision, revision);
 });
 
+test("H3 continuation authorizes source-stage work waiting for shared review and replays without duplicating work", t => {
+    const { service, coordinator } = fixture(t);
+    coordinator.start("ep", { operationId: "source-waiting", expectedRevision: 1, sceneIds: ["A", "B"], generateMedia: false });
+    const before = coordinator.inspect("ep").works;
+    assert.equal(before[0].stage, "create");
+    const input = { operationId: "h3-waiting", expectedRevision: service.get("ep").revision, sceneIds: ["A", "B"], generateMedia: true, model: "chosen-channel::model", effort: "high" };
+    coordinator.start("ep", input);
+    const after = coordinator.inspect("ep").works;
+    assert.deepEqual(after.map(work => work.workId), before.map(work => work.workId));
+    assert.ok(after.every(work => work.generationAuthorized && work.stage === "create" && work.status === "awaiting_review"));
+    assert.ok(after.every(work => work.runIds.length === 0), "shared review still gates actual media");
+    assert.ok(after.every(work => work.model === input.model && work.effort === input.effort), "old works without a model inherit the explicitly selected channel");
+    const revision = service.get("ep").revision;
+    coordinator.start("ep", input);
+    assert.equal(service.get("ep").revision, revision);
+    coordinator.start("ep", { ...input, operationId: "explicit-review-retry", expectedRevision: revision });
+    assert.deepEqual(coordinator.inspect("ep").works.map(work => work.workId), before.map(work => work.workId));
+});
+
+test("authorizing an unfinished work does not restart its running worker or unpause it", t => {
+    const { service, coordinator } = fixture(t);
+    coordinator.start("ep", { operationId: "source-states", expectedRevision: 1, sceneIds: ["A", "B"], generateMedia: false });
+    const current = service.get("ep"), works = structuredClone(current.draft.director!.workflow.sceneWorks!);
+    Object.values(works).forEach(work => { work.status = work.sceneId === "A" ? "running" : "paused"; });
+    service.edit("ep", { operationId: "set-worker-states", expectedRevision: current.revision, ops: [{ type: "set_director_workflow", patch: { sceneWorks: works } }] }, undefined, true);
+    coordinator.start("ep", { operationId: "authorize-worker-states", expectedRevision: service.get("ep").revision, sceneIds: ["A", "B"], generateMedia: true });
+    const after = coordinator.inspect("ep").works;
+    assert.equal(after.find(work => work.sceneId === "A")?.status, "running");
+    assert.equal(after.find(work => work.sceneId === "B")?.status, "paused");
+    assert.ok(after.every(work => work.generationAuthorized));
+});
+
 test("scene coordinator progresses independent source, scoped compilation, automatic review and H3 closeout", async t => {
     const { service, db, root, director } = fixture(t), stores = createStores(db);
     director.engine = resolveAchengEngine();

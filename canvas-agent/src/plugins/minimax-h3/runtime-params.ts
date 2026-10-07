@@ -24,6 +24,7 @@ export function resolveH3Runtime(segment: Record<string, unknown>, override: Rec
     if (override.steps === undefined && values.videoSteps !== undefined) { values.steps = values.videoSteps; sources.steps = sources.videoSteps; }
     delete values.videoSteps;
     const parameterIssues: string[] = [];
+    if (values.tailFrameContinuation === true && values.motionContextEnabled === true) parameterIssues.push('尾帧参考与潜空间续写的保存值同时开启，请先在 Clip 设置中选择一种衔接方式并保存');
     const requestedSlots = Array.isArray(values.loraSlots) && values.loraSlots.length ? values.loraSlots as Array<Record<string, unknown>> : values.loraName ? [{ name: values.loraName, strength: values.loraStrength ?? 1, enabled: true }] : [];
     for (const slot of requestedSlots) if (slot.enabled !== false && slot.name && slot.strength !== undefined && (!Number.isFinite(Number(slot.strength)) || Number(slot.strength) < H3_LORA_STRENGTH_MIN || Number(slot.strength) > H3_LORA_STRENGTH_MAX)) parameterIssues.push(`LoRA ${slot.name} 的强度超出当前 H3 节点已声明的范围 ${H3_LORA_STRENGTH_MIN}–${H3_LORA_STRENGTH_MAX}，拒绝静默夹紧`);
     if (!Number.isFinite(Number(values.megapixels)) || Number(values.megapixels) <= 0) parameterIssues.push('H3 分辨率必须为有效正数');
@@ -40,6 +41,9 @@ export function resolveH3Runtime(segment: Record<string, unknown>, override: Rec
 
 /** A deliberate field edit remains effective even when the Clip otherwise follows defaults. */
 export function withH3ParameterEdits(segment: Record<string, unknown>, patch: Record<string, unknown>) {
+    // Save the companion field too, so inherited defaults cannot re-enable it.
+    if (patch.tailFrameContinuation === true) patch = { ...patch, motionContextEnabled: false };
+    else if (patch.motionContextEnabled === true) patch = { ...patch, tailFrameContinuation: false };
     if (patch.steps !== undefined && patch.videoSteps === undefined) patch = { ...patch, videoSteps: patch.steps };
     const keys = new Set(Array.isArray(segment.h3ParameterOverrides) ? segment.h3ParameterOverrides.map(String) : []);
     if (patch.h3ParameterPolicy === 'defaults' && !Object.hasOwn(patch, 'h3ParameterOverrides')) keys.clear();

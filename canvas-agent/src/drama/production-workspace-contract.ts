@@ -34,7 +34,7 @@ export const productionWorkspaceSchemas = {
 };
 export const productionWorkspaceToolNames = Object.keys(productionWorkspaceSchemas) as Array<keyof typeof productionWorkspaceSchemas>;
 export const productionWorkspaceDescriptions = {
-    production_hash_source: "计算完整制作源稿对象的 canonical sourceHash；只读，不依赖当前画布，不保存、发布或生成。",
+    production_hash_source: "仅在首次或明确整稿替换、准备提交新的完整 source 对象时计算 canonical sourceHash；同一候选对象复用已算哈希。读取已保存源稿使用返回的 sourceHash；局部修改用 production_edit 的 patch_director_source/patch_director_continuity，由 Backend 重算，不回读整稿逐次哈希。只读，不保存、发布或生成。",
     production_start_shared_review: "启动当前就绪共同资产或完整共同基础的自动审核；沿用生产代理池，不提交图片或视频，不自动重生成。",
     production_get_scene_work: "读取场次工作、当前审核输入哈希、源稿与真实媒体摘要；只读，不启动代理、编译或生成。",
     production_start_scene_work: "启动选定正式场次的隔离代理制作；generateMedia 显式授权这些场次的媒体生成，false 只制作源稿。默认三代理与三编译任务并行。",

@@ -3,7 +3,7 @@ from pathlib import Path
 import re
 import sys
 
-PATCH_VERSION = "canvas-5"
+PATCH_VERSION = "canvas-6"
 
 
 def replace(path, before, after):
@@ -121,6 +121,10 @@ def content_hash(value):
     concise_module = importlib.util.module_from_spec(concise_spec)
     concise_spec.loader.exec_module(concise_module)
     concise_module.apply_prompt_policy(root)
+    model_spec = importlib.util.spec_from_file_location("canvas_model_contract", Path(__file__).with_name("model-contract.py"))
+    model_module = importlib.util.module_from_spec(model_spec)
+    model_spec.loader.exec_module(model_module)
+    model_module.apply(root)
     (root / "CANVAS-COMPATIBILITY.md").write_text(
         "# Canvas compatibility overlay\n\n"
         "Upstream is retained in the clean Git checkout. Local overlay: " + PATCH_VERSION + ".\n"

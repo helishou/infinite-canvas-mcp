@@ -14,6 +14,14 @@ const hash = (value: unknown) => crypto.createHash("sha256").update(canonicalPro
 type Compiler = typeof compileAchengDirector;
 type CompilationJob = { operationId: string; owner: string; id: string; expectedRevision: number; requestHash: string; baselineHash: string; preparedId: string; director: DirectorProduction; references: Record<string, string>; scope?: CompilationScope; scopeHash?: string; status: "queued" | "running" | "succeeded" | "blocked" | "failed" | "interrupted"; diagnostics: any[]; result?: any; continuityReceipt?: any; application?: any; createdAt: string };
 const compilerPool = new WorkPool(3);
+const hasBlockingArtifactDiagnostics = (value: unknown) => {
+    if (Array.isArray(value)) return value.some(item => item && typeof item === "object" && (item as { severity?: unknown }).severity === "error");
+    if (!value || typeof value !== "object") return false;
+    const report = value as Record<string, unknown>;
+    if (Array.isArray(report.blockers)) return report.blockers.length > 0;
+    if (typeof report.accepted === "boolean") return !report.accepted;
+    return true;
+};
 function schedule(work: () => Promise<void>, _createdAt: string) {
     void compilerPool.submit(work).catch(error => console.error("COMPILATION_RECEIPT_WRITE_FAILED", error instanceof Error ? error.name : "Error"));
 }
@@ -139,6 +147,19 @@ export class ProductionCompilationService {
             reportRuntimeId: continuity.report?.runtimeId || null, reportOperationId: continuity.report?.operationId || null,
             checkedAt: continuity.report?.checkedAt || null, status: continuity.status };
     }
+    private reusableArtifacts(director: DirectorProduction, targetIds: string[]) {
+        return director.artifacts.filter(artifact => targetIds.includes(artifact.targetId) && artifact.status === "ready"
+            && artifact.receipt.engineRuntimeId === director.engine.runtimeId && currentCompilationArtifact(director, artifact)
+            && crypto.createHash("sha256").update(artifact.prompt, "utf8").digest("hex") === artifact.sha256
+            && artifact.receipt.promptHash === artifact.sha256
+            && !hasBlockingArtifactDiagnostics(artifact.receipt.diagnostics));
+    }
+    private compilationTargets(director: DirectorProduction) {
+        return [...new Set(["asset_plan", "asset_cards", "segments"].flatMap(field => {
+            const entries = director.source[field];
+            return Array.isArray(entries) ? entries.map(item => String(item.asset_id || item.id || "")).filter(Boolean) : [];
+        }))];
+    }
     private scheduleJob(job: CompilationJob) {
         const key = this.jobFile(job.operationId);
         if (activeJobs.has(key)) return;
@@ -148,10 +169,19 @@ export class ProductionCompilationService {
                 job.status = "running"; this.saveJob(job);
                 const directory = path.join(this.root, job.preparedId);
                 const projection = job.scope ? compilationScopeInput(job.director, job.scope) : undefined;
-                const compileInput = projection && job.scope ? scopedCompilerInput(projection.director, job.scope) : job.director;
+                const targetIds = projection?.targetIds || this.compilationTargets(job.director);
+                const reusable = this.reusableArtifacts(job.director, targetIds);
+                const pending = targetIds.filter(id => !reusable.some(artifact => artifact.targetId === id));
+                // Keep validation dependencies in the projection, but do not recompile
+                // unrelated Segments when only part of a scoped request has changed.
+                const compileScope = job.scope && pending.length && reusable.length ? { ...job.scope, targetIds: pending } : job.scope;
+                const compileProjection = compileScope === job.scope ? projection : compileScope ? compilationScopeInput(job.director, compileScope) : undefined;
+                const compileInput = compileProjection && compileScope ? scopedCompilerInput(compileProjection.director, compileScope) : job.director;
                 let compiled: ReturnType<Compiler>;
-                const cached = projection && projection.targetIds.length > 0 && projection.targetIds.every(targetId => job.director.artifacts.some(item => item.targetId === targetId && item.status === "ready" && item.receipt.engineRuntimeId === job.director.engine.runtimeId && currentCompilationArtifact(job.director, item)));
-                if (cached) compiled = { director: structuredClone(compileInput), exitCode: 0, diagnostics: [], audit: { status: "REUSED", artifactIds: compileInput.artifacts.map(item => item.id) }, sourceAdjustments: [], acceptance: { reused: true } };
+                const cached = targetIds.length > 0 && !pending.length;
+                if (cached) compiled = { director: structuredClone(projection?.director || job.director), exitCode: 0,
+                    diagnostics: reusable.flatMap(artifact => artifact.receipt.diagnostics || []) as ReturnType<Compiler>["diagnostics"],
+                    audit: { status: "REUSED", artifactIds: reusable.map(item => item.id) }, sourceAdjustments: [], acceptance: { reused: true } };
                 else if (this.compiler !== compileAchengDirector) compiled = await this.compiler(structuredClone(compileInput), directory, (targetId, label) => job.references[`${targetId}\0${label}`]);
                 else compiled = await new Promise((resolve, reject) => {
                     const worker = new Worker(`const { parentPort, workerData } = require("node:worker_threads");
@@ -167,9 +197,11 @@ export class ProductionCompilationService {
                     worker.once("exit", code => { if (!delivered) reject(new Error(`编译执行单元退出 (${code})`)); });
                 });
                 if (projection && job.scope) {
+                    // Reused targets may be absent from the narrowed compiler output.
+                    compiled.director.artifacts = [...compiled.director.artifacts.filter(artifact => !reusable.some(prior => prior.targetId === artifact.targetId)), ...structuredClone(reusable)];
                     const projectedSourceHash = compiled.director.sourceHash;
                     const artifacts = compiled.director.artifacts.filter(artifact => projection.targetIds.includes(artifact.targetId)).map(artifact => {
-                        const prior = job.director.artifacts.find(item => item.kind === artifact.kind && item.targetId === artifact.targetId && item.sha256 === artifact.sha256 && item.receipt.engineRuntimeId === artifact.receipt.engineRuntimeId && currentCompilationArtifact(job.director, item));
+                        const prior = reusable.find(item => item.kind === artifact.kind && item.targetId === artifact.targetId && item.sha256 === artifact.sha256);
                         if (prior) return prior;
                         const targetScope = { targetIds: [artifact.targetId] };
                         return { ...artifact, sourceHash: job.director.sourceHash, receipt: { ...artifact.receipt, sourceHash: job.director.sourceHash,
@@ -205,10 +237,13 @@ export class ProductionCompilationService {
         const director = this.compilationDirector(candidate || current.draft.director);
         const checked = this.service.preflight(id, { action: "compile", request: { expectedRevision, director } }, this.compiler === compileAchengDirector ? director.engine.runtimeId : undefined);
         if (!checked.valid) throw new ProductionValidationError(checked.diagnostics);
-        this.service.verifyCompilationBindings(id, director);
+        const references = this.service.compilationReferenceFiles(id, director);
         const preparedId = crypto.randomUUID();
         const directory = path.join(this.root, preparedId);
-        const compiled = this.compiler(director, directory, (targetId, label) => this.service.compilationReferenceFile(id, director, targetId, label), this.compiler === compileAchengDirector ? director.engine.runtimeId : undefined);
+        const targets = this.compilationTargets(director), reusable = this.reusableArtifacts(director, targets);
+        const compiled: ReturnType<Compiler> = targets.length > 0 && targets.every(id => reusable.some(artifact => artifact.targetId === id))
+            ? { director: structuredClone(director), exitCode: 0, diagnostics: reusable.flatMap(artifact => artifact.receipt.diagnostics || []) as ReturnType<Compiler>["diagnostics"], audit: { status: "REUSED", artifactIds: reusable.map(item => item.id) }, sourceAdjustments: [], acceptance: { reused: true } }
+            : this.compiler(director, directory, (targetId, label) => references[`${targetId}\0${label}`], this.compiler === compileAchengDirector ? director.engine.runtimeId : undefined);
         const continuityReceipt = this.applyContinuityGate(id, compiled.director, compiled.diagnostics);
         if (compiled.director.workflow.currentWork) {
             compiled.director.workflow.currentWork = { ...compiled.director.workflow.currentWork, inputRevision: expectedRevision, sourceHash: compiled.director.sourceHash };

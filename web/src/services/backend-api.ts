@@ -1,3 +1,4 @@
+import type { DirectorSubagentInput, DirectorSubagentSummary, DirectorSubagentResult } from "@basketikun/canvas-agent/agent/delegation";
 /** 总后台 API client（Web 端）。 */
 
 import { getBackendTokenShared } from "@/lib/backend-token";
@@ -680,4 +681,8 @@ export function releaseBackendBrowserTask(id: string, workerId: string) {
 
 export function diagnoseBackendCanvasProject(projectId: string) {
     return request<{ ok: boolean; projectId: string; revision: number; issues: Array<Record<string, unknown>> }>("GET", `/canvas/projects/${encodeURIComponent(projectId)}/diagnostics`);
+}
+
+export function directorSubagentRequest(input: Omit<DirectorSubagentInput, "view"> & { view?: DirectorSubagentInput["view"] }) {
+    return request<{ ok: boolean; task?: DirectorSubagentSummary; tasks?: DirectorSubagentSummary[]; result?: DirectorSubagentResult; chunk?: { text: string; resultHash: string; nextCursor: string | null }; nextOffset?: number | null }>("POST", "/director/subagents", input);
 }

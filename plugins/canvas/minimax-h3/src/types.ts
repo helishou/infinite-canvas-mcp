@@ -298,7 +298,7 @@ export type H3Segment = {
     // 只有链式续跑（runFromCurrent）时生效；标在本段上（index > 0 才有意义）。
     // 仅保留历史记录兼容；新配置和执行器不再消费该字段。
     previousVideoAsReference?: boolean;
-    // 尾帧参考：下一段运行时追加本段尾帧，参考动作、场景与连续性；独立于潜空间续写。
+    // 尾帧参考：下一段运行时追加本段尾帧，参考动作、场景与连续性；设置开关时与潜空间续写互斥。
     // （仅运行时拼接，不写回 prompt 编辑区）。该开关标在本段上，表示「把我的尾帧传给下一段」。
     // 注意：唯一有效键名是 tailFrameContinuation；不要再引入 tailFrameEnabled 之类的别名。
     tailFrameContinuation?: boolean;

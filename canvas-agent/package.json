@@ -5,9 +5,11 @@
   "type": "module",
   "main": "./dist/index.js",
   "exports": {
+    "./agent/work-package": "./dist/agent/work-package.js",
     "./agent/llm": "./dist/agent/llm.js",
     "./agent/codex-text": "./dist/agent/codex-text.js",
     "./drama/compilation-scope": "./dist/drama/compilation-scope.js",
+    "./agent/delegation": "./dist/agent/delegation.js",
     "./agent/production": "./dist/agent/production.js",
     ".": "./dist/index.js",
     "./http": "./dist/server/http.js",

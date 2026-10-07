@@ -34,7 +34,9 @@ Acheng 的纯提示词限制适用于创作职责；用户授权实际生成时�
 
 进入制作前调用 `production_get_contract`，恢复旧稿也读取当前激活版本，`runtimeId` 已弃用且不选择执行版本；可用 `operationType` 查询单项操作。返回共享 JSON Schema、合法示例、patch 字段及本机当前激活版本的制作源稿模板。示例中的 ID、引擎标识与哈希必须替换成当前真实数据，不把示例视为发布或生成依据。
 
-Backend 已发布版本是正式源，本地 production.json 是带 revision 的工作副本。修改需稳定 operationId 和 expectedRevision；冲突回读，不覆盖他人草稿。剧本、镜头和 Clip 视图是投影，修改应进入导演源；源变化后重跑当前激活版本的提示词编译/校验脚本并更新对应回执，旧产物不能作为当前版本执行依据。模型选择继承现有配置；保存草稿不生成。
+Backend draft 是正式创作编辑源，published 保留显式发布的历史版本，本地 production.json 是带 revision 的工作副本。修改需稳定 operationId 和 expectedRevision；冲突回读，不覆盖他人草稿。默认 inputBasis=canvas 的运行冻结当前有效画布输入，显式 published 才核验指定发布稿。剧本、镜头和 Clip 视图是投影，修改应进入导演源；源变化后沿编译/校验更新回执。模型继承原配置；保存、编译、审核和发布不授权生成。
+
+已有正式稿的导演委派携带 production.kind/id/expectedRevision/scope，由 Backend 构造固定版本、依赖和专业模块的工作包。建议完整且无未决项后，主导演在原授权范围内通过 production_edit 的 ops 与 adoptions:[{taskId,artifactHash}] 原子采纳；partial、unbound 或输入过期不能登记采纳。partial 按已有交付模式沿原任务 continue；recover 只回读原已完成回合，不自动重跑或生成。
 
 Agent 编辑正式源稿，程序负责提示词编译、校验与引用投影。编辑、编译和发布前读[源稿编译与发布](canvas-compilation.md)。开始工作或登记用户决定时读[工作台与布局](canvas-workspace.md)。
 

@@ -16,6 +16,23 @@ function fixture(t: TestContext) {
     return db;
 }
 
+test("versioned text and title replacement commits together and rolls back on concurrent text changes", t => {
+    const db = fixture(t), target = { nodeId: "text", field: "content" as const };
+    const before = db.getCanvasText("canvas", target);
+    const operations = [{ type: "update_node", id: "text", patch: { title: "新标题" } },
+        { type: "text_replace", target, documentId: before.documentId, expectedText: before.text, text: "中文正文\n第二行😀" }];
+    db.applyCanvasProjectOperations("canvas", undefined, operations, { operationId: "text-title-original" });
+    assert.equal(db.getCanvasText("canvas", target).text, "中文正文\n第二行😀");
+    assert.equal((db.getCanvasProject("canvas")!.nodes as any[]).find(node => node.id === "text").title, "新标题");
+    assert.equal(db.applyCanvasProjectOperations("canvas", undefined, operations, { operationId: "text-title-original" }).duplicated, true);
+    const current = db.getCanvasText("canvas", target);
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "text_replace", target, documentId: current.documentId, expectedText: current.text, text: "协作者新内容" }]);
+    const changed = db.getCanvasProject("canvas");
+    assert.throws(() => db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "text", patch: { title: "不得留下" } },
+        { type: "text_replace", target, documentId: current.documentId, expectedText: current.text, text: "旧基线覆盖" }], { operationId: "text-title-conflict" }), { code: "TEXT_CONFLICT" });
+    assert.deepEqual(db.getCanvasProject("canvas"), changed);
+});
+
 test("角色主图变更原子更新下游引用，回执/广播/历史重放一致，失败不留下半次更新", (t) => {
     const db = fixture(t);
     db.applyCanvasProjectOperations("canvas", undefined, [

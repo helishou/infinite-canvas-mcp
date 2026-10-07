@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { DirectorSubagents, registerDirectorSubagentRoutes } from "./drama/director-subagents.js";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -60,14 +61,23 @@ if (process.argv[2] === "mcp") {
 }
 
 async function startBackendHttpServer() {
+  const startupTimingsMs: Record<string, number> = { imports: Math.round(performance.now()) };
+  let startupStageStarted = performance.now();
+  const markStartupStage = (stage: string) => {
+    const now = performance.now();
+    startupTimingsMs[stage] = Math.round(now - startupStageStarted);
+    startupStageStarted = now;
+  };
   const config = loadConfig(true);
   saveConfig(config);
   ensureDataDirs();
   const releaseInstanceLock = await acquireBackendInstanceLock(DATA_DIR);
+  markStartupStage("configAndLock");
 
   const db = new BackendDatabase();
   const stores = createStores(db);
   applyNetworkSettings(config, stores.settings.get(NETWORK_SETTINGS_KEY));
+  markStartupStage("databaseAndStores");
   const events = new BackendEventBus();
   const writeBackStandaloneH3Task = async (
     task: import("./db.js").RuntimeTask,
@@ -100,6 +110,7 @@ async function startBackendHttpServer() {
     stores.settings,
   );
   await workflowModels.syncStoredConfig();
+  markStartupStage("executorsAndWorkflowCatalog");
   const workflowExecutor = new WorkflowExecutor(
     runtime.comfy,
     runtime.stores.tasks,
@@ -240,6 +251,9 @@ async function startBackendHttpServer() {
   const episodeProductionRunner = new EpisodeProductionRunner(episodeProduction, runtime.stores, canvasGeneration);
   registerDramaProductionRoutes(app, episodeProduction, episodeProductionRunner, undefined, runtime.events, productionAgents);
   const canvasProduction = new EpisodeProductionService(runtime.db, runtime.events, undefined, true);
+  const directorSubagents = new DirectorSubagents(runtime.stores, productionAgents, runtime.events, process.cwd(), (threadId, model) => productionLlm.delegationModel(threadId, model), kind => kind === "episode" ? episodeProduction : canvasProduction);
+  directorSubagents.reconcileStartup();
+  registerDirectorSubagentRoutes(app, directorSubagents);
   const canvasProductionRunner = new EpisodeProductionRunner(canvasProduction, runtime.stores, canvasGeneration);
   registerDramaProductionRoutes(app, canvasProduction, canvasProductionRunner, "/canvas/projects/:episodeId/production", runtime.events, productionAgents);
   const nativeProductionGeneration = new NativeProductionGeneration(runtime.db, runtime.stores, episodeProduction, canvasProduction, runtime.events);
@@ -279,9 +293,11 @@ async function startBackendHttpServer() {
     stores.mcpObservability,
     () => canvasRealtime.focusedProjectId(),
   );
+  markStartupStage("routesAndAgent");
   // 启动时只读取最新 10 条需要恢复的生成任务；超出范围的记录保持原状，
   // 不因未入选而标记失败。终态只考虑仍绑定的 H3 父任务和未收口的生成日志。
   const recoveryTasks = db.listStartupRecoveryTasks([...boundH3ParentTaskIds(stores.projects.list())], 10);
+  markStartupStage("recoverySelection");
   for (const task of recoveryTasks) {
     if (task.kind === "canvas-h3-run" && ["succeeded", "failed", "cancelled"].includes(task.status)) {
       void canvasH3Runner.reconcileTerminal(task).catch((error) =>
@@ -409,6 +425,7 @@ async function startBackendHttpServer() {
   h3Queue.activate();
   void episodeProductionRunner.resumePending();
   void canvasProductionRunner.resumePending();
+  markStartupStage("recoveryDispatch");
   app.get("/canvas/projects/:id/collaboration", (req, res) => {
     const project = db.getCanvasProject(req.params.id);
     if (!project)
@@ -425,10 +442,13 @@ async function startBackendHttpServer() {
     config.port,
     config.listenHost || "127.0.0.1",
     () => {
+      markStartupStage("listen");
       logger.info(`总后台已启动 ${config.url}`, {
         listenHost: config.listenHost || "127.0.0.1",
         pid: process.pid,
         version: readVersion(),
+        startupTimingsMs,
+        startupTotalMs: Math.round(performance.now()),
       });
     },
   );

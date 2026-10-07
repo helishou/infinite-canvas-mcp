@@ -27,6 +27,95 @@ function fixture(t: test.TestContext) {
     return { root, db, service, compilations, director };
 }
 
+test("unchanged full compilation reuses artifacts and a scoped edit compiles only its invalid target", async t => {
+    const { root, service, director } = fixture(t);
+    director.source.asset_plan = ["A", "B"].map(id => ({ id, kind: "prop", depends_on: [] }));
+    director.source.asset_cards = ["A", "B"].map(id => ({ id, prompt: `authored ${id}` }));
+    director.sourceHash = directorHash(director.source);
+    service.edit("episode", { operationId: "two-targets", expectedRevision: 1, ops: [{ type: "set_director_production", director }] });
+    const calls: string[][] = [];
+    const compiler = (input: DirectorProduction) => {
+        const cards = input.source.asset_cards as Array<{ id: string; prompt: string }>;
+        calls.push(cards.map(card => card.id));
+        return { director: { ...input, artifacts: cards.map(card => ({ id: `image-${card.id}`, targetId: card.id, kind: "image" as const,
+            prompt: card.prompt, sha256: promptHash(card.prompt), sourceHash: input.sourceHash, status: "ready" as const, references: [],
+            receipt: { sourceHash: input.sourceHash, promptHash: promptHash(card.prompt), engineRuntimeId: input.engine.runtimeId, validator: "fixture" } })) },
+            exitCode: 0, diagnostics: [], audit: {}, sourceAdjustments: [], acceptance: {} };
+    };
+    const jobs = new ProductionCompilationService(service, path.join(root, "packets"), compiler);
+    const run = async (operationId: string, scope?: { targetIds: string[] }) => {
+        jobs.enqueue("episode", "episode", operationId, service.get("episode").revision, undefined, scope);
+        await new Promise(resolve => setImmediate(resolve));
+        const job = jobs.getCompilation("episode", "episode", operationId);
+        assert.equal(job.status, "succeeded");
+        jobs.apply("episode", "episode", job.preparedId!);
+        return job;
+    };
+    await run("initial", { targetIds: ["A", "B"] });
+    await run("unchanged-full");
+    assert.deepEqual(calls, [["A", "B"]], "an unscoped unchanged request must not invoke the compiler again");
+    const current = service.get("episode"), changed = structuredClone(current.draft.director!);
+    const originalA = structuredClone(current.draft.director!.artifacts.find(item => item.targetId === "A"));
+    (changed.source.asset_cards as Array<{ id: string; prompt: string }>)[1].prompt = "revised B";
+    changed.sourceHash = directorHash(changed.source);
+    changed.artifacts.find(item => item.targetId === "B")!.status = "draft";
+    service.edit("episode", { operationId: "change-B", expectedRevision: current.revision, ops: [{ type: "set_director_production", director: changed }] });
+    await run("partial", { targetIds: ["A", "B"] });
+    assert.deepEqual(calls, [["A", "B"], ["B"]]);
+    const after = service.get("episode").draft.director!;
+    assert.deepEqual(after.artifacts.find(item => item.targetId === "A"), originalA, "reuse retains the actual original receipt and bytes");
+    assert.equal(after.artifacts.find(item => item.targetId === "B")!.prompt, "revised B");
+    assert.ok(after.artifacts.every(item => currentCompilationArtifact(after, item)));
+    const prepared = jobs.prepare("episode", "episode", service.get("episode").revision);
+    assert.equal(prepared.audit.status, "REUSED");
+    assert.equal(calls.length, 2, "synchronous preparation uses the same reuse rules");
+});
+
+test("prompt bytes and receipt hashes must match before a ready artifact is reused", async t => {
+    const { root, service, director } = fixture(t);
+    director.source.asset_plan = [{ id: "STYLE", kind: "style" }];
+    director.sourceHash = directorHash(director.source);
+    const prompt = "original prompt";
+    director.artifacts = [{ id: "style", targetId: "STYLE", kind: "image", prompt: "tampered prompt", sha256: promptHash(prompt), sourceHash: director.sourceHash,
+        status: "ready", references: [], receipt: { sourceHash: director.sourceHash, promptHash: promptHash(prompt), engineRuntimeId: director.engine.runtimeId, validator: "fixture" } }];
+    let calls = 0;
+    const jobs = new ProductionCompilationService(service, root, input => {
+        calls++;
+        const next = structuredClone(input);
+        next.artifacts[0].prompt = prompt;
+        return { director: next, exitCode: 0, diagnostics: [], audit: {}, sourceAdjustments: [], acceptance: {} };
+    });
+    jobs.enqueue("episode", "episode", "tampered", 1, director, { targetIds: ["STYLE"] });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(jobs.getCompilation("episode", "episode", "tampered").status, "succeeded");
+    assert.equal(calls, 1);
+    const targets: any = jobs.getCompilation("episode", "episode", "tampered", "targets", 0, 10);
+    assert.equal(targets.items[0].sha256, promptHash(prompt));
+});
+
+test("repeated media bindings read bytes once per verification and still reject each mismatched binding", t => {
+    const { root, db, service, director } = fixture(t);
+    const filePath = path.join(root, "reference.png"), storageKey = "reference.png", bytes = "verified reference bytes";
+    fs.writeFileSync(filePath, bytes);
+    db.upsertMediaFile({ storageKey, filePath, mimeType: "image/png", bytes: Buffer.byteLength(bytes), width: 1, height: 1, durationMs: null, createdAt: new Date().toISOString() });
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "reference", nodeType: "image", position: { x: 0, y: 0 }, metadata: { storageKey } }]);
+    director.assets = Object.fromEntries(["A", "B"].map(id => [id, { nodeId: "reference", version: "v1", status: "approved", storageKey, sha256: promptHash(bytes), evidence: "verified" }]));
+    const read = fs.readFileSync;
+    let reads = 0;
+    fs.readFileSync = ((file: any, ...args: any[]) => {
+        if (file === filePath) reads++;
+        return (read as any)(file, ...args);
+    }) as typeof read;
+    try { service.verifyCompilationBindings("episode", director); }
+    finally { fs.readFileSync = read; }
+    assert.equal(reads, 1);
+    director.assets.B.sha256 = "0".repeat(64);
+    assert.throws(() => service.verifyCompilationBindings("episode", director), /reference bytes changed/);
+    director.assets.B.sha256 = promptHash(bytes);
+    director.assets.B.nodeId = "missing-node";
+    assert.throws(() => service.verifyCompilationBindings("episode", director), /not bound/);
+});
+
 test("scoped asset-only compilation applies with ledger v2 before video continuity is authored", async t => {
     const { root, service, director } = fixture(t);
     director.source.asset_plan = [{ id: "STYLE", kind: "style", version: "v1", purpose: "Lock the film rendering language.", status: "planned", depends_on: [] }];

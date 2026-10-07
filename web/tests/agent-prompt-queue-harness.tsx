@@ -77,11 +77,11 @@ Object.assign(window, {
             const dataUrl = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1' height='1'/%3E";
             useAgentStore.setState({ attachments: [{ id: "image-attachment", name: "fixture.svg", type: "image/svg+xml", size: dataUrl.length, width: 1, height: 1, url: dataUrl, dataUrl }] });
         },
-        setIdle(revision = 11, advanceConversationRevision = true) {
+        setIdle(revision = 11, advanceConversationRevision = true, clearRuntimeThread = false) {
             const previous = useAgentStore.getState().conversation;
             const ready = { ...previous, revision: previous.revision + (advanceConversationRevision ? 1 : 0), status: "ready" as const };
-            runtime = { ...runtime, revision, codex: { busy: false, threadId: "queue-thread", turnId: "active-turn" }, conversation: ready };
-            useAgentStore.setState({ conversation: ready, waiting: false, sending: false, activeTurnId: "", codexRuntime: { instanceId: runtime.instanceId, revision, busy: false, threadId: "queue-thread", turnId: "active-turn" } });
+            runtime = { ...runtime, revision, codex: { busy: false, threadId: clearRuntimeThread ? "" : "queue-thread", turnId: clearRuntimeThread ? "" : "active-turn" }, conversation: ready };
+            useAgentStore.setState({ conversation: ready, waiting: false, sending: false, activeTurnId: "", codexRuntime: { instanceId: runtime.instanceId, revision, busy: false, threadId: runtime.codex.threadId, turnId: runtime.codex.turnId } });
         },
         setIdleInNewInstance(instanceId: string, revision = 1) {
             const previous = useAgentStore.getState().conversation;

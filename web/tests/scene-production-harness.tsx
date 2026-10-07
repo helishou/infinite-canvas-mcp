@@ -9,12 +9,21 @@ import "../src/styles/globals.css";
 const hash = "a".repeat(64), policy = { mode: "manual", shared: "manual", scene: "manual" } as const;
 const source = { script_scenes: ["A", "B", "C", "D"].map(id => ({ id, scene_id: id, heading: `场次 ${id}`, text: `场次 ${id} 已确认的真实叙事内容` })), shots: [], segments: [], asset_plan: [] };
 const commands: unknown[] = [];
+const directorRequests: unknown[] = [];
 let state: SceneWorkInspection = { revision: 1, shared: { inputHash: hash, review: { sourceHash: hash, inputHash: hash, verdict: "approved", evidence: "fixture", mode: "manual", media: [], checkedAt: new Date().toISOString() } }, works: ["A", "B", "C"].map((id, index) => ({ workId: `work-${id}`, sceneId: id, sourceHash: hash, inputHash: hash, reviewInputHash: hash, inputRevision: 1, status: index === 0 ? "awaiting_review" : index === 1 ? "awaiting_media" : "succeeded", stage: index === 0 ? "review" : index === 1 ? "produce" : "complete", runIds: [], artifactIds: [], generationAuthorized: false, assetReviews: index === 0 ? [{ sourceHash: hash, inputHash: hash, mediaInputHash: hash, verdict: "approved", mode: "manual", evidence: "模拟记录：前置资产 K1 身份与风格通过，其余素材仍待审。", media: [{ targetId: "K1", storageKey: "image:fixture-k1", sha256: hash }], checkedAt: new Date().toISOString() }] : [], policy, updatedAt: new Date().toISOString(), source: { shots: [{ id: `shot-${id}`, title: `场次 ${id} 镜头`, visual: "人物放下信件，看向门外，镜头缓慢推近。" }] }, media: [] })) };
+const scenario = new URLSearchParams(location.search).get("scenario");
+if (scenario === "waiting") {
+    state.works = ["A", "B", "C", "D"].map(id => ({ ...state.works[0], workId: `work-${id}`, sceneId: id, stage: "create", status: "awaiting_review", generationAuthorized: true, error: "自动审核不可用，请人工核对：workspace routing discovery failed" }));
+    state.shared = { inputHash: hash, reviewCurrent: false, error: "自动审核需要处理" };
+}
+let failStart = false;
+Object.assign(window, { __sceneProductionTest: { failNextStart() { failStart = true; } } });
 // All requests, including imported module initialization, stay inside this fixture.
 window.fetch = async (input, init) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, location.origin);
     if (!url.pathname.includes("/production/scene-work")) return new Response(JSON.stringify({ ok: true, settings: {}, tasks: [], models: [] }), { headers: { "content-type": "application/json" } });
     if (init?.method === "POST") {
+        if (failStart && url.pathname.endsWith("/start")) { failStart = false; return Response.json({ error: "模拟：推进请求被拒绝" }, { status: 409 }); }
         const request = JSON.parse(String(init.body || "{}")); commands.push({ action: url.pathname.split("/").at(-1), ...request });
         const work = state.works.find(item => item.workId === request.workId);
         if (url.pathname.endsWith("/shared-review") && !state.shared?.inputHash) state.shared = { ...state.shared!, continuation: { authorizationId: request.operationId, contextHash: hash, status: "active", policy: { mode: "mixed", shared: "automatic", scene: "manual" }, updatedAt: new Date().toISOString() } };
@@ -35,6 +44,8 @@ async function mount() {
     await i18n.changeLanguage("zh-CN");
     function Harness() {
         const [plan, setPlan] = useState<DramaProductionPlan>({ requirements: "", imageModel: "", imageModelsByKind: {}, h3Model: "", confirmedOutline: "" });
+        const [commandPending, setCommandPending] = useState(false);
+        const [, renderDirector] = useState(0);
         const [revision, setRevision] = useState(1), [dark, setDark] = useState(false), [sharedDemo, setSharedDemo] = useState(false);
         const production = { episodeId: "scene-fixture", revision, publishedVersion: 1, updatedAt: "", published: null, draft: { director: { source }, scenes: [], shots: [], keyframes: {}, keyframeReviews: {}, clipGroups: [], settings: { mode: "manual", imageModel: "", h3Model: "", imageModels: {}, imageModelsByKind: {}, h3Models: {}, parallelScenes: true, reviewPolicy: sharedDemo ? { mode: "mixed", shared: "automatic", scene: "manual" } : policy }, legacyImports: [] } } as unknown as EpisodeProduction;
         return <ConfigProvider theme={{ algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm }}><App><main className={`${dark ? "dark bg-slate-950 text-white" : "bg-white text-slate-900"} min-h-screen space-y-5 p-6`}>
@@ -43,7 +54,8 @@ async function mount() {
             <button onClick={() => { state.shared = { reviewCurrent: false, error: "共同素材尚未生成" }; state.revision++; setSharedDemo(true); setRevision(state.revision); }}>模拟共同素材未就绪</button>
             <SceneProductionSettings value={plan} onChange={patch => setPlan({ ...plan, ...patch })} />
             <output data-testid="review-settings">{JSON.stringify(plan.reviewPolicy || null)}</output>
-            <SceneProductionPanel onCommand={(action, revision) => submitProductionSceneAction("scene-fixture", action, revision, nanoid())} production={production} owner="scene-fixture" onRefresh={() => setRevision(state.revision)} />
+            <SceneProductionPanel onAskDirector={scope => { directorRequests.push(scope); renderDirector(value => value + 1); }} commandPending={commandPending} onCommand={async (action, revision) => { setCommandPending(true); try { return await submitProductionSceneAction("scene-fixture", action, revision, nanoid()); } finally { setCommandPending(false); } }} production={production} owner="scene-fixture" onRefresh={() => setRevision(state.revision)} />
+            <output data-testid="director-requests">{JSON.stringify(directorRequests)}</output>
             <output data-testid="commands">{JSON.stringify(commands)}</output>
         </main></App></ConfigProvider>;
     }

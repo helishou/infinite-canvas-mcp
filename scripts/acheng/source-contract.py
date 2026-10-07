@@ -31,7 +31,18 @@ def contract():
         "contractVersion": "2", "ref2vaMaximumWords": None, "scopedCompilation": True,
         "jsonSchema": {"type": "object", "properties": {
             "segments": {"type": "array", "items": {"type": "object", "properties": {
-                "mode": {"type": "string", "enum": list(MODES)}, "mode_lock": {"type": "string", "enum": list(MODES)}, "mode_selection_reason": prose}, "required": ["mode", "mode_lock", "mode_selection_reason"]}},
+                "mode": {"type": "string", "enum": list(MODES)}, "mode_lock": {"type": "string", "enum": list(MODES)}, "mode_selection_reason": prose,
+                "subjects": {"type": "array", "items": {"type": "object", "properties": {
+                    "label": {"type": "string", "pattern": "^<Subject [1-9][0-9]*>$"},
+                    "entity_id": prose, "definition": prose, "retention": prose,
+                    "shot_ids": {"type": "array", "minItems": 1, "items": prose}},
+                    "required": ["label", "entity_id", "definition", "retention", "shot_ids"]}}
+                }, "required": ["mode", "mode_lock", "mode_selection_reason"]}},
+            "shots": {"type": "array", "items": {"type": "object", "properties": {
+                "continuity_cues": {"type": "array", "items": {"type": "object", "properties": {
+                    "fact_id": prose, "phase": {"type": "string", "enum": ["start", "end"]},
+                    "value": prose, "description": prose}, "required": ["fact_id", "phase", "value", "description"]}}
+            }}},
             "asset_cards": {"type": "array", "items": {"type": "object", "properties": {
                 "recipe": {"type": "string", "enum": list(RECIPES)},
                 "view_layout": {"type": "object", "properties": {
@@ -44,6 +55,11 @@ def contract():
         "relationships": ["segments[].mode_lock must equal mode", "Full creative and file contracts remain owned by Acheng audit/compiler; this schema covers Canvas source fields."],
         "templates": {"segment": {"mode": "Ref2VA", "mode_lock": "Ref2VA", "mode_selection_reason": "Use approved identity and scene references."}, "asset_card": {"recipe": "portrait"}, "style_scope": {"preserve_scope": ["Preserve the approved lighting and palette."], "exclude_scope": ["Do not copy the anchor subject identity."]}},
         "continuityLedger": continuity_v2_contract(),
+        "modelPromptContract": {"version": 1,
+            "subjects": "Ref2VA identity/character/scene/environment/prop references require one matching entity/source/Shot Subject. Frame and composition anchors may remain Pictures.",
+            "continuity": "Replay snapshots remain report-only. Optional shots[].continuity_cues assert a registered local fact/value at start/end and provide complete model-facing description. Without cues, authored shot state/action remains the prose source.",
+            "internalIds": "Registered fact/object/Shot/Segment IDs cannot appear in instructions; original dialogue and quoted visible text are preserved.",
+            "semanticReview": "Structural acceptance does not verify natural-language agreement or visual quality."},
     }
 
 
@@ -75,6 +91,11 @@ def validate(source, stage="edit"):
                 if field in value:
                     check(value[field], child, f"{path}.{field}".strip("."), target)
     check(source, contract()["jsonSchema"], "")
+    # The bridge is also imported while building the source-contract manifest.
+    # Structural template generation needs no candidate-only dependencies.
+    if isinstance(source, dict):
+        from canvas_model_contract import source_diagnostics
+        issues.extend({**item, "severity": "warning" if stage == "edit" else "error"} for item in source_diagnostics(source))
     continuity_issues = []
     if isinstance(source, dict) and isinstance(source.get("ledger"), dict) and source["ledger"].get("contract_version") == 2:
         report = audit_continuity_v2(source)
@@ -107,6 +128,8 @@ def main():
                     issues.append({"code": "INVALID_ARTIFACT_TARGET", "path": f"director.artifacts.{index}.targetId", "targetId": artifact.get("targetId"), "message": "Compiled Segment is not registered", "severity": "error"})
                     continue
                 try:
+                    from canvas_model_contract import check_source_and_text
+                    check_source_and_text(source, seg, artifact["prompt"])
                     policy = detail_policy(source, seg)
                     validate_h3_format(artifact["prompt"], mode=seg["mode"], shot_count=len(seg.get("shot_ids", [])), reference_labels=[r["label"] for r in artifact.get("references", [])], subject_labels=[r["label"] for r in seg.get("subjects", [])], minimum_words=policy["minimum_words"] if seg["mode"] == "Ref2VA" else 0, duration_seconds=float(Fraction(str(seg["generation_clip_duration"]))))
                 except (ValueError, KeyError, TypeError) as error:

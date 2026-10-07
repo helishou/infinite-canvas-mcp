@@ -11,9 +11,7 @@ const stage = z.enum(["script", "shots", "director"]);
 const run = identity.extend({ runId: z.string().min(1) });
 const version = identity.extend({ version: z.number().int().min(1) });
 const write = { operationId: z.string().min(1), expectedRevision: z.number().int().nonnegative() };
-type EditSchema = z.ZodObject<typeof owner & { operationId: z.ZodString; expectedRevision: z.ZodNumber;
-    ops: z.ZodArray<z.ZodType<ProductionOperation, z.ZodTypeDef, z.input<typeof productionOperationSchema>>> }, "strict">;
-const edit: EditSchema = productionEditSchema.extend(owner).strict();
+const edit = productionEditSchema.extend(owner).strict();
 export const productionToolSchemas = {
     production_preflight: productionPreflightSchema.extend(owner).strict(),
     production_get: productionReadSchema.extend(owner).strict(),
@@ -39,9 +37,9 @@ export const productionToolNames = Object.keys(productionToolSchemas) as Product
 export const isProductionTool = (name: string): name is ProductionToolName => Object.hasOwn(productionToolSchemas, name);
 export const productionToolDescriptions: Record<ProductionToolName, string> = {
     production_preflight: "按显式 kind/id 检查制作请求；只读，不提交媒体。",
-    production_get: "读取 kind/id 制作摘要；通过 view、sourceSection、targetIds、分页或 chunkBytes 读取完整内容。",
+    production_get: "读取 kind/id 制作摘要；详情优先 sourceSection/targetIds 定向读取。复用已完整读取的同版本内容；仅核验变化时传 ifRevision，同版本返回 unchanged。cursor 只用于未完成的分页/分块，不从头重读。完整源稿编辑优先 production_edit 的 patch_director_source/patch_director_continuity，由 Backend 重算哈希。",
     production_get_readiness: "读取 kind/id 的制作依赖、缺项和下一步。",
-    production_start_run: "按 kind/id 启动已有授权的制作运行；保留 runId/idempotencyKey 与版本边界，先执行 preflight，阻塞时不提交媒体。",
+    production_start_run: "按 kind/id 启动已有授权的制作运行；inputBasis 默认 canvas，冻结当前有效画布输入，显式 published 核验指定发布稿。保留 runId/idempotencyKey 与版本边界，先执行 preflight，阻塞时不提交媒体。保存、编译、审核和发布不授权生成。",
     production_get_batch: "按 kind/id/runId 读取固定生产范围、状态与任务 ID。",
     production_pause_run: "暂停 kind/id/runId；在途任务完成后停在边界。",
     production_resume_run: "继续原 kind/id/runId，复用原快照和任务，不自动重生成失败任务。",
@@ -49,7 +47,7 @@ export const productionToolDescriptions: Record<ProductionToolName, string> = {
     production_get_version: "默认读取 kind/id/version 历史摘要；显式视图支持定向、分页和 UTF-8 分块完整读取。",
     production_list_legacy: "读取 kind/id 的旧剧情与剧本文件及哈希，供明确选择导入。",
     production_preview_impact: "按 kind/id/stage 预览发布影响，不提交媒体。",
-    production_edit: "以 operationId 和 expectedRevision 原子编辑 kind/id 制作稿，保留原请求恢复回执；成功返回短回执，详情用 production_get。",
+    production_edit: "以 operationId/expectedRevision 原子编辑 kind/id draft；主导演核对绑定的完整子代理建议后可带 adoptions:[{taskId,artifactHash}]，同时校验范围输入与实际编辑，登记采纳 revision。unbound/partial/stale 不采纳。已有稿优先 patch_director_source/patch_director_continuity，Backend 重算 sourceHash；响应丢失恢复原 operationId 回执，nextRead 按需使用。保存不批准媒体或生成。",
     production_publish: "按 kind/id 发布指定制作阶段；保留 operationId、expectedRevision，返回短回执。",
     production_restore: "按 kind/id 恢复历史版本为草稿；保留 operationId 和 expectedRevision，不修改历史快照。",
     production_sync_clips: "同步 kind/id 当前发布 Clip 输入，不提交媒体；相同输入、绑定和顺序不推进版本。",

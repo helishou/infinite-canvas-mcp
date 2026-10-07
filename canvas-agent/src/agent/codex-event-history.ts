@@ -1,5 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { createWriteStream } from "node:fs";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { setImmediate as yieldToRequests } from "node:timers/promises";
 
 import { CONFIG_DIR } from "../config.js";
 import { recordFlushTiming, recordHistoryLoad, recordQueueDepth, releaseQueueDepth } from "./codex-perf.js";
@@ -196,17 +200,42 @@ export class CodexEventHistory {
         await fs.mkdir(path.dirname(this.file), { recursive: true });
         const temporaryFile = `${this.file}.${process.pid}.${Date.now()}.tmp`;
         try {
-            // 紧凑序列化：这层缩进曾让 50MB 级文件额外膨胀约三成，
-            // 而唯一读者是我们自己的 JSON.parse，没有人工可读性需求。
-            const serializeStarted = Date.now();
-            const payload = JSON.stringify(data);
-            const serializeMs = Date.now() - serializeStarted;
-            const writeStarted = Date.now();
-            await fs.writeFile(temporaryFile, payload);
+            // 逐条序列化并交还事件循环，避免大历史的一次 stringify/UTF-8 转换
+            // 阻塞同进程的 /health、业务请求与 Agent 事件。流背压控制在途内存。
+            let serializeMs = 0;
+            let bytes = 0;
+            async function* chunks() {
+                const encode = (value: unknown) => {
+                    const started = performance.now();
+                    const chunk = Buffer.from(JSON.stringify(value));
+                    serializeMs += performance.now() - started;
+                    bytes += chunk.length;
+                    return chunk;
+                };
+                const literal = (value: string) => {
+                    bytes += Buffer.byteLength(value);
+                    return value;
+                };
+                yield literal('{"version":1,"items":[');
+                for (const [index, entry] of data.items.entries()) {
+                    await yieldToRequests();
+                    if (index) yield literal(',');
+                    yield encode(entry);
+                }
+                yield literal('],"turns":[');
+                for (const [index, entry] of data.turns.entries()) {
+                    await yieldToRequests();
+                    if (index) yield literal(',');
+                    yield encode(entry);
+                }
+                yield literal(']}');
+            }
+            const writeStarted = performance.now();
+            await pipeline(Readable.from(chunks()), createWriteStream(temporaryFile));
             await fs.rename(temporaryFile, this.file);
-            const writeMs = Date.now() - writeStarted;
-            this.options.onFlush?.(payload.length);
-            recordFlushTiming({ serializeMs, writeMs, bytes: payload.length });
+            const writeMs = performance.now() - writeStarted - serializeMs;
+            this.options.onFlush?.(bytes);
+            recordFlushTiming({ serializeMs, writeMs, bytes });
         } finally {
             await fs.unlink(temporaryFile).catch(() => undefined);
         }

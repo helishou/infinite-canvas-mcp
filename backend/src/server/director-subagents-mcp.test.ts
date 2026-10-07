@@ -1,0 +1,65 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
+import express from "express";
+import { once } from "node:events";
+import { BackendDatabase } from "../db.js";
+import { createStores } from "../stores/index.js";
+import { BackendEventBus } from "../events.js";
+import { DirectorSubagents, registerDirectorSubagentRoutes } from "../drama/director-subagents.js";
+import { registerBackendMcpHttpRoutes } from "../mcp.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+
+test("HTTP MCP exposes delegation, compact replays, task waiting and complete Unicode result reads", async t => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "director-delegate-mcp-"));
+    const db = new BackendDatabase(path.join(root, "fixture.sqlite"));
+    db.createCanvasProject({ id: "canvas", title: "fixture", nodes: [], connections: [] });
+    const stores = createStores(db), events = new BackendEventBus();
+    let runs = 0;
+    const content = "完整分镜与连续性😀".repeat(20000);
+    let finish: (() => void) | undefined;
+    const service = new DirectorSubagents(stores, { run: request => { runs++; request.onThread("worker"); return new Promise(resolve => { finish = () => resolve({ threadId: "worker", output: { status: "complete", summary: "核对完成", content, unresolved: [] } }); }); } }, events, root);
+    const app = express(); app.use(express.json());
+    app.get("/plugins/mcp", (_req, res) => res.json({ declarations: [] }));
+    app.post("/mcp/observability/events", (_req, res) => res.json({ ok: true }));
+    // The existing task wait tool uses the normal task endpoint, not a second wait service.
+    app.get("/tasks", (req, res) => { res.json({ ok: true, tasks: String(req.query.taskIds || "").split(",").filter(Boolean).map(id => stores.tasks.get(id)).filter(Boolean) }); if (finish) { const complete = finish; finish = undefined; setImmediate(complete); } });
+    registerDirectorSubagentRoutes(app, service);
+    const server = app.listen(0, "127.0.0.1"); await once(server, "listening");
+    const config = { url: `http://127.0.0.1:${(server.address() as { port: number }).port}`, token: "fixture", port: 0, origins: [] };
+    const routes = registerBackendMcpHttpRoutes(app, config);
+    const client = new Client({ name: "director-fixture", version: "1" });
+    t.after(async () => { await client.close(); await routes.closeAll(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); db.close(); assert.ok(root.startsWith(os.tmpdir() + path.sep)); await fs.rm(root, { recursive: true }); });
+    await client.connect(new StreamableHTTPClientTransport(new URL(config.url + "/mcp")));
+    const listed = await client.listTools();
+    const schema = listed.tools.find(tool => tool.name === "director_subagent")!;
+    assert.ok(schema); assert.ok(schema.inputSchema.required?.includes("parentThreadId"));
+    let bytes = 0, calls = 0; const started = Date.now();
+    const call = async (args: Record<string, unknown>, name = "director_subagent") => {
+        const result: any = await client.callTool({ name, arguments: args });
+        calls++; bytes += Buffer.byteLength(JSON.stringify(result));
+        assert.ok(!result.isError, JSON.stringify(result)); return JSON.parse(result.content[0].text);
+    };
+    const spawn = { action: "spawn", projectId: "canvas", parentThreadId: "parent", operationId: "stable", title: "分镜核对", role: "shots", prompt: "检查完整场次", context: "导演源稿" };
+    const receipt = await call(spawn), replay = await call(spawn);
+    assert.equal(replay.replayed, true); assert.equal(receipt.task.taskId, replay.task.taskId); assert.equal(runs, 1);
+    const summary = await call({ action: "get", projectId: "canvas", parentThreadId: "parent", taskId: receipt.task.taskId });
+    assert.equal(summary.result, undefined); assert.ok(JSON.stringify(summary).length < 2500);
+    assert.equal(summary.task.status, "running");
+    const waiting = await call({ taskIds: [receipt.task.taskId], timeoutMs: 1000 }, "canvas_wait_tasks");
+    assert.equal(waiting.tasks[0].status, "succeeded");
+    const overflow: any = await client.callTool({ name: "director_subagent", arguments: { action: "get", projectId: "canvas", parentThreadId: "parent", taskId: receipt.task.taskId, view: "result" } });
+    assert.equal(overflow.isError, true, "explicit oversized reads retain the existing output protection");
+    calls++; bytes += Buffer.byteLength(JSON.stringify(overflow));
+    assert.match(JSON.stringify(overflow), /chunkBytes/);
+    let cursor: string | undefined, joined = "";
+    do {
+        const result = await call({ action: "get", projectId: "canvas", parentThreadId: "parent", taskId: receipt.task.taskId, view: "result", chunkBytes: 8192, cursor });
+        joined += result.chunk.text; cursor = result.chunk.nextCursor || undefined;
+    } while (cursor);
+    assert.equal(JSON.parse(joined).content, content);
+    t.diagnostic(`delegation cycle: calls=${calls}, UTF-8 bytes=${bytes}, elapsedMs=${Date.now() - started}, workerRuns=${runs}`);
+});

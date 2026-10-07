@@ -115,7 +115,7 @@ default_tools_approval_mode = "approve"
 - `canvas_export_snapshot`
 - `canvas_apply_ops`
 - `canvas_create_text_node`
-- `canvas_create_image_prompt_flow`
+- `canvas_create_generation_flow`（显式 `mode=image`）
 
 `canvas_apply_ops` 示例：
 

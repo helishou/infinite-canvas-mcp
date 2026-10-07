@@ -22,10 +22,14 @@ export function removedToolNotice(name: string) {
     return migration ? { ok: false, code: "TOOL_REMOVED", error: `工具 ${name} 已移除，请使用 ${migration.replacement}。${migration.instructions}`, migration } : undefined;
 }
 function migrateAction(action: any) {
-    const migration = Object.hasOwn(removedToolMigrations, action?.tool) ? removedToolMigrations[action.tool] : undefined;
+    const knownCanonical = productionToolMigrationPairs.some(([, name]) => name === action?.tool);
+    const legacyInput = action?.input;
+    const migration = Object.hasOwn(removedToolMigrations, action?.tool) ? removedToolMigrations[action.tool]
+        : knownCanonical && !legacyInput?.kind && Boolean(legacyInput?.episodeId) !== Boolean(legacyInput?.projectId)
+            ? { replacement: action.tool, kind: (legacyInput.episodeId ? "episode" : "canvas") as "episode" | "canvas" } : undefined;
     if (!migration?.kind) return action;
     const { episodeId, projectId, ...rest } = action.input || {};
-    return { ...action, tool: migration.replacement, input: { ...rest, kind: migration.kind, id: migration.kind === "episode" ? episodeId : projectId } };
+    return { ...action, tool: migration.replacement, input: { ...rest, kind: migration.kind, id: (migration.kind === "episode" ? episodeId : projectId) ?? rest.id } };
 }
 /** Visit response guidance containers, never authored source, prompts or historical snapshots. */
 export function migrateToolGuidance(value: any): any {

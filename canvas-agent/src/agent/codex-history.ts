@@ -705,6 +705,8 @@ function routeName(path: string) {
 
 /** 将 MCP 工具名称转换为聊天记录中的中文标题。 */
 function toolName(name: string) {
+    const productionLabels: Record<string, string> = {"production_preflight": "检查制作请求", "production_get": "读取制作稿", "production_get_readiness": "检查制作就绪", "production_start_run": "启动制作运行", "production_get_batch": "读取制作批次", "production_pause_run": "暂停制作运行", "production_resume_run": "继续制作运行", "production_list_versions": "列出制作版本", "production_get_version": "读取制作版本", "production_list_legacy": "读取旧制作资料", "production_preview_impact": "预览制作影响", "production_edit": "编辑制作稿", "production_publish": "发布制作稿", "production_restore": "恢复制作版本", "production_sync_clips": "同步制作片段", "production_get_run": "读取制作运行", "production_export_markdown": "导出制作文档"};
+    if (productionLabels[name]) return productionLabels[name];
     if (name === "imagegen" || name.endsWith("__imagegen")) return "生成图片";
     if (name === "view_image" || name.endsWith("__view_image")) return "查看图片";
     if (name === "exec" || name === "exec_command" || name.endsWith("__exec_command")) return "执行命令";

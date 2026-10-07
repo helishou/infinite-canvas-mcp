@@ -1,6 +1,8 @@
 import { captureCanvasInputs, effectiveTargetInput, inputHash, type CanvasExecutionSnapshot } from "./canvas-inputs.js";
 import { adoptedDirectorFields } from "./input-merge.js";
 import crypto from "node:crypto";
+import { assertDirectorWorkScope, directorArtifact, directorAdoption, directorWorkInput, type DirectorWorkPackage } from "@basketikun/canvas-agent/agent/work-package";
+import { DIRECTOR_SUBAGENT_KIND } from "@basketikun/canvas-agent/agent/delegation";
 import { currentCompilationArtifact, compilationScopeInput, preserveCompilationProvenance, scopedCompilerInput, productionReviewHash } from "@basketikun/canvas-agent/drama/compilation-scope";
 import fs from "node:fs";
 import path from "node:path";
@@ -580,6 +582,7 @@ export class EpisodeProductionService {
         const nodes = rawNodes as Array<Record<string, any>>;
         for (const asset of Object.values(director.assets)) validateSharedAssetSource(this.db, canvasId!, asset);
         const bindings = [...Object.values(director.assets), ...director.artifacts.flatMap(a => a.references)];
+        const mediaDigests = new Map<string, string>();
         for (const binding of bindings) {
             if (!binding.storageKey) continue;
             const node = nodes.find(n => n.id === binding.nodeId);
@@ -587,7 +590,10 @@ export class EpisodeProductionService {
             const keys = node ? [...resolveCanvasImageReferenceNode(node).map(r => r.storageKey), (node as any).storageKey, meta?.storageKey, meta?.resultStorageKey] : [];
             if (!node || !keys.includes(binding.storageKey)) throw new Error(`Compilation media is not bound to the production canvas: ${binding.nodeId}`);
             const media = this.db.getMediaFile(binding.storageKey);
-            if (!media || !fs.existsSync(media.filePath) || promptHashBytes(media.filePath) !== binding.sha256) throw new Error(`Compilation reference bytes changed: ${binding.storageKey}`);
+            if (!media || !fs.existsSync(media.filePath)) throw new Error(`Compilation reference bytes changed: ${binding.storageKey}`);
+            const digest = mediaDigests.get(binding.storageKey) || promptHashBytes(media.filePath);
+            mediaDigests.set(binding.storageKey, digest);
+            if (digest !== binding.sha256) throw new Error(`Compilation reference bytes changed: ${binding.storageKey}`);
         }
     }
 
@@ -785,7 +791,7 @@ export class EpisodeProductionService {
             for (const targetId of batch.targets.filter(target => wanted.has(target))) {
                 const tasks = batch.submitted.filter(task => `${task.kind === "h3" ? "segment" : "frame"}:${task.id}` === targetId || batch.targets.length === 1).map(task => ({ taskId: task.taskId, status: this.db.getTask(task.taskId)?.status || "unknown" }));
                 occupied.push({ targetId, status: batch.status, runId: batch.runId, taskIds: tasks.map(task => task.taskId), tasks,
-                    nextAction: { action: batch.status === "awaiting_review" ? "review" : "read_run", message: batch.status === "awaiting_review" ? "读取旧结果并完成审核或按用户决定退回；暂停不会释放目标。" : "读取原运行及精确任务状态，等待在途任务结束；不要换 runId 重提。", tool: this.projectScope ? "production_get_batch" : "production_get_batch", input: { [this.projectScope ? "projectId" : "episodeId"]: id, runId: batch.runId } } });
+                    nextAction: { action: batch.status === "awaiting_review" ? "review" : "read_run", message: batch.status === "awaiting_review" ? "读取旧结果并完成审核或按用户决定退回；暂停不会释放目标。" : "读取原运行及精确任务状态，等待在途任务结束；不要换 runId 重提。", tool: "production_get_batch", input: { kind: this.projectScope ? "canvas" : "episode", id: id, runId: batch.runId } } });
             }
         }
         const bindings = this.db.db.prepare(`SELECT b.task_id, b.target_kind, b.targets_json, t.status FROM production_task_bindings b JOIN tasks t ON t.id=b.task_id WHERE b.owner_kind=? AND b.owner_id=? AND b.status='submitted' AND t.status IN ('queued','running','awaiting_confirmation')`).all(this.ownerKind, id);
@@ -798,7 +804,7 @@ export class EpisodeProductionService {
             for (const targetId of (run.targets || run.plan.clipGroupIds.map(groupId => `segment:${groupId}`)).filter(target => wanted.has(target))) {
                 if (occupied.some(item => item.targetId === targetId && item.runId === run.runId)) continue;
                 const tasks = run.submitted.map(task => ({ taskId: task.taskId, status: this.db.getTask(task.taskId)?.status || "unknown" }));
-                occupied.push({ targetId, status: run.status, runId: run.runId, taskIds: tasks.map(task => task.taskId), tasks, nextAction: { action: "read_run", message: "读取原版本运行并等待其结束，保留当前输入和媒体。", tool: this.projectScope ? "production_get_run" : "production_get_run", input: { [this.projectScope ? "projectId" : "episodeId"]: id, version: run.version } } });
+                occupied.push({ targetId, status: run.status, runId: run.runId, taskIds: tasks.map(task => task.taskId), tasks, nextAction: { action: "read_run", message: "读取原版本运行并等待其结束，保留当前输入和媒体。", tool: "production_get_run", input: { kind: this.projectScope ? "canvas" : "episode", id: id, version: run.version } } });
             }
         }
         const canvasId = this.episodeInfo(id).canvasId;
@@ -825,7 +831,7 @@ export class EpisodeProductionService {
             const prior = this.prepare("SELECT run_id, request_hash FROM episode_production_batches WHERE episode_id=? AND idempotency_key=?").get(episodeId, input.request.idempotencyKey) as { run_id: string; request_hash: string } | undefined;
             if (prior) {
                 if (prior.request_hash === batchRequestHash(input.request)) return { ...result, valid: true, generationReady: false, replayed: true, nextActions: [] };
-                result.diagnostics.push({ code: "IDEMPOTENCY_CONFLICT", path: "request.idempotencyKey", message: "idempotencyKey 已用于不同生产请求，请读取原运行并核对范围，不能原样重提。", severity: "error", nextAction: { action: "read_run", message: "读取原运行并核对幂等请求。", tool: this.projectScope ? "production_get_batch" : "production_get_batch", input: { [this.projectScope ? "projectId" : "episodeId"]: episodeId, runId: prior.run_id } } });
+                result.diagnostics.push({ code: "IDEMPOTENCY_CONFLICT", path: "request.idempotencyKey", message: "idempotencyKey 已用于不同生产请求，请读取原运行并核对范围，不能原样重提。", severity: "error", nextAction: { action: "read_run", message: "读取原运行并核对幂等请求。", tool: "production_get_batch", input: { kind: this.projectScope ? "canvas" : "episode", id: episodeId, runId: prior.run_id } } });
                 result.nextActions = result.diagnostics.flatMap(item => item.nextAction ? [item.nextAction] : []);
                 return result;
             }
@@ -840,9 +846,9 @@ export class EpisodeProductionService {
             else if (input.action === "compile") {
                 if (!current.draft.director) throw new ProductionValidationError([{ code: "COMPILE_STAGE_NOT_READY", path: "director", message: "请先保存正式导演源稿，再准备编译。", severity: "error" }]);
                 const director = directorProductionSchema.parse(structuredClone(input.request.director || current.draft.director));
-                this.verifyCompilationBindings(episodeId, director);
+                const referenceFiles = this.compilationReferenceFiles(episodeId, director);
                 if (this.checkEngine === assertDirectorEngine) {
-                    const checked = preflightCompilationDirector(director, (targetId, label) => this.compilationReferenceFile(episodeId, director, targetId, label), compilationRuntimeId);
+                    const checked = preflightCompilationDirector(director, (targetId, label) => referenceFiles[`${targetId}\0${label}`], compilationRuntimeId);
                     if (checked.engine) director.engine = checked.engine;
                     diagnostics.push(...checked.diagnostics.filter(item => item.code !== "ONLINE_CONTEXT_UNVERIFIED"));
                 } else if (!(Array.isArray(director.source.asset_cards) && director.source.asset_cards.length) && !(Array.isArray(director.source.segments) && director.source.segments.length)) {
@@ -878,7 +884,7 @@ export class EpisodeProductionService {
         result.generationReady = input.action === "generate" && result.valid && !diagnostics.some(item => item.severity === "unverified");
         result.compileReady = input.action === "compile" && result.valid;
         result.nextActions = diagnostics.filter(item => item.severity === "error").map(item => item.nextAction || { action: item.code === "REVISION_CONFLICT" ? "refresh" : "correct_source", message: item.message,
-            tool: this.projectScope ? "production_get" : "production_get", input: { [this.projectScope ? "projectId" : "episodeId"]: episodeId, view: "source" } });
+            tool: "production_get", input: { kind: this.projectScope ? "canvas" : "episode", id: episodeId, view: "source" } });
         return result;
     }
 
@@ -1085,6 +1091,7 @@ export class EpisodeProductionService {
             addTarget({ id: `frame:${shotId}`, targetId: shotId, kind: "keyframe", title: String(shot.title || shotId), status, blockers: [...new Set(blockers)], ...(rejected && input.keyframePolicy === "new" ? { notice: "关键帧已退回；再次生成会创建一个新的显式生产任务。" } : {}), ...(artifact ? { artifactId: artifact.id } : {}) });
         }
         const boundaryByFrom = new Map(director.boundaries.map(boundary => [boundary.from, boundary]));
+        const completionBatches = this.listBatches(episodeId);
         for (const [index, segment] of segments.entries()) {
             const segmentId = String(segment.id || "");
             if (!segmentId) continue;
@@ -1143,7 +1150,7 @@ export class EpisodeProductionService {
             while (chainEnd < segments.length - 1 && boundaryByFrom.get(String(segments[chainEnd].id))?.motionContext) chainEnd++;
             const executionTargets = segments.slice(chainStart, chainEnd + 1).map(item => `segment:${String(item.id)}`);
             const hasMotionChain = chainEnd > chainStart;
-            const completed = data.settings.parallelScenes && !blockers.length && this.completedSceneSegment(episodeId, data, segmentId);
+            const completed = !blockers.length && this.completedSegment(episodeId, data, segmentId, completionBatches);
             addTarget({ id: `segment:${segmentId}`, targetId: segmentId, kind: "segment", title: segmentId, status: blockers.length ? "blocked" : completed ? "complete" : "ready", blockers: [...new Set(blockers)],
                 ...(artifact ? { artifactId: artifact.id } : {}), ...(hasMotionChain ? { executionTargets, notice: `Motion Context 使用同一连续组运行；本次范围从 ${String(segments[chainStart].id)} 到 ${String(segments[chainEnd].id)}。如果没有可复用 latent，将从组首段重新运行。` } : {}) });
         }
@@ -1163,7 +1170,7 @@ export class EpisodeProductionService {
         return { revision: current.revision, publishedVersion: current.publishedVersion, source, targets, modules: moduleStates, unresolved: [...new Set([...director.unresolved, ...blockedModules, ...ungroupedShotIssues, ...invalidBoundaryIssues])], nextAction, ...(presentation ? { presentation } : {}), sceneWorks: current.draft.director?.workflow.sceneWorks };
     }
 
-    private completedSceneSegment(id: string, data: EpisodeProductionData, segmentId: string) {
+    private completedSegment(id: string, data: EpisodeProductionData, segmentId: string, batches: ProductionBatch[]) {
         const group = data.clipGroups.find(item => item.id === segmentId);
         if (!data.director || !group?.nodeId || !group.segmentId || group.inputOutdated) return false;
         const node = this.canvasNode(id, group.nodeId);
@@ -1171,14 +1178,20 @@ export class EpisodeProductionService {
         const storageKey = String(clip?.resultStorageKey || "");
         const media = storageKey && this.db.getMediaFile(storageKey);
         if (!media || !fs.existsSync(media.filePath)) return false;
-        return this.listBatches(id).some(batch => {
-            if (batch.status !== "succeeded") return false;
-            const submitted = batch.submitted.find(item => item.kind === "h3" && item.id === segmentId && item.nodeId === group.nodeId && item.segmentId === group.segmentId && item.status === "succeeded");
+        return batches.some(batch => {
+            // A failed batch may contain successfully archived independent Clips.
+            if (!["succeeded", "failed", "cancelled"].includes(batch.status)) return false;
+            const submitted = batch.submitted.find(item => item.kind === "h3" && [segmentId, `segment:${segmentId}`].includes(item.id) && item.nodeId === group.nodeId && item.segmentId === group.segmentId && item.status === "succeeded");
             const task = submitted && this.db.getTask(submitted.taskId);
             if (!task || task.status !== "succeeded" || task.projectId !== this.episodeInfo(id).canvasId || task.nodeId !== group.nodeId) return false;
             const resultMedia = Array.isArray(task.result?.media) ? task.result.media as Record<string, unknown>[] : [];
             if (![...task.outputs, ...resultMedia].some(item => item.storageKey === storageKey)) return false;
             try {
+                const frozen = batch.executionSnapshot?.targets.find(target => target.id === `segment:${segmentId}` && target.nodeId === group.nodeId && target.segmentId === group.segmentId);
+                if (batch.executionSnapshot) {
+                    const project = this.db.getCanvasProject(this.episodeInfo(id).canvasId!);
+                    if (!frozen || !project || frozen.inputHash !== inputHash(effectiveTargetInput(project, group.nodeId!, group.segmentId!, record(this.db.getSetting(H3_DEFAULTS_KEY))))) return false;
+                }
                 const original = this.version(id, batch.version).snapshot.director;
                 const scope = { targetIds: [segmentId] };
                 return Boolean(original && compilationScopeInput(original, scope).inputHash === compilationScopeInput(data.director!, scope).inputHash);
@@ -1458,9 +1471,10 @@ export class EpisodeProductionService {
                     : "请读取并恢复原运行；暂停仍保留目标占用，不要换 runId 重试";
                 diagnostics.push({ code: awaitingReview ? "TARGET_AWAITING_REVIEW" : "TARGET_OCCUPIED", path: "request.targets", message: `所选生产目标已由运行 ${batch.runId} 占用；${message}`, severity: "error",
                     blockingRun: { runId: batch.runId, status: batch.status, taskIds: batch.submitted.map(item => item.taskId) },
-                    nextAction: { action: awaitingReview ? "review" : "read_run", message, tool: this.projectScope ? "production_get_batch" : "production_get_batch", input: { [this.projectScope ? "projectId" : "episodeId"]: episodeId, runId: batch.runId } } });
+                    nextAction: { action: awaitingReview ? "review" : "read_run", message, tool: "production_get_batch", input: { kind: this.projectScope ? "canvas" : "episode", id: episodeId, runId: batch.runId } } });
             }
-            for (const target of selectedTargets.flatMap(id => targets.has(id) ? [targets.get(id)!] : []).filter(item => item.status !== "ready")) {
+            for (const target of selectedTargets.flatMap(id => targets.has(id) ? [targets.get(id)!] : []).filter(item => item.status !== "ready"
+                && !(item.status === "complete" && item.executionTargets?.some(id => selectedTargetSet.has(id) && targets.get(id)?.status === "ready")))) {
                 diagnostics.push({ code: target.status === "needs_review" ? "TARGET_NEEDS_REVIEW" : "TARGET_DEPENDENCY_BLOCKED", path: "request.targets", targetId: target.id,
                     message: `${target.title}：${target.blockers.join("；") || target.notice || target.status}`, severity: "error",
                     nextAction: { action: target.status === "needs_review" ? "review" : "correct_source", message: target.blockers.join("；") || target.notice || "读取目标就绪状态并补齐依赖。" } });
@@ -1875,8 +1889,31 @@ export class EpisodeProductionService {
         const input = productionEditSchema.parse(raw);
         if (input.ops.some(operation => operation.type === "restore_archived_scene_results") && input.ops.length !== 1) throw new Error("归档视频恢复必须单独提交，不能与其他制作编辑混批");
         const canvasCommits: CanvasCommit[] = [];
+        const adoptedTasks: Array<{ taskId: string; result: Record<string, unknown> }> = [];
         const result = this.commit(episodeId, input.operationId, input.expectedRevision, fingerprint(input), (record) => {
+            const packets: DirectorWorkPackage[] = [];
+            if (input.adoptions) {
+                if (new Set(input.adoptions.map(item => item.taskId)).size !== input.adoptions.length) throw new Error("ADOPTION_DUPLICATE");
+                if (input.ops.some(op => !["patch_director_source", "patch_director_continuity", "set_director_production"].includes(op.type))) throw new Error("ADOPTION_PROTECTED_OPERATION: 采纳只允许创作源稿编辑");
+                for (const adoption of input.adoptions) {
+                    const task = this.db.getTask(adoption.taskId), packet = task?.input.workPackage as DirectorWorkPackage | undefined;
+                    const output = task?.result;
+                    if (!task || task.kind !== DIRECTOR_SUBAGENT_KIND || !packet || packet.projectId !== this.episodeInfo(episodeId).canvasId
+                        || (packet.owner.kind === "episode" ? packet.owner.id !== episodeId : packet.owner.id !== packet.projectId)) throw new Error("ADOPTION_OWNER_MISMATCH: 任务未绑定当前正式稿");
+                    if (task.status !== "succeeded" || output?.status !== "complete" || !Array.isArray(output.unresolved) || output.unresolved.length || output.artifactHash !== adoption.artifactHash) throw new Error("ADOPTION_INCOMPLETE: 产物未完整或身份不符");
+                    const artifact = (output.artifacts as Array<Record<string, any>> | undefined)?.find(item => item.artifactHash === adoption.artifactHash);
+                    if (!artifact || directorArtifact(packet.inputHash, packet.runtimeId, artifact.output, packet.contractHash).artifactHash !== adoption.artifactHash) throw new Error("ADOPTION_ARTIFACT_INVALID");
+                    if (output.adoption) throw new Error("ADOPTION_ALREADY_APPLIED: 请恢复原 operationId 回执");
+                    if (!record.draft.director || directorWorkInput(record.draft.director, packet.scope).inputHash !== packet.inputHash) throw new Error("ADOPTION_INPUT_CHANGED: 范围或依赖输入已变化");
+                    packets.push(packet); adoptedTasks.push({ taskId: task.id, result: output });
+                }
+            }
             const { draft, published } = this.editedCandidate(episodeId, record, input, canvasCommits, sceneRuntime);
+            if (packets.length) {
+                if (!draft.director || !record.draft.director) throw new Error("ADOPTION_SOURCE_MISSING");
+                if (fingerprint(draft.settings) !== fingerprint(record.draft.settings) || fingerprint(published) !== fingerprint(record.published)) throw new Error("ADOPTION_PROTECTED_FIELDS");
+                assertDirectorWorkScope(record.draft.director, draft.director, packets.map(packet => packet.scope));
+            }
             if (this.projectScope && published?.director) for (const operation of input.ops) {
                 if (operation.type === "review_director_asset" && operation.verdict === "approved") registerApprovedSharedAsset(this.db, episodeId, record.publishedVersion, operation.assetId, published.director);
             }
@@ -1898,7 +1935,10 @@ export class EpisodeProductionService {
                     operationId: canvasPreparation.operationId, runtimeWrite: true, withinTransaction: true, deferredCommits: commits, source: { kind: "system", clientId: "production:layout", label: "准备制作布局" },
                 });
             }
-        } : undefined, beforeCommit);
+        } : undefined, record => {
+            for (const task of adoptedTasks) this.db.updateTask(task.taskId, { result: { ...task.result, adoption: directorAdoption(input.operationId, record.revision, record.draft.director!.sourceHash, input.ops, String(task.result.artifactHash)) } });
+            beforeCommit?.(record);
+        });
         canvasCommits.forEach(commit => this.db.notifyCanvasCommit(commit));
         return result;
     }

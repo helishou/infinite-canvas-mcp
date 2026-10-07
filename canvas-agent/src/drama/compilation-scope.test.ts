@@ -26,6 +26,19 @@ test("scoped ledger retains coverage using the authored source anchor", () => {
     assert.deepEqual((a.director.source.ledger as any).coverage.map((row: any) => row.id), ["CA"]);
 });
 
+test("scoped replay retains genuine foreign asset identities without expanding output or media", () => {
+    const director = scopedDirector();
+    (director.source.asset_plan as any[]).push({ id: "FOREIGN_PROP", canvas_scope: "episode", shot_ids: ["SB"] });
+    director.source.ledger = { contract_version: 2, facts: [{ id: "FOREIGN_STATE", object_kind: "asset", object_id: "FOREIGN_PROP" }] };
+    const before = structuredClone(director);
+    const scoped = compilationScopeInput(director, { sceneId: "A" });
+    assert.ok((scoped.director.source._canvas_continuity_asset_registry as any[]).some(item => item.id === "FOREIGN_PROP"));
+    assert.ok(!(scoped.director.source.asset_plan as any[]).some(item => item.id === "FOREIGN_PROP"));
+    assert.ok(!scoped.targetIds.includes("FOREIGN_PROP"));
+    assert.equal(scoped.director.assets.FOREIGN_PROP, undefined);
+    assert.deepEqual(director, before);
+});
+
 test("one Clip keeps shared-block coverage, event references and replay context without compiling sibling Clips", () => {
     const d = scopedDirector(), runtime = resolveAchengEngine();
     d.engine = { commit: runtime.commit, patchVersion: runtime.patchVersion, runtimeId: runtime.runtimeId, version: runtime.version };

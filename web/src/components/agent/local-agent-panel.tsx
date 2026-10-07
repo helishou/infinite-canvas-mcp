@@ -221,6 +221,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
     const attachmentUrlsRef = useRef(new Set<string>());
     const clientIdRef = useRef("");
     const [clientReady, setClientReady] = useState(false);
+    const [reconnectEpoch, setReconnectEpoch] = useState(0);
     const loadThreadsSequenceRef = useRef(0);
     const threadMessagesRef = useRef(new Map<string, AgentChatItem[]>());
     const authoritativeHistoryTurnsRef = useRef(new Set<string>());
@@ -447,6 +448,8 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         if (!clientReady || !enabled || !token.trim()) return;
         const clientId = clientIdRef.current;
         let disposed = false;
+        connectedRef.current = false;
+        setAgentState({ connected: false });
         let protocolRejected = false;
         let eventQueue = Promise.resolve();
         runtimeCursorRef.current = null;
@@ -713,10 +716,11 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
             runtimeRequestSequenceRef.current++;
             source.close();
             connectedRef.current = false;
+            setAgentState({ connected: false });
             loadThreadsSequenceRef.current += 1;
             useAgentSkillStore.getState().reset();
         };
-    }, [applyConversationState, applyRuntimeState, applyWorkspaceChange, clientReady, enabled, endpoint, loadSkills, loadThreads, message, reconcileRuntimeState, setAgentState, token]);
+    }, [applyConversationState, applyRuntimeState, applyWorkspaceChange, clientReady, enabled, endpoint, loadSkills, loadThreads, message, reconnectEpoch, reconcileRuntimeState, setAgentState, token]);
 
     useEffect(() => {
         if (connected) void loadThreads();
@@ -893,6 +897,11 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         } catch (error) {
             const text = error instanceof Error ? error.message : rt("sendFailed");
             const response = error instanceof AgentApiError ? error.response as { code?: string; state?: AgentConversationState } : undefined;
+            if (response?.code === "CLIENT_DISCONNECTED" || error instanceof AgentApiError && error.status === 409 && text === "发起任务的网页已断开，请重新连接后再试") {
+                connectedRef.current = false;
+                setAgentState({ connected: false, enabled: true });
+                setReconnectEpoch(value => value + 1);
+            }
             if (response?.state && response.state.threadId === requestThreadId) applyConversationState(response.state);
             const stale = response?.code === "CONVERSATION_STALE";
             const busy = response?.code === "CONVERSATION_BUSY" || text.includes("Codex 正在运行");

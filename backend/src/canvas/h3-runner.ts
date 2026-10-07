@@ -805,9 +805,10 @@ export class CanvasH3Runner {
         const metadata = recordOf(node?.metadata);
         const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
         const source = segments[plan.segmentIndex - 1];
-        if (!source || source.motionContextEnabled !== true) throw new Error(`Clip ${plan.segmentIndex + 1} 缺少上一段的潜空间续写开关`);
+        if (!source) throw new Error(`Clip ${plan.segmentIndex + 1} 缺少上一段的潜空间续写开关`);
         const defaults = input.runPlan?.defaults || recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
         const sourceParams = extractParams(source, override, metadata, defaults);
+        if (sourceParams.motionContextEnabled !== true) throw new Error(`Clip ${plan.segmentIndex + 1} 缺少上一段的潜空间续写开关`);
         return { ...override, ...Object.fromEntries(H3_OUTGOING_CONTEXT_KEYS.filter((key) => sourceParams[key] !== undefined).map((key) => [key, sourceParams[key]])) };
     }
 
@@ -839,23 +840,32 @@ export class CanvasH3Runner {
         if (selected < 0) throw new Error("找不到所选 Clip，请刷新画布后重试");
         const end = input.endSegmentId ? segments.findIndex(segment => segment.id === input.endSegmentId) : segments.length - 1;
         if (end < selected) throw new Error("连续组结束 Clip 不存在或早于起点");
-        const resumesGroup = selected > 0 && segments[selected - 1].motionContextEnabled === true;
+        const defaults = input.runPlan?.defaults || recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
+        // Group boundaries must match the effective settings shown by the UI,
+        // including inherited defaults. Never conceal conflicting saved switches.
+        const motionContext = (index: number) => {
+            const segment = segments[index];
+            const params = extractParams(segment, input.params || {}, metadata, defaults);
+            if (params.tailFrameContinuation === true && params.motionContextEnabled === true) throw new Error(`Clip ${String(segment.id)} 尾帧参考与潜空间续写的保存值同时开启，请先选择一种衔接方式并保存`);
+            return params.motionContextEnabled === true;
+        };
+        const resumesGroup = selected > 0 && motionContext(selected - 1);
         const indices = input.runFromCurrent ? segments.map((_, index) => index).filter((index) => index >= selected && index <= end) : [selected];
-        if (input.runFromCurrent && input.skipCompleted && indices.some((index) => index + 1 < segments.length && segments[index].motionContextEnabled === true)) {
+        if (input.runFromCurrent && input.skipCompleted && indices.some((index) => index + 1 < segments.length && motionContext(index))) {
             throw new Error("V15 潜空间续写不能跳过已完成 Clip，请从连续组首段重新运行。");
         }
         let groupHead = -1;
         let continuationIndex = 0;
         if (resumesGroup) {
             groupHead = selected;
-            while (groupHead > 0 && segments[groupHead - 1].motionContextEnabled === true) groupHead--;
+            while (groupHead > 0 && motionContext(groupHead - 1)) groupHead--;
             continuationIndex = selected - groupHead;
         }
         return indices.filter((index) => segments[index]).filter((index) => !input.skipCompleted || !segments[index].result).map((segmentIndex) => {
             const segment = segments[segmentIndex];
             if (!segment.id) throw new Error(`H3 Clip ${segmentIndex + 1} 缺少身份标识`);
-            const incoming = (segmentIndex === selected && resumesGroup) || (input.runFromCurrent === true && segmentIndex > selected && segments[segmentIndex - 1].motionContextEnabled === true);
-            const outgoing = input.runFromCurrent === true && segmentIndex < end && segment.motionContextEnabled === true;
+            const incoming = (segmentIndex === selected && resumesGroup) || (input.runFromCurrent === true && segmentIndex > selected && motionContext(segmentIndex - 1));
+            const outgoing = input.runFromCurrent === true && segmentIndex < end && motionContext(segmentIndex);
             if (!incoming && !outgoing) {
                 groupHead = -1;
                 continuationIndex = 0;

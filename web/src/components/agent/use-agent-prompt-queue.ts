@@ -115,8 +115,9 @@ export function useAgentPromptQueue(options: UseAgentPromptQueueOptions) {
             insertionAcknowledgedRef.current = false;
             return;
         }
-        if (current.codexRuntime.revision <= insertionStartRevisionRef.current || current.codexRuntime.busy || current.codexRuntime.threadId !== item.threadId || !["ready", "warning"].includes(current.conversation.status)) return;
+        if (current.codexRuntime.revision <= insertionStartRevisionRef.current || current.codexRuntime.busy || !["ready", "warning"].includes(current.conversation.status)) return;
         current.updatePromptQueue((items) => updateAgentPrompt(items, id, "queued"));
+        current.setPromptQueuePaused(item.threadId, item.conversationId, false);
         insertionIdRef.current = "";
         insertionAcknowledgedRef.current = false;
     }, [activeThreadId, codexBusy, codexRevision, conversationId, conversationStatus, queue]);
@@ -136,6 +137,8 @@ export function useAgentPromptQueue(options: UseAgentPromptQueueOptions) {
         const interruptsThisTurn = current.codexRuntime.busy && current.codexRuntime.threadId === item.threadId;
         if (!interruptsThisTurn) {
             current.updatePromptQueue((items) => moveAgentPromptToFront(items, id));
+            current.setPromptQueuePaused(item.threadId, item.conversationId, false);
+            void reconcileRef.current();
             return;
         }
         if (!current.codexRuntime.turnId) return;

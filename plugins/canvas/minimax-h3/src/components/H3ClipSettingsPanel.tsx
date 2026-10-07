@@ -4,7 +4,7 @@ import { Select, Switch } from "antd";
 import type { H3Segment } from "../types";
 import { exportH3Settings, importH3Settings } from "../services/h3-segment-utils";
 import { readDefaultParams, writeDefaultParams } from "../services/h3-defaults";
-import { resolveH3Runtime } from "../../../../../canvas-agent/src/plugins/minimax-h3/runtime-params";
+import { resolveH3Runtime } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { clipRuntimeState } from "../services/h3-clip-runtime";
 import { cancelActiveH3Task } from "../services/h3-run-control";
 import type { H3DefaultLayout } from "../services/h3-defaults";

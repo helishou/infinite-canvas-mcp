@@ -1,4 +1,16 @@
 import test from "node:test";
+import { directorRunStartSchema } from "./production-contract.js";
+
+test("unified run routing preserves canvas defaults and explicit published inputs", () => {
+    const input = { kind: "canvas" as const, id: "canvas", runId: "run", idempotencyKey: "intent", expectedRevision: 2, targets: ["segment"] };
+    const normal = productionToolRequest("production_start_run", input);
+    assert.equal(directorRunStartSchema.parse((normal as { body: unknown }).body).inputBasis, "canvas");
+    const published = productionToolRequest("production_start_run", { ...input, inputBasis: "published", version: 4 });
+    assert.equal(directorRunStartSchema.parse((published as { body: unknown }).body).inputBasis, "published");
+    const edit = productionToolRequest("production_edit", { kind: "canvas", id: "canvas", operationId: "adopt", expectedRevision: 2,
+        ops: [{ type: "patch_director_source", entity: "brief", patch: { value: "accepted" } }], adoptions: [{ taskId: "task", artifactHash: "a".repeat(64) }] });
+    assert.deepEqual((edit as { body: any }).body.adoptions, [{ taskId: "task", artifactHash: "a".repeat(64) }]);
+});
 import assert from "node:assert/strict";
 import { productionToolNames, productionToolRequest, productionToolSchemas, executeProductionTool } from "./production-tools.js";
 import { removedToolMigrations, removedToolNotice, migrateToolGuidance } from "../canvas/tool-migrations.js";
@@ -42,6 +54,8 @@ test("removed names are metadata, not executable aliases; guidance never rewrite
     const result = migrateToolGuidance(value);
     assert.equal(result.source, source); assert.equal(result.snapshot, source);
     assert.deepEqual(result.preflight.nextActions[0], { tool: "production_get", input: { kind: "episode", id: "original" } });
+    assert.deepEqual(migrateToolGuidance({ nextRead: { tool: "drama_get_production", input: { kind: "episode", id: "original" } } }).nextRead,
+        { tool: "production_get", input: { kind: "episode", id: "original" } });
 });
 test("write routing preserves request identity and projects replies without carrying full source", async () => {
     const input = { kind: "canvas", id: "c", operationId: "original", expectedRevision: 2, ops: [{ type: "set_director_brief", brief: "中文\n原文" }] };
