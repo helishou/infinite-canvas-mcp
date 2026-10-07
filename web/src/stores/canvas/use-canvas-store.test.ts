@@ -376,7 +376,7 @@ test("Backend 差量事件支持 metadata 删除和 H3 单段回放", () => {
 
     assert.equal(metadata.status, "success");
     assert.equal("errorDetails" in metadata, false);
-    assert.deepEqual(metadata.segments, [{ id: "s1", prompt: "新文", status: "success" }]);
+    assert.deepEqual(metadata.segments, [{ id: "s1", prompt: "新文", status: "success", start: 0 }]);
     assert.equal(baseMetadata.status, "loading");
     assert.equal(baseMetadata.segments?.[0]?.prompt, "原文");
 });

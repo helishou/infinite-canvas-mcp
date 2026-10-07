@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
-import { previewH3Generation } from '@/services/backend-api';
+import { useCallback, useEffect, useMemo, useRef, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
+import { previewH3Generation, fetchBackendH3Defaults, saveBackendH3Defaults, resetBackendH3Defaults } from '@/services/backend-api';
 import { useTranslation } from "react-i18next";
 
 import { storeGeneratedVideo } from "@/services/api/video";
@@ -76,21 +76,20 @@ export function usePluginHost(params: PluginHostParams) {
             remove: async (options: any) => { const result = await deleteBackendGenerationLogs(options); return Number(result.deleted || 0); },
         };
     }, [projectId]);
+    const defaultLoadVersion = useRef(0);
     const h3Defaults = useMemo(() => ({
-        get: async () => {
-            const response = await fetch(`${getBackendUrl()}/plugins/minimax-h3/defaults?token=${encodeURIComponent(getBackendTokenShared())}`);
-            if (!response.ok) throw new Error(`读取 H3 默认参数失败（HTTP ${response.status}）`);
-            const data = await response.json() as { defaults?: Record<string, unknown> | null };
-            return data.defaults || {};
-        },
+        get: fetchBackendH3Defaults,
         set: async (settings: Record<string, unknown>) => {
-            const response = await fetch(`${getBackendUrl()}/plugins/minimax-h3/defaults?token=${encodeURIComponent(getBackendTokenShared())}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(settings) });
-            if (!response.ok) throw new Error(`保存 H3 默认参数失败（HTTP ${response.status}）`);
-            return ((await response.json()) as { defaults?: Record<string, unknown> }).defaults || settings;
+            defaultLoadVersion.current++;
+            const committed = await saveBackendH3Defaults(settings);
+            defaultLoadVersion.current++;
+            window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: committed }));
+            return committed;
         },
         reset: async () => {
-            const response = await fetch(`${getBackendUrl()}/plugins/minimax-h3/defaults?token=${encodeURIComponent(getBackendTokenShared())}`, { method: "DELETE" });
-            if (!response.ok) throw new Error(`重置 H3 默认参数失败（HTTP ${response.status}）`);
+            defaultLoadVersion.current++;
+            await resetBackendH3Defaults();
+            defaultLoadVersion.current++;
             window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: {} }));
         },
     }), []);
@@ -309,29 +308,42 @@ export function usePluginHost(params: PluginHostParams) {
         return rest;
     };
     useEffect(() => {
+        let active = true;
         void (async () => {
+            const version = ++defaultLoadVersion.current;
             const raw = localStorage.getItem("minimax-h3-default-params");
             const local = raw ? (() => { try { const parsed = JSON.parse(raw) as { settings?: Record<string, unknown> }; return parsed.settings || {}; } catch { return {}; } })() : {};
-            const remote = await h3Defaults.get().catch(() => ({}));
+            const remote = await h3Defaults.get();
+            if (!active || version !== defaultLoadVersion.current) return;
             if (Object.keys(remote).length) {
                 window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: remote }));
                 if (raw) localStorage.removeItem("minimax-h3-default-params");
             } else if (Object.keys(stripLayout(local)).length) {
                 const migrated = await h3Defaults.set(stripLayout(local));
+                if (!active) return;
                 window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: migrated }));
                 localStorage.removeItem("minimax-h3-default-params");
+            } else {
+                window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: {} }));
             }
-        })();
+        })().catch(error => console.error("H3 默认参数尚未读取，保留原设置与迁移数据", error));
         void ensurePluginsLoaded();
-        const reloadPlugins = () => void ensurePluginsLoaded();
+        const readDefaults = async () => {
+            const version = ++defaultLoadVersion.current;
+            try {
+                const settings = await h3Defaults.get();
+                if (active && version === defaultLoadVersion.current) window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: settings }));
+            } catch (error) { console.error("H3 默认参数更新尚未确认，保留上次读取值", error); }
+        };
+        const reloadPlugins = () => { void ensurePluginsLoaded(); void readDefaults(); };
         const refreshH3Defaults = (event: Event) => {
             const detail = (event as CustomEvent<{ type?: string; entityId?: string }>).detail;
             if (detail?.type !== "settings.updated" || detail.entityId !== "plugin:minimax-h3:defaults:v1") return;
-            void h3Defaults.get().then((settings) => window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: settings })));
+            void readDefaults();
         };
         window.addEventListener("backend-connected", reloadPlugins);
         window.addEventListener("backend-event", refreshH3Defaults);
-        return () => { window.removeEventListener("backend-connected", reloadPlugins); window.removeEventListener("backend-event", refreshH3Defaults); };
+        return () => { active = false; window.removeEventListener("backend-connected", reloadPlugins); window.removeEventListener("backend-event", refreshH3Defaults); };
     }, [h3Defaults]);
 
     return { pluginHost, renderPluginPanel, buildNodeToolbarItems };

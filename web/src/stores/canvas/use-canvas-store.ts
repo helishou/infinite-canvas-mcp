@@ -875,10 +875,10 @@ export function diffCanvasProject(base: CanvasProject, next: CanvasProject): Arr
                     const baseSegment = baseById.get(id)!;
                     const segmentPatch: Record<string, unknown> = {};
                     const segmentDelete: string[] = [];
-                    // 正式编译产物字段由 Backend 独占；前端 diff 不生成这些字段的 patch，
-                    // 避免撞上 operation-authority.ts 的 FORMAL_CLIP_OWNED 守卫。
+                    // 续接开关允许人工编辑，必须进入保存 op，不能只留下乐观显示。
+                    // 其他正式投影字段继续沿既有过滤；编译身份由 Backend 维护。
                     const formalClipFields = segment.productionClipProjection || (baseSegment as Record<string, unknown>).productionClipProjection
-                        ? new Set(["prompt", "referenceBindings", "directorEngine", "directorSourceHash", "h3CharacterGroups", "storyboardShots", "tailFrameContinuation", "motionContextEnabled", "productionClipProjection"])
+                        ? new Set(["prompt", "referenceBindings", "directorEngine", "directorSourceHash", "h3CharacterGroups", "storyboardShots", "productionClipProjection"])
                         : null;
                     for (const field of new Set([...Object.keys(baseSegment), ...Object.keys(segment)])) {
                         if (field === "id" || field === "start") continue;

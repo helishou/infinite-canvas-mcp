@@ -117,7 +117,13 @@ export class CanvasH3Runner {
         const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
         const requirements = this.stores.projects.getH3ProductionRequirements?.(normalized.projectId) || null;
         const diagnostics: Array<{ code: string; nodeId: string; segmentId: string; message: string }> = [];
-        const clips = this.plansFor(normalized).map(plan => {
+        const plans = this.plansFor(normalized);
+        const firstPlan = plans[0];
+        if (firstPlan?.continuation && firstPlan.continuation.index > 1) {
+            try { this.resolveResumeSeed(normalized, firstPlan, project, defaults); }
+            catch (error) { diagnostics.push({ code: 'H3_LATENT_RESUME_UNAVAILABLE', nodeId: firstPlan.nodeId, segmentId: firstPlan.segmentId, message: (error as Error).message }); }
+        }
+        const clips = plans.map(plan => {
             const node = (project.nodes as Array<Record<string, unknown>>).find(item => item.id === plan.nodeId)!;
             const metadata = recordOf(node.metadata);
             const segment = (metadata.segments as H3Segment[]).find(item => item.id === plan.segmentId)!;

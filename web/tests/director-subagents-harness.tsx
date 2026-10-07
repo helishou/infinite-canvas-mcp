@@ -18,6 +18,7 @@ let holdResult = false, release: (() => void) | undefined;
 let failList = scenario === "empty-error";
 window.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input), location.origin);
+    if (url.pathname.startsWith("/tasks/")) return Response.json({ ok: true, task: { id: url.pathname.split("/").pop(), kind: "director-subagent", projectId: "canvas", status: "running", input: { parentThreadId: "director", prompt: "核对 Clip 8 与 Clip 9 的人物、持物与起止状态，保留原对白。", context: "只读检查第二场，不生成媒体。", workPackage: { revision: 4, scope: ["Clip 8", "Clip 9"] } } } });
     if (!url.pathname.endsWith("/director/subagents")) return Response.json({ ok: true, settings: {} });
     const body = JSON.parse(String(init?.body || "{}")); calls.push(body);
     if (body.action === "list") {
@@ -43,8 +44,8 @@ await i18n.changeLanguage("zh-CN");
 function Harness() {
     const [dark, setDark] = useState(true);
     return <ConfigProvider theme={getAntThemeConfig(dark)}><App><main className={`${dark ? "dark " : ""}min-h-screen bg-background p-5 text-foreground`}>
-        <div className="mb-5 flex gap-4"><button onClick={() => setDark(value => !value)}>Theme</button><button onClick={() => void i18n.changeLanguage(i18n.language === "zh-CN" ? "en-US" : "zh-CN")}>Language</button><button onClick={() => useAgentStore.setState({ activeThreadId: "other" })}>Other director</button><button onClick={() => useAgentStore.setState({ activeThreadId: "director" })}>Original director</button></div>
-        <div className="mx-auto max-w-xl"><AgentSubagents theme={canvasThemes[dark ? "dark" : "light"]} /></div>
+        <div className="mb-5 flex gap-4"><button onClick={() => setDark(value => !value)}>Theme</button><button onClick={() => (window as any).__subagentFixture.complete()}>Complete child</button><button onClick={() => (window as any).__subagentFixture.fail()}>Fail child</button><button onClick={() => void i18n.changeLanguage(i18n.language === "zh-CN" ? "en-US" : "zh-CN")}>Language</button><button onClick={() => useAgentStore.setState({ activeThreadId: "other" })}>Other director</button><button onClick={() => useAgentStore.setState({ activeThreadId: "director" })}>Original director</button></div>
+        <div data-agent-preview-anchor className="fixed right-5 top-24 h-[560px] w-[360px] overflow-y-auto rounded-xl border p-3"><AgentSubagents theme={canvasThemes[dark ? "dark" : "light"]} /></div>
     </main></App></ConfigProvider>;
 }
 createRoot(document.getElementById("root")!).render(<Harness />);

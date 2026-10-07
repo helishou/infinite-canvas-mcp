@@ -92,6 +92,16 @@ test("automatic shared review works without scene records and atomically approve
     assert.equal(current.assets.K1.status, "approved"); assert.equal(current.assets.K2.status, "approved");
     assert.equal(current.workflow.sharedReview?.verdict, "approved"); assert.equal(Object.values(current.workflow.sharedReviewWorks!)[0].status, "succeeded");
     assert.equal(Object.values(current.workflow.sharedReviewWorks!)[0].agentThreadId, "review-thread");
+    const audit = Object.values(current.workflow.sharedReviewWorks!)[0];
+    assert.ok(audit.workPackage?.contractHash); assert.ok(audit.workPackage?.policy);
+    assert.deepEqual(audit.workPackage!.owner, { kind: "canvas", id });
+    assert.equal((audit.workPackage!.policy as any).authorization.purpose, "review");
+    assert.equal((audit.workPackage?.modules as string[])[0], "continuity");
+    const artifact = audit.reviewArtifacts![0];
+    assert.equal(audit.workAdoptions![String(artifact.artifactHash)].artifactHash, artifact.artifactHash);
+    assert.ok(audit.workAdoptions![String(artifact.artifactHash)].revision <= service.get(id).revision);
+    assert.ok(agents[0].readRoots.length); assert.ok(agents[0].images.every((file: string) => fs.existsSync(file)));
+    assert.match(agents[0].prompt, /已核验并预载的专业文件/);
     assert.equal(current.workflow.sceneWorks, undefined); assert.equal(agents[0].model, "user-model"); assert.equal(agents[0].effort, "high");
     coordinator.startSharedReview(id, request); await new Promise(resolve => setImmediate(resolve)); assert.equal(agents.length, 1);
     assert.equal((db.db.prepare("SELECT count(*) AS n FROM tasks").get() as { n: number }).n, 0, "review never submits media tasks");
@@ -469,6 +479,11 @@ test("scene coordinator progresses independent source, scoped compilation, autom
     }
     const works = coordinator.inspect("ep").works;
     assert.ok(works.every(work => work.status === "succeeded"), JSON.stringify(works.map(work => ({ scene: work.sceneId, stage: work.stage, status: work.status, error: work.error }))));
+    const formalWorks = service.get("ep").draft.director!.workflow.sceneWorks!;
+    const b = Object.values(formalWorks).find(work => work.sceneId === "B")!;
+    assert.ok(b.workArtifacts?.length); assert.ok(b.reviewArtifacts?.length);
+    assert.ok(Object.keys(b.workAdoptions || {}).length >= 2, "source and automatic review have distinct atomic adoption receipts");
+    assert.ok(Object.values(b.reviewPackages || {}).every(packet => packet.contractHash && packet.policy));
     assert.equal(generated, 2); assert.equal(service.listBatches("ep").filter(batch => batch.status === "succeeded").length, 2);
     coordinator.wake("ep"); await new Promise(resolve => setImmediate(resolve)); assert.equal(generated, 2, "completed work must not generate again");
 });

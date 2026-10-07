@@ -32,11 +32,15 @@ export function resolveH3Runtime(segment: Record<string, unknown>, override: Rec
     const params = normalizeH3Params({ ...values, ...override }, false);
     delete params.videoSteps;
     const requestedMode = override.mode ?? override.taskMode ?? params.mode ?? params.taskMode;
-    const aliases: Record<string, string> = { t2va: 't2v', i2va: 'i2v', fl2va: 'fl2v', l2va: 'l2v', ref2v: 'ref2va' };
-    const rawMode = String(requestedMode || 'ref2va').toLowerCase();
-    params.mode = params.taskMode = aliases[rawMode] || rawMode;
+    params.mode = params.taskMode = canonicalH3TaskMode(requestedMode);
     if (sources.loraSlots === 'builtIn' && String(values.loraName || '').trim()) sources.loraSlots = sources.loraName;
     return { params, sources, parameterIssues, policy: useDefaults ? 'defaults' as const : 'overrides' as const };
+}
+
+export function canonicalH3TaskMode(value: unknown): string {
+    const aliases: Record<string, string> = { t2va: 't2v', i2va: 'i2v', fl2va: 'fl2v', l2va: 'l2v', ref2v: 'ref2va' };
+    const mode = String(value || 'ref2va').toLowerCase();
+    return aliases[mode] || mode;
 }
 
 /** A deliberate field edit remains effective even when the Clip otherwise follows defaults. */

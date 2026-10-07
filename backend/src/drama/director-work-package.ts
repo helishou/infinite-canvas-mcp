@@ -25,3 +25,9 @@ export function verifyWorkRuntime(packet: Pick<DirectorWorkPackage, "runtimeId" 
     if (contractHash !== packet.contractHash) throw new Error("WORK_CONTRACT_CHANGED: 原专业合同已变化");
     return runtime;
 }
+/** Mandatory professional modules enter the request deterministically; references remain on-demand. */
+export function loadWorkContract(packet: Pick<DirectorWorkPackage, "runtimeId" | "contractHash" | "skillPaths">) {
+    const runtime = verifyWorkRuntime(packet);
+    const text = packet.skillPaths.map(file => `\n--- 已核验并预载的专业文件 ${file} ---\n${fs.readFileSync(file, "utf8")}`).join("\n");
+    return { runtime, text };
+}

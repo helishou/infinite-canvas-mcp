@@ -5,13 +5,13 @@ export const directorRoleModules = { story: ["story"], shots: ["shots", "perform
 export type DirectorRole = keyof typeof directorRoleModules;
 export type DirectorWorkPolicy = {
     contentDeliveryMode: "auto_file_batch" | "interactive_segment";
-    authorization: { id: string; inputHash: string; purpose: "creative_advice" };
+    authorization: { id: string; inputHash: string; purpose: "creative_advice" | "review" };
 };
 export type DirectorAdoption = { operationId: string; revision: number; sourceHash: string; opsHash: string; artifactHash?: string };
-export function directorWorkPolicy(mode: DirectorWorkPolicy["contentDeliveryMode"] | undefined, id: string, inputHash: string): DirectorWorkPolicy {
-    return { contentDeliveryMode: mode || "auto_file_batch", authorization: { id, inputHash, purpose: "creative_advice" } };
+export function directorWorkPolicy(mode: DirectorWorkPolicy["contentDeliveryMode"] | undefined, id: string, inputHash: string, purpose: DirectorWorkPolicy["authorization"]["purpose"] = "creative_advice"): DirectorWorkPolicy {
+    return { contentDeliveryMode: mode || "auto_file_batch", authorization: { id, inputHash, purpose } };
 }
-export function directorAdoption(operationId: string, revision: number, sourceHash: string, ops: unknown, artifactHash: string): DirectorAdoption {
+export function directorAdoption(operationId: string, revision: number, sourceHash: string, ops: unknown, artifactHash: string): DirectorAdoption & { artifactHash: string } {
     // Provenance hashes the operation without its own adoption metadata.
     const semantic = (value: unknown): unknown => Array.isArray(value) ? value.map(semantic) : value && typeof value === "object"
         ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== "workAdoptions").map(([key, item]) => [key, semantic(item)])) : value;

@@ -17,6 +17,7 @@ def replace(path, before, after):
 
 def apply(root):
     root = Path(root)
+    sys.path.insert(0, str(root / "scripts"))
     contract = root / "scripts/h3_contract.py"
     replace(contract, "REF2VA_MIN_WORDS = 2000", "REF2VA_MIN_WORDS = 0")
     replace(contract, "REF2VA_TARGET_WORDS = 2400", "REF2VA_TARGET_WORDS = 500")

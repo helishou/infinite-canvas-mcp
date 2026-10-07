@@ -72,6 +72,10 @@ try {
     await page.evaluate(() => window.__subagentFixture.failList(false));
     await page.evaluate(() => window.__subagentFixture.lifecycle({ binding: "bound", status: "succeeded", outcome: "partial", validity: "current", artifactHash: "a".repeat(64) }));
     await page.getByText("内容未完成", { exact: true }).waitFor();
+    await page.evaluate(() => window.__subagentFixture.lifecycle({ contentDeliveryMode: "interactive_segment" }));
+    await page.getByText("交互交付：需要本轮明确继续", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "继续完成建议", exact: true }).click();
+    assert.ok(await page.evaluate(() => window.__subagentFixture.calls.some(call => call.action === "continue" && call.continuationIntent === "explicit")));
     await page.evaluate(() => window.__subagentFixture.lifecycle({ outcome: "complete", validity: "stale" }));
     await page.getByText("输入已过期", { exact: true }).waitFor();
     await page.evaluate(() => window.__subagentFixture.lifecycle({ adoption: { operationId: "edit", revision: 8, sourceHash: "b".repeat(64), opsHash: "c".repeat(64) } }));

@@ -1,5 +1,5 @@
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
-import { createH3NodeMetadata } from "../../../../canvas-agent/src/plugins/minimax-h3/node-factory";
+import { createH3NodeMetadata } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { H3ContentExact } from "./components/H3Workbench";
 import { readDefaultLayout, readDefaultParams } from "./services/h3-defaults";
 

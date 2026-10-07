@@ -686,3 +686,21 @@ export function diagnoseBackendCanvasProject(projectId: string) {
 export function directorSubagentRequest(input: Omit<DirectorSubagentInput, "view"> & { view?: DirectorSubagentInput["view"] }) {
     return request<{ ok: boolean; task?: DirectorSubagentSummary; tasks?: DirectorSubagentSummary[]; result?: DirectorSubagentResult; chunk?: { text: string; resultHash: string; nextCursor: string | null }; nextOffset?: number | null }>("POST", "/director/subagents", input);
 }
+
+/** Defaults are acknowledged Backend values, never the submitted fallback. */
+export async function fetchBackendH3Defaults() {
+    const result = await request<{ defaults?: Record<string, unknown> | null }>("GET", "/plugins/minimax-h3/defaults");
+    if (!Object.hasOwn(result, "defaults") || result.defaults !== null && (typeof result.defaults !== "object" || Array.isArray(result.defaults))) throw new Error("Backend 未返回有效的 H3 默认参数");
+    return result.defaults || {};
+}
+
+export async function saveBackendH3Defaults(settings: Record<string, unknown>) {
+    const result = await request<{ defaults?: Record<string, unknown> }>("PUT", "/plugins/minimax-h3/defaults", settings);
+    if (!result.defaults || typeof result.defaults !== "object" || Array.isArray(result.defaults)) throw new Error("Backend 未确认 H3 默认参数保存值");
+    return result.defaults;
+}
+
+export async function resetBackendH3Defaults() {
+    const result = await request<{ defaults?: null }>("DELETE", "/plugins/minimax-h3/defaults");
+    if (result.defaults !== null) throw new Error("Backend 未确认 H3 默认参数重置");
+}

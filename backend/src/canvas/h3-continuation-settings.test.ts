@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { CanvasH3Runner } from "./h3-runner.js";
 import { BackendDatabase } from "../db.js";
+import { createStores } from "../stores/index.js";
+import { BackendEventBus } from "../events.js";
 
 function plans(segments: Record<string, unknown>[], defaults: Record<string, unknown> = {}, options: Record<string, unknown> = {}) {
     const runner = new CanvasH3Runner({ settings: { get: () => defaults } } as never, {} as never, {} as never, {} as never);
@@ -37,6 +39,26 @@ test("tail-frame boundary splits groups instead of propagating legacy latent fla
 
 test("conflicting saved continuation values require a real edit", () => {
     assert.throws(() => plans([{ id: 'a', tailFrameContinuation: true, motionContextEnabled: true }, { id: 'b' }]), /保存值同时开启/);
+});
+
+test("preview detects the same missing predecessor latent task as submission, then clears after a saved disable", (t) => {
+    const db = new BackendDatabase(':memory:');
+    t.after(() => db.close());
+    db.createCanvasProject({ id: 'p', nodes: [{ id: 'h3', type: 'minimax-h3:video', metadata: { segments: [
+        { id: 'a', mode: 't2v', duration: 5, prompt: 'A bell.', tailFrameContinuation: false, motionContextEnabled: true, result: 'saved.mp4', resultStorageKey: 'video:previous' },
+        { id: 'b', mode: 't2v', duration: 5, prompt: 'Another bell.', tailFrameContinuation: false, motionContextEnabled: false },
+    ] } }], connections: [] });
+    const stores = createStores(db);
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), {} as never, {} as never);
+    const input = { projectId: 'p', nodeId: 'h3', segmentId: 'b' };
+    const before = runner.preview(input);
+    assert.equal(before.ready, false);
+    assert.ok(before.diagnostics.some(issue => issue.code === 'H3_LATENT_RESUME_UNAVAILABLE' && issue.message.includes('找不到与上一段当前成片匹配')));
+    assert.equal(stores.tasks.list({}).length, 0);
+    stores.projects.applyOperations('p', undefined, [{ type: 'update_h3_segment', nodeId: 'h3', segmentId: 'a', patch: { motionContextEnabled: false } }]);
+    const after = runner.preview(input);
+    assert.equal(after.ready, true, JSON.stringify(after.diagnostics));
+    assert.equal(stores.tasks.list({}).length, 0);
 });
 
 test("Backend transaction saves both continuation switches, broadcasts both and replays once", (t) => {

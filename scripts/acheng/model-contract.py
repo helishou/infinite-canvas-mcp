@@ -156,6 +156,8 @@ def source_diagnostics(production):
 
 
 def check_source_and_text(production, segment, text=None):
+    from storyboard_policy import check, render
+    check(production, set(segment.get("shot_ids", [])))
     errors = subject_coverage_errors(segment)
     selected = set(segment.get("shot_ids", []))
     for shot in rows(production.get("shots")):
@@ -164,6 +166,11 @@ def check_source_and_text(production, segment, text=None):
     if errors:
         raise ValueError("; ".join(errors))
     if text is not None:
+        for shot in rows(production.get("shots")):
+            if shot.get("id") in selected:
+                framing = render(shot, production)
+                if framing and framing not in text:
+                    raise ValueError("STORYBOARD_COMPILED_COVERAGE: framing, attention or editorial purpose missing for " + shot["id"])
         validate_model_text(text, internal_ids(production))
 
 

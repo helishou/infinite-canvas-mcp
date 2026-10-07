@@ -132,6 +132,12 @@ export class EpisodeProductionService {
     }
 
     episodeInfo(episodeId: string): { id: string; canvasId?: string | null; fullPlot?: string | null } { const linked = this.linked(episodeId); return linked ? linked.service.episodeInfo(linked.id) : this.episode(episodeId); }
+    ownerIdentity(id: string): { kind: "episode" | "canvas"; id: string } {
+        const linked = this.linked(id);
+        if (linked) return linked.service.ownerIdentity(linked.id);
+        this.episode(id);
+        return { kind: this.ownerKind, id };
+    }
     /** Check before accepting a preparation; create only after all targets are validated. */
     preparationCanvas(id: string, create = false): string | null {
         const linked = this.linked(id); if (linked) return linked.service.preparationCanvas(linked.id, create);

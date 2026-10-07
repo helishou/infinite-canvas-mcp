@@ -1,5 +1,5 @@
 import { resolveH3Runtime } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
-import { readDefaultParams } from "../services/h3-defaults";
+import { useDefaultParams } from "../services/h3-defaults";
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { CanvasNodeContext, CanvasVideoModelField, CanvasVideoModelSchema } from "@infinite-canvas/plugin-sdk";
 import { AutoComplete, Input, InputNumber, Switch, Select, Tooltip } from "antd";
@@ -7,8 +7,8 @@ import { Search } from "lucide-react";
 import { h3LoraOptions, h3ModelOptions, H3_LORA_STRENGTH_MIN, H3_LORA_STRENGTH_MAX } from "../constants";
 import { discoverH3Models, mergeH3Options } from "../services/model-discovery";
 import { useH3DropdownOpen } from "../hooks/useH3DropdownOpen";
-import { H3_STYLE_TEMPLATES, styleTemplateFromPrompt } from "../../../../../canvas-agent/src/plugins/minimax-h3/style-templates";
-import { H3_VIDEO_MEGAPIXELS as megapixels } from "../../../../../canvas-agent/src/plugins/minimax-h3/video-settings";
+import { H3_STYLE_TEMPLATES, styleTemplateFromPrompt } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
+import { H3_VIDEO_MEGAPIXELS as megapixels } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import type { H3Segment } from "../types";
 import { h3Label, useH3Locale } from "../h3-locale";
 
@@ -62,10 +62,11 @@ function H3LoraPicker({ values, value, onChange }: { values: string[]; value: st
 
 export function ClipSettings({ ctx, metadata, segment: inputSegment, patch: savePatch }: Props) {
     const raw = (Array.isArray(metadata.segments) ? metadata.segments as Array<Record<string, unknown>> : []).find(item => item.id === inputSegment?.id) || inputSegment || {};
-    const resolved = resolveH3Runtime(raw as Record<string, unknown>, {}, metadata, readDefaultParams());
+    const defaults = useDefaultParams();
+    const resolved = resolveH3Runtime(raw as Record<string, unknown>, {}, metadata, defaults);
     const segment = inputSegment ? { ...inputSegment, ...resolved.params, videoSteps: resolved.params.steps } as H3Segment : undefined;
     const selectedVideoReferenceCount = selectedVideoWorkflowReferenceCount(segment);
-    const patch = (value: Partial<H3Segment>) => savePatch({ ...value, ...(!('h3ParameterPolicy' in value) && Object.keys(value).some(key => !['duration', 'aspectRatio', 'mode', 'taskMode', 'motionContextEnabled', 'tailFrameContinuation'].includes(key)) ? { h3ParameterPolicy: 'overrides' } : {}) });
+    const patch = savePatch;
     const [selectedVideoModelSchema, setSelectedVideoModelSchema] = useState<CanvasVideoModelSchema | null>(null);
     const [selectedVideoModelLoading, setSelectedVideoModelLoading] = useState(false);
     const [selectedVideoModelError, setSelectedVideoModelError] = useState('');
@@ -237,7 +238,7 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, patch: save
     // 开启「一采使用手动 Sigma」后实际步数 = Sigma 序列长度 - 1（与后端 validateNanFengSingleSigma 语义一致）；
     // 解析不出有效序列时回退到采样步数字段。
     const manualSigmaValues = segment.v81ManualSigma === true ? String(segment.h3FullSigma || "").match(/[-+]?(?:\d*\.)?\d+(?:[eE][-+]?\d+)?/g)?.map(Number).filter(Number.isFinite) || [] : [];
-    const samplingStepsSummary = manualSigmaValues.length >= 2 ? manualSigmaValues.length - 1 : (segment.steps || 20);
+    const samplingStepsSummary = manualSigmaValues.length >= 2 ? manualSigmaValues.length - 1 : (segment.steps ?? 20);
     // 续段衔接折叠头摘要：两个开关任一开启都要能一眼看出状态。
     // 接缝加噪/denoise 属于「接缝软硬」而非开关状态，但数值偏离默认时必须能被看见，
     // 否则用户只看到「潜空间续写至下一段」却不知道缝是硬接还是加了噪。
@@ -258,6 +259,7 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, patch: save
         patch(next);
     };
     return <div className="nfh3-settings">
+        {resolved.parameterIssues.length ? <div className="nfh3-hint" role="alert">{resolved.parameterIssues.join("；")}</div> : null}
         <div className="nfh3-mode-grid">{(Object.keys(modeLabels) as Array<keyof typeof modeLabels>).map((key) => <button key={key} type="button" data-mode={key} className={mode === key ? "active" : ""} onClick={() => patch({ mode: key, taskMode: key })}><b>{modeLabels[key]}</b></button>)}</div>
         {segment.selectedVideoModelEnabled === true ? selectedVideoModelPanel : <>
         {section("model", "模型与基础参数", String(segment.modelName || "未选择模型").replace(/^.*[\\/]/, ""), <div className="nfh3-control-grid">
@@ -277,10 +279,10 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, patch: save
                 <div style={{ flex: "0 0 auto", minWidth: 120 }}><H3Dropdown values={["random", "fixed"]} value={seedMode} onChange={(value) => setSeedMode(String(value))} format={(value) => value === "fixed" ? "固定" : "随机"} listId="nfh3-seed-mode-options" /></div>
                 <div style={{ flex: 1, display: "flex", gap: 6, alignItems: "center", minWidth: 0 }}>{seedMode === "random" ? <button type="button" className="nfh3-seed-reroll" title="重新生成随机种子" onMouseDown={(event) => event.stopPropagation()} onClick={() => { const seed = Math.max(1, Math.floor(Math.random() * Number.MAX_SAFE_INTEGER)); patch({ seed, noiseSeed: seed }); }}>🎲</button> : null}<InputNumber style={field} min={0} precision={0} value={String(segment.seed ?? segment.noiseSeed ?? "").trim() !== "" ? Number(segment.seed ?? segment.noiseSeed) : undefined} placeholder={seedMode === "fixed" ? "输入固定种子" : "随机种子"} onChange={(value) => patch({ seed: value ?? undefined, noiseSeed: value ?? undefined })} /></div>
             </div>, true)}
-            {choice("百万像素", megapixelChoices, segment.megapixels || 0.4, (value) => patch({ megapixels: Number(value) }), (value) => `${value} MP`)}
-            {choice("尺寸倍数", [32], segment.sizeMultiple || 32, (value) => patch({ sizeMultiple: Number(value) }))}
+            {choice("百万像素", megapixelChoices, segment.megapixels ?? 0.4, (value) => patch({ megapixels: Number(value) }), (value) => `${value} MP`)}
+            {choice("尺寸倍数", [32], segment.sizeMultiple ?? 32, (value) => patch({ sizeMultiple: Number(value) }))}
             {mode === "ref2va" ? choice("参考图尺寸", refImageSizeChoices, segment.refImageSize || "match", (value) => patch({ refImageSize: String(value) })) : null}
-            {mode !== "t2v" ? choice("参考图最长边", refLongEdgeChoices, segment.referenceLongEdge || 1920, (value) => patch({ referenceLongEdge: Number(value) })) : null}
+            {mode !== "t2v" ? choice("参考图最长边", refLongEdgeChoices, segment.referenceLongEdge ?? 1920, (value) => patch({ referenceLongEdge: Number(value) })) : null}
         </div>)}
         {section("continuation", "续段衔接", continuationSummary, <div className="nfh3-control-grid">
             {control("尾帧参考（传给下一段）", <Switch checked={segment.tailFrameContinuation === true} onChange={(checked) => patch({ tailFrameContinuation: checked, ...(checked ? { motionContextEnabled: false } : {}) })} />, false, "下一段运行时截取本段尾帧，自动追加到已有图片参考的最后一张，作为下一段首帧状态基准，继承姿态、持物、动作进度和场景状态；机位、景别可改变，不能把动作重置。保留素材和引用编号；运行时使用多参考模式接收尾帧，保存的模式不改写。") }
@@ -326,7 +328,7 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, patch: save
             {control("指定稠密步", <input value={String(segment.slaDenseSteps || "0")} onChange={(event) => patch({ slaDenseSteps: event.target.value })} placeholder="0" />)}
             {choice("稠密后端", slaBackendChoices, segment.slaBackend || "comfy_kitchen", (value) => patch({ slaBackend: String(value) }), undefined, true)}
         </div>)}
-        {section("latentUpscale", "H3 潜空间放大二采", segment.latentUpscaleEnabled ? enabledSummary(segment.latentUpscaleConfirmationMode ? "一采待确认后继续" : "已启用") : "关闭", <div className="nfh3-control-grid">{choice("一采/二采采样器", samplerChoices, segment.sampler || "res_multistep", (value) => patch({ sampler: String(value) }), undefined, true, true)}{choice("一采/二采调度器", schedulerChoices, segment.scheduler || "simple", (value) => patch({ scheduler: String(value) }), undefined, true, true)}{control("启用潜空间二采", <Switch checked={segment.latentUpscaleEnabled === true} disabled={!latentUpscaleModelChoices.length} onChange={(checked) => patch({ latentUpscaleEnabled: checked, ...(!checked ? { latentUpscaleConfirmationMode: false } : {}) })} />)}{control("一采确认模式", <Switch checked={segment.latentUpscaleEnabled === true && segment.latentUpscaleConfirmationMode === true} disabled={segment.latentUpscaleEnabled !== true} onChange={(checked) => patch({ latentUpscaleConfirmationMode: checked })} />, false, "需先启用潜空间二采。开启后先预览一采，只有确认后才执行潜空间放大二采；可保留一采或放弃任务。一采/二采步数与 Sigma 在启动时固定。")}{control("一采步数", <InputNumber style={field} min={1} max={20} value={segment.h3FirstSteps != null ? Number(segment.h3FirstSteps) : undefined} placeholder="6" onChange={(value) => patch({ h3FirstSteps: value ?? undefined })} />)}{control("二采步数", <InputNumber style={field} min={1} max={12} value={segment.h3SecondSteps != null ? Number(segment.h3SecondSteps) : undefined} placeholder="4" onChange={(value) => patch({ h3SecondSteps: value ?? undefined })} />)}{choice("放大模型", latentUpscaleModelChoices, segment.latentUpscaleModel, (value) => patch({ latentUpscaleModel: String(value) }), undefined, true, false, "请选择放大模型")}{segment.latentUpscaleEnabled === true && !latentUpscaleModelChoices.length ? <div className="nfh3-latent-warning" style={{ color: "#faad14", fontSize: 22, padding: "4px 0" }}>未在 ComfyUI 发现 H3 潜空间放大模型，请确认已安装 NanFengH3LowPeakLatentUpscalerV15 节点并重刷模型列表。</div> : null}{choice("目标百万像素", megapixelChoices, segment.latentUpscaleMegapixels || 1, (value) => patch({ latentUpscaleMegapixels: Number(value) }), (value) => `${value} MP`)}{choice("潜空间对齐", [2, 4, 8, 16, 32], segment.latentUpscaleAlign || 2, (value) => patch({ latentUpscaleAlign: Number(value) }))}{choice("潜空间精度", ["fp16", "bf16", "fp32"], segment.latentUpscalePrecision || "bf16", (value) => patch({ latentUpscalePrecision: String(value) }))}</div>)}
+        {section("latentUpscale", "H3 潜空间放大二采", segment.latentUpscaleEnabled ? enabledSummary(segment.latentUpscaleConfirmationMode ? "一采待确认后继续" : "已启用") : "关闭", <div className="nfh3-control-grid">{choice("一采/二采采样器", samplerChoices, segment.sampler || "res_multistep", (value) => patch({ sampler: String(value) }), undefined, true, true)}{choice("一采/二采调度器", schedulerChoices, segment.scheduler || "simple", (value) => patch({ scheduler: String(value) }), undefined, true, true)}{control("启用潜空间二采", <Switch checked={segment.latentUpscaleEnabled === true} disabled={!latentUpscaleModelChoices.length} onChange={(checked) => patch({ latentUpscaleEnabled: checked, ...(!checked ? { latentUpscaleConfirmationMode: false } : {}) })} />)}{control("一采确认模式", <Switch checked={segment.latentUpscaleEnabled === true && segment.latentUpscaleConfirmationMode === true} disabled={segment.latentUpscaleEnabled !== true} onChange={(checked) => patch({ latentUpscaleConfirmationMode: checked })} />, false, "需先启用潜空间二采。开启后先预览一采，只有确认后才执行潜空间放大二采；可保留一采或放弃任务。一采/二采步数与 Sigma 在启动时固定。")}{control("一采步数", <InputNumber style={field} min={1} max={20} value={segment.h3FirstSteps != null ? Number(segment.h3FirstSteps) : undefined} placeholder="6" onChange={(value) => patch({ h3FirstSteps: value ?? undefined })} />)}{control("二采步数", <InputNumber style={field} min={1} max={12} value={segment.h3SecondSteps != null ? Number(segment.h3SecondSteps) : undefined} placeholder="4" onChange={(value) => patch({ h3SecondSteps: value ?? undefined })} />)}{choice("放大模型", latentUpscaleModelChoices, segment.latentUpscaleModel, (value) => patch({ latentUpscaleModel: String(value) }), undefined, true, false, "请选择放大模型")}{segment.latentUpscaleEnabled === true && !latentUpscaleModelChoices.length ? <div className="nfh3-latent-warning" style={{ color: "#faad14", fontSize: 22, padding: "4px 0" }}>未在 ComfyUI 发现 H3 潜空间放大模型，请确认已安装 NanFengH3LowPeakLatentUpscalerV15 节点并重刷模型列表。</div> : null}{choice("目标百万像素", megapixelChoices, segment.latentUpscaleMegapixels ?? 1, (value) => patch({ latentUpscaleMegapixels: Number(value) }), (value) => `${value} MP`)}{choice("潜空间对齐", [2, 4, 8, 16, 32], segment.latentUpscaleAlign ?? 2, (value) => patch({ latentUpscaleAlign: Number(value) }))}{choice("潜空间精度", ["fp16", "bf16", "fp32"], segment.latentUpscalePrecision || "bf16", (value) => patch({ latentUpscalePrecision: String(value) }))}</div>)}
         {section("runtime", "显存与卸载", segment.keepModelCache !== false ? enabledSummary("连续生成") : segment.uniBlockSwapEnabled ? enabledSummary("UniBlockSwap") : "默认", <div className="nfh3-control-grid">
             {control("运行时预留显存", <Switch checked={segment.runtimeReserveEnabled === true} onChange={(checked) => patch({ runtimeReserveEnabled: checked })} />)}
             {control("预留显存 GB", <InputNumber style={field} min={0} max={24} step={0.1} value={segment.reservedVramGb != null ? Number(segment.reservedVramGb) : undefined} placeholder="0.6" onChange={(value) => patch({ reservedVramGb: value ?? undefined })} />)}

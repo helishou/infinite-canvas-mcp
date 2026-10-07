@@ -10,7 +10,7 @@ import { EpisodeProductionService, ProductionConflictError } from "./production.
 import { ProductionCompilationService } from "./compilation.js";
 import type { EpisodeProductionRunner } from "./production-runner.js";
 import { directorArtifact, directorAdoption, directorWorkPolicy, type DirectorWorkPackage } from "@basketikun/canvas-agent/agent/work-package";
-import { productionWorkPackage, verifyWorkRuntime } from "./director-work-package.js";
+import { productionWorkPackage, verifyWorkRuntime, loadWorkContract } from "./director-work-package.js";
 
 type SceneWork = z.infer<typeof directorSceneWorkSchema>;
 type SharedWork = z.infer<typeof directorSharedReviewWorkSchema>;
@@ -134,9 +134,9 @@ export class SceneWorkCoordinator {
     private file(workId: string, cursor?: string) { return path.join(this.root, `${compilationHash({ workId, cursor: cursor || "" })}.json`); }
     private reviewPackage(id: string, authorizationId: string, director: DirectorProduction, inputHash: string, media: Array<{ targetId: string; storageKey: string; sha256: string; mimeType: string }>, scope?: DirectorWorkPackage["scope"]) {
         const current = this.service.get(id);
-        const packet = productionWorkPackage({ kind: this.owner.startsWith("/canvas") ? "canvas" : "episode", id }, this.service.episodeInfo(id).canvasId!, current.revision, director, "review", scope);
+        const packet = productionWorkPackage(this.service.ownerIdentity(id), this.service.episodeInfo(id).canvasId!, current.revision, director, "review", scope);
         packet.inputHash = inputHash;
-        packet.policy = directorWorkPolicy(current.draft.director!.workflow.contentDeliveryMode, authorizationId, inputHash);
+        packet.policy = directorWorkPolicy(current.draft.director!.workflow.contentDeliveryMode, authorizationId, inputHash, "review");
         packet.media = media.map(({ targetId, storageKey, sha256, mimeType }) => ({ targetId, storageKey, sha256, mimeType }));
         return packet;
     }
@@ -160,17 +160,21 @@ export class SceneWorkCoordinator {
     inspect(id: string) {
         const current = this.service.get(id), director = current.draft.director;
         if (!director) return { revision: current.revision, works: [], shared: null };
+        const sharedWorks = Object.values(director.workflow.sharedReviewWorks || {}).map(work => {
+            const { workPackage: _packet, workArtifacts: _artifacts, reviewPackages: _reviews, reviewArtifacts: _reviewArtifacts, ...summary } = work;
+            return { ...summary, reviewArtifactHashes: work.reviewArtifacts?.map(item => item.artifactHash) };
+        });
         let shared: Record<string, unknown>;
-        try { const selection = this.sharedSelection(id), value = this.shared(id, true, selection); shared = { reviewAssetIds: selection, reviewCurrent: !selection && director.workflow.sharedReview?.inputHash === value.inputHash && director.workflow.sharedReview?.verdict === "approved", reviews: director.workflow.sharedAssetReviews, continuation: director.workflow.sharedReviewContinuation, reviewWorks: Object.values(director.workflow.sharedReviewWorks || {}), inputHash: value.inputHash, review: director.workflow.sharedReview, source: director.source, media: value.media.map(({ filePath: _file, ...item }) => item) }; }
-        catch (error) { shared = { continuation: director.workflow.sharedReviewContinuation, reviewWorks: Object.values(director.workflow.sharedReviewWorks || {}), error: error instanceof Error ? error.message : String(error) }; }
+        try { const selection = this.sharedSelection(id), value = this.shared(id, true, selection); shared = { reviewAssetIds: selection, reviewCurrent: !selection && director.workflow.sharedReview?.inputHash === value.inputHash && director.workflow.sharedReview?.verdict === "approved", reviews: director.workflow.sharedAssetReviews, continuation: director.workflow.sharedReviewContinuation, reviewWorks: sharedWorks, inputHash: value.inputHash, review: director.workflow.sharedReview, source: director.source, media: value.media.map(({ filePath: _file, ...item }) => item) }; }
+        catch (error) { shared = { continuation: director.workflow.sharedReviewContinuation, reviewWorks: sharedWorks, error: error instanceof Error ? error.message : String(error) }; }
         const works = Object.values(director.workflow.sceneWorks || {}).map(work => {
-            const { workPackage: _packet, workArtifacts: _artifacts, ...summary } = work;
+            const { workPackage: _packet, workArtifacts: _artifacts, reviewPackages: _reviews, reviewArtifacts: _reviewArtifacts, ...summary } = work;
             try {
                 const projection = compilationScopeInput({ ...director, engine: work.inputEngine || director.engine }, { sceneId: work.sceneId });
                 const media = this.service.sceneReviewMedia(id, projection.targetIds.filter(targetId => director.assets[targetId]?.storageKey));
                 const missing = requiredSceneAssets(projection.director, current.draft.settings.storyboardImageMode === "skip").some(id => !director.assets[id]?.storageKey);
                 const reviewAssetIds = missing ? media.filter(item => director.assets[item.targetId]?.status === "generated").map(item => item.targetId) : undefined;
-                return { ...summary, workArtifactHashes: work.workArtifacts?.map(item => item.artifactHash), reviewInputHash: productionReviewHash(projection.inputHash, media), inputChanged: projection.inputHash !== work.inputHash && projection.legacyInputHash !== work.inputHash, reviewAssetIds, source: projection.director.source, media: media.map(({ filePath: _file, ...item }) => item) };
+                return { ...summary, workArtifactHashes: work.workArtifacts?.map(item => item.artifactHash), reviewArtifactHashes: work.reviewArtifacts?.map(item => item.artifactHash), reviewInputHash: productionReviewHash(projection.inputHash, media), inputChanged: projection.inputHash !== work.inputHash && projection.legacyInputHash !== work.inputHash, reviewAssetIds, source: projection.director.source, media: media.map(({ filePath: _file, ...item }) => item) };
             } catch (error) { return { ...summary, error: error instanceof Error ? error.message : String(error) }; }
         });
         return { revision: current.revision, works, shared };
@@ -260,14 +264,14 @@ export class SceneWorkCoordinator {
             this.updateSharedWork(id, workId, { status: "running" });
             const file = this.file(workId);
             const packet = work.workPackage as DirectorWorkPackage | undefined || this.reviewPackage(id, workId, shared.director, work.inputHash, shared.media);
-            const runtime = verifyWorkRuntime(packet);
+            const loaded = loadWorkContract(packet), runtime = loaded.runtime;
             if (!work.workPackage) this.updateSharedWork(id, workId, { workPackage: packet });
             let raw: unknown;
             if (fs.existsSync(file)) raw = JSON.parse(fs.readFileSync(file, "utf8"));
             else {
                 raw = (await this.agent.run({ workId, review: true, threadId: work.agentThreadId, turnId: work.agentTurnId, recoverOutput: work.recoveryPending, model: work.model, effort: work.effort as ProductionAgentRequest["effort"], cwd: process.cwd(), schema: reviewOutputSchema, readRoots: [runtime.path],
                     images: shared.media.map(item => item.filePath),
-                    prompt: `先读取冻结工作包 skillPaths 的专业模块及交付验收合同。审核${work.assetIds ? "当前就绪的一批共同资产，不批准完整共同基础" : "完整共同基础"}。实际查看每张图片，检查身份、画风、构图、跨资产一致性、共同叙事事实与连续性。缺少图片分析能力、证据不足或需要创作选择必须 needs_human，不以文件存在当作通过。inspectedMedia 填实际查看的 storageKey。\n${JSON.stringify({ workPackage: packet, source: packet.director.source, assetIds: work.assetIds, media: packet.media })}`,
+                    prompt: `必载专业模块与交付验收合同已预载，按固定工作包与原审核范围执行，不重复读取入口、不扩大授权；其他引用按需读取。审核${work.assetIds ? "当前就绪的一批共同资产，不批准完整共同基础" : "完整共同基础"}。实际查看每张图片，检查身份、画风、构图、跨资产一致性、共同叙事事实与连续性。缺少图片分析能力、证据不足或需要创作选择必须 needs_human，不以文件存在当作通过。inspectedMedia 填实际查看的 storageKey。\n${loaded.text}\n${JSON.stringify({ workPackage: packet, source: packet.director.source, assetIds: work.assetIds, media: packet.media })}`,
                     onThread: agentThreadId => { this.updateSharedWork(id, workId, { agentThreadId }); }, onTurn: agentTurnId => { this.updateSharedWork(id, workId, { agentTurnId }); },
                 })).output;
                 fs.mkdirSync(this.root, { recursive: true }); const temporary = `${file}.${randomUUID()}.pending`; fs.writeFileSync(temporary, JSON.stringify(raw), { flag: "wx" }); fs.renameSync(temporary, file);
@@ -330,7 +334,7 @@ export class SceneWorkCoordinator {
         this.update(id, workId, { status: "pending", error: null }, true, operationId); void this.advance(id, workId);
         return this.service.get(id);
     }
-    async review(id: string, input: { operationId?: string; workId?: string; assetIds?: string[]; inputHash: string; verdict: "approved" | "rejected"; evidence: string; artifactHash?: string }, mode: "manual" | "automatic" = "manual") {
+    async review(id: string, input: { operationId?: string; workId?: string; assetIds?: string[]; inputHash: string; verdict: "approved" | "rejected"; evidence: string; artifactHash?: string; artifactWorkId?: string }, mode: "manual" | "automatic" = "manual") {
         const current = this.service.get(id), director = current.draft.director!;
         const work = input.workId ? director.workflow.sceneWorks?.[input.workId] : undefined;
         if (input.workId && !work) throw new Error("场次审核工作不存在");
@@ -366,12 +370,14 @@ export class SceneWorkCoordinator {
         const operationId = input.operationId || `scene-review:${compilationHash({ workId: work?.workId, inputHash: mediaInputHash, assetIds: input.assetIds, verdict: input.verdict, evidence: input.evidence, mode })}`;
         if (mode === "automatic" && input.artifactHash) {
             const artifactHash = input.artifactHash;
-            const recipients = work ? [work] : Object.values(director.workflow.sharedReviewWorks || {}).filter(item => item.inputHash === inputHash);
+            const provenanceWork = input.artifactWorkId ? director.workflow.sceneWorks?.[input.artifactWorkId] : work;
+            const recipients = provenanceWork ? [provenanceWork] : Object.values(director.workflow.sharedReviewWorks || {}).filter(item => item.inputHash === inputHash);
             if (!recipients.some(item => item.reviewArtifacts?.some(artifact => artifact.artifactHash === artifactHash))) throw new Error("REVIEW_ARTIFACT_MISSING");
             const receipt = directorAdoption(operationId, current.revision + 1, director.sourceHash, ops, artifactHash);
+            if (provenanceWork && !work) ops.push({ type: "set_director_workflow", patch: { sceneWorks: { ...director.workflow.sceneWorks, [provenanceWork.workId]: { ...provenanceWork, workAdoptions: { ...provenanceWork.workAdoptions, [artifactHash]: receipt } } } } });
             for (const op of ops) if (op.type === "set_director_workflow") {
-                const values = work ? op.patch.sceneWorks : op.patch.sharedReviewWorks;
-                for (const item of Object.values(values || {})) if (recipients.some(recipient => recipient.workId === item.workId) && item.reviewArtifacts?.some(artifact => artifact.artifactHash === artifactHash)) item.workAdoptions = { ...item.workAdoptions, [artifactHash]: receipt };
+                const values = provenanceWork ? op.patch.sceneWorks : op.patch.sharedReviewWorks;
+                for (const item of Object.values(values || {})) if (recipients.some(recipient => recipient.workId === item.workId) && item.reviewArtifacts?.some((artifact: Record<string, unknown>) => artifact.artifactHash === artifactHash)) item.workAdoptions = { ...item.workAdoptions, [artifactHash]: receipt };
             }
         }
         this.service.edit(id, { operationId, expectedRevision: current.revision, ops }, undefined, true);
@@ -395,14 +401,14 @@ export class SceneWorkCoordinator {
             const latest = this.service.get(id).draft.director!.workflow.sceneWorks![work.workId];
             let packet = latest.reviewPackages?.[reviewKey] as DirectorWorkPackage | undefined;
             if (!packet) { packet = this.reviewPackage(id, work.workId, director, inputHash, media, shared ? undefined : { sceneId: work.sceneId }); this.saveReviewPackage(id, work.workId, reviewKey, packet); }
-            const frozen = packet, runtime = verifyWorkRuntime(frozen), file = this.file(`review:${work.workId}:${reviewKey}`);
+            const frozen = packet, loaded = loadWorkContract(frozen), runtime = loaded.runtime, file = this.file(`review:${work.workId}:${reviewKey}`);
             const saveThread = (patch: Partial<DirectorWorkPackage>) => { const fresh = this.service.get(id).draft.director!.workflow.sceneWorks![work.workId].reviewPackages![reviewKey] as DirectorWorkPackage; this.saveReviewPackage(id, work.workId, reviewKey, { ...fresh, ...patch }); };
             let raw: unknown;
             if (fs.existsSync(file)) raw = JSON.parse(fs.readFileSync(file, "utf8"));
             else {
                 raw = (await this.agent.run({ workId: `review:${shared ? id : work.workId}:${reviewKey}`, review: true, cwd: process.cwd(), model: work.model, effort: work.effort as ProductionAgentRequest["effort"], schema: reviewOutputSchema, readRoots: [runtime.path], threadId: frozen.workerThreadId, turnId: frozen.workerTurnId, recoverOutput: Boolean(frozen.workerThreadId),
             images: media.map(item => item.filePath),
-            prompt: `先读取冻结工作包 skillPaths 的专业模块及交付验收合同。审核${shared ? "共同基础" : assetIds ? "本场当前就绪的前置素材；其他未生成图片不属于这次审核，不批准整个场次开拍" : "当前场次开拍条件"}。逐一查看实际图片，检查剧情、表演设计、身份、画风、构图与连续性。没有充分证据必须 needs_human；不能以文件存在代替视觉通过。inspectedMedia 填实际查看的 storageKey。\n${JSON.stringify({ workPackage: frozen, source: frozen.director.source, media: frozen.media })}`,
+            prompt: `必载专业模块与交付验收合同已预载，按固定工作包与原审核范围执行，不重复读取入口、不扩大授权；其他引用按需读取。审核${shared ? "共同基础" : assetIds ? "本场当前就绪的前置素材；其他未生成图片不属于这次审核，不批准整个场次开拍" : "当前场次开拍条件"}。逐一查看实际图片，检查剧情、表演设计、身份、画风、构图与连续性。没有充分证据必须 needs_human；不能以文件存在代替视觉通过。inspectedMedia 填实际查看的 storageKey。\n${loaded.text}\n${JSON.stringify({ workPackage: frozen, source: frozen.director.source, media: frozen.media })}`,
             onThread: workerThreadId => saveThread({ workerThreadId }), onTurn: workerTurnId => saveThread({ workerTurnId }) })).output;
                 fs.mkdirSync(this.root, { recursive: true }); const temporary = `${file}.${randomUUID()}.pending`; fs.writeFileSync(temporary, JSON.stringify(raw), { flag: "wx" }); fs.renameSync(temporary, file);
             }
@@ -415,7 +421,7 @@ export class SceneWorkCoordinator {
         const latestWork = this.service.get(id).draft.director?.workflow.sceneWorks?.[work.workId];
         if (!latestWork || latestWork.status === "paused" || (!shared && (latestWork.stage !== "review" || latestWork.status !== "awaiting_review"))) return;
         if (result.verdict === "needs_human" || result.unresolved.length || media.some(item => !result.inspectedMedia.includes(item.storageKey))) return this.update(id, work.workId, { status: "awaiting_review", error: result.evidence });
-        try { return await this.review(id, { workId: shared ? undefined : work.workId, assetIds, inputHash, verdict: result.verdict, evidence: result.evidence, artifactHash: shared ? undefined : artifactHash }, "automatic"); }
+        try { return await this.review(id, { workId: shared ? undefined : work.workId, assetIds, inputHash, verdict: result.verdict, evidence: result.evidence, artifactHash, artifactWorkId: shared ? work.workId : undefined }, "automatic"); }
         catch (error) {
             if (String(error).includes("REVIEW_INPUT_CHANGED")) return this.update(id, work.workId, { status: "awaiting_review", error: "审核期间源稿或图片已变化，请查看最新版本重新审核" });
             throw error;
@@ -442,13 +448,13 @@ export class SceneWorkCoordinator {
                 const resultFile = this.file(workId, work.cursor);
                 if (fs.existsSync(resultFile)) raw = JSON.parse(fs.readFileSync(resultFile, "utf8"));
                 else {
-                    const packet = work.workPackage as DirectorWorkPackage | undefined || productionWorkPackage({ kind: this.owner.startsWith("/canvas") ? "canvas" : "episode", id }, this.service.episodeInfo(id).canvasId!, current.revision, current.draft.director!, "shots", { sceneId: work.sceneId });
-                    const runtime = verifyWorkRuntime(packet);
+                    const packet = work.workPackage as DirectorWorkPackage | undefined || productionWorkPackage(this.service.ownerIdentity(id), this.service.episodeInfo(id).canvasId!, current.revision, current.draft.director!, "shots", { sceneId: work.sceneId });
+                    const loaded = loadWorkContract(packet), runtime = loaded.runtime;
                     if (!packet.policy) packet.policy = directorWorkPolicy(current.draft.director!.workflow.contentDeliveryMode, workId, packet.inputHash);
                     if (!work.workPackage) this.update(id, workId, { workPackage: packet });
                     const contract = { engine: packet.runtimeId, sourceContract: runtime.sourceContract };
                     raw = (await this.agent.run({ workId, cwd: process.cwd(), readRoots: [path.dirname(runtime.skillPath)], threadId: work.agentThreadId, recoverOutput: work.recoveryPending, turnId: work.agentTurnId, onTurn: agentTurnId => { this.update(id, workId, { agentTurnId }); }, model: work.model, effort: work.effort as ProductionAgentRequest["effort"], schema: outputSchema,
-                        prompt: `读取 ${runtime.skillPath} 与当前需要的专业模块。根据当前激活 Acheng 合同完成当前场次的详细分镜、表演、动作、资产卡和 Segment 源稿。不得改变剧本、共同事实或其他场次。若有 priorFeedback，按退回意见定位本场源字段并返修，不提交媒体或自动重生成。所有镜头 source_scene_id 必须为 ${work.sceneId}；专用资产 canvas_scope=episode 并写 shot_ids。返回完整输入源稿的 JSON 字符串 sourceJson，镜头映射 shotInputsJson 与本场相邻边界 boundariesJson。只有 shots/segments/asset_plan/asset_cards 和本场 ledger.events/requirements/coverage 可改；事实、时间线、初态及其他字段逐字保留。若缺共同连续性骨架，返回 needs_human，不新建或猜测事实。每镜写 timeline_id/story_order，本场剧本块登记真实覆盖，保持完整详细度。续写游标：${work.cursor || "首次"}。\n${JSON.stringify({ workPackage: packet, source: packet.director.source, priorFeedback: Object.values(current.draft.director!.workflow.sceneWorks || {}).filter(item => item.sceneId === work.sceneId && item.workId !== workId).map(item => ({ workId: item.workId, review: item.review, error: item.error })), approvedAssets: packet.director.assets, settings: current.draft.settings, engine: contract.engine, contract: contract.sourceContract })}`,
+                        prompt: `读取 ${runtime.skillPath} 与当前需要的专业模块。根据当前激活 Acheng 合同完成当前场次的详细分镜、表演、动作、资产卡和 Segment 源稿。不得改变剧本、共同事实或其他场次。若有 priorFeedback，按退回意见定位本场源字段并返修，不提交媒体或自动重生成。所有镜头 source_scene_id 必须为 ${work.sceneId}；专用资产 canvas_scope=episode 并写 shot_ids。返回完整输入源稿的 JSON 字符串 sourceJson，镜头映射 shotInputsJson 与本场相邻边界 boundariesJson。只有 shots/segments/asset_plan/asset_cards 和本场 ledger.events/requirements/coverage 可改；事实、时间线、初态及其他字段逐字保留。若缺共同连续性骨架，返回 needs_human，不新建或猜测事实。每镜写 timeline_id/story_order，本场剧本块登记真实覆盖，保持完整详细度。必载模块已预载，依固定工作包执行，不重复读取入口选择题，其他引用按需读取。续写游标：${work.cursor || "首次"}。\n${loaded.text}\n${JSON.stringify({ workPackage: packet, source: packet.director.source, priorFeedback: Object.values(current.draft.director!.workflow.sceneWorks || {}).filter(item => item.sceneId === work.sceneId && item.workId !== workId).map(item => ({ workId: item.workId, review: item.review, error: item.error })), approvedAssets: packet.director.assets, settings: current.draft.settings, engine: contract.engine, contract: contract.sourceContract })}`,
                         onThread: threadId => { this.update(id, workId, { agentThreadId: threadId }); } })).output;
                     fs.mkdirSync(this.root, { recursive: true }); const temporary = `${resultFile}.${randomUUID()}.pending`; fs.writeFileSync(temporary, JSON.stringify(raw), { flag: "wx" }); fs.renameSync(temporary, resultFile);
                 }

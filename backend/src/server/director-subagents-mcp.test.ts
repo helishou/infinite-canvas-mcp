@@ -12,6 +12,51 @@ import { DirectorSubagents, registerDirectorSubagentRoutes } from "../drama/dire
 import { registerBackendMcpHttpRoutes } from "../mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { EpisodeProductionService } from "../drama/production.js";
+import { compilationHash } from "@basketikun/canvas-agent/drama/compilation-scope";
+import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
+
+test("HTTP MCP binds a formal draft, continues partial on the same thread, adopts and replays atomically", async t => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "director-roundtrip-"));
+    const db = new BackendDatabase(path.join(root, "fixture.sqlite")), stores = createStores(db), events = new BackendEventBus();
+    db.createCanvasProject({ id: "canvas", title: "roundtrip", nodes: [], connections: [] });
+    const production = new EpisodeProductionService(db, events, root, true, () => {});
+    const source = { brief: "two scenes", script_scenes: [{ id: "A" }, { id: "B" }], shots: [{ id: "SA", source_scene_id: "A", scene_id: "A", title: "old", start_frame: 0, end_frame: 120 }, { id: "SB", source_scene_id: "B", scene_id: "B", start_frame: 120, end_frame: 240 }], segments: [], asset_plan: [], asset_cards: [] };
+    const director: DirectorProduction = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "test" }, source, sourceHash: compilationHash(source), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], workflow: { contentDeliveryMode: "interactive_segment" }, unresolved: [], executionAuthorized: false };
+    production.edit("canvas", { operationId: "seed", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
+    let turns = 0, settle: (() => void) | undefined;
+    const service = new DirectorSubagents(stores, { run: request => {
+        turns++; if (turns > 1) assert.equal(request.threadId, "same-worker");
+        request.onThread("same-worker"); request.onTurn?.(`turn-${turns}`);
+        return new Promise(resolve => { settle = () => resolve({ threadId: "same-worker", output: { status: turns === 1 ? "partial" : "complete", summary: "roundtrip", content: turns === 1 ? "第一部分" : "完整建议：镜头标题改为新标题", unresolved: [], cursor: turns === 1 ? "part-2" : "" } }); });
+    } }, events, root, undefined, () => production);
+    const app = express(); app.use(express.json());
+    app.get("/plugins/mcp", (_req, res) => res.json({ declarations: [] })); app.post("/mcp/observability/events", (_req, res) => res.json({ ok: true }));
+    app.get("/tasks", (req, res) => { res.json({ tasks: String(req.query.taskIds).split(",").map(id => stores.tasks.get(id)) }); if (settle) { const finish = settle; settle = undefined; setImmediate(finish); } });
+    app.post("/canvas/projects/:id/production/ops", (req, res) => { try { res.json({ production: production.edit(req.params.id, req.body) }); } catch (error) { res.status(400).json({ error: String(error) }); } });
+    registerDirectorSubagentRoutes(app, service);
+    const server = app.listen(0, "127.0.0.1"); await once(server, "listening");
+    const config = { url: `http://127.0.0.1:${(server.address() as { port: number }).port}`, token: "fixture", port: 0, origins: [] };
+    const routes = registerBackendMcpHttpRoutes(app, config), client = new Client({ name: "roundtrip", version: "1" });
+    t.after(async () => { await client.close(); await routes.closeAll(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); db.close(); assert.ok(root.startsWith(os.tmpdir() + path.sep)); await fs.rm(root, { recursive: true }); });
+    await client.connect(new StreamableHTTPClientTransport(new URL(config.url + "/mcp")));
+    let calls = 0, bytes = 0;
+    const call = async (name: string, argumentsValue: Record<string, unknown>) => { const result: any = await client.callTool({ name, arguments: argumentsValue }); calls++; bytes += Buffer.byteLength(JSON.stringify(result)); assert.ok(!result.isError, JSON.stringify(result)); return JSON.parse(result.content[0].text); };
+    const receipt = await call("director_subagent", { action: "spawn", projectId: "canvas", parentThreadId: "parent", operationId: "author-A", title: "A 分镜", role: "shots", prompt: "写建议", production: { kind: "canvas", id: "canvas", expectedRevision: 1, scope: { sceneId: "A" } } });
+    const taskId = receipt.task.taskId, identity = { projectId: "canvas", parentThreadId: "parent", taskId };
+    await call("canvas_wait_tasks", { taskIds: [taskId], timeoutMs: 1000 });
+    const partial = await call("director_subagent", { ...identity, action: "get", view: "result" }); assert.equal(partial.result.status, "partial");
+    await call("director_subagent", { ...identity, action: "continue", operationId: "explicit-next", continuationIntent: "explicit" });
+    await call("canvas_wait_tasks", { taskIds: [taskId], timeoutMs: 1000 });
+    const completed = await call("director_subagent", { ...identity, action: "get", view: "result" }); assert.equal(completed.result.status, "complete");
+    const edit = { kind: "canvas", id: "canvas", operationId: "adopt-A", expectedRevision: production.get("canvas").revision, ops: [{ type: "patch_director_source", entity: "shot", id: "SA", patch: { title: "new" } }], adoptions: [{ taskId, artifactHash: completed.task.artifactHash }] };
+    await call("production_edit", edit); const adoptedRevision = production.get("canvas").revision;
+    const replay = await call("production_edit", edit); assert.equal(replay.production.replayed, true); assert.equal(production.get("canvas").revision, adoptedRevision);
+    const adopted = await call("director_subagent", { ...identity, action: "get" }); assert.equal(adopted.task.adoption.revision, adoptedRevision); assert.equal(turns, 2);
+    const historical = await call("director_subagent", { ...identity, action: "get", view: "result", artifactHash: partial.task.artifactHash }); assert.equal(historical.result.status, "partial");
+    assert.equal(db.listTasks().some(task => task.kind !== "director-subagent"), false);
+    t.diagnostic(`bound MCP cycle: calls=${calls}, UTF-8 bytes=${bytes}, workerTurns=${turns}`);
+});
 
 test("HTTP MCP exposes delegation, compact replays, task waiting and complete Unicode result reads", async t => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "director-delegate-mcp-"));

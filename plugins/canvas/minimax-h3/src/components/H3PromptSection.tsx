@@ -13,7 +13,7 @@ import { alignStoryboardShotsToReferences } from "../services/storyboard-shot-al
 import { segmentsFor } from "../hooks/useH3Segments";
 import { persistPromptCandidate, promptJobs, setPromptJob } from "../services/h3-prompt-jobs";
 import { buildPromptEnhancementInput, buildStoryboardPromptSections, ensureCharacterGroupSubjectDefinitions, ensureCharacterGroupSubjects, mergeSubjectDefinitions, storyboardPromptFingerprint, toSubjectDefinitions } from "../services/storyboard-prompt";
-import { matchStyleTemplatePrefix } from "../../../../../canvas-agent/src/plugins/minimax-h3/style-templates";
+import { matchStyleTemplatePrefix } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
 import { extractDialogues, stripDialogueSpeakers, injectDialogueSpeakers, parseSubjectSpeakerMap, collectSpeakerIds } from "../services/storyboard-dialogue";
 import { h3ThemeVars } from "../h3-theme";
 import { h3Label, useH3Locale } from "../h3-locale";

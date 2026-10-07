@@ -37,6 +37,66 @@ def add_subject(segment, entity):
 
 
 class ModelContractTests(unittest.TestCase):
+    def test_storyboard_structure_warnings_and_compiled_receipt(self):
+        value = json.loads((root / "examples/02-drama.production.json").read_text(encoding="utf-8"))
+        value['storyboard_policy'] = {'version': 1}
+        for shot in value['shots']:
+            shot['camera'].update(framing='CU', attention_subject_ids=[shot['characters'][0]['id']], editorial_reason='Read the changing response and retain the eyeline')
+        segment = value['segments'][0]
+        text = compile_segment(value, segment)
+        check_source_and_text(value, segment, text)
+        with self.assertRaisesRegex(ValueError, 'STORYBOARD_COMPILED_COVERAGE'):
+            check_source_and_text(value, segment, text.replace('Framing: close-up.', 'Framing omitted.'))
+        shot = value['shots'][0]
+        shot['camera']['framing'] = 'MS'
+        shot['characters'] = value['shots'][0]['characters'] + [{'id': 'another-visible-person'}]
+        issues = validate(value, 'publish')
+        self.assertTrue(any(d['code'] == 'DIALOGUE_WIDE_COVERAGE' and d['severity'] == 'warning' for d in issues))
+        del shot['camera']['editorial_reason']
+        self.assertTrue(any(d['code'] == 'STORYBOARD_EDITORIAL_REASON_REQUIRED' and d['severity'] == 'error' for d in validate(value, 'publish')))
+        self.assertTrue(any(d['code'] == 'STORYBOARD_EDITORIAL_REASON_REQUIRED' and d['severity'] == 'warning' for d in validate(value, 'edit')))
+
+    def test_scoped_storyboard_does_not_upgrade_context_shots(self):
+        value = json.loads((root / "examples/02-drama.production.json").read_text(encoding="utf-8"))
+        value['storyboard_policy'] = {'version': 1}
+        segment = value['segments'][0]
+        selected = set(segment['shot_ids'])
+        value['segments'] = [segment]
+        value['_canvas_compilation_scope'] = {'scope': {'targetIds': [segment['id']]}}
+        for shot in value['shots']:
+            if shot['id'] in selected:
+                shot['camera'].update(framing='CU', attention_subject_ids=[shot['characters'][0]['id']], editorial_reason='Read the changed reaction')
+        value['shots'].append({'id': 'HISTORICAL_CONTEXT', 'camera': {}, 'dialogues': []})
+        self.assertFalse(any(d['code'].startswith('STORYBOARD_') and d['severity'] == 'error' for d in validate(value, 'publish')))
+
+    def test_utterance_across_reverse_cut_preserves_words_and_sound_window(self):
+        value = json.loads((root / "examples/02-drama.production.json").read_text(encoding="utf-8"))
+        value['storyboard_policy'] = {'version': 1}
+        first, second = value['shots'][:2]
+        original = copy.deepcopy(first['dialogues'][0])
+        midpoint = len(original['text']) // 2
+        speaker = next(c for c in value['character_registry'] if c['name'] == original['speaker_name'])
+        listener = next(c for c in second['characters'] if c['id'] != speaker['id'])
+        first.update(start_frame=0, end_frame=120)
+        second.update(start_frame=120, end_frame=240, characters=[listener])
+        first['dialogues'] = [{**original, 'character_id': speaker['id'], 'utterance_id': 'CONTINUED_LINE', 'text': original['text'][:midpoint], 'start': 96, 'end': 120}]
+        second['dialogues'] = [{**original, 'character_id': speaker['id'], 'utterance_id': 'CONTINUED_LINE', 'text': original['text'][midpoint:], 'start': 0, 'end': 24}]
+        value['shots'] = [first, second]
+        segment = value['segments'][0]
+        segment.update(shot_ids=[first['id'], second['id']], start_frame=0, end_frame=240, generation_clip_duration=10)
+        value['segments'] = [segment]
+        for shot, target in ((first, speaker['id']), (second, listener['id'])):
+            shot['camera'].update(framing='CU', attention_subject_ids=[target], editorial_reason='Read the changing response across this continuous line')
+            shot.pop('performance', None)
+            shot['features']['core_emotion'] = False
+        text = compile_segment(value, segment)
+        self.assertIn(original['text'][:midpoint] + '<scenetrans></d>', text)
+        self.assertIn('<scenetrans>' + original['text'][midpoint:], text)
+        self.assertIn('During 4.000–5.000 seconds', text)
+        self.assertIn('During 0.000–1.000 seconds', text)
+        self.assertIn('not as narration', text)
+        self.assertEqual(''.join(d['text'] for shot in value['shots'] for d in shot['dialogues']), original['text'])
+
     def test_registry_lookup_does_not_invent_missing_assets_or_add_media(self):
         from canvas_model_contract import continuity_input
         source = {'_canvas_compilation_scope': {}, '_canvas_continuity_asset_registry': [{'id': 'KNOWN_FOREIGN'}], 'asset_plan': [{'id': 'LOCAL', 'file': 'approved.png'}]}

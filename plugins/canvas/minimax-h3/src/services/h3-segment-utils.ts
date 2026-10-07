@@ -28,8 +28,11 @@ export function importH3Settings(value: unknown): Partial<H3Segment> | null {
 
 export function patchSelectedSegment(ctx: CanvasNodeContext, metadata: Record<string, unknown>, patch: Partial<H3Segment>) {
     const liveMetadata = ctx.getNode?.(ctx.node.id)?.metadata || metadata;
-    const segments = segmentsFor(liveMetadata);
-    const selectedId = String(liveMetadata.selectedSegmentId || segments[0]?.id || "");
+    const segments = Array.isArray(liveMetadata.segments) && liveMetadata.segments.length
+        ? liveMetadata.segments as H3Segment[] : segmentsFor(liveMetadata);
+    // The control owns the edit target; a later selection must not redirect it.
+    const selectedId = String(metadata.selectedSegmentId || liveMetadata.selectedSegmentId || segments[0]?.id || "");
+    if (!segments.some(segment => segment.id === selectedId)) throw new Error("编辑目标 Clip 已不存在，请刷新后重试");
     ctx.updateMetadata({ selectedSegmentId: selectedId, segments: segments.map((segment) => segment.id === selectedId ? { ...segment, ...withH3ParameterEdits(segment as unknown as Record<string, unknown>, patch) } : segment) });
 }
 

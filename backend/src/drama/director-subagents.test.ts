@@ -35,11 +35,30 @@ function formalFixture(t: test.TestContext) {
     const director: DirectorProduction = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "test" }, source, sourceHash: compilationHash(source), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], workflow: {}, unresolved: [], executionAuthorized: false };
     production.edit("canvas", { operationId: "seed", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
     const service = new DirectorSubagents(stores, { run: request => { calls.push(request); return new Promise(resolve => settles.push(output => resolve({ threadId: "worker", output }))); } }, events, root, undefined, () => production);
-    const bound = { ...spawn, production: { kind: "canvas" as const, id: "canvas", expectedRevision: production.get("canvas").revision, scope: { sceneId: "A" } } };
+    const bound = { ...spawn, role: "shots" as const, production: { kind: "canvas" as const, id: "canvas", expectedRevision: production.get("canvas").revision, scope: { sceneId: "A" } } };
     return { ...fixtureValue, service, production, bound };
 }
 const complete = { status: "complete", summary: "done", content: "建议", unresolved: [], cursor: "" };
 const patchShot = (id: string, title: string) => ({ type: "patch_director_source", entity: "shot", id, patch: { title } });
+
+test("interactive continuation enforces frozen mode, original authorization and explicit intent", async t => {
+    const { service, production, bound, stores, calls, settles } = formalFixture(t);
+    production.edit("canvas", { operationId: "interactive", expectedRevision: production.get("canvas").revision, ops: [{ type: "set_director_workflow", patch: { contentDeliveryMode: "interactive_segment" } }] });
+    const receipt = service.execute({ ...bound, production: { ...bound.production, expectedRevision: production.get("canvas").revision } }) as any;
+    const taskId = receipt.task.taskId;
+    calls[0].onThread("worker"); calls[0].onTurn?.("first"); settles[0]({ ...complete, status: "partial", cursor: "next" }); await tick();
+    const policy = stores.tasks.get(taskId)!.input.policy as any;
+    assert.equal(policy.authorization.id, bound.operationId); assert.equal(policy.authorization.purpose, "creative_advice");
+    assert.equal(receipt.task.contentDeliveryMode, "interactive_segment");
+    assert.throws(() => service.execute({ ...read(taskId), action: "continue", operationId: "automatic" }), /CONFIRMATION_REQUIRED/);
+    const command = { ...read(taskId), action: "continue", operationId: "human-next", continuationIntent: "explicit" };
+    service.execute(command); assert.equal(calls.length, 2); settles[1]({ ...complete, status: "partial", cursor: "next-2" }); await tick();
+    assert.equal(service.execute(command).replayed, true);
+    assert.throws(() => service.execute({ ...command, continuationIntent: "automatic" }), /REUSE_MISMATCH/);
+    production.edit("canvas", { operationId: "change-mode", expectedRevision: production.get("canvas").revision, ops: [{ type: "set_director_workflow", patch: { contentDeliveryMode: "auto_file_batch" } }] });
+    assert.throws(() => service.execute({ ...command, operationId: "later" }), /POLICY_CHANGED/);
+    assert.equal(calls.length, 2);
+});
 
 test("bound packages freeze formal input and modules; adoption is atomic, replayable and preserves chunk identity", async t => {
     const { service, production, bound, stores, calls, settles } = formalFixture(t);
@@ -48,6 +67,7 @@ test("bound packages freeze formal input and modules; adoption is atomic, replay
     const packet = stores.tasks.get(taskId)!.input.workPackage as any;
     assert.equal(packet.owner.id, "canvas"); assert.equal(packet.director.workflow.sceneWorks, undefined);
     assert.ok(calls[0].readRoots?.length); assert.match(calls[0].prompt, /正式冻结工作包/);
+    for (const module of ["shots", "performance", "effects"]) assert.ok(calls[0].prompt.replaceAll("\\", "/").includes(`modules/${module}/SKILL.md ---`), `mandatory ${module} contract is preloaded into the request`);
     settles[0](complete); await tick();
     const first = service.execute({ ...read(taskId), view: "result", chunkBytes: 25 }) as any;
     // Unrelated source changes advance revision without invalidating scene A.

@@ -34,6 +34,7 @@ try {
 
     await page.goto(`${base}/tests/scene-production.html`);
     await page.getByRole("button", { name: "并行制作源稿", exact: true }).waitFor();
+    await page.getByText("产物 aaaaaaaa 已写入修订 7", { exact: true }).waitFor();
     await page.getByRole("button", { name: /并行推进到 H3/ }).click();
     await page.getByText("已提交 3 个场次继续推进到 H3", { exact: false }).waitFor();
     const selective = JSON.parse(await page.getByTestId("commands").textContent());

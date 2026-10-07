@@ -27,13 +27,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     const ctx = useH3LocalView(sharedContext);
     const metadata = ctx.node.metadata || {};
     const sharedMetadata = sharedContext.node.metadata || {};
-    const segmentFallbacks = JSON.stringify([
-        sharedMetadata.prompt, sharedMetadata.duration, sharedMetadata.seed, sharedMetadata.noiseSeed,
-        sharedMetadata.mode, sharedMetadata.taskMode, sharedMetadata.modelName, sharedMetadata.loraName,
-        sharedMetadata.aspectRatio, sharedMetadata.megapixels, sharedMetadata.videoSteps, sharedMetadata.denoise,
-        sharedMetadata.teAccel, sharedMetadata.noDub, sharedMetadata.noCaption, sharedMetadata.audioMode,
-    ]);
-    const segments = useMemo(() => segmentsFor(sharedMetadata), [sharedMetadata.segments, segmentFallbacks]);
+    const segments = useMemo(() => segmentsFor(sharedMetadata), [sharedMetadata]);
     const ctxRef = useRef(ctx);
     ctxRef.current = ctx;
     const storedSelectedId = String(metadata.selectedSegmentId || "");
@@ -268,7 +262,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     }, [commitSegmentChange, ctx, metadata, selected]);
     const patchAllSettings = useCallback((patch: Partial<H3Segment>) => {
         const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata;
-        const current = segmentsFor(liveMetadata);
+        const current = Array.isArray(liveMetadata.segments) && liveMetadata.segments.length ? liveMetadata.segments as H3Segment[] : segmentsFor(liveMetadata);
         const next = current.map((segment) => {
             const updated = { ...segment, ...withH3ParameterEdits(segment as unknown as Record<string, unknown>, patch) } as H3Segment;
             if ((patch.duration !== undefined || patch.mode !== undefined || patch.taskMode !== undefined) && storyboardTrackItems(segment).length) {

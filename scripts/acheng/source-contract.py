@@ -26,10 +26,12 @@ def is_scope(value):
 
 
 def contract():
+    from storyboard_policy import FRAMINGS
     prose = {"type": "string", "minLength": 3, "pattern": r"^(?!\s*(?:TBD|TODO|unknown|待填|示例|\.\.\.|…|N/A)\s*$).+", "description": "At least three trimmed characters; concrete content, no placeholder."}
     return {
         "contractVersion": "2", "ref2vaMaximumWords": None, "scopedCompilation": True,
         "jsonSchema": {"type": "object", "properties": {
+            "storyboard_policy": {"type": "object", "properties": {"version": {"type": "integer", "enum": [1]}}, "required": ["version"]},
             "segments": {"type": "array", "items": {"type": "object", "properties": {
                 "mode": {"type": "string", "enum": list(MODES)}, "mode_lock": {"type": "string", "enum": list(MODES)}, "mode_selection_reason": prose,
                 "subjects": {"type": "array", "items": {"type": "object", "properties": {
@@ -39,6 +41,10 @@ def contract():
                     "required": ["label", "entity_id", "definition", "retention", "shot_ids"]}}
                 }, "required": ["mode", "mode_lock", "mode_selection_reason"]}},
             "shots": {"type": "array", "items": {"type": "object", "properties": {
+                "camera": {"type": "object", "properties": {
+                    "framing": {"type": "string", "enum": list(FRAMINGS)},
+                    "attention_subject_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+                    "editorial_reason": prose}},
                 "continuity_cues": {"type": "array", "items": {"type": "object", "properties": {
                     "fact_id": prose, "phase": {"type": "string", "enum": ["start", "end"]},
                     "value": prose, "description": prose}, "required": ["fact_id", "phase", "value", "description"]}}
@@ -53,8 +59,9 @@ def contract():
             }, "required": ["recipe"]}},
             "style_lock": {"type": "object", "properties": {field: {"type": "array", "minItems": 1, "items": prose} for field in ("preserve_scope", "exclude_scope")}, "required": ["preserve_scope", "exclude_scope"]}}},
         "relationships": ["segments[].mode_lock must equal mode", "Full creative and file contracts remain owned by Acheng audit/compiler; this schema covers Canvas source fields."],
-        "templates": {"segment": {"mode": "Ref2VA", "mode_lock": "Ref2VA", "mode_selection_reason": "Use approved identity and scene references."}, "asset_card": {"recipe": "portrait"}, "style_scope": {"preserve_scope": ["Preserve the approved lighting and palette."], "exclude_scope": ["Do not copy the anchor subject identity."]}},
+        "templates": {"storyboard_policy": {"version": 1}, "camera": {"framing": "MCU", "attention_subject_ids": ["<registered subject id>"], "editorial_reason": "Read the speaker's strategy or listener's changing response."}, "segment": {"mode": "Ref2VA", "mode_lock": "Ref2VA", "mode_selection_reason": "Use approved identity and scene references."}, "asset_card": {"recipe": "portrait"}, "style_scope": {"preserve_scope": ["Preserve the approved lighting and palette."], "exclude_scope": ["Do not copy the anchor subject identity."]}},
         "continuityLedger": continuity_v2_contract(),
+        "storyboardPolicy": {"version": 1, "defaultForNewProductions": True, "requiredCameraFields": ["framing", "attention_subject_ids", "editorial_reason"], "framingValues": list(FRAMINGS), "legacy": "Absent policy retains historical behavior; scoped compilation validates only selected Shot/Segment structure."},
         "modelPromptContract": {"version": 1,
             "subjects": "Ref2VA identity/character/scene/environment/prop references require one matching entity/source/Shot Subject. Frame and composition anchors may remain Pictures.",
             "continuity": "Replay snapshots remain report-only. Optional shots[].continuity_cues assert a registered local fact/value at start/end and provide complete model-facing description. Without cues, authored shot state/action remains the prose source.",
@@ -75,7 +82,7 @@ def validate(source, stage="edit"):
             issue(path, "Expected " + kind, target)
             return
         if "enum" in schema and value not in schema["enum"]:
-            issue(path, "Allowed values: " + ", ".join(schema["enum"]), target)
+            issue(path, "Allowed values: " + ", ".join(map(str, schema["enum"])), target)
         if kind == "string" and "minLength" in schema and not substantive(value):
             issue(path, "Concrete text of at least three trimmed characters required; placeholders are invalid", target)
         if kind == "array":
@@ -94,6 +101,9 @@ def validate(source, stage="edit"):
     # The bridge is also imported while building the source-contract manifest.
     # Structural template generation needs no candidate-only dependencies.
     if isinstance(source, dict):
+        from storyboard_policy import diagnostics
+        selected_shots = {sid for segment in source.get("segments", []) if isinstance(segment, dict) for sid in segment.get("shot_ids", [])} if source.get("_canvas_compilation_scope") else None
+        issues.extend({**item, "severity": "warning" if stage == "edit" else item["severity"]} for item in diagnostics(source, selected_shots))
         from canvas_model_contract import source_diagnostics
         issues.extend({**item, "severity": "warning" if stage == "edit" else "error"} for item in source_diagnostics(source))
     continuity_issues = []

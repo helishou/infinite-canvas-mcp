@@ -1,5 +1,6 @@
 import { Button } from "antd";
-import { ArrowUpToLine, RotateCcw, X } from "lucide-react";
+import { ArrowUpToLine, ChevronDown, ChevronRight, RotateCcw, X } from "lucide-react";
+import { useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -16,14 +17,20 @@ export function AgentChatQueue({ items, paused, canInsert, theme, onRemove, onIn
     onResume: () => void;
 }) {
     const { t } = useTranslation();
+    const [collapsed, setCollapsed] = useState(false);
+    const contentId = useId();
     // 队列为空时不占位；暂停标记只在有内容需要恢复时才提示。
     if (!items.length) return null;
     return (
         <section aria-label={t("agent.queue.title", { count: items.length })} className="mx-3 mb-2 max-h-40 shrink-0 overflow-y-auto rounded-xl border px-3 py-2" style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel }}>
-            <header className="mb-2 flex items-center justify-between gap-2 text-xs">
-                <strong>{t("agent.queue.title", { count: items.length })}</strong>
+            <header className={`${collapsed ? "" : "mb-2 "}flex items-center justify-between gap-2 text-xs`}>
+                <button type="button" className="flex min-w-0 flex-1 items-center gap-1.5 text-left" aria-expanded={!collapsed} aria-controls={contentId} title={t(collapsed ? "agent.queue.expand" : "agent.queue.collapse")} onClick={() => setCollapsed(value => !value)}>
+                    {collapsed ? <ChevronRight className="size-3.5 shrink-0" /> : <ChevronDown className="size-3.5 shrink-0" />}
+                    <strong>{t("agent.queue.title", { count: items.length })}</strong>
+                </button>
                 {paused ? <Button type="link" size="small" className="!h-auto !p-0" onClick={onResume}>{t("agent.queue.resume")}</Button> : null}
             </header>
+            <div id={contentId} hidden={collapsed}>
             {paused ? <p className="mb-2 text-xs" style={{ color: theme.node.muted }}>{t("agent.queue.paused")}</p> : null}
             <ol className="space-y-2">
                 {items.map((item) => {
@@ -49,6 +56,7 @@ export function AgentChatQueue({ items, paused, canInsert, theme, onRemove, onIn
                     );
                 })}
             </ol>
+            </div>
         </section>
     );
 }

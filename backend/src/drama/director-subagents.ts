@@ -7,7 +7,7 @@ import type { Stores } from "../stores/types.js";
 import type { BackendEventBus } from "../events.js";
 import { directorArtifact, directorWorkInput, directorWorkPolicy, type DirectorWorkPackage, type DirectorWorkPolicy } from "@basketikun/canvas-agent/agent/work-package";
 import { EpisodeProductionService } from "./production.js";
-import { productionWorkPackage, professionalContract, verifyWorkRuntime } from "./director-work-package.js";
+import { productionWorkPackage, professionalContract, verifyWorkRuntime, loadWorkContract } from "./director-work-package.js";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const outputSchema = { type: "object", additionalProperties: false, properties: { status: { type: "string", enum: ["complete", "partial", "needs_human"] }, summary: { type: "string" }, content: { type: "string" }, unresolved: { type: "array", items: { type: "string" } }, cursor: { type: "string" } }, required: ["status", "summary", "content", "unresolved", "cursor"] };
@@ -121,7 +121,7 @@ export class DirectorSubagents {
             if (record.revision !== input.production.expectedRevision) throw new Error("WORK_REVISION_CHANGED: 制作版本已变化");
             if (service.episodeInfo(input.production.id).canvasId !== input.projectId) throw new Error("WORK_PROJECT_MISMATCH: 制作对象与画布绑定不符");
             if (!record.draft.director) throw new Error("WORK_SOURCE_MISSING: 缺少正式导演稿");
-            workPackage = productionWorkPackage({ kind: input.production.kind, id: input.production.id }, input.projectId, record.revision, record.draft.director, input.role, input.production.scope);
+            workPackage = productionWorkPackage(service.ownerIdentity(input.production.id), input.projectId, record.revision, record.draft.director, input.role, input.production.scope);
             mode = record.draft.director.workflow.contentDeliveryMode;
         }
         const policy = directorWorkPolicy(mode, input.operationId, workPackage?.inputHash || requestHash);
@@ -146,12 +146,13 @@ export class DirectorSubagents {
             const input = task.input;
             const packet = input.workPackage as DirectorWorkPackage | undefined;
             const professional = (input.professional || packet) as ReturnType<typeof professionalContract> | undefined;
-            const runtime = professional ? verifyWorkRuntime(professional) : undefined;
+            const loaded = professional ? loadWorkContract(professional) : undefined;
+            const runtime = loaded?.runtime;
             this.update(task.id, { status: "running" });
             const response = await this.agents.run({ workId: `${task.id}:${command}`, cwd: this.cwd, model: input.model as string | undefined, effort: input.effort as ProductionAgentRequest["effort"], review: input.role === "review", schema: outputSchema,
                 threadId: task.result?.workerThreadId as string | undefined, turnId: task.result?.workerTurnId as string | undefined, recoverOutput,
                 readRoots: runtime ? [runtime.path] : undefined,
-                prompt: `你是主导演的${input.role}子代理。返回严格 JSON（status、summary、content、unresolved、cursor）。只读专业文件，不写文件、业务数据，不生成、不再委派。先读取工作包 skillPaths，按固定合同执行。正式工作包事实优先于补充说明。complete 返回完整建议，partial 必须给非空 cursor；证据不足返回 needs_human。不猜测审核通过。\n任务：${input.title}\n要求：${input.prompt}\n专业合同：${JSON.stringify(professional || {})}\n正式冻结工作包：${packet ? JSON.stringify(packet) : "unbound；只提供自由建议"}\n补充说明：${input.context}\n续写游标：${task.result?.cursor || "首次"}`,
+                prompt: `你是主导演的${input.role}子代理。返回严格 JSON（status、summary、content、unresolved、cursor）。只读专业文件，不写文件、业务数据，不生成、不再委派。必载专业文件已在下文预载，不重复读取；按固定合同执行，其他引用仅按需读取。正式工作包事实与冻结交付模式优先于补充说明和旧入口选择题。complete 返回完整建议，partial 必须给非空 cursor；证据不足返回 needs_human。不猜测审核通过。\n任务：${input.title}\n要求：${input.prompt}\n专业合同：${JSON.stringify(professional || {})}\n正式冻结工作包：${packet ? JSON.stringify(packet) : "unbound；只提供自由建议"}\n补充说明：${input.context}\n续写游标：${task.result?.cursor || "首次"}\n${loaded?.text || ""}`,
                 onThread: threadId => { const current = this.stores.tasks.get(task.id)!; this.update(task.id, { status: "running", result: { ...current.result, workerThreadId: threadId } }); },
                 onTurn: turnId => { const current = this.stores.tasks.get(task.id)!; this.update(task.id, { result: { ...current.result, workerTurnId: turnId } }); },
             });

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { H3Segment } from "../types";
 import { applyH3GlobalSettings, patchAllH3Clips } from "./h3-global-settings";
+import { resolveH3Runtime } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 
 test("global H3 edits update every Clip and remain available to new Clips", () => {
     const clips: H3Segment[] = [
@@ -26,4 +27,22 @@ test("clearing a global setting still clears an inherited value on new Clips", (
     assert.equal(update.segments[0].sampler, undefined);
     assert.equal(update.h3GlobalSettings.sampler, null);
     assert.equal(applyH3GlobalSettings({ id: "two", sampler: "euler" }, JSON.parse(JSON.stringify(update))).sampler, undefined);
+});
+
+test("new Clips keep explicitly chosen global fields while following defaults for other fields", () => {
+    const clip = applyH3GlobalSettings({ id: "new", h3ParameterPolicy: "defaults", videoSteps: 99 }, { h3GlobalSettings: { megapixels: 0.9, motionContextEnabled: true } });
+    const params = resolveH3Runtime(clip as unknown as Record<string, unknown>, {}, {}, { megapixels: 0.4, videoSteps: 12, tailFrameContinuation: true }).params;
+    assert.equal(params.megapixels, 0.9);
+    assert.equal(params.steps, 12);
+    assert.equal(params.motionContextEnabled, true);
+    assert.equal(params.tailFrameContinuation, false);
+});
+
+test("global imports cannot restore the conflicting raw patch over atomic continuation edits", () => {
+    const result = patchAllH3Clips({}, [{ id: "a" }, { id: "b" }], { tailFrameContinuation: true, motionContextEnabled: true });
+    assert.equal(result.h3GlobalSettings.motionContextEnabled, false);
+    for (const clip of result.segments) {
+        assert.equal(clip.tailFrameContinuation, true);
+        assert.equal(clip.motionContextEnabled, false);
+    }
 });

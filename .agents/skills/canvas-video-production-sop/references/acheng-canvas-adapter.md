@@ -10,6 +10,8 @@ Acheng Director 本身就是 Skill，完整上游文件和模块位于项目 `.a
 
 ## 创作权属
 
+新建制作源稿默认采用当前运行包的 `storyboard_policy.version=1`，对白景别、观看对象和剪辑理由按 shots 专业合同设计。每次摄影视角切换登记独立 Shot，Shot 可短于 4 秒，4–12 秒只限制 Clip。旧稿不自动迁移；显式采用策略的返修只校验选定范围。
+
 story、assets、shots、performance、effects、model、continuity 按 Acheng 原合同协作。空间设计在 assets 的 scene-design 支路，shots 消费空间事实；站位图是按需资产。多资产新制作采用 STYLE_MOTHER，新四视图默认采用等高的正脸近景、正面全身、侧面全身、背面全身和空手；色卡为辅助信息，不另建强制前置阶段。旧批准资产可保留并登记适用范围，缺项只补本轮所需。
 
 用户明确指定其他角色布局时，在完整 `asset_cards[].view_layout` 中保存 `selection: user_explicit` 和具体 `selection_reason`，由支持该选择的当前激活运行包校验。当前可显式选择1:2行高的正脸近景、右侧脸近景、无头正面服装全身、完整背面四格，或等高的生物头正面、头侧面、盘绕全身、身体中段鳞片细节四格。类型、视图、顺序、行高、同一主体与用途必须完整；缺少明确选择不按历史布局放行。不能伪造批准状态或用历史 fixture 绕过新制作校验。
@@ -37,6 +39,8 @@ Acheng 的纯提示词限制适用于创作职责；用户授权实际生成时�
 Backend draft 是正式创作编辑源，published 保留显式发布的历史版本，本地 production.json 是带 revision 的工作副本。修改需稳定 operationId 和 expectedRevision；冲突回读，不覆盖他人草稿。默认 inputBasis=canvas 的运行冻结当前有效画布输入，显式 published 才核验指定发布稿。剧本、镜头和 Clip 视图是投影，修改应进入导演源；源变化后沿编译/校验更新回执。模型继承原配置；保存、编译、审核和发布不授权生成。
 
 已有正式稿的导演委派携带 production.kind/id/expectedRevision/scope，由 Backend 构造固定版本、依赖和专业模块的工作包。建议完整且无未决项后，主导演在原授权范围内通过 production_edit 的 ops 与 adoptions:[{taskId,artifactHash}] 原子采纳；partial、unbound 或输入过期不能登记采纳。partial 按已有交付模式沿原任务 continue；recover 只回读原已完成回合，不自动重跑或生成。
+
+交付模式与原创作授权随工作包固定。交互或无模式记录的旧任务，continue 必须携带本轮真实用户续写意图 continuationIntent=explicit；自动模式使用 automatic，不扩大原任务要求。正式稿改换交付模式或原输入变化时拒绝沿旧工作自动推进。场次创作、共同资产审核与场次自动审核共用固定专业合同和不可变产物封套；源稿合并与审核记录分别在原事务登记 workAdoptions，含产物摘要、operationId、revision、sourceHash 和语义 opsHash。审核结果写入不表示所有质量维度已通过。
 
 Agent 编辑正式源稿，程序负责提示词编译、校验与引用投影。编辑、编译和发布前读[源稿编译与发布](canvas-compilation.md)。开始工作或登记用户决定时读[工作台与布局](canvas-workspace.md)。
 
