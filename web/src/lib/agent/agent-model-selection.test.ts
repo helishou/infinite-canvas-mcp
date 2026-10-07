@@ -19,3 +19,10 @@ test("uses the selected model's supported effort and clears stale catalog", () =
     assert.equal(selectAvailableAgentModel(models, "gpt-5.6-luna", "ultra").reasoningEffort, "medium");
     assert.deepEqual(selectAvailableAgentModel([], "gpt-6-luna", "medium"), { models: [], model: "", reasoningEffort: "" });
 });
+
+test("channel models remain selectable without inheriting Codex reasoning effort", () => {
+    const channels: AgentModel[] = ["a", "b"].map(channel => ({ id: `${channel}::same`, model: `${channel}::same`, displayName: `${channel} / same`, isDefault: channel === "a", defaultReasoningEffort: "", supportedReasoningEfforts: [] }));
+    assert.equal(selectAvailableAgentModel(channels, "b::same", "high").model, "b::same");
+    assert.equal(selectAvailableAgentModel(channels, "b::same", "high").reasoningEffort, "");
+    assert.equal(selectAvailableAgentModel(channels, "old-codex", "high").model, "a::same");
+});

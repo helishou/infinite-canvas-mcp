@@ -10,6 +10,7 @@ import { EpisodeProductionService, ProductionConflictError } from "./production.
 import { EpisodeProductionRunner } from "./production-runner.js";
 import { directorHash, promptHash } from "./director.js";
 import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
+import { compilationScopeInput } from "@basketikun/canvas-agent/drama/compilation-scope";
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 import type { CanvasGenerationService } from "../canvas/generation-service.js";
 import express from "express";
@@ -43,6 +44,30 @@ function publish(service: EpisodeProductionService, director: DirectorProduction
     service.edit(id, { operationId: `edit-${current.revision}`, expectedRevision: current.revision, ops: [{ type: "set_director_production", director }, { type: "set_settings", patch: { mode: "auto", ...(storyboardImageMode ? { storyboardImageMode } : {}) } }] });
     return service.publish(id, { operationId: `publish-${current.revision}`, expectedRevision: current.revision + 1, stage: "director" });
 }
+
+test("parallel H3 completion requires terminal task, active archived output and matching frozen inputs", async t => {
+    const { service, stores, db, dir } = fixture(t), d = doc(1);
+    publish(service, d, "ep", "skip");
+    service.edit("ep", { operationId: "parallel", expectedRevision: service.get("ep").revision, ops: [{ type: "set_settings", patch: { parallelScenes: true, reviewPolicy: { mode: "manual", shared: "manual", scene: "manual" } } }] });
+    const work = { workId: "work", sceneId: "scene-block", inputRevision: 1, sourceHash: d.sourceHash, inputHash: compilationScopeInput(d, { sceneId: "scene-block" }).inputHash, stage: "produce", status: "pending", policy: { mode: "manual", shared: "manual", scene: "manual" }, updatedAt: new Date().toISOString(), review: { sourceHash: d.sourceHash, inputHash: compilationScopeInput(d, { sceneId: "scene-block" }).inputHash, verdict: "approved", mode: "manual", evidence: "source inspected", media: [], checkedAt: new Date().toISOString() } };
+    service.edit("ep", { operationId: "review", expectedRevision: service.get("ep").revision, ops: [{ type: "set_director_workflow", patch: { sceneWorks: { work } } }] }, undefined, true);
+    service.publish("ep", { operationId: "parallel-publish", expectedRevision: service.get("ep").revision, stage: "director" });
+    const fake = { start: async (command: CanvasGenerationCommand) => {
+        const task = stores.tasks.create(command.idempotencyKey!, "canvas-h3-run", command, {});
+        const storageKey = `video:${task.id}`, filePath = join(dir, "result.mp4"); writeFileSync(filePath, "test-video");
+        db.upsertMediaFile({ storageKey, filePath, mimeType: "video/mp4", bytes: 10, width: 16, height: 9, durationMs: 5000, createdAt: new Date().toISOString() });
+        db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_h3_segment", nodeId: command.nodeId, segmentId: command.segmentId!, patch: { resultStorageKey: storageKey } }], { runtimeWrite: true });
+        stores.tasks.update(task.id, { status: "succeeded", result: { media: [{ storageKey }] } }); return { taskId: task.id };
+    } } as unknown as CanvasGenerationService;
+    const runner = new EpisodeProductionRunner(service, stores, fake);
+    const batch = service.startBatch("ep", { inputBasis: "published", runId: "parallel-video", idempotencyKey: "parallel-video", expectedRevision: service.get("ep").revision, version: service.get("ep").publishedVersion, targets: ["segment:seg0"] });
+    await runner.runBatch("ep", batch.runId);
+    assert.equal(service.getBatch("ep", batch.runId)?.status, "succeeded", service.getBatch("ep", batch.runId)?.error || "");
+    assert.equal(service.workflowReadiness("ep", "published").targets.find(target => target.id === "segment:seg0")?.status, "complete");
+    const taskId = service.getBatch("ep", batch.runId)!.submitted[0].taskId;
+    stores.tasks.update(taskId, { result: null });
+    assert.equal(service.workflowReadiness("ep", "published").targets.find(target => target.id === "segment:seg0")?.status, "ready", "node-only output cannot establish completion");
+});
 
 test("skipping storyboard images retains written shots and allows ready H3 segments", async t => {
     const { service, stores } = fixture(t);
@@ -93,7 +118,7 @@ test('Clip sync loads saved defaults, persists episode aspect and keeps existing
     assert.equal(node().metadata.latentUpscaleEnabled, true);
     db.applyCanvasProjectOperations('canvas', undefined, [{ type: 'update_h3_segment', nodeId: group.nodeId!, segmentId: group.segmentId!, patch: { modelName: 'user-model', sampler: 'euler', loraSlots: [{ name: 'user-lora', strength: 0.4, enabled: true }] } }]);
     db.applyCanvasProjectOperations('canvas', undefined, [{ type: 'update_h3_segment', nodeId: group.nodeId!, segmentId: group.segmentId!, patch: { resultStorageKey: 'old-result' } }], { runtimeWrite: true });
-    assert.throws(() => runner.syncClips('ep', 1), /CLIP_EDIT_CONFLICT/);
+    runner.syncClips('ep', 1);
     assert.equal(node().metadata.segments[0].modelName, 'user-model');
     assert.equal(node().metadata.segments[0].sampler, 'euler');
     assert.equal(node().metadata.segments[0].resultStorageKey, 'old-result');
@@ -109,7 +134,7 @@ test("successful generation preflight preserves currentWork and creates no run o
     publish(service, d);
     await new EpisodeProductionRunner(service, stores, {} as CanvasGenerationService).syncClips("ep", 1);
     const current = service.get("ep"), before = JSON.stringify(current);
-    const request = { runId: "run", workId: "work", idempotencyKey: "run", expectedRevision: current.revision, version: 1, targets: ["segment:seg0"] };
+    const request = { inputBasis: "published" as const, runId: "run", workId: "work", idempotencyKey: "run", expectedRevision: current.revision, version: 1, targets: ["segment:seg0"] };
     const preflight = service.preflight("ep", { action: "generate", request });
     assert.equal(preflight.valid, true, JSON.stringify(preflight.diagnostics));
     assert.equal(JSON.stringify(service.get("ep")), before);
@@ -126,7 +151,7 @@ test("canvas aliases create, replay and control the canonical episode batch", as
     publish(service, director);
     await new EpisodeProductionRunner(service, stores, {} as CanvasGenerationService).syncClips("ep", 1);
     const canvas = new EpisodeProductionService(db, undefined, undefined, true, () => {});
-    const input = { runId: "alias-run", idempotencyKey: "alias-run", expectedRevision: canvas.get("canvas").revision, version: 1, targets: ["segment:seg0"] };
+    const input = { inputBasis: "published" as const, runId: "alias-run", idempotencyKey: "alias-run", expectedRevision: canvas.get("canvas").revision, version: 1, targets: ["segment:seg0"] };
     const run = canvas.startBatch("canvas", input);
     assert.equal(run.episodeId, "ep");
     assert.equal(service.getBatch("ep", "alias-run")?.runId, run.runId);
@@ -169,7 +194,7 @@ test("early Acheng planning drafts save without node bindings and readiness scop
     const current = service.get("ep");
     const edited = service.edit("ep", { operationId: "early-plan", expectedRevision: current.revision, ops: [{ type: "set_director_production", director: d }] });
     assert.equal(edited.draft.director?.assets.STYLE_MOTHER.nodeId, undefined);
-    assert.match(service.workflowReadiness("ep").targets.find(item => item.id === "asset:STYLE_MOTHER")?.blockers.join(" ") || "", /尚未发布/);
+    assert.match(service.workflowReadiness("ep").targets.find(item => item.id === "asset:STYLE_MOTHER")?.blockers.join(" ") || "", /未绑定画布/);
     const patched = service.edit("ep", { operationId: "patch-scene", expectedRevision: edited.revision, ops: [{ type: "patch_director_source", entity: "scene", id: "scene1", patch: { text: "修订后的逐字对白。" } }] });
     assert.equal((patched.draft.director!.source.extension as any).authored, true);
     assert.equal((patched.draft.director!.source.script_scenes as any[])[0].text, "修订后的逐字对白。");
@@ -179,7 +204,7 @@ test("early Acheng planning drafts save without node bindings and readiness scop
     assert.equal(service.run("ep", 1), null);
     const readiness = service.workflowReadiness("ep");
     assert.equal(readiness.targets.find(item => item.id === "asset:STYLE_MOTHER")?.status, "blocked");
-    assert.match(readiness.targets.find(item => item.id === "asset:STYLE_MOTHER")?.blockers.join(" ") || "", /完整编译提示词/);
+    assert.match(readiness.targets.find(item => item.id === "asset:STYLE_MOTHER")?.blockers.join(" ") || "", /未绑定画布/);
 });
 
 test("source revisions reject stale receipts, preserve drafts and prohibit projection-only edits", t => {
@@ -247,7 +272,7 @@ test("version 16 migration backs up data and creates run history without rewriti
     const reopened = new BackendDatabase(file);
     assert.equal(reopened.getDramaEpisode("ep")?.title, "Episode");
     assert.ok(reopened.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='canvas_production_batches'").get());
-    assert.ok(readdirSync(dir).some(n => n.includes("pre-schema-v16-to-v32"))); reopened.close();
+    assert.ok(readdirSync(dir).some(n => n.includes("pre-schema-v16-to-v33"))); reopened.close();
 });
 
 test("version 21 databases upgrade to the current schema and retain production batch storage", t => {
@@ -255,7 +280,7 @@ test("version 21 databases upgrade to the current schema and retain production b
     db.db.exec("DELETE FROM schema_migrations WHERE version>=22; DROP TABLE canvas_production_batches; DROP TABLE episode_production_batches");
     const upgraded = new BackendDatabase(file);
     const version = upgraded.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number };
-    assert.equal(version.version, 32);
+    assert.equal(version.version, 33);
     assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='episode_production_batches'").get());
     assert.equal(upgraded.getDramaEpisode("ep")?.title, "Episode");
     upgraded.close();
@@ -277,15 +302,15 @@ test("Motion Context group submits one bounded task and standalone next Clip rem
         stores.tasks.update(task.id, { status: "succeeded" }); return { taskId: task.id };
     } } as unknown as CanvasGenerationService;
     const runner = new EpisodeProductionRunner(service, stores, fake);
-    const first = service.startBatch("ep", { runId: "motion-chain", idempotencyKey: "motion-chain", expectedRevision: service.get("ep").revision, version: 1, targets: ["segment:seg0"] });
-    const duplicateIntent = { runId: "other-motion-chain", idempotencyKey: "other-motion-chain", expectedRevision: service.get("ep").revision, version: 1, targets: ["segment:seg1"] };
+    const first = service.startBatch("ep", { inputBasis: "published", runId: "motion-chain", idempotencyKey: "motion-chain", expectedRevision: service.get("ep").revision, version: 1, targets: ["segment:seg0"] });
+    const duplicateIntent = { inputBasis: "published" as const, runId: "other-motion-chain", idempotencyKey: "other-motion-chain", expectedRevision: service.get("ep").revision, version: 1, targets: ["segment:seg1"] };
     assert.throws(() => service.startBatch("ep", duplicateIntent), /已由运行 motion-chain 占用/);
     assert.equal(service.startBatch("ep", { ...duplicateIntent, runId: "motion-chain", idempotencyKey: "motion-chain", targets: ["segment:seg0"] }).runId, "motion-chain", "an idempotent replay returns the existing run before overlap checks");
     await runner.runBatch("ep", first.runId); assert.equal(service.getBatch("ep", first.runId)?.status, "succeeded", service.getBatch("ep", first.runId)?.error || "");
     assert.equal(commands.length, 1); assert.equal(commands[0].runFromCurrent, true); assert.equal(commands[0].skipCompleted, false);
     assert.notEqual(commands[0].segmentId, commands[0].endSegmentId);
     assert.equal(JSON.stringify(commands).includes('"previousVideoAsReference":true'), false);
-    const second = service.startBatch("ep", { runId: "tail-frame-next", idempotencyKey: "tail-frame-next", expectedRevision: service.get("ep").revision, version: 1, targets: ["segment:seg2"] });
+    const second = service.startBatch("ep", { inputBasis: "published", runId: "tail-frame-next", idempotencyKey: "tail-frame-next", expectedRevision: service.get("ep").revision, version: 1, targets: ["segment:seg2"] });
     await runner.runBatch("ep", second.runId);
     assert.equal(commands.length, 2); assert.equal(commands[1].runFromCurrent, false);
     await runner.runBatch("ep", first.runId); assert.equal(commands.length, 2);
@@ -296,7 +321,7 @@ test("failed generation pauses without resubmission or deleting earlier results"
     let count = 0;
     const fake = { start: async (command: CanvasGenerationCommand) => { count++; const task = stores.tasks.create(command.idempotencyKey!, "canvas-h3-run", command, {}); stores.tasks.update(task.id, { status: "failed", error: "simulated provider failure" }); return { taskId: task.id }; } } as unknown as CanvasGenerationService;
     const runner = new EpisodeProductionRunner(service, stores, fake);
-    const batch = service.startBatch("ep", { runId: "failed-run", idempotencyKey: "failed-run", expectedRevision: service.get("ep").revision, version: 1, targets: ["segment:seg0"] });
+    const batch = service.startBatch("ep", { inputBasis: "published", runId: "failed-run", idempotencyKey: "failed-run", expectedRevision: service.get("ep").revision, version: 1, targets: ["segment:seg0"] });
     await runner.runBatch("ep", batch.runId); await runner.runBatch("ep", batch.runId);
     assert.equal(count, 1); assert.equal(service.getBatch("ep", batch.runId)?.status, "failed"); assert.match(service.getBatch("ep", batch.runId)?.error || "", /simulated/);
 });
@@ -346,12 +371,13 @@ test("automatic dependency runs pause for review, then continue the same runId w
         stores.tasks.update(task.id, { status: "succeeded" }); return { taskId: task.id };
     } } as unknown as CanvasGenerationService;
     const runner = new EpisodeProductionRunner(service, stores, fake);
-    const batch = service.startBatch("ep", { runId: "style-run", idempotencyKey: "style-run", expectedRevision: service.get("ep").revision, version: 1, targets: ["asset:STYLE_MOTHER"], scope: "all_ready" });
+    const batch = service.startBatch("ep", { inputBasis: "published", runId: "style-run", idempotencyKey: "style-run", expectedRevision: service.get("ep").revision, version: 1, targets: ["asset:STYLE_MOTHER"], scope: "all_ready" });
+    db.db.prepare("UPDATE episode_production_batches SET execution_snapshot_json=NULL WHERE run_id=?").run(batch.runId); // Legacy runs retain their original review/expansion semantics.
     await runner.runBatch("ep", batch.runId); await runner.runBatch("ep", batch.runId);
     assert.equal(submitted, 1); assert.equal(service.getBatch("ep", batch.runId)?.status, "awaiting_review");
     assert.equal(service.get("ep").published!.director!.assets.STYLE_MOTHER.status, "generated");
     assert.equal(service.get("ep").published!.director!.assets.STYLE_MOTHER.storageKey, "image:style_mother");
-    const duplicateReviewTarget = () => service.startBatch("ep", { runId: "style-rerun", idempotencyKey: "style-rerun", expectedRevision: service.get("ep").revision, version: 1, targets: ["asset:STYLE_MOTHER"], scope: "selected" });
+    const duplicateReviewTarget = () => service.startBatch("ep", { inputBasis: "published", runId: "style-rerun", idempotencyKey: "style-rerun", expectedRevision: service.get("ep").revision, version: 1, targets: ["asset:STYLE_MOTHER"], scope: "selected" });
     assert.throws(duplicateReviewTarget, /暂停不会释放目标.*退回旧结果/);
     const pausedReview = service.pauseBatch("ep", batch.runId);
     assert.equal(pausedReview.status, "awaiting_review");
@@ -361,7 +387,7 @@ test("automatic dependency runs pause for review, then continue the same runId w
     assert.equal(submitted, 1, "a paused review must not resubmit the same generated target");
     service.edit("ep", { operationId: "prompt-only-preflight", expectedRevision: service.get("ep").revision, ops: [{ type: "set_director_workflow", patch: { mediaProductionMode: "prompt_only" } }] });
     const beforePreflight = JSON.stringify({ production: service.get("ep"), batch: service.getBatch("ep", batch.runId) });
-    const blocked = service.preflight("ep", { action: "generate", request: { runId: "another-run", idempotencyKey: "another-key", expectedRevision: service.get("ep").revision, version: 1, targets: ["asset:STYLE_MOTHER"] } });
+    const blocked = service.preflight("ep", { action: "generate", request: { inputBasis: "published", runId: "another-run", idempotencyKey: "another-key", expectedRevision: service.get("ep").revision, version: 1, targets: ["asset:STYLE_MOTHER"] } });
     assert.equal(blocked.valid, false);
     assert.ok(blocked.diagnostics.some(item => item.code === "MEDIA_MODE_PROMPT_ONLY"));
     const occupied = blocked.diagnostics.find(item => item.code === "TARGET_AWAITING_REVIEW");
@@ -369,7 +395,7 @@ test("automatic dependency runs pause for review, then continue the same runId w
     assert.equal(occupied?.blockingRun?.taskIds.length, 1);
     assert.deepEqual(occupied?.nextAction?.input, { episodeId: "ep", runId: batch.runId });
     assert.equal(JSON.stringify({ production: service.get("ep"), batch: service.getBatch("ep", batch.runId) }), beforePreflight);
-    const replayInput = { runId: batch.runId, idempotencyKey: batch.idempotencyKey, expectedRevision: batch.sourceRevision, version: 1, targets: ["asset:STYLE_MOTHER"], scope: "all_ready" };
+    const replayInput = { inputBasis: "published" as const, runId: batch.runId, idempotencyKey: batch.idempotencyKey, expectedRevision: batch.sourceRevision, version: 1, targets: ["asset:STYLE_MOTHER"], scope: "all_ready" };
     assert.equal(service.preflight("ep", { action: "generate", request: replayInput }).valid, true, "a stale-revision replay must still recover the original receipt");
     assert.equal(service.startBatch("ep", replayInput).runId, batch.runId);
     const collision = service.preflight("ep", { action: "generate", request: { ...replayInput, runId: "wrong-run", targets: ["asset:CHAR"] } });
@@ -387,7 +413,7 @@ test("automatic dependency runs pause for review, then continue the same runId w
     const continued = service.resumeBatch("ep", batch.runId);
     assert.ok(continued.targets.includes("asset:CHAR"), "automatic scope should release newly ready dependencies after approval");
     await runner.runBatch("ep", batch.runId);
-    assert.equal(submitted, 2);
+    assert.equal(submitted, 2, service.getBatch("ep", batch.runId)?.error || "");
     assert.equal(service.getBatch("ep", batch.runId)?.status, "awaiting_review");
     const charMediaHash = crypto.createHash("sha256").update("test-CHAR").digest("hex");
     service.edit("ep", { operationId: "char-review", expectedRevision: service.get("ep").revision, ops: [{ type: "review_director_asset", assetId: "CHAR", version: 1, sourceHash: d.sourceHash, nodeId: "character", storageKey: "image:char", sha256: charMediaHash, verdict: "approved", evidence: "character follows STYLE_MOTHER" }] });
@@ -395,6 +421,22 @@ test("automatic dependency runs pause for review, then continue the same runId w
     await runner.runBatch("ep", batch.runId);
     assert.equal(service.getBatch("ep", batch.runId)?.status, "succeeded");
     assert.equal(submitted, 2);
+});
+
+test("HTTP hashes the source itself through the shared production contract", async t => {
+    const { service } = fixture(t);
+    const app = express(); app.use(express.json()); registerDramaProductionRoutes(app, service);
+    const server = app.listen(0, "127.0.0.1"); await new Promise<void>(resolve => server.once("listening", resolve));
+    t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/canvas/production/hash`;
+    const post = (body: unknown) => fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    for (const source of [{ brief: "x" }, {}, { title: "角色", nested: { z: [2, 1], a: true } }]) {
+        const response = await post({ source }); assert.equal(response.status, 200);
+        assert.deepEqual(await response.json(), { ok: true, hash: directorHash(source) });
+    }
+    for (const body of [{}, { source: null }, { source: [] }, { source: 1 }, { source: {}, unexpected: true }]) {
+        assert.equal((await post(body)).status, 400);
+    }
 });
 
 test("HTTP director operations round-trip and project facade shares the episode revision", async t => {
@@ -413,11 +455,11 @@ test("HTTP director operations round-trip and project facade shares the episode 
     const current = await (await fetch(base + "/canvas/projects/canvas/production")).json() as any;
     assert.equal(current.production.publishedVersion, 1); assert.equal(current.production.published.director.sourceHash, doc().sourceHash);
     const readiness = await (await fetch(base + "/drama/episodes/ep/production/readiness")).json() as any;
-    assert.equal(readiness.readiness.targets.find((item: any) => item.id === "segment:seg0")?.status, "ready");
+    assert.equal(readiness.readiness.targets.find((item: any) => item.id === "segment:seg0")?.status, "blocked");
     const missingBatch = await fetch(base + "/drama/episodes/ep/production/batches/not-started");
     assert.equal(missingBatch.status, 200);
     assert.equal((await missingBatch.json() as any).run, null);
-    const runInput = { runId: "http-run", idempotencyKey: "http-run", expectedRevision: current.production.revision, version: 1, targets: ["segment:seg0"] };
+    const runInput = { inputBasis: "published" as const, runId: "http-run", idempotencyKey: "http-run", expectedRevision: current.production.revision, version: 1, targets: ["segment:seg0"] };
     const started = await post("/drama/episodes/ep/production/runs", runInput);
     assert.equal(started.status, 200);
     const replay = await post("/drama/episodes/ep/production/runs", runInput);
@@ -495,7 +537,7 @@ test("production batches bind workId and runId atomically and replay without a s
     service.edit("ep", { operationId: "settings-before-run", expectedRevision: settingsBase.revision, ops: [{ type: "set_settings", patch: { h3Model: "test-h3" } }] });
     publish(service, d);
     const before = service.get("ep");
-    const input = { runId: "bounded-run", idempotencyKey: "bounded-run", workId: "bounded-work", expectedRevision: before.revision, version: before.publishedVersion, targets: ["segment:seg0"], scope: "selected" as const };
+    const input = { inputBasis: "published" as const, runId: "bounded-run", idempotencyKey: "bounded-run", workId: "bounded-work", expectedRevision: before.revision, version: before.publishedVersion, targets: ["segment:seg0"], scope: "selected" as const };
     const run = service.startBatch("ep", input);
     const after = service.get("ep");
     assert.equal(after.revision, before.revision + 1);

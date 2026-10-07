@@ -1,4 +1,7 @@
+import { captureCanvasInputs, effectiveTargetInput, inputHash, type CanvasExecutionSnapshot } from "./canvas-inputs.js";
+import { adoptedDirectorFields } from "./input-merge.js";
 import crypto from "node:crypto";
+import { currentCompilationArtifact, compilationScopeInput, scopedCompilerInput, productionReviewHash } from "@basketikun/canvas-agent/drama/compilation-scope";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -48,8 +51,8 @@ import { ensureProductionCanvas, productionCanvasContext } from "./production-ca
 import { scriptNodeOperations } from "./script-nodes.js";
 import { compileProductionLayout, productionAssetPosition, productionSceneIdsForShots } from "./production-layout.js";
 import { productionLayoutStableId, productionNodePosition } from "./production-layout-geometry.js";
-import { assertImageReferenceCoverage, imageInputOperations, verifyImageInput } from "./image-inputs.js";
-import { clipInputOperations, productionClipProjection, type ReferenceSync } from "./clip-inputs.js";
+import { compiledImageInput, assertImageReferenceCoverage, imageInputOperations, verifyImageInput } from "./image-inputs.js";
+import { buildProductionClip, clipInputHash, clipInputOperations, productionClipProjection, type ReferenceSync } from "./clip-inputs.js";
 import { continuityTargetBlockers, ProductionContinuityReports } from "./continuity-reports.js";
 import { dedupReceipt, resolveReceiptDedup, assertPublicReceipt } from "./receipt-dedup.js";
 import type { NativeProductionTarget } from "./native-generation.js";
@@ -57,11 +60,12 @@ import type { NativeProductionTarget } from "./native-generation.js";
 type Row = { revision: number; draft_json: string; published_json: string | null; published_version: number; updated_at: string };
 export type ProductionImpact = { changedSceneIds: string[]; affectedShotIds: string[]; imageShotIds: string[]; clipGroupIds: string[]; missingAssetNodeIds: string[]; assetIds?: string[] };
 export type ProductionRecord = { episodeId: string; revision: number; draft: EpisodeProductionData; published: EpisodeProductionData | null; publishedVersion: number; updatedAt: string; referenceSync?: ReferenceSync[] };
-export type ProductionRun = { episodeId: string; version: number; runId?: string; targets?: string[]; engine?: Record<string, unknown> | null; settings?: Record<string, unknown>; status: string; plan: ProductionImpact; submitted: Array<{ kind: "image" | "h3"; id: string; taskId: string; projectId?: string; nodeId?: string; segmentId?: string; status?: "running" | "succeeded" | "failed" }>; error: string | null; updatedAt: string };
+export type ProductionTargetOccupancy = { targetId: string; status: string; runId?: string; taskIds: string[]; tasks: Array<{ taskId: string; status: string }>; nextAction: NonNullable<ProductionDiagnostic["nextAction"]> };
+export type ProductionRun = { episodeId: string; version: number; runId?: string; targets?: string[]; engine?: Record<string, unknown> | null; settings?: Record<string, unknown>; executionSnapshot?: CanvasExecutionSnapshot | null; status: string; plan: ProductionImpact; submitted: Array<{ kind: "image" | "h3"; id: string; taskId: string; projectId?: string; nodeId?: string; segmentId?: string; status?: "running" | "succeeded" | "failed" }>; error: string | null; updatedAt: string };
 export type ProductionBatch = {
     runId: string; episodeId: string; version: number; sourceRevision: number; idempotencyKey: string; status: string;
     targets: string[]; plan: ProductionImpact; engine: Record<string, unknown> | null; settings: Record<string, unknown>;
-    submitted: ProductionRun["submitted"]; error: string | null; pauseRequested: boolean; createdAt: string; updatedAt: string;
+    executionSnapshot?: CanvasExecutionSnapshot | null; submitted: ProductionRun["submitted"]; error: string | null; pauseRequested: boolean; createdAt: string; updatedAt: string;
 };
 export type DirectorReadinessTarget = { id: string; targetId: string; kind: "asset" | "keyframe" | "segment"; title: string; status: "ready" | "blocked" | "needs_review" | "complete"; blockers: string[]; artifactId?: string; executionTargets?: string[]; notice?: string };
 export type DirectorPresentation = {
@@ -69,10 +73,10 @@ export type DirectorPresentation = {
     action: "author" | "compile" | "produce" | "review" | "deliver" | "blocked"; targetKind?: string; targetId?: string; canvasId?: string;
     nodeId?: string; segmentId?: string; runId?: string; taskId?: string; status: "ready" | "working" | "needs_review" | "blocked" | "complete"; reason?: string;
 };
-export type DirectorReadiness = { revision: number; publishedVersion: number; source: "draft" | "published"; targets: DirectorReadinessTarget[]; modules: Record<string, unknown>; unresolved: string[]; nextAction: string; presentation?: DirectorPresentation };
+export type DirectorReadiness = { revision: number; publishedVersion: number; source: "draft" | "published"; targets: DirectorReadinessTarget[]; modules: Record<string, unknown>; unresolved: string[]; nextAction: string; presentation?: DirectorPresentation; sceneWorks?: DirectorProduction["workflow"]["sceneWorks"] };
 
 const fingerprint = (value: unknown) => crypto.createHash("sha256").update(JSON.stringify(value ?? null)).digest("hex");
-const batchRequestHash = (input: DirectorRunStart) => fingerprint({ idempotencyKey: input.idempotencyKey, workId: input.workId, expectedRevision: input.expectedRevision, version: input.version, targets: input.targets, scope: input.scope });
+const batchRequestHash = (input: DirectorRunStart) => fingerprint({ idempotencyKey: input.idempotencyKey, workId: input.workId, expectedRevision: input.expectedRevision, version: input.version, targets: input.targets, scope: input.scope, inputBasis: input.inputBasis, expectedCanvasRevision: input.expectedCanvasRevision, expectedPlanHash: input.expectedPlanHash });
 const promptHashBytes = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 
 export class ProductionConflictError extends Error {
@@ -126,6 +130,17 @@ export class EpisodeProductionService {
     }
 
     episodeInfo(episodeId: string): { id: string; canvasId?: string | null; fullPlot?: string | null } { const linked = this.linked(episodeId); return linked ? linked.service.episodeInfo(linked.id) : this.episode(episodeId); }
+    /** Check before accepting a preparation; create only after all targets are validated. */
+    preparationCanvas(id: string, create = false): string | null {
+        const linked = this.linked(id); if (linked) return linked.service.preparationCanvas(linked.id, create);
+        const owner = this.episode(id);
+        if (owner.canvasId) {
+            if (!this.db.getCanvasProject(owner.canvasId)) throw new Error("固定绑定的画布不存在，请恢复原画布");
+            return owner.canvasId;
+        }
+        if (this.projectScope) throw new Error("制作画布不存在");
+        return create ? ensureProductionCanvas(this.db, "episode", id, this.events).project.id : null;
+    }
     compilationRoot() { return path.join(this.legacyDataDir, "production-compilations"); }
     private continuityReports() { return new ProductionContinuityReports(path.join(this.compilationRoot(), "continuity")); }
 
@@ -237,6 +252,40 @@ export class EpisodeProductionService {
             activeRuns };
     }
 
+    bindCanvasTaskResult(id: string, taskId: string, target: { projectId: string; nodeId: string; kind: string; targets: Array<{ targetId: string; segmentId?: string; inputHash?: string; controlHash?: string }> }): ProductionRecord {
+        const linked = this.linked(id); if (linked) return linked.service.bindCanvasTaskResult(linked.id, taskId, target);
+        const task = this.db.getTask(taskId), current = this.get(id), project = this.db.getCanvasProject(target.projectId);
+        if (!task || task.status !== "succeeded" || !project || this.episodeInfo(id).canvasId !== project.id) throw new Error("任务归属或状态无效");
+        if (task.projectId !== target.projectId || task.nodeId !== target.nodeId) throw new Error("任务与目标节点归属不一致");
+        const actualOutputs = [...task.outputs, ...(Array.isArray(task.result?.media) ? task.result.media as any[] : []), ...(task.result?.storageKey ? [{ storageKey: task.result.storageKey }] : [])];
+        if (!actualOutputs.some(output => {
+            const media = output.storageKey && this.db.getMediaFile(String(output.storageKey));
+            return media && fs.existsSync(media.filePath) && fs.statSync(media.filePath).size > 0 && media.mimeType.startsWith(target.kind === "segment" ? "video/" : "image/");
+        })) throw new Error("成功任务缺少对应类型的真实归档媒体");
+        const defaults = this.db.canvasEditorDefaults(target.projectId);
+        return this.commit(id, `canvas-result:${taskId}`, current.revision, fingerprint({ taskId, target }), record => {
+            const draft = structuredClone(record.draft), node = (project.nodes as any[]).find(node => node.id === target.nodeId);
+            const outputs = [...task.outputs, ...(Array.isArray(task.result?.media) ? task.result.media as any[] : [])];
+            for (const item of target.targets) {
+                let outdated = true;
+                try { outdated = (item.controlHash || item.inputHash) !== inputHash(effectiveTargetInput(project, target.nodeId, item.segmentId, defaults)); } catch { /* Deleted target retains task history. */ }
+                if (item.segmentId) {
+                    const group = draft.clipGroups.find(group => group.id === item.targetId);
+                    if (group) group.inputOutdated = outdated;
+                } else {
+                    const assetId = target.kind === "keyframe" ? draft.director?.shotInputs[item.targetId]?.keyframeAssetId : item.targetId;
+                    const key = String(outputs.find(output => output.storageKey)?.storageKey || task.result?.storageKey || "");
+                    const media = key && this.db.getMediaFile(key);
+                    if (assetId && draft.director?.assets[assetId] && media) {
+                        Object.assign(draft.director.assets[assetId], { inputOutdated: outdated });
+                        if (!outdated) Object.assign(draft.director.assets[assetId], { storageKey: key, sha256: promptHashBytes(media.filePath), status: "generated", evidence: "", generationTaskId: taskId });
+                    }
+                }
+            }
+            return { ...record, draft, revision: record.revision + 1, updatedAt: new Date().toISOString() };
+        });
+    }
+
     registerNativeTask(id: string, taskId: string, target: NativeProductionTarget): ProductionRecord {
         const linked = this.linked(id); if (linked) return linked.service.registerNativeTask(linked.id, taskId, target);
         const current = this.get(id);
@@ -270,7 +319,7 @@ export class EpisodeProductionService {
         const canvasId = this.episodeInfo(id).canvasId;
         if (!canvasId) throw new Error("制作对象尚未关联画布");
         const owner = { kind: this.ownerKind, id };
-        const plan = compileProductionLayout({ canvasId, owner, production: production.draft, project, previous: this.db.getProductionLayoutPlan(canvasId) });
+        const plan = compileProductionLayout({ h3Defaults: record(this.db.getSetting("plugin:minimax-h3:defaults:v1")), canvasId, owner, production: production.draft, project, previous: this.db.getProductionLayoutPlan(canvasId) });
         this.db.saveProductionLayoutPlan(canvasId, plan);
         return plan;
     }
@@ -299,7 +348,15 @@ export class EpisodeProductionService {
         const frozen = layoutReceipt || this.db.getProductionPreparationLayout(operationId)?.receipt as ProductionLayoutReceipt | undefined;
         const frozenPlan = layoutPlan || this.db.getProductionPreparationLayout(operationId)?.plan;
         const canvasId = this.episodeInfo(id).canvasId;
-        const result = bindings.length ? this.edit(id, { operationId, expectedRevision, ops: bindings }, canvasPreparation) : this.get(id);
+        let completedResponse: ProductionRecord & { replayed?: boolean; layoutReceipt?: ProductionLayoutReceipt } | undefined;
+        const finishReceipt = (record: ProductionRecord & { replayed?: boolean }) => {
+            const completed = frozen && canvasId ? { ...frozen, canvasRevision: this.db.getCanvasProjectRevision(canvasId) || frozen.canvasRevision } : frozen;
+            const response = { ...record, ...(completed ? { layoutReceipt: completed } : {}), ...(referenceSync ? { referenceSync } : {}) };
+            this.db.db.prepare("UPDATE production_preparations SET receipt_json=? WHERE operation_id=?").run(JSON.stringify(response), operationId);
+            completedResponse = response;
+            return response;
+        };
+        const result = bindings.length ? this.edit(id, { operationId, expectedRevision, ops: bindings }, canvasPreparation, false, finishReceipt) : this.get(id);
         const projectionLayout = frozenPlan || (result.draft.director ? this.ensureLayoutPlan(id, result) : undefined);
         if (!bindings.length && canvasPreparation) {
             const canvasCommits: CanvasCommit[] = [];
@@ -315,7 +372,8 @@ export class EpisodeProductionService {
                 if (scriptOps.length) this.db.applyCanvasProjectOperations(canvasPreparation.projectId, Number(projectedProject.revision || 0), scriptOps,
                     { operationId: `${operationId}:scripts`, runtimeWrite: true, withinTransaction: true, deferredCommits: canvasCommits, source: { kind: "system", clientId: "production:scripts", label: "准备剧本文本节点" } });
                 const updatedProject = this.db.getCanvasProject(canvasPreparation.projectId)!;
-                if (result.draft.director) this.db.saveProductionLayoutPlan(canvasPreparation.projectId, compileProductionLayout({ canvasId: canvasPreparation.projectId, owner: { kind: this.ownerKind, id }, production: result.draft, project: updatedProject, previous: frozenPlan || null }));
+                if (result.draft.director) this.db.saveProductionLayoutPlan(canvasPreparation.projectId, compileProductionLayout({ h3Defaults: record(this.db.getSetting("plugin:minimax-h3:defaults:v1")), canvasId: canvasPreparation.projectId, owner: { kind: this.ownerKind, id }, production: result.draft, project: updatedProject, previous: frozenPlan || null }));
+                finishReceipt(result);
                 this.db.db.exec("COMMIT");
                 canvasCommits.forEach(commit => this.db.notifyCanvasCommit(commit));
             } catch (error) { this.db.db.exec("ROLLBACK"); throw error; }
@@ -327,10 +385,7 @@ export class EpisodeProductionService {
                 if (operations.length) this.db.applyCanvasProjectOperations(canvasId!, Number(canvas.revision || 0), operations, { operationId: `${operationId}:scripts`, runtimeWrite: true, source: { kind: "system", clientId: "production:scripts", label: "准备剧本文本节点" } });
             }
         }
-        const completed = frozen && canvasId ? { ...frozen, canvasRevision: this.db.getCanvasProjectRevision(canvasId) || frozen.canvasRevision } : frozen;
-        const response = { ...result, ...(completed ? { layoutReceipt: completed } : {}), ...(referenceSync ? { referenceSync } : {}) };
-        this.db.db.prepare("UPDATE production_preparations SET receipt_json=? WHERE operation_id=?").run(JSON.stringify(response), operationId);
-        return response;
+        return completedResponse || finishReceipt(result);
     }
 
     previewSharedAssetPromotion(id: string, assetId: string, expectedRevision: number) {
@@ -470,7 +525,7 @@ export class EpisodeProductionService {
         const targetPlan = (Array.isArray(planned.director!.source.asset_plan) ? planned.director!.source.asset_plan : []).find((item: any) => String(item.asset_id || item.id) === input.assetId) as Record<string, any> | undefined;
         if (!targetPlan) throw new Error(`正式资产计划中不存在 ${input.assetId}`);
         targetPlan.canvas_scope = "shared";
-        const layout = compileProductionLayout({ canvasId: episodeCanvasId!, owner: { kind: "episode", id }, production: planned, project: canvas, previous: previousLayout });
+        const layout = compileProductionLayout({ h3Defaults: record(this.db.getSetting("plugin:minimax-h3:defaults:v1")), canvasId: episodeCanvasId!, owner: { kind: "episode", id }, production: planned, project: canvas, previous: previousLayout });
         const layoutUnit = layout.units.find(unit => unit.targets.includes(`asset:${input.assetId}`) && unit.members.some(member => member.role === "asset"));
         const layoutNodeId = layoutUnit?.members.find(member => member.role === "asset")?.nodeId;
         if (!layoutUnit || !layoutNodeId) throw new Error(`共享资产 ${input.assetId} 缺少正式布局预留`);
@@ -583,8 +638,16 @@ export class EpisodeProductionService {
     }
 
     validateExecution(episodeId: string, version: number, targetIds?: string[]): void {
-        const record = this.get(episodeId);
-        if (record.publishedVersion !== version || !record.published?.director) throw Object.assign(new Error("Acheng 发布版本已变化"), { code: Object.values(record.draft.director?.assets || {}).some(asset => asset.sharedSource) ? "SHARED_ASSET_UPDATE" : "VERSION_CHANGED" });
+        const current = this.get(episodeId);
+        let record = current;
+        if (current.publishedVersion !== version) {
+            const frozen = this.version(episodeId, version).snapshot;
+            if (!frozen.settings.parallelScenes || !frozen.director || !current.published?.director || !targetIds?.length) throw Object.assign(new Error("Acheng 发布版本已变化"), { code: "VERSION_CHANGED" });
+            const scope = { targetIds };
+            if (compilationScopeInput(frozen.director, scope).inputHash !== compilationScopeInput(current.published.director, scope).inputHash) throw Object.assign(new Error("当前目标的源稿或引用版本已变化"), { code: "SHARED_ASSET_UPDATE" });
+            record = { ...current, published: frozen, publishedVersion: version };
+        }
+        if (!record.published?.director) throw new Error("缺少正式发布导演稿");
         this.checkEngine(record.published.director.engine);
         const canvasId = this.episodeInfo(episodeId).canvasId;
         if (!canvasId) throw new Error("制作稿未绑定画布");
@@ -600,18 +663,38 @@ export class EpisodeProductionService {
         }
     }
 
+    sceneReviewMedia(episodeId: string, targetIds: string[]) {
+        const current = this.get(episodeId), director = current.draft.director;
+        if (!director) throw new Error("缺少导演源稿");
+        return targetIds.map(targetId => {
+            const asset = director.assets[targetId];
+            if (!asset?.nodeId || !asset.storageKey) throw new Error(`素材 ${targetId} 尚未绑定媒体`);
+            const media = this.db.getMediaFile(asset.storageKey);
+            if (!media || !fs.existsSync(media.filePath) || !JSON.stringify(this.canvasNode(episodeId, asset.nodeId)).includes(asset.storageKey)) throw new Error(`素材 ${targetId} 的实际归档或节点绑定不一致`);
+            const sha256 = promptHashBytes(media.filePath);
+            if (sha256 !== asset.sha256) throw new Error(`素材 ${targetId} 的媒体版本已变化`);
+            return { targetId, nodeId: asset.nodeId, storageKey: asset.storageKey, sha256, filePath: media.filePath, mimeType: media.mimeType };
+        });
+    }
+
+    sceneWorkOwners(): string[] {
+        return (this.prepare("SELECT episode_id AS owner_id FROM episode_productions WHERE json_extract(draft_json, '$.director.workflow.sceneWorks') IS NOT NULL OR json_extract(draft_json, '$.director.workflow.sharedReviewWorks') IS NOT NULL OR json_extract(draft_json, '$.director.workflow.sharedReviewContinuation') IS NOT NULL").all() as Array<{ owner_id: string }>).map(row => row.owner_id);
+    }
+
     bindDirectorAsset(episodeId: string, version: number, assetId: string, storageKey: string): void {
         const linked = this.linked(episodeId); if (linked) return linked.service.bindDirectorAsset(linked.id, version, assetId, storageKey);
         this.db.db.exec("BEGIN IMMEDIATE");
         try {
             const current = this.get(episodeId);
             if (current.publishedVersion !== version) {
-                const snapshot = structuredClone(this.version(episodeId, version).snapshot);
+                const baseline = this.version(episodeId, version).snapshot;
+                const snapshot = structuredClone(baseline);
                 const asset = snapshot.director?.assets[assetId];
                 const media = this.db.getMediaFile(storageKey);
                 if (!asset?.nodeId || !media || !fs.existsSync(media.filePath) || !JSON.stringify(this.canvasNode(episodeId, asset.nodeId)).includes(storageKey)) throw new Error("历史任务媒体与原节点绑定不一致");
                 snapshot.director!.assets[assetId] = { ...asset, storageKey, sha256: promptHashBytes(media.filePath), status: "generated", inputOutdated: false };
                 this.prepare("UPDATE episode_production_versions SET snapshot_json=? WHERE episode_id=? AND version=?").run(JSON.stringify(snapshot), episodeId, version);
+                this.projectEquivalentHistoricalResult(episodeId, current, baseline, snapshot, version, { assetId, nodeId: asset.nodeId!, storageKey });
                 this.db.db.exec("COMMIT");
                 this.events?.publish({ type: "drama-production.updated", entityId: episodeId, payload: { publishedVersion: current.publishedVersion, historyVersion: version } });
                 return;
@@ -639,6 +722,39 @@ export class EpisodeProductionService {
         } catch (error) { this.db.db.exec("ROLLBACK"); throw error; }
     }
 
+    /** Opt-in parallel runs may project an unchanged target; origin version and task history remain intact. */
+    private projectEquivalentHistoricalResult(id: string, current: ProductionRecord, baseline: EpisodeProductionData, result: EpisodeProductionData, version: number,
+        target: { assetId?: string; shotId?: string; groupId?: string; nodeId: string; segmentId?: string; storageKey?: string }) {
+        if (!baseline.settings.parallelScenes || !current.published?.settings.parallelScenes || !baseline.director || !current.published.director || !current.draft.director) return;
+        const assetId = target.assetId || (target.shotId ? baseline.director.shotInputs[target.shotId]?.keyframeAssetId : undefined);
+        const targetId = target.groupId || assetId;
+        if (!targetId) return;
+        const scope = { targetIds: [targetId] };
+        const originHash = compilationScopeInput(baseline.director, scope).inputHash;
+        if (compilationScopeInput(current.published.director, scope).inputHash !== originHash || compilationScopeInput(current.draft.director, scope).inputHash !== originHash) return;
+        const node = this.canvasNode(id, target.nodeId);
+        const segment = target.groupId ? (record(node.metadata).segments as Record<string, any>[] || []).find(item => item.id === target.segmentId) : undefined;
+        const activeKey = target.groupId ? String(segment?.resultStorageKey || "") : String(resolveCanvasImageReferenceNode(node)[0]?.storageKey || record(node.metadata).storageKey || "");
+        if (target.storageKey && activeKey !== target.storageKey) return;
+        const published = structuredClone(current.published), draft = structuredClone(current.draft);
+        if (assetId && result.director?.assets[assetId]) {
+            const asset = { ...result.director.assets[assetId], resultSourceVersion: version };
+            published.director!.assets[assetId] = asset; draft.director!.assets[assetId] = structuredClone(asset);
+        }
+        if (target.shotId && result.keyframes[target.shotId]) {
+            published.keyframes[target.shotId] = result.keyframes[target.shotId]; draft.keyframes[target.shotId] = structuredClone(result.keyframes[target.shotId]);
+        }
+        if (target.groupId) {
+            const original = result.clipGroups.find(item => item.id === target.groupId);
+            const fresh = published.clipGroups.find(item => item.id === target.groupId), freshDraft = draft.clipGroups.find(item => item.id === target.groupId);
+            if (!original || !fresh || !freshDraft || fresh.nodeId !== original.nodeId || fresh.segmentId !== original.segmentId) return;
+            Object.assign(fresh, { sourceVersion: version, inputOutdated: false }); Object.assign(freshDraft, { sourceVersion: version, inputOutdated: false });
+        }
+        const updatedAt = new Date().toISOString();
+        this.prepare("UPDATE episode_productions SET revision=?, draft_json=?, published_json=?, updated_at=? WHERE episode_id=?").run(current.revision + 1, JSON.stringify(draft), JSON.stringify(published), updatedAt, id);
+        this.prepare("UPDATE episode_production_versions SET snapshot_json=? WHERE episode_id=? AND version=?").run(JSON.stringify(published), id, current.publishedVersion);
+    }
+
     get(episodeId: string): ProductionRecord {
         const linked = this.linked(episodeId); if (linked) return linked.service.get(linked.id);
         this.episode(episodeId);
@@ -649,11 +765,53 @@ export class EpisodeProductionService {
         const drama = this.db.listCanvasFolders().find(folder => this.projectScope ? folder.sharedAssetCanvasId === episodeId : folder.id === dramaId);
         const plan = drama?.productionPlan;
         if (plan?.confirmedAt && plan.confirmedOutline === drama?.outline) Object.assign(draft.settings, {
+            ...(plan.parallelScenes !== undefined ? { parallelScenes: plan.parallelScenes } : {}),
+            ...(plan.reviewPolicy ? { reviewPolicy: structuredClone(plan.reviewPolicy) } : {}),
             imageModel: plan.imageModel, imageModelsByKind: structuredClone(plan.imageModelsByKind), h3Model: plan.h3Model,
             ...(plan.storyboardImageMode ? { storyboardImageMode: plan.storyboardImageMode } : {}),
             ...(plan.videoAspectRatio !== undefined ? { videoAspectRatio: plan.videoAspectRatio, videoAspectRatioConfirmed: true } : {}),
         });
         return { episodeId, revision: 0, draft, published: null, publishedVersion: 0, updatedAt: "" };
+    }
+
+    /** Exact live blockers for a directed read, also enforced before committing edits. */
+    targetOccupancy(id: string, targetIds: string[]): ProductionTargetOccupancy[] {
+        const linked = this.linked(id); if (linked) return linked.service.targetOccupancy(linked.id, targetIds);
+        const current = this.get(id);
+        const segmentIds = new Set((current.draft.director?.source.segments as any[] || []).map(segment => String(segment.id)));
+        const wanted = new Set(targetIds.map(target => target.includes(":") ? target : segmentIds.has(target) ? `segment:${target}` : target));
+        const occupied: ProductionTargetOccupancy[] = [];
+        for (const batch of this.listBatches(id).filter(batch => ["pending", "running", "paused", "awaiting_review"].includes(batch.status) && !this.rejectedBatchTarget(batch, current.published))) {
+            for (const targetId of batch.targets.filter(target => wanted.has(target))) {
+                const tasks = batch.submitted.filter(task => `${task.kind === "h3" ? "segment" : "frame"}:${task.id}` === targetId || batch.targets.length === 1).map(task => ({ taskId: task.taskId, status: this.db.getTask(task.taskId)?.status || "unknown" }));
+                occupied.push({ targetId, status: batch.status, runId: batch.runId, taskIds: tasks.map(task => task.taskId), tasks,
+                    nextAction: { action: batch.status === "awaiting_review" ? "review" : "read_run", message: batch.status === "awaiting_review" ? "读取旧结果并完成审核或按用户决定退回；暂停不会释放目标。" : "读取原运行及精确任务状态，等待在途任务结束；不要换 runId 重提。", tool: this.projectScope ? "canvas_get_production_batch" : "drama_get_production_batch", input: { [this.projectScope ? "projectId" : "episodeId"]: id, runId: batch.runId } } });
+            }
+        }
+        const bindings = this.db.db.prepare(`SELECT b.task_id, b.target_kind, b.targets_json, t.status FROM production_task_bindings b JOIN tasks t ON t.id=b.task_id WHERE b.owner_kind=? AND b.owner_id=? AND b.status='submitted' AND t.status IN ('queued','running','awaiting_confirmation')`).all(this.ownerKind, id);
+        for (const binding of bindings) for (const target of JSON.parse(String(binding.targets_json))) {
+            const targetId = `${binding.target_kind === "keyframe" ? "frame" : binding.target_kind}:${target.targetId}`;
+            const taskId = String(binding.task_id), status = String(binding.status);
+            if (wanted.has(targetId) && !occupied.some(item => item.targetId === targetId && item.taskIds.includes(taskId))) occupied.push({ targetId, status, taskIds: [taskId], tasks: [{ taskId, status }], nextAction: { action: "wait", message: "读取精确任务，等待结束或处理原任务的确认请求；不重复提交。", tool: "h3_get_task", input: { taskId } } });
+        }
+        for (const run of this.pendingRuns().filter(run => run.episodeId === id)) {
+            for (const targetId of (run.targets || run.plan.clipGroupIds.map(groupId => `segment:${groupId}`)).filter(target => wanted.has(target))) {
+                if (occupied.some(item => item.targetId === targetId && item.runId === run.runId)) continue;
+                const tasks = run.submitted.map(task => ({ taskId: task.taskId, status: this.db.getTask(task.taskId)?.status || "unknown" }));
+                occupied.push({ targetId, status: run.status, runId: run.runId, taskIds: tasks.map(task => task.taskId), tasks, nextAction: { action: "read_run", message: "读取原版本运行并等待其结束，保留当前输入和媒体。", tool: this.projectScope ? "canvas_get_production_run" : "drama_get_production_run", input: { [this.projectScope ? "projectId" : "episodeId"]: id, version: run.version } } });
+            }
+        }
+        const canvasId = this.episodeInfo(id).canvasId;
+        const nodes = canvasId ? this.db.getCanvasProject(canvasId)?.nodes as any[] || [] : [];
+        for (const group of current.draft.clipGroups.filter(group => wanted.has(`segment:${group.id}`))) {
+            const nodeClips = record(nodes.find(node => node.id === group.nodeId)?.metadata).segments;
+            const clip = (Array.isArray(nodeClips) ? nodeClips : []).find((clip: any) => clip.id === group.segmentId);
+            const taskId = String(clip?.runtimeTaskId || ""), task = taskId ? this.db.getTask(taskId) : null;
+            const status = task?.status || (clip && ["queued", "running", "loading", "generating", "awaiting_confirmation"].includes(clip.status) ? "unknown" : "");
+            if (!["queued", "running", "awaiting_confirmation", "unknown"].includes(status) || occupied.some(item => item.targetId === `segment:${group.id}`)) continue;
+            occupied.push({ targetId: `segment:${group.id}`, status, taskIds: taskId ? [taskId] : [], tasks: taskId ? [{ taskId, status }] : [], nextAction: { action: "wait", message: "核对 Clip 与原任务运行态，确认结束后再修改；未知状态不能当作空闲。", tool: "h3_get_clip_runtime", input: { projectId: canvasId, nodeId: group.nodeId, segmentId: group.segmentId } } });
+        }
+        return occupied;
     }
 
     preflight(episodeId: string, raw: unknown): ProductionPreflight {
@@ -673,11 +831,12 @@ export class EpisodeProductionService {
             }
         }
         if (input.request.expectedRevision !== current.revision) diagnostics.push({ code: "REVISION_CONFLICT", path: "request.expectedRevision", message: `Current revision is ${current.revision}`, severity: "error", nextAction: { action: "refresh", message: "回读制作对象并核对新 revision 后再提交。", tool: this.projectScope ? "canvas_get_production" : "drama_get_production", input: { [this.projectScope ? "projectId" : "episodeId"]: episodeId } } });
+        if (input.action === "edit" && input.request.ops.some(operation => operation.type === "restore_archived_scene_results") && input.request.ops.length !== 1) diagnostics.push({ code: "ARCHIVED_RESULT_RESTORE_MIXED", path: "request.ops", message: "归档视频恢复必须单独提交，不能与其他制作编辑混批", severity: "error" });
         if (diagnostics.length) { result.nextActions = diagnostics.flatMap(item => item.nextAction ? [item.nextAction] : []); return result; }
         let candidate = current.draft;
         try {
             if (input.action === "edit") candidate = this.editedCandidate(episodeId, current, input.request).draft;
-            else if (input.action === "publish") candidate = this.publishedCandidate(current, input.request.stage);
+            else if (input.action === "publish") candidate = this.publishedCandidate(current, input.request.stage, input.request.scope);
             else if (input.action === "compile") {
                 if (!current.draft.director) throw new ProductionValidationError([{ code: "COMPILE_STAGE_NOT_READY", path: "director", message: "请先保存正式导演源稿，再准备编译。", severity: "error" }]);
                 const director = directorProductionSchema.parse(structuredClone(input.request.director || current.draft.director));
@@ -701,7 +860,14 @@ export class EpisodeProductionService {
                     });
                 }
                 candidate = { ...current.draft, director };
-            } else { this.batchCandidate(episodeId, current, input.request); candidate = current.published!; }
+             } else {
+                const checked = this.batchCandidate(episodeId, current, input.request);
+                if (checked.executionSnapshot) {
+                    const snapshot = checked.executionSnapshot;
+                    return { ...result, valid: true, generationReady: true, engine: null, readyTargets: snapshot.targets.map(target => target.id), blockedTargets: snapshot.blockedTargets, warnings: snapshot.warnings, planHash: snapshot.planHash, canvasRevision: snapshot.canvasRevision };
+                }
+                candidate = current.published!;
+            }
             result.engine = candidate.director?.engine || null;
             if (input.action !== "compile" && candidate.director && this.checkEngine === assertDirectorEngine) diagnostics.push(...validateAchengSource(candidate.director, input.action === "edit" ? "edit" : input.action === "publish" ? "publish" : "generate"));
         } catch (error) {
@@ -724,6 +890,25 @@ export class EpisodeProductionService {
     }
 
     workflowReadiness(episodeId: string, source: "draft" | "published" = "draft", runId?: string): DirectorReadiness {
+        const baseline = this.formalWorkflowReadiness(episodeId, source, runId);
+        if (source === "published") return baseline;
+        const data = this.get(episodeId).draft;
+        if (!data.director) return baseline;
+        const keyframeIds = new Set(Object.values(data.director.shotInputs).map(input => input.keyframeAssetId).filter(Boolean));
+        const ids = [...Object.keys(data.director.assets).filter(id => !keyframeIds.has(id)).map(id => `asset:${id}`), ...Object.keys(data.director.shotInputs).filter(id => data.director!.shotInputs[id].keyframeAssetId).map(id => `frame:${id}`), ...data.clipGroups.map(group => `segment:${group.id}`)];
+        try {
+            const checked = this.canvasExecution(episodeId, ids);
+            const ready = new Set(checked.targets.map(target => target.id));
+            const dependencyBlocked = new Map(checked.targets.filter(target => target.dependencies.length && data.director!.workflow.mediaProductionMode !== "automatic").map(target => [target.id, target.dependencies.map(dependency => dependency.targetId)]));
+            return { ...baseline, targets: ids.map(id => {
+                const previous = baseline.targets.find(target => target.id === id);
+                return { ...(previous || { id, targetId: id.slice(id.indexOf(":") + 1), kind: id.startsWith("segment:") ? "segment" as const : id.startsWith("frame:") ? "keyframe" as const : "asset" as const, title: id }),
+                    status: ready.has(id) && !dependencyBlocked.has(id) ? "ready" as const : "blocked" as const, blockers: [...checked.blockedTargets.filter(target => target.targetId === id).map(target => target.message), ...(dependencyBlocked.has(id) ? [`请先生成前置目标：${dependencyBlocked.get(id)!.join(", ")}`] : [])], notice: "使用当前已保存内容" };
+            }) };
+        } catch { return baseline; }
+    }
+
+    private formalWorkflowReadiness(episodeId: string, source: "draft" | "published" = "draft", runId?: string): DirectorReadiness {
         const current = this.get(episodeId);
         const selectedData = source === "published" ? current.published || current.draft : current.draft;
         const fallbackSettings = current.published?.settings || selectedData.settings;
@@ -846,7 +1031,7 @@ export class EpisodeProductionService {
         const compiled = (artifact: NonNullable<ReturnType<typeof artifactFor>> | undefined, id: string) => {
             const blockers: string[] = [];
             if (!artifact) blockers.push(`缺少 ${id} 的完整编译提示词`);
-            else if (artifact.status !== "ready" || artifact.sourceHash !== director.sourceHash || artifact.receipt.sourceHash !== director.sourceHash || artifact.receipt.promptHash !== artifact.sha256) blockers.push(`提示词需要由固定 Acheng 引擎重新编译`);
+            else if (artifact.status !== "ready" || !currentCompilationArtifact(director, artifact) || artifact.receipt.promptHash !== artifact.sha256) blockers.push(`提示词需要由固定 Acheng 引擎重新编译`);
             return blockers;
         };
         const dependencyBlockers = (ids: string[]) => [...new Set(ids)].flatMap(id => {
@@ -958,7 +1143,8 @@ export class EpisodeProductionService {
             while (chainEnd < segments.length - 1 && boundaryByFrom.get(String(segments[chainEnd].id))?.motionContext) chainEnd++;
             const executionTargets = segments.slice(chainStart, chainEnd + 1).map(item => `segment:${String(item.id)}`);
             const hasMotionChain = chainEnd > chainStart;
-            addTarget({ id: `segment:${segmentId}`, targetId: segmentId, kind: "segment", title: segmentId, status: blockers.length ? "blocked" : "ready", blockers: [...new Set(blockers)],
+            const completed = data.settings.parallelScenes && !blockers.length && this.completedSceneSegment(episodeId, data, segmentId);
+            addTarget({ id: `segment:${segmentId}`, targetId: segmentId, kind: "segment", title: segmentId, status: blockers.length ? "blocked" : completed ? "complete" : "ready", blockers: [...new Set(blockers)],
                 ...(artifact ? { artifactId: artifact.id } : {}), ...(hasMotionChain ? { executionTargets, notice: `Motion Context 使用同一连续组运行；本次范围从 ${String(segments[chainStart].id)} 到 ${String(segments[chainEnd].id)}。如果没有可复用 latent，将从组首段重新运行。` } : {}) });
         }
         let engineError = "";
@@ -974,7 +1160,30 @@ export class EpisodeProductionService {
         const next = targets.find(item => item.status === "ready") || targets.find(item => item.status === "needs_review") || targets.find(item => item.status === "blocked");
         const nextAction = next ? next.status === "ready" ? `可以推进：${next.title}` : next.status === "needs_review" ? `待审核：${next.title}` : `先补齐：${next.blockers[0]}` : blockedModules[0] || "等待 Acheng 继续完善制作稿";
         const presentation = this.directorPresentation(episodeId, current, current.draft.director || director, targets, runId);
-        return { revision: current.revision, publishedVersion: current.publishedVersion, source, targets, modules: moduleStates, unresolved: [...new Set([...director.unresolved, ...blockedModules, ...ungroupedShotIssues, ...invalidBoundaryIssues])], nextAction, ...(presentation ? { presentation } : {}) };
+        return { revision: current.revision, publishedVersion: current.publishedVersion, source, targets, modules: moduleStates, unresolved: [...new Set([...director.unresolved, ...blockedModules, ...ungroupedShotIssues, ...invalidBoundaryIssues])], nextAction, ...(presentation ? { presentation } : {}), sceneWorks: current.draft.director?.workflow.sceneWorks };
+    }
+
+    private completedSceneSegment(id: string, data: EpisodeProductionData, segmentId: string) {
+        const group = data.clipGroups.find(item => item.id === segmentId);
+        if (!data.director || !group?.nodeId || !group.segmentId || group.inputOutdated) return false;
+        const node = this.canvasNode(id, group.nodeId);
+        const clip = (record(node.metadata).segments as Record<string, unknown>[] || []).find(item => item.id === group.segmentId);
+        const storageKey = String(clip?.resultStorageKey || "");
+        const media = storageKey && this.db.getMediaFile(storageKey);
+        if (!media || !fs.existsSync(media.filePath)) return false;
+        return this.listBatches(id).some(batch => {
+            if (batch.status !== "succeeded") return false;
+            const submitted = batch.submitted.find(item => item.kind === "h3" && item.id === segmentId && item.nodeId === group.nodeId && item.segmentId === group.segmentId && item.status === "succeeded");
+            const task = submitted && this.db.getTask(submitted.taskId);
+            if (!task || task.status !== "succeeded" || task.projectId !== this.episodeInfo(id).canvasId || task.nodeId !== group.nodeId) return false;
+            const resultMedia = Array.isArray(task.result?.media) ? task.result.media as Record<string, unknown>[] : [];
+            if (![...task.outputs, ...resultMedia].some(item => item.storageKey === storageKey)) return false;
+            try {
+                const original = this.version(id, batch.version).snapshot.director;
+                const scope = { targetIds: [segmentId] };
+                return Boolean(original && compilationScopeInput(original, scope).inputHash === compilationScopeInput(data.director!, scope).inputHash);
+            } catch { return false; }
+        });
     }
 
     private directorPresentation(episodeId: string, current: ProductionRecord, director: DirectorProduction, targets: DirectorReadinessTarget[], requestedRunId?: string): DirectorPresentation | undefined {
@@ -1129,7 +1338,61 @@ export class EpisodeProductionService {
         return { key, workId: work.workId, owner, ...(aliases.length ? { aliases } : {}), workspace, action, ...(targetKind ? { targetKind } : {}), ...(targetId ? { targetId } : {}), ...(canvasId ? { canvasId } : {}), ...(nodeId ? { nodeId } : {}), ...(segmentId ? { segmentId } : {}), ...(taskId ? { taskId } : {}), ...(run?.runId ? { runId: run.runId } : {}), status, ...(reason ? { reason } : {}) };
     }
 
+    canvasEditorialState(id: string, targetIds: string[]) {
+        const current = this.get(id), canvasId = this.episodeInfo(id).canvasId, project = canvasId && this.db.getCanvasProject(canvasId);
+        if (!project) return [];
+        return targetIds.flatMap(requestedId => {
+            const targetId = requestedId.replace(/^(asset|frame|segment):/, "");
+            const group = current.draft.clipGroups.find(group => group.id === targetId);
+            const assetId = current.draft.director?.shotInputs[targetId]?.keyframeAssetId || targetId;
+            const nodeId = group?.nodeId || current.draft.director?.assets[assetId]?.nodeId;
+            const node = (project.nodes as any[]).find(node => node.id === nodeId);
+            const input = group ? node?.metadata?.segments?.find((clip: any) => clip.id === group.segmentId) : node?.metadata;
+            const projection = group ? input?.productionClipProjection : input?.productionImageProjection;
+            if (!input) return [];
+            const fields = group ? ["prompt", "referenceBindings", "storyboardShots", "duration", "styleTemplateId", "motionContextEnabled", "tailFrameContinuation"] : ["prompt", "model", "comfyParams", "size", "quality", "count"];
+            return [{ targetId, nodeId, segmentId: group?.segmentId, canvasRevision: project.revision, current: Object.fromEntries(fields.map(field => [field, input[field]])),
+                directorBaseline: projection?.nextValues || {}, manualFields: fields.filter(field => projection?.fieldHashes?.[field] && projection.fieldHashes[field] !== inputHash(input[field])), directorChanges: projection?.conflicts || [], inputOutdated: input.inputOutdated || false }];
+        });
+    }
+
+    canvasExecution(id: string, targets: string[], expectedCanvasRevision?: number): CanvasExecutionSnapshot {
+        const linked = this.linked(id); if (linked) return linked.service.canvasExecution(linked.id, targets, expectedCanvasRevision);
+        const current = this.get(id), canvasId = this.episodeInfo(id).canvasId;
+        const project = canvasId && this.db.getCanvasProject(canvasId);
+        if (!project) throw new Error("制作对象未关联可用画布");
+        if (expectedCanvasRevision !== undefined && expectedCanvasRevision !== Number(project.revision)) throw new Error("画布版本已变化，请刷新生成预检");
+        return captureCanvasInputs(project, current.draft, targets, record(this.db.getSetting(H3_DEFAULTS_KEY)), key => this.db.getMediaFile(key));
+    }
+
+    private canvasBatchCandidate(id: string, current: ProductionRecord, input: DirectorRunStart) {
+        if (current.revision !== input.expectedRevision) throw new ProductionConflictError(current);
+        const director = current.draft.director;
+        if (!director) throw new Error("生产对象缺少导演登记信息");
+        const executionSnapshot = this.canvasExecution(id, input.targets, input.expectedCanvasRevision);
+        if (input.expectedPlanHash && input.expectedPlanHash !== executionSnapshot.planHash) throw new Error("生成预检已过期，请刷新当前输入");
+        for (const batch of this.listBatches(id)) if (["pending", "running", "paused", "awaiting_review"].includes(batch.status) && batch.targets.some(target => input.targets.includes(target))) {
+            throw new ProductionValidationError([{ code: "TARGET_OCCUPIED", path: "targets", message: `目标已由运行 ${batch.runId} 占用`, severity: "error", blockingRun: { runId: batch.runId, status: batch.status, taskIds: batch.submitted.map(item => item.taskId) } }]);
+        }
+        if (!executionSnapshot.targets.length) throw new ProductionValidationError(executionSnapshot.blockedTargets.map(item => ({ ...item, path: "targets", severity: "error" as const })));
+        const selectedTargets = executionSnapshot.targets.map(target => target.id);
+        const plan: ProductionImpact = { changedSceneIds: [], affectedShotIds: [], imageShotIds: [], clipGroupIds: [], missingAssetNodeIds: [], assetIds: [] };
+        for (const target of selectedTargets) {
+            if (target.startsWith("segment:")) plan.clipGroupIds.push(target.slice(8));
+            else if (target.startsWith("frame:")) plan.imageShotIds.push(target.slice(6));
+            else plan.assetIds!.push(target.slice(6));
+        }
+        let nextDraft: EpisodeProductionData | undefined;
+        if (input.workId) {
+            if (director.workflow.currentWork?.workId !== input.workId) throw new Error("workId 不属于当前制作游标");
+            nextDraft = structuredClone(current.draft);
+            nextDraft.director!.workflow.currentWork = { ...director.workflow.currentWork!, runId: input.runId, inputRevision: current.revision + 1 };
+        }
+        return { selectedTargets, plan, workflow: director.workflow, runSettings: current.draft.settings, nextDraft, director, executionSnapshot };
+    }
+
     private batchCandidate(episodeId: string, current: ProductionRecord, input: DirectorRunStart) {
+            if (input.inputBasis === "canvas") return this.canvasBatchCandidate(episodeId, current, input);
             if (current.revision !== input.expectedRevision) throw new ProductionConflictError(current);
             if (current.publishedVersion !== input.version || !current.published?.director) throw new Error("请先发布当前 Acheng 制作稿");
             const currentWork = current.draft.director?.workflow.currentWork;
@@ -1141,7 +1404,13 @@ export class EpisodeProductionService {
             });
             const diagnostics: ProductionDiagnostic[] = [];
             if (!current.draft.director) throw new ProductionValidationError([{ code: "DIRECTOR_SOURCE_MISSING", path: "director", message: "缺少正式导演源稿。", severity: "error" }]);
-            if (fingerprint(executionSignature(current.draft.director)) !== fingerprint(executionSignature(current.published.director))) diagnostics.push({ code: "COMPILATION_STALE", path: "director", message: "制作源稿、参考映射或编译回执已变化；请先重新验证、编译并发布。", severity: "error" });
+            let changedExecution = fingerprint(executionSignature(current.draft.director)) !== fingerprint(executionSignature(current.published.director));
+            if (changedExecution && current.draft.settings.parallelScenes) {
+                const targetIds = input.targets.map(target => target.slice(target.indexOf(":") + 1));
+                try { changedExecution = compilationScopeInput(current.draft.director, { targetIds }).inputHash !== compilationScopeInput(current.published.director, { targetIds }).inputHash; }
+                catch { changedExecution = true; }
+            }
+            if (changedExecution) diagnostics.push({ code: "COMPILATION_STALE", path: "director", message: "当前目标的制作输入或引用已变化；请先编译并发布。", severity: "error" });
             const workflow = current.draft.director.workflow;
             const mediaMode = workflow.mediaProductionMode || "per_item";
             if (mediaMode === "prompt_only") diagnostics.push({ code: "MEDIA_MODE_PROMPT_ONLY", path: "director.workflow.mediaProductionMode", message: "当前设置为仅提示词，切换媒体生产模式后才能提交生成。", severity: "error", nextAction: { action: "configure", message: "根据用户生成意图确认并保存媒体生产模式；不要直接重试。" } });
@@ -1162,6 +1431,22 @@ export class EpisodeProductionService {
                 for (const segment of segmentItems.slice(start, end + 1)) expandedTargets.add(`segment:${String(segment.id)}`);
             }
             const selectedTargets = [...expandedTargets];
+            if (current.draft.settings.parallelScenes && !current.draft.settings.reviewPolicy) diagnostics.push({ code: "REVIEW_POLICY_REQUIRED", path: "settings.reviewPolicy", message: "请在剧目开局选择审核模式。", severity: "error" });
+            if (current.draft.settings.parallelScenes) for (const target of selectedTargets.filter(id => id.startsWith("segment:"))) {
+                const segment = segmentItems.find(item => String(item.id) === target.slice("segment:".length));
+                const ids = Array.isArray(segment?.shot_ids) ? segment.shot_ids as string[] : [];
+                const scene = productionSceneEntries(current.published.director.source).find(item => ids.length > 0 && ids.every(shotId => item.shotIds.includes(shotId)));
+                const work = Object.values(current.draft.director?.workflow.sceneWorks || {}).reverse().find(item => item.sceneId === scene?.id && item.status !== "failed" && item.review?.verdict === "approved");
+                if (!work || work.review!.inputHash !== compilationScopeInput(current.published.director, { sceneId: work.sceneId }).inputHash) diagnostics.push({ code: "SCENE_REVIEW_REQUIRED", path: "workflow.sceneWorks", targetId: target, message: "本场开拍审核缺失或已过期。", severity: "error" });
+                else {
+                    try {
+                        const scope = compilationScopeInput(current.published.director, { sceneId: work.sceneId });
+                        const media = this.sceneReviewMedia(episodeId, scope.targetIds.filter(id => current.published!.director!.assets[id]?.storageKey));
+                        const reviewedHash = work.review!.mediaInputHash || productionReviewHash(work.review!.inputHash, work.review!.media);
+                        if (reviewedHash !== productionReviewHash(scope.inputHash, media)) throw new Error("本场审核图片已变化");
+                    } catch (error) { diagnostics.push({ code: "SCENE_REVIEW_MEDIA_CHANGED", path: "workflow.sceneWorks", targetId: target, message: error instanceof Error ? error.message : String(error), severity: "error" }); }
+                }
+            }
             const missing = selectedTargets.filter(id => !targets.has(id));
             for (const targetId of missing) diagnostics.push({ code: "TARGET_NOT_FOUND", path: "request.targets", targetId, message: `生产目标不存在：${targetId}`, severity: "error" });
             const selectedTargetSet = new Set(selectedTargets);
@@ -1213,7 +1498,31 @@ export class EpisodeProductionService {
                 if (workTarget && !selectedTargetSet.has(workTarget)) throw new Error("当前 currentWork 目标不在授权 run 范围内");
                 nextDraft.director!.workflow.currentWork = { ...activeWork, inputRevision: current.revision + 1, sourceHash: nextDraft.director!.sourceHash, runId: input.runId };
             }
-            return { selectedTargets, plan, workflow, runSettings, nextDraft, director };
+            const executionProject = structuredClone(this.db.getCanvasProject(canvasId)!);
+            const nodes = executionProject.nodes as any[];
+            for (const id of selectedTargets) {
+                if (id.startsWith("segment:")) {
+                    const group: EpisodeProductionData["clipGroups"][number] | undefined = current.published.clipGroups.find(group => group.id === id.slice(8));
+                    const node: any = nodes.find(node => node.id === group?.nodeId);
+                    const index = node?.metadata?.segments?.findIndex((segment: any) => segment.id === group?.segmentId);
+                    if (group?.segmentId && index >= 0) node.metadata.segments[index] = buildProductionClip(executionProject, current.published, group, group.segmentId, runSettings);
+                } else {
+                    const assetId = id.startsWith("frame:") ? director.shotInputs[id.slice(6)]?.keyframeAssetId : id.slice(6);
+                    const node = nodes.find(node => node.id === director.assets[assetId || ""]?.nodeId);
+                    const artifact = director.artifacts.find(artifact => artifact.kind === "image" && artifact.targetId === assetId);
+                    if (!node || !artifact) continue;
+                    const sourceId = node.metadata?.productionImageInput?.sourceNodeId || node.id;
+                    const source = nodes.find(node => node.id === sourceId) || node;
+                    const manifest = compiledImageInput(director, artifact, source.id);
+                    node.metadata = { ...node.metadata, prompt: artifact.prompt, productionImageInput: manifest, productionImageProjection: undefined };
+                    source.metadata = { ...source.metadata, prompt: artifact.prompt, productionImageInput: manifest, productionImageProjection: undefined };
+                    executionProject.connections = (executionProject.connections as any[]).filter(edge => edge.toNodeId !== source.id);
+                    for (const [order, ref] of artifact.references.entries()) (executionProject.connections as any[]).push({ id: `published:${source.id}:${order}`, fromNodeId: ref.nodeId, toNodeId: source.id, order });
+                }
+            }
+            const captured = captureCanvasInputs(executionProject, current.published, selectedTargets, record(this.db.getSetting(H3_DEFAULTS_KEY)), key => this.db.getMediaFile(key));
+            const executionSnapshot = captured.targets.length === selectedTargets.length ? { ...captured, inputBasis: "published" as const } : null;
+            return { selectedTargets, plan, workflow, runSettings, nextDraft, director, executionSnapshot };
     }
 
     startBatch(episodeId: string, raw: unknown): ProductionBatch {
@@ -1230,13 +1539,13 @@ export class EpisodeProductionService {
             }
             const current = this.get(episodeId);
             this.finishRejectedBatches(episodeId, current.published);
-            const { selectedTargets, plan, workflow, runSettings, nextDraft, director } = this.batchCandidate(episodeId, current, input);
+            const { selectedTargets, plan, workflow, runSettings, nextDraft, director, executionSnapshot } = this.batchCandidate(episodeId, current, input);
             const now = new Date().toISOString();
             const productionRevision = nextDraft ? current.revision + 1 : current.revision;
             if (nextDraft) this.prepare("UPDATE episode_productions SET revision=?, draft_json=?, updated_at=? WHERE episode_id=?")
                 .run(productionRevision, JSON.stringify(nextDraft), now, episodeId);
-            this.prepare("INSERT INTO episode_production_batches (run_id, episode_id, idempotency_key, request_hash, version, source_revision, status, targets_json, plan_json, engine_json, settings_json, submitted_json, error, pause_requested, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, '[]', NULL, 0, ?, ?)")
-                .run(input.runId, episodeId, input.idempotencyKey, requestHash, input.version, current.revision, JSON.stringify(selectedTargets), JSON.stringify(plan), JSON.stringify(director.engine), JSON.stringify({ ...runSettings, workflow: { ...workflow, runScope: input.scope, currentWorkId: input.workId } }), now, now);
+            this.prepare("INSERT INTO episode_production_batches (run_id, episode_id, idempotency_key, request_hash, version, source_revision, status, targets_json, plan_json, engine_json, settings_json, submitted_json, error, pause_requested, created_at, updated_at, execution_snapshot_json) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, '[]', NULL, 0, ?, ?, ?)")
+                .run(input.runId, episodeId, input.idempotencyKey, requestHash, input.version, current.revision, JSON.stringify(selectedTargets), JSON.stringify(plan), JSON.stringify(director.engine), JSON.stringify({ ...runSettings, workflow: { ...workflow, runScope: input.scope, currentWorkId: input.workId } }), now, now, executionSnapshot ? JSON.stringify(executionSnapshot) : null);
             const created = this.getBatch(episodeId, input.runId);
             if (!created) throw new Error("生产批次未被当前制作对象持久化");
             this.db.db.exec("COMMIT");
@@ -1252,6 +1561,52 @@ export class EpisodeProductionService {
         return row ? this.batchFromRow(row) : null;
     }
 
+    resolveCanvasDependency(id: string, runId: string, targetId: string, nodeId: string, taskId: string, storageKey: string): CanvasExecutionSnapshot {
+        const linked = this.linked(id); if (linked) return linked.service.resolveCanvasDependency(linked.id, runId, targetId, nodeId, taskId, storageKey);
+        this.db.db.exec("BEGIN IMMEDIATE");
+        try {
+            const batch = this.getBatch(id, runId), snapshot = batch?.executionSnapshot;
+            const target = snapshot?.targets.find(target => target.id === targetId);
+            const dependencies = target?.dependencies.filter(dependency => dependency.nodeId === nodeId);
+            const task = this.db.getTask(taskId), media = this.db.getMediaFile(storageKey);
+            if (!snapshot || !target || !dependencies?.length || !task || task.status !== "succeeded" || !media) throw new Error("前置任务或冻结依赖无效");
+            const outputs = [...task.outputs, ...(Array.isArray(task.result?.media) ? task.result.media as any[] : [])];
+            if (!outputs.some(output => output.storageKey === storageKey) || !dependencies.every(dep => batch!.submitted.some(item => item.id === dep.targetId && item.taskId === taskId))) throw new Error("媒体不属于本批次精确前置任务");
+            for (const dependency of dependencies) {
+                if (dependency.taskId && (dependency.taskId !== taskId || dependency.storageKey !== storageKey)) throw new Error("已解析依赖不可替换");
+                Object.assign(dependency, { taskId, storageKey, sha256: promptHashBytes(media.filePath) });
+            }
+            const nodes = snapshot.project.nodes as any[], node = nodes.find(node => node.id === target.nodeId);
+            if (target.segmentId) {
+                const segment = node?.metadata?.segments?.find((segment: any) => segment.id === target.segmentId);
+                for (const dependency of dependencies) {
+                    const binding = segment?.referenceBindings?.find((binding: any) => binding.id === dependency.bindingId);
+                    if (!binding) throw new Error("冻结 Clip 参考绑定不存在");
+                    Object.assign(binding, { storageKey });
+                    const catalog = snapshot.project.referenceCatalog as any[] || [];
+                    const existing = catalog.find(asset => asset.id === binding.assetId);
+                    const asset = { id: binding.assetId, mediaType: "image", sourceNodeId: nodeId, storageKey, sha256: dependency.sha256 };
+                    if (existing) Object.assign(existing, asset); else catalog.push(asset);
+                    snapshot.project.referenceCatalog = catalog;
+                }
+            } else {
+                const refs = target.command.references || [];
+                if (!refs.some(ref => ref.sourceNodeId === nodeId)) refs.push({ id: nodeId, sourceNodeId: nodeId, storageKey, sha256: dependencies[0].sha256, type: "image" });
+                const sourceNode = nodes.find(node => node.id === nodeId);
+                if (sourceNode) sourceNode.metadata = { ...sourceNode.metadata, storageKey, images: [{ storageKey, id: storageKey }], mainImageId: storageKey };
+                target.command.references = refs;
+                // Reorder resolved references by the frozen canvas edge order.
+                const source = nodes.find(node => node.id === target.sourceNodeId);
+                const order = (snapshot.project.connections as any[]).filter(edge => edge.toNodeId === source?.id).sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).map(edge => edge.fromNodeId);
+                refs.sort((a, b) => order.indexOf(String(a.sourceNodeId || a.id)) - order.indexOf(String(b.sourceNodeId || b.id)));
+            }
+            target.inputHash = inputHash(effectiveTargetInput(snapshot.project, target.nodeId, target.segmentId, snapshot.defaults));
+            this.prepare("UPDATE episode_production_batches SET execution_snapshot_json=? WHERE episode_id=? AND run_id=?").run(JSON.stringify(snapshot), id, runId);
+            this.db.db.exec("COMMIT");
+            return snapshot;
+        } catch (error) { this.db.db.exec("ROLLBACK"); throw error; }
+    }
+
     listBatches(episodeId: string): ProductionBatch[] {
         const linked = this.linked(episodeId); if (linked) return linked.service.listBatches(linked.id);
         this.episode(episodeId);
@@ -1260,7 +1615,7 @@ export class EpisodeProductionService {
 
     batchForRun(episodeId: string, runId: string): ProductionRun | null {
         const batch = this.getBatch(episodeId, runId);
-        return batch ? { episodeId, version: batch.version, runId, targets: batch.targets, engine: batch.engine, settings: batch.settings, status: batch.status, plan: batch.plan, submitted: batch.submitted, error: batch.error, updatedAt: batch.updatedAt } : null;
+        return batch ? { episodeId, version: batch.version, runId, targets: batch.targets, engine: batch.engine, settings: batch.settings, executionSnapshot: batch.executionSnapshot, status: batch.status, plan: batch.plan, submitted: batch.submitted, error: batch.error, updatedAt: batch.updatedAt } : null;
     }
 
     updateBatch(run: ProductionRun, patch: Partial<Pick<ProductionBatch, "status" | "error" | "pauseRequested">> = {}): void {
@@ -1272,6 +1627,27 @@ export class EpisodeProductionService {
         this.prepare("UPDATE episode_production_batches SET status=?, submitted_json=?, error=?, pause_requested=?, updated_at=? WHERE episode_id=? AND run_id=?")
             .run(status, JSON.stringify(run.submitted), patch.error === undefined ? run.error : patch.error, patch.pauseRequested === undefined ? Number(batch.pauseRequested) : Number(patch.pauseRequested), new Date().toISOString(), run.episodeId, run.runId);
         this.events?.publish({ type: "drama-production.updated", entityId: run.episodeId, payload: { revision: batch.sourceRevision, publishedVersion: batch.version, runId: run.runId, status } });
+    }
+
+    retireBatch(episodeId: string, runId: string, reason: string): ProductionBatch {
+        const linked = this.linked(episodeId); if (linked) return linked.service.retireBatch(linked.id, runId, reason);
+        this.db.db.exec("BEGIN IMMEDIATE");
+        try {
+            const batch = this.getBatch(episodeId, runId);
+            if (!batch) throw new Error(`找不到生产运行 ${runId}`);
+            if (["succeeded", "failed"].includes(batch.status)) { this.db.db.exec("COMMIT"); return batch; }
+            if (!["paused", "awaiting_review"].includes(batch.status)) throw new Error("只能结束已暂停或待审核的历史批次");
+            for (const item of batch.submitted) {
+                const task = this.db.getTask(item.taskId);
+                if (!task || !["succeeded", "failed", "cancelled"].includes(task.status)) throw new Error(`批次仍有在途或未知任务：${item.taskId}`);
+            }
+            const run = this.batchForRun(episodeId, runId);
+            if (!run) throw new Error(`找不到生产运行 ${runId}`);
+            this.updateBatch(run, { status: "failed", pauseRequested: false, error: `用户结束历史批次：${reason}` });
+            const result = this.getBatch(episodeId, runId)!;
+            this.db.db.exec("COMMIT");
+            return result;
+        } catch (error) { this.db.db.exec("ROLLBACK"); throw error; }
     }
 
     batchPauseRequested(episodeId: string, runId: string): boolean {
@@ -1294,7 +1670,15 @@ export class EpisodeProductionService {
         const linked = this.linked(episodeId); if (linked) return linked.service.resumeBatch(linked.id, runId);
         const batch = this.getBatch(episodeId, runId);
         if (!batch) throw new Error(`找不到生产运行 ${runId}`);
+        if (batch.settings.parallelScenes && batch.status === "running" && batch.pauseRequested) {
+            this.prepare("UPDATE episode_production_batches SET pause_requested=0, updated_at=? WHERE episode_id=? AND run_id=?").run(new Date().toISOString(), episodeId, runId);
+            return this.getBatch(episodeId, runId)!;
+        }
         if (!["paused", "pending", "awaiting_review"].includes(batch.status)) throw new Error(`该生产运行不能继续：${batch.status}`);
+        if (batch.executionSnapshot) {
+            this.prepare("UPDATE episode_production_batches SET status='pending', pause_requested=0, updated_at=? WHERE episode_id=? AND run_id=?").run(new Date().toISOString(), episodeId, runId);
+            return this.getBatch(episodeId, runId)!;
+        }
         const currentProduction = this.get(episodeId);
         const currentDirector = currentProduction.published?.director;
         const returned = currentDirector && batch.targets.find(id => {
@@ -1387,19 +1771,32 @@ export class EpisodeProductionService {
         });
     }
 
-    private editedCandidate(episodeId: string, record: ProductionRecord, input: ProductionEdit, canvasCommits?: CanvasCommit[]) {
+    private editedCandidate(episodeId: string, record: ProductionRecord, input: ProductionEdit, canvasCommits?: CanvasCommit[], sceneRuntime = false) {
             const draft = structuredClone(record.draft);
             const published = record.published ? structuredClone(record.published) : null;
             for (const [index, operation] of input.ops.entries()) {
                 try {
                 if (operation.type === "upgrade_director_continuity" && operation.previewRevision !== record.revision) throw new Error("CONTINUITY_UPGRADE_PREVIEW_STALE: 制作修订已变化，请重新预览");
-                if (operation.type === "select_director_result") {
+                if (operation.type === "restore_archived_scene_results") {
+                    if (!published) throw new Error("尚无发布版本，不能核验迁移前 H3 结果");
+                    this.restoreArchivedSceneResults(episodeId, record, draft, published, operation, input.operationId, canvasCommits);
+                } else if (operation.type === "select_director_result") {
                     if (!published) throw new Error("尚无可选用历史结果的发布版本");
                     this.selectDirectorResult(episodeId, record, draft, published, operation, input.operationId, canvasCommits);
                 } else if (operation.type === "review_director_asset") {
-                    if (!published) throw new Error("尚无可审核的发布版本");
-                    this.applyDirectorAssetReview(episodeId, draft, published, operation, record.publishedVersion);
-                } else this.apply(episodeId, draft, operation, record.publishedVersion);
+                    const asset = draft.director?.assets[operation.assetId];
+                    if (operation.version === 0 && asset?.generationTaskId) {
+                        const task = this.db.getTask(String(asset.generationTaskId));
+                        const media = this.db.getMediaFile(operation.storageKey);
+                        const outputs = task ? [...task.outputs, ...(Array.isArray(task.result?.media) ? task.result.media as any[] : [])] : [];
+                        if (!task || task.status !== "succeeded" || task.nodeId !== operation.nodeId || asset.nodeId !== operation.nodeId || asset.storageKey !== operation.storageKey
+                            || draft.director!.sourceHash !== operation.sourceHash || !outputs.some(output => output.storageKey === operation.storageKey) || !media || promptHashBytes(media.filePath) !== operation.sha256) throw new Error("审核对象与本次成功归档任务不一致");
+                        Object.assign(asset, { status: operation.verdict, evidence: operation.evidence, sha256: operation.sha256 });
+                    } else {
+                        if (!published) throw new Error("当前素材缺少可核验的生成来源");
+                        this.applyDirectorAssetReview(episodeId, draft, published, operation, record.publishedVersion);
+                    }
+                } else this.apply(episodeId, draft, operation, record.publishedVersion, canvasCommits);
                 } catch (error) {
                     if (error instanceof ProductionValidationError) throw error;
                     throw new ProductionValidationError([{ code: "INVALID_OPERATION", path: `request.ops.${index}`, targetId: "id" in operation ? String(operation.id) : undefined, message: error instanceof Error ? error.message : String(error), severity: "error" }]);
@@ -1435,6 +1832,20 @@ export class EpisodeProductionService {
                     }
                 }
             }
+            if (!sceneRuntime && fingerprint({ works: draft.director?.workflow.sceneWorks, review: draft.director?.workflow.sharedReview, sharedWorks: draft.director?.workflow.sharedReviewWorks, sharedAssets: draft.director?.workflow.sharedAssetReviews, sharedContinuation: draft.director?.workflow.sharedReviewContinuation }) !== fingerprint({ works: record.draft.director?.workflow.sceneWorks, review: record.draft.director?.workflow.sharedReview, sharedWorks: record.draft.director?.workflow.sharedReviewWorks, sharedAssets: record.draft.director?.workflow.sharedAssetReviews, sharedContinuation: record.draft.director?.workflow.sharedReviewContinuation })) throw new Error("SCENE_RUNTIME_OWNED: 场次工作与审核记录只能通过场次协调服务更新");
+            const before = record.draft.director, after = draft.director;
+            if (before && after) {
+                const priorSegments = before.source.segments as any[] || [], nextSegments = after.source.segments as any[] || [];
+                const priorShots = before.source.shots as any[] || [], nextShots = after.source.shots as any[] || [];
+                const globalChange = fingerprint(before.source.ledger) !== fingerprint(after.source.ledger) || fingerprint(before.source.style_lock) !== fingerprint(after.source.style_lock);
+                const changed = [...new Set([...priorSegments, ...nextSegments].map(segment => String(segment.id)))].filter(id => {
+                    const left = priorSegments.find(segment => segment.id === id), right = nextSegments.find(segment => segment.id === id);
+                    const shotIds = new Set([...(left?.shot_ids || []), ...(right?.shot_ids || [])]);
+                    return globalChange || fingerprint(left) !== fingerprint(right) || fingerprint(priorShots.filter(shot => shotIds.has(shot.id))) !== fingerprint(nextShots.filter(shot => shotIds.has(shot.id))) || fingerprint(before.boundaries.filter(edge => edge.from === id)) !== fingerprint(after.boundaries.filter(edge => edge.from === id));
+                });
+                const occupied = this.targetOccupancy(episodeId, changed);
+                if (occupied.length) throw new ProductionValidationError(occupied.map((item): ProductionDiagnostic => ({ code: "TARGET_OCCUPIED", path: "request.ops", targetId: item.targetId, severity: "error", message: `目标 ${item.targetId} 被 ${item.runId || item.taskIds.join(", ") || "运行态待确认"} 占用 (${item.status})；${item.nextAction.message}`, ...(item.runId || item.taskIds.length ? { blockingRun: { runId: item.runId || item.taskIds[0], status: item.status, taskIds: item.taskIds } } : {}), nextAction: item.nextAction })));
+            }
             this.validateGraph(draft);
             for (const operation of input.ops) if (operation.type === "review_keyframe") {
                 const link = published?.keyframes[operation.shotId];
@@ -1450,12 +1861,13 @@ export class EpisodeProductionService {
     }
 
 
-    edit(episodeId: string, raw: unknown, canvasPreparation?: { projectId: string; expectedCanvasRevision: number; operationId: string; operations: CanvasOperation[] }): ProductionRecord & { replayed?: boolean; impact?: ProductionImpact } {
-        const linked = this.linked(episodeId); if (linked) return linked.service.edit(linked.id, raw, canvasPreparation);
+    edit(episodeId: string, raw: unknown, canvasPreparation?: { projectId: string; expectedCanvasRevision: number; operationId: string; operations: CanvasOperation[] }, sceneRuntime = false, beforeCommit?: (record: ProductionRecord) => void): ProductionRecord & { replayed?: boolean; impact?: ProductionImpact } {
+        const linked = this.linked(episodeId); if (linked) return linked.service.edit(linked.id, raw, canvasPreparation, sceneRuntime, beforeCommit);
         const input = productionEditSchema.parse(raw);
+        if (input.ops.some(operation => operation.type === "restore_archived_scene_results") && input.ops.length !== 1) throw new Error("归档视频恢复必须单独提交，不能与其他制作编辑混批");
         const canvasCommits: CanvasCommit[] = [];
         const result = this.commit(episodeId, input.operationId, input.expectedRevision, fingerprint(input), (record) => {
-            const { draft, published } = this.editedCandidate(episodeId, record, input, canvasCommits);
+            const { draft, published } = this.editedCandidate(episodeId, record, input, canvasCommits, sceneRuntime);
             if (this.projectScope && published?.director) for (const operation of input.ops) {
                 if (operation.type === "review_director_asset" && operation.verdict === "approved") registerApprovedSharedAsset(this.db, episodeId, record.publishedVersion, operation.assetId, published.director);
             }
@@ -1477,7 +1889,7 @@ export class EpisodeProductionService {
                     operationId: canvasPreparation.operationId, runtimeWrite: true, withinTransaction: true, deferredCommits: commits, source: { kind: "system", clientId: "production:layout", label: "准备制作布局" },
                 });
             }
-        } : undefined);
+        } : undefined, beforeCommit);
         canvasCommits.forEach(commit => this.db.notifyCanvasCommit(commit));
         return result;
     }
@@ -1513,9 +1925,10 @@ export class EpisodeProductionService {
         const linked = this.linked(episodeId); if (linked) return linked.service.publish(linked.id, raw);
         const input = productionPublishSchema.parse(raw);
         return this.commit(episodeId, input.operationId, input.expectedRevision, fingerprint(input), (record) => {
-            const candidate = this.publishedCandidate(record, input.stage);
+            const candidate = this.publishedCandidate(record, input.stage, input.scope);
             if (input.stage === "director" && candidate.director && (candidate.director.source.ledger as any)?.contract_version === 2) {
-                const readySegments = candidate.director.artifacts.filter(artifact => artifact.kind === "h3" && artifact.status === "ready");
+                const scopedIds = input.scope ? compilationScopeInput(candidate.director, input.scope).targetIds : undefined;
+                const readySegments = candidate.director.artifacts.filter(artifact => artifact.kind === "h3" && artifact.status === "ready" && (!scopedIds || scopedIds.includes(artifact.targetId)));
                 if (readySegments.length) {
                     const continuity = this.continuityForDirector(episodeId, candidate.director);
                     const targetIds = readySegments.map(artifact => String(artifact.targetId || artifact.id));
@@ -1561,7 +1974,8 @@ export class EpisodeProductionService {
                 const segments = record(node.metadata).segments;
                 if (!isH3NodeType(node.type) || !Array.isArray(segments) || !segments.some((segment) => record(segment).id === input.segmentId)) throw new Error("运行 Clip 绑定不是当前分集的 H3 片段");
             }
-            const snapshot = structuredClone(historical ? this.version(episodeId, version).snapshot : current.published);
+            const baseline = historical ? this.version(episodeId, version).snapshot : current.published;
+            const snapshot = structuredClone(baseline);
             const draft = structuredClone(current.draft);
             if (input.shotId) {
                 if (!snapshot.shots.some((shot) => shot.id === input.shotId)) throw new Error("镜头不在发布版本中");
@@ -1586,6 +2000,7 @@ export class EpisodeProductionService {
             }
             if (historical) {
                 this.prepare("UPDATE episode_production_versions SET snapshot_json=? WHERE episode_id=? AND version=?").run(JSON.stringify(snapshot), episodeId, version);
+                this.projectEquivalentHistoricalResult(episodeId, current, baseline, snapshot, version, input);
                 this.db.db.exec("COMMIT");
                 this.events?.publish({ type: "drama-production.updated", entityId: episodeId, payload: { publishedVersion: current.publishedVersion, historyVersion: version } });
                 return current;
@@ -1605,9 +2020,21 @@ export class EpisodeProductionService {
 
     restore(episodeId: string, version: number, operationId: string, expectedRevision: number): ProductionRecord & { replayed?: boolean } {
         const linked = this.linked(episodeId); if (linked) return linked.service.restore(linked.id, version, operationId, expectedRevision);
-        return this.commit(episodeId, operationId, expectedRevision, fingerprint({ version, operationId, expectedRevision }), (record) => ({
-            ...record, revision: record.revision + 1, draft: structuredClone(this.version(episodeId, version).snapshot), updatedAt: new Date().toISOString(),
-        }));
+        return this.commit(episodeId, operationId, expectedRevision, fingerprint({ version, operationId, expectedRevision }), (record) => {
+            const draft = structuredClone(this.version(episodeId, version).snapshot);
+            if (draft.director && record.draft.director) {
+                draft.director.workflow.sceneWorks = structuredClone(record.draft.director.workflow.sceneWorks);
+                draft.director.workflow.sharedReview = structuredClone(record.draft.director.workflow.sharedReview);
+                draft.director.workflow.sharedReviewWorks = structuredClone(record.draft.director.workflow.sharedReviewWorks);
+                draft.director.workflow.sharedAssetReviews = structuredClone(record.draft.director.workflow.sharedAssetReviews);
+                if (record.draft.director.workflow.sharedReviewContinuation) draft.director.workflow.sharedReviewContinuation = { ...structuredClone(record.draft.director.workflow.sharedReviewContinuation), status: "paused", error: "已恢复历史源稿，需明确重新启动共同审核" };
+                for (const work of Object.values(draft.director.workflow.sharedReviewWorks || {})) if (!["succeeded", "failed"].includes(work.status)) { work.status = "paused"; work.error = "源稿已恢复，请核对共同审核输入后恢复"; }
+                for (const work of Object.values(draft.director.workflow.sceneWorks || {})) if (!["succeeded", "failed"].includes(work.status)) {
+                    work.status = "paused"; work.error = "制作源稿已恢复历史版本，请核对场次输入后明确恢复";
+                }
+            }
+            return { ...record, revision: record.revision + 1, draft, updatedAt: new Date().toISOString() };
+        });
     }
 
     private patchDirectorSource(director: NonNullable<EpisodeProductionData["director"]>, entity: keyof typeof directorPatchFields, id: string | undefined, patch: Record<string, unknown>) {
@@ -1688,7 +2115,7 @@ export class EpisodeProductionService {
             .flatMap((row) => { const item = row as { owner_id: string; version: number }; const run = this.run(item.owner_id, item.version); return run ? [run] : []; });
     }
 
-    private commit(episodeId: string, operationId: string, expectedRevision: number, requestHash: string, mutate: (record: ProductionRecord) => ProductionRecord & { impact?: ProductionImpact }, beforeMutation?: (record: ProductionRecord, canvasCommits: CanvasCommit[]) => void) {
+    private commit(episodeId: string, operationId: string, expectedRevision: number, requestHash: string, mutate: (record: ProductionRecord) => ProductionRecord & { impact?: ProductionImpact }, beforeMutation?: (record: ProductionRecord, canvasCommits: CanvasCommit[]) => void, beforeCommit?: (record: ProductionRecord) => void) {
         const scriptCommits: CanvasCommit[] = [];
         this.db.db.exec("BEGIN IMMEDIATE");
         try {
@@ -1710,13 +2137,9 @@ export class EpisodeProductionService {
             if (canvas) {
                 if (next.draft.director) {
                     const owner = { kind: this.ownerKind, id: episodeId };
-                    const layout = compileProductionLayout({ canvasId: canvas.id, owner, production: next.draft, project: canvas, previous: this.db.getProductionLayoutPlan(canvas.id) });
+                    const layout = compileProductionLayout({ h3Defaults: record(this.db.getSetting("plugin:minimax-h3:defaults:v1")), canvasId: canvas.id, owner, production: next.draft, project: canvas, previous: this.db.getProductionLayoutPlan(canvas.id) });
                     this.db.saveProductionLayoutPlan(canvas.id, layout);
                     const clips = clipInputOperations(canvas, next.draft, layout);
-                    for (const item of clips.referenceSync) if (item.status === "ready") {
-                        try { this.validateClipMedia(episodeId, next.draft.director, item.targetId); }
-                        catch (error) { item.status = "blocked"; item.diagnostics.push({ code: "REFERENCE_NOT_APPROVED", message: String(error) }); }
-                    }
                     next.referenceSync = clips.referenceSync;
                     const readyClips = new Set(clips.referenceSync.filter(item => item.status === "ready").map(item => item.targetId));
                     const operations = [...scriptNodeOperations(canvas, next.draft, owner, current.draft, layout), ...imageInputOperations(canvas, next.draft, episodeId, current.draft, layout), ...clips.operations.filter(op => readyClips.has((op.patch as any).productionClipProjection.targetId))];
@@ -1730,6 +2153,7 @@ export class EpisodeProductionService {
                 .run(episodeId, next.revision, JSON.stringify(next.draft), next.published ? JSON.stringify(next.published) : null, next.publishedVersion, next.updatedAt);
             this.prepare("INSERT INTO episode_production_operations (operation_id, episode_id, request_hash, receipt_json, created_at) VALUES (?, ?, ?, ?, ?)")
                 .run(operationId, episodeId, requestHash, JSON.stringify(dedupReceipt(next)), next.updatedAt);
+            beforeCommit?.(next);
             this.db.db.exec("COMMIT");
             this.events?.publish({ type: "drama-production.updated", entityId: episodeId, payload: { revision: next.revision, publishedVersion: next.publishedVersion } });
             scriptCommits.forEach(commit => this.db.notifyCanvasCommit(commit));
@@ -1744,6 +2168,7 @@ export class EpisodeProductionService {
             targets: JSON.parse(String(row.targets_json)) as string[], plan: JSON.parse(String(row.plan_json)) as ProductionImpact,
             engine: row.engine_json ? JSON.parse(String(row.engine_json)) as Record<string, unknown> : null,
             settings: JSON.parse(String(row.settings_json)) as Record<string, unknown>,
+            executionSnapshot: row.execution_snapshot_json ? JSON.parse(String(row.execution_snapshot_json)) : null,
             submitted: JSON.parse(String(row.submitted_json)) as ProductionRun["submitted"], error: row.error === null ? null : String(row.error),
             pauseRequested: Boolean(row.pause_requested), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
         };
@@ -1769,6 +2194,100 @@ export class EpisodeProductionService {
         if (!directory.startsWith(`${base}${path.sep}`)) throw new Error("制作目录路径无效");
         const file = path.join(directory, source);
         return fs.existsSync(file) && fs.statSync(file).isFile() ? fs.readFileSync(file, "utf8") : "";
+    }
+
+    private restoreArchivedSceneResults(episodeId: string, current: ProductionRecord, draft: EpisodeProductionData, published: EpisodeProductionData,
+        operation: Extract<ProductionOperation, { type: "restore_archived_scene_results" }>, operationId: string, canvasCommits?: CanvasCommit[]) {
+        if (this.ownerKind !== "episode" || this.projectScope) throw new Error("迁移前场次视频恢复仅支持分集制作稿");
+        const canvasId = this.episodeInfo(episodeId).canvasId;
+        const project = canvasId && this.db.getCanvasProject(canvasId);
+        if (!canvasId || !project || !draft.director || !published.director) throw new Error("恢复缺少固定分集画布或导演稿");
+        if (Number(project.revision || 0) !== operation.expectedCanvasRevision) throw new Error(`恢复画布 revision 已变化：当前 ${Number(project.revision || 0)}`);
+        const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, any>> : [];
+        const byId = new Map(nodes.map(node => [String(node.id), node]));
+        const sourceNode = byId.get(operation.sourceNodeId);
+        const sourceMetadata = record(sourceNode?.metadata);
+        if (!sourceNode || !isH3NodeType(String(sourceNode.type)) || !String(sourceMetadata.productionArchiveLabel || "").includes("原视频")) throw new Error("来源必须是保留原视频的迁移归档 H3 节点");
+        const sourceSegments = Array.isArray(sourceMetadata.segments) ? sourceMetadata.segments as Array<Record<string, any>> : [];
+        const sourceSegmentById = new Map(sourceSegments.map(segment => [String(segment.id || ""), segment]));
+        const sceneEntries = productionSceneEntries(draft.director.source);
+        const activeStatuses = new Set(["queued", "pending", "running", "loading", "generating", "awaiting_confirmation"]);
+        const targetNodeIds = [...new Set(draft.clipGroups.map(group => String(group.nodeId || "")).filter(Boolean))];
+        for (let offset = 0; ; offset += 500) {
+            const page = this.db.listTasks({ projectId: canvasId, nodeIds: [operation.sourceNodeId, ...targetNodeIds], limit: 500, offset });
+            const active = page.find(task => activeStatuses.has(task.status));
+            if (active) throw new Error(`相关 H3 任务 ${active.id} 仍在执行，不能恢复归档结果`);
+            if (page.length < 500) break;
+        }
+
+        const canvasOperations: CanvasOperation[] = [];
+        for (const group of draft.clipGroups) {
+            const segmentId = String(group.segmentId || "");
+            const sourceClip = sourceSegmentById.get(segmentId);
+            if (!sourceClip?.resultStorageKey || sourceClip.status !== "success") continue;
+            const storageKey = String(sourceClip.resultStorageKey);
+            const sceneIds = productionSceneIdsForShots(sceneEntries, group.shotIds);
+            if (sceneIds.length !== 1) throw new Error(`Clip ${group.id} 未映射到唯一正式场次，不能恢复归档视频`);
+            const sceneId = sceneIds[0];
+            const targetNodeId = String(group.nodeId || "");
+            const targetNode = targetNodeId ? byId.get(targetNodeId) : undefined;
+            const expectedNodeId = productionLayoutStableId("production-h3-scene", episodeId, sceneId);
+            const expectedGroupId = productionLayoutStableId("production-scene", episodeId, sceneId);
+            if (!targetNode || targetNodeId !== expectedNodeId || !isH3NodeType(String(targetNode.type)) || String(record(targetNode.metadata).groupId || "") !== expectedGroupId) {
+                throw new Error(`Clip ${group.id} 没有绑定到场次 ${sceneId} 的正式 H3 节点`);
+            }
+            const targetClip = (Array.isArray(record(targetNode.metadata).segments) ? record(targetNode.metadata).segments as Array<Record<string, any>> : []).find(clip => String(clip.id || "") === segmentId);
+            if (!targetClip || String(record(targetClip.productionClipProjection).targetId || "") !== group.id) throw new Error(`场次 H3 缺少正式 Clip 投影：${group.id}`);
+            if (targetClip.resultStorageKey && String(targetClip.resultStorageKey) !== storageKey) throw new Error(`场次 Clip ${group.id} 已绑定其他视频，拒绝覆盖`);
+            if (activeStatuses.has(String(targetClip.status || ""))) throw new Error(`场次 Clip ${group.id} 正在运行，拒绝恢复归档视频`);
+
+            const publishedGroup = published.clipGroups.find(item => item.id === group.id);
+            if (!publishedGroup || publishedGroup.nodeId !== operation.sourceNodeId || publishedGroup.segmentId !== segmentId) throw new Error(`迁移前视频 ${group.id} 与当前发布版本的归档节点不匹配`);
+            const logs = this.db.listGenerationLogs({ projectId: canvasId, nodeId: operation.sourceNodeId, segmentId, status: "success", limit: 100 })
+                .filter(log => log.outputs.some(output => output.storageKey === storageKey));
+            const candidates = logs.flatMap(log => {
+                const task = log.runtimeTaskId ? this.db.getTask(log.runtimeTaskId) : null;
+                if (!task || task.status !== "succeeded" || task.projectId !== canvasId || task.nodeId !== operation.sourceNodeId || task.segmentId !== segmentId) return [];
+                const outputs = [...task.outputs, ...(Array.isArray(record(task.result).media) ? record(task.result).media as Array<Record<string, any>> : [])];
+                const output = outputs.find(item => item.storageKey === storageKey && String(item.mimeType || "video/mp4").startsWith("video/"));
+                return output ? [{ log, task, output }] : [];
+            });
+            if (candidates.length !== 1) throw new Error(`Clip ${group.id} 的归档媒体无法与唯一成功任务和日志对应`);
+            const { log, task, output } = candidates[0];
+            const media = this.db.getMediaFile(storageKey);
+            if (!media || !fs.existsSync(media.filePath) || !String(media.mimeType || "").startsWith("video/")) throw new Error(`归档媒体 ${storageKey} 不可用`);
+            const sha256 = promptHashBytes(media.filePath);
+            const loggedOutput = log.outputs.find(item => item.storageKey === storageKey)!;
+            if ((output.sha256 && output.sha256 !== sha256) || (loggedOutput.sha256 && loggedOutput.sha256 !== sha256)) throw new Error(`Clip ${group.id} 的归档视频摘要与任务日志不一致`);
+
+            const parentTaskId = String(task.parentTaskId || record(task.params).parentTaskId || task.id);
+            const bindingRows = [...new Set([task.id, parentTaskId])].map(taskId =>
+                this.db.db.prepare("SELECT * FROM production_task_bindings WHERE task_id=? AND owner_kind=? AND owner_id=?").get(taskId, "episode", episodeId) as Record<string, any> | undefined).filter(Boolean) as Array<Record<string, any>>;
+            const binding = bindingRows.find(row => {
+                if (row.project_id !== canvasId || row.node_id !== operation.sourceNodeId || row.target_kind !== "segment" || row.status === "submitted") return false;
+                const targets = JSON.parse(String(row.targets_json || "[]")) as Array<{ targetId?: string; segmentId?: string }>;
+                return (row.target_id === group.id || targets.some(target => target.targetId === group.id && target.segmentId === segmentId));
+            });
+            // Older aggregate H3 runs may only have a run-level binding. The exact successful log,
+            // task and archived Clip identity remain the authority when no per-Clip binding exists.
+            const sourceHash = String(binding?.source_hash || record(sourceClip.productionClipProjection).sourceHash || sourceClip.directorSourceHash || published.director.sourceHash);
+            const sourceVersion = Number(binding?.version || current.publishedVersion);
+            const inputOutdated = sourceHash !== draft.director.sourceHash || clipInputHash(sourceClip) !== clipInputHash(targetClip);
+            const selectedResult = { generationLogId: log.id, taskId: task.id, sourceVersion, sourceHash, sourceNodeId: operation.sourceNodeId };
+            Object.assign(group, { selectedResult, inputOutdated });
+            if (String(targetClip.resultStorageKey || "") === storageKey && targetClip.status === "success") continue;
+            const url = `/media/${encodeURIComponent(storageKey)}`;
+            canvasOperations.push({ type: "update_h3_segment", nodeId: targetNodeId, segmentId, expectedFields: { resultStorageKey: targetClip.resultStorageKey, status: targetClip.status }, patch: {
+                result: url, resultStorageKey: storageKey, results: [{ url, storageKey, mimeType: media.mimeType }], status: "success", progress: 1,
+                runtimeTaskId: "", parentTaskId: "", errorDetails: "", cacheFingerprint: "", firstPassReady: false, firstPassResult: "", firstPassStorageKey: "", firstPassFingerprint: "",
+                archivedResultOrigin: { sourceNodeId: operation.sourceNodeId, sourceSegmentId: segmentId, generationLogId: log.id, taskId: task.id, storageKey, sourceVersion, sourceHash },
+            } });
+        }
+        if (!draft.clipGroups.some(group => group.selectedResult?.sourceNodeId === operation.sourceNodeId)) throw new Error("迁移前归档节点没有可恢复的成功视频");
+        if (canvasCommits && canvasOperations.length) this.db.applyCanvasProjectOperations(canvasId, operation.expectedCanvasRevision, canvasOperations, {
+            operationId: `${operationId}:restore-archived-scene-results`, runtimeWrite: true, withinTransaction: true, deferredCommits: canvasCommits,
+            source: { kind: "system", clientId: "production:restore-archived-scene-results", label: "恢复迁移前场次视频结果" },
+        });
     }
 
     private selectDirectorResult(episodeId: string, current: ProductionRecord, draft: EpisodeProductionData, published: EpisodeProductionData,
@@ -1860,7 +2379,7 @@ export class EpisodeProductionService {
         }
     }
 
-    private apply(episodeId: string, draft: EpisodeProductionData, op: ProductionOperation, sourceVersion: number) {
+    private apply(episodeId: string, draft: EpisodeProductionData, op: ProductionOperation, sourceVersion: number, canvasCommits?: CanvasCommit[]) {
         if (op.type === "adopt_shared_asset") {
             if (!draft.director) throw new Error("缺少 Acheng 制作稿");
             const approved = approvedSharedAsset(this.db, op.approvedId);
@@ -1916,6 +2435,7 @@ export class EpisodeProductionService {
             return;
         }
         if (op.type === "set_director_production") {
+            if (Object.hasOwn(op.director.source, "_canvas_compilation_scope")) throw new Error("编译隔离标记不得写入正式源稿");
             draft.director = op.director;
             projectDirector(draft);
             return;
@@ -1923,6 +2443,46 @@ export class EpisodeProductionService {
         if (op.type === "patch_director_source") {
             if (!draft.director) throw new Error("缺少 Acheng 制作稿");
             this.patchDirectorSource(draft.director, op.entity, op.id, op.patch);
+            projectDirector(draft);
+            return;
+        }
+        if (op.type === "adopt_director_fields") {
+            const canvasId = this.episodeInfo(episodeId).canvasId, project = canvasId && this.db.getCanvasProject(canvasId);
+            if (!project || Number(project.revision) !== op.canvasRevision) throw new Error("画布版本已变化，请重新读取差异");
+            const node = (project.nodes as any[]).find(node => node.id === op.nodeId);
+            const current = op.segmentId ? node?.metadata?.segments?.find((segment: any) => segment.id === op.segmentId) : node?.metadata;
+            const projection = op.segmentId ? current?.productionClipProjection : current?.productionImageProjection;
+            if (!projection || projection.targetId !== op.targetId) throw new Error("目标导演基线不属于当前对象");
+            const owned = op.segmentId ? draft.clipGroups.some(group => group.id === op.targetId && group.nodeId === op.nodeId && group.segmentId === op.segmentId)
+                : Object.entries(draft.director?.assets || {}).some(([id, asset]) => id === op.targetId && (asset.nodeId === op.nodeId || projection.sourceNodeId === op.nodeId));
+            if (!owned) throw new Error("导演字段采用目标归属无效");
+            const adopted = adoptedDirectorFields(current, projection, op.fields);
+            const referenceIds = adopted.patch.referenceNodeIds;
+            delete adopted.patch.referenceNodeIds;
+            const operations: CanvasOperation[] = [op.segmentId
+                ? { type: "update_h3_segment", nodeId: op.nodeId, segmentId: op.segmentId, ...adopted }
+                : { type: "update_node", id: op.nodeId, metadata: adopted.patch, metadataDelete: adopted.patchDelete }];
+            if (Array.isArray(referenceIds)) {
+                const sourceId = projection.sourceNodeId || op.nodeId;
+                const incoming = (project.connections as any[]).filter(edge => edge.toNodeId === sourceId);
+                if (incoming.length) operations.push({ type: "delete_connections", ids: incoming.map(edge => edge.id) });
+                referenceIds.forEach((fromNodeId, order) => operations.push({ type: "connect_nodes", id: `adopt-${crypto.randomUUID()}`, fromNodeId, toNodeId: sourceId, order }));
+            }
+            if (canvasCommits) this.db.applyCanvasProjectOperations(project.id, op.canvasRevision, operations, { runtimeWrite: true, withinTransaction: true, deferredCommits: canvasCommits, source: { kind: "system", clientId: "production:adopt", label: "采用选定导演字段" } });
+            return;
+        }
+        if (op.type === "adopt_director_clip_style") {
+            if (!draft.director) throw new Error("缺少正式导演源稿");
+            const canvasId = this.episodeInfo(episodeId).canvasId;
+            const project = canvasId && this.db.getCanvasProject(canvasId);
+            if (!project || Number(project.revision) !== op.canvasRevision) throw new Error("画布版本已变化，请重新读取用户修改后再采用");
+            const group = draft.clipGroups.find(group => group.id === op.targetId);
+            if (!group || group.nodeId !== op.nodeId || group.segmentId !== op.segmentId) throw new Error("待采用的 Clip 不属于该正式目标");
+            const node = (project.nodes as any[]).find(node => node.id === op.nodeId);
+            const nodeClips = record(node?.metadata).segments;
+            const clip = (Array.isArray(nodeClips) ? nodeClips : []).find((clip: any) => clip.id === op.segmentId);
+            if (!clip || (clip.styleTemplateId ?? null) !== op.styleTemplateId) throw new Error("Clip 风格已变化，请重新核对用户修改");
+            this.patchDirectorSource(draft.director, "segment", op.targetId, { styleTemplateId: op.styleTemplateId });
             projectDirector(draft);
             return;
         }
@@ -2100,13 +2660,14 @@ export class EpisodeProductionService {
         }
     }
 
-    private publishedCandidate(record: ProductionRecord, stage: "script" | "shots" | "director") {
+    private publishedCandidate(record: ProductionRecord, stage: "script" | "shots" | "director", scope?: { sceneId?: string; targetIds?: string[] }) {
         const candidate = structuredClone(record.published || emptyEpisodeProduction());
         if (stage === "director") {
             if (!record.draft.director) throw new Error("缺少 Acheng 制作稿");
             const directorCandidate = structuredClone(record.draft);
             projectDirector(directorCandidate);
-            this.validateSource(directorCandidate.director!, "publish");
+            if (scope && !directorCandidate.settings.parallelScenes) throw new Error("按范围发布须显式启用场次并行制作");
+            this.validateSource(scope ? scopedCompilerInput(compilationScopeInput(directorCandidate.director!, scope).director, scope) : directorCandidate.director!, "publish");
             this.validateGraph(directorCandidate);
             this.lockModels(record.episodeId, directorCandidate);
             return directorCandidate;

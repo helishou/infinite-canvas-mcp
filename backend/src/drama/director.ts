@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 import fs from "node:fs";
 import { canonicalProduction, type DirectorProduction, type EpisodeProductionData } from "@basketikun/canvas-agent/drama/production-contract";
 import type { BackendDatabase } from "../db.js";
@@ -47,7 +48,7 @@ export function projectDirector(data: EpisodeProductionData) {
     if (new Set(d.artifacts.map(a => `${a.kind}:${a.targetId}`)).size !== d.artifacts.length) throw new Error("同一目标只能有一个当前编译产物");
     for (const artifact of d.artifacts) {
         if (artifact.sha256 !== promptHash(artifact.prompt)) throw new Error(`产物 ${artifact.id} 正文字节摘要不一致`);
-        if (artifact.status === "ready" && (artifact.sourceHash !== d.sourceHash || artifact.receipt.sourceHash !== d.sourceHash || artifact.receipt.promptHash !== artifact.sha256 || artifact.receipt.engineRuntimeId !== d.engine.runtimeId)) throw new Error(`产物 ${artifact.id} 回执版本不一致`);
+        if (artifact.status === "ready" && (!currentCompilationArtifact(d, artifact) || artifact.receipt.promptHash !== artifact.sha256 || artifact.receipt.engineRuntimeId !== d.engine.runtimeId)) throw new Error(`产物 ${artifact.id} 回执版本不一致`);
 
     }
     const sourceContract = /^[a-f0-9]{40}-[a-f0-9]{16}$/.test(d.engine.runtimeId) ? resolveAchengRuntime(d.engine.runtimeId).sourceContract : null;
@@ -113,6 +114,6 @@ export function validateDirectorMedia(db: BackendDatabase, projectId: string, d:
 export function directorArtifact(data: EpisodeProductionData, kind: "image" | "h3", targetId: string) {
     const d = data.director;
     const a = d?.artifacts.find(a => a.kind === kind && a.targetId === targetId && a.status === "ready");
-    if (!d || !a || a.sourceHash !== d.sourceHash || promptHash(a.prompt) !== a.sha256) throw new Error(`${targetId} 缺少当前版本完整 ${kind} 产物；请由 Acheng 编译，不从镜头摘要生成`);
+    if (!d || !a || !currentCompilationArtifact(d, a) || promptHash(a.prompt) !== a.sha256) throw new Error(`${targetId} 缺少当前版本完整 ${kind} 产物；请由 Acheng 编译，不从镜头摘要生成`);
     return a;
 }

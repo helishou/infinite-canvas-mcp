@@ -3,7 +3,7 @@ from pathlib import Path
 import re
 import sys
 
-PATCH_VERSION = "canvas-4"
+PATCH_VERSION = "canvas-5"
 
 
 def replace(path, before, after):
@@ -18,19 +18,17 @@ def replace(path, before, after):
 def apply(root):
     root = Path(root)
     contract = root / "scripts/h3_contract.py"
-    replace(contract, "REF2VA_MIN_WORDS = 2000", "REF2VA_MIN_WORDS = 2200")
-    # Preserve the existing density floor/default target; the old source field
-    # is readable but is no longer a hard limit on output or an explicit target.
-    replace(contract, 'maximum = int(policy.get("ref2va_max_words", REF2VA_MAX_WORDS))', 'maximum = REF2VA_MAX_WORDS')
-    replace(contract, '    if target > maximum:\n        target = maximum\n', '')
-    replace(contract, '    if target < minimum:\n', '    if explicit_target is None and target < minimum:\n        target = minimum + 200\n    if target < minimum:\n')
-    replace(contract, '"maximum_words": maximum,', '"maximum_words": None,')
+    replace(contract, "REF2VA_MIN_WORDS = 2000", "REF2VA_MIN_WORDS = 0")
+    replace(contract, "REF2VA_TARGET_WORDS = 2400", "REF2VA_TARGET_WORDS = 500")
+    replace(contract, "REF2VA_MIN_WORDS_PER_SECOND = 200", "REF2VA_MIN_WORDS_PER_SECOND = 0")
+    replace(contract, "REF2VA_TARGET_WORDS_PER_SECOND = 240", "REF2VA_TARGET_WORDS_PER_SECOND = 0")
+    # The concise policy below preserves the current absence of a hard maximum.
     replace(contract, '''            need(word_count <= policy.get("maximum_words", REF2VA_MAX_WORDS),
                  f"Ref2VA detailed_description is {word_count} words; exceeds maximum ceiling of {policy.get('maximum_words', REF2VA_MAX_WORDS)} words (2900 words limit)")''', '')
     final = root / "scripts/h3_final_format.py"
     replace(final, "floor = max(2000, ceil(duration * 200))",
             'from h3_contract import detail_policy\n        floor = detail_policy({"shots": []}, {"generation_clip_duration": duration})["minimum_words"]')
-    # The upstream floor guard remains; no maximum guard is added.
+    # Explicit authored minima remain verifiable; no automatic floor is added.
     bridge = Path(__file__).with_name("source-contract.py")
     (root / "scripts/canvas_source_contract.py").write_bytes(bridge.read_bytes())
     if not (root / "scripts/continuity_v2.py").is_file():
@@ -79,10 +77,50 @@ def apply(root):
             raise RuntimeError("Acheng director entry has no paragraph boundary for the Canvas kickoff overlay")
         text = text[:end] + "\n\n" + kickoff + text[end:]
         entry.write_text(text, encoding="utf-8")
-    for path in [root / "SKILL.md", root / "modules/model/SKILL.md", root / "references/90-production-contract.md", root / "templates/h3-prompt-package.md"]:
+    for path in [root / "SKILL.md", root / "modules/assets/SKILL.md", root / "modules/model/SKILL.md", root / "references/90-production-contract.md", root / "templates/h3-prompt-package.md"]:
         text = path.read_text(encoding="utf-8")
         text = re.sub(r"极限值\s*2900\s*词硬性封顶[^；。\n]*", "正文无硬性词数上限，保留固定运行版本的最低细节要求", text)
+        text = text.replace("### H3 详细度、极限值（2200-2900词）与模式锁", "### H3 详细度、固定运行版本与模式锁")
+        text = re.sub(r"1\. \*\*动态密度与硬性上限（2200-2900 词）\*\*[^\n]*", "1. **按固定运行版本计算详细度**：保留编译器的最低细节要求与复杂度预算；正文无硬性词数上限，不截断、不压缩、不按词数重装箱。", text)
+        text = re.sub(r"### 固定角色四格模板（用户指定）\s*\n[^\n]*", "### Infinite Canvas 角色四视图规格\n新制作默认使用等高的正脸近景、正面全身、侧面全身、背面全身。用户明确指定时，在完整 view_layout 中保存 selection=user_explicit 和有效 selection_reason，可使用1:2行高的无头人形四格或等高的蛇形头正面/头侧面/盘绕全身/鳞片细节四格。空手中立、无文字，不改变角色事实；既有批准资产沿用原版本，不自动重生成。", text)
         path.write_text(text, encoding="utf-8")
+    asset_plan = root / "scripts/asset_plan.py"
+    overlay = Path(__file__).with_name("character-layout.py").read_text(encoding="utf-8")
+    asset_plan.write_text(asset_plan.read_text(encoding="utf-8") + "\n\n" + overlay, encoding="utf-8")
+    hooks = root / "scripts/post_hooks.py"
+    text = hooks.read_text(encoding="utf-8")
+    start = text.index('            if layout["type"] == "four_view_character_turnaround":')
+    end = text.index('        if card.get("asset_kind") == "style":', start)
+    text = text[:start] + "            check_character_view_layout(card, payload)\n" + text[end:]
+    hooks.write_text("from asset_plan import check_character_view_layout\n" + text, encoding="utf-8")
+    validator = root / "scripts/validate_director_contract.py"
+    text = validator.read_text(encoding="utf-8")
+    start = text.index('                require(resolved.get("view_layout", {}).get("type") == "four_view_character_turnaround"')
+    end = text.index('            entry = entries[card["id"]]', start)
+    text = text[:start] + "                check_character_view_layout(resolved, production)\n" + text[end:]
+    validator.write_text("from asset_plan import check_character_view_layout\n" + text, encoding="utf-8")
+    # The compiler adds a derived continuity report after freezing the authored
+    # revision. Binding and delivery hashes must ignore that scratch-only field.
+    for name in ("reference_bindings.py", "h3_delivery.py", "asset_delivery.py"):
+        target = root / "scripts" / name
+        target.write_text(target.read_text(encoding="utf-8") + '''
+
+_canvas_authored_content_hash = content_hash
+def content_hash(value):
+    if isinstance(value, dict) and "_continuity_report" in value:
+        value = {key: item for key, item in value.items() if key != "_continuity_report"}
+    return _canvas_authored_content_hash(value)
+''', encoding="utf-8")
+    audit = root / "scripts/audit_storyboard_quality.py"
+    text = audit.read_text(encoding="utf-8")
+    text = text.replace('p.get("ledger", {}).get("initial", {}).get("props", {})', '(p.get("ledger", {}).get("initial", {}) if isinstance(p.get("ledger", {}).get("initial", {}), dict) else {}).get("props", {})')
+    text = text.replace('p.get("delivery_scope") == "full_production" or p.get("story", {}).get("contract_version") == "3.0"', '(not p.get("_canvas_compilation_scope")) and (p.get("delivery_scope") == "full_production" or p.get("story", {}).get("contract_version") == "3.0")')
+    audit.write_text(text, encoding="utf-8")
+    import importlib.util
+    concise_spec = importlib.util.spec_from_file_location("canvas_h3_prompt_policy", Path(__file__).with_name("h3-prompt-policy.py"))
+    concise_module = importlib.util.module_from_spec(concise_spec)
+    concise_spec.loader.exec_module(concise_module)
+    concise_module.apply_prompt_policy(root)
     (root / "CANVAS-COMPATIBILITY.md").write_text(
         "# Canvas compatibility overlay\n\n"
         "Upstream is retained in the clean Git checkout. Local overlay: " + PATCH_VERSION + ".\n"
@@ -90,7 +128,7 @@ def apply(root):
         "Its authorized generation/storage integration overrides prompt-only delivery in that context. "
         "Video production asks and records the final aspect ratio before creative breakdown; asset ratios stay independent. "
         "H3 uses <Picture N>/<Subject N>; style references occupy the final asset slot. "
-        "New Ref2VA output retains its duration/complexity detail floor, without a hard maximum word count. "
+        "New H3 prompts use complete local facts with no automatic word floor or per-second expansion; short-shot length guidance is 350–500 words. "
         "Historical legacy_fixture is for shipped examples only.\n", encoding="utf-8")
 
 

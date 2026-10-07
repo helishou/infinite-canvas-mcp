@@ -21,6 +21,8 @@
 
 ## MCP 与运行现场
 
+- 新增或修改 MCP 工具遵循[MCP 工具契约](../.agents/rules/mcp-contracts.md)；方法与验证见[工具开发指引](../.agents/skills/canvas-h3-implementation/references/mcp-tool-development.md)。
+
 - 外部客户端连接常驻 Backend `/mcp` Streamable HTTP。session 上下文隔离，插件声明轮询由 Backend 统一维护；stdio 仅兼容。
 - HTTP session 在进程内存中，服务重载后须让客户端重新初始化；不要误判成项目数据丢失，也不要为每个会话新建业务 Backend。
 - `npm run dev --workspace backend` 当前为 `tsx src/index.ts`，不会自动重启；需要热重启时显式运行 `npm run dev:watch --workspace backend`。只有实际消费 dist 时才必须重建 Backend。共享包 dist 变更也要确认已被当前进程加载。

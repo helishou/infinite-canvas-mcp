@@ -3,7 +3,6 @@ import { useCanvasProductionContext } from "@/components/production/canvas-produ
 import { productionObjectForNode, productionObjectPath, productionObjectState, type ProductionObject } from "@/lib/production-object";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
-import { H3_LOCAL_VIEW_DEFAULTS } from "../../../../plugins/canvas/minimax-h3/src/hooks/useH3LocalView";
 import { viewportForCanvasNodes } from "@/lib/canvas/canvas-navigation";
 import { createCanvasGraphIndexSelector } from "@/lib/canvas/canvas-graph-index";
 import { startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
@@ -1949,11 +1948,7 @@ function InfiniteCanvasPage() {
         const available = rect ? { width: canvasFocusWidth(rect), height: rect.height } : size;
         const topInset = 64;
         const screen = { left: node.position.x * current.k + current.x, top: node.position.y * current.k + current.y, right: (node.position.x + node.width) * current.k + current.x, bottom: (node.position.y + node.height) * current.k + current.y };
-        const isH3 = String(node.type).includes("minimax-h3");
-        const view = isH3 ? getPluginNodeView(projectId, nodeId).getSnapshot() : {};
-        const previewWidth = Number(view.minimaxPreviewW || H3_LOCAL_VIEW_DEFAULTS.minimaxPreviewW);
-        const previewHeight = Number(view.minimaxPreviewH || H3_LOCAL_VIEW_DEFAULTS.minimaxPreviewH) + Number(view.minimaxTimelineH || H3_LOCAL_VIEW_DEFAULTS.minimaxTimelineH);
-        const target = viewportForCanvasNodes([isH3 ? { ...node, width: Math.min(node.width, previewWidth), height: Math.min(node.height, previewHeight) } : node], { width: available.width, height: Math.max(1, available.height - topInset) });
+        const target = viewportForCanvasNodes([node], { width: available.width, height: Math.max(1, available.height - topInset) });
         if (!target) return;
         selectCanvasNodes(new Set([nodeId]));
         if (screen.left >= 24 && screen.top >= topInset && screen.right <= available.width - 24 && screen.bottom <= available.height - 24) return;
@@ -2016,15 +2011,17 @@ function InfiniteCanvasPage() {
             const ticket = h3FocusTicketRef.current;
             if (detail?.projectId !== projectId || !ticket || detail.nodeId !== ticket.nodeId || detail.requestId !== ticket.requestId || ticket.epoch !== focusEpochRef.current) return;
             const el = Array.from(containerRef.current?.querySelectorAll<HTMLElement>("[data-node-id]") || []).find(el => el.dataset.nodeId === detail.nodeId);
-            const preview = el?.querySelector<HTMLElement>(".minimax-player-stage");
             const node = nodesRef.current.find(node => node.id === detail.nodeId);
             const viewportRect = containerRef.current?.getBoundingClientRect();
-            if (!el || !preview || !node || !viewportRect) return;
-            const rect = preview.getBoundingClientRect(), nodeRect = el.getBoundingClientRect(), k = liveViewportRef.current.k;
-            if (rect.width <= 0 || rect.height <= 0) return;
+            if (!el || !node || !viewportRect) return;
+            const nodeRect = el.getBoundingClientRect(), k = liveViewportRef.current.k;
+            if (nodeRect.width <= 0 || nodeRect.height <= 0 || k <= 0) return;
             h3FocusTicketRef.current = null;
             const topInset = 64;
-            const target = viewportForCanvasNodes([{ ...node, position: { x: node.position.x + (rect.left - nodeRect.left) / k, y: node.position.y + (rect.top - nodeRect.top) / k }, width: rect.width / k, height: rect.height / k }], { width: canvasFocusWidth(viewportRect), height: Math.max(1, viewportRect.height - topInset) });
+            const availableWidth = canvasFocusWidth(viewportRect);
+            if (nodeRect.left >= viewportRect.left + 24 && nodeRect.top >= viewportRect.top + topInset && nodeRect.right <= viewportRect.left + availableWidth - 24 && nodeRect.bottom <= viewportRect.bottom - 24) return;
+            // Clip readiness may change the mounted layout; fit that whole node, not only the player.
+            const target = viewportForCanvasNodes([{ ...node, width: nodeRect.width / k, height: nodeRect.height / k }], { width: availableWidth, height: Math.max(1, viewportRect.height - topInset) });
             if (target) { target.y += topInset; animateFocus(target); }
         };
         const onSelectClip = (event: Event) => {
@@ -6016,7 +6013,8 @@ function InfiniteCanvasPage() {
                             message={canvasConflict.message}
                             description={
                                 <div className="space-y-2">
-                                    <div>{`后端当前版本 ${canvasConflict.revision}，本地有 ${canvasConflict.pendingOperations} 个未提交操作；其中 ${canvasConflict.conflictTargets.length} 个与远端改动直接冲突。`}</div>
+                                    <div>{t(canvasConflict.reason === "rejected" ? "canvasSave.rejected" : "canvasSave.conflict", { revision: canvasConflict.revision, count: canvasConflict.pendingOperations, conflicts: canvasConflict.conflictTargets.length })}</div>
+                                    {canvasConflict.reason === "rejected" ? <div>{t(canvasConflict.canRecoverTimeline ? "canvasSave.timelineRecovery" : canvasConflict.canRetryFormalClip ? "canvasSave.formalRecovery" : canvasConflict.canRetryBackendFailure ? "canvasSave.backendRecovery" : "canvasSave.rejectedHelp")}</div> : null}
                                     {canvasConflict.conflictTargets.length ? (
                                         <ul className="m-0 list-disc pl-5 text-xs opacity-80">
                                             {canvasConflict.conflictTargets.slice(0, 5).map((target) => (
@@ -6026,7 +6024,7 @@ function InfiniteCanvasPage() {
                                         </ul>
                                     ) : null}
                                     <div className="flex gap-2 pt-1">
-                                        <Button size="small" onClick={() => keepPendingOpsOnCanvasConflict(projectId)}>{`保留我的 ${canvasConflict.pendingOperations} 个操作（自动在新版本上重提）`}</Button>
+                                        <Button size="small" disabled={canvasConflict.reason === "rejected" && !canvasConflict.canRecoverTimeline && !canvasConflict.canRetryFormalClip && !canvasConflict.canRetryBackendFailure} onClick={() => keepPendingOpsOnCanvasConflict(projectId)}>{t(canvasConflict.canRecoverTimeline ? "canvasSave.recover" : canvasConflict.canRetryFormalClip ? "canvasSave.retryFormal" : canvasConflict.canRetryBackendFailure ? "canvasSave.retrySaved" : "canvasSave.keep", { count: canvasConflict.pendingOperations })}</Button>
                                         <Button size="small" danger onClick={() => adoptRemoteOnCanvasConflict(projectId)}>{`采用远端（丢弃我的 ${canvasConflict.pendingOperations} 个操作）`}</Button>
                                     </div>
                                 </div>

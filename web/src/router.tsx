@@ -20,6 +20,7 @@ const WorkflowsPage = lazy(() => import("@/pages/workflows"));
 const PromptsPage = lazy(() => import("@/pages/prompts"));
 const VideoPage = lazy(() => import("@/pages/video"));
 const McpObservabilityPage = lazy(() => import("@/pages/mcp-observability"));
+const PelicanBikePage = lazy(() => import("@/pages/pelican-bike"));
 
 const pageFallback = <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">加载中…</div>;
 
@@ -58,5 +59,6 @@ export const router = createBrowserRouter([
             { path: "/diagnostics/mcp", element: lazyPage(McpObservabilityPage) },
         ],
     },
+    { path: "/pelican-bike", element: lazyPage(PelicanBikePage) },
     { path: "*", element: lazyPage(NotFound) },
 ]);

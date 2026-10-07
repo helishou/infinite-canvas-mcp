@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import { isH3StyleTemplateId } from "../plugins/minimax-h3/style-templates.js";
+import { currentCompilationArtifact } from "./compilation-scope.js";
 import { toJsonSchemaCompat } from "@modelcontextprotocol/sdk/server/zod-json-schema-compat.js";
 import { z } from "zod";
 import { directorPatchFields, productionContractVersion, productionOperationSchema, productionEditSchema, productionPublishSchema, productionCompileSchema, directorRunStartSchema, canonicalProduction, type DirectorProduction, type ProductionDiagnostic } from "./production-contract.js";
@@ -9,6 +11,8 @@ const examples: Record<string, unknown> = {
     set_director_production: { director: { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "example", runtimeId: "a".repeat(40) + "-" + "b".repeat(16), version: "example" }, source: {}, sourceHash: "0".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], unresolved: [] } },
     set_director_brief: { brief: "A traveller returns home." },
     patch_director_source: { entity: "asset", id: "character-1", patch: { description: "Authored character appearance." } },
+    adopt_director_fields: { targetId: "SEG001", nodeId: "h3-1", segmentId: "clip-1", canvasRevision: 1, fields: ["prompt"] },
+    adopt_director_clip_style: { targetId: "segment-1", nodeId: "h3-node", segmentId: "clip-1", canvasRevision: 1, styleTemplateId: "soft-light" },
     patch_director_continuity: { ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } },
     upgrade_director_continuity: { fromSourceHash: "0".repeat(64), previewRevision: 0, previewHash: "0".repeat(64), toRuntimeId: "runtime-v2", ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } },
     set_director_workflow: { patch: { mediaProductionMode: "per_item" } },
@@ -19,6 +23,7 @@ const examples: Record<string, unknown> = {
     set_director_segment_group: { segmentId: "SEG001", shotIds: ["shot-1"] },
     review_director_asset: { assetId: "character-1", version: 1, sourceHash: "0".repeat(64), nodeId: "image-1", storageKey: "media-1", sha256: "0".repeat(64), verdict: "approved", evidence: "Compared appearance against the reference." },
     select_director_result: { targetKind: "asset", targetId: "character-1", nodeId: "image-1", generationLogId: "log-1", storageKey: "media-1", canvasRevision: 0 },
+    restore_archived_scene_results: { sourceNodeId: "archived-h3-1", expectedCanvasRevision: 0 },
     upsert_scene: { scene }, delete_scene: { id: scene.id }, reorder_scenes: { ids: [scene.id] },
     upsert_script_block: { sceneId: scene.id, block }, delete_script_block: { sceneId: scene.id, id: block.id }, reorder_script_blocks: { sceneId: scene.id, ids: [block.id] },
     upsert_shot: { shot: { id: "shot-1", sceneId: scene.id, title: "Arrival", duration: 5, visual: "The traveller enters.", camera: "Static", openingState: "Door closed", endingState: "Door open", sound: "Door creaks", assetNodeIds: [], keyframePolicy: "none" } },
@@ -41,6 +46,7 @@ export function productionOperationContract(operationType?: string) {
             return { type, example: option.parse({ type, ...examples[type] as object }), preconditions: type === "patch_director_source"
                 ? ["Director exists; scene/asset/shot/segment require an existing stable ID; patch uses allowed fields; brief/style accept no ID; brief accepts only string value."]
                 : type === "select_director_result" ? ["Successful archived output must belong to the original formal task and exact node/Clip; both revisions must match; active generation and shared reference replacement are rejected. Images require review after selection. No media generation or prompt/timeline replacement occurs."]
+                : type === "restore_archived_scene_results" ? ["Episode draft only. Verifies the archive node, exact Clip identity, succeeded task, generation log and media bytes before restoring outputs to matching scene H3 nodes. Preserves the original archive and provenance; creates no task and does not modify the published version."]
                 : type === "set_director_production" ? ["Example is schema-valid only; replace hashes and engine with actual validated receipts."]
                 : ["Target IDs, ownership, revision and production stage are checked against the current production."] };
         }),
@@ -102,6 +108,7 @@ export function applyDirectorSourcePatch(director: DirectorProduction, entity: k
             if (!target) throw new Error(`${entity} ${id} 不存在；先由 Acheng 创建稳定对象`);
             const forbidden = Object.keys(patch).filter(key => !(directorPatchFields[entity] as readonly string[]).includes(key));
             if (forbidden.length) throw new Error(`不允许直接修改字段：${forbidden.join(", ")}`);
+            if (entity === "segment" && Object.hasOwn(patch, "styleTemplateId") && patch.styleTemplateId !== null && !isH3StyleTemplateId(patch.styleTemplateId)) throw new Error("未知 H3 风格模板；styleTemplateId 必须为已登记模板 ID 或 null");
             if (entity === "asset" && patch.canvas_scope !== undefined && !["shared", "episode"].includes(String(patch.canvas_scope))) throw new Error("资产画布归属只能是 shared 或 episode");
             if (entity === "asset" && patch.canvas_scope === "episode" && director.assets[id]?.sharedSource) throw new Error("已采用的剧目共享资产必须保留 shared 归属；需要本集专用版本时请新建分集资产");
             Object.assign(target, patch);
@@ -109,7 +116,7 @@ export function applyDirectorSourcePatch(director: DirectorProduction, entity: k
         director.sourceHash = crypto.createHash("sha256").update(canonicalProduction(director.source)).digest("hex");
         // A changed source revision invalidates compile receipts. Recompilation may
         // retain identical prompts; target-level impact decides whether media is stale.
-        director.artifacts = director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));
+        director.artifacts = director.artifacts.map(artifact => currentCompilationArtifact(director, artifact) ? artifact : { ...artifact, status: "stale" as const });
         director.executionAuthorized = false;
     }
 

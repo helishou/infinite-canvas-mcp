@@ -59,7 +59,11 @@ export type H3TaskState = { id?: string; status: H3TaskStatus; progress: number;
 export type H3Pane = "library" | "preview" | "video" | "refs";
 
 export type H3Segment = {
+    /** Backend 的正式编译基线；自动修复不能改写它投影的正文和参考。 */
+    productionClipProjection?: Record<string, unknown>;
     h3ParameterPolicy?: "defaults" | "overrides";
+    h3ParameterOverrides?: string[];
+    inputOutdated?: boolean;
     selectedVideoModelEnabled?: boolean;
     selectedVideoModel?: string;
     selectedVideoModelFieldValues?: Record<string, Record<string, unknown>>;

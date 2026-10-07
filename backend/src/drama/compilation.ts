@@ -2,36 +2,27 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { Worker } from "node:worker_threads";
-import { compileAchengDirector } from "@basketikun/canvas-agent/skills/acheng";
+import { compileAchengDirector, resolveAchengRuntime } from "@basketikun/canvas-agent/skills/acheng";
 import { canonicalProduction, directorProductionSchema, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import { EpisodeProductionService, ProductionConflictError } from "./production.js";
 import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
 import { continuityTargetBlockers } from "./continuity-reports.js";
+import { WorkPool } from "@basketikun/canvas-agent/agent/production";
+import { compilationScopeInput, currentCompilationArtifact, scopedCompilerInput, type CompilationScope } from "@basketikun/canvas-agent/drama/compilation-scope";
 
 const hash = (value: unknown) => crypto.createHash("sha256").update(canonicalProduction(value)).digest("hex");
 type Compiler = typeof compileAchengDirector;
-type CompilationJob = { operationId: string; owner: string; id: string; expectedRevision: number; requestHash: string; baselineHash: string; preparedId: string; director: DirectorProduction; references: Record<string, string>; status: "queued" | "running" | "succeeded" | "blocked" | "failed" | "interrupted"; diagnostics: any[]; result?: any; continuityReceipt?: any; application?: any; createdAt: string };
-const pending: Array<{ work: () => Promise<void>; createdAt: string }> = [];
-let draining = false;
-function schedule(work: () => Promise<void>, createdAt: string) {
-    pending.push({ work, createdAt });
-    pending.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    if (draining) return;
-    draining = true;
-    setImmediate(async () => {
-        try {
-            while (pending.length) {
-                try { await pending.shift()!.work(); }
-                catch (error) { console.error("COMPILATION_RECEIPT_WRITE_FAILED", error instanceof Error ? error.name : "Error"); }
-            }
-        } finally { draining = false; }
-    });
+type CompilationJob = { operationId: string; owner: string; id: string; expectedRevision: number; requestHash: string; baselineHash: string; preparedId: string; director: DirectorProduction; references: Record<string, string>; scope?: CompilationScope; scopeHash?: string; status: "queued" | "running" | "succeeded" | "blocked" | "failed" | "interrupted"; diagnostics: any[]; result?: any; continuityReceipt?: any; application?: any; createdAt: string };
+const compilerPool = new WorkPool(3);
+function schedule(work: () => Promise<void>, _createdAt: string) {
+    void compilerPool.submit(work).catch(error => console.error("COMPILATION_RECEIPT_WRITE_FAILED", error instanceof Error ? error.name : "Error"));
 }
 const activeJobs = new Set<string>();
 const hasFatalCompilationError = (diagnostics: Array<{ severity?: string; targetId?: string }>) => diagnostics.some(item => item.severity === "error" && !item.targetId);
 
 /** Frozen compiler packets are sidecar files; only the existing ops transaction edits production. */
 export class ProductionCompilationService {
+    onSettled?: (id: string) => void;
     constructor(private service: EpisodeProductionService, private root: string, private compiler: Compiler = compileAchengDirector) {}
 
     private jobFile(operationId: string) { return path.join(this.root, "operations", hash(operationId) + ".json"); }
@@ -58,8 +49,8 @@ export class ProductionCompilationService {
         const committed = this.service.operationReceipt?.(job.id, `compilation:${job.preparedId}`);
         return committed ? { revision: committed.revision, sourceHash: committed.draft.director?.sourceHash, operationId: `compilation:${job.preparedId}`, referenceSync: committed.referenceSync, mediaSubmitted: false } : undefined;
     }
-    enqueue(id: string, owner: string, operationId: string, expectedRevision: number, candidate?: DirectorProduction) {
-        const requestHash = hash({ id, owner, expectedRevision, candidate });
+    enqueue(id: string, owner: string, operationId: string, expectedRevision: number, candidate?: DirectorProduction, scope?: CompilationScope) {
+        const requestHash = hash({ id, owner, expectedRevision, candidate, scope });
         const prior = this.loadJob(operationId);
         if (prior) {
             if (prior.requestHash !== requestHash) throw new Error("IDEMPOTENCY_CONFLICT: operationId 已用于不同编译请求");
@@ -69,6 +60,7 @@ export class ProductionCompilationService {
         if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
         if (!current.draft.director) throw new Error("缺少正式导演源稿");
         const director = directorProductionSchema.parse(structuredClone(candidate || current.draft.director));
+        if (scope && this.compiler === compileAchengDirector && !resolveAchengRuntime(director.engine.runtimeId).sourceContract?.scopedCompilation) throw new Error("PARALLEL_RUNTIME_UPGRADE_REQUIRED: 旧制作固定引擎不支持按场次编译，请沿旧路径或显式升级制作版本");
         if (hash(director.engine) !== hash(current.draft.director.engine)) throw new Error("ENGINE_MISMATCH: 必须使用制作对象固定引擎");
         const boundFiles = this.service.compilationReferenceFiles(id, director);
         const preparedId = crypto.randomUUID(), directory = path.join(this.root, preparedId);
@@ -84,25 +76,27 @@ export class ProductionCompilationService {
         };
         for (const [assetId, asset] of Object.entries(director.assets)) if (asset.storageKey) freeze(assetId, "asset");
         for (const card of (director.source.asset_cards || []) as any[]) for (const ref of card.references || []) freeze(card.id, ref.label || `<Picture ${ref.image}>`, path.isAbsolute(ref.file || "") ? ref.file : undefined);
-        const job: CompilationJob = { operationId, owner, id, expectedRevision, requestHash, baselineHash: hash(current.draft.director), preparedId, director, references, status: "queued", diagnostics: [], createdAt: new Date().toISOString() };
+        const scopeHash = scope ? compilationScopeInput(director, scope).inputHash : undefined;
+        const job: CompilationJob = { operationId, owner, id, expectedRevision, requestHash, baselineHash: hash(current.draft.director), preparedId, director, references, scope, scopeHash, status: "queued", diagnostics: [], createdAt: new Date().toISOString() };
         this.saveJob(job); this.scheduleJob(job);
         return this.getCompilation(id, owner, operationId);
     }
-    async preflight(id: string, expectedRevision: number, candidate?: DirectorProduction) {
+    async preflight(id: string, expectedRevision: number, candidate?: DirectorProduction, scope?: CompilationScope) {
         const current = this.service.get(id);
         if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
         if (!current.draft.director) throw new Error("COMPILE_STAGE_NOT_READY: 请先保存正式导演源稿");
         const director = directorProductionSchema.parse(structuredClone(candidate || current.draft.director));
         if (hash(director.engine) !== hash(current.draft.director.engine)) throw new Error("ENGINE_MISMATCH: 必须使用制作固定引擎");
         const references = this.service.compilationReferenceFiles(id, director);
+        const compileInput = scope ? scopedCompilerInput(compilationScopeInput(director, scope).director, scope) : director;
         const result = await new Promise<any>((resolve, reject) => {
             const worker = new Worker(`const { parentPort, workerData } = require("node:worker_threads");
-                (async () => { const engine = await import(workerData.module); parentPort.postMessage(engine.preflightCompilationDirector(workerData.director, (id, label) => workerData.references[id + "\\0" + label])); })().catch(error => parentPort.postMessage({ error: error.message }));`, { eval: true, workerData: { module: import.meta.resolve("@basketikun/canvas-agent/skills/acheng"), director, references } });
+                (async () => { const engine = await import(workerData.module); parentPort.postMessage(engine.preflightCompilationDirector(workerData.director, (id, label) => workerData.references[id + "\\0" + label])); })().catch(error => parentPort.postMessage({ error: error.message }));`, { eval: true, workerData: { module: import.meta.resolve("@basketikun/canvas-agent/skills/acheng"), director: compileInput, references } });
             let delivered = false;
             worker.once("message", message => { delivered = true; message.error ? reject(new Error(message.error)) : resolve(message); }); worker.once("error", reject);
             worker.once("exit", code => { if (!delivered) reject(new Error(`预检执行单元退出 (${code})`)); });
         });
-        return { ...result, revision: current.revision };
+        return { ...result, revision: current.revision, scope };
     }
     recover(owner: string) {
         const directory = path.join(this.root, "operations");
@@ -123,12 +117,12 @@ export class ProductionCompilationService {
         }
     }
     private shortResult(preparedId: string, packet: any) {
-        return { preparedId, sourceHash: packet.director.sourceHash, targets: packet.director.artifacts.map((a: any) => ({ id: a.id, targetId: a.targetId, kind: a.kind, status: a.status, sha256: a.sha256, referenceCount: a.references.length })) };
+        return { preparedId, sourceHash: packet.director.sourceHash, targets: packet.director.artifacts.filter((a: any) => !packet.targetIds || packet.targetIds.includes(a.targetId)).map((a: any) => ({ id: a.id, targetId: a.targetId, kind: a.kind, status: a.status, sha256: a.sha256, referenceCount: a.references.length })) };
     }
-    private applyContinuityGate(id: string, director: DirectorProduction, diagnostics: any[]) {
+    private applyContinuityGate(id: string, director: DirectorProduction, diagnostics: any[], targetIds?: string[]) {
         if ((director.source.ledger as any)?.contract_version !== 2) return undefined;
         const continuity = this.service.continuityForDirector(id, director);
-        for (const artifact of director.artifacts.filter(item => item.kind === "h3" && item.status === "ready")) {
+        for (const artifact of director.artifacts.filter(item => item.kind === "h3" && item.status === "ready" && (!targetIds || targetIds.includes(item.targetId)))) {
             const blockers = continuityTargetBlockers(continuity, [artifact.targetId]);
             if (!blockers.length) continue;
             artifact.status = "draft";
@@ -148,8 +142,12 @@ export class ProductionCompilationService {
             try {
                 job.status = "running"; this.saveJob(job);
                 const directory = path.join(this.root, job.preparedId);
+                const projection = job.scope ? compilationScopeInput(job.director, job.scope) : undefined;
+                const compileInput = projection && job.scope ? scopedCompilerInput(projection.director, job.scope) : job.director;
                 let compiled: ReturnType<Compiler>;
-                if (this.compiler !== compileAchengDirector) compiled = this.compiler(structuredClone(job.director), directory, (targetId, label) => job.references[`${targetId}\0${label}`]);
+                const cached = projection && projection.targetIds.length > 0 && projection.targetIds.every(targetId => job.director.artifacts.some(item => item.targetId === targetId && item.status === "ready" && currentCompilationArtifact(job.director, item)));
+                if (cached) compiled = { director: structuredClone(compileInput), exitCode: 0, diagnostics: [], audit: { status: "REUSED", artifactIds: compileInput.artifacts.map(item => item.id) }, sourceAdjustments: [], acceptance: { reused: true } };
+                else if (this.compiler !== compileAchengDirector) compiled = await this.compiler(structuredClone(compileInput), directory, (targetId, label) => job.references[`${targetId}\0${label}`]);
                 else compiled = await new Promise((resolve, reject) => {
                     const worker = new Worker(`const { parentPort, workerData } = require("node:worker_threads");
                         (async () => { const engine = await import(workerData.module);
@@ -157,16 +155,27 @@ export class ProductionCompilationService {
                           const checked = engine.preflightCompilationDirector(workerData.director, resolveRef);
                           if (!checked.valid) { parentPort.postMessage({ blocked: checked.diagnostics }); return; }
                           parentPort.postMessage({ compiled: engine.compileAchengDirector(workerData.director, workerData.directory, resolveRef) });
-                        })().catch(error => parentPort.postMessage({ error: error.message }));`, { eval: true, workerData: { module: import.meta.resolve("@basketikun/canvas-agent/skills/acheng"), director: job.director, references: job.references, directory } });
+                        })().catch(error => parentPort.postMessage({ error: error.message }));`, { eval: true, workerData: { module: import.meta.resolve("@basketikun/canvas-agent/skills/acheng"), director: compileInput, references: job.references, directory } });
                     let delivered = false;
                     worker.once("message", message => { delivered = true; if (message.error) reject(new Error(message.error)); else if (message.blocked) reject(new ProductionValidationError(message.blocked)); else resolve(message.compiled); });
                     worker.once("error", reject);
                     worker.once("exit", code => { if (!delivered) reject(new Error(`编译执行单元退出 (${code})`)); });
                 });
+                if (projection && job.scope) {
+                    const projectedSourceHash = compiled.director.sourceHash;
+                    const artifacts = compiled.director.artifacts.filter(artifact => projection.targetIds.includes(artifact.targetId)).map(artifact => {
+                        const prior = job.director.artifacts.find(item => item.kind === artifact.kind && item.targetId === artifact.targetId && item.sha256 === artifact.sha256 && currentCompilationArtifact(job.director, item));
+                        if (prior) return prior;
+                        const targetScope = { targetIds: [artifact.targetId] };
+                        return { ...artifact, sourceHash: job.director.sourceHash, receipt: { ...artifact.receipt, sourceHash: job.director.sourceHash,
+                            compilationScope: { scope: targetScope, inputHash: compilationScopeInput(job.director, targetScope).inputHash, projectedSourceHash } } };
+                    });
+                    compiled.director = { ...structuredClone(job.director), artifacts: [...job.director.artifacts.filter(item => !projection.targetIds.includes(item.targetId)), ...artifacts] };
+                }
                 if (compiled.director.workflow.currentWork) compiled.director.workflow.currentWork = { ...compiled.director.workflow.currentWork, inputRevision: job.expectedRevision, sourceHash: compiled.director.sourceHash };
-                const continuityReceipt = this.applyContinuityGate(job.id, compiled.director, compiled.diagnostics);
+                const continuityReceipt = this.applyContinuityGate(job.id, compiled.director, compiled.diagnostics, projection?.targetIds);
                 job.continuityReceipt = continuityReceipt;
-                const packet = { owner: job.owner, id: job.id, expectedRevision: job.expectedRevision, baselineHash: job.baselineHash, operationId: `compilation:${job.preparedId}`, resultHash: hash(compiled.director), ...compiled, continuityReceipt };
+                const packet = { owner: job.owner, id: job.id, expectedRevision: job.expectedRevision, baselineHash: job.baselineHash, scope: job.scope, scopeHash: job.scopeHash, targetIds: projection?.targetIds, operationId: `compilation:${job.preparedId}`, resultHash: hash(compiled.director), ...compiled, continuityReceipt };
                 fs.mkdirSync(directory, { recursive: true });
                 const temporary = this.file(job.preparedId) + ".tmp";
                 fs.writeFileSync(temporary, JSON.stringify({ ...packet, packetHash: hash(packet) }), "utf8"); fs.renameSync(temporary, this.file(job.preparedId));
@@ -175,7 +184,7 @@ export class ProductionCompilationService {
             } catch (error) {
                 job.status = error instanceof ProductionValidationError ? "blocked" : "failed";
                 job.diagnostics = error instanceof ProductionValidationError ? error.diagnostics : [{ code: "COMPILATION_FAILED", path: "compile", message: error instanceof Error ? error.message : String(error), severity: "error" }];
-            } finally { try { this.saveJob(job); } finally { activeJobs.delete(key); } }
+            } finally { try { this.saveJob(job); } finally { activeJobs.delete(key); this.onSettled?.(job.id); } }
         }, job.createdAt);
     }
 
@@ -215,6 +224,25 @@ export class ProductionCompilationService {
         if (hash(packet.director) !== packet.resultHash) throw new Error("Frozen compilation bytes changed");
         if (hasFatalCompilationError(packet.diagnostics)) throw new Error("Compilation has unresolved global errors; correct its source and prepare a new packet");
         const current = this.service.get(id);
+        if (packet.scope) {
+            const committed = this.service.operationReceipt(id, packet.operationId);
+            if (committed) return { revision: committed.revision, sourceHash: committed.draft.director?.sourceHash, referenceSync: committed.referenceSync, replayed: true, mediaSubmitted: false };
+            const director = current.draft.director;
+            if (!director || compilationScopeInput(director, packet.scope).inputHash !== packet.scopeHash) throw new ProductionConflictError(current);
+            const targets = new Set<string>(packet.targetIds);
+            const merged = { ...structuredClone(director), artifacts: [...director.artifacts.filter(item => !targets.has(item.targetId)), ...packet.director.artifacts.filter((item: any) => targets.has(item.targetId))] };
+            this.service.verifyCompilationBindings(id, merged);
+            if ((merged.source.ledger as any)?.contract_version === 2) {
+                const readyTargets = merged.artifacts.filter(item => targets.has(item.targetId) && item.kind === "h3" && item.status === "ready").map(item => item.targetId);
+                if (readyTargets.length) {
+                    const blockers = continuityTargetBlockers(this.service.continuityForDirector(id, merged), readyTargets);
+                    if (blockers.length) throw new Error(`CONTINUITY_PACKET_BLOCKED: ${blockers.map(item => item.message).join("；")}`);
+                }
+            }
+            const result = this.service.edit(id, { operationId: packet.operationId, expectedRevision: current.revision, ops: [{ type: "set_director_production", director: merged }] });
+            return { referenceSync: result.referenceSync, revision: result.revision, sourceHash: result.draft.director?.sourceHash, replayed: result.replayed === true, operationId: packet.operationId, mediaSubmitted: false };
+        }
+
         // Let the ops service recover an already committed operation before its revision check.
         if (current.revision === packet.expectedRevision) {
             if (hash(current.draft.director) !== packet.baselineHash) throw new ProductionConflictError(current);

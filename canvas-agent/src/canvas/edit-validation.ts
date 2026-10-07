@@ -20,8 +20,9 @@ export function validateNodeUpdate(operation: Record<string, any>, previous?: Re
     }
     return patch;
 }
-const clipKeys = new Set([...H3_PARAM_KEYS, ...H3_NARRATIVE_FIELDS, ...Object.keys(BASE_H3_NODE_METADATA), "title", "taskMode", "h3ParameterPolicy", "referenceBindings", "storyboardShots", "subjects", "tailFrameContinuation", "sourceShotId", "styleTemplateId", "strictPromptTags"]);
+const clipKeys = new Set([...H3_PARAM_KEYS, ...H3_NARRATIVE_FIELDS, ...Object.keys(BASE_H3_NODE_METADATA), "title", "taskMode", "h3ParameterPolicy", "h3ParameterOverrides", "referenceBindings", "h3CharacterGroups", "storyboardShots", "storyboardDurations", "storyboardModeEnabled", "storyboardCompositeEnabled", "storyboardPromptCache", "subjectDefinitions", "subjects", "tailFrameContinuation", "sourceShotId", "styleTemplateId", "strictPromptTags"]);
 export function validateH3Edit(patch: Record<string, any>, allowLegacy = false) {
+    if (patch.h3ParameterOverrides !== undefined && (!Array.isArray(patch.h3ParameterOverrides) || patch.h3ParameterOverrides.some((key: unknown) => typeof key !== "string" || !(H3_PARAM_KEYS as readonly string[]).includes(key)))) throw new Error("H3 人工参数标记无效");
     for (const [key, value] of Object.entries(patch)) {
         if (allowLegacy && ["refs", "refItems"].includes(key)) continue;
         if (!clipKeys.has(key)) throw new Error(`INVALID_CLIP_FIELD: patch.${key} 不属于可编辑 Clip 配置`);
@@ -29,7 +30,9 @@ export function validateH3Edit(patch: Record<string, any>, allowLegacy = false) 
         if (typeof base === "boolean" && typeof value !== "boolean") throw new Error(`INVALID_CLIP_FIELD: patch.${key} 必须为 boolean`);
         if (typeof base === "number" && (typeof value !== "number" || !Number.isFinite(value))) throw new Error(`INVALID_CLIP_FIELD: patch.${key} 必须为有限 number`);
         if (["title", "prompt", ...H3_NARRATIVE_FIELDS.filter(field => field !== "timeline")].includes(key as any) && typeof value !== "string") throw new Error(`INVALID_CLIP_FIELD: patch.${key} 必须为 string`);
-        if (["referenceBindings", "storyboardShots", "subjects", "timeline", "loraSlots"].includes(key) && !Array.isArray(value)) throw new Error(`INVALID_CLIP_FIELD: patch.${key} 必须为 array`);
+        if (["referenceBindings", "storyboardShots", "subjectDefinitions", "subjects", "timeline", "loraSlots"].includes(key) && !Array.isArray(value)) throw new Error(`INVALID_CLIP_FIELD: patch.${key} 必须为 array`);
+        if (["h3CharacterGroups", "storyboardDurations", "storyboardPromptCache"].includes(key) && (!value || typeof value !== "object" || Array.isArray(value))) throw new Error(`INVALID_CLIP_FIELD: patch.${key} 必须为 object`);
+        if (["storyboardModeEnabled", "storyboardCompositeEnabled"].includes(key) && typeof value !== "boolean") throw new Error(`INVALID_CLIP_FIELD: patch.${key} 必须为 boolean`);
         if (key === "duration" && (typeof value !== "number" && typeof value !== "string" || !Number.isFinite(Number(value)) || Number(value) <= 0)) throw new Error("INVALID_CLIP_FIELD: patch.duration 必须为正数");
         if (key === "taskMode" && !["t2v", "i2v", "fl2v", "l2v", "ref2va"].includes(String(value))) throw new Error("INVALID_CLIP_FIELD: patch.taskMode 无效");
     }

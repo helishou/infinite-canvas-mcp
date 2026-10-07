@@ -1,3 +1,4 @@
+export { CanvasSession } from "../canvas/session.js";
 import { ZodError } from "zod";
 import { toolInputSchemas } from "../canvas/schemas.js";
 import { spawn } from "node:child_process";
@@ -13,6 +14,7 @@ import express, {
 } from "express";
 
 import { runClaudeTurn } from "../agent/claude.js";
+import { LlmAgent, isLlmThread, type LlmSettings } from "../agent/llm.js";
 import {
   archiveCodexThread,
   CodexSkillLookupError,
@@ -30,13 +32,16 @@ import {
   runCodexTurn,
   startCodexThread,
   summarizeCodexThread,
+  SKILL_DRAFT_OUTPUT_SCHEMA,
+  validateAgentSkillDraft,
+  canvasSkillSource,
 } from "../agent/codex.js";
 import type {
   CodexReasoningEffort,
   CodexSkillSelector,
 } from "../agent/codex-protocol.js";
 import { messageMetadataStore } from "../agent/message-metadata.js";
-import type { AgentAttachment, AgentPermissionMode } from "../agent/types.js";
+import type { AgentAttachment, AgentEmit, AgentPermissionMode } from "../agent/types.js";
 import { AGENT_PROTOCOL_VERSION, CanvasSession } from "../canvas/session.js";
 import {
   executeCollaborationTool,
@@ -73,6 +78,8 @@ export type AgentHttpOptions = {
   listen?: boolean;
   backendUrl?: string;
   backendToken?: string;
+  /** Backend owns channels and API-backed conversation history. */
+  settings?: LlmSettings;
 };
 
 /** 创建 Agent Express 应用；嵌入 Backend 时不监听端口。 */
@@ -86,7 +93,6 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
   saveConfig(config);
 
   const initialWorkspace = ensureSiteWorkspace(config);
-  const session = new CanvasSession(initialWorkspace.activeThreadId || "");
   const skillStore = new SkillStore(initialWorkspace.workspacePath);
   const backendUrl =
     options.backendUrl || config.backendUrl || `http://127.0.0.1:17370`;
@@ -96,6 +102,12 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
       ? { INFINITE_CANVAS_BACKEND_TOKEN: options.backendToken }
       : {}),
   });
+  const session = new CanvasSession(initialWorkspace.activeThreadId || "", projectId => backend.post(`/canvas/projects/${encodeURIComponent(projectId)}/mcp-export`, {}));
+  const llm = options.settings ? new LlmAgent(options.settings, backend.backendUrl, backend.backendToken) : undefined;
+  const useLlm = () => {
+    const id = ensureSiteWorkspace(config).activeThreadId || "";
+    return Boolean(llm && (isLlmThread(id) || !id && llm.providers().some(provider => provider.kind !== "codex-cli")));
+  };
   // Codex 会话与 Agent 共用当前已解析的 Backend 连接，不再从用户全局配置猜测端点或密钥。
   process.env.INFINITE_CANVAS_BACKEND_URL = backend.backendUrl;
   process.env.INFINITE_CANVAS_BACKEND_TOKEN = backend.backendToken;
@@ -170,27 +182,30 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     });
     return workspace;
   };
-  let draftThreadStart: ReturnType<typeof startCodexThread> | null = null;
+  let draftThreadStart: Promise<Record<string, unknown>> | null = null;
   let skillDraftRunning = false;
   const prepareDraftThread = (
     clientId: string,
     permission: AgentPermissionMode,
+    model?: string,
   ) => {
     if (draftThreadStart) return draftThreadStart;
     const workspace = ensureSiteWorkspace(config);
-    let prepared!: ReturnType<typeof startCodexThread>;
+    let prepared!: Promise<Record<string, unknown>>;
     prepared = (async () => {
       emit("agent_bootstrap", {
         type: "codex.preparing",
         sourceClientId: clientId,
       });
       try {
-        const thread = await startCodexThread(
-          emit,
-          workspace.workspacePath,
-          permission,
-          true,
-        );
+        const selectedModel = model?.includes("::") ? model : llm?.defaultModel();
+        const provider = selectedModel ? llm?.provider(selectedModel) : undefined;
+        const thread = provider?.kind === "codex-cli"
+          ? await startCodexThread(emit, workspace.workspacePath, permission, true, provider.model)
+          : llm && llm.providers().length ? llm.startThread(workspace.workspacePath, selectedModel)
+          : await startCodexThread(emit, workspace.workspacePath, permission, true);
+        if (provider?.kind === "codex-cli") llm!.rememberCodexThread(thread.id, provider.id);
+        if (llm && isLlmThread(thread.id)) await llm.prepare(thread.id, workspace.workspacePath, emit);
         if (draftThreadStart !== prepared) return thread;
         const threadId = String((thread as Record<string, unknown>).id || "");
         if (threadId && !ensureSiteWorkspace(config).activeThreadId) {
@@ -237,13 +252,9 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
       threadId,
       sourceClientId: clientId || undefined,
     });
-    const result = await resumeCodexThread(
-      emit,
-      threadId,
-      workspace.workspacePath,
-      permission,
-      true,
-    );
+    const result = llm && isLlmThread(threadId)
+      ? await llm.prepare(threadId, workspace.workspacePath, emit)
+      : await resumeCodexThread(emit, threadId, workspace.workspacePath, permission, true);
     session.completeConversationPreparation(threadId);
     return result;
   };
@@ -658,7 +669,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
       const blockedProduction = await productionToolPreflight(backend, name, input);
       if (blockedProduction) return void res.json({ ok: true, result: blockedProduction });
       const workspaceRequest = productionWorkspaceRequest(name, input);
-      if (workspaceRequest) return void res.json({ ok: true, result: workspaceRequest.method === "GET" ? await backend.get(workspaceRequest.path) : await backend.post(workspaceRequest.path, workspaceRequest.body) });
+      if (workspaceRequest) return void res.json({ ok: true, result: workspaceRequest.method === "GET" ? await backend.get(workspaceRequest.path) : productionWriteReceipt(await backend.post(workspaceRequest.path, workspaceRequest.body), { tool: name, input }) });
       if (isCollaborationTool(name))
         return void res.json({
           ok: true,
@@ -723,6 +734,12 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
             String(input.episodeId || ""),
           ),
         });
+      if (name === "production_diagnose_clips") {
+        const params = new URLSearchParams({ offset: String(input.offset ?? 0), pageSize: String(input.pageSize ?? 200) });
+        if (input.nodeId) params.set("nodeId", String(input.nodeId));
+        if (Array.isArray(input.nodeIds) && input.nodeIds.length) params.set("nodeIds", JSON.stringify(input.nodeIds));
+        return void res.json({ ok: true, result: await backend.get(`/canvas/projects/${encodeURIComponent(String(input.projectId))}/h3-diagnose?${params}`) });
+      }
       if (name === "production_get_contract") {
         const query = new URLSearchParams();
         if (input.runtimeId) query.set("runtimeId", String(input.runtimeId));
@@ -736,7 +753,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         const result = name === "production_get_compilation" ? await backend.get(`${base}/compilations/${encodeURIComponent(String(input.operationId))}?${params}`)
           : name === "production_diagnose_bindings" ? await backend.get(`${base}/bindings`)
           : name === "production_apply_compilation" ? await backend.post(`${base}/apply-compilation`, { preparedId: input.preparedId })
-          : await backend.post(`${base}/compile`, { operationId: input.operationId, expectedRevision: input.expectedRevision, director: input.director });
+          : await backend.post(`${base}/compile`, { operationId: input.operationId, expectedRevision: input.expectedRevision, director: input.director, scope: input.scope });
         return void res.json({ ok: true, result });
       }
       if (name === "canvas_preflight_production" || name === "drama_preflight_production") {
@@ -752,7 +769,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
           : name === "drama_pause_production_run" ? await backend.post(`${path}/batches/${encodeURIComponent(String(input.runId || ""))}/pause`, {})
           : name === "drama_resume_production_run" ? await backend.post(`${path}/batches/${encodeURIComponent(String(input.runId || ""))}/resume`, {})
           : name === "drama_list_production_versions" ? await backend.get(`${path}/versions`)
-          : name === "drama_get_production_version" ? await backend.get(`${path}/versions/${encodeURIComponent(String(input.version || ""))}`)
+          : name === "drama_get_production_version" ? await backend.get(`${path}/versions/${encodeURIComponent(String(input.version || ""))}${productionReadQuery(input)}`)
           : name === "drama_list_production_legacy" ? await backend.get(`${path}/legacy`)
           : name === "drama_get_production_run" ? await backend.get(`${path}/runs/${encodeURIComponent(String(input.version || ""))}`)
           : name === "drama_export_production_markdown" ? await backend.get(`${path}/export?stage=${encodeURIComponent(String(input.stage || ""))}${input.version ? `&version=${encodeURIComponent(String(input.version))}` : ""}`)
@@ -761,7 +778,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
           : name === "drama_restore_production" ? await backend.post(`${path}/restore`, { version: input.version, operationId: input.operationId, expectedRevision: input.expectedRevision })
           : name === "drama_sync_production_clips" ? await backend.post(`${path}/sync-clips`, {})
           : await backend.post(`${path}/publish`, { operationId: input.operationId, expectedRevision: input.expectedRevision, stage: input.stage });
-        return void res.json({ ok: true, result: ["drama_edit_production", "drama_publish_production", "drama_restore_production", "drama_sync_production_clips"].includes(name) ? productionWriteReceipt(result) : result });
+        return void res.json({ ok: true, result: ["drama_edit_production", "drama_publish_production", "drama_restore_production", "drama_sync_production_clips"].includes(name) ? productionWriteReceipt(result, { tool: name, input }) : result });
       }
       if (["canvas_get_production", "canvas_get_workflow_readiness", "canvas_start_production_run", "canvas_get_production_batch", "canvas_pause_production_run", "canvas_resume_production_run", "canvas_edit_production", "canvas_preview_production_impact", "canvas_publish_production", "canvas_list_production_versions", "canvas_get_production_version", "canvas_list_production_legacy", "canvas_restore_production", "canvas_sync_production_clips", "canvas_get_production_run", "canvas_export_production_markdown"].includes(name)) {
         const path = `/canvas/projects/${encodeURIComponent(String(input.projectId || ""))}/production`;
@@ -772,7 +789,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
           : name === "canvas_pause_production_run" ? await backend.post(`${path}/batches/${encodeURIComponent(String(input.runId || ""))}/pause`, {})
           : name === "canvas_resume_production_run" ? await backend.post(`${path}/batches/${encodeURIComponent(String(input.runId || ""))}/resume`, {})
           : name === "canvas_list_production_versions" ? await backend.get(`${path}/versions`)
-          : name === "canvas_get_production_version" ? await backend.get(`${path}/versions/${encodeURIComponent(String(input.version || ""))}`)
+          : name === "canvas_get_production_version" ? await backend.get(`${path}/versions/${encodeURIComponent(String(input.version || ""))}${productionReadQuery(input)}`)
           : name === "canvas_list_production_legacy" ? await backend.get(`${path}/legacy`)
           : name === "canvas_get_production_run" ? await backend.get(`${path}/runs/${encodeURIComponent(String(input.version || ""))}`)
           : name === "canvas_export_production_markdown" ? await backend.get(`${path}/export?stage=${encodeURIComponent(String(input.stage || ""))}${input.version ? `&version=${encodeURIComponent(String(input.version))}` : ""}`)
@@ -781,7 +798,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
           : name === "canvas_restore_production" ? await backend.post(`${path}/restore`, { version: input.version, operationId: input.operationId, expectedRevision: input.expectedRevision })
           : name === "canvas_sync_production_clips" ? await backend.post(`${path}/sync-clips`, {})
           : await backend.post(`${path}/publish`, { operationId: input.operationId, expectedRevision: input.expectedRevision, stage: input.stage });
-        return void res.json({ ok: true, result: ["canvas_edit_production", "canvas_publish_production", "canvas_restore_production", "canvas_sync_production_clips"].includes(name) ? productionWriteReceipt(result) : result });
+        return void res.json({ ok: true, result: ["canvas_edit_production", "canvas_publish_production", "canvas_restore_production", "canvas_sync_production_clips"].includes(name) ? productionWriteReceipt(result, { tool: name, input }) : result });
       }
       return void res.json({
         ok: true,
@@ -824,20 +841,27 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
   });
   app.get(
     agentRoute("/codex/models"),
-    route(async (_req, res) =>
-      res.json({ ok: true, ...(await listCodexModels(emit)) }),
-    ),
+    route(async (req, res) => {
+      const id = ensureSiteWorkspace(config).activeThreadId || "";
+      const configured = llm && req.query.source !== "codex" && (req.query.source === "llm" || llm.providers().length > 0 && (!id || isLlmThread(id) || llm.codexThreadModel(id)));
+      if (!configured) return void res.json({ ok: true, ...(await listCodexModels(emit)) });
+      let native: Awaited<ReturnType<typeof listCodexModels>>["data"] = [];
+      const errors: Array<{ message: string }> = [];
+      if (llm!.providers().some(provider => provider.kind === "codex-cli")) {
+        try { native = (await listCodexModels(emit)).data; }
+        catch (error) { errors.push({ message: error instanceof Error ? error.message : "无法读取 Codex CLI 模型列表" }); }
+      }
+      res.json({ ok: true, ...llm!.models(native), ...(errors.length ? { errors } : {}) });
+    }),
   );
   app.get(
     agentRoute("/codex/skills"),
     route(async (req, res) => {
       const forceReload = String(req.query.forceReload || "") === "1" && !session.codexBusy;
       const workspace = ensureSiteWorkspace(config, forceReload);
-      const result = await listCodexSkills(
-        emit,
-        workspace.workspacePath,
-        forceReload,
-      );
+      const result = useLlm()
+        ? await llm!.skills(workspace.workspacePath)
+        : await listCodexSkills(emit, workspace.workspacePath, forceReload);
       res.json({
         ok: true,
         data: result.skills.map((skill) => ({
@@ -860,7 +884,10 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         return res
           .status(409)
           .json({ ok: false, error: "发起提炼的网页已断开，请重新连接后再试" });
-      const model = String(req.body?.model || "") || undefined;
+      const selectedModel = String(req.body?.model || "") || undefined;
+      const selectedProvider = selectedModel?.includes("::") ? llm?.provider(selectedModel) : undefined;
+      if (selectedProvider && (useLlm() ? selectedProvider.kind === "codex-cli" : selectedProvider.kind !== "codex-cli")) return void res.status(409).json({ ok: false, code: "MODEL_RUNTIME_CHANGED", error: "该模型使用不同的 Agent 运行方式，请先新建对话；原对话已保留" });
+      const model = selectedProvider?.kind === "codex-cli" ? selectedProvider.model : selectedModel;
       const effort = reasoningEffort(req.body?.effort);
       const previousCodexState = session.codexStateSnapshot;
       skillDraftRunning = true;
@@ -878,11 +905,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
                 ok: false,
                 error: "当前对话已在其他页面切换，请同步后重试",
               });
-          const history = await readCodexThread(
-            emit,
-            threadId,
-            workspace.workspacePath,
-          );
+          const history = llm && isLlmThread(threadId) ? llm.read(threadId, workspace.workspacePath) : await readCodexThread(emit, threadId, workspace.workspacePath);
           if (
             !history.messages.some(
               (message) => message.role === "user" && message.turnId,
@@ -895,11 +918,9 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
             { busy: true, threadId, turnId: "" },
             { preserveReplay: true },
           );
-          const data = await generateCodexSkillDraft(
-            emit,
-            workspace.workspacePath,
-            { source, threadId, model, effort },
-          );
+          const data = llm && isLlmThread(threadId)
+            ? await generateLlmSkillDraft(history.messages.filter(message => ["user", "assistant"].includes(message.role)).map(message => ({ role: message.role, text: message.text })), model, effort)
+            : await generateCodexSkillDraft(emit, workspace.workspacePath, { source, threadId, model, effort });
           if (!session.hasClient(clientId))
             return res
               .status(409)
@@ -921,11 +942,9 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
           { busy: true, threadId: workspace.activeThreadId || "", turnId: "" },
           { preserveReplay: true },
         );
-        const data = await generateCodexSkillDraft(
-          emit,
-          workspace.workspacePath,
-          { source, snapshot, model, effort },
-        );
+        const data = useLlm()
+          ? await generateLlmSkillDraft(canvasSkillSource(snapshot), model, effort)
+          : await generateCodexSkillDraft(emit, workspace.workspacePath, { source, snapshot, model, effort });
         if (!session.hasClient(clientId))
           return res
             .status(409)
@@ -940,6 +959,11 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
       }
     }),
   );
+  async function generateLlmSkillDraft(source: unknown, model?: string, effort?: string) {
+    const result = await llm!.structured({ cwd: ensureSiteWorkspace(config).workspacePath, model, effort, schema: SKILL_DRAFT_OUTPUT_SCHEMA, onThread: () => {},
+      prompt: `根据以下已完成内容提炼可编辑的通用 Skill。只保存稳定、可复用的步骤、约束和输出要求，不记录一次性结果或日志。instructions 不含 frontmatter。defaultPrompt 必须引用 $name；shortDescription 为空或 25–64 字符。禁止本地路径、外部 URL、节点身份和任何敏感凭证。\n${JSON.stringify(source)}` });
+    return validateAgentSkillDraft(result.output);
+  }
   app.get(
     agentRoute("/codex/skills/:name"),
     route(async (req, res) => {
@@ -966,12 +990,9 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
       const selector = skillSelector(req.body);
       if (selector.name !== routeParam(req.params.name))
         return res.status(400).json({ ok: false, error: "Skill 选择无效" });
-      const data = await configureCodexSkill(
-        emit,
-        workspace.workspacePath,
-        selector,
-        req.body.enabled,
-      );
+      const data = useLlm()
+        ? await llm!.configureSkill(workspace.workspacePath, selector, req.body.enabled)
+        : await configureCodexSkill(emit, workspace.workspacePath, selector, req.body.enabled);
       session.emitAll("skills_changed", { forceReload: true });
       res.json({ ok: true, data });
     }),
@@ -1002,7 +1023,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     agentRoute("/codex/threads"),
     route(async (req, res) => {
       const workspace = ensureSiteWorkspace(config);
-      const result = await listCodexThreads(emit, {
+      const result = llm && (req.query.source === "llm" || req.query.source !== "codex" && useLlm()) ? llm.list(workspace.workspacePath, String(req.query.searchTerm || "")) : await listCodexThreads(emit, {
         cwd: workspace.workspacePath,
         searchTerm: String(req.query.searchTerm || ""),
       });
@@ -1027,6 +1048,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
       const thread = await prepareDraftThread(
         clientId,
         permissionMode(req.body?.permissionMode),
+        String(req.body?.model || "") || undefined,
       );
       res.json({
         ok: true,
@@ -1050,6 +1072,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
       await prepareDraftThread(
         clientId,
         permissionMode(req.body?.permissionMode),
+        String(req.body?.model || "") || undefined,
       );
       res.json({
         ok: true,
@@ -1067,7 +1090,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         ok: true,
         workspace,
         conversation: session.conversationStateSnapshot,
-        ...(await readCodexThread(emit, threadId, workspace.workspacePath)),
+        ...(llm && isLlmThread(threadId) ? llm.read(threadId, workspace.workspacePath) : await readCodexThread(emit, threadId, workspace.workspacePath)),
       });
     }),
   );
@@ -1112,7 +1135,8 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     codexMutation(async (req, res) => {
       const workspace = ensureSiteWorkspace(config);
       const threadId = routeParam(req.params.threadId);
-      await archiveCodexThread(emit, threadId, workspace.workspacePath);
+      if (llm && isLlmThread(threadId)) llm.archive(threadId, workspace.workspacePath);
+      else await archiveCodexThread(emit, threadId, workspace.workspacePath);
       const nextWorkspace = setActiveThread(
         workspace.activeThreadId === threadId
           ? ""
@@ -1171,21 +1195,21 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
           .json({
             ok: false,
             code: "CONVERSATION_NOT_READY",
-            error: "Codex 对话仍在初始化，请等待 MCP 加载完成",
+            error: "Agent 对话仍在初始化，请等待 MCP 加载完成",
             state: conversation,
           });
       }
-      const model = String(req.body?.model || "") || undefined;
+      const selectedModel = String(req.body?.model || "") || undefined;
+      const selectedProvider = selectedModel?.includes("::") ? llm?.provider(selectedModel) : undefined;
+      if (selectedProvider && (useLlm() ? selectedProvider.kind === "codex-cli" : selectedProvider.kind !== "codex-cli")) return void res.status(409).json({ ok: false, code: "MODEL_RUNTIME_CHANGED", error: "该模型使用不同的 Agent 运行方式，请先新建对话；原对话已保留" });
+      const model = selectedProvider?.kind === "codex-cli" ? selectedProvider.model : selectedModel;
       const effort = reasoningEffort(req.body?.effort);
       const skill =
         req.body?.skill === undefined
           ? undefined
-          : await resolveCodexSkill(
-              emit,
-              workspace.workspacePath,
-              skillSelector(req.body.skill),
-              true,
-            );
+          : useLlm()
+            ? await llm!.resolveSkill(workspace.workspacePath, skillSelector(req.body.skill), true)
+            : await resolveCodexSkill(emit, workspace.workspacePath, skillSelector(req.body.skill), true);
       const messageId = String(req.body?.messageId || Date.now());
       const messageText = String(
         req.body?.messageText ||
@@ -1197,7 +1221,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         req.body?.messageMetadata,
       );
       let threadId = activeThreadId;
-      logger.info("Codex turn accepted", {
+      logger.info("Agent turn accepted", {
         threadId: req.body?.threadId,
         model: model || "default",
         reasoningEffort: effort || "default",
@@ -1248,7 +1272,10 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
             ...(sourceClientId ? { sourceClientId } : {}),
           });
         };
-        void runCodexTurn(
+        const runTurn = llm && isLlmThread(threadId)
+          ? (prompt: string, lifecycleEmit: AgentEmit, attachments: AgentAttachment[] = [], options: Parameters<typeof runCodexTurn>[3] = {}) => llm.run(prompt, lifecycleEmit, attachments, options, String(session.canvasStateForClient(clientId)?.projectId || "") || undefined)
+          : runCodexTurn;
+        void runTurn(
           withAttachmentContext(prompt, attachmentRefs),
           lifecycleEmit,
           attachments,
@@ -1263,6 +1290,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
             appEmit: emit,
             onStart: () => session.bindClient(clientId),
             onThread: (actualThreadId) => {
+              if (selectedProvider?.kind === "codex-cli") llm!.rememberCodexThread(actualThreadId, selectedProvider.id);
               const threadChanged = actualThreadId !== threadId;
               void messageMetadataStore
                 .bindThread(messageId, actualThreadId)
@@ -1327,7 +1355,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
                   },
                 });
               }
-              logger.info("Codex turn started", {
+              logger.info("Agent turn started", {
                 threadId,
                 turnId,
                 model: model || "default",
@@ -1336,7 +1364,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
               session.setCodexState({ busy: true, threadId, turnId });
             },
             onFinish: () => {
-              logger.info("Codex turn finished", { threadId, turnId });
+              logger.info("Agent turn finished", { threadId, turnId });
               if (!turnId)
                 void messageMetadataStore
                   .remove(messageId, threadId)
@@ -1382,7 +1410,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
           .json({
             ok: false,
             code: "CONVERSATION_BUSY",
-            error: "Codex 正在运行或正在切换会话，请稍后重试",
+            error: "Agent 正在运行或正在切换会话，请稍后重试",
             state: session.conversationStateSnapshot,
           });
       try {
@@ -1412,9 +1440,10 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
   app.post(
     agentRoute("/codex/interrupt"),
     route(async (req, res) => {
-      const ok = await interruptCodexTurn(
-        skillDraftRunning ? undefined : String(req.body?.threadId || ""),
-      );
+      const requestedThreadId = String(req.body?.threadId || "");
+      const ok = useLlm()
+        ? llm!.interrupt(skillDraftRunning ? undefined : requestedThreadId)
+        : await interruptCodexTurn(skillDraftRunning ? undefined : requestedThreadId);
       res
         .status(ok ? 200 : 409)
         .json({ ok, ...(ok ? {} : { error: "当前没有可停止的任务" }) });

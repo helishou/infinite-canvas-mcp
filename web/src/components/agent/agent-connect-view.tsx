@@ -75,6 +75,7 @@ export function AgentConnectView({
                     </div>
                 </div>
                 <div className="space-y-2">
+                    <p className="rounded-lg border px-3 py-2.5 text-xs leading-5" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>{t("agent.connect.llmHint")}</p>
                     {steps.map((step, index) => {
                         const command = "command" in step ? step.command : "";
                         return (

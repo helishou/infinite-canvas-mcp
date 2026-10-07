@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export type H3ExecutionPreview = {
-    ready: boolean; revision: number; planHash: string;
+    ready: boolean; readyTargets?: Array<{ nodeId: string; segmentId: string }>; blockedTargets?: Array<{ nodeId: string; segmentId: string; code: string; message: string }>; warnings?: Array<{ code: string; message: string }>; revision: number; planHash: string;
     clips: Array<{ nodeId: string; segmentId: string; savedRuntime: Record<string, unknown>; effectiveRuntime: Record<string, unknown>; parameterSources: Record<string, string>; policy: string;
         expectedDimensions: { firstPass: { width: number; height: number } | null; final: { width: number; height: number } | null }; promptHash: string; referenceMap: Array<Record<string, unknown>> }>;
     diagnostics: Array<{ code: string; nodeId: string; segmentId: string; message: string }>;
@@ -67,6 +67,8 @@ export const canvasGenerationCommandSchema = z
     runFromCurrent: z.boolean().optional(),
     skipCompleted: z.boolean().optional(),
     forceRegenerate: z.boolean().optional(),
+    inputBasis: z.enum(["canvas", "published"]).optional(),
+    expectedCanvasRevision: z.number().int().nonnegative().optional(),
     expectedPlanHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
     model: z.string().optional(),
     prompt: z.string().optional(),

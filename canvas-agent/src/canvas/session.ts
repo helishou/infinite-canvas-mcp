@@ -5,7 +5,7 @@ import type { AgentAttachment } from "../agent/types.js";
 import { logger } from "../utils/logger.js";
 import { buildCanvasToolRequest, fitAttachmentNodeSize } from "./operations.js";
 import type { ToolName } from "./schemas.js";
-import { compactCanvasState, compactNode, isToolName, nextCanvasX, parseToolInput } from "./tools.js";
+import { compactNode, isToolName, nextCanvasX, parseToolInput } from "./tools.js";
 import { summarizeCanvasState } from "./state-summary.js";
 import type { CanvasSnapshot } from "./types.js";
 
@@ -62,7 +62,7 @@ export class CanvasSession {
     private conversationInventoryComplete = false;
     private preparedConversationThreadId = "";
 
-    constructor(activeThreadId = "") {
+    constructor(activeThreadId = "", private readonly exportSnapshot?: (projectId: string) => Promise<unknown>) {
         this.conversationState = {
             revision: 1,
             conversationId: activeThreadId || crypto.randomUUID(),
@@ -466,7 +466,12 @@ export class CanvasSession {
             if (!this.clients.size) throw new Error("当前没有已连接网页");
             return await this.requestCanvasTool(name, input);
         }
-        const readTool = ["canvas_get_state", "canvas_get_selection", "canvas_export_snapshot"].includes(name);
+        if (name === "canvas_export_snapshot") {
+            const projectId = String(input.projectId || this.canvasState?.projectId || "");
+            if (!projectId || !this.exportSnapshot) throw new Error("无法取得 Backend 权威画布导出能力");
+            return this.exportSnapshot(projectId);
+        }
+        const readTool = ["canvas_get_state", "canvas_get_selection"].includes(name);
         if (readTool && (!this.clients.size || !this.canvasState)) throw new Error("当前没有已连接画布");
         if (name === "canvas_get_state") {
             const canvas = this.canvasState!;
@@ -474,7 +479,6 @@ export class CanvasSession {
             // 网页内存快照没有可信持久 revision；条件读取在此入口总返回新鲜目录。
             return summarizeCanvasState(canvas as unknown as Record<string, unknown>, input, 512 * 1024);
         }
-        if (name === "canvas_export_snapshot") return compactCanvasState(this.canvasState);
         if (name === "canvas_get_selection") {
             const ids = new Set(this.canvasState?.selectedNodeIds || []);
             return { nodes: (this.canvasState?.nodes || []).filter((node) => ids.has(node.id)).map(compactNode) };

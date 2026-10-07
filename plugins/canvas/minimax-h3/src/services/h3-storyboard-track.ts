@@ -471,6 +471,8 @@ function escapeRegExp(value: string) {
 
 export async function syncStoryboardPrompt(ctx: CanvasNodeContext, segment: H3Segment, previous?: H3Segment) {
     if (!segment.id) return false;
+    // 无 before 的调用来自自动归一化；正式稿只在显式编辑后同步。
+    if (segment.productionClipProjection && !previous) return true;
     const target = { nodeId: ctx.node.id, segmentId: segment.id, field: "prompt" as const };
     const document = ctx.textDocument(target);
     try {

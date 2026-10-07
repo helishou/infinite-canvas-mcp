@@ -1,6 +1,8 @@
+import { effectiveTargetInput, inputHash } from "../drama/canvas-inputs.js";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import fs from "node:fs";
 import { assertReferenceCompilation, compileReferenceSubmission } from "@basketikun/canvas-agent/reference-contract";
 import { applyH3StyleTemplate, isH3StyleTemplateId, styleTemplateFromPrompt } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
 
@@ -17,7 +19,8 @@ import { createLogger } from "../logger.js";
 import { h3ClipCacheFingerprint, h3ClipCacheFingerprintV1, h3ConfirmationKind, h3ConfirmationFingerprintParams, h3ConfirmationPhaseParams, pickH3PostpassParams, stableH3Fingerprint } from "./h3-cache.js";
 import { appendScenePalettePrompt, sceneNodesByIds } from "./scene-generation-context.js";
 import { cleanupStoryboardCompositeDirectory, createStoryboardComposite, remapCompositePrompt, storyboardCompositeDirective, storyboardCompositePlan } from "./storyboard-composite.js";
-import { H3_PARAM_KEYS, resolveH3Runtime, normalizeH3Params, randomH3Seed, estimateH3Dimensions, canonicalH3AspectRatio, h3StoryboardIssues, h3PromptContent } from "./h3-params.js";
+import { H3_PARAM_KEYS, resolveH3Runtime, normalizeH3Params, randomH3Seed, estimateH3Dimensions, canonicalH3AspectRatio, h3StoryboardIssues } from "./h3-params.js";
+import { diagnoseH3Clips } from "./h3-diagnose.js";
 import type { CanvasOperation } from "./project-ops.js";
 
 type H3RunInput = {
@@ -39,7 +42,7 @@ type H3Ref = Record<string, unknown> & { url?: string; storageKey?: string; name
 type H3Segment = Record<string, unknown> & { id?: string; prompt?: string; result?: string; resultStorageKey?: string; refItems?: H3Ref[]; refs?: Record<string, H3Ref | H3Ref[]>; referenceBindings?: Record<string, unknown>[]; continuationGroupId?: string; motionContextEnabled?: boolean; storyboardCompositeEnabled?: boolean };
 type H3Plan = { nodeId: string; segmentId: string; segmentIndex: number; continuation?: { group: string; index: number } };
 type H3ResumeSeed = { nodeId: string; sourceNodeId: string; group: string; previousIndex: number; sourceParentTaskId: string; sourceChildTaskId: string; sourceSegmentId: string; sourceStorageKey: string; contextParams: Record<string, unknown> };
-type H3RunPlan = { version: 1; plans: H3Plan[]; project: { nodes: Array<Record<string, unknown>>; referenceCatalog: Array<Record<string, unknown>> }; defaults: Record<string, unknown>; requirements?: import('../stores/types.js').H3ProductionRequirements | null; resumeSeed?: H3ResumeSeed };
+type H3RunPlan = { referenceDigests?: Record<string, string>; version: 1; plans: H3Plan[]; project: { nodes: Array<Record<string, unknown>>; referenceCatalog: Array<Record<string, unknown>> }; defaults: Record<string, unknown>; requirements?: import('../stores/types.js').H3ProductionRequirements | null; resumeSeed?: H3ResumeSeed };
 type PendingH3 = { nodeId: string; segmentId: string; firstPassFingerprint: string; firstPassResult: string; firstPassStorageKey?: string; firstPassChildTaskId: string; previousOutput: { result?: string; resultStorageKey?: string; cacheFingerprint?: string } };
 type H3Confirmation = { cursor: number; pending: PendingH3[]; inFlight?: { nodeId: string; segmentId: string; action: "confirm"; attempt: number; childTaskId: string; postpassParams: Record<string, unknown> }; revision: number; prepared?: PendingH3["previousOutput"] };
 export type H3ConfirmationAction = { action: "confirm" | "keep_first_pass" | "discard"; segmentId: string; expectedRevision: number; postpassParams?: Record<string, unknown> };
@@ -113,40 +116,83 @@ export class CanvasH3Runner {
         if (!project) throw new Error(`画布不存在: ${normalized.projectId}`);
         const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
         const requirements = this.stores.projects.getH3ProductionRequirements?.(normalized.projectId) || null;
-        const { expectedPlanHash: _expected, runPlan: _plan, ...intent } = normalized;
         const diagnostics: Array<{ code: string; nodeId: string; segmentId: string; message: string }> = [];
         const clips = this.plansFor(normalized).map(plan => {
             const node = (project.nodes as Array<Record<string, unknown>>).find(item => item.id === plan.nodeId)!;
             const metadata = recordOf(node.metadata);
             const segment = (metadata.segments as H3Segment[]).find(item => item.id === plan.segmentId)!;
             const effective = resolveH3Runtime(segment, normalized.params || {}, metadata, defaults);
-            const required = requirements?.clips.find(item => item.nodeId === plan.nodeId && item.segmentId === plan.segmentId);
-            const expectedRatio = canonicalH3AspectRatio(requirements?.videoAspectRatio);
-            const actualRatio = canonicalH3AspectRatio(effective.params.aspectRatio);
             const issue = (code: string, message: string) => diagnostics.push({ code, nodeId: plan.nodeId, segmentId: plan.segmentId, message });
             for (const message of effective.parameterIssues) issue('INVALID_H3_PARAMETERS', message);
             if (effective.params.selectedVideoModelEnabled === true && !String(effective.params.selectedVideoModel || "").trim()) issue("SELECTED_VIDEO_MODEL_REQUIRED", "已启用自选视频模型，请先选择一个已配置的视频模型");
             if (effective.params.selectedVideoModelEnabled === true && h3LocalOnlyReason(effective.params)) issue("SELECTED_VIDEO_MODEL_UNSUPPORTED_MODE", "当前 H3 专用的潜空间连续或分阶段确认功能不能与自选视频模型一起使用");
-            if (segment.directorEngine && required?.promptContentHash && createHash('sha256').update(h3PromptContent(String(segment.prompt || ''))).digest('hex') !== required.promptContentHash) issue('DIRECTOR_PROMPT_CHANGED', 'Clip 正文与正式导演稿不一致；请保留完整对白、动作与镜头描述并重新编译发布');
-            if (segment.directorEngine && required?.sourceHash && segment.directorSourceHash !== required.sourceHash) issue('DIRECTOR_SOURCE_STALE', 'Clip 所属导演源哈希已过期');
-            if (expectedRatio && actualRatio !== expectedRatio) issue('PRODUCTION_ASPECT_RATIO_MISMATCH', `制作要求 ${expectedRatio}，Clip 实际配置 ${effective.params.aspectRatio}`);
-            if (requirements?.videoAspectRatio && !expectedRatio) issue('INVALID_PRODUCTION_ASPECT_RATIO', '制作画幅无效');
-            for (const message of h3StoryboardIssues(segment, required && (required.storyboardRequired || Array.isArray(segment.storyboardShots) && segment.storyboardShots.length > 0) ? required.shots : undefined)) issue('STORYBOARD_MISMATCH', message);
+
+
+
+            // Canvas runs consume the saved manual edit. Published prose and shot tracks
+            // remain compilation baselines, not content locks on this generation entry.
+            for (const message of h3StoryboardIssues(segment)) issue('STORYBOARD_MISMATCH', message);
             let compilation: ReturnType<typeof compileReferenceSubmission> | undefined;
             try { compilation = compileH3Submission(project, segment, String(effective.params.taskMode)).compilation; assertReferenceCompilation(compilation); }
             catch (error) { issue('REFERENCE_INVALID', (error as Error).message); }
-            for (const dialogue of required?.literalDialogues || []) if (dialogue.text && !(compilation?.compiledPrompt || String(segment.prompt || '')).includes(dialogue.text)) issue('SCRIPT_DIALOGUE_MISSING', `正式剧本对白 ${dialogue.blockId} 未完整进入本段提示词：${dialogue.text}`);
             if (plan.continuation && effective.params.latentUpscaleEnabled === true) issue('INCOMPATIBLE_PARAMETERS', '潜空间续写不能与潜空间放大二采混用');
             const { params, sources, policy } = effective;
             return { nodeId: plan.nodeId, segmentId: plan.segmentId, savedRuntime: Object.fromEntries(H3_PARAM_KEYS.filter(key => segment[key] !== undefined).map(key => [key, segment[key]])), effectiveRuntime: params, parameterSources: sources, policy,
                 expectedDimensions: { firstPass: estimateH3Dimensions(params), final: estimateH3Dimensions(params, params.latentUpscaleEnabled === true) },
                 promptHash: stableH3Fingerprint(compilation?.compiledPrompt || segment.prompt || ''), referenceMap: compilation?.references.map(ref => ({ id: ref.id, token: ref.token, role: ref.role, subjectId: ref.subjectId, sourceNodeId: ref.sourceNodeId, storageKey: ref.storageKey })) || [] };
         });
-        const planHash = stableH3Fingerprint({ intent, revision: project.revision, defaults, requirements, nodes: project.nodes, catalog: project.referenceCatalog });
-        return { ready: clips.length > 0 && diagnostics.length === 0, revision: Number(project.revision || 0), planHash, requirements, clips, diagnostics };
+        const planHash = stableH3Fingerprint({ projectId: normalized.projectId,
+            selection: { nodeId: normalized.nodeId, nodeIds: normalized.nodeIds, segmentId: normalized.segmentId, segmentIndex: normalized.segmentIndex, endSegmentId: normalized.endSegmentId,
+                runFromCurrent: normalized.runFromCurrent, skipCompleted: normalized.skipCompleted, forceRegenerate: normalized.forceRegenerate },
+            clips: clips.map(clip => {
+                const node = (project.nodes as any[]).find(node => node.id === clip.nodeId);
+                const segment = node.metadata.segments.find((segment: any) => segment.id === clip.segmentId);
+                return { nodeId: clip.nodeId, segmentId: clip.segmentId, promptHash: clip.promptHash,
+                    params: Object.fromEntries(Object.entries(clip.effectiveRuntime).filter(([key]) => (H3_PARAM_KEYS as readonly string[]).includes(key))),
+                    storyboard: segment.storyboardShots || [], composite: segment.storyboardCompositeEnabled === true,
+                    references: clip.referenceMap.map(reference => {
+                        const media = reference.storageKey && this.stores.media.meta(String(reference.storageKey));
+                        return { ...reference, sha256: media && fs.existsSync(media.filePath) ? createHash('sha256').update(fs.readFileSync(media.filePath)).digest('hex') : null };
+                    }),
+                };
+            }),
+        });
+        const blockedKeys = new Set(diagnostics.map(issue => `${issue.nodeId}:${issue.segmentId}`));
+        const readyTargets = clips.filter(clip => !blockedKeys.has(`${clip.nodeId}:${clip.segmentId}`)).map(clip => ({ nodeId: clip.nodeId, segmentId: clip.segmentId }));
+        return { ready: readyTargets.length > 0, readyTargets, blockedTargets: diagnostics, warnings: [], revision: Number(project.revision || 0), planHash, requirements, clips, diagnostics };
     }
 
-    start(input: H3RunInput, clientTaskId?: string) {
+    /** Read-only diagnosis; delegates to the shared module so HTTP and MCP agree. */
+    diagnoseClips(input: Parameters<typeof diagnoseH3Clips>[1]) { return diagnoseH3Clips(this.stores, input); }
+
+    previewFrozen(input: H3RunInput, project: CanvasProject, defaults: Record<string, unknown>) {
+        const stores = { ...this.stores, settings: { ...this.stores.settings, get: (key: string) => key === H3_DEFAULTS_KEY ? defaults : this.stores.settings.get(key) },
+            projects: { ...this.stores.projects, get: (id: string) => id === project.id ? project : this.stores.projects.get(id) } } as Stores;
+        return new CanvasH3Runner(stores, this.events, this.comfy, this.runningHub, this.videoDispatcher).preview(input);
+    }
+
+    /** Backend-only frozen planning: canonicalization is confined to a private copy. */
+    startFrozen(input: H3RunInput, clientTaskId: string | undefined, project: CanvasProject, defaults: Record<string, unknown>) {
+        const snapshot = structuredClone(project);
+        const stores = { ...this.stores, settings: { ...this.stores.settings, get: (key: string) => key === H3_DEFAULTS_KEY ? defaults : this.stores.settings.get(key) },
+            projects: { ...this.stores.projects, get: (id: string) => id === project.id ? snapshot : this.stores.projects.get(id),
+                applyOperations: (_id: string, _revision: unknown, ops: CanvasOperation[]) => {
+                    for (const op of ops) if (op.type === "update_h3_segment") {
+                        const node = (snapshot.nodes as any[]).find(node => node.id === op.nodeId);
+                        const segment = node?.metadata?.segments?.find((segment: any) => segment.id === op.segmentId);
+                        if (segment) Object.assign(segment, op.patch);
+                    }
+                    return {} as never;
+                } } } as Stores;
+        const planner = new CanvasH3Runner(stores, this.events, this.comfy, this.runningHub, this.videoDispatcher);
+        const normalized = normalizeInput(input);
+        const checked = planner.preview(normalized);
+        if (!checked.ready) throw new Error(checked.diagnostics.map(issue => issue.message).join("；"));
+        if (normalized.expectedPlanHash && normalized.expectedPlanHash !== checked.planHash) throw new Error("所选生成输入已变化，请刷新预览");
+        return this.start({ ...normalized, expectedPlanHash: undefined }, clientTaskId, planner.buildRunPlan(normalized));
+    }
+
+    start(input: H3RunInput, clientTaskId?: string, preparedPlan?: H3RunPlan) {
         const normalized = normalizeInput(input);
         // Replay immutable caller intent before consulting today's draft/defaults.
         // The persisted runPlan is execution history, not part of that intent.
@@ -161,12 +207,16 @@ export class CanvasH3Runner {
         if (normalized.params?.confirmSecondPass === true) throw new Error("请通过 H3 确认接口继续原任务，不能另建二采任务");
         const project = this.stores.projects.get(normalized.projectId);
         if (!project) throw new Error(`画布不存在: ${normalized.projectId}`);
-        const preview = this.preview(normalized);
+        const preview = preparedPlan ? { diagnostics: [], planHash: "" } : this.preview(normalized);
         if (normalized.expectedPlanHash && normalized.expectedPlanHash !== preview.planHash) throw Object.assign(new Error('生成预检已过期，请重新读取参数与预检'), { code: 'STALE_H3_PREVIEW', preview });
         const blocking = preview.diagnostics.filter(issue => issue.code !== 'REFERENCE_INVALID');
-        if (blocking.length) throw Object.assign(new Error(blocking.map(issue => `${issue.segmentId}: ${issue.message}`).join('；')), { code: 'H3_EXECUTION_CONTRACT_MISMATCH', diagnostics: blocking });
+        if (blocking.length && !("readyTargets" in preview && preview.readyTargets.length)) throw Object.assign(new Error(blocking.map(issue => `${issue.segmentId}: ${issue.message}`).join('；')), { code: 'H3_EXECUTION_CONTRACT_MISMATCH', diagnostics: blocking });
         // 单个 Clip 的参考素材不完整只跳过它自己；其余 Clip 必须照常入队，不能整批卡死。
-        const blockedPlans = this.validatePlannedReferences(project, normalized);
+        const blockedPlans = preparedPlan ? [] : this.validatePlannedReferences(project, normalized);
+        for (const issue of blocking) if (!blockedPlans.some(plan => plan.nodeId === issue.nodeId && plan.segmentId === issue.segmentId)) blockedPlans.push({ nodeId: issue.nodeId, segmentId: issue.segmentId, clipNumber: 0, reason: issue.message });
+        const allPlans = preparedPlan ? [] : this.plansFor(normalized);
+        const failedGroups = new Set(allPlans.filter(plan => plan.continuation && blockedPlans.some(block => block.nodeId === plan.nodeId && block.segmentId === plan.segmentId)).map(plan => plan.continuation!.group));
+        for (const plan of allPlans) if (plan.continuation && failedGroups.has(plan.continuation.group) && !blockedPlans.some(block => block.nodeId === plan.nodeId && block.segmentId === plan.segmentId)) blockedPlans.push({ nodeId: plan.nodeId, segmentId: plan.segmentId, clipNumber: plan.segmentIndex + 1, reason: "前置连续组不可执行" });
         const duplicate = this.findActiveDuplicate(normalized);
         if (duplicate) {
             // 旧投影可能因同节点另一 Clip 占据顶层 taskId 而丢失；即使拒绝新提交，
@@ -180,7 +230,7 @@ export class CanvasH3Runner {
             if (!sameInput || (duplicate.status === "awaiting_confirmation" && !sameClip)) throw new Error(`H3 Clip 正被任务 ${duplicate.id} 占用；请先完成或放弃该任务`);
             return duplicate;
         }
-        const runPlan = this.buildRunPlan(normalized, blockedPlans);
+        const runPlan = preparedPlan || this.buildRunPlan(normalized, blockedPlans);
         if (blockedPlans.length) logger.warn("H3 批量运行跳过参考素材不完整的 Clip", { projectId: normalized.projectId, blocked: blockedPlans.map((item) => `${item.segmentId}: ${item.reason}`) });
         const frozenInput = { ...normalized, runPlan };
         const created = clientTaskId
@@ -385,9 +435,6 @@ export class CanvasH3Runner {
     private buildRunPlan(input: H3RunInput, blockedPlans: Array<{ nodeId: string; segmentId: string; clipNumber: number; reason: string }> = []): H3RunPlan {
         const blockedKeys = new Set(blockedPlans.map((item) => `${item.nodeId}:${item.segmentId}`));
         const allPlans = this.plansFor(input);
-        if (allPlans.some((plan) => plan.continuation && blockedKeys.has(`${plan.nodeId}:${plan.segmentId}`))) {
-            throw new Error("潜空间续写不能跳过连续组中的 Clip；请修复参考素材后从组首重新运行");
-        }
         const plans = allPlans.filter((plan) => !blockedKeys.has(`${plan.nodeId}:${plan.segmentId}`));
         if (!plans.length) throw new Error(blockedPlans.length
             ? `没有可运行的 H3 Clip：${blockedPlans.slice(0, 3).map((item) => `Clip ${item.clipNumber}：${item.reason}`).join("；")}`
@@ -466,6 +513,11 @@ export class CanvasH3Runner {
         for (const asset of catalog) if (assetIds.has(String(asset.id)) && asset.sourceNodeId) sourceNodeIds.add(String(asset.sourceNodeId));
         return structuredClone({
             version: 1, plans,
+            referenceDigests: (before as any).canvasReferenceDigests || Object.fromEntries([...assetIds].flatMap(id => {
+                const asset = catalog.find(asset => asset.id === id), key = String(asset?.storageKey || "");
+                const media = key && this.stores.media.meta(key);
+                return media && fs.existsSync(media.filePath) ? [[key, createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex")]] : [];
+            })),
             project: {
                 nodes: nodes.filter((node) => selectedNodeIds.has(String(node.id)) || sourceNodeIds.has(String(node.id))),
                 referenceCatalog: catalog.filter((asset) => assetIds.has(String(asset.id))),
@@ -985,6 +1037,11 @@ export class CanvasH3Runner {
         params.requestedEngine = requestedEngine;
         params.resolvedEngine = engine;
         if (localOnlyReason && requestedEngine === "auto") params.routingReason = localOnlyReason;
+        for (const reference of compilation.references) {
+            const key = String(reference.storageKey || ""), digest = input.runPlan?.referenceDigests?.[key];
+            const media = key && this.stores.media.meta(key);
+            if (digest && (!media || !fs.existsSync(media.filePath) || createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex") !== digest)) throw new Error(`参考文件在提交前已变化：${key}`);
+        }
         const submission = {
             authoredPrompt: String(segment.prompt || ""),
             editableReferences,
@@ -1006,7 +1063,7 @@ export class CanvasH3Runner {
             }) },
         });
         this.events.publish({ type: "generation-log.created", entityId: log.id, payload: log });
-        const childParams = { ...params, h3ExecutionContract: { version: 1, expectedRuntime: { ...params }, production: input.runPlan?.requirements || null }, ...(compositeTempDir ? { storyboardCompositeTempDir: compositeTempDir } : {}), parentTaskId: parent.id, canvasBinding: { projectId: parent.input.projectId, nodeId: plan.nodeId, segmentId: plan.segmentId, generationLogId: log.id, bindOnStart: false } };
+        const childParams = { ...params, canvasInputHash: inputHash(effectiveTargetInput(project as CanvasProject, plan.nodeId, plan.segmentId, input.runPlan?.defaults || {})), canvasInputDefaults: input.runPlan?.defaults || {}, h3ExecutionContract: { version: 1, expectedRuntime: { ...params }, production: input.runPlan?.requirements || null }, ...(compositeTempDir ? { storyboardCompositeTempDir: compositeTempDir } : {}), parentTaskId: parent.id, canvasBinding: { projectId: parent.input.projectId, nodeId: plan.nodeId, segmentId: plan.segmentId, generationLogId: log.id, bindOnStart: false } };
         const childInput = confirmingSecondPass && !params.latentConfirmationPhase ? {
             prompt,
             video: cachedFirstPassPath,

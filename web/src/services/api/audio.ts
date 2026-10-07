@@ -1,6 +1,7 @@
 import axios from "axios";
 
 import i18n from "@/i18n";
+import { corsBlockedHint } from "@/lib/api-error";
 import { audioMimeType, normalizeAudioFormatValue, normalizeAudioSpeedValue, normalizeAudioVoiceValue } from "@/lib/audio-generation";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
@@ -135,7 +136,7 @@ function readApiErrorMessage(value: unknown): string {
 function readAxiosError(error: unknown, fallback: string) {
     if (axios.isCancel(error)) return apiText("requestCanceled");
     if (axios.isAxiosError(error)) {
-        if (!error.response && error.code === "ERR_NETWORK") return apiText("requestFailed");
+        if (!error.response && error.code === "ERR_NETWORK") return corsBlockedHint();
         const responseData = error.response?.data;
         const apiMsg = readApiErrorMessage(responseData);
         if (apiMsg) return apiMsg;

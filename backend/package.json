@@ -19,6 +19,8 @@
     "build": "tsc -p tsconfig.json",
     "redact-inline-media": "tsx src/maintenance/redact-inline-media.ts",
     "prune-canvas-batches": "tsx src/maintenance/prune-canvas-batches.ts",
+    "check:mcp-payloads": "node --import tsx --test --test-name-pattern=\"large preparation|large MCP exports|HTTP MCP defaults|shared-node Clip ordering\" src/drama/production-canvas.test.ts src/server/mcp-payload-contracts.test.ts src/server/mcp-export-routes.test.ts",
+    "audit:mcp-payloads": "tsx src/maintenance/mcp-payload-audit.ts",
     "prune-observability": "tsx src/maintenance/prune-observability.ts",
     "rebalance-canvas-history": "tsx src/maintenance/rebalance-canvas-history.ts",
     "prune-runtime-history": "tsx src/maintenance/prune-runtime-history.ts",

@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { requestCodexText } from "@basketikun/canvas-agent/agent/codex-text";
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 
 import type { ResolvedConfig } from "../config.js";
@@ -33,6 +34,7 @@ export type CanvasTextGenerationInput = {
 };
 
 type TextProvider = {
+    kind?: "codex-cli";
     model: string;
     baseUrl: string;
     apiKey: string;
@@ -129,6 +131,7 @@ export class CanvasTextDispatcher {
             const node = project && arrayRecords(project.nodes).find((node) => node.id === input.nodeId);
             if (project && recordOf(node?.metadata).runtimeTaskId !== task.id) throw new Error("文本任务已失去节点绑定，保留当前画布，不恢复旧任务");
             provider = this.resolveProvider(input);
+            if (provider.kind === "codex-cli" && task.status === "running") throw new Error("Codex CLI 文本请求已中断，原输入与任务已保留；未自动重跑，请确认后重试");
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             this.stores.tasks.update(task.id, { status: "failed", error: message });
@@ -224,6 +227,10 @@ export class CanvasTextDispatcher {
         if (!channel) throw new Error(`文本模型「${model}」没有可用渠道配置`);
         const declaration = arrayRecords(channel.models).find((entry) => String(entry.name || "") === model);
         if (String(declaration?.script || "").trim()) throw new Error(`文本模型「${model}」使用浏览器自定义脚本，Backend 无头执行暂不支持该脚本`);
+        if (channel.kind === "codex-cli") {
+            if (!declaration || declaration.capability !== "text") throw new Error("Codex CLI 渠道只能使用已登记的文本模型");
+            return { kind: "codex-cli", model, baseUrl: "", apiKey: "", apiFormat: "openai", systemPrompt: String(input.params?.systemPrompt ?? config.systemPrompt ?? "").trim(), reasoningEffort: String(input.params?.reasoningEffort || config.reasoningEffort || "auto") };
+        }
         const apiFormat = String(channel.apiFormat || config.apiFormat || "openai");
         if (apiFormat !== "openai" && apiFormat !== "openai-chat") throw new Error(`Backend 文本执行器暂不支持渠道协议：${apiFormat}`);
         const baseUrl = String(channel.baseUrl || config.baseUrl || "").trim();
@@ -363,6 +370,7 @@ export class CanvasTextDispatcher {
 }
 
 export async function requestOpenAiText(provider: TextProvider, prompt: string, imageDataUrls: string[], signal?: AbortSignal): Promise<string> {
+    if (provider.kind === "codex-cli") return requestCodexText({ model: provider.model, prompt, images: imageDataUrls, systemPrompt: provider.systemPrompt, effort: provider.reasoningEffort, signal });
     const userContent: string | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }> = imageDataUrls.length
         ? [{ type: "text", text: prompt }, ...imageDataUrls.map((url) => ({ type: "image_url" as const, image_url: { url } }))]
         : prompt;

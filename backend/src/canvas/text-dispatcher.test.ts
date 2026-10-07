@@ -5,6 +5,29 @@ import { CanvasTextDispatcher, requestOpenAiText } from "./text-dispatcher.js";
 import { BackendDatabase } from "../db.js";
 import { createStores } from "../stores/index.js";
 
+test("Codex text tasks resolve the selected channel without requiring an HTTP key", async () => {
+    const db = new BackendDatabase(":memory:");
+    try {
+        const stores = createStores(db);
+        stores.settings.set("ai.config", { channels: [{ id: "cli", kind: "codex-cli", models: [{ name: "native", capability: "text" }] }] });
+        let kind = "", model = "";
+        const dispatcher = new CanvasTextDispatcher({ url: "http://unused" } as any, stores, async provider => { kind = provider.kind || ""; model = provider.model; assert.equal(provider.apiKey, ""); assert.equal(provider.baseUrl, ""); return "native result"; });
+        const started = dispatcher.start({ model: "cli::native", prompt: "fixture" });
+        const deadline = Date.now() + 1000;
+        while (!['succeeded', 'failed'].includes(stores.tasks.get(started.taskId)?.status || "") && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+        assert.equal(kind, "codex-cli"); assert.equal(model, "native");
+        assert.equal(stores.tasks.get(started.taskId)?.status, "succeeded");
+        assert.equal((stores.tasks.get(started.taskId)?.result?.texts as any[])[0].content, "native result");
+        let retried = 0;
+        const resumed = new CanvasTextDispatcher({ url: "http://unused" } as any, stores, async () => { retried++; return "duplicate"; });
+        const interrupted = stores.tasks.create("cli-interrupted", "canvas-text", { model: "cli::native", prompt: "fixture" }, {});
+        stores.tasks.update(interrupted.id, { status: "running" });
+        resumed.resume(stores.tasks.get(interrupted.id)!);
+        assert.equal(retried, 0); assert.equal(stores.tasks.get(interrupted.id)?.status, "failed");
+        assert.match(stores.tasks.get(interrupted.id)?.error || "", /未自动重跑/);
+    } finally { db.close(); }
+});
+
 test("OpenAI Responses 请求携带参考图并解析 output_text", async () => {
     const originalFetch = globalThis.fetch;
     let seenUrl = "";

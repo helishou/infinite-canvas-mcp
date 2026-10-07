@@ -2,6 +2,7 @@ import { useMemo } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3Segment } from "../types";
 import { defaultH3Model, defaultPrompt } from "../constants";
+import { compactH3SegmentStarts } from "@basketikun/canvas-agent/runtime-fields";
 function resultUrl(value: unknown) { return typeof value === "string" ? value : value && typeof value === "object" ? String((value as Record<string, unknown>).url || (value as Record<string, unknown>).content || "") : ""; }
 function canonicalTaskMode(value: unknown) {
     const mode = String(value || "").toLowerCase();
@@ -71,5 +72,5 @@ export function segmentsFor(metadata: Record<string, unknown>): H3Segment[] {
         return normalized;
     });
 }
-export function compactSegmentStarts(segments: H3Segment[]) { let start = 0; return segments.map((segment) => { const next = { ...segment, start }; start += Math.max(0.5, Number(segment.duration || 1)); return next; }); }
+export function compactSegmentStarts(segments: H3Segment[]) { return compactH3SegmentStarts(segments); }
 export function useH3Segments(ctx: CanvasNodeContext) { const metadata = ctx.node.metadata || {}; const segments = useMemo(() => segmentsFor(metadata), [metadata]); return { segments, update: (next: H3Segment[]) => ctx.updateMetadata({ segments: compactSegmentStarts(next) }) }; }

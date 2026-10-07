@@ -6,7 +6,7 @@ import { toolInputSchemas } from "../canvas/schemas.js";
 
 test("all published operation examples use the actual edit contract", () => {
     const contract = productionOperationContract();
-    assert.equal(contract.operations.length, 28);
+    assert.ok(contract.operations.some(operation => operation.type === "adopt_director_fields"));
     for (const item of contract.operations) {
         assert.equal(productionEditSchema.safeParse({ operationId: "example", expectedRevision: 0, ops: [item.example] }).success, true);
     }
@@ -14,6 +14,7 @@ test("all published operation examples use the actual edit contract", () => {
     assert.ok(json.includes("set_director_brief"));
     assert.ok(json.includes("committed"));
     assert.ok(json.includes("entity"));
+    assert.ok(json.includes("restore_archived_scene_results"));
     assert.throws(() => productionOperationContract("invented"), /Unknown/);
 });
 

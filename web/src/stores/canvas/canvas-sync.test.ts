@@ -24,6 +24,49 @@ const { useBackendStore } = await import("../use-backend-store");
 const { getBackendUrl, getCanvasDraftSessionId } = await import("../../services/backend-api");
 const cacheKey = (id: string) => JSON.stringify([getBackendUrl(), getCanvasDraftSessionId(), id]);
 
+test("独立节点、字段和 Clip 编辑重放保留双方修改，同字段竞争仍报冲突", async () => {
+    const { applyBackendCanvasDelta, detectCanvasConflicts } = await import("./use-canvas-store");
+    const base: any = { id: "independent-edits", nodes: [
+        { id: "a", type: "image", title: "A", metadata: { prompt: "A prompt" } },
+        { id: "b", type: "image", title: "B", metadata: { prompt: "B prompt" } },
+        { id: "h3", type: "minimax-h3:video", metadata: { segments: [{ id: "s1", prompt: "one", duration: 5 }, { id: "s2", prompt: "two", duration: 5 }] } },
+    ], connections: [] };
+    const remote = applyBackendCanvasDelta(base, [
+        { type: "update_node", id: "a", metadata: { prompt: "Remote prompt" } },
+        { type: "update_h3_segment", nodeId: "h3", segmentId: "s1", patch: { prompt: "Remote clip" } },
+    ], 1);
+    const local = [
+        { type: "update_node", id: "a", patch: { title: "Local title" } },
+        { type: "update_node", id: "b", metadata: { prompt: "Local B prompt" } },
+        { type: "update_h3_segment", nodeId: "h3", segmentId: "s1", patch: { duration: 6 } },
+        { type: "update_h3_segment", nodeId: "h3", segmentId: "s2", patch: { prompt: "Local clip" } },
+    ];
+    assert.deepEqual(detectCanvasConflicts(local, remote, base), []);
+    const merged = applyBackendCanvasDelta(remote, local, 2);
+    assert.equal(merged.nodes[0].title, "Local title");
+    assert.equal(merged.nodes[0].metadata.prompt, "Remote prompt");
+    assert.equal(merged.nodes[1].metadata.prompt, "Local B prompt");
+    const segments = merged.nodes[2].metadata.segments;
+    assert.equal(segments[0].prompt, "Remote clip");
+    assert.equal(segments[0].duration, 6);
+    assert.equal(segments[1].prompt, "Local clip");
+    assert.equal(detectCanvasConflicts([{ type: "update_h3_segment", nodeId: "h3", segmentId: "s1", patch: { prompt: "Conflicting clip" } }], remote, base).length, 1);
+});
+
+test("Clip 派生起点不提交，排序生成移动命令并能通过回放恢复", async () => {
+    const { applyBackendCanvasDelta, detectCanvasConflicts } = await import("./use-canvas-store");
+    const base = { id: "timeline", nodes: [{ id: "h3", type: "minimax-h3:video", metadata: { segments: [{ id: "a", duration: 5 }, { id: "b", duration: 5 }] } }], connections: [] } as any;
+    const next = structuredClone(base);
+    next.nodes[0].metadata.segments = [{ id: "b", duration: 5, start: 0 }, { id: "a", duration: 8, start: 5 }];
+    const operations = diffCanvasProject(base, next);
+    assert.deepEqual(operations, [{ type: "update_h3_segment", nodeId: "h3", segmentId: "a", patch: { duration: 8 } }, { type: "move_h3_segment", nodeId: "h3", segmentId: "b", beforeSegmentId: "a" }]);
+    assert.deepEqual(detectCanvasConflicts(operations, base, base), []);
+    const replayed = applyBackendCanvasDelta(base, operations);
+    assert.deepEqual(replayed.nodes[0].metadata?.segments, next.nodes[0].metadata.segments);
+    assert.deepEqual(diffCanvasProject(replayed, next), []);
+    assert.equal(detectCanvasConflicts(operations, replayed, base).length, 2);
+});
+
 test("普通生成节点运行中只提交用户字段，不夹带 Backend 瞬态状态", () => {
     const base = { id: "task-fields", title: "画布", createdAt: "", updatedAt: "", revision: 1, nodes: [{ id: "image", type: "image", title: "图", position: { x: 0, y: 0 }, width: 100, height: 100, metadata: { prompt: "旧", status: "loading", runtimeTaskId: "task-1", runProgress: 0.3 } }], connections: [], chatSessions: [], activeChatId: null, backgroundMode: "lines", showImageInfo: false, globalPrompt: "", viewport: { x: 0, y: 0, k: 1 } } as any;
     const next = structuredClone(base);

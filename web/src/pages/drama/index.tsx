@@ -16,6 +16,8 @@ import { ModelPicker } from "@/components/model-picker";
 import { useConfigStore } from "@/stores/use-config-store";
 import { upsertBackendCanvasFolder } from "@/services/backend-api";
 
+import { SceneProductionSettings } from "./scene-production-settings";
+
 const DRAMA_LIBRARY = "__drama-library__";
 
 type DramaDraft = {
@@ -221,26 +223,27 @@ export default function DramaPage({ embedded = false }: { embedded?: boolean }) 
         });
         setEditorOpen(true);
     };
-    const saveFolder = async () => {
+    const saveFolder = async (confirm = true) => {
         if (!activeFolder || !draft) return;
-        if (!draft.productionPlan.storyboardImageMode) {
+        if (confirm && !draft.productionPlan.storyboardImageMode) {
             message.warning(t("productionCanvas.storyboardImageRequired"));
             return;
         }
+        if (confirm && draft.productionPlan.parallelScenes && !draft.productionPlan.reviewPolicy) { message.warning(t("sceneProduction.reviewRequired")); return; }
         const patch = {
             name: draft.name.trim() || activeFolder.name,
             outline: draft.outline.trim(),
             description: draft.description.trim(),
             tags: draft.tags.split(",").map((tag) => tag.trim()).filter(Boolean),
             coverStorageKey: draft.coverStorageKey,
-            productionPlan: { ...draft.productionPlan, confirmedOutline: draft.outline.trim(), confirmedAt: new Date().toISOString() },
+            productionPlan: { ...draft.productionPlan, confirmedOutline: confirm ? draft.outline.trim() : "", confirmedAt: confirm ? new Date().toISOString() : undefined },
         };
         setSavingPlan(true);
         try {
             const result = await upsertBackendCanvasFolder({ ...activeFolder, ...patch, expectedPlanningUpdatedAt: draft.expectedPlanningUpdatedAt, updatedAt: new Date().toISOString() });
             useCanvasStore.setState(state => ({ folders: state.folders.map(folder => folder.id === activeFolder.id ? result.folder as unknown as CanvasFolder : folder) }));
             setEditorOpen(false);
-            message.success(t("drama.saved"));
+            message.success(t(confirm ? "drama.saved" : "sceneProduction.draftSaved"));
         } catch (error) { message.error(String(error)); }
         finally { setSavingPlan(false); }
     };
@@ -446,7 +449,7 @@ export default function DramaPage({ embedded = false }: { embedded?: boolean }) 
                     <div className="rounded-lg border border-stone-200 px-3 py-3 text-sm text-stone-500 dark:border-stone-800 dark:text-stone-400">{episodeDraft.canvasId ? t("drama.legacyEpisodeCanvasBound", { name: projects.find(project => project.id === episodeDraft.canvasId)?.title || episodeDraft.canvasId }) : t("drama.sceneCanvasWorkflowHint")}</div>
                 </div> : null}
             </Modal>
-            <Modal title={t("productionCanvas.dramaPlanning")} open={editorOpen} onCancel={() => { if (!savingPlan) setEditorOpen(false); }} onOk={() => void saveFolder()} okText={t("productionCanvas.confirmPlan")} cancelText={t("common.cancel")} confirmLoading={uploadingCover || savingPlan} width={760} styles={{ body: { maxHeight: "70dvh", overflow: "auto" } }} footer={(originNode) => <div className="flex w-full items-center justify-between"><Button danger type="text" icon={<Trash2 className="size-4" />} onClick={deleteDrama}>{t("drama.deleteProject")}</Button><div className="flex gap-2">{originNode}</div></div>}>
+            <Modal title={t("productionCanvas.dramaPlanning")} open={editorOpen} onCancel={() => { if (!savingPlan) setEditorOpen(false); }} onOk={() => void saveFolder()} okText={t("productionCanvas.confirmPlan")} cancelText={t("common.cancel")} confirmLoading={uploadingCover || savingPlan} width={760} styles={{ body: { maxHeight: "70dvh", overflow: "auto" } }} footer={(originNode) => <div className="flex w-full flex-wrap items-center justify-between gap-2"><Button danger type="text" disabled={savingPlan} icon={<Trash2 className="size-4" />} onClick={deleteDrama}>{t("drama.deleteProject")}</Button><div className="flex flex-wrap gap-2"><Button disabled={uploadingCover || savingPlan} onClick={() => void saveFolder(false)}>{t("sceneProduction.saveDraft")}</Button>{originNode}</div></div>}>
                 {draft ? (
                     <div className="space-y-5">
                         <div className="grid gap-5 sm:grid-cols-[180px_minmax(0,1fr)]">
@@ -464,6 +467,8 @@ export default function DramaPage({ embedded = false }: { embedded?: boolean }) 
                         <p className="text-xs text-muted-foreground">{t("productionCanvas.newEpisodeDefaults")}</p>
                         <div className="grid gap-4 sm:grid-cols-2">
                             <label><p className="mb-2 text-sm">{t("productionCanvas.storyboardImageMode")}</p><Select className="w-full" placeholder={t("productionCanvas.storyboardImageRequired")} value={draft.productionPlan.storyboardImageMode} onChange={storyboardImageMode => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, storyboardImageMode } })} options={[{ value: "generate", label: t("productionCanvas.storyboardImagesGenerate") }, { value: "skip", label: t("productionCanvas.storyboardImagesSkip") }]} /><p className="mt-2 text-xs text-muted-foreground">{t("productionCanvas.storyboardImageModeHint")}</p></label>
+                            <SceneProductionSettings value={draft.productionPlan} onChange={patch => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, ...patch } })} />
+                            <p className="text-xs text-muted-foreground">{t("sceneProduction.draftHint")}</p>
                             <div><p className="mb-2 text-sm">{t("productionCanvas.generalImageModel")}</p><ModelPicker config={modelConfig} capability="image" fullWidth value={draft.productionPlan.imageModel} onChange={imageModel => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, imageModel } })} /></div>
                             {(["character", "scene", "prop", "style", "keyframe"] as const).map(kind => <div key={kind}><p className="mb-2 text-sm">{t(`productionCanvas.assetModel.${kind}`)}</p><ModelPicker config={modelConfig} capability="image" fullWidth placeholder={t("productionCanvas.inheritImageModel")} value={draft.productionPlan.imageModelsByKind[kind]} onChange={model => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, imageModelsByKind: { ...draft.productionPlan.imageModelsByKind, [kind]: model } } })} /><Button type="text" size="small" disabled={!draft.productionPlan.imageModelsByKind[kind]} onClick={() => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, imageModelsByKind: { ...draft.productionPlan.imageModelsByKind, [kind]: undefined } } })}>{t("productionCanvas.inheritImageModel")}</Button></div>)}
                             <div><p className="mb-2 text-sm">{t("productionCanvas.videoModel")}</p><ModelPicker config={modelConfig} capability="video" fullWidth value={draft.productionPlan.h3Model} onChange={h3Model => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, h3Model } })} /></div>

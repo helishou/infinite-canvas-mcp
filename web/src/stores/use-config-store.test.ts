@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildApiUrl, defaultConfig, useConfigStore } from "./use-config-store";
+import { buildApiUrl, createModelChannel, defaultConfig, useConfigStore } from "./use-config-store";
 
 test("old exports retain provider settings but cannot reactivate the retired proxy", () => {
     const original = useConfigStore.getState().config;
@@ -36,4 +36,17 @@ test("provider and Backend URLs keep their configured origin and API prefix", ()
     assert.equal(buildApiUrl("https://provider.example/", "/images/generations"), "https://provider.example/v1/images/generations");
     assert.equal(buildApiUrl("https://provider.example/v1/", "/chat/completions"), "https://provider.example/v1/chat/completions");
     assert.equal(buildApiUrl("http://127.0.0.1:17370", "/models"), "http://127.0.0.1:17370/v1/models");
+});
+
+test("Codex CLI channel round trips without injecting an API URL or requiring credentials", () => {
+    const channel = createModelChannel({ id: "cli", name: "Codex", kind: "codex-cli", models: [{ name: "native", capability: "text" }] });
+    assert.equal(channel.baseUrl, ""); assert.equal(channel.apiKey, "");
+    const original = useConfigStore.getState().config;
+    try {
+        useConfigStore.getState().replaceConfig({ ...defaultConfig, channels: [channel], textModel: "cli::native" });
+        const config = useConfigStore.getState().config;
+        assert.equal(config.channels[0].kind, "codex-cli"); assert.equal(config.channels[0].baseUrl, "");
+        assert.equal(useConfigStore.getState().isAiConfigReady(config, "cli::native"), true);
+        assert.equal(JSON.parse(JSON.stringify(config)).channels[0].kind, "codex-cli");
+    } finally { useConfigStore.setState({ config: original }); }
 });

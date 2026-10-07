@@ -62,7 +62,7 @@ export function verifyRuntime(directory) {
   return manifest;
 }
 export function runtimePatchVersion(upstream) {
-  const files = ['compat.py', 'verify.py', 'contracts.json', 'restore-source-bytes.py', 'source-contract.py', 'canvas-kickoff.md'];
+  const files = ['compat.py', 'character-layout.py', 'h3-prompt-policy.py', 'verify.py', 'contracts.json', 'restore-source-bytes.py', 'source-contract.py', 'canvas-kickoff.md'];
   return sha(Buffer.concat([Buffer.from(upstream + '\n'), fs.readFileSync(path.join(scripts, 'acheng-engine.mjs')), ...files.map(file => fs.readFileSync(path.join(scripts, 'acheng', file)))])).slice(0, 16);
 }
 export class AchengEngine {

@@ -1,8 +1,10 @@
 import axios from "axios";
 
 import i18n from "@/i18n";
-import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
+import { corsBlockedHint } from "@/lib/api-error";
+import { buildApiUrl, encodeChannelModel, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
+import { shouldProxyLocalModelList } from "./local-models";
 import { nanoid } from "nanoid";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
@@ -305,7 +307,7 @@ function readAxiosError(error: unknown, fallback: string) {
     if (axios.isCancel(error)) return apiText("requestCanceled");
     if (axios.isAxiosError(error)) {
         if (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT") return apiText("imageTimeout");
-        if (!error.response && error.code === "ERR_NETWORK") return apiText("requestFailed");
+        if (!error.response && error.code === "ERR_NETWORK") return corsBlockedHint();
         const responseData = error.response?.data;
         // Prefer the API error from the response body.
         const apiMsg = readApiErrorMessage(responseData);
@@ -959,6 +961,23 @@ async function normalizeImageUrls(messages: AiTextMessage[]): Promise<AiTextMess
 export async function requestImageQuestion(config: AiConfig, messages: AiTextMessage[], onDelta: (text: string) => void, options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.textModel);
     const normalizedMessages = await normalizeImageUrls(messages);
+    const channel = resolveModelChannel(config, config.model || config.textModel);
+    if (channel.kind === "codex-cli") {
+        const references: Array<{ dataUrl: string }> = [];
+        const prompt = normalizedMessages.map(message => {
+            const content = typeof message.content === "string" ? message.content : message.content.map(part => {
+                if (part.type === "text") return part.text;
+                references.push({ dataUrl: part.image_url.url });
+                return `<Picture ${references.length}>`;
+            }).join("\n");
+            return `[${message.role}]\n${content}`;
+        }).join("\n\n");
+        const { observeCanvasGenerationTask } = await import("./canvas-generation-task");
+        const task = await observeCanvasGenerationTask({ mode: "text", model: encodeChannelModel(channel.id, requestConfig.model), prompt, references, params: { systemPrompt: requestConfig.systemPrompt, reasoningEffort: requestConfig.reasoningEffort } }, options?.signal || new AbortController().signal, i18n.t("config.channelEditor.capabilities.text"));
+        const answer = task.result?.texts?.[0]?.content || "";
+        if (!answer) throw new Error(apiText("requestFailed"));
+        onDelta(answer); return answer;
+    }
     const script = resolveModelScript(config, config.model || config.textModel);
     if (script) {
         try {
@@ -1078,6 +1097,19 @@ export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKe
 }
 
 export async function fetchChannelModels(channel: ModelChannel) {
+    if (channel.kind === "codex-cli") {
+        const { request } = await import("@/services/backend-api");
+        const response = await request<{ data?: Array<{ model: string; hidden?: boolean }> }>("GET", "/agent/codex/models?source=codex");
+        return (response.data || []).filter(model => !model.hidden).map(model => model.model);
+    }
+    if (shouldProxyLocalModelList(channel.baseUrl, channel.apiFormat)) {
+        const { request } = await import("@/services/backend-api");
+        const response = await request<{ models?: string[] }>("POST", "/api/local-models", {
+            baseUrl: channel.baseUrl,
+            apiKey: channel.apiKey,
+        });
+        return response.models || [];
+    }
     return fetchImageModels({ baseUrl: channel.baseUrl, apiKey: channel.apiKey, apiFormat: channel.apiFormat });
 }
 

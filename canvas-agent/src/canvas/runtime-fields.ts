@@ -1,11 +1,22 @@
 /** H3 字段归属的公共定义：前端过滤编辑命令，后台强制保护已存在实体的运行状态。 */
+/** Clip 起点由数组顺序和时长派生，不能作为用户配置提交。 */
+export function compactH3SegmentStarts<T extends Record<string, unknown>>(segments: T[], fallbackDuration: unknown = 5): T[] {
+    let start = 0;
+    return segments.map((segment) => {
+        const next = { ...segment, start };
+        const duration = Number(segment.duration || fallbackDuration || 5);
+        start += Number.isFinite(duration) ? Math.max(0.5, Math.min(60, duration)) : 5;
+        return next;
+    });
+}
+
 export const H3_RUNTIME_NODE_FIELDS = [
     "status", "runProgress", "runtimeTaskId", "runtimeRunId", "runRequestId", "runRequestConsumedId",
     "cancelRequested", "errorDetails", "content", "storageKey",
 ] as const;
 export const H3_RUNTIME_SEGMENT_FIELDS = [
     "status", "progress", "runtimeTaskId", "parentTaskId", "result", "resultStorageKey", "results", "errorDetails",
-    "firstPassReady", "firstPassResult", "firstPassStorageKey", "firstPassFingerprint", "cacheFingerprint",
+    "inputOutdated", "firstPassReady", "firstPassResult", "firstPassStorageKey", "firstPassFingerprint", "cacheFingerprint", "archivedResultOrigin",
 ] as const;
 export const H3_LOCAL_VIEW_FIELDS = [
     "playhead", "selectedSegmentId", "h3PlaybackAll", "h3PlayRequest", "h3Scrubbing", "h3FocusRequest",

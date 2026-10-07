@@ -7,15 +7,39 @@ import type { EpisodeProductionRunner } from "../drama/production-runner.js";
 import { getProductionContract } from "@basketikun/canvas-agent/skills/acheng";
 import { productionWorkspaceSchemas, productionContractQuerySchema } from "@basketikun/canvas-agent/drama/production-contract";
 import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
-import { productionCompileSchema, productionApplyCompilationSchema, productionReadSchema, projectProductionRead } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionCompileSchema, productionApplyCompilationSchema, productionReadSchema, projectProductionRead, projectProductionVersion } from "@basketikun/canvas-agent/drama/production-contract";
 import { ProductionCompilationService } from "../drama/compilation.js";
-import { DATA_DIR } from "../config.js";
-import path from "node:path";
 import { z } from "zod";
+import { SceneWorkCoordinator } from "../drama/scene-work.js";
+import type { BackendEventBus } from "../events.js";
+import { directorHash } from "../drama/director.js";
+import type { ProductionAgentPool } from "@basketikun/canvas-agent/agent/production";
 
-export function registerDramaProductionRoutes(router: Router, service: EpisodeProductionService, runner?: EpisodeProductionRunner, base = "/drama/episodes/:episodeId/production") {
-    const compilations = new ProductionCompilationService(service, path.join(DATA_DIR, "production-compilations"));
+const sceneCoordinators = new Map<string, SceneWorkCoordinator>();
+
+function batchReceipt(batch: ReturnType<EpisodeProductionService["getBatch"]>) {
+    if (!batch?.executionSnapshot) return batch;
+    const snapshot = batch.executionSnapshot;
+    return { ...batch, executionSnapshot: { schemaVersion: snapshot.schemaVersion, inputBasis: snapshot.inputBasis, canvasId: snapshot.canvasId,
+        canvasRevision: snapshot.canvasRevision, planHash: snapshot.planHash, targets: snapshot.targets.map(({ id, nodeId, segmentId, inputHash, dependencies }) => ({ id, nodeId, segmentId, inputHash, dependencies })), blockedTargets: snapshot.blockedTargets, warnings: snapshot.warnings } };
+}
+
+export function registerDramaProductionRoutes(router: Router, service: EpisodeProductionService, runner?: EpisodeProductionRunner, base = "/drama/episodes/:episodeId/production", events?: BackendEventBus, agents?: Pick<ProductionAgentPool, "run">) {
+    const compilations = new ProductionCompilationService(service, service.compilationRoot());
     compilations.recover(base);
+    const scenes = new SceneWorkCoordinator(service, compilations, runner, base, agents);
+    sceneCoordinators.set(`${service.compilationRoot()}:${base}`, scenes);
+    const sceneOwner = (id: string) => {
+        const canonical = service.get(id).episodeId;
+        const coordinator = canonical !== id ? sceneCoordinators.get(`${service.compilationRoot()}:/drama/episodes/:episodeId/production`) : scenes;
+        if (!coordinator) throw new Error("场次协调服务尚未就绪");
+        return { id: canonical, coordinator };
+    };
+    compilations.onSettled = id => { queueMicrotask(() => scenes.wake(id)); };
+    events?.subscribe(event => {
+        if (event.type === "drama-production.updated" && service.sceneWorkOwners().includes(event.entityId || "")) queueMicrotask(() => scenes.wake(event.entityId!));
+    });
+    for (const id of service.sceneWorkOwners()) scenes.recover(id);
     const handle = (res: { status: (code: number) => { json: (body: unknown) => void } }, error: unknown) => {
         if (error instanceof ProductionValidationError) return res.status(400).json({ ok: false, code: error.diagnostics[0]?.code || "PRODUCTION_BLOCKED", error: error.message, diagnostics: error.diagnostics, nextActions: error.diagnostics.flatMap(item => item.nextAction ? [item.nextAction] : []) });
         if (error instanceof ZodError) return res.status(400).json({ ok: false, error: error.message, diagnostics: error.issues.map(issue => ({ code: "INVALID_SCHEMA", path: issue.path.join("."), message: issue.message, severity: "error" })) });
@@ -26,12 +50,43 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
     router.post<Record<string, string>>(`${base}/compile`, (req, res) => {
         try {
             const input = productionCompileSchema.extend({ operationId: z.string().min(1).optional() }).parse(req.body);
-            res.json({ ok: true, compilation: input.operationId ? compilations.enqueue(req.params.episodeId, base, input.operationId, input.expectedRevision, input.director) : compilations.prepare(req.params.episodeId, base, input.expectedRevision, input.director) });
+            if (input.scope && !input.operationId) throw new Error("按范围编译必须提供稳定 operationId");
+            res.json({ ok: true, compilation: input.operationId ? compilations.enqueue(req.params.episodeId, base, input.operationId, input.expectedRevision, input.director, input.scope) : compilations.prepare(req.params.episodeId, base, input.expectedRevision, input.director) });
         } catch (error) { handle(res, error); }
+    });
+    for (const action of ["start", "resume", "pause", "review"] as const) router.post<Record<string, string>>(`${base}/scene-work/${action}`, async (req, res) => {
+        try {
+            const tool = `production_${action}_scene_work` as "production_start_scene_work" | "production_resume_scene_work" | "production_pause_scene_work" | "production_review_scene_work";
+            const input = productionWorkspaceSchemas[tool].parse({ ...req.body, kind: base.startsWith("/canvas") ? "canvas" : "episode", id: req.params.episodeId });
+            const current = service.get(req.params.episodeId);
+            const { id, coordinator } = sceneOwner(req.params.episodeId);
+            const prior = coordinator.commandReceipt(id, input.operationId, { action, input: { ...input, id, kind: current.episodeId !== req.params.episodeId ? "episode" : input.kind } });
+            if (prior) return void res.json({ ok: true, production: prior, replayed: true });
+            // Reviews independently recheck their frozen source/media digest in the coordinator.
+            if (input.expectedRevision > current.revision || (action !== "review" && current.revision !== input.expectedRevision)) throw new ProductionConflictError(current);
+            const production = action === "start" ? coordinator.start(id, input as Parameters<SceneWorkCoordinator["start"]>[1])
+                : action === "review" ? await coordinator.review(id, input as Parameters<SceneWorkCoordinator["review"]>[1])
+                : action === "pause" ? coordinator.pause(id, (input as { workId: string }).workId, input.operationId)
+                : coordinator.resume(id, (input as { workId: string }).workId, input.operationId);
+            res.json(action === "start" ? { ok: true, ...production as ReturnType<SceneWorkCoordinator["start"]> } : { ok: true, production });
+        } catch (error) { handle(res, error); }
+    });
+    router.post<Record<string, string>>(`${base}/scene-work/shared-review`, (req, res) => {
+        try {
+            const input = productionWorkspaceSchemas.production_start_shared_review.parse({ ...req.body, kind: base.startsWith("/canvas") ? "canvas" : "episode", id: req.params.episodeId });
+            const { id, coordinator } = sceneOwner(req.params.episodeId);
+            const prior = coordinator.commandReceipt(id, input.operationId, { action: "shared-review", input: { ...input, id, kind: id !== req.params.episodeId ? "episode" : input.kind } });
+            if (prior) return void res.json({ ok: true, production: prior, replayed: true });
+            res.json({ ok: true, production: coordinator.startSharedReview(id, input) });
+        } catch (error) { handle(res, error); }
+    });
+    router.get<Record<string, string>>(`${base}/scene-work`, (req, res) => {
+        try { const { id, coordinator } = sceneOwner(req.params.episodeId); res.json({ ok: true, state: coordinator.inspect(id) }); }
+        catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/compilations/:operationId`, (req, res) => {
         try {
-            const query = z.object({ view: z.enum(["status", "targets", "diagnostics"]).default("status"), offset: z.coerce.number().int().nonnegative().default(0), pageSize: z.coerce.number().int().positive().optional() }).strict().parse(req.query);
+            const query = z.object({ view: z.enum(["status", "targets", "diagnostics"]).default("status"), offset: z.coerce.number().int().nonnegative().default(0), pageSize: z.coerce.number().int().positive().optional() }).strict().parse(queryWithoutToken(req.query));
             res.json({ ok: true, compilation: compilations.getCompilation(req.params.episodeId, base, req.params.operationId, query.view, query.offset, query.pageSize) });
         } catch (error) { handle(res, error); }
     });
@@ -45,8 +100,10 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         try { res.json({ ok: true, bindings: service.diagnoseBindings(req.params.episodeId) }); }
         catch (error) { handle(res, error); }
     });
+    // Web 端 request() 会在 query 上追加 ?token= 鉴权键；strict schema 不认它，先剥掉。
+    const queryWithoutToken = (query: unknown) => { const { token: _token, ...rest } = (query || {}) as Record<string, unknown>; return rest; };
     router.get<Record<string, string>>(`${base}/continuity`, (req, res) => {
-        try { res.json({ ok: true, continuity: service.getContinuity(req.params.episodeId, req.query) }); }
+        try { res.json({ ok: true, continuity: service.getContinuity(req.params.episodeId, queryWithoutToken(req.query)) }); }
         catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/continuity/check`, (req, res) => {
@@ -57,15 +114,21 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         try { res.json({ ok: true, preview: service.previewContinuityUpgrade(req.params.episodeId, req.body) }); }
         catch (error) { handle(res, error); }
     });
+    if (base === "/drama/episodes/:episodeId/production") router.post("/canvas/production/hash", (req, res) => {
+        try {
+            const { source } = productionWorkspaceSchemas.production_hash_source.parse(req.body);
+            res.json({ ok: true, hash: directorHash(source) });
+        } catch (error) { handle(res, error); }
+    });
     if (base === "/drama/episodes/:episodeId/production") router.get("/production/contract", (req, res) => {
-        try { const input = productionContractQuerySchema.parse(req.query); res.json({ ok: true, contract: getProductionContract(input.runtimeId, input.operationType, input.moduleId) }); }
+        try { const input = productionContractQuerySchema.parse(queryWithoutToken(req.query)); res.json({ ok: true, contract: getProductionContract(input.runtimeId, input.operationType, input.moduleId) }); }
         catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/preflight`, async (req, res) => {
         try {
             if (req.body?.action === "compile") {
                 const input = productionCompileSchema.parse(req.body.request);
-                res.json({ ok: true, preflight: await compilations.preflight(req.params.episodeId, input.expectedRevision, input.director) });
+                res.json({ ok: true, preflight: await compilations.preflight(req.params.episodeId, input.expectedRevision, input.director, input.scope) });
             } else res.json({ ok: true, preflight: service.preflight(req.params.episodeId, req.body) });
         }
         catch (error) { handle(res, error); }
@@ -117,7 +180,10 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             const production = service.get(req.params.episodeId);
             // Existing Web consumers still receive the full record unless selecting a view.
             const query = productionReadSchema.parse({ ...req.query, view: req.query.view || "full", targetIds: typeof req.query.targetIds === "string" ? req.query.targetIds.split(",") : req.query.targetIds });
-            res.json({ ok: true, production: projectProductionRead(production, query, value => crypto.createHash("sha256").update(value).digest("hex")) });
+            const owner = base.startsWith("/canvas") ? { projectId: req.params.episodeId } : base.startsWith("/drama/scenes") ? { sceneId: req.params.episodeId } : {};
+            const selected = projectProductionRead(query.view === "full" ? production : { ...production, ...owner }, query, value => crypto.createHash("sha256").update(value).digest("hex"));
+            if (query.targetIds?.length && query.view !== "summary" && !query.chunkBytes) { (selected as any).targetStatus = service.targetOccupancy(req.params.episodeId, query.targetIds); (selected as any).canvasInputs = service.canvasEditorialState(req.params.episodeId, query.targetIds); }
+            res.json({ ok: true, production: selected });
         } catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/readiness`, (req, res) => {
@@ -134,7 +200,12 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         try { res.json({ ok: true, versions: service.versions(req.params.episodeId) }); } catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/versions/:version`, (req, res) => {
-        try { res.json({ ok: true, version: service.version(req.params.episodeId, Number(req.params.version)) }); } catch (error) { handle(res, error); }
+        try {
+            const version = service.version(req.params.episodeId, Number(req.params.version));
+            const owner = { episodeId: req.params.episodeId, ...(base.startsWith("/canvas") ? { projectId: req.params.episodeId } : base.startsWith("/drama/scenes") ? { sceneId: req.params.episodeId } : {}) };
+            const query = { ...req.query, targetIds: typeof req.query.targetIds === "string" ? req.query.targetIds.split(",") : req.query.targetIds };
+            res.json({ ok: true, version: req.query.view ? projectProductionVersion(owner, version, query, value => crypto.createHash("sha256").update(value).digest("hex")) : version });
+        } catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/export`, (req, res) => {
         try {
@@ -177,23 +248,29 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
     router.post<Record<string, string>>(`${base}/runs`, (req, res) => {
         try {
             const run = service.startBatch(req.params.episodeId, req.body);
-            res.json({ ok: true, run });
+            res.json({ ok: true, run: batchReceipt(run) });
             if (run.status === "pending") void runner?.runBatch(req.params.episodeId, run.runId);
         } catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/batches`, (req, res) => {
-        try { res.json({ ok: true, runs: service.listBatches(req.params.episodeId) }); } catch (error) { handle(res, error); }
+        try { res.json({ ok: true, runs: service.listBatches(req.params.episodeId).map(batchReceipt) }); } catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/batches/:runId`, (req, res) => {
-        try { res.json({ ok: true, run: service.getBatch(req.params.episodeId, req.params.runId) }); } catch (error) { handle(res, error); }
+        try { res.json({ ok: true, run: req.query.view === "inputs" ? service.getBatch(req.params.episodeId, req.params.runId) : batchReceipt(service.getBatch(req.params.episodeId, req.params.runId)) }); } catch (error) { handle(res, error); }
+    });
+    router.post<Record<string, string>>(`${base}/batches/:runId/retire`, (req, res) => {
+        try {
+            const input = z.object({ reason: z.string().trim().min(8) }).strict().parse(req.body);
+            res.json({ ok: true, run: batchReceipt(service.retireBatch(req.params.episodeId, req.params.runId, input.reason)), mediaSubmitted: false });
+        } catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/batches/:runId/pause`, (req, res) => {
-        try { res.json({ ok: true, run: service.pauseBatch(req.params.episodeId, req.params.runId) }); } catch (error) { handle(res, error); }
+        try { res.json({ ok: true, run: batchReceipt(service.pauseBatch(req.params.episodeId, req.params.runId)) }); } catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/batches/:runId/resume`, (req, res) => {
         try {
             const run = service.resumeBatch(req.params.episodeId, req.params.runId);
-            res.json({ ok: true, run });
+            res.json({ ok: true, run: batchReceipt(run) });
             if (run.status === "pending") void runner?.runBatch(req.params.episodeId, run.runId);
         } catch (error) { handle(res, error); }
     });

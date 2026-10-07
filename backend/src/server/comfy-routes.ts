@@ -1,4 +1,5 @@
 import path from "node:path";
+import { projectModelCatalog } from "@basketikun/canvas-agent/runtime/model-catalog";
 import type { Request, Response } from "express";
 
 import { type ResolvedConfig } from "../config.js";
@@ -15,8 +16,12 @@ export function registerComfyRoutes(ctx: { app: import("express").Express; store
         res.json({ ok: true, ...(await bridge.status()) });
     });
 
-    app.get(routePath("/comfy/models"), async (_req, res) => {
-        res.json({ ok: true, data: await bridge.models() });
+    app.get(routePath("/comfy/models"), async (req, res) => {
+        try {
+            const catalog = await bridge.models();
+            const input = { ...req.query, categories: typeof req.query.categories === "string" ? req.query.categories.split(",") : req.query.categories };
+            res.json({ ok: true, data: req.query.view ? projectModelCatalog(catalog, input) : catalog });
+        } catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
     });
 
     /** 代理 ComfyUI 媒体预览（/view） */

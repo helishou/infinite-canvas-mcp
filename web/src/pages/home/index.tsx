@@ -52,6 +52,10 @@ export default function IndexPage() {
     const latest = sorted[0];
     const projectIds = new Set(projects.map((p) => p.id));
     const date = (value: string) => (Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString(i18n.resolvedLanguage, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—");
+    const stats = (project: CanvasProject) => t("canvas.project.stats", {
+        nodes: project.summary?.nodeCount ?? project.nodes.length,
+        connections: project.summary?.connectionCount ?? project.connections.length,
+    });
     const openProject = (id: string) => navigate(`/canvas/${encodeURIComponent(id)}`);
     const visibleProjects = (data.dramaReady ? filtered.slice(0, visibleCount) : []).flatMap((entry) => entry.kind === "canvas" ? [entry.project] : []);
     const coverProjects = latest && !visibleProjects.some((p) => p.id === latest.id) ? [latest, ...visibleProjects] : visibleProjects;

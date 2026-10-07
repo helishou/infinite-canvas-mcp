@@ -1,3 +1,4 @@
+import { withH3ParameterEdits } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { validateNodeUpdate, validateH3Edit, validateH3Metadata } from "@basketikun/canvas-agent/schemas";
 import { CANVAS_ACTIVE_TASK_NODE_FIELDS, H3_LOCAL_VIEW_FIELDS, H3_RUNTIME_NODE_FIELDS, H3_RUNTIME_SEGMENT_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
 import { isH3CanvasNode, type CanvasOperation } from "./project-ops.js";
@@ -66,7 +67,8 @@ export function prepareClientCanvasOperation(project: Record<string, unknown>, o
     const protectFormal = (previous: Record<string, unknown>, incoming: Record<string, unknown>, deleted?: unknown) => {
         if (Object.hasOwn(incoming, "productionClipProjection") && commandFingerprint(incoming.productionClipProjection) !== commandFingerprint(previous.productionClipProjection) || Array.isArray(deleted) && deleted.includes("productionClipProjection")) throw collaborationError("FORMAL_CLIP_OWNED", "制作投影摘要由 Backend 管理");
         if (!previous.productionClipProjection) return;
-        for (const field of ["prompt", "referenceBindings", "directorEngine", "directorSourceHash", "h3CharacterGroups", "storyboardShots", "tailFrameContinuation", "motionContextEnabled"]) if (Array.isArray(deleted) && deleted.includes(field) || Object.hasOwn(incoming, field) && commandFingerprint(incoming[field]) !== commandFingerprint(previous[field])) throw collaborationError("FORMAL_CLIP_OWNED", `字段 ${field} 属于正式编译产物，请修改编译前源稿后重新编译`);
+        // 创作字段允许手动编辑；保留原编译摘要作为基线，重新投影时检测并保留人工修改。
+        for (const field of ["directorEngine", "directorSourceHash"]) if (Array.isArray(deleted) && deleted.includes(field) || Object.hasOwn(incoming, field) && commandFingerprint(incoming[field]) !== commandFingerprint(previous[field])) throw collaborationError("FORMAL_CLIP_OWNED", `字段 ${field} 由 Backend 维护，不能直接修改编译身份`);
     };
     const preserveSegments = (incoming: unknown) => {
         if (!Array.isArray(incoming)) return;
@@ -74,6 +76,8 @@ export function prepareClientCanvasOperation(project: Record<string, unknown>, o
             const segment = recordOf(value);
             const previous = segments.find((item) => item.id === segment.id);
             if (!previous) continue; // 新实体/导入不是对已有任务状态的覆盖。
+            const changed = Object.fromEntries(Object.entries(segment).filter(([key, value]) => commandFingerprint(value) !== commandFingerprint(previous[key])));
+            Object.assign(segment, withH3ParameterEdits(previous, changed));
             protectFormal(previous, segment);
             if (previous.productionClipProjection) {
                 segment.productionClipProjection = structuredClone(previous.productionClipProjection);
@@ -99,6 +103,7 @@ export function prepareClientCanvasOperation(project: Record<string, unknown>, o
         if (Object.hasOwn(patch, "id") || (Array.isArray(operation.patchDelete) && operation.patchDelete.includes("id"))) throw collaborationError("INVALID_NODE_PATCH", "Clip ID 不可修改");
         const previous = segments.find((segment) => segment.id === operation.segmentId);
         if (previous) {
+            Object.assign(patch, withH3ParameterEdits(previous, patch));
             protectFormal(previous, patch, operation.patchDelete);
             checkPatch(previous, patch, operation.patchDelete, H3_RUNTIME_SEGMENT_FIELDS);
         }

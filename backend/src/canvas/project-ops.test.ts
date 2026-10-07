@@ -26,6 +26,19 @@ function makeProject(nodes: Array<Record<string, unknown>>): Project {
     return { revision: 1, nodes, connections: [] };
 }
 
+test("Clip 编辑、插入、移动和删除均在后端重算起点", () => {
+    const project = makeProject([makeH3Node({ segments: [{ id: "a", duration: 5, start: 99 }, { id: "b", duration: 5 }] })]);
+    const segments = () => (project.nodes[0].metadata as any).segments;
+    applyCanvasProjectOperations(project, [{ type: "update_h3_segment", nodeId: "h3-1", segmentId: "a", patch: { duration: 8 } }]);
+    assert.deepEqual(segments().map((s: any) => s.start), [0, 8]);
+    applyCanvasProjectOperations(project, [{ type: "add_h3_segment", nodeId: "h3-1", segment: { id: "c", duration: 3, start: 999 }, beforeSegmentId: "b" }]);
+    assert.deepEqual(segments().map((s: any) => [s.id, s.start]), [["a", 0], ["c", 8], ["b", 11]]);
+    applyCanvasProjectOperations(project, [{ type: "move_h3_segment", nodeId: "h3-1", segmentId: "b", beforeSegmentId: "a" }]);
+    assert.deepEqual(segments().map((s: any) => [s.id, s.start]), [["b", 0], ["a", 5], ["c", 13]]);
+    applyCanvasProjectOperations(project, [{ type: "delete_h3_segment", nodeId: "h3-1", segmentId: "a" }]);
+    assert.deepEqual(segments().map((s: any) => [s.id, s.start]), [["b", 0], ["c", 5]]);
+});
+
 test("update_h3_segment：按 segmentId 原子更新单段字段，不动其它段", () => {
     const project = makeProject([makeH3Node()]);
     const results = applyCanvasProjectOperations(project as Record<string, unknown>, [

@@ -12,6 +12,35 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { registerBackendMcpHttpRoutes } from "./mcp.js";
 import type { ResolvedConfig } from "./config.js";
 
+test("production workspace writes return compact receipts and scene reads use explicit selectors", async t => {
+  const app = express(); app.use(express.json());
+  app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
+  app.post("/mcp/observability/events", (_req, res) => res.status(201).json({ ok: true }));
+  const longText = "Authored source and prompt. ".repeat(10000);
+  const production = { episodeId: "owner", revision: 4, publishedVersion: 2, draft: { director: { sourceHash: "a".repeat(64), engine: { runtimeId: "fixed" }, workflow: {}, source: { brief: longText }, artifacts: [{ prompt: longText }] } }, referenceSync: [{ targetId: "SEG_A", status: "ready", referenceCount: 2 }] };
+  for (const endpoint of ["/canvas/projects/owner/production/prepare-targets", "/drama/scenes/scene/production/ops", "/drama/scenes/scene/production/publish"]) app.post(endpoint, (_req, res) => res.json({ ok: true, production, layoutReceipt: { planHash: "layout" }, mediaSubmitted: false }));
+  app.get("/drama/scenes/scene/production", (req, res) => {
+    assert.equal(req.query.view, "source"); assert.equal(req.query.sourceSection, "segments"); assert.equal(req.query.targetIds, "SEG_A");
+    res.json({ ok: true, production: { revision: 4, source: [{ id: "SEG_A", styleTemplateId: "soft-light" }] } });
+  });
+  const server = app.listen(0, "127.0.0.1"); await once(server, "listening");
+  t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+  const address = server.address(); if (!address || typeof address === "string") throw new Error("missing address");
+  const client = await mcpClient(t, await fixture(t, `http://127.0.0.1:${address.port}`));
+  for (const [name, args] of [
+    ["production_prepare_targets", { kind: "canvas", id: "owner", operationId: "prepare", expectedRevision: 3, targets: ["segment:SEG_A"] }],
+    ["production_edit_scene_production", { sceneId: "scene", operationId: "edit", expectedRevision: 3, ops: [{ type: "patch_director_source", entity: "segment", id: "SEG_A", patch: { styleTemplateId: "soft-light" } }] }],
+    ["production_publish_scene_production", { sceneId: "scene", operationId: "publish", expectedRevision: 3, stage: "director" }],
+  ] as const) {
+    const result = textPayload(await client.callTool({ name, arguments: args }));
+    assert.equal(result.production.revision, 4); assert.equal(result.production.draft, undefined);
+    assert.equal(result.counts.referenceSync, 1); assert.equal(result.production.referenceSync, undefined); assert.equal(result.layoutReceipt.planHash, "layout");
+    assert.equal(JSON.stringify(result).includes(longText), false);
+  }
+  const read = textPayload(await client.callTool({ name: "production_get_scene_production", arguments: { sceneId: "scene", view: "source", sourceSection: "segments", targetIds: ["SEG_A"] } }));
+  assert.deepEqual(read.production.source, [{ id: "SEG_A", styleTemplateId: "soft-light" }]);
+});
+
 function indexFixture(project: Record<string, unknown>, ifRevision: unknown) {
   const nodes = (project.nodes || []) as Array<Record<string, unknown>>;
   const connections = (project.connections || []) as unknown[];
@@ -165,8 +194,7 @@ async function mockOversizedBackend(t: import("node:test").TestContext, onMcpEve
     onMcpEvent?.(req.body as Record<string, unknown>);
     res.status(201).json({ ok: true });
   });
-  // 单个画布节点携带 ~1 MB 文本：canvas_export_snapshot（整图导出）会把它原样放进返回体，触发输出上限。
-  // canvas_get_state 自改为默认回节点摘要后已不会超限，故本用例改用导出工具验证同一道熔断。
+  // 显式选择节点详情仍受现有输出保护；整图导出已改为文件引用。
   const oversized = "x".repeat(1024 * 1024);
   app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
   // 素材库同样会超限：声明了 keyword/page/pageSize 但以前被忽略，永远返回全量。
@@ -207,6 +235,7 @@ async function mockOversizedBackend(t: import("node:test").TestContext, onMcpEve
           selectedNodeIds: [],
         };
   app.get("/canvas/projects", (_req, res) => res.json({ ok: true, projects: [project] }));
+  app.get("/canvas/projects/:id/selection", (_req, res) => res.json({ ok: true, project }));
   app.get("/canvas/projects/:id", (_req, res) => res.json({ ok: true, project }));
   app.get("/canvas/projects/:id/collaboration", (req, res) =>
     res.json({ ok: true, projectId: req.params.id, revision: 3, participants: [] }),
@@ -424,16 +453,22 @@ test("production tools publish full operation schemas and forward read-only pref
   const calls: unknown[] = [];
   app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, plugins: [] }));
   app.get("/production/contract", (req, res) => res.json({ ok: true, contract: { runtimeId: req.query.runtimeId, operationType: req.query.operationType } }));
+  app.post("/canvas/production/hash", (req, res) => res.json({ ok: true, hash: "a".repeat(64), source: req.body.source }));
   app.post(["/canvas/projects/:id/production/preflight", "/drama/episodes/:id/production/preflight"], (req, res) => {
     calls.push({ id: req.params.id, ...req.body });
-    res.json({ ok: true, preflight: { valid: false, revision: 4, diagnostics: [{ code: "INVALID_SCHEMA", path: "request.ops.0.brief", severity: "error", message: "Expected string" }] } });
+    res.json({ ok: true, preflight: { valid: false, revision: 4, diagnostics: [{ code: "INVALID_SCHEMA", path: "request.ops.0.brief", severity: "error", message: "Expected string", example: { brief: "A complete authored brief." } }] } });
   });
   const server = app.listen(0, "127.0.0.1"); await once(server, "listening");
   t.after(() => server.close());
   const address = server.address(); assert.ok(address && typeof address !== "string");
   const client = await mcpClient(t, await fixture(t, `http://127.0.0.1:${address.port}`));
   const { tools } = await client.listTools();
-  for (const name of ["production_get_contract", "canvas_preflight_production", "drama_preflight_production"]) assert.ok(tools.some(item => item.name === name));
+  for (const name of ["production_hash_source", "production_get_contract", "canvas_preflight_production", "drama_preflight_production"]) assert.ok(tools.some(item => item.name === name));
+  const hashSchema = tools.find(item => item.name === "production_hash_source")!.inputSchema;
+  assert.deepEqual(hashSchema.required, ["source"]);
+  const hashed = textPayload(await client.callTool({ name: "production_hash_source", arguments: { source: { brief: "hash the full authored source" } } }));
+  assert.equal(hashed.hash, "a".repeat(64));
+  assert.deepEqual(hashed.source, { brief: "hash the full authored source" });
   for (const name of ["canvas_edit_production", "drama_edit_production"]) {
     const schema = JSON.stringify(tools.find(item => item.name === name)?.inputSchema);
     assert.match(schema, /set_director_brief/); assert.match(schema, /committed/); assert.match(schema, /entity/);
@@ -444,8 +479,21 @@ test("production tools publish full operation schemas and forward read-only pref
   for (const [name, owner] of [["canvas_preflight_production", { projectId: "canvas" }], ["drama_preflight_production", { episodeId: "episode" }]] as const) {
     const response = textPayload(await client.callTool({ name, arguments: { ...owner, action: "edit", request } }));
     assert.equal(response.preflight.diagnostics[0].path, "request.ops.0.brief");
+    assert.deepEqual(response.preflight.diagnostics[0].example, { brief: "A complete authored brief." });
   }
   assert.equal(calls.length, 2);
+});
+
+test("MCP forwards the authored compilation scope to Backend", async t => {
+  const app = express(); app.use(express.json());
+  app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
+  let received: unknown;
+  app.post("/drama/episodes/:id/production/compile", (req, res) => { received = req.body; res.json({ ok: true, compilation: { status: "running" } }); });
+  const server = app.listen(0, "127.0.0.1"); await once(server, "listening"); t.after(() => server.close());
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const client = await mcpClient(t, await fixture(t, `http://127.0.0.1:${address.port}`));
+  await client.callTool({ name: "production_compile", arguments: { kind: "episode", id: "episode", operationId: "compile-scene", expectedRevision: 4, scope: { targetIds: ["SEG_004"] } } });
+  assert.deepEqual(received, { operationId: "compile-scene", expectedRevision: 4, scope: { targetIds: ["SEG_004"] } });
 });
 
 test("MCP HTTP returns 404 for an expired session so clients can reconnect", async (t) => {
@@ -598,7 +646,7 @@ test("返回体超过上限时直接报错并给出可恢复建议", async (t) =
   const events: Array<Record<string, unknown>> = [];
   const backendUrl = await mockOversizedBackend(t, (event) => events.push(event));
   const client = await mcpClient(t, await fixture(t, backendUrl));
-  const result = await client.callTool({ name: "canvas_export_snapshot", arguments: { projectId: "canvas-oversized" } });
+  const result = await client.callTool({ name: "canvas_get_selection", arguments: { projectId: "canvas-oversized" } });
   const payload = textPayload(result);
 
   assert.equal(result.isError, true, "超限必须报错而不是把大返回体交给模型");

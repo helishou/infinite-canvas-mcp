@@ -1,3 +1,4 @@
+import { modelCatalogReadSchema } from "../../runtime/model-catalog.js";
 import { validateH3Edit } from "../../canvas/edit-validation.js";
 import { H3_PARAM_KEYS } from "./runtime-params.js";
 import type { AgentCanvasNode, McpToolHandler, PluginMcpContext, PluginMcpModule, PluginMcpToolWire } from "../../server/plugin-mcp.js";
@@ -117,10 +118,12 @@ const TOOLS: PluginMcpToolWire[] = [
     H3_PREPARE_CLIP_TOOL,
     {
         id: "h3_list_models", annotations: { readOnlyHint: true },
-        version: "1.2.0",
+        version: "2.0.0",
         name: "H3 列出模型",
-        description: "列出 MiniMax H3 可用的模型(unet)与 LoRA 清单。",
-        inputJsonSchema: { type: "object", properties: {} },
+        description: "默认返回模型分类数量；view: entries 必须指定 categories 和 pageSize，可用 query/cursor 筛选续读。view: full 显式读取完整目录。",
+        inputJsonSchema: { type: "object", properties: { view: { type: "string", enum: ["summary", "entries", "full"], default: "summary" }, categories: { type: "array", minItems: 1, items: { type: "string", enum: ["models", "loras", "textEncoders", "videoVaes", "audioVaes", "nanfeng"] } }, query: { type: "string" }, pageSize: { type: "integer", minimum: 1 }, cursor: { type: "string" } },
+            allOf: [{ if: { properties: { view: { const: "entries" } }, required: ["view"] }, then: { required: ["categories", "pageSize"] },
+                else: { not: { anyOf: ["categories", "query", "pageSize", "cursor"].map(key => ({ required: [key] })) } } }] },
     },
     {
         id: "h3_get_node", annotations: { readOnlyHint: true },
@@ -939,16 +942,10 @@ export const pluginMcp: PluginMcpModule = {
                 if (!updated) throw new Error(`分镜提示词写入后读取失败:${segmentId}`);
                 return { ok: true, unchanged: false, projectId, nodeId, segmentId, fingerprint: generated.fingerprint, subjectCount: generated.subjectCount, shotCount: generated.shotCount, promptLength: generated.prompt.length, timings: { promptBuildMs, applyMs: Date.now() - applyStarted } };
             },
-            h3_list_models: async () => {
-                const catalog = await context.comfyUi.models();
-                return {
-                    models: catalog.models || [],
-                    loras: catalog.loras || [],
-                    textEncoders: catalog.textEncoders || [],
-                    videoVaes: catalog.videoVaes || [],
-                    audioVaes: catalog.audioVaes || [],
-                    nanfeng: catalog.nanfeng || {},
-                };
+            h3_list_models: async (input) => {
+                const query = modelCatalogReadSchema.parse(input);
+                if (!context.comfyUi.modelCatalog) throw new Error("Backend 模型目录定向读取能力不可用，请更新服务");
+                return context.comfyUi.modelCatalog(query);
             },
             h3_get_clip: async (input) => {
                 const include = new Set(Array.isArray(input.include) ? input.include.map(String) : []);

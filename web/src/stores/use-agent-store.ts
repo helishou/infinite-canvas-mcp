@@ -20,10 +20,11 @@ export type AgentPendingToolCall = { requestId: string; name: string; input?: { 
 export type AgentPermissionMode = "request" | "automatic" | "full";
 export type AgentReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 export type AgentModel = {
+    runtime?: "llm" | "codex";
     id: string;
     model: string;
     displayName: string;
-    defaultReasoningEffort: AgentReasoningEffort;
+    defaultReasoningEffort: AgentReasoningEffort | "";
     supportedReasoningEfforts: Array<{ reasoningEffort: AgentReasoningEffort; description?: string }>;
     isDefault?: boolean;
     hidden?: boolean;

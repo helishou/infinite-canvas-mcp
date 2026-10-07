@@ -1,13 +1,16 @@
+import { ProductionInputDiff } from "./production-input-diff";
 import { useEffect, useMemo, useState } from "react";
 import { Alert, App, Button, Image as AntdImage, Input, Modal, Select, Switch, Tag } from "antd";
 import { ArrowRight, ArrowLeft, Check, Pause, Play, RotateCcw, WandSparkles, Users, MapPin, Image as ImageIcon, Film, Pencil, BookOpen, Search, ChevronDown } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { directorModules, directorProductionSchema, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
-import { backendMediaUrl, type BackendRuntimeTask, type EpisodeProduction, type ProductionBatch, type ProductionReadiness } from "@/services/backend-api";
+import { backendMediaUrl, type ProductionSceneAction, type BackendRuntimeTask, type EpisodeProduction, type ProductionBatch, type ProductionReadiness } from "@/services/backend-api";
 import { groupScriptScenes, dialogueBody, readableText, humanName, records, formatSeconds, shotDisplayText } from "./director-display";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { saveAs } from "file-saver";
 import { ContinuityPanel } from "./continuity-panel";
+import { SceneProductionPanel } from "./scene-production-panel";
+import { H3_STYLE_TEMPLATES } from "../../../../canvas-agent/src/plugins/minimax-h3/style-templates";
 
 export type DirectorWorkspace = "overview" | "story" | "assets" | "shots" | "continuity" | "production" | "advanced";
 type CanvasNodeOption = { id: string; title?: string; type?: string; metadata?: Record<string, unknown> };
@@ -148,7 +151,7 @@ export function DirectorPanel({
   workspace, director, production, readiness, run, batches, runtimeTasks = [], canvasNodes, legacy, versions, busy, canvasId, canvasRole, focusTarget, embedded = false, continuityReport,
   briefDraft, onBriefDraftChange, onOpenSharedAsset, onPromoteExistingSharedAsset,
   compact = false, onSaveScript, generationSupported = true,
-  onBrief, onPatch, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onReview, onPublish, onReplace, onAskDirector, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRestore, onRefresh, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onPreviewContinuityUpgrade, onCheckContinuity, onContinuitySnapshot,
+  onBrief, onPatch, onEditCanvasClip, onAdoptDirectorFields, onAdoptClipStyle, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onReview, onPublish, onReplace, onAskDirector, onRequestContinuityUpgrade, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRestore, onRefresh, onSceneCommand, sceneCommandPending, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onPreviewContinuityUpgrade, onCheckContinuity, onContinuitySnapshot,
 }: {
   workspace: DirectorWorkspace; director?: DirectorProduction; production: EpisodeProduction; readiness?: ProductionReadiness; run?: ProductionBatch | null;
   continuityReport?: import("@/services/backend-api").ProductionContinuity;
@@ -166,6 +169,9 @@ export function DirectorPanel({
   runtimeTasks?: BackendRuntimeTask[];
   onBrief: (brief: string) => Promise<void> | void;
   onPatch: (entity: "style" | "scene" | "asset" | "shot" | "segment", id: string | undefined, patch: Record<string, unknown>) => Promise<boolean> | void;
+  onEditCanvasClip?: (nodeId: string, segmentId: string, patch: Record<string, unknown>) => Promise<boolean>;
+  onAdoptDirectorFields?: (targetId: string, nodeId: string, segmentId: string | undefined, fields: string[]) => Promise<boolean>;
+  onAdoptClipStyle?: (targetId: string, styleTemplateId: string | null) => Promise<boolean>;
   onRegroup: (segmentId: string, shotIds: string[], removeSegmentIds: string[]) => Promise<boolean> | void;
   sourceDrafts: Record<string, string>;
   onSourceDraftChange: (key: string, value: string | undefined) => void;
@@ -177,10 +183,11 @@ export function DirectorPanel({
   onPreviewContinuityUpgrade?: (ledger: Record<string, unknown>, fromSourceHash: string) => Promise<Record<string, any>>;
   onCheckContinuity?: () => Promise<void>;
   onContinuitySnapshot?: (value: "draft" | "published") => void;
-  onReview: (review: AssetReview) => void;
+  onReview: (review: AssetReview) => Promise<boolean | void> | boolean | void;
   onPublish: () => void;
   onReplace: (value: DirectorProduction) => void;
   onAskDirector: (scope: { workspace: DirectorWorkspace; targetId?: string; instruction?: string; brief?: string; workId?: string }) => void;
+  onRequestContinuityUpgrade?: (instruction: string, workId?: string) => Promise<{ id: string; threadId?: string } | undefined>;
   onAnswerDecision: (decisionId: string, answer: string) => Promise<boolean> | boolean;
   onNavigate: (workspace: DirectorWorkspace, target?: { kind: string; id: string }) => void;
   onLocateTarget?: (kind: string, id: string) => void;
@@ -189,6 +196,8 @@ export function DirectorPanel({
   onResume: (runId: string) => void;
   onRestore: (version: number) => void;
   onRefresh: () => void;
+  sceneCommandPending?: boolean;
+  onSceneCommand: (action: ProductionSceneAction, revision: number) => Promise<unknown>;
   onExport: (includeGeneratedMedia: boolean) => Promise<void>;
   exporting: boolean;
   runStartPending: boolean;
@@ -206,9 +215,9 @@ export function DirectorPanel({
   const [json, setJson] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [evidence, setEvidence] = useState<Record<string, string>>({});
+  const [reviewingAssets, setReviewingAssets] = useState<Record<string, boolean>>({});
   const [decisionReplies, setDecisionReplies] = useState<Record<string, string>>({});
-  const [viewedMedia, setViewedMedia] = useState<Record<string, boolean>>({});
-  const [mediaPreview, setMediaPreview] = useState<{ assetId: string; title: string; storageKey: string; sha256: string } | null>(null);
+  const [mediaPreview, setMediaPreview] = useState<{ assetId: string; title: string; storageKey: string } | null>(null);
   const [includeGeneratedMedia, setIncludeGeneratedMedia] = useState(false);
   const d = director;
   const source = d?.source || {};
@@ -332,9 +341,12 @@ export function DirectorPanel({
   const allAssetIds = [...new Set([...assetPlan.map(assetIdOf).filter(Boolean), ...Object.keys(d?.assets || {}), ...keyframeAssetIds])];
 
   const submitReview = async (assetId: string, nodeId: string, storageKey: string, providedHash: string, verdict: "approved" | "rejected") => {
-    if (!publishedDirector || !production.publishedVersion) return;
+    const currentAsset = d?.assets[assetId];
+    if ((!publishedDirector || !production.publishedVersion) && !currentAsset?.generationTaskId) { setError(t("productionCanvas.reviewFailed")); return; }
     const note = evidence[assetId]?.trim() || (verdict === "approved" ? t("director.workspace.approvalEvidence") : "");
     if (!note) { setError(t("director.workspace.reviewReasonRequired")); return; }
+    setReviewingAssets(current => ({ ...current, [assetId]: true }));
+    setError("");
     try {
       let sha256 = providedHash;
       if (!sha256) {
@@ -343,9 +355,17 @@ export function DirectorPanel({
         const digest = await crypto.subtle.digest("SHA-256", await response.arrayBuffer());
         sha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
       }
-      await onReview({ assetId, version: production.publishedVersion, sourceHash: publishedDirector.sourceHash, nodeId, storageKey, sha256, verdict, evidence: note });
+      const saved = await onReview({ assetId, version: currentAsset?.generationTaskId ? 0 : production.publishedVersion, sourceHash: currentAsset?.generationTaskId ? d!.sourceHash : publishedDirector!.sourceHash, nodeId, storageKey, sha256, verdict, evidence: note });
+      if (saved === false) {
+        const failure = t("productionCanvas.reviewFailed");
+        setError(failure); message.error(failure); return;
+      }
       setError("");
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+      message.success(t(verdict === "approved" ? "director.workspace.reviewApproved" : "director.workspace.reviewReturned"));
+    } catch (cause) {
+      const failure = cause instanceof Error ? cause.message : String(cause);
+      setError(failure); message.error(failure);
+    } finally { setReviewingAssets(current => ({ ...current, [assetId]: false })); }
   };
 
   const assetName = (id: string) => {
@@ -371,31 +391,30 @@ export function DirectorPanel({
     const media = mediaForAsset(assetId, keyframeShot);
     const dependencies = Array.isArray(item?.depends_on) ? item.depends_on.map((value: unknown) => typeof value === "string" ? value : String((value as Record<string, unknown>)?.asset_id || (value as Record<string, unknown>)?.id || "")).filter(Boolean) : [];
     const title = keyframeShot ? `${shotTitle(keyframeShot)} · ${t("director.studio.keyframe")}` : assetName(assetId);
-    const viewedKey = `${assetId}:${media.sha256}:${media.storageKey}`;
     const publishedMedia = publishedDirector?.assets[assetId];
-    const canReview = Boolean(media.nodeId && media.storageKey && publishedMedia?.nodeId === media.nodeId && publishedMedia?.storageKey === media.storageKey && production.publishedVersion && media.status === "generated" && viewedMedia[viewedKey]);
+    const reviewTargetMatches = Boolean(media.nodeId && media.storageKey && media.status === "generated" && (media.asset?.generationTaskId || publishedMedia?.nodeId === media.nodeId && publishedMedia?.storageKey === media.storageKey && production.publishedVersion));
     const field = item?.description !== undefined || item?.prompt === undefined ? "description" : "prompt";
     return <article key={`${assetId}:${keyframeShot || "asset"}`} data-production-target={keyframeShot ? `frame:${keyframeShot}` : `asset:${assetId}`} className={compact ? "grid min-w-0 items-start gap-4 md:grid-cols-[280px_minmax(0,1fr)]" : "min-w-0 overflow-hidden rounded-xl border border-border bg-card"}>
-      <button type="button" disabled={!media.storageKey} aria-label={t("director.studio.previewAsset", { title })} onClick={() => setMediaPreview({ assetId, title, storageKey: media.storageKey, sha256: media.sha256 })} className={`flex w-full items-center justify-center overflow-hidden bg-muted/40 ${compact ? "h-[min(50dvh,420px)] rounded-lg" : "aspect-[4/3]"}`}>
+      <button type="button" disabled={!media.storageKey} aria-label={t("director.studio.previewAsset", { title })} onClick={() => setMediaPreview({ assetId, title, storageKey: media.storageKey })} className={`flex w-full items-center justify-center overflow-hidden bg-muted/40 ${compact ? "h-[min(50dvh,420px)] rounded-lg" : "aspect-[4/3]"}`}>
         {media.storageKey && /\.(mp4|webm|mov)(?:$|\?)/i.test(media.storageKey) ? <Film className="size-10 text-muted-foreground" /> : media.storageKey ? <img className="h-full w-full object-contain" src={backendMediaUrl(media.storageKey)} alt={title} loading="lazy" /> : <div className="space-y-2 text-center text-muted-foreground"><ImageIcon className="mx-auto size-8 opacity-40" /><span className="text-xs">{t("director.studio.noImage")}</span></div>}
       </button>
       <div className={compact ? "min-w-0" : "p-4"}><div className="flex items-start justify-between gap-2"><div className="min-w-0">{!compact && <h3 className="text-base font-semibold">{title}</h3>}<p className="mt-1 text-xs text-muted-foreground">{t(`director.studio.filter.${assetCategory(assetId)}`)}</p></div><Tag color={media.status === "approved" ? "green" : media.status === "generated" ? "blue" : media.status === "rejected" ? "red" : "default"}>{t(`director.workspace.assetStatus.${media.status}`)}</Tag></div>
       {compact && item ? <label className="mt-4 grid gap-2 text-sm">{t("director.workspace.description")}<SourceField value={proseOf(item[field] ?? item.visual ?? item.purpose)} draftValue={sourceDrafts[`asset:${assetId}:${field}`] ?? sourceDrafts[`asset:${assetId}:visual`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:${field}`, value)} multiline disabled={busy || Boolean(media.asset?.sharedSource)} onCommit={async value => { const saved = await onPatch("asset", assetId, { [field]: patchProse(item[field], value) }); if (saved !== false) onSourceDraftChange(`asset:${assetId}:visual`, undefined); return saved; }} /></label> : proseOf(item?.description || item?.prompt || item?.visual || item?.purpose) && <p className="mt-3 line-clamp-3 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{proseOf(item?.description || item?.prompt || item?.visual || item?.purpose)}</p>}
       {media.evidence && (!compact || media.status === "rejected") && <p className="mt-3 text-xs leading-5 text-muted-foreground">{media.evidence}</p>}
       {item && !keyframeShot && ["episode", "shared-assets"].includes(canvasRole) && <div className="mt-3 grid gap-2"><label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.assetCanvasScope")}<Select value={String(item.canvas_scope || (media.asset?.sharedSource || canvasRole === "shared-assets" ? "shared" : "episode"))} disabled={busy || Boolean(media.asset?.sharedSource) || canvasRole === "shared-assets"} options={[{ value: "episode", label: t("director.workspace.assetCanvasScopeEpisode") }, { value: "shared", label: t("director.workspace.assetCanvasScopeShared") }]} onChange={value => void onPatch("asset", assetId, { canvas_scope: value })} /></label>{canvasRole === "episode" && String(item.canvas_scope || (media.asset?.sharedSource ? "shared" : "episode")) === "shared" && <div className="flex flex-wrap items-center gap-2"><p className="m-0 text-xs text-muted-foreground">{t("director.workspace.sharedAssetNeedsAdoption")}</p>{media.status === "approved" && !media.asset?.sharedSource && <Button size="small" disabled={busy} onClick={() => onPromoteExistingSharedAsset(assetId, title)}>{t("director.workspace.promoteExistingSharedAsset")}</Button>}<Button size="small" disabled={busy} onClick={() => onOpenSharedAsset(assetId, title)}>{t("director.workspace.openSharedCanvas")}</Button></div>}</div>}
-      <div className="mt-4 flex flex-wrap gap-2">{!compact && media.storageKey && <Button size="small" onClick={() => setMediaPreview({ assetId, title, storageKey: media.storageKey, sha256: media.sha256 })}>{t("director.workspace.viewOriginal")}</Button>}<Button icon={<WandSparkles className="size-3" />} size="small" onClick={() => onAskDirector({ workspace: "assets", targetId: assetId, instruction: t("director.workspace.reviseAssetContract") })}>{t("director.studio.collaborate")}</Button></div>
+      <div className="mt-4 flex flex-wrap gap-2">{media.storageKey && <Button size="small" onClick={() => setMediaPreview({ assetId, title, storageKey: media.storageKey })}>{t("director.workspace.viewOriginal")}</Button>}<Button icon={<WandSparkles className="size-3" />} size="small" onClick={() => onAskDirector({ workspace: "assets", targetId: assetId, instruction: t("director.workspace.reviseAssetContract") })}>{t("director.studio.collaborate")}</Button></div>
       <details className="mt-3 border-t border-border pt-3"><summary className="cursor-pointer text-xs text-muted-foreground">{t(compact ? "productionCanvas.objectDetails" : "director.studio.assetDetails")}</summary><div className="mt-3 space-y-3">
         {item && <>{!compact && <label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.description")}<SourceField value={proseOf(item[field] ?? item.visual ?? item.purpose)} draftValue={sourceDrafts[`asset:${assetId}:${field}`] ?? sourceDrafts[`asset:${assetId}:visual`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:${field}`, value)} multiline rows={3} disabled={busy} onCommit={async value => { const saved = await onPatch("asset", assetId, { [field]: patchProse(item[field], value) }); if (saved !== false) onSourceDraftChange(`asset:${assetId}:visual`, undefined); return saved; }} /></label>}<label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.assetVersion")}<SourceField value={item.version || item.asset_version || "v1"} draftValue={sourceDrafts[`asset:${assetId}:version`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:version`, value)} disabled={busy} onCommit={value => onPatch("asset", assetId, { version: String(value) })} /></label><label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.assetDependencies")}<Select mode="multiple" value={dependencies} disabled={busy} options={assetPlan.filter(value => assetIdOf(value) !== assetId).map(value => ({ value: assetIdOf(value), label: assetName(assetIdOf(value)) }))} onChange={value => void onPatch("asset", assetId, { depends_on: value })} /></label></>}
         <label className="grid gap-1 text-xs text-muted-foreground">{t("director.studio.linkImage")}<Select value={media.nodeId || undefined} disabled={busy || !imageNodes.length} placeholder={t("director.workspace.bindCanvasImage")} options={imageNodes.map((node, index) => ({ value: node.id, label: humanName(node.title, node.id, t("director.studio.imageNumber", { number: index + 1 })) }))} onChange={nodeId => nodeId && onBindAsset(assetId, nodeId)} /></label>
       </div></details>
       {media.inputOutdated && <p className="mt-2 text-xs">{t("productionCanvas.outdatedMedia")}</p>}
-      {!compact && media.status === "generated" && !viewedMedia[viewedKey] && <p className="mt-3 text-xs text-amber-600">{t("director.workspace.viewOriginalBeforeReview")}</p>}
-      {!compact && canReview && <div className="mt-3 space-y-2 border-t border-border pt-3"><Input.TextArea value={evidence[assetId] ?? media.evidence} disabled={busy} autoSize={{ minRows: 1, maxRows: 3 }} placeholder={t("director.workspace.reviewReason")} onChange={event => setEvidence(current => ({ ...current, [assetId]: event.target.value }))} /><div className="flex flex-wrap gap-2"><Button size="small" type="primary" disabled={busy} onClick={() => void submitReview(assetId, media.nodeId, media.storageKey, media.sha256, "approved")}>{t("director.workspace.approve")}</Button><Button size="small" danger disabled={busy} onClick={() => void submitReview(assetId, media.nodeId, media.storageKey, media.sha256, "rejected")}>{t("director.workspace.returnAsset")}</Button></div></div>}
+      {reviewTargetMatches && <div className="mt-3 space-y-2 border-t border-border pt-3"><Input.TextArea value={evidence[assetId] ?? media.evidence} disabled={busy || Boolean(reviewingAssets[assetId])} autoSize={{ minRows: 1, maxRows: 3 }} placeholder={t("director.workspace.reviewReason")} onChange={event => setEvidence(current => ({ ...current, [assetId]: event.target.value }))} /><div className="flex flex-wrap gap-2"><Button size="small" type="primary" loading={Boolean(reviewingAssets[assetId])} disabled={busy || Boolean(reviewingAssets[assetId])} onClick={() => void submitReview(assetId, media.nodeId, media.storageKey, media.sha256, "approved")}>{t("director.workspace.approve")}</Button><Button size="small" danger loading={Boolean(reviewingAssets[assetId])} disabled={busy || Boolean(reviewingAssets[assetId])} onClick={() => void submitReview(assetId, media.nodeId, media.storageKey, media.sha256, "rejected")}>{t("director.workspace.returnAsset")}</Button></div></div>}
       </div>
     </article>;
   };
 
   const renderOverview = () => <div className="space-y-5">
+    {production.draft.settings.parallelScenes && canvasRole !== "scene" && <SceneProductionPanel key={JSON.stringify({ canvasId, episodeId: production.episodeId })} disabled={busy} commandPending={sceneCommandPending} onCommand={onSceneCommand} production={production} owner={canvasRole === "episode" ? production.episodeId : { projectId: canvasId }} onRefresh={onRefresh} />}
     <section className="rounded-2xl border border-border bg-muted/40 p-4 sm:p-5" aria-label={t("director.workspace.overview.currentTask")}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0"><p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{t("director.workspace.overview.currentTask")}</p><h2 className="mt-1 text-lg font-semibold sm:text-xl">{humanMessage(taskTitle)}</h2>
@@ -521,7 +540,7 @@ export function DirectorPanel({
     })() : <Alert type="info" message={t("director.workspace.noAssets")} description={t("director.workspace.noAssetsHint")} />}
     {d && allAssetIds.length > 0 && !allAssetIds.some(id => (assetFilter === "all" || assetCategory(id) === assetFilter) && assetName(id).toLowerCase().includes(assetSearch.toLowerCase())) && <p className="py-12 text-center text-sm text-muted-foreground">{t("director.studio.emptySearch")}</p>}
     <Modal open={Boolean(mediaPreview)} title={mediaPreview?.title} footer={null} width={960} onCancel={() => setMediaPreview(null)}>
-      {mediaPreview && /\.(mp4|webm|mov)(?:$|\?)/i.test(mediaPreview.storageKey) ? <video className="max-h-[72dvh] w-full" controls src={backendMediaUrl(mediaPreview.storageKey)} onLoadedMetadata={() => setViewedMedia(current => ({ ...current, [`${mediaPreview.assetId}:${mediaPreview.sha256}:${mediaPreview.storageKey}`]: true }))} onError={() => setError(t("director.workspace.mediaReadFailed"))} /> : mediaPreview && <img className="max-h-[72dvh] w-full object-contain" src={backendMediaUrl(mediaPreview.storageKey)} alt={mediaPreview.title} onLoad={() => setViewedMedia(current => ({ ...current, [`${mediaPreview.assetId}:${mediaPreview.sha256}:${mediaPreview.storageKey}`]: true }))} onError={() => setError(t("director.workspace.mediaReadFailed"))} />}
+      {mediaPreview && /\.(mp4|webm|mov)(?:$|\?)/i.test(mediaPreview.storageKey) ? <video className="max-h-[72dvh] w-full" controls src={backendMediaUrl(mediaPreview.storageKey)} onError={() => setError(t("director.workspace.mediaReadFailed"))} /> : mediaPreview && <img className="max-h-[72dvh] w-full object-contain" src={backendMediaUrl(mediaPreview.storageKey)} alt={mediaPreview.title} onError={() => setError(t("director.workspace.mediaReadFailed"))} />}
     </Modal>
   </div>;
 
@@ -607,10 +626,10 @@ export function DirectorPanel({
   };
 
   const continuitySource = continuityReport?.snapshot === "published" ? (production.published?.director || d) : d;
-  const renderContinuity = () => <ContinuityPanel ledger={continuitySource?.source.ledger as Record<string, unknown> | undefined} sourceHash={continuitySource?.sourceHash || ""} editable={continuityReport?.snapshot !== "published"}
+  const renderContinuity = () => <ContinuityPanel locations={records(continuitySource?.source.scene_registry)} ledger={continuitySource?.source.ledger as Record<string, unknown> | undefined} sourceHash={continuitySource?.sourceHash || ""} editable={continuityReport?.snapshot !== "published"}
     workId={readiness?.presentation?.workId || continuitySource?.workflow.currentWork?.workId}
     scenes={Array.isArray(continuitySource?.source.script_scenes) ? records(continuitySource.source.script_scenes) : scriptScenes} shots={Array.isArray(continuitySource?.source.shots) ? records(continuitySource.source.shots) : sourceShots} segments={Array.isArray(continuitySource?.source.segments) ? records(continuitySource.source.segments) : segments} boundaries={continuitySource?.boundaries || []} characters={Array.isArray(continuitySource?.source.character_registry) ? records(continuitySource.source.character_registry) : characters} assets={Array.isArray(continuitySource?.source.asset_plan) ? records(continuitySource.source.asset_plan) : assetPlan} report={continuityReport} busy={busy}
-    onSave={onSaveContinuity || (async () => false)} onPreviewUpgrade={onPreviewContinuityUpgrade || (async () => ({}))} onCheck={onCheckContinuity || (async () => undefined)} onBoundary={value => onBoundary(value as DirectorProduction["boundaries"][number])} onLocate={(kind, id) => onLocateTarget?.(kind, id)} onAskDirector={onAskDirector} onSnapshot={onContinuitySnapshot} />;
+    onSave={onSaveContinuity || (async () => false)} onPreviewUpgrade={onPreviewContinuityUpgrade || (async () => ({}))} onCheck={onCheckContinuity || (async () => undefined)} onBoundary={value => onBoundary(value as DirectorProduction["boundaries"][number])} onLocate={(kind, id) => onLocateTarget?.(kind, id)} onAskDirector={onAskDirector} onRequestAgentUpgrade={onRequestContinuityUpgrade} agentThreadId={d?.workflow.agentThreadId} onSnapshot={onContinuitySnapshot} />;
 
   const renderProduction = () => <div className="space-y-5">
     <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">{t("director.workspace.tab.production")}</h2><p className="mt-1 text-sm text-muted-foreground">{t("director.studio.productionSummary")}</p></div><div className="flex flex-wrap items-center gap-2"><label className="flex items-center gap-2 text-xs text-muted-foreground"><Switch checked={includeGeneratedMedia} disabled={exporting} onChange={setIncludeGeneratedMedia} />{t("director.workspace.includeGeneratedMedia")}</label><Button size="small" loading={exporting} disabled={!d || exporting} onClick={() => void onExport(includeGeneratedMedia)}>{t("director.workspace.exportBundle")}</Button><Button size="small" disabled={busy || !d} onClick={() => onAskDirector({ workspace: "production", targetId: readiness?.targets.find(item => item.status === "blocked")?.targetId, instruction: t("director.workspace.validateCompileCurrent") })}>{t("director.workspace.validateCompile")}</Button><Button size="small" onClick={onRefresh}>{t("director.workspace.refresh")}</Button><Button type="primary" disabled={busy || !d} onClick={onPublish}>{t("drama.production.directorPublish")}</Button></div></div>
@@ -622,12 +641,12 @@ export function DirectorPanel({
     {d && <section className="grid gap-3 rounded-2xl border border-border bg-card p-4 md:grid-cols-2"><label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.contentDelivery")}</span><Select value={delivery} disabled={busy} options={[{ value: "auto_file_batch", label: t("director.workspace.autoFileBatch") }, { value: "interactive_segment", label: t("director.workspace.interactiveSegment") }]} onChange={value => onWorkflow({ contentDeliveryMode: value })} /></label><label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.mediaProduction")}</span><Select value={mode} disabled={busy} options={[{ value: "prompt_only", label: t("director.workspace.promptOnly") }, { value: "per_item", label: t("director.workspace.perItem") }, { value: "automatic", label: t("director.workspace.automatic") }]} onChange={value => onWorkflow({ mediaProductionMode: value })} /></label><p className="text-xs text-muted-foreground md:col-span-2">{t("director.workspace.settingsNextRun")}</p></section>}
 </div></details>
     {!generationSupported && <Alert type="info" showIcon message={t("director.workspace.sceneGenerationUnavailable")} />}
-    {run && <section className="rounded-2xl border border-border bg-card p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs uppercase tracking-wide text-muted-foreground">{t("director.workspace.activeRun")}</p><h3 className="mt-1 font-semibold">{t(`director.studio.runStatus.${run.status}`, { defaultValue: run.status })}</h3></div><div className="flex gap-2">{["pending", "running"].includes(run.status) && <Button size="small" icon={<Pause className="size-3" />} onClick={() => onPause(run.runId)}>{t("director.workspace.pause")}</Button>}{["paused", "awaiting_review"].includes(run.status) && <Button size="small" type="primary" icon={<Play className="size-3" />} onClick={() => onResume(run.runId)}>{t("director.workspace.resume")}</Button>}</div></div><p className="mt-2 text-sm text-muted-foreground">{t("director.studio.runSummary", { version: run.version, count: run.targets.length })}</p>{run.error && <Alert className="mt-3" type={run.status === "failed" ? "error" : "warning"} showIcon message={run.error} />}</section>}
+    {run && <section className="rounded-2xl border border-border bg-card p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs uppercase tracking-wide text-muted-foreground">{t("director.workspace.activeRun")}</p><h3 className="mt-1 font-semibold">{t(`director.studio.runStatus.${run.status}`, { defaultValue: run.status })}</h3></div><div className="flex gap-2">{["pending", "running"].includes(run.status) && <Button size="small" icon={<Pause className="size-3" />} onClick={() => onPause(run.runId)}>{t("director.workspace.pause")}</Button>}{["paused", "awaiting_review"].includes(run.status) && <Button size="small" type="primary" icon={<Play className="size-3" />} onClick={() => onResume(run.runId)}>{t("director.workspace.resume")}</Button>}</div></div><p className="mt-2 text-sm text-muted-foreground">{run.executionSnapshot?.inputBasis === "canvas" ? t("director.workspace.canvasRunSummary", { count: run.targets.length }) : t("director.studio.runSummary", { version: run.version, count: run.targets.length })}</p>{run.error && <Alert className="mt-3" type={run.status === "failed" ? "error" : "warning"} showIcon message={run.error} />}</section>}
     {deliveredClips.length > 0 && <section className="space-y-3"><div><h3 className="font-semibold">{t("director.workspace.deliveredVideos")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("director.workspace.technicalCloseout")}</p></div><div className="grid gap-3 md:grid-cols-2">{deliveredClips.map(({ group, storageKey }) => <article key={`${group.id}:${storageKey}`} className="rounded-xl border border-border bg-card p-3"><video className="w-full rounded-lg bg-black" controls preload="metadata" src={backendMediaUrl(storageKey)} /><p className="mt-2 text-sm font-medium">{segmentTitle(group.id)}</p></article>)}</div></section>}
     {!deliveredClips.length && <div className="flex min-h-36 flex-col items-center justify-center rounded-xl border border-dashed border-border bg-muted/20 p-6 text-center"><Film className="mb-3 size-7 text-muted-foreground" /><h3 className="font-medium">{t("director.studio.noResults")}</h3><p className="mt-2 text-sm text-muted-foreground">{t("director.studio.noResultsHint")}</p></div>}
     {mode === "automatic" && <Button icon={<Play className="size-4" />} disabled={!generationSupported || busy || runStartPending || !readiness?.targets.some(item => item.status === "ready" && !activeTargetIds.includes(item.id))} onClick={() => onStart((readiness?.targets || []).filter(item => item.status === "ready" && !activeTargetIds.includes(item.id)).map(item => item.id), "all_ready")}>{t("director.workspace.startAutomatic")}</Button>}
     {mode === "prompt_only" && <Alert type="info" showIcon message={t("director.workspace.promptOnlyHint")} />}
-    {readiness?.targets.length ? <section className="space-y-2"><h3 className="font-semibold">{t("director.workspace.productionTargets")}</h3>{readiness.targets.map(target => <article key={target.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card p-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><strong>{targetName(target.kind, target.targetId, target.title)}</strong><Tag>{t(`director.workspace.targetKind.${target.kind}`)}</Tag><Tag color={target.status === "ready" ? "green" : target.status === "blocked" ? "red" : target.status === "needs_review" ? "orange" : "default"}>{t(`director.workspace.targetStatus.${target.status}`)}</Tag></div>{target.blockers.length > 0 && <p className="mt-1 text-sm text-amber-600">{humanMessage(target.blockers.join("；"))}</p>}{target.notice && <p className="mt-1 text-xs text-muted-foreground">{humanMessage(target.notice)}</p>}{activeTargetIds.includes(target.id) && <p className="mt-1 text-xs text-amber-600">{t("director.workspace.runTargetActiveInline")}</p>}</div>{target.status === "ready" && mode !== "prompt_only" && mode !== "automatic" && <Button size="small" disabled={!generationSupported || busy || runStartPending || activeTargetIds.includes(target.id)} onClick={() => onStart([target.id])}>{target.kind === "segment" ? t("director.workspace.generateClip") : t("director.workspace.generateItem")}</Button>}</article>)}</section> : <Alert type="info" message={readiness?.nextAction || t("director.workspace.noReadiness")} />}
+    {readiness?.targets.length ? <section className="space-y-2"><h3 className="font-semibold">{t("director.workspace.productionTargets")}</h3>{readiness.targets.map(target => <article key={target.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card p-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><strong>{targetName(target.kind, target.targetId, target.title)}</strong><Tag>{t(`director.workspace.targetKind.${target.kind}`)}</Tag><Tag color={target.status === "ready" ? "green" : target.status === "blocked" ? "red" : target.status === "needs_review" ? "orange" : "default"}>{t(`director.workspace.targetStatus.${target.status}`)}</Tag></div>{target.blockers.length > 0 && <p className="mt-1 text-sm text-amber-600">{humanMessage(target.blockers.join("；"))}</p>}{target.notice && <p className="mt-1 text-xs text-muted-foreground">{humanMessage(target.notice)}</p>}{activeTargetIds.includes(target.id) && <p className="mt-1 text-xs text-amber-600">{t("director.workspace.runTargetActiveInline")}</p>}</div>{target.status === "ready" && mode !== "prompt_only" && mode !== "automatic" && <Button size="small" disabled={!generationSupported || busy || runStartPending || activeTargetIds.includes(target.id)} onClick={() => onStart([target.id])}>{target.kind === "segment" ? t("director.workspace.generateClip") : t("director.workspace.generateItem")}</Button>}<p className="mt-2 text-xs text-muted-foreground">{t("director.workspace.savedInput")}</p>{inputDiff(target)}</article>)}</section> : <Alert type="info" message={readiness?.nextAction || t("director.workspace.noReadiness")} />}
     {d && <section className="space-y-2"><h3 className="font-semibold">{t("director.workspace.completePrompts")}</h3>{d.artifacts.map(artifact => <details key={artifact.id} className="rounded-xl border border-border bg-card p-4"><summary className="cursor-pointer font-medium">{targetName(artifact.kind === "h3" ? "segment" : "asset", artifact.targetId)}</summary><div className="mt-3 space-y-3"><pre className="max-h-[32rem] overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted/40 p-3 text-sm">{artifact.prompt}</pre>{artifact.references.length > 0 && <div className="space-y-2"><p className="text-sm font-medium">{t("director.workspace.actualReferences")}</p>{artifact.references.map(ref => <div key={`${artifact.id}:${ref.label}:${ref.storageKey}`} className="flex flex-wrap items-center gap-2 rounded-lg border border-border p-2 text-xs"><Image className="max-h-16 max-w-20 rounded object-contain" src={backendMediaUrl(ref.storageKey)} alt={ref.label} /><span>{ref.label}</span><Tag>{ref.role}</Tag></div>)}</div>}</div></details>)}</section>}
   </div>;
 
@@ -667,12 +686,38 @@ export function DirectorPanel({
     </>}
   </div>;
 
+  const renderSegmentStyle = (segment: Record<string, any>) => {
+    const group = production.draft.clipGroups.find(group => group.id === segment.id);
+    const node = canvasNodes.find(node => node.id === group?.nodeId);
+    const clip = (Array.isArray(node?.metadata?.segments) ? node.metadata.segments as Record<string, any>[] : []).find(clip => clip.id === group?.segmentId);
+    const styleDeclared = clip ? clip.productionClipProjection?.styleTemplateDeclared === true || clip.h3ParameterOverrides?.includes("styleTemplateId") : Object.hasOwn(segment, "styleTemplateId");
+    const sourceStyle = segment.styleTemplateId ?? null;
+    const liveStyle = clip?.styleTemplateId ?? null;
+    const disabled = busy;
+    const styleName = (value: string | null) => value ? t(`director.workspace.clipStyleNames.${value}`) : t("director.workspace.clipStyleNone");
+    return <div className="mt-3 space-y-2" data-production-clip-style={segment.id}><label className="flex flex-wrap items-center gap-3 text-sm"><span>{t("director.workspace.clipStyle")}</span><Select className="w-56 max-w-full" aria-label={t("director.workspace.clipStyle")} value={styleDeclared ? (clip ? liveStyle : sourceStyle) || "" : "__inherit__"} disabled={disabled} options={[...(!styleDeclared ? [{ value: "__inherit__", label: t("director.workspace.clipStyleInherit"), disabled: true }] : []), { value: "", label: styleName(null) }, ...H3_STYLE_TEMPLATES.map(template => ({ value: template.id, label: styleName(template.id) }))]} onChange={value => { if (value !== "__inherit__") { if (onEditCanvasClip && group?.nodeId && group.segmentId) void onEditCanvasClip(group.nodeId, group.segmentId, { styleTemplateId: value || null }); else void onPatch("segment", segment.id, { styleTemplateId: value || null }); } }} /></label><p className="text-xs text-muted-foreground">{t("director.workspace.clipStyleHint")}</p>{clip && liveStyle !== sourceStyle && onAdoptClipStyle && <Button size="small" disabled={disabled} onClick={() => { void onAdoptClipStyle(segment.id, liveStyle); }}>{t("director.workspace.adoptClipStyle", { style: styleName(liveStyle) })}</Button>}</div>;
+  };
+  const inputDiff = (target: { id: string; targetId: string; kind: string }) => {
+    const group = target.kind === "segment" ? production.draft.clipGroups.find(group => group.id === target.targetId) : undefined;
+    const assetId = target.kind === "keyframe" ? d?.shotInputs[target.targetId]?.keyframeAssetId : target.targetId;
+    const nodeId = group?.nodeId || (assetId ? d?.assets[assetId]?.nodeId : undefined);
+    const node = canvasNodes.find(node => node.id === nodeId);
+    if (!node || !onAdoptDirectorFields) return null;
+    const sourceId = (node.metadata?.productionImageProjection as any)?.sourceNodeId;
+    const sourceNode = !group && sourceId ? canvasNodes.find(node => node.id === sourceId) : undefined;
+    const targetPromptChanged = !group && node.metadata?.prompt !== (node.metadata?.productionImageProjection as any)?.nextValues?.prompt;
+    const chosenNode = sourceNode && !targetPromptChanged ? sourceNode : node;
+    const current = group ? (node.metadata?.segments as Record<string, any>[] || []).find(clip => clip.id === group.segmentId) : { ...chosenNode.metadata, referenceNodeIds: chosenNode.metadata?.canvasReferenceNodeIds };
+    if (!current) return null;
+    return <ProductionInputDiff current={current} projection={group ? current.productionClipProjection : current.productionImageProjection} busy={busy}
+      onAdopt={fields => onAdoptDirectorFields(group ? group.id : assetId!, chosenNode.id, group?.segmentId || undefined, fields)} />;
+  };
   const focusedAsset = focusTarget?.startsWith("asset:") ? focusedId : focusTarget?.startsWith("frame:") ? d?.shotInputs[focusedId]?.keyframeAssetId : undefined;
   const focusedShot = focusTarget?.startsWith("shot:") ? sourceShots.find(shot => String(shot.id) === focusedId) : undefined;
   const focusedSegment = focusTarget?.startsWith("segment:") ? segments.find(segment => String(segment.id) === focusedId) : undefined;
   if (compact && workspace === "assets" && focusedAsset) return <section data-production-object-editor className="space-y-4">
     {renderAssetCard(focusedAsset, assetPlan.find(item => assetIdOf(item) === focusedAsset), focusTarget?.startsWith("frame:") ? focusedId : undefined)}
-    <Modal open={Boolean(mediaPreview)} title={mediaPreview?.title} footer={null} width={960} onCancel={() => setMediaPreview(null)}>{mediaPreview && <img className="max-h-[72dvh] w-full object-contain" src={backendMediaUrl(mediaPreview.storageKey)} alt={mediaPreview.title} onLoad={() => setViewedMedia(current => ({ ...current, [`${mediaPreview.assetId}:${mediaPreview.sha256}:${mediaPreview.storageKey}`]: true }))} onError={() => setError(t("director.workspace.mediaReadFailed"))} />}</Modal>
+    <Modal open={Boolean(mediaPreview)} title={mediaPreview?.title} footer={null} width={960} onCancel={() => setMediaPreview(null)}>{mediaPreview && <img className="max-h-[72dvh] w-full object-contain" src={backendMediaUrl(mediaPreview.storageKey)} alt={mediaPreview.title} onError={() => setError(t("director.workspace.mediaReadFailed"))} />}</Modal>
     {error && <Alert type="error" message={error} />}
   </section>;
   if (compact && workspace === "shots" && focusedShot) {
@@ -696,6 +741,7 @@ export function DirectorPanel({
     return <section data-production-object-editor className="space-y-4">
       {media ? <video className="max-h-[32dvh] w-full" src={backendMediaUrl(media)} controls preload="metadata" /> : <p className="text-sm text-muted-foreground">{t("director.studio.noResults")}</p>}
       {target && <div><Tag>{t(`director.workspace.targetStatus.${target.status}`)}</Tag>{target.blockers[0] && <p className="mt-2 text-sm text-muted-foreground">{humanMessage(target.blockers[0])}</p>}</div>}
+      {renderSegmentStyle(focusedSegment)}
       {sourceShots.filter(shot => (focusedSegment.shot_ids || []).includes(String(shot.id))).map(shot => <div key={shot.id}><h3 className="text-sm font-medium">{shotTitle(String(shot.id))}</h3><p className="mt-2 whitespace-pre-wrap text-sm leading-7">{shotDisplayText(shot)}</p></div>)}
       <Button type="text" disabled={busy} onClick={() => onAskDirector({ workspace: "production", targetId: focusedId })}>{t("productionCanvas.discussObject")}</Button>
       <details className="border-t border-border pt-3"><summary className="cursor-pointer text-sm text-muted-foreground">{t("productionCanvas.objectDetails")}</summary>{target?.blockers.slice(1).map(reason => <p key={reason} className="mt-2 text-sm text-muted-foreground">{humanMessage(reason)}</p>)}<SegmentGroupEditor segment={focusedSegment} shots={sourceShots} segments={segments} fps={fps} draftValue={sourceDrafts[`segment:${focusedId}:shot_ids`]} onDraftChange={value => onSourceDraftChange(`segment:${focusedId}:shot_ids`, value)} disabled={busy} onSave={onRegroup} /></details>

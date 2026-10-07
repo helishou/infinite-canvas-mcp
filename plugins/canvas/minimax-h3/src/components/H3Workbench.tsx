@@ -1,3 +1,4 @@
+import { withH3ParameterEdits } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { useEffect, useRef, useState, useCallback, useMemo } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContentProps } from "@infinite-canvas/plugin-sdk";
 import { message } from "antd";
@@ -176,6 +177,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             const currentSegments = segmentsFor(liveMetadata);
             let changed = false;
             const nextSegments = currentSegments.map((segment) => {
+                if (segment.productionClipProjection) return segment;
                 let nextSegment = segment;
                 const sourceIds = new Set(refsForSegment(segment).filter((ref) => !ref.groupId && ref.nodeId && (!changedNodeIds || changedNodeIds.has(ref.nodeId))).map((ref) => ref.nodeId!));
                 for (const sourceId of sourceIds) {
@@ -217,6 +219,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         const ctx = ctxRef.current;
         let changed = false;
         const next = segments.map((segment) => {
+            if (segment.productionClipProjection) return segment;
             // 先清掉指向已不存在引用的分镜绑定（旧版本遗留的孤儿卡），再做常规归一化。
             const healed = dropUnboundStoryboardReferences(segment);
             const hasStoryboards = storyboardRefsForSegment(healed).length > 0;
@@ -267,7 +270,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata;
         const current = segmentsFor(liveMetadata);
         const next = current.map((segment) => {
-            const updated = { ...segment, ...patch };
+            const updated = { ...segment, ...withH3ParameterEdits(segment as unknown as Record<string, unknown>, patch) } as H3Segment;
             if ((patch.duration !== undefined || patch.mode !== undefined || patch.taskMode !== undefined) && storyboardTrackItems(segment).length) {
                 const withRefs = withSegmentRefs(updated, refsForSegment(segment));
                 void syncStoryboardPrompt(ctx, withRefs, segment);
@@ -625,6 +628,16 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             <div key="prompt-side" className="minimax-prompt-side"><H3ClipSettingsPanel ctx={ctx} metadata={metadata} selected={selected} patchSelected={patchSelected} patchAllSettings={patchAllSettings} /></div>
         <H3Timeline key="timeline" ctx={ctx} segments={segments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onEditRef={(segmentId, ref) => setEditingRef({ segmentId, ref })} onRequestReplaceRef={beginCanvasRefReplace} onRequestPickRef={requestCanvasRefPick} onRequestPickStoryboardShot={requestStoryboardShotPick} pickingShotKey={pickingRef?.shotId ? `${pickingRef.segmentId}:${pickingRef.shotId}` : undefined} onSegmentChange={commitSegmentChange} pickingKey={pickingRef ? `${pickingRef.segmentId}:${pickingRef.slotIndex}` : undefined} onPlayAll={playAll} fmt={fmt} />
             <H3MaterialLibrary key="material-library" ctx={ctx} outputs={outputs} segments={segments} selected={selected} patchSelected={patchSelected} />
+            <div key="input-source" className="minimax-wb-input-source" style={{ padding: "8px 0", fontSize: 14 }}>
+                使用当前已保存内容
+                {selected?.productionClipProjection && <span> · 已关联导演基线</span>}
+                {selected?.inputOutdated === true && <span> · 输入已修改</span>}
+                {typeof (selected?.productionClipProjection?.nextValues as any)?.prompt === "string" && selected?.prompt !== (selected.productionClipProjection?.nextValues as any).prompt && <details>
+                    <summary>已手动修改 · 查看导演提示词差异</summary>
+                    <pre style={{ maxHeight: 240, overflow: "auto", whiteSpace: "pre-wrap" }}>{String((selected.productionClipProjection?.nextValues as any).prompt)}</pre>
+                    <button type="button" onClick={() => patchSelected({ prompt: String((selected.productionClipProjection?.nextValues as any).prompt) })}>采用导演提示词</button>
+                </details>}
+            </div>
             <H3CurrentClipPanel key="current-clip-panel" ctx={ctx} selected={selected} selectedIndex={selectedIndex} imageRefs={imageRefs} videoRefs={videoRefs} audioRefs={audioRefs} patchSelected={patchSelected} fmt={fmt} onOpenStoryboard={() => setSmartStoryboardOpen(true)} />
         </div>
         <div key="status" className="minimax-wb-status"><H3StatusBadge status={currentRuntime.status} error={String(selected?.errorDetails || metadata.errorDetails || metadata.error || "")} onRetry={() => requestH3Run(ctx, false, true)} />{String(metadata.smartStoryboardStatus || "") === "loading" ? <span style={{ marginLeft: 8, color: "#f59e0b", fontSize: 24 }}>智能分镜正在分析参考图并生成提示词，请稍候…</span> : null}{String(metadata.smartStoryboardStatus || "") === "success" ? <span style={{ marginLeft: 8, color: "#22c55e", fontSize: 24 }}>智能分镜已完成</span> : null}{String(metadata.smartStoryboardStatus || "") === "error" ? <span style={{ marginLeft: 8, color: "#ef4444", fontSize: 24 }}>智能分镜生成失败</span> : null}</div>

@@ -1,3 +1,4 @@
+import { effectiveTargetInput, inputHash } from "./drama/canvas-inputs.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -7,7 +8,7 @@ import { DB_FILE, MEDIA_DIR, ensureDataDirs } from "./config.js";
 import { prepareDatabaseUpgrade, DATABASE_SCHEMA_VERSION } from "./database-upgrade.js";
 import { syncScriptNodeEdits } from "./drama/script-nodes.js";
 import { syncImageReferenceEdits } from "./drama/image-inputs.js";
-import { dramaProductionPlanSchema, type DramaProductionPlan } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionImageModel, dramaProductionPlanSchema, type DramaProductionPlan } from "@basketikun/canvas-agent/drama/production-contract";
 import { productionLayoutPlanSchema, type ProductionLayoutPlan, type ProductionLayoutReceipt } from "@basketikun/canvas-agent/drama/production-contract";
 import { normalizeSceneAsset } from "./canvas/asset-contract.js";
 import { completedImageSlots, dropImageSlots, imageSourceStatus } from "./canvas/image-result-slots.js";
@@ -396,6 +397,7 @@ export class BackendDatabase {
         }
         const version = this.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version?: number } | undefined;
         const currentVersion = version?.version || 0;
+        if (currentVersion > DATABASE_SCHEMA_VERSION) throw new Error("未知数据库版本，拒绝覆盖");
         if (currentVersion < 1) {
             this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?)").run(new Date().toISOString());
         }
@@ -909,6 +911,16 @@ export class BackendDatabase {
                     CREATE INDEX IF NOT EXISTS generation_logs_status_updated ON generation_logs(status, updated_at);
                 `);
                 this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (32, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
+        if (currentVersion < 33) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                for (const table of ["episode_production_batches", "canvas_production_batches", "scene_production_batches"]) {
+                    if (!this.hasColumn(table, "execution_snapshot_json")) this.db.exec(`ALTER TABLE ${table} ADD COLUMN execution_snapshot_json TEXT`);
+                }
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (33, ?)").run(new Date().toISOString());
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }
@@ -1922,6 +1934,8 @@ export class BackendDatabase {
             }
             // getCanvasProject parses a fresh snapshot for this transaction; it has no shared owner.
             const project = current as Record<string, unknown>;
+            const editorialCheck = operations.some(operation => ["connect_nodes", "disconnect_nodes", "delete_connections", "delete_node", "update_h3_segment", "replace_h3_segments"].includes(operation.type) || operation.type === "update_node" && (operation.metadata || operation.metadataDelete));
+            const editorialBefore = !context?.runtimeWrite && editorialCheck ? structuredClone(current) : null;
             const formalImageNodes = !context?.runtimeWrite ? (project.nodes as Record<string, any>[] || []).filter(node => node.metadata?.productionImageInput) : [];
             const formalSourceIds = new Set(formalImageNodes.map(node => node.metadata.productionImageInput.sourceNodeId));
             const imageInputBaseline = formalImageNodes.length ? structuredClone({
@@ -1943,7 +1957,7 @@ export class BackendDatabase {
                         if (Object.hasOwn(change, key) && commandFingerprint(change[key]) !== commandFingerprint(node?.metadata?.[key] ?? null)) throw new Error("制作布局标识由 Backend 管理");
                     }
                     if ((operation.metadataDelete as string[] || []).some(key => layoutKeys.includes(key))) throw new Error("制作布局标识不能直接删除");
-                    for (const change of [metadata, patched].filter(Boolean)) if (Object.hasOwn(change, "productionImageInput") && commandFingerprint(change.productionImageInput) !== commandFingerprint(node?.metadata?.productionImageInput || null)) throw new Error("正式图片输入清单由 Backend 编译登记，不能直接修改");
+                    for (const change of [metadata, patched].filter(Boolean)) for (const field of ["productionImageInput", "productionImageProjection", "canvasReferenceNodeIds"]) if (Object.hasOwn(change, field) && commandFingerprint(change[field]) !== commandFingerprint(node?.metadata?.[field] || null)) throw new Error("正式图片输入清单与导演基线由 Backend 登记，不能直接修改");
                     if ((operation.metadataDelete as string[] || []).includes("productionImageInput")) throw new Error("正式图片输入清单不能直接删除");
                     if (metadata?.sharedAssetOrigin && commandFingerprint(metadata.sharedAssetOrigin) !== commandFingerprint(node?.metadata?.sharedAssetOrigin || null)) throw new Error("共享资产来源由 Backend 登记，不能直接修改");
                     if (node?.metadata?.sharedAssetOrigin && operation.type === "update_node") {
@@ -1991,6 +2005,26 @@ export class BackendDatabase {
                 }
                 return result;
             });
+            if (editorialBefore) {
+                const defaults = this.canvasEditorDefaults(id);
+                const oldNodes = editorialBefore.nodes as any[];
+                const stale: CanvasOperation[] = [];
+                for (const node of project.nodes as any[]) {
+                    const old = oldNodes.find(old => old.id === node.id);
+                    if (!old) continue;
+                    for (const segment of node.metadata?.segments || []) {
+                        const previous = old.metadata?.segments?.find((previous: any) => previous.id === segment.id);
+                        if (!previous?.resultStorageKey) continue;
+                        try { if (inputHash(effectiveTargetInput(editorialBefore, node.id, segment.id, defaults)) !== inputHash(effectiveTargetInput(project as CanvasProject, node.id, segment.id, defaults))) stale.push({ type: "update_h3_segment", nodeId: node.id, segmentId: segment.id, patch: { inputOutdated: true } }); }
+                        catch { stale.push({ type: "update_h3_segment", nodeId: node.id, segmentId: segment.id, patch: { inputOutdated: true } }); }
+                    }
+                    if (old.metadata?.productionImageInput && old.metadata?.storageKey) {
+                        try { if (inputHash(effectiveTargetInput(editorialBefore, node.id, undefined, defaults)) !== inputHash(effectiveTargetInput(project as CanvasProject, node.id, undefined, defaults))) stale.push({ type: "update_node", id: node.id, metadata: { inputOutdated: true } }); }
+                        catch { stale.push({ type: "update_node", id: node.id, metadata: { inputOutdated: true } }); }
+                    }
+                }
+                for (const operation of stale) { const result = applyCanvasProjectOperations(project, [operation]); committedOperations.push(operation); operationResults.push(...result); }
+            }
             const productionUpdates = scriptBaseline ? syncScriptNodeEdits(this, id, scriptBaseline, project) : [];
             if (imageInputBaseline) {
                 const synced = syncImageReferenceEdits(this, id, imageInputBaseline, project);
@@ -2030,6 +2064,21 @@ export class BackendDatabase {
         try { this.canvasCommitListener?.(commit); } catch (error) { console.error("画布提交成功，但实时通知失败", error); }
     }
 
+    canvasEditorDefaults(projectId: string): Record<string, unknown> {
+        const defaults = recordOf(this.getSetting("plugin:minimax-h3:defaults:v1"));
+        const episode = this.getDramaEpisodeByCanvasId(projectId);
+        const row = episode
+            ? this.db.prepare("SELECT draft_json FROM episode_productions WHERE episode_id=?").get(episode.id)
+            : this.db.prepare("SELECT draft_json FROM canvas_productions WHERE project_id=?").get(projectId);
+        if (!row?.draft_json) return defaults;
+        const data = JSON.parse(String(row.draft_json));
+        const settings = data.settings || {};
+        return { ...defaults, canvasImageModels: Object.fromEntries(Object.entries(data.director?.assets || {}).flatMap(([id, value]) => {
+            const asset = value as any;
+            return asset.nodeId ? [[asset.nodeId, productionImageModel(settings, data.director?.source || {}, id)]] : [];
+        })) };
+    }
+
     writeBackH3Task(
         task: RuntimeTask,
         binding: { projectId: string; nodeId: string; segmentId: string; generationLogId?: string },
@@ -2062,9 +2111,17 @@ export class BackendDatabase {
         const index = segments.findIndex((segment) => String(segment.id || "") === binding.segmentId);
         const currentTaskId = index >= 0 ? String(segments[index].runtimeTaskId || "") : "";
         if (index < 0 || (currentTaskId && currentTaskId !== task.id)) return null;
+        const frozenHash = recordOf(recordOf(task.input).params).canvasControlHash || recordOf(recordOf(task.input).params).canvasInputHash;
+        const defaults = this.canvasEditorDefaults(binding.projectId);
+        let inputOutdated = false;
+        if (frozenHash) {
+            try { inputOutdated = frozenHash !== inputHash(effectiveTargetInput(project, binding.nodeId, binding.segmentId, defaults)); }
+            catch { inputOutdated = true; }
+        }
         const terminalStatus = task.status === "succeeded" ? "success" : task.status === "cancelled" ? "cancelled" : "error";
         const active = segments.find((segment) => ["queued", "loading", "awaiting_confirmation"].includes(String(segment.status || "")) && String(segment.id || "") !== binding.segmentId);
         const segmentPatch: Record<string, unknown> = {
+            inputOutdated,
             status: terminalStatus,
             progress: task.progress,
             runtimeTaskId: "",
@@ -2072,14 +2129,14 @@ export class BackendDatabase {
             ...(task.error ? { errorDetails: task.error } : {}),
         };
         if (output) {
-            if ((task.result?.specification as Record<string, unknown> | undefined)?.status !== 'mismatch') {
+            if (!inputOutdated && (task.result?.specification as Record<string, unknown> | undefined)?.status !== 'mismatch') {
                 segmentPatch.result = output.url;
                 segmentPatch.resultStorageKey = output.storageKey;
             }
             const previousResults = Array.isArray(segments[index].results) ? segments[index].results as Array<Record<string, unknown>> : [];
             segmentPatch.results = [
                 ...previousResults.filter((item) => String(item.url || "") !== String(output.url || "")),
-                { ...output, name: `Clip ${index + 1}` },
+                { ...output, name: `Clip ${index + 1}`, taskId: task.id, inputHash: frozenHash },
             ];
         }
         const operations: CanvasOperation[] = [{
@@ -2098,7 +2155,7 @@ export class BackendDatabase {
             runProgress: Math.max(Number(active?.progress || 0), task.progress),
             runtimeTaskId: String(active?.parentTaskId || (active?.status === "awaiting_confirmation" ? active?.runtimeTaskId : "") || ""),
         };
-        if (output) {
+        if (output && !inputOutdated) {
             nodeMetadataPatch.content = output.url;
             nodeMetadataPatch.storageKey = output.storageKey;
         }
@@ -2126,14 +2183,28 @@ export class BackendDatabase {
             const source = nodes.find((item) => String(item.id || "") === input.nodeId);
             if (!source || String(recordOf(source.metadata).runtimeTaskId || "") !== task.id) return null;
             const sourceMetadata = recordOf(source.metadata);
+            const frozenHash = recordOf(recordOf(task.input).params).canvasControlHash || recordOf(recordOf(task.input).params).canvasInputHash;
+            let changed = false;
+            if (frozenHash) {
+                try { changed = frozenHash !== inputHash(effectiveTargetInput(project, input.nodeId, undefined, this.canvasEditorDefaults(input.projectId))); } catch { changed = true; }
+            }
+            if (changed) {
+                const history = Array.isArray(sourceMetadata.generatedImageHistory) ? sourceMetadata.generatedImageHistory as unknown[] : [];
+                const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId, metadata: {
+                    inputOutdated: true, generatedImageHistory: [...history, ...media.map(output => ({ ...output, taskId: task.id, inputHash: frozenHash }))],
+                    status: "success", runProgress: 1,
+                } }];
+                const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations, { runtimeWrite: true, source: { clientId: `task:${task.id}`, kind: "task", label: "保留旧输入生成历史" } });
+                return { project: result.project, operations: result.operations };
+            }
             if (recordOf(recordOf(task.input).params).writeBackToTarget === true) {
                 const output = media[0];
                 if (!output) throw new Error("生成完成但没有返回图片");
                 const metadata = {
                     content: output.url, url: output.url, storageKey: output.storageKey || "", mimeType: output.mimeType || "image/png",
                     bytes: output.bytes, naturalWidth: output.width, naturalHeight: output.height,
-                    prompt: input.prompt, model: input.model, generationType: input.references?.length ? "edit" : "generation",
-                    status: "success", runProgress: 1, generationTaskId: task.id,
+                    ...(!recordOf(recordOf(task.input).params).canvasFrozenInput ? { prompt: input.prompt, model: input.model } : {}), generationType: input.references?.length ? "edit" : "generation",
+                    status: "success", runProgress: 1, generationTaskId: task.id, inputOutdated: false, generatedImageHistory: [...(Array.isArray(sourceMetadata.generatedImageHistory) ? sourceMetadata.generatedImageHistory : []), ...media.map(output => ({ ...output, taskId: task.id, inputHash: frozenHash }))],
                 };
                 const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId, metadata,
                     metadataDelete: ["runtimeTaskId", "errorDetails"] }];
@@ -2923,7 +2994,31 @@ export class BackendDatabase {
                 });
             }
         }
-        return out;
+        const project = this.getCanvasProject(projectId);
+        const node = (project?.nodes as Array<Record<string, any>> | undefined)?.find(item => String(item.id) === nodeId);
+        const segments = Array.isArray(node?.metadata?.segments) ? node!.metadata.segments as Array<Record<string, any>> : [];
+        for (const segment of segments) {
+            const targetSegmentId = String(segment.id || "");
+            if (segmentId && targetSegmentId !== segmentId) continue;
+            const origin = segment.archivedResultOrigin && typeof segment.archivedResultOrigin === "object" && !Array.isArray(segment.archivedResultOrigin)
+                ? segment.archivedResultOrigin as Record<string, unknown> : undefined;
+            if (!origin) continue;
+            const sourceNodeId = String(origin.sourceNodeId || ""), sourceSegmentId = String(origin.sourceSegmentId || "");
+            const storageKey = String(origin.storageKey || ""), logId = String(origin.generationLogId || "");
+            if (!sourceNodeId || !sourceSegmentId || !storageKey || !logId) continue;
+            const log = this.getGenerationLog(logId);
+            if (!log || log.projectId !== projectId || log.nodeId !== sourceNodeId || log.segmentId !== sourceSegmentId || log.status !== "success") continue;
+            const output = log.outputs.find(item => item.storageKey === storageKey && String(item.mimeType || "video/mp4").startsWith("video/"));
+            const media = this.getMediaFile(storageKey);
+            if (!output || !media || !fs.existsSync(media.filePath)) continue;
+            const url = String(output.url || output.video_url || `/media/${encodeURIComponent(storageKey)}`);
+            if (seen.has(url)) continue;
+            seen.add(url);
+            out.push({ url, storageKey, mimeType: String(output.mimeType || media.mimeType), width: media.width || 0, height: media.height || 0,
+                name: String(output.name || output.filename || ""), segmentId: targetSegmentId, createdAt: log.finishedAt || log.startedAt });
+        }
+        out.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        return out.slice(0, safeLimit);
     }
 
     // ── MCP observability ─────────────────────────────────────────────────

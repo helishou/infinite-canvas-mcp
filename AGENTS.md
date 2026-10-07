@@ -11,6 +11,7 @@
 | Web 页面、组件、Store | [web/AGENTS.md](web/AGENTS.md) |
 | Backend API、SQLite、媒体、执行器 | [backend/AGENTS.md](backend/AGENTS.md) |
 | Agent 会话、MCP 工具、共享契约 | [canvas-agent/AGENTS.md](canvas-agent/AGENTS.md) |
+| MCP 工具新增、修改或返回体治理 | [MCP 工具契约](.agents/rules/mcp-contracts.md)，覆盖 Backend、Agent 兼容入口与插件 |
 | 画布插件、SDK、H3 UI | [plugins/canvas/AGENTS.md](plugins/canvas/AGENTS.md) |
 | 画布持久编辑、同步、生成、参考或任务回写 | [画布数据契约](.agents/rules/canvas-contracts.md)，与代码目录无关 |
 | 画布主题、视口、拖拽、H3 布局 | [画布交互约束](.agents/rules/canvas-ui.md) |

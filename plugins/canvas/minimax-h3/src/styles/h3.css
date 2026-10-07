@@ -281,6 +281,7 @@
 .minimax-prompt-translate:disabled:hover { background:rgba(168,85,247,.1); }
 .minimax-prompt-translate.is-translated { background:rgba(168,85,247,.22); border-color:rgba(168,85,247,.55); color:#d8b4fe; }
 .minimax-prompt-translate-error { position:absolute; left:8px; bottom:8px; font-size:22px; color:#fca5a5; pointer-events:none; }
+.minimax-prompt-translate-status { position:absolute; left:8px; right:58px; bottom:8px; padding:3px 6px; font-size:18px; line-height:1.4; color:var(--h3-muted); background:var(--h3-panel); pointer-events:none; }
 .minimax-output-list > div > span[style*="display: flex"],
 .minimax-output-list > div > span[style*="display:flex"] { position:absolute !important; right:4px; top:4px; z-index:5; }
 .minimax-output-list > div > span[style*="display: flex"] button,

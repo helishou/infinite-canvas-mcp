@@ -1,3 +1,4 @@
+import { withH3ParameterEdits } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3Ref, H3Segment } from "../types";
 import { segmentsFor } from "../hooks/useH3Segments";
@@ -29,7 +30,7 @@ export function patchSelectedSegment(ctx: CanvasNodeContext, metadata: Record<st
     const liveMetadata = ctx.getNode?.(ctx.node.id)?.metadata || metadata;
     const segments = segmentsFor(liveMetadata);
     const selectedId = String(liveMetadata.selectedSegmentId || segments[0]?.id || "");
-    ctx.updateMetadata({ selectedSegmentId: selectedId, segments: segments.map((segment) => segment.id === selectedId ? { ...segment, ...patch } : segment) });
+    ctx.updateMetadata({ selectedSegmentId: selectedId, segments: segments.map((segment) => segment.id === selectedId ? { ...segment, ...withH3ParameterEdits(segment as unknown as Record<string, unknown>, patch) } : segment) });
 }
 
 function editableHistoricalReferences(snapshot: Record<string, unknown> | undefined, segments: H3Segment[], targetSegment?: H3Segment): H3Ref[] | undefined {

@@ -16,3 +16,8 @@ test("H3 edits reject unknown fields, booleans as strings and invalid modes", ()
     assert.throws(() => validateH3Edit({ taskMode: "no-mode" }), /taskMode/);
     assert.doesNotThrow(() => validateH3Edit({ prompt: "ordinary Clip", motionContextEnabled: false, duration: 5 }));
 });
+test("H3 reference and storyboard editor fields accept real UI patches and reject invalid container types", () => {
+    assert.doesNotThrow(() => validateH3Edit({ h3CharacterGroups: {}, storyboardDurations: { board: 5 }, storyboardModeEnabled: true, storyboardCompositeEnabled: false, storyboardPromptCache: { version: 13 }, subjectDefinitions: [{ subjectId: "hero" }] }));
+    for (const patch of [{ h3CharacterGroups: [] }, { storyboardDurations: "five" }, { storyboardPromptCache: null }, { storyboardModeEnabled: "true" }, { storyboardCompositeEnabled: 1 }, { subjectDefinitions: {} }]) assert.throws(() => validateH3Edit(patch), /INVALID_CLIP_FIELD/);
+    assert.throws(() => validateH3Edit({ productionClipProjection: {} }), /不属于可编辑/);
+});

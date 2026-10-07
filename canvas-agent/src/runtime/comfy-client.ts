@@ -5,6 +5,7 @@ import path from "node:path";
 import { BackendClient } from "./backend-client.js";
 import type { ComfyModelCatalog, ComfyPreset } from "./comfyui-types.js";
 import type { RuntimeTask, RuntimeTaskEvent } from "./types.js";
+import type { ModelCatalogRead } from "./model-catalog.js";
 
 export { BackendClientError } from "./backend-client.js";
 
@@ -34,6 +35,7 @@ export function createBackendClient(backendUrl: string, env: Record<string, stri
 export type ComfyUiClient = {
     status(): Promise<Record<string, unknown>>;
     models(signal?: AbortSignal): Promise<ComfyModelCatalog>;
+    modelCatalog?(input: ModelCatalogRead): Promise<unknown>;
     presets(): ComfyPreset[];
     run(preset: string, input: Record<string, unknown>, params: Record<string, unknown>, baseUrl?: string, clientTaskId?: string): Promise<RuntimeTask>;
     cancel(id: string): Promise<RuntimeTask>;
@@ -46,6 +48,12 @@ export function backendComfyUi(client: BackendClient, presets: () => ComfyPreset
     return {
         status: () => client.comfyStatus(),
         models: (signal) => client.comfyModels(signal),
+        modelCatalog: (input) => {
+            const params = new URLSearchParams();
+            for (const [key, value] of Object.entries(input)) if (value !== undefined) params.set(key, Array.isArray(value) ? value.join(",") : String(value));
+            if (!params.has("view")) params.set("view", "summary");
+            return client.get<{ data: unknown }>(`/comfy/models?${params}`).then(result => result.data);
+        },
         presets,
         run: (preset, input, params, baseUrl, clientTaskId) => client.comfyRun(preset, input, params, baseUrl, clientTaskId),
         cancel: (id) => client.comfyCancel(id),

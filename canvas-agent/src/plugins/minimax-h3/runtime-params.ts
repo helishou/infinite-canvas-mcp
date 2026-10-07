@@ -8,11 +8,16 @@ const plannedKeys = new Set(['mode', 'taskMode', 'duration', 'aspectRatio', 'tai
 export function resolveH3Runtime(segment: Record<string, unknown>, override: Record<string, unknown>, metadata: Record<string, unknown>, defaults: Record<string, unknown>) {
     const nodeParams = record(metadata.comfyParams);
     const useDefaults = (segment.h3ParameterPolicy ?? metadata.h3ParameterPolicy) === 'defaults';
+    const manualKeys = new Set(Array.isArray(segment.h3ParameterOverrides) ? segment.h3ParameterOverrides.map(String) : []);
     const sources: Record<string, H3ParameterSource> = {};
     const values: Record<string, unknown> = {};
     const layers: Array<[H3ParameterSource, Record<string, unknown>]> = [['request', override], ['clip', segment], ['node', metadata], ['nodeParams', nodeParams], ['defaults', defaults], ['builtIn', BASE_H3_NODE_METADATA]];
     for (const key of H3_PARAM_KEYS) {
-        const selected = layers.find(([source, layer]) => !(useDefaults && !plannedKeys.has(key) && ['clip', 'node', 'nodeParams'].includes(source)) && layer[key] !== undefined && (key === 'styleTemplateId' || layer[key] !== null));
+        const selected = layers.find(([source, layer]) => {
+            const projection = record(segment.productionClipProjection);
+            const explicitStyle = key === 'styleTemplateId' && source === 'clip' && (!segment.productionClipProjection || projection.styleTemplateDeclared === true);
+            return !(useDefaults && !plannedKeys.has(key) && !explicitStyle && !manualKeys.has(key) && ['clip', 'node', 'nodeParams'].includes(source)) && layer[key] !== undefined && (key === 'styleTemplateId' || layer[key] !== null);
+        });
         if (selected) { values[key] = selected[1][key]; sources[key] = selected[0]; }
     }
     // steps is an execution alias; videoSteps is the persisted domain field.
@@ -31,6 +36,16 @@ export function resolveH3Runtime(segment: Record<string, unknown>, override: Rec
     params.mode = params.taskMode = aliases[rawMode] || rawMode;
     if (sources.loraSlots === 'builtIn' && String(values.loraName || '').trim()) sources.loraSlots = sources.loraName;
     return { params, sources, parameterIssues, policy: useDefaults ? 'defaults' as const : 'overrides' as const };
+}
+
+/** A deliberate field edit remains effective even when the Clip otherwise follows defaults. */
+export function withH3ParameterEdits(segment: Record<string, unknown>, patch: Record<string, unknown>) {
+    if (patch.steps !== undefined && patch.videoSteps === undefined) patch = { ...patch, videoSteps: patch.steps };
+    const keys = new Set(Array.isArray(segment.h3ParameterOverrides) ? segment.h3ParameterOverrides.map(String) : []);
+    if (patch.h3ParameterPolicy === 'defaults' && !Object.hasOwn(patch, 'h3ParameterOverrides')) keys.clear();
+    else for (const key of Object.keys(patch)) if ((H3_PARAM_KEYS as readonly string[]).includes(key)) keys.add(key);
+    return Object.keys(patch).some(key => (H3_PARAM_KEYS as readonly string[]).includes(key)) || Object.hasOwn(patch, 'h3ParameterPolicy')
+        ? { ...patch, h3ParameterOverrides: [...keys] } : patch;
 }
 
 export function canonicalH3AspectRatio(value: unknown) {

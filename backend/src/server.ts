@@ -39,6 +39,7 @@ import type {
 import { BackendEventBus, type CanvasEventSource } from "./events.js";
 import type { CanvasOperation } from "./canvas/project-ops.js";
 import { diagnoseCanvasProject } from "./canvas/project-diagnostics.js";
+import { diagnoseH3Clips } from "./canvas/h3-diagnose.js";
 import { syncCharacterAssetsForProject } from "./canvas/character-asset-on-open.js";
 import {
   detectLineInset,
@@ -54,8 +55,10 @@ import {
   isLocalConnection,
   registerConnectionRoutes,
 } from "./server/connection-routes.js";
+import { registerLocalModelProxyRoutes } from "./server/local-model-proxy.js";
 import { CanvasDraftSessionLeases } from "./canvas/draft-session-leases.js";
 import { registerMcpObservabilityRoutes } from "./server/mcp-observability-routes.js";
+import { registerMcpExportRoutes, type McpSnapshotExports } from "./server/mcp-export-routes.js";
 import { CHARACTER_VOICE_COMPRESSION_THRESHOLD_BYTES, prepareCharacterVoiceUpload } from "./server/character-voice-compression.js";
 import { redactInlineMedia } from "./runtime/redact-inline-media.js";
 
@@ -112,6 +115,7 @@ async function withBaiduTranslateRequestSlot<T>(operation: () => Promise<T>): Pr
 
 /** startServer 的可选依赖（comfy 路由由 index.ts 单独挂载）。 */
 export type ServerDeps = {
+  snapshotExports?: McpSnapshotExports;
   comfy?: ComfyUiBackend;
   events?: BackendEventBus;
   stores?: Stores;
@@ -269,6 +273,7 @@ export function startServer(
     });
   });
   registerConnectionRoutes(app, config, stores.settings);
+  registerLocalModelProxyRoutes(app);
   app.post("/canvas/draft-sessions/:owner/acquire", (req, res) => {
     const owner = String(req.params.owner || "").trim();
     const holderId =
@@ -634,6 +639,29 @@ export function startServer(
     const project = db.getCanvasProjectH3Context(req.params.id, nodeId, typeof req.query.segmentId === "string" ? req.query.segmentId : undefined, { sourceNodeIds, assetIds });
     if (!project || !Array.isArray(project.nodes) || !project.nodes.length) return void res.status(404).json({ ok: false, error: "H3 节点不存在" });
     res.json({ ok: true, project });
+  });
+  app.get("/canvas/projects/:id/h3-diagnose", (req, res) => {
+    const nodeId = typeof req.query.nodeId === "string" && req.query.nodeId ? req.query.nodeId : undefined;
+    let nodeIds: string[] | undefined;
+    if (typeof req.query.nodeIds === "string" && req.query.nodeIds) {
+      try {
+        const parsed = JSON.parse(req.query.nodeIds);
+        if (!Array.isArray(parsed) || parsed.some(item => typeof item !== "string")) throw new Error("must be string array");
+        nodeIds = parsed as string[];
+      } catch { return void res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "nodeIds 必须是字符串数组 JSON" }); }
+    }
+    const offset = Number.parseInt(String(req.query.offset ?? "0"), 10);
+    const pageSize = Number.parseInt(String(req.query.pageSize ?? "200"), 10);
+    try {
+      const result = diagnoseH3Clips(stores, {
+        projectId: req.params.id, nodeId, nodeIds,
+        offset: Number.isFinite(offset) && offset >= 0 ? offset : 0,
+        pageSize: Number.isFinite(pageSize) && pageSize > 0 ? pageSize : 200,
+      });
+      res.json({ ok: true, ...result });
+    } catch (error) {
+      res.status(404).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
   });
   app.get("/canvas/projects/:id/h3-node-summary", (req, res) => {
     const nodeId = String(req.query.nodeId || "");
@@ -2002,6 +2030,7 @@ export function startServer(
   });
 
   registerMcpObservabilityRoutes(app, stores.mcpObservability);
+  registerMcpExportRoutes(app, stores.projects, deps.snapshotExports);
   registerBackendErrorHandler(app);
 
   return { app: app as Express, stores, events };

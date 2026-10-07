@@ -27,6 +27,7 @@ export type AgentEventPayload = {
     duration_ms?: number;
 };
 export type AgentEventItem = {
+    model?: string;
     id?: string;
     type?: string;
     text?: unknown;

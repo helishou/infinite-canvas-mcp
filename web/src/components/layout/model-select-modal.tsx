@@ -61,7 +61,7 @@ export function ModelSelectModal({ open, channel, selectedNames, onConfirm, onCl
 
     const fetchModels = async () => {
         if (!channel) return;
-        if (!channel.baseUrl.trim() || !channel.apiKey.trim()) {
+        if (channel.kind !== "codex-cli" && (!channel.baseUrl.trim() || !channel.apiKey.trim())) {
             message.error(t("config.modelSelect.missingConfig"));
             return;
         }
@@ -113,7 +113,7 @@ export function ModelSelectModal({ open, channel, selectedNames, onConfirm, onCl
                     {t("config.modelSelect.fetch")}
                 </Button>
             </div>
-            <div className="mt-2 text-xs text-stone-500">{t("config.modelSelect.description")}</div>
+            <div className="mt-2 text-xs text-stone-500">{t(channel?.kind === "codex-cli" ? "config.channelEditor.codexHint" : "config.modelSelect.description")}</div>
 
             <Tabs
                 className="mt-3"

@@ -23,6 +23,7 @@ import { useAgentSkillStore } from "@/stores/use-agent-skill-store";
 import { useShallow } from "zustand/react/shallow";
 import { useAgentStore, type AgentAttachment, type AgentBootstrapStatus, type AgentCanvasContext, type AgentCanvasReference, type AgentChatItem, type AgentConversationState, type AgentCreativeLaunch, type AgentModel, type AgentPendingApproval, type AgentPendingToolCall, type AgentPermissionMode, type AgentQueuedPrompt, type AgentQueuedPromptPayload, type AgentReasoningEffort, type AgentScopedTask, type AgentThreadSummary } from "@/stores/use-agent-store";
 import { useBackendStore } from "@/stores/use-backend-store";
+import { useConfigStore } from "@/stores/use-config-store";
 import { discoverBackendToken, editEpisodeProduction, fetchEpisodeProduction, fetchProductionReadiness } from "@/services/backend-api";
 import { productionPresentationPath, productionTarget } from "@/lib/production-navigation";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
@@ -134,6 +135,9 @@ function conversationBootstrapView(conversation: AgentConversationState) {
 }
 
 export function LocalAgentPanel({ embedded, headless, autoConnect, compact, headerAction }: { embedded?: boolean; headless?: boolean; autoConnect?: boolean; compact?: boolean; headerAction?: ReactNode }) {
+    const configuredChannels = useConfigStore(state => state.config.channels);
+    const [legacyHistory, setLegacyHistory] = useState(false);
+    const legacyHistoryRef = useRef(false);
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { message, modal } = App.useApp();
@@ -333,7 +337,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         let sequence = ++loadThreadsSequenceRef.current;
         setAgentState({ loadingThreads: true });
         try {
-            const data = await fetchAgentJson<AgentThreadsResponse>(endpoint, token, `/codex/threads`);
+            const data = await fetchAgentJson<AgentThreadsResponse>(endpoint, token, `/codex/threads?source=${legacyHistoryRef.current ? "codex" : "llm"}`);
             if (sequence !== loadThreadsSequenceRef.current) return;
             if (data.conversation) {
                 applyConversationState(data.conversation);
@@ -356,6 +360,14 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
             if (sequence === loadThreadsSequenceRef.current && !threadOperationRef.current) setAgentState({ loadingThreads: false });
         }
     }, [applyConversationState, applyWorkspaceChange, endpoint, loadThreadSnapshot, setAgentState, token]);
+
+    useEffect(() => {
+        if (!activeThreadId) return;
+        const legacy = !activeThreadId.startsWith("llm-");
+        legacyHistoryRef.current = legacy;
+        setLegacyHistory(legacy);
+        void loadThreads(true);
+    }, [activeThreadId, loadThreads]);
 
     const applyRuntimeState = useCallback((snapshot: AgentRuntimeState, allowNewInstance = false) => {
         if (!snapshot?.instanceId || !Number.isInteger(snapshot.revision) || snapshot.revision < 1 || !snapshot.conversation || !snapshot.codex) return;
@@ -512,7 +524,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
             void postState(endpoint, token, clientId, canvasContextRef.current?.snapshot || null);
             if (document.visibilityState === "visible" && document.hasFocus()) void activateAgentClient(endpoint, token, clientId);
             if (!busy && !nextThreadId && (!hello?.conversation || hello.conversation.status === "idle")) {
-                void fetchAgentJson<AgentWorkspaceResponse>(endpoint, token, "/codex/threads/reset", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientId, permissionMode }) })
+                void fetchAgentJson<AgentWorkspaceResponse>(endpoint, token, "/codex/threads/reset", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientId, permissionMode, model: useAgentStore.getState().model }) })
                     .then((result) => result.conversation && applyConversationState(result.conversation))
                     .catch((error) => {
                         const state = agentErrorState(error);
@@ -726,7 +738,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                 addEventLog(rt("modelListFailed"), error);
             });
         return () => { disposed = true; };
-    }, [connected, endpoint, setAgentState, token]);
+    }, [activeThreadId, configuredChannels, connected, endpoint, setAgentState, token]);
 
     useEffect(() => {
         if (!connected) return;
@@ -923,7 +935,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
             void fetchAgentJson<AgentWorkspaceResponse>(endpoint, token, "/codex/threads/reset", {
                 method: "POST",
                 headers: { "content-type": "application/json" },
-                body: JSON.stringify({ clientId: clientIdRef.current, permissionMode }),
+                body: JSON.stringify({ clientId: clientIdRef.current, permissionMode, model: useAgentStore.getState().model }),
             }).then((result) => {
                 if (useAgentStore.getState().creativeLaunch?.id !== creativeLaunch.id) return;
                 if (result.conversation) applyConversationState(result.conversation);
@@ -1365,7 +1377,9 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         clearSkillSelection();
         setAgentState({ activeTab: "chat", activity: rt("creatingConversation") });
         try {
-            const result = await fetchAgentJson<AgentWorkspaceResponse>(endpoint, token, "/codex/threads/reset", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientId: clientIdRef.current, permissionMode }) });
+            legacyHistoryRef.current = false;
+            setLegacyHistory(false);
+            const result = await fetchAgentJson<AgentWorkspaceResponse>(endpoint, token, "/codex/threads/reset", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientId: clientIdRef.current, permissionMode, model: useAgentStore.getState().model }) });
             if (threadOperationRef.current !== operation) return;
             if (result.conversation) applyConversationState(result.conversation);
             setAgentState({ activeTab: "chat", activity: rt("newConversation") });
@@ -1600,7 +1614,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
             return;
         }
         if (event.type === "item.completed" && event.item?.type === "agent_message" && event.item.id) {
-            const scoped = scopeEventChatItem(event, { id: event.item.id, role: "assistant", title: "Codex", text: stringText(event.item.text) }, event.item.id);
+            const scoped = scopeEventChatItem(event, { id: event.item.id, role: "assistant", title: event.agent === "llm" ? event.item.model || "Agent" : "Codex", text: stringText(event.item.text) }, event.item.id);
             const currentMessages = useAgentStore.getState().messages;
             const index = currentMessages.findIndex((message) => message.id === scoped.id);
             if (index >= 0) {
@@ -1669,7 +1683,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         if (!text) return;
         const itemId = event.item?.id;
         if (!itemId) return;
-        const scoped = scopeEventChatItem(event, { id: itemId, role: "assistant", title: "Codex", text, streamId: itemId }, itemId);
+        const scoped = scopeEventChatItem(event, { id: itemId, role: "assistant", title: event.agent === "llm" ? event.item?.model || "Agent" : "Codex", text, streamId: itemId }, itemId);
         const currentMessages = useAgentStore.getState().messages;
         const index = currentMessages.findIndex((message) => message.id === scoped.id);
         if (index < 0) {
@@ -1758,6 +1772,8 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                     loading={loadingThreads}
                     busy={sending || waiting || conversationBusy}
                     connected={connected}
+                    legacyHistory={legacyHistory}
+                    onLegacyHistoryChange={value => { legacyHistoryRef.current = value; setLegacyHistory(value); void loadThreads(true); }}
                     onRefresh={() => void loadThreads()}
                     onNewThread={() => void startNewThread()}
                     onResumeThread={(threadId) => void resumeThread(threadId)}
@@ -1799,7 +1815,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                         onRemoveAttachment={removeAttachment}
                         confirmTools={confirmTools}
                         onConfirmToolsChange={(confirmTools) => setAgentState({ confirmTools })}
-                        permissionMode={permissionMode}
+                        permissionMode={models.find(item => item.model === model)?.runtime === "codex" || !model.includes("::") ? permissionMode : undefined}
                         onPermissionModeChange={changePermissionMode}
                         models={models}
                         model={model}
@@ -1808,7 +1824,8 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                             const selected = models.find((item) => item.model === model);
                             if (!selected) return;
                             const effort = selected.defaultReasoningEffort || selected.supportedReasoningEfforts[0]?.reasoningEffort;
-                            setAgentState({ model, ...(effort ? { reasoningEffort: effort } : {}) });
+                            setAgentState({ model, reasoningEffort: effort || "" });
+                            if (selected.runtime && Boolean(activeThreadId) && (activeThreadId.startsWith("llm-") ? selected.runtime === "codex" : selected.runtime === "llm")) message.info(t("agent.runtime.modelNeedsNewConversation"));
                         }}
                         onReasoningEffortChange={(reasoningEffort) => {
                             setAgentState({ reasoningEffort });

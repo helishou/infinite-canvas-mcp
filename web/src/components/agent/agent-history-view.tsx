@@ -14,6 +14,8 @@ export function AgentHistoryView({
     loading,
     busy,
     connected,
+    legacyHistory,
+    onLegacyHistoryChange,
     onRefresh,
     onNewThread,
     onResumeThread,
@@ -26,6 +28,8 @@ export function AgentHistoryView({
     loading: boolean;
     busy: boolean;
     connected: boolean;
+    legacyHistory?: boolean;
+    onLegacyHistoryChange?: (value: boolean) => void;
     onRefresh: () => void;
     onNewThread: () => void;
     onResumeThread: (threadId: string) => void;
@@ -54,6 +58,7 @@ export function AgentHistoryView({
                     </span>
                 </div>
                 <div className="flex flex-wrap items-center justify-between gap-2">
+                    {onLegacyHistoryChange && <Checkbox checked={legacyHistory} disabled={!connected || loading || busy} onChange={event => onLegacyHistoryChange(event.target.checked)}>{t("agent.history.codexHistory")}</Checkbox>}
                     <div className="flex items-center gap-2 text-sm" style={{ color: theme.node.muted }}>
                         {threads.length ? <Checkbox checked={allSelected} indeterminate={Boolean(selectedThreads.length) && !allSelected} disabled={loading || busy} onChange={() => setSelectedIds(allSelected ? new Set() : new Set(threads.map((thread) => thread.id)))} /> : null}
                         <span>{selectedThreads.length ? t("agent.history.selected", { count: selectedThreads.length }) : threads.length ? t("agent.history.count", { count: threads.length }) : connected ? t("agent.history.empty") : t("agent.status.disconnected")}</span>

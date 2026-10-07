@@ -9,6 +9,7 @@ import { ProductionCompilationService } from "./compilation.js";
 import { directorHash, promptHash } from "./director.js";
 import { ProductionContinuityReports } from "./continuity-reports.js";
 import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
+import { compilationScopeInput, currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 
 function fixture(t: test.TestContext) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "production-compile-"));
@@ -25,6 +26,65 @@ function fixture(t: test.TestContext) {
     t.after(() => { db.close(); fs.rmSync(root, { recursive: true, force: true }); });
     return { root, db, service, compilations, director };
 }
+
+test("scoped asset-only compilation applies with ledger v2 before video continuity is authored", async t => {
+    const { root, service, director } = fixture(t);
+    director.source.asset_plan = [{ id: "STYLE", kind: "style", version: "v1", purpose: "Lock the film rendering language.", status: "planned", depends_on: [] }];
+    director.source.ledger = { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] };
+    director.sourceHash = directorHash(director.source);
+    service.edit("episode", { operationId: "asset-ledger", expectedRevision: 1, ops: [{ type: "set_director_production", director }] });
+    const jobs = new ProductionCompilationService(service, root, ((input: DirectorProduction) => {
+        const prompt = "The complete authored style image", sha256 = promptHash(prompt);
+        return { director: { ...input, artifacts: [{ id: "image-STYLE", kind: "image", targetId: "STYLE", prompt, sha256, sourceHash: input.sourceHash,
+            status: "ready", references: [], receipt: { sourceHash: input.sourceHash, promptHash: sha256, engineRuntimeId: input.engine.runtimeId, validator: "fixture" } }] },
+            exitCode: 0, diagnostics: [], audit: {}, sourceAdjustments: [], acceptance: {} };
+    }) as any);
+    jobs.enqueue("episode", "episode", "asset-only", 2, undefined, { targetIds: ["STYLE"] });
+    await new Promise(resolve => setImmediate(resolve));
+    const job = jobs.getCompilation("episode", "episode", "asset-only");
+    assert.equal(job.status, "succeeded");
+    jobs.apply("episode", "episode", job.preparedId!);
+    assert.equal(service.get("episode").draft.director!.artifacts[0].status, "ready");
+    assert.equal(jobs.apply("episode", "episode", job.preparedId!).replayed, true);
+});
+
+test("three scoped compiler jobs overlap and merge disjoint results without overwriting revisions", async t => {
+    const { root, service, director } = fixture(t);
+    director.source = { ...director.source, script_scenes: ["A", "B", "C"].map(id => ({ id, scene_id: id, text: "confirmed" })),
+        shots: ["A", "B", "C"].map(id => ({ id: `S${id}`, source_scene_id: id, scene_id: id, visual: id, required_assets: [] })), segments: [],
+        asset_plan: ["A", "B", "C"].map(id => ({ id: `K${id}`, kind: "keyframe", canvas_scope: "episode", shot_ids: [`S${id}`] })),
+        asset_cards: ["A", "B", "C"].map(id => ({ id: `K${id}`, prompt: "authored image" })) };
+    director.sourceHash = directorHash(director.source);
+    service.edit("episode", { operationId: "scenes", expectedRevision: 1, ops: [{ type: "set_director_production", director }] });
+    const releases: Array<() => void> = []; let concurrent = 0, peak = 0;
+    const compiler = async (input: DirectorProduction) => {
+        concurrent++; peak = Math.max(peak, concurrent);
+        await new Promise<void>(resolve => releases.push(resolve)); concurrent--;
+        const targetId = String((input.source.asset_plan as any[])[0].id), prompt = `compiled ${targetId}`;
+        return { director: { ...input, artifacts: [{ id: `image-${targetId}`, kind: "image" as const, targetId, prompt, sha256: promptHash(prompt), sourceHash: input.sourceHash, status: "ready" as const, references: [], receipt: { sourceHash: input.sourceHash, promptHash: promptHash(prompt), engineRuntimeId: input.engine.runtimeId, validator: "fixture" } }] }, exitCode: 0, diagnostics: [], audit: {}, sourceAdjustments: [], acceptance: {} };
+    };
+    const jobs = new ProductionCompilationService(service, root, compiler as any);
+    for (const sceneId of ["A", "B", "C"]) jobs.enqueue("episode", "episode", `compile-${sceneId}`, 2, undefined, { sceneId });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(releases.length, 3); assert.equal(peak, 3); releases.forEach(release => release());
+    await new Promise(resolve => setImmediate(resolve));
+    for (const sceneId of ["A", "B", "C"]) {
+        const job = jobs.getCompilation("episode", "episode", `compile-${sceneId}`);
+        assert.equal(job.status, "succeeded"); jobs.apply("episode", "episode", job.preparedId!);
+    }
+    const current = service.get("episode");
+    assert.equal(current.draft.director!.artifacts.length, 3);
+    assert.deepEqual(current.draft.director!.artifacts.map(item => item.targetId).sort(), ["KA", "KB", "KC"]);
+    const job = jobs.getCompilation("episode", "episode", "compile-A");
+    assert.equal(jobs.apply("episode", "episode", job.preparedId!).replayed, true);
+    const b = current.draft.director!.artifacts.find(item => item.targetId === "KB")!;
+    const originalHash = b.sourceHash;
+    service.edit("episode", { operationId: "change-A", expectedRevision: current.revision, ops: [{ type: "patch_director_source", entity: "shot", id: "SA", patch: { visual: "changed A" } }] });
+    const changed = service.get("episode").draft.director!;
+    assert.equal(currentCompilationArtifact(changed, b), true); assert.equal(b.sourceHash, originalHash);
+    assert.throws(() => jobs.apply("episode", "other", job.preparedId!), /different production/);
+    assert.deepEqual(compilationScopeInput(changed, { sceneId: "B" }).targetIds, ["KB"]);
+});
 
 test("prepare is read-only; frozen apply is atomic and idempotent", t => {
     const { db, service, compilations } = fixture(t);

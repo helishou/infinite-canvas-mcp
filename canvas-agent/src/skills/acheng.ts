@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { currentCompilationArtifact } from "../drama/compilation-scope.js";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
@@ -8,6 +9,44 @@ import { directorModules, directorProductionSchema, canonicalProduction, product
 import { productionOperationContract, schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch, ref2vaPromptDiagnostics, continuityBoundaryDiagnostics } from "../drama/production-validation.js";
 
 let discoveredPython: string | undefined;
+/** Only isolated compilation copies consume Backend-approved bindings; never change authored source. */
+function hydrateScopedApprovedInputs(director: DirectorProduction, resolver?: (targetId: string, label: string) => string | undefined) {
+    if (!director.source._canvas_compilation_scope || !resolver) return;
+    const scope = director.source._canvas_compilation_scope as Record<string, any>;
+    for (const segment of (director.source.segments || []) as Array<Record<string, any>>) {
+        const shift = scope.frameShifts?.[segment.shot_ids?.[0]] || 0;
+        for (const ref of [...(segment.references || []), ...(segment.subjects || [])]) {
+            if (typeof ref.start_frame !== "number" || typeof ref.end_frame !== "number") continue;
+            const outside = ref.start_frame < segment.start_frame || ref.end_frame > segment.end_frame;
+            if (outside && ref.start_frame + shift >= segment.start_frame && ref.end_frame + shift <= segment.end_frame) {
+                ref.start_frame += shift; ref.end_frame += shift;
+            }
+        }
+    }
+    const plans = Array.isArray(director.source.asset_plan) ? director.source.asset_plan as Array<Record<string, any>> : [];
+    const files = new Map<string, string>();
+    for (const plan of plans) {
+        const id = String(plan.asset_id || plan.id || ""), asset = director.assets[id];
+        if (asset?.status !== "approved" || asset.inputOutdated) continue;
+        const file = resolver(id, "asset");
+        if (!file || !fs.existsSync(file)) throw new Error(`批准素材 ${id} 缺少真实编译输入`);
+        if (crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== asset.sha256) throw new Error(`批准素材 ${id} 字节已变化`);
+        if (plan.version && String(plan.version) !== asset.version) throw new Error(`批准素材 ${id} 的源版本未更新`);
+        plan.status = "approved"; plan.file = file; plan.sha256 = asset.sha256;
+        files.set(id, file);
+    }
+    const source = director.source as Record<string, any>;
+    const anchor = source.style_lock && director.assets[source.style_lock.anchor_asset_id];
+    const anchorFile = source.style_lock && files.get(source.style_lock.anchor_asset_id);
+    if (anchorFile && anchor?.sha256 === source.style_lock.approved_sha256) source.style_lock.approved_file = anchorFile;
+    for (const item of [...(source.asset_cards || []), ...(source.segments || [])]) for (const ref of item.references || []) {
+        const id = String(ref.asset_id || ""), asset = director.assets[id], file = files.get(id);
+        if (!file || !asset) continue;
+        if (ref.asset_version && ref.asset_version !== asset.version || ref.sha256 && ref.sha256 !== asset.sha256) throw new Error(`参考 ${id} 声明的批准版本已过期`);
+        ref.file = file; ref.sha256 = asset.sha256;
+    }
+    director.sourceHash = crypto.createHash("sha256").update(canonicalProduction(director.source)).digest("hex");
+}
 /** Resolve once; a configured executable never silently falls back. */
 export function resolveAchengPython() {
     if (process.env.ACHENG_PYTHON) {
@@ -59,6 +98,7 @@ export function readCompilationReference(output: string, filename: string, verif
 
 export function compileAchengDirector(input: DirectorProduction, directory: string, resolveReferenceFile?: (targetId: string, label: string) => string | undefined) {
     const director = directorProductionSchema.parse(structuredClone(input));
+    hydrateScopedApprovedInputs(director, resolveReferenceFile);
     const runtime = resolveAchengRuntime(director.engine.runtimeId);
     if (runtime.commit !== director.engine.commit || runtime.patchVersion !== director.engine.patchVersion || runtime.version !== director.engine.version) throw new Error("Pinned engine identity differs from the production");
     if (JSON.stringify(director.source).includes('"legacy_fixture"')) throw new Error("Historical fixtures cannot be submitted as new production");
@@ -269,6 +309,7 @@ export function preflightCompilationDirector(raw: unknown, resolveReferenceFile?
     if (result.diagnostics.some(item => item.severity === "error" && /CONTINUITY/.test(item.code))) { result.valid = false; result.nextActions = [{ action: "correct_source", message: "先逐项登记连续性边界，再重新编译源稿。" }]; return result; }
     if (result.diagnostics.some(item => ["INVALID_SCHEMA", "ENGINE_UNAVAILABLE", "ENGINE_MISMATCH"].includes(item.code))) return result;
     const director = directorProductionSchema.parse(structuredClone(raw));
+    hydrateScopedApprovedInputs(director, resolveReferenceFile);
     if (JSON.stringify(director.source).includes('"legacy_fixture"')) {
         result.diagnostics.push({ code: "COMPILE_HISTORICAL_FIXTURE", path: "director.source", message: "历史示例不能作为新制作输入；请使用本次实际撰写的源稿。", severity: "error" });
         result.valid = false;
@@ -318,7 +359,7 @@ export function preflightDirector(raw: unknown, stage: "edit" | "publish" | "gen
     if (digest(canonicalProduction(director.source)) !== director.sourceHash) diagnostics.push({ code: "SOURCE_HASH_MISMATCH", path: "director.sourceHash", message: "Source hash differs from the full authored source", severity: "error" });
     for (const [index, artifact] of director.artifacts.entries()) {
         if (digest(artifact.prompt) !== artifact.sha256) diagnostics.push({ code: "PROMPT_HASH_MISMATCH", path: `director.artifacts.${index}.sha256`, targetId: artifact.targetId, message: "Prompt byte hash differs", severity: "error" });
-        if (artifact.status === "ready" && (artifact.sourceHash !== director.sourceHash || artifact.receipt.sourceHash !== director.sourceHash || artifact.receipt.promptHash !== artifact.sha256 || artifact.receipt.engineRuntimeId !== director.engine.runtimeId)) diagnostics.push({ code: "STALE_RECEIPT", path: `director.artifacts.${index}.receipt`, targetId: artifact.targetId, message: "Receipt differs from the fixed source/prompt/runtime", severity: "error" });
+        if (artifact.status === "ready" && (!currentCompilationArtifact(director, artifact) || artifact.receipt.promptHash !== artifact.sha256 || artifact.receipt.engineRuntimeId !== director.engine.runtimeId)) diagnostics.push({ code: "STALE_RECEIPT", path: `director.artifacts.${index}.receipt`, targetId: artifact.targetId, message: "Receipt differs from the fixed source/prompt/runtime", severity: "error" });
     }
     try { diagnostics.push(...validateAchengSource(director, stage)); }
     catch (error) { diagnostics.push({ code: "ENGINE_UNAVAILABLE", path: "director.engine", message: error instanceof Error ? error.message : String(error), severity: "error" }); }

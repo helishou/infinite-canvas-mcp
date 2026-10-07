@@ -5,6 +5,116 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## MCP recovery and acceptance audit
+
+- Scene arrangement marks restored receipts as replayed. Repeating Clip synchronization skips identical inputs, existing bindings and already-correct ordering, preserving canvas and production revisions. The payload regression command covers large temporary productions and recovery after a discarded response; the read-only audit reports total calls, MCP bytes and elapsed time while verifying complete historical content and model pagination. Existing Web and generation behavior remain unchanged.
+
+## Canvas saves and rejected draft recovery
+
+- Legacy formal image nodes without reference summaries accept node moves, title edits and Clip configuration saves. Concurrent edits to different nodes or fields merge automatically; competing writes to the same field retain conflict protection.
+- Drafts rejected by the Backend's undefined `data` hashing error remain preserved. After the Backend loads the fix, explicitly resubmit preserved edits. Refreshes and remote updates do not retry them automatically, historical outputs remain intact, and unrelated validation rejections remain blocked.
+
+## Home canvas preview
+
+- Canvas preview opens without a page error and shows node and connection counts from the project summary or loaded canvas. Check opening, closing and reopening the preview in grid and list views, including canvases without a cover.
+
+## MCP large payload governance
+
+- MCP writes return compact receipts; production and historical-version reads default to summaries, with explicit views and pagination or UTF-8 chunks for complete content. H3 model catalogs default to category counts; entries require categories and pageSize, with optional query and cursor. Canvas exports return immutable, authenticated download references. Verify external callers migrate to explicit views, old history remains readable, operation replay does not execute again, and downloads preserve hashes across later canvas edits. Existing Backend Web reads without view retain their full response. Diagnostic statistics and output limits are unchanged.
+
+## Director and manual editing
+
+- Clips, characters, scenes and keyframes generate from current saved canvas content by default. Manual edits do not require recompilation or publication; valid archived references do not require approval. Check prompt, reference order, storyboard, model, sampler and explicit no-style changes.
+- Director updates use a three-way merge that preserves manual content while updating unrelated fields. Object details compare and adopt selected director fields; related references, storyboard and duration move together. Edits during generation affect the next request; old-input outputs remain in history without replacing a newer selection.
+- New batches freeze canvas inputs, continue independent targets and resolve pending references once from exact tasks in that batch. Explicitly enabled review waits for approval; otherwise downstream work continues. Refresh, pause and resume preserve the snapshot, scope and task IDs. Explicit published mode and legacy batches retain published-version semantics.
+- Database upgrades create verified backups before adding nullable execution snapshots. Existing versions, media and drafts remain intact. Batch lists return input summaries; a single batch with `?view=inputs` exposes its saved snapshot. These changes still require user acceptance and real-model media validation.
+
+## Return to the Agent's current node
+
+- The director chat header offers a persistent locate button during active or paused following. Clicking collapses the chat, reads the latest production progress from Backend and resumes following at the current canvas node or Clip. The button is disabled until a production target is reported. Existing editing guards still apply. Check returning after panning, advancing targets, cross-canvas navigation, narrow screens, both languages and themes.
+
+## MCP diagnostic trends
+
+- The MCP diagnostics page requests the full report so daily trends, per-tool trends, tool transitions and exported summaries include the stored data. Check date filtering, tool selection and the details tab against existing local events.
+
+## Manual editing of formal Clips
+
+- Formal Clips on production canvases support direct edits to prompts, reference images, character reference groups, storyboards and continuation settings through the existing save and generation controls. Manual edits retain the original compilation baseline and output history; applying compiled inputs preserves conflicting edits and reports the conflict.
+- Opening panels, refreshing or receiving source-media updates does not automatically rewrite formal Clip prompts or references. Check save, cross-window synchronization, flushing before generation, and actual character-reference and storyboard form saves. Task results and compilation identities remain owned by Backend.
+- Drafts rejected by the old formal Clip restriction stay paused until the user chooses to resubmit manual edits. Recovery persists a replacement command before removing the original and saves the edits against the current revision. Check refresh, preservation of the original command, explicit recovery and real remote conflicts.
+
+## Single-Clip repairs and formal styles
+
+- Formal Segments can save an H3 style template. Clip details offer Adopt user change with target, Clip and canvas-revision checks. Declared styles or an explicit no-template choice survive the default parameter policy; older sources without a declaration keep their original default behavior. Sync does not embed template prose or overwrite other manual conflicts.
+- A target selection combined with a scene no longer expands to the whole scene. Shared-block shot, event, hold and prior-state replay dependencies remain validation context, while sibling Clips stay outside compiler output and application. Directed reads expose occupying runs, exact task states and next actions. Edits affecting occupied Clips fail before commit; unrelated Clips remain editable.
+- Editing, preparation and publication tools share compact receipts. Scene source and ledger entries support directed reads. Local repairs follow read, edit, compile/check, preview/publish and explicitly authorized single-target generation; unknown outcomes recover original receipts and unchanged failures do not submit a new key. Check real shared-block cases, clearing styles, revision conflicts, running/review locks and payload sizes. Engineering checks submit no media tasks.
+
+## Concise H3 prompts
+
+- New verified runtimes remove the automatic Ref2VA word floor and per-second expansion. The usual 350–500 English words for a short shot is guidance; shorter text alone does not block delivery. Character identity and permanent scene geometry are defined once within each Segment, while every shot retains its own positions, actions, audio, dialogue and end state. Writing instructions no longer enter the generated prompt.
+- Check real-channel results for short shots, dialogue across cuts and complex action, including reference responsibilities and continuity. Explicit word requirements still apply, and media, timing, verbatim dialogue and hash-bound readback checks remain. New productions use the new active runtime; existing pinned versions and historical prompts retain their identity and adopt these rules through the existing upgrade flow.
+
+## Readable continuity views
+
+- Continuity opens with story states grouped into items, timelines, initial states, changes, shot requirements and script evidence. Registered names and existing display values replace identifiers in the main view; state changes and shot states compare before/after and opening/closing states. Complete JSON and identifiers remain in technical details, with manual editing collapsed by default.
+- Check real-source display labels and older records without them, registered location names, issue filters and location actions, director handoffs, removal/save and broken-reference checks, published read-only mode, both languages and themes, and scrolling in narrow dialogs. Presentation does not translate or rewrite existing source states; saves and handoffs retain canonical identities and values.
+
+## Director Clip focus zoom
+
+- Director navigation and Clip-ready focus both fit the complete H3 node, preventing a player-only zoom from clipping prompts, the timeline and settings. A fully visible node retains the current view. The selected Clip and existing timeline focus flow remain intact. Check large nodes, repeated focus, director-dialog space, narrow screens and scrolling in the real H3 timeline.
+
+## H3 long-prompt translation
+
+- A Clip's Chinese translation combines lines into batches of at most 4,000 source characters, requests the selected text model sequentially and displays completion progress. Oversized lines split at punctuation or whitespace while retaining reference markers and Unicode characters. The complete preview preserves headers, blank lines, indentation and N/A. Switching back and reopening reuses the complete translation; the source prompt is preserved.
+- Translation records retain their identities, including complete JSON returned within Markdown or document wrappers. Length notices, empty output, missing/duplicate records and changed reference tags or shot markers fail, stop later batches and neither cache partial translations nor retry automatically. Switching Clips, editing the source or leaving the panel cancels the old translation and prevents late results from appearing. Check real-channel long prompts through the final shot, completion progress, manual retry after failure, switching/editing during requests, both themes and narrow screens.
+
+## Asset preflight and production tools
+
+- Source hashing is available through production_hash_source without an active canvas. Compilation diagnostics include applicable repair examples while incomplete drafts remain editable.
+- Scoped image compilation can apply asset results before video continuity is authored; ready H3 outputs still require their applicable continuity receipt.
+- Preparing valid targets in an unbound episode creates its fixed canvas without submitting media. Invalid targets, stale revisions and conflicting operation IDs must leave the canvas uncreated; repeated or interrupted preparation must recover the same receipt and layout.
+- A preparation receipt write failure rolls back its production bindings and nodes together; the accepted seed canvas remains recoverable with the original operation ID.
+- New verified runtimes support explicitly selected headless character boards and snake anatomy boards. Default character boards retain the current equal-height layout; approved historical assets and pinned runs keep their original versions. Check selection reasons, panel geometry, reference upload order and real image results.
+
+## Codex CLI text channels
+
+- Add or edit a channel, choose Codex CLI as its type, then fetch and select text models from the local Codex catalog. It uses Codex sign-in and configuration on the computer running Backend; no Base URL or API key is needed in the channel. Import/export retains the type, and existing API and ComfyUI channels retain their settings.
+- Agent can select these models and use native Codex conversations, tools, approvals and reasoning effort. Switching between API and Codex runtimes requires a new conversation while retaining old history. Check defaults, new/restored CLI conversations and unsupported-model errors; a catalog entry does not prove account inference access.
+- Canvas text and image-analysis requests create Backend tasks and return text through isolated read-only Codex conversations. Scene workers reuse the existing pool. Late results cannot publish after cancellation, and interrupted running CLI text requests do not automatically rerun after restart. This channel declares text/image-analysis capability, not image, video or audio generation.
+- Simulated Codex and browser checks cover routing, temporary images, cancellation, terminal states, Chinese/English, light/dark and narrow layouts. Actual sign-in, model access and response quality still require acceptance testing.
+
+## Built-in Agent using existing channel models
+
+- New conversations in the Backend's built-in Agent use text models from existing channel configuration. The selected text model is the default; switch by channel/model in the composer without entering another URL or API key. OpenAI Responses, OpenAI Chat Completions and Gemini are supported; the model must support tool calling. ComfyUI models and browser-only custom scripts are excluded.
+- Conversation history, tool results and terminal states live in Backend storage; canvas actions still use shared MCP. Check equal model names across channels, continuing with another model, image attachments and tool images, Skill reading/toggling/drafts, originating canvas binding across windows and reconnect recovery. The local file tool is read-only and does not provide Codex command execution, arbitrary file editing or built-in image generation.
+- Scene creation and automatic review use the same text model configuration and existing worker pool. Workers can only read files and return structured results; media submission remains in the formal production flow. Stops, request failures and process interruptions do not automatically rerun uncertain tools. Structured recovery reads the original completed turn. Existing Codex conversations remain available through the Codex conversations option in history and require the original Codex installation.
+- Targeted checks use local simulated model and MCP services. Real channel tool calling, visual review and production quality still require acceptance testing.
+
+## Parallel scene direction
+
+- Shared auto-review can be enabled before media exists. Persisted authorization freezes review settings, consumes ready asset waves, continues after human approval, and completes only after full foundation approval. Authored input changes or interrupted unconfirmed turns pause continuation; uncertain results require human review without automatic model retries. Verify reload/restart, arriving media waves, changed source, and human takeover. This authorization submits reviews only, never new image or video tasks.
+
+- Shared-asset canvases can start Auto-review shared assets without scene records. Ready asset waves retain their evidence; a complete foundation requires review of all available materials, and a partial wave cannot release it. Uncertain results or missing analysis capability require human review. Restart reuses cached output or reads the original thread; service reload also checks production-worker busy state.
+- Scene repairs retain media and require new review for changed assets, keyframes and their declared downstream dependencies. Unchanged material retains its identity; regeneration still requires explicit authorization.
+
+- Scene start, pause, resume and review use the workspace pending-command journal. Lost responses retain the original request for Recover receipt; new submissions remain blocked while inspection stays available. Agent authoring and compilation use the existing polling fallback. Equal revisions and unchanged node sets do not trigger continuous reads. Reviews remain valid across unrelated global revisions when their own source and media digest is unchanged. Check lost-response recovery, late stale snapshots and matrix updates without real-time events.
+
+- The real drama planning dialog supports Save draft before review mode or storyboard strategy is chosen. Confirming the plan still requires explicit choices. Unconfirmed drafts do not seed new production defaults; confirmed settings initialize new productions while existing productions and in-flight tasks retain their versions.
+
+- Scene reviews commit all asset decisions and the work receipt atomically; any invalid media/version check rolls back the whole decision. Replacing an output image invalidates its prior review even without a source edit, and H3 submission rechecks actual images. Review cards expose asset-wave and whole-scene evidence. Skipping storyboard images only waives keyframes; required character, environment and prop assets remain mandatory.
+
+- New dramas can explicitly enable parallel scene production at kickoff and must choose automatic, manual or mixed shared-foundation/scene-shoot reviews. After shared assets and the foundation are approved, up to three scene agents and three compiler jobs progress through H3 technical closeout. Existing productions keep their runtime and media history.
+- The progress matrix shows authoring, assets, review, compilation, video and completion per scene. Review cards bind displayed source and images to a specific input version. Prerequisite assets can be reviewed in waves; missing media, failed analysis or uncertain creative choices require human review. Check isolated waits, pauses and failures, both languages and themes.
+- Create scene sources authorizes authoring and compilation; Progress scenes through H3 also authorizes ready media targets. Repeated requests, connection loss and restart retain work, threads, packets and task identities. Failed paid generation is not automatically retried. Independent chains overlap; tail-frame and Motion Context dependencies remain ordered.
+- Editing scene A must preserve valid B/C results. Unrelated publications must not interrupt frozen runs, while changed references block affected unsubmitted targets. Real automatic visual review and the complete media flow still require on-site acceptance; mock executors do not establish visual quality. Editing, audio post-production and final-cut review are outside this release.
+
+
+## H3 timeline edits and draft recovery
+
+- Duration changes, insertion, deletion and Clip dragging save correctly, with the same order and start times after refresh and in another window. Validation failures report unsaved edits rather than remote conflicts. Recoverable legacy `patch.start` drafts offer an explicit timeline repair that preserves other edits before resubmission. Ambiguous drafts remain preserved with unchanged retries paused. Check reload after rejection, storage failure during recovery, concurrent ordering and real field conflicts.
+
+- New production H3 nodes inherit the saved default node dimensions, with scene space reserved to fit. Existing nodes and reserved layouts retain their geometry. Save a larger H3 default layout, prepare new scene Clips through MCP, and compare their dimensions with a node created from the canvas menu.
+
 ## Home dramas and canvases
 
 - Home lists one card per drama alongside standalone canvases. Drama cards open the drama page; episode, scene and shared asset canvases are excluded from both home and the canvas library. Library folders, counts and bulk actions only include standalone canvases, and move menus exclude dramas. Check dramas with no canvases, search, filters, grid/list views, both languages and themes.
@@ -2419,6 +2529,7 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 - Preview archived H3 results and export prompts, real reference copies, target upload cards and receipts bound to a fixed revision/engine. Partial exports must list missing inputs and remain marked incomplete.
 - With Agent credentials saved but disconnected, submit an idea once. Confirm the same request waits through connection, thread initialization and creative-skill loading before sending once; a missing credential or failed connection preserves the idea and reports the reason. No image or video task should be submitted.
 - Open the same production from Director Studio, an independent canvas, and an episode. Confirm the Overview, Story, Style & Assets, Shots & Segments, Production & Delivery, and Advanced & History workspaces share one Backend record; Acheng's seven modules remain roles rather than sequential gates.
+- After a scene H3 migration, restore an archived successful video to its stable scene Clip. Confirm the original task, log and media are verified, the old archive stays unchanged, the new Clip plays the same output with origin recorded, and no generation or publication is submitted.
 - Save a brief and confirm `source.brief` is written to the formal revision before a scoped Agent request is sent. Save partial work before canvas binding or a complete shot plan; verify structured edits preserve unknown Acheng fields and readiness names the exact missing dependency.
 - Edit scene text and exact dialogue, asset descriptions, shot visuals/camera/timing, and adjacent Segment continuity. Verify a Segment can hold multiple adjacent Shots, stays within 4–15 seconds, and does not compress dialogue or action. Tail-frame reference and Motion Context must toggle independently.
 - Review the archived image itself and approve or return it with evidence. Verify a stale production version, wrong node, storage key, or SHA-256 is rejected, and related targets remain blocked until the current media version is approved.
@@ -2427,6 +2538,8 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 - Confirm the next Segment may receive a tail-frame still, but never an automatically submitted previous MP4. An explicitly selected ordinary video reference remains available. Keep full prompts and actual references visible in Production & Delivery.
 - Type a chat message and retain an attachment/reference, then launch a scoped Director task. Verify the workbench sends a separate request without clearing composer content, associates the resulting conversation, and stops with a useful reason when Agent is disconnected or busy.
 - In Advanced & History, inspect legacy text read-only, ask the director to connect it to Acheng without regenerating historical media, import/edit JSON and restore a prior revision. Check Chinese and English on desktop and mobile.
+
+- Restore an archived H3 result to its matching scene Clip after a per-scene node migration. Verify the original successful task, generation log and media key are checked; the old archive remains unchanged, the new scene Clip displays the same media with its original source recorded, and no task is submitted or published version changed.
 
 ### Production compilation and reference receipts
 
@@ -2452,8 +2565,6 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 - Repair an issue in the workspace, save, recheck, and verify it clears only after the fresh report returns. Editing never writes derived snapshots or submits media. Refresh and browser history must retain the selected view, object, shot and issue without replacing an unsaved edit.
 - Inspect a legacy draft in diagnostic-only mode. Review the proposed v2 ledger, target runtime, source revision, equivalent conversions, historical-only fields, semantic gaps, unapplied suggestions, diagnostics and active runs; only an explicit preview-bound upgrade may switch the draft, and historical projections and media remain available.
 - Check Chinese/English, light/dark themes, narrow-screen details, read-only published snapshots, event updates during an unsaved form, and navigation back to the originating shot, story or asset.
-
-- For an existing episode whose Segments share one H3 node, explicitly migrate the draft and verify one H3 node per formal scene, old Clips/media/task history retained in an archive area, published version unchanged, new Clips idle, no generation submitted, active tasks and stale revisions blocked, and duplicate operation replayed without a second mutation.
 
 ### Canvas episode switcher
 

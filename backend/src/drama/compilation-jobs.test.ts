@@ -22,7 +22,7 @@ async function done(compilations: ProductionCompilationService, op: string) {
 test("lost response and identical submissions retain one compiler invocation and a prompt-free receipt", async t => {
     let calls = 0; const f = setup(t, (input: any) => { calls++; return result(input); });
     const first = f.compilations.enqueue("e", "owner", "op", 1);
-    assert.equal(first.status, "queued"); assert.equal((f.compilations.enqueue("e", "owner", "op", 1) as any).replayed, true);
+    assert.ok(["queued", "running"].includes(first.status)); assert.equal((f.compilations.enqueue("e", "owner", "op", 1) as any).replayed, true);
     assert.throws(() => f.compilations.enqueue("e", "owner", "op", 2), /IDEMPOTENCY_CONFLICT/);
     const completed: any = await done(f.compilations, "op"); assert.equal(completed.status, "succeeded"); assert.equal(calls, 1);
     assert.equal(JSON.stringify(completed).includes('"prompt"'), false);

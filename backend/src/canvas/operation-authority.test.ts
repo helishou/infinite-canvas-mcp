@@ -143,7 +143,7 @@ test("H3 个人视图字段在新建、导入节点和旧客户端更新边界�
     db.applyCanvasProjectOperations("local-view", undefined, [{ type: "add_node", id: "added", nodeType: "minimax-h3:video", metadata: { timelineScrollLeft: 320, nanFengExpandedSections: { model: true }, segments: [{ id: "S01" }] } }]);
     db.applyCanvasProjectOperations("local-view", undefined, [{ type: "update_node", id: "added", metadata: { selectedSegmentId: "S01", minimaxPromptW: 700, notes: "保留" }, metadataDelete: ["playhead"] }]);
     nodes = db.getCanvasProject("local-view")!.nodes as Array<Record<string, any>>;
-    assert.deepEqual(nodes[1].metadata.segments, [{ id: "S01" }]);
+    assert.deepEqual(nodes[1].metadata.segments, [{ id: "S01", start: 0 }]);
     assert.equal(nodes[1].metadata.notes, "保留");
     for (const field of ["timelineScrollLeft", "nanFengExpandedSections", "selectedSegmentId", "minimaxPromptW", "playhead"]) {
         assert.equal(Object.hasOwn(nodes[1].metadata, field), false);
@@ -179,6 +179,58 @@ test("拒绝输出修改时，同批合法文本增量与条件替换也完整�
     assert.deepEqual(db.getCanvasProject("p"), before);
     assert.equal(db.readCanvasChanges("p", 0).commits.length, 0);
     doc.destroy();
+});
+
+test("正式 Clip 可手动编辑正文，协作增量、条件替换与幂等回放保留编译基线和历史输出", (t) => {
+    const db = fixture(t);
+    const projection = { targetId: "formal-1", sourceHash: "compiled-source", inputHash: "compiled-input", fieldHashes: { prompt: "compiled-prompt" } };
+    db.applyCanvasProjectOperations("p", undefined, [{ type: "update_h3_segment", nodeId: "h3", segmentId: "s1", patch: { productionClipProjection: projection, directorSourceHash: "compiled-source" } }], { runtimeWrite: true });
+    const target = { nodeId: "h3", segmentId: "s1", field: "prompt" };
+    const state = db.getCanvasText("p", target);
+    const doc = new Y.Doc();
+    t.after(() => doc.destroy());
+    Y.applyUpdate(doc, Buffer.from(state.state, "base64"));
+    const vector = Y.encodeStateVector(doc);
+    doc.getText("text").insert(0, "手动编辑：");
+    const operations = [{ type: "text_update", target, documentId: state.documentId, update: Buffer.from(Y.encodeStateAsUpdate(doc, vector)).toString("base64") }];
+    const revision = Number(db.getCanvasProject("p")!.revision);
+    const receipt = db.applyCanvasProjectOperations("p", revision, operations, { operationId: "formal-text-edit" });
+    assert.equal(db.getCanvasText("p", target).text, "手动编辑：一");
+    assert.equal(db.applyCanvasProjectOperations("p", revision, operations, { operationId: "formal-text-edit" }).duplicated, true);
+    assert.equal(db.getCanvasProject("p")!.revision, receipt.revision);
+    db.applyCanvasProjectOperations("p", undefined, [{ type: "text_replace", target, documentId: state.documentId, expectedText: "手动编辑：一", text: "手动替换正文" }]);
+    const clip = (db.getCanvasProject("p")!.nodes as any[])[0].metadata.segments[0];
+    assert.equal(clip.prompt, "手动替换正文");
+    assert.deepEqual(clip.productionClipProjection, projection);
+    assert.equal(clip.directorSourceHash, "compiled-source");
+    assert.equal(clip.result, "one.mp4");
+    assert.equal(clip.runtimeTaskId, "child1");
+    const before = db.getCanvasProject("p");
+    for (const patch of [{ productionClipProjection: {} }, { directorSourceHash: "forged" }, { result: "forged.mp4" }]) {
+        assert.throws(() => db.applyCanvasProjectOperations("p", undefined, [{ type: "update_h3_segment", nodeId: "h3", segmentId: "s1", patch }]), /Backend|编译身份|后台任务/);
+        assert.deepEqual(db.getCanvasProject("p"), before);
+    }
+});
+
+test("正式 Clip 的参考、分镜和续接可手动修改，完整替换仍继承编译身份及输出", (t) => {
+    const db = fixture(t);
+    const projection = { targetId: "formal-1", inputHash: "compiled-input" };
+    db.applyCanvasProjectOperations("p", undefined, [{ type: "update_h3_segment", nodeId: "h3", segmentId: "s1", patch: { productionClipProjection: projection, directorSourceHash: "compiled-source" } }], { runtimeWrite: true });
+    db.applyCanvasProjectOperations("p", undefined, [{ type: "update_h3_segment", nodeId: "h3", segmentId: "s1", patch: {
+        referenceBindings: [{ id: "manual-ref", assetId: "manual-asset", label: "Manual image", role: "storyboard", tags: [], enabled: true, usage: "reference", mediaType: "image", storageKey: "image:manual" }],
+        h3CharacterGroups: {}, storyboardShots: [{ id: "shot-1", referenceBindingId: "manual-ref", duration: 5 }], tailFrameContinuation: true, motionContextEnabled: false,
+    } }]);
+    let clip = (db.getCanvasProject("p")!.nodes as any[])[0].metadata.segments[0];
+    assert.equal(clip.referenceBindings[0].storageKey, "image:manual");
+    assert.equal(clip.storyboardShots[0].referenceBindingId, "manual-ref");
+    assert.equal(clip.tailFrameContinuation, true);
+    assert.equal(clip.motionContextEnabled, false);
+    db.applyCanvasProjectOperations("p", undefined, [{ type: "replace_h3_segments", nodeId: "h3", segments: [{ id: "s1", prompt: "replacement" }, { id: "s2", prompt: "二" }] }]);
+    clip = (db.getCanvasProject("p")!.nodes as any[])[0].metadata.segments[0];
+    assert.equal(clip.prompt, "replacement");
+    assert.deepEqual(clip.productionClipProjection, projection);
+    assert.equal(clip.directorSourceHash, "compiled-source");
+    assert.equal(clip.result, "one.mp4");
 });
 
 test("真实任务回写仍可落库并记录增量，旧任务不能覆盖已被接管的 Clip", (t) => {

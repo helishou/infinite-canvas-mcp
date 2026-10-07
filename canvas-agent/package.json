@@ -5,6 +5,10 @@
   "type": "module",
   "main": "./dist/index.js",
   "exports": {
+    "./agent/llm": "./dist/agent/llm.js",
+    "./agent/codex-text": "./dist/agent/codex-text.js",
+    "./drama/compilation-scope": "./dist/drama/compilation-scope.js",
+    "./agent/production": "./dist/agent/production.js",
     ".": "./dist/index.js",
     "./http": "./dist/server/http.js",
     "./plugin-mcp": "./dist/server/plugin-mcp.js",
@@ -20,6 +24,7 @@
     "./generation-api": "./dist/canvas/generation-api.js",
     "./reference-contract": "./dist/canvas/reference-contract.js",
     "./model-workflow": "./dist/canvas/model-workflow.js",
+    "./runtime/model-catalog": "./dist/runtime/model-catalog.js",
     "./runtime/comfy-client": "./dist/runtime/comfy-client.js",
     "./runtime/agent-runtime": "./dist/runtime/agent-runtime.js",
     "./plugins/minimax-h3/node-factory": "./dist/plugins/minimax-h3/node-factory.js",

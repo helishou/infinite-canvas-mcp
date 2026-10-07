@@ -20,6 +20,13 @@ import { NativeProductionGeneration } from "./native-generation.js";
 import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import type { CanvasGenerationService } from "../canvas/generation-service.js";
 import type { compileAchengDirector } from "@basketikun/canvas-agent/skills/acheng";
+import { productionWriteReceipt } from "@basketikun/canvas-agent/drama/production-contract";
+import express from "express";
+import { once } from "node:events";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { registerBackendMcpHttpRoutes } from "../mcp.js";
+import { registerDramaProductionRoutes } from "../server/drama-production-routes.js";
 
 function fixture(t: test.TestContext) {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "production-canvas-"));
@@ -56,6 +63,94 @@ function save(service: EpisodeProductionService, id: string, d: DirectorProducti
 function publish(service: EpisodeProductionService, id: string) {
     return service.publish(id, { operationId: crypto.randomUUID(), expectedRevision: service.get(id).revision, stage: "director" });
 }
+
+test("large preparation, arrangement and synchronization recover lost responses without duplicate effects", async t => {
+    const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
+    const d = director();
+    (d.source.script_scenes as any[]).forEach(scene => { scene.text = "完整剧情😀".repeat(25000); });
+    (d.source.shots as any[]).forEach(shot => { shot.required_assets = []; });
+    Object.values(d.shotInputs).forEach(input => { input.assetIds = []; input.keyframePolicy = "none"; delete input.keyframeAssetId; });
+    d.sourceHash = directorHash(d.source);
+    d.artifacts.forEach(artifact => { artifact.prompt += "完整镜头正文😀".repeat(10000); artifact.sha256 = promptHash(artifact.prompt); artifact.sourceHash = d.sourceHash; artifact.receipt.sourceHash = d.sourceHash; artifact.receipt.promptHash = artifact.sha256; });
+    save(f.episode, "ep", d); const published = publish(f.episode, "ep");
+    const generation = { run: () => { throw new Error("Acceptance must never submit media"); } } as unknown as CanvasGenerationService;
+    let runner = new EpisodeProductionRunner(f.episode, f.stores, generation);
+    const measure = (tool: string, input: Record<string, unknown>, action: () => any) => {
+        const start = performance.now(), production = action();
+        const beforeBytes = Buffer.byteLength(JSON.stringify({ ok: true, production }));
+        const receipt = productionWriteReceipt({ ok: true, production }, { tool, input });
+        console.log(JSON.stringify({ tool, calls: 1, beforeBytes, afterBytes: Buffer.byteLength(JSON.stringify(receipt)), elapsedMs: Math.round(performance.now() - start) }));
+        assert.ok(Buffer.byteLength(JSON.stringify(receipt)) < 8192);
+        return production;
+    };
+    const revision = f.episode.get("ep").revision;
+    const prepareInput = { kind: "episode", id: "ep", expectedRevision: revision, operationId: "lost-prepare", targets: ["segment:seg1"] };
+    measure("production_prepare_targets", prepareInput, () => runner.prepareTargets("ep", revision, prepareInput.targets, prepareInput.operationId));
+    const afterPrepare = f.db.getCanvasProject(projectId)!;
+    const reopened = new EpisodeProductionService(f.db, f.events, f.directory, false, () => {});
+    runner = new EpisodeProductionRunner(reopened, f.stores, generation);
+    const app = express(); app.use(express.json());
+    app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
+    app.post("/mcp/observability/events", (_req, res) => res.json({ ok: true }));
+    registerDramaProductionRoutes(app, reopened, runner);
+    const server = app.listen(0, "127.0.0.1"); await once(server, "listening");
+    const url = `http://127.0.0.1:${(server.address() as any).port}`;
+    const routes = registerBackendMcpHttpRoutes(app, { url, token: "fixture", port: 0, origins: [] });
+    const client = new Client({ name: "lost-response-recovery", version: "1" });
+    t.after(async () => { await client.close(); await routes.closeAll(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
+    await client.connect(new StreamableHTTPClientTransport(new URL(url + "/mcp")));
+    const recover = async (tool: string, input: Record<string, unknown>) => {
+        const start = performance.now();
+        const response: any = await client.callTool({ name: tool, arguments: input });
+        assert.equal(response.isError, undefined, JSON.stringify(response));
+        assert.ok(Buffer.byteLength(JSON.stringify(response)) < 8192);
+        console.log(JSON.stringify({ tool, recoveryCalls: 1, recoveryMcpBytes: Buffer.byteLength(JSON.stringify(response)), elapsedMs: Math.round(performance.now() - start) }));
+        return JSON.parse(response.content[0].text);
+    };
+    assert.equal((await recover("production_prepare_targets", prepareInput)).production.replayed, true);
+    assert.equal(f.db.getCanvasProject(projectId)!.revision, afterPrepare.revision);
+    const arrangeRevision = reopened.get("ep").revision;
+    const arrangeInput = { kind: "episode", id: "ep", sceneId: "morning", expectedRevision: arrangeRevision, operationId: "lost-arrange" };
+    measure("production_arrange_scene", arrangeInput, () => runner.arrangeScene("ep", "morning", arrangeRevision, arrangeInput.operationId));
+    const afterArrange = f.db.getCanvasProject(projectId)!;
+    assert.equal((await recover("production_arrange_scene", arrangeInput)).production.replayed, true);
+    assert.equal(f.db.getCanvasProject(projectId)!.revision, afterArrange.revision);
+    measure("drama_sync_production_clips", { episodeId: "ep" }, () => runner.syncClips("ep", published.publishedVersion));
+    const afterSync = f.db.getCanvasProject(projectId)!;
+    const productionRevision = reopened.get("ep").revision;
+    const repeatedSync = await recover("drama_sync_production_clips", { episodeId: "ep" });
+    assert.equal(repeatedSync.counts.updated, 0);
+    assert.equal(repeatedSync.counts.skipped, published.published!.clipGroups.length);
+    assert.equal(f.db.getCanvasProject(projectId)!.revision, afterSync.revision, "repeated synchronization must not rewrite identical Clip inputs");
+    assert.equal(reopened.get("ep").revision, productionRevision);
+    assert.deepEqual((f.db.getCanvasProject(projectId)!.nodes as any[]).filter(node => node.type === "minimax-h3:video").map(node => node.metadata.segments.map((segment: any) => segment.id)),
+        (afterSync.nodes as any[]).filter(node => node.type === "minimax-h3:video").map(node => node.metadata.segments.map((segment: any) => segment.id)));
+    assert.equal(f.stores.tasks.list().length, 0);
+});
+
+test("synchronization repairs shared-node Clip ordering once and then leaves revisions unchanged", t => {
+    const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
+    const d = director();
+    d.source.script_scenes = [{ id: "morning", scene_id: "room", scene_name: "Morning", text: "One scene", beat_ids: ["b1", "b2"] }];
+    (d.source.shots as any[]).forEach(shot => { shot.required_assets = []; });
+    Object.values(d.shotInputs).forEach(input => { input.assetIds = []; input.keyframePolicy = "none"; delete input.keyframeAssetId; });
+    d.sourceHash = directorHash(d.source);
+    d.artifacts.forEach(artifact => { artifact.sourceHash = d.sourceHash; artifact.receipt.sourceHash = d.sourceHash; });
+    save(f.episode, "ep", d); const published = publish(f.episode, "ep");
+    const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+    const first = runner.syncClips("ep", published.publishedVersion);
+    const [a, b] = first.published!.clipGroups;
+    assert.equal(a.nodeId, b.nodeId);
+    f.stores.projects.applyOperations(projectId, undefined, [{ type: "move_h3_segment", nodeId: a.nodeId!, segmentId: b.segmentId!, beforeSegmentId: a.segmentId! }], { runtimeWrite: true });
+    const repaired = runner.syncClips("ep", published.publishedVersion);
+    const segments = () => ((f.db.getCanvasProject(projectId)!.nodes as any[]).find(node => node.id === a.nodeId).metadata.segments as any[]).map(segment => segment.id);
+    assert.deepEqual(segments(), [a.segmentId, b.segmentId]); assert.ok(repaired.syncReceipt.reordered > 0);
+    const revision = f.db.getCanvasProject(projectId)!.revision;
+    const repeated = runner.syncClips("ep", published.publishedVersion);
+    assert.equal(f.db.getCanvasProject(projectId)!.revision, revision);
+    assert.equal(repeated.syncReceipt.updated, 0); assert.equal(repeated.syncReceipt.reordered, 0); assert.equal(repeated.syncReceipt.skipped, 2);
+    assert.equal(f.stores.tasks.list().length, 0);
+});
 
 test("script text nodes persist original blocks, synchronize collaborative edits atomically and replay once", t => {
     const f = fixture(t), canvasId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
@@ -211,6 +306,63 @@ test("history selection restores the exact Clip without changing authored timing
     assert.equal(selected.draft.clipGroups[1].selectedResult?.generationLogId, op.generationLogId);
     assert.throws(() => f.db.applyCanvasProjectOperations(f.projectId, Number(f.db.getCanvasProject(f.projectId)!.revision), [{ type: "restore_h3_output", nodeId: op.nodeId, segmentId: before.draft.clipGroups[1].segmentId, generationLogId: op.generationLogId, storageKey: op.storageKey, settings: {} }]), /正式制作片段/);
 });
+
+test("archived H3 video results return to their scene Clips with original task provenance and no new task", t => {
+    const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
+    const d = director();
+    (d.source.shots as any[]).forEach(shot => { shot.required_assets = []; });
+    Object.values(d.shotInputs).forEach(input => { input.assetIds = []; input.keyframePolicy = "none"; delete input.keyframeAssetId; });
+    d.sourceHash = directorHash(d.source);
+    d.artifacts = d.artifacts.map(artifact => ({ ...artifact, sourceHash: d.sourceHash, receipt: { ...artifact.receipt, sourceHash: d.sourceHash } }));
+    save(f.episode, "ep", d);
+    const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+    const prepared = runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1", "segment:seg2"], "prepare-scene-video-targets");
+    const targetGroup = prepared.draft.clipGroups.find(group => group.id === "seg1")!;
+    const targetNodeId = targetGroup.nodeId!, segmentId = targetGroup.segmentId!;
+    const targetNode = (f.db.getCanvasProject(projectId)!.nodes as any[]).find(node => node.id === targetNodeId)!;
+    const targetClip = structuredClone(targetNode.metadata.segments.find((segment: any) => segment.id === segmentId));
+    assert.ok(targetClip.productionClipProjection);
+
+    const oldNodeId = "archived-h3-before-scene-split", storageKey = "video:restored-scene-result";
+    const filePath = path.join(f.directory, "restored-scene-result.mp4"); fs.writeFileSync(filePath, "verified archived video bytes");
+    f.db.upsertMediaFile({ storageKey, filePath, mimeType: "video/mp4", bytes: fs.statSync(filePath).size, width: 16, height: 9, durationMs: 5000, createdAt: new Date().toISOString() });
+    const task = f.db.createTask("archived-scene-result-task", "comfyui:minimax-h3", { projectId, nodeId: oldNodeId, segmentId }, { model: "fixture" });
+    f.db.updateTask(task.id, { status: "succeeded", result: { media: [{ storageKey, mimeType: "video/mp4" }] } });
+    const oldLog = f.db.createGenerationLog({ projectId, nodeId: oldNodeId, segmentId, status: "success", platform: "h3", model: "fixture", runtimeTaskId: task.id, references: [], inputCounts: {}, startedAt: new Date().toISOString(), durationMs: 0, outputs: [{ storageKey, mimeType: "video/mp4" }], params: {} });
+    const oldClip = { ...targetClip, status: "success", progress: 1, result: `/media/${encodeURIComponent(storageKey)}`, resultStorageKey: storageKey, results: [{ url: `/media/${encodeURIComponent(storageKey)}`, storageKey, mimeType: "video/mp4" }] };
+    let project = f.db.getCanvasProject(projectId)!;
+    f.db.applyCanvasProjectOperations(projectId, Number(project.revision), [{
+        type: "add_node", id: oldNodeId, nodeType: "minimax-h3:video", title: "H3 Clips（迁移前归档）", position: { x: 3000, y: 0 }, width: 1960, height: 1080,
+        metadata: { ...createH3NodeMetadata({}, { segments: [oldClip] }), segments: [oldClip], productionArchiveLabel: "旧版 H3 Clips；保留原视频、结果和任务历史" },
+    }]);
+
+    let current = f.episode.get("ep");
+    f.episode.edit("ep", { operationId: "bind-published-old-scene-h3", expectedRevision: current.revision, ops: [{ type: "bind_director_segment", targetId: targetGroup.id, nodeId: oldNodeId, segmentId }] });
+    const published = publish(f.episode, "ep");
+    assert.equal(published.published!.clipGroups.find(group => group.id === targetGroup.id)!.nodeId, oldNodeId);
+    current = f.episode.get("ep");
+    f.episode.edit("ep", { operationId: "bind-draft-new-scene-h3", expectedRevision: current.revision, ops: [{ type: "bind_director_segment", targetId: targetGroup.id, nodeId: targetNodeId, segmentId }] });
+    current = f.episode.get("ep"); project = f.db.getCanvasProject(projectId)!;
+    const oldNodeBefore = (project.nodes as any[]).find(node => node.id === oldNodeId), oldClipBefore = structuredClone(oldNodeBefore.metadata.segments[0]);
+    const oldTaskBefore = f.db.getTask(task.id);
+    const request = { operationId: "restore-archived-scene-results", expectedRevision: current.revision, ops: [{ type: "restore_archived_scene_results", sourceNodeId: oldNodeId, expectedCanvasRevision: Number(project.revision) }] };
+    assert.equal(f.episode.preflight("ep", { action: "edit", request }).valid, true);
+    assert.deepEqual(f.db.getCanvasProject(projectId), project, "restore preflight must not change the canvas");
+    const restored = f.episode.edit("ep", request);
+    const after = f.db.getCanvasProject(projectId)!, nodes = after.nodes as any[];
+    const activeNode = nodes.find(node => node.id === targetNodeId), activeClip = activeNode.metadata.segments.find((segment: any) => segment.id === segmentId);
+    const archiveNode = nodes.find(node => node.id === oldNodeId);
+    assert.equal(restored.publishedVersion, published.publishedVersion, "restoring draft playback must not republish or rewrite the published mapping");
+    assert.equal(activeClip.status, "success"); assert.equal(activeClip.resultStorageKey, storageKey);
+    assert.equal(activeClip.archivedResultOrigin.generationLogId, oldLog.id);
+    assert.equal(restored.draft.clipGroups.find(group => group.id === targetGroup.id)!.selectedResult?.sourceNodeId, oldNodeId);
+    assert.deepEqual(archiveNode.metadata.segments[0], oldClipBefore, "archived source output stays unchanged");
+    assert.deepEqual(f.db.getTask(task.id), oldTaskBefore);
+    assert.deepEqual(f.db.getGenerationLog(oldLog.id), oldLog);
+    assert.equal(f.stores.tasks.list().length, 1, "restoration does not create a generation task");
+    assert.equal(f.episode.edit("ep", request).replayed, true);
+    assert.deepEqual(f.db.getCanvasProject(projectId), after);
+});
 function approve(f: ReturnType<typeof fixture>, projectId: string, revision: number) {
     const storageKey = `image:role-${revision}`, filePath = path.join(f.directory, `role-${revision}.png`);
     fs.writeFileSync(filePath, Buffer.from(`reference bytes ${revision}`));
@@ -229,6 +381,101 @@ function approve(f: ReturnType<typeof fixture>, projectId: string, revision: num
     f.shared.edit(projectId, review);
     return listApprovedSharedAssets(f.db, "drama")[0];
 }
+
+test("first target preparation creates only the unbound episode canvas and replays its receipt", t => {
+    const f = fixture(t); save(f.episode, "ep", director());
+    let submitted = 0;
+    const runner = new EpisodeProductionRunner(f.episode, f.stores, { start() { submitted++; throw new Error("No generation"); } } as unknown as CanvasGenerationService);
+    const revision = f.episode.get("ep").revision;
+    assert.equal(f.db.getDramaEpisode("ep")!.canvasId, null);
+    const prepared = runner.prepareTargets("ep", revision, ["asset:ROLE"], "first-unbound");
+    const canvasId = f.db.getDramaEpisode("ep")!.canvasId!;
+    assert.ok(canvasId); assert.ok(prepared.layoutReceipt);
+    const project = structuredClone(f.db.getCanvasProject(canvasId));
+    assert.equal(runner.prepareTargets("ep", revision, ["asset:ROLE"], "first-unbound").replayed, true);
+    assert.deepEqual(f.db.getCanvasProject(canvasId), project);
+    assert.equal(submitted, 0);
+    assert.throws(() => runner.prepareTargets("ep", prepared.revision, ["scene:morning"], "first-unbound"), /operationId/);
+});
+
+test("first target preparation rejects invalid requests before reserving an operation or creating a canvas", t => {
+    const f = fixture(t); save(f.episode, "ep", director());
+    const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+    const revision = f.episode.get("ep").revision;
+    for (const [index, targets] of [["ROLE"], ["unknown:ROLE"], ["scene:missing"], ["frame:missing"], ["asset:missing"]].entries()) {
+        const operationId = "invalid-unbound-" + index;
+        assert.throws(() => runner.prepareTargets("ep", revision, targets, operationId));
+        assert.equal(f.db.db.prepare("SELECT 1 FROM production_preparations WHERE operation_id=?").get(operationId), undefined);
+        assert.equal(f.db.getDramaEpisode("ep")!.canvasId, null);
+    }
+    assert.throws(() => runner.prepareTargets("ep", revision - 1, ["asset:ROLE"], "stale-unbound"));
+    assert.equal(f.db.getDramaEpisode("ep")!.canvasId, null);
+});
+
+test("first target preparation recovers an accepted layout failure on the same seeded canvas", t => {
+    const f = fixture(t); save(f.episode, "ep", director());
+    const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+    const revision = f.episode.get("ep").revision, original = f.episode.ensureLayoutPlan.bind(f.episode);
+    f.episode.ensureLayoutPlan = () => { throw new Error("injected layout failure"); };
+    assert.throws(() => runner.prepareTargets("ep", revision, ["asset:ROLE"], "recover-unbound"), /injected/);
+    const canvasId = f.db.getDramaEpisode("ep")!.canvasId;
+    assert.ok(canvasId);
+    f.episode.ensureLayoutPlan = original;
+    assert.ok(runner.prepareTargets("ep", revision, ["asset:ROLE"], "recover-unbound").layoutReceipt);
+    assert.equal(f.db.getDramaEpisode("ep")!.canvasId, canvasId);
+});
+
+test("first target preparation preserves foreign seeds and refuses missing fixed bindings", t => {
+    const f = fixture(t); save(f.episode, "ep", director());
+    const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+    const seedId = "production-episode-" + crypto.createHash("sha256").update("ep").digest("hex").slice(0, 24);
+    f.db.createCanvasProject({ id: seedId, title: "User canvas", nodes: [], connections: [] });
+    const foreign = structuredClone(f.db.getCanvasProject(seedId));
+    assert.throws(() => runner.prepareTargets("ep", f.episode.get("ep").revision, ["asset:ROLE"], "foreign-seed"), /身份冲突/);
+    assert.deepEqual(f.db.getCanvasProject(seedId), foreign);
+    assert.equal(f.db.getDramaEpisode("ep")!.canvasId, null);
+    f.db.createCanvasProject({ id: "missing-original", title: "Original bound canvas", nodes: [], connections: [] });
+    f.db.updateDramaEpisode("ep", { canvasId: "missing-original" });
+    const originalGet = f.db.getCanvasProject.bind(f.db);
+    f.db.getCanvasProject = id => id === "missing-original" ? null : originalGet(id);
+    assert.throws(() => runner.prepareTargets("ep", f.episode.get("ep").revision, ["asset:ROLE"], "missing-fixed"), /恢复原画布/);
+    assert.equal(f.db.db.prepare("SELECT 1 FROM production_preparations WHERE operation_id=?").get("missing-fixed"), undefined);
+    assert.deepEqual(f.db.getCanvasProject(seedId), foreign);
+});
+
+test("preparation receipt write failure rolls back bindings and nodes before recovering the original operation", t => {
+    const f = fixture(t); save(f.episode, "ep", director());
+    const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+    const revision = f.episode.get("ep").revision;
+    const prepare = f.db.db.prepare.bind(f.db.db);
+    f.db.db.prepare = ((sql: string) => {
+        if (sql.startsWith("UPDATE production_preparations SET receipt_json")) throw new Error("injected receipt write failure");
+        return prepare(sql);
+    }) as typeof f.db.db.prepare;
+    assert.throws(() => runner.prepareTargets("ep", revision, ["asset:ROLE"], "atomic-preparation"), /receipt write failure/);
+    f.db.db.prepare = prepare;
+    assert.equal(f.episode.get("ep").revision, revision);
+    const canvasId = f.db.getDramaEpisode("ep")!.canvasId!;
+    assert.equal((f.db.getCanvasProject(canvasId)!.nodes as any[]).length, 0);
+    const recovered = runner.prepareTargets("ep", revision, ["asset:ROLE"], "atomic-preparation");
+    assert.ok(recovered.layoutReceipt);
+    assert.equal(runner.prepareTargets("ep", revision, ["asset:ROLE"], "atomic-preparation").replayed, true);
+});
+
+test("first target preparation rejects shared-scope assets and cross-owner operation reuse before creating a canvas", t => {
+    const f = fixture(t), d = director();
+    (d.source.asset_plan as any[])[0].canvas_scope = "shared"; d.sourceHash = directorHash(d.source);
+    d.artifacts = d.artifacts.map(artifact => ({ ...artifact, status: "stale" }));
+    save(f.episode, "ep", d);
+    const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+    assert.throws(() => runner.prepareTargets("ep", f.episode.get("ep").revision, ["asset:ROLE"], "shared-unbound"), /共享/);
+    assert.equal(f.db.getDramaEpisode("ep")!.canvasId, null);
+    assert.equal(f.db.db.prepare("SELECT 1 FROM production_preparations WHERE operation_id=?").get("shared-unbound"), undefined);
+    save(f.episode, "ep2", director());
+    runner.prepareTargets("ep2", f.episode.get("ep2").revision, ["asset:ROLE"], "owner-bound-operation");
+    assert.throws(() => runner.prepareTargets("ep", f.episode.get("ep").revision, ["asset:ROLE"], "owner-bound-operation"), /operationId/);
+    assert.equal(f.db.getDramaEpisode("ep")!.canvasId, null);
+});
 
 test("fixed episode and shared canvases: repeated preparation, ownership, initial binding and protected deletion", t => {
     const f = fixture(t);
@@ -468,6 +715,7 @@ test("native H3 tracking follows the active Clip while a pending decision keeps 
     assert.equal(storedClip.productionClipProjection.inputHash, clipInputHash(storedClip), JSON.stringify(clipReady.referenceSync));
     const current = publish(f.episode, "ep"), groups = current.published!.clipGroups;
     const nodeId = groups[0].nodeId!, first = groups[0].segmentId!, second = groups[1].segmentId!;
+    f.stores.projects.applyOperations(projectId, Number(f.db.getCanvasProject(projectId)!.revision), [{ type: "update_h3_segment", nodeId, segmentId: first, patch: { prompt: "integrated_multimodal_description:\nManual Clip edit.\n\noverall_soundscape:\nN/A\n\nnon_diegetic_music:\nN/A" } }], { operationId: "native-manual-prompt" });
     const observer = new NativeProductionGeneration(f.db, f.stores, f.episode, f.shared, f.events);
     const prepared = observer.prepare({ mode: "video", operation: "h3-run", projectId, nodeId, segmentId: first, runFromCurrent: true, endSegmentId: second });
     const task = f.stores.tasks.create("native-h3", "canvas-h3", { projectId, nodeId, segmentId: first }, { canvasBinding: { projectId, nodeId, segmentId: first } });
@@ -509,6 +757,40 @@ test("each formal scene owns one H3 node and keeps its scripts, frames and clips
         const script = nodes.find(node => node.metadata?.productionScriptId === sceneId);
         assert.equal(script.metadata.groupId, group.id);
         assert.ok(script.position.x >= group.position.x && script.position.y >= group.position.y);
+    }
+    assert.equal(f.stores.tasks.list().length, 0, "scene H3 layout preparation must not generate media");
+});
+
+test("scene H3 preparation inherits saved layout and preserves materialized and reserved geometry", t => {
+    const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
+    f.db.setSetting("plugin:minimax-h3:defaults:v1", { layout: { width: 3572.6, height: 2145, panes: { minimaxPreviewH: 1303 } } });
+    save(f.episode, "ep", director());
+    const reserved = f.episode.ensureLayoutPlan("ep");
+    f.db.setSetting("plugin:minimax-h3:defaults:v1", { layout: { width: 4200, height: 2800 } });
+    const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+    const prepared = runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1", "segment:seg2"], "scene-h3-layout");
+    const groups = prepared.draft.clipGroups;
+    assert.notEqual(groups[0].nodeId, groups[1].nodeId, "two scene occurrences sharing one environment still need separate H3 nodes");
+    const nodes = f.db.getCanvasProject(projectId)!.nodes as any[];
+    const scenes = new Map(["morning", "night"].map(sceneId => [sceneId, nodes.find(node => node.metadata?.productionSceneId === sceneId)]));
+    for (const [index, sceneId] of ["morning", "night"].entries()) {
+        const group = scenes.get(sceneId)!;
+        const h3 = nodes.find(node => node.id === groups[index].nodeId);
+        assert.equal(h3.width, 3573);
+        assert.equal(h3.height, 2145);
+        assert.ok(group, `scene group ${sceneId} is materialized`);
+        assert.equal(h3.metadata.groupId, group.id);
+        assert.ok(h3.position.x >= group.position.x && h3.position.y >= group.position.y);
+        assert.ok(h3.position.x + h3.width <= group.position.x + group.width);
+        assert.ok(h3.position.y + h3.height <= group.position.y + group.height);
+        assert.match(h3.title, sceneId === "morning" ? /Morning/ : /Night/);
+        const script = nodes.find(node => node.metadata?.productionScriptId === sceneId);
+        assert.equal(script.metadata.groupId, group.id);
+        assert.ok(script.position.x >= group.position.x && script.position.y >= group.position.y);
+    }
+    const recompiled = f.episode.ensureLayoutPlan("ep");
+    for (const unit of reserved.units.filter(unit => unit.area === "video")) {
+        assert.deepEqual(recompiled.units.find(item => item.id === unit.id)!.members, unit.members);
     }
     assert.equal(f.stores.tasks.list().length, 0, "scene H3 layout preparation must not generate media");
 });
@@ -686,8 +968,15 @@ test("first and repeated Clip preparation persist approved references and identi
     assert.deepEqual(f.runner.prepareTargets("ep", revision, ["segment:seg1"], "reference-first").referenceSync, first.referenceSync);
     assert.equal(f.runner.prepareTargets("ep", first.revision, ["segment:seg1"], "reference-again").referenceSync?.[0].status, "ready");
     const canvas = f.db.getCanvasProject(f.projectId)!;
-    assert.throws(() => f.stores.projects.applyOperations(f.projectId, Number(canvas.revision), [{ type: "update_h3_segment", nodeId: group.nodeId, segmentId: group.segmentId, patch: { prompt: "hand rewritten" } }], { operationId: "wrong-edit" }), /修改编译前源稿/);
-    assert.equal(f.db.getCanvasProject(f.projectId)!.revision, canvas.revision);
+    const projection = structuredClone(read().productionClipProjection);
+    const edit = f.stores.projects.applyOperations(f.projectId, Number(canvas.revision), [{ type: "update_h3_segment", nodeId: group.nodeId, segmentId: group.segmentId, patch: { prompt: "hand rewritten" } }], { operationId: "manual-edit" });
+    assert.equal(read().prompt, "hand rewritten");
+    assert.deepEqual(read().productionClipProjection, projection);
+    assert.equal(edit.revision, Number(canvas.revision) + 1);
+    const prepared = f.runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1"], "preserve-manual-edit");
+    assert.equal(prepared.referenceSync?.[0].status, "blocked");
+    assert.match(JSON.stringify(prepared.referenceSync), /CLIP_EDIT_CONFLICT/);
+    assert.equal(read().prompt, "hand rewritten", "recompilation must retain the edited Clip prompt");
 });
 test("unapproved references remain explicitly blocked and applying a new compiled input repairs an existing Clip", t => {
     const f = referenceClipFixture(t);
@@ -729,6 +1018,31 @@ test("manual Clip conflicts preserve edits and can be reconciled through the aut
     save(f.episode, "ep", candidate);
     const ready = f.runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1"], "conflict-resolved");
     assert.equal(ready.referenceSync?.[0].status, "ready", JSON.stringify(ready.referenceSync));
+});
+
+test("adopt user soft-light preserves canonical prompt bytes and survives formal Clip projection", t => {
+    const f = referenceClipFixture(t);
+    const prepared = f.runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1"], "style-prepare");
+    const group = prepared.draft.clipGroups.find(group => group.id === "seg1")!;
+    const prompt = prepared.draft.director!.artifacts.find(artifact => artifact.targetId === "seg1")!.prompt;
+    f.stores.projects.applyOperations(f.projectId, Number(f.db.getCanvasProject(f.projectId)!.revision), [{ type: "update_h3_segment", nodeId: group.nodeId, segmentId: group.segmentId, patch: { styleTemplateId: "soft-light" } }], { operationId: "manual-soft-light" });
+    const request = { operationId: "adopt-soft-light", expectedRevision: f.episode.get("ep").revision, ops: [{ type: "adopt_director_clip_style", targetId: "seg1", nodeId: group.nodeId!, segmentId: group.segmentId!, canvasRevision: Number(f.db.getCanvasProject(f.projectId)!.revision), styleTemplateId: "soft-light" }] };
+    assert.throws(() => f.episode.edit("ep", { ...request, operationId: "stale-adopt", ops: [{ ...request.ops[0], canvasRevision: request.ops[0].canvasRevision - 1 }] }), /画布版本/);
+    const adopted = f.episode.edit("ep", request);
+    assert.equal((adopted.draft.director!.source.segments as any[])[0].styleTemplateId, "soft-light");
+    assert.equal(adopted.draft.director!.artifacts.find(artifact => artifact.targetId === "seg1")!.prompt, prompt);
+    assert.equal(f.episode.edit("ep", request).replayed, true);
+    const compiled = structuredClone(adopted.draft.director!);
+    compiled.artifacts.forEach(artifact => { artifact.status = "ready"; artifact.sourceHash = compiled.sourceHash; artifact.receipt.sourceHash = compiled.sourceHash; });
+    save(f.episode, "ep", compiled);
+    const ready = f.runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1"], "style-sync");
+    assert.equal(ready.referenceSync?.find(sync => sync.targetId === "seg1")?.status, "ready", JSON.stringify(ready.referenceSync));
+    const clip = (f.db.getCanvasProject(f.projectId)!.nodes as any[]).find(node => node.id === group.nodeId).metadata.segments.find((clip: any) => clip.id === group.segmentId);
+    assert.equal(clip.styleTemplateId, "soft-light"); assert.equal(clip.prompt, prompt);
+    const runtime = resolveH3Runtime({ ...clip, h3ParameterPolicy: "defaults" }, {}, {}, { styleTemplateId: "cold-xianxia", videoSteps: 17 });
+    assert.equal(runtime.params.styleTemplateId, "soft-light"); assert.equal(runtime.sources.styleTemplateId, "clip"); assert.equal(runtime.params.steps, 17);
+    assert.equal(resolveH3Runtime({ ...clip, styleTemplateId: null, h3ParameterPolicy: "defaults" }, {}, {}, { styleTemplateId: "cold-xianxia" }).params.styleTemplateId, null);
+    assert.equal(resolveH3Runtime({ ...clip, styleTemplateId: null, productionClipProjection: { ...clip.productionClipProjection, styleTemplateDeclared: false }, h3ParameterPolicy: "defaults" }, {}, {}, { styleTemplateId: "cold-xianxia" }).params.styleTemplateId, "cold-xianxia");
 });
 
 test("a new approved reference version projects only current Clips and retains the published input", t => {

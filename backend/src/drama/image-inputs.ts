@@ -1,3 +1,4 @@
+import { mergeDirectorInput } from "./input-merge.js";
 import crypto from "node:crypto";
 import { canonicalProduction, type DirectorProduction, type EpisodeProductionData } from "@basketikun/canvas-agent/drama/production-contract";
 import { productionImageInput, type ProductionImageInput } from "@basketikun/canvas-agent/reference-contract";
@@ -7,7 +8,7 @@ import type { ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/produc
 import { applyDirectorSourcePatch } from "@basketikun/canvas-agent/drama/production-validation";
 import { projectDirector } from "./director.js";
 
-const hash = (value: unknown) => crypto.createHash("sha256").update(canonicalProduction(value)).digest("hex");
+const hash = (value: unknown) => crypto.createHash("sha256").update(canonicalProduction(value ?? null)).digest("hex");
 const stableId = (kind: string, ...parts: string[]) => `${kind}-${crypto.createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24)}`;
 const rows = (value: unknown): Record<string, any>[] => Array.isArray(value) ? value : [];
 type ImageArtifact = DirectorProduction["artifacts"][number];
@@ -68,22 +69,27 @@ export function imageInputOperations(project: Record<string, any>, data: Episode
         const input = compiledImageInput(director, artifact, sourceId);
         const oldArtifact = previous?.director?.artifacts.find(item => item.kind === "image" && item.targetId === artifact.targetId);
         const projectedNodes = sourceId === target.id ? [target] : [target, source || { id: sourceId }];
-        // A legacy/local prompt difference must not reject unrelated workflow edits or reviews.
-        // Keep this target untouched; verifyImageInput still blocks its next submission.
-        if (projectedNodes.some(node => node.metadata?.prompt && node.metadata.prompt !== artifact.prompt
-            && oldArtifact && node.metadata.prompt !== oldArtifact.prompt)) continue;
         if (!source) {
             const unit = layout.units.find(item => item.id === `frame-prompt:${shotId}`), member = unit?.members.find(item => item.role === "prompt" && item.nodeId === sourceId);
             if (!unit || !member) throw new Error(`关键帧 ${shotId} 缺少正式提示词节点布局`);
             operations.push({ type: "add_node", id: sourceId, nodeType: member.nodeType, title: target.title || "关键帧提示词", position: member.position, width: member.size.width, height: member.size.height,
                 metadata: { generationMode: "image", productionShotId: shotId, ...(target.metadata?.groupId ? { groupId: target.metadata.groupId } : {}), productionLayoutUnitId: unit.id, productionLayoutBounds: unit.bounds.size } });
         }
+        const oldReferenceIds = [...new Set((productionImageInput(source || target)?.references || []).map(ref => ref.nodeId))];
+        const currentIncoming = connections.filter(edge => edge.toNodeId === sourceId).sort((a, b) => (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER)).map(edge => edge.fromNodeId);
+        const referenceBaseline = source?.metadata?.productionImageProjection?.fieldHashes?.referenceNodeIds || hash(oldReferenceIds);
+        const keepReferences = referenceBaseline !== hash(currentIncoming);
         for (const node of projectedNodes) {
-            if (hash(node.metadata?.productionImageInput || null) !== hash(input) || node.metadata?.prompt !== artifact.prompt) operations.push({ type: "update_node", id: node.id, metadata: { productionImageInput: input, prompt: artifact.prompt } });
+            const nextValues = { prompt: artifact.prompt, referenceNodeIds: [...new Set(input.references.map(ref => ref.nodeId))] };
+            const projection = node.metadata?.productionImageProjection;
+            const baseline = projection?.fieldHashes || (oldArtifact && node.metadata?.prompt !== undefined ? { prompt: hash(oldArtifact.prompt) } : undefined);
+            const merged = mergeDirectorInput({ ...(node.metadata || {}), referenceNodeIds: currentIncoming }, nextValues, baseline, [["prompt"], ["referenceNodeIds"]]);
+            operations.push({ type: "update_node", id: node.id, metadata: { productionImageInput: input, prompt: merged.merged.prompt, canvasReferenceNodeIds: keepReferences ? currentIncoming : nextValues.referenceNodeIds,
+                productionImageProjection: { targetId: artifact.targetId, sourceNodeId: sourceId, fieldHashes: { prompt: hash(artifact.prompt), referenceNodeIds: hash(nextValues.referenceNodeIds) }, nextValues, fieldGroups: [["prompt"], ["referenceNodeIds"]], conflicts: merged.conflicts, manualFields: merged.manualFields, referenceChanged: keepReferences } } });
         }
         const expected = [...new Set(input.references.map(ref => ref.nodeId))];
         const incoming = connections.filter(edge => edge.toNodeId === sourceId).sort((a, b) => (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER));
-        if (hash(incoming.map(edge => edge.fromNodeId)) !== hash(expected)) {
+        if (!keepReferences && hash(incoming.map(edge => edge.fromNodeId)) !== hash(expected)) {
             if (incoming.length) operations.push({ type: "delete_connections", ids: incoming.map(edge => edge.id) });
             expected.forEach((fromNodeId, order) => operations.push({ type: "connect_nodes", id: stableId("production-reference", sourceId, fromNodeId), fromNodeId, toNodeId: sourceId, order }));
         }
@@ -106,62 +112,13 @@ export function verifyImageInput(project: Record<string, any>, director: Directo
     return structuredClone(expected);
 }
 
-/** Called inside the existing canvas ops transaction. Never edits published or in-flight inputs. */
-export function syncImageReferenceEdits(db: BackendDatabase, projectId: string, before: Record<string, any>, after: Record<string, any>) {
-    const sources = rows(before.nodes).filter(node => productionImageInput(node)?.sourceNodeId === node.id);
+/** Reference edits update the canvas view, preserving immutable director baselines. */
+export function syncImageReferenceEdits(_db: BackendDatabase, _projectId: string, _before: Record<string, any>, after: Record<string, any>) {
     const operations: CanvasOperation[] = [];
-    if (!sources.length) return { updates: [], operations };
-    const episode = db.getDramaEpisodeByCanvasId(projectId);
-    const ownerId = episode?.id || projectId, table = episode ? "episode_productions" : "canvas_productions", column = episode ? "episode_id" : "project_id";
-    const row = db.db.prepare(`SELECT revision, draft_json FROM ${table} WHERE ${column}=?`).get(ownerId) as { revision: number; draft_json: string } | undefined;
-    if (!row) return { updates: [], operations };
-    const draft = JSON.parse(row.draft_json) as EpisodeProductionData, director = draft.director;
-    if (!director) return { updates: [], operations };
-    const baselineSourceHash = director.sourceHash;
-    const changed: Array<{ input: ProductionImageInput; references: ProductionImageInput["references"] }> = [];
-    const incoming = (project: Record<string, any>, id: string) => rows(project.connections).filter(edge => edge.toNodeId === id)
-        .sort((a, b) => (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER)).map(edge => edge.fromNodeId);
-    for (const source of sources) {
-        const input = productionImageInput(source)!;
-        if (!rows(after.nodes).some(node => node.id === source.id)) continue;
-        const ids = incoming(after, source.id);
-        if (hash(ids) === hash(incoming(before, source.id))) continue;
-        if (input.sourceHash !== baselineSourceHash) throw new Error("正式参考源稿已变化，请回读后再编辑连线");
-        if (new Set(ids).size !== ids.length) throw new Error("正式图片参考不能用重复连线扩张输入");
-        const card = rows(director.source.asset_cards).find(card => card.id === input.targetId);
-        const plan = rows(director.source.asset_plan).find(plan => String(plan.asset_id || plan.id) === input.targetId);
-        if (!card || !plan) throw new Error("目标缺少正式参考卡，请先由导演登记 asset_cards，再编辑参考");
-        const refs = ids.flatMap((nodeId: string) => {
-            const existing = input.references.filter(ref => ref.nodeId === nodeId);
-            if (existing.length) return existing;
-            const match = Object.entries(director.assets).find(([, asset]) => asset.nodeId === nodeId && asset.storageKey && asset.sha256 && asset.status === "approved" && asset.evidence?.trim());
-            if (!match) throw new Error(`新参考 ${nodeId} 必须先登记并批准到正式资产表`);
-            const [assetId, asset] = match, assetPlan = rows(director.source.asset_plan).find(plan => String(plan.asset_id || plan.id) === assetId);
-            const prior = director.artifacts.find(artifact => artifact.kind === "image" && artifact.targetId === input.targetId)?.references.find(ref => ref.nodeId === nodeId && ref.storageKey === asset.storageKey);
-            const inferredRole = assetPlan?.kind === "style" ? "style" : ["character", "costume", "injury"].includes(assetPlan?.kind) ? "identity" : "composition";
-            return [{ ...prior, label: "", nodeId, assetId, assetVersion: asset.version, storageKey: asset.storageKey!, sha256: asset.sha256!, role: String(prior?.role || assetPlan?.reference_role || inferredRole) }];
-        }).map((ref, index) => ({ ...ref, label: `<Picture ${index + 1}>` }));
-        card.references = refs.map((ref, index) => {
-            const prior = (card.references || []).find((item: Record<string, any>) => item.asset_id === ref.assetId);
-            return { ...prior, image: index + 1, asset_id: ref.assetId, asset_version: ref.assetVersion, role: ref.role,
-                subject: prior?.subject || ref.assetId, preserve: prior?.preserve || ref.preserve || "仅保留该正式资产登记的特征", exclude: prior?.exclude || ref.exclude || "不继承未登记的对象、背景和姿势" };
-        });
-        const assetIds = [...new Set(refs.map(ref => ref.assetId))];
-        for (const shot of Object.values(director.shotInputs)) if (shot.keyframeAssetId === input.targetId) shot.assetIds = assetIds;
-        applyDirectorSourcePatch(director, "asset", input.targetId, { depends_on: assetIds });
-        changed.push({ input, references: refs });
+    for (const node of rows(after.nodes).filter(node => productionImageInput(node))) {
+        const sourceId = productionImageInput(node)!.sourceNodeId;
+        const ids = rows(after.connections).filter(edge => edge.toNodeId === sourceId).sort((a, b) => (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER)).map(edge => edge.fromNodeId);
+        if (hash(ids) !== hash(node.metadata?.canvasReferenceNodeIds)) operations.push({ type: "update_node", id: node.id, metadata: { canvasReferenceNodeIds: ids } });
     }
-    if (!changed.length) return { updates: [], operations };
-    projectDirector(draft);
-    // All receipts are stale after a source edit; keep exact current choices visible until recompilation.
-    for (const node of rows(after.nodes)) {
-        const old = productionImageInput(node);
-        if (!old) continue;
-        const edited = changed.find(item => item.input.targetId === old.targetId);
-        const base = { ...old, sourceHash: director.sourceHash, ...(edited ? { references: edited.references } : {}), stale: true };
-        operations.push({ type: "update_node", id: node.id, metadata: { productionImageInput: { ...base, inputHash: hash({ ...base, inputHash: undefined, stale: undefined }) } } });
-    }
-    const revision = row.revision + 1;
-    db.db.prepare(`UPDATE ${table} SET revision=?, draft_json=?, updated_at=? WHERE ${column}=?`).run(revision, JSON.stringify(draft), new Date().toISOString(), ownerId);
-    return { updates: [{ entityId: ownerId, revision }], operations };
+    return { updates: [] as Array<{ entityId: string; revision: number }>, operations };
 }

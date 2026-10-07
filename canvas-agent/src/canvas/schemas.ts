@@ -2,7 +2,7 @@ import { nodePatchSchema } from "./edit-validation.js";
 export { validateNodeUpdate, validateH3Edit, validateH3Metadata } from "./edit-validation.js";
 import { z } from "zod";
 import { productionWorkspaceSchemas, productionWorkspaceDescriptions, productionWorkspaceToolNames } from "../drama/production-workspace-contract.js";
-import { productionEditSchema, productionPreflightSchema, productionContractQuerySchema, productionCompileSchema, productionApplyCompilationSchema, productionReadSchema } from "../drama/production-contract.js";
+import { productionEditSchema, productionOperationSchema, productionPreflightSchema, productionContractQuerySchema, productionCompileSchema, productionApplyCompilationSchema, productionReadSchema, type ProductionOperation } from "../drama/production-contract.js";
 import {
   collaborationDescriptions,
   collaborationSchemas,
@@ -109,6 +109,7 @@ export const toolNames = [
   "production_get_compilation",
   "production_apply_compilation",
   "production_diagnose_bindings",
+  "production_diagnose_clips",
   "canvas_preflight_production",
   "drama_preflight_production",
   "canvas_get_production",
@@ -333,6 +334,19 @@ const assetUpsertItemSchema = z.object({
   source: z.string().nullable().optional(),
   metadata: recordSchema.optional(),
 });
+
+// Preserve the exact production operation types without expanding both copies
+// of the large discriminated union in this registry's generated declaration.
+type ProductionEditToolSchema<Owner extends "episodeId" | "projectId"> = z.ZodObject<
+  { [Key in Owner]: z.ZodString } & {
+    operationId: z.ZodString; expectedRevision: z.ZodNumber;
+    ops: z.ZodArray<z.ZodType<ProductionOperation, z.ZodTypeDef, z.input<typeof productionOperationSchema>>>;
+  }, "strict"
+>;
+type EpisodeProductionEditToolSchema = ProductionEditToolSchema<"episodeId">;
+type CanvasProductionEditToolSchema = ProductionEditToolSchema<"projectId">;
+const episodeProductionEditToolSchema: EpisodeProductionEditToolSchema = productionEditSchema.extend({ episodeId: z.string().min(1) });
+const canvasProductionEditToolSchema: CanvasProductionEditToolSchema = productionEditSchema.extend({ projectId: z.string().min(1) });
 
 export const toolInputSchemas = {
   ...collaborationSchemas,
@@ -846,29 +860,36 @@ export const toolInputSchemas = {
   production_get_compilation: z.object({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1), operationId: z.string().min(1), view: z.enum(["status", "targets", "diagnostics"]).default("status"), offset: z.number().int().nonnegative().default(0), pageSize: z.number().int().positive().optional() }).strict(),
   production_apply_compilation: productionApplyCompilationSchema.extend({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1) }),
   production_diagnose_bindings: z.object({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1) }),
+  production_diagnose_clips: z.object({
+    projectId: z.string().min(1),
+    nodeId: z.string().min(1).optional(),
+    nodeIds: z.array(z.string().min(1)).min(1).optional(),
+    offset: z.number().int().nonnegative().default(0),
+    pageSize: z.number().int().positive().max(1000).default(200),
+  }),
   canvas_preflight_production: productionPreflightSchema.extend({ projectId: z.string().min(1) }),
   drama_preflight_production: productionPreflightSchema.extend({ episodeId: z.string().min(1) }),
   canvas_get_production: productionReadSchema.extend({ projectId: z.string().min(1) }),
   drama_get_workflow_readiness: z.object({ episodeId: z.string().min(1) }),
   canvas_get_workflow_readiness: z.object({ projectId: z.string().min(1) }),
-  drama_start_production_run: z.object({ episodeId: z.string().min(1), runId: z.string().min(1), idempotencyKey: z.string().min(1), workId: z.string().min(1).optional(), expectedRevision: z.number().int().min(0), version: z.number().int().min(1), targets: z.array(z.string().min(1)).min(1), scope: z.enum(["selected", "all_ready"]).optional().describe("selected 固定为明确目标；all_ready 授权按依赖扩展当前就绪范围并在审核后沿同一 runId 继续") }),
-  canvas_start_production_run: z.object({ projectId: z.string().min(1), runId: z.string().min(1), idempotencyKey: z.string().min(1), workId: z.string().min(1).optional(), expectedRevision: z.number().int().min(0), version: z.number().int().min(1), targets: z.array(z.string().min(1)).min(1), scope: z.enum(["selected", "all_ready"]).optional().describe("selected 固定为明确目标；all_ready 授权按依赖扩展当前就绪范围并在审核后沿同一 runId 继续") }),
+  drama_start_production_run: z.object({ episodeId: z.string().min(1), runId: z.string().min(1), idempotencyKey: z.string().min(1), workId: z.string().min(1).optional(), expectedRevision: z.number().int().min(0), version: z.number().int().min(0).optional(), inputBasis: z.enum(["canvas", "published"]).optional(), expectedCanvasRevision: z.number().int().nonnegative().optional(), expectedPlanHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), targets: z.array(z.string().min(1)).min(1), scope: z.enum(["selected", "all_ready"]).optional().describe("selected 固定为明确目标；all_ready 冻结本次就绪范围；canvas 批次恢复沿原快照，只有旧发布稿批次保留审核后扩展语义") }),
+  canvas_start_production_run: z.object({ projectId: z.string().min(1), runId: z.string().min(1), idempotencyKey: z.string().min(1), workId: z.string().min(1).optional(), expectedRevision: z.number().int().min(0), version: z.number().int().min(0).optional(), inputBasis: z.enum(["canvas", "published"]).optional(), expectedCanvasRevision: z.number().int().nonnegative().optional(), expectedPlanHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), targets: z.array(z.string().min(1)).min(1), scope: z.enum(["selected", "all_ready"]).optional().describe("selected 固定为明确目标；all_ready 冻结本次就绪范围；canvas 批次恢复沿原快照，只有旧发布稿批次保留审核后扩展语义") }),
   drama_get_production_batch: z.object({ episodeId: z.string().min(1), runId: z.string().min(1) }),
   canvas_get_production_batch: z.object({ projectId: z.string().min(1), runId: z.string().min(1) }),
   drama_pause_production_run: z.object({ episodeId: z.string().min(1), runId: z.string().min(1) }),
   canvas_pause_production_run: z.object({ projectId: z.string().min(1), runId: z.string().min(1) }),
   drama_resume_production_run: z.object({ episodeId: z.string().min(1), runId: z.string().min(1) }),
   canvas_resume_production_run: z.object({ projectId: z.string().min(1), runId: z.string().min(1) }),
-  drama_edit_production: productionEditSchema.extend({ episodeId: z.string().min(1) }),
-  canvas_edit_production: productionEditSchema.extend({ projectId: z.string().min(1) }),
+  drama_edit_production: episodeProductionEditToolSchema,
+  canvas_edit_production: canvasProductionEditToolSchema,
   drama_preview_production_impact: z.object({ episodeId: z.string().min(1), stage: z.enum(["script", "shots", "director"]) }),
   canvas_preview_production_impact: z.object({ projectId: z.string().min(1), stage: z.enum(["script", "shots", "director"]) }),
   drama_publish_production: z.object({ episodeId: z.string().min(1), operationId: z.string().min(1), expectedRevision: z.number().int().min(0), stage: z.enum(["script", "shots", "director"]) }),
   canvas_publish_production: z.object({ projectId: z.string().min(1), operationId: z.string().min(1), expectedRevision: z.number().int().min(0), stage: z.enum(["script", "shots", "director"]) }),
   drama_list_production_versions: z.object({ episodeId: z.string().min(1) }),
   canvas_list_production_versions: z.object({ projectId: z.string().min(1) }),
-  drama_get_production_version: z.object({ episodeId: z.string().min(1), version: z.number().int().min(1) }),
-  canvas_get_production_version: z.object({ projectId: z.string().min(1), version: z.number().int().min(1) }),
+  drama_get_production_version: productionReadSchema.extend({ episodeId: z.string().min(1), version: z.number().int().min(1) }),
+  canvas_get_production_version: productionReadSchema.extend({ projectId: z.string().min(1), version: z.number().int().min(1) }),
   drama_list_production_legacy: z.object({ episodeId: z.string().min(1) }),
   canvas_list_production_legacy: z.object({ projectId: z.string().min(1) }),
   drama_restore_production: z.object({ episodeId: z.string().min(1), version: z.number().int().min(1), operationId: z.string().min(1), expectedRevision: z.number().int().min(0) }),
@@ -892,7 +913,7 @@ export const toolDescriptions: Record<ToolName, string> = {
   canvas_get_state:
     "读取当前画布。默认返回全部节点目录（id/type/title/generationMode），无需布局或连线时用此模式；view: graph 读取节点布局和连线。超限按 nextNodeOffset 分页。已知 nodeIds 时只取指定节点的完整数据和相关连线。完整目录可用 projectId + ifRevision 复查是否变化。H3 时间线用 h3_get_node 读取稳定 Clip ID。",
   canvas_get_selection: "读取当前网页画布选中的节点。",
-  canvas_export_snapshot: "导出当前画布快照，用于理解布局。",
+  canvas_export_snapshot: "导出 Backend 权威画布固定快照，返回 SHA256、字节数与鉴权下载路径；布局查看使用 canvas_get_state。",
   canvas_apply_ops:
     "批量操作画布。projectId、operationId、expectedRevision 必填；响应未知时保留原请求，用 mcp_get_command_receipt 查询；版本冲突不自动 rebase。H3 Clip 内容请使用专用工具；运行状态与结果仍由 Backend 管理。",
   canvas_create_node:
@@ -987,13 +1008,14 @@ export const toolDescriptions: Record<ToolName, string> = {
   production_get_compilation: "按 owner 和原 operationId 查询后台编译状态及应用回执；默认仅返回短状态，诊断/目标列表需 view 和 pageSize。只读，不重跑编译。",
   production_apply_compilation: "用精确 preparedId 原子接入 Backend 编译产物；沿用冻结的 expectedRevision/operationId，重复调用恢复原回执，源稿或绑定冲突拒绝覆盖。保存草稿，不发布或生成。",
   production_diagnose_bindings: "只读核对源资产版本、草稿绑定、发布版本绑定、节点活动媒体、归档字节哈希与消费者；明确指出新旧版本或活动媒体不一致，不修改数据。",
+  production_diagnose_clips: "只读逐段对照 H3 Clip 现场正文与最新发布编译产物：状态（一致/不同/无法比较）、两侧归一哈希、导演源哈希、任务状态、生产版本与只读下一步。一次调用完成排障；不同为信息级提示，不表示生成不可用。nodeId 与 nodeIds 同时出现时以 nodeIds 为准。默认最多返回 200 行，超出时给出 nextOffset。",
   canvas_preflight_production: "只读检查画布 edit/publish/compile/generate 正式请求；返回全部已识别缺项、目标占用、版本和 nextActions，不提交编辑或生成。",
   drama_preflight_production: "只读检查分集 edit/publish/compile/generate 正式请求；返回全部已识别缺项、目标占用、版本和 nextActions，不提交编辑或生成。",
   canvas_get_production: "默认读取制作摘要与版本；view=source 读取一个 snapshot 的完整源稿；view=artifacts 可用 targetIds 定向读取完整正文；view=full 返回原完整记录。",
   drama_get_workflow_readiness: "按 Acheng 目标读取分集制作的依赖就绪、缺项与下一步；无关模块的 partial 不会阻塞可执行目标。",
   canvas_get_workflow_readiness: "按 Acheng 目标读取画布制作的依赖就绪、缺项与下一步；无关模块的 partial 不会阻塞可执行目标。",
-  drama_start_production_run: "以稳定 runId/idempotencyKey 对指定已发布分集目标启动媒体生产；仅调用此工具才授权所选范围生成。 自动预检未通过时返回 status=blocked、阻塞 runId/taskIds 和 nextActions，不提交任务；不可将暂停当作结束或换 runId 盲试。",
-  canvas_start_production_run: "以稳定 runId/idempotencyKey 对指定已发布画布目标启动媒体生产；仅调用此工具才授权所选范围生成。 自动预检未通过时返回 status=blocked、阻塞 runId/taskIds 和 nextActions，不提交任务；不可将暂停当作结束或换 runId 盲试。",
+  drama_start_production_run: "以稳定 runId/idempotencyKey 对指定分集目标启动媒体生产，默认使用当前画布保存的内容；inputBasis=published 显式使用发布稿；仅调用此工具才授权所选范围生成。 自动预检未通过时返回 status=blocked、阻塞 runId/taskIds 和 nextActions，不提交任务；不可将暂停当作结束或换 runId 盲试。",
+  canvas_start_production_run: "以稳定 runId/idempotencyKey 对指定画布目标启动媒体生产，默认使用当前画布保存的内容；inputBasis=published 显式使用发布稿；仅调用此工具才授权所选范围生成。 自动预检未通过时返回 status=blocked、阻塞 runId/taskIds 和 nextActions，不提交任务；不可将暂停当作结束或换 runId 盲试。",
   drama_get_production_batch: "读取分集生产批次状态、固定引擎版本、范围与精确任务 ID。",
   canvas_get_production_batch: "读取画布生产批次状态、固定引擎版本、范围与精确任务 ID。",
   drama_pause_production_run: "暂停分集生产批次；已提交任务不会被重复提交。",
@@ -1008,8 +1030,8 @@ export const toolDescriptions: Record<ToolName, string> = {
   canvas_publish_production: "发布 Acheng 导演稿的新正式版本并冻结回执；不会启动媒体任务。用户明确授权后另调用 canvas_start_production_run 指定范围。",
   drama_list_production_versions: "读取分集制作稿历史版本及每次发布的影响范围。",
   canvas_list_production_versions: "读取分集制作稿历史版本及每次发布的影响范围。",
-  drama_get_production_version: "读取指定已发布版本的完整结构化制作稿。",
-  canvas_get_production_version: "读取指定已发布版本的完整结构化制作稿。",
+  drama_get_production_version: "默认读取指定发布版本摘要；用 view: source/artifact_index/artifacts/full、sourceSection、targetIds、pageSize/cursor 或 chunkBytes 定向读取完整内容。",
+  canvas_get_production_version: "默认读取指定发布版本摘要；用 view: source/artifact_index/artifacts/full、sourceSection、targetIds、pageSize/cursor 或 chunkBytes 定向读取完整内容。",
   drama_list_production_legacy: "列出旧 fullPlot、script.md、storyboard.md 原文供用户选择导入待审核草稿。",
   canvas_list_production_legacy: "列出旧 fullPlot、script.md、storyboard.md 原文供用户选择导入待审核草稿。",
   drama_restore_production: "将历史版本复制到当前草稿；保留已发布版本与媒体历史。",

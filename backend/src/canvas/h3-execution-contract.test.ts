@@ -8,11 +8,11 @@ import { resolveH3Runtime, estimateH3Dimensions, h3StoryboardIssues } from './h3
 import { assertH3WorkflowContract, compareH3MediaSpecification } from './h3-execution-contract.js';
 import { resolveNanFengWorkflowParams } from '../comfyui/bridge.js';
 
-function fixture(t: test.TestContext) {
+function fixture(t: test.TestContext, manualClip: Record<string, unknown> = {}) {
     const db = new BackendDatabase(':memory:');
     t.after(() => db.close());
     const stores = createStores(db);
-    stores.projects.create({ id: 'p', nodes: [{ id: 'n', type: 'minimax-h3', metadata: { sampler: 'res_multistep', segments: [{ id: 'a', mode: 't2v', prompt: '完整对白和动作', aspectRatio: '9:16', h3ParameterPolicy: 'defaults' }, { id: 'b', mode: 't2v', prompt: '下一段', aspectRatio: '9:16', h3ParameterPolicy: 'defaults' }] } }], connections: [] });
+    stores.projects.create({ id: 'p', nodes: [{ id: 'n', type: 'minimax-h3', metadata: { sampler: 'res_multistep', segments: [{ id: 'a', mode: 't2v', prompt: '完整对白和动作', aspectRatio: '9:16', h3ParameterPolicy: 'defaults', ...manualClip }, { id: 'b', mode: 't2v', prompt: '下一段', aspectRatio: '9:16', h3ParameterPolicy: 'defaults' }] } }], connections: [] });
     stores.settings.set('plugin:minimax-h3:defaults:v1', { sampler: 'er_sde', megapixels: 0.6, loraSlots: [{ name: 'turbo', strength: 0.75, enabled: true }] });
     return { db, stores, runner: new CanvasH3Runner(stores, new BackendEventBus(), {} as never, {} as never) };
 }
@@ -25,8 +25,8 @@ test('defaults policy ignores stale generation overrides but preserves planned a
     assert.equal(resolved.params.latentUpscaleEnabled, true);
     assert.equal(resolved.params.sampler, 'er_sde');
     assert.equal(resolved.sources.sampler, 'defaults');
-    assert.equal(resolved.params.styleTemplateId, 'soft-light');
-    assert.equal(resolved.sources.styleTemplateId, 'defaults');
+    assert.equal(resolved.params.styleTemplateId, 'modern-korean');
+    assert.equal(resolved.sources.styleTemplateId, 'clip');
     const cleared = resolveH3Runtime({ styleTemplateId: null }, {}, {}, { styleTemplateId: 'soft-light' });
     assert.equal(cleared.params.styleTemplateId, null);
     assert.equal(cleared.sources.styleTemplateId, 'clip');
@@ -50,10 +50,10 @@ test('preview is read-only; draft revision and defaults changes invalidate its s
     assert.equal(stores.tasks.list().length, 0);
 });
 
-test('direct canvas run rejects an episode aspect mismatch before creating any task', t => {
+test('direct canvas preview permits a valid manual aspect differing from episode defaults', t => {
     const { stores, runner } = fixture(t);
     stores.projects.getH3ProductionRequirements = () => ({ ownerId: 'ep', revision: 1, version: 1, videoAspectRatio: '9:16', clips: [] });
-    assert.throws(() => runner.start({ projectId: 'p', nodeId: 'n', segmentId: 'a', params: { aspectRatio: '16:9' } }), /制作要求 9:16/);
+    assert.equal(runner.preview({ projectId: 'p', nodeId: 'n', segmentId: 'a', params: { aspectRatio: '16:9' } }).ready, true);
     assert.equal(stores.tasks.list().length, 0);
 });
 
@@ -63,10 +63,33 @@ test('an out-of-range enabled LoRA is rejected rather than silently clamped in a
     assert.equal(stores.tasks.list().length, 0);
 });
 
-test('an omitted literal script line blocks generation even when the reference structure is valid', t => {
+test('manual formal Clip prose generates from the saved input without republishing', t => {
+    const { stores, runner } = fixture(t, { directorEngine: 'acheng', directorSourceHash: 'published-source', prompt: '我自己修改的对白、动作与运镜。' });
+    const project = stores.projects.get('p')!;
+    const segment = (project.nodes as any[])[0].metadata.segments[0];
+    stores.projects.getH3ProductionRequirements = () => ({ ownerId: 'ep', revision: 1, version: 1, clips: [{ nodeId: 'n', segmentId: 'a', sourceHash: 'published-source', promptContentHash: 'original-prose-hash', storyboardRequired: true, shots: [{ id: 'published-shot', duration: 5 }], literalDialogues: [{ blockId: 'line', speaker: '张伟', text: '我想重新开始。' }] }] });
+    const input = { projectId: 'p', nodeId: 'n', segmentId: 'a' };
+    const before = JSON.stringify(project);
+    const preview = runner.preview(input);
+    assert.equal(preview.ready, true);
+    assert.deepEqual(preview.diagnostics, []);
+    assert.equal(JSON.stringify(project), before);
+    assert.equal(stores.tasks.list().length, 0);
+    // Inspect the frozen submission without invoking a media provider.
+    t.mock.method(runner as any, 'execute', async () => {});
+    const task = runner.start({ ...input, expectedPlanHash: preview.planHash }, 'manual-formal-run');
+    const saved = (task.input.runPlan as any).project.nodes[0].metadata.segments[0];
+    assert.equal(saved.prompt, segment.prompt);
+    assert.equal(saved.directorSourceHash, 'published-source');
+    assert.equal(stores.tasks.list().length, 1);
+    assert.equal(runner.start({ ...input, expectedPlanHash: preview.planHash }, task.id).id, task.id);
+});
+
+test('manual storyboard edits still reject dangling current reference bindings', t => {
     const { stores, runner } = fixture(t);
-    stores.projects.getH3ProductionRequirements = () => ({ ownerId: 'ep', revision: 1, version: 1, clips: [{ nodeId: 'n', segmentId: 'a', storyboardRequired: false, shots: [], literalDialogues: [{ blockId: 'line', speaker: '张伟', text: '我想重新开始。' }] }] });
-    assert.throws(() => runner.start({ projectId: 'p', nodeId: 'n', segmentId: 'a' }), /正式剧本对白 line/);
+    stores.projects.applyOperations('p', undefined, [{ type: 'update_h3_segment', nodeId: 'n', segmentId: 'a', patch: { duration: 5, storyboardShots: [{ id: 'manual-shot', referenceBindingId: 'missing-frame', duration: 5 }] } }]);
+    assert.ok(runner.preview({ projectId: 'p', nodeId: 'n', segmentId: 'a' }).diagnostics.some(issue => issue.code === 'STORYBOARD_MISMATCH'));
+    assert.throws(() => runner.start({ projectId: 'p', nodeId: 'n', segmentId: 'a' }), /storyboard 绑定/);
     assert.equal(stores.tasks.list().length, 0);
 });
 

@@ -19,6 +19,8 @@ import { h3ThemeVars } from "../h3-theme";
 import { h3Label, useH3Locale } from "../h3-locale";
 import { promptEnhanceImagePayload } from "../services/prompt-enhance-references";
 import { captureH3PromptRequest } from "../services/h3-prompt-request";
+import { translateH3Prompt } from "../services/h3-prompt-translation";
+import type { TranslationProgress } from "../services/h3-prompt-translation";
 import { literalPromptSubjects } from "../services/prompt-subject-definitions";
 import type { StoryboardPromptReference } from "../services/storyboard-prompt";
 import { assembleH3Prompt, readH3PromptSection } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
@@ -714,12 +716,24 @@ export function H3PromptSection({
   type Translation = { segmentId: string; prompt: string; text: string };
   const [translation, setTranslation] = useState<Translation | null>(null);
   const [translating, setTranslating] = useState(false);
+  const [translationProgress, setTranslationProgress] = useState<TranslationProgress>({ completed: 0, total: 0 });
   const [isTranslated, setIsTranslated] = useState(false);
   const [translateError, setTranslateError] = useState<string | null>(null);
   const [copiedError, setCopiedError] = useState(false);
   // 用来在异步翻译返回时校验 prompt 是否已被用户改掉，避免显示错配的中文
   const promptRef = useRef({ prompt, segmentId: selected?.id });
   promptRef.current = { prompt, segmentId: selected?.id };
+  const translationRequestRef = useRef<{ controller: AbortController; prompt: string; segmentId?: string } | null>(null);
+  useEffect(() => {
+    const request = translationRequestRef.current;
+    if (request && (request.prompt !== prompt || request.segmentId !== selected?.id)) {
+      request.controller.abort();
+      translationRequestRef.current = null;
+      setTranslating(false);
+    }
+    setTranslateError(null);
+  }, [selected?.id, prompt]);
+  useEffect(() => () => { translationRequestRef.current?.controller.abort(); }, []);
   const loadStoryboardPrompt = (sourcePrompt: string) => {
     const summary = promptMode === "ref2va" ? readPromptSection(sourcePrompt, "summary") : "";
     const { openingDescription, shots: parsedShots } = parseStoryboardDescription(readPromptSection(sourcePrompt, storyboardSection), imageRefs, [...imageRefs, ...videoRefs, ...audioRefs]);
@@ -1345,19 +1359,8 @@ export function H3PromptSection({
     }
   };
 
-  // 翻译 system prompt：只翻自然语言，保留南风官方结构标记、引用标签和数值
-  const TRANSLATION_SYSTEM_PROMPT = [
-    "You are a translator for H3 video prompts. Translate the following to Simplified Chinese.",
-    "Rules:",
-    "- Keep section headers ending with ':' (e.g., subject_definitions:, summary:) exactly as in the original; they are official structure markers.",
-    "- Keep reference tags like <Subject 1>, <Picture 1>, <Video 1>, <Audio 1> exactly as in the original.",
-    "- Keep timestamps, numerical values, and proper nouns unchanged.",
-    "- Translate all other natural language to natural Simplified Chinese.",
-    "- Preserve line breaks, indentation, and overall structure.",
-    "- Return only the translated prompt. No explanations, no Markdown fences, no preamble.",
-  ].join("\n");
-
   const handleTranslateToggle = async () => {
+    if (translationRequestRef.current) return;
     if (isTranslated) {
       setIsTranslated(false);
       return;
@@ -1369,8 +1372,11 @@ export function H3PromptSection({
       return;
     }
     const promptAtCall = prompt;
-    const segmentIdAtCall = selected?.id || "";
+    const segmentIdAtCall = selected?.id;
+    const controller = new AbortController();
+    translationRequestRef.current = { controller, prompt: promptAtCall, segmentId: segmentIdAtCall };
     setTranslating(true);
+    setTranslationProgress({ completed: 0, total: 0 });
     setTranslateError(null);
     try {
       const model = String(
@@ -1379,23 +1385,27 @@ export function H3PromptSection({
           ctx.ai.defaultModel("text") ||
           "",
       );
-      const result = await ctx.ai.generateText(promptAtCall.trim(), {
+      const text = await translateH3Prompt(promptAtCall, (excerpt, options) => ctx.ai.generateText(excerpt, options), {
         model,
-        system: TRANSLATION_SYSTEM_PROMPT,
+        signal: controller.signal,
         log: { taskMode: "翻译", nodeId: ctx.node.id, segmentId: segmentIdAtCall },
+      }, (progress) => {
+        if (!controller.signal.aborted && translationRequestRef.current?.controller === controller) setTranslationProgress(progress);
       });
-      const text = result.text.trim();
-      if (text) {
-        setTranslation({ segmentId: segmentIdAtCall, prompt: promptAtCall, text });
-        // 异步期间 prompt 可能已被用户改掉，只在没变时才切到中文态
-        if (promptRef.current.prompt === promptAtCall && promptRef.current.segmentId === segmentIdAtCall) setIsTranslated(true);
-      } else {
-        setTranslateError("翻译模型未返回内容，请检查文本模型配置或重试");
+      // Only cache and show a complete translation of the still-current Clip and source.
+      if (!controller.signal.aborted && promptRef.current.prompt === promptAtCall && promptRef.current.segmentId === segmentIdAtCall) {
+        setTranslation({ segmentId: segmentIdAtCall || "", prompt: promptAtCall, text });
+        setIsTranslated(true);
       }
     } catch (error) {
-      setTranslateError(error instanceof Error ? error.message : String(error));
+      if (!controller.signal.aborted && promptRef.current.prompt === promptAtCall && promptRef.current.segmentId === segmentIdAtCall) {
+        setTranslateError(error instanceof Error ? error.message : String(error));
+      }
     } finally {
-      setTranslating(false);
+      if (translationRequestRef.current?.controller === controller) {
+        translationRequestRef.current = null;
+        setTranslating(false);
+      }
     }
   };
 
@@ -1730,10 +1740,11 @@ export function H3PromptSection({
           disabled={translating || (!isTranslated && !prompt.trim())}
           className={`minimax-prompt-translate${isTranslated ? " is-translated" : ""}`}
           aria-label={isTranslated ? "切换回原提示词" : translating ? "正在翻译" : "查看中文翻译"}
-          title={isTranslated ? "切换回原提示词" : translating ? "正在翻译…" : !prompt.trim() ? "请先输入提示词" : "查看中文翻译"}
+          title={isTranslated ? "切换回原提示词" : translating ? `正在翻译，已完成 ${translationProgress.completed}/${translationProgress.total} 段` : !prompt.trim() ? "请先输入提示词" : "查看中文翻译"}
         >
           {translating ? "…" : isTranslated ? "EN" : "译"}
         </button>
+        {translating ? <div className="minimax-prompt-translate-status" role="status">正在翻译，已完成 {translationProgress.completed}/{translationProgress.total} 段…</div> : null}
         {translateError ? <div key="prompt-translate-error" className="minimax-prompt-translate-error" role="alert">翻译失败：{translateError}</div> : null}
       </div>
       <Modal

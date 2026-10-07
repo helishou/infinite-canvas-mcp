@@ -26,7 +26,9 @@ Agent 负责编译前的创作、源稿编辑、依赖与批准版本登记。`p
 
 ## 创作权属
 
-story、assets、shots、performance、effects、model、continuity 按 Acheng 原合同协作。空间设计在 assets 的 scene-design 支路，shots 消费空间事实；站位图是按需资产。多资产新制作采用 STYLE_MOTHER，新四视图采用正脸近景、正面全身、侧面全身、背面全身和空手；色卡为辅助信息，不另建强制前置阶段。旧批准资产可保留并登记适用范围，缺项只补本轮所需。
+story、assets、shots、performance、effects、model、continuity 按 Acheng 原合同协作。空间设计在 assets 的 scene-design 支路，shots 消费空间事实；站位图是按需资产。多资产新制作采用 STYLE_MOTHER，新四视图默认采用等高的正脸近景、正面全身、侧面全身、背面全身和空手；色卡为辅助信息，不另建强制前置阶段。旧批准资产可保留并登记适用范围，缺项只补本轮所需。
+
+用户明确指定其他角色布局时，在完整 `asset_cards[].view_layout` 中保存 `selection: user_explicit` 和具体 `selection_reason`，由支持该选择的固定运行包校验。当前可显式选择1:2行高的正脸近景、右侧脸近景、无头正面服装全身、完整背面四格，或等高的生物头正面、头侧面、盘绕全身、身体中段鳞片细节四格。类型、视图、顺序、行高、同一主体与用途必须完整；缺少明确选择不按历史布局放行。不能伪造批准状态或用历史 fixture 绕过新制作校验。
 
 ### 制作内容语言
 
@@ -56,7 +58,7 @@ Acheng 的纯提示词限制适用于创作职责；用户授权实际生成时�
 
 修改导演源码后先在子模块内提交，再使用 `npm run acheng:update -- --local --check` 验证该 HEAD，使用 `npm run acheng:update -- --local` 激活。仅重建 Canvas 兼容层时沿用当前源码 HEAD；旧不可变运行版本继续保留。此操作不改制作稿、不提交生成。
 
-source 原样保存 Acheng production 数据。sourceHash 是递归键排序、无空白、UTF-8 JSON 的 SHA-256；脚本使用项目导出工具，不能凭记忆拼哈希。artifacts 每项包含独立 prompt 字节、sha256、源哈希、参考标签/节点/storageKey/媒体哈希/职责及编译回执；draft 和 partial 不标 ready。接入包不填造 PASS，先执行本次制作锁定版本的真实离线编译与校验，再由 Backend 核对源与媒体。
+source 原样保存 Acheng production 数据。sourceHash 是递归键排序、无空白、UTF-8 JSON 的 SHA-256；MCP 提交完整源稿对象时使用 `production_hash_source`，脚本复用项目导出工具，不另写 canonical 算法或凭记忆拼哈希。artifacts 每项包含独立 prompt 字节、sha256、源哈希、参考标签/节点/storageKey/媒体哈希/职责及编译回执；draft 和 partial 不标 ready。接入包不填造 PASS，先执行本次制作锁定版本的真实离线编译与校验，再由 Backend 核对源与媒体。
 
 Backend 已发布版本是正式源，本地 production.json 是带 revision 的工作副本。修改需稳定 operationId 和 expectedRevision；冲突回读，不覆盖他人草稿。剧本、镜头和 Clip 视图是投影，修改应进入导演源；源变化后重跑锁定版本的提示词编译/校验脚本并更新对应回执，旧产物不能作为当前版本执行依据。模型选择继承现有配置；保存草稿不生成。
 
@@ -111,6 +113,8 @@ Backend 将已有节点的真实位置与尺寸作为固定锚点，新目标只
 视频制作在 kickoff 阶段、进入故事拆解和提示词编写前先确认成片画幅。检查用户 brief 与正式 `settings`：若 brief 已写明比例或 `videoAspectRatio` 已有非空值，直接采用；若 `videoAspectRatioConfirmed=true` 且值为 null，表示用户明确选择“沿用画布配置”，不重复询问；只有值为空且未确认时才询问。确认后通过正式 `set_settings` 保存 `videoAspectRatio`（沿用画布时为 null）和 `videoAspectRatioConfirmed=true`，读回 revision 再继续。纯资产交付且不制作视频时不问视频画幅。成片比例只控制视频规格；角色四视图用 2:3，关键帧及其他参考按各自镜头用途定比例，不用参考卡比例决定视频画幅。
 
 用户要求沿用默认参数时，H3 Clip 采用 h3ParameterPolicy=defaults，仅按制作稿指定画幅、时长、模式和连续性边界；模型、VAE、LoRA、采样、分辨率与放大消费 Backend 保存默认值。用户明确调整生成参数时采用 overrides。新节点须加载保存默认值；同步正文和参考不覆盖已有用户配置。每次新运行冻结默认快照，途中修改默认值不改变原批次。
+
+用户确认的视觉风格保存到正式 `segments[].styleTemplateId`，使用登记模板 ID 或 null；不要把模板正文搬进源稿。画布与正式稿冲突时，读取精确 nodeId/segmentId、风格和 canvas revision，经 `adopt_director_clip_style` 明确采用用户修改，再按目标 scope 编译、检查 referenceSync 并预览发布；不能自动覆盖其他人工编辑。编辑、准备和发布工具读取短回执；源对象用 sourceSection/targetIds，连续性条目用 `ledger.facts/events/requirements/coverage` 定向读取，不搬运整稿来修改单条。
 
 通过 h3_preview_run 或 canvas_validate_generation 核对生效值、来源、预计一采/二采尺寸、正式画幅和参考映射。使用与提交一致的范围与参数，提交携带 expectedPlanHash 和稳定 idempotencyKey；过期预检回读后重新准备，未知提交结果先恢复原幂等键。不擅自换模型、关闭 LoRA/放大、降规格或关闭确认开关来通过检查。
 

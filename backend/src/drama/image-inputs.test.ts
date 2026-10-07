@@ -16,6 +16,29 @@ import { assertImageReferenceCoverage, verifyImageInput } from "./image-inputs.j
 import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 
+test("legacy image nodes without reference summaries accept independent edits and replay receipts", t => {
+    const f = fixture(t);
+    const legacy = structuredClone(f.project());
+    legacy.id = "legacy-no-reference-summary";
+    for (const node of legacy.nodes as any[]) delete node.metadata?.canvasReferenceNodeIds;
+    f.db.createCanvasProject(legacy);
+    const baseRevision = Number(f.db.getCanvasProject(legacy.id)!.revision);
+    const input = f.input();
+    const move = [{ type: "update_node", id: "frame", patch: { position: { x: 12, y: 34 } } }];
+    const first = f.db.applyCanvasProjectOperations(legacy.id, undefined, move, { operationId: "legacy-move", baseRevision });
+    const second = f.db.applyCanvasProjectOperations(legacy.id, undefined, [{ type: "update_node", id: input.sourceNodeId, patch: { title: "Independent title" } }], { operationId: "legacy-title", baseRevision });
+    const nodes = second.project.nodes as any[];
+    assert.deepEqual(nodes.find(node => node.id === "frame").position, { x: 12, y: 34 });
+    assert.equal(nodes.find(node => node.id === input.sourceNodeId).title, "Independent title");
+    assert.deepEqual(nodes.find(node => node.id === "frame").metadata.canvasReferenceNodeIds, f.names);
+    assert.deepEqual(nodes.find(node => node.id === "frame").metadata.productionImageInput, input);
+    const replay = f.db.applyCanvasProjectOperations(legacy.id, undefined, move, { operationId: "legacy-move", baseRevision });
+    assert.equal(replay.duplicated, true);
+    assert.equal(replay.revision, first.revision);
+    assert.equal(f.db.getCanvasProject(legacy.id)!.revision, second.revision);
+    assert.throws(() => f.db.applyCanvasProjectOperations(legacy.id, undefined, [{ type: "update_node", id: input.sourceNodeId, patch: { title: "Conflicting title" } }], { baseRevision }), { code: "FIELD_CONFLICT" });
+});
+
 function fixture(t: test.TestContext) {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "formal-image-input-"));
     const db = new BackendDatabase(path.join(directory, "db.sqlite")), stores = createStores(db), events = new BackendEventBus();
@@ -64,8 +87,8 @@ test("five formal references project exact media, ordering and roles before any 
     await generation.start({ mode: "image", projectId: "canvas", nodeId: input.sourceNodeId, model: "test-image", prompt: f.director.artifacts[0].prompt, idempotencyKey: "manual" });
     assert.deepEqual(calls[0].references?.map(ref => ref.storageKey), input.references.map((ref: any) => ref.storageKey));
     assert.equal(calls[0].nodeId, "frame");
-    assert.deepEqual(calls[0].params?.productionImageInput, input);
-    await assert.rejects(() => generation.start({ mode: "image", projectId: "canvas", nodeId: "frame", model: "test-image", prompt: f.director.artifacts[0].prompt, references: [] }), /节点参考已变化/);
+    assert.equal(calls[0].params?.canvasFrozenInput, true);
+    await assert.rejects(() => generation.start({ mode: "image", projectId: "canvas", nodeId: "frame", model: "test-image", prompt: f.director.artifacts[0].prompt, references: [] }), /正在由任务/);
     assert.equal(calls.length, 1);
 });
 
@@ -75,46 +98,48 @@ test("automatic production freezes the same five references and never restarts a
         calls.push(structuredClone(command));
         const task = f.stores.tasks.create(command.idempotencyKey!, "canvas-image", command, {});
         f.db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "frame", metadata: { storageKey: f.director.assets.CUIZI.storageKey } }], { runtimeWrite: true });
-        f.stores.tasks.update(task.id, { status: "succeeded" }); return { taskId: task.id };
+        f.stores.tasks.update(task.id, { status: "succeeded", result: { media: [{ storageKey: f.director.assets.CUIZI.storageKey }] } }); return { taskId: task.id };
     } } as unknown as CanvasGenerationService;
     const runner = new EpisodeProductionRunner(f.service, f.stores, fake);
-    const batch = f.service.startBatch("ep", { runId: "run", idempotencyKey: "run", expectedRevision: f.service.get("ep").revision, version: 1, targets: ["frame:SH001"] });
+    const batch = f.service.startBatch("ep", { inputBasis: "published", runId: "run", idempotencyKey: "run", expectedRevision: f.service.get("ep").revision, version: 1, targets: ["frame:SH001"] });
     await runner.runBatch("ep", batch.runId);
     assert.equal(calls.length, 1, f.service.getBatch("ep", "run")?.error || "must submit once");
-    assert.deepEqual(calls[0].params?.productionImageInput, input);
-    f.service.pauseBatch("ep", "run"); await runner.runBatch("ep", "run");
+    assert.deepEqual(calls[0].references?.map(ref => ref.storageKey), input.references.map((ref: any) => ref.storageKey));
+    await runner.runBatch("ep", "run");
     assert.equal(calls.length, 1);
 });
 
-test("reference removal rewrites the formal draft atomically, invalidates receipts and preserves published and frozen task data", t => {
+test("reference removal edits the canvas atomically and preserves director baselines and frozen tasks", t => {
     const f = fixture(t), before = f.service.get("ep"), input = f.input(), frozen = structuredClone(input);
     const task = f.stores.tasks.create("frozen", "canvas-image", { params: { productionImageInput: frozen } }, {});
     const edge = (f.project().connections as any[]).find(edge => edge.fromNodeId === "NEIGHBOR" && edge.toNodeId === input.sourceNodeId);
     const request = [{ type: "delete_connections", id: edge.id }], revision = Number(f.project().revision);
     const receipt = f.db.applyCanvasProjectOperations("canvas", revision, request, { operationId: "remove-neighbor" });
     const current = f.service.get("ep"), d = current.draft.director!;
-    assert.equal(current.revision, before.revision + 1);
-    assert.equal(d.artifacts[0].status, "stale"); assert.equal(f.input().stale, true);
-    assert.deepEqual((d.source.asset_cards as any[])[0].references.map((ref: any) => ref.asset_id), f.names.filter(id => id !== "NEIGHBOR"));
+    assert.equal(current.revision, before.revision);
+    assert.equal(d.artifacts[0].status, "ready"); assert.ok(!f.input().stale);
+    assert.deepEqual((d.source.asset_cards as any[])[0].references.map((ref: any) => ref.asset_id), f.names);
     assert.deepEqual(current.published, before.published);
     assert.deepEqual(f.stores.tasks.get(task.id)!.input.params, { productionImageInput: frozen });
     assert.deepEqual(receipt.operations.filter((op: any) => op.type === "update_node").map((op: any) => op.id).sort(), ["frame", input.sourceNodeId].sort());
     assert.equal(f.db.applyCanvasProjectOperations("canvas", revision, request, { operationId: "remove-neighbor" }).duplicated, true);
     assert.equal(f.service.get("ep").revision, current.revision);
     const fakeReady = structuredClone(d); fakeReady.artifacts[0].references = fakeReady.artifacts[0].references.filter(ref => ref.nodeId !== "NEIGHBOR");
-    assert.throws(() => assertImageReferenceCoverage(fakeReady, fakeReady.artifacts[0]), /未完整登记并传入/);
+    assert.throws(() => assertImageReferenceCoverage(fakeReady, fakeReady.artifacts[0]), /遗漏正式依赖参考/);
 });
 
-test("reordering writes card numbering and dependencies; invalid additions and forged manifests rollback", t => {
+test("reordering uses current canvas references; missing media blocks generation and forged manifests rollback", t => {
     const f = fixture(t), input = f.input(), project = f.project();
     const edges = (project.connections as any[]).filter(edge => edge.toNodeId === input.sourceNodeId);
     const order = ["SHUANZI", "CUIZI", "NEIGHBOR", "COURTYARD", "STYLE"];
     f.db.applyCanvasProjectOperations("canvas", Number(project.revision), [{ type: "delete_connections", ids: edges.map(edge => edge.id) }, ...order.map((fromNodeId, index) => ({ type: "connect_nodes", fromNodeId, toNodeId: input.sourceNodeId, order: index }))], { operationId: "order" });
     const d = f.service.get("ep").draft.director!, refs = (d.source.asset_cards as any[])[0].references;
-    assert.deepEqual(refs.map((ref: any) => [ref.image, ref.asset_id]), order.map((id, i) => [i + 1, id]));
+    assert.deepEqual(refs.map((ref: any) => [ref.image, ref.asset_id]), f.names.map((id, i) => [i + 1, id]));
+    assert.deepEqual(f.service.canvasExecution("ep", ["frame:SH001"]).targets[0].command.references?.map(ref => ref.sourceNodeId), order);
     const stable = JSON.stringify(f.project()), formal = JSON.stringify(f.service.get("ep"));
-    assert.throws(() => f.db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "unknown", nodeType: "image" }, { type: "connect_nodes", fromNodeId: "unknown", toNodeId: input.sourceNodeId }]), /必须先登记并批准/);
-    assert.equal(JSON.stringify(f.project()), stable); assert.equal(JSON.stringify(f.service.get("ep")), formal);
+    f.db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "unknown", nodeType: "image" }, { type: "connect_nodes", fromNodeId: "unknown", toNodeId: input.sourceNodeId }]);
+    assert.equal(f.service.canvasExecution("ep", ["frame:SH001"]).blockedTargets.length, 1);
+    assert.equal(JSON.stringify(f.service.get("ep")), formal);
     assert.throws(() => f.db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "frame", metadata: { productionImageInput: { ...f.input(), references: [] } } }]), /不能直接修改/);
 });
 
@@ -165,7 +190,7 @@ test("new approved media versions refresh only the projection and preserve froze
     assert.throws(() => verifyImageInput(f.project(), old.published!.director!, old.published!.director!.artifacts[0], "frame"), /正式编译不一致/);
 });
 
-test("legacy prompt differences preserve approved history and do not block unrelated edits, while generation stays blocked", t => {
+test("legacy prompt differences preserve history, accept a director baseline, and generate saved edits", t => {
     const f = fixture(t), input = f.input(), original = f.service.get("ep");
     f.db.applyCanvasProjectOperations("canvas", undefined, ["frame", input.sourceNodeId].map(id => ({ type: "update_node", id,
         metadata: { prompt: "Existing manually revised prompt" }, metadataDelete: ["productionImageInput"] })), { runtimeWrite: true });
@@ -174,7 +199,7 @@ test("legacy prompt differences preserve approved history and do not block unrel
         ops: [{ type: "set_director_workflow", patch: { agentThreadId: "new-conversation" } }] });
     assert.equal(changed.draft.director!.workflow.agentThreadId, "new-conversation");
     assert.deepEqual(changed.published, original.published);
-    assert.deepEqual(f.project(), project, "an unrelated edit must not rewrite or discard legacy canvas prompts");
-    assert.throws(() => f.service.validateExecution("ep", 1, ["FRAME"]), /参考清单与正式编译不一致/);
+    for (const id of ["frame", input.sourceNodeId]) assert.equal((f.project().nodes as any[]).find(node => node.id === id).metadata.prompt, "Existing manually revised prompt");
+    assert.equal(f.service.canvasExecution("ep", ["frame:SH001"]).targets[0].command.prompt, "Existing manually revised prompt");
     assert.equal(f.stores.tasks.list().length, 0);
 });

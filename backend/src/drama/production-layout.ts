@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { readH3Layout } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { canonicalProduction, productionLayoutPlanSchema, productionSceneEntries, type EpisodeProductionData, type ProductionLayoutPlan, type ProductionLayoutUnit } from "@basketikun/canvas-agent/drama/production-contract";
 import { productionScriptNodes } from "./script-nodes.js";
 import { productionNodePosition, productionLayoutStableId, productionSharedProjectionNodeId, type Position } from "./production-layout-geometry.js";
@@ -19,7 +20,7 @@ export function productionSceneIdsForShots(scenes: ReturnType<typeof productionS
 
 type Node = Record<string, any>;
 type Owner = { kind: "episode" | "canvas" | "scene"; id: string };
-type Input = { canvasId: string; owner: Owner; production: EpisodeProductionData; project: Record<string, any>; previous?: ProductionLayoutPlan | null };
+type Input = { canvasId: string; owner: Owner; production: EpisodeProductionData; project: Record<string, any>; previous?: ProductionLayoutPlan | null; h3Defaults?: Record<string, unknown> };
 type Member = ProductionLayoutUnit["members"][number];
 type DraftUnit = { id: string; area: ProductionLayoutUnit["area"]; targets: string[]; sceneId?: string; bounds: { position: Position; size: { width: number; height: number } }; members: Member[]; status?: ProductionLayoutUnit["status"] };
 const obj = (value: unknown): Record<string, any> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {};
@@ -29,10 +30,17 @@ const size = (value: unknown, fallback: number) => Number.isFinite(Number(value)
 const category = (kind: string) => { const key = kind.toLocaleLowerCase(); return /(style|风格)/.test(key) ? 0 : /(character|wardrobe|outfit|costume|角色|服装)/.test(key) ? 1 : /(scene|环境|场景)/.test(key) ? 2 : /(prop|道具)/.test(key) ? 3 : 4; };
 
 /** Pure whole-production layout compiler. It neither writes nodes nor submits media. */
-export function compileProductionLayout({ canvasId, owner, production, project, previous }: Input): ProductionLayoutPlan {
+export function compileProductionLayout({ canvasId, owner, production, project, previous, h3Defaults }: Input): ProductionLayoutPlan {
     const director = production.director;
     const nodes = arr(project.nodes), nodeById = new Map(nodes.map(node => [String(node.id), node]));
     const oldUnits = new Map((previous?.units || []).map(unit => [unit.id, unit]));
+    const layout = readH3Layout(h3Defaults?.layout);
+    // Existing nodes and reserved plans stay fixed; only new slots inherit saved defaults.
+    const videoSize = (nodeId: string) => {
+        const node = nodeById.get(nodeId);
+        const reserved = oldUnits.get(`video:${nodeId}`)?.members.find(member => member.nodeId === nodeId)?.size;
+        return { width: size(node?.width, reserved?.width ?? layout.width ?? 1960), height: size(node?.height, reserved?.height ?? layout.height ?? 1080) };
+    };
     const diagnostics: ProductionLayoutPlan["diagnostics"] = [];
     const units = new Map<string, DraftUnit>(), activeIds = new Set<string>();
     const plan = arr(director?.source.asset_plan);
@@ -135,12 +143,11 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
         const frameBottomOffset = frameShots.length ? framesTopOffset + Math.ceil(frameShots.length / 3) * 1000 + 780 : framesTopOffset;
         const videoTopOffset = frameBottomOffset + 120;
         const videoHeights = (videoNodesByScene.get(scene.id) || []).map(nodeId => {
-            const node = nodeById.get(nodeId);
-            return size(node?.height, 1080);
+            return videoSize(nodeId).height;
         });
         const videoStackHeight = videoHeights.reduce((total, videoHeight) => total + videoHeight, 0) + Math.max(0, videoHeights.length - 1) * 100;
         const height = Math.max(900, videoHeights.length ? videoTopOffset + videoStackHeight + 80 : frameBottomOffset + 80, sceneScripts.length ? 70 + sceneScripts.length * 380 + 80 : 0);
-        const width = Math.max(2160, ...((videoNodesByScene.get(scene.id) || []).map(nodeId => size(nodeById.get(nodeId)?.width, 1960) + 80)));
+        const width = Math.max(2160, ...((videoNodesByScene.get(scene.id) || []).map(nodeId => videoSize(nodeId).width + 80)));
         const requiredGroupSize = { width: Math.max(width, size(groupNode?.width, width)), height: Math.max(height, size(groupNode?.height, height)) };
         sceneGeometry.set(scene.id, { position: groupPosition, height: requiredGroupSize.height, width: requiredGroupSize.width, framesTopOffset, videoTopOffset, videoNodeHeights: videoHeights });
         const sceneUnit = createUnit(`scene:${scene.id}`, "scene", [`scene:${scene.id}`], scene.id, groupPosition, requiredGroupSize,
@@ -179,9 +186,9 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
         const geometry = sceneId ? sceneGeometry.get(sceneId) : undefined;
         const sceneVideoIds = sceneId ? videoNodesByScene.get(sceneId) || [] : [];
         const videoIndex = sceneVideoIds.indexOf(nodeId);
-        const heightBefore = sceneVideoIds.slice(0, videoIndex).reduce((total, priorNodeId) => total + size(nodeById.get(priorNodeId)?.height, 1080) + 100, 0);
-        const position = existing?.position || (geometry ? { x: geometry.position.x + 40, y: geometry.position.y + geometry.videoTopOffset + heightBefore } : { x: 0, y: sceneY + index * 1240 });
-        const width = size(existing?.width, 1960), height = size(existing?.height, 1080);
+        const heightBefore = sceneVideoIds.slice(0, videoIndex).reduce((total, priorNodeId) => total + videoSize(priorNodeId).height + 100, 0);
+        const position = existing?.position || (geometry ? { x: geometry.position.x + 40, y: geometry.position.y + geometry.videoTopOffset + heightBefore } : { x: 0, y: sceneY + videoNodeIds.slice(0, index).reduce((total, priorNodeId) => total + videoSize(priorNodeId).height + 160, 0) });
+        const { width, height } = videoSize(nodeId);
         const targets = videoGroups.filter(item => item.nodeId === nodeId).map(item => `segment:${item.group.id}`);
         createUnit(`video:${nodeId}`, "video", targets, sceneId, position, { width, height }, [{ role: "video", nodeId, nodeType: "minimax-h3:video", position, size: { width, height } }]);
     }

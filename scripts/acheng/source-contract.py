@@ -28,11 +28,18 @@ def is_scope(value):
 def contract():
     prose = {"type": "string", "minLength": 3, "pattern": r"^(?!\s*(?:TBD|TODO|unknown|待填|示例|\.\.\.|…|N/A)\s*$).+", "description": "At least three trimmed characters; concrete content, no placeholder."}
     return {
-        "contractVersion": "2", "ref2vaMaximumWords": None,
+        "contractVersion": "2", "ref2vaMaximumWords": None, "scopedCompilation": True,
         "jsonSchema": {"type": "object", "properties": {
             "segments": {"type": "array", "items": {"type": "object", "properties": {
                 "mode": {"type": "string", "enum": list(MODES)}, "mode_lock": {"type": "string", "enum": list(MODES)}, "mode_selection_reason": prose}, "required": ["mode", "mode_lock", "mode_selection_reason"]}},
-            "asset_cards": {"type": "array", "items": {"type": "object", "properties": {"recipe": {"type": "string", "enum": list(RECIPES)}}, "required": ["recipe"]}},
+            "asset_cards": {"type": "array", "items": {"type": "object", "properties": {
+                "recipe": {"type": "string", "enum": list(RECIPES)},
+                "view_layout": {"type": "object", "properties": {
+                    "selection": {"type": "string", "enum": ["user_explicit"]},
+                    "selection_reason": prose,
+                    "type": {"type": "string", "enum": ["four_view_character_turnaround", "four_view_creature_turnaround"]},
+                }},
+            }, "required": ["recipe"]}},
             "style_lock": {"type": "object", "properties": {field: {"type": "array", "minItems": 1, "items": prose} for field in ("preserve_scope", "exclude_scope")}, "required": ["preserve_scope", "exclude_scope"]}}},
         "relationships": ["segments[].mode_lock must equal mode", "Full creative and file contracts remain owned by Acheng audit/compiler; this schema covers Canvas source fields."],
         "templates": {"segment": {"mode": "Ref2VA", "mode_lock": "Ref2VA", "mode_selection_reason": "Use approved identity and scene references."}, "asset_card": {"recipe": "portrait"}, "style_scope": {"preserve_scope": ["Preserve the approved lighting and palette."], "exclude_scope": ["Do not copy the anchor subject identity."]}},

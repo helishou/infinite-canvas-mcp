@@ -17,20 +17,21 @@ def diagnose(runtime, source):
     issues = []
     seen = set()
 
-    def add(message, path, target=None, code="COMPILE_SOURCE_INVALID", severity="error"):
+    def add(message, path, target=None, code="COMPILE_SOURCE_INVALID", severity="error", example=None):
         key = (code, path, str(message))
         if key in seen:
             return
         seen.add(key)
         issues.append({"code": code, "path": "director.source." + path,
                        **({"targetId": target} if target else {}), "message": str(message),
-                       "severity": severity, "nextAction": {"action": "correct_source", "message": "补齐此字段或绑定后重新预检；不要原样重试编译。"}})
+                       "severity": severity, **({"example": example} if example is not None else {}),
+                       "nextAction": {"action": "correct_source", "message": "补齐此字段或绑定后重新预检；不要原样重试编译。"}})
 
-    def check(callback, path, target=None):
+    def check(callback, path, target=None, example_for_error=None):
         try:
             callback()
         except (ContractError, ValueError, TypeError, KeyError, IndexError, AttributeError, OSError, ZeroDivisionError) as error:
-            add(error, path, target)
+            add(error, path, target, example=example_for_error(str(error)) if example_for_error else None)
 
     if source.get("segments"):
         if not isinstance(source["segments"], list):
@@ -75,7 +76,8 @@ def diagnose(runtime, source):
             if not isinstance(node.get("version"), str) or not node["version"].strip():
                 add("资产版本不能为空", f"asset_plan.{index}.version", target)
             if not asset_plan.prose(node.get("purpose")):
-                add("资产用途缺失或不完整", f"asset_plan.{index}.purpose", target)
+                add("资产用途缺失或不完整", f"asset_plan.{index}.purpose", target,
+                    example={"purpose": "锁定此资产的身份、形态与材质，为后续镜头提供一致参考。"})
         if plans:
             check(lambda: asset_plan.check_asset_plan(source, base), "asset_plan")
     check(lambda: style_anchor.check_style_lock(source, base), "style_lock")
@@ -105,8 +107,27 @@ def diagnose(runtime, source):
             add("资产提示词卡必须为对象", f"asset_cards.{index}")
             continue
         target = str(card.get("id") or "")
+        def prompt_example(message):
+            refs = card.get("references", [])
+            if message == "reference_policy must explicitly be none or required" and isinstance(refs, list):
+                return {"reference_policy": "required" if refs else "none"}
+            if isinstance(refs, list):
+                for slot, ref in enumerate(refs, 1):
+                    if not isinstance(ref, dict):
+                        continue
+                    examples = {
+                        "subject": "该槽位已登记的资产主体与视觉特征",
+                        "preserve": "仅继承此参考明确登记的外观与材质特征",
+                        "exclude": "不继承参考构图、动作及未登记的主体身份",
+                    }
+                    for field, value in examples.items():
+                        if message == f"reference image {slot}: {field} description required":
+                            repaired = copy.deepcopy(refs)
+                            repaired[slot - 1][field] = value
+                            return {"references": repaired}
+            return None
         check(lambda: asset_plan.resolve_card(card, source, base, True), f"asset_cards.{index}.references", target)
-        check(lambda: render_asset_prompt(card, source.get("prompt_bindings"), source.get("style_lock")), f"asset_cards.{index}.prompt", target)
+        check(lambda: render_asset_prompt(card, source.get("prompt_bindings"), source.get("style_lock")), f"asset_cards.{index}.prompt", target, prompt_example)
         if anchor_id and isinstance(plans, list):
             scoped = copy.deepcopy(source)
             scoped["asset_plan"] = [node for node in plans if isinstance(node, dict) and node.get("id") in (anchor_id, target)]

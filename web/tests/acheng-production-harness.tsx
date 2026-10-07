@@ -71,6 +71,7 @@ const initialReadiness: ProductionReadiness = {
 function Harness() {
   const [director, setDirector] = useState(initial), [production, setProduction] = useState(initialProduction), [readiness, setReadiness] = useState(initialReadiness);
   const [sourceDrafts, setSourceDrafts] = useState<Record<string, string>>({});
+  const [focusTarget, setFocusTarget] = useState<string>();
   const [dark, setDark] = useState(false), [locale, setLocale] = useState("zh-CN"), [workspace, setWorkspace] = useState<DirectorWorkspace>("overview");
   const [saves, setSaves] = useState(0), [published, setPublished] = useState(0), [asks, setAsks] = useState(0);
   const [exporting, setExporting] = useState(false);
@@ -120,16 +121,17 @@ function Harness() {
   };
   return <ConfigProvider theme={{ algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm }}><App><main className="p-6">
     <div className="mb-4 flex gap-2"><button onClick={() => setDark(!dark)}>theme</button><button onClick={() => { const next = locale === "zh-CN" ? "en-US" : "zh-CN"; setLocale(next); void i18n.changeLanguage(next); }}>language</button></div>
+    <button onClick={() => { setWorkspace("production"); setFocusTarget("segment:SEG1"); }}>Edit Clip style</button>
     <nav className="mb-4 flex flex-wrap gap-2">{(["overview", "story", "assets", "shots", "continuity", "production", "advanced"] as DirectorWorkspace[]).map(key => <button key={key} onClick={() => setWorkspace(key)}>{i18n.t(`director.workspace.tab.${key}`)}</button>)}</nav>
     <DirectorPanel
-      workspace={workspace} director={director} production={production} readiness={readiness} continuityReport={continuityReport} run={activeRun} batches={batches}
-      canvasNodes={[{ id: "image-style", title: "STYLE_MOTHER output", type: "image" }, { id: "image-frame", title: "Keyframe output", type: "image" }]}
+      workspace={workspace} focusTarget={focusTarget} compact={Boolean(focusTarget)} director={director} production={production} readiness={readiness} continuityReport={continuityReport} run={activeRun} batches={batches}
+      canvasNodes={[{ id: "h3-node", type: "minimax-h3:video", metadata: { segments: [{ id: "segment-1", styleTemplateId: "soft-light" }] } }, { id: "image-style", title: "STYLE_MOTHER output", type: "image" }, { id: "image-frame", title: "Keyframe output", type: "image" }]}
       legacy={[{ source: "script.md", sha256: hash, text: "旧剧本文本：完整台词和历史事实。" }]} versions={[{ version: 1, stage: "director", createdAt: new Date(0).toISOString() }]}
       busy={false} canvasId="fixture" canvasRole="episode" onOpenSharedAsset={() => undefined} onPromoteExistingSharedAsset={() => setAsks(n => n + 1)} sourceDrafts={sourceDrafts} runStartPending={false} activeTargetIds={[...new Set(batches.filter(item => ["pending", "running", "paused", "awaiting_review"].includes(item.status)).flatMap(item => item.targets))]}
       briefDraft={String(director.source.brief || "")} onBriefDraftChange={brief => { updateDirector({ ...director, source: { ...director.source, brief } }); }}
       onSourceDraftChange={(key, value) => setSourceDrafts(current => { if (value === undefined) { const next = { ...current }; delete next[key]; return next; } return { ...current, [key]: value }; })}
       onBrief={brief => updateDirector({ ...director, source: { ...director.source, brief } })}
-      onPatch={patch} onRegroup={regroup} onWorkflow={workflow => updateDirector({ ...director, workflow: { ...director.workflow, ...workflow } })}
+      onPatch={patch} onAdoptClipStyle={async (id, styleTemplateId) => { patch("segment", id, { styleTemplateId }); return true; }} onRegroup={regroup} onWorkflow={workflow => updateDirector({ ...director, workflow: { ...director.workflow, ...workflow } })}
       onBindAsset={(assetId, nodeId) => updateDirector({ ...director, assets: { ...director.assets, [assetId]: { ...(director.assets[assetId] || { version: "v1", status: "planned" as const }), nodeId } } })}
       onBoundary={boundary => updateDirector({ ...director, boundaries: [...boundaries.filter(item => item.from !== boundary.from), boundary] })}
       onSaveContinuity={async (ledger, preview) => { if (preview) return false; updateDirector({ ...director, source: { ...director.source, ledger } }); return true; }}
@@ -142,7 +144,7 @@ function Harness() {
       onStart={targets => setBatches([{ runId: "fixture-run", episodeId: "fixture", version: 1, sourceRevision: 4, idempotencyKey: "fixture-run", status: "pending", targets, plan: { changedSceneIds: [], affectedShotIds: [], imageShotIds: [], clipGroupIds: targets.map(id => id.replace("segment:", "")), missingAssetNodeIds: [] }, engine: director.engine, settings: {}, submitted: [], error: null, pauseRequested: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }])}
       onPause={runId => setBatches(current => current.map(item => item.runId === runId ? { ...item, status: "paused" } : item))}
       onResume={runId => setBatches(current => current.map(item => item.runId === runId ? { ...item, status: "pending" } : item))}
-      onRestore={() => setSaves(n => n + 1)} onRefresh={() => setSaves(n => n + 1)}
+      onSceneCommand={async () => { setSaves(n => n + 1); }} onRestore={() => setSaves(n => n + 1)} onRefresh={() => setSaves(n => n + 1)}
     />
     <output aria-label="evidence">{JSON.stringify({ saves, published, asks, director, production, readiness, batches, continuityReport })}</output>
   </main></App></ConfigProvider>;

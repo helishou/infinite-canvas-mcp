@@ -13,10 +13,44 @@ function director(source: Record<string, any>): DirectorProduction {
 }
 const styleSource = () => JSON.parse(fs.readFileSync(path.join(resolveAchengEngine().path, "templates", "style-anchor-stage.json"), "utf8"));
 
+test("purpose and reference policy examples repair the same pinned source without changing it", () => {
+    for (const field of ["purpose", "reference_policy"] as const) {
+        const source = styleSource();
+        if (field === "purpose") delete source.asset_plan[0].purpose;
+        else delete source.asset_cards[0].reference_policy;
+        const input = director(source), before = structuredClone(input);
+        const result = preflightCompilationDirector(input);
+        const issue = result.diagnostics.find(item => field === "purpose" ? item.path.endsWith(".purpose") : item.message.includes("reference_policy must explicitly")) as any;
+        assert.ok(issue?.example, JSON.stringify(result.diagnostics));
+        assert.deepEqual(input, before);
+        const repaired = structuredClone(source);
+        Object.assign(field === "purpose" ? repaired.asset_plan[0] : repaired.asset_cards[0], issue.example);
+        assert.equal(preflightCompilationDirector(director(repaired)).compileReady, true);
+    }
+});
+
 test("story-only source is diagnosed as not yet compilable without launching a compiler", () => {
     const result = preflightCompilationDirector(director({ brief: "A story still being written", script_scenes: [], asset_cards: [] }));
     assert.equal(result.compileReady, false);
     assert.ok(result.diagnostics.some(item => item.code === "COMPILE_STAGE_NOT_READY"));
+});
+
+test("reference description examples retain declared asset identity, version and upload order", () => {
+    const source = styleSource();
+    source.asset_plan.push({ id: "ROOM", kind: "scene", version: "v1.0", purpose: "Lock the documented room geometry.", status: "planned", depends_on: ["STYLE_MOTHER"] });
+    source.asset_cards.push({ ...structuredClone(source.asset_cards[0]), id: "ROOM", asset_kind: "scene", recipe: "dark", reference_policy: "required",
+        references: [{ image: 1, asset_id: "STYLE_MOTHER", asset_version: source.asset_plan[0].version, role: "style", subject: "approved rendering medium", preserve: "palette and material response", exclude: "identity and composition" }] });
+    for (const field of ["subject", "preserve", "exclude"]) {
+        const broken = structuredClone(source); delete broken.asset_cards[1].references[0][field];
+        const input = director(broken), before = structuredClone(input), result = preflightCompilationDirector(input);
+        const issue = result.diagnostics.find(item => item.message === "reference image 1: " + field + " description required") as any;
+        assert.ok(issue?.example);
+        assert.deepEqual(input, before);
+        Object.assign(broken.asset_cards[1], issue.example);
+        const ref = broken.asset_cards[1].references[0];
+        assert.equal(ref.asset_id, "STYLE_MOTHER"); assert.equal(ref.asset_version, source.asset_plan[0].version); assert.equal(ref.image, 1);
+        assert.equal(preflightCompilationDirector(director(broken)).compileReady, true);
+    }
 });
 
 test("pinned asset validators collect plan fields and style binding defects together", () => {

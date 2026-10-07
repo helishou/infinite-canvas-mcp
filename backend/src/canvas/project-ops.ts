@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { compactH3SegmentStarts } from "@basketikun/canvas-agent/runtime-fields";
 import { characterReferenceUpdates, h3CharacterSourceFromNode, referenceBindingsOf, syncH3CharacterGroupSource } from "@basketikun/canvas-agent/reference-contract";
 
 export type CanvasOperation = Record<string, unknown> & { type: string };
@@ -389,6 +390,12 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             for (const key of allowed) if (key in patch) project[key] = patch[key];
         } else {
             throw new Error(`未知画布操作：${operation.type}`);
+        }
+        const timelineNode = nodes.find((node) => String(node.id) === String(operation.nodeId || operation.id || ""));
+        if (isH3CanvasNode(timelineNode) && Array.isArray(recordOf(timelineNode!.metadata).segments)) {
+            const metadata = recordOf(timelineNode!.metadata);
+            metadata.segments = compactH3SegmentStarts(segmentsOf(timelineNode!), metadata.duration);
+            timelineNode!.metadata = metadata;
         }
         results.push(result);
         results.push(...derived.map((operation) => ({ type: operation.type, ok: true })));

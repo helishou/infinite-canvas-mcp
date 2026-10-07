@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { Badge, Button, Modal, Tooltip } from "antd";
-import { Bell, BellOff, LoaderCircle, MessageSquare, X } from "lucide-react";
+import { Bell, BellOff, LoaderCircle, LocateFixed, MessageSquare, X } from "lucide-react";
 import { useConfirmationReminders } from "./use-confirmation-reminders";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -81,6 +81,15 @@ export function AgentPanel() {
             aria-label={t("confirmationReminders.button")} aria-pressed={reminders.enabled}
             icon={reminders.enabled ? <Bell className="size-3.5" /> : <BellOff className="size-3.5" />} onClick={() => void reminders.toggle()} />
     </Tooltip>;
+    const progressControl = <Tooltip title={t(followTarget?.kind && followTarget.id ? "productionCanvas.returnToAgentNodeHint" : "productionCanvas.noAgentTarget")} placement="bottom">
+        <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8"
+            aria-label={t("productionCanvas.returnToAgentNode")} disabled={!followTarget?.kind || !followTarget.id}
+            icon={<LocateFixed className="size-3.5" />} onClick={() => {
+                closePanel();
+                useProductionFollowStore.getState().resume();
+            }} />
+    </Tooltip>;
+    const headerControls = <>{reminderControl}{progressControl}</>;
     return <>
         <div className="fixed bottom-4 right-4 z-[80] flex max-w-[calc(100vw-32px)] flex-col items-end gap-2" data-canvas-shortcuts-ignore>
             {homePage && !chatOpen && !welcomeDismissed && <div data-director-welcome-bubble className="relative flex max-w-[calc(100vw-32px)] items-center gap-1 rounded-xl border px-2 py-1.5 shadow-sm" style={{ background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }}>
@@ -109,8 +118,8 @@ export function AgentPanel() {
                 {followTarget?.kind && followTarget.id && (!following || pending) && <Button type="text" size="small" onClick={() => useProductionFollowStore.getState().resume()}>{t("productionHub.follow.return")}</Button>}
             </div>}
             <div className="flex min-h-0 flex-1 flex-col">
-                <AgentCreativeWelcome active={welcomeOpen} onShowChat={() => setCreativeEntryOpen(false)} onClose={closePanel} headerAction={reminderControl} />
-                <LocalAgentPanel embedded compact headless={!panelMounted || welcomeOpen} autoConnect headerAction={reminderControl} />
+                <AgentCreativeWelcome active={welcomeOpen} onShowChat={() => setCreativeEntryOpen(false)} onClose={closePanel} headerAction={headerControls} />
+                <LocalAgentPanel embedded compact headless={!panelMounted || welcomeOpen} autoConnect headerAction={headerControls} />
             </div>
         </section>
         {owner && <Modal open={objectOpen} forceRender title={t("productionCanvas.object")} onCancel={closePanel} footer={null} width="min(1120px, calc(100vw - 32px))" centered styles={{ body: { maxHeight: "calc(100dvh - 160px)", overflow: "auto" } }}>

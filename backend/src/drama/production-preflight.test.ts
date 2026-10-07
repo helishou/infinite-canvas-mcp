@@ -66,6 +66,28 @@ test("stage-specific checks do not prohibit unfinished planning drafts", t => {
     assert.deepEqual(snapshot(db), before);
 });
 
+test("target edits report the original occupying run and tasks before changing source, while unrelated Clips remain editable", t => {
+    const { db, service } = fixture(t);
+    const source = { shots: [{ id: "s1" }, { id: "s2" }], segments: [{ id: "seg1", shot_ids: ["s1"], mode: "T2VA" }, { id: "seg2", shot_ids: ["s2"], mode: "T2VA" }] };
+    const director: DirectorProduction = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "fixture", runtimeId: "fixture", version: "fixture" }, source, sourceHash: directorHash(source), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
+    service.edit("episode", { operationId: "seed-occupied", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
+    db.db.prepare("INSERT INTO episode_production_batches (run_id,episode_id,idempotency_key,request_hash,version,source_revision,status,targets_json,plan_json,engine_json,settings_json,submitted_json,pause_requested,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+        .run("original-run", "episode", "original-key", "hash", 1, 1, "running", '["segment:seg1"]', '{}', '{}', '{}', JSON.stringify([{ kind: "h3", id: "seg1", taskId: "exact-task" }]), 0, "now", "now");
+    const original = service.get("episode");
+    const request = { operationId: "blocked-edit", expectedRevision: original.revision, ops: [{ type: "patch_director_source", entity: "segment", id: "seg1", patch: { styleTemplateId: "soft-light" } }] };
+    const checked = service.preflight("episode", { action: "edit", request });
+    assert.equal(checked.valid, false);
+    assert.equal(checked.diagnostics[0].code, "TARGET_OCCUPIED");
+    assert.deepEqual(checked.diagnostics[0].blockingRun?.taskIds, ["exact-task"]);
+    assert.equal(checked.nextActions?.[0].input?.runId, "original-run");
+    assert.equal(service.targetOccupancy("episode", ["seg1"])[0].runId, "original-run");
+    assert.throws(() => service.edit("episode", request), /original-run/);
+    assert.deepEqual(service.get("episode"), original);
+    const unrelated = service.edit("episode", { operationId: "other-clip", expectedRevision: original.revision, ops: [{ type: "patch_director_source", entity: "segment", id: "seg2", patch: { styleTemplateId: "soft-light" } }] });
+    assert.equal(unrelated.revision, original.revision + 1);
+    assert.equal(service.edit("episode", { operationId: "other-clip", expectedRevision: original.revision, ops: [{ type: "patch_director_source", entity: "segment", id: "seg2", patch: { styleTemplateId: "soft-light" } }] }).replayed, true);
+});
+
 test("offline and Backend share the activated engine source diagnostics", t => {
     const contract = getProductionContract();
     if (!contract.sourceContract) return t.skip("Activate the versioned Canvas source contract to run this integration check");

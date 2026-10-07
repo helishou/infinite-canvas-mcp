@@ -17,6 +17,8 @@ import { H3ExecutionQueue, h3CanResumeQueued } from "./runtime/h3-queue.js";
 import { VideoConcatBackend } from "./runtime/video-concat.js";
 import { registerAgentRuntimeRoutes } from "./server/agent-runtime-routes.js";
 import { createAgentRuntime } from "@basketikun/canvas-agent/runtime/agent-runtime";
+import { LlmAgent, isLlmThread } from "@basketikun/canvas-agent/agent/llm";
+import { ProductionAgentPool } from "@basketikun/canvas-agent/agent/production";
 import { WorkflowStore } from "./workflows/store.js";
 import { WorkflowExecutor } from "./workflows/executor.js";
 import { WorkflowModelCatalog } from "./workflows/model-catalog.js";
@@ -228,11 +230,18 @@ async function startBackendHttpServer() {
   );
   registerCanvasGenerationRoutes(app, canvasGeneration);
   const episodeProduction = new EpisodeProductionService(runtime.db, runtime.events);
+  const productionLlm = new LlmAgent(runtime.stores.settings, config.url, config.token);
+  const productionAgents = new ProductionAgentPool(undefined, {
+    canRun: request => request.threadId ? isLlmThread(request.threadId) : Boolean(request.model?.includes("::")),
+    run: request => productionLlm.structured(request),
+  }, (model, threadId) => productionLlm.nativeWorkerModel(model, threadId));
+  process.once("exit", () => productionAgents.stop());
+  app.get("/production/worker-status", (_req, res) => res.json({ ok: true, busy: productionAgents.busy }));
   const episodeProductionRunner = new EpisodeProductionRunner(episodeProduction, runtime.stores, canvasGeneration);
-  registerDramaProductionRoutes(app, episodeProduction, episodeProductionRunner);
+  registerDramaProductionRoutes(app, episodeProduction, episodeProductionRunner, undefined, runtime.events, productionAgents);
   const canvasProduction = new EpisodeProductionService(runtime.db, runtime.events, undefined, true);
   const canvasProductionRunner = new EpisodeProductionRunner(canvasProduction, runtime.stores, canvasGeneration);
-  registerDramaProductionRoutes(app, canvasProduction, canvasProductionRunner, "/canvas/projects/:episodeId/production");
+  registerDramaProductionRoutes(app, canvasProduction, canvasProductionRunner, "/canvas/projects/:episodeId/production", runtime.events, productionAgents);
   const nativeProductionGeneration = new NativeProductionGeneration(runtime.db, runtime.stores, episodeProduction, canvasProduction, runtime.events);
   nativeProductionGeneration.start();
   canvasGeneration.observeProduction(nativeProductionGeneration);
@@ -259,6 +268,7 @@ async function startBackendHttpServer() {
   const agent = createAgentRuntime({
     backendUrl: config.url,
     backendToken: config.token,
+    settings: runtime.stores.settings,
   });
   runtime.agent = agent;
   app.use("/agent", agent.app);

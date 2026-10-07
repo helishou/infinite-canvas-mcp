@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test, { type TestContext } from "node:test";
 import express from "express";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -137,6 +140,34 @@ test("real HTTP Clip result lookup rejects the other Clip's exact task or storag
     assert.deepEqual(payload(correct).result.identity, { projectId: "hardening", nodeId: "h3", segmentId: "A", taskId: "task-A", storageKey: "video:A" });
     assert.equal(payload(correct).result.media.url, "/media/video%3AA");
     assert.equal(f.writes.length, 0);
+});
+
+test("restored scene Clips read an archived video through its exact source task and keep history visible", async (t) => {
+    const f = await fixture(t), sourceNodeId = "archive-h3", storageKey = "video:archived-scene-result";
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "h3-archive-result-")), filePath = path.join(directory, "archived.mp4");
+    fs.writeFileSync(filePath, "verified archived video");
+    f.db.upsertMediaFile({ storageKey, filePath, mimeType: "video/mp4", bytes: fs.statSync(filePath).size, width: 16, height: 9, durationMs: 4000, createdAt: new Date().toISOString() });
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const task = f.db.createTask("task-archived-scene", "comfyui:minimax-h3", { projectId: "hardening", nodeId: sourceNodeId, segmentId: "A" }, { canvasBinding: { projectId: "hardening", nodeId: sourceNodeId, segmentId: "A" } });
+    f.db.updateTask(task.id, { status: "succeeded", progress: 1, result: { media: [{ storageKey, mimeType: "video/mp4" }] } });
+    const log = f.db.createGenerationLog({ projectId: "hardening", nodeId: sourceNodeId, segmentId: "A", status: "success", platform: "h3", model: "fixture", runtimeTaskId: task.id, references: [], inputCounts: {}, startedAt: new Date().toISOString(), durationMs: 0, outputs: [{ storageKey, mimeType: "video/mp4" }], params: {} });
+    const project = f.db.getCanvasProject("hardening")!;
+    f.db.applyCanvasProjectOperations("hardening", Number(project.revision), [
+        { type: "add_node", id: sourceNodeId, nodeType: "minimax-h3:video", position: { x: 800, y: 0 }, width: 400, height: 300,
+            metadata: { productionArchiveLabel: "旧版 H3 Clips；保留原视频", segments: [{ id: "A", status: "success", result: `/media/${encodeURIComponent(storageKey)}`, resultStorageKey: storageKey }] } },
+        { type: "update_h3_segment", nodeId: "h3", segmentId: "A", patch: {
+            status: "success", progress: 1, runtimeTaskId: "", result: `/media/${encodeURIComponent(storageKey)}`, resultStorageKey: storageKey,
+            results: [{ taskId: task.id, storageKey, mimeType: "video/mp4" }], archivedResultOrigin: { sourceNodeId, sourceSegmentId: "A", generationLogId: log.id, taskId: task.id, storageKey },
+        } },
+    ], { runtimeWrite: true });
+    const read = await f.client.callTool({ name: "h3_get_clip", arguments: { projectId: "hardening", nodeId: "h3", segmentId: "A", include: ["result"] } });
+    assert.notEqual(read.isError, true);
+    assert.deepEqual(payload(read).result.identity, { projectId: "hardening", nodeId: "h3", segmentId: "A", taskId: task.id, storageKey, sourceNodeId, sourceSegmentId: "A", generationLogId: log.id });
+    assert.equal(payload(read).result.media.url, `/media/${encodeURIComponent(storageKey)}`);
+    assert.equal(payload(read).result.currentOutput, true);
+    assert.deepEqual(f.db.getH3NodeMaterials("hardening", "h3").map(item => ({ storageKey: item.storageKey, segmentId: item.segmentId })), [{ storageKey, segmentId: "A" }]);
+    const wrongTask = await f.client.callTool({ name: "h3_get_clip", arguments: { projectId: "hardening", nodeId: "h3", segmentId: "A", include: ["result"], taskId: "wrong-task", storageKey } });
+    assert.equal(wrongTask.isError, true); assert.equal(payload(wrongTask).error.code, "MEDIA_IDENTITY_MISMATCH");
 });
 
 test("real HTTP a shared parent requires a matching Clip event, not a flat/latest output", async (t) => {

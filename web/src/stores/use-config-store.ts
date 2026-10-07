@@ -56,7 +56,7 @@ export type ModelChannel = {
     apiKey: string;
     apiFormat: ApiCallFormat;
     models: ChannelModel[];
-    kind?: "api" | "comfyui";
+    kind?: "api" | "comfyui" | "codex-cli";
 };
 
 export type AiConfig = {
@@ -287,6 +287,7 @@ export function resolveModelWorkflowParams(config: AiConfig, value: string, refe
 
 function isAiConfigReady(config: AiConfig, model: string) {
     const channel = resolveModelChannel(config, model);
+    if (channel.kind === "codex-cli") return Boolean(model.trim());
     if (channel.kind === "comfyui") return Boolean(model.trim() && channel.baseUrl.trim());
     return Boolean(model.trim() && channel.baseUrl.trim() && channel.apiKey.trim());
 }
@@ -540,7 +541,7 @@ export function createModelChannel(channel?: Partial<ModelChannel>): ModelChanne
     return {
         id: channel?.id?.trim() || nanoid(),
         name: channel?.name?.trim() || i18n.t("config.channels.newName"),
-        baseUrl: channel?.baseUrl?.trim() || defaultBaseUrlForApiFormat(apiFormat),
+        baseUrl: channel?.baseUrl?.trim() || (channel?.kind === "codex-cli" ? "" : defaultBaseUrlForApiFormat(apiFormat)),
         apiKey: channel?.apiKey || "",
         apiFormat,
         models: normalizeChannelModels(channel?.models),
