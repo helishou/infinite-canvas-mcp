@@ -5,7 +5,7 @@ import { z } from "zod";
 import { ProductionAgentPool, type ProductionAgentRequest } from "@basketikun/canvas-agent/agent/production";
 import { compilationHash, compilationScopeInput, currentCompilationArtifact, productionReviewHash } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { directorProductionSchema, directorSceneWorkSchema, directorSharedReviewWorkSchema, productionSceneEntries, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
-import { getProductionContract, resolveAchengRuntime } from "@basketikun/canvas-agent/skills/acheng";
+import { getProductionContract, resolveAchengEngine } from "@basketikun/canvas-agent/skills/acheng";
 import { EpisodeProductionService, ProductionConflictError } from "./production.js";
 import { ProductionCompilationService } from "./compilation.js";
 import type { EpisodeProductionRunner } from "./production-runner.js";
@@ -29,8 +29,8 @@ const reviewOutputSchema = { type: "object", additionalProperties: false, proper
 export function mergeSceneSource(current: DirectorProduction, work: SceneWork, raw: unknown) {
     const result = responseSchema.parse(raw);
     if (result.status !== "complete" || result.unresolved.length) return { result };
-    const baseline = compilationScopeInput(current, { sceneId: work.sceneId });
-    if (baseline.inputHash !== work.inputHash) throw new Error("SCENE_INPUT_CHANGED: 场次或共同输入已变化，保留回包并回读后处理");
+    const baseline = compilationScopeInput({ ...current, engine: current.workflow.sceneWorks?.[work.workId]?.inputEngine || work.inputEngine || current.engine }, { sceneId: work.sceneId });
+    if (baseline.inputHash !== work.inputHash && baseline.legacyInputHash !== work.inputHash) throw new Error("SCENE_INPUT_CHANGED: 场次或共同输入已变化，保留回包并回读后处理");
     const source = JSON.parse(result.sourceJson) as Record<string, any>;
     const mutable = new Set(["shots", "segments", "asset_plan", "asset_cards", "ledger"]);
     for (const key of new Set([...Object.keys(source), ...Object.keys(baseline.director.source)])) if (!mutable.has(key) && compilationHash(source[key] ?? null) !== compilationHash(baseline.director.source[key] ?? null)) throw new Error(`SCENE_WRITE_OUTSIDE_SCOPE: ${key}`);
@@ -151,11 +151,11 @@ export class SceneWorkCoordinator {
         catch (error) { shared = { continuation: director.workflow.sharedReviewContinuation, reviewWorks: Object.values(director.workflow.sharedReviewWorks || {}), error: error instanceof Error ? error.message : String(error) }; }
         const works = Object.values(director.workflow.sceneWorks || {}).map(work => {
             try {
-                const projection = compilationScopeInput(director, { sceneId: work.sceneId });
+                const projection = compilationScopeInput({ ...director, engine: work.inputEngine || director.engine }, { sceneId: work.sceneId });
                 const media = this.service.sceneReviewMedia(id, projection.targetIds.filter(targetId => director.assets[targetId]?.storageKey));
                 const missing = requiredSceneAssets(projection.director, current.draft.settings.storyboardImageMode === "skip").some(id => !director.assets[id]?.storageKey);
                 const reviewAssetIds = missing ? media.filter(item => director.assets[item.targetId]?.status === "generated").map(item => item.targetId) : undefined;
-                return { ...work, reviewInputHash: productionReviewHash(projection.inputHash, media), inputChanged: projection.inputHash != work.inputHash, reviewAssetIds, source: projection.director.source, media: media.map(({ filePath: _file, ...item }) => item) };
+                return { ...work, reviewInputHash: productionReviewHash(projection.inputHash, media), inputChanged: projection.inputHash !== work.inputHash && projection.legacyInputHash !== work.inputHash, reviewAssetIds, source: projection.director.source, media: media.map(({ filePath: _file, ...item }) => item) };
             } catch (error) { return { ...work, error: error instanceof Error ? error.message : String(error) }; }
         });
         return { revision: current.revision, works, shared };
@@ -385,16 +385,16 @@ export class SceneWorkCoordinator {
             }
             if (work.stage === "create") {
                 this.update(id, workId, { status: "running" });
-                const projection = compilationScopeInput(current.draft.director!, { sceneId: work.sceneId });
-                if (projection.inputHash !== work.inputHash) throw new Error("SCENE_INPUT_CHANGED: 工作输入已变化");
+                const projection = compilationScopeInput({ ...current.draft.director!, engine: work.inputEngine || current.draft.director!.engine }, { sceneId: work.sceneId });
+                if (projection.inputHash !== work.inputHash && projection.legacyInputHash !== work.inputHash) throw new Error("SCENE_INPUT_CHANGED: 工作输入已变化");
                 let raw: unknown;
                 const resultFile = this.file(workId, work.cursor);
                 if (fs.existsSync(resultFile)) raw = JSON.parse(fs.readFileSync(resultFile, "utf8"));
                 else {
-                    const contract = getProductionContract(current.draft.director!.engine.runtimeId);
-                    const runtime = resolveAchengRuntime(current.draft.director!.engine.runtimeId);
+                    const contract = getProductionContract();
+                    const runtime = resolveAchengEngine();
                     raw = (await this.agent.run({ workId, cwd: process.cwd(), readRoots: [path.dirname(runtime.skillPath)], threadId: work.agentThreadId, recoverOutput: work.recoveryPending, turnId: work.agentTurnId, onTurn: agentTurnId => { this.update(id, workId, { agentTurnId }); }, model: work.model, effort: work.effort as ProductionAgentRequest["effort"], schema: outputSchema,
-                        prompt: `读取 ${runtime.skillPath} 与当前需要的专业模块。根据固定 Acheng 合同完成当前场次的详细分镜、表演、动作、资产卡和 Segment 源稿。不得改变剧本、共同事实或其他场次。若有 priorFeedback，按退回意见定位本场源字段并返修，不提交媒体或自动重生成。所有镜头 source_scene_id 必须为 ${work.sceneId}；专用资产 canvas_scope=episode 并写 shot_ids。返回完整输入源稿的 JSON 字符串 sourceJson，镜头映射 shotInputsJson 与本场相邻边界 boundariesJson。只有 shots/segments/asset_plan/asset_cards 和本场 ledger.events/requirements/coverage 可改；事实、时间线、初态及其他字段逐字保留。若缺共同连续性骨架，返回 needs_human，不新建或猜测事实。每镜写 timeline_id/story_order，本场剧本块登记真实覆盖，保持完整详细度。续写游标：${work.cursor || "首次"}。\n${JSON.stringify({ source: projection.director.source, priorFeedback: Object.values(current.draft.director!.workflow.sceneWorks || {}).filter(item => item.sceneId === work.sceneId && item.workId !== workId).map(item => ({ workId: item.workId, review: item.review, error: item.error })), approvedAssets: current.draft.director!.assets, settings: current.draft.settings, engine: current.draft.director!.engine, contract: contract.sourceContract })}`,
+                        prompt: `读取 ${runtime.skillPath} 与当前需要的专业模块。根据当前激活 Acheng 合同完成当前场次的详细分镜、表演、动作、资产卡和 Segment 源稿。不得改变剧本、共同事实或其他场次。若有 priorFeedback，按退回意见定位本场源字段并返修，不提交媒体或自动重生成。所有镜头 source_scene_id 必须为 ${work.sceneId}；专用资产 canvas_scope=episode 并写 shot_ids。返回完整输入源稿的 JSON 字符串 sourceJson，镜头映射 shotInputsJson 与本场相邻边界 boundariesJson。只有 shots/segments/asset_plan/asset_cards 和本场 ledger.events/requirements/coverage 可改；事实、时间线、初态及其他字段逐字保留。若缺共同连续性骨架，返回 needs_human，不新建或猜测事实。每镜写 timeline_id/story_order，本场剧本块登记真实覆盖，保持完整详细度。续写游标：${work.cursor || "首次"}。\n${JSON.stringify({ source: projection.director.source, priorFeedback: Object.values(current.draft.director!.workflow.sceneWorks || {}).filter(item => item.sceneId === work.sceneId && item.workId !== workId).map(item => ({ workId: item.workId, review: item.review, error: item.error })), approvedAssets: current.draft.director!.assets, settings: current.draft.settings, engine: contract.engine, contract: contract.sourceContract })}`,
                         onThread: threadId => { this.update(id, workId, { agentThreadId: threadId }); } })).output;
                     fs.mkdirSync(this.root, { recursive: true }); const temporary = `${resultFile}.${randomUUID()}.pending`; fs.writeFileSync(temporary, JSON.stringify(raw), { flag: "wx" }); fs.renameSync(temporary, resultFile);
                 }

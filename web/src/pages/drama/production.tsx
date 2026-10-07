@@ -629,9 +629,9 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
       ACHENG_CANVAS_LANGUAGE_RULE,
       `制作对象：${key}；对象类型：${ownerKind}`,
       `Backend 正式 revision：${currentProduction.revision}；已发布版本：${currentProduction.publishedVersion}`,
-      `固定引擎：${director.engine.version} / ${director.engine.runtimeId} / commit ${director.engine.commit}`,
+      "本次创作、编译和校验使用本机当前激活的 Acheng 版本。先调用 production_get_contract 读取当前合同，不用制作记录中的历史引擎身份选择执行版本。",
       `本次工作区：${scope.workspace}；调用模块：${selectedModules}`,
-      ...(scope.workspace === "continuity" ? ["开始 continuity 写入前，调用 production_get_contract({runtimeId: 固定引擎 runtimeId, moduleId: \"continuity\"})，实际读取返回的模块入口与必读合同，再按该回执的 owner 规则修改源稿。当前 scope 必须有源哈希匹配的连续性覆盖及重放回执；诊断旧版只读，不自动迁移。"] : []),
+      ...(scope.workspace === "continuity" ? ["开始 continuity 写入前，调用 production_get_contract({moduleId: \"continuity\"})，实际读取当前激活版本返回的模块入口与必读合同，再按该回执的 owner 规则修改源稿。当前 scope 必须有源哈希匹配的连续性覆盖及重放回执；诊断旧版只读，不自动迁移。"] : []),
       `分镜图模式：${storyboardImageMode || "尚未设置"}`,
       "若本对象尚未开始镜头设计且分镜图模式尚未设置，先通过正式 workflow.pendingDecisions 询问用户生成分镜图或跳过图片、只保留文字分镜；将答复写入正式 settings.storyboardImageMode（generate/skip）后再继续。skip 时保留文字 Shot、Segment 和 H3 提示词，所有 shotInputs.keyframePolicy 设为 none，不登记、准备或生成关键帧图片；角色、场景、道具等其他资产仍按制作需要处理。",
       `内容交付模式：${director.workflow.contentDeliveryMode || "auto_file_batch"}；媒体生产模式：${director.workflow.mediaProductionMode || "per_item"}`,
@@ -655,7 +655,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false }: { 
     useProductionWorkspaceStore.getState().setPanelTab("director");
     setAgentState({
       panelOpen: true, panelMounted: true, activeTab: "chat", scopedTaskResult: null,
-      scopedTask: { id, text, threadId: director.workflow.agentThreadId || agent.activeThreadId || undefined, productionId: key, revision: currentProduction.revision, engineRuntimeId: director.engine.runtimeId },
+      scopedTask: { id, text, threadId: director.workflow.agentThreadId || agent.activeThreadId || undefined, productionId: key, revision: currentProduction.revision },
     });
   };
 

@@ -75,7 +75,7 @@ export function resolveAchengPython() {
     return discoveredPython;
 }
 
-function runAchengPython(args: string[], options: ExecFileSyncOptionsWithStringEncoding) {
+export function runAchengPython(args: string[], options: ExecFileSyncOptionsWithStringEncoding) {
     try { return execFileSync(resolveAchengPython(), args, options); }
     catch (error: any) {
         if (process.platform !== "win32" || process.env.ACHENG_PYTHON || !["EPERM", "ENOENT"].includes(error.code)) throw error;
@@ -86,7 +86,7 @@ function runAchengPython(args: string[], options: ExecFileSyncOptionsWithStringE
     }
 }
 
-/** Compile the pinned source with its original compiler; never call a media model. */
+/** Compile authored source using the locally active compiler; never call a media model. */
 /** Compiler prompts stay inside the package; media may use only exact verified resolver paths. */
 export function readCompilationReference(output: string, filename: string, verifiedFiles: Array<string | undefined>) {
     const resolved = path.resolve(output, filename);
@@ -96,11 +96,11 @@ export function readCompilationReference(output: string, filename: string, verif
     return fs.readFileSync(resolved);
 }
 
-export function compileAchengDirector(input: DirectorProduction, directory: string, resolveReferenceFile?: (targetId: string, label: string) => string | undefined) {
+export function compileAchengDirector(input: DirectorProduction, directory: string, resolveReferenceFile?: (targetId: string, label: string) => string | undefined, selectedRuntimeId?: string) {
     const director = directorProductionSchema.parse(structuredClone(input));
     hydrateScopedApprovedInputs(director, resolveReferenceFile);
-    const runtime = resolveAchengRuntime(director.engine.runtimeId);
-    if (runtime.commit !== director.engine.commit || runtime.patchVersion !== director.engine.patchVersion || runtime.version !== director.engine.version) throw new Error("Pinned engine identity differs from the production");
+    const runtime = selectedRuntimeId ? resolveAchengRuntime(selectedRuntimeId) : resolveAchengEngine();
+    director.engine = achengEngineIdentity(runtime);
     if (JSON.stringify(director.source).includes('"legacy_fixture"')) throw new Error("Historical fixtures cannot be submitted as new production");
     fs.mkdirSync(directory, { recursive: true });
     const sourceFile = path.join(directory, "source.json"), output = path.join(directory, "compiled");
@@ -208,7 +208,7 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
                     ...(sourceRef?.preserve !== undefined ? { preserve: sourceRef.preserve } : {}), ...(sourceRef?.exclude !== undefined ? { exclude: sourceRef.exclude } : {}) });
             }
             director.artifacts.push({ id: `${kind}-${targetId}`, kind, targetId, prompt, sha256, sourceHash: director.sourceHash, status: ready ? "ready" : "draft", references,
-                receipt: { sourceHash: director.sourceHash, promptHash: sha256, engineRuntimeId: runtime.runtimeId, validator: onlyAssets ? "compile_assets/validate_asset_entries" : "compile_h3/validate_package",
+                receipt: { sourceHash: director.sourceHash, promptHash: sha256, engineRuntimeId: runtime.runtimeId, engine: director.engine, validator: onlyAssets ? "compile_assets/validate_asset_entries" : "compile_h3/validate_package",
                     diagnostics: { englishWords: entry.detailed_description_english_words ?? null, detailPolicy: entry.h3_detail_policy ?? null, blockers: entry.blockers || [], formatPass: entry.format_pass || null, accepted: entry.accepted ?? ready } } });
         }
     }
@@ -216,7 +216,7 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
     for (const gate of audit.gates || []) if (gate.status === "FAIL") {
         for (const message of gate.errors || []) diagnostics.push({ code: "COMPILER_GATE_FAILED", path: `audit.${gate.gate}`, message, severity: "error" });
     }
-    diagnostics.push(...preflightDirector(director).diagnostics.filter(d => d.severity === "error"));
+    diagnostics.push(...preflightDirector(director, "edit", runtime).diagnostics.filter(d => d.severity === "error"));
     return { director, exitCode, diagnostics, audit, sourceAdjustments, acceptance: JSON.parse(readFile("delivery.acceptance.json").toString("utf8")) };
 }
 
@@ -225,7 +225,7 @@ export function resolveAchengEngine(home = process.env.CODEX_HOME || path.join(o
     const base = path.resolve(home, "skill-runtimes", "acheng-director");
     const state = JSON.parse(fs.readFileSync(path.join(base, "active.json"), "utf8")) as { active: { path: string; runtimeId: string; commit: string; patchVersion: string; version: string } };
     const resolved = resolveAchengRuntime(state.active.runtimeId, home);
-    if (path.resolve(state.active.path) !== resolved.path) throw new Error("Acheng 激活路径与固定版本不一致");
+    if (path.resolve(state.active.path) !== resolved.path) throw new Error("Acheng 激活路径与运行包不一致");
     return resolved;
 }
 
@@ -246,40 +246,40 @@ export function resolveAchengRuntime(runtimeId: string, home = process.env.CODEX
 }
 
 export function getProductionContract(runtimeId?: string, operationType?: string, moduleId?: typeof directorModules[number]) {
-    const runtime = runtimeId ? resolveAchengRuntime(runtimeId) : resolveAchengEngine();
+    const runtime = resolveAchengEngine();
     const moduleRegistryPath = path.join(runtime.path, "data", "module-registry.json");
     const moduleRegistry = JSON.parse(fs.readFileSync(moduleRegistryPath, "utf8"));
     const moduleRow = moduleId ? moduleRegistry.modules.find((item: any) => item.id === moduleId) : undefined;
-    if (moduleId && !moduleRow) throw new Error(`Pinned Acheng runtime does not define module ${moduleId}`);
+    if (moduleId && !moduleRow) throw new Error(`Active Acheng runtime does not define module ${moduleId}`);
     const moduleFiles = moduleRow ? [moduleRow.entry, ...moduleRow.reads].map((relative: string) => {
         const file = path.resolve(runtime.path, relative);
-        if (!file.startsWith(`${path.resolve(runtime.path)}${path.sep}`)) throw new Error("Pinned module resource escaped its runtime");
+        if (!file.startsWith(`${path.resolve(runtime.path)}${path.sep}`)) throw new Error("Module resource escaped its runtime");
         const bytes = fs.readFileSync(file);
         return { path: relative, sha256: crypto.createHash("sha256").update(bytes).digest("hex"), content: bytes.toString("utf8") };
     }) : undefined;
     return { ...productionOperationContract(operationType), engine: { runtimeId: runtime.runtimeId, commit: runtime.commit, patchVersion: runtime.patchVersion, version: runtime.version },
         sourceContract: runtime.sourceContract, ref2vaMaximumWords: runtime.sourceContract ? runtime.sourceContract.ref2vaMaximumWords : 2900,
         ...(moduleRow ? { module: { id: moduleRow.id, owns: moduleRow.owns, checks_with: moduleRow.checks_with, check_focus: moduleRow.check_focus, files: moduleFiles } } : {}),
-        ...(runtime.sourceContract ? {} : { notice: "This pinned historical runtime has no machine-readable Canvas source contract; its original compiler remains authoritative." }) };
+        ...(runtimeId ? { notice: "runtimeId is deprecated and does not select a compiler; this contract uses the locally active Acheng runtime." } : {}),
+        ...(runtime.sourceContract ? {} : { sourceContractNotice: "The active runtime has no machine-readable Canvas source contract; compiler validation remains authoritative." }) };
 }
 
-/** Deterministic ledger report from the immutable runtime selected by this production. */
+export type AchengRuntime = ReturnType<typeof resolveAchengRuntime>;
+export function achengEngineIdentity(runtime: AchengRuntime): DirectorProduction["engine"] {
+    return { runtimeId: runtime.runtimeId, commit: runtime.commit, patchVersion: runtime.patchVersion, version: runtime.version };
+}
+
+/** Each new check follows the locally active runtime; its report records the actual validator. */
 export function auditAchengContinuity(director: DirectorProduction, targetIds?: string[], diagnosticOnly = false) {
-    const runtime = diagnosticOnly ? resolveAchengEngine() : resolveAchengRuntime(director.engine.runtimeId);
-    if (!diagnosticOnly && (runtime.commit !== director.engine.commit || runtime.patchVersion !== director.engine.patchVersion || runtime.version !== director.engine.version))
-        throw new Error("Pinned runtime identity differs from the production receipt");
+    const runtime = resolveAchengEngine();
     const response = runAchengPython(["-B", "-X", "utf8", path.join(runtime.path, "scripts", "continuity_v2.py")], {
         cwd: runtime.path, windowsHide: true, encoding: "utf8", input: JSON.stringify({ source: director.source, target_ids: targetIds }),
     });
-    return { ...JSON.parse(response), validatorRuntimeId: runtime.runtimeId, diagnosticOnly };
+    return { ...JSON.parse(response), validatorRuntimeId: runtime.runtimeId, validatorEngine: achengEngineIdentity(runtime), diagnosticOnly };
 }
 
-export function validateAchengSource(director: DirectorProduction, stage: "edit" | "publish" | "generate"): ProductionDiagnostic[] {
-    const runtime = resolveAchengRuntime(director.engine.runtimeId);
-    if (runtime.commit !== director.engine.commit || runtime.patchVersion !== director.engine.patchVersion || runtime.version !== director.engine.version) {
-        return [{ code: "ENGINE_MISMATCH", path: "director.engine", message: "Pinned runtime identity differs from the production receipt", severity: "error" }];
-    }
-    if (!runtime.sourceContract) return [...ref2vaPromptDiagnostics(director, 2900), ...continuityBoundaryDiagnostics(director, stage), { code: "SOURCE_CONTRACT_UNAVAILABLE", path: "director.engine", message: "Historical runtime: source checks remain with its original compiler", severity: "unverified" }];
+export function validateAchengSource(director: DirectorProduction, stage: "edit" | "publish" | "generate", runtime = resolveAchengEngine()): ProductionDiagnostic[] {
+    if (!runtime.sourceContract) return [...ref2vaPromptDiagnostics(director, 2900), ...continuityBoundaryDiagnostics(director, stage), { code: "SOURCE_CONTRACT_UNAVAILABLE", path: "director.engine", message: "Active runtime has no source contract; final checks remain with the compiler", severity: "unverified" }];
     const response = runAchengPython(["-B", "-X", "utf8", path.join(runtime.path, "scripts", "canvas_source_contract.py")], {
         cwd: runtime.path, windowsHide: true, encoding: "utf8", input: JSON.stringify({ source: director.source, artifacts: director.artifacts || [], stage }),
     });
@@ -295,11 +295,15 @@ export function assertAchengSource(director: DirectorProduction, stage: "edit" |
     if (diagnostics.length) throw new ProductionValidationError(diagnostics);
 }
 
-/** Stage-aware, read-only compilation checks; the pinned compiler still validates final output. */
-export function preflightCompilationDirector(raw: unknown, resolveReferenceFile?: (targetId: string, label: string) => string | undefined): ProductionPreflight {
+/** Read-only checks use the active compiler, or the runtime captured for this compilation request. */
+export function preflightCompilationDirector(raw: unknown, resolveReferenceFile?: (targetId: string, label: string) => string | undefined, selectedRuntimeId?: string): ProductionPreflight {
+    let runtime: AchengRuntime;
+    try { runtime = selectedRuntimeId ? resolveAchengRuntime(selectedRuntimeId) : resolveAchengEngine(); }
+    catch (error) { return { valid: false, compileReady: false, generationReady: false, contractVersion: productionContractVersion, engine: null, revision: null,
+        diagnostics: [{ code: "ENGINE_UNAVAILABLE", path: "director.engine", message: error instanceof Error ? error.message : String(error), severity: "error" }] }; }
     const parsed = directorProductionSchema.safeParse(raw);
     // Previous receipts are replaced by compilation, so their staleness must not block rebuilding.
-    const result = preflightDirector(parsed.success ? { ...parsed.data, artifacts: [] } : raw, "edit");
+    const result = preflightDirector(parsed.success ? { ...parsed.data, artifacts: [] } : raw, "edit", runtime);
     result.compileReady = false;
     if (parsed.success) {
         const decisions = continuityBoundaryDiagnostics(parsed.data, "compile");
@@ -315,7 +319,6 @@ export function preflightCompilationDirector(raw: unknown, resolveReferenceFile?
         result.valid = false;
         return result;
     }
-    const runtime = resolveAchengRuntime(director.engine.runtimeId);
     const source = director.source;
     const plans = (Array.isArray(source.asset_plan) ? source.asset_plan : []).filter(plan => plan && typeof plan === "object") as Array<Record<string, any>>;
     for (const plan of plans) if (typeof plan.file === "string" && plan.file && !path.isAbsolute(plan.file)) {
@@ -349,7 +352,7 @@ export function preflightCompilationDirector(raw: unknown, resolveReferenceFile?
 }
 
 /** Shared file/Backend check. File checks cannot establish online ownership. */
-export function preflightDirector(raw: unknown, stage: "edit" | "publish" | "generate" = "edit"): ProductionPreflight {
+export function preflightDirector(raw: unknown, stage: "edit" | "publish" | "generate" = "edit", selectedRuntime?: AchengRuntime): ProductionPreflight {
     const diagnostics = schemaDiagnostics(directorProductionSchema, raw, "director");
     const result: ProductionPreflight = { valid: false, contractVersion: productionContractVersion, engine: null, revision: null, diagnostics, generationReady: false };
     if (diagnostics.length) return result;
@@ -359,9 +362,9 @@ export function preflightDirector(raw: unknown, stage: "edit" | "publish" | "gen
     if (digest(canonicalProduction(director.source)) !== director.sourceHash) diagnostics.push({ code: "SOURCE_HASH_MISMATCH", path: "director.sourceHash", message: "Source hash differs from the full authored source", severity: "error" });
     for (const [index, artifact] of director.artifacts.entries()) {
         if (digest(artifact.prompt) !== artifact.sha256) diagnostics.push({ code: "PROMPT_HASH_MISMATCH", path: `director.artifacts.${index}.sha256`, targetId: artifact.targetId, message: "Prompt byte hash differs", severity: "error" });
-        if (artifact.status === "ready" && (!currentCompilationArtifact(director, artifact) || artifact.receipt.promptHash !== artifact.sha256 || artifact.receipt.engineRuntimeId !== director.engine.runtimeId)) diagnostics.push({ code: "STALE_RECEIPT", path: `director.artifacts.${index}.receipt`, targetId: artifact.targetId, message: "Receipt differs from the fixed source/prompt/runtime", severity: "error" });
+        if (artifact.status === "ready" && (!currentCompilationArtifact(director, artifact) || artifact.receipt.promptHash !== artifact.sha256)) diagnostics.push({ code: "STALE_RECEIPT", path: `director.artifacts.${index}.receipt`, targetId: artifact.targetId, message: "Receipt differs from its source or prompt", severity: "error" });
     }
-    try { diagnostics.push(...validateAchengSource(director, stage)); }
+    try { const runtime = selectedRuntime || resolveAchengEngine(); result.engine = achengEngineIdentity(runtime); diagnostics.push(...validateAchengSource(director, stage, runtime)); }
     catch (error) { diagnostics.push({ code: "ENGINE_UNAVAILABLE", path: "director.engine", message: error instanceof Error ? error.message : String(error), severity: "error" }); }
     diagnostics.push({ code: "ONLINE_CONTEXT_UNVERIFIED", path: "director.assets", message: "Media ownership, approvals, model availability and current revision require Backend preflight", severity: "unverified" });
     result.valid = !diagnostics.some(item => item.severity === "error");

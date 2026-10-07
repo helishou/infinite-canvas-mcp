@@ -79,9 +79,24 @@ test("three scoped compiler jobs overlap and merge disjoint results without over
     assert.equal(jobs.apply("episode", "episode", job.preparedId!).replayed, true);
     const b = current.draft.director!.artifacts.find(item => item.targetId === "KB")!;
     const originalHash = b.sourceHash;
-    service.edit("episode", { operationId: "change-A", expectedRevision: current.revision, ops: [{ type: "patch_director_source", entity: "shot", id: "SA", patch: { visual: "changed A" } }] });
+    const next = structuredClone(current.draft.director!);
+    next.engine = { commit: "b".repeat(40), patchVersion: "next", runtimeId: "next", version: "next" };
+    jobs.enqueue("episode", "episode", "compile-A-new-engine", current.revision, next, { sceneId: "A" });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(releases.length, 4, "same-source artifacts from an older compiler must not skip the requested new compilation");
+    releases[3](); await new Promise(resolve => setImmediate(resolve));
+    const newer = jobs.getCompilation("episode", "episode", "compile-A-new-engine");
+    assert.equal(newer.status, "succeeded"); jobs.apply("episode", "episode", newer.preparedId!);
+    const mixed = service.get("episode");
+    assert.equal(mixed.draft.director!.engine.runtimeId, "next");
+    assert.equal(mixed.draft.director!.artifacts.find(item => item.targetId === "KA")!.receipt.engineRuntimeId, "next");
+    const preservedB = mixed.draft.director!.artifacts.find(item => item.targetId === "KB")!;
+    assert.equal(preservedB.prompt, b.prompt);
+    assert.equal(preservedB.receipt.engineRuntimeId, b.receipt.engineRuntimeId);
+    assert.equal(currentCompilationArtifact(mixed.draft.director!, preservedB), true);
+    service.edit("episode", { operationId: "change-A", expectedRevision: mixed.revision, ops: [{ type: "patch_director_source", entity: "shot", id: "SA", patch: { visual: "changed A" } }] });
     const changed = service.get("episode").draft.director!;
-    assert.equal(currentCompilationArtifact(changed, b), true); assert.equal(b.sourceHash, originalHash);
+    assert.equal(currentCompilationArtifact(changed, preservedB), true); assert.equal(preservedB.sourceHash, originalHash);
     assert.throws(() => jobs.apply("episode", "other", job.preparedId!), /different production/);
     assert.deepEqual(compilationScopeInput(changed, { sceneId: "B" }).targetIds, ["KB"]);
 });
@@ -99,11 +114,11 @@ test("prepare is read-only; frozen apply is atomic and idempotent", t => {
     assert.equal(service.get("episode").revision, 2);
 });
 
-test("changed revision, engine and owner cannot silently overwrite a production", t => {
+test("changed revision and owner cannot overwrite a production; old engine metadata does not lock compilation", t => {
     const { service, compilations, director } = fixture(t);
     const prepared = compilations.prepare("episode", "episode", 1);
     assert.throws(() => compilations.prepare("episode", "episode", 0), ProductionConflictError);
-    assert.throws(() => compilations.prepare("episode", "episode", 1, { ...director, engine: { ...director.engine, runtimeId: "other" } }), (error: any) => error.diagnostics?.some((item: any) => item.code === "ENGINE_MISMATCH"));
+    assert.ok(compilations.prepare("episode", "episode", 1, { ...director, engine: { ...director.engine, runtimeId: "other" } }).preparedId);
     assert.throws(() => compilations.apply("episode", "canvas", prepared.preparedId), /different production/);
     service.edit("episode", { operationId: "concurrent", expectedRevision: 1, ops: [{ type: "set_director_brief", brief: "Another window's edit" }] });
     assert.throws(() => compilations.apply("episode", "episode", prepared.preparedId), ProductionConflictError);

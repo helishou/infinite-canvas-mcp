@@ -889,6 +889,8 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
       if (selectedProvider && (useLlm() ? selectedProvider.kind === "codex-cli" : selectedProvider.kind !== "codex-cli")) return void res.status(409).json({ ok: false, code: "MODEL_RUNTIME_CHANGED", error: "该模型使用不同的 Agent 运行方式，请先新建对话；原对话已保留" });
       const model = selectedProvider?.kind === "codex-cli" ? selectedProvider.model : selectedModel;
       const effort = reasoningEffort(req.body?.effort);
+      // Refresh protected Skill mirrors only at the boundary of an accepted, idle turn.
+      if (!session.codexBusy) ensureSiteWorkspace(config, true);
       const previousCodexState = session.codexStateSnapshot;
       skillDraftRunning = true;
       try {

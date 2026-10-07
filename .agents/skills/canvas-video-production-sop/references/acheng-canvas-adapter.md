@@ -2,11 +2,11 @@
 
 ## 加载与版本
 
-Acheng Director 本身就是 Skill，完整上游文件和模块位于项目 `.agents/skills/acheng-director`。Skill 规定创作方法；`compile_assets.py`、`compile_h3.py` 及校验脚本是把制作源稿转换成提示词产物的可执行工具，不是另一个导演 Agent 或模型。脚本版本由本机 `skill-runtimes/acheng-director/active.json` 固定；制作开始记录上游 commit、patchVersion、runtimeId、Skill version，恢复时沿用该制作记录锁定的脚本版本。版本缺失或兼容检查失败时停止，不退回旧画布流程。
+Acheng Director 本身就是 Skill，完整上游文件和模块位于项目 `.agents/skills/acheng-director`。Skill 规定创作方法；`compile_assets.py`、`compile_h3.py` 及校验脚本是把制作源稿转换成提示词产物的可执行工具，不是另一个导演 Agent 或模型。开始或恢复制作、读取合同以及新发起编译或校验时，使用本机 `skill-runtimes/acheng-director/active.json` 当前激活的版本。上游通过 `npm run acheng:update` 手动更新；激活新版不自动重编项目。每次编译请求创建时记录上游 commit、patchVersion、runtimeId、Skill version，该请求的预检、编译与回执使用同一版本；版本切换只影响后续请求。历史产物保留实际编译版本，局部编译不改写无关产物或已提交任务。版本缺失或兼容检查失败时停止，不退回旧画布流程。
 
 导演 Skill 的源码位于项目 Git 子模块 `.agents/skills/acheng-director`，`origin` 指向 [helishou/acheng-director-skill](https://github.com/helishou/acheng-director-skill)，跟踪 `main`。新克隆使用 `--recurse-submodules`，已有克隆使用 `git submodule update --init -- .agents/skills/acheng-director` 初始化。源码可直接修改并在子模块内提交、推送到 fork；父仓库只记录子模块提交指针，不代替子模块的提交或推送。
 
-项目命令 `npm run acheng:status` 查看源码 HEAD、未提交文件和活动运行包。`npm run acheng:update -- --local --check` 验证子模块当前已提交 HEAD；去掉 `--check` 后激活该版本。`npm run acheng:update` 验证远端 `origin/main`，成功后仅快进源码并激活运行包；存在未提交改动、领先或分叉的本地提交时拒绝覆盖，使用本地构建或自行处理分支。`--check` 不改变源码 HEAD 或活动运行包，但可获取 Git 对象和创建候选运行包。旧 `acheng:vendor` 命令等同于从当前 HEAD 本地构建，不再覆盖源码。`npm run acheng:rollback` 仅回退固定运行包，不切换源码分支、不丢弃修改。所有命令均不启动媒体生成。
+项目命令 `npm run acheng:status` 查看源码 HEAD、未提交文件和活动运行包。`npm run acheng:update -- --local --check` 验证子模块当前已提交 HEAD；去掉 `--check` 后激活该版本。`npm run acheng:update` 验证远端 `origin/main`，成功后仅快进源码并激活运行包；存在未提交改动、领先或分叉的本地提交时拒绝覆盖，使用本地构建或自行处理分支。`--check` 不改变源码 HEAD 或活动运行包，但可获取 Git 对象和创建候选运行包。旧 `acheng:vendor` 命令等同于从当前 HEAD 本地构建，不再覆盖源码。`npm run acheng:rollback` 仅回退当前激活运行包，不切换源码分支、不丢弃修改。所有命令均不启动媒体生成。
 
 Canvas 兼容层仅应用于候选运行包，不写回源码。Docker 镜像通过显式 `ACHENG_SOURCE` 使用持久卷中的可写 Git 克隆，其他校验与运行包行为一致；不因开发子模块缺失而退回隐藏源码副本。
 
@@ -22,13 +22,13 @@ Agent 负责编译前的创作、源稿编辑、依赖与批准版本登记。`p
 
 编译输入是已保存的结构化制作源稿、Shot/Segment、资产资料和实际参考绑定。只有资产时运行 `compile_assets.py`；包含视频片段时运行 `compile_h3.py`。脚本按对应 Skill 规则产出独立、完整的图像或 H3 提示词文件、索引、逐目标诊断、参考映射和哈希回执；缺少依赖的目标保留为 draft，不伪造 ready。Backend 再核对当前制作 revision、媒体归属和执行条件。
 
-这里的“编译”不是编译程序代码，也不是让 AI 重写整份导演稿；它把既有制作源稿转换成可检查、可提交的提示词产物。脚本不调用图像或视频模型、不产生媒体、不消耗生成额度。源稿、提示词、实际参考或镜头边界变化时，才用这次制作锁定的脚本版本重算受影响的产物和回执；已生成媒体不会因此自动重做。
+这里的“编译”不是编译程序代码，也不是让 AI 重写整份导演稿；它把既有制作源稿转换成可检查、可提交的提示词产物。脚本不调用图像或视频模型、不产生媒体、不消耗生成额度。源稿、提示词、实际参考或镜头边界变化时，才用本机当前激活的脚本版本重算受影响的产物和回执；已生成媒体不会因此自动重做。
 
 ## 创作权属
 
 story、assets、shots、performance、effects、model、continuity 按 Acheng 原合同协作。空间设计在 assets 的 scene-design 支路，shots 消费空间事实；站位图是按需资产。多资产新制作采用 STYLE_MOTHER，新四视图默认采用等高的正脸近景、正面全身、侧面全身、背面全身和空手；色卡为辅助信息，不另建强制前置阶段。旧批准资产可保留并登记适用范围，缺项只补本轮所需。
 
-用户明确指定其他角色布局时，在完整 `asset_cards[].view_layout` 中保存 `selection: user_explicit` 和具体 `selection_reason`，由支持该选择的固定运行包校验。当前可显式选择1:2行高的正脸近景、右侧脸近景、无头正面服装全身、完整背面四格，或等高的生物头正面、头侧面、盘绕全身、身体中段鳞片细节四格。类型、视图、顺序、行高、同一主体与用途必须完整；缺少明确选择不按历史布局放行。不能伪造批准状态或用历史 fixture 绕过新制作校验。
+用户明确指定其他角色布局时，在完整 `asset_cards[].view_layout` 中保存 `selection: user_explicit` 和具体 `selection_reason`，由支持该选择的当前激活运行包校验。当前可显式选择1:2行高的正脸近景、右侧脸近景、无头正面服装全身、完整背面四格，或等高的生物头正面、头侧面、盘绕全身、身体中段鳞片细节四格。类型、视图、顺序、行高、同一主体与用途必须完整；缺少明确选择不按历史布局放行。不能伪造批准状态或用历史 fixture 绕过新制作校验。
 
 ### 制作内容语言
 
@@ -36,7 +36,7 @@ story、assets、shots、performance、effects、model、continuity 按 Acheng �
 
 Shot 是叙事镜头，Segment 是请求，Clip 对应 Segment。按题材、对白和动作容量规划，沿已有镜头边界装箱至 4–15 秒。不得自动一镜一段、强制正反打或仅允许动作镜合并。关键帧依真实锚点需要制作。
 
-保留 Acheng 的内容完整性、模块检查、partial/commit、风格及版本规则。Ref2VA 最低细节要求按本次制作锁定的编译脚本版本计算；新兼容版本取消正文硬上限，词数只作诊断，不截断、压缩或按词数重装箱。旧稿沿用原脚本版本；显式升级后重新生成提示词产物与校验回执。H3 引用使用 `<Picture N>/<Subject N>`，风格母图在资产参考最后槽。上游宣传文案不是生成提示词。
+保留 Acheng 的内容完整性、模块检查、partial/commit、风格及版本规则。Ref2VA 最低细节要求按本机当前激活的编译脚本版本计算；新兼容版本取消正文硬上限，词数只作诊断，不截断、压缩或按词数重装箱。旧稿下次编译使用当前激活版本，历史正文与回执保留，不自动重编或生成媒体。H3 引用使用 `<Picture N>/<Subject N>`，风格母图在资产参考最后槽。上游宣传文案不是生成提示词。
 
 ## 画布是执行与正式存储
 
@@ -44,23 +44,23 @@ Acheng 的纯提示词限制适用于创作职责；用户授权实际生成时�
 
 分集调用 `drama_get_production/drama_edit_production/drama_publish_production`；独立画布调用对应 `canvas_*_production`。通过 `set_director_production` 提交完整导演稿：schemaVersion、engine、source、sourceHash、modules、artifacts、assets、shotInputs、boundaries、workflow、unresolved、executionAuthorized。
 
-进入制作前调用 `production_get_contract`，恢复旧稿时传原 `runtimeId`；可用 `operationType` 查询单项操作。返回共享 JSON Schema、合法示例、patch 字段及本机锁定版本的制作源稿模板。示例中的 ID、引擎标识与哈希必须替换成当前真实数据，不把示例视为发布或生成依据。
+进入制作前调用 `production_get_contract`，恢复旧稿也读取当前激活版本，`runtimeId` 已弃用且不选择执行版本；可用 `operationType` 查询单项操作。返回共享 JSON Schema、合法示例、patch 字段及本机当前激活版本的制作源稿模板。示例中的 ID、引擎标识与哈希必须替换成当前真实数据，不把示例视为发布或生成依据。
 
-正式提交前调用 `canvas_preflight_production` 或 `drama_preflight_production`，传所属 ID、`action: edit/publish/compile/generate` 与原正式 `request`。预检只读，返回 revision、固定引擎、已识别缺项的 `code/path/targetId/message/severity`、阻塞运行及 `nextActions`。计划稿缺项可保存；编译、发布和生成按各自阶段检查。只有故事正文、没有资产卡或视频段落时不要调用编译器；编译预检按固定版本检查资产计划、风格参考和提示词卡，并保留合法缺图草案的交付能力。
+正式提交前调用 `canvas_preflight_production` 或 `drama_preflight_production`，传所属 ID、`action: edit/publish/compile/generate` 与原正式 `request`。预检只读，返回 revision、当前激活引擎、已识别缺项的 `code/path/targetId/message/severity`、阻塞运行及 `nextActions`。计划稿缺项可保存；编译、发布和生成按各自阶段检查。只有故事正文、没有资产卡或视频段落时不要调用编译器；编译预检按当前激活版本检查资产计划、风格参考和提示词卡，并保留合法缺图草案的交付能力。
 
 `production_compile` 和 `*_start_production_run` 在 HTTP MCP 与页面内 Agent 中自动执行同一预检。返回 `status: blocked` 表示条件检查完成、本次没有执行编译或提交媒体，不等于已经生成或得到 preparedId；按 `preflight.diagnostics` 一次补齐已识别缺项，再按 `nextActions` 回读精确对象、运行和任务。相同源稿/revision/运行状态没有变化时，不重复同一请求，不通过换 runId、幂等键或暂停绕过占用。`replayed: true` 的有效预检只允许恢复原幂等回执，不授权新生成。预检通过后正式提交仍重新检查 revision、幂等与媒体归属；网络、引擎故障或提交竞态仍作为真实失败处理，按返回的稳定代码和下一步恢复。
 
-用 `node scripts/acheng/export-canvas.mjs production.json canvas-mapping.json <新输出目录>` 调用本次制作锁定的 Acheng 编译脚本，生成包含完整提示词产物与回执的 `director.json`。mapping 包含 assets、shotInputs、boundaries、modules 与按 targetId/label 索引的 references（nodeId/storageKey/role）；首次使用当前激活版本，恢复时传入原运行 `engine.path`。该命令只处理离线文件，不调用画布或图像/视频模型。
+用 `node scripts/acheng/export-canvas.mjs production.json canvas-mapping.json <新输出目录>` 调用本机当前激活的 Acheng 编译脚本，生成包含完整提示词产物与回执的 `director.json`。mapping 包含 assets、shotInputs、boundaries、modules 与按 targetId/label 索引的 references（nodeId/storageKey/role）；始终使用当前激活版本，mapping 中旧 `engine.path` 不再选择编译器。该命令只处理离线文件，不调用画布或图像/视频模型。
 
-导出前检查源稿契约，导出目录保留 `preflight.json`；提示词长度、阻塞项与格式验收保存在产物回执诊断中。已有文件可用 `node scripts/acheng/preflight.mjs director.json edit` 检查，也可选 `publish` 或 `generate`。离线检查使用同一锁定版本的编译/校验脚本，但不证明在线 revision、模型和媒体归属，`generationReady` 保持 false。脚本使用已构建的共享包；运行前设置真实可执行的 `ACHENG_PYTHON`，不要依赖 Windows Store 的占位命令。
+导出前检查源稿契约，导出目录保留 `preflight.json`；提示词长度、阻塞项与格式验收保存在产物回执诊断中。已有文件可用 `node scripts/acheng/preflight.mjs director.json edit` 检查，也可选 `publish` 或 `generate`。离线检查使用本次请求选定版本的编译/校验脚本，但不证明在线 revision、模型和媒体归属，`generationReady` 保持 false。脚本使用已构建的共享包；运行前设置真实可执行的 `ACHENG_PYTHON`，不要依赖 Windows Store 的占位命令。
 
-离线命令也接受 `{action,request,production?}` 的正式请求文件；`production` 可传 Backend 读取到的制作记录快照。操作 schema、源稿 patch 和锁定版本的脚本规则与 Backend 共用；需要在线对象、媒体或模型上下文的操作逐项标为 `unverified`，不能用离线快照替代在线提交检查。
+离线命令也接受 `{action,request,production?}` 的正式请求文件；`production` 可传 Backend 读取到的制作记录快照。操作 schema、源稿 patch 和当前激活版本的脚本规则与 Backend 共用；需要在线对象、媒体或模型上下文的操作逐项标为 `unverified`，不能用离线快照替代在线提交检查。
 
-修改导演源码后先在子模块内提交，再使用 `npm run acheng:update -- --local --check` 验证该 HEAD，使用 `npm run acheng:update -- --local` 激活。仅重建 Canvas 兼容层时沿用当前源码 HEAD；旧不可变运行版本继续保留。此操作不改制作稿、不提交生成。
+修改导演源码后先在子模块内提交，再使用 `npm run acheng:update -- --local --check` 验证该 HEAD，使用 `npm run acheng:update -- --local` 激活。仅重建 Canvas 兼容层时沿用当前源码 HEAD；旧不可变运行包保留用于历史追溯，不锁定制作对象。此操作不改制作稿、不提交生成。
 
-source 原样保存 Acheng production 数据。sourceHash 是递归键排序、无空白、UTF-8 JSON 的 SHA-256；MCP 提交完整源稿对象时使用 `production_hash_source`，脚本复用项目导出工具，不另写 canonical 算法或凭记忆拼哈希。artifacts 每项包含独立 prompt 字节、sha256、源哈希、参考标签/节点/storageKey/媒体哈希/职责及编译回执；draft 和 partial 不标 ready。接入包不填造 PASS，先执行本次制作锁定版本的真实离线编译与校验，再由 Backend 核对源与媒体。
+source 原样保存 Acheng production 数据。sourceHash 是递归键排序、无空白、UTF-8 JSON 的 SHA-256；MCP 提交完整源稿对象时使用 `production_hash_source`，脚本复用项目导出工具，不另写 canonical 算法或凭记忆拼哈希。artifacts 每项包含独立 prompt 字节、sha256、源哈希、参考标签/节点/storageKey/媒体哈希/职责及编译回执；draft 和 partial 不标 ready。接入包不填造 PASS，先执行本机当前激活版本的真实离线编译与校验，再由 Backend 核对源与媒体。
 
-Backend 已发布版本是正式源，本地 production.json 是带 revision 的工作副本。修改需稳定 operationId 和 expectedRevision；冲突回读，不覆盖他人草稿。剧本、镜头和 Clip 视图是投影，修改应进入导演源；源变化后重跑锁定版本的提示词编译/校验脚本并更新对应回执，旧产物不能作为当前版本执行依据。模型选择继承现有配置；保存草稿不生成。
+Backend 已发布版本是正式源，本地 production.json 是带 revision 的工作副本。修改需稳定 operationId 和 expectedRevision；冲突回读，不覆盖他人草稿。剧本、镜头和 Clip 视图是投影，修改应进入导演源；源变化后重跑当前激活版本的提示词编译/校验脚本并更新对应回执，旧产物不能作为当前版本执行依据。模型选择继承现有配置；保存草稿不生成。
 
 assets 映射保存实际 nodeId、assetId、storageKey、sha256、version 和批准证据。每张图一项主要职责并写保留/排除范围；真实文件不存在时只能交草案。正式引用须通过真实媒体检查，不把任务成功当批准。完整资产提示词按依赖准备，H3 编译必须满足原资产门禁。
 
@@ -78,7 +78,7 @@ assets 映射保存实际 nodeId、assetId、storageKey、sha256、version 和�
 
 早期 brief 和 partial 可保存，且不要求先创建全部画布节点。首次需求使用 `set_director_brief` 写入 `source.brief`；常见场景、风格策略、资产、Shot 与 Segment 编辑使用 `patch_director_source`，只改声明的源字段并保留其他 Acheng 字段；边界用 `set_director_boundary`，工作模式、稳定 workId、currentWork 和待决定事项用 `set_director_workflow`，资产节点映射用 `bind_director_asset`。完整模块回包仍可使用 `set_director_production`，但常见 UI 编辑不能整稿覆盖。`currentWork` 绑定源 revision/hash；用户决定卡绑定同一 workId 和源哈希，答复先保存再交回导演。
 
-通过 `workflow/readiness` 或 MCP `*_get_workflow_readiness` 查询按目标依赖计算的缺项、待审核项、可执行范围和正式 `presentation`。无关模块的 partial 不应拦住已就绪分支。Agent 推进当前目标时更新 `workflow.currentWork` 并回读展示投影，再使用结构化 `site_navigate` 呈现工作区或实际节点/Clip；普通页面跳转保留原 `path` 入口。改过 source、提示词输入、实际参考映射或边界后，须用该制作锁定的 Acheng 编译/校验脚本重算受影响产物，再由 Backend 检查并发布；只改工作游标或内容交付/媒体生产设置不需重跑提示词编译脚本。发布只冻结正式 revision，不提交生成。
+通过 `workflow/readiness` 或 MCP `*_get_workflow_readiness` 查询按目标依赖计算的缺项、待审核项、可执行范围和正式 `presentation`。无关模块的 partial 不应拦住已就绪分支。Agent 推进当前目标时更新 `workflow.currentWork` 并回读展示投影，再使用结构化 `site_navigate` 呈现工作区或实际节点/Clip；普通页面跳转保留原 `path` 入口。改过 source、提示词输入、实际参考映射或边界后，须用本机当前激活的 Acheng 编译/校验脚本重算受影响产物，再由 Backend 检查并发布；只改工作游标或内容交付/媒体生产设置不需重跑提示词编译脚本。发布只冻结正式 revision，不提交生成。
 
 内容交付模式为自动文件批处理或逐 Segment 互动；媒体生产模式为仅提示词、逐项生成或按依赖自动生产。只有用户点击生产目标，或调用 `*_start_production_run` 时才授权媒体生成。每批使用稳定 `runId`/`idempotencyKey`，保存范围、发布版本、设置、引擎和 taskId；重复请求返回原批次。自动范围在审核后继续同一 runId 时，只扩展至当前依赖刚就绪的目标；逐项范围不扩张。`*_pause_production_run` 在当前任务边界暂停，`*_resume_production_run` 继续相同 runId；失败或退回的目标不能因恢复而重新提交，重生成须明确新开 runId。
 
@@ -141,4 +141,4 @@ Backend 将已有节点的真实位置与尺寸作为固定锚点，新目标只
 
 保留 prompt-only 与授权执行的区别，自动/逐步模式沿用用户选择，不重复问。图片与关键帧需要实际查看并记录证据；待用户确认不假写 approved。Clip 默认只核对 taskId、终态、媒体可访问性与结果回写，不主动评分、试听、返修或重抽。
 
-恢复先读取 Backend 修订、导演模块游标、本次制作锁定的 Skill/编译脚本版本及原 taskId。提示词产物就绪、媒体已生成、技术自检和用户验收分别记录。局部修改只使依赖项失效，不重算无关目标，也不重做整项目；禁止以摘要替代完整对白、镜头或提示词。
+恢复先读取 Backend 修订、导演模块游标、本机当前激活的 Skill/编译脚本版本及原 taskId。提示词产物就绪、媒体已生成、技术自检和用户验收分别记录。局部修改只使依赖项失效，不重算无关目标，也不重做整项目；禁止以摘要替代完整对白、镜头或提示词。

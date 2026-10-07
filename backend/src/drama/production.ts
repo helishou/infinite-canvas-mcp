@@ -1,7 +1,7 @@
 import { captureCanvasInputs, effectiveTargetInput, inputHash, type CanvasExecutionSnapshot } from "./canvas-inputs.js";
 import { adoptedDirectorFields } from "./input-merge.js";
 import crypto from "node:crypto";
-import { currentCompilationArtifact, compilationScopeInput, scopedCompilerInput, productionReviewHash } from "@basketikun/canvas-agent/drama/compilation-scope";
+import { currentCompilationArtifact, compilationScopeInput, preserveCompilationProvenance, scopedCompilerInput, productionReviewHash } from "@basketikun/canvas-agent/drama/compilation-scope";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -155,9 +155,9 @@ export class EpisodeProductionService {
             status: "missing", coverageStatus: "unchecked", semanticDiscovery: "not_performed", checkedAt: null, diagnostics: { total: 1, blocked: 1, unresolved: 1 }, items: [], total: 0, nextCursor: null };
         const reports = this.continuityReports();
         let projected = reports.get({ kind: this.ownerKind, id }, query.snapshot,
-            { sourceHash: director.sourceHash, runtimeId: director.engine.runtimeId, snapshotVersion: current.publishedVersion }, query.view, query.targetId, query.objectId, query.pageSize, query.cursor);
+            { sourceHash: director.sourceHash, snapshotVersion: current.publishedVersion }, query.view, query.targetId, query.objectId, query.pageSize, query.cursor);
         if (query.snapshot === "published" && !projected.report && director.source.ledger && (director.source.ledger as any).contract_version === 2) {
-            const draftReport = reports.get({ kind: this.ownerKind, id }, "draft", { sourceHash: director.sourceHash, runtimeId: director.engine.runtimeId }, query.view, query.targetId, query.objectId, query.pageSize, query.cursor);
+            const draftReport = reports.get({ kind: this.ownerKind, id }, "draft", { sourceHash: director.sourceHash }, query.view, query.targetId, query.objectId, query.pageSize, query.cursor);
             if (draftReport.report && draftReport.status !== "stale") projected = { ...draftReport, report: { ...draftReport.report, snapshot: "published", snapshotVersion: current.publishedVersion } };
         }
         const items = projected.items as any[];
@@ -166,7 +166,7 @@ export class EpisodeProductionService {
         const effectiveStatus = projected.status === "passed" && checkedTargets?.length && allSegments.some(target => !checkedTargets.includes(target)) ? "partial" : projected.status;
         const legacyIssue = legacy && !projected.report ? [{ code: "LEGACY_CONTINUITY_UNCHECKED", message: "旧版草稿尚未运行只读诊断；诊断结果不会授权新门禁。" }] : [];
         return { owner: { kind: this.ownerKind, id }, snapshot: query.snapshot, revision: current.revision, publishedVersion: current.publishedVersion,
-            sourceHash: director.sourceHash, runtime: director.engine, status: legacy ? "diagnosticOnly" : effectiveStatus,
+            sourceHash: director.sourceHash, runtime: projected.report?.engine || { ...director.engine, runtimeId: projected.report?.runtimeId || director.engine.runtimeId }, status: legacy ? "diagnosticOnly" : effectiveStatus,
             coverageStatus: projected.report?.coverageStatus || "unchecked", semanticDiscovery: "not_performed", checkedAt: projected.report?.checkedAt || null,
             diagnostics: { total: (projected.report?.diagnostics?.length || 0) + legacyIssue.length, blocked: legacy ? 0 : (projected.report?.diagnostics || []).filter((item: any) => item.severity !== "warning").length,
                 unresolved: (projected.report?.diagnostics || []).filter((item: any) => /UNKNOWN|UNRESOLVED|MISSING/.test(String(item.code))).length },
@@ -176,7 +176,7 @@ export class EpisodeProductionService {
     continuityForDirector(id: string, director: NonNullable<EpisodeProductionData["director"]>, snapshot: "draft" | "published" = "draft") {
         const current = this.get(id);
         const formal = snapshot === "published" ? current.published?.director : current.draft.director;
-        if (!formal || formal.sourceHash !== director.sourceHash || formal.engine.runtimeId !== director.engine.runtimeId) {
+        if (!formal || formal.sourceHash !== director.sourceHash) {
             return { status: "stale", sourceHash: director.sourceHash, runtime: director.engine, report: null };
         }
         return this.getContinuity(id, { snapshot, view: "summary" });
@@ -215,7 +215,7 @@ export class EpisodeProductionService {
         if ((input.targetIds || []).some(target => !segments.has(target))) throw new Error("连续性检查目标必须属于当前制作稿 Segment");
         const engineReport = auditAchengContinuity(director, input.targetIds, Boolean(legacy));
         const report = { ...engineReport, verdict: legacy ? "diagnosticOnly" : engineReport.status, owner, snapshot: input.snapshot, snapshotVersion: current.publishedVersion, sourceHash: director.sourceHash,
-            runtimeId: director.engine.runtimeId, revision: current.revision, checkedAt: new Date().toISOString(), operationId: input.operationId,
+            runtimeId: engineReport.validatorRuntimeId, engine: engineReport.validatorEngine, revision: current.revision, checkedAt: new Date().toISOString(), operationId: input.operationId,
             selectedTargets: input.targetIds || (segments.size ? [...segments] : []) };
         const persisted = reports.persist(owner, input.operationId, requestHash, report);
         this.events?.publish({ type: "drama-production.updated", entityId: id, payload: { revision: current.revision, continuitySourceHash: director.sourceHash, continuitySnapshot: input.snapshot } });
@@ -814,8 +814,8 @@ export class EpisodeProductionService {
         return occupied;
     }
 
-    preflight(episodeId: string, raw: unknown): ProductionPreflight {
-        const linked = this.linked(episodeId); if (linked) return linked.service.preflight(linked.id, raw);
+    preflight(episodeId: string, raw: unknown, compilationRuntimeId?: string): ProductionPreflight {
+        const linked = this.linked(episodeId); if (linked) return linked.service.preflight(linked.id, raw, compilationRuntimeId);
         const current = this.get(episodeId);
         const diagnostics = schemaDiagnostics(productionPreflightRequestSchema, raw);
         const result: ProductionPreflight = { valid: false, contractVersion: productionContractVersion, engine: current.draft.director?.engine || null, revision: current.revision, diagnostics, generationReady: false };
@@ -840,10 +840,10 @@ export class EpisodeProductionService {
             else if (input.action === "compile") {
                 if (!current.draft.director) throw new ProductionValidationError([{ code: "COMPILE_STAGE_NOT_READY", path: "director", message: "请先保存正式导演源稿，再准备编译。", severity: "error" }]);
                 const director = directorProductionSchema.parse(structuredClone(input.request.director || current.draft.director));
-                if (fingerprint(director.engine) !== fingerprint(current.draft.director.engine)) throw new ProductionValidationError([{ code: "ENGINE_MISMATCH", path: "director.engine", message: "编译必须使用制作对象固定的引擎版本。", severity: "error" }]);
                 this.verifyCompilationBindings(episodeId, director);
                 if (this.checkEngine === assertDirectorEngine) {
-                    const checked = preflightCompilationDirector(director, (targetId, label) => this.compilationReferenceFile(episodeId, director, targetId, label));
+                    const checked = preflightCompilationDirector(director, (targetId, label) => this.compilationReferenceFile(episodeId, director, targetId, label), compilationRuntimeId);
+                    if (checked.engine) director.engine = checked.engine;
                     diagnostics.push(...checked.diagnostics.filter(item => item.code !== "ONLINE_CONTEXT_UNVERIFIED"));
                 } else if (!(Array.isArray(director.source.asset_cards) && director.source.asset_cards.length) && !(Array.isArray(director.source.segments) && director.source.segments.length)) {
                     diagnostics.push({ code: "COMPILE_STAGE_NOT_READY", path: "director.source.asset_cards", message: "当前只有剧情规划，尚无资产提示词卡或视频段落可编译。", severity: "error" });
@@ -1031,7 +1031,7 @@ export class EpisodeProductionService {
         const compiled = (artifact: NonNullable<ReturnType<typeof artifactFor>> | undefined, id: string) => {
             const blockers: string[] = [];
             if (!artifact) blockers.push(`缺少 ${id} 的完整编译提示词`);
-            else if (artifact.status !== "ready" || !currentCompilationArtifact(director, artifact) || artifact.receipt.promptHash !== artifact.sha256) blockers.push(`提示词需要由固定 Acheng 引擎重新编译`);
+            else if (artifact.status !== "ready" || !currentCompilationArtifact(director, artifact) || artifact.receipt.promptHash !== artifact.sha256) blockers.push(`提示词需要由当前激活 Acheng 引擎重新编译`);
             return blockers;
         };
         const dependencyBlockers = (ids: string[]) => [...new Set(ids)].flatMap(id => {
@@ -1260,7 +1260,7 @@ export class EpisodeProductionService {
             if (matching.length === 1) run = matching[0];
         }
         if (work.inputRevision > current.revision || (work.sourceHash && work.sourceHash !== director.sourceHash)) {
-            status = "blocked"; action = "blocked"; reason = "制作源稿已变化；请让固定 Acheng 引擎重新检查当前目标";
+            status = "blocked"; action = "blocked"; reason = "制作源稿已变化；请用当前激活的 Acheng 引擎重新检查当前目标";
         } else if (keyForWork && ["asset", "frame", "segment"].includes(keyForWork.split(":", 1)[0]) && !target) {
             status = "blocked"; action = "blocked"; reason = `目标 ${keyForWork} 已不存在于当前正式制作稿`;
         }
@@ -1832,7 +1832,16 @@ export class EpisodeProductionService {
                     }
                 }
             }
-            if (!sceneRuntime && fingerprint({ works: draft.director?.workflow.sceneWorks, review: draft.director?.workflow.sharedReview, sharedWorks: draft.director?.workflow.sharedReviewWorks, sharedAssets: draft.director?.workflow.sharedAssetReviews, sharedContinuation: draft.director?.workflow.sharedReviewContinuation }) !== fingerprint({ works: record.draft.director?.workflow.sceneWorks, review: record.draft.director?.workflow.sharedReview, sharedWorks: record.draft.director?.workflow.sharedReviewWorks, sharedAssets: record.draft.director?.workflow.sharedAssetReviews, sharedContinuation: record.draft.director?.workflow.sharedReviewContinuation })) throw new Error("SCENE_RUNTIME_OWNED: 场次工作与审核记录只能通过场次协调服务更新");
+            // Backfill only the deterministic legacy input identity; work state remains coordinator-owned.
+            const previousDirector = record.draft.director && structuredClone(record.draft.director);
+            if (previousDirector) {
+                preserveCompilationProvenance(previousDirector);
+                for (const [workId, work] of Object.entries(draft.director?.workflow.sceneWorks || {})) {
+                    const prior = previousDirector.workflow.sceneWorks?.[workId];
+                    if (prior && !work.inputEngine) work.inputEngine = prior.inputEngine;
+                }
+            }
+            if (!sceneRuntime && fingerprint({ works: draft.director?.workflow.sceneWorks, review: draft.director?.workflow.sharedReview, sharedWorks: draft.director?.workflow.sharedReviewWorks, sharedAssets: draft.director?.workflow.sharedAssetReviews, sharedContinuation: draft.director?.workflow.sharedReviewContinuation }) !== fingerprint({ works: previousDirector?.workflow.sceneWorks, review: record.draft.director?.workflow.sharedReview, sharedWorks: record.draft.director?.workflow.sharedReviewWorks, sharedAssets: record.draft.director?.workflow.sharedAssetReviews, sharedContinuation: record.draft.director?.workflow.sharedReviewContinuation })) throw new Error("SCENE_RUNTIME_OWNED: 场次工作与审核记录只能通过场次协调服务更新");
             const before = record.draft.director, after = draft.director;
             if (before && after) {
                 const priorSegments = before.source.segments as any[] || [], nextSegments = after.source.segments as any[] || [];
@@ -2501,7 +2510,7 @@ export class EpisodeProductionService {
             const activeRuns = this.continuityUpgradeActiveRuns(episodeId);
             if (activeRuns.length) throw new Error(`CONTINUITY_UPGRADE_WAIT: 活动生成任务仍在占用版本：${activeRuns.map(run => run.runId).join(", ")}`);
             const target = resolveAchengEngine();
-            if (target.runtimeId !== op.toRuntimeId) throw new Error("CONTINUITY_UPGRADE_RUNTIME_STALE: 固定运行版本已变化，请重新预览");
+            if (target.runtimeId !== op.toRuntimeId) throw new Error("CONTINUITY_UPGRADE_RUNTIME_STALE: 当前激活运行版本已变化，请重新预览");
             const expectedPreview = fingerprint({ owner: { kind: this.ownerKind, id: episodeId }, expectedRevision: op.previewRevision,
                 fromSourceHash: op.fromSourceHash, targetRuntimeId: op.toRuntimeId, ledger: op.ledger });
             if (op.previewHash !== expectedPreview) throw new Error("CONTINUITY_UPGRADE_PREVIEW_STALE: 预览内容与升级输入不一致");

@@ -1,4 +1,4 @@
-"""Read-only diagnostics using the production's pinned Acheng validators."""
+"""Read-only diagnostics using the Acheng validators selected for this request."""
 import copy
 import json
 from pathlib import Path

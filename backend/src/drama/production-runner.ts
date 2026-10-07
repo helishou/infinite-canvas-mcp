@@ -440,7 +440,7 @@ export class EpisodeProductionRunner {
         if (!snapshot.director) throw new Error("缺少 Acheng 制作稿");
         if (!run.runId && !snapshot.director.executionAuthorized) throw new Error("缺少 Acheng 生产执行授权");
         if (!run.runId && snapshot.director.unresolved.length) throw new Error(snapshot.director.unresolved.join("；"));
-        if (run.engine && JSON.stringify(run.engine) !== JSON.stringify(snapshot.director.engine)) throw new Error("运行批次固定引擎与已发布导演稿不一致");
+        if (run.engine && JSON.stringify(run.engine) !== JSON.stringify(snapshot.director.engine)) throw new Error("运行批次的编译来源与原发布快照不一致");
         const runSettings = run.settings || snapshot.settings as unknown as Record<string, unknown>;
         if (runSettings.storyboardImageMode === "skip" && run.plan.imageShotIds.length) throw new Error("此运行范围包含关键帧图片，但已选择跳过分镜图；请重新确认生产范围后启动新运行");
         const imageModels = object(runSettings.imageModels), h3Models = object(runSettings.h3Models);

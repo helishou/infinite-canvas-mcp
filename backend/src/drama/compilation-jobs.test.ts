@@ -49,7 +49,7 @@ test("recovery resumes queued records and marks uncompleted running records inte
     assert.equal((await done(restored, "queued")).status, "succeeded");
 });
 
-test("a real background worker keeps reads responsive and reports preflight failure without compiling", async t => {
+test("a real background worker keeps reads responsive and diagnoses an incomplete source without compiling", async t => {
     const f = setup(t, undefined); const worker = new ProductionCompilationService(f.service, f.root);
     worker.enqueue("e", "owner", "real-worker", 1);
     let responsive = false; setImmediate(() => { responsive = true; });
@@ -58,7 +58,7 @@ test("a real background worker keeps reads responsive and reports preflight fail
     for (let i = 0; i < 300; i++) { await pause(10); status = worker.getCompilation("e", "owner", "real-worker"); if (!["queued", "running"].includes(status.status)) break; }
     assert.equal(responsive, true); assert.equal(status.status, "blocked"); assert.equal(status.preparedId, undefined);
     const diagnostics: any = worker.getCompilation("e", "owner", "real-worker", "diagnostics", 0, 10);
-    assert.ok(diagnostics.items.some((item: any) => item.code === "ENGINE_UNAVAILABLE"));
+    assert.ok(diagnostics.items.some((item: any) => item.code === "COMPILE_STAGE_NOT_READY"));
 });
 test("queued compilation reads frozen media even when the original file changes", async t => {
     const f = setup(t, undefined); const original = path.join(f.root, "reference.png"); fs.writeFileSync(original, "approved bytes");
@@ -75,7 +75,7 @@ test("completed compilation cannot overwrite a concurrently edited source", asyn
     assert.throws(() => f.compilations.apply("e", "owner", status.preparedId), /conflict/);
 });
 
-test("pinned Python compiler succeeds in the worker and returns only compact program receipts", async t => {
+test("active Python compiler succeeds in the worker and returns only compact program receipts", async t => {
     const { resolveAchengEngine } = await import("@basketikun/canvas-agent/skills/acheng");
     const { canonicalProduction } = await import("@basketikun/canvas-agent/drama/production-contract");
     const crypto = await import("node:crypto");
@@ -92,4 +92,65 @@ test("pinned Python compiler succeeds in the worker and returns only compact pro
     assert.ok(status.preparedId); assert.ok(status.targetCount > 0);
     const index: any = jobs.getCompilation("e", "owner", "python", "targets", 0, 10);
     assert.ok(index.items.every((item: any) => !('prompt' in item)));
+});
+
+test("queued and synchronous real compilation retain their captured runtime across activation changes", async t => {
+    const { resolveAchengEngine } = await import("@basketikun/canvas-agent/skills/acheng");
+    const { canonicalProduction } = await import("@basketikun/canvas-agent/drama/production-contract");
+    const crypto = await import("node:crypto");
+    const installed = resolveAchengEngine();
+    const f = setup(t, result), home = path.join(f.root, "codex-home"), base = path.join(home, "skill-runtimes", "acheng-director");
+    const originalHome = process.env.CODEX_HOME;
+    t.after(() => { if (originalHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = originalHome; });
+    const makeRuntime = (letter: string) => {
+        const commit = letter.repeat(40), patchVersion = letter.repeat(16), runtimeId = `${commit}-${patchVersion}`;
+        const directory = path.join(base, "versions", runtimeId);
+        fs.cpSync(installed.path, directory, { recursive: true });
+        const identity = { commit, patchVersion, runtimeId, version: `test-${letter}` };
+        const manifestFile = path.join(directory, "canvas-engine.json");
+        fs.writeFileSync(manifestFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(manifestFile, "utf8")), ...identity }));
+        return { ...identity, path: directory };
+    };
+    const old = makeRuntime("a"), next = makeRuntime("b");
+    const activate = (runtime: typeof old) => fs.writeFileSync(path.join(base, "active.json"), JSON.stringify({ active: runtime }));
+    process.env.CODEX_HOME = home; activate(next);
+    const candidate = structuredClone(director);
+    candidate.engine = { commit: old.commit, patchVersion: old.patchVersion, runtimeId: old.runtimeId, version: old.version };
+    candidate.source = JSON.parse(fs.readFileSync(path.join(installed.path, "templates", "style-anchor-stage.json"), "utf8"));
+    candidate.sourceHash = crypto.createHash("sha256").update(canonicalProduction(candidate.source)).digest("hex");
+    const baseline = f.service.get(); baseline.draft.director = candidate; f.service.get = () => structuredClone(baseline);
+    // Hold all three slots so activation changes before the real worker starts.
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    t.after(release);
+    const blockers = new ProductionCompilationService(f.service, f.root, (async (input: any) => { await gate; return result(input); }) as any);
+    for (let i = 0; i < 3; i++) blockers.enqueue("e", "owner", `block-${i}`, 1);
+    const jobs = new ProductionCompilationService(f.service, f.root);
+    jobs.enqueue("e", "owner", "captured", 1);
+    assert.equal(jobs.getCompilation("e", "owner", "captured").status, "queued");
+    activate(old);
+    assert.equal((jobs.enqueue("e", "owner", "captured", 1) as any).replayed, true);
+    release();
+    const { setTimeout: pause } = await import("node:timers/promises");
+    let status: any;
+    for (let i = 0; i < 1000; i++) {
+        await pause(10); status = jobs.getCompilation("e", "owner", "captured");
+        if (!["queued", "running"].includes(status.status)) break;
+    }
+    assert.equal(status.status, "succeeded", JSON.stringify(jobs.getCompilation("e", "owner", "captured", "diagnostics", 0, 20)));
+    const packet = JSON.parse(fs.readFileSync(path.join(f.root, status.preparedId, "packet.json"), "utf8"));
+    assert.equal(packet.director.engine.runtimeId, next.runtimeId);
+    assert.ok(packet.director.artifacts.every((artifact: any) => artifact.receipt.engineRuntimeId === next.runtimeId));
+    assert.deepEqual(f.service.get(), baseline);
+    assert.equal((jobs.enqueue("e", "owner", "captured", 1) as any).replayed, true);
+    activate(next);
+    f.service.preflight = (_id: string, _request: unknown, runtimeId: string) => {
+        assert.equal(runtimeId, next.runtimeId);
+        activate(old); return { valid: true, diagnostics: [] };
+    };
+    f.service.compilationReferenceFile = () => undefined;
+    const prepared = jobs.prepare("e", "owner", 1);
+    assert.equal(prepared.engine.runtimeId, next.runtimeId);
+    const synchronous = JSON.parse(fs.readFileSync(path.join(f.root, prepared.preparedId, "packet.json"), "utf8"));
+    assert.ok(synchronous.director.artifacts.every((artifact: any) => artifact.receipt.engineRuntimeId === next.runtimeId));
 });

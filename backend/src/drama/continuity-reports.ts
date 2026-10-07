@@ -18,7 +18,7 @@ export function continuityTargetBlockers(result: ContinuityConsumerResult, targe
     const report = result.report;
     if (!report || report.stale || !result.sourceHash || !result.runtime?.runtimeId || report.sourceHash !== result.sourceHash || report.runtimeId !== result.runtime.runtimeId ||
         !["passed", "partial", "blocked", "unresolved"].includes(String(result.status))) {
-        return [{ code: "CONTINUITY_REPORT_REQUIRED", message: "当前制作源和固定运行包缺少有效连续性检查回执" }];
+        return [{ code: "CONTINUITY_REPORT_REQUIRED", message: "当前制作源缺少有效连续性检查回执" }];
     }
     const selected = new Set(Array.isArray(report.selectedTargets) ? report.selectedTargets : []);
     const blockers: ContinuityConsumerBlocker[] = targetIds.filter(targetId => !selected.has(targetId)).map(targetId => ({
@@ -47,14 +47,14 @@ export class ProductionContinuityReports {
         const reports = fs.existsSync(directory) ? fs.readdirSync(directory).filter(name => name.startsWith("report-") && name.endsWith(".json")).flatMap(name => {
             try { return [JSON.parse(fs.readFileSync(path.join(directory, name), "utf8"))]; } catch { return []; }
         }).filter(report => report.owner?.kind === owner.kind && report.owner?.id === owner.id && report.snapshot === snapshot).sort((a, b) => String(b.checkedAt).localeCompare(String(a.checkedAt))) : [];
-        const prior = (reports.find(report => report.sourceHash === current.sourceHash && report.runtimeId === current.runtimeId &&
+        const prior = (reports.find(report => report.sourceHash === current.sourceHash && (!current.runtimeId || report.runtimeId === current.runtimeId) &&
             (snapshot === "draft" || report.snapshotVersion === current.snapshotVersion)) || reports[0]) as any;
         if (!prior) return { status: "unchecked", report: null, total: 0, items: [], nextCursor: null };
-        const currentReport = prior.sourceHash === current.sourceHash && prior.runtimeId === current.runtimeId &&
+        const currentReport = prior.sourceHash === current.sourceHash && (!current.runtimeId || prior.runtimeId === current.runtimeId) &&
             (snapshot === "draft" || prior.snapshotVersion === current.snapshotVersion);
         const status = currentReport ? prior.verdict : "stale";
         const selection = JSON.stringify({ owner, snapshot, snapshotVersion: snapshot === "published" ? current.snapshotVersion : undefined,
-            sourceHash: current.sourceHash || "", runtimeId: current.runtimeId || "", view, targetId, objectId });
+            sourceHash: current.sourceHash || "", runtimeId: current.runtimeId || prior.runtimeId || "", reportOperationId: prior.operationId, view, targetId, objectId });
         let offset = 0;
         if (cursor) {
             try {

@@ -44,6 +44,12 @@ test("HTTP MCP defaults stay compact while historic source and model catalog rem
         return JSON.parse(result.content[0].text);
     };
     const tools = await client.listTools();
+    const contractTool = tools.tools.find(tool => tool.name === "production_get_contract")!;
+    assert.match((contractTool.inputSchema.properties as any).runtimeId.description, /Deprecated/);
+    const contract = await call("production_get_contract", { runtimeId: "historical-runtime-no-longer-installed" });
+    assert.match(contract.contract.notice, /deprecated/);
+    const { resolveAchengEngine } = await import("@basketikun/canvas-agent/skills/acheng");
+    assert.equal(contract.contract.engine.runtimeId, resolveAchengEngine().runtimeId);
     assert.ok((tools.tools.find(tool => tool.name === "drama_get_production_version")!.inputSchema.properties as any).view);
     const summary = await call("drama_get_production_version", { episodeId: "ep", version: 1 });
     assert.ok(JSON.stringify(summary).length < 3000); assert.equal(summary.version.snapshot.draft.counts.scenes, 1);

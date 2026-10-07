@@ -27,7 +27,7 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
     // const h3Model = String(object(settings.h3Models)[group.id] || settings.h3Model || "");
     const authored = directorArtifact(published, "h3", group.id);
     const d = published.director!;
-    if (!currentCompilationArtifact(d, authored) || authored.receipt.promptHash !== authored.sha256 || authored.receipt.engineRuntimeId !== d.engine.runtimeId) throw new Error("编译回执已过期，请修改源稿后重新编译");
+    if (!currentCompilationArtifact(d, authored) || authored.receipt.promptHash !== authored.sha256) throw new Error("编译回执已过期，请修改源稿后重新编译");
     const planned = (d.source.segments as Array<Record<string, any>>).find(s => s.id === group.id)!;
     const styleTemplateId = planned.styleTemplateId ?? null;
     if (styleTemplateId !== null && !isH3StyleTemplateId(styleTemplateId)) throw new Error(`未知 H3 风格模板：${styleTemplateId}`);
@@ -68,7 +68,7 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
     const segment: Record<string, any> = { id: segmentId, sourceShotId: group.shotIds.join("~"), title: shots.map(shot => shot.title).join(" / "),
         duration: shots.reduce((sum, shot) => sum + shot.duration, 0), taskMode, prompt, referenceBindings: bindings,
         tailFrameContinuation: boundary?.tailFrame === true, motionContextEnabled: boundary?.motionContext === true,
-        directorEngine: d.engine, directorSourceHash: authored.sourceHash, styleTemplateId, h3CharacterGroups: characterGroups,
+        directorEngine: authored.receipt.engine || (authored.receipt.compilationScope as any)?.engine || d.engine, directorSourceHash: authored.sourceHash, styleTemplateId, h3CharacterGroups: characterGroups,
         ...(storyboardShots ? { storyboardShots } : {}),
         aspectRatio: settings.videoAspectRatio || object(nodes.find((node: any) => node.id === group.nodeId)?.metadata).aspectRatio || BASE_H3_NODE_METADATA.aspectRatio,
         modelName: /* h3Model || */ object(nodes.find((node: any) => node.id === group.nodeId)?.metadata).modelName || BASE_H3_NODE_METADATA.modelName };

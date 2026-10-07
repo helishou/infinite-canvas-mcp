@@ -69,7 +69,16 @@ export function ref2vaPromptDiagnostics(director: DirectorProduction, maximum: n
         // Inspect normalized newlines without changing the authored bytes/hash.
         const body = artifact.prompt.replace(/\r\n?/g, "\n").split("detailed_description:\n")[1]?.split("\n\noverall_soundscape:")[0] || "";
         const words = body.match(/\b[A-Za-z]+(?:[-'][A-Za-z]+)*\b/g)?.length || 0;
-        return words < 2200 || (maximum !== null && words > maximum) ? [{ code: "INVALID_PROMPT_LENGTH", path: `director.artifacts.${index}.prompt`, targetId: artifact.targetId, message: `Ref2VA 正文词数不符合固定引擎要求 (${words}, minimum 2200, maximum ${maximum ?? "unbounded"})`, severity: "error" as const }] : [];
+        const diagnostics = artifact.receipt.diagnostics as Record<string, any> | undefined;
+        const declaredMinimum = diagnostics?.detailPolicy?.minimum_words;
+        const matchedReceipt = artifact.receipt.validator === "compile_h3/validate_package"
+            && artifact.receipt.engineRuntimeId === ((artifact.receipt.engine as DirectorProduction["engine"] | undefined) || director.engine).runtimeId
+            && artifact.receipt.sourceHash === artifact.sourceHash
+            && artifact.receipt.promptHash === artifact.sha256
+            && diagnostics?.accepted === true && diagnostics?.formatPass === "PASSED";
+        // Each artifact retains its actual compiler's policy after other targets use a newer engine.
+        const minimum = matchedReceipt && Number.isInteger(declaredMinimum) && declaredMinimum >= 0 ? declaredMinimum : 2200;
+        return words < minimum || (maximum !== null && words > maximum) ? [{ code: "INVALID_PROMPT_LENGTH", path: `director.artifacts.${index}.prompt`, targetId: artifact.targetId, message: `Ref2VA 正文词数不符合编译回执要求 (${words}, minimum ${minimum}, maximum ${maximum ?? "unbounded"})`, severity: "error" as const }] : [];
     });
 }
 

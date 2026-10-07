@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { bundledSkillWarnings, installBundledProductionSkill, installPinnedAchengSkill, syncBundledProductionSkills } from "./bundled.js";
+import { bundledSkillWarnings, installBundledProductionSkill, installAchengSkill, syncBundledProductionSkills } from "./bundled.js";
 
 function fixture(context: { after: (fn: () => void) => void }) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "canvas-sop-bundle-"));
@@ -59,32 +59,32 @@ function achengFixture(context: { after: (fn: () => void) => void }) {
     return { workspace, runtime, installed: path.join(workspace, ".agents", "skills", "acheng-director", "SKILL.md") };
 }
 
-test("pinned Acheng runtime installs as a project Skill without generated output or repository metadata", (context) => {
+test("active Acheng runtime installs as a project Skill without generated output or repository metadata", (context) => {
     const { workspace, runtime, installed } = achengFixture(context);
-    assert.deepEqual(installPinnedAchengSkill(workspace, runtime), []);
+    assert.deepEqual(installAchengSkill(workspace, runtime), []);
     assert.equal(fs.readFileSync(installed, "utf8"), "version 1");
     assert.equal(fs.readFileSync(path.join(path.dirname(installed), "modules", "story", "SKILL.md"), "utf8"), "story module");
     assert.equal(fs.existsSync(path.join(path.dirname(installed), "output")), false);
     assert.equal(fs.existsSync(path.join(path.dirname(installed), ".git")), false);
 });
 
-test("pinned Acheng Skill follows an engine update but preserves local edits", (context) => {
+test("active Acheng Skill follows an engine update but preserves local edits", (context) => {
     const { workspace, runtime, installed } = achengFixture(context);
-    assert.deepEqual(installPinnedAchengSkill(workspace, runtime), []);
+    assert.deepEqual(installAchengSkill(workspace, runtime), []);
     fs.writeFileSync(path.join(runtime, "SKILL.md"), "version 2");
-    assert.deepEqual(installPinnedAchengSkill(workspace, runtime), []);
+    assert.deepEqual(installAchengSkill(workspace, runtime), []);
     assert.equal(fs.readFileSync(installed, "utf8"), "version 2");
     fs.writeFileSync(installed, "user edit");
     fs.writeFileSync(path.join(runtime, "SKILL.md"), "version 3");
-    assert.match(installPinnedAchengSkill(workspace, runtime).join(" "), /本地修改/);
+    assert.match(installAchengSkill(workspace, runtime).join(" "), /本地修改/);
     assert.equal(fs.readFileSync(installed, "utf8"), "user edit");
 });
 
-test("pinned Acheng Skill preserves an existing unmanaged project Skill", (context) => {
+test("active Acheng Skill preserves an existing unmanaged project Skill", (context) => {
     const { workspace, runtime, installed } = achengFixture(context);
     fs.mkdirSync(path.dirname(installed), { recursive: true });
     fs.writeFileSync(installed, "user-owned project skill");
-    assert.match(installPinnedAchengSkill(workspace, runtime).join(" "), /已有 Acheng Director/);
+    assert.match(installAchengSkill(workspace, runtime).join(" "), /已有 Acheng Director/);
     assert.equal(fs.readFileSync(installed, "utf8"), "user-owned project skill");
 });
 

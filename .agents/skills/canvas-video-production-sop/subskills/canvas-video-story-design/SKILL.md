@@ -5,7 +5,7 @@ description: Acheng 画布适配的剧情设计入口；使用 story 模块与�
 
 # 剧情设计
 
-先读取 [Acheng 画布适配](../../references/acheng-canvas-adapter.md)，解析当前或运行固定的 Acheng 版本，再加载其 story 对应模块。已有确认稿直接进入缺项，不启动无关模块。
+先读取 [Acheng 画布适配](../../references/acheng-canvas-adapter.md)，解析本机当前激活的 Acheng 版本，再加载其 story 对应模块。已有确认稿直接进入缺项，不启动无关模块。
 
 以 Acheng 合同组织内容、依赖、版本、完整提示词和检查。画布负责对象、参考、任务和媒体；按实时 MCP schema 操作。旧六阶段、强制单镜 Clip、固定正反打、独立站位闸门和无头服装四视图不再适用。
 

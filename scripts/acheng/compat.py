@@ -32,7 +32,7 @@ def apply(root):
     bridge = Path(__file__).with_name("source-contract.py")
     (root / "scripts/canvas_source_contract.py").write_bytes(bridge.read_bytes())
     if not (root / "scripts/continuity_v2.py").is_file():
-        raise RuntimeError("Pinned Acheng source is missing scripts/continuity_v2.py")
+        raise RuntimeError("Acheng source is missing scripts/continuity_v2.py")
     import importlib.util
     spec = importlib.util.spec_from_file_location("canvas_source_contract", bridge)
     module = importlib.util.module_from_spec(spec)
@@ -58,7 +58,7 @@ def apply(root):
     marker = "你是总导演及生产合同的唯一写入者。"
     if marker not in text:
         raise RuntimeError("Acheng director entry changed; review the Canvas routing hook")
-    text = text.replace(marker, "涉及无限画布项目时，先读取项目提供的 `canvas-video-production-sop` 适配入口与 [本机兼容说明](CANVAS-COMPATIBILITY.md)。创作仍由本 Skill 主导；已获用户生成授权时，适配层通过原生画布 MCP 负责实际生成和正式存储。下文纯提示词交付限制不禁止该独立执行层。运行固定引擎版本，不混装另一套同名 H3 规范。\n\n" + marker, 1)
+    text = text.replace(marker, "涉及无限画布项目时，先读取项目提供的 `canvas-video-production-sop` 适配入口与 [本机兼容说明](CANVAS-COMPATIBILITY.md)。创作仍由本 Skill 主导；已获用户生成授权时，适配层通过原生画布 MCP 负责实际生成和正式存储。下文纯提示词交付限制不禁止该独立执行层。新制作或恢复制作使用本机当前激活引擎，不混装另一套同名 H3 规范。\n\n" + marker, 1)
     entry.write_text(text, encoding="utf-8")
     kickoff = Path(__file__).with_name("canvas-kickoff.md").read_text(encoding="utf-8").strip()
     kickoff_heading = kickoff.splitlines()[0]
@@ -79,9 +79,9 @@ def apply(root):
         entry.write_text(text, encoding="utf-8")
     for path in [root / "SKILL.md", root / "modules/assets/SKILL.md", root / "modules/model/SKILL.md", root / "references/90-production-contract.md", root / "templates/h3-prompt-package.md"]:
         text = path.read_text(encoding="utf-8")
-        text = re.sub(r"极限值\s*2900\s*词硬性封顶[^；。\n]*", "正文无硬性词数上限，保留固定运行版本的最低细节要求", text)
-        text = text.replace("### H3 详细度、极限值（2200-2900词）与模式锁", "### H3 详细度、固定运行版本与模式锁")
-        text = re.sub(r"1\. \*\*动态密度与硬性上限（2200-2900 词）\*\*[^\n]*", "1. **按固定运行版本计算详细度**：保留编译器的最低细节要求与复杂度预算；正文无硬性词数上限，不截断、不压缩、不按词数重装箱。", text)
+        text = re.sub(r"极限值\s*2900\s*词硬性封顶[^；。\n]*", "正文无硬性词数上限，保留当前激活运行版本的最低细节要求", text)
+        text = text.replace("### H3 详细度、极限值（2200-2900词）与模式锁", "### H3 详细度、当前激活运行版本与模式锁")
+        text = re.sub(r"1\. \*\*动态密度与硬性上限（2200-2900 词）\*\*[^\n]*", "1. **按当前激活运行版本计算详细度**：保留编译器的最低细节要求与复杂度预算；正文无硬性词数上限，不截断、不压缩、不按词数重装箱。", text)
         text = re.sub(r"### 固定角色四格模板（用户指定）\s*\n[^\n]*", "### Infinite Canvas 角色四视图规格\n新制作默认使用等高的正脸近景、正面全身、侧面全身、背面全身。用户明确指定时，在完整 view_layout 中保存 selection=user_explicit 和有效 selection_reason，可使用1:2行高的无头人形四格或等高的蛇形头正面/头侧面/盘绕全身/鳞片细节四格。空手中立、无文字，不改变角色事实；既有批准资产沿用原版本，不自动重生成。", text)
         path.write_text(text, encoding="utf-8")
     asset_plan = root / "scripts/asset_plan.py"

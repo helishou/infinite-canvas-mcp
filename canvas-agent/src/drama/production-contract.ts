@@ -84,8 +84,10 @@ export const directorSceneReviewSchema = z.object({
     media: z.array(z.object({ targetId: id, storageKey: id, sha256: hash })),
     checkedAt: z.string().datetime(),
 }).strict();
+const directorEngineSchema = z.object({ commit: z.string().regex(/^[a-f0-9]{40}$/), patchVersion: id, runtimeId: id, version: id });
 export const directorSceneWorkSchema = z.object({
     workId: id, sceneId: id, inputRevision: z.number().int().nonnegative(), sourceHash: hash, inputHash: hash,
+    inputEngine: directorEngineSchema.optional(),
     status: z.enum(["pending", "running", "awaiting_media", "awaiting_review", "blocked", "failed", "paused", "succeeded"]),
     stage: z.enum(["create", "assets", "review", "compile", "produce", "complete"]),
     agentTurnId: id.optional(), recoveryPending: z.boolean().optional(), agentThreadId: id.optional(), compilationId: id.optional(), runIds: z.array(id).default([]),
@@ -110,7 +112,7 @@ export const directorWorkflowSchema = z.object({
 }).passthrough();
 export const directorProductionSchema = z.object({
     schemaVersion: z.literal(1),
-    engine: z.object({ commit: z.string().regex(/^[a-f0-9]{40}$/), patchVersion: id, runtimeId: id, version: id }),
+    engine: directorEngineSchema,
     // Preserve every upstream field; Canvas does not maintain a second creative compiler.
     source: z.record(z.unknown()).superRefine((source, context) => {
         if (Array.isArray(source.segments)) source.segments.forEach((segment, index) => {
@@ -275,7 +277,7 @@ export const productionEditSchema = z.object({ operationId: id, expectedRevision
 export const productionPublishSchema = z.object({ operationId: id, expectedRevision: z.number().int().min(0), stage: z.enum(["script", "shots", "director"]), scope: productionCompilationScopeSchema.optional() }).strict();
 export const directorRunStartSchema = z.object({ runId: id, idempotencyKey: id, workId: id.optional(), expectedRevision: z.number().int().min(0), version: z.number().int().min(0).default(0), inputBasis: z.enum(["canvas", "published"]).default("canvas"), expectedCanvasRevision: z.number().int().nonnegative().optional(), expectedPlanHash: hash.optional(), targets: z.array(id).min(1), scope: z.enum(["selected", "all_ready"]).default("selected") }).strict();
 export const directorRunControlSchema = z.object({ runId: id }).strict();
-export const productionContractQuerySchema = z.object({ runtimeId: id.optional(), operationType: id.optional(), moduleId: z.enum(directorModules).optional() }).strict();
+export const productionContractQuerySchema = z.object({ runtimeId: id.optional().describe("Deprecated: accepted for compatibility; the contract always uses the locally active Acheng runtime."), operationType: id.optional(), moduleId: z.enum(directorModules).optional() }).strict();
 export const productionContinuityReadSchema = z.object({ snapshot: z.enum(["draft", "published"]).default("draft"), view: z.enum(["summary", "issues", "timeline", "shot"]).default("summary"), targetId: id.optional(), objectId: id.optional(), pageSize: z.coerce.number().int().positive().optional(), cursor: z.string().optional() }).strict();
 export const productionContinuityCheckSchema = z.object({ expectedRevision: z.number().int().nonnegative(), operationId: id, snapshot: z.enum(["draft", "published"]).default("draft"), targetIds: z.array(id).optional() }).strict();
 export const productionContinuityUpgradePreviewSchema = z.object({ expectedRevision: z.number().int().nonnegative(), operationId: id, fromSourceHash: hash, ledger: z.record(z.unknown()) }).strict();

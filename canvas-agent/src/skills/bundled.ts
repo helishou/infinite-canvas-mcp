@@ -114,8 +114,8 @@ export function installBundledProductionSkill(workspacePath: string, bundledPath
     return installManagedSkill(workspacePath, bundledPath, PRODUCTION_SKILL_NAME, "bundled-production-sop.json", "画布生产 SOP");
 }
 
-/** Mirror only the pinned, immutable Acheng skill runtime, excluding its generated output directory. */
-export function installPinnedAchengSkill(workspacePath: string, runtimePath: string) {
+/** Mirror the locally active, verified Acheng skill runtime, excluding its generated output directory. */
+export function installAchengSkill(workspacePath: string, runtimePath: string) {
     return installManagedSkill(workspacePath, runtimePath, ACHENG_SKILL_NAME, "bundled-acheng-director.json", "Acheng Director", new Set([".git", "output"]));
 }
 
@@ -123,7 +123,7 @@ export function syncBundledProductionSkills(workspacePath: string, bundledPath: 
     const warnings: Array<{ path: string; message: string }> = installBundledProductionSkill(workspacePath, bundledPath).map(message => ({ path: PRODUCTION_SKILL_NAME, message }));
     try {
         const runtimePath = achengRuntimePath || resolveAchengEngine().path;
-        warnings.push(...installPinnedAchengSkill(workspacePath, runtimePath).map(message => ({ path: ACHENG_SKILL_NAME, message })));
+        warnings.push(...installAchengSkill(workspacePath, runtimePath).map(message => ({ path: ACHENG_SKILL_NAME, message })));
     } catch (error) {
         warnings.push({ path: ACHENG_SKILL_NAME, message: `Acheng 引擎不可用，项目 Skill 未安装且不得退回旧流程：${error instanceof Error ? error.message : String(error)}` });
     }

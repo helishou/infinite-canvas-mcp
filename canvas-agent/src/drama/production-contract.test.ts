@@ -72,6 +72,27 @@ test("new word policy accepts 2901 and 6500 words without truncation, while the 
     }
 });
 
+test("Ref2VA length validation follows matched compiler receipts, including a zero minimum", () => {
+    const director = productionOperationContract("set_director_production").operations[0].example.director as DirectorProduction;
+    director.source.segments = [{ id: "segment", mode: "Ref2VA" }];
+    const prompt = `detailed_description:\n${"authored ".repeat(100)}\n\noverall_soundscape:\nWind.`;
+    const receipt = { sourceHash: director.sourceHash, promptHash: "0".repeat(64), engineRuntimeId: director.engine.runtimeId,
+        validator: "compile_h3/validate_package", diagnostics: { accepted: true, formatPass: "PASSED", detailPolicy: { minimum_words: 0 } } };
+    director.artifacts = [{ id: "prompt", targetId: "segment", kind: "h3", status: "ready", prompt,
+        sha256: receipt.promptHash, sourceHash: receipt.sourceHash, references: [], receipt }];
+    assert.deepEqual(ref2vaPromptDiagnostics(director, null), []);
+    assert.equal(ref2vaPromptDiagnostics(director, 90).length, 1);
+    receipt.diagnostics.detailPolicy.minimum_words = 200;
+    assert.equal(ref2vaPromptDiagnostics(director, null).length, 1);
+    receipt.diagnostics.detailPolicy.minimum_words = 0;
+    receipt.engineRuntimeId = "unmatched-runtime";
+    assert.equal(ref2vaPromptDiagnostics(director, null).length, 1);
+    receipt.engineRuntimeId = director.engine.runtimeId;
+    receipt.promptHash = "1".repeat(64);
+    assert.equal(ref2vaPromptDiagnostics(director, null).length, 1);
+    assert.equal(director.artifacts[0].prompt, prompt);
+});
+
 test("Ref2VA CRLF validation counts the same words while preserving prompt bytes", () => {
     const director = productionOperationContract("set_director_production").operations[0].example.director as DirectorProduction;
     director.source.segments = [{ id: "segment", mode: "Ref2VA" }];
@@ -81,6 +102,19 @@ test("Ref2VA CRLF validation counts the same words while preserving prompt bytes
         assert.deepEqual(ref2vaPromptDiagnostics(director, 2900), []);
         assert.equal(director.artifacts[0].prompt, prompt);
     }
+});
+
+test("a retained Ref2VA receipt uses its original compiler policy after scoped compilation changes the production engine", () => {
+    const director = productionOperationContract("set_director_production").operations[0].example.director as DirectorProduction;
+    const engine = structuredClone(director.engine), prompt = "detailed_description:\nA quiet shot.\n\noverall_soundscape:\nWind.";
+    director.source.segments = [{ id: "old-segment", mode: "Ref2VA" }];
+    director.artifacts = [{ id: "old-prompt", targetId: "old-segment", kind: "h3", status: "ready", prompt, sha256: "0".repeat(64), sourceHash: director.sourceHash, references: [],
+        receipt: { sourceHash: director.sourceHash, promptHash: "0".repeat(64), engineRuntimeId: engine.runtimeId, engine, validator: "compile_h3/validate_package",
+            diagnostics: { accepted: true, formatPass: "PASSED", detailPolicy: { minimum_words: 0 } } } }];
+    director.engine = { commit: "b".repeat(40), patchVersion: "next", runtimeId: "next", version: "next" };
+    assert.deepEqual(ref2vaPromptDiagnostics(director, null), []);
+    director.artifacts[0].receipt.engineRuntimeId = "forged-runtime";
+    assert.equal(ref2vaPromptDiagnostics(director, null).length, 1);
 });
 
 test("production compilation tools have explicit owner, revision and frozen handle contracts", () => {

@@ -44,7 +44,7 @@ GUIDANCE = """# H3 精简生产正文
 
 
 def apply_prompt_policy(root):
-    """Apply only to a new runtime candidate, never an existing pinned runtime."""
+    """Apply only to a new runtime candidate, never an existing verified runtime."""
     root = Path(root)
     (root / "scripts/canvas_h3_prompt_policy.py").write_bytes(Path(__file__).read_bytes())
     (root / "references/115-h3-concise-prompts.md").write_text(GUIDANCE, encoding="utf-8")
@@ -106,8 +106,8 @@ def apply_prompt_policy(root):
     # libraries and their hashes remain unchanged and are superseded explicitly.
     entry = root / "SKILL.md"
     text = entry.read_text(encoding="utf-8")
-    text = text.replace("### H3 详细度、固定运行版本与模式锁", "### H3 精简正文、固定运行版本与模式锁")
-    text = re.sub(r"1\. \*\*按固定运行版本计算详细度\*\*[^\n]*",
+    text = text.replace("### H3 详细度、当前激活运行版本与模式锁", "### H3 精简正文、当前激活运行版本与模式锁")
+    text = re.sub(r"1\. \*\*按当前激活运行版本计算详细度\*\*[^\n]*",
                   "1. **按本镜事实量写正文**：遵守[H3 精简生产正文](references/115-h3-concise-prompts.md)；取消自动词数下限和按秒扩写，短镜头正文通常为 350–500 英文词建议范围。", text)
     text = re.sub(r"4\. \*\*逐镜展开与独立性\*\*[^\n]*",
                   "4. **每段独立、段内去重**：一个 Segment 独立重建当前人物身份、场景和参考职责一次，各 Shot 写自己的位置、光线、起始状态、动作因果、镜头、声音及尾态。", text)

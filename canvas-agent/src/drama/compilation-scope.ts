@@ -94,14 +94,32 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     ]);
     const inputAssets = Object.fromEntries(Object.entries(projected.assets).filter(([id]) => referenced.has(id) || Boolean(scene && !shots.size)).map(([id, asset]) => [id, { nodeId: asset.nodeId, assetId: asset.assetId, version: asset.version, storageKey: asset.storageKey, sha256: asset.sha256, sharedSource: asset.sharedSource }]));
     const bindings = Object.fromEntries(Object.entries(projected.assets).map(([id, asset]) => [id, { nodeId: asset.nodeId ?? null, assetId: asset.assetId ?? null }]));
-    const inputHash = compilationHash({ source: projected.source, engine: projected.engine, assets: inputAssets, bindings, shotInputs: projected.shotInputs, boundaries: projected.boundaries });
-    return { director: projected, inputHash, targetIds };
+    const inputs = { source: projected.source, assets: inputAssets, bindings, shotInputs: projected.shotInputs, boundaries: projected.boundaries };
+    const inputHash = compilationHash(inputs);
+    const legacyInputHash = compilationHash({ ...inputs, engine: projected.engine });
+    return { director: projected, inputHash, legacyInputHash, targetIds };
 }
 
 export function currentCompilationArtifact(director: DirectorProduction, artifact: DirectorProduction["artifacts"][number]) {
-    const scoped = artifact.receipt.compilationScope as { scope: CompilationScope; inputHash: string } | undefined;
+    const identity = artifact.receipt.engine as DirectorProduction["engine"] | undefined;
+    if (identity && identity.runtimeId !== artifact.receipt.engineRuntimeId) return false;
+    const scoped = artifact.receipt.compilationScope as { scope: CompilationScope; inputHash: string; engine?: DirectorProduction["engine"] } | undefined;
     if (!scoped) return artifact.sourceHash === director.sourceHash && artifact.receipt.sourceHash === director.sourceHash;
-    try { return compilationScopeInput(director, scoped.scope).inputHash === scoped.inputHash; } catch { return false; }
+    if (scoped.engine && artifact.receipt.engineRuntimeId && scoped.engine.runtimeId !== artifact.receipt.engineRuntimeId) return false;
+    try {
+        const input = compilationScopeInput({ ...director, engine: scoped.engine || director.engine }, scoped.scope);
+        return input.inputHash === scoped.inputHash || input.legacyInputHash === scoped.inputHash;
+    } catch { return false; }
+}
+
+/** Record the existing receipt identity before changing a production's last compiler. */
+export function preserveCompilationProvenance(director: DirectorProduction) {
+    for (const artifact of director.artifacts) {
+        if (!artifact.receipt.engine && artifact.receipt.engineRuntimeId === director.engine.runtimeId) artifact.receipt.engine = structuredClone(director.engine);
+        const scoped = artifact.receipt.compilationScope as { engine?: DirectorProduction["engine"] } | undefined;
+        if (scoped && !scoped.engine) scoped.engine = structuredClone(director.engine);
+    }
+    for (const work of Object.values(director.workflow.sceneWorks || {})) if (!work.inputEngine) work.inputEngine = structuredClone(director.engine);
 }
 
 /** Review identity includes actual outputs, even when an image is not a compiler reference. */

@@ -4,14 +4,13 @@ import fs from "node:fs";
 import { canonicalProduction, type DirectorProduction, type EpisodeProductionData } from "@basketikun/canvas-agent/drama/production-contract";
 import type { BackendDatabase } from "../db.js";
 import { resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
-import { resolveAchengRuntime } from "@basketikun/canvas-agent/skills/acheng";
+import { resolveAchengEngine } from "@basketikun/canvas-agent/skills/acheng";
 import { ref2vaPromptDiagnostics, ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
 import { assertImageReferenceCoverage } from "./image-inputs.js";
 import { productionCanvasContext } from "./production-canvas.js";
 
-export function assertDirectorEngine(engine: DirectorProduction["engine"]) {
-    const runtime = resolveAchengRuntime(engine.runtimeId);
-    if (runtime.commit !== engine.commit || runtime.patchVersion !== engine.patchVersion || runtime.version !== engine.version) throw new Error("Acheng 引擎回执与固定运行版本不一致");
+export function assertDirectorEngine(_engine: DirectorProduction["engine"]) {
+    resolveAchengEngine();
 }
 
 export const directorHash = (value: unknown) => crypto.createHash("sha256").update(canonicalProduction(value)).digest("hex");
@@ -48,10 +47,10 @@ export function projectDirector(data: EpisodeProductionData) {
     if (new Set(d.artifacts.map(a => `${a.kind}:${a.targetId}`)).size !== d.artifacts.length) throw new Error("同一目标只能有一个当前编译产物");
     for (const artifact of d.artifacts) {
         if (artifact.sha256 !== promptHash(artifact.prompt)) throw new Error(`产物 ${artifact.id} 正文字节摘要不一致`);
-        if (artifact.status === "ready" && (!currentCompilationArtifact(d, artifact) || artifact.receipt.promptHash !== artifact.sha256 || artifact.receipt.engineRuntimeId !== d.engine.runtimeId)) throw new Error(`产物 ${artifact.id} 回执版本不一致`);
+        if (artifact.status === "ready" && (!currentCompilationArtifact(d, artifact) || artifact.receipt.promptHash !== artifact.sha256)) throw new Error(`产物 ${artifact.id} 回执版本不一致`);
 
     }
-    const sourceContract = /^[a-f0-9]{40}-[a-f0-9]{16}$/.test(d.engine.runtimeId) ? resolveAchengRuntime(d.engine.runtimeId).sourceContract : null;
+    const sourceContract = /^[a-f0-9]{40}-[a-f0-9]{16}$/.test(d.engine.runtimeId) ? resolveAchengEngine().sourceContract : null;
     const promptIssues = ref2vaPromptDiagnostics(d, sourceContract ? sourceContract.ref2vaMaximumWords : 2900);
     if (promptIssues.length) throw new ProductionValidationError(promptIssues);
 }

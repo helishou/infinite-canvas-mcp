@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { compilationHash, compilationScopeInput, currentCompilationArtifact, scopedCompilerInput } from "./compilation-scope.js";
+import { compilationHash, compilationScopeInput, currentCompilationArtifact, preserveCompilationProvenance, scopedCompilerInput } from "./compilation-scope.js";
 import type { DirectorProduction } from "./production-contract.js";
 import { auditAchengContinuity, resolveAchengEngine } from "../skills/acheng.js";
 
@@ -78,4 +78,18 @@ test("scoped receipts preserve original provenance across unrelated edits, but r
     assert.equal(currentCompilationArtifact(changed, artifact), false);
     assert.equal(artifact.sourceHash, d.sourceHash);
     assert.throws(() => compilationScopeInput(d, { sceneId: "missing" }), /UNKNOWN_SCENE/);
+});
+
+test("engine changes retain legacy scoped receipt validity without accepting changed source or prompt identity", () => {
+    const director = scopedDirector(), scope = { targetIds: ["KA"] };
+    const artifact: DirectorProduction["artifacts"][number] = { id: "image-KA", kind: "image", targetId: "KA", prompt: "original", sha256: "a".repeat(64), sourceHash: director.sourceHash, status: "ready", references: [],
+        receipt: { sourceHash: director.sourceHash, engineRuntimeId: director.engine.runtimeId, compilationScope: { scope, inputHash: compilationScopeInput(director, scope).legacyInputHash } } };
+    director.artifacts = [artifact];
+    preserveCompilationProvenance(director);
+    const originalReceipt = structuredClone(artifact.receipt);
+    director.engine = { commit: "b".repeat(40), patchVersion: "new", runtimeId: "new", version: "2" };
+    assert.equal(currentCompilationArtifact(director, artifact), true);
+    assert.deepEqual(artifact.receipt, originalReceipt);
+    (director.source.shots as any[])[0].visual = "changed relevant action";
+    assert.equal(currentCompilationArtifact(director, artifact), false);
 });
