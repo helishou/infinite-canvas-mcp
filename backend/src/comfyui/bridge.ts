@@ -601,7 +601,7 @@ export class ComfyUiBackend {
             if (execution) execution.promptId = body.prompt_id;
             this.deps.tasks.addEvent(task.id, "submitted", actualSubmission ? { promptId: body.prompt_id, actualSubmission: { ...actualSubmission, promptId: body.prompt_id } } : { promptId: body.prompt_id });
             const startedAt = Date.now();
-            const maxExecutionMs = Math.max(5 * 60 * 1000, Math.min(60 * 60 * 1000, Number(params.maxExecutionMs) || 30 * 60 * 1000));
+            const maxExecutionMs = Math.max(5 * 60 * 1000, Math.min(120 * 60 * 1000, Number(params.maxExecutionMs) || 120 * 60 * 1000));
             const stallTimeoutMs = params.stallTimeoutMs === undefined
                 ? 9000 * 1000
                 : Math.max(0, Number(params.stallTimeoutMs) || 0);

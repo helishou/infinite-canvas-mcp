@@ -19,7 +19,7 @@ test("all published operation examples use the actual edit contract", () => {
 });
 
 test("MCP edit schemas reject formerly opaque invalid operations", () => {
-    for (const schema of [toolInputSchemas.canvas_edit_production, toolInputSchemas.drama_edit_production]) {
+    for (const schema of [toolInputSchemas.production_edit]) {
         for (const op of [{ type: "set_director_brief", brief: {} }, { type: "patch_director_source", patch: {} }]) {
             assert.equal(schema.safeParse({ projectId: "canvas", episodeId: "episode", operationId: "op", expectedRevision: 0, ops: [op] }).success, false);
         }
@@ -121,6 +121,6 @@ test("production compilation tools have explicit owner, revision and frozen hand
     assert.ok(toolInputSchemas.production_compile.safeParse({ kind: "canvas", id: "canvas", expectedRevision: 1, operationId: "compile-1" }).success);
     assert.equal(toolInputSchemas.production_compile.safeParse({ kind: "canvas", id: "canvas" }).success, false);
     assert.equal(toolInputSchemas.production_apply_compilation.safeParse({ kind: "episode", id: "episode", preparedId: "../../packet" }).success, false);
-    assert.ok(toolInputSchemas.drama_preflight_production.safeParse({ episodeId: "episode", action: "compile", request: { expectedRevision: 1 } }).success);
+    assert.ok(toolInputSchemas.production_preflight.safeParse({ kind: "episode", id: "episode", action: "compile", request: { expectedRevision: 1 } }).success);
     assert.ok((productionOperationContract().requests.compile as any).required.includes("operationId"));
 });

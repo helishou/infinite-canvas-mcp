@@ -11,7 +11,7 @@ import { writeStoryboardPrompt } from "./storyboard-write.js";
 import { isReferenceNameEcho } from "./prompt-rules.js";
 import { createHash, randomUUID } from "node:crypto";
 import { H3_RUNTIME_SEGMENT_FIELDS } from "../../canvas/runtime-fields.js";
-import { H3_GET_CLIP_TOOL, H3_UPDATE_CLIPS_TOOL, H3_PREPARE_CLIP_UPDATES_TOOL, H3_DISCARD_CLIP_UPDATES_TOOL, H3_PREPARE_CLIP_TOOL } from "./batch-update-tool.js";
+import { H3_LIST_MODELS_TOOL, H3_GET_CLIP_TOOL, H3_UPDATE_CLIPS_TOOL, H3_PREPARE_CLIP_UPDATES_TOOL, H3_DISCARD_CLIP_UPDATES_TOOL, H3_PREPARE_CLIP_TOOL } from "./batch-update-tool.js";
 import { buildNarrativeEditPatch, H3_MAX_EDIT_PREVIEWS, projectNarrativeFields, type H3EditSummary } from "./narrative-edits.js";
 import { readPreparedSource, assertPreparedInvariants, selectCompactUpdate, addPreparedPatchPreviews, type PreparedH3Plan } from "./prepared-updates.js";
 import { readClipResult } from "./clip-result.js";
@@ -116,15 +116,7 @@ const TOOLS: PluginMcpToolWire[] = [
     H3_PREPARE_CLIP_UPDATES_TOOL,
     H3_DISCARD_CLIP_UPDATES_TOOL,
     H3_PREPARE_CLIP_TOOL,
-    {
-        id: "h3_list_models", annotations: { readOnlyHint: true },
-        version: "2.0.0",
-        name: "H3 列出模型",
-        description: "默认返回模型分类数量；view: entries 必须指定 categories 和 pageSize，可用 query/cursor 筛选续读。view: full 显式读取完整目录。",
-        inputJsonSchema: { type: "object", properties: { view: { type: "string", enum: ["summary", "entries", "full"], default: "summary" }, categories: { type: "array", minItems: 1, items: { type: "string", enum: ["models", "loras", "textEncoders", "videoVaes", "audioVaes", "nanfeng"] } }, query: { type: "string" }, pageSize: { type: "integer", minimum: 1 }, cursor: { type: "string" } },
-            allOf: [{ if: { properties: { view: { const: "entries" } }, required: ["view"] }, then: { required: ["categories", "pageSize"] },
-                else: { not: { anyOf: ["categories", "query", "pageSize", "cursor"].map(key => ({ required: [key] })) } } }] },
-    },
+    H3_LIST_MODELS_TOOL,
     {
         id: "h3_get_node", annotations: { readOnlyHint: true },
         version: "1.3.0",
@@ -281,22 +273,6 @@ const TOOLS: PluginMcpToolWire[] = [
         name: "H3 取消任务",
         description: "取消正在运行的 MiniMax H3 生成任务。",
         inputJsonSchema: { type: "object", properties: { taskId: { type: "string", description: "任务 id" } }, required: ["taskId"] },
-    },
-    {
-        id: "h3_update_clip",
-        version: "1.3.0",
-        name: "H3 更新片段",
-        description: "更新画布 H3 节点某个片段的部分字段(如 prompt、参数或状态),写回节点 metadata。",
-        inputJsonSchema: {
-            type: "object",
-            properties: {
-                nodeId: { type: "string", description: "画布节点 id" },
-                projectId: { type: "string", description: "画布项目 id" },
-                segmentId: { type: "string", description: "片段稳定 id；不要用会因重排变化的数组下标" },
-                patch: { type: "object", description: "要合并进该片段的字段" },
-            },
-            required: ["projectId", "nodeId", "segmentId", "patch"],
-        },
     },
     {
         id: "h3_move_clip",
@@ -1159,29 +1135,6 @@ export const pluginMcp: PluginMcpModule = {
                 const committed = await context.backend.getMcpCommandReceipt(operationId, request?.signal);
                 if (committed.command?.status === "committed") return { ...recordOf(committed.command.receipt), projectId, revision: committed.command.committedRevision, replayed: result.duplicated === true };
                 return { ...receiptPreview, ok: true, committed: true, operationId, replayed: result.duplicated === true, projectId, revision: result.revision, segmentIds: entries.map(entry => String(entry.segmentId)) };
-            },
-            h3_update_clip: async (input) => {
-                const nodeId = String(input.nodeId || "");
-                const projectId = String(input.projectId || "");
-                const { project, node } = await getProjectNode(context, projectId, nodeId);
-                if (!node) throw new Error(`找不到画布节点:${nodeId}`);
-                const segments = segmentsOf(node);
-                const segmentId = String(input.segmentId || "");
-                if (!segmentId) throw new Error("segmentId 必填");
-                const index = segments.findIndex((segment) => String(segment.id || "") === segmentId);
-                if (index < 0) throw new Error(`找不到片段:${segmentId}`);
-                const target = segments[index];
-                if (!target.id) throw new Error(`片段 ${index} 缺少 id，无法使用细粒度 update_h3_segment`);
-                const patch = (input.patch as Record<string, unknown>) || {};
-                assertH3ClipPatch(project, target, patch);
-                const operations: Record<string, unknown>[] = [{ type: "update_h3_segment", nodeId, segmentId: String(target.id), patch }];
-                const projection = nodeProjection(patch);
-                if (Object.keys(projection).length) operations.push({ type: "update_node", id: nodeId, metadata: projection });
-                const result = await context.backend.applyCanvasOperations(projectId, operations, Number(project.revision || 0));
-                const refreshed = (result.project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === nodeId) as AgentCanvasNode | undefined;
-                const refreshedSegment = refreshed && segmentsOf(refreshed).find((segment) => String(segment.id || "") === segmentId);
-                if (!refreshedSegment) throw new Error(`片段更新后读取失败:${segmentId}`);
-                return { ok: true, projectId: String(input.projectId || ""), nodeId, segmentIndex: index, segmentId, updatedFields: Object.keys(patch) };
             },
             h3_move_clip: async (input) => {
                 const projectId = String(input.projectId || "");

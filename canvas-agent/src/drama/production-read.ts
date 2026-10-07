@@ -1,3 +1,4 @@
+import { migrateToolGuidance } from "../canvas/tool-migrations.js";
 import { z } from "zod";
 
 export const productionReadSchema = z.object({
@@ -82,11 +83,11 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
         counts: { scenes: count(data.scenes), shots: count(data.shots), clipGroups: count(data.clipGroups), keyframes: count(data.keyframes), keyframeReviews: count(data.keyframeReviews) },
     } : null;
     const owner = production.sceneId ? { tool: "production_get_scene_production", input: { sceneId: production.sceneId } }
-        : production.projectId ? { tool: "canvas_get_production", input: { projectId: production.projectId } } : { tool: "drama_get_production", input: { episodeId: production.episodeId } };
-    return { ...header, view: "summary", snapshot: input.snapshot, [input.snapshot]: summarize(selected),
+        : production.projectId ? { tool: "production_get", input: { kind: "canvas", id: production.projectId } } : { tool: "production_get", input: { kind: "episode", id: production.episodeId } };
+    return migrateToolGuidance({ ...header, view: "summary", snapshot: input.snapshot, [input.snapshot]: summarize(selected),
         omitted: ["source", "artifacts", "references", "scenes", "shots", "clipGroups", "keyframes", "keyframeReviews", "settings"],
         nextRead: { tool: owner.tool, input: { ...owner.input, snapshot: input.snapshot, view: "artifact_index", ...(input.targetIds ? { targetIds: input.targetIds } : {}) } },
-        readOptions: { views: ["source", "artifact_index", "artifacts", "full"], selectors: ["sourceSection", "targetIds", "pageSize", "cursor", "chunkBytes"] } };
+        readOptions: { views: ["source", "artifact_index", "artifacts", "full"], selectors: ["sourceSection", "targetIds", "pageSize", "cursor", "chunkBytes"] } });
 }
 
 function count(value: any): number { return Array.isArray(value) ? value.length : value && typeof value === "object" ? Object.keys(value).length : 0; }
@@ -103,9 +104,10 @@ export function projectProductionVersion(owner: { episodeId: string; projectId?:
         versionHash, draft: snapshot, published: snapshot }, input, digest, snapshot);
     if (input.view === "summary") {
         const summary = projected as any;
-        summary.nextRead = { tool: owner.sceneId ? "production_get_scene_version" : owner.projectId ? "canvas_get_production_version" : "drama_get_production_version",
-            input: { [owner.sceneId ? "sceneId" : owner.projectId ? "projectId" : "episodeId"]: owner.sceneId || owner.projectId || owner.episodeId, version: version.version, view: "artifact_index" } };
+        summary.nextRead = { tool: owner.sceneId ? "production_get_scene_version" : "production_get_version",
+            input: { ...(owner.sceneId ? { sceneId: owner.sceneId } : { kind: owner.projectId ? "canvas" : "episode", id: owner.projectId || owner.episodeId }), version: version.version, view: "artifact_index" } };
     }
+    if (input.view === "summary") (projected as any).nextRead = migrateToolGuidance({ nextRead: (projected as any).nextRead }).nextRead;
     return { ...pick(version, ["version", "stage", "createdAt"]), ...owner, sha256: versionHash,
         ...(input.view === "full" && !input.chunkBytes ? { impact: version.impact } : {}), snapshot: projected };
 }
@@ -123,9 +125,9 @@ export function productionWriteReceipt(result: any, context: { tool?: string; in
     const diagnosticCodes = [...new Set([...sync.flatMap((item: any) => item.diagnostics || []), ...(layout.diagnostics || [])].map((item: any) => String(item.code || "UNKNOWN")))];
     const ownerId = input.id || input.projectId || input.sceneId || input.episodeId || p.episodeId;
     const kind = input.kind || (input.sceneId && !input.episodeId && !input.projectId ? "scene" : input.projectId || context.tool?.startsWith("canvas_") ? "canvas" : "episode");
-    const tool = kind === "scene" ? "production_get_scene_production" : kind === "canvas" ? "canvas_get_production" : "drama_get_production";
-    const readInput = { [kind === "scene" ? "sceneId" : kind === "canvas" ? "projectId" : "episodeId"]: ownerId, view: "summary" };
-    return { ...pick(result, ["ok", "replayed", "mediaSubmitted", "mediaAuthorized", "operationId", "workId", "runId", "status", "updated", "created", "reused", "skipped"]),
+    const tool = kind === "scene" ? "production_get_scene_production" : "production_get";
+    const readInput = { ...(kind === "scene" ? { sceneId: ownerId } : { kind, id: ownerId }), view: "summary" };
+    return migrateToolGuidance({ ...pick(result, ["ok", "replayed", "mediaSubmitted", "mediaAuthorized", "operationId", "workId", "runId", "status", "updated", "created", "reused", "skipped"]),
         ...pick(input, ["operationId", "sceneId", "projectId", "episodeId"]),
         production: { ...pick(p, ["episodeId", "revision", "publishedVersion", "updatedAt", "replayed"]), sourceHash: p.draft?.director?.sourceHash, engine: p.draft?.director?.engine },
         ...(result.canvas ? { canvas: { ...pick(result.canvas, ["id", "projectId", "revision"]), nodeCount: count(result.canvas.nodes), connectionCount: count(result.canvas.connections) } } : {}),
@@ -140,5 +142,5 @@ export function productionWriteReceipt(result: any, context: { tool?: string; in
             conflicts: sync.filter((item: any) => (item.diagnostics || []).some((d: any) => String(d.code).includes("CONFLICT"))).length, referenceSync: sync.length },
         warnings: { count: sync.reduce((n: number, item: any) => n + count(item.diagnostics), 0) + count(layout.diagnostics), codes: diagnosticCodes },
         ...(result.project ? { nextRead: { tool: "production_get_canvas_context", input: { projectId: result.project.id } } } : ownerId ? { nextRead: { tool: context.tool?.includes("scene_work") || context.tool === "production_start_shared_review" ? "production_get_scene_work" : tool,
-            input: context.tool?.includes("scene_work") || context.tool === "production_start_shared_review" ? { kind, id: ownerId } : readInput } } : {}) };
+            input: context.tool?.includes("scene_work") || context.tool === "production_start_shared_review" ? { kind, id: ownerId } : readInput } } : {}) });
 }

@@ -9,7 +9,7 @@ import { CodexEventHistory } from "./codex-event-history.js";
 import { settledTurnIds, summarizeCodexThread, threadMessages } from "./codex-history.js";
 
 test("重启后恢复的中断回合保留已完成工具并明确显示中断", () => {
-    const messages = threadMessages({ id: "thread", turns: [{ id: "turn", status: "interrupted", items: [{ id: "intro", type: "agentMessage", text: "我会继续写第二场。", phase: "commentary" }, { id: "read", type: "mcpToolCall", tool: "drama_get_production", status: "completed", arguments: {}, result: {} }] }] });
+    const messages = threadMessages({ id: "thread", turns: [{ id: "turn", status: "interrupted", items: [{ id: "intro", type: "agentMessage", text: "我会继续写第二场。", phase: "commentary" }, { id: "read", type: "mcpToolCall", tool: "production_get", status: "completed", arguments: {}, result: {} }] }] });
     assert.equal(messages.find(item => item.itemId === "read")?.role, "tool");
     assert.equal(messages.find(item => item.itemId === "intro")?.text, "我会继续写第二场。");
     assert.equal(messages.at(-1)?.title, "本轮已中断");

@@ -115,10 +115,10 @@ test("large preparation, arrangement and synchronization recover lost responses 
     const afterArrange = f.db.getCanvasProject(projectId)!;
     assert.equal((await recover("production_arrange_scene", arrangeInput)).production.replayed, true);
     assert.equal(f.db.getCanvasProject(projectId)!.revision, afterArrange.revision);
-    measure("drama_sync_production_clips", { episodeId: "ep" }, () => runner.syncClips("ep", published.publishedVersion));
+    measure("production_sync_clips", { kind: "episode", id: "ep" }, () => runner.syncClips("ep", published.publishedVersion));
     const afterSync = f.db.getCanvasProject(projectId)!;
     const productionRevision = reopened.get("ep").revision;
-    const repeatedSync = await recover("drama_sync_production_clips", { episodeId: "ep" });
+    const repeatedSync = await recover("production_sync_clips", { kind: "episode", id: "ep" });
     assert.equal(repeatedSync.counts.updated, 0);
     assert.equal(repeatedSync.counts.skipped, published.published!.clipGroups.length);
     assert.equal(f.db.getCanvasProject(projectId)!.revision, afterSync.revision, "repeated synchronization must not rewrite identical Clip inputs");

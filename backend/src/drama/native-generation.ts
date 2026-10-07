@@ -1,7 +1,7 @@
 import { captureCanvasInputs, effectiveTargetInput, inputHash } from "./canvas-inputs.js";
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import { buildProductionClip, clipInputHash, CLIP_PROJECTION_FIELDS } from "./clip-inputs.js";
+import { buildPublishedProductionClip, clipInputHash, CLIP_PROJECTION_FIELDS } from "./clip-inputs.js";
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 import type { BackendDatabase } from "../db.js";
 import type { BackendEventBus } from "../events.js";
@@ -71,7 +71,7 @@ export class NativeProductionGeneration {
             const node = (executionProject.nodes as any[]).find(node => node.id === command.nodeId);
             for (const target of targets) {
                 const group = current.published!.clipGroups.find(group => group.id === target.targetId)!;
-                const expected = buildProductionClip(executionProject, current.published!, group, target.segmentId!);
+                const expected = buildPublishedProductionClip(executionProject, current.published!, group, target.segmentId!, this.stores.settings.get("plugin:minimax-h3:defaults:v1") as Record<string, unknown> || {});
                 const index = node?.metadata?.segments?.findIndex((clip: any) => clip.id === target.segmentId);
                 if (index < 0) throw new Error("已发布 Clip 节点不存在");
                 node.metadata.segments[index] = expected;

@@ -93,7 +93,7 @@ canvas_split_image(nodeId, rows, columns, inset, gap)
 机制：H3 会**学习参考图的色调风格**，所以 krea2 那 +3.0 b\* 的暖偏被放大后传进视频；原图直接喂反而比参考图更中性（H3 自身的电影质感 LoRA 在往回拉）。**洗图 → 更黄、更暗，锐度无优势。**
 
 做这个 A/B 的两个前提，缺一个结论就无效：
-1. **固定种子**：`h3_apply_video_plan` 会把 `noiseSeedMode` 静默改回 `random`，apply 之后必须补 `h3_update_clip({seed, noiseSeed, noiseSeedMode:"fixed"})`。
+1. **固定种子**：`h3_apply_video_plan` 会把 `noiseSeedMode` 静默改回 `random`，apply 之后必须补 `h3_update_clips({projectId,nodeId,operationId,expectedRevision,updates:[{segmentId,patch:{seed,noiseSeed,noiseSeedMode:"fixed"}}]})`（先读取当前 revision；未知响应复用本次 operationId 与原参数）。
 2. **别被上一轮结果骗**：重复跑同一 segment 时 `resultStorageKey` 在新结果落库前**一直保持上一轮的值**，只判 `status==="success"` 会读到旧结果、得出「两轮一模一样」。提交前记下旧值，**必须等它变了才算新结果**（或盯底层 `comfyui:minimax-h3` 那个新任务 id）。
 
 用户说「放弃洗图」时要把链拆干净：H3 参考换回切分原图，并删掉洗图/超分的中间节点（实测 107 个），不要留着占画布。

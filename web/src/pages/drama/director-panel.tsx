@@ -51,6 +51,15 @@ function patchProse(value: unknown, text: unknown) {
     : text;
 }
 
+/** Read structured source without reducing objects to their description field. */
+function SourceData({ value, names }: { value: unknown; names: Record<string, string> }) {
+  const { t } = useTranslation();
+  if (value === null || value === undefined) return <span>—</span>;
+  if (Array.isArray(value)) return <div className="space-y-2">{value.map((item, index) => <div key={index}><SourceData value={item} names={names} /></div>)}</div>;
+  if (typeof value === "object") return <dl className="space-y-2 border-l border-border pl-3">{Object.entries(value).map(([key, item]) => <div key={key} className="min-w-0"><dt className="text-xs text-muted-foreground">{t(`director.studio.sourceField.${key}`, { defaultValue: key })}</dt><dd className="mt-1 whitespace-pre-wrap break-words text-sm"><SourceData value={item} names={names} /></dd></div>)}</dl>;
+  return <span className="whitespace-pre-wrap break-words">{typeof value === "boolean" ? t(value ? "director.studio.flagOn" : "director.studio.flagOff") : names[String(value)] || String(value)}</span>;
+}
+
 function SourceField({ value, draftValue, onDraftChange, multiline, rows = 3, numeric, placeholder, disabled, onCommit, commitOnBlur = true }: {
   value: unknown; draftValue?: string; onDraftChange?: (value: string | undefined) => void; multiline?: boolean; rows?: number; numeric?: boolean; placeholder?: string; disabled?: boolean; onCommit: (value: unknown) => Promise<boolean | void> | boolean | void;
   commitOnBlur?: boolean;
@@ -544,7 +553,7 @@ export function DirectorPanel({
     </Modal>
   </div>;
 
-  const renderShotDetails = (shot: Record<string, any>) => {
+  const renderShotDetails = (shot: Record<string, any>, showSource = false) => {
     const id = String(shot.id || "");
     const input = d?.shotInputs[id];
     const segment = segments.find(item => (item.shot_ids || []).includes(id));
@@ -571,11 +580,12 @@ export function DirectorPanel({
         <span>{t("director.studio.tailFrameLabel")} · {t(boundary.tailFrame ? "director.studio.flagOn" : "director.studio.flagOff")}</span>
         <span>{t("director.studio.motionContextLabel")} · {t(boundary.motionContext ? "director.studio.flagOn" : "director.studio.flagOff")}</span>
       </div>}
-      <details className="border-t border-border pt-3" data-shot-source-details>
+      <details open={showSource || undefined} className="border-t border-border pt-3" data-shot-source-details>
         <summary className="cursor-pointer text-xs text-muted-foreground">{t("director.studio.sourceDetails")}</summary>
         <div className="mt-4 space-y-4">{(["visual", "camera", "state_in", "state_out"] as const).map(field => <label key={field} className="grid gap-2 text-xs text-muted-foreground"><span>{t(`director.studio.shotField.${field}`)}</span><SourceField value={proseOf(shot[field])} draftValue={sourceDrafts[`shot:${id}:${field}`]} onDraftChange={value => onSourceDraftChange(`shot:${id}:${field}`, value)} multiline rows={3} disabled={busy} placeholder={(field === "state_in" || field === "state_out") && shot[field] && !proseOf(shot[field]) ? t("director.studio.structuredState") : undefined} onCommit={value => onPatch("shot", id, { [field]: patchProse(shot[field], value) })} /></label>)}</div>
         <div className="mt-4 flex flex-wrap gap-2">{input?.assetIds?.map(assetId => <button key={assetId} type="button" className="rounded border border-border px-2 py-1 text-xs" onClick={() => onNavigate("assets", { kind: "asset", id: assetId })}>{assetName(assetId)}</button>)}</div>
         <div className="mt-4 grid gap-3 sm:grid-cols-2">{(["start_frame", "end_frame"] as const).map(field => <label key={field} className="grid gap-1 text-xs text-muted-foreground"><span>{t(field === "start_frame" ? "director.workspace.startFrame" : "director.workspace.endFrame")}</span><SourceField value={shot[field]} draftValue={sourceDrafts[`shot:${id}:${field}`]} onDraftChange={value => onSourceDraftChange(`shot:${id}:${field}`, value)} numeric disabled={busy} onCommit={value => onPatch("shot", id, { [field]: value })} /></label>)}</div>
+        {showSource && <div className="mt-4" data-shot-complete-source><SourceData value={shot} names={nameMap} /></div>}
       </details>
     </div>;
   };
@@ -737,11 +747,21 @@ export function DirectorPanel({
     const clip = clips.find(clip => clip.id === group?.segmentId);
     const media = String(clip?.resultStorageKey || "");
     const target = readiness?.targets.find(target => target.id === `segment:${focusedId}`);
+    const clipShots = (Array.isArray(focusedSegment.shot_ids) ? focusedSegment.shot_ids : []).flatMap((id: string) => sourceShots.filter(shot => String(shot.id) === String(id)));
+    const segmentIndex = segments.indexOf(focusedSegment);
+    const adjacentPairs = [segmentIndex - 1, segmentIndex].filter(index => index >= 0 && index < segments.length - 1);
+    const ledger = source.ledger;
     return <section data-production-object-editor className="space-y-4">
+      <header className="space-y-2 border-b border-border pb-4"><h2 className="text-lg font-semibold">{segmentTitle(focusedId)} · {t("director.studio.clipSource")}</h2><p className="text-sm text-muted-foreground">{t("director.studio.clipSourceHint")}</p><div className="flex flex-wrap gap-2 text-xs text-muted-foreground"><Tag>{String(focusedSegment.mode || "H3")}</Tag><span>{formatSeconds(Number(focusedSegment.start_frame) / fps)}–{formatSeconds(Number(focusedSegment.end_frame) / fps)}s</span><span>{t("director.studio.generationDuration", { seconds: focusedSegment.generation_clip_duration ?? "—" })}</span></div></header>
       {media ? <video className="max-h-[32dvh] w-full" src={backendMediaUrl(media)} controls preload="metadata" /> : <p className="text-sm text-muted-foreground">{t("director.studio.noResults")}</p>}
       {target && <div><Tag>{t(`director.workspace.targetStatus.${target.status}`)}</Tag>{target.blockers[0] && <p className="mt-2 text-sm text-muted-foreground">{humanMessage(target.blockers[0])}</p>}</div>}
       {renderSegmentStyle(focusedSegment)}
-      {sourceShots.filter(shot => (focusedSegment.shot_ids || []).includes(String(shot.id))).map(shot => <div key={shot.id}><h3 className="text-sm font-medium">{shotTitle(String(shot.id))}</h3><p className="mt-2 whitespace-pre-wrap text-sm leading-7">{shotDisplayText(shot)}</p></div>)}
+      <section className="space-y-5" data-clip-source-shots><h3 className="font-semibold">{t("director.studio.storyboard")}</h3>{clipShots.length ? clipShots.map(shot => <article key={shot.id} className="space-y-3 border-t border-border pt-4"><h4 className="font-medium">{shotTitle(String(shot.id))}</h4>{renderShotDetails(shot, true)}</article>) : <p className="text-sm text-muted-foreground">{t("director.workspace.noShotInSegment")}</p>}</section>
+      <section className="space-y-3 border-t border-border pt-4" data-clip-source-continuity><h3 className="font-semibold">{t("director.workspace.continuityTitle")}</h3>{adjacentPairs.map(index => {
+        const from = String(segments[index].id), to = String(segments[index + 1].id), draftKey = `boundary:${from}:${to}`;
+        return <BoundaryCard key={draftKey} from={from} to={to} fromLabel={segmentTitle(from)} toLabel={segmentTitle(to)} boundary={d?.boundaries.find(item => item.from === from && item.to === to)} draftValue={sourceDrafts[draftKey]} onDraftChange={value => onSourceDraftChange(draftKey, value)} disabled={busy} onSave={onBoundary} />;
+      })}<Button type="text" size="small" onClick={() => onNavigate("continuity")}>{t("director.studio.viewContinuity")}</Button>{Boolean(ledger) && <details><summary className="cursor-pointer text-sm text-muted-foreground">{t("director.studio.continuityLedger")}</summary><div className="mt-3"><SourceData value={ledger} names={nameMap} /></div></details>}</section>
+      <details className="border-t border-border pt-3" data-clip-complete-source><summary className="cursor-pointer text-sm text-muted-foreground">{t("director.studio.clipSourceDetails")}</summary><div className="mt-3"><SourceData value={focusedSegment} names={nameMap} /></div></details>
       <Button type="text" disabled={busy} onClick={() => onAskDirector({ workspace: "production", targetId: focusedId })}>{t("productionCanvas.discussObject")}</Button>
       <details className="border-t border-border pt-3"><summary className="cursor-pointer text-sm text-muted-foreground">{t("productionCanvas.objectDetails")}</summary>{target?.blockers.slice(1).map(reason => <p key={reason} className="mt-2 text-sm text-muted-foreground">{humanMessage(reason)}</p>)}<SegmentGroupEditor segment={focusedSegment} shots={sourceShots} segments={segments} fps={fps} draftValue={sourceDrafts[`segment:${focusedId}:shot_ids`]} onDraftChange={value => onSourceDraftChange(`segment:${focusedId}:shot_ids`, value)} disabled={busy} onSave={onRegroup} /></details>
     </section>;

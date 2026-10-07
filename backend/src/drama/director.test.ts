@@ -8,6 +8,9 @@ import { BackendDatabase } from "../db.js";
 import { createStores } from "../stores/index.js";
 import { EpisodeProductionService, ProductionConflictError } from "./production.js";
 import { EpisodeProductionRunner } from "./production-runner.js";
+import { NativeProductionGeneration } from "./native-generation.js";
+import { BackendEventBus } from "../events.js";
+import { resolveH3Runtime } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { directorHash, promptHash } from "./director.js";
 import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import { compilationScopeInput } from "@basketikun/canvas-agent/drama/compilation-scope";
@@ -125,6 +128,37 @@ test('Clip sync loads saved defaults, persists episode aspect and keeps existing
     const requirements = stores.projects.getH3ProductionRequirements!('canvas');
     assert.equal(requirements!.videoAspectRatio, '9:16');
     assert.equal(requirements!.clips.length, 2);
+});
+
+test('published H3 batch and native submission retain UI settings instead of old node parameters', t => {
+    const { db, stores, service } = fixture(t);
+    db.setSetting('plugin:minimax-h3:defaults:v1', { megapixels: 0.6, latentUpscaleEnabled: true, latentUpscaleConfirmationMode: true, loraSlots: [{ name: 'old-turbo', strength: 0.75, enabled: true }] });
+    publish(service, doc(), 'ep', 'skip');
+    new EpisodeProductionRunner(service, stores, {} as CanvasGenerationService).syncClips('ep', 1);
+    const group = service.get('ep').published!.clipGroups[0];
+    const uiSettings = { modelName: 'ui-model', megapixels: 0.8, videoSteps: 12, latentUpscaleEnabled: false, latentUpscaleConfirmationMode: false, loraSlots: [{ name: 'ui-dmad', strength: 1, enabled: true }], h3ParameterPolicy: 'overrides' };
+    stores.projects.applyOperations('canvas', undefined, [{ type: 'update_h3_segment', nodeId: group.nodeId!, segmentId: group.segmentId!, patch: uiSettings }]);
+    const saved = stores.projects.get('canvas')!;
+    const before = JSON.stringify(saved);
+    const batch = service.startBatch('ep', { inputBasis: 'published', runId: 'published-ui-settings', idempotencyKey: 'published-ui-settings', expectedRevision: service.get('ep').revision, version: 1, targets: [`segment:${group.id}`] });
+    assert.ok(batch.executionSnapshot);
+    const observer = new NativeProductionGeneration(db, stores, service, service, new BackendEventBus());
+    const native = observer.prepare({ inputBasis: 'published', mode: 'video', operation: 'h3-run', projectId: 'canvas', nodeId: group.nodeId!, segmentId: group.segmentId! });
+    assert.ok(native.executionProject);
+    for (const project of [batch.executionSnapshot!.project, native.executionProject!]) {
+        const node = (project.nodes as any[]).find(node => node.id === group.nodeId);
+        const segment = node.metadata.segments.find((clip: any) => clip.id === group.segmentId);
+        const runtime = resolveH3Runtime(segment, {}, node.metadata, {}).params;
+        assert.equal(runtime.modelName, 'ui-model');
+        assert.equal(runtime.megapixels, 0.8);
+        assert.equal(runtime.steps, 12);
+        assert.equal(runtime.latentUpscaleEnabled, false);
+        assert.equal(runtime.latentUpscaleConfirmationMode, false);
+        assert.deepEqual(runtime.loraSlots, uiSettings.loraSlots);
+        assert.equal(segment.prompt, service.get('ep').published!.director!.artifacts.find(artifact => artifact.kind === 'h3' && artifact.targetId === group.id)!.prompt);
+    }
+    assert.equal(JSON.stringify(stores.projects.get('canvas')), before);
+    assert.equal(stores.tasks.list().length, 0);
 });
 
 test("successful generation preflight preserves currentWork and creates no run or receipt", async t => {

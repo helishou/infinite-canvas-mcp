@@ -14,8 +14,8 @@ const outputIndex = process.argv.indexOf("--output");
 if (outputIndex >= 0 && !process.argv[outputIndex + 1]) throw new Error("--output 必须指定报告路径");
 const db = new DatabaseSync(DB_FILE, { readOnly: true });
 const histories = [
-    { table: "episode_production_versions", key: "episode_id", kind: "episode", tool: "drama_get_production_version", base: "/drama/episodes" },
-    { table: "canvas_production_versions", key: "project_id", kind: "canvas", tool: "canvas_get_production_version", base: "/canvas/projects" },
+    { table: "episode_production_versions", key: "episode_id", kind: "episode", tool: "production_get_version", base: "/drama/episodes" },
+    { table: "canvas_production_versions", key: "project_id", kind: "canvas", tool: "production_get_version", base: "/canvas/projects" },
 ].flatMap(scope => {
     const row = db.prepare(`SELECT ${scope.key} ownerId, version, length(CAST(snapshot_json AS BLOB)) bytes FROM ${scope.table} ORDER BY bytes DESC LIMIT 1`).get() as { ownerId: string; version: number; bytes: number } | undefined;
     return row ? [{ ...scope, ...row }] : [];
@@ -34,7 +34,7 @@ const cost = (): Cost => ({ calls: 0, bytes: 0, elapsedMs: 0 });
 try {
     await client.connect(new StreamableHTTPClientTransport(new URL(cfg.url + "/mcp"), { requestInit: { headers: { Authorization: `Bearer ${cfg.token}` } } }));
     for (const history of histories) {
-        const input = { [history.kind === "episode" ? "episodeId" : "projectId"]: history.ownerId, version: history.version };
+        const input = { kind: history.kind, id: history.ownerId, version: history.version };
         const response = await fetch(`${cfg.url}${history.base}/${encodeURIComponent(history.ownerId)}/production/versions/${history.version}`, { headers: { Authorization: `Bearer ${cfg.token}` } });
         if (!response.ok) throw new Error(`Historical HTTP baseline failed: ${response.status}`);
         const original = (await response.json() as any).version;

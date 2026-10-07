@@ -1,10 +1,12 @@
+import { productionToolNames, executeProductionTool } from "@basketikun/canvas-agent/drama/production-tools";
+import { removedToolNotice, migrateToolGuidance } from "@basketikun/canvas-agent/tool-migrations";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { productionToolPreflight } from "@basketikun/canvas-agent/drama/production-contract";
-import { productionEditSchema, productionReadQuery, productionWriteReceipt, productionWorkspaceRequest, productionWorkspaceToolNames } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionWriteReceipt, productionWorkspaceRequest, productionWorkspaceToolNames } from "@basketikun/canvas-agent/drama/production-contract";
 import crypto from "node:crypto";
 import {
   executeCollaborationTool,
@@ -70,7 +72,7 @@ type McpSessionState = {
 type BackendMcpInstance = { server: McpServer; registry: PluginMcpRegistry };
 type McpEventRecorder = (event: McpObservabilityEventInput) => void | Promise<void>;
 const logger = createLogger("mcp-http");
-const MCP_CONTRACT_VERSION = 2;
+const MCP_CONTRACT_VERSION = 3;
 
 /** Backend 进程外的 MCP stdio 入口：所有业务写入都经由常驻 Backend API。 */
 export async function startBackendMcpServer() {
@@ -136,7 +138,7 @@ async function createBackendMcpInstance(
   };
   const server = new McpServer({
     name: "infinite-canvas-backend",
-    version: "0.1.0+mcp2",
+    version: "0.1.0+mcp3",
   });
   const context = buildPluginMcpContext(directBackend, backendComfy);
   const registry = new PluginMcpRegistry(server, context);
@@ -273,6 +275,11 @@ export function registerBackendMcpHttpRoutes(
     const sessionId = sessionIdOf(req);
     const existing = sessionId ? sessions.get(sessionId) : undefined;
     if (existing) {
+      const notice = req.body?.method === "tools/call" ? removedToolNotice(String(req.body.params?.name || "")) : undefined;
+      if (notice && req.body.id !== undefined) {
+        res.json({ jsonrpc: "2.0", id: req.body.id, error: { code: -32602, message: notice.error, data: notice } });
+        return;
+      }
       try {
         await existing.transport.handleRequest(req, res, req.body);
       } catch (error) {
@@ -377,7 +384,6 @@ const BACKEND_CANVAS_TOOLS = [
   "canvas_create_text_node",
   "canvas_create_text_nodes",
   "canvas_create_config_node",
-  "canvas_create_image_prompt_flow",
   "canvas_create_generation_flow",
   "canvas_generate_text",
   "canvas_generate_image",
@@ -385,7 +391,6 @@ const BACKEND_CANVAS_TOOLS = [
   "canvas_generate_video",
   "canvas_generate_audio",
   "canvas_update_node",
-  "canvas_update_node_text",
   "canvas_move_nodes",
   "canvas_resize_node",
   "canvas_delete_nodes",
@@ -420,43 +425,11 @@ const BACKEND_OWNED_TOOL_NAMES = new Set<string>([
   "drama_create_episode",
   "drama_update_episode",
   "drama_delete_episode",
-  "drama_get_production",
   "production_compile",
   "production_get_compilation",
   "production_apply_compilation",
   "production_diagnose_bindings",
   "production_diagnose_clips",
-  "canvas_get_production",
-  "drama_get_workflow_readiness",
-  "canvas_get_workflow_readiness",
-  "drama_start_production_run",
-  "canvas_start_production_run",
-  "drama_get_production_batch",
-  "canvas_get_production_batch",
-  "drama_pause_production_run",
-  "canvas_pause_production_run",
-  "drama_resume_production_run",
-  "canvas_resume_production_run",
-  "drama_edit_production",
-  "canvas_edit_production",
-  "drama_preview_production_impact",
-  "canvas_preview_production_impact",
-  "drama_publish_production",
-  "canvas_publish_production",
-  "drama_list_production_versions",
-  "canvas_list_production_versions",
-  "drama_get_production_version",
-  "canvas_get_production_version",
-  "drama_list_production_legacy",
-  "canvas_list_production_legacy",
-  "drama_restore_production",
-  "canvas_restore_production",
-  "drama_sync_production_clips",
-  "canvas_sync_production_clips",
-  "drama_get_production_run",
-  "canvas_get_production_run",
-  "drama_export_production_markdown",
-  "canvas_export_production_markdown",
   "drama_delete_project",
   "comfyui_status",
   "comfyui_get_task",
@@ -467,7 +440,6 @@ const BACKEND_OWNED_TOOL_NAMES = new Set<string>([
 
 const EXISTING_CANVAS_STATE_TOOLS = new Set<ToolName>([
   "canvas_apply_ops",
-  "canvas_create_image_prompt_flow",
   "canvas_create_generation_flow",
   "canvas_generate_text",
   "canvas_generate_image",
@@ -475,7 +447,6 @@ const EXISTING_CANVAS_STATE_TOOLS = new Set<ToolName>([
   "canvas_generate_audio",
   "canvas_set_generation_references",
   "canvas_update_node",
-  "canvas_update_node_text",
   "canvas_move_nodes",
   "canvas_resize_node",
   "canvas_delete_nodes",
@@ -1826,11 +1797,10 @@ function registerBackendCanvasTools(
       });
     },
   );
-  const productionPath = (episodeId: string) => `/drama/episodes/${encodeURIComponent(episodeId)}/production`;
   for (const name of productionWorkspaceToolNames) {
     server.registerTool(name, { description: toolDescriptions[name], inputSchema: toolInputSchemas[name] }, async (raw: Record<string, unknown>) => {
       const request = productionWorkspaceRequest(name, raw)!;
-      return textResult(request.method === "GET" ? await backendApi.get(request.path) : productionWriteReceipt(await backendApi.post(request.path, request.body), { tool: name, input: raw }));
+      return textResult(migrateToolGuidance(request.method === "GET" ? await backendApi.get(request.path) : productionWriteReceipt(await backendApi.post(request.path, request.body), { tool: name, input: raw })));
     });
   }
   for (const name of ["production_compile", "production_get_compilation", "production_apply_compilation", "production_diagnose_bindings"] as const) {
@@ -1838,7 +1808,7 @@ function registerBackendCanvasTools(
       const input = toolInputSchemas[name].parse(rawInput);
       const base = input.kind === "canvas" ? `/canvas/projects/${encodeURIComponent(input.id)}/production`
         : input.kind === "scene" ? `/drama/scenes/${encodeURIComponent(input.id)}/production`
-        : productionPath(input.id);
+        : `/drama/episodes/${encodeURIComponent(input.id)}/production`;
       if (name === "production_get_compilation") {
         const query = toolInputSchemas.production_get_compilation.parse(rawInput);
         const params = new URLSearchParams({ view: query.view, offset: String(query.offset), ...(query.pageSize ? { pageSize: String(query.pageSize) } : {}) });
@@ -1870,245 +1840,12 @@ function registerBackendCanvasTools(
     if (input.operationType) query.set("operationType", input.operationType);
     return textResult(await backendApi.get(`/production/contract?${query}`));
   });
-  for (const name of ["canvas_preflight_production", "drama_preflight_production"] as const) {
-    server.registerTool(name, { description: toolDescriptions[name], inputSchema: toolInputSchemas[name] }, async (rawInput: Record<string, unknown>) => {
-      const input = toolInputSchemas[name].parse(rawInput);
-      const base = "projectId" in input ? `/canvas/projects/${encodeURIComponent(input.projectId)}/production` : `/drama/episodes/${encodeURIComponent(input.episodeId)}/production`;
-      return textResult(await backendApi.post(`${base}/preflight`, { action: input.action, request: input.request }));
+  for (const name of productionToolNames) {
+    server.registerTool(name, { description: toolDescriptions[name], inputSchema: toolInputSchemas[name] }, async (raw: Record<string, unknown>) => {
+      const input = toolInputSchemas[name].parse(raw);
+      const blocked = await productionToolPreflight(backendApi, name, input);
+      return textResult(blocked || await executeProductionTool(backendApi, name, input));
     });
-  }
-  const productionIdSchema = z.object({ episodeId: z.string().trim().min(1) });
-  server.registerTool("drama_get_production", {
-    description: toolDescriptions.drama_get_production,
-    inputSchema: toolInputSchemas.drama_get_production,
-  }, async (rawInput: Record<string, unknown>) => {
-    const input = toolInputSchemas.drama_get_production.parse(rawInput);
-    return textResult(await backendApi.get(productionPath(input.episodeId) + productionReadQuery(input)));
-  });
-  server.registerTool("drama_get_workflow_readiness", {
-    description: "按 Acheng 制作目标读取依赖就绪、缺项和下一步。",
-    inputSchema: productionIdSchema,
-  }, async (rawInput: Record<string, unknown>) => {
-    const { episodeId } = productionIdSchema.parse(rawInput);
-    return textResult(await backendApi.get(`${productionPath(episodeId)}/readiness`));
-  });
-  server.registerTool("drama_start_production_run", {
-    description: toolDescriptions.drama_start_production_run,
-    inputSchema: toolInputSchemas.drama_start_production_run,
-  }, async (rawInput: Record<string, unknown>) => {
-    const { episodeId, ...input } = rawInput;
-    const blocked = await productionToolPreflight(backendApi, "drama_start_production_run", rawInput);
-    if (blocked) return textResult(blocked);
-    return textResult(await backendApi.post(`${productionPath(String(episodeId))}/runs`, input));
-  });
-  server.registerTool("drama_get_production_batch", {
-    description: "读取指定 runId 的生产状态、固定范围、引擎和任务 ID。",
-    inputSchema: productionIdSchema.extend({ runId: z.string().min(1) }),
-  }, async (rawInput: Record<string, unknown>) => {
-    const input = productionIdSchema.extend({ runId: z.string().min(1) }).parse(rawInput);
-    return textResult(await backendApi.get(`${productionPath(input.episodeId)}/batches/${encodeURIComponent(input.runId)}`));
-  });
-  server.registerTool("drama_pause_production_run", {
-    description: "暂停指定分集 runId；在途任务完成后停在边界，不重复提交已提交任务。",
-    inputSchema: productionIdSchema.extend({ runId: z.string().min(1) }),
-  }, async (rawInput: Record<string, unknown>) => {
-    const input = productionIdSchema.extend({ runId: z.string().min(1) }).parse(rawInput);
-    return textResult(await backendApi.post(`${productionPath(input.episodeId)}/batches/${encodeURIComponent(input.runId)}/pause`, {}));
-  });
-  server.registerTool("drama_resume_production_run", {
-    description: "继续原 runId 的分集任务；失败任务不会自动重生成。",
-    inputSchema: productionIdSchema.extend({ runId: z.string().min(1) }),
-  }, async (rawInput: Record<string, unknown>) => {
-    const input = productionIdSchema.extend({ runId: z.string().min(1) }).parse(rawInput);
-    return textResult(await backendApi.post(`${productionPath(input.episodeId)}/batches/${encodeURIComponent(input.runId)}/resume`, {}));
-  });
-  server.registerTool("drama_list_production_versions", {
-    description: "读取单集制作稿的历史发布版本。",
-    inputSchema: productionIdSchema,
-  }, async (rawInput: Record<string, unknown>) => {
-    const { episodeId } = productionIdSchema.parse(rawInput);
-    return textResult(await backendApi.get(`${productionPath(episodeId)}/versions`));
-  });
-  server.registerTool("drama_get_production_version", {
-    description: "默认读取历史版本摘要；使用 view、sourceSection、targetIds 和分页／分块参数读取详情。",
-    inputSchema: toolInputSchemas.drama_get_production_version,
-  }, async (rawInput: Record<string, unknown>) => {
-    const input = toolInputSchemas.drama_get_production_version.parse(rawInput);
-    return textResult(await backendApi.get(`${productionPath(input.episodeId)}/versions/${input.version}${productionReadQuery(input)}`));
-  });
-  server.registerTool("drama_list_production_legacy", {
-    description: "读取 fullPlot、script.md 与 storyboard.md 原文及哈希，供用户选择导入。",
-    inputSchema: productionIdSchema,
-  }, async (rawInput: Record<string, unknown>) => {
-    const { episodeId } = productionIdSchema.parse(rawInput);
-    return textResult(await backendApi.get(`${productionPath(episodeId)}/legacy`));
-  });
-  server.registerTool("drama_preview_production_impact", {
-    description: "发布前预览受影响场次、镜头、图片、Clip 和缺失资产。",
-    inputSchema: productionIdSchema.extend({ stage: z.enum(["script", "shots", "director"]) }),
-  }, async (rawInput: Record<string, unknown>) => {
-    const input = productionIdSchema.extend({ stage: z.enum(["script", "shots", "director"]) }).parse(rawInput);
-    return textResult(await backendApi.get(`${productionPath(input.episodeId)}/impact?stage=${input.stage}`));
-  });
-  server.registerTool("drama_edit_production", {
-    description: "编辑制作草稿。每次请求提供新 operationId 与读取时的 expectedRevision；冲突返回当前版本，不能直接覆盖。",
-    inputSchema: productionEditSchema.extend(productionIdSchema.shape),
-  }, async (rawInput: Record<string, unknown>) => {
-    const { episodeId, ...input } = rawInput;
-    return textResult(productionWriteReceipt(await backendApi.post(`${productionPath(String(episodeId))}/ops`, input), { input: rawInput }));
-  });
-  server.registerTool("drama_publish_production", {
-    description: "发布 Acheng 导演稿的新正式版本并冻结回执；此操作不会生成媒体。用户授权后另调用 drama_start_production_run 指定范围。",
-    inputSchema: productionIdSchema.extend({ operationId: z.string().min(1), expectedRevision: z.number().int().min(0), stage: z.enum(["script", "shots", "director"]) }),
-  }, async (rawInput: Record<string, unknown>) => {
-    const { episodeId, ...input } = rawInput;
-    return textResult(productionWriteReceipt(await backendApi.post(`${productionPath(String(episodeId))}/publish`, input), { input: rawInput }));
-  });
-  server.registerTool("drama_restore_production", {
-    description: "将历史发布版本恢复到草稿；不删除现有发布历史或媒体。",
-    inputSchema: productionIdSchema.extend({ version: z.number().int().min(1), operationId: z.string().min(1), expectedRevision: z.number().int().min(0) }),
-  }, async (rawInput: Record<string, unknown>) => {
-    const { episodeId, ...input } = rawInput;
-    return textResult(productionWriteReceipt(await backendApi.post(`${productionPath(String(episodeId))}/restore`, input), { input: rawInput }));
-  });
-  server.registerTool("drama_sync_production_clips", {
-    description: "同步当前已发布镜头的 H3 Clip 草稿，不发起视频生成。",
-    inputSchema: productionIdSchema,
-  }, async (rawInput: Record<string, unknown>) => {
-    const { episodeId } = productionIdSchema.parse(rawInput);
-    return textResult(productionWriteReceipt(await backendApi.post(`${productionPath(episodeId)}/sync-clips`, {}), { input: rawInput }));
-  });
-  server.registerTool("drama_get_production_run", {
-    description: "读取发布版本自动生产状态、暂停原因和已提交的精确任务 ID。",
-    inputSchema: productionIdSchema.extend({ version: z.number().int().min(1) }),
-  }, async (rawInput: Record<string, unknown>) => {
-    const input = productionIdSchema.extend({ version: z.number().int().min(1) }).parse(rawInput);
-    return textResult(await backendApi.get(`${productionPath(input.episodeId)}/runs/${input.version}`));
-  });
-  server.registerTool("drama_export_production_markdown", {
-    description: "导出已发布剧本或镜头表 Markdown，不覆盖旧制作文件。",
-    inputSchema: productionIdSchema.extend({ stage: z.enum(["script", "shots", "director"]), version: z.number().int().min(1).optional() }),
-  }, async (rawInput: Record<string, unknown>) => {
-    const input = productionIdSchema.extend({ stage: z.enum(["script", "shots", "director"]), version: z.number().int().min(1).optional() }).parse(rawInput);
-    return textResult(await backendApi.get(`${productionPath(input.episodeId)}/export?stage=${input.stage}${input.version ? `&version=${input.version}` : ""}`));
-  });
-  {
-  const productionPath = (projectId: string) => `/canvas/projects/${encodeURIComponent(projectId)}/production`;
-  const productionIdSchema = z.object({ projectId: z.string().trim().min(1) });
-  server.registerTool("canvas_get_production", {
-    description: toolDescriptions.canvas_get_production,
-    inputSchema: toolInputSchemas.canvas_get_production,
-  }, async (rawInput: Record<string, unknown>) => {
-    const input = toolInputSchemas.canvas_get_production.parse(rawInput);
-    return textResult(await backendApi.get(productionPath(input.projectId) + productionReadQuery(input)));
-  });
-  server.registerTool("canvas_get_workflow_readiness", {
-    description: "按 Acheng 制作目标读取依赖就绪、缺项和下一步。",
-    inputSchema: productionIdSchema,
-  }, async (rawInput: Record<string, unknown>) => {
-    const { projectId } = productionIdSchema.parse(rawInput);
-    return textResult(await backendApi.get(`${productionPath(projectId)}/readiness`));
-  });
-  server.registerTool("canvas_start_production_run", {
-    description: toolDescriptions.canvas_start_production_run,
-    inputSchema: toolInputSchemas.canvas_start_production_run,
-  }, async (rawInput: Record<string, unknown>) => {
-    const { projectId, ...input } = rawInput;
-    const blocked = await productionToolPreflight(backendApi, "canvas_start_production_run", rawInput);
-    if (blocked) return textResult(blocked);
-    return textResult(await backendApi.post(`${productionPath(String(projectId))}/runs`, input));
-  });
-  server.registerTool("canvas_get_production_batch", {
-    description: "读取指定 runId 的生产状态、固定范围、引擎和任务 ID。",
-    inputSchema: productionIdSchema.extend({ runId: z.string().min(1) }),
-  }, async (rawInput: Record<string, unknown>) => {
-    const input = productionIdSchema.extend({ runId: z.string().min(1) }).parse(rawInput);
-    return textResult(await backendApi.get(`${productionPath(input.projectId)}/batches/${encodeURIComponent(input.runId)}`));
-  });
-  server.registerTool("canvas_pause_production_run", {
-    description: "暂停指定画布 runId；在途任务完成后停在边界，不重复提交已提交任务。",
-    inputSchema: productionIdSchema.extend({ runId: z.string().min(1) }),
-  }, async (rawInput: Record<string, unknown>) => {
-    const input = productionIdSchema.extend({ runId: z.string().min(1) }).parse(rawInput);
-    return textResult(await backendApi.post(`${productionPath(input.projectId)}/batches/${encodeURIComponent(input.runId)}/pause`, {}));
-  });
-  server.registerTool("canvas_resume_production_run", {
-    description: "继续原 runId 的画布任务；失败任务不会自动重生成。",
-    inputSchema: productionIdSchema.extend({ runId: z.string().min(1) }),
-  }, async (rawInput: Record<string, unknown>) => {
-    const input = productionIdSchema.extend({ runId: z.string().min(1) }).parse(rawInput);
-    return textResult(await backendApi.post(`${productionPath(input.projectId)}/batches/${encodeURIComponent(input.runId)}/resume`, {}));
-  });
-  server.registerTool("canvas_list_production_versions", {
-    description: "读取单集制作稿的历史发布版本。",
-    inputSchema: productionIdSchema,
-  }, async (rawInput: Record<string, unknown>) => {
-    const { projectId } = productionIdSchema.parse(rawInput);
-    return textResult(await backendApi.get(`${productionPath(projectId)}/versions`));
-  });
-  server.registerTool("canvas_get_production_version", {
-    description: "默认读取历史版本摘要；使用 view、sourceSection、targetIds 和分页／分块参数读取详情。",
-    inputSchema: toolInputSchemas.canvas_get_production_version,
-  }, async (rawInput: Record<string, unknown>) => {
-    const input = toolInputSchemas.canvas_get_production_version.parse(rawInput);
-    return textResult(await backendApi.get(`${productionPath(input.projectId)}/versions/${input.version}${productionReadQuery(input)}`));
-  });
-  server.registerTool("canvas_list_production_legacy", {
-    description: "读取 fullPlot、script.md 与 storyboard.md 原文及哈希，供用户选择导入。",
-    inputSchema: productionIdSchema,
-  }, async (rawInput: Record<string, unknown>) => {
-    const { projectId } = productionIdSchema.parse(rawInput);
-    return textResult(await backendApi.get(`${productionPath(projectId)}/legacy`));
-  });
-  server.registerTool("canvas_preview_production_impact", {
-    description: "发布前预览受影响场次、镜头、图片、Clip 和缺失资产。",
-    inputSchema: productionIdSchema.extend({ stage: z.enum(["script", "shots", "director"]) }),
-  }, async (rawInput: Record<string, unknown>) => {
-    const input = productionIdSchema.extend({ stage: z.enum(["script", "shots", "director"]) }).parse(rawInput);
-    return textResult(await backendApi.get(`${productionPath(input.projectId)}/impact?stage=${input.stage}`));
-  });
-  server.registerTool("canvas_edit_production", {
-    description: "编辑制作草稿。每次请求提供新 operationId 与读取时的 expectedRevision；冲突返回当前版本，不能直接覆盖。",
-    inputSchema: productionEditSchema.extend(productionIdSchema.shape),
-  }, async (rawInput: Record<string, unknown>) => {
-    const { projectId, ...input } = rawInput;
-    return textResult(productionWriteReceipt(await backendApi.post(`${productionPath(String(projectId))}/ops`, input), { input: rawInput }));
-  });
-  server.registerTool("canvas_publish_production", {
-    description: "发布 Acheng 导演稿的新正式版本并冻结回执；此操作不会生成媒体。用户授权后另调用 canvas_start_production_run 指定范围。",
-    inputSchema: productionIdSchema.extend({ operationId: z.string().min(1), expectedRevision: z.number().int().min(0), stage: z.enum(["script", "shots", "director"]) }),
-  }, async (rawInput: Record<string, unknown>) => {
-    const { projectId, ...input } = rawInput;
-    return textResult(productionWriteReceipt(await backendApi.post(`${productionPath(String(projectId))}/publish`, input), { input: rawInput }));
-  });
-  server.registerTool("canvas_restore_production", {
-    description: "将历史发布版本恢复到草稿；不删除现有发布历史或媒体。",
-    inputSchema: productionIdSchema.extend({ version: z.number().int().min(1), operationId: z.string().min(1), expectedRevision: z.number().int().min(0) }),
-  }, async (rawInput: Record<string, unknown>) => {
-    const { projectId, ...input } = rawInput;
-    return textResult(productionWriteReceipt(await backendApi.post(`${productionPath(String(projectId))}/restore`, input), { input: rawInput }));
-  });
-  server.registerTool("canvas_sync_production_clips", {
-    description: "同步当前已发布镜头的 H3 Clip 草稿，不发起视频生成。",
-    inputSchema: productionIdSchema,
-  }, async (rawInput: Record<string, unknown>) => {
-    const { projectId } = productionIdSchema.parse(rawInput);
-    return textResult(productionWriteReceipt(await backendApi.post(`${productionPath(projectId)}/sync-clips`, {}), { input: rawInput }));
-  });
-  server.registerTool("canvas_get_production_run", {
-    description: "读取发布版本自动生产状态、暂停原因和已提交的精确任务 ID。",
-    inputSchema: productionIdSchema.extend({ version: z.number().int().min(1) }),
-  }, async (rawInput: Record<string, unknown>) => {
-    const input = productionIdSchema.extend({ version: z.number().int().min(1) }).parse(rawInput);
-    return textResult(await backendApi.get(`${productionPath(input.projectId)}/runs/${input.version}`));
-  });
-  server.registerTool("canvas_export_production_markdown", {
-    description: "导出已发布剧本或镜头表 Markdown，不覆盖旧制作文件。",
-    inputSchema: productionIdSchema.extend({ stage: z.enum(["script", "shots", "director"]), version: z.number().int().min(1).optional() }),
-  }, async (rawInput: Record<string, unknown>) => {
-    const input = productionIdSchema.extend({ stage: z.enum(["script", "shots", "director"]), version: z.number().int().min(1).optional() }).parse(rawInput);
-    return textResult(await backendApi.get(`${productionPath(input.projectId)}/export?stage=${input.stage}${input.version ? `&version=${input.version}` : ""}`));
-  });
   }
   server.registerTool(
     "drama_delete_project",
@@ -2403,15 +2140,10 @@ async function applyGenerationDefaults(
 ) {
   if (input.model) return input;
   const generateNow = name.startsWith("canvas_generate_");
-  const namedMode = generateNow
-    ? name.replace("canvas_generate_", "")
-    : name === "canvas_create_image_prompt_flow"
-      ? "image"
-      : "";
+  const namedMode = generateNow ? name.replace("canvas_generate_", "") : "";
   const autoRun =
     generateNow ||
     ((name === "canvas_create_generation_flow" ||
-      name === "canvas_create_image_prompt_flow" ||
       name === "canvas_create_config_node") &&
       input.autoRun === true);
   if (!autoRun) return input;
@@ -3270,7 +3002,6 @@ function preflightExistingCanvasState(
       break;
     }
     case "canvas_update_node":
-    case "canvas_update_node_text":
     case "canvas_resize_node":
       requireNode(input.id);
       break;
@@ -3295,7 +3026,6 @@ function preflightExistingCanvasState(
       requireNode(input.nodeId);
       for (const id of referenceNodeIds) requireNode(id);
       break;
-    case "canvas_create_image_prompt_flow":
     case "canvas_create_generation_flow":
     case "canvas_generate_text":
     case "canvas_generate_image":

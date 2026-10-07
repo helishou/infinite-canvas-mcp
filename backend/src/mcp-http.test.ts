@@ -463,20 +463,20 @@ test("production tools publish full operation schemas and forward read-only pref
   const address = server.address(); assert.ok(address && typeof address !== "string");
   const client = await mcpClient(t, await fixture(t, `http://127.0.0.1:${address.port}`));
   const { tools } = await client.listTools();
-  for (const name of ["production_hash_source", "production_get_contract", "canvas_preflight_production", "drama_preflight_production"]) assert.ok(tools.some(item => item.name === name));
+  for (const name of ["production_hash_source", "production_get_contract", "production_preflight", "production_preflight"]) assert.ok(tools.some(item => item.name === name));
   const hashSchema = tools.find(item => item.name === "production_hash_source")!.inputSchema;
   assert.deepEqual(hashSchema.required, ["source"]);
   const hashed = textPayload(await client.callTool({ name: "production_hash_source", arguments: { source: { brief: "hash the full authored source" } } }));
   assert.equal(hashed.hash, "a".repeat(64));
   assert.deepEqual(hashed.source, { brief: "hash the full authored source" });
-  for (const name of ["canvas_edit_production", "drama_edit_production"]) {
+  for (const name of ["production_edit", "production_edit"]) {
     const schema = JSON.stringify(tools.find(item => item.name === name)?.inputSchema);
     assert.match(schema, /set_director_brief/); assert.match(schema, /committed/); assert.match(schema, /entity/);
   }
   const result = textPayload(await client.callTool({ name: "production_get_contract", arguments: { runtimeId: "pinned", operationType: "set_director_brief" } }));
   assert.equal(result.contract.runtimeId, "pinned");
   const request = { operationId: "op", expectedRevision: 4, ops: [{ type: "set_director_brief", brief: {} }] };
-  for (const [name, owner] of [["canvas_preflight_production", { projectId: "canvas" }], ["drama_preflight_production", { episodeId: "episode" }]] as const) {
+  for (const [name, owner] of [["production_preflight", { kind: "canvas", id: "canvas" }], ["production_preflight", { kind: "episode", id: "episode" }]] as const) {
     const response = textPayload(await client.callTool({ name, arguments: { ...owner, action: "edit", request } }));
     assert.equal(response.preflight.diagnostics[0].path, "request.ops.0.brief");
     assert.deepEqual(response.preflight.diagnostics[0].example, { brief: "A complete authored brief." });
@@ -999,10 +999,10 @@ test("canvas_get_state 在 tools/list 中声明按需读取参数", async (t) =>
   const properties = state.inputSchema.properties as Record<string, { description?: string; enum?: string[] }>;
   assert.deepEqual(properties.view.enum, ["index", "graph"]);
   assert.match(String(properties.ifRevision.description), /revision/);
-  for (const name of ["drama_get_workflow_readiness", "canvas_get_workflow_readiness", "drama_start_production_run", "canvas_start_production_run", "drama_get_production_batch", "canvas_get_production_batch", "drama_pause_production_run", "canvas_pause_production_run", "drama_resume_production_run", "canvas_resume_production_run"]) {
+  for (const name of ["production_get_readiness", "production_get_readiness", "production_start_run", "production_start_run", "production_get_batch", "production_get_batch", "production_pause_run", "production_pause_run", "production_resume_run", "production_resume_run"]) {
     assert.ok(listed.tools.some(tool => tool.name === name), `${name} should be in the native MCP catalog`);
   }
-  const start = listed.tools.find(tool => tool.name === "canvas_start_production_run");
+  const start = listed.tools.find(tool => tool.name === "production_start_run");
   assert.ok(start);
   const runProperties = start.inputSchema.properties as Record<string, unknown>;
   assert.ok(runProperties.runId && runProperties.idempotencyKey && runProperties.expectedRevision && runProperties.targets);

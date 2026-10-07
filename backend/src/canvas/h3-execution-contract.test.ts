@@ -93,6 +93,34 @@ test('manual storyboard edits still reject dangling current reference bindings',
     assert.equal(stores.tasks.list().length, 0);
 });
 
+test('director submission rejects hidden parameter overrides and accepts saved UI edits', t => {
+    const { stores, runner } = fixture(t, { directorEngine: 'acheng' });
+    const input = { projectId: 'p', nodeId: 'n', segmentId: 'a', skipCompleted: false };
+    for (const params of [{ megapixels: 0.8 }, { steps: 12 }, { sampler: 'euler' },
+        { loraSlots: [{ name: 'other', strength: 0.5, enabled: true }] }, { latentUpscaleEnabled: true }]) {
+        const preview = runner.preview({ ...input, params });
+        assert.equal(preview.ready, false);
+        assert.ok(preview.diagnostics.some(issue => issue.code === 'H3_UI_PARAMETER_MISMATCH'));
+        assert.throws(() => runner.start({ ...input, params }), /必须与前端 Clip 设置一致/);
+    }
+    assert.equal(stores.tasks.list().length, 0);
+    assert.throws(() => runner.start({ projectId: 'p', nodeId: 'n', runFromCurrent: true, skipCompleted: false, params: { megapixels: 0.8 } }), /必须与前端 Clip 设置一致/);
+    assert.throws(() => runner.startFrozen({ projectId: 'p', nodeId: 'n', runFromCurrent: true, skipCompleted: false, params: { megapixels: 0.8 } }, 'frozen-hidden-override', stores.projects.get('p')!, stores.settings.get('plugin:minimax-h3:defaults:v1') as Record<string, unknown>), /必须与前端 Clip 设置一致/);
+    stores.projects.applyOperations('p', undefined, [{ type: 'update_h3_segment', nodeId: 'n', segmentId: 'a', patch: { megapixels: 0.8, videoSteps: 12, sampler: 'euler' } }]);
+    const saved = runner.preview(input);
+    assert.equal(saved.ready, true);
+    assert.equal(saved.clips[0].effectiveRuntime.megapixels, 0.8);
+    assert.equal(saved.clips[0].effectiveRuntime.steps, 12);
+    assert.equal(saved.clips[0].effectiveRuntime.sampler, 'euler');
+    assert.equal(runner.preview({ ...input, params: { megapixels: 0.8, steps: 12, sampler: 'euler' } }).ready, true);
+    t.mock.method(runner as any, 'execute', async () => {});
+    const task = runner.start(input, 'saved-ui-director');
+    const frozen = (task.input.runPlan as any).project.nodes[0].metadata.segments[0];
+    assert.equal(frozen.megapixels, 0.8);
+    assert.equal(frozen.videoSteps, 12);
+    assert.equal(frozen.sampler, 'euler');
+});
+
 test('distinct shot IDs may reuse one frame; dangling, reordered and shortened tracks fail', () => {
     const segment = { duration: 5, referenceBindings: [{ id: 'frame', role: 'storyboard', enabled: true }], storyboardShots: [{ id: 'one', referenceBindingId: 'frame', duration: 2 }, { id: 'two', referenceBindingId: 'frame', duration: 3 }] };
     const expected = [{ id: 'one', duration: 2 }, { id: 'two', duration: 3 }];

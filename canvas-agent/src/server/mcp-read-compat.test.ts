@@ -32,7 +32,7 @@ test("Agent HTTP forwards historical views and Backend export references", async
         const res = await fetch(`${url}/agent/api/tools`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, input }) });
         assert.equal(res.status, 200); return await res.json() as any;
     };
-    for (const [name, input] of [["drama_get_production_version", { episodeId: "e", version: 2 }], ["canvas_get_production_version", { projectId: "c", version: 2 }], ["production_get_scene_version", { sceneId: "s", version: 2 }]] as const) {
+    for (const [name, input] of [["production_get_version", { kind: "episode", id: "e", version: 2 }], ["production_get_version", { kind: "canvas", id: "c", version: 2 }], ["production_get_scene_version", { sceneId: "s", version: 2 }]] as const) {
         assert.equal((await call(name, input)).result.version.snapshot.view, "summary");
     }
     assert.equal((await call("canvas_export_snapshot", { projectId: "c" })).result.export.projectId, "c");

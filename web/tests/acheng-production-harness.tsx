@@ -29,6 +29,12 @@ const source = {
     { id: "SEG2", shot_ids: ["s2"], start_frame: 120, end_frame: 240, generation_clip_duration: 5, mode: "Ref2VA" },
   ],
 };
+const clipScenario = new URLSearchParams(window.location.search).get("scenario");
+if (clipScenario === "single") source.segments = source.segments.slice(0, 1);
+if (clipScenario === "middle") {
+  source.shots.push({ ...source.shots[1], id: "s3", title: "信使接过信封", start_frame: 240, end_frame: 360 });
+  source.segments.push({ ...source.segments[1], id: "SEG3", shot_ids: ["s3"], start_frame: 240, end_frame: 360 });
+}
 const initial: DirectorProduction = {
   schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "canvas-1", runtimeId: "test-runtime", version: "4.3.9" },
   source, sourceHash: hash,
@@ -71,8 +77,9 @@ const initialReadiness: ProductionReadiness = {
 function Harness() {
   const [director, setDirector] = useState(initial), [production, setProduction] = useState(initialProduction), [readiness, setReadiness] = useState(initialReadiness);
   const [sourceDrafts, setSourceDrafts] = useState<Record<string, string>>({});
-  const [focusTarget, setFocusTarget] = useState<string>();
-  const [dark, setDark] = useState(false), [locale, setLocale] = useState("zh-CN"), [workspace, setWorkspace] = useState<DirectorWorkspace>("overview");
+  const initialTarget = new URLSearchParams(window.location.search).get("clip");
+  const [focusTarget, setFocusTarget] = useState<string | undefined>(initialTarget ? `segment:${initialTarget}` : undefined);
+  const [dark, setDark] = useState(false), [locale, setLocale] = useState("zh-CN"), [workspace, setWorkspace] = useState<DirectorWorkspace>(initialTarget ? "production" : "overview");
   const [saves, setSaves] = useState(0), [published, setPublished] = useState(0), [asks, setAsks] = useState(0);
   const [exporting, setExporting] = useState(false);
   const [batches, setBatches] = useState<ProductionBatch[]>([]);
@@ -139,7 +146,7 @@ function Harness() {
       onCheckContinuity={async () => { const ledger = director.source.ledger as Record<string, any>; const scoped = (ledger.coverage || []).some((item: any) => item.source_anchor?.block_id === "B01" && ["s1", "s2"].every(id => item.shot_ids?.includes(id)) && item.evidence_kind === "explicit_hold"); setContinuityReport(current => ({ ...current, status: scoped ? "passed" : "blocked", coverageStatus: scoped ? "registered" : "incomplete", checkedAt: new Date().toISOString(), diagnostics: { total: scoped ? 0 : 1, blocked: scoped ? 0 : 1, unresolved: scoped ? 0 : 1 }, report: { ...current.report, status: scoped ? "passed" : "blocked", coverageStatus: scoped ? "registered" : "incomplete", diagnostics: scoped ? [] : current.report?.diagnostics || [] } })); setReadiness(current => ({ ...current, targets: current.targets.map(item => item.id.startsWith("segment:") ? { ...item, status: scoped ? "ready" : "blocked", blockers: scoped ? [] : item.blockers } : item) })); }}
       onContinuitySnapshot={snapshot => setContinuityReport(current => ({ ...current, snapshot }))}
       onReview={review => { updateDirector({ ...director, assets: { ...director.assets, [review.assetId]: { ...director.assets[review.assetId], status: review.verdict, evidence: review.evidence } } }); setReadiness(current => ({ ...current, targets: current.targets.map(item => item.id === `asset:${review.assetId}` ? { ...item, status: review.verdict === "approved" ? "complete" : "ready", blockers: [] } : item) })); }}
-      onPublish={() => setPublished(n => n + 1)} onReplace={updateDirector} onAskDirector={() => setAsks(n => n + 1)} onNavigate={setWorkspace}
+      onPublish={() => setPublished(n => n + 1)} onReplace={updateDirector} onAskDirector={() => setAsks(n => n + 1)} onNavigate={(workspace, target) => { setWorkspace(workspace); setFocusTarget(target ? `${target.kind}:${target.id}` : undefined); }}
       onAnswerDecision={() => true} onExport={downloadBundle} exporting={exporting}
       onStart={targets => setBatches([{ runId: "fixture-run", episodeId: "fixture", version: 1, sourceRevision: 4, idempotencyKey: "fixture-run", status: "pending", targets, plan: { changedSceneIds: [], affectedShotIds: [], imageShotIds: [], clipGroupIds: targets.map(id => id.replace("segment:", "")), missingAssetNodeIds: [] }, engine: director.engine, settings: {}, submitted: [], error: null, pauseRequested: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }])}
       onPause={runId => setBatches(current => current.map(item => item.runId === runId ? { ...item, status: "paused" } : item))}

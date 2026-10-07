@@ -35,7 +35,7 @@ test("API authentication leaves strict production queries clean and preserves JS
 
 test("production rejection diagnostics and concrete next actions survive HTTP transport", async () => {
   const diagnostic = { code: "TARGET_AWAITING_REVIEW", path: "request.targets", message: "Review the original result", severity: "error", blockingRun: { runId: "original", status: "awaiting_review", taskIds: ["task"] } };
-  const nextAction = { action: "review", message: "Read the original run", tool: "drama_get_production_batch", input: { episodeId: "episode", runId: "original" } };
+  const nextAction = { action: "review", message: "Read the original run", tool: "production_get_batch", input: { kind: "episode", id: "episode", runId: "original" } };
   await withFetch(async () => new Response(JSON.stringify({ code: diagnostic.code, error: diagnostic.message, diagnostics: [diagnostic], nextActions: [nextAction] }), { status: 400 }), async () => {
     await assert.rejects(() => client.post("/drama/episodes/episode/production/runs", {}), (error: unknown) => {
       assert.ok(error instanceof BackendClientError);

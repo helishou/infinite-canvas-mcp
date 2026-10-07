@@ -2,6 +2,7 @@ import { mergeDirectorInput } from "./input-merge.js";
 import { outgoingDirectorBoundary } from "@basketikun/canvas-agent/drama/production-validation";
 import { isH3StyleTemplateId } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
 import { BASE_H3_NODE_METADATA } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
+import { resolveH3Runtime, H3_PARAM_KEYS } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import crypto from "node:crypto";
 import { currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { buildCharacterGroupFromExistingNode } from "@basketikun/canvas-agent/plugins/minimax-h3/character-groups";
@@ -79,6 +80,24 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
     segment.productionClipProjection.inputHash = clipInputHash(segment);
     return segment;
 }
+/** Published content does not replace the model and generation settings saved in the Clip UI. */
+export function buildPublishedProductionClip(project: Record<string, any>, published: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], segmentId: string, defaults: Record<string, unknown>, runSettings?: Record<string, unknown>) {
+    const node = (project.nodes || []).find((node: any) => node.id === group.nodeId);
+    const metadata = object(node?.metadata);
+    const saved = (metadata.segments || []).find((clip: any) => clip.id === segmentId);
+    if (!saved) throw new Error("已发布 Clip 节点不存在");
+    const authored = buildProductionClip(project, published, group, segmentId, runSettings);
+    const runtime = resolveH3Runtime(saved, {}, metadata, defaults).params;
+    const contentKeys = new Set(CLIP_PROJECTION_FIELDS.filter(key => key !== "modelName"));
+    const settings = Object.fromEntries(H3_PARAM_KEYS.filter(key => !contentKeys.has(key) && runtime[key] !== undefined).map(key => [key, runtime[key]]));
+    if (runtime.steps !== undefined) settings.videoSteps = runtime.steps;
+    delete settings.steps;
+    const segment = { ...authored, ...settings, h3ParameterPolicy: "overrides" };
+    segment.productionClipProjection.fieldHashes.modelName = clipFieldHash(segment.modelName);
+    segment.productionClipProjection.inputHash = clipInputHash(segment);
+    return segment;
+}
+
 export function productionClipProjection(project: Record<string, any>, data: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], segmentId: string, existing?: Record<string, any>) {
     const result: ReferenceSync = { targetId: group.id, status: "blocked", referenceCount: 0, diagnostics: [] };
     try {

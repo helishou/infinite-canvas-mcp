@@ -62,6 +62,7 @@ useAgentStore.setState({
 Object.assign(window, {
     __agentPromptQueueTest: {
         calls,
+        async flushQueue() { await (await import("../src/stores/use-agent-store")).flushAgentPromptQueue(); },
         snapshot: () => {
             const state = useAgentStore.getState();
             return { queue: state.queuedPrompts.map((item) => ({ id: item.id, status: item.status, text: item.payload.messageText, attachments: item.payload.attachments.map(({ id, url, dataUrl }) => ({ id, url, dataUrl })) })), paused: state.pausedPromptQueueScopes.length > 0, users: state.messages.filter((item) => item.role === "user").map((item) => ({ id: item.id, clientMessageId: item.clientMessageId, text: item.text })) };

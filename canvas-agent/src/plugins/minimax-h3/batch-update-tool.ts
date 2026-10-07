@@ -118,3 +118,14 @@ export const H3_PREPARE_CLIP_TOOL = {
     },
     annotations: { title: "H3 原子准备片段", readOnlyHint: false },
 } as const;
+
+/** Model catalog discovery uses the same wire contract in native MCP and browser declarations. */
+export const H3_LIST_MODELS_TOOL = {
+        id: "h3_list_models", annotations: { readOnlyHint: true },
+        version: "2.0.0",
+        name: "H3 列出模型",
+        description: "默认返回模型分类数量；view: entries 必须指定 categories 和 pageSize，可用 query/cursor 筛选续读。view: full 显式读取完整目录。",
+        inputJsonSchema: { type: "object", properties: { view: { type: "string", enum: ["summary", "entries", "full"], default: "summary" }, categories: { type: "array", minItems: 1, items: { type: "string", enum: ["models", "loras", "textEncoders", "videoVaes", "audioVaes", "nanfeng"] } }, query: { type: "string" }, pageSize: { type: "integer", minimum: 1 }, cursor: { type: "string" } },
+            allOf: [{ if: { properties: { view: { const: "entries" } }, required: ["view"] }, then: { required: ["categories", "pageSize"] },
+                else: { not: { anyOf: ["categories", "query", "pageSize", "cursor"].map(key => ({ required: [key] })) } } }] },
+    };

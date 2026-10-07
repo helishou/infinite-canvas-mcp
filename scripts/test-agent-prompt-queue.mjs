@@ -39,7 +39,8 @@ try {
         headless: true,
         ...(process.env.CANVAS_TEST_BROWSER ? { executablePath: process.env.CANVAS_TEST_BROWSER } : fs.existsSync("C:/Program Files/Google/Chrome/Application/chrome.exe") ? { executablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe" } : fs.existsSync("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe") ? { executablePath: "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe" } : {}),
     });
-    const page = await browser.newPage();
+    const context = await browser.newContext();
+    const page = await context.newPage();
     page.setDefaultTimeout(30000);
     const errors = [];
     const badResponses = [];
@@ -136,7 +137,37 @@ try {
     const writes = (await calls()).filter((call) => call.method !== "GET" && !["/agent/codex/turn", "/agent/codex/interrupt"].includes(call.path));
     assert.deepEqual(writes, [], "the isolated harness must not issue unrelated writes");
     assert.deepEqual(errors, [], `the page must not throw; bad responses: ${JSON.stringify(badResponses)}`);
-    console.log("PASS: editable busy composer, FIFO queue, removal, authoritative interrupt/idle ordering, and remaining FIFO. No unrelated writes.");
+    await page.evaluate(() => window.__agentPromptQueueTest.setBusy(18));
+    await composer.fill("survives refresh with image");
+    await page.evaluate(() => window.__agentPromptQueueTest.setAttachmentFixture());
+    await page.getByRole("button", { name: "加入队列", exact: true }).click();
+    await page.getByTestId("agent-queued-prompt").waitFor();
+    await page.evaluate(() => window.__agentPromptQueueTest.flushQueue());
+    const beforeReload = await snapshot();
+    const clientId = await page.evaluate(() => sessionStorage.getItem("canvas-agent-client-id"));
+    await page.reload();
+    await page.getByTestId("agent-queued-prompt").waitFor();
+    assert.deepEqual((await snapshot()).queue, beforeReload.queue, "reload restores the same IDs, order, and image payloads");
+    assert.equal((await snapshot()).paused, true, "reload preserves the paused queue");
+    await page.evaluate(() => window.__agentPromptQueueTest.setIdle(20));
+    assert.equal((await turnBodies()).length, 0, "a restored paused queue must not send automatically");
+
+    const duplicate = await page.context().newPage();
+    await duplicate.addInitScript((id) => sessionStorage.setItem("canvas-agent-client-id", id), clientId);
+    await duplicate.goto(page.url());
+    await duplicate.waitForFunction((id) => sessionStorage.getItem("canvas-agent-client-id") !== id, clientId);
+    await duplicate.getByRole("textbox").first().waitFor();
+    assert.equal(await duplicate.getByTestId("agent-queued-prompt").count(), 0, "a duplicated tab must not claim another tab's queue");
+    await duplicate.close();
+    await page.getByRole("button", { name: "继续队列", exact: true }).click();
+    await page.waitForFunction(() => window.__agentPromptQueueTest.calls.some((call) => call.path === "/agent/codex/turn"));
+    assert.equal((await turnBodies()).length, 1, "resuming sends the restored instruction exactly once");
+    assert.match(JSON.stringify((await turnBodies())[0]), /survives refresh with image/);
+    await page.evaluate(() => window.__agentPromptQueueTest.flushQueue());
+    await page.reload();
+    await page.getByRole("textbox").first().waitFor();
+    assert.equal((await snapshot()).queue.length, 0, "confirmed sends remain removed after reload");
+    console.log("PASS: queue ordering, interrupts, refresh with images and pause state, duplicated-tab isolation, and no replay after confirmed send.");
 } finally {
     await browser?.close();
     await server.close();

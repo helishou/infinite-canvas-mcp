@@ -52,7 +52,7 @@ import { scriptNodeOperations } from "./script-nodes.js";
 import { compileProductionLayout, productionAssetPosition, productionSceneIdsForShots } from "./production-layout.js";
 import { productionLayoutStableId, productionNodePosition } from "./production-layout-geometry.js";
 import { compiledImageInput, assertImageReferenceCoverage, imageInputOperations, verifyImageInput } from "./image-inputs.js";
-import { buildProductionClip, clipInputHash, clipInputOperations, productionClipProjection, type ReferenceSync } from "./clip-inputs.js";
+import { buildPublishedProductionClip, clipInputHash, clipInputOperations, productionClipProjection, type ReferenceSync } from "./clip-inputs.js";
 import { continuityTargetBlockers, ProductionContinuityReports } from "./continuity-reports.js";
 import { dedupReceipt, resolveReceiptDedup, assertPublicReceipt } from "./receipt-dedup.js";
 import type { NativeProductionTarget } from "./native-generation.js";
@@ -785,7 +785,7 @@ export class EpisodeProductionService {
             for (const targetId of batch.targets.filter(target => wanted.has(target))) {
                 const tasks = batch.submitted.filter(task => `${task.kind === "h3" ? "segment" : "frame"}:${task.id}` === targetId || batch.targets.length === 1).map(task => ({ taskId: task.taskId, status: this.db.getTask(task.taskId)?.status || "unknown" }));
                 occupied.push({ targetId, status: batch.status, runId: batch.runId, taskIds: tasks.map(task => task.taskId), tasks,
-                    nextAction: { action: batch.status === "awaiting_review" ? "review" : "read_run", message: batch.status === "awaiting_review" ? "读取旧结果并完成审核或按用户决定退回；暂停不会释放目标。" : "读取原运行及精确任务状态，等待在途任务结束；不要换 runId 重提。", tool: this.projectScope ? "canvas_get_production_batch" : "drama_get_production_batch", input: { [this.projectScope ? "projectId" : "episodeId"]: id, runId: batch.runId } } });
+                    nextAction: { action: batch.status === "awaiting_review" ? "review" : "read_run", message: batch.status === "awaiting_review" ? "读取旧结果并完成审核或按用户决定退回；暂停不会释放目标。" : "读取原运行及精确任务状态，等待在途任务结束；不要换 runId 重提。", tool: this.projectScope ? "production_get_batch" : "production_get_batch", input: { [this.projectScope ? "projectId" : "episodeId"]: id, runId: batch.runId } } });
             }
         }
         const bindings = this.db.db.prepare(`SELECT b.task_id, b.target_kind, b.targets_json, t.status FROM production_task_bindings b JOIN tasks t ON t.id=b.task_id WHERE b.owner_kind=? AND b.owner_id=? AND b.status='submitted' AND t.status IN ('queued','running','awaiting_confirmation')`).all(this.ownerKind, id);
@@ -798,7 +798,7 @@ export class EpisodeProductionService {
             for (const targetId of (run.targets || run.plan.clipGroupIds.map(groupId => `segment:${groupId}`)).filter(target => wanted.has(target))) {
                 if (occupied.some(item => item.targetId === targetId && item.runId === run.runId)) continue;
                 const tasks = run.submitted.map(task => ({ taskId: task.taskId, status: this.db.getTask(task.taskId)?.status || "unknown" }));
-                occupied.push({ targetId, status: run.status, runId: run.runId, taskIds: tasks.map(task => task.taskId), tasks, nextAction: { action: "read_run", message: "读取原版本运行并等待其结束，保留当前输入和媒体。", tool: this.projectScope ? "canvas_get_production_run" : "drama_get_production_run", input: { [this.projectScope ? "projectId" : "episodeId"]: id, version: run.version } } });
+                occupied.push({ targetId, status: run.status, runId: run.runId, taskIds: tasks.map(task => task.taskId), tasks, nextAction: { action: "read_run", message: "读取原版本运行并等待其结束，保留当前输入和媒体。", tool: this.projectScope ? "production_get_run" : "production_get_run", input: { [this.projectScope ? "projectId" : "episodeId"]: id, version: run.version } } });
             }
         }
         const canvasId = this.episodeInfo(id).canvasId;
@@ -825,12 +825,12 @@ export class EpisodeProductionService {
             const prior = this.prepare("SELECT run_id, request_hash FROM episode_production_batches WHERE episode_id=? AND idempotency_key=?").get(episodeId, input.request.idempotencyKey) as { run_id: string; request_hash: string } | undefined;
             if (prior) {
                 if (prior.request_hash === batchRequestHash(input.request)) return { ...result, valid: true, generationReady: false, replayed: true, nextActions: [] };
-                result.diagnostics.push({ code: "IDEMPOTENCY_CONFLICT", path: "request.idempotencyKey", message: "idempotencyKey 已用于不同生产请求，请读取原运行并核对范围，不能原样重提。", severity: "error", nextAction: { action: "read_run", message: "读取原运行并核对幂等请求。", tool: this.projectScope ? "canvas_get_production_batch" : "drama_get_production_batch", input: { [this.projectScope ? "projectId" : "episodeId"]: episodeId, runId: prior.run_id } } });
+                result.diagnostics.push({ code: "IDEMPOTENCY_CONFLICT", path: "request.idempotencyKey", message: "idempotencyKey 已用于不同生产请求，请读取原运行并核对范围，不能原样重提。", severity: "error", nextAction: { action: "read_run", message: "读取原运行并核对幂等请求。", tool: this.projectScope ? "production_get_batch" : "production_get_batch", input: { [this.projectScope ? "projectId" : "episodeId"]: episodeId, runId: prior.run_id } } });
                 result.nextActions = result.diagnostics.flatMap(item => item.nextAction ? [item.nextAction] : []);
                 return result;
             }
         }
-        if (input.request.expectedRevision !== current.revision) diagnostics.push({ code: "REVISION_CONFLICT", path: "request.expectedRevision", message: `Current revision is ${current.revision}`, severity: "error", nextAction: { action: "refresh", message: "回读制作对象并核对新 revision 后再提交。", tool: this.projectScope ? "canvas_get_production" : "drama_get_production", input: { [this.projectScope ? "projectId" : "episodeId"]: episodeId } } });
+        if (input.request.expectedRevision !== current.revision) diagnostics.push({ code: "REVISION_CONFLICT", path: "request.expectedRevision", message: `Current revision is ${current.revision}`, severity: "error", nextAction: { action: "refresh", message: "回读制作对象并核对新 revision 后再提交。", tool: this.projectScope ? "production_get" : "production_get", input: { [this.projectScope ? "projectId" : "episodeId"]: episodeId } } });
         if (input.action === "edit" && input.request.ops.some(operation => operation.type === "restore_archived_scene_results") && input.request.ops.length !== 1) diagnostics.push({ code: "ARCHIVED_RESULT_RESTORE_MIXED", path: "request.ops", message: "归档视频恢复必须单独提交，不能与其他制作编辑混批", severity: "error" });
         if (diagnostics.length) { result.nextActions = diagnostics.flatMap(item => item.nextAction ? [item.nextAction] : []); return result; }
         let candidate = current.draft;
@@ -878,7 +878,7 @@ export class EpisodeProductionService {
         result.generationReady = input.action === "generate" && result.valid && !diagnostics.some(item => item.severity === "unverified");
         result.compileReady = input.action === "compile" && result.valid;
         result.nextActions = diagnostics.filter(item => item.severity === "error").map(item => item.nextAction || { action: item.code === "REVISION_CONFLICT" ? "refresh" : "correct_source", message: item.message,
-            tool: this.projectScope ? "canvas_get_production" : "drama_get_production", input: { [this.projectScope ? "projectId" : "episodeId"]: episodeId, view: "source" } });
+            tool: this.projectScope ? "production_get" : "production_get", input: { [this.projectScope ? "projectId" : "episodeId"]: episodeId, view: "source" } });
         return result;
     }
 
@@ -1458,7 +1458,7 @@ export class EpisodeProductionService {
                     : "请读取并恢复原运行；暂停仍保留目标占用，不要换 runId 重试";
                 diagnostics.push({ code: awaitingReview ? "TARGET_AWAITING_REVIEW" : "TARGET_OCCUPIED", path: "request.targets", message: `所选生产目标已由运行 ${batch.runId} 占用；${message}`, severity: "error",
                     blockingRun: { runId: batch.runId, status: batch.status, taskIds: batch.submitted.map(item => item.taskId) },
-                    nextAction: { action: awaitingReview ? "review" : "read_run", message, tool: this.projectScope ? "canvas_get_production_batch" : "drama_get_production_batch", input: { [this.projectScope ? "projectId" : "episodeId"]: episodeId, runId: batch.runId } } });
+                    nextAction: { action: awaitingReview ? "review" : "read_run", message, tool: this.projectScope ? "production_get_batch" : "production_get_batch", input: { [this.projectScope ? "projectId" : "episodeId"]: episodeId, runId: batch.runId } } });
             }
             for (const target of selectedTargets.flatMap(id => targets.has(id) ? [targets.get(id)!] : []).filter(item => item.status !== "ready")) {
                 diagnostics.push({ code: target.status === "needs_review" ? "TARGET_NEEDS_REVIEW" : "TARGET_DEPENDENCY_BLOCKED", path: "request.targets", targetId: target.id,
@@ -1505,7 +1505,7 @@ export class EpisodeProductionService {
                     const group: EpisodeProductionData["clipGroups"][number] | undefined = current.published.clipGroups.find(group => group.id === id.slice(8));
                     const node: any = nodes.find(node => node.id === group?.nodeId);
                     const index = node?.metadata?.segments?.findIndex((segment: any) => segment.id === group?.segmentId);
-                    if (group?.segmentId && index >= 0) node.metadata.segments[index] = buildProductionClip(executionProject, current.published, group, group.segmentId, runSettings);
+                    if (group?.segmentId && index >= 0) node.metadata.segments[index] = buildPublishedProductionClip(executionProject, current.published, group, group.segmentId, record(this.db.getSetting(H3_DEFAULTS_KEY)), runSettings);
                 } else {
                     const assetId = id.startsWith("frame:") ? director.shotInputs[id.slice(6)]?.keyframeAssetId : id.slice(6);
                     const node = nodes.find(node => node.id === director.assets[assetId || ""]?.nodeId);

@@ -38,7 +38,7 @@ npm run dev
 | `h3_run_clip` | 运行单个片段(解析参考图/视频/音频并提交 ComfyUI) |
 | `h3_get_task` | 查询生成任务状态/进度/结果 |
 | `h3_cancel_task` | 取消运行中的任务 |
-| `h3_update_clip` | 更新某片段字段并写回节点 metadata |
+| `h3_update_clips` | 以稳定 operationId 和 expectedRevision 更新单个或多个 Clip 保存稿，支持回执恢复 |
 | `h3_run_all_clips` | 运行全部/指定 H3 节点的未完成片段 |
 
 ### 生命周期与安全边界

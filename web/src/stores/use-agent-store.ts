@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import localforage from "localforage";
 import i18n from "@/i18n";
 
 import { getBackendUrl } from "@/services/backend-api";
@@ -89,6 +90,7 @@ type AgentStore = {
     waiting: boolean;
     messages: AgentChatItem[];
     queuedPrompts: AgentQueuedPrompt[];
+    promptQueueHydrated: boolean;
     pausedPromptQueueScopes: string[];
     codexRuntime: AgentCodexRuntime;
     tokenUsage: AgentTokenUsage | null;
@@ -168,6 +170,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     waiting: false,
     messages: [],
     queuedPrompts: [],
+    promptQueueHydrated: false,
     pausedPromptQueueScopes: [],
     codexRuntime: { instanceId: "", revision: 0, busy: false, threadId: "", turnId: "" },
     tokenUsage: null,
@@ -262,6 +265,62 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     addEventLog: (item) => set((state) => ({ eventLogs: [...state.eventLogs.slice(-160), item] })),
     clearEventLogs: () => set({ eventLogs: [] }),
 }));
+
+type PromptQueueSnapshot = { version: 1; queuedPrompts: AgentQueuedPrompt[]; pausedPromptQueueScopes: string[] };
+const promptQueueStorage = localforage.createInstance({ name: "infinite-canvas-agent-prompt-queues" });
+let promptQueueScope = "";
+let promptQueueInitialization: Promise<void> | null = null;
+let unsubscribePromptQueue: (() => void) | undefined;
+let promptQueueWrite: Promise<unknown> = Promise.resolve();
+let promptQueueStorageError: unknown;
+
+/** The client ID is acquired with a Web Lock before loading: duplicated tabs cannot dispatch this queue. */
+export function hydrateAgentPromptQueue(endpoint: string, clientId: string): Promise<void> {
+    const scope = JSON.stringify([endpoint.replace(/\/$/, ""), clientId]);
+    if (scope === promptQueueScope && promptQueueInitialization) return promptQueueInitialization;
+    unsubscribePromptQueue?.();
+    unsubscribePromptQueue = undefined;
+    promptQueueScope = scope;
+    useAgentStore.setState({ promptQueueHydrated: false });
+    promptQueueInitialization = (async () => {
+        await promptQueueWrite;
+        const saved = await promptQueueStorage.getItem<PromptQueueSnapshot>(scope);
+        if (scope !== promptQueueScope) return;
+        if (saved && (saved.version !== 1 || !Array.isArray(saved.queuedPrompts) || !Array.isArray(saved.pausedPromptQueueScopes))) {
+            throw new Error(i18n.t("agent.queue.storageFailed"));
+        }
+        const interruptedScopes = (saved?.queuedPrompts || []).filter((item) => item.status === "sending" || item.status === "interrupting").map((item) => JSON.stringify([item.threadId, item.conversationId]));
+        useAgentStore.setState({
+            queuedPrompts: (saved?.queuedPrompts || []).map((item) => item.status === "sending" || item.status === "interrupting"
+                ? { ...item, status: "failed" as const, error: i18n.t("agent.queue.deliveryUncertain") }
+                : item),
+            pausedPromptQueueScopes: [...new Set([...(saved?.pausedPromptQueueScopes || []), ...interruptedScopes])],
+            promptQueueHydrated: true,
+        });
+        promptQueueStorageError = undefined;
+        unsubscribePromptQueue = useAgentStore.subscribe((state, before) => {
+            if (state.queuedPrompts === before.queuedPrompts && state.pausedPromptQueueScopes === before.pausedPromptQueueScopes) return;
+            const snapshot: PromptQueueSnapshot = { version: 1, queuedPrompts: state.queuedPrompts, pausedPromptQueueScopes: state.pausedPromptQueueScopes };
+            promptQueueWrite = promptQueueWrite.then(() => promptQueueStorage.setItem(scope, snapshot)).then(() => {
+                promptQueueStorageError = undefined;
+            }).catch((error: unknown) => {
+                promptQueueStorageError = error;
+                console.warn("Agent prompt queue could not be saved", error);
+            });
+        });
+    })().catch((error: unknown) => {
+        promptQueueStorageError = error;
+        throw error;
+    });
+    return promptQueueInitialization;
+}
+
+/** Do not clear the composer until the queued payload (including images) has reached IndexedDB. */
+export async function flushAgentPromptQueue() {
+    if (!unsubscribePromptQueue) throw new Error(i18n.t("agent.queue.storageFailed"));
+    await promptQueueWrite;
+    if (promptQueueStorageError) throw promptQueueStorageError;
+}
 
 /** 从 backend settings 同步 agent 相关配置 */
 async function hydrateAgentSettings() {

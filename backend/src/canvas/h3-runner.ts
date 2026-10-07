@@ -123,6 +123,14 @@ export class CanvasH3Runner {
             const segment = (metadata.segments as H3Segment[]).find(item => item.id === plan.segmentId)!;
             const effective = resolveH3Runtime(segment, normalized.params || {}, metadata, defaults);
             const issue = (code: string, message: string) => diagnostics.push({ code, nodeId: plan.nodeId, segmentId: plan.segmentId, message });
+            // Director submissions must use the same saved values the Clip UI resolves.
+            // Execution controls may travel in params, but cannot silently replace settings.
+            if (segment.directorEngine || segment.productionClipProjection) {
+                const saved = resolveH3Runtime(segment, {}, metadata, defaults).params;
+                const changed = Object.keys(effective.params).filter(key => (H3_PARAM_KEYS as readonly string[]).includes(key)
+                    && stableH3Fingerprint(effective.params[key]) !== stableH3Fingerprint(saved[key]));
+                if (changed.length) issue('H3_UI_PARAMETER_MISMATCH', `导演 H3 参数必须与前端 Clip 设置一致：${changed.join('、')}；请先保存 Clip 参数，再重新预检提交`);
+            }
             for (const message of effective.parameterIssues) issue('INVALID_H3_PARAMETERS', message);
             if (effective.params.selectedVideoModelEnabled === true && !String(effective.params.selectedVideoModel || "").trim()) issue("SELECTED_VIDEO_MODEL_REQUIRED", "已启用自选视频模型，请先选择一个已配置的视频模型");
             if (effective.params.selectedVideoModelEnabled === true && h3LocalOnlyReason(effective.params)) issue("SELECTED_VIDEO_MODEL_UNSUPPORTED_MODE", "当前 H3 专用的潜空间连续或分阶段确认功能不能与自选视频模型一起使用");
@@ -187,7 +195,7 @@ export class CanvasH3Runner {
         const planner = new CanvasH3Runner(stores, this.events, this.comfy, this.runningHub, this.videoDispatcher);
         const normalized = normalizeInput(input);
         const checked = planner.preview(normalized);
-        if (!checked.ready) throw new Error(checked.diagnostics.map(issue => issue.message).join("；"));
+        if (!checked.ready || checked.diagnostics.some(issue => issue.code === 'H3_UI_PARAMETER_MISMATCH')) throw new Error(checked.diagnostics.map(issue => issue.message).join("；"));
         if (normalized.expectedPlanHash && normalized.expectedPlanHash !== checked.planHash) throw new Error("所选生成输入已变化，请刷新预览");
         return this.start({ ...normalized, expectedPlanHash: undefined }, clientTaskId, planner.buildRunPlan(normalized));
     }
@@ -210,7 +218,7 @@ export class CanvasH3Runner {
         const preview = preparedPlan ? { diagnostics: [], planHash: "" } : this.preview(normalized);
         if (normalized.expectedPlanHash && normalized.expectedPlanHash !== preview.planHash) throw Object.assign(new Error('生成预检已过期，请重新读取参数与预检'), { code: 'STALE_H3_PREVIEW', preview });
         const blocking = preview.diagnostics.filter(issue => issue.code !== 'REFERENCE_INVALID');
-        if (blocking.length && !("readyTargets" in preview && preview.readyTargets.length)) throw Object.assign(new Error(blocking.map(issue => `${issue.segmentId}: ${issue.message}`).join('；')), { code: 'H3_EXECUTION_CONTRACT_MISMATCH', diagnostics: blocking });
+        if (blocking.length && (blocking.some(issue => issue.code === 'H3_UI_PARAMETER_MISMATCH') || !("readyTargets" in preview && preview.readyTargets.length))) throw Object.assign(new Error(blocking.map(issue => `${issue.segmentId}: ${issue.message}`).join('；')), { code: 'H3_EXECUTION_CONTRACT_MISMATCH', diagnostics: blocking });
         // 单个 Clip 的参考素材不完整只跳过它自己；其余 Clip 必须照常入队，不能整批卡死。
         const blockedPlans = preparedPlan ? [] : this.validatePlannedReferences(project, normalized);
         for (const issue of blocking) if (!blockedPlans.some(plan => plan.nodeId === issue.nodeId && plan.segmentId === issue.segmentId)) blockedPlans.push({ nodeId: issue.nodeId, segmentId: issue.segmentId, clipNumber: 0, reason: issue.message });

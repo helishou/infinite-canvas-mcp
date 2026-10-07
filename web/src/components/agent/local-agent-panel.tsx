@@ -21,7 +21,7 @@ import { uploadImage } from "@/services/image-storage";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useAgentSkillStore } from "@/stores/use-agent-skill-store";
 import { useShallow } from "zustand/react/shallow";
-import { useAgentStore, type AgentAttachment, type AgentBootstrapStatus, type AgentCanvasContext, type AgentCanvasReference, type AgentChatItem, type AgentConversationState, type AgentCreativeLaunch, type AgentModel, type AgentPendingApproval, type AgentPendingToolCall, type AgentPermissionMode, type AgentQueuedPrompt, type AgentQueuedPromptPayload, type AgentReasoningEffort, type AgentScopedTask, type AgentThreadSummary } from "@/stores/use-agent-store";
+import { flushAgentPromptQueue, hydrateAgentPromptQueue, useAgentStore, type AgentAttachment, type AgentBootstrapStatus, type AgentCanvasContext, type AgentCanvasReference, type AgentChatItem, type AgentConversationState, type AgentCreativeLaunch, type AgentModel, type AgentPendingApproval, type AgentPendingToolCall, type AgentPermissionMode, type AgentQueuedPrompt, type AgentQueuedPromptPayload, type AgentReasoningEffort, type AgentScopedTask, type AgentThreadSummary } from "@/stores/use-agent-store";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { useConfigStore } from "@/stores/use-config-store";
 import { discoverBackendToken, editEpisodeProduction, fetchEpisodeProduction, fetchProductionReadiness } from "@/services/backend-api";
@@ -237,14 +237,17 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
     const urlAgentAutoConnect = searchParams.has("agentUrl") && searchParams.has("agentToken");
     useEffect(() => {
         let disposed = false;
-        void acquireAgentClientId().then((clientId) => {
+        void acquireAgentClientId().then(async (clientId) => {
+            if (disposed) return;
+            try { await hydrateAgentPromptQueue(endpoint, clientId); }
+            catch { message.error(i18n.t("agent.queue.storageFailed")); }
             if (!disposed) {
                 clientIdRef.current = clientId;
                 setClientReady(true);
             }
         });
         return () => { disposed = true; };
-    }, []);
+    }, [endpoint, message]);
     const loadThreadSnapshot = useCallback(async (threadId: string, sequence: number, response?: AgentThreadResponse, expectedTurnId = "") => {
         let thread = response;
         let lastError: unknown;
@@ -1029,7 +1032,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         setAgentState({ attachments: attachments.filter((item) => item.id !== id) });
     };
 
-    const enqueueCurrentPrompt = () => {
+    const enqueueCurrentPrompt = async () => {
         const current = useAgentStore.getState();
         if (!current.connected || !current.activeThreadId || !current.conversation.conversationId) return;
         const text = current.prompt.trim();
@@ -1068,11 +1071,19 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         };
         const queued = { id: createId(), threadId: current.activeThreadId, conversationId: current.conversation.conversationId, payload, status: "queued" as const };
         useAgentStore.getState().updatePromptQueue((items) => enqueueAgentPrompt(items, queued));
+        try { await flushAgentPromptQueue(); }
+        catch {
+            message.error(t("agent.queue.storageFailed"));
+            return;
+        }
         files.forEach((item) => {
             if (item.url.startsWith("blob:")) URL.revokeObjectURL(item.url);
             attachmentUrlsRef.current.delete(item.url);
         });
-        setAgentState({ prompt: "", attachments: [], canvasReferences: [] });
+        const latest = useAgentStore.getState();
+        if (latest.prompt === current.prompt && latest.attachments === files && latest.canvasReferences === current.canvasReferences) {
+            setAgentState({ prompt: "", attachments: [], canvasReferences: [] });
+        }
     };
 
     const promptQueue = useAgentPromptQueue({

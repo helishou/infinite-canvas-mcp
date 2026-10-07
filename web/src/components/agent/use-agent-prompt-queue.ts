@@ -4,7 +4,7 @@ import i18n from "@/i18n";
 
 import { claimNextAgentPrompt, moveAgentPromptToFront, removeAgentPrompt, updateAgentPrompt } from "@/lib/agent/agent-prompt-queue";
 import { interruptCodexTurn } from "@/services/api/canvas-agent";
-import { useAgentStore, type AgentQueuedPrompt } from "@/stores/use-agent-store";
+import { flushAgentPromptQueue, useAgentStore, type AgentQueuedPrompt } from "@/stores/use-agent-store";
 
 export type AgentPromptSubmissionResult = { status: "sent" } | { status: "busy" } | { status: "failed"; error: string };
 
@@ -31,6 +31,7 @@ export function useAgentPromptQueue(options: UseAgentPromptQueueOptions) {
         codexBusy, codexThreadId, codexTurnId, codexRevision, sending, loadingThreads, onSubmit, onReconcile,
     } = options;
     const queue = useAgentStore((state) => state.queuedPrompts);
+    const hydrated = useAgentStore((state) => state.promptQueueHydrated);
     const pausedScopes = useAgentStore((state) => state.pausedPromptQueueScopes);
     const [dispatchEpoch, setDispatchEpoch] = useState(0);
     const submitRef = useRef(onSubmit);
@@ -67,14 +68,14 @@ export function useAgentPromptQueue(options: UseAgentPromptQueueOptions) {
             if (blocked.instanceId !== current.codexRuntime.instanceId || current.codexRuntime.revision > blocked.revision) blockedRuntimeRevisionRef.current = null;
             else return;
         }
-        if (!connected || !activeThreadId || !conversationId || current.activeThreadId !== activeThreadId || current.conversation.conversationId !== conversationId || !["ready", "warning"].includes(current.conversation.status) || current.codexRuntime.busy || current.sending || current.waiting || current.loadingThreads || current.pausedPromptQueueScopes.includes(scope) || inFlightIdRef.current) return;
+        if (!current.promptQueueHydrated || !connected || !activeThreadId || !conversationId || current.activeThreadId !== activeThreadId || current.conversation.conversationId !== conversationId || !["ready", "warning"].includes(current.conversation.status) || current.codexRuntime.busy || current.sending || current.waiting || current.loadingThreads || current.pausedPromptQueueScopes.includes(scope) || inFlightIdRef.current) return;
 
         const claimed = claimNextAgentPrompt(current.queuedPrompts, activeThreadId, conversationId);
         if (!claimed.item) return;
         const dispatchRuntime = { instanceId: current.codexRuntime.instanceId, revision: current.codexRuntime.revision };
         current.updatePromptQueue(() => claimed.queue);
         inFlightIdRef.current = claimed.item.id;
-        void submitRef.current(claimed.item).then((result) => {
+        void flushAgentPromptQueue().then(() => submitRef.current(claimed.item!)).then((result) => {
             const latest = useAgentStore.getState();
             if (inFlightIdRef.current !== claimed.item!.id) return;
             if (result.status === "sent") {
@@ -96,7 +97,7 @@ export function useAgentPromptQueue(options: UseAgentPromptQueueOptions) {
             if (inFlightIdRef.current === claimed.item!.id) inFlightIdRef.current = "";
             setDispatchEpoch((epoch) => epoch + 1);
         });
-    }, [activeThreadId, connected, conversationId, conversationStatus, codexBusy, codexRevision, dispatchEpoch, loadingThreads, paused, queue, scope, sending]);
+    }, [activeThreadId, connected, conversationId, conversationStatus, codexBusy, codexRevision, dispatchEpoch, hydrated, loadingThreads, paused, queue, scope, sending]);
 
     useEffect(() => {
         const id = insertionIdRef.current;
@@ -143,6 +144,7 @@ export function useAgentPromptQueue(options: UseAgentPromptQueueOptions) {
         insertionAcknowledgedRef.current = false;
         current.updatePromptQueue((items) => moveAgentPromptToFront(items, id).map((candidate) => candidate.id === id ? { ...candidate, status: "interrupting", error: undefined } : candidate));
         try {
+            await flushAgentPromptQueue();
             await interruptCodexTurn(endpoint, token, item.threadId);
             const afterAck = useAgentStore.getState();
             if (afterAck.activeThreadId !== item.threadId || afterAck.conversation.conversationId !== item.conversationId) {

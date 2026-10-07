@@ -1,44 +1,23 @@
 ---
 name: canvas-video-production-sop
-description: 以本机 Acheng Director 七模块主导影视制作，适配画布正式数据、原生 MCP 生产、参考绑定、尾帧和 Motion Context；保留完整提示词，视频默认只做技术收口。不用于工程开发。
+description: 使用当前激活的 Acheng Director 创作，在真实画布上保存制作源稿、编译提示词并按授权生产媒体；提供画布执行与恢复适配。不用于工程开发。
 ---
 
 # Acheng 画布制作入口
 
-创作与工作组织由 Acheng 决定，画布承担执行和正式存储。进入前完整读取 [Acheng 画布适配](references/acheng-canvas-adapter.md)，解析本机当前激活引擎；开始或恢复制作都使用当前版本。只按本次缺项读取 Acheng 专业模块，不重做已确认内容。
+开始或恢复制作先读[适配核心](references/acheng-canvas-adapter.md)，解析当前激活的 Acheng Skill，并按本次缺项加载其专业模块。创作合同、完整提示词与 partial/commit 由 Acheng 维护；画布承担正式存储和授权执行。已有确认内容直接复用，七模块不是强制顺序阶段，也不默认启动多代理。
 
-| 工作 | Acheng 模块 |
-|---|---|
-| 剧情、知情、关系、伏笔 | story |
-| 风格母图、角色、场景、道具、关键帧依赖；空间设计 | assets / scene-design |
-| 镜头、空间消费、机位、切镜、Segment 装箱 | shots |
-| 表演与动作因果 | performance |
-| 特效、巨构 | effects |
-| 独立图像/H3 提示词、引用及编译门 | model |
-| 连续性事件、原文恢复、提交与交付 | continuity |
+| 当前工作 | Acheng 模块 | 本次按需读取的画布参考 |
+|---|---|---|
+| 剧情、关系、伏笔 | story | 保存源稿、决定或切换工作区时读[工作台与布局](references/canvas-workspace.md) |
+| 角色、场景、道具、关键帧；空间设计 | assets / scene-design | 登记图片参考、共享素材或生产图片时读[图片生产](references/canvas-image-production.md)；共享归属见[工作台](references/canvas-workspace.md) |
+| 镜头与 Segment 规划 | shots | 规划 Segment 时读[Clip 规格与连续性](references/canvas-clip-production.md) |
+| 表演、动作、特效与巨构 | performance / effects | 涉及 Segment 边界时读[连续性](references/canvas-clip-production.md#连续性边界) |
+| 编译或局部返修 | model / continuity | [源稿编译与发布](references/canvas-compilation.md)，视频另读 Clip 参考，图片另读图片参考 |
+| 准备节点、导航、共享资产 | 当前创作模块 | [工作台与布局](references/canvas-workspace.md) |
+| 提交、跟踪或恢复媒体任务 | 当前创作模块 | [运行与恢复](references/canvas-production-runs.md)，加本次图片或 Clip 参考 |
+| 更新引擎、离线导出 | 无新增创作模块 | [维护与离线工具](references/acheng-canvas-maintenance.md) |
 
-以上是职责而非七个强制顺序阶段，也不默认启动多代理。旧子 Skill 仅保留执行入口，不能覆盖 Acheng 的创作合同。空间图按需设计，取消独立站位阶段和色卡前置。Shot/Segment/Clip 分工、风格母图与角色规格、字数策略统一见适配合同。
+仅提示词、单张试跑、指定片段或逐项确认沿用用户范围。生成须有用户授权；准备节点、编译和发布均不表示已生成。真实画布操作遵守[生产操作边界](../../rules/h3-production.md)，数据保护遵守[画布数据契约](../../rules/canvas-contracts.md)。
 
-中文用户未指定其他语言时，导演对话与工作台可读的制作源稿默认简体中文；对白、歌词和画面内文字保持原语言。`prompt_description`、`state_description` 和最终 H3 正文等模型编译字段继续遵守 Acheng 合同，不能用英文编译文本替代中文角色说明、资产描述或镜头摘要。详细字段约定见适配合同。
-
-持续制作时，按 Backend 正式 `workflow.currentWork` 和 readiness 投影报告当前模块、目标、依赖、待决定项与下一步。变更阶段时更新同一制作 workId，再用结构化 `site_navigate` 呈现；不要仅凭聊天中的“已完成”跳页。待用户选择的关键决定用 `workflow.pendingDecisions` 登记；用户明确选择后先持久化答复，再从绑定的源 revision 继续。画布生产仍依赖真实 run/task 与节点/Clip 映射。
-
-只有用户授权生成时才调用原生画布工具。计划、提示词就绪、实际生成、媒体自检与用户验收严格分开。静帧冻结一个可见状态，声音和完整动作链归视频；输入改过而媒体未重生成时只能报告输入已更新。
-
-用户授权多张图片时，资产图与关键帧按真实依赖并发推进：先提交授权范围内全部已就绪、互不依赖的目标，再统一跟踪各自 runId/taskId，不等一张完成或审核后才启动另一张无关图片。当前 Backend 单个 run 内逐项等待，因此新任务按适配合同的[图片并发调度](references/acheng-canvas-adapter.md#图片并发调度)建立不重叠的独立运行；执行器按既有容量排队。前置媒体未批准只阻塞其下游。仅提示词、单张试跑或用户明确要求逐项确认时保留原范围和节奏。
-
-节点坐标由 Backend 持久化的整批布局编译计划统一分配。Skill 只登记正式目标及已知用途/关联，调用 `production_prepare_targets` 后检查顶层 `layoutReceipt`；不自行算坐标、不创建后补排。每集按正式场次制作：每个场次有独立区域，剧本、镜头图片与提示词及一个 H3 Clips 节点放在同一区域；该场次内的 Segment 共用该 H3 节点，不跨场次合并。新 Segment 必须只属于一个正式场次，跨场次时先按场次拆分。已有明确节点绑定与位置固定为锚点，布局只增量分配新目标。详见[制作画布布局](references/acheng-canvas-adapter.md#制作画布布局)。
-
-Agent 只负责编译前的源稿与批准依赖。局部返修固定走“定向读取 → 局部修改 → 检查编译 → 预览发布 → 单条生成”，最后一步仍需用户生成授权。先以 sourceSection/targetIds 读取目标和 targetStatus；占用时按原运行或精确任务的 nextAction 等待，不先修改再尝试生成。编译使用稳定 operationId 和目标 scope 在后台执行，通过 `production_get_compilation` 读取短状态/诊断；成功应用编译包后，依据程序 `referenceSync` 回执继续。失败先处理诊断，源稿与诊断状态未变不换 operationId 重提；响应未知先恢复原回执。默认不读取或审核编译正文，不直接修改正式 Clip 的编译字段；调整必须回到源稿并重新编译。具体恢复与定向读取规则见适配合同。
-
-制作工具返回 `status: blocked` 时，先处理 `preflight.diagnostics` 和 `nextActions`，不把工具检查完成描述为编译或生成完成；输入与状态未改变时不原样重试。编译和启动生成会自动预检，正式提交仍复核；完整阶段、幂等恢复及目标占用规则见适配合同。
-
-导演工作台以正式 `workflow.currentWork` 和 `workflow/readiness.presentation` 为阶段与导航依据。新阶段沿用同一 workId 并调用结构化 `site_navigate`；待用户回答的问题登记为 `workflow.pendingDecisions`，绑定源哈希，收到明确答复后保存并继续。实际媒体运行须使用真实 runId、taskId 与节点/Clip映射，不能只依据助手消息或批次文字切页。
-
-编译前逐项评估每对相邻 Segment 的尾帧参考与 Motion Context，并记录承接或断链的具体事实。不能用统一“独立剪切”理由把整批关闭，也不能因为同场景而整批开启；缺失决定不按 false 处理。规则及旧成片恢复条件见适配合同的连续性边界。
-
-默认 Clip 完成条件是任务终态、媒体归档/可访问、活动结果绑定及 taskId/storageKey 可追溯；不增加默认质量检查或自动返修。用户限定仅提示词、单张试跑、指定镜头或逐项确认时按其范围执行。
-
-## 维护归属
-
-导演源码在项目 Git 子模块中独立开发、提交与推送；Canvas 兼容补丁在项目 scripts/acheng，本包维护适配和执行方法。更新先检查候选，成功后激活，不静默替换在途运行版本。不得重新引入旧一镜一 Clip、固定对话机位、默认无头服装格或前段成片自动输入；用户明确选择的角色布局按适配合同登记并由支持该规格的当前激活运行包校验。数据/节点保护仍遵守项目 AGENTS 与画布契约。
+旧子 Skill 保留兼容路由。历史玩法和模板仅在用户确需该内容时按小节读取，不作为另一套创作流程或默认规格。

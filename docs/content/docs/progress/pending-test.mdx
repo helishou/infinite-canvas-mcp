@@ -5,12 +5,33 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Director H3 parameters match the Clip UI
+
+- Formal director Clips use the parameters currently saved in the UI. Preview and submission reject request overrides that change models, sampling, dimensions, LoRAs, or second-pass settings and list the differing fields. Save changes to the Clip before submitting. Historical and running tasks retain their original inputs.
+- Published-input single-Clip submissions and batch snapshots retain the current Clip's model, resolution, sampling, LoRAs, second-pass and confirmation settings. Rebuilding published prose and references must not fall back to older node settings. Verify that new tasks use Clip settings when they differ from node settings; existing batches retain their original snapshots.
+
+## Director prompt queue recovery after refresh
+
+- Reloading the same tab restores queued instructions, image attachments, order, and pause state. A duplicated tab does not take over the original queue. Reloading during a send or insertion retains the uncertain instruction and pauses the queue; review the conversation before retrying, removing, or resuming. Browser storage failures prompt users to keep their draft. Instructions lost before this change cannot be recovered.
+
 ## Acheng follows the locally active compiler
 
 - Settings and history no longer show a pinned compiler version. Director stage tasks and continuity repair requests read the active contract without selecting a historical runtimeId. Actual compiler provenance and original batch snapshots remain preserved.
 
 - Manually update and activate the engine with `npm run acheng:update`. Existing productions use the locally active version for their next contract read, compilation and validation, without a production upgrade step. The `production_get_contract` runtimeId parameter remains accepted for compatibility but no longer selects a compiler.
 - Verify that scoped compilation updates only its targets and retains other scenes’ prompts and actual compiler receipts. Activation does not regenerate media or change submitted compilation requests and task inputs. Later Agent turns synchronize the active Skill while preserving workspace edits.
+
+## ComfyUI preset task timeout
+
+- ComfyUI preset generation, including H3 Clips, waits up to 120 minutes by default instead of 30 minutes. The configurable execution timeout also allows up to 120 minutes. Verify that a task still running after 30 minutes continues waiting and receives its result; exceeding the timeout reports failure with the actual limit and asks users to check ComfyUI.
+
+## Director Clip duration
+
+- Newly planned or adjusted director Clips must last 4–12 seconds, inclusive. Before saving source notes and compiling, the agent checks declared seconds against the frame window. Verify safe splits for long clips and merging or redistributing short tails within the same scene, without accelerated dialogue, compressed action or filler. Existing approved clips outside the range require an explanation and adjustment proposal before edits or regeneration. This is an agent planning instruction and still needs validation in a real director conversation.
+
+## H3 Clip production notes
+
+- Open Edit notes for a formal H3 Clip to inspect its current source storyboard, dialogue, camera, opening and closing states, and complete shot fields. Incoming and outgoing continuity settings are shown alongside expandable clip source, reference planning, and the episode continuity ledger. Check first, middle, last and single clips, missing video results, both languages and themes. Opening the editor must not save or generate; source notes and manually edited canvas prompts remain separate.
 
 ## MCP recovery and acceptance audit
 

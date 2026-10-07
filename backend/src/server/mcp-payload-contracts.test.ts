@@ -50,15 +50,15 @@ test("HTTP MCP defaults stay compact while historic source and model catalog rem
     assert.match(contract.contract.notice, /deprecated/);
     const { resolveAchengEngine } = await import("@basketikun/canvas-agent/skills/acheng");
     assert.equal(contract.contract.engine.runtimeId, resolveAchengEngine().runtimeId);
-    assert.ok((tools.tools.find(tool => tool.name === "drama_get_production_version")!.inputSchema.properties as any).view);
-    const summary = await call("drama_get_production_version", { episodeId: "ep", version: 1 });
+    assert.ok((tools.tools.find(tool => tool.name === "production_get_version")!.inputSchema.properties as any).view);
+    const summary = await call("production_get_version", { kind: "episode", id: "ep", version: 1 });
     assert.ok(JSON.stringify(summary).length < 3000); assert.equal(summary.version.snapshot.draft.counts.scenes, 1);
-    assert.equal(summary.version.snapshot.nextRead.tool, "drama_get_production_version");
+    assert.equal(summary.version.snapshot.nextRead.tool, "production_get_version");
     const original = (await (await fetch(`${config.url}/drama/episodes/ep/production/versions/1`)).json() as any).version;
     assert.equal(original.snapshot.scenes[0].blocks[0].text, text, "unselected HTTP reads preserve Web behavior");
     let cursor: string | undefined; let reconstructed = "";
     do {
-        const page = await call("drama_get_production_version", { episodeId: "ep", version: 1, view: "full", chunkBytes: 100000, cursor });
+        const page = await call("production_get_version", { kind: "episode", id: "ep", version: 1, view: "full", chunkBytes: 100000, cursor });
         reconstructed += page.version.snapshot.chunk.text; cursor = page.version.snapshot.chunk.nextCursor || undefined;
     } while (cursor);
     assert.deepEqual(JSON.parse(reconstructed), original.snapshot);

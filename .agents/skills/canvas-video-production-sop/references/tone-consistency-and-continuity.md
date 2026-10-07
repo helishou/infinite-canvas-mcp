@@ -253,7 +253,7 @@ Mouth movement only produces speech and never creates screen text.
 
 1. **`h3_apply_video_plan` 会重新生成 prompt，丢弃你传的 `prompt`**
    （`normalizePlannedSegment` 按 `timeline`/`openingState` 等字段自己拼）。
-   → 必须**先 apply plan，再 `h3_update_clip` 覆写 prompt**。
+   → 必须**先 apply plan，再 `h3_update_clips` 用单项 updates 覆写 prompt；提交前读取 revision 并保存稳定 operationId**。
 2. **`h3_apply_video_plan` 会把 `noiseSeedMode` 强制改回 `random`**
    → 覆写 prompt 时一并写 `{noiseSeed, noiseSeedMode: "fixed", seed}`。
 
@@ -267,7 +267,9 @@ Mouth movement only produces speech and never creates screen text.
 2. 之后**只跑不重建**：用 `h3_run_clip`，绝不再调 `h3_apply_video_plan`；
    跑之前打印其余段状态确认没被破坏，并加断言「prompt 长度未变，变了就中止」。
 
-### 回写静默丢弃
+### 回写静默丢弃（旧入口历史说明）
+
+旧 `h3_update_clip` 已移除；当前 `h3_update_clips` 拒绝运行状态和结果字段。以下为旧实现故障说明，不作为当前工具操作指南；结果由 Backend 任务回写。
 
 `db.ts` 的 `writeBackH3Task` 原先要求 `segments[i].runtimeTaskId === task.id`，
 而 `h3_update_clip` 整段合并（`{...segment, ...patch}`）时若 patch 带了 `runtimeTaskId: ""`，

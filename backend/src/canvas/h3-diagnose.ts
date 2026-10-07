@@ -38,7 +38,7 @@ function compareRow(nodeId: string, segment: Record<string, unknown>, required: 
         : promptState === "unavailable" ? (livePromptHash ? "发布稿缺该段编译产物或哈希，无法比对。" : "现场该段没有正文，无法比对。")
         : sourceState === "different" ? "现场记录的导演源哈希落后于当前发布源。" : "现场正文与导演源哈希均与发布稿一致。";
     const next = promptState === "different" ? "若需两者一致：把画布侧改动经导演工作台采用并重新编译发布；仅排障则无需处理。"
-        : promptState === "unavailable" ? "用 canvas_get_production(view=artifacts, targetIds=[该段]) 确认编译产物是否存在。"
+        : promptState === "unavailable" ? "用 production_get(kind=canvas, id=画布ID, view=artifacts, targetIds=[该段]) 确认编译产物是否存在。"
         : "";
     return {
         nodeId, segmentId: String(segment.id || ""),

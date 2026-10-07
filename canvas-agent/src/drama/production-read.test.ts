@@ -78,7 +78,7 @@ test("write receipts discard top-level snapshots and retain operation replay ide
     const receipt: any = productionWriteReceipt(payload, { tool: "production_prepare_targets", input: { kind: "canvas", id: "c", operationId: "original" } });
     assert.equal(receipt.operationId, "original"); assert.equal(receipt.replayed, true);
     assert.equal(receipt.layoutReceipt.created, 100); assert.equal(receipt.canvas.prompt, undefined);
-    assert.deepEqual(receipt.nextRead, { tool: "canvas_get_production", input: { projectId: "c", view: "summary" } });
+    assert.deepEqual(receipt.nextRead, { tool: "production_get", input: { kind: "canvas", id: "c", view: "summary" } });
     assert.ok(JSON.stringify(receipt).length < 2000);
     console.log(`write projection: ${Buffer.byteLength(JSON.stringify(payload))} -> ${Buffer.byteLength(JSON.stringify(receipt))} bytes`);
 });

@@ -16,6 +16,8 @@
     "./state-summary": "./dist/canvas/state-summary.js",
     "./collaboration-tools": "./dist/canvas/collaboration-tools.js",
     "./runtime-fields": "./dist/canvas/runtime-fields.js",
+    "./drama/production-tools": "./dist/drama/production-tools.js",
+    "./tool-migrations": "./dist/canvas/tool-migrations.js",
     "./drama/production-contract": "./dist/drama/production-contract.js",
     "./skills/acheng": "./dist/skills/acheng.js",
     "./drama/production-validation": "./dist/drama/production-validation.js",

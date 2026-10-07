@@ -12,7 +12,7 @@ import { projectProductionRead } from "@basketikun/canvas-agent/drama/production
 
 function textOf(result: any) { return String(result.content?.find((entry: any) => entry.type === "text")?.text || ""); }
 
-test("HTTP MCP v2 exposes the new contracts, compact asset reads, idempotent writes and runtime diagnostics", async t => {
+test("HTTP MCP v3 exposes the new contracts, compact asset reads, idempotent writes and runtime diagnostics", async t => {
   const db = new BackendDatabase(":memory:");
   const backend = express();
   backend.use(express.json());
@@ -21,7 +21,7 @@ test("HTTP MCP v2 exposes the new contracts, compact asset reads, idempotent wri
   backend.get("/canvas/projects/large/production", (req, res) => res.json({ ok: true, production: projectProductionRead(largeProduction, req.query) }));
   backend.post("/canvas/projects/large/production/ops", (_req, res) => res.json({ ok: true, production: { ...largeProduction, revision: 2, replayed: false } }));
   let productionBlocked = true, productionSubmissions = 0, simulateProductionRace = false;
-  const productionIssue = { code: "TARGET_AWAITING_REVIEW", path: "request.targets", message: "Original image needs review", severity: "error", blockingRun: { runId: "original", status: "awaiting_review", taskIds: ["original-task"] }, nextAction: { action: "review", message: "Read the existing run", tool: "drama_get_production_batch", input: { episodeId: "guarded", runId: "original" } } };
+  const productionIssue = { code: "TARGET_AWAITING_REVIEW", path: "request.targets", message: "Original image needs review", severity: "error", blockingRun: { runId: "original", status: "awaiting_review", taskIds: ["original-task"] }, nextAction: { action: "review", message: "Read the existing run", tool: "production_get_batch", input: { kind: "episode", id: "guarded", runId: "original" } } };
   backend.post(["/drama/episodes/guarded/production/preflight", "/canvas/projects/guarded/production/preflight"], (_req, res) => res.json({ ok: true, preflight: { valid: !productionBlocked, diagnostics: productionBlocked ? [productionIssue] : [], nextActions: productionBlocked ? [productionIssue.nextAction] : [] } }));
   backend.post(["/drama/episodes/guarded/production/compile", "/drama/episodes/guarded/production/runs", "/canvas/projects/guarded/production/runs"], (_req, res) => {
     productionSubmissions++;
@@ -58,8 +58,8 @@ test("HTTP MCP v2 exposes the new contracts, compact asset reads, idempotent wri
 
   const catalog = await client.listTools();
   const secondCatalog = await secondClient.listTools();
-  assert.equal(client.getServerVersion()?.version, "0.1.0+mcp2");
-  assert.equal(secondClient.getServerVersion()?.version, "0.1.0+mcp2");
+  assert.equal(client.getServerVersion()?.version, "0.1.0+mcp3");
+  assert.equal(secondClient.getServerVersion()?.version, "0.1.0+mcp3");
   assert.ok(secondCatalog.tools.some(entry => entry.name === "mcp_get_command_receipt"));
   const tool = (name: string) => catalog.tools.find(entry => entry.name === name)!;
   assert.ok(tool("mcp_get_command_receipt"));
@@ -68,8 +68,8 @@ test("HTTP MCP v2 exposes the new contracts, compact asset reads, idempotent wri
   assert.ok((tool("production_compile").inputSchema as any).required.includes("expectedRevision"));
   const productionCalls = [
     { name: "production_compile", arguments: { kind: "episode", id: "guarded", expectedRevision: 1, operationId: "compile-original" } },
-    { name: "drama_start_production_run", arguments: { episodeId: "guarded", expectedRevision: 1, version: 1, runId: "new", idempotencyKey: "new", targets: ["asset:STYLE_MOTHER"] } },
-    { name: "canvas_start_production_run", arguments: { projectId: "guarded", expectedRevision: 1, version: 1, runId: "new", idempotencyKey: "new", targets: ["asset:STYLE_MOTHER"] } },
+    { name: "production_start_run", arguments: { kind: "episode", id: "guarded", expectedRevision: 1, version: 1, runId: "new", idempotencyKey: "new", targets: ["asset:STYLE_MOTHER"] } },
+    { name: "production_start_run", arguments: { kind: "canvas", id: "guarded", expectedRevision: 1, version: 1, runId: "new", idempotencyKey: "new", targets: ["asset:STYLE_MOTHER"] } },
   ];
   for (const call of productionCalls.slice(1)) {
     const result = await client.callTool(call);
@@ -77,7 +77,7 @@ test("HTTP MCP v2 exposes the new contracts, compact asset reads, idempotent wri
     const blocked = JSON.parse(textOf(result));
     assert.equal(blocked.status, "blocked");
     assert.equal(blocked.mediaSubmitted, false);
-    assert.deepEqual(blocked.preflight.nextActions[0].input, { episodeId: "guarded", runId: "original" });
+    assert.deepEqual(blocked.preflight.nextActions[0].input, { kind: "episode", id: "guarded", runId: "original" });
   }
   assert.equal(productionSubmissions, 0, "blocked preflights must never reach a compile/start endpoint");
   productionBlocked = false;
@@ -91,14 +91,14 @@ test("HTTP MCP v2 exposes the new contracts, compact asset reads, idempotent wri
   assert.equal(race.error.code, "TARGET_AWAITING_REVIEW");
   assert.equal(race.error.issues[0].path, "request.targets");
   assert.equal(race.error.issues[0].blockingRun.runId, "original");
-  assert.equal(race.suggestedAction.tool, "drama_get_production_batch");
+  assert.equal(race.suggestedAction.tool, "production_get_batch");
   assert.equal(productionSubmissions, 2);
   assert.ok((tool("production_apply_compilation").inputSchema as any).required.includes("preparedId"));
-  const largeRead = await client.callTool({ name: "canvas_get_production", arguments: { projectId: "large" } });
+  const largeRead = await client.callTool({ name: "production_get", arguments: { kind: "canvas", id: "large" } });
   assert.equal(largeRead.isError, undefined);
   assert.ok(textOf(largeRead).length < 5000);
   assert.equal(JSON.parse(textOf(largeRead)).production.revision, 1);
-  const largeWrite = await client.callTool({ name: "canvas_edit_production", arguments: { projectId: "large", operationId: "large-write", expectedRevision: 1, ops: [{ type: "set_director_brief", brief: "sample" }] } });
+  const largeWrite = await client.callTool({ name: "production_edit", arguments: { kind: "canvas", id: "large", operationId: "large-write", expectedRevision: 1, ops: [{ type: "set_director_brief", brief: "sample" }] } });
   assert.ok(textOf(largeWrite).length < 2000);
   assert.equal(JSON.parse(textOf(largeWrite)).production.revision, 2);
   assert.equal(JSON.parse(textOf(largeWrite)).production.sourceHash, "full-source-hash");
@@ -152,7 +152,7 @@ test("HTTP MCP v2 exposes the new contracts, compact asset reads, idempotent wri
 
   const report = await client.callTool({ name: "mcp_observability_report", arguments: { from: "2026-01-01", tool: "assets_add" } });
   const reportValue = JSON.parse(textOf(report));
-  assert.equal(reportValue.runtime.mcpContractVersion, 2);
+  assert.equal(reportValue.runtime.mcpContractVersion, 3);
   assert.equal(reportValue.runtime.h3PluginVersion, KNOWN_FIRST_PARTY["minimax-h3"].version);
   assert.match(reportValue.runtime.toolSchemaHash, /^[a-f0-9]{64}$/);
   assert.equal("daily" in reportValue, false);
