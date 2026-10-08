@@ -35,3 +35,8 @@
 - 生成链验证 taskId → 子任务/promptId → 归档媒体 → 活动节点绑定；ComfyUI success、目录里有文件或旧结果存在都不代表验收。
 - 模型或工作流新增优先扩展已有执行器注册和输入契约；不要为每个模型再开专用 MCP/API。
 - H3/ComfyUI 排障方法按需读[工程 Skill](../.agents/skills/canvas-h3-implementation/SKILL.md)。
+
+## Production 编译素材池
+
+- 编译素材（asset/references 的冻结字节）一律物化到 compilation root 下内容寻址全局池 `inputs/<sha256><ext>`（`writePool`），复用前按 digest 校验完整性、损坏即 tmp+rename 重写；禁止把 per-preparedId 物化路径写进 source——resolver 返回的路径会进 `approved_file`/`asset_plan.file`/`segments[].references[].file` 并参与 sourceHash，路径随目录漂移会让连续性回执（严格 hash+runtimeId 匹配）永远 stale，结构性死循环。
+- prepare 与 enqueue 两个入口必须共用同一素材池（`collectMaterial` + `writePool`），否则两边产物 hash 互相打回对方。

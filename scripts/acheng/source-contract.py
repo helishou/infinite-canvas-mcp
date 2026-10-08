@@ -41,6 +41,9 @@ def contract():
                     "required": ["label", "entity_id", "definition", "retention", "shot_ids"]}}
                 }, "required": ["mode", "mode_lock", "mode_selection_reason"]}},
             "shots": {"type": "array", "items": {"type": "object", "properties": {
+                "prompt_contract_version": {"type": "integer", "enum": [2]},
+                "identity_context": {"type": "object", "additionalProperties": prose},
+                "offscreen_character_ids": {"type": "array", "items": {"type": "string"}},
                 "camera": {"type": "object", "properties": {
                     "framing": {"type": "string", "enum": list(FRAMINGS)},
                     "attention_subject_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}},
@@ -105,7 +108,7 @@ def validate(source, stage="edit"):
         selected_shots = {sid for segment in source.get("segments", []) if isinstance(segment, dict) for sid in segment.get("shot_ids", [])} if source.get("_canvas_compilation_scope") else None
         issues.extend({**item, "severity": "warning" if stage == "edit" else item["severity"]} for item in diagnostics(source, selected_shots))
         from canvas_model_contract import source_diagnostics
-        issues.extend({**item, "severity": "warning" if stage == "edit" else "error"} for item in source_diagnostics(source))
+        issues.extend({**item, "severity": "warning" if stage == "edit" else item.get("severity", "error")} for item in source_diagnostics(source))
     continuity_issues = []
     if isinstance(source, dict) and isinstance(source.get("ledger"), dict) and source["ledger"].get("contract_version") == 2:
         report = audit_continuity_v2(source)

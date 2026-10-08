@@ -8,6 +8,8 @@
 
 `patch_director_source` 的 `scene` 修改剧本场次 `script_scenes`，`environment` 修改编译引用的 `scene_registry`，`asset` 修改 `asset_plan`，`asset_card` 修改 `asset_cards` 的提示词与七步正文。环境文字返修须定向检查登记与资产卡中实际被消费的文字，不能把修改资产计划当作已更新环境正文。
 
+拆镜返修可用 `replace_director_scene_storyboard` 在现有 `production_edit.ops` 中提交场次 ID、完整本场 Shots、原 Segment ID 集合及对应 shotInputs；保留场次起止帧和其他场次正文，按原剧情顺序顺延同一时间线的 story_order。连续性事件和覆盖用同批 `patch_director_continuity` 保存，边界决定沿现有操作更新。Clip-only 编译不自动包含已明确跳过的关键帧资产；显式指定关键帧目标仍按其完整合同校验。
+
 按对象、snapshot、读取范围和 revision 复用已完整读取的内容；仅核验版本时携带 `ifRevision`，返回 `unchanged` 后继续使用原内容。不能把写回执的新 revision 当成尚未读过的数据版本，也不能把第一页当全集；续页沿原 cursor 完成，不带 ifRevision。冲突或版本改变时只补读任务涉及的章节／目标；任务状态使用 readiness 或精确 runId/taskId 查询。成功写回执已确认保存，nextRead 是缺字段时的入口，不要求保存后整稿回读；编译可直接消费已保存稿。
 
 source 原样保存 Acheng production 数据。sourceHash 是递归键排序、无空白、UTF-8 JSON 的 SHA-256；MCP 提交完整源稿对象时使用 `production_hash_source`，脚本复用项目导出工具，不另写 canonical 算法或凭记忆拼哈希。artifacts 每项包含独立 prompt 字节、sha256、源哈希、参考标签/节点/storageKey/媒体哈希/职责及编译回执；draft 和 partial 不标 ready。接入包不填造 PASS，先执行本机当前激活版本的真实离线编译与校验，再由 Backend 核对源与媒体。

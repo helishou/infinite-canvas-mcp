@@ -282,6 +282,8 @@
 .minimax-prompt-translate.is-translated { background:rgba(168,85,247,.22); border-color:rgba(168,85,247,.55); color:#d8b4fe; }
 .minimax-prompt-translate-error { position:absolute; left:8px; bottom:8px; font-size:22px; color:#fca5a5; pointer-events:none; }
 .minimax-prompt-translate-status { position:absolute; left:8px; right:58px; bottom:8px; padding:3px 6px; font-size:18px; line-height:1.4; color:var(--h3-muted); background:var(--h3-panel); pointer-events:none; }
+/* 翻译结果：叠加式只读展示面板，固定高度，不打断上方原提示词编辑器。 */
+.minimax-prompt-translation { flex:0 0 160px; min-height:120px; resize:none; box-sizing:border-box; margin-top:6px; padding:10px 12px; border:1px solid rgba(168,85,247,.32); border-radius:8px; background:color-mix(in srgb,var(--h3-fill) 50%,transparent); color:var(--h3-text); font-size:18px; line-height:1.5; overflow:auto; }
 .minimax-output-list > div > span[style*="display: flex"],
 .minimax-output-list > div > span[style*="display:flex"] { position:absolute !important; right:4px; top:4px; z-index:5; }
 .minimax-output-list > div > span[style*="display: flex"] button,

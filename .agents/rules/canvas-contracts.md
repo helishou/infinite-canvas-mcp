@@ -31,6 +31,8 @@
 
 ## 生成任务
 
+- Motion Context 与尾帧参考是相邻 Clip 的互斥边界决定，只允许都关闭、仅尾帧或仅 Motion Context；两项同时开启须明确报错，不能静默选一种。从保存的全局默认参数、新节点或复制 Clip 不自动开启。A 段开关登记 A→B 的出边，实际由 B 段消费 A 的 AV latent 或末帧；不影响 A 自身输入。Motion Context 的导演选择按 Acheng shots 中的不可切镜规则执行，已有显式设置和历史媒体不自动改写。
+
 - 所有画布生成经 Backend 统一任务服务，来源可以是网页、MCP、Agent 或浏览器模型；调用方提交源节点和输入，Backend 在任务绑定事务中创建结果占位、槽位与连线。
 - 已有结果槽重试或明确 writeBackToTarget 可以原位回写；调用方不得为了看见产物另造结果 ID、位置或状态。
 - 自定义模型脚本、Backend 尚不能无头执行的浏览器渠道，先创建 `canvas-browser-script` 权威任务并绑定节点，再由窗口唯一 workerId 原子认领。

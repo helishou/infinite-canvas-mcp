@@ -2,6 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { normalizeH3Params, resolveH3Runtime, withH3ParameterEdits } from "./runtime-params.js";
 
+test("global defaults cannot enable continuation, while authored per-Clip choices remain effective", () => {
+    const defaults = { motionContextEnabled: true, tailFrameContinuation: true };
+    const fresh = resolveH3Runtime({}, {}, {}, defaults);
+    assert.equal(fresh.params.motionContextEnabled, false);
+    assert.equal(fresh.params.tailFrameContinuation, false);
+    assert.equal(resolveH3Runtime({ motionContextEnabled: true }, {}, {}, defaults).params.motionContextEnabled, true);
+});
+
 test("conflicting saved switches stay visible and are diagnosed instead of hidden", () => {
     const clip = { tailFrameContinuation: true, motionContextEnabled: true };
     const { params, parameterIssues } = resolveH3Runtime(clip, {}, {}, {});

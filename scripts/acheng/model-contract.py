@@ -133,6 +133,8 @@ def render_continuity(shot, production, *, strict=True):
 
 def source_diagnostics(production):
     result = []
+    from canvas_shot_diagnostics import diagnostics as shot_diagnostics
+    result.extend(shot_diagnostics(production))
     for index, segment in enumerate(rows(production.get("segments"))):
         for message in subject_coverage_errors(segment):
             result.append({"code": message.split(":", 1)[0], "message": message,
@@ -160,6 +162,8 @@ def check_source_and_text(production, segment, text=None):
     check(production, set(segment.get("shot_ids", [])))
     errors = subject_coverage_errors(segment)
     selected = set(segment.get("shot_ids", []))
+    from canvas_shot_diagnostics import diagnostics as shot_diagnostics
+    errors.extend(f"{d['code']} {d['path']}: {d['message']}" for d in shot_diagnostics(production, segment) if d['severity'] == 'error')
     for shot in rows(production.get("shots")):
         if shot.get("id") in selected:
             errors.extend(continuity_errors(production, shot))
@@ -245,6 +249,7 @@ def apply(root):
     root = Path(root)
     (root / "scripts/canvas_model_contract.py").write_bytes(Path(__file__).read_bytes())
     (root / "scripts/canvas_prompt_diagnostics.py").write_bytes(Path(__file__).with_name("prompt-diagnostics.py").read_bytes())
+    (root / "scripts/canvas_shot_diagnostics.py").write_bytes(Path(__file__).with_name("shot-diagnostics.py").read_bytes())
 
     def replace(relative, before, after):
         path = root / relative

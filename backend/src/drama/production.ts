@@ -1,4 +1,5 @@
 import { captureCanvasInputs, effectiveTargetInput, inputHash, type CanvasExecutionSnapshot } from "./canvas-inputs.js";
+import { replaceDirectorSceneStoryboard } from "./scene-storyboard.js";
 import { adoptedDirectorFields } from "./input-merge.js";
 import crypto from "node:crypto";
 import { assertDirectorWorkScope, directorArtifact, directorAdoption, directorWorkInput, type DirectorWorkPackage } from "@basketikun/canvas-agent/agent/work-package";
@@ -2507,6 +2508,12 @@ export class EpisodeProductionService {
         if (op.type === "set_director_production") {
             if (Object.hasOwn(op.director.source, "_canvas_compilation_scope")) throw new Error("编译隔离标记不得写入正式源稿");
             draft.director = op.director;
+            projectDirector(draft);
+            return;
+        }
+        if (op.type === "replace_director_scene_storyboard") {
+            if (!draft.director) throw new Error("缺少 Acheng 制作稿");
+            replaceDirectorSceneStoryboard(draft.director, op);
             projectDirector(draft);
             return;
         }

@@ -235,7 +235,9 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
                 if (afterIndex < 0) throw new Error(`afterSegmentId 不存在：${afterSegmentId}`);
                 insertIndex = afterIndex + 1;
             }
-            segments.splice(insertIndex, 0, incoming);
+            // A newly inserted Clip has no authored outgoing continuity decision yet.
+            // Preserve explicit choices; do not inherit a legacy node-wide chain switch.
+            segments.splice(insertIndex, 0, { motionContextEnabled: false, tailFrameContinuation: false, ...incoming });
             const metadata = recordOf(node.metadata);
             metadata.segments = segments;
             node.metadata = metadata;

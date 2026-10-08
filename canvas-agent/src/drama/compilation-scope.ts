@@ -25,13 +25,14 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     const includeShotSegments = Boolean(scene && !wanted.size) || [...wanted].some(id => allShots.some(item => key(item) === id));
     const segments = allSegments.filter(item => wanted.has(key(item)) || includeShotSegments && (item.shot_ids || []).some((id: string) => shots.has(id)));
     for (const segment of segments) if ((segment.shot_ids || []).some((id: string) => !shots.has(id))) throw new Error("COMPILATION_SCOPE_CROSS_SCENE: Segment 跨越编译范围");
-    const assets = new Set(plans.filter(item => wanted.has(key(item)) || (item.shot_ids || []).some((id: string) => shots.has(id))).map(key));
+    const activeFrame = (item: Record<string, any>) => item.kind !== "keyframe" || Object.values(director.shotInputs).some(input => input.keyframePolicy !== "none" && input.keyframeAssetId === key(item));
+    const assets = new Set(plans.filter(item => wanted.has(key(item)) || activeFrame(item) && (item.shot_ids || []).some((id: string) => shots.has(id))).map(key));
     if (scene && !wanted.size && !shots.size) for (const plan of plans) if (plan.canvas_scope === "shared") assets.add(key(plan));
     for (const shot of allShots.filter(item => shots.has(key(item)))) {
         for (const id of shot.required_assets || []) assets.add(String(id));
         const input = director.shotInputs[key(shot)];
         for (const id of input?.assetIds || []) assets.add(id);
-        if (input?.keyframeAssetId) assets.add(input.keyframeAssetId);
+        if (input?.keyframePolicy !== "none" && input?.keyframeAssetId) assets.add(input.keyframeAssetId);
     }
     for (const segment of segments) for (const ref of segment.references || []) if (ref.asset_id) assets.add(String(ref.asset_id));
     const visit = (id: string, seen = new Set<string>()) => {

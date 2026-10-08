@@ -8,7 +8,7 @@
   "scripts/director_pipeline.py": "8ec18b1c05a068ddbc3fe1498c78abae050d3cbfdc980817754a838e6127ed7d",
   "scripts/compile_h3.py": "f7029cab8d0d81a06ff120fa5ea723a896fc908485e987e9d0f6b8e3903c5aeb",
   "scripts/compile_assets.py": "fa23573313f8eff26088d7ddbd8d087dbe9db9d39d13c7ee3b37e7bc4611ab50",
-  "scripts/reference_bindings.py": "06de471374669bb9204b2408aca6f7d58b725f53ec7d36ec61c7ba7458cc8346",
+  "scripts/reference_bindings.py": "4771b804e275ed58f65f2a0959e9b9ea965d74273d7cdf074f11bb0c4cd6f1cc",
   "scripts/orchestrator_plan.py": "1c8d6cad705fd61c0273b91c4c3a595147568ef609a3a77ebc9a83218646d2e3",
   "scripts/orchestrator_commit.py": "cf26cc4a6e803b4e7f95c3cbbdc5ea2796ccb1f6ff682c2f1ea885b6418244bf"
 }

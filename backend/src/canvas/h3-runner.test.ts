@@ -22,6 +22,14 @@ test("启动恢复只选仍绑定在节点或 Clip 上的 H3 父任务", () => {
 
 const previousReady = { id: "s1", result: "http://local/media/clip-1", tailFrameContinuation: false };
 
+test("A's tail-frame switch is consumed by B and does not change A's own input", () => {
+    const a = { id: "A", result: "a.mp4", tailFrameContinuation: true };
+    const b = { id: "B", result: "b.mp4", tailFrameContinuation: false };
+    assert.equal(resolveClipContinuation(a, undefined, false, {}).useTailFrame, false);
+    assert.equal(resolveClipContinuation(b, a, false, {}).useTailFrame, true);
+    assert.equal(resolveClipContinuation({ id: "C" }, b, false, {}).useTailFrame, false);
+});
+
 test("默认不把上一段成品带进下一段：既不当参考视频也不抓尾帧", () => {
     const decision = resolveClipContinuation({ id: "s2" }, previousReady, true, {});
     assert.equal(decision.usePreviousAsReference, false);

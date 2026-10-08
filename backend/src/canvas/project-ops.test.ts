@@ -26,6 +26,19 @@ function makeProject(nodes: Array<Record<string, unknown>>): Project {
     return { revision: 1, nodes, connections: [] };
 }
 
+test("inserting an unrelated Clip does not inherit the legacy node's Motion Context switch", () => {
+    const node = makeH3Node();
+    (node.metadata as any).motionContextEnabled = true;
+    const project = makeProject([node]);
+    applyCanvasProjectOperations(project, [{ type: "add_h3_segment", nodeId: "h3-1", segment: { id: "fresh" } }]);
+    const clips = (node.metadata as any).segments;
+    assert.equal(clips.at(-1).motionContextEnabled, false);
+    assert.equal(clips.at(-1).tailFrameContinuation, false);
+    applyCanvasProjectOperations(project, [{ type: "add_h3_segment", nodeId: "h3-1", segment: { id: "explicit", motionContextEnabled: true } }]);
+    assert.equal((node.metadata as any).segments.at(-1).motionContextEnabled, true);
+    assert.equal((node.metadata as any).motionContextEnabled, true);
+});
+
 test("Clip 编辑、插入、移动和删除均在后端重算起点", () => {
     const project = makeProject([makeH3Node({ segments: [{ id: "a", duration: 5, start: 99 }, { id: "b", duration: 5 }] })]);
     const segments = () => (project.nodes[0].metadata as any).segments;

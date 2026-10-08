@@ -17,6 +17,16 @@ test("same-environment scene occurrences have isolated compiler inputs and real 
     b.assets.ROLE.sha256 = "b".repeat(64);
     assert.notEqual(compilationScopeInput(b, { sceneId: "A" }).inputHash, a.inputHash);
 });
+
+test("Clip scope skips dormant storyboard frames but retains explicitly requested frames", () => {
+    const d = scopedDirector();
+    (d.source.asset_plan as any[]).find(item => item.id === "KA").kind = "keyframe";
+    d.shotInputs.SA.keyframePolicy = "none";
+    const clip = compilationScopeInput(d, { targetIds: ["GA"] });
+    assert.deepEqual(clip.targetIds, ["GA", "ROLE"]);
+    const explicit = compilationScopeInput(d, { targetIds: ["KA"] });
+    assert.ok(explicit.targetIds.includes("KA"));
+});
 test("scoped ledger retains coverage using the authored source anchor", () => {
     const d = scopedDirector();
     (d.source.script_scenes as any[])[0].blocks = [{ id: "A1", kind: "action", text: "Enter" }];

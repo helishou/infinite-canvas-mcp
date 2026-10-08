@@ -10,8 +10,10 @@ export function globalH3Settings(metadata: Record<string, unknown>): Record<stri
 
 export function applyH3GlobalSettings(segment: H3Segment, metadata: Record<string, unknown>): H3Segment {
     const settings = globalH3Settings(metadata);
-    const patch = Object.fromEntries(Object.entries(settings).map(([key, value]) => [key, value === null ? undefined : value]));
-    return { ...segment, ...withH3ParameterEdits(segment as unknown as Record<string, unknown>, patch) } as H3Segment;
+    const patch = Object.fromEntries(Object.entries(settings)
+        .filter(([key]) => key !== "motionContextEnabled" && key !== "tailFrameContinuation")
+        .map(([key, value]) => [key, value === null ? undefined : value]));
+    return { motionContextEnabled: false, tailFrameContinuation: false, ...segment, ...withH3ParameterEdits(segment as unknown as Record<string, unknown>, patch) } as H3Segment;
 }
 
 export function patchH3GlobalSettings(metadata: Record<string, unknown>, patch: Partial<H3Segment>) {

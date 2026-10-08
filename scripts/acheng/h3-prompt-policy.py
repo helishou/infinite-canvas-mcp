@@ -78,7 +78,10 @@ def apply_prompt_policy(root):
     replace("scripts/audit_storyboard_quality.py", "    body.insert(0, DETAIL_DIRECTIVE)\n", "")
     replace("scripts/audit_storyboard_quality.py", "    for i, s in enumerate(shots, 1):",
             "    seen_characters, seen_scenes = set(), set()\n    for i, s in enumerate(shots, 1):")
-    replace("scripts/audit_storyboard_quality.py", """        # Repeat the complete visible context in every shot. A later shot in
+    if "    seen_context = set()" in text:
+        replace("scripts/audit_storyboard_quality.py", "        context = [SHOT_DETAIL_DIRECTIVE]\n", "        context = []\n")
+    else:
+        replace("scripts/audit_storyboard_quality.py", """        # Repeat the complete visible context in every shot. A later shot in
         # the same segment must remain intelligible when copied on its own.
         context = [SHOT_DETAIL_DIRECTIVE]
         context.extend(characters[ch["id"]]["prompt_description"] for ch in s["characters"])

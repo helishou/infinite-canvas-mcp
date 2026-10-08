@@ -34,8 +34,16 @@ test("new Clips keep explicitly chosen global fields while following defaults fo
     const params = resolveH3Runtime(clip as unknown as Record<string, unknown>, {}, {}, { megapixels: 0.4, videoSteps: 12, tailFrameContinuation: true }).params;
     assert.equal(params.megapixels, 0.9);
     assert.equal(params.steps, 12);
-    assert.equal(params.motionContextEnabled, true);
+    assert.equal(params.motionContextEnabled, false);
     assert.equal(params.tailFrameContinuation, false);
+});
+
+test("new Clips do not inherit bulk continuation decisions; existing explicitly edited Clips keep them", () => {
+    const update = patchAllH3Clips({}, [{ id: "A" }], { motionContextEnabled: true });
+    assert.equal(update.segments[0].motionContextEnabled, true);
+    const fresh = applyH3GlobalSettings({ id: "B" }, update);
+    assert.equal(fresh.motionContextEnabled, false);
+    assert.equal(fresh.tailFrameContinuation, false);
 });
 
 test("global imports cannot restore the conflicting raw patch over atomic continuation edits", () => {

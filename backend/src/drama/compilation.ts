@@ -12,6 +12,7 @@ import { compilationScopeInput, currentCompilationArtifact, preserveCompilationP
 
 const hash = (value: unknown) => crypto.createHash("sha256").update(canonicalProduction(value)).digest("hex");
 type Compiler = typeof compileAchengDirector;
+type MaterialItem = { bytes: Buffer; digest: string; extension: string; file: string };
 type CompilationJob = { operationId: string; owner: string; id: string; expectedRevision: number; requestHash: string; baselineHash: string; preparedId: string; director: DirectorProduction; references: Record<string, string>; scope?: CompilationScope; scopeHash?: string; compilerInputFingerprint?: string; reusedFromOperationId?: string; status: "queued" | "running" | "succeeded" | "blocked" | "failed" | "interrupted"; diagnostics: any[]; result?: any; continuityReceipt?: any; application?: any; createdAt: string };
 const compilerPool = new WorkPool(3);
 const hasBlockingArtifactDiagnostics = (value: unknown) => {
@@ -129,16 +130,7 @@ export class ProductionCompilationService {
         if (scope && this.compiler === compileAchengDirector && !resolveAchengRuntime(director.engine.runtimeId).sourceContract?.scopedCompilation) throw new Error("SCOPED_COMPILATION_UNSUPPORTED: 当前激活引擎不支持按场次编译，请更新本机引擎");
         const boundFiles = this.service.compilationReferenceFiles(id, director);
         const effective = this.effectiveInput(director, scope);
-        const material = new Map<string, { bytes: Buffer; digest: string; extension: string; file: string }>();
-        const collect = (targetId: string, label: string, original?: string) => {
-            const file = boundFiles[`${targetId}\0${label}`] || original;
-            if (!file || !fs.existsSync(file)) return;
-            const bytes = fs.readFileSync(file);
-            material.set(`${targetId}\0${label}`, { bytes, digest: crypto.createHash("sha256").update(bytes).digest("hex"), extension: path.extname(file), file });
-        };
-        for (const [assetId, asset] of Object.entries(effective.input.assets)) if (asset.storageKey) collect(assetId, "asset");
-        for (const field of ["asset_cards", "segments"] as const) for (const card of (effective.input.source[field] || []) as any[])
-            for (const ref of card.references || []) collect(card.id, ref.label || `<Picture ${ref.image}>`, path.isAbsolute(ref.file || "") ? ref.file : undefined);
+        const material = this.collectMaterial(boundFiles, effective.input);
         const normalizedSource = JSON.parse(JSON.stringify(effective.input.source), (_key, value) => {
             if (typeof value !== "string") return value;
             const match = [...material.values()].find(item => item.file === value);
@@ -154,13 +146,7 @@ export class ProductionCompilationService {
             return this.getCompilation(id, owner, operationId);
         }
         const preparedId = crypto.randomUUID(), directory = path.join(this.root, preparedId);
-        const references: Record<string, string> = {};
-        for (const [identity, item] of material) {
-            const destination = path.join(directory, "inputs", item.digest + item.extension);
-            fs.mkdirSync(path.dirname(destination), { recursive: true });
-            if (!fs.existsSync(destination)) fs.writeFileSync(destination, item.bytes);
-            references[identity] = destination;
-        }
+        const references = this.writePool(material);
         const scopeHash = scope ? compilationScopeInput(director, scope).inputHash : undefined;
         const job: CompilationJob = { operationId, owner, id, expectedRevision, requestHash, baselineHash: hash(current.draft.director), preparedId, director, references, scope, scopeHash, compilerInputFingerprint, status: "queued", diagnostics: [], createdAt: new Date().toISOString() };
         this.saveJob(job); this.scheduleJob(job);
@@ -295,6 +281,43 @@ export class ProductionCompilationService {
         return path.join(this.root, preparedId, "packet.json");
     }
 
+    /** Compile inputs are materialized into a content-addressed pool under the compilation root so that
+     *  identical inputs always resolve to identical absolute paths; otherwise the compiler rewrites file
+     *  references per prepared directory and sourceHash drifts on every full compilation. */
+    private collectMaterial(boundFiles: Record<string, string | undefined>, input: DirectorProduction) {
+        const material = new Map<string, MaterialItem>();
+        const collect = (targetId: string, label: string, original?: string) => {
+            const file = boundFiles[`${targetId}\0${label}`] || original;
+            if (!file || !fs.existsSync(file)) return;
+            const bytes = fs.readFileSync(file);
+            material.set(`${targetId}\0${label}`, { bytes, digest: crypto.createHash("sha256").update(bytes).digest("hex"), extension: path.extname(file), file });
+        };
+        for (const [assetId, asset] of Object.entries(input.assets)) if (asset.storageKey) collect(assetId, "asset");
+        for (const field of ["asset_cards", "segments"] as const) for (const card of (input.source[field] || []) as any[])
+            for (const ref of card.references || []) collect(card.id, ref.label || `<Picture ${ref.image}>`, path.isAbsolute(ref.file || "") ? ref.file : undefined);
+        return material;
+    }
+    private writePool(material: Map<string, MaterialItem>) {
+        const pool = path.join(this.root, "inputs");
+        fs.mkdirSync(pool, { recursive: true });
+        const references: Record<string, string> = {};
+        for (const [identity, item] of material) {
+            const destination = path.join(pool, item.digest + item.extension);
+            let intact = false;
+            if (fs.existsSync(destination)) {
+                try { intact = crypto.createHash("sha256").update(fs.readFileSync(destination)).digest("hex") === item.digest; } catch { intact = false; }
+            }
+            if (!intact) {
+                // A corrupted or missing pool copy is rewritten atomically; digest-equal bytes make overwrites harmless.
+                const temporary = `${destination}.${crypto.randomUUID()}.tmp`;
+                fs.writeFileSync(temporary, item.bytes);
+                fs.renameSync(temporary, destination);
+            }
+            references[identity] = destination;
+        }
+        return references;
+    }
+
     prepare(id: string, owner: string, expectedRevision: number, candidate?: DirectorProduction) {
         const current = this.service.get(id);
         if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
@@ -302,7 +325,8 @@ export class ProductionCompilationService {
         const director = this.compilationDirector(candidate || current.draft.director);
         const checked = this.service.preflight(id, { action: "compile", request: { expectedRevision, director } }, this.compiler === compileAchengDirector ? director.engine.runtimeId : undefined);
         if (!checked.valid) throw new ProductionValidationError(checked.diagnostics);
-        const references = this.service.compilationReferenceFiles(id, director);
+        const boundFiles = this.service.compilationReferenceFiles(id, director);
+        const references = this.writePool(this.collectMaterial(boundFiles, director));
         const preparedId = crypto.randomUUID();
         const directory = path.join(this.root, preparedId);
         const targets = this.compilationTargets(director), reusable = this.reusableArtifacts(director, targets);

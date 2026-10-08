@@ -148,7 +148,12 @@ export function usePluginHost(params: PluginHostParams) {
                     const text = String(task.result?.texts?.[0]?.content || "");
                     if (!text) throw new Error("插件文本任务成功但没有返回文本");
                     options?.onDelta?.(text);
-                    if (log) void generationLogs.update(log.id, { status: "success", finishedAt: new Date().toISOString(), durationMs: Date.now() - startedAtMs, runtimeTaskId: task.id, outputs: [{ type: "text", text }] }).catch(() => { });
+                    // 翻译任务（H3 提示词翻译）的模型原始响应是分段 JSON（{"translations":[...]}），
+                    // 真正的格式化中文由插件在画布只读框回填。生成日志里若原样展示该 JSON，
+                    // 用户会误以为是翻译输出，因此只记录一条友好说明而不暴露原始响应。
+                    const isTranslation = logMeta?.taskMode === "翻译";
+                    const loggedText = isTranslation ? "翻译已格式化为中文并回填到提示词只读框" : text;
+                    if (log) void generationLogs.update(log.id, { status: "success", finishedAt: new Date().toISOString(), durationMs: Date.now() - startedAtMs, runtimeTaskId: task.id, outputs: [{ type: "text", text: loggedText }] }).catch(() => { });
                     return { text, taskId: task.id };
                 } catch (error) {
                     if (log) void generationLogs.update(log.id, {

@@ -11,6 +11,7 @@ const examples: Record<string, unknown> = {
     set_director_production: { director: { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "example", runtimeId: "a".repeat(40) + "-" + "b".repeat(16), version: "example" }, source: {}, sourceHash: "0".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], unresolved: [] } },
     set_director_brief: { brief: "A traveller returns home." },
     patch_director_source: { entity: "asset", id: "character-1", patch: { description: "Authored character appearance." } },
+    replace_director_scene_storyboard: { sceneId: "SC1", shots: [{ id: "SH1", source_scene_id: "SC1", start_frame: 0, end_frame: 120 }], segments: [{ id: "SEG1", shot_ids: ["SH1"], start_frame: 0, end_frame: 120 }], shotInputs: { SH1: { keyframePolicy: "none", assetIds: [] } } },
     adopt_director_fields: { targetId: "SEG001", nodeId: "h3-1", segmentId: "clip-1", canvasRevision: 1, fields: ["prompt"] },
     adopt_director_clip_style: { targetId: "segment-1", nodeId: "h3-node", segmentId: "clip-1", canvasRevision: 1, styleTemplateId: "soft-light" },
     patch_director_continuity: { ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } },
@@ -142,17 +143,12 @@ export function continuityBoundaryDiagnostics(director: DirectorProduction, stag
         const rows = boundaries.filter(edge => edge.from === pair.from && edge.to === pair.to);
         if (rows.length !== 1) issue(rows.length ? "DUPLICATE_CONTINUITY_BOUNDARY" : "MISSING_CONTINUITY_BOUNDARY", pair.from, `${pair.from} → ${pair.to} 必须登记唯一的尾帧与潜空间决定；缺项不能当作关闭`);
         else if (typeof rows[0].tailFrame !== "boolean" || typeof rows[0].motionContext !== "boolean") issue("MISSING_CONTINUITY_FLAGS", pair.from, `${pair.from} → ${pair.to} 两项开关必须显式为 true 或 false`);
+        else if (rows[0].tailFrame && rows[0].motionContext) issue("CONTINUITY_MODES_CONFLICT", pair.from, `${pair.from} → ${pair.to} 尾帧参考与 Motion Context 不能同时开启；请选择一种衔接方式，或两项都关闭`);
         else if (typeof rows[0].reason !== "string" || !rows[0].reason.trim()) issue("CONTINUITY_REASON_REQUIRED", pair.from, `${pair.from} → ${pair.to} 需要说明承接的动作/状态或断链的叙事事实`);
     }
     for (const edge of boundaries) if (!expected.some(pair => pair.from === edge.from && pair.to === edge.to)) issue("NON_ADJACENT_CONTINUITY_BOUNDARY", edge.from, `${edge.from} → ${edge.to} 不是当前相邻 Segment，不能连接旧边界或末段`);
-    if (expected.length > 1 && !diagnostics.length && boundaries.every(edge => !edge.tailFrame && !edge.motionContext)) {
-        const normalizedReasons = boundaries.map(edge => {
-            let reason = edge.reason.trim().toLocaleLowerCase().replace(/\s+/g, " ");
-            for (const id of ids) reason = reason.split(id.toLocaleLowerCase()).join("<segment>");
-            return reason;
-        });
-        if (new Set(normalizedReasons).size === 1) issue("CONTINUITY_DECISIONS_UNREVIEWED", ids[0], "所有相邻边界被同一模板理由关闭；请逐边界说明尾态→初态、时间/场景变化及两项独立决定，不自动全开或用硬切作为统一理由");
-    }
+    // Ordinary edited scenes may legitimately use cuts on every boundary.
+    // Repeated cut reasons alone are not evidence that latent continuation is needed.
     return diagnostics;
 }
 
@@ -164,5 +160,6 @@ export function outgoingDirectorBoundary(director: DirectorProduction, segmentId
     const to = String(segments[index + 1].id);
     const matches = director.boundaries.filter(edge => edge.from === segmentId);
     if (matches.length !== 1 || matches[0].to !== to || typeof matches[0].tailFrame !== "boolean" || typeof matches[0].motionContext !== "boolean" || typeof matches[0].reason !== "string" || !matches[0].reason.trim()) throw new Error(`MISSING_CONTINUITY_DECISION: ${segmentId} → ${to} 缺少明确的相邻边界决定，请修正编译前源稿`);
+    if (matches[0].tailFrame && matches[0].motionContext) throw new Error(`CONTINUITY_MODES_CONFLICT: ${segmentId} → ${to} 尾帧参考与 Motion Context 不能同时开启；请选择一种衔接方式，或两项都关闭`);
     return matches[0];
 }

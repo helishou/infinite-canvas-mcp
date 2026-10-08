@@ -22,3 +22,15 @@ test("H3 节点工厂把保存的布局写入初始 Clip", () => {
     assert.equal(segment.minimaxPreviewH, 1325);
     assert.equal(segment.minimaxTimelineH, 555);
 });
+
+test("new H3 nodes do not inherit continuation from saved defaults; explicit Clip decisions survive", () => {
+    const defaults = { motionContextEnabled: true, tailFrameContinuation: true };
+    const created = createH3NodeMetadata(defaults);
+    assert.equal(created.motionContextEnabled, false);
+    assert.equal(created.segments[0].motionContextEnabled, false);
+    assert.equal(created.segments[0].tailFrameContinuation, false);
+    const explicit = createH3NodeMetadata(defaults, { segments: [{ id: "A", motionContextEnabled: true, tailFrameContinuation: false }] });
+    assert.equal(explicit.segments[0].motionContextEnabled, true);
+    assert.equal(explicit.segments[0].tailFrameContinuation, false);
+    assert.deepEqual(defaults, { motionContextEnabled: true, tailFrameContinuation: true });
+});

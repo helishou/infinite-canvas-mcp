@@ -100,6 +100,136 @@ test("unknown and compiler-origin failures, running jobs and legacy records neve
     assert.equal(calls, 7);
 });
 
+test("pool materialization keeps sourceHash stable across full recompiles and self-heals corrupted copies", async t => {
+    const { root, service, director } = fixture(t);
+    const legacy = path.join(root, "legacy"); fs.mkdirSync(legacy, { recursive: true });
+    const style = path.join(legacy, "style-approved.png"), segRef = path.join(legacy, "seg01-ref.png");
+    fs.writeFileSync(style, "style bytes");
+    fs.writeFileSync(segRef, "segment reference bytes");
+    service.compilationReferenceFiles = () => ({ "STYLE\0asset": style, "SEG01\0first": segRef });
+    director.source.asset_plan = [{ id: "STYLE", kind: "style", depends_on: [], approved_file: path.join(root, "old-compile", "inputs", "gone.png") }];
+    director.assets.STYLE = { version: "v1", status: "approved", storageKey: "image:fixture" };
+    director.source.segments = [{ id: "SEG01", references: [{ label: "first", image: 1, file: path.join(root, "old-compile", "inputs", "seg-ref.png") }] }];
+    director.sourceHash = directorHash(director.source);
+    service.edit("episode", { operationId: "pool-seed", expectedRevision: 1, ops: [{ type: "set_director_production", director }] });
+    const resolved: string[] = [];
+    // Mirrors acheng.ts: approved_file (130-133) and segments[].references[].file (154) are rewritten to the resolver path.
+    const compiler = (input: DirectorProduction, _directory: string, resolve: (targetId: string, label: string) => string | undefined) => {
+        const next = structuredClone(input);
+        const styleFile = resolve("STYLE", "asset"), refFile = resolve("SEG01", "first");
+        assert.ok(styleFile && refFile);
+        (next.source.asset_plan as any[])[0].approved_file = styleFile;
+        (next.source.segments as any[])[0].references[0].file = refFile;
+        resolved.push(styleFile, refFile);
+        next.sourceHash = directorHash(next.source);
+        return { director: next, exitCode: 0, diagnostics: [], audit: { status: "PASS" }, sourceAdjustments: [], acceptance: {} };
+    };
+    const jobs = new ProductionCompilationService(service, root, compiler);
+    const revision = service.get("episode").revision;
+    const run = async (operationId: string) => {
+        jobs.enqueue("episode", "episode", operationId, revision);
+        await new Promise(resolve => setImmediate(resolve));
+        return jobs.getCompilation("episode", "episode", operationId);
+    };
+    const first = await run("pool-1");
+    const second = await run("pool-2");
+    assert.equal(first.status, "succeeded");
+    assert.equal(second.status, "succeeded");
+    assert.ok(first.sourceHash && first.sourceHash === second.sourceHash, "identical inputs must compile to an identical sourceHash");
+    const pool = path.join(root, "inputs");
+    assert.ok(resolved.every(file => path.dirname(file) === pool), "every resolved reference lives in the shared pool");
+    assert.equal(new Set(resolved).size, 2, "identical inputs resolve to identical pool paths");
+    assert.equal(fs.readdirSync(pool).length, 2, "pool holds one content-addressed copy per input");
+    for (const prepared of [first.preparedId!, second.preparedId!]) assert.equal(fs.existsSync(path.join(root, prepared, "inputs")), false, "no per-preparedId material copies");
+    const [poolFile] = fs.readdirSync(pool);
+    const intactBytes = fs.readFileSync(path.join(pool, poolFile), "utf8");
+    fs.writeFileSync(path.join(pool, poolFile), "corrupted");
+    const third = await run("pool-3");
+    assert.equal(third.status, "succeeded");
+    assert.equal(third.sourceHash, first.sourceHash, "a corrupted pool copy is rewritten from frozen bytes");
+    assert.equal(fs.readFileSync(path.join(pool, poolFile), "utf8"), intactBytes);
+});
+
+test("prepare and enqueue resolve references to the same pool paths and hashes", async t => {
+    const { root, service, director } = fixture(t);
+    const legacy = path.join(root, "legacy"); fs.mkdirSync(legacy, { recursive: true });
+    const style = path.join(legacy, "style-approved.png");
+    fs.writeFileSync(style, "style bytes");
+    service.compilationReferenceFiles = () => ({ "STYLE\0asset": style });
+    director.source.asset_plan = [{ id: "STYLE", kind: "style", depends_on: [], approved_file: path.join(root, "old-compile", "inputs", "gone.png") }];
+    director.sourceHash = directorHash(director.source);
+    service.edit("episode", { operationId: "pool-seed-t2", expectedRevision: 1, ops: [{ type: "set_director_production", director }] });
+    const compiler = (input: DirectorProduction, _directory: string, resolve: (targetId: string, label: string) => string | undefined) => {
+        const next = structuredClone(input);
+        (next.source.asset_plan as any[])[0].approved_file = resolve("STYLE", "asset");
+        next.sourceHash = directorHash(next.source);
+        return { director: next, exitCode: 0, diagnostics: [], audit: { status: "PASS" }, sourceAdjustments: [], acceptance: {} };
+    };
+    const jobs = new ProductionCompilationService(service, root, compiler);
+    const revision = service.get("episode").revision;
+    jobs.enqueue("episode", "episode", "pool-enqueue", revision);
+    await new Promise(resolve => setImmediate(resolve));
+    const enqueued = jobs.getCompilation("episode", "episode", "pool-enqueue");
+    const prepared = jobs.prepare("episode", "episode", revision);
+    assert.equal(prepared.sourceHash, enqueued.sourceHash, "both entry points must converge on one hash");
+    assert.equal(prepared.audit.status, "PASS");
+});
+
+test("legacy per-prepared inputs switch to the pool: apply, recheck and recompile keep H3 ready", async t => {
+    const { root, service, director } = fixture(t);
+    const legacy = path.join(root, "legacy"); fs.mkdirSync(legacy, { recursive: true });
+    const segRef = path.join(legacy, "seg01-ref.png");
+    fs.writeFileSync(segRef, "segment reference bytes");
+    service.compilationReferenceFiles = () => ({ "SEG01\0first": segRef });
+    director.source = { ...director.source, ledger: { contract_version: 2 }, segments: [{ id: "SEG01", references: [{ label: "first", image: 1, file: path.join(root, "stale-prepare", "inputs", "seg-ref.png") }] }] };
+    const legacyHash = directorHash(director.source);
+    director.sourceHash = legacyHash;
+    service.edit("episode", { operationId: "ledger-v2-legacy", expectedRevision: 1, ops: [{ type: "set_director_production", director }] });
+    const compiler = (input: DirectorProduction, _directory: string, resolve: (targetId: string, label: string) => string | undefined) => {
+        const next = structuredClone(input);
+        const refFile = resolve("SEG01", "first");
+        assert.ok(refFile);
+        (next.source.segments as any[])[0].references[0].file = refFile;
+        next.sourceHash = directorHash(next.source);
+        const prompt = "compiled H3 prompt";
+        next.artifacts = [{ id: "h3-SEG01", kind: "h3" as const, targetId: "SEG01", prompt, sha256: promptHash(prompt), sourceHash: next.sourceHash, status: "ready" as const, references: [], receipt: { sourceHash: next.sourceHash, promptHash: promptHash(prompt), engineRuntimeId: next.engine.runtimeId, validator: "fixture" } }];
+        return { director: next, exitCode: 0, diagnostics: [], audit: { status: "PASS" }, sourceAdjustments: [], acceptance: {} };
+    };
+    const jobs = new ProductionCompilationService(service, root, compiler);
+    const revision = () => service.get("episode").revision;
+    // First compile after the switch: the rewrite lands on the pool path, so the result hash necessarily differs from the legacy draft hash.
+    jobs.enqueue("episode", "episode", "switch-1", revision());
+    await new Promise(resolve => setImmediate(resolve));
+    const first = jobs.getCompilation("episode", "episode", "switch-1");
+    assert.equal(first.status, "succeeded");
+    const poolHash = first.sourceHash!;
+    assert.notEqual(poolHash, legacyHash, "switching layouts changes the hash exactly once, as expected");
+    const firstTargets: any = jobs.getCompilation("episode", "episode", "switch-1", "targets", 0, 10);
+    assert.equal(firstTargets.items[0].status, "draft", "the continuity gate downgrades ready H3 until the new hash is checked in");
+    // Apply stores the pool-path source in the draft.
+    jobs.apply("episode", "episode", first.preparedId!);
+    assert.equal(service.get("episode").draft.director!.sourceHash, poolHash);
+    // Bind a continuity report to the new hash (what production_check_continuity does against the applied draft).
+    const owner = { kind: "episode", id: "episode" };
+    new ProductionContinuityReports(path.join(root, "production-compilations", "continuity")).persist(owner, "check-pool", "check-request", {
+        owner, snapshot: "draft", snapshotVersion: 0, sourceHash: poolHash, runtimeId: director.engine.runtimeId, revision: revision(),
+        verdict: "passed", selectedTargets: ["SEG01"], checkedAt: new Date().toISOString(), diagnostics: [],
+    } as any);
+    // Second full compile: the pool path is stable, so the hash must not drift and the gate must pass.
+    jobs.enqueue("episode", "episode", "switch-2", revision());
+    await new Promise(resolve => setImmediate(resolve));
+    const second = jobs.getCompilation("episode", "episode", "switch-2");
+    assert.equal(second.status, "succeeded");
+    assert.equal(second.sourceHash, poolHash, "zero drift once inputs live in the content-addressed pool");
+    const secondTargets: any = jobs.getCompilation("episode", "episode", "switch-2", "targets", 0, 10);
+    assert.equal(secondTargets.items[0].status, "ready", "H3 stays ready now that draft, result and report hashes agree");
+    jobs.apply("episode", "episode", second.preparedId!);
+    const draft = service.get("episode").draft.director!;
+    assert.equal(draft.sourceHash, poolHash);
+    assert.equal(draft.artifacts[0].status, "ready");
+    assert.equal((draft.artifacts[0].receipt.continuityDiagnostics ?? []).length, 0);
+});
+
 function fixture(t: test.TestContext) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "production-compile-"));
     const db = new BackendDatabase(path.join(root, "test.sqlite"));

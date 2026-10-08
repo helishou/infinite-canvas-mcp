@@ -1373,39 +1373,65 @@ export function H3PromptSection({
     }
     const promptAtCall = prompt;
     const segmentIdAtCall = selected?.id;
-    const controller = new AbortController();
-    translationRequestRef.current = { controller, prompt: promptAtCall, segmentId: segmentIdAtCall };
-    setTranslating(true);
-    setTranslationProgress({ completed: 0, total: 0 });
-    setTranslateError(null);
-    try {
-      const model = String(
-        ctx.node.metadata?.minimaxLlmModel ||
-          ctx.node.metadata?.llmModel ||
-          ctx.ai.defaultModel("text") ||
-          "",
-      );
-      const text = await translateH3Prompt(promptAtCall, (excerpt, options) => ctx.ai.generateText(excerpt, options), {
-        model,
-        signal: controller.signal,
-        log: { taskMode: "翻译", nodeId: ctx.node.id, segmentId: segmentIdAtCall },
-      }, (progress) => {
-        if (!controller.signal.aborted && translationRequestRef.current?.controller === controller) setTranslationProgress(progress);
-      });
-      // Only cache and show a complete translation of the still-current Clip and source.
-      if (!controller.signal.aborted && promptRef.current.prompt === promptAtCall && promptRef.current.segmentId === segmentIdAtCall) {
-        setTranslation({ segmentId: segmentIdAtCall || "", prompt: promptAtCall, text });
-        setIsTranslated(true);
-      }
-    } catch (error) {
-      if (!controller.signal.aborted && promptRef.current.prompt === promptAtCall && promptRef.current.segmentId === segmentIdAtCall) {
-        setTranslateError(error instanceof Error ? error.message : String(error));
-      }
-    } finally {
-      if (translationRequestRef.current?.controller === controller) {
+    // 对运行环境中止（非用户取消）做有限退避重试，吸收 WorkBuddy 运行时对翻译请求的中断。
+    const MAX_TRANSLATE_ATTEMPTS = 3;
+    let lastError: unknown = null;
+    let userCancelled = false;
+    for (let attempt = 1; attempt <= MAX_TRANSLATE_ATTEMPTS; attempt++) {
+      const controller = new AbortController();
+      translationRequestRef.current = { controller, prompt: promptAtCall, segmentId: segmentIdAtCall };
+      setTranslating(true);
+      setTranslationProgress({ completed: 0, total: 0 });
+      setTranslateError(null);
+      try {
+        const model = String(
+          ctx.node.metadata?.minimaxLlmModel ||
+            ctx.node.metadata?.llmModel ||
+            ctx.ai.defaultModel("text") ||
+            "",
+        );
+        const text = await translateH3Prompt(promptAtCall, (excerpt, options) => ctx.ai.generateText(excerpt, options), {
+          model,
+          signal: controller.signal,
+          log: { taskMode: "翻译", nodeId: ctx.node.id, segmentId: segmentIdAtCall },
+        }, (progress) => {
+          if (!controller.signal.aborted && translationRequestRef.current?.controller === controller) setTranslationProgress(progress);
+        });
+        // Only cache and show a complete translation of the still-current Clip and source.
+        if (!controller.signal.aborted && promptRef.current.prompt === promptAtCall && promptRef.current.segmentId === segmentIdAtCall) {
+          setTranslation({ segmentId: segmentIdAtCall || "", prompt: promptAtCall, text });
+          setIsTranslated(true);
+        }
         translationRequestRef.current = null;
         setTranslating(false);
+        return;
+      } catch (error) {
+        lastError = error;
+        const err = error instanceof Error ? error : new Error(String(error));
+        const aborted = err.name === "AbortError" || /abort|without reason|this operation was aborted/i.test(err.message);
+        translationRequestRef.current = null;
+        setTranslating(false);
+        // 用户取消或翻译期间上下文已变化：不再重试，静默退出（错误本就不该显示）。
+        if (controller.signal.aborted || promptRef.current.prompt !== promptAtCall || promptRef.current.segmentId !== segmentIdAtCall) {
+          userCancelled = true;
+          break;
+        }
+        // 运行环境中止（非用户取消）：退避后重试。
+        if (aborted && attempt < MAX_TRANSLATE_ATTEMPTS) {
+          await new Promise((resolve) => setTimeout(resolve, 400 * attempt));
+          continue;
+        }
+        break;
       }
+    }
+    // 最终失败：仅在上下文仍是当前 Clip/源、且非用户主动取消时显示，
+    // 并把运行环境中止的 cryptic 消息映射为可读提示。
+    if (lastError != null && !userCancelled && promptRef.current.prompt === promptAtCall && promptRef.current.segmentId === segmentIdAtCall) {
+      const finalError = lastError instanceof Error ? lastError : new Error(String(lastError));
+      const message = /without reason|signal is aborted|this operation was aborted/i.test(finalError.message)
+        ? "翻译请求被运行环境中断，请检查文本模型渠道配置或网络/代理后重试"
+        : finalError.message;
+      setTranslateError(message);
     }
   };
 
@@ -1729,10 +1755,13 @@ export function H3PromptSection({
       {unresolvedReferenceMarkers.length ? <div className="minimax-prompt-reference-error" role="alert">
         发现 {unresolvedReferenceMarkers.length} 处未匹配的主体或素材引用（见红色标记）。点击红色标记可从当前 Clip 引用中重新选择，也可以删除。
       </div> : null}
-      <div key="prompt-textarea-wrap" className={`minimax-prompt-translate-wrap${!isTranslated && selected ? " has-line-map" : ""}`}>
+      <div key="prompt-textarea-wrap" className={`minimax-prompt-translate-wrap${selected ? " has-line-map" : ""}`}>
+        {/* 原提示词编辑器始终挂载：翻译只做叠加展示，绝不卸载/改写原文。 */}
+        {selected ? <TextEditor key={selected.id} projectId={ctx.projectId} target={textTarget} editorRef={editorRef} references={editorReferences} chips clipReferenceTags speakers={speakerRoster} dialogue lineMap placeholder="请输入提示词" className="minimax-collaborative-prompt minimax-prompt-line-map-enabled" style={{ minHeight: 160, height: 240, fontSize: 29 }} /> : null}
+        {/* 翻译结果：纯只读展示面板，独立存在，不影响上面的原提示词编辑器与文档。 */}
         {isTranslated && translation && translation.segmentId === selected?.id && translation.prompt === prompt
-          ? <textarea readOnly value={translation.text} aria-label="中文翻译（只读）" />
-          : selected ? <TextEditor key={selected.id} projectId={ctx.projectId} target={textTarget} editorRef={editorRef} references={editorReferences} chips clipReferenceTags speakers={speakerRoster} dialogue lineMap placeholder="请输入提示词" className="minimax-collaborative-prompt minimax-prompt-line-map-enabled" style={{ minHeight: 160, height: 240, fontSize: 29 }} /> : null}
+          ? <textarea readOnly value={translation.text} aria-label="中文翻译（只读）" className="minimax-prompt-translation" />
+          : null}
         <button
           key="prompt-translate"
           type="button"

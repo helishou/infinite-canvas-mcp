@@ -6,7 +6,7 @@ const defaultH3Model = "h3\\DasiwaMinimaxH3_dasiwaREF2VAHybridV1.safetensors";
 export const BASE_H3_NODE_METADATA: Record<string, unknown> = {
     content: "", prompt: defaultPrompt, status: "idle", duration: "8", aspectRatio: "16:9",
     videoSteps: 8, denoise: 1, modelName: defaultH3Model, minimaxBaseModel: defaultH3Model,
-    motionContextEnabled: true, motionContextNoiseEnabled: false,
+    motionContextEnabled: false, tailFrameContinuation: false, motionContextNoiseEnabled: false,
     smartStoryboardCount: 3, smartStoryboardMode: "ref2va", smartStoryboardSkill: "regular_storyboard",
     textEncoder: "qwen3vl_32b_minimax_h3_fp8.safetensors",
     videoVae: "minimax_h3_video_vae_fp16.safetensors",
@@ -66,6 +66,9 @@ export function readH3Layout(source: unknown): H3LayoutSnapshot {
 /** 按“节点显式值 > 保存默认值 > 基础默认值”创建完整 H3 metadata。 */
 export function createH3NodeMetadata(stored: Record<string, unknown> = {}, metadata: Record<string, unknown> = {}, panes: Record<string, number> = {}) {
     const storedParams = { ...stored };
+    // Continuation is an authored adjacent boundary, never a saved creation default.
+    delete storedParams.motionContextEnabled;
+    delete storedParams.tailFrameContinuation;
     // layout 是随默认参数一起保存的布局快照：只有各模块区域宽高进节点 metadata，
     // 节点自身宽高由创建入口消费（前端 defaultLayoutSize / MCP width/height），不留在 metadata 里。
     const layout = readH3Layout(storedParams.layout);

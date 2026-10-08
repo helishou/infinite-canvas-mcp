@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import fs from "node:fs";
 import { assertReferenceCompilation, compileReferenceSubmission } from "@basketikun/canvas-agent/reference-contract";
 import { applyH3StyleTemplate, isH3StyleTemplateId, styleTemplateFromPrompt } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
+import { h3MotionGroup } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 
 import type { CanvasProject, RuntimeTask } from "../db.js";
 import type { BackendEventBus } from "../events.js";
@@ -844,7 +845,7 @@ export class CanvasH3Runner {
             ? segments.findIndex((segment) => String(segment.id || "") === input.segmentId)
             : input.segmentIndex ?? Math.max(0, segments.findIndex((segment) => !segment.result));
         if (selected < 0) throw new Error("找不到所选 Clip，请刷新画布后重试");
-        const end = input.endSegmentId ? segments.findIndex(segment => segment.id === input.endSegmentId) : segments.length - 1;
+        let end = input.endSegmentId ? segments.findIndex(segment => segment.id === input.endSegmentId) : segments.length - 1;
         if (end < selected) throw new Error("连续组结束 Clip 不存在或早于起点");
         const defaults = input.runPlan?.defaults || recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
         // Group boundaries must match the effective settings shown by the UI,
@@ -856,8 +857,14 @@ export class CanvasH3Runner {
             return params.motionContextEnabled === true;
         };
         const resumesGroup = selected > 0 && motionContext(selected - 1);
-        const indices = input.runFromCurrent ? segments.map((_, index) => index).filter((index) => index >= selected && index <= end) : [selected];
-        if (input.runFromCurrent && input.skipCompleted && indices.some((index) => index + 1 < segments.length && motionContext(index))) {
+        // Running the group head authorizes the whole connected group, bounded by
+        // the first disabled outgoing edge. Explicit run-from-current keeps its range.
+        const group = !input.runFromCurrent && !resumesGroup ? h3MotionGroup(segments.length, selected, motionContext) : null;
+        const runGroup = Boolean(group && group.head === selected);
+        if (runGroup) end = Math.min(end, group!.tail);
+        const runSequence = input.runFromCurrent === true || runGroup;
+        const indices = runSequence ? segments.map((_, index) => index).filter((index) => index >= selected && index <= end) : [selected];
+        if (runSequence && input.skipCompleted && indices.some((index) => index < end && motionContext(index))) {
             throw new Error("V15 潜空间续写不能跳过已完成 Clip，请从连续组首段重新运行。");
         }
         let groupHead = -1;
@@ -870,8 +877,8 @@ export class CanvasH3Runner {
         return indices.filter((index) => segments[index]).filter((index) => !input.skipCompleted || !segments[index].result).map((segmentIndex) => {
             const segment = segments[segmentIndex];
             if (!segment.id) throw new Error(`H3 Clip ${segmentIndex + 1} 缺少身份标识`);
-            const incoming = (segmentIndex === selected && resumesGroup) || (input.runFromCurrent === true && segmentIndex > selected && motionContext(segmentIndex - 1));
-            const outgoing = input.runFromCurrent === true && segmentIndex < end && motionContext(segmentIndex);
+            const incoming = (segmentIndex === selected && resumesGroup) || (runSequence && segmentIndex > selected && motionContext(segmentIndex - 1));
+            const outgoing = runSequence && segmentIndex < end && motionContext(segmentIndex);
             if (!incoming && !outgoing) {
                 groupHead = -1;
                 continuationIndex = 0;

@@ -14,6 +14,8 @@ export function resolveH3Runtime(segment: Record<string, unknown>, override: Rec
     const layers: Array<[H3ParameterSource, Record<string, unknown>]> = [['request', override], ['clip', segment], ['node', metadata], ['nodeParams', nodeParams], ['defaults', defaults], ['builtIn', BASE_H3_NODE_METADATA]];
     for (const key of H3_PARAM_KEYS) {
         const selected = layers.find(([source, layer]) => {
+            // Saved global defaults must not silently connect unrelated Clips.
+            if (source === 'defaults' && ['motionContextEnabled', 'tailFrameContinuation'].includes(key)) return false;
             const projection = record(segment.productionClipProjection);
             const explicitStyle = key === 'styleTemplateId' && source === 'clip' && (!segment.productionClipProjection || projection.styleTemplateDeclared === true);
             return !(useDefaults && !plannedKeys.has(key) && !explicitStyle && !manualKeys.has(key) && ['clip', 'node', 'nodeParams'].includes(source)) && layer[key] !== undefined && (key === 'styleTemplateId' || layer[key] !== null);
@@ -209,4 +211,14 @@ export function normalizeH3Params(params: Record<string, unknown>, generateRando
 export function resolveH3Seed(params: Record<string, unknown>) {
     const normalized = normalizeH3Params(params, true);
     return parseH3Seed(normalized.seed) ?? randomH3Seed();
+}
+
+/** A Clip's Motion Context switch owns the edge to the next Clip. */
+export function h3MotionGroup(count: number, selected: number, outgoing: (index: number) => boolean) {
+    if (selected < 0 || selected >= count) return null;
+    let head = selected;
+    let tail = selected;
+    while (head > 0 && outgoing(head - 1)) head--;
+    while (tail + 1 < count && outgoing(tail)) tail++;
+    return head === tail ? null : { head, tail };
 }

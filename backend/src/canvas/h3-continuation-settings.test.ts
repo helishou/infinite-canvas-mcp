@@ -23,9 +23,10 @@ test("saved tail-frame selection prevents Clip 8 from seeking a latent resume ta
     assert.equal(plans(segments, {}, { runFromCurrent: true, skipCompleted: true })[0].continuation, undefined);
 });
 
-test("explicit false blocks inherited motion while inherited true keeps a real continuation", () => {
+test("global defaults do not create motion groups; explicit outgoing Clip choices do", () => {
     assert.equal(plans([{ id: "a", motionContextEnabled: false }, { id: "b" }], { motionContextEnabled: true })[0].continuation, undefined);
-    assert.equal(plans([{ id: "a" }, { id: "b" }], { motionContextEnabled: true })[0].continuation?.index, 2);
+    assert.equal(plans([{ id: "a" }, { id: "b" }], { motionContextEnabled: true })[0].continuation, undefined);
+    assert.equal(plans([{ id: "a", motionContextEnabled: true }, { id: "b" }], {})[0].continuation?.index, 2);
 });
 
 test("tail-frame boundary splits groups instead of propagating legacy latent flags", () => {
@@ -39,6 +40,69 @@ test("tail-frame boundary splits groups instead of propagating legacy latent fla
 
 test("conflicting saved continuation values require a real edit", () => {
     assert.throws(() => plans([{ id: 'a', tailFrameContinuation: true, motionContextEnabled: true }, { id: 'b' }]), /保存值同时开启/);
+});
+
+test("generate current at a Motion Context group head runs only its complete group", () => {
+    const segments = [
+        { id: "before", motionContextEnabled: false },
+        { id: "b", motionContextEnabled: true, result: "old-b.mp4" },
+        { id: "c", motionContextEnabled: true, result: "old-c.mp4" },
+        { id: "d", motionContextEnabled: false, result: "old-d.mp4" },
+        { id: "other", motionContextEnabled: true },
+        { id: "last", motionContextEnabled: false },
+    ];
+    const result = plans(segments, {}, { runFromCurrent: false });
+    assert.deepEqual(result.map(plan => plan.segmentId), ["b", "c", "d"]);
+    assert.deepEqual(result.map(plan => plan.continuation?.index), [1, 2, 3]);
+    assert.throws(() => plans(segments, {}, { skipCompleted: true }), /不能跳过已完成/);
+    assert.deepEqual(plans(segments, {}, { runFromCurrent: true }).map(plan => plan.segmentId), ["b", "c", "d", "other", "last"]);
+    assert.deepEqual(plans(segments, {}, { segmentId: "c" }).map(plan => plan.segmentId), ["c"]);
+    assert.deepEqual(plans(segments, {}, { segmentId: "d" }).map(plan => plan.segmentId), ["d"]);
+    assert.deepEqual(plans(segments, {}, { endSegmentId: "c" }).map(plan => plan.segmentId), ["b", "c"]);
+});
+
+test("automatic groups require explicit edges, and a terminal outgoing switch has no effect", () => {
+    assert.deepEqual(plans([{ id: "b" }, { id: "c" }, { id: "d" }], { motionContextEnabled: true }).map(plan => plan.continuation), [undefined]);
+    assert.deepEqual(plans([{ id: "b", motionContextEnabled: true }, { id: "c", motionContextEnabled: true }, { id: "d", motionContextEnabled: true }]).map(plan => plan.continuation?.index), [1, 2, 3]);
+    assert.deepEqual(plans([{ id: "b", motionContextEnabled: false }, { id: "c" }], { motionContextEnabled: true }).map(plan => plan.segmentId), ["b"]);
+    assert.deepEqual(plans([{ id: "b", motionContextEnabled: true }]).map(plan => plan.continuation), [undefined]);
+});
+
+test("single-Clip command executes the group sequentially in one parent and regenerates old results", async (t) => {
+    const db = new BackendDatabase(':memory:');
+    t.after(() => db.close());
+    db.createCanvasProject({ id: 'auto-group', nodes: [{ id: 'h3', type: 'minimax-h3:video', metadata: { segments: [
+        { id: 'a', mode: 't2v', prompt: 'A', motionContextEnabled: true, result: 'old-a.mp4' },
+        { id: 'b', mode: 't2v', prompt: 'B', motionContextEnabled: true, result: 'old-b.mp4' },
+        { id: 'c', mode: 't2v', prompt: 'C', motionContextEnabled: false },
+        { id: 'outside', mode: 't2v', prompt: 'Outside', motionContextEnabled: false },
+    ] } }], connections: [] });
+    const stores = createStores(db);
+    const submissions: Array<{ segmentId: unknown; run: string; index: number; group: string }> = [];
+    const comfy = {
+        async run(_preset: string, input: Record<string, unknown>, params: Record<string, unknown>, _url?: string, id?: string, onCreated?: (task: ReturnType<typeof stores.tasks.create>) => void) {
+            const child = stores.tasks.create(id!, 'comfyui:minimax-h3', input, params);
+            onCreated?.(child);
+            submissions.push({ segmentId: (params.canvasBinding as Record<string, unknown>).segmentId, ...JSON.parse(String(params.continuationTask)) });
+            const media = stores.media.store(Buffer.from('fake-video'), { name: `${child.id}.mp4`, mimeType: 'video/mp4', category: 'output' });
+            return stores.tasks.update(child.id, { status: 'succeeded', progress: 1, result: { media: [{ url: stores.media.url(media), storageKey: media.storageKey, mimeType: 'video/mp4' }] } });
+        },
+    };
+    const hub = { ready: () => false, queue: { select: () => 'local', unreserve() {} } };
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, hub as never);
+    for (const id of ['auto-first', 'auto-again']) {
+        const input = { projectId: 'auto-group', nodeId: 'h3', segmentId: 'a', runFromCurrent: false };
+        assert.deepEqual(runner.preview(input).clips.map(clip => clip.segmentId), ['a', 'b', 'c']);
+        runner.start(input, id);
+        for (let i = 0; i < 200 && !['succeeded', 'failed'].includes(stores.tasks.get(id)?.status || ''); i++) await new Promise(resolve => setTimeout(resolve, 5));
+        assert.equal(stores.tasks.get(id)?.status, 'succeeded', stores.tasks.get(id)?.error || 'group did not finish');
+        assert.deepEqual(submissions.filter(item => item.run === id).map(item => [item.segmentId, item.index]), [['a', 1], ['b', 2], ['c', 3]]);
+    }
+    const clips = (db.getCanvasProject('auto-group')!.nodes[0].metadata as { segments: Record<string, unknown>[] }).segments;
+    assert.deepEqual(clips.slice(0, 3).map(clip => clip.status), ['success', 'success', 'success']);
+    assert.equal(clips[3].result, undefined);
+    assert.equal(submissions.length, 6);
+    assert.equal(new Set(submissions.map(item => item.group)).size, 1);
 });
 
 test("preview detects the same missing predecessor latent task as submission, then clears after a saved disable", (t) => {

@@ -532,6 +532,9 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         const { id, result, resultStorageKey, results, status, progress, runtimeTaskId, refs, refItems, referenceBindings, h3CharacterGroups, storyboardModeEnabled, storyboardDurations, storyboardShots, ...settings } = basis || ({} as H3Segment);
         return applyH3GlobalSettings({
             ...settings,
+            // New content starts a fresh boundary; cloning sampling settings must not clone a chain.
+            motionContextEnabled: false,
+            tailFrameContinuation: false,
             id: newClipId(),
             prompt: defaultPrompt,
             duration: Number(basis?.duration || 5),

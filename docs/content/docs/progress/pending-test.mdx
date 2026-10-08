@@ -5,6 +5,24 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Local storyboard repair and model-facing prompts
+
+- Replace one scene's storyboard while retaining its Segment IDs and total frame range. Verify conflict rejection, operation replay, cross-scene protection and refreshed dialogue/reference windows.
+- New H3 prompts use explicit local Shot windows, declare repeated identity/reference facts once, and keep offscreen voices independent of visible lip movement. Check hidden observers, delayed entrances and real-egg swallowing against generated media; structural checks alone do not establish visual success.
+- Clip-only compilation excludes dormant storyboard-frame assets when keyframe policy is none; an explicitly requested frame still receives full validation.
+- Preparing all Clips of a draft scene repairs its physical timeline order without publishing or generating, retaining archived results and nonformal Clip slots. Check death before testimony, explanatory dialogue before the ending, and repeated preparation.
+
+## Motion Context defaults and boundary decisions
+
+- Tail-frame reference and Motion Context are mutually exclusive. Enabling either in the UI saves the other as off. Conflicting authored boundaries block compilation, publication, generation preflight and direct Clip projection, with diagnostics identifying the adjacent segments. Historical conflicting values remain available for explicit correction.
+
+- New H3 nodes and added or copied Clips start with Motion Context and tail-frame continuation off, without inheriting saved global continuation defaults. Explicit choices on existing Clips remain intact. Check creation with old enabled defaults, copying an enabled Clip, refresh and readback.
+- Directors select Motion Context only when adjacent segments must remain one uninterrupted camera take. Dialogue reverse shots, viewpoint changes and an all-cut scene may leave it off. A's switch records A→B: B consumes A's ending frame or AV latent; the final Clip's switch does not affect its own generation.
+
+## Motion Context group generation
+
+- Adjacent Clips connected by Motion Context show their group range on the timeline and in settings. From the group head, Generate current Clip automatically runs the whole group in order and stops at the first disabled edge. Completed group Clips regenerate to establish this run's latent context. Run current and following retains its broader range. Check inherited defaults, switch edits, refresh, group boundaries, cancellation and confirmation during a group run.
+
 ## Backend development reload
 
 - Backend dev/dev:watch observe source and shared Agent dist changes, coalescing edits. Active media or confirmation tasks, Agent/production turns and writes defer reload. Once idle, writes are fenced and the old process exits before its watcher starts a new Backend child; Web and ComfyUI stay running. Verify new PIDs after edits, stable PIDs while busy, reload after completion, reconnects and retained drafts/receipts. Shared sources require a dist build; tests and declarations do not trigger reload. After a syntax-error exit, monitoring waits for the next source correction. Production start and dev:once remain single runs.

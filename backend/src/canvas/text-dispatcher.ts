@@ -166,7 +166,7 @@ export class CanvasTextDispatcher {
         const contents: string[] = [];
         for (let index = 0; index < count; index++) {
             if (controller.signal.aborted) return;
-            const content = (await this.requestText(provider, input.prompt, imageDataUrls, controller.signal)).trim();
+            const content = (await this.requestTextWithRetry(provider, input.prompt, imageDataUrls, controller.signal)).trim();
             if (controller.signal.aborted) return; // 提供方可能忽略 AbortSignal；迟到结果不能把 cancelled 改回 succeeded。
             if (!content) throw new Error("文本模型返回了空内容");
             contents.push(content);
@@ -176,6 +176,30 @@ export class CanvasTextDispatcher {
         const result = { texts: contents.map((content, index) => ({ index, content })) };
         this.stores.tasks.update(task.id, { status: "succeeded", progress: 1, result });
         this.stores.tasks.addEvent(task.id, "result", result);
+    }
+
+    /**
+     * 在任务自身的 controller 未取消的前提下，对文本提供方请求做有限重试。
+     * 用于吸收运行环境（如 WorkBuddy 运行时对后台请求的强制中断）抛出的
+     * “signal is aborted without reason” 类中止错误，而不是一次失败就判定任务失败。
+     * 一旦检测到用户主动取消（signal 已 abort）则立即抛出，不重试。
+     */
+    private async requestTextWithRetry(provider: TextProvider, prompt: string, imageDataUrls: string[], signal: AbortSignal, maxAttempts = 3): Promise<string> {
+        let lastError: unknown;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            if (signal.aborted) throw new Error("Aborted");
+            try {
+                return await this.requestText(provider, prompt, imageDataUrls, signal);
+            } catch (error) {
+                lastError = error;
+                const err = error instanceof Error ? error : new Error(String(error));
+                const aborted = err.name === "AbortError" || /abort|without reason|this operation was aborted/i.test(err.message);
+                // 非中止类错误、用户主动取消、或已到最大重试次数：直接抛出。
+                if (!aborted || signal.aborted || attempt >= maxAttempts) throw error;
+                await new Promise((resolve) => setTimeout(resolve, 300 * attempt));
+            }
+        }
+        throw lastError instanceof Error ? lastError : new Error(String(lastError));
     }
 
     private canvasTarget(input: CanvasTextGenerationInput) {
@@ -398,7 +422,16 @@ export async function requestOpenAiText(provider: TextProvider, prompt: string, 
     } catch (error) {
         if (error instanceof HttpError && (error.status === 401 || error.status === 403)) throw error;
         if (signal?.aborted) throw error;
-        return requestChatCompletions(provider, messages, signal);
+        try {
+            return await requestChatCompletions(provider, messages, signal);
+        } catch (second) {
+            const wrapped = error instanceof Error ? error : new Error(String(error));
+            const aborted = wrapped.name === "AbortError" || /abort|without reason|this operation was aborted/i.test(wrapped.message);
+            // 运行环境（如 WorkBuddy 运行时）对后台请求强制中断时，把 cryptic 的
+            // “signal is aborted without reason” 映射为可读提示，便于排查渠道/代理/超时。
+            if (aborted) throw new Error(`文本模型请求被运行环境中断（${wrapped.message}），请检查渠道 Base URL / 代理 / 超时设置`);
+            throw second;
+        }
     }
 }
 

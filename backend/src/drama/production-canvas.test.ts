@@ -64,6 +64,25 @@ function publish(service: EpisodeProductionService, id: string) {
     return service.publish(id, { operationId: crypto.randomUUID(), expectedRevision: service.get(id).revision, stage: "director" });
 }
 
+test("scene storyboard replacement replays once and refuses stale revisions without changing other scenes", t => {
+    const f = fixture(t), d = director();
+    (d.source.shots as any[])[0].source_scene_id = "morning";
+    (d.source.shots as any[])[1].source_scene_id = "night";
+    d.sourceHash = directorHash(d.source);
+    for (const artifact of d.artifacts) { artifact.sourceHash = d.sourceHash; artifact.receipt.sourceHash = d.sourceHash; }
+    const before = save(f.episode, "ep", d);
+    const first = (d.source.shots as any[])[0];
+    const request = { operationId: "scene-replacement", expectedRevision: before.revision, ops: [{ type: "replace_director_scene_storyboard", sceneId: "morning",
+        shots: [{ ...first, end_frame: 60 }, { ...first, id: "s1b", start_frame: 60 }],
+        segments: [{ ...(d.source.segments as any[])[0], shot_ids: ["s1", "s1b"] }], shotInputs: { s1: { keyframePolicy: "none", assetIds: ["ROLE"] }, s1b: { keyframePolicy: "none", assetIds: ["ROLE"] } } }] };
+    const saved = f.episode.edit("ep", request);
+    assert.equal(saved.revision, before.revision + 1);
+    assert.equal(f.episode.edit("ep", request).replayed, true);
+    assert.equal(f.episode.get("ep").revision, saved.revision);
+    assert.deepEqual((saved.draft.director!.source.shots as any[]).find(shot => shot.id === "s2"), (before.draft.director!.source.shots as any[]).find(shot => shot.id === "s2"));
+    assert.throws(() => f.episode.edit("ep", { ...request, operationId: "stale-replacement" }), /版本已变化/);
+});
+
 test("large preparation, arrangement and synchronization recover lost responses without duplicate effects", async t => {
     const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
     const d = director();
@@ -149,6 +168,26 @@ test("synchronization repairs shared-node Clip ordering once and then leaves rev
     const repeated = runner.syncClips("ep", published.publishedVersion);
     assert.equal(f.db.getCanvasProject(projectId)!.revision, revision);
     assert.equal(repeated.syncReceipt.updated, 0); assert.equal(repeated.syncReceipt.reordered, 0); assert.equal(repeated.syncReceipt.skipped, 2);
+    assert.equal(f.stores.tasks.list().length, 0);
+});
+
+test("complete draft preparation repairs Clip order without publishing or submitting media", t => {
+    const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
+    const d = director();
+    d.source.script_scenes = [{ id: "morning", scene_id: "room", scene_name: "Morning", text: "One scene", beat_ids: ["b1", "b2"] }];
+    (d.source.shots as any[]).forEach(shot => { shot.required_assets = []; });
+    Object.values(d.shotInputs).forEach(input => { input.assetIds = []; input.keyframePolicy = "none"; delete input.keyframeAssetId; });
+    d.sourceHash = directorHash(d.source);
+    d.artifacts.forEach(artifact => { artifact.sourceHash = d.sourceHash; artifact.receipt.sourceHash = d.sourceHash; });
+    save(f.episode, "ep", d);
+    const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+    const first = runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1", "segment:seg2"], "prepare-draft");
+    const [a, b] = first.draft.clipGroups;
+    f.stores.projects.applyOperations(projectId, undefined, [{ type: "move_h3_segment", nodeId: a.nodeId!, segmentId: b.segmentId!, beforeSegmentId: a.segmentId! }], { runtimeWrite: true });
+    runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1", "segment:seg2"], "repair-draft-order");
+    const node = (f.db.getCanvasProject(projectId)!.nodes as any[]).find(node => node.id === a.nodeId);
+    assert.deepEqual(node.metadata.segments.map((segment: any) => segment.id), [a.segmentId, b.segmentId]);
+    assert.equal(f.episode.get("ep").publishedVersion, 0);
     assert.equal(f.stores.tasks.list().length, 0);
 });
 
@@ -1197,19 +1236,24 @@ test("a new approved reference version projects only current Clips and retains t
 
 test("formal outgoing flags survive projection and defaults; terminal Clip closes the chain", t => {
     const f = referenceClipFixture(t), candidate = structuredClone(f.d);
-    candidate.boundaries[0] = { from: "seg1", to: "seg2", tailFrame: true, motionContext: true, reason: "Continue the held egg and uninterrupted hand action" };
+    candidate.boundaries[0] = { from: "seg1", to: "seg2", tailFrame: false, motionContext: true, reason: "Keep one uninterrupted camera take across the generation boundary" };
     save(f.episode, "ep", candidate);
     const current = f.episode.get("ep"), project = f.db.getCanvasProject(f.projectId)!;
     const head = buildProductionClip(project, current.draft, current.draft.clipGroups[0], "head");
     const tail = buildProductionClip(project, current.draft, current.draft.clipGroups[1], "tail");
-    assert.equal(head.tailFrameContinuation, true); assert.equal(head.motionContextEnabled, true);
+    assert.equal(head.tailFrameContinuation, false); assert.equal(head.motionContextEnabled, true);
     const resolved = resolveH3Runtime({ ...head, h3ParameterPolicy: "defaults" }, {}, { motionContextEnabled: false, tailFrameContinuation: false }, { motionContextEnabled: false, tailFrameContinuation: false });
-    assert.equal(resolved.params.motionContextEnabled, true); assert.equal(resolved.params.tailFrameContinuation, true);
+    assert.equal(resolved.params.motionContextEnabled, true); assert.equal(resolved.params.tailFrameContinuation, false);
     const prepared = f.runner.prepareTargets("ep", current.revision, ["segment:seg1", "segment:seg2"], "enabled-flags");
     const group = prepared.draft.clipGroups[0]; publish(f.episode, "ep");
     const observer = new NativeProductionGeneration(f.db, f.stores, f.episode, f.shared, f.events);
-    assert.throws(() => observer.prepare({ mode: "video", operation: "h3-run", projectId: f.projectId, nodeId: group.nodeId!, segmentId: group.segmentId!, params: { motionContextEnabled: false } }), /DIRECTOR_CONTINUITY_CHANGED/);
+    const manual = observer.prepare({ mode: "video", operation: "h3-run", projectId: f.projectId, nodeId: group.nodeId!, segmentId: group.segmentId!, params: { motionContextEnabled: false } });
+    assert.equal(manual.command.params?.motionContextEnabled, false);
+    assert.equal(current.draft.director!.boundaries[0].motionContext, true);
     assert.equal(tail.tailFrameContinuation, false); assert.equal(tail.motionContextEnabled, false);
+    const conflict = structuredClone(current.draft);
+    conflict.director!.boundaries[0].tailFrame = true;
+    assert.throws(() => buildProductionClip(project, conflict, conflict.clipGroups[0], "invalid"), /CONTINUITY_MODES_CONFLICT/);
     candidate.boundaries = []; save(f.episode, "ep", candidate);
     const blocked = f.runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1"], "missing-boundary");
     assert.equal(blocked.referenceSync?.[0].status, "blocked");

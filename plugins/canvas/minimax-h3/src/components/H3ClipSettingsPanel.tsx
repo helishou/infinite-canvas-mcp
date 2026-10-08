@@ -4,7 +4,7 @@ import { Select, Switch } from "antd";
 import type { H3Segment } from "../types";
 import { exportH3Settings, importH3Settings } from "../services/h3-segment-utils";
 import { useDefaultParams, writeDefaultParams } from "../services/h3-defaults";
-import { resolveH3Runtime } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
+import { h3MotionGroup, resolveH3Runtime } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { clipRuntimeState } from "../services/h3-clip-runtime";
 import { cancelActiveH3Task } from "../services/h3-run-control";
 import type { H3DefaultLayout } from "../services/h3-defaults";
@@ -25,6 +25,9 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, patchSelected, pa
     const resolved = savedSelected ? resolveH3Runtime(savedSelected as unknown as Record<string, unknown>, {}, metadata, defaults) : null;
     const effectiveVideoModel = resolved?.params || {};
     const effectiveSegment = selected ? { ...selected, ...effectiveVideoModel, videoSteps: effectiveVideoModel.steps } as H3Segment : undefined;
+    const clips = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
+    const selectedIndex = clips.findIndex(clip => clip.id === selected?.id);
+    const motionGroup = h3MotionGroup(clips.length, selectedIndex, (index) => resolveH3Runtime(clips[index] as unknown as Record<string, unknown>, {}, metadata, defaults).params.motionContextEnabled === true);
     const selectedVideoModelEnabled = effectiveVideoModel.selectedVideoModelEnabled === true;
     const selectedVideoModel = String(effectiveVideoModel.selectedVideoModel || "");
     const patchVideoModelSettings = patchSettings;
@@ -133,6 +136,7 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, patchSelected, pa
             <p role="status">{h3Label(locale, globalScope ? "globalScopeNotice" : "clipScopeNotice")}</p>
         </div>
         <p className="nfh3-hint">{h3Label(locale, "parameterPolicy")}：{h3Label(locale, resolved?.policy === "defaults" ? "inheritDefaults" : "explicitOverrides")} · {h3Label(locale, "effectiveParameters")}</p>
+        {motionGroup ? <p className="nfh3-hint" role="status">{locale === "en-US" ? `Motion group: Clip ${motionGroup.head + 1}–${motionGroup.tail + 1}. Generate current Clip from the group head to run the entire group in order.` : `接续组：Clip ${motionGroup.head + 1}–${motionGroup.tail + 1}。从组首点击「生成当前 Clip」会依次运行全组。`}</p> : null}
         <ClipSettings key="clip-settings" ctx={ctx} metadata={metadata} segment={selected} patch={patchSettings} />
         <div key="panel-actions" className="nfh3-panel-actions">{awaitingConfirmation ? <><button type="button" className="minimax-run" disabled={decisionBusy || !confirmationEnabled} onClick={() => void resolveConfirmation("confirm")}><H3Icon name="sparkles" /> {selected?.latentUpscaleEnabled ? "确认一采并继续二采" : "确认并精修"}</button><button type="button" disabled={decisionBusy} onClick={() => void resolveConfirmation("keep_first_pass")}>保留一采</button><button type="button" disabled={decisionBusy} onClick={() => void resolveConfirmation("discard")}>放弃任务</button></> : status === "awaiting_confirmation" ? <span>请选中待确认的 Clip</span> : <>{busy ? <button type="button" className="minimax-reset" style={{ gridColumn: "1 / -1" }} disabled={cancelBusy || !runtimeTaskId} title={h3Label(locale, runtimeTaskId ? "cancelScopeHint" : "cancelUnavailableHint")} onClick={() => void cancelRun()}><H3Icon name="close" /> {h3Label(locale, cancelBusy ? "cancellingGeneration" : "cancelGeneration")}</button> : null}<button type="button" disabled={cancelBusy} className={busy || stuck ? "minimax-reset" : "minimax-run"} onClick={() => { ctx.openPanel(); if (busy) { ctx.emit("minimax-h3:reset-and-run", { nodeId: ctx.node.id, all: false, segmentId: selected?.id || "" }); return; } requestH3Run(ctx, false, Boolean(selected?.result)); }}><H3Icon name={busy || stuck ? "restore" : "sparkles"} /> {busy || stuck ? "重置并重新生成" : selected?.result ? "重新生成当前 Clip" : "生成当前 Clip"}</button><button type="button" disabled={cancelBusy} className={busy ? "minimax-reset" : "minimax-run-all"} onClick={() => { ctx.openPanel(); if (busy) { ctx.emit("minimax-h3:reset-and-run", { nodeId: ctx.node.id, all: true, segmentId: selected?.id || "" }); return; } requestH3Run(ctx, true); }}><H3Icon name={busy ? "restore" : "forward"} /> {busy ? "重置并重新运行" : "运行当前及后续"}</button></>}</div>
     </div>;

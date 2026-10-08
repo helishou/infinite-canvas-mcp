@@ -67,6 +67,7 @@ export type ReferenceCompilation = {
 };
 
 export function normalizeReferenceRole(value: unknown, fallback: ReferenceRole = "other"): ReferenceRole {
+    if (value === "identity" || value === "character") return "character_identity";
     return REFERENCE_ROLES.includes(value as ReferenceRole) ? value as ReferenceRole : fallback;
 }
 

@@ -307,5 +307,20 @@ class PromptDiagnosticTests(unittest.TestCase):
         diagnostics = external_context_diagnostics(value)
         self.assertTrue(any(d["path"] == "director.source.scene_registry." + scene["id"] + ".prompt_description" for d in diagnostics))
 
+class LocalShotDiagnosticsTests(unittest.TestCase):
+    def test_visible_identity_and_offscreen_entry_conflict_are_locatable(self):
+        from canvas_shot_diagnostics import diagnostics
+        p = {'shots': [{'id': 'Q', 'start_frame': 0, 'end_frame': 24, 'prompt_contract_version': 2, 'characters': [{'id': 'A'}], 'offscreen_character_ids': ['A']}], 'segments': [{'shot_ids': ['Q'], 'references': []}]}
+        errors = diagnostics(p)
+        self.assertEqual({e['code'] for e in errors}, {'SHOT_IDENTITY_REFERENCE_MISSING', 'SHOT_OFFSCREEN_ENTRY_CONFLICT'})
+        self.assertTrue(all(e['targetId'] == 'Q' and e['severity'] == 'error' for e in errors))
+        p['shots'][0].pop('prompt_contract_version')
+        self.assertTrue(all(e['severity'] == 'warning' for e in diagnostics(p)))
+
+    def test_framing_and_post_dialogue_action_time(self):
+        from canvas_shot_diagnostics import diagnostics
+        p = {'shots': [{'id': 'Q', 'start_frame': 0, 'end_frame': 24, 'prompt_contract_version': 2, 'characters': [], 'camera': {'framing': 'CU'}, 'dialogues': [{'end': 23}], 'performance': {'tracks': {'gaze': {'visibility': 'Medium framing shows both people'}}, 'events': [{'start': 23, 'end': 25, 'after_dialogue': True}]}}], 'segments': []}
+        self.assertEqual({e['code'] for e in diagnostics(p)}, {'SHOT_FRAMING_VISIBILITY_CONFLICT', 'SHOT_ACTION_TIME_MISSING'})
+
 if __name__ == "__main__":
     unittest.main()

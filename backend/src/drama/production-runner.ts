@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { formalClipOrderOperations } from "./clip-order.js";
 import { inputHash, type CanvasExecutionTarget } from "./canvas-inputs.js";
 import { createH3NodeMetadata } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { H3_DEFAULTS_KEY } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
@@ -223,6 +224,16 @@ export class EpisodeProductionRunner {
                 plannedNodeIds.add(member.nodeId);
                 if (group.nodeId !== member.nodeId || group.segmentId !== (group.segmentId || stableId("clip", id, group.id))) bindings.push({ type: "bind_director_segment", targetId: group.id, nodeId: member.nodeId, segmentId });
             }
+        }
+        // Preparing a complete scene also repairs its physical timeline order.
+        // Published sync remains unchanged; draft repair needs no new publication.
+        const selectedSegments = new Set(targetIds.filter(target => target.startsWith("segment:")).map(target => target.slice(8)));
+        for (const nodeId of new Set(current.draft.clipGroups.filter(group => selectedSegments.has(group.id)).map(group => group.nodeId).filter(Boolean))) {
+            const groups = current.draft.clipGroups.filter(group => group.nodeId === nodeId);
+            if (!groups.every(group => selectedSegments.has(group.id))) continue;
+            const existing = nodesOf(project).find(node => node.id === nodeId);
+            const segments = object(existing?.metadata).segments as Array<Record<string, unknown>> | undefined;
+            if (segments) canvasOps.push(...formalClipOrderOperations(nodeId!, segments.map(segment => String(segment.id)), groups.map(group => group.segmentId!).filter(Boolean)));
         }
         const requestedUnits = selectedUnits;
         const unitsForTarget = (target: string) => {
