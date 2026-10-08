@@ -7,6 +7,7 @@
   "exports": {
     "./agent/work-package": "./dist/agent/work-package.js",
     "./agent/llm": "./dist/agent/llm.js",
+    "./agent/tool-result": "./dist/agent/tool-result.js",
     "./agent/codex-text": "./dist/agent/codex-text.js",
     "./drama/compilation-scope": "./dist/drama/compilation-scope.js",
     "./agent/delegation": "./dist/agent/delegation.js",

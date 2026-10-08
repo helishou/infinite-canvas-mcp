@@ -18,7 +18,7 @@ npm run dev
 
 Open `http://localhost:3001`.
 
-`npm run dev` builds the official plugin registry and `canvas-agent/dist` before starting either service and does not clear existing services. Root-level `dev:backend`, `dev:web`, and `dev:services` also build those shared assets first; direct workspace `dev` commands do not. Backend `dev` does not restart on edits; use `dev:watch` explicitly when needed.
+`npm run dev` builds the official plugin registry and `canvas-agent/dist` before starting either service and does not clear existing services. Root-level `dev:backend`, `dev:web`, and `dev:services` also build those shared assets first; direct workspace `dev` commands do not. Backend `dev` and `dev:watch` reload after source changes when tasks, confirmations, Agent turns and writes are idle. Use `dev:once` for a single run. Rebuild shared Agent sources to update the watched `dist` outputs.
 
 | Address | Purpose |
 | --- | --- |

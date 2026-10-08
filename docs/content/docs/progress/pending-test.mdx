@@ -5,6 +5,32 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Backend development reload
+
+- Backend dev/dev:watch observe source and shared Agent dist changes, coalescing edits. Active media or confirmation tasks, Agent/production turns and writes defer reload. Once idle, writes are fenced and the old process exits before its watcher starts a new Backend child; Web and ComfyUI stay running. Verify new PIDs after edits, stable PIDs while busy, reload after completion, reconnects and retained drafts/receipts. Shared sources require a dist build; tests and declarations do not trigger reload. After a syntax-error exit, monitoring waits for the next source correction. Production start and dev:once remain single runs.
+
+## Manual history selection with unpublished drafts
+
+- Production batch history is verified against its original submitted task receipts, including multiple Clips sharing a parent task, without requiring a separate native node task binding. Verify scene H3 batch selection, wrong node/Clip/episode rejection, unchanged original tasks/batches, and published-version provenance for older batches without canvas snapshots.
+- Explicit manual history selection uses current formal draft targets without requiring publication or newer snapshot fields on old tasks. Successful task, log, media, node/Clip, active-run and both revision checks remain. Published history and original task inputs stay unchanged; old-input media retains its changed-input marker. Manual selection does not update old published snapshots. Verify changed or never-published drafts, receipt replay, wrong ownership and mixed-operation rollback. End deterministically rejected requests through the existing server-revision reconciliation that retains edits; do not retry them automatically with new IDs.
+
+## Formal H3 output selection entry
+
+- Formal Clip output cards open the same media review and result-selection flow as node history, retaining current prompts and parameters. Confirmation uses the formal transaction to update production and canvas records together. Select the matching Clip before using another Clip's output; missing archived media or formal bindings reject without ordinary restore ops. Ordinary H3 prompt/parameter restoration keeps its existing behavior. Verify cancellation, selection, active runs, revision conflicts and preserved historical inputs.
+
+## Located compilation blockers and receipt reuse
+
+- Compilation blockers identify their Segment, Shot, source field and matched phrase, separating authored external-context dependencies from compiler-generated failures. Cards show queued, running, blocked, failed, interrupted or successful compilation separately from tool transport; query titles distinguish status, diagnostics and targets, with operation and application details.
+- Identical effective inputs with located authored standalone-prompt blockers reuse the original receipt across operation IDs without rerunning. Reference, scope or engine changes allow compilation. Historical records are not migrated and authored source/media are not automatically edited. Check restart recovery, both languages/themes, diagnostic pagination and source/compiler attribution.
+
+## Generation task query cards
+
+- Successful queries count the returned tasks and remain successful even when the summary contains “0 failed” or lists failed generation tasks. Live and history views share result parsing, preserve actual errors, and suggest querying again after a connection recovers. Missing task lists do not become zero counts. Check both languages and themes, empty and mixed task lists, and query failures.
+
+## Subagent input and result
+
+- The left preview shows Input above Subagent result in one continuous scroll area. Input reads the saved Backend task's delegated instructions, additional context and expandable frozen work package, including while the task is running. Verify section order, continuous scrolling, languages, themes, read failures and isolation of old inputs and late reads after director/canvas changes.
+
 ## Subagent preview beside the director
 
 - Selecting a subagent opens its result, running state or failure details in a separate preview to the left of the director panel. The roster and chat remain on the right. Select the same task again, use Close or press Esc to dismiss. Resizing repositions the preview; narrow windows use the available viewport. Director/canvas changes isolate old previews and late results. Opening a preview does not send or adopt suggestions. Verify both languages, themes and narrow windows.
@@ -856,7 +882,7 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 
 ## Local Backend startup
 
-- From a VS Code terminal, run `npm run dev:local`. Backend should report that it has started and `/health` should respond before opening the canvas; Web and Agent should remain available. The default `dev:backend` command should run without a watch child. Use `npm run dev:watch --workspace backend` only when source watching is needed.
+- From a VS Code terminal, run `npm run dev:local`. Backend should report that it has started and `/health` should respond before opening the canvas; Web and Agent should remain available. The default `dev:backend` and explicit `dev:watch` commands use guarded reload. Use `dev:once` for a single run.
 - Start `npm run dev:backend` with a canvas that has accumulated H3 history. The Backend health check should become available promptly, and opening the canvas should connect without waiting for all historical H3 tasks to replay. Startup should process at most the 10 newest recovery candidates, including unfinished tasks and terminal H3 tasks still bound to a node or Clip. Older candidates should remain unchanged if excluded. A selected terminal H3 task should finish its saved writeback even if its older generation log has been pruned.
 
 ## Canvas video comparison

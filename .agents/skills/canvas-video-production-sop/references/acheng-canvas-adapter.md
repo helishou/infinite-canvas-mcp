@@ -10,7 +10,7 @@ Acheng Director 本身就是 Skill，完整上游文件和模块位于项目 `.a
 
 ## 创作权属
 
-新建制作源稿默认采用当前运行包的 `storyboard_policy.version=1`，对白景别、观看对象和剪辑理由按 shots 专业合同设计。每次摄影视角切换登记独立 Shot，Shot 可短于 4 秒，4–12 秒只限制 Clip。旧稿不自动迁移；显式采用策略的返修只校验选定范围。
+H3 编译按对白说话者和帧窗自动插入近景与反打，不要求普通 Shot 手工填写对白景别。用户需固定/覆盖机位时才显式采用 `storyboard_policy.version=1` 登记景别、关注对象和剪辑理由。Shot/Clip 时长和边界沿原合同保留。
 
 story、assets、shots、performance、effects、model、continuity 按 Acheng 原合同协作。空间设计在 assets 的 scene-design 支路，shots 消费空间事实；站位图是按需资产。多资产新制作采用 STYLE_MOTHER，新四视图默认采用等高的正脸近景、正面全身、侧面全身、背面全身和空手；色卡为辅助信息，不另建强制前置阶段。旧批准资产可保留并登记适用范围，缺项只补本轮所需。
 

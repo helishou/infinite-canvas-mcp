@@ -14,7 +14,7 @@ npm ci
 npm run dev
 ```
 
-Open `http://localhost:3001`. Root startup commands build `canvas-agent/dist` before starting the Backend (17370) and Web (3001); a failed shared build prevents dependent services from starting. Build the shared package yourself before invoking workspace commands directly. Backend `dev` does not restart on source edits; `dev:watch` does.
+Open `http://localhost:3001`. Root startup commands build `canvas-agent/dist` before starting the Backend (17370) and Web (3001); a failed shared build prevents dependent services from starting. Build the shared package yourself before invoking workspace commands directly. Backend `dev` and `dev:watch` use guarded automatic reload: edits are coalesced, running or confirmation tasks, Agent/production turns and writes delay restart. `dev:once` starts once. Shared Agent source changes need a build; the watcher observes the resulting dist changes. HTTP/MCP connections reconnect after reload.
 
 API channels require your endpoint, key, and model settings. Local ComfyUI needs its service and workflows without an OpenAI API key; canvas editing alone needs no model endpoint. Codex CLI is installed only when needed.
 

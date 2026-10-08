@@ -1,3 +1,4 @@
+import { parseToolResult, toolResultFailure, generationTaskCounts, compilationToolView, describeCompilation, compilationDetailRows } from "@basketikun/canvas-agent/agent/tool-result";
 import { isSiteTool, SITE_TOOL_LABELS } from "@/lib/agent/agent-site-tools";
 import i18n from "@/i18n";
 import { summarizeCanvasAgentOps, type CanvasAgentOp } from "@/lib/canvas/canvas-agent-ops";
@@ -54,7 +55,7 @@ export type AgentEventItem = {
     savedPath?: unknown;
     revisedPrompt?: unknown;
 };
-export type AgentUserDetail = { kind: string; status: string; rows?: Array<{ label: string; value: string }>; output?: string; files?: Array<{ path: string; action?: string }>; tasks?: Array<{ step: string; status: string }>; explanation?: string };
+export type AgentUserDetail = { kind: string; status: string; compilationStatus?: string; rows?: Array<{ label: string; value: string }>; output?: string; files?: Array<{ path: string; action?: string }>; tasks?: Array<{ step: string; status: string }>; explanation?: string };
 
 export type AgentLogContext = { endpoint: string; connected: boolean; enabled: boolean; activity: string; waiting: boolean; sending: boolean; messages: number; pendingTool?: string };
 
@@ -108,7 +109,8 @@ export function formatAgentActivity(event: AgentEventPayload): Omit<AgentChatIte
     if (item.type === "context_compaction") return { role: "tool", title: tr("compactContext"), text: item.error?.message || tr(completed ? "contextCompacted" : "compactingContext"), detail: { kind: "context", status: itemStatus, ...(item.error?.message ? { output: item.error.message } : {}) } };
     if (isMcpToolItem(item)) {
         const name = String(item.tool || "");
-        return { role: "tool", title: toolName(name), text: completed ? item.error?.message || toolSummary(item) : tr("toolRunning", { action: toolAction(name) }), detail: toolDetail(item, itemStatus) };
+        const failure = toolResultFailure(item);
+        return { role: "tool", title: compilationToolView(item) ? tr(compilationToolView(item)!.titleKey) : toolName(name), text: completed ? toolSummary(item) : tr("toolRunning", { action: toolAction(name) }), detail: toolDetail(item, failure.failed ? "failed" : itemStatus) };
     }
     if (item.type === "dynamic_tool_call") {
         const name = String(item.tool || "");
@@ -342,8 +344,8 @@ function siteToolSummary(name: string, result: unknown, input: unknown) {
     if (name === "assets_list") return tr("assetCount", { count: numberField(data, "total") });
     if (name === "assets_add") return tr("assetAdded");
     if (name === "generation_get_status") {
-        const summary = data.summary && typeof data.summary === "object" ? (data.summary as Record<string, unknown>) : {};
-        return tr("generationStatus", { total: numberField(data, "total"), queued: numberField(summary, "queued"), running: numberField(summary, "running"), succeeded: numberField(summary, "succeeded"), failed: numberField(summary, "failed") });
+        const counts = generationTaskCounts(data);
+        return counts ? tr("generationStatus", counts) : tr("generationStatusUnavailable");
     }
     if (name === "workbench_image_generate" || name === "workbench_video_generate") return typeof data.note === "string" ? data.note : tr("workbenchExecuted");
     if (name === "workbench_image_get_config" || name === "workbench_video_get_config") return tr("workbenchConfigRead");
@@ -356,7 +358,10 @@ function isMcpToolItem(item?: AgentEventItem): item is AgentEventItem & { type: 
 
 export function toolDetail(item: AgentEventItem | undefined, status: string): AgentUserDetail {
     const name = String(item?.tool || "");
-    return { kind: "tool", status, rows: toolInputRows(name, item?.arguments), ...(item?.error?.message ? { output: item.error.message } : {}) };
+    const failure = toolResultFailure(item);
+    const compilation = compilationToolView(item);
+    if (compilation) return { kind: "tool", status, compilationStatus: compilation.status, rows: compilationDetailRows(compilation).map(row => ({ label: tr(row.key), value: row.value })), output: describeCompilation(compilation, tr) };
+    return { kind: "tool", status, rows: toolInputRows(name, item?.arguments), ...(failure.failed ? { output: toolFailureText(item) } : {}) };
 }
 
 export function toolCallDetail(name: string, input: unknown, status: string, error = ""): AgentUserDetail {
@@ -373,7 +378,15 @@ function toolInputRows(name: string, input: unknown) {
     return [];
 }
 
+function toolFailureText(item?: AgentEventItem) {
+    const failure = toolResultFailure(item);
+    return [failure.message || tr("toolResultFailed"), failure.connection ? tr("toolConnectionRecovery") : ""].filter(Boolean).join("\n");
+}
+
 export function toolSummary(item?: AgentEventItem) {
+    if (toolResultFailure(item).failed) return toolFailureText(item);
+    const compilation = compilationToolView(item);
+    if (compilation) return describeCompilation(compilation, tr);
     const result = parseToolResult(item?.result);
     const name = String(item?.tool || "");
     if (name === "site_navigate" || isSiteTool(name)) return siteToolSummary(name, result, parseToolArguments(item?.arguments));
@@ -460,21 +473,6 @@ export function latestPlanMessage(messages: AgentChatItem[]) {
 
 export function isPlanMessage(message: AgentChatItem) {
     return message.role === "tool" && objectField(message.detail, "kind") === "todo";
-}
-
-function parseToolResult(result: unknown) {
-    const content = objectField(result, "content");
-    const text = Array.isArray(content)
-        ? content
-              .map((item) => objectField(item, "text"))
-              .filter((item): item is string => typeof item === "string")
-              .join("\n")
-        : "";
-    try {
-        return text ? JSON.parse(text) : result;
-    } catch {
-        return text || result;
-    }
 }
 
 export function normalizeText(value: unknown) {

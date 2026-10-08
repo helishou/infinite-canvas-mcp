@@ -213,8 +213,13 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
         }
     }
     const audit = JSON.parse(readFile("audit.json").toString("utf8"));
+    const located: ProductionDiagnostic[] = Array.isArray(audit.diagnostics) ? audit.diagnostics.filter((item: ProductionDiagnostic) => item.code === "PROMPT_EXTERNAL_CONTEXT") : [];
+    diagnostics.push(...located);
     for (const gate of audit.gates || []) if (gate.status === "FAIL") {
-        for (const message of gate.errors || []) diagnostics.push({ code: "COMPILER_GATE_FAILED", path: `audit.${gate.gate}`, message, severity: "error" });
+        for (const message of gate.errors || []) {
+            if (located.length && (message.startsWith("Prompt depends on external prose:") || message.startsWith("external-context dependency:"))) continue;
+            diagnostics.push({ code: "COMPILER_GATE_FAILED", path: `audit.${gate.gate}`, message, severity: "error" });
+        }
     }
     diagnostics.push(...preflightDirector(director, "edit", runtime).diagnostics.filter(d => d.severity === "error"));
     return { director, exitCode, diagnostics, audit, sourceAdjustments, acceptance: JSON.parse(readFile("delivery.acceptance.json").toString("utf8")) };

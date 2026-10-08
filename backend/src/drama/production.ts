@@ -1801,8 +1801,7 @@ export class EpisodeProductionService {
                     if (!published) throw new Error("尚无发布版本，不能核验迁移前 H3 结果");
                     this.restoreArchivedSceneResults(episodeId, record, draft, published, operation, input.operationId, canvasCommits);
                 } else if (operation.type === "select_director_result") {
-                    if (!published) throw new Error("尚无可选用历史结果的发布版本");
-                    this.selectDirectorResult(episodeId, record, draft, published, operation, input.operationId, canvasCommits);
+                    this.selectDirectorResult(episodeId, draft, operation, input.operationId, canvasCommits);
                 } else if (operation.type === "review_director_asset") {
                     const asset = draft.director?.assets[operation.assetId];
                     if (operation.version === 0 && asset?.generationTaskId) {
@@ -1930,7 +1929,7 @@ export class EpisodeProductionService {
                     .run(record.revision + 1, new Date().toISOString(), input.operationId);
             }
             if (published && input.ops.some(operation => operation.type === "review_director_asset" || operation.type === "review_keyframe")) this.finishRejectedBatches(episodeId, published);
-            if (published && input.ops.some((operation) => operation.type === "review_keyframe" || operation.type === "review_director_asset" || operation.type === "select_director_result")) this.prepare("UPDATE episode_production_versions SET snapshot_json=? WHERE episode_id=? AND version=?").run(JSON.stringify(published), episodeId, record.publishedVersion);
+            if (published && input.ops.some((operation) => operation.type === "review_keyframe" || operation.type === "review_director_asset")) this.prepare("UPDATE episode_production_versions SET snapshot_json=? WHERE episode_id=? AND version=?").run(JSON.stringify(published), episodeId, record.publishedVersion);
             return { ...record, revision: record.revision + 1, draft, published, updatedAt: new Date().toISOString() };
         }, canvasPreparation ? (record, commits) => {
             if (canvasPreparation) {
@@ -2345,7 +2344,7 @@ export class EpisodeProductionService {
         });
     }
 
-    private selectDirectorResult(episodeId: string, current: ProductionRecord, draft: EpisodeProductionData, published: EpisodeProductionData,
+    private selectDirectorResult(episodeId: string, draft: EpisodeProductionData,
         op: Extract<ProductionOperation, { type: "select_director_result" }>, operationId: string, canvasCommits?: CanvasCommit[]) {
         const canvasId = this.episode(episodeId).canvasId;
         const project = canvasId && this.db.getCanvasProject(canvasId);
@@ -2353,13 +2352,32 @@ export class EpisodeProductionService {
         const log = this.db.getGenerationLog(op.generationLogId);
         if (!node || !log || log.status !== "success" || log.projectId !== canvasId || log.nodeId !== op.nodeId) throw new Error("历史结果不属于当前制作节点，或尚未成功归档");
         if (Number(project!.revision) !== op.canvasRevision) throw new Error("画布已变化，请刷新历史后重新选择");
-        const director = published.director;
-        if (!director || !draft.director || director.sourceHash !== draft.director.sourceHash) throw new Error("制作稿尚未发布，请先完成当前版本发布");
         const task = log.runtimeTaskId && this.db.getTask(log.runtimeTaskId);
-        if (!task || task.status !== "succeeded") throw new Error("历史结果缺少可核验的成功任务");
+        if (!task || task.status !== "succeeded" || task.projectId !== canvasId || task.nodeId !== op.nodeId || task.segmentId !== log.segmentId) throw new Error("历史结果缺少可核验的成功任务");
         const taskId = String(task.parentTaskId || record(task.params).parentTaskId || task.id);
-        const binding = this.db.db.prepare("SELECT * FROM production_task_bindings WHERE task_id=? AND owner_kind=? AND owner_id=?")
+        // An explicit human history selection targets the current draft. Publication
+        // and old task snapshot formats are not prerequisites for this edit.
+        const director = draft.director;
+        if (!director) throw new Error("当前制作记录缺少导演数据，无法核对历史结果归属");
+        let binding = this.db.db.prepare("SELECT * FROM production_task_bindings WHERE task_id=? AND owner_kind=? AND owner_id=?")
             .get(taskId, this.ownerKind, episodeId) as Record<string, any> | undefined;
+        if (!binding) {
+            // Production batches persist their exact task/target mapping in submitted_json,
+            // independently of native node controls' production_task_bindings.
+            const targetId = `${op.targetKind === "keyframe" ? "frame" : op.targetKind}:${op.targetId}`;
+            const receipt = this.prepare(`SELECT b.version,
+                COALESCE(json_extract(b.execution_snapshot_json, '$.sourceHash'), json_extract(v.snapshot_json, '$.director.sourceHash')) AS source_hash
+                FROM episode_production_batches b
+                LEFT JOIN episode_production_versions v ON v.episode_id=b.episode_id AND v.version=b.version,
+                json_each(b.submitted_json) submitted
+                WHERE b.episode_id=? AND json_extract(submitted.value, '$.taskId')=?
+                AND json_extract(submitted.value, '$.id')=? AND json_extract(submitted.value, '$.kind')=?
+                AND json_extract(submitted.value, '$.projectId')=? AND json_extract(submitted.value, '$.nodeId')=?
+                AND json_extract(submitted.value, '$.segmentId') IS ?
+                ORDER BY b.created_at DESC LIMIT 1`).get(episodeId, taskId, targetId, op.targetKind === "segment" ? "h3" : "image", canvasId!, op.nodeId, log.segmentId || null);
+            if (receipt?.source_hash) binding = { ...receipt, project_id: canvasId, node_id: op.nodeId, target_kind: op.targetKind, target_id: op.targetId,
+                targets_json: JSON.stringify([{ targetId: op.targetId, segmentId: log.segmentId }]), status: "bound" };
+        }
         if (!binding || binding.project_id !== canvasId || binding.node_id !== op.nodeId || binding.target_kind !== op.targetKind || binding.status === "submitted") throw new Error("历史任务不属于当前正式制作对象，或尚未完成结果绑定");
         const outputs = [...task.outputs, ...(Array.isArray(record(task.result).media) ? record(task.result).media as Record<string, any>[] : [])];
         const output = outputs.find(output => output.storageKey === op.storageKey);
@@ -2374,30 +2392,27 @@ export class EpisodeProductionService {
         const staleInput = binding.source_hash !== director.sourceHash;
         let operations: Array<Record<string, unknown> & { type: string }>;
         if (op.targetKind === "segment") {
-            const group = published.clipGroups.find(group => group.id === op.targetId);
-            const draftGroup = draft.clipGroups.find(group => group.id === op.targetId);
+            const group = draft.clipGroups.find(group => group.id === op.targetId);
             const targets = JSON.parse(String(binding.targets_json)) as Array<{ targetId: string; segmentId?: string }>;
-            if (!group || !draftGroup || group.nodeId !== op.nodeId || draftGroup.nodeId !== op.nodeId || group.segmentId !== draftGroup.segmentId || log.segmentId !== group.segmentId || !targets.some(target => target.targetId === op.targetId && target.segmentId === group.segmentId)) throw new Error("历史视频不属于这个正式 Clip");
+            if (!group || group.nodeId !== op.nodeId || log.segmentId !== group.segmentId || !targets.some(target => target.targetId === op.targetId && target.segmentId === group.segmentId)) throw new Error("历史视频不属于这个正式 Clip");
             const clip = (Array.isArray(metadata.segments) ? metadata.segments as Record<string, unknown>[] : []).find(clip => clip.id === group.segmentId);
             if (!clip || ["queued", "loading", "awaiting_confirmation"].includes(String(clip.status))) throw new Error("Clip 正在生成，不能替换活动结果");
             if (!String(media.mimeType).startsWith("video/")) throw new Error("Clip 历史结果必须是视频");
             operations = [{ type: "restore_h3_output", nodeId: op.nodeId, segmentId: group.segmentId, generationLogId: log.id, storageKey: op.storageKey, settings: {} }];
-            Object.assign(group, { selectedResult, inputOutdated: staleInput }); Object.assign(draftGroup, { selectedResult, inputOutdated: staleInput });
+            Object.assign(group, { selectedResult, inputOutdated: staleInput });
         } else {
             if (binding.target_id !== op.targetId || !String(media.mimeType).startsWith("image/")) throw new Error("历史图片不属于这个正式资产或关键帧");
             const assetId = op.targetKind === "keyframe" ? director.shotInputs[op.targetId]?.keyframeAssetId : op.targetId;
             const asset = assetId && director.assets[assetId];
-            const local = assetId && draft.director.assets[assetId];
-            if (!assetId || !asset || !local || asset.nodeId !== op.nodeId || local.nodeId !== op.nodeId || asset.sharedSource || local.sharedSource) throw new Error("请在原资产画布选择版本，不能修改共享引用");
+            if (!assetId || !asset || asset.nodeId !== op.nodeId || asset.sharedSource) throw new Error("请在原资产画布选择版本，不能修改共享引用");
             const priorKey = asset.storageKey;
             const selected = { ...asset, storageKey: op.storageKey, sha256, status: "generated" as const, evidence: "", inputOutdated: staleInput, selectedResult };
-            director.assets[assetId] = selected; draft.director.assets[assetId] = structuredClone(selected);
+            director.assets[assetId] = selected;
             if (op.targetKind === "keyframe") {
-                published.keyframes[op.targetId] = { nodeId: op.nodeId, storageKey: op.storageKey, sourceVersion: selectedResult.sourceVersion };
-                draft.keyframes[op.targetId] = structuredClone(published.keyframes[op.targetId]);
-                delete published.keyframeReviews[op.targetId]; delete draft.keyframeReviews[op.targetId];
+                draft.keyframes[op.targetId] = { nodeId: op.nodeId, storageKey: op.storageKey, sourceVersion: selectedResult.sourceVersion };
+                delete draft.keyframeReviews[op.targetId];
             }
-            for (const production of [director, draft.director]) for (const artifact of production.artifacts) if (priorKey !== op.storageKey && artifact.references.some(ref => ref.nodeId === op.nodeId || ref.storageKey === priorKey)) artifact.status = "stale";
+            for (const artifact of director.artifacts) if (priorKey !== op.storageKey && artifact.references.some(ref => ref.nodeId === op.nodeId || ref.storageKey === priorKey)) artifact.status = "stale";
             const images = Array.isArray(metadata.images) ? metadata.images as Record<string, unknown>[] : [];
             const imageId = images.find(image => image.storageKey === op.storageKey)?.id || `history:${log.id}:${op.storageKey}`;
             const image = { id: imageId, status: "success", storageKey: op.storageKey, content: `/media/${encodeURIComponent(op.storageKey)}`, naturalWidth: media.width || 0, naturalHeight: media.height || 0, bytes: media.bytes, mimeType: media.mimeType };

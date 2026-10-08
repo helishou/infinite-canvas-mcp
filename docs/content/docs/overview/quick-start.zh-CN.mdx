@@ -22,7 +22,7 @@ npm run dev
 http://localhost:3001
 ```
 
-`npm run dev` 先构建官方插件清单和 `canvas-agent/dist`，成功后启动两个进程，不清理旧服务。根目录的 `dev:backend`、`dev:web` 和 `dev:services` 也会先构建共享产物；直接调用 workspace 的 `dev` 不经过这个准备步骤。Backend `dev` 不自动重启，需要时显式使用 `dev:watch`。
+`npm run dev` 先构建官方插件清单和 `canvas-agent/dist`，成功后启动两个进程，不清理旧服务。根目录的 `dev:backend`、`dev:web` 和 `dev:services` 也会先构建共享产物；直接调用 workspace 的 `dev` 不经过这个准备步骤。Backend `dev` 与 `dev:watch` 在源码变化后等待任务、确认、Agent 回合及写请求空闲再重载；单次启动使用 `dev:once`。共享 Agent 源码仍需构建，更新 dist 后会触发重载。
 
 | 地址 | 用途 |
 | --- | --- |

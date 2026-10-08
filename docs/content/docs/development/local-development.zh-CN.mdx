@@ -20,7 +20,7 @@ npm run dev
 http://localhost:3001
 ```
 
-根目录启动命令先构建 `canvas-agent/dist`，再启动 Backend（17370）与 Web（3001）；共享包构建失败时不会启动依赖它的服务。单独运行 workspace 命令前须先构建共享包。Backend 的 `dev` 不自动重启，`dev:watch` 才监听源码变化。
+根目录启动命令先构建 `canvas-agent/dist`，再启动 Backend（17370）与 Web（3001）；共享包构建失败时不会启动依赖它的服务。单独运行 workspace 命令前须先构建共享包。Backend 的 `dev` 与 `dev:watch` 默认使用安全自动重载：连续编辑合并，运行／待确认任务、Agent／生产代理回合和写请求未结束时延后重载。`dev:once` 单次启动。共享 Agent 源码需要先构建；重载器监听其 dist 更新。重载后 HTTP／MCP 连接重新建立。
 
 ## 2. 配置模型
 

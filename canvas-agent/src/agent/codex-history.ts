@@ -1,3 +1,4 @@
+import { parseToolResult, toolResultFailure, generationTaskCounts, compilationToolView, describeCompilation, compilationDetailRows, compilationHistoryLabels } from "./tool-result.js";
 import { field } from "../utils/value.js";
 import type { CodexPlanUpdate } from "./codex-protocol.js";
 
@@ -93,9 +94,10 @@ export function threadMessages(thread: unknown, planUpdates: CodexPlanUpdate[] =
             }
             if (type === "mcpToolCall") {
                 const tool = String(field(item, "tool") || "工具调用");
-                const error = String(field(field(item, "error"), "message") || "");
+                const failure = toolResultFailure(item);
+                const error = failure.failed ? [failure.message || "工具调用失败，未取得结果", failure.connection ? "工具连接已断开或暂时不可用；服务恢复后，在新回合重新查询。" : ""].filter(Boolean).join("\n") : "";
                 const input = toolArguments(field(item, "arguments"));
-                push({ id, role: "tool", title: toolName(tool), text: error || toolHistorySummary(tool, item, input), detail: toolHistoryDetail(tool, item, input, error) });
+                push({ id, role: "tool", title: compilationToolView(item) ? compilationHistoryLabels[compilationToolView(item)!.titleKey] : toolName(tool), text: error || toolHistorySummary(tool, item, input), detail: toolHistoryDetail(tool, item, input, error) });
             }
             if (type === "commandExecution") {
                 const command = String(field(item, "command") || "").trim();
@@ -510,6 +512,8 @@ function commandDetail(item: unknown) {
 
 /** 生成 MCP 工具的用户可读详情。 */
 function toolHistoryDetail(tool: string, item: unknown, input: unknown, error: string) {
+    const compilation = compilationToolView(item);
+    if (compilation) return { kind: "tool", status: itemStatus(item, error), compilationStatus: compilation.status, rows: compilationDetailRows(compilation).map(row => ({ label: compilationHistoryLabels[row.key], value: row.value })), output: describeCompilation(compilation, key => compilationHistoryLabels[key]) };
     return { kind: "tool", status: itemStatus(item, error), rows: toolInputRows(tool, input), ...(error ? { output: error } : {}) };
 }
 
@@ -531,6 +535,8 @@ function aggregateItemStatus(statuses: string[]) {
 
 /** 生成 MCP 工具在对话中的结果摘要。 */
 function toolHistorySummary(tool: string, item: unknown, input: unknown) {
+    const compilation = compilationToolView(item);
+    if (compilation) return describeCompilation(compilation, key => compilationHistoryLabels[key]);
     const result = parseToolResult(field(item, "result"));
     if (tool === "site_navigate") return `已打开${routeName(String(field(input, "path") || "/"))}`;
     if (tool === "canvas_list_projects") return `共 ${numberValue(field(result, "total"))} 个画布`;
@@ -551,8 +557,8 @@ function toolHistorySummary(tool: string, item: unknown, input: unknown) {
     if (tool === "assets_list") return `共 ${numberValue(field(result, "total"))} 个资产`;
     if (tool === "assets_add") return "已加入我的素材";
     if (tool === "generation_get_status") {
-        const summary = field(result, "summary");
-        return `共 ${numberValue(field(result, "total"))} 个任务，排队 ${numberValue(field(summary, "queued"))}，运行中 ${numberValue(field(summary, "running"))}，成功 ${numberValue(field(summary, "succeeded"))}，失败 ${numberValue(field(summary, "failed"))}`;
+        const counts = generationTaskCounts(result);
+        return counts ? `共 ${counts.total} 个任务，排队 ${counts.queued}，运行中 ${counts.running}，成功 ${counts.succeeded}，失败 ${counts.failed}` : "未取得任务列表，无法统计生成状态";
     }
     if (tool === "workbench_image_generate" || tool === "workbench_video_generate") return String(field(result, "note") || "已在工作台执行");
     if (tool === "workbench_image_get_config" || tool === "workbench_video_get_config") return "已读取工作台配置";
@@ -579,20 +585,6 @@ function canvasContentSummary(nodes: unknown[], connections: number) {
         connections ? `${connections} 条连线` : "",
     ].filter(Boolean);
     return parts.length ? parts.join("、") : "当前画布为空";
-}
-
-/** 从 MCP 历史结果中还原工具返回的数据。 */
-function parseToolResult(result: unknown) {
-    const content = field(result, "content");
-    const text = arrayValue(content)
-        .map((item) => field(item, "text"))
-        .filter((item): item is string => typeof item === "string")
-        .join("\n");
-    try {
-        return text ? JSON.parse(text) : result;
-    } catch {
-        return text || result;
-    }
 }
 
 /** 提取工具参数中适合普通用户查看的信息。 */

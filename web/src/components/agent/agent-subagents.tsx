@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Button, Tabs, theme as antdTheme } from "antd";
+import { Button, theme as antdTheme } from "antd";
 import { Users, ChevronRight, RefreshCw, LoaderCircle, Clock3, CheckCircle2, CircleAlert, CircleX, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { DirectorSubagentResult, DirectorSubagentSummary } from "@basketikun/canvas-agent/agent/delegation";
@@ -137,7 +137,7 @@ export function AgentSubagents({ theme }: { theme: (typeof canvasThemes)[keyof t
             void fetchBackendTask(task.taskId).then(response => {
                 if (generation.current !== epoch) return;
                 const saved = response.task;
-                if (!saved?.input || saved.kind !== "director-subagent" || saved.projectId !== projectId || saved.input.parentThreadId !== parentThreadId) throw new Error(t("agent.subagents.inputUnavailable"));
+                if (!saved?.input || saved.id !== task.taskId || saved.kind !== "director-subagent" || saved.projectId !== projectId || saved.input.parentThreadId !== parentThreadId) throw new Error(t("agent.subagents.inputUnavailable"));
                 setInputs(previous => ({ ...previous, [task.taskId]: { value: saved.input } }));
             }).catch(reason => { if (generation.current === epoch) setInputs(previous => ({ ...previous, [task.taskId]: { error: String(reason) } })); });
         }
@@ -168,16 +168,17 @@ export function AgentSubagents({ theme }: { theme: (typeof canvasThemes)[keyof t
                     <Button type="text" size="small" icon={<X className="size-4" />} aria-label={t("agent.message.close")} onClick={() => setSelected("")} />
                 </header>
                 <div className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain px-4 py-3 text-xs" data-testid="agent-subagent-detail">
-                <Tabs defaultActiveKey="result" items={[
-                    { key: "input", label: t("agent.subagents.input"), children: <div className="space-y-3" data-testid="agent-subagent-input">
+                    <section className="space-y-3" data-testid="agent-subagent-input">
+                        <h2 className="text-sm font-semibold">{t("agent.subagents.input")}</h2>
                         {inputs[detail.taskId]?.error ? <p role="alert">{inputs[detail.taskId].error}</p> : !inputs[detail.taskId]?.value ? <p>{t("agent.subagents.readingInput")}</p> : <>
                             <h3 className="font-medium">{t("agent.subagents.inputPrompt")}</h3>
                             <AgentChatMessage theme={theme} item={{ id: `subagent-input:${detail.taskId}`, role: "user", text: String(inputs[detail.taskId].value!.prompt || "") }} />
                             {inputs[detail.taskId].value!.context ? <><h3 className="font-medium">{t("agent.subagents.inputContext")}</h3><p className="whitespace-pre-wrap break-words">{String(inputs[detail.taskId].value!.context)}</p></> : null}
                             {inputs[detail.taskId].value!.workPackage ? <details><summary className="cursor-pointer">{t("agent.subagents.inputWorkPackage")}</summary><pre className="mt-2 whitespace-pre-wrap break-words text-xs">{JSON.stringify(inputs[detail.taskId].value!.workPackage, null, 2)}</pre></details> : null}
                         </>}
-                    </div> },
-                    { key: "result", label: t("agent.subagents.result"), children: <div className="space-y-2">
+                    </section>
+                    <section className="mt-4 space-y-2 border-t pt-4" style={{ borderColor: theme.node.stroke }} data-testid="agent-subagent-result">
+                        <h2 className="text-sm font-semibold">{t("agent.subagents.result")}</h2>
                 {detail.error && <p className="whitespace-pre-wrap break-words">{detail.error}</p>}
                 {!detail.binding || detail.binding === "unbound" ? <p>{t("agent.subagents.unbound")}</p> : null}
                 {detail.artifactHash && <p className="break-all">{t("agent.subagents.artifact", { hash: detail.artifactHash })}</p>}
@@ -199,8 +200,7 @@ export function AgentSubagents({ theme }: { theme: (typeof canvasThemes)[keyof t
                 {detail.resultAvailable && !result && reading !== detail.taskId && <Button type="text" size="small" onClick={() => void read(detail)}>{t("agent.subagents.readResult")}</Button>}
                 {!detail.resultAvailable && !detail.error && <p style={{ color: theme.node.muted }}>{t(["queued", "running"].includes(detail.status) ? "agent.subagents.workingDetail" : "agent.subagents.noResult")}</p>}
                 {result && <><p className="whitespace-pre-wrap break-words text-sm">{result.summary}</p><AgentChatMessage theme={theme} item={{ id: `subagent-result:${detail.taskId}`, role: "assistant", text: result.content }} />{result.unresolved.length > 0 && <div style={{ color: theme.node.muted }}><p>{t("agent.subagents.unresolved")}</p><ul className="list-disc pl-4">{result.unresolved.map((item, index) => <li className="break-words" key={index}>{item}</li>)}</ul></div>}</>}
-                    </div> },
-                ]} />
+                    </section>
                 </div>
             </section>, document.body,
         )}

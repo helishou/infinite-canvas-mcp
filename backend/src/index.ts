@@ -40,6 +40,7 @@ import { CANVAS_BROWSER_TASK_KIND, CanvasBrowserScriptDispatcher } from "./canva
 import { registerCanvasBrowserScriptRoutes } from "./server/browser-script-routes.js";
 import { acquireBackendInstanceLock } from "./instance-lock.js";
 import { CanvasReferenceService } from "./canvas/reference-service.js";
+import { createDevReloadGate } from "./runtime/dev-reload.js";
 import { registerCanvasReferenceRoutes } from "./server/canvas-reference-routes.js";
 import { EpisodeProductionService } from "./drama/production.js";
 import { SharedAssetCoordinator } from "./drama/shared-assets.js";
@@ -158,7 +159,10 @@ async function startBackendHttpServer() {
     canvasBrowserScriptDispatcher,
   );
   const canvasReferences = new CanvasReferenceService(runtime.stores, (alert) => logger.warn("疑似参考资产循环写入", alert));
+  const devReload = process.env.INFINITE_CANVAS_DEV_WATCH === "1" && process.send ? createDevReloadGate() : null;
+  const devActiveTask = devReload ? db.db.prepare("SELECT 1 FROM tasks WHERE status IN ('queued','running','awaiting_confirmation') LIMIT 1") : null;
   const { app } = startServer(runtime.db, config, {
+    devReloadMiddleware: devReload?.middleware,
     comfy: runtime.comfy,
     events: runtime.events,
     stores: runtime.stores,
@@ -494,6 +498,15 @@ async function startBackendHttpServer() {
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
+  if (devReload && process.send) {
+    process.on("message", (message: unknown) => {
+      if (!message || typeof message !== "object" || (message as { type?: string }).type !== "dev:reload") return;
+      const accepted = devReload.tryReload(() => agent.session.codexBusy || agent.session.runtimeStateSnapshot.conversation.status === "running" || productionAgents.busy
+        || Boolean(devActiveTask?.get()));
+      process.send?.({ type: "dev:reload-status", accepted }, undefined, undefined, () => { if (accepted) shutdown("DEV_RELOAD"); });
+    });
+    process.send({ type: "dev:ready", pid: process.pid });
+  }
   // tsx --watch 默认用 SIGINT 重启：Express 5 异步关闭、可能不触发 SIGINT 监听器，
   // 补一个 beforeExit 走同样收尾，避免每次热重载都卡到 10s 兜底才退。
   process.on("beforeExit", () => {

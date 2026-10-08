@@ -25,7 +25,7 @@
 
 - 外部客户端连接常驻 Backend `/mcp` Streamable HTTP。session 上下文隔离，插件声明轮询由 Backend 统一维护；stdio 仅兼容。
 - HTTP session 在进程内存中，服务重载后须让客户端重新初始化；不要误判成项目数据丢失，也不要为每个会话新建业务 Backend。
-- `npm run dev --workspace backend` 当前为 `tsx src/index.ts`，不会自动重启；需要热重启时显式运行 `npm run dev:watch --workspace backend`。只有实际消费 dist 时才必须重建 Backend。共享包 dist 变更也要确认已被当前进程加载。
+- `dev` 与 `dev:watch` 使用带空闲保护的开发重载器，监听 Backend 源码和共享包 dist；媒体任务、待确认任务、Agent／生产代理回合或写请求未结束时延后重载。`dev:once` 为单次启动，`start` 消费 Backend dist。只有实际消费 dist 时才必须重建 Backend；共享包源码仍须先构建 dist，再确认消费进程重载。
 - 端口、lock 文件和进程名都不是唯一证据；核对命令行、端点响应和相关日志，不批量清理服务。
 
 ## 改动验收

@@ -6,6 +6,8 @@
 
 已有导演稿的局部修改优先在一次 `production_edit` 中合并已确定的 `patch_director_source`（brief/style/scene/asset/shot/segment）或 `patch_director_continuity` 操作；Backend 保留其余源稿并重算 sourceHash。只有首次创建或用户明确整稿替换才回传完整导演稿。同一候选 source 对象计算一次哈希并复用，已保存稿采用读取或写回执返回的 sourceHash。
 
+`patch_director_source` 的 `scene` 修改剧本场次 `script_scenes`，`environment` 修改编译引用的 `scene_registry`，`asset` 修改 `asset_plan`，`asset_card` 修改 `asset_cards` 的提示词与七步正文。环境文字返修须定向检查登记与资产卡中实际被消费的文字，不能把修改资产计划当作已更新环境正文。
+
 按对象、snapshot、读取范围和 revision 复用已完整读取的内容；仅核验版本时携带 `ifRevision`，返回 `unchanged` 后继续使用原内容。不能把写回执的新 revision 当成尚未读过的数据版本，也不能把第一页当全集；续页沿原 cursor 完成，不带 ifRevision。冲突或版本改变时只补读任务涉及的章节／目标；任务状态使用 readiness 或精确 runId/taskId 查询。成功写回执已确认保存，nextRead 是缺字段时的入口，不要求保存后整稿回读；编译可直接消费已保存稿。
 
 source 原样保存 Acheng production 数据。sourceHash 是递归键排序、无空白、UTF-8 JSON 的 SHA-256；MCP 提交完整源稿对象时使用 `production_hash_source`，脚本复用项目导出工具，不另写 canonical 算法或凭记忆拼哈希。artifacts 每项包含独立 prompt 字节、sha256、源哈希、参考标签/节点/storageKey/媒体哈希/职责及编译回执；draft 和 partial 不标 ready。接入包不填造 PASS，先执行本机当前激活版本的真实离线编译与校验，再由 Backend 核对源与媒体。
@@ -23,6 +25,12 @@ Agent 负责编译前的创作、源稿编辑、依赖与批准版本登记。`p
 编译输入是已保存的结构化制作源稿、Shot/Segment、资产资料和实际参考绑定。只有资产时运行 `compile_assets.py`；包含视频片段时运行 `compile_h3.py`。脚本按对应 Skill 规则产出独立、完整的图像或 H3 提示词文件、索引、逐目标诊断、参考映射和哈希回执；缺少依赖的目标保留为 draft，不伪造 ready。Backend 再核对当前制作 revision、媒体归属和执行条件。
 
 脚本不调用媒体模型。源稿、提示词、实际参考或镜头边界变化后重算受影响产物，已生成媒体不会自动重做。
+
+## 编译受阻的定位与恢复
+
+`production_compile` 的请求完成不代表编译成功；消费 `compilation.status`。`queued/running` 沿原 operationId 查询；`blocked/failed/interrupted` 是终态，读取首条 `blockingDiagnostic`，需要全集时分页读取 diagnostics，不继续轮询同一终态。`PROMPT_EXTERNAL_CONTEXT` 表示模型提示词含“同上／沿用前段”等外部文字依赖，不表示缺少前段视频或连续性事实。按 targetId、shotId、path 和 matchedText 定向展开原字段；origin=compiler 时修编译器，不要求导演改创作稿。
+
+相同有效编译输入、范围、参考内容身份和 runtime 的可定位源稿独立性阻塞，可跨操作 ID 返回原阻塞回执。`reused=true` 与 `reusedFromOperationId` 表示本次没有重跑编译器；同 operationId 的 `replayed` 仍表示原命令重放。改变确实影响编译的输入后再提交，不靠换 ID 或扩大范围试错。旧回执没有定位信息时不猜字段，不把单独的 revision 或 sourceHash 变化作为问题已解决的证据。
 
 ## 批次复核与回执复用
 

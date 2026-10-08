@@ -13,8 +13,8 @@
     "workers"
   ],
   "scripts": {
-    "dev": "tsx src/index.ts",
-    "dev:watch": "tsx watch src/index.ts",
+    "dev": "node ../scripts/dev-backend-watch.mjs",
+    "dev:watch": "node ../scripts/dev-backend-watch.mjs",
     "dev:once": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "redact-inline-media": "tsx src/maintenance/redact-inline-media.ts",

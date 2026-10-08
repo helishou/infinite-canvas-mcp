@@ -537,14 +537,26 @@ function AgentMessageAttachments({ attachments, alignRight }: { attachments: Age
 }
 
 function toolCardState(title: string, text: string, detail?: unknown) {
+    const compilation = String(objectField(detail, "compilationStatus") || "");
+    if (["queued", "running", "blocked", "failed", "interrupted", "succeeded"].includes(compilation)) {
+        const running = compilation === "queued" || compilation === "running";
+        const failed = ["blocked", "failed", "interrupted"].includes(compilation);
+        return { label: tr(`compilation_${compilation}`), color: failed ? "#dc2626" : running ? "#d97706" : "#16a34a", icon: running ? <LoaderCircle className="size-4 animate-spin" /> : failed ? <XCircle className="size-4" /> : <CheckCircle2 className="size-4" />, isError: failed };
+    }
     const raw = `${title} ${text} ${normalizeText(objectField(detail, "error"))}`;
     const lower = raw.toLowerCase();
     const status = String(objectField(detail, "status") || "").toLowerCase();
-    if (status === "noop" || /未生效|无需|没有找到|没有.*可|已存在/.test(raw)) return { label: tr("noEffect"), color: "#d97706", icon: <CircleAlert className="size-4" />, isError: false };
-    if (["declined", "rejected", "cancelled", "canceled"].includes(status) || /拒绝|取消/.test(raw)) return { label: tr("canceled"), color: "#dc2626", icon: <XCircle className="size-4" />, isError: true };
-    if (["failed", "error"].includes(status) || /失败|错误/.test(raw) || lower.includes("failed") || lower.includes("error")) return { label: tr("failed"), color: "#dc2626", icon: <XCircle className="size-4" />, isError: true };
+    // A completed query may describe failed media tasks (including "失败 0").
+    // Structured tool status is authoritative; text is only a legacy fallback.
+    if (["failed", "error"].includes(status)) return { label: tr("failed"), color: "#dc2626", icon: <XCircle className="size-4" />, isError: true };
+    if (["declined", "rejected", "cancelled", "canceled"].includes(status)) return { label: tr("canceled"), color: "#dc2626", icon: <XCircle className="size-4" />, isError: true };
+    if (status === "noop") return { label: tr("noEffect"), color: "#d97706", icon: <CircleAlert className="size-4" />, isError: false };
     if (["inprogress", "in_progress", "running", "started", "pending"].includes(status)) return { label: tr("running"), color: "#d97706", icon: <LoaderCircle className="size-4 animate-spin" />, isError: false };
-    if (["completed", "succeeded", "success"].includes(status) || /完成|成功/.test(raw)) return { label: tr("completed"), color: "#16a34a", icon: <CheckCircle2 className="size-4" />, isError: false };
+    if (["completed", "succeeded", "success"].includes(status)) return { label: tr("completed"), color: "#16a34a", icon: <CheckCircle2 className="size-4" />, isError: false };
+    if (/未生效|无需|没有找到|没有.*可|已存在/.test(raw)) return { label: tr("noEffect"), color: "#d97706", icon: <CircleAlert className="size-4" />, isError: false };
+    if (/拒绝|取消/.test(raw)) return { label: tr("canceled"), color: "#dc2626", icon: <XCircle className="size-4" />, isError: true };
+    if (/失败|错误/.test(raw) || lower.includes("failed") || lower.includes("error")) return { label: tr("failed"), color: "#dc2626", icon: <XCircle className="size-4" />, isError: true };
+    if (/完成|成功/.test(raw)) return { label: tr("completed"), color: "#16a34a", icon: <CheckCircle2 className="size-4" />, isError: false };
     return { label: tr("recorded"), color: "#2563eb", icon: <Wrench className="size-4" />, isError: false };
 }
 

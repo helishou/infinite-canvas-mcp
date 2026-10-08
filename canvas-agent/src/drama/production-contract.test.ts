@@ -39,6 +39,30 @@ test("asset canvas scope is a formal, validated source field that invalidates ol
     assert.throws(() => applyDirectorSourcePatch(director, "asset", "ROLE", { canvas_scope: "episode" }), /必须保留 shared/);
 });
 
+test("environment and asset-card patches update compiler source without changing script or asset plans", () => {
+    const director = productionOperationContract("set_director_production").operations[0].example.director as DirectorProduction;
+    director.source.scene_registry = [{ id: "YARD", description: "Child at the coop window", prompt_description: "A child crouches" }, { id: "ROOM", description: "Room" }];
+    director.source.asset_cards = [{ id: "YARD", prompt: "Child at the window", seven_steps: [{ step: 1, content: "Child at the window" }, { step: 2, content: "Keep materials" }] }];
+    director.source.script_scenes = [{ id: "SC1", text: "The boy stands in the yard" }];
+    director.source.asset_plan = [{ asset_id: "YARD", version: "v1" }];
+    const beforeHash = director.sourceHash;
+    const ops = [
+        { type: "patch_director_source", entity: "environment", id: "YARD", patch: { description: "Empty courtyard", prompt_description: "A low coop window" } },
+        { type: "patch_director_source", entity: "asset_card", id: "YARD", patch: { prompt: "Empty courtyard", seven_steps: [{ step: 1, content: "Empty courtyard" }, { step: 2, content: "Keep materials" }] } },
+    ];
+    assert.equal(productionEditSchema.safeParse({ operationId: "repair", expectedRevision: 1, ops }).success, true);
+    applyDirectorSourcePatch(director, "environment", "YARD", ops[0].patch);
+    applyDirectorSourcePatch(director, "asset_card", "YARD", ops[1].patch);
+    assert.equal((director.source.scene_registry as any[])[0].prompt_description, "A low coop window");
+    assert.equal((director.source.scene_registry as any[])[1].description, "Room");
+    assert.equal((director.source.asset_cards as any[])[0].seven_steps[1].content, "Keep materials");
+    assert.deepEqual(director.source.script_scenes, [{ id: "SC1", text: "The boy stands in the yard" }]);
+    assert.deepEqual(director.source.asset_plan, [{ asset_id: "YARD", version: "v1" }]);
+    assert.notEqual(director.sourceHash, beforeHash);
+    assert.throws(() => applyDirectorSourcePatch(director, "environment", "missing", { description: "Missing" }), /不存在/);
+    assert.throws(() => applyDirectorSourcePatch(director, "asset_card", "YARD", { references: [] }), /不允许/);
+});
+
 test("video aspect kickoff distinguishes an explicit canvas-inherit choice from an unanswered setting", () => {
     const inherited = productionSettingsSchema.safeParse({ mode: "manual", imageModel: "", h3Model: "", videoAspectRatio: null, videoAspectRatioConfirmed: true });
     assert.equal(inherited.success, true);

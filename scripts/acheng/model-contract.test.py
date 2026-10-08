@@ -38,6 +38,10 @@ def add_subject(segment, entity):
 
 class ModelContractTests(unittest.TestCase):
     def test_storyboard_structure_warnings_and_compiled_receipt(self):
+        from canvas_source_contract import contract
+        contract_value = contract()
+        self.assertFalse(contract_value["storyboardPolicy"]["defaultForNewProductions"])
+        self.assertEqual(contract_value["templates"]["manual_storyboard_override"]["storyboard_policy"], {"version": 1})
         value = json.loads((root / "examples/02-drama.production.json").read_text(encoding="utf-8"))
         value['storyboard_policy'] = {'version': 1}
         for shot in value['shots']:
@@ -56,6 +60,17 @@ class ModelContractTests(unittest.TestCase):
         self.assertTrue(any(d['code'] == 'STORYBOARD_EDITORIAL_REASON_REQUIRED' and d['severity'] == 'error' for d in validate(value, 'publish')))
         self.assertTrue(any(d['code'] == 'STORYBOARD_EDITORIAL_REASON_REQUIRED' and d['severity'] == 'warning' for d in validate(value, 'edit')))
 
+    def test_new_compiler_adds_dialogue_camera_coverage_without_source_policy(self):
+        value = json.loads((root / "examples/02-drama.production.json").read_text(encoding="utf-8"))
+        value.pop("storyboard_policy", None)
+        value.pop("prompt_detail_policy", None)
+        for segment in value["segments"]:
+            segment.pop("prompt_detail_policy", None)
+            compiled = compile_segment(value, segment)
+            if any(not line.get("voiceover", False) for sid in segment["shot_ids"] for shot in value["shots"] if shot["id"] == sid for line in shot["dialogues"]):
+                self.assertIn("Dialogue-led editorial coverage derived from the immutable speaker and frame schedule", compiled)
+                self.assertIn("face and shoulders as the active speaker", compiled)
+
     def test_scoped_storyboard_does_not_upgrade_context_shots(self):
         value = json.loads((root / "examples/02-drama.production.json").read_text(encoding="utf-8"))
         value['storyboard_policy'] = {'version': 1}
@@ -71,6 +86,7 @@ class ModelContractTests(unittest.TestCase):
 
     def test_utterance_across_reverse_cut_preserves_words_and_sound_window(self):
         value = json.loads((root / "examples/02-drama.production.json").read_text(encoding="utf-8"))
+        value.pop("prompt_detail_policy", None)
         value['storyboard_policy'] = {'version': 1}
         first, second = value['shots'][:2]
         original = copy.deepcopy(first['dialogues'][0])
@@ -83,6 +99,7 @@ class ModelContractTests(unittest.TestCase):
         second['dialogues'] = [{**original, 'character_id': speaker['id'], 'utterance_id': 'CONTINUED_LINE', 'text': original['text'][midpoint:], 'start': 0, 'end': 24}]
         value['shots'] = [first, second]
         segment = value['segments'][0]
+        segment.pop("prompt_detail_policy", None)
         segment.update(shot_ids=[first['id'], second['id']], start_frame=0, end_frame=240, generation_clip_duration=10)
         value['segments'] = [segment]
         for shot, target in ((first, speaker['id']), (second, listener['id'])):
@@ -238,6 +255,57 @@ class ModelContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "INTERNAL_ID_IN_PROMPT"):
                 validate_h3_file(path, contract)
 
+
+
+class PromptDiagnosticTests(unittest.TestCase):
+    def test_actual_visual_is_located_and_unused_notes_are_ignored(self):
+        from canvas_prompt_diagnostics import external_context_diagnostics
+        value, segment, _ = production()
+        shot = next(item for item in value["shots"] if item["id"] == segment["shot_ids"][0])
+        shot["visual"] += " Keep the same camera axis as the preceding segment."
+        shot["notes"] = "same as above"
+        diagnostics = external_context_diagnostics(value, {segment["id"]})
+        located = [d for d in diagnostics if d["matchedText"] == "preceding segment"]
+        self.assertTrue(located)
+        self.assertEqual(located[0]["path"], "director.source.shots." + shot["id"] + ".visual")
+        self.assertEqual(located[0]["targetId"], segment["id"])
+        self.assertEqual(located[0]["shotId"], shot["id"])
+        self.assertTrue(located[0]["blocksCompilation"])
+        self.assertFalse(any("notes" in d["path"] for d in diagnostics))
+        shot["visual"] = shot["visual"].replace("Keep the same camera axis as the preceding segment.", "Use an eye-level camera facing the courtyard doorway.")
+        self.assertFalse(any(d["matchedText"] == "preceding segment" for d in external_context_diagnostics(value, {segment["id"]})))
+
+    def test_literal_and_binding_origins(self):
+        from canvas_prompt_diagnostics import external_context_diagnostics
+        value, segment, _ = production()
+        shot = next(item for item in value["shots"] if item["id"] == segment["shot_ids"][0])
+        shot["visual"] += ' A sign reads "preceding segment".'
+        self.assertFalse(any(d["matchedText"] == "preceding segment" for d in external_context_diagnostics(value, {segment["id"]})))
+        shot["visual"] += " {{axis}}"
+        value.setdefault("prompt_bindings", {})["axis"] = "Keep the same axis as the preceding segment."
+        diagnostics = external_context_diagnostics(value, {segment["id"]})
+        self.assertTrue(any(d["path"] == "director.source.prompt_bindings.axis" for d in diagnostics))
+        value["prompt_bindings"]["axis"] = "{{nested_axis}}"
+        value["prompt_bindings"]["nested_axis"] = "Use the preceding segment."
+        diagnostics = external_context_diagnostics(value, {segment["id"]})
+        self.assertTrue(any(d["path"] == "director.source.prompt_bindings.nested_axis" for d in diagnostics))
+
+    def test_compiler_origin_and_shared_description(self):
+        from canvas_prompt_diagnostics import external_context_diagnostics
+        from unittest.mock import patch
+        value, segment, _ = production()
+        with patch("audit_storyboard_quality.compile_segment", return_value="Use the preceding segment."):
+            diagnostics = external_context_diagnostics(value, {segment["id"]})
+            self.assertEqual(diagnostics[0]["origin"], "compiler")
+        shot = next(item for item in value["shots"] if item["id"] == segment["shot_ids"][0])
+        shot["visual"] += " Keep the same setting as the preceding segment."
+        with patch("audit_storyboard_quality.compile_segment", return_value=shot["visual"] + " Compiler instruction: use the preceding segment."):
+            origins = {d["origin"] for d in external_context_diagnostics(value, {segment["id"]})}
+            self.assertEqual(origins, {"source", "compiler"})
+        scene = value["scene_registry"][0]
+        scene["prompt_description"] += " Keep the same setting as the preceding segment."
+        diagnostics = external_context_diagnostics(value)
+        self.assertTrue(any(d["path"] == "director.source.scene_registry." + scene["id"] + ".prompt_description" for d in diagnostics))
 
 if __name__ == "__main__":
     unittest.main()

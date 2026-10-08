@@ -37,6 +37,8 @@ export const directorPatchFields = {
     continuity: ["ledger"],
     style: ["style_policy", "style_policy_reason", "anchor_asset_id"],
     scene: ["scene_name", "heading", "location", "time_of_day", "text"],
+    environment: ["name", "description", "prompt_description"],
+    asset_card: ["prompt", "seven_steps"],
     asset: ["asset_name", "name", "title", "kind", "description", "prompt", "depends_on", "role", "version", "reference_role", "canvas_scope"],
     shot: ["title", "visual", "camera", "start_frame", "end_frame", "dialogues", "audio", "required_assets", "description", "shot_type", "timeline_id", "story_order", "continuity_facts"],
     segment: ["shot_ids", "start_frame", "end_frame", "generation_clip_duration", "mode", "audio", "sound", "overall_soundscape", "non_diegetic_music", "references", "subjects", "execution_gate", "styleTemplateId"],
@@ -245,7 +247,7 @@ export const episodeProductionDataSchema = z.object({
 export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("set_director_production"), director: directorProductionSchema }).strict(),
     z.object({ type: z.literal("set_director_brief"), brief: z.string() }).strict(),
-    z.object({ type: z.literal("patch_director_source"), entity: z.enum(["brief", "style", "scene", "asset", "shot", "segment"]), id: id.optional(), patch: z.record(z.unknown()) }).strict(),
+    z.object({ type: z.literal("patch_director_source"), entity: z.enum(["brief", "style", "scene", "environment", "asset", "asset_card", "shot", "segment"]), id: id.optional(), patch: z.record(z.unknown()) }).strict(),
     z.object({ type: z.literal("adopt_director_fields"), targetId: id, nodeId: id, segmentId: id.optional(), canvasRevision: z.number().int().nonnegative(), fields: z.array(id).min(1) }).strict(),
     z.object({ type: z.literal("adopt_director_clip_style"), targetId: id, nodeId: id, segmentId: id, canvasRevision: z.number().int().nonnegative(), styleTemplateId: z.string().nullable() }).strict(),
     z.object({ type: z.literal("patch_director_continuity"), ledger: z.record(z.unknown()) }).strict(),
@@ -294,7 +296,7 @@ export const productionPreflightRequestSchema = z.discriminatedUnion("action", [
     z.object({ action: z.literal("generate"), request: directorRunStartSchema }),
 ]);
 export type ProductionNextAction = { action: "correct_source" | "refresh" | "configure" | "read_run" | "review" | "wait"; message: string; tool?: string; input?: Record<string, unknown> };
-export type ProductionDiagnostic = { code: string; path: string; targetId?: string; message: string; severity: "error" | "warning" | "unverified"; example?: unknown; blockingRun?: { runId: string; status: string; taskIds: string[] }; nextAction?: ProductionNextAction };
+export type ProductionDiagnostic = { code: string; path: string; targetId?: string; shotId?: string; origin?: "source" | "compiler"; matchedText?: string; blocksCompilation?: boolean; message: string; severity: "error" | "warning" | "unverified"; example?: unknown; blockingRun?: { runId: string; status: string; taskIds: string[] }; nextAction?: ProductionNextAction };
 export type ProductionPreflight = { readyTargets?: string[]; blockedTargets?: Array<{ targetId: string; code: string; message: string }>; warnings?: Array<{ targetId: string; code: string; message: string }>; planHash?: string; canvasRevision?: number; valid: boolean; contractVersion: string; engine: DirectorProduction["engine"] | null; revision: number | null; diagnostics: ProductionDiagnostic[]; generationReady: boolean; compileReady?: boolean; replayed?: boolean; nextActions?: ProductionNextAction[] };
 export type DirectorRunStart = z.infer<typeof directorRunStartSchema>;
 

@@ -11,6 +11,95 @@ import { ProductionContinuityReports } from "./continuity-reports.js";
 import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import { compilationScopeInput, currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 
+const externalBlock = { code: "PROMPT_EXTERNAL_CONTEXT", path: "director.source.shots.SH1.visual", targetId: "SEG1", shotId: "SH1", origin: "source" as const, matchedText: "preceding segment", blocksCompilation: true, message: "Prompt depends on external prose: preceding segment", severity: "error" as const };
+
+test("located hard blockers reuse across IDs and restart without recompiling or editing production", async t => {
+    const { root, service, director, db } = fixture(t);
+    let calls = 0;
+    const compiler = (input: DirectorProduction) => { calls++; return { director: input, exitCode: 2, diagnostics: [externalBlock], audit: {}, sourceAdjustments: [], acceptance: {} }; };
+    const jobs = new ProductionCompilationService(service, root, compiler);
+    const before = JSON.stringify(service.get("episode"));
+    jobs.enqueue("episode", "episode", "blocked-original", 1);
+    await new Promise(resolve => setImmediate(resolve));
+    const first = jobs.getCompilation("episode", "episode", "blocked-original");
+    assert.equal(first.status, "blocked", "targetId cannot downgrade a hard error to a draft");
+    assert.equal(first.blockingDiagnostic?.path, externalBlock.path);
+    assert.equal(first.blockingDiagnostic?.shotId, "SH1");
+    assert.ok(first.compilerInputFingerprint);
+    const replay = jobs.enqueue("episode", "episode", "blocked-original", 1);
+    assert.equal("replayed" in replay && replay.replayed, true);
+    const directories = fs.readdirSync(root).sort();
+    const alias = jobs.enqueue("episode", "episode", "blocked-alias", 1);
+    assert.equal(alias.reused, true);
+    assert.equal(alias.reusedFromOperationId, "blocked-original");
+    assert.equal(alias.operationId, "blocked-alias");
+    assert.deepEqual(fs.readdirSync(root).sort(), directories);
+    assert.equal(calls, 1);
+    const restored = new ProductionCompilationService(service, root, compiler);
+    assert.equal(restored.getCompilation("episode", "episode", "blocked-alias").reusedFromOperationId, "blocked-original");
+    const page = restored.getCompilation("episode", "episode", "blocked-alias", "diagnostics", 0, 1);
+    assert.ok("items" in page);
+    assert.equal(page.items[0].code, externalBlock.code);
+    assert.throws(() => restored.enqueue("episode", "episode", "stale", 0), ProductionConflictError);
+    assert.throws(() => restored.enqueue("episode", "episode", "blocked-alias", 1, director), /IDEMPOTENCY_CONFLICT/);
+    assert.throws(() => restored.getCompilation("another", "episode", "blocked-alias"), /不属于/);
+    assert.equal(JSON.stringify(service.get("episode")), before);
+    assert.equal(db.listTasks().length, 0);
+    assert.ok(Buffer.byteLength(JSON.stringify(alias)) < 2500);
+});
+
+test("fingerprint changes for input, scope, engine and reference bytes; workflow-only updates reuse", async t => {
+    const { root, service, director } = fixture(t);
+    const media = path.join(root, "ref.png"); fs.writeFileSync(media, "first");
+    service.compilationReferenceFiles = () => ({ "STYLE\0asset": media });
+    director.source.asset_plan = [{ id: "STYLE", kind: "prop", depends_on: [] }];
+    director.assets.STYLE = { version: "v1", status: "approved", storageKey: "image:fixture" };
+    director.source.asset_cards = [{ id: "STYLE", prompt: "Keep the same axis as the preceding segment." }];
+    let calls = 0;
+    const compiler = (input: DirectorProduction) => { calls++; return { director: input, exitCode: 2, diagnostics: [externalBlock], audit: {}, sourceAdjustments: [], acceptance: {} }; };
+    const jobs = new ProductionCompilationService(service, root, compiler);
+    const run = async (id: string, candidate = director, scope?: { targetIds: string[] }) => {
+        const receipt = jobs.enqueue("episode", "episode", id, 1, candidate, scope);
+        await new Promise(resolve => setImmediate(resolve));
+        return jobs.getCompilation("episode", "episode", receipt.operationId);
+    };
+    const first = await run("first");
+    const workflow = structuredClone(director); workflow.workflow = { agentThreadId: "different-thread" };
+    assert.equal((await run("workflow", workflow)).reused, true);
+    fs.writeFileSync(media, "second");
+    assert.notEqual((await run("reference")).compilerInputFingerprint, first.compilerInputFingerprint);
+    const engine = structuredClone(director); engine.engine.runtimeId = "other-runtime";
+    assert.equal((await run("engine", engine)).reused, undefined);
+    assert.equal((await run("scope", director, { targetIds: ["STYLE"] })).reused, undefined);
+    const authored = structuredClone(director); (authored.source.asset_cards as any[])[0].prompt = "Use an eye-level view.";
+    assert.equal((await run("source", authored)).reused, undefined);
+    assert.equal(calls, 5);
+});
+
+test("unknown and compiler-origin failures, running jobs and legacy records never reuse", async t => {
+    const { root, service } = fixture(t);
+    let calls = 0;
+    let diagnostic = { ...externalBlock, origin: "compiler" as "source" | "compiler" };
+    const compiler = (input: DirectorProduction) => { calls++; return { director: input, exitCode: 2, diagnostics: [diagnostic], audit: {}, sourceAdjustments: [], acceptance: {} }; };
+    const jobs = new ProductionCompilationService(service, root, compiler);
+    for (const id of ["one", "two"]) { jobs.enqueue("episode", "episode", id, 1); await new Promise(resolve => setImmediate(resolve)); }
+    assert.equal(calls, 2);
+    diagnostic = { ...diagnostic, code: "NETWORK_FAILED", origin: "source" };
+    for (const id of ["three", "four"]) { jobs.enqueue("episode", "episode", id, 1); await new Promise(resolve => setImmediate(resolve)); }
+    assert.equal(calls, 4);
+    diagnostic = { ...externalBlock };
+    jobs.enqueue("episode", "episode", "running-one", 1); jobs.enqueue("episode", "episode", "running-two", 1);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls, 6);
+    for (const file of fs.readdirSync(path.join(root, "operations"))) {
+        const location = path.join(root, "operations", file), saved = JSON.parse(fs.readFileSync(location, "utf8"));
+        delete saved.compilerInputFingerprint; fs.writeFileSync(location, JSON.stringify(saved));
+    }
+    assert.equal(jobs.enqueue("episode", "episode", "legacy", 1).reused, undefined);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls, 7);
+});
+
 function fixture(t: test.TestContext) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "production-compile-"));
     const db = new BackendDatabase(path.join(root, "test.sqlite"));

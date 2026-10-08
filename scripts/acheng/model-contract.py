@@ -244,6 +244,7 @@ def apply(root):
     from pathlib import Path
     root = Path(root)
     (root / "scripts/canvas_model_contract.py").write_bytes(Path(__file__).read_bytes())
+    (root / "scripts/canvas_prompt_diagnostics.py").write_bytes(Path(__file__).with_name("prompt-diagnostics.py").read_bytes())
 
     def replace(relative, before, after):
         path = root / relative
@@ -298,3 +299,28 @@ def apply(root):
             '    from canvas_model_contract import check_source_and_text, internal_ids\n    check_source_and_text(production, segment)\n    result["internal_ids"] = internal_ids(production)\n    result["model_subjects"] = [{key: subject.get(key) for key in ("label", "entity_id", "definition", "shot_ids")} for subject in segment.get("subjects", [])]\n    if segment["mode"] == "Ref2VA":\n        from h3_contract import remap_speech_references')
     replace("scripts/h3_final_format.py", '    _need(not re.search(r"\\b(?:CHAR|SCENE|PROP)_[A-Za-z0-9_]+\\b", text),',
             '    from canvas_model_contract import instruction_text\n    _need(not re.search(r"\\b(?:CHAR|SCENE|PROP)_[A-Za-z0-9_]+\\b", instruction_text(text)),')
+
+    # Preserve upstream gate behavior, while retaining per-target source provenance.
+    path = root / "scripts/audit_storyboard_quality.py"
+    text = path.read_text(encoding="utf-8")
+    text = text.replace("def audit(p, base_dir=ROOT, *, h3_segment_ids=None):", "def _canvas_audit_impl(p, base_dir=ROOT, *, h3_segment_ids=None):", 1)
+    wrapper = '''
+def audit(p, base_dir=ROOT, *, h3_segment_ids=None):
+    report = _canvas_audit_impl(p, base_dir, h3_segment_ids=h3_segment_ids)
+    from canvas_prompt_diagnostics import external_context_diagnostics
+    diagnostics = external_context_diagnostics(p, h3_segment_ids)
+    if diagnostics:
+        report["diagnostics"] = diagnostics
+        report["status"] = "FAIL"
+        for item in report.get("gates", []):
+            if item["gate"] == "h3_schema":
+                item["status"] = "FAIL"
+                item["score"] = 0
+                item["errors"] = [error for error in item["errors"] if not error.startswith("external-context dependency:")] + [diagnostic["message"] for diagnostic in diagnostics]
+    return report
+
+'''
+    marker = "def main():"
+    if text.count(marker) != 1:
+        raise RuntimeError("Unsupported audit diagnostics overlay")
+    path.write_text(text.replace(marker, wrapper + marker), encoding="utf-8")

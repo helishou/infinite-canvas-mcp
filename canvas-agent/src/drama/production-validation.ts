@@ -44,7 +44,7 @@ export function productionOperationContract(operationType?: string) {
         operations: options.map(option => {
             const type = option.shape.type.value;
             return { type, example: option.parse({ type, ...examples[type] as object }), preconditions: type === "patch_director_source"
-                ? ["Director exists; scene/asset/shot/segment require an existing stable ID; patch uses allowed fields; brief/style accept no ID; brief accepts only string value."]
+                ? ["Director exists; scene edits script_scenes, environment edits scene_registry, asset edits asset_plan, and asset_card edits asset_cards. Each object requires an existing stable ID and allowed fields; brief/style accept no ID; brief accepts only string value."]
                 : type === "select_director_result" ? ["Successful archived output must belong to the original formal task and exact node/Clip; both revisions must match; active generation and shared reference replacement are rejected. Images require review after selection. No media generation or prompt/timeline replacement occurs."]
                 : type === "restore_archived_scene_results" ? ["Episode draft only. Verifies the archive node, exact Clip identity, succeeded task, generation log and media bytes before restoring outputs to matching scene H3 nodes. Preserves the original archive and provenance; creates no task and does not modify the published version."]
                 : type === "set_director_production" ? ["Example is schema-valid only; replace hashes and engine with actual validated receipts."]
@@ -110,7 +110,7 @@ export function applyDirectorSourcePatch(director: DirectorProduction, entity: k
             if (patch.anchor_asset_id !== undefined) director.source.style_lock = { ...record(director.source.style_lock), anchor_asset_id: patch.anchor_asset_id };
         } else {
             if (!id) throw new Error("源对象修改缺少稳定 ID");
-            const collection = ({ scene: "script_scenes", asset: "asset_plan", shot: "shots", segment: "segments" } as const)[entity];
+            const collection = ({ scene: "script_scenes", environment: "scene_registry", asset: "asset_plan", asset_card: "asset_cards", shot: "shots", segment: "segments" } as const)[entity];
             const items = Array.isArray(director.source[collection]) ? director.source[collection] as Array<Record<string, unknown>> : [];
             const fieldId = (item: Record<string, unknown>) => String(item.id || item.scene_id || item.asset_id || "");
             const target = items.find(item => fieldId(item) === id);

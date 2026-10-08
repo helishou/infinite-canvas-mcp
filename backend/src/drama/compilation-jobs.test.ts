@@ -6,6 +6,30 @@ import path from "node:path";
 import { setImmediate as immediate } from "node:timers/promises";
 import { ProductionCompilationService } from "./compilation.js";
 const director: any = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "1" }, source: { brief: "source" }, sourceHash: "b".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
+
+test("active Python audit preserves standalone-error provenance through the shared compiler adapter", async t => {
+    const { resolveAchengEngine, compileAchengDirector, achengEngineIdentity } = await import("@basketikun/canvas-agent/skills/acheng");
+    const { canonicalProduction } = await import("@basketikun/canvas-agent/drama/production-contract");
+    const crypto = await import("node:crypto");
+    const runtime = resolveAchengEngine();
+    const candidate = structuredClone(director);
+    candidate.engine = achengEngineIdentity(runtime);
+    candidate.source = JSON.parse(fs.readFileSync(path.join(runtime.path, "examples", "01-mecha.production.json"), "utf8"));
+    delete candidate.source.prompt_detail_policy;
+    const segment = candidate.source.segments[0]; delete segment.prompt_detail_policy;
+    const shot = candidate.source.shots.find((item: any) => item.id === segment.shot_ids[0]);
+    shot.visual += " Keep the same camera axis as the preceding segment.";
+    candidate.sourceHash = crypto.createHash("sha256").update(canonicalProduction(candidate.source)).digest("hex");
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "actual-prompt-diagnostic-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const reference = path.join(root, "fixture.png");
+    fs.writeFileSync(reference, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aL9sAAAAASUVORK5CYII=", "base64"));
+    const compiled = compileAchengDirector(candidate, root, () => reference, runtime.runtimeId);
+    const error = compiled.diagnostics.find(item => item.code === "PROMPT_EXTERNAL_CONTEXT" && item.shotId === shot.id);
+    assert.ok(error, JSON.stringify(compiled.diagnostics));
+    assert.equal(error.path, `director.source.shots.${shot.id}.visual`);
+    assert.equal(error.targetId, segment.id); assert.equal(error.origin, "source"); assert.equal(error.blocksCompilation, true);
+});
 function setup(t: any, compiler: any) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "compilation-jobs-")); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
     let current: any = { revision: 1, draft: { director: structuredClone(director) } };

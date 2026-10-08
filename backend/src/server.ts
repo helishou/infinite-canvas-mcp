@@ -115,6 +115,7 @@ async function withBaiduTranslateRequestSlot<T>(operation: () => Promise<T>): Pr
 
 /** startServer 的可选依赖（comfy 路由由 index.ts 单独挂载）。 */
 export type ServerDeps = {
+  devReloadMiddleware?: import("express").RequestHandler;
   snapshotExports?: McpSnapshotExports;
   comfy?: ComfyUiBackend;
   events?: BackendEventBus;
@@ -146,6 +147,7 @@ export function startServer(
     for (const update of commit.productionUpdates || []) events.publish({ type: "drama-production.updated", entityId: update.entityId, payload: { revision: update.revision } });
   });
   const app = express();
+  if (deps.devReloadMiddleware) app.use(deps.devReloadMiddleware);
   const draftSessionLeases = new CanvasDraftSessionLeases();
   const FRONTEND_SETTINGS_KEY = "frontend.settings";
   const STRUCTURED_SETTING_KEYS = new Map([

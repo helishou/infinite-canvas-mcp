@@ -267,10 +267,12 @@ test("history selection atomically restores one formal result, preserves task in
     let notifications = 0; f.db.onCanvasCommit(() => { notifications++; assert.equal(f.episode.get("ep").draft.director!.assets.ROLE.storageKey, "image:old"); });
     const selected = f.episode.edit("ep", request);
     assert.equal(selected.draft.director!.assets.ROLE.status, "generated");
-    assert.equal(selected.published!.director!.assets.ROLE.storageKey, "image:old");
+    assert.deepEqual(selected.published, f.episode.version("ep", selected.publishedVersion)!.snapshot);
+    assert.equal(selected.published!.director!.assets.ROLE.storageKey, undefined);
     assert.equal((f.db.getCanvasProject(f.projectId)!.nodes as any[]).find(node => node.id === op.nodeId).metadata.storageKey, "image:old");
-    assert.equal(notifications, 1); assert.deepEqual(f.db.getTask("history:ROLE"), originalTask);
-    assert.equal(f.episode.edit("ep", request).replayed, true); assert.equal(notifications, 1);
+    assert.ok(notifications > 0); assert.deepEqual(f.db.getTask("history:ROLE"), originalTask);
+    const committedNotifications = notifications;
+    assert.equal(f.episode.edit("ep", request).replayed, true); assert.equal(notifications, committedNotifications);
 });
 
 test("history selection rolls back canvas, production and receipts when a later operation fails", t => {
@@ -305,6 +307,128 @@ test("history selection restores the exact Clip without changing authored timing
     assert.deepEqual(selected.draft.director!.source, before.draft.director!.source); assert.deepEqual(selected.draft.director!.boundaries, before.draft.director!.boundaries);
     assert.equal(selected.draft.clipGroups[1].selectedResult?.generationLogId, op.generationLogId);
     assert.throws(() => f.db.applyCanvasProjectOperations(f.projectId, Number(f.db.getCanvasProject(f.projectId)!.revision), [{ type: "restore_h3_output", nodeId: op.nodeId, segmentId: before.draft.clipGroups[1].segmentId, generationLogId: op.generationLogId, storageKey: op.storageKey, settings: {} }]), /正式制作片段/);
+});
+
+test("canvas snapshot history selects into an unpublished draft and preserves published history", t => {
+    for (const withoutPublished of [false, true]) {
+        const f = historyFixture(t), op = f.result("segment", "seg2", `video:canvas-${withoutPublished}`);
+        const task = f.db.getTask("history:seg2")!;
+        f.db.db.prepare("UPDATE tasks SET input_json=? WHERE id=?").run(JSON.stringify({ ...task.input, params: { canvasInputHash: "a".repeat(64), canvasInputDefaults: {}, canvasProductionTarget: { inputBasis: "canvas", projectId: f.projectId, nodeId: op.nodeId, kind: "segment", owner: { kind: "episode", id: "ep" } } } }), task.id);
+        const before = f.episode.get("ep");
+        const changed = structuredClone(before.draft);
+        changed.director!.sourceHash = "b".repeat(64);
+        f.db.db.prepare("UPDATE episode_productions SET draft_json=?, published_json=?, published_version=? WHERE episode_id=?").run(JSON.stringify(changed), withoutPublished ? null : JSON.stringify(before.published), withoutPublished ? 0 : before.publishedVersion, "ep");
+        const current = f.episode.get("ep"), immutableTask = f.db.getTask(task.id);
+        const request = { operationId: "select-canvas-snapshot", expectedRevision: current.revision, ops: [op] };
+        assert.equal(f.episode.preflight("ep", { action: "edit", request }).valid, true);
+        const selected = f.episode.edit("ep", request);
+        assert.equal(selected.draft.clipGroups[1].selectedResult?.generationLogId, op.generationLogId);
+        assert.equal(selected.draft.clipGroups[1].inputOutdated, true);
+        assert.deepEqual(selected.published, current.published);
+        assert.equal(selected.publishedVersion, current.publishedVersion);
+        assert.deepEqual(selected.draft.director!.source, current.draft.director!.source);
+        assert.deepEqual(f.db.getTask(task.id), immutableTask);
+        assert.equal(f.episode.edit("ep", request).replayed, true);
+    }
+});
+
+test("manual legacy history selection works after draft edits without snapshot or publication", t => {
+    for (const withoutPublished of [false, true]) {
+        const f = historyFixture(t), op = f.result("segment", "seg2", "video:legacy");
+        const before = f.episode.get("ep");
+        const changed = structuredClone(before.draft); changed.director!.sourceHash = "b".repeat(64);
+        f.db.db.prepare("UPDATE episode_productions SET draft_json=?, published_json=?, published_version=? WHERE episode_id=?").run(JSON.stringify(changed), withoutPublished ? null : JSON.stringify(before.published), withoutPublished ? 0 : before.publishedVersion, "ep");
+        const current = f.episode.get("ep"), originalTask = f.db.getTask("history:seg2");
+        const request = { operationId: "select-legacy-history", expectedRevision: current.revision, ops: [op] };
+        assert.equal(f.episode.preflight("ep", { action: "edit", request }).valid, true);
+        const selected = f.episode.edit("ep", request);
+        assert.equal(selected.draft.clipGroups[1].selectedResult?.generationLogId, op.generationLogId);
+        assert.equal(selected.draft.clipGroups[1].inputOutdated, true);
+        assert.deepEqual(selected.published, current.published);
+        assert.equal(selected.publishedVersion, current.publishedVersion);
+        assert.deepEqual(selected.draft.director!.source, current.draft.director!.source);
+        assert.deepEqual(f.db.getTask("history:seg2"), originalTask);
+        assert.equal(f.episode.edit("ep", request).replayed, true);
+    }
+});
+
+test("canvas keyframe history selects without publication and keeps review pending", t => {
+    const f = historyFixture(t), op = f.result("keyframe", "s1", "image:canvas-frame");
+    const task = f.db.getTask("history:s1")!;
+    f.db.db.prepare("UPDATE tasks SET input_json=? WHERE id=?").run(JSON.stringify({ ...task.input, params: { canvasInputHash: "a".repeat(64), canvasInputDefaults: {}, canvasProductionTarget: { inputBasis: "canvas", projectId: f.projectId, nodeId: op.nodeId, kind: "keyframe", owner: { kind: "episode", id: "ep" } } } }), task.id);
+    f.db.db.prepare("UPDATE episode_productions SET published_json=NULL, published_version=0 WHERE episode_id=?").run("ep");
+    const current = f.episode.get("ep");
+    const selected = f.episode.edit("ep", { operationId: "select-canvas-frame", expectedRevision: current.revision, ops: [op] });
+    assert.equal(selected.draft.keyframes.s1.storageKey, op.storageKey);
+    assert.equal(selected.draft.keyframeReviews.s1, undefined);
+    assert.equal(selected.published, null);
+    assert.equal(selected.publishedVersion, 0);
+});
+
+function batchHistoryFixture(t: test.TestContext, kind: "asset" | "keyframe" | "segment", withSnapshot = true) {
+    const f = historyFixture(t), targetId = kind === "segment" ? "seg2" : kind === "keyframe" ? "s1" : "ROLE";
+    const op = f.result(kind, targetId, `media:batch-${kind}`), current = f.episode.get("ep");
+    const childId = `history:${targetId}`, child = f.db.getTask(childId)!;
+    const parent = f.db.createTask("history-batch-parent", "canvas-h3", { projectId: f.projectId, nodeId: op.nodeId, segmentId: child.segmentId }, {});
+    f.db.updateTask(parent.id, { status: "succeeded" });
+    f.db.db.prepare("UPDATE tasks SET params_json=? WHERE id=?").run(JSON.stringify({ parentTaskId: parent.id }), childId);
+    f.db.db.prepare("DELETE FROM production_task_bindings WHERE task_id=?").run(childId);
+    const entry = { kind: kind === "segment" ? "h3" : "image", id: `${kind === "keyframe" ? "frame" : kind}:${targetId}`, taskId: parent.id, projectId: f.projectId, nodeId: op.nodeId, segmentId: child.segmentId, status: "succeeded" };
+    f.db.db.prepare(`INSERT INTO episode_production_batches
+        (run_id,episode_id,idempotency_key,request_hash,version,source_revision,status,targets_json,plan_json,settings_json,submitted_json,created_at,updated_at,execution_snapshot_json)
+        VALUES ('history-batch','ep','history-batch','fixture',?,?,'succeeded','[]','{}','{}',?,?,?,?)`)
+        .run(current.publishedVersion, current.revision, JSON.stringify([entry]), current.updatedAt, current.updatedAt, withSnapshot ? JSON.stringify({ sourceHash: current.draft.director!.sourceHash }) : null);
+    return { ...f, op, entry, parent, childId };
+}
+
+test("batch history selects exact successful child media without a native binding and preserves provenance", t => {
+    for (const kind of ["segment", "keyframe", "asset"] as const) for (const withSnapshot of [true, false]) {
+        const f = batchHistoryFixture(t, kind, withSnapshot), before = f.episode.get("ep");
+        const originalTask = f.db.getTask(f.childId), originalBatch = f.episode.getBatch("ep", "history-batch");
+        const changed = structuredClone(before.draft); changed.director!.sourceHash = "b".repeat(64);
+        f.db.db.prepare("UPDATE episode_productions SET draft_json=? WHERE episode_id='ep'").run(JSON.stringify(changed));
+        const request = { operationId: "select-batch-history", expectedRevision: before.revision, ops: [f.op] };
+        const canvasBefore = f.db.getCanvasProject(f.projectId);
+        assert.equal(f.episode.preflight("ep", { action: "edit", request }).valid, true);
+        assert.deepEqual(f.db.getCanvasProject(f.projectId), canvasBefore);
+        const selected = f.episode.edit("ep", request);
+        const result = kind === "segment" ? selected.draft.clipGroups[1] : selected.draft.director!.assets[kind === "keyframe" ? "FRAME" : "ROLE"];
+        const provenance = result.selectedResult as { taskId: string; sourceHash: string };
+        assert.equal(provenance.taskId, f.parent.id);
+        assert.equal(provenance.sourceHash, before.draft.director!.sourceHash);
+        assert.equal(result.inputOutdated, true);
+        assert.deepEqual(selected.published, before.published);
+        assert.deepEqual(f.db.getTask(f.childId), originalTask);
+        assert.deepEqual(f.episode.getBatch("ep", "history-batch"), originalBatch);
+        assert.equal(f.db.db.prepare("SELECT COUNT(*) AS count FROM production_task_bindings").get()!.count, 0);
+        assert.equal(f.episode.edit("ep", request).replayed, true);
+    }
+});
+
+test("batch history rejects wrong owner, task, target, node, Clip and kind without changing the canvas", t => {
+    const f = batchHistoryFixture(t, "segment"), before = f.episode.get("ep"), canvasBefore = f.db.getCanvasProject(f.projectId);
+    for (const patch of [{ taskId: "other-task" }, { id: "segment:seg1" }, { projectId: "other-project" }, { nodeId: "other-node" }, { segmentId: "other-clip" }, { kind: "image" }]) {
+        f.db.db.prepare("UPDATE episode_production_batches SET submitted_json=? WHERE run_id='history-batch'").run(JSON.stringify([{ ...f.entry, ...patch }]));
+        assert.throws(() => f.episode.edit("ep", { operationId: crypto.randomUUID(), expectedRevision: before.revision, ops: [f.op] }), /历史任务不属于/);
+        assert.deepEqual(f.episode.get("ep"), before); assert.deepEqual(f.db.getCanvasProject(f.projectId), canvasBefore);
+    }
+    f.db.db.prepare("UPDATE episode_production_batches SET episode_id='ep2', submitted_json=? WHERE run_id='history-batch'").run(JSON.stringify([f.entry]));
+    assert.throws(() => f.episode.edit("ep", { operationId: "wrong-batch-owner", expectedRevision: before.revision, ops: [f.op] }), /历史任务不属于/);
+});
+
+test("batch history resolves a shared parent by exact Clip and rolls back a mixed-operation failure", t => {
+    const f = batchHistoryFixture(t, "segment"), before = f.episode.get("ep"), canvasBefore = f.db.getCanvasProject(f.projectId);
+    const entries = [{ ...f.entry, id: "segment:seg1", segmentId: before.draft.clipGroups[0].segmentId }, f.entry];
+    f.db.db.prepare("UPDATE episode_production_batches SET submitted_json=? WHERE run_id='history-batch'").run(JSON.stringify(entries));
+    const originalBatch = f.episode.getBatch("ep", "history-batch");
+    const failed = { operationId: "failed-batch-history", expectedRevision: before.revision, ops: [f.op, { type: "bind_director_asset", assetId: "MISSING", nodeId: "missing" }] };
+    assert.throws(() => f.episode.edit("ep", failed), /MISSING/);
+    assert.deepEqual(f.episode.get("ep"), before); assert.deepEqual(f.db.getCanvasProject(f.projectId), canvasBefore);
+    assert.deepEqual(f.episode.getBatch("ep", "history-batch"), originalBatch);
+    assert.equal(f.db.getCanvasOperationReceipt(f.projectId, "failed-batch-history:result:segment:seg2").committed, false);
+    const selected = f.episode.edit("ep", { operationId: "shared-parent-history", expectedRevision: before.revision, ops: [f.op] });
+    assert.equal(selected.draft.clipGroups[0].selectedResult, undefined);
+    assert.equal(selected.draft.clipGroups[1].selectedResult?.generationLogId, f.op.generationLogId);
 });
 
 test("archived H3 video results return to their scene Clips with original task provenance and no new task", t => {

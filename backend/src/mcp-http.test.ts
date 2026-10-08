@@ -12,6 +12,42 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { registerBackendMcpHttpRoutes } from "./mcp.js";
 import type { ResolvedConfig } from "./config.js";
 
+test("HTTP MCP exposes located compilation blockers, aliases and complete diagnostic pages", async t => {
+  const { ProductionCompilationService } = await import("./drama/compilation.js");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "mcp-compilation-blocker-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const director: any = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "1" }, source: { brief: "Authored source ".repeat(10000) }, sourceHash: "b".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
+  const service: any = { get: () => ({ revision: 1, draft: { director } }), compilationReferenceFiles: () => ({}) };
+  let compilerCalls = 0;
+  const diagnostics = ["SH1", "SH2"].map(shotId => ({ code: "PROMPT_EXTERNAL_CONTEXT", path: `director.source.shots.${shotId}.visual`, targetId: "SEG1", shotId, origin: "source" as const, matchedText: "preceding segment", blocksCompilation: true, severity: "error" as const, message: "Prompt depends on external prose: preceding segment" }));
+  const jobs = new ProductionCompilationService(service, root, (input: any) => { compilerCalls++; return { director: input, exitCode: 2, diagnostics, audit: {}, sourceAdjustments: [], acceptance: {} }; });
+  const app = express(); app.use(express.json());
+  app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
+  app.post("/mcp/observability/events", (_req, res) => res.status(201).json({ ok: true }));
+  app.post("/drama/episodes/:id/production/compile", (req, res) => res.json({ ok: true, compilation: jobs.enqueue(req.params.id, "episode", req.body.operationId, req.body.expectedRevision) }));
+  app.get("/drama/episodes/:id/production/compilations/:op", (req, res) => res.json({ ok: true, compilation: jobs.getCompilation(req.params.id, "episode", req.params.op, req.query.view as any, Number(req.query.offset || 0), req.query.pageSize ? Number(req.query.pageSize) : undefined) }));
+  const server = app.listen(0, "127.0.0.1"); await once(server, "listening"); t.after(() => server.close());
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const client = await mcpClient(t, await fixture(t, `http://127.0.0.1:${address.port}`));
+  const tools = (await client.listTools()).tools;
+  assert.match(tools.find(tool => tool.name === "production_compile")!.description!, /PROMPT_EXTERNAL_CONTEXT/);
+  let bytes = 0, calls = 0;
+  const started = performance.now();
+  const call = async (name: string, args: object) => { const response = await client.callTool({ name, arguments: args as any }); bytes += Buffer.byteLength(JSON.stringify(response)); calls++; return textPayload(response).compilation; };
+  await call("production_compile", { kind: "episode", id: "episode", expectedRevision: 1, operationId: "original" });
+  const status = await call("production_get_compilation", { kind: "episode", id: "episode", operationId: "original" });
+  assert.equal(status.status, "blocked"); assert.equal(status.blockingDiagnostic.shotId, "SH1"); assert.equal(status.items, undefined);
+  const alias = await call("production_compile", { kind: "episode", id: "episode", expectedRevision: 1, operationId: "alias" });
+  assert.equal(alias.reused, true); assert.equal(alias.reusedFromOperationId, "original");
+  const pages = [];
+  for (const offset of [0, 1]) pages.push(await call("production_get_compilation", { kind: "episode", id: "episode", operationId: "alias", view: "diagnostics", offset, pageSize: 1 }));
+  assert.deepEqual(pages.flatMap(page => page.items.map((item: any) => item.shotId)), ["SH1", "SH2"]);
+  assert.equal(pages[0].nextOffset, 1); assert.equal(pages[1].nextOffset, null);
+  assert.equal(compilerCalls, 1);
+  assert.ok(bytes < 20000);
+  console.log(JSON.stringify({ compilationRegression: { calls, bytes, compilerCalls, durationMs: Math.round(performance.now() - started) } }));
+});
+
 test("production workspace writes return compact receipts and scene reads use explicit selectors", async t => {
   const app = express(); app.use(express.json());
   app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));

@@ -23,6 +23,7 @@ import type { CanvasConnection, CanvasNodeData, ViewportTransform } from "@/type
 import { flushCanvasProjectBeforeGeneration, useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import type { CanvasGraphIndex } from "@/lib/canvas/canvas-graph-index";
 import { createPluginGraphAccess } from "./plugin-graph-access";
+import { requestFormalH3OutputSelection } from "@/lib/canvas/h3-output-restore";
 
 type CanvasTheme = (typeof canvasThemes)[keyof typeof canvasThemes];
 
@@ -194,6 +195,9 @@ export function usePluginHost(params: PluginHostParams) {
             restoreH3Output: async (input) => {
                 const project = getProject();
                 if (!project) throw new Error("画布已关闭，无法还原历史输出");
+                const node = project.nodes.find(node => node.id === input.nodeId);
+                if (!node) throw new Error("目标 H3 节点已不存在，请刷新后重新选择");
+                if (requestFormalH3OutputSelection(projectId, node, input)) return;
                 await applyBackendCanvasOperations(projectId, [{ type: "restore_h3_output", ...input }], Number(project.revision || 0));
             },
             runVideoConcat: async (videos, options) => {

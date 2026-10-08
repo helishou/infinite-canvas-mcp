@@ -110,19 +110,21 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
         const liveSegments = segmentsFor(liveMetadata);
         const source = ref.generationLogId ? ref : historyOutputs.find((item) => (item.storageKey && item.storageKey === ref.storageKey) || item.url === ref.url);
         if (!source?.generationLogId || !selected?.id) { message.error("缺少可验证的生成日志，无法还原输出"); return; }
+        const formal = Boolean(liveSegments.find(segment => segment.id === selected.id)?.productionClipProjection);
+        if (formal && source.segmentId !== selected.id) { message.error("该历史输出属于其他 Clip，请先选择对应 Clip 再选用"); return; }
         try {
             await ctx.flush();
             await ctx.ai.restoreH3Output({
                 nodeId: ctx.node.id, segmentId: selected.id, generationLogId: source.generationLogId,
-                storageKey: source.storageKey, settings: buildRestoreParamsPatch(liveSegments, source, selected) as Record<string, unknown>,
+                storageKey: source.storageKey, settings: formal ? {} : buildRestoreParamsPatch(liveSegments, source, selected) as Record<string, unknown>,
             });
-            message.success("已还原当前 Clip 的输出与参数");
+            if (!formal) message.success("已还原当前 Clip 的输出与参数");
         } catch (error) {
             message.error(error instanceof Error ? error.message : String(error));
         }
     };
     return <aside className="minimax-library">
         <div key="library-head" className="minimax-library-head"><H3Icon name="output" /> <span>{h3Label(locale, "output")}</span><span className="minimax-output-actions"><button type="button" aria-label="切换输出筛选" aria-pressed={outputFilter === "current"} title={outputFilter === "all" ? "当前显示全部输出，点击只显示当前 Clip" : "当前只显示当前 Clip，点击显示全部输出"} onClick={() => changeOutputFilter(outputFilter === "all" ? "current" : "all")} className={`minimax-output-filter${outputFilter === "current" ? " active" : ""}`}><H3Icon name={outputFilter === "all" ? "filter-all" : "filter-current"} /></button></span></div>
-        <div key="library-list" ref={listRef} className="minimax-library-list minimax-output-list" style={{ "--h3-out-card-h": `${cardH}px` } as React.CSSProperties}>{visibleOutputs.map((ref, index) => <H3MaterialCard key={`${ref.generationLogId || ref.type}-${ref.url}-${index}`} ctx={ctx} ref={ref} locale={locale} compact removable onRestore={() => void restoreOutput(ref)} onOpenPreview={() => { const preview = buildH3OutputPreview(visibleOutputs, index, ctx.mediaUrl); if (preview) ctx.openMediaPreview(preview); }} />)}{!visibleOutputs.length ? <div key="empty-output" className="minimax-library-empty"><H3Icon name="output" /><span>{h3Label(locale, "output")}</span></div> : null}</div>
+        <div key="library-list" ref={listRef} className="minimax-library-list minimax-output-list" style={{ "--h3-out-card-h": `${cardH}px` } as React.CSSProperties}>{visibleOutputs.map((ref, index) => <H3MaterialCard key={`${ref.generationLogId || ref.type}-${ref.url}-${index}`} ctx={ctx} ref={ref} locale={locale} compact removable restoreTitle={selected?.productionClipProjection ? "设为当前输出（保留当前提示词与参数）" : undefined} onRestore={() => void restoreOutput(ref)} onOpenPreview={() => { const preview = buildH3OutputPreview(visibleOutputs, index, ctx.mediaUrl); if (preview) ctx.openMediaPreview(preview); }} />)}{!visibleOutputs.length ? <div key="empty-output" className="minimax-library-empty"><H3Icon name="output" /><span>{h3Label(locale, "output")}</span></div> : null}</div>
     </aside>;
 }
