@@ -26,7 +26,7 @@ import { runCanvasVideoTask } from "@/services/api/canvas-video";
 import { runCanvasAudioTask } from "@/services/api/canvas-audio";
 import { runCanvasTextTask } from "@/services/api/canvas-text-task";
 import { getCanvasTextSession, replaceCanvasText } from "@/services/api/canvas-text";
-import { translateWithBaidu } from "@/services/api/baidu-translate";
+import { translateText } from "@/services/api/translation";
 import { kickCanvasBrowserTask } from "@/services/api/canvas-browser-task";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { nanoid } from "nanoid";
@@ -6365,7 +6365,7 @@ function InfiniteCanvasPage() {
                             const sourceText = contextMenuText;
                             setContextMenu(null);
                             if (!source || !sourceText) return;
-                            void translateWithBaidu(sourceText, target).then(({ translatedText }) => {
+                            void translateText(sourceText, target).then(({ translatedText }) => {
                                 const translated = createCanvasNode(CanvasNodeType.Text, { x: source.position.x + 48, y: source.position.y + 48 });
                                 translated.title = target === "zh-CN" ? `${source.title || "文本"}（中文）` : `${source.title || "文本"}（English）`;
                                 translated.metadata = { ...translated.metadata, content: translatedText, status: NODE_STATUS_SUCCESS };

@@ -40,6 +40,7 @@ export async function requestCodexText(input: { model: string; prompt: string; i
         input.signal?.removeEventListener("abort", stop);
         client?.stopProductionClient();
         if (path.dirname(path.resolve(directory)) !== path.resolve(os.tmpdir())) throw new Error("临时文件路径超出本次请求目录，保留文件");
-        await fs.rm(directory, { recursive: true, force: true });
+        // 清理是尽力而为：目录被占用（如 Windows 上 EBUSY）时不能让 finally 抛错顶掉已经拿到的文本结果。
+        await fs.rm(directory, { recursive: true, force: true }).catch(() => undefined);
     }
 }

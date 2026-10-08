@@ -2,10 +2,10 @@ import { migrateToolGuidance } from "../canvas/tool-migrations.js";
 import { z } from "zod";
 
 export const productionReadSchema = z.object({
-    view: z.enum(["summary", "source", "artifacts", "artifact_index", "full"]).default("summary"),
+    view: z.enum(["summary", "source", "artifacts", "artifact_index", "full", "subject_workbench", "shot_workbench", "clip_workbench"]).default("summary"),
     snapshot: z.enum(["draft", "published"]).default("draft"),
     targetIds: z.array(z.string().min(1)).optional(),
-    sourceSection: z.enum(["context", "asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "ledger.facts", "ledger.timelines", "ledger.initial", "ledger.events", "ledger.requirements", "ledger.coverage"]).optional(),
+    sourceSection: z.enum(["context", "asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "subject_registry", "utterances", "ledger.facts", "ledger.timelines", "ledger.initial", "ledger.events", "ledger.requirements", "ledger.coverage"]).optional(),
     pageSize: z.coerce.number().int().positive().optional(),
     cursor: z.string().optional(),
     chunkBytes: z.coerce.number().int().positive().optional(),
@@ -25,7 +25,7 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
     const header = { episodeId: production.episodeId, ...(production.sceneId ? { sceneId: production.sceneId } : {}), ...(production.projectId ? { projectId: production.projectId } : {}), revision: production.revision, publishedVersion: production.publishedVersion, updatedAt: production.updatedAt };
     const selected = production[input.snapshot];
     const d = selected?.director;
-    const selection = JSON.stringify({ owner: production.episodeId, snapshot: input.snapshot, revision: production.revision, versionHash: production.versionHash, sourceHash: d?.sourceHash, view: input.view, targetIds: input.targetIds, section: input.sourceSection, chunkBytes: input.chunkBytes });
+    const selection = JSON.stringify({ owner: production.episodeId, snapshot: input.snapshot, revision: production.revision, versionHash: production.versionHash, workbenchVersion: production.workbenchVersion, sourceHash: d?.sourceHash, view: input.view, targetIds: input.targetIds, section: input.sourceSection, chunkBytes: input.chunkBytes });
     let offset = 0;
     if (input.cursor) {
         let cursor: any;
@@ -34,7 +34,7 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
         offset = z.number().int().nonnegative().parse(cursor.offset);
     }
     // 续页仍须返回未读部分；不能让条件读取把同版本的下一页吞掉。
-    if (!input.cursor && input.ifRevision !== undefined && input.ifRevision === production.revision) {
+    if (!["clip_workbench", "shot_workbench", "subject_workbench"].includes(input.view) && !input.cursor && input.ifRevision !== undefined && input.ifRevision === production.revision) {
         return { ...header, snapshot: input.snapshot, view: input.view, sourceHash: d?.sourceHash, unchanged: true };
     }
     if (input.view === "full" && !input.chunkBytes) return fullValue;
@@ -54,11 +54,19 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
         return { sha256: digest(value), bytes: bytes.length, offset, text: new TextDecoder("utf-8", { fatal: true }).decode(bytes.slice(offset, end)), nextCursor: end < bytes.length ? next(end) : null };
     };
     if (input.view === "full") return { ...header, snapshot: input.snapshot, chunk: chunk(JSON.stringify(fullValue)) };
+    if (["clip_workbench", "shot_workbench", "subject_workbench"].includes(input.view)) {
+        if (input.targetIds?.length !== 1) throw new Error("CLIP_WORKBENCH_TARGET: select exactly one Segment");
+        const workbench = input.view === "subject_workbench" ? production.subjectWorkbench
+            : input.view === "shot_workbench" ? production.shotWorkbench : production.clipWorkbench;
+        if (!workbench) throw new Error("CLIP_WORKBENCH_UNAVAILABLE: use the live production read endpoint");
+        return { ...header, snapshot: input.snapshot, sourceHash: d?.sourceHash, workbenchVersion: production.workbenchVersion,
+            ...(input.chunkBytes ? { chunk: chunk(JSON.stringify(workbench)) } : { workbench }) };
+    }
     const selectedArtifacts = (d?.artifacts || []).filter((a: any) => !input.targetIds || input.targetIds.includes(a.targetId));
     if (input.view === "source") {
         if (input.targetIds && !input.sourceSection) throw new Error("定向源稿读取必须指定 sourceSection");
         const source = d?.source || null;
-        const section = input.sourceSection === "context" ? Object.fromEntries(Object.entries(source || {}).filter(([key]) => !["asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "ledger"].includes(key))) : input.sourceSection?.startsWith("ledger.") ? source?.ledger?.[input.sourceSection.split(".")[1]] : input.sourceSection ? source?.[input.sourceSection] : source;
+        const section = input.sourceSection === "context" ? Object.fromEntries(Object.entries(source || {}).filter(([key]) => !["asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "subject_registry", "utterances", "ledger"].includes(key))) : input.sourceSection?.startsWith("ledger.") ? source?.ledger?.[input.sourceSection.split(".")[1]] : input.sourceSection ? source?.[input.sourceSection] : source;
         const filtered = Array.isArray(section) && input.targetIds ? section.filter((item: any) => input.targetIds!.includes(String(item.id || item.asset_id || item.shot_id || item.segment_id || item.fact_id))) : section;
         if (input.chunkBytes) {
             const value = Array.isArray(filtered) ? (filtered.length === 1 ? filtered[0] : undefined) : filtered;
@@ -66,7 +74,7 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
             return { ...header, snapshot: input.snapshot, sourceHash: d?.sourceHash, chunk: chunk(JSON.stringify(value)) };
         }
         return { ...header, snapshot: input.snapshot, engine: d?.engine, sourceHash: d?.sourceHash,
-            ...(input.sourceSection === "context" ? { omittedSourceSections: ["asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "ledger"], ledgerSummary: source?.ledger ? { contractVersion: source.ledger.contract_version, counts: Object.fromEntries(["facts", "timelines", "initial", "events", "requirements", "coverage"].map(key => [key, Array.isArray(source.ledger[key]) ? source.ledger[key].length : 0])) } : null } : {}),
+            ...(input.sourceSection === "context" ? { omittedSourceSections: ["asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "subject_registry", "utterances", "ledger"], ledgerSummary: source?.ledger ? { contractVersion: source.ledger.contract_version, counts: Object.fromEntries(["facts", "timelines", "initial", "events", "requirements", "coverage"].map(key => [key, Array.isArray(source.ledger[key]) ? source.ledger[key].length : 0])) } : null } : {}),
             ...(Array.isArray(filtered) && input.pageSize ? { source: paginate(filtered) } : { source: filtered }) };
     }
     if (input.view === "artifacts" || input.view === "artifact_index") {
@@ -133,6 +141,7 @@ export function productionWriteReceipt(result: any, context: { tool?: string; in
     const tool = kind === "scene" ? "production_get_scene_production" : "production_get";
     const readInput = { ...(kind === "scene" ? { sceneId: ownerId } : { kind, id: ownerId }), view: "summary" };
     return migrateToolGuidance({ ...pick(result, ["ok", "replayed", "mediaSubmitted", "mediaAuthorized", "operationId", "workId", "runId", "status", "updated", "created", "reused", "skipped"]),
+        ...(p.clipRefresh ? { sourceSaved: true, clipRefresh: p.clipRefresh, mediaSubmitted: false } : {}),
         ...pick(input, ["operationId", "sceneId", "projectId", "episodeId"]),
         production: { ...pick(p, ["episodeId", "revision", "publishedVersion", "updatedAt", "replayed"]), sourceHash: p.draft?.director?.sourceHash, engine: p.draft?.director?.engine },
         ...(result.canvas ? { canvas: { ...pick(result.canvas, ["id", "projectId", "revision"]), nodeCount: count(result.canvas.nodes), connectionCount: count(result.canvas.connections) } } : {}),

@@ -33,7 +33,7 @@ export type CanvasTextGenerationInput = {
     resultPolicy?: "replace-active" | "append";
 };
 
-type TextProvider = {
+export type TextProvider = {
     kind?: "codex-cli";
     model: string;
     baseUrl: string;
@@ -44,6 +44,45 @@ type TextProvider = {
 };
 
 type TextRequest = (provider: TextProvider, prompt: string, imageDataUrls: string[], signal?: AbortSignal) => Promise<string>;
+
+/**
+ * 从 ai.config 解析一次文本调用的渠道与凭据。
+ * 画布文本任务与其它后端文本调用（如右键翻译）共用，避免各自解析一份渠道规则。
+ */
+export function resolveTextProvider(
+    aiConfig: unknown,
+    modelValue: string,
+    params?: { systemPrompt?: unknown; reasoningEffort?: unknown },
+): TextProvider {
+    const config = recordOf(aiConfig);
+    const decoded = decodeChannelModel(modelValue);
+    const model = modelOptionName(modelValue).trim();
+    const channels = arrayRecords(config.channels);
+    const channel = decoded
+        ? channels.find((item) => String(item.id || "") === decoded.channelId)
+        : channels.find((item) => arrayRecords(item.models).some((entry) => String(entry.name || "") === model)) || channels[0];
+    if (!channel) throw new Error(`文本模型「${model}」没有可用渠道配置`);
+    const declaration = arrayRecords(channel.models).find((entry) => String(entry.name || "") === model);
+    if (String(declaration?.script || "").trim()) throw new Error(`文本模型「${model}」使用浏览器自定义脚本，Backend 无头执行暂不支持该脚本`);
+    if (channel.kind === "codex-cli") {
+        if (!declaration || declaration.capability !== "text") throw new Error("Codex CLI 渠道只能使用已登记的文本模型");
+        return { kind: "codex-cli", model, baseUrl: "", apiKey: "", apiFormat: "openai", systemPrompt: String(params?.systemPrompt ?? config.systemPrompt ?? "").trim(), reasoningEffort: String(params?.reasoningEffort || config.reasoningEffort || "auto") };
+    }
+    const apiFormat = String(channel.apiFormat || config.apiFormat || "openai");
+    if (apiFormat !== "openai" && apiFormat !== "openai-chat") throw new Error(`Backend 文本执行器暂不支持渠道协议：${apiFormat}`);
+    const baseUrl = String(channel.baseUrl || config.baseUrl || "").trim();
+    const apiKey = String(channel.apiKey || config.apiKey || "").trim();
+    if (!baseUrl) throw new Error(`文本模型「${model}」缺少 Base URL`);
+    if (!apiKey) throw new Error(`文本模型「${model}」缺少 API Key`);
+    return {
+        model,
+        baseUrl,
+        apiKey,
+        apiFormat,
+        systemPrompt: String(params?.systemPrompt ?? config.systemPrompt ?? "").trim(),
+        reasoningEffort: String(params?.reasoningEffort || config.reasoningEffort || "auto"),
+    };
+}
 
 /** Backend 原生文本执行器：无浏览器时也能运行画布识图/文本生成并回写结果节点。 */
 export class CanvasTextDispatcher {
@@ -241,34 +280,7 @@ export class CanvasTextDispatcher {
     }
 
     private resolveProvider(input: CanvasTextGenerationInput): TextProvider {
-        const config = recordOf(this.stores.settings.get("ai.config"));
-        const decoded = decodeChannelModel(input.model);
-        const model = modelOptionName(input.model).trim();
-        const channels = arrayRecords(config.channels);
-        const channel = decoded
-            ? channels.find((item) => String(item.id || "") === decoded.channelId)
-            : channels.find((item) => arrayRecords(item.models).some((entry) => String(entry.name || "") === model)) || channels[0];
-        if (!channel) throw new Error(`文本模型「${model}」没有可用渠道配置`);
-        const declaration = arrayRecords(channel.models).find((entry) => String(entry.name || "") === model);
-        if (String(declaration?.script || "").trim()) throw new Error(`文本模型「${model}」使用浏览器自定义脚本，Backend 无头执行暂不支持该脚本`);
-        if (channel.kind === "codex-cli") {
-            if (!declaration || declaration.capability !== "text") throw new Error("Codex CLI 渠道只能使用已登记的文本模型");
-            return { kind: "codex-cli", model, baseUrl: "", apiKey: "", apiFormat: "openai", systemPrompt: String(input.params?.systemPrompt ?? config.systemPrompt ?? "").trim(), reasoningEffort: String(input.params?.reasoningEffort || config.reasoningEffort || "auto") };
-        }
-        const apiFormat = String(channel.apiFormat || config.apiFormat || "openai");
-        if (apiFormat !== "openai" && apiFormat !== "openai-chat") throw new Error(`Backend 文本执行器暂不支持渠道协议：${apiFormat}`);
-        const baseUrl = String(channel.baseUrl || config.baseUrl || "").trim();
-        const apiKey = String(channel.apiKey || config.apiKey || "").trim();
-        if (!baseUrl) throw new Error(`文本模型「${model}」缺少 Base URL`);
-        if (!apiKey) throw new Error(`文本模型「${model}」缺少 API Key`);
-        return {
-            model,
-            baseUrl,
-            apiKey,
-            apiFormat,
-            systemPrompt: String(input.params?.systemPrompt ?? config.systemPrompt ?? "").trim(),
-            reasoningEffort: String(input.params?.reasoningEffort || config.reasoningEffort || "auto"),
-        };
+        return resolveTextProvider(this.stores.settings.get("ai.config"), input.model, input.params);
     }
 
     private findActiveTask(input: CanvasTextGenerationInput) {
@@ -440,13 +452,34 @@ async function requestChatCompletions(provider: TextProvider, messages: Array<Re
     return readTextPayload(payload);
 }
 
+/**
+ * 连不上渠道时 fetch 抛出的是 libcurl / TLS / DNS 之类的底层字串（例如中转网关上游抖动时
+ * 透传的 “Failed to perform, curl: (35) TLS connect error …”），直接抛给界面无法排查。
+ * 这里统一转成可读提示，并把原始信息附在末尾保留诊断价值。
+ */
+function describeTransportError(error: unknown, baseUrl: string) {
+    const message = error instanceof Error ? error.message : String(error);
+    const target = baseUrl || "渠道地址";
+    if (/TLS connect error|invalid library|ssl|tls|handshake/i.test(message)) return `无法连接文本模型渠道（${target}）：TLS 握手失败，通常是渠道上游或代理异常。原始错误：${message}`;
+    if (/ECONNREFUSED/i.test(message)) return `无法连接文本模型渠道（${target}）：连接被拒绝，渠道服务可能未启动。原始错误：${message}`;
+    if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(message)) return `无法连接文本模型渠道（${target}）：域名解析失败，请检查 Base URL 与网络。原始错误：${message}`;
+    if (/fetch failed|socket hang up|ECONNRESET|UND_ERR|aborted/i.test(message)) return `无法连接文本模型渠道（${target}）：网络请求失败，请检查渠道地址、代理与超时。原始错误：${message}`;
+    return message;
+}
+
 async function postJson(provider: TextProvider, path: string, body: Record<string, unknown>, signal?: AbortSignal) {
-    const response = await fetch(apiUrl(provider.baseUrl, path), {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${provider.apiKey}` },
-        body: JSON.stringify(body),
-        signal,
-    });
+    let response: Awaited<ReturnType<typeof fetch>>;
+    try {
+        response = await fetch(apiUrl(provider.baseUrl, path), {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${provider.apiKey}` },
+            body: JSON.stringify(body),
+            signal,
+        });
+    } catch (error) {
+        if (signal?.aborted) throw error;
+        throw new Error(describeTransportError(error, provider.baseUrl));
+    }
     const raw = await response.text();
     let payload: unknown;
     try { payload = raw ? JSON.parse(raw) : {}; } catch { payload = { error: { message: raw.slice(0, 500) } }; }

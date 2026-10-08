@@ -4,10 +4,9 @@ import { CheckCircle2, CircleAlert, Copy, Network, ShieldCheck, Wifi } from "luc
 import { useCopyText } from "@/hooks/use-copy-text";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { getBackendConnectionInfo, normalizeBackendAddress, saveBackendNetworkSettings, testBackendConnection, type BackendConnectionInfo } from "@/services/api/backend-connection";
-import { getBaiduTranslateStatus, saveBaiduTranslateCredentials } from "@/services/api/baidu-translate";
 
 export function ConfigConnection({ active }: { active: boolean }) {
-    const { modal, message } = App.useApp();
+    const { modal } = App.useApp();
     const copy = useCopyText();
     const currentUrl = useBackendStore((state) => state.url);
     const currentToken = useBackendStore((state) => state.token);
@@ -20,10 +19,6 @@ export function ConfigConnection({ active }: { active: boolean }) {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState("");
     const [notice, setNotice] = useState("");
-    const [baiduAppId, setBaiduAppId] = useState("");
-    const [baiduSecretKey, setBaiduSecretKey] = useState("");
-    const [baiduTranslateStatus, setBaiduTranslateStatus] = useState({ hasAppId: false, hasSecretKey: false });
-    const [savingBaiduTranslate, setSavingBaiduTranslate] = useState(false);
     useEffect(() => {
         if (!active) return;
         let disposed = false;
@@ -33,27 +28,6 @@ export function ConfigConnection({ active }: { active: boolean }) {
         }).catch(() => { if (!disposed) setInfo(undefined); });
         return () => { disposed = true; };
     }, [active, currentUrl, connected]);
-    useEffect(() => {
-        if (!active) return;
-        let disposed = false;
-        void getBaiduTranslateStatus().then((status) => { if (!disposed) setBaiduTranslateStatus({ hasAppId: status.hasAppId, hasSecretKey: status.hasSecretKey }); }).catch(() => undefined);
-        return () => { disposed = true; };
-    }, [active, currentUrl, connected]);
-    const saveBaiduTranslate = async () => {
-        setSavingBaiduTranslate(true);
-        try {
-            const clear = !baiduAppId.trim() && !baiduSecretKey.trim();
-            const result = await saveBaiduTranslateCredentials({ appId: baiduAppId, secretKey: baiduSecretKey, clear });
-            setBaiduTranslateStatus({ hasAppId: result.hasAppId, hasSecretKey: result.hasSecretKey });
-            setBaiduAppId("");
-            setBaiduSecretKey("");
-            message.success(clear ? "百度翻译配置已清除" : "百度翻译配置已保存");
-        } catch (error) {
-            message.error(error instanceof Error ? error.message : "保存百度翻译配置失败");
-        } finally {
-            setSavingBaiduTranslate(false);
-        }
-    };
     const check = async (switchTo: boolean) => {
         setBusy(true); setError(""); setNotice("");
         try {
@@ -75,24 +49,6 @@ export function ConfigConnection({ active }: { active: boolean }) {
     };
     return (
         <Form layout="vertical" requiredMark={false} className="py-2">
-            <section className="mb-4 rounded-lg border border-stone-200 p-4 dark:border-stone-800">
-                <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                        <div className="text-sm font-semibold">百度翻译通用文本 API</div>
-                        <p className="mt-1 text-xs leading-5 text-stone-500 dark:text-stone-400">标准版每月前 5 万字符免费，单次最多 1000 字符、每秒 1 次。请填写开放平台的 APP ID 和密钥；超过免费额度会按平台规则计费。</p>
-                    </div>
-                    <span className="text-xs text-stone-500">{baiduTranslateStatus.hasAppId && baiduTranslateStatus.hasSecretKey ? "已配置" : "未配置"}</span>
-                </div>
-                <div className="flex flex-wrap items-end gap-2">
-                    <Form.Item label="APP ID" className="mb-0 min-w-48 flex-1">
-                        <Input aria-label="百度翻译 APP ID" autoComplete="off" value={baiduAppId} onChange={(event) => setBaiduAppId(event.target.value)} placeholder={baiduTranslateStatus.hasAppId ? "已保存；输入新 APP ID 可替换" : "粘贴 APP ID"} />
-                    </Form.Item>
-                    <Form.Item label="密钥" className="mb-0 min-w-48 flex-1">
-                        <Input.Password aria-label="百度翻译密钥" autoComplete="new-password" value={baiduSecretKey} onChange={(event) => setBaiduSecretKey(event.target.value)} placeholder={baiduTranslateStatus.hasSecretKey ? "已保存；输入新密钥可替换" : "粘贴密钥"} />
-                    </Form.Item>
-                    <Button type="primary" loading={savingBaiduTranslate} disabled={!baiduAppId && !baiduSecretKey && !baiduTranslateStatus.hasAppId && !baiduTranslateStatus.hasSecretKey} onClick={() => void saveBaiduTranslate()}>{baiduAppId || baiduSecretKey ? "保存配置" : "清除配置"}</Button>
-                </div>
-            </section>
             <section className="rounded-lg border border-stone-200 p-4 dark:border-stone-800">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>

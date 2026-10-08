@@ -1186,6 +1186,8 @@ stopTitle: "停止生成？", stopDescription: "当前生成请求会被中断�
             defaultImageModel: "默认生图模型",
             defaultVideoModel: "默认视频模型",
             defaultTextModel: "默认文本模型",
+            translationModel: "翻译模型",
+            translationModelDescription: "画布右键「翻译为中文/英文」使用的文本模型，走所选渠道调用大模型；留空时按默认文本模型翻译。",
             defaultAudioModel: "默认音频模型",
             generation: "生成偏好",
             canvasImageCount: "画布默认生图张数",

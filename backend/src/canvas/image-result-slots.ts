@@ -63,7 +63,7 @@ export function dropImageSlots(project: CanvasProject, nodeId: string, ids: stri
     return patch;
 }
 
-export function completedImageSlots(metadata: Record<string, any>, ids: string[], media: Array<Record<string, unknown>>) {
+export function completedImageSlots(metadata: Record<string, any>, ids: string[], media: Array<Record<string, unknown>>, generationTaskId?: string) {
     const completedIds = new Set<string>();
     const keptImages: Array<Record<string, unknown>> = [];
     const oldImages: Array<Record<string, unknown>> = Array.isArray(metadata.images) ? metadata.images : [];
@@ -81,7 +81,7 @@ export function completedImageSlots(metadata: Record<string, any>, ids: string[]
         completedIds.add(String(image.id));
         keptImages.push({ ...image, status: "success", errorDetails: undefined, content: output.url,
             storageKey: output.storageKey, naturalWidth: output.width, naturalHeight: output.height,
-            bytes: output.bytes, mimeType: output.mimeType || "image/png" });
+            bytes: output.bytes, mimeType: output.mimeType || "image/png", ...(generationTaskId ? { generationTaskId } : {}) });
     }
     // 批量结果保持折叠；单张自动展示。运行中选择了另一张主图时不抢回选择。
     const primaryId = metadata.primaryImageId || (keptImages.length === 1 ? keptImages[0].id : undefined);

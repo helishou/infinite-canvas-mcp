@@ -1,5 +1,7 @@
 import { captureCanvasInputs, effectiveTargetInput, inputHash, type CanvasExecutionSnapshot } from "./canvas-inputs.js";
 import { replaceDirectorSceneStoryboard } from "./scene-storyboard.js";
+import { replaceDirectorClipStoryboard, repartitionDirectorClips, assertClipEdit, clipShots, rows as clipRows } from "./clip-storyboard.js";
+import { ClipRefreshStore, clipRefreshReceipt, clipRefreshScope } from "./clip-refresh.js";
 import { adoptedDirectorFields } from "./input-merge.js";
 import crypto from "node:crypto";
 import { assertDirectorWorkScope, directorArtifact, directorAdoption, directorWorkInput, type DirectorWorkPackage } from "@basketikun/canvas-agent/agent/work-package";
@@ -23,6 +25,7 @@ import {
     productionContinuityCheckSchema,
     productionContinuityUpgradePreviewSchema,
     productionContractVersion,
+    isSubjectPromptAssembly,
     type ProductionLayoutPlan,
     type ProductionLayoutReceipt,
     type ProductionLayoutUnit,
@@ -41,6 +44,7 @@ import { H3_RUNTIME_NODE_FIELDS, H3_RUNTIME_SEGMENT_FIELDS } from "@basketikun/c
 import { resolveAchengEngine, resolveAchengRuntime } from "@basketikun/canvas-agent/skills/acheng";
 import { assertAchengSource, auditAchengContinuity, validateAchengSource, preflightCompilationDirector } from "@basketikun/canvas-agent/skills/acheng";
 import { schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch } from "@basketikun/canvas-agent/drama/production-validation";
+import { selectSmartImageResult } from "@basketikun/canvas-agent/reference-contract";
 
 import { directorHash, projectDirector, validateDirectorMedia, assertDirectorEngine } from "./director.js";
 import { DATA_DIR } from "../config.js";
@@ -151,6 +155,153 @@ export class EpisodeProductionService {
         return create ? ensureProductionCanvas(this.db, "episode", id, this.events).project.id : null;
     }
     compilationRoot() { return path.join(this.legacyDataDir, "production-compilations"); }
+    resolveSubjectPictureInputs(id: string, input: DirectorProduction): DirectorProduction {
+        const linked = this.linked(id);
+        if (linked) return linked.service.resolveSubjectPictureInputs(linked.id, input);
+        if (!isSubjectPromptAssembly(input.source)) return structuredClone(input);
+        const director = structuredClone(input), productionCanvasId = this.episodeInfo(id).canvasId;
+        if (!productionCanvasId) throw new Error("SUBJECT_IMAGE_PRODUCTION_CANVAS_MISSING: 制作对象尚未绑定画布");
+        const assetPlans = clipRows(director.source.asset_plan), subjects = clipRows(director.source.subject_registry);
+        const bindings = subjects.flatMap(subject => clipRows(subject.pictureBindings).map(binding => ({ subjectId: String(subject.id), binding })));
+        const shots = clipRows(director.source.shots), usedBindings = new Set<string>();
+        for (const shot of shots) {
+            for (const usage of clipRows(shot.subject_usages)) for (const bindingId of usage.pictureBindingIds || []) usedBindings.add(String(bindingId));
+            for (const frame of clipRows(shot.keyframes)) usedBindings.add(String(frame.id));
+        }
+        for (const shot of shots) for (const frame of clipRows(shot.keyframes)) bindings.push({
+            subjectId: String(frame.subjectIds?.[0] || `keyframe:${shot.id}`),
+            binding: { id: String(frame.id), assetId: String(frame.assetId || frame.id), sourceNode: frame.sourceNode, selection: frame.selection },
+        });
+        for (const { subjectId, binding } of bindings) {
+            const bindingId = String(binding.id || ""), assetId = String(binding.assetId || bindingId);
+            if (!usedBindings.has(bindingId)) continue;
+            const plan = assetPlans.find(asset => String(asset.asset_id || asset.id) === assetId);
+            if (!plan) throw new ProductionValidationError([{ code: "SUBJECT_PICTURE_ASSET_MISSING", path: `subject_registry.${subjectId}.pictureBindings.${bindingId}.assetId`, targetId: assetId, message: `Subject ${subjectId} 的图片资产未登记`, severity: "error" }]);
+            const ref = binding.sourceNode && typeof binding.sourceNode === "object" ? binding.sourceNode as Record<string, any> : {};
+            const projectId = String(ref.projectId || ""), nodeId = String(ref.nodeId || "");
+            const project = projectId && this.db.getCanvasProject(projectId), node = (project?.nodes as Array<Record<string, any>> | undefined)?.find(item => item.id === nodeId);
+            if (!project || !node || node.type !== "config" || node.metadata?.smart !== true || (node.metadata?.generationMode || "image") !== "image") throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_NODE_INVALID", path: `subject_registry.${subjectId}.pictureBindings.${bindingId}.sourceNode`, targetId: bindingId, message: "Subject 图片必须绑定有效的智能图片节点", severity: "error" }]);
+            let authorized = projectId === productionCanvasId;
+            if (!authorized) {
+                const consumer = productionCanvasContext(this.db, productionCanvasId), source = productionCanvasContext(this.db, projectId), adopted = director.assets[assetId];
+                if (consumer.dramaId && consumer.dramaId === source.dramaId && source.role === "shared-assets" && adopted?.sharedSource?.sourceProjectId === projectId) {
+                    validateSharedAssetSource(this.db, productionCanvasId, adopted);
+                    authorized = true;
+                }
+            }
+            if (!authorized) throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_NODE_OWNER", path: `subject_registry.${subjectId}.pictureBindings.${bindingId}.sourceNode.projectId`, targetId: bindingId, message: "跨画布 Subject 图片必须来自当前剧目的已采用共享资产", severity: "error" }]);
+            const resolved = selectSmartImageResult(node.metadata, binding.selection as any);
+            if (resolved.error || !resolved.image) throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_RESULT_MISSING", path: `subject_registry.${subjectId}.pictureBindings.${bindingId}.selection`, targetId: bindingId, message: resolved.error || "智能节点没有有效结果", severity: "error" }]);
+            const slot = resolved.image as Record<string, any>, storageKey = String(slot.storageKey || ""), generationTaskId = String(slot.generationTaskId || "");
+            const media = storageKey && this.db.getMediaFile(storageKey);
+            if (!media || !fs.existsSync(media.filePath)) throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_NOT_ARCHIVED", path: `subject_registry.${subjectId}.pictureBindings.${bindingId}.selection`, targetId: bindingId, message: "智能节点结果尚未归档，不能作为模型参考", severity: "error" }]);
+            const digest = crypto.createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex");
+            if (generationTaskId) {
+                const task = this.db.getTask(generationTaskId);
+                const outputs = [...(task?.outputs || []), ...(Array.isArray(task?.result?.media) ? task.result.media as Array<Record<string, any>> : [])];
+                if (!task || task.status !== "succeeded" || task.projectId !== projectId || task.nodeId !== nodeId || !outputs.some(output => output.storageKey === storageKey)) throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_PROVENANCE_INVALID", path: `subject_registry.${subjectId}.pictureBindings.${bindingId}.selection`, targetId: bindingId, message: "节点图片缺少对应的成功任务和归档结果记录", severity: "error" }]);
+            }
+            const old = director.assets[assetId];
+            director.assets[assetId] = { ...(old || { version: String(plan.version || `node:${nodeId}`), status: "planned" as const }), nodeId, storageKey,
+                generationTaskId: generationTaskId || undefined, sha256: digest, status: old?.status === "approved" && old.sha256 === digest ? "approved" : "generated",
+                ...(old?.evidence && old.sha256 === digest ? { evidence: old.evidence } : {}), selectedResult: { imageId: String(slot.id || ""), taskId: generationTaskId || undefined, storageKey, sha256: digest, projectId, nodeId } };
+        }
+        return director;
+    }
+    clipRefreshStore(id: string): ClipRefreshStore {
+        const linked = id && this.linked(id);
+        return linked ? linked.service.clipRefreshStore(linked.id) : new ClipRefreshStore(this.db.db, { kind: this.ownerKind, id });
+    }
+    clipWorkbench(id: string, segmentId: string, snapshot: "draft" | "published" = "draft") {
+        const started = performance.now(), production = this.get(id), d = production[snapshot]?.director;
+        if (!d) throw new Error("CLIP_WORKBENCH_SOURCE: 缺少导演源稿");
+        if (isSubjectPromptAssembly(d.source)) {
+            let resolved = d, resolutionDiagnostics: Array<Record<string, unknown>> = [];
+            if (snapshot === "draft") try { resolved = this.resolveSubjectPictureInputs(id, d); } catch (error) { resolutionDiagnostics = (error as any)?.diagnostics || [{ code: "SUBJECT_IMAGE_RESOLUTION", message: error instanceof Error ? error.message : String(error) }]; }
+            const { segment, shots } = clipShots(d, segmentId), shotIds = new Set(shots.map(s => String(s.id)));
+            const usages = shots.flatMap(s => clipRows(s.subject_usages).map(usage => ({ shotId: String(s.id), ...usage })));
+            const subjectIds = new Set(usages.map(usage => String(usage.subjectId)));
+            const subjects = clipRows(d.source.subject_registry).filter(subject => subjectIds.has(String(subject.id)));
+            const ledger = d.source.ledger as any, projection = subjectStateProjection(d.source), windows = subjectShotWindows(d.source);
+            const states = Object.fromEntries(shots.map(shot => [shot.id, projection[shot.id] || { start: [], end: [], unresolved: [] }]));
+            const relatedFacts = new Set(usages.flatMap(usage => (usage.continuityFactIds || []).map(String)));
+            for (const fact of clipRows(ledger?.facts)) if (subjects.some(subject => subject.entityRef?.kind === fact.object_kind && subject.entityRef?.id === fact.object_id)) relatedFacts.add(String(fact.id));
+            const workbench = { owner: this.ownerIdentity(id), sourceVersion: "subject-prompt-v2", segmentId, sourceHash: d.sourceHash,
+                inputHash: compilationScopeInput(resolved, clipRefreshScope(segmentId)).inputHash,
+                segment: { id: segment.id, shot_ids: segment.shot_ids, mode: segment.mode, duration_frames: shots.reduce((n, shot) => n + Number(shot.duration_frames), 0) },
+                shots: shots.map(shot => ({ ...shot, timelineWindow: windows.get(String(shot.id)), continuity: states[shot.id] })),
+                subjects: subjects.map(subject => ({ ...subject, assets: clipRows(subject.pictureBindings).map(binding => ({ ...binding, resolved: resolved.assets[String(binding.assetId)] || null })) })),
+                utterances: clipRows(d.source.utterances).filter(u => shots.some(shot => (shot.utterance_refs || []).some((ref: any) => ref.utteranceId === u.id))),
+                continuity: { status: ledger?.contract_version === 2 ? "available" : "unavailable", facts: clipRows(ledger?.facts).filter(fact => relatedFacts.has(String(fact.id))),
+                    events: clipRows(ledger?.events).filter(event => shotIds.has(String(event.shot_id))), requirements: clipRows(ledger?.requirements).filter(req => shotIds.has(String(req.shot_id))),
+                    coverage: clipRows(ledger?.coverage).filter(item => (item.shot_ids || []).some((shotId: string) => shotIds.has(shotId))) },
+                targetStatus: this.targetOccupancy(id, [segmentId]),
+                directorArtifacts: d.artifacts.filter(a => a.targetId === segmentId).map(a => ({ id: a.id, status: a.status, current: currentCompilationArtifact(resolved, a), sha256: a.sha256, promptBytes: Buffer.byteLength(a.prompt), references: a.references })),
+                canvasInputs: this.canvasEditorialState(id, [segmentId]), boundaries: d.boundaries.filter(b => b.from === segmentId || b.to === segmentId),
+                resolutionDiagnostics, workbenchBuildMs: performance.now() - started };
+            return { ...production, clipWorkbench: workbench, workbenchVersion: directorHash(workbench) };
+        }
+        const { segment, shots } = clipShots(d, segmentId), projection = compilationScopeInput(d, clipRefreshScope(segmentId));
+        const shotIds = new Set(shots.map(s => s.id)), assetIds = new Set(Object.keys(projection.director.assets));
+        const subjects = new Set(shots.flatMap(s => [...(s.characters || []).map((c: any) => typeof c === "string" ? c : c.id || c.character_id), ...(s.camera?.attention_subject_ids || [])]));
+        const ledger = d.source.ledger as any;
+        const related = (r: any) => shotIds.has(r.shot_id) || (r.shot_ids || []).some((s: string) => shotIds.has(s));
+        const continuity = this.continuityForDirector(id, d, snapshot);
+        const report: any = continuity.report;
+        const workbench = { owner: this.ownerIdentity(id), segmentId, sourceHash: d.sourceHash, inputHash: projection.inputHash, engine: d.engine,
+            segment, shots, shotInputs: Object.fromEntries(shots.map(s => [s.id, d.shotInputs[s.id]])),
+            characterRegistry: clipRows(d.source.character_registry).filter(c => subjects.has(c.id)),
+            sceneRegistry: clipRows(d.source.scene_registry).filter(c => shots.some(s => s.scene_id === c.id)),
+            assetPlan: clipRows(projection.director.source.asset_plan), assetCards: clipRows(projection.director.source.asset_cards), assets: Object.fromEntries(Object.entries(d.assets).filter(([key]) => assetIds.has(key))),
+            directorReferences: { authored: segment.references || [], compiled: d.artifacts.filter(a => a.targetId === segmentId).map(a => ({ id: a.id, status: a.status, current: currentCompilationArtifact(d, a), sha256: a.sha256, references: a.references })) },
+            canvasInputs: this.canvasEditorialState(id, [segmentId]), targetStatus: this.targetOccupancy(id, [segmentId]),
+            continuity: { status: continuity.status, stale: report?.stale ?? true, sourceHash: report?.sourceHash, runtimeId: report?.runtimeId,
+                trajectories: Object.fromEntries(Object.entries(report?.trajectories || {}).filter(([s]) => shotIds.has(s))),
+                diagnostics: (report?.diagnostics || []).filter((i: any) => !i.affectedTargets?.length || i.affectedTargets.includes(segmentId)),
+                events: clipRows(ledger?.events).filter(related), requirements: clipRows(ledger?.requirements).filter(related), coverage: clipRows(ledger?.coverage).filter(related), facts: ledger?.facts || [], initial: ledger?.initial || [] },
+            boundaries: d.boundaries.filter(b => b.from === segmentId || b.to === segmentId) };
+        return { ...production, clipWorkbench: workbench, workbenchVersion: directorHash(workbench), workbenchBuildMs: performance.now() - started };
+    }
+    subjectWorkbench(id: string, subjectId: string, snapshot: "draft" | "published" = "draft") {
+        const production = this.get(id), authored = production[snapshot]?.director;
+        if (!authored || !isSubjectPromptAssembly(authored.source)) throw new Error("SUBJECT_WORKBENCH_SOURCE_VERSION: 所选制作稿尚未采用 Subject Prompt v2");
+        let director = authored, resolutionDiagnostics: Array<Record<string, unknown>> = [];
+        if (snapshot === "draft") try { director = this.resolveSubjectPictureInputs(id, authored); } catch (error) { resolutionDiagnostics = (error as any)?.diagnostics || [{ code: "SUBJECT_IMAGE_RESOLUTION", message: error instanceof Error ? error.message : String(error) }]; }
+        const subject = clipRows(director.source.subject_registry).find(item => item.id === subjectId);
+        if (!subject) throw new Error(`Subject ${subjectId} 不存在`);
+        const facts = clipRows(director.source.ledger?.facts).filter(fact => fact.object_kind === subject.entityRef?.kind && fact.object_id === subject.entityRef?.id);
+        const factIds = new Set(facts.map(fact => String(fact.id))), state = subjectStateProjection(director.source);
+        const usages = clipRows(director.source.shots).flatMap(shot => clipRows(shot.subject_usages).filter(usage => usage.subjectId === subjectId).map(usage => ({
+            shotId: String(shot.id), clipIds: clipRows(director.source.segments).filter(clip => (clip.shot_ids || []).includes(shot.id)).map(clip => String(clip.id)),
+            usage, state: state[String(shot.id)],
+        })));
+        const workbench = { subject, pictureBindings: clipRows(subject.pictureBindings).map(binding => ({ ...binding, resolved: director.assets[String(binding.assetId)] || null })),
+            facts, timelines: clipRows(director.source.ledger?.timelines), initial: clipRows(director.source.ledger?.initial).filter(item => factIds.has(String(item.fact_id))),
+            events: clipRows(director.source.ledger?.events).filter(item => factIds.has(String(item.fact_id))),
+            requirements: clipRows(director.source.ledger?.requirements).filter(item => factIds.has(String(item.fact_id))), usages, resolutionDiagnostics };
+        return { ...production, subjectWorkbench: workbench, workbenchVersion: directorHash({ revision: production.revision, sourceHash: director.sourceHash, workbench }) };
+    }
+    shotWorkbench(id: string, shotId: string, snapshot: "draft" | "published" = "draft") {
+        const production = this.get(id), authored = production[snapshot]?.director;
+        if (!authored || !isSubjectPromptAssembly(authored.source)) throw new Error("SHOT_WORKBENCH_SOURCE_VERSION: 所选制作稿尚未采用 Subject Prompt v2");
+        let director = authored, resolutionDiagnostics: Array<Record<string, unknown>> = [];
+        if (snapshot === "draft") try { director = this.resolveSubjectPictureInputs(id, authored); } catch (error) { resolutionDiagnostics = (error as any)?.diagnostics || [{ code: "SUBJECT_IMAGE_RESOLUTION", message: error instanceof Error ? error.message : String(error) }]; }
+        const shot = clipRows(director.source.shots).find(item => item.id === shotId);
+        if (!shot) throw new Error(`Shot ${shotId} 不存在`);
+        const subjectIds = new Set(clipRows(shot.subject_usages).map(usage => String(usage.subjectId))), states = subjectStateProjection(director.source);
+        const usages = clipRows(shot.subject_usages).map(usage => {
+            const subject = clipRows(director.source.subject_registry).find(item => item.id === usage.subjectId);
+            const bindingIds = new Set((usage.pictureBindingIds || []).map(String));
+            return { ...usage, subject, pictureBindings: clipRows(subject?.pictureBindings).filter(binding => bindingIds.has(String(binding.id))).map(binding => ({ ...binding, resolved: director.assets[String(binding.assetId)] || null })) };
+        });
+        const clipId = String(clipRows(director.source.segments).find(clip => (clip.shot_ids || []).includes(shotId))?.id || "");
+        const workbench = { shot, timelineWindow: subjectShotWindows(director.source).get(shotId), continuity: states[shotId], subjectUsages: usages,
+            subjectRegistry: clipRows(director.source.subject_registry).filter(subject => subjectIds.has(String(subject.id))),
+            keyframes: clipRows(shot.keyframes).map(frame => ({ ...frame, resolved: director.assets[String(frame.assetId || frame.id)] || null })),
+            utterances: clipRows(director.source.utterances).filter(u => (shot.utterance_refs || []).some((ref: any) => ref.utteranceId === u.id)), clipId,
+            targetStatus: clipId ? this.targetOccupancy(id, [clipId]) : [], resolutionDiagnostics };
+        return { ...production, shotWorkbench: workbench, workbenchVersion: directorHash({ revision: production.revision, sourceHash: director.sourceHash, workbench }) };
+    }
     private continuityReports() { return new ProductionContinuityReports(path.join(this.compilationRoot(), "continuity")); }
 
     getContinuity(id: string, raw: unknown = {}): Record<string, any> {
@@ -1893,6 +2044,8 @@ export class EpisodeProductionService {
     edit(episodeId: string, raw: unknown, canvasPreparation?: { projectId: string; expectedCanvasRevision: number; operationId: string; operations: CanvasOperation[] }, sceneRuntime = false, beforeCommit?: (record: ProductionRecord) => void): ProductionRecord & { replayed?: boolean; impact?: ProductionImpact } {
         const linked = this.linked(episodeId); if (linked) return linked.service.edit(linked.id, raw, canvasPreparation, sceneRuntime, beforeCommit);
         const input = productionEditSchema.parse(raw);
+        const refreshes = input.ops.filter(op => op.type === "request_director_clip_refresh");
+        if (refreshes.length > 1) throw new ProductionValidationError([{ code: "CLIP_REFRESH_SCOPE", path: "request.ops", message: "单批仅允许一个 Clip 自动刷新", severity: "error" }]);
         if (input.ops.some(operation => operation.type === "restore_archived_scene_results") && input.ops.length !== 1) throw new Error("归档视频恢复必须单独提交，不能与其他制作编辑混批");
         const canvasCommits: CanvasCommit[] = [];
         const adoptedTasks: Array<{ taskId: string; result: Record<string, unknown> }> = [];
@@ -1915,6 +2068,12 @@ export class EpisodeProductionService {
                 }
             }
             const { draft, published } = this.editedCandidate(episodeId, record, input, canvasCommits, sceneRuntime);
+            const refresh = refreshes[0];
+            if (refresh?.type === "request_director_clip_refresh") {
+                if (!record.draft.director || !draft.director) throw new Error("CLIP_REFRESH_SOURCE_MISSING");
+                assertClipEdit(record.draft.director, draft.director, input, refresh.segmentId);
+                this.clipRefreshStore(episodeId).register(input.operationId, record.revision + 1, record.draft.director, draft.director, refresh.segmentId);
+            }
             if (packets.length) {
                 if (!draft.director || !record.draft.director) throw new Error("ADOPTION_SOURCE_MISSING");
                 if (fingerprint(draft.settings) !== fingerprint(record.draft.settings) || fingerprint(published) !== fingerprint(record.published)) throw new Error("ADOPTION_PROTECTED_FIELDS");
@@ -1946,6 +2105,8 @@ export class EpisodeProductionService {
             beforeCommit?.(record);
         });
         canvasCommits.forEach(commit => this.db.notifyCanvasCommit(commit));
+        const refresh = this.clipRefreshStore(episodeId).byEdit(input.operationId);
+        if (refresh) (result as any).clipRefresh = clipRefreshReceipt(refresh);
         return result;
     }
 
@@ -2508,6 +2669,64 @@ export class EpisodeProductionService {
         if (op.type === "set_director_production") {
             if (Object.hasOwn(op.director.source, "_canvas_compilation_scope")) throw new Error("编译隔离标记不得写入正式源稿");
             draft.director = op.director;
+            projectDirector(draft);
+            return;
+        }
+        if (op.type === "upsert_director_subject") {
+            if (!draft.director || !isSubjectPromptAssembly(draft.director.source)) throw new Error("SUBJECT_SOURCE_VERSION_REQUIRED: 仅 Subject Prompt v2 可写 Subject");
+            const rows = clipRows(draft.director.source.subject_registry);
+            const index = rows.findIndex(subject => subject.id === op.subject.id);
+            if (index < 0) rows.push(structuredClone(op.subject)); else rows[index] = structuredClone(op.subject);
+            draft.director.source.subject_registry = rows;
+            draft.director.sourceHash = directorHash(draft.director.source);
+            draft.director.executionAuthorized = false;
+            draft.director.artifacts = draft.director.artifacts.map(artifact => ({ ...artifact, status: "stale" }));
+            projectDirector(draft);
+            return;
+        }
+        if (op.type === "set_director_shot_keyframes") {
+            if (!draft.director || !isSubjectPromptAssembly(draft.director.source)) throw new Error("SUBJECT_SOURCE_VERSION_REQUIRED: 仅 Subject Prompt v2 可编辑 Shot 关键帧");
+            const shot = clipRows(draft.director.source.shots).find(item => item.id === op.shotId);
+            if (!shot) throw new Error(`Shot ${op.shotId} 不存在`);
+            shot.keyframes = structuredClone(op.keyframes);
+            draft.director.sourceHash = directorHash(draft.director.source);
+            draft.director.executionAuthorized = false;
+            draft.director.artifacts = draft.director.artifacts.map(artifact => ({ ...artifact, status: "stale" }));
+            projectDirector(draft);
+            return;
+        }
+        if (op.type === "repartition_director_clips") {
+            if (!draft.director || !isSubjectPromptAssembly(draft.director.source)) throw new Error("SUBJECT_SOURCE_VERSION_REQUIRED: 仅 Subject Prompt v2 可重组 Clip");
+            repartitionDirectorClips(draft.director, op);
+            projectDirector(draft);
+            return;
+        }
+        if (op.type === "edit_director_continuity") {
+            if (!draft.director || !isSubjectPromptAssembly(draft.director.source)) throw new Error("SUBJECT_SOURCE_VERSION_REQUIRED: 仅 Subject Prompt v2 可细粒度编辑连续性台账");
+            const ledger = draft.director.source.ledger as Record<string, any>;
+            for (const change of op.changes) {
+                const collection = ledger[change.collection];
+                if (!Array.isArray(collection)) throw new Error(`连续性集合 ${change.collection} 不存在`);
+                const index = collection.findIndex((entry: any) => String(entry.id || `${entry.timeline_id}:${entry.fact_id}`) === change.id);
+                if (change.action === "delete") {
+                    if (index < 0) throw new Error(`连续性条目 ${change.id} 不存在`);
+                    collection.splice(index, 1);
+                } else {
+                    if (!change.value) throw new Error(`连续性条目 ${change.id} 缺少 value`);
+                    if (String(change.value.id || `${change.value.timeline_id}:${change.value.fact_id}`) !== change.id) throw new Error("连续性条目 ID 与变更目标不符");
+                    if (index < 0) collection.push(structuredClone(change.value)); else collection[index] = structuredClone(change.value);
+                }
+            }
+            draft.director.sourceHash = directorHash(draft.director.source);
+            draft.director.executionAuthorized = false;
+            draft.director.artifacts = draft.director.artifacts.map(artifact => ({ ...artifact, status: "stale" }));
+            projectDirector(draft);
+            return;
+        }
+        if (op.type === "request_director_clip_refresh") return;
+        if (op.type === "replace_director_clip_storyboard") {
+            if (!draft.director) throw new Error("缺少 Acheng 制作稿");
+            replaceDirectorClipStoryboard(draft.director, op);
             projectDirector(draft);
             return;
         }

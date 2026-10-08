@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setImmediate as immediate } from "node:timers/promises";
-import { ProductionCompilationService } from "./compilation.js";
+import { ProductionCompilationService, productionCompilationBusy } from "./compilation.js";
 const director: any = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "1" }, source: { brief: "source" }, sourceHash: "b".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
 
 test("active Python audit preserves standalone-error provenance through the shared compiler adapter", async t => {
@@ -39,6 +39,14 @@ function setup(t: any, compiler: any) {
     return { root, service, compilations: new ProductionCompilationService(service, root, compiler), change: () => { current.revision++; } };
 }
 const result = (input: any) => ({ director: input, exitCode: 0, diagnostics: [], audit: {}, sourceAdjustments: [], acceptance: {} });
+test("queued and running compilations keep development reload busy until settlement", async t => {
+    assert.equal(productionCompilationBusy(), false);
+    const f = setup(t, result);
+    f.compilations.enqueue("e", "owner", "busy-guard", 1);
+    assert.equal(productionCompilationBusy(), true);
+    await done(f.compilations, "busy-guard");
+    assert.equal(productionCompilationBusy(), false);
+});
 async function done(compilations: ProductionCompilationService, op: string) {
     for (let i = 0; i < 20; i++) { await immediate(); const status = compilations.getCompilation("e", "owner", op); if (!["queued", "running"].includes(status.status)) return status; }
     throw new Error("job did not finish");

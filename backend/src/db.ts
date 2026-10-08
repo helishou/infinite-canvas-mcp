@@ -924,6 +924,27 @@ export class BackendDatabase {
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }
+        if (currentVersion < 34) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                this.db.exec(`CREATE TABLE IF NOT EXISTS production_clip_refresh_jobs (
+                    owner_kind TEXT NOT NULL, owner_id TEXT NOT NULL, operation_id TEXT NOT NULL,
+                    parent_operation_id TEXT NOT NULL, compilation_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL, job_json TEXT NOT NULL,
+                    PRIMARY KEY (owner_kind, owner_id, operation_id));
+                    CREATE INDEX IF NOT EXISTS clip_refresh_pending ON production_clip_refresh_jobs(owner_kind, status);`);
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (34, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
+        if (currentVersion < 35) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                if (!this.hasColumn("production_clip_refresh_jobs", "parent_operation_id")) this.db.exec("ALTER TABLE production_clip_refresh_jobs ADD COLUMN parent_operation_id TEXT NOT NULL DEFAULT ''");
+                this.db.exec("CREATE INDEX IF NOT EXISTS clip_refresh_parent ON production_clip_refresh_jobs(owner_kind, owner_id, parent_operation_id)");
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (35, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
     }
 
     /** A rolled-back schema_migrations row leaves its column behind, so every ADD COLUMN must be checked first. */
@@ -2214,7 +2235,7 @@ export class BackendDatabase {
             }
             if (input.imageIds) {
                 if (!media.length) throw new Error("生成完成但没有返回图片");
-                const slots = completedImageSlots(sourceMetadata, input.imageIds, media);
+                const slots = completedImageSlots(sourceMetadata, input.imageIds, media, task.id);
                 const initialSize = recordOf(task.params.imageTargetSize);
                 const keepSmartLayout = source.type === "config" && sourceMetadata.smart === true;
                 const resultSize = slots.content && !keepSmartLayout && !sourceMetadata.freeResize && source.width === initialSize.width && source.height === initialSize.height

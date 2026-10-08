@@ -9,6 +9,7 @@ import { productionWorkspaceSchemas, productionContractQuerySchema } from "@bask
 import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
 import { productionCompileSchema, productionApplyCompilationSchema, productionReadSchema, projectProductionRead, projectProductionVersion } from "@basketikun/canvas-agent/drama/production-contract";
 import { ProductionCompilationService } from "../drama/compilation.js";
+import { ClipRefreshCoordinator } from "../drama/clip-refresh.js";
 import { z } from "zod";
 import { SceneWorkCoordinator } from "../drama/scene-work.js";
 import type { BackendEventBus } from "../events.js";
@@ -27,6 +28,7 @@ function batchReceipt(batch: ReturnType<EpisodeProductionService["getBatch"]>) {
 export function registerDramaProductionRoutes(router: Router, service: EpisodeProductionService, runner?: EpisodeProductionRunner, base = "/drama/episodes/:episodeId/production", events?: BackendEventBus, agents?: Pick<ProductionAgentPool, "run">) {
     const compilations = new ProductionCompilationService(service, service.compilationRoot());
     compilations.recover(base);
+    const refreshes = new ClipRefreshCoordinator(service, compilations, base);
     const scenes = new SceneWorkCoordinator(service, compilations, runner, base, agents);
     sceneCoordinators.set(`${service.compilationRoot()}:${base}`, scenes);
     const sceneOwner = (id: string) => {
@@ -35,11 +37,12 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         if (!coordinator) throw new Error("场次协调服务尚未就绪");
         return { id: canonical, coordinator };
     };
-    compilations.onSettled = id => { queueMicrotask(() => scenes.wake(id)); };
+    compilations.onSettled = id => { queueMicrotask(() => { scenes.wake(id); refreshes.wake(id); }); };
     events?.subscribe(event => {
         if (event.type === "drama-production.updated" && service.sceneWorkOwners().includes(event.entityId || "")) queueMicrotask(() => scenes.wake(event.entityId!));
     });
     for (const id of service.sceneWorkOwners()) scenes.recover(id);
+    refreshes.recover();
     const handle = (res: { status: (code: number) => { json: (body: unknown) => void } }, error: unknown) => {
         if (error instanceof ProductionValidationError) return res.status(400).json({ ok: false, code: error.diagnostics[0]?.code || "PRODUCTION_BLOCKED", error: error.message, diagnostics: error.diagnostics, nextActions: error.diagnostics.flatMap(item => item.nextAction ? [item.nextAction] : []) });
         if (error instanceof ZodError) return res.status(400).json({ ok: false, error: error.message, diagnostics: error.issues.map(issue => ({ code: "INVALID_SCHEMA", path: issue.path.join("."), message: issue.message, severity: "error" })) });
@@ -87,7 +90,7 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
     router.get<Record<string, string>>(`${base}/compilations/:operationId`, (req, res) => {
         try {
             const query = z.object({ view: z.enum(["status", "targets", "diagnostics"]).default("status"), offset: z.coerce.number().int().nonnegative().default(0), pageSize: z.coerce.number().int().positive().optional() }).strict().parse(queryWithoutToken(req.query));
-            res.json({ ok: true, compilation: compilations.getCompilation(req.params.episodeId, base, req.params.operationId, query.view, query.offset, query.pageSize) });
+            res.json({ ok: true, compilation: refreshes.inspect(req.params.episodeId, req.params.operationId, query.view, query.offset, query.pageSize) || compilations.getCompilation(req.params.episodeId, base, req.params.operationId, query.view, query.offset, query.pageSize) });
         } catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/apply-compilation`, (req, res) => {
@@ -177,12 +180,22 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
     });
     router.get<Record<string, string>>(`${base}`, (req, res) => {
         try {
-            const production = service.get(req.params.episodeId);
+            let production: any = service.get(req.params.episodeId);
             // Existing Web consumers still receive the full record unless selecting a view.
             const query = productionReadSchema.parse({ ...req.query, view: req.query.view || "full", targetIds: typeof req.query.targetIds === "string" ? req.query.targetIds.split(",") : req.query.targetIds });
+            if (query.view === "clip_workbench") {
+                if (query.targetIds?.length !== 1) throw new Error("CLIP_WORKBENCH_TARGET: select exactly one Segment");
+                production = service.clipWorkbench(req.params.episodeId, query.targetIds[0], query.snapshot);
+            } else if (query.view === "subject_workbench") {
+                if (query.targetIds?.length !== 1) throw new Error("SUBJECT_WORKBENCH_TARGET: select exactly one Subject");
+                production = service.subjectWorkbench(req.params.episodeId, query.targetIds[0], query.snapshot);
+            } else if (query.view === "shot_workbench") {
+                if (query.targetIds?.length !== 1) throw new Error("SHOT_WORKBENCH_TARGET: select exactly one Shot");
+                production = service.shotWorkbench(req.params.episodeId, query.targetIds[0], query.snapshot);
+            }
             const owner = base.startsWith("/canvas") ? { projectId: req.params.episodeId } : base.startsWith("/drama/scenes") ? { sceneId: req.params.episodeId } : {};
             const selected = projectProductionRead(query.view === "full" ? production : { ...production, ...owner }, query, value => crypto.createHash("sha256").update(value).digest("hex"));
-            if (!(selected as any).unchanged && query.targetIds?.length && query.view !== "summary" && !query.chunkBytes) { (selected as any).targetStatus = service.targetOccupancy(req.params.episodeId, query.targetIds); (selected as any).canvasInputs = service.canvasEditorialState(req.params.episodeId, query.targetIds); }
+            if (!(selected as any).unchanged && query.targetIds?.length && !["summary", "clip_workbench", "shot_workbench", "subject_workbench"].includes(query.view) && !query.chunkBytes) { (selected as any).targetStatus = service.targetOccupancy(req.params.episodeId, query.targetIds); (selected as any).canvasInputs = service.canvasEditorialState(req.params.episodeId, query.targetIds); }
             res.json({ ok: true, production: selected });
         } catch (error) { handle(res, error); }
     });
@@ -227,6 +240,7 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         try {
             const production = service.edit(req.params.episodeId, req.body);
             res.json({ ok: true, production });
+            queueMicrotask(() => refreshes.wake(req.params.episodeId));
         } catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/publish`, (req, res) => {

@@ -61,57 +61,9 @@ import { registerMcpObservabilityRoutes } from "./server/mcp-observability-route
 import { registerMcpExportRoutes, type McpSnapshotExports } from "./server/mcp-export-routes.js";
 import { CHARACTER_VOICE_COMPRESSION_THRESHOLD_BYTES, prepareCharacterVoiceUpload } from "./server/character-voice-compression.js";
 import { redactInlineMedia } from "./runtime/redact-inline-media.js";
+import { CANVAS_TRANSLATION_TARGETS, translateCanvasText, type CanvasTranslationTarget } from "./canvas/translation.js";
 
 const logger = createLogger("backend");
-
-const BAIDU_TRANSLATE_CHUNK_CHAR_LIMIT = 1000;
-const BAIDU_TRANSLATE_MIN_INTERVAL_MS = 1000;
-let baiduTranslateLastRequestAt = 0;
-let baiduTranslateRequestQueue: Promise<void> = Promise.resolve();
-
-function splitBaiduTranslateText(text: string): string[] {
-  const chars = Array.from(text);
-  const chunks: string[] = [];
-  let start = 0;
-  while (start < chars.length) {
-    const limit = Math.min(start + BAIDU_TRANSLATE_CHUNK_CHAR_LIMIT, chars.length);
-    if (limit === chars.length) {
-      chunks.push(chars.slice(start, limit).join(""));
-      break;
-    }
-    const strongFloor = limit - Math.floor(BAIDU_TRANSLATE_CHUNK_CHAR_LIMIT * 0.2);
-    let strongCut = -1;
-    let softCut = -1;
-    for (let index = start; index < limit; index += 1) {
-      const char = chars[index];
-      const cut = index + 1;
-      if (/[。！？!?\n]/u.test(char)) {
-        if (cut >= strongFloor) strongCut = cut;
-      } else if (/[，,；;：:\s]/u.test(char)) {
-        softCut = cut;
-      }
-    }
-    const end = strongCut > start ? strongCut : softCut > start ? softCut : limit;
-    chunks.push(chars.slice(start, end).join(""));
-    start = end;
-  }
-  return chunks;
-}
-
-async function withBaiduTranslateRequestSlot<T>(operation: () => Promise<T>): Promise<T> {
-  let release!: () => void;
-  const previous = baiduTranslateRequestQueue;
-  baiduTranslateRequestQueue = new Promise<void>((resolve) => { release = resolve; });
-  await previous;
-  try {
-    const delay = BAIDU_TRANSLATE_MIN_INTERVAL_MS - (Date.now() - baiduTranslateLastRequestAt);
-    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
-    baiduTranslateLastRequestAt = Date.now();
-    return await operation();
-  } finally {
-    release();
-  }
-}
 
 /** startServer 的可选依赖（comfy 路由由 index.ts 单独挂载）。 */
 export type ServerDeps = {
@@ -416,56 +368,17 @@ export function startServer(
     res.json({ ok: true });
   });
 
-  const BAIDU_TRANSLATE_KEY = "baidu-translate.config";
-  app.get("/settings/baidu-translate", (_req, res) => {
-    const saved = stores.settings.get(BAIDU_TRANSLATE_KEY) as { appId?: string; secretKey?: string } | undefined;
-    res.json({ ok: true, hasAppId: Boolean(saved?.appId), hasSecretKey: Boolean(saved?.secretKey) });
-  });
-  app.put("/settings/baidu-translate", (req, res) => {
-    if (req.body?.clear === true) {
-      stores.settings.delete(BAIDU_TRANSLATE_KEY);
-      events.publish({ type: "settings.updated", entityId: BAIDU_TRANSLATE_KEY, payload: { synced: true } });
-      return void res.json({ ok: true, hasAppId: false, hasSecretKey: false });
-    }
-    const current = stores.settings.get(BAIDU_TRANSLATE_KEY) as { appId?: string; secretKey?: string } | undefined;
-    const appId = (typeof req.body?.appId === "string" ? req.body.appId.trim() : "") || current?.appId || "";
-    const secretKey = (typeof req.body?.secretKey === "string" ? req.body.secretKey.trim() : "") || current?.secretKey || "";
-    if (!appId || !secretKey) return void res.status(400).json({ ok: false, error: "百度翻译 APP ID 和密钥都必填" });
-    stores.settings.set(BAIDU_TRANSLATE_KEY, { appId, secretKey });
-    events.publish({ type: "settings.updated", entityId: BAIDU_TRANSLATE_KEY, payload: { synced: true } });
-    res.json({ ok: true, hasAppId: true, hasSecretKey: true });
-  });
-  app.post("/translation/baidu", async (req, res) => {
+  // 画布右键翻译：走设置里选定的文本模型（ai.config.translationModel），不再依赖第三方翻译 API。
+  app.post("/translation/text", async (req, res) => {
     const text = typeof req.body?.text === "string" ? req.body.text : "";
     const target = typeof req.body?.target === "string" ? req.body.target.trim() : "";
-    if (!text.trim() || !["zh-CN", "en"].includes(target)) return void res.status(400).json({ ok: false, error: "text 必填，target 仅支持 zh-CN 或 en" });
-    const saved = stores.settings.get(BAIDU_TRANSLATE_KEY) as { appId?: string; secretKey?: string } | undefined;
-    if (!saved?.appId || !saved.secretKey) return void res.status(409).json({ ok: false, error: "请先在连接设置中配置百度翻译 APP ID 和密钥" });
+    if (!text.trim()) return void res.status(400).json({ ok: false, error: "text 必填" });
+    if (!CANVAS_TRANSLATION_TARGETS.includes(target as CanvasTranslationTarget)) return void res.status(400).json({ ok: false, error: "target 仅支持 zh-CN 或 en" });
     try {
-      const chunks = splitBaiduTranslateText(text);
-      const translations: string[] = [];
-      for (const chunk of chunks) {
-        const payload = await withBaiduTranslateRequestSlot(async () => {
-          const salt = crypto.randomBytes(16).toString("hex");
-          const sign = crypto.createHash("md5").update(`${saved.appId}${chunk}${salt}${saved.secretKey}`, "utf8").digest("hex");
-          const form = new URLSearchParams({ q: chunk, from: "auto", to: target === "zh-CN" ? "zh" : "en", appid: saved.appId!, salt, sign });
-          const upstream = await fetch("https://fanyi-api.baidu.com/api/trans/vip/translate", {
-            method: "POST",
-            headers: { "content-type": "application/x-www-form-urlencoded" },
-            body: form,
-          });
-          const response = await upstream.json() as { trans_result?: Array<{ dst?: string }>; error_code?: string; error_msg?: string };
-          return { upstream, response };
-        });
-        if (!payload.upstream.ok || payload.response.error_code) return void res.status(payload.upstream.ok ? 502 : payload.upstream.status).json({ ok: false, error: payload.response.error_msg || `百度翻译 API 返回 HTTP ${payload.upstream.status}` });
-        const translatedChunk = payload.response.trans_result?.map((item) => item.dst || "").join("");
-        if (!translatedChunk) return void res.status(502).json({ ok: false, error: "百度翻译 API 未返回译文" });
-        translations.push(translatedChunk.trim());
-      }
-      const translatedText = translations.join(target === "en" ? " " : "");
+      const translatedText = await translateCanvasText(stores, { text, target: target as CanvasTranslationTarget });
       res.json({ ok: true, translatedText });
     } catch (error) {
-      res.status(502).json({ ok: false, error: error instanceof Error ? error.message : "无法连接百度翻译 API" });
+      res.status(502).json({ ok: false, error: error instanceof Error ? error.message : "翻译失败" });
     }
   });
 

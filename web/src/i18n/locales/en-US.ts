@@ -1186,6 +1186,8 @@ stopTitle: "Stop generation?", stopDescription: "The current request will be int
             defaultImageModel: "Default image model",
             defaultVideoModel: "Default video model",
             defaultTextModel: "Default text model",
+            translationModel: "Translation model",
+            translationModelDescription: "Text model used by the canvas right-click \"Translate to Chinese/English\" action. It calls the model through the selected provider. Leave empty to use the default text model.",
             defaultAudioModel: "Default audio model",
             generation: "Generation preferences",
             canvasImageCount: "Default canvas image count",

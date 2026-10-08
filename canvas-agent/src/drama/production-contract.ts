@@ -40,7 +40,7 @@ export const directorPatchFields = {
     environment: ["name", "description", "prompt_description"],
     asset_card: ["prompt", "seven_steps"],
     asset: ["asset_name", "name", "title", "kind", "description", "prompt", "depends_on", "role", "version", "reference_role", "canvas_scope"],
-    shot: ["title", "visual", "camera", "start_frame", "end_frame", "dialogues", "audio", "required_assets", "description", "shot_type", "timeline_id", "story_order", "continuity_facts", "characters", "performance", "state_description", "continuity_cues", "reference_requirements", "prompt_contract_version", "identity_context", "offscreen_character_ids"],
+    shot: ["title", "visual", "camera", "start_frame", "end_frame", "duration_frames", "dialogues", "audio", "required_assets", "description", "shot_type", "timeline_id", "story_order", "continuity_facts", "characters", "performance", "state_description", "continuity_cues", "reference_requirements", "prompt_contract_version", "identity_context", "offscreen_character_ids", "subject_usages", "keyframes", "utterance_refs"],
     segment: ["shot_ids", "start_frame", "end_frame", "generation_clip_duration", "mode", "audio", "sound", "overall_soundscape", "non_diegetic_music", "references", "subjects", "execution_gate", "styleTemplateId"],
 } as const;
 
@@ -123,6 +123,8 @@ export const directorProductionSchema = z.object({
         if (Array.isArray(source.segments)) source.segments.forEach((segment, index) => {
             if (segment && typeof segment === "object" && Object.hasOwn(segment, "styleTemplateId") && segment.styleTemplateId !== null && !isH3StyleTemplateId(segment.styleTemplateId)) context.addIssue({ code: "custom", path: ["segments", index, "styleTemplateId"], message: "未知 H3 风格模板，使用已登记的模板 ID 或 null" });
         });
+        for (const issue of directorSourceV2Diagnostics(source)) context.addIssue({ code: "custom", path: issue.path, message: issue.message });
+        for (const issue of directorSourceV2Diagnostics(source)) context.addIssue({ code: "custom", path: issue.path, message: issue.message });
     }),
     sourceHash: hash,
     modules: z.record(z.enum(directorModules), z.object({ status: z.enum(["planned", "partial", "committed", "blocked"]), cursor: z.unknown().optional(), evidence: z.array(z.string()).default([]), unresolved: z.array(z.string()).default([]) })),
@@ -141,9 +143,200 @@ export const directorProductionSchema = z.object({
     workflow: directorWorkflowSchema.default({}),
 }).passthrough();
 export type DirectorProduction = z.infer<typeof directorProductionSchema>;
-export const productionCompilationScopeSchema = z.object({ sceneId: id.optional(), targetIds: z.array(id).min(1).optional() }).strict().refine(scope => Boolean(scope.sceneId || scope.targetIds?.length), "编译范围不能为空");
+export function isSubjectPromptAssembly(source: Record<string, unknown>) {
+    return (source.prompt_assembly as Record<string, unknown> | undefined)?.version === 2;
+}
+export const productionCompilationScopeSchema = z.object({ sceneId: id.optional(), targetIds: z.array(id).min(1).optional(), output: z.literal("selected").optional() }).strict().refine(scope => Boolean(scope.sceneId || scope.targetIds?.length), "编译范围不能为空");
 export const productionCompileSchema = z.object({ operationId: id.optional(), expectedRevision: z.number().int().nonnegative(), director: directorProductionSchema.optional(), scope: productionCompilationScopeSchema.optional() }).strict();
 export const productionApplyCompilationSchema = z.object({ preparedId: z.string().uuid() }).strict();
+
+const subjectPictureBindingSchema = z.object({
+    id, assetId: id, sourceNode: z.object({ projectId: id, nodeId: id }).strict(),
+    selection: z.discriminatedUnion("mode", [
+        z.object({ mode: z.literal("latest_success") }).strict(),
+        z.object({ mode: z.literal("selected_result"), resultId: id }).strict(),
+    ]),
+    provides: z.array(id).min(1), retain: z.array(z.string()), exclude: z.array(z.string()),
+    applicableState: z.record(id, z.string()).default({}), defaultFor: z.array(id).default([]),
+}).strict();
+const subjectEntrySchema = z.object({
+    id, kind: z.enum(["character", "scene", "prop", "animal", "other"]),
+    entityRef: z.object({ ownerKind: z.enum(["episode", "drama", "canvas"]), ownerId: id, kind: z.enum(["character", "scene", "asset"]), id }).strict(),
+    pictureBindings: z.array(subjectPictureBindingSchema).default([]),
+}).strict();
+const shotSubjectUsageSchema = z.object({
+    subjectId: id, presentation: z.enum(["visible", "offscreen_voice", "state_context"]),
+    localStartFrame: z.number().int().nonnegative().optional(), localEndFrame: z.number().int().positive().optional(),
+    pictureBindingIds: z.array(id).default([]), referencePurpose: z.array(id).default([]), continuityFactIds: z.array(id).default([]),
+    stateRequirements: z.array(z.object({ factId: id, value: id }).strict()).default([]),
+    localNotes: z.string().optional(),
+}).strict();
+const shotKeyframeSchema = z.object({
+    id, assetId: id, sourceNode: z.object({ projectId: id, nodeId: id }).strict(),
+    selection: z.discriminatedUnion("mode", [
+        z.object({ mode: z.literal("latest_success") }).strict(),
+        z.object({ mode: z.literal("selected_result"), resultId: id }).strict(),
+    ]),
+    anchor: z.enum(["composition", "opening", "closing", "at_frame"]), localFrame: z.number().int().nonnegative().optional(),
+    subjectIds: z.array(id).default([]), retain: z.array(z.string()), exclude: z.array(z.string()), requiredForSubmission: z.boolean().default(false),
+}).strict().superRefine((keyframe, context) => {
+    if (keyframe.anchor === "at_frame" && keyframe.localFrame === undefined) context.addIssue({ code: "custom", path: ["localFrame"], message: "at_frame 关键帧必须提供镜头局部帧" });
+    if (keyframe.anchor !== "at_frame" && keyframe.localFrame !== undefined) context.addIssue({ code: "custom", path: ["localFrame"], message: "非定时锚点不能指定 localFrame" });
+});
+const shotUtteranceRefSchema = z.object({ utteranceId: id, role: z.enum(["speaker", "reaction"]), localStartFrame: z.number().int().nonnegative(), localEndFrame: z.number().int().positive(), textStart: z.number().int().nonnegative(), textEnd: z.number().int().positive() }).strict();
+const utteranceSchema = z.object({
+    id, speakerSubjectId: id, text: z.string().min(1), delivery: z.string().optional(), voiceover: z.boolean().default(false),
+    start: z.object({ shotId: id, localFrame: z.number().int().nonnegative() }).strict(),
+    end: z.object({ shotId: id, localFrame: z.number().int().positive() }).strict(),
+}).strict();
+
+/** Structured, source-owned inputs for compiler-assembled Prompt v2. */
+export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
+    const issues: Array<{ path: (string | number)[]; message: string }> = [];
+    const add = (path: (string | number)[], message: string) => issues.push({ path, message });
+    const assembly = source.prompt_assembly as Record<string, unknown> | undefined;
+    if (assembly?.version !== 2) return issues;
+    const subjectsResult = z.array(subjectEntrySchema).safeParse(source.subject_registry);
+    const shots = Array.isArray(source.shots) ? source.shots as Array<Record<string, any>> : [];
+    const segments = Array.isArray(source.segments) ? source.segments as Array<Record<string, any>> : [];
+    const utterancesResult = z.array(utteranceSchema).safeParse(source.utterances ?? []);
+    for (const issue of subjectsResult.success ? [] : subjectsResult.error.issues) add(["subject_registry", ...issue.path], issue.message);
+    for (const issue of utterancesResult.success ? [] : utterancesResult.error.issues) add(["utterances", ...issue.path], issue.message);
+    if (!subjectsResult.success || !utterancesResult.success) return issues;
+    const subjects = subjectsResult.data, utterances = utterancesResult.data;
+    const assets = rowsForContract(source.asset_plan).map(item => String(item.asset_id || item.id || ""));
+    const entityIds = new Map<string, Set<string>>([
+        ["character", new Set(rowsForContract(source.character_registry).map(item => String(item.id || "")))],
+        ["scene", new Set(rowsForContract(source.scene_registry).map(item => String(item.id || "")))],
+        ["asset", new Set(assets)],
+    ]);
+    const subjectById = new Map(subjects.map(subject => [subject.id, subject]));
+    const entityOwners = new Set<string>();
+    const bindingOwners = new Map<string, string>();
+    const bindingIds = new Set<string>();
+    for (const [subjectIndex, subject] of subjects.entries()) {
+        const entityKey = `${subject.entityRef.ownerKind}:${subject.entityRef.ownerId}:${subject.entityRef.kind}:${subject.entityRef.id}`;
+        if (entityOwners.has(entityKey)) add(["subject_registry", subjectIndex, "entityRef"], "同一已登记实体只能对应一个稳定 Subject");
+        entityOwners.add(entityKey);
+        if (!entityIds.get(subject.entityRef.kind)?.has(subject.entityRef.id)) add(["subject_registry", subjectIndex, "entityRef"], "Subject 必须引用已登记的人物、场景或资产");
+        for (const [bindingIndex, binding] of subject.pictureBindings.entries()) {
+            const path = ["subject_registry", subjectIndex, "pictureBindings", bindingIndex];
+            if (bindingIds.has(binding.id)) add([...path, "id"], `重复图片绑定 ID：${binding.id}`);
+            bindingIds.add(binding.id); bindingOwners.set(binding.id, subject.id);
+            if (!assets.includes(binding.assetId)) add([...path, "assetId"], `Subject 图片绑定的资产 ${binding.assetId} 未登记在 asset_plan`);
+        }
+    }
+    const shotById = new Map<string, Record<string, any>>();
+    const shotOrder = new Map<string, number>();
+    const timelineOrder = new Set<string>();
+    for (const [index, shot] of shots.entries()) {
+        const path = ["shots", index];
+        if (!shot.id || shotById.has(String(shot.id))) add([...path, "id"], "Shot ID 必须全局唯一");
+        else shotById.set(String(shot.id), shot);
+        if (!Number.isInteger(shot.duration_frames) || shot.duration_frames <= 0) add([...path, "duration_frames"], "新合同 Shot 必须使用正整数 duration_frames");
+        if (Object.hasOwn(shot, "start_frame") || Object.hasOwn(shot, "end_frame")) add(path, "prompt v2 Shot 的全局帧窗由 duration_frames、timeline 与 story_order 派生");
+        if (!shot.timeline_id || !Number.isInteger(shot.story_order) || shot.story_order < 0) add(path, "Shot 必须登记 timeline_id 和非负 story_order");
+        const orderKey = `${shot.timeline_id}\0${shot.story_order}`;
+        if (timelineOrder.has(orderKey)) add([...path, "story_order"], "同一 timeline 的 story_order 不能重复");
+        timelineOrder.add(orderKey); shotOrder.set(String(shot.id), index);
+        const usages = z.array(shotSubjectUsageSchema).safeParse(shot.subject_usages ?? []);
+        const keyframes = z.array(shotKeyframeSchema).safeParse(shot.keyframes ?? []);
+        const utteranceRefs = z.array(shotUtteranceRefSchema).safeParse(shot.utterance_refs ?? []);
+        for (const [field, result] of [["subject_usages", usages], ["keyframes", keyframes], ["utterance_refs", utteranceRefs]] as const) {
+            for (const issue of result.success ? [] : result.error.issues) add([...path, field, ...issue.path], issue.message);
+        }
+        if (usages.success) for (const [usageIndex, usage] of usages.data.entries()) {
+            if (!subjectById.has(usage.subjectId)) add([...path, "subject_usages", usageIndex, "subjectId"], "Shot 引用了未登记 Subject");
+            for (const bindingId of usage.pictureBindingIds) if (bindingOwners.get(bindingId) !== usage.subjectId) add([...path, "subject_usages", usageIndex, "pictureBindingIds"], `图片绑定 ${bindingId} 不属于 Subject ${usage.subjectId}`);
+        }
+        if (keyframes.success) for (const [keyframeIndex, keyframe] of keyframes.data.entries()) {
+            if (!assets.includes(keyframe.assetId)) add([...path, "keyframes", keyframeIndex, "assetId"], `关键帧资产 ${keyframe.assetId} 未登记在 asset_plan`);
+            if (keyframe.localFrame !== undefined && keyframe.localFrame >= Number(shot.duration_frames)) add([...path, "keyframes", keyframeIndex, "localFrame"], "关键帧时刻超出 Shot 时长");
+            for (const subjectId of keyframe.subjectIds) if (!subjectById.has(subjectId)) add([...path, "keyframes", keyframeIndex, "subjectIds"], `关键帧引用未登记 Subject ${subjectId}`);
+        }
+        if (utteranceRefs.success) for (const [refIndex, ref] of utteranceRefs.data.entries()) {
+            if (ref.localEndFrame <= ref.localStartFrame || ref.localEndFrame > Number(shot.duration_frames)) add([...path, "utterance_refs", refIndex], "对白引用时窗须位于 Shot 内");
+        }
+    }
+    if (utterancesResult.success) for (const [index, utterance] of utterances.entries()) {
+        if (!subjectById.has(utterance.speakerSubjectId)) add(["utterances", index, "speakerSubjectId"], "说话 Subject 未登记");
+        const startIndex = shotOrder.get(utterance.start.shotId), endIndex = shotOrder.get(utterance.end.shotId);
+        const references = shots.flatMap((shot, shotIndex) => rowsForContract(shot.utterance_refs).filter(ref => ref.utteranceId === utterance.id).map(ref => ({ shot, shotIndex, ref })))
+            .sort((a, b) => a.shotIndex - b.shotIndex || Number(a.ref.localStartFrame) - Number(b.ref.localStartFrame));
+        if (!references.length) add(["utterances", index], "对白事件必须由 Shot 引用");
+        else {
+            if (references[0].shot.id !== utterance.start.shotId || references[0].ref.localStartFrame !== utterance.start.localFrame) add(["utterances", index, "start"], "对白起点与 Shot 声音覆盖不一致");
+            const last = references.at(-1)!;
+            if (last.shot.id !== utterance.end.shotId || last.ref.localEndFrame !== utterance.end.localFrame) add(["utterances", index, "end"], "对白终点与 Shot 声音覆盖不一致");
+            let textCursor = 0;
+            for (const [partIndex, part] of references.entries()) {
+                if (part.ref.textStart !== textCursor || part.ref.textEnd <= part.ref.textStart) add(["utterances", index, "references", partIndex], "对白原文片段必须按顺序连续覆盖且不重不漏");
+                textCursor = Number(part.ref.textEnd);
+                if (partIndex > 0 && references[partIndex - 1].shotIndex !== part.shotIndex && references[partIndex - 1].ref.localEndFrame !== Number(references[partIndex - 1].shot.duration_frames)) add(["utterances", index, "references", partIndex - 1], "跨切对白必须连续到达镜头切点");
+                if (partIndex < references.length - 1 && references[partIndex + 1].shotIndex !== part.shotIndex && part.ref.localEndFrame !== Number(part.shot.duration_frames)) add(["utterances", index, "references", partIndex], "跨切对白必须连续到达镜头切点");
+            }
+            if (textCursor !== Array.from(utterance.text).length) add(["utterances", index, "text"], "Shot 声音片段未逐字覆盖完整对白原文");
+            if (references.some(part => Number(part.ref.textEnd) > Array.from(utterance.text).length)) add(["utterances", index, "references"], "对白片段索引超出原文");
+            const segmentIds = new Set(references.map(part => segments.find(segment => (segment.shot_ids || []).includes(part.shot.id))?.id || ""));
+            if (segmentIds.size !== 1 || segmentIds.has("")) add(["utterances", index], "完整对白事件必须包含在同一个 Clip");
+        }
+        if (startIndex === undefined || endIndex === undefined || startIndex > endIndex) add(["utterances", index], "对白起止 Shot 不存在或顺序倒置");
+        else {
+            const startShot = shotById.get(utterance.start.shotId)!, endShot = shotById.get(utterance.end.shotId)!;
+            if (startShot.timeline_id !== endShot.timeline_id || utterance.start.localFrame >= Number(startShot.duration_frames) || utterance.end.localFrame > Number(endShot.duration_frames)) add(["utterances", index], "对白时间须处于同一时间线的有效 Shot 帧窗");
+        }
+    }
+    const partitioned = new Set<string>();
+    const compilerScope = source._canvas_compilation_scope as Record<string, any> | undefined;
+    const compiledShotIds = compilerScope ? new Set(segments.flatMap(segment => Array.isArray(segment.shot_ids) ? segment.shot_ids.map(String) : [])) : undefined;
+    for (const [segmentIndex, segment] of segments.entries()) {
+        const ids = Array.isArray(segment.shot_ids) ? segment.shot_ids.map(String) : [];
+        if (!ids.length) add(["segments", segmentIndex, "shot_ids"], "Clip 至少包含一个 Shot");
+        let prior = -1, timelineId: string | undefined;
+        for (const [shotIndex, shotId] of ids.entries()) {
+            const position = shotOrder.get(shotId);
+            if (position === undefined) add(["segments", segmentIndex, "shot_ids", shotIndex], `未知 Shot：${shotId}`);
+            else if (position <= prior) add(["segments", segmentIndex, "shot_ids", shotIndex], "Clip 中的 Shots 必须按源稿顺序连续排列");
+            else if (prior >= 0 && position !== prior + 1) add(["segments", segmentIndex, "shot_ids", shotIndex], "Clip 不能跳过中间 Shot");
+            else if (timelineId && shotById.get(shotId)?.timeline_id !== timelineId) add(["segments", segmentIndex, "shot_ids", shotIndex], "Clip 不能合并不同叙事时间线");
+            prior = position ?? prior;
+            timelineId ||= String(shotById.get(shotId)?.timeline_id || "");
+            if (partitioned.has(shotId)) add(["segments", segmentIndex, "shot_ids", shotIndex], `Shot ${shotId} 被多个 Clip 重复使用`);
+            partitioned.add(shotId);
+        }
+        if (ids.some(id => shotOrder.get(id) === undefined)) continue;
+        const durationFrames = ids.reduce((sum, id) => sum + Number(shotById.get(id)!.duration_frames), 0);
+        if (segment.duration_frames !== undefined && segment.duration_frames !== durationFrames) add(["segments", segmentIndex, "duration_frames"], "Clip 时长由 Shot 时长求和派生，不能单独修改");
+        for (const field of ["references", "subjects", "definition", "retention"]) if (Object.hasOwn(segment, field)) add(["segments", segmentIndex, field], "prompt v2 Clip 的 Subject、Picture 与保留范围由 Shots 编译派生");
+    }
+    for (const shot of shots) if ((!compiledShotIds || compiledShotIds.has(String(shot.id))) && !partitioned.has(String(shot.id))) add(["shots", shotOrder.get(String(shot.id)) ?? 0], "新合同每个输出 Shot 必须且只能归属一个 Clip");
+    const ledger = source.ledger as Record<string, any> | undefined;
+    if (!ledger || ledger.contract_version !== 2) add(["ledger"], "Prompt v2 必须沿用 continuity ledger v2");
+    else {
+        const facts = rowsForContract(ledger.facts);
+        const factsById = new Map(facts.map(fact => [String(fact.id), fact]));
+        const subjectForEntity = new Map<string, string>();
+        for (const subject of subjects) subjectForEntity.set(`${subject.entityRef.kind}:${subject.entityRef.id}`, subject.id);
+        for (const [index, fact] of facts.entries()) {
+            if (!subjectForEntity.has(`${fact.object_kind}:${fact.object_id}`)) add(["ledger", "facts", index], "连续性事实所属对象必须映射到稳定 Subject");
+            const descriptions = fact.value_descriptions;
+            const values = Array.isArray(fact.allowed_values) ? fact.allowed_values.map(String) : [];
+            if (!descriptions || typeof descriptions !== "object" || values.some(value => typeof descriptions[value] !== "string" || !descriptions[value].trim())) add(["ledger", "facts", index, "value_descriptions"], "每个合法连续性值都需要模型可读描述");
+        }
+        for (const [index, event] of rowsForContract(ledger.events).entries()) {
+            if (!Number.isInteger(event.local_frame) || event.local_frame < 0) add(["ledger", "events", index, "local_frame"], "新合同状态事件使用 Shot 局部帧");
+            const shot = shotById.get(String(event.shot_id));
+            if (!shot) add(["ledger", "events", index, "shot_id"], "状态事件引用未知 Shot");
+            else if (event.local_frame >= Number(shot.duration_frames)) add(["ledger", "events", index, "local_frame"], "状态事件超出 Shot 时长");
+            if (!factsById.has(String(event.fact_id))) add(["ledger", "events", index, "fact_id"], "状态事件引用未知连续性事实");
+        }
+    }
+    return issues;
+}
+
+function rowsForContract(value: unknown): Array<Record<string, any>> {
+    return Array.isArray(value) ? value.filter(item => item && typeof item === "object" && !Array.isArray(item)) as Array<Record<string, any>> : [];
+}
 export { productionReadSchema, productionReadQuery, projectProductionRead, projectProductionVersion, productionWriteReceipt } from "./production-read.js";
 
 /** Stable wire hashing input shared by offline adapters and Backend. */
@@ -247,6 +440,13 @@ export const episodeProductionDataSchema = z.object({
 export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("set_director_production"), director: directorProductionSchema }).strict(),
     z.object({ type: z.literal("replace_director_scene_storyboard"), sceneId: id, shots: z.array(z.record(z.unknown())).min(1), segments: z.array(z.record(z.unknown())).min(1), shotInputs: z.record(z.unknown()) }).strict(),
+    z.object({ type: z.literal("upsert_director_subject"), subject: subjectEntrySchema }).strict(),
+    z.object({ type: z.literal("set_director_shot_keyframes"), shotId: id, keyframes: z.array(shotKeyframeSchema) }).strict(),
+    z.object({ type: z.literal("repartition_director_clips"), shotIds: z.array(id).min(1), segments: z.array(z.record(z.unknown())).min(1) }).strict(),
+    z.object({ type: z.literal("reverse_sync_director_prompt"), segmentId: id, artifactId: id, sourceHash: hash, basePromptHash: hash, prompt: z.string(), canvasRevision: z.number().int().nonnegative() }).strict(),
+    z.object({ type: z.literal("edit_director_continuity"), changes: z.array(z.object({ collection: z.enum(["facts", "timelines", "initial", "events", "requirements", "coverage"]), action: z.enum(["upsert", "delete"]), id, value: z.record(z.unknown()).optional() }).strict()).min(1) }).strict(),
+    z.object({ type: z.literal("replace_director_clip_storyboard"), segmentId: id, segment: z.record(z.unknown()), shots: z.array(z.record(z.unknown())).min(1), shotInputs: z.record(z.unknown()) }).strict(),
+    z.object({ type: z.literal("request_director_clip_refresh"), segmentId: id }).strict(),
     z.object({ type: z.literal("set_director_brief"), brief: z.string() }).strict(),
     z.object({ type: z.literal("patch_director_source"), entity: z.enum(["brief", "style", "scene", "environment", "asset", "asset_card", "shot", "segment"]), id: id.optional(), patch: z.record(z.unknown()) }).strict(),
     z.object({ type: z.literal("adopt_director_fields"), targetId: id, nodeId: id, segmentId: id.optional(), canvasRevision: z.number().int().nonnegative(), fields: z.array(id).min(1) }).strict(),

@@ -5,6 +5,8 @@ import { canonicalProduction, type DirectorProduction, type EpisodeProductionDat
 import type { BackendDatabase } from "../db.js";
 import { resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
 import { resolveAchengEngine } from "@basketikun/canvas-agent/skills/acheng";
+import { isSubjectPromptAssembly } from "@basketikun/canvas-agent/drama/production-contract";
+import { subjectShotWindows, subjectStateProjection } from "@basketikun/canvas-agent/drama/subject-assembly";
 import { ref2vaPromptDiagnostics, ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
 import { assertImageReferenceCoverage } from "./image-inputs.js";
 import { productionCanvasContext } from "./production-canvas.js";
@@ -27,17 +29,42 @@ export function projectDirector(data: EpisodeProductionData) {
     const fps = Number(source.fps_num || 24) / Number(source.fps_den || 1);
     if (!Number.isFinite(fps) || fps <= 0) throw new Error("Acheng fps 无效");
     const shots = list(source.shots);
+    const subjectAssembly = isSubjectPromptAssembly(source);
+    const shotWindows = subjectShotWindows(source);
+    const stateProjection = subjectStateProjection(source);
+    const subjectsById = new Map(list(source.subject_registry).map(subject => [String(subject.id), subject]));
+    const subjectBindings = new Map<string, Record<string, any>>();
+    for (const subject of list(source.subject_registry)) for (const binding of list(subject.pictureBindings)) subjectBindings.set(String(binding.id), binding);
     const scenes = list(source.script_scenes);
     // Location is the shared Shot scene identity; preserve authored scene blocks.
     const sceneIds = [...new Set([...scenes.map(s => String(s.scene_id || s.id)), ...shots.map(s => String(s.scene_id))])];
     data.scenes = sceneIds.map(sceneId => ({ id: sceneId, heading: String(scenes.find(s => (s.scene_id || s.id) === sceneId)?.scene_name || sceneId), location: sceneId, timeOfDay: "", blocks: scenes.filter(s => (s.scene_id || s.id) === sceneId).map(s => ({ id: String(s.id), kind: "action" as const, text: String(s.text || "") })) }));
     data.shots = shots.map(s => {
         const input = d.shotInputs[String(s.id)];
-        const assetNodeIds = (input?.assetIds || []).flatMap(id => d.assets[id]?.nodeId ? [d.assets[id]!.nodeId!] : []);
-        const duration = (Number(s.end_frame) - Number(s.start_frame)) / fps;
-        return { id: String(s.id), sceneId: String(s.scene_id), title: String(s.title || s.id), duration: Number.isFinite(duration) && duration > 0 ? duration : 0,
-            visual: prose(s.visual), camera: prose(s.camera), openingState: prose(s.state_in), endingState: prose(s.state_out), sound: prose({ dialogues: s.dialogues, audio: s.audio }), assetNodeIds,
-            keyframePolicy: data.settings.storyboardImageMode === "skip" ? "none" : input?.keyframePolicy || "none" };
+        const window = shotWindows.get(String(s.id));
+        const usages = subjectAssembly ? list(s.subject_usages) : [];
+        const assetIds = subjectAssembly ? usages.flatMap(usage => (usage.pictureBindingIds || []).map((bindingId: string) => String(subjectBindings.get(bindingId)?.assetId || "")))
+            : [...(input?.assetIds || [])];
+        const keyframeAssetIds = subjectAssembly ? list(s.keyframes).map(frame => String(frame.assetId || frame.id)) : input?.keyframeAssetId ? [input.keyframeAssetId] : [];
+        const assetNodeIds = [...new Set([...assetIds, ...keyframeAssetIds].flatMap(id => d.assets[id]?.nodeId ? [d.assets[id]!.nodeId!] : []))];
+        const durationFrames = subjectAssembly ? Number(s.duration_frames) : Number(s.end_frame) - Number(s.start_frame);
+        const duration = durationFrames / fps;
+        const projectedState = stateProjection[String(s.id)];
+        const openingState = subjectAssembly ? JSON.stringify(projectedState?.start || []) : prose(s.state_in);
+        const endingState = subjectAssembly ? JSON.stringify(projectedState?.end || []) : prose(s.state_out);
+        const characters = subjectAssembly ? usages.flatMap(usage => {
+            const subject = subjectsById.get(String(usage.subjectId));
+            const entity = subject?.entityRef;
+            if (entity?.kind !== "character" || usage.presentation !== "visible") return [];
+            const row = list(source.character_registry).find(item => item.id === entity.id);
+            return [{ id: String(entity.id), name: String(row?.name || entity.id) }];
+        }) : undefined;
+        return { id: String(s.id), sceneId: String(s.scene_id || s.source_scene_id || ""), title: String(s.title || s.id), duration: Number.isFinite(duration) && duration > 0 ? duration : 0,
+            visual: prose(s.visual), camera: prose(s.camera), openingState, endingState,
+            sound: prose(subjectAssembly ? { utterance_refs: s.utterance_refs, audio: s.audio } : { dialogues: s.dialogues, audio: s.audio }), assetNodeIds,
+            ...(characters ? { characters } : {}),
+            ...(subjectAssembly && window ? { startFrame: window.startFrame, endFrame: window.endFrame, stateUnresolved: projectedState?.unresolved || [] } : {}),
+            keyframePolicy: data.settings.storyboardImageMode === "skip" || subjectAssembly && !keyframeAssetIds.length ? "none" : input?.keyframePolicy || (keyframeAssetIds.length ? "reuse" : "none") };
     });
     const prior = new Map(data.clipGroups.map(g => [g.id, g]));
     const shotIds = new Set(shots.map(s => String(s.id)));

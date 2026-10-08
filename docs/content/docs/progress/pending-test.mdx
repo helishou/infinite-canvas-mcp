@@ -304,9 +304,10 @@ description: Implemented changes that still need manual verification
 - Home and director project cards reuse the canvas's browser thumbnail cache and load images or videos when visible. A large image without a cached preview still needs its original download once; after caching, reload or return to home should show the thumbnail directly. Explicit previews use the original. Clearing browser cache allows thumbnails to be rebuilt.
 - Project covers appear as their individual queries finish, so one slow request does not block others. Returning to the page reuses the existing query cache. Check grid/list views, scrolling, failed media, explicit previews, both languages and both themes.
 
-## Baidu Translate
+## Canvas translate via selected model
 
-- Configure the Baidu Translate APP ID and secret under connection settings, then right-click a canvas text node and translate it to Chinese or English. The translated text is added as a new node, preserving the source. Text longer than 1,000 characters is split at sentence boundaries and sent sequentially at Baidu Standard's one-request-per-second rate. Verify missing credentials, invalid-signature errors, long-text chunk boundaries, and confirm the secret is not returned to the browser.
+- Pick any configured text model under the "Translation model" preference, then right-click a canvas text node and translate it to Chinese or English. The Backend calls that provider; the translation is added as a new text node and the source is preserved. No third-party translation credentials are required. When unset, the default text model is used, and each direction uses its own translation instruction.
+- Verify the errors for no text model, a provider missing its Base URL or API key, and an empty model response, plus long text and text containing line breaks and reference markers such as `{{name}}` or `<Subject 1>`; Markdown code fences around a model answer should be stripped.
 
 ## Reading and editing text storyboards
 

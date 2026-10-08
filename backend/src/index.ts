@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { DirectorSubagents, registerDirectorSubagentRoutes } from "./drama/director-subagents.js";
+import { productionCompilationBusy } from "./drama/compilation.js";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -502,7 +503,7 @@ async function startBackendHttpServer() {
     process.on("message", (message: unknown) => {
       if (!message || typeof message !== "object" || (message as { type?: string }).type !== "dev:reload") return;
       const accepted = devReload.tryReload(() => agent.session.codexBusy || agent.session.runtimeStateSnapshot.conversation.status === "running" || productionAgents.busy
-        || Boolean(devActiveTask?.get()));
+        || productionCompilationBusy() || Boolean(devActiveTask?.get()));
       process.send?.({ type: "dev:reload-status", accepted }, undefined, undefined, () => { if (accepted) shutdown("DEV_RELOAD"); });
     });
     process.send({ type: "dev:ready", pid: process.pid });

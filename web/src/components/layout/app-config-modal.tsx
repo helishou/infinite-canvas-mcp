@@ -18,7 +18,7 @@ import { createModelChannel, modelOptionsFromChannels, normalizeModelOptionValue
 
 type ModelGroup = {
     capability: ModelCapability;
-    modelKey: "imageModel" | "videoModel" | "textModel" | "audioModel";
+    modelKey: "imageModel" | "videoModel" | "textModel" | "translationModel" | "audioModel";
     labelKey: string;
 };
 
@@ -236,6 +236,9 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                         </Form.Item>
                                     ))}
                                 </div>
+                                <Form.Item label={t("config.preferences.translationModel")} extra={t("config.preferences.translationModelDescription")} className="mb-4 max-w-md">
+                                    <ModelPicker config={config} value={config.translationModel} onChange={(model) => updateConfig("translationModel", model)} capability="text" fullWidth />
+                                </Form.Item>
                                 <div className="mb-2 text-sm font-semibold">{t("config.preferences.generation")}</div>
                                 <div className="grid gap-4 md:grid-cols-4">
                                     <Form.Item label={t("config.preferences.canvasImageCount")} extra={t("config.preferences.canvasImageCountDescription")} className="mb-4">

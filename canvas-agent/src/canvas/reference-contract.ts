@@ -14,6 +14,7 @@ export type ReferenceRole = (typeof REFERENCE_ROLES)[number];
 export type ReferenceMediaType = "image" | "video" | "audio";
 export type ReferenceUsage = "reference" | "first_frame" | "last_frame";
 export type ReferenceRetention = "fully_preserved" | "partially_preserved" | "attribute_transfer" | "weak_reference";
+export type NodeImageSelectionPolicy = { mode: "latest_success" } | { mode: "selected_result"; resultId: string };
 
 export type ProjectReferenceAsset = {
     id: string;
@@ -53,6 +54,7 @@ export type ReferenceBinding = {
     sourceNodeId?: string;
     groupId?: string;
     outfitId?: string;
+    resultSelectionPolicy?: NodeImageSelectionPolicy;
 };
 
 export type ReferenceIssue = { severity: "error" | "warning"; code: string; message: string; bindingId?: string };
@@ -229,10 +231,13 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
     const counters: Record<ReferenceMediaType, number> = { image: 0, video: 0, audio: 0 };
     const references = bindings.filter((binding) => binding.enabled).flatMap((binding): CompiledReference[] => {
         const asset = catalog.get(binding.assetId);
+        const sourceMedia = sourceMediaOf(project, { ...binding, sourceNodeId: binding.sourceNodeId || asset?.sourceNodeId });
+        if (sourceMedia.selectionError) issues.push({ severity: "error", code: "source_result_unavailable", bindingId: binding.id, message: String(sourceMedia.selectionError) });
+        const { selectionError: _selectionError, ...resolvedSourceMedia } = sourceMedia;
         const merged = {
             ...binding,
             ...(asset || {}),
-            ...sourceMediaOf(project, { ...binding, sourceNodeId: binding.sourceNodeId || asset?.sourceNodeId }),
+            ...resolvedSourceMedia,
             id: binding.id,
             assetId: binding.assetId,
             enabled: binding.enabled,
@@ -301,14 +306,32 @@ function sourceMediaOf(project: Record<string, unknown>, binding: ReferenceBindi
     let media = metadata;
     if (node.type === "scene") media = recordOf(metadata.sceneImage);
     else if (node.type === "config" && metadata.smart === true && (metadata.generationMode || "image") === "image") {
-        const images = Array.isArray(metadata.images) ? metadata.images.map(recordOf) : [];
-        media = images.find((item) => item.id === metadata.primaryImageId && (item.content || item.storageKey))
-            || images.find((item) => item.content || item.storageKey) || metadata;
+        const selected = selectSmartImageResult(metadata, binding.resultSelectionPolicy);
+        if (selected.error) return { selectionError: selected.error };
+        media = selected.image || metadata;
     } else if (node.type === "character") return {};
     const storageKey = String(media.storageKey || recordOf(media.assetRef).storageKey || "");
     const url = String(media.content || media.url || media.localUrl || media.sourceUrl || "");
     if (!storageKey && !url) return {};
     return { ...(storageKey ? { storageKey } : {}), ...(url ? { url } : {}), ...(media.mimeType ? { mimeType: String(media.mimeType) } : {}) };
+}
+
+/** Resolve one image for a formal binding. Existing clips retain their legacy primary-image rule. */
+export function selectSmartImageResult(metadataValue: unknown, policy?: NodeImageSelectionPolicy) {
+    const metadata = recordOf(metadataValue);
+    const images = Array.isArray(metadata.images) ? metadata.images.map(recordOf) : [];
+    const completed = (item: Record<string, unknown>) => item.status === "success" && Boolean(item.storageKey);
+    if (policy?.mode === "latest_success") {
+        const image = [...images].reverse().find(completed);
+        return image ? { image } : { error: "智能节点没有成功归档的图片结果；不会引用运行中、失败或占位图片。" };
+    }
+    if (policy?.mode === "selected_result") {
+        const image = images.find(item => item.id === policy.resultId && completed(item));
+        return image ? { image } : { error: `选定历史结果 ${policy.resultId} 不存在、未成功或未归档。` };
+    }
+    const legacy = images.find(item => item.id === metadata.primaryImageId && (item.content || item.storageKey))
+        || images.find(item => item.content || item.storageKey);
+    return legacy ? { image: legacy } : { image: metadata };
 }
 
 function bindLiteralSubjectsToPictures(
@@ -428,12 +451,16 @@ function normalizeBinding(value: unknown): ReferenceBinding | null {
     const id = String(item.id || item.bindingId || "");
     const assetId = String(item.assetId || "");
     if (!id || !assetId) return null;
+    const rawSelection = recordOf(item.resultSelectionPolicy);
+    const resultSelectionPolicy: NodeImageSelectionPolicy | undefined = rawSelection.mode === "latest_success" ? { mode: "latest_success" }
+        : rawSelection.mode === "selected_result" && typeof rawSelection.resultId === "string" && rawSelection.resultId ? { mode: "selected_result", resultId: rawSelection.resultId } : undefined;
     return {
         ...item, id, assetId, label: String(item.label || item.name || assetId), role: inferReferenceRole(item),
         tags: Array.isArray(item.tags) ? item.tags.map(String) : [], enabled: item.enabled !== false,
         usage: ["first_frame", "last_frame"].includes(String(item.usage)) ? item.usage as ReferenceUsage : "reference",
         ...(["fully_preserved", "partially_preserved", "attribute_transfer", "weak_reference"].includes(String(item.retentionLevel)) ? { retentionLevel: item.retentionLevel as ReferenceRetention } : {}),
         ...(item.mediaType || item.type || item.kind || item.storageKey || item.mimeType || item.url ? { mediaType: inferReferenceMediaType(item) } : {}),
+        ...(resultSelectionPolicy ? { resultSelectionPolicy } : {}),
     } as ReferenceBinding;
 }
 

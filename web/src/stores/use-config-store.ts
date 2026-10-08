@@ -70,6 +70,8 @@ export type AiConfig = {
     imageModel: string;
     videoModel: string;
     textModel: string;
+    /** 画布右键翻译使用的文本模型；留空时按默认文本模型翻译。 */
+    translationModel: string;
     audioModel: string;
     audioVoice: string;
     audioFormat: string;
@@ -135,6 +137,7 @@ export const defaultConfig: AiConfig = {
     imageModel: "default::gpt-image-2",
     videoModel: "default::grok-imagine-video",
     textModel: "default::gpt-5.5",
+    translationModel: "default::gpt-5.5",
     audioModel: "default::gpt-4o-mini-tts",
     audioVoice: "alloy",
     audioFormat: "mp3",
@@ -326,6 +329,7 @@ function normalizeConfig(input: Partial<AiConfig>): AiConfig {
         imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
         videoModel: normalizeModelOptionValue(config.videoModel, channels),
         textModel: normalizeModelOptionValue(config.textModel || config.model, channels),
+        translationModel: normalizeModelOptionValue(config.translationModel || config.textModel || config.model, channels),
         audioModel: normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels),
         audioVoice: config.audioVoice || defaultConfig.audioVoice,
         audioFormat: config.audioFormat || defaultConfig.audioFormat,
