@@ -918,6 +918,11 @@ export function startServer(
     res.json({ ok: true, deleted });
   });
   // ── Drama episodes：剧目 → 分集 → 画布 ───────────────────────────────
+  app.get("/drama/projects/:dramaId", (req, res) => {
+    const drama = db.listCanvasFolders(String(req.params.dramaId))[0];
+    if (!drama?.isDrama) return void res.status(404).json({ ok: false, code: "DRAMA_NOT_FOUND", error: "剧目不存在" });
+    res.json({ ok: true, drama });
+  });
   app.get("/drama/projects/:dramaId/episodes", (req, res) => {
     const dramaId = String(req.params.dramaId || "");
     const drama = stores.canvasFolders

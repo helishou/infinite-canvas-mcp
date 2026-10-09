@@ -257,3 +257,16 @@ test('the actual native H3 generation entry accepts the preview hash after addin
     assert.equal((await service.start(request)).taskId, task.taskId);
     assert.equal(f.stores.tasks.list().filter(task => task.kind === 'canvas-h3-run').length, 1);
 });
+
+
+test('restoring an image prompt to the director baseline clears current conflict without rewriting it', t => {
+    const { db, service } = fixture(t);
+    const baseline = 'Compiled style mother';
+    db.applyCanvasProjectOperations('canvas', undefined, [{ type: 'update_node', id: 'image', metadata: { prompt: 'A real manual edit', productionImageProjection: { fieldHashes: { prompt: inputHash(baseline) }, nextValues: { prompt: baseline }, conflicts: ['prompt'], manualFields: ['prompt'] } } }], { runtimeWrite: true });
+    assert.deepEqual(service.canvasEditorialState('ep', ['A'])[0].directorChanges, ['prompt']);
+    db.applyCanvasProjectOperations('canvas', undefined, [{ type: 'update_node', id: 'image', metadata: { prompt: baseline } }], { operationId: 'restore-prompt' });
+    const before = db.getCanvasProject('canvas')!.revision;
+    assert.deepEqual(service.canvasEditorialState('ep', ['A'])[0].directorChanges, []);
+    assert.deepEqual(service.canvasEditorialState('ep', ['A'])[0].manualFields, []);
+    assert.equal(db.getCanvasProject('canvas')!.revision, before);
+});

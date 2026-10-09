@@ -95,6 +95,7 @@ export const toolNames = [
   "assets_get",
   "assets_add",
   "assets_upsert_batch",
+  "drama_get_project",
   "drama_list_episodes",
   "drama_get_episode",
   "drama_create_episode",
@@ -746,6 +747,7 @@ export const toolInputSchemas = {
       .max(100)
       .describe("要幂等写入的完整资产数组；传稳定 id 可更新已有资产"),
   }),
+  drama_get_project: z.object({ dramaId: z.string().min(1).describe("剧目 ID；不是分集或画布 ID") }),
   drama_list_episodes: z.object({
     dramaId: z
       .string()
@@ -894,6 +896,7 @@ export const toolDescriptions: Record<ToolName, string> = {
     "向「我的素材」新增素材。必填 operationId；响应未知时用原 ID 和相同内容恢复回执。kind=text 用 content，kind=image 用 imageUrl。成功只返回 assetId 和哈希摘要；详情用 assets_get 按 ID 读取。",
   assets_upsert_batch:
     "使用稳定 operationId 原子写入一批素材，失败时整批回滚。重试必须使用相同 ID 和相同内容；成功只返回资产 ID、数量和哈希摘要，不重复返回素材正文。",
+  drama_get_project: "读取剧目本体、规划、大纲和已保存决定；分集为空不代表剧目不存在。剧目 ID 不能传给 production_get 的 episode/canvas。",
   drama_list_episodes:
     "列出一个剧目的全部分集，按 episodeNumber 升序返回；每项含标题、剧情和绑定画布 ID。",
   drama_get_episode:

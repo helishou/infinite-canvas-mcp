@@ -704,6 +704,8 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
           ok: true,
           result: await comfyUi.cancel(String(input.taskId || "")),
         });
+      if (name === "drama_get_project")
+        return void res.json({ ok: true, result: await backend.getDramaProject(String(input.dramaId || "")) });
       if (name === "drama_list_episodes")
         return void res.json({
           ok: true,

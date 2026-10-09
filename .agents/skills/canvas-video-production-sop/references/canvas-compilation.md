@@ -14,6 +14,8 @@
 
 按对象、snapshot、读取范围和 revision 复用已完整读取的内容；仅核验版本时携带 `ifRevision`，返回 `unchanged` 后继续使用原内容。不能把写回执的新 revision 当成尚未读过的数据版本，也不能把第一页当全集；续页沿原 cursor 完成，不带 ifRevision。冲突或版本改变时只补读任务涉及的章节／目标；任务状态使用 readiness 或精确 runId/taskId 查询。成功写回执已确认保存，nextRead 是缺字段时的入口，不要求保存后整稿回读；编译可直接消费已保存稿。
 
+故事模块产物按当前激活合同写入 `source.story`，节拍由 `story.beats` 消费；分场写 `script_scenes` 并关联真实 `scene_registry`。不自创 `story_beats` 等未被工作台和校验器消费的替代字段。首次新稿保存后回读实际字段归属；模块声明 committed 不代表验证 passed，依据 verifiedStatus 和真实证据区分保存与验收。
+
 source 原样保存 Acheng production 数据。sourceHash 是递归键排序、无空白、UTF-8 JSON 的 SHA-256；MCP 提交完整源稿对象时使用 `production_hash_source`，脚本复用项目导出工具，不另写 canonical 算法或凭记忆拼哈希。artifacts 每项包含独立 prompt 字节、sha256、源哈希、参考标签/节点/storageKey/媒体哈希/职责及编译回执；draft 和 partial 不标 ready。接入包不填造 PASS，正式在线制作由 Backend 执行当前激活版本的编译与校验；明确离线交付时才运行离线编译，不为普通返修重复跑离线和在线两套。
 
 ### 编译后由程序承接

@@ -34,6 +34,12 @@ test("drama episode REST：剧目、分集、画布三层关系可读写", async
 
     const drama = await request("POST", "/canvas/folders", { id: "drama-1", name: "剧目一", createdAt: "2026-01-01T00:00:00.000Z" });
     assert.equal(drama.status, 201);
+    const plannedDrama = await request("GET", "/drama/projects/drama-1");
+    assert.equal(plannedDrama.status, 200);
+    assert.equal((plannedDrama.body.drama as Record<string, unknown>).name, "剧目一");
+    assert.equal((await request("GET", "/drama/projects/missing")).status, 404);
+    assert.deepEqual((await request("GET", "/drama/projects/drama-1/episodes")).body.episodes, []);
+
     const canvas1 = await request("POST", "/canvas/projects", { id: "canvas-1", title: "第一集画布", folderId: "drama-1", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z", nodes: [], connections: [] });
     assert.equal(canvas1.status, 201);
     assert.equal(Object.prototype.hasOwnProperty.call(canvas1.body.project, "folderId"), false);

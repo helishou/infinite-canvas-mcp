@@ -3,7 +3,7 @@ import type { AgentSkillSummary } from "@/services/api/canvas-agent";
 
 export const ACHENG_DIRECTOR_SKILL_NAME = "acheng-director";
 
-export const ACHENG_CANVAS_LANGUAGE_RULE = "制作语言默认简体中文：导演对话、问题与说明，以及导演工作台展示的故事梗概、分场名称和非对白正文、角色/场景/资产名称与说明、镜头标题和摘要、阻塞原因及审核说明都用简体中文，除非用户明确指定其他语言。角色对白、歌词和画面内文字逐字保留原语言。Acheng 编译专用字段（如 prompt_description、state_description 和最终 H3 正文）继续遵循对应 Skill/模型合同要求的英文；同时填写中文展示字段（角色 appearance、资产 description、镜头 display_summary 等），不要把英文编译提示词当作唯一的用户可读说明。不要自行翻译既有确认稿，只将新写或用户明确要求修改的内容按此规则输出。";
+export const ACHENG_CANVAS_LANGUAGE_RULE = "制作语言遵循当前激活 Acheng 导演 Skill 的‘制作内容语言’：新增和用户明确修改的描述性原字段直接使用中文，包括 prompt_description、state_description 和台账状态正文，人和编译器共用同一份源内容，不另维护英文正文与中文显示副本。技术字段键、稳定 ID、枚举及确认对白保持合同值和原文；最终模型请求由编译器适配。";
 
 export function findProjectAchengDirectorSkill(skills: readonly AgentSkillSummary[]) {
     return skills.find(skill => skill.name === ACHENG_DIRECTOR_SKILL_NAME && skill.scope === "repo" && skill.enabled) || null;

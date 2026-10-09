@@ -7,6 +7,10 @@ description: Implemented changes that still need manual verification
 
 ## Subject storyboard workbench
 
+- `drama_get_project` reads a single drama and its saved plan, including when it has no episodes. Test existing/no-episode and missing drama cases, shared HTTP MCP and Agent compatibility, and distinguish drama, episode and canvas IDs before creating production data.
+
+- Workbench and creative-entry director prompts use Chinese source prose and the Subject v2 automatic-refresh path. Verify the configured model produces native tool calls before interpreting a director reply as saved production data; a text-only completion is not a write receipt.
+
 - MCP descriptions and the bundled director SOP route Subject v2 edits through targeted workbenches and automatic refresh. Source prose is authored in Chinese; no separate display translation is required. Legacy requests keep their compatibility flow. Verify live contract examples and new-turn skill loading; in-flight agent snapshots remain unchanged.
 
 - Subject editing selects one object from a compact navigator; pictures and entity edits sit together. Continuity selects one Shot and compares start/end states with changes marked. Deliveries mount one selected video with explicit Shot, canvas and download actions; no auto-play. Shot save controls remain visible at the editor bottom. Verify narrow screens, theme, selection, drafts and unchanged generation/submission behavior.

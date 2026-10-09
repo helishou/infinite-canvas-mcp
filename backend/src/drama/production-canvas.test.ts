@@ -753,28 +753,29 @@ test("promoting an already reviewed episode asset preserves its source and adds 
     d.assets.ROLE = { nodeId: "episode-role", version: "v8", storageKey, sha256, status: "generated", selectedResult: { taskId: "original-image-task" } };
     save(f.episode, "ep", d);
     const published = publish(f.episode, "ep");
+    const originalNodeBefore = structuredClone((f.db.getCanvasProject(sourceCanvas)!.nodes as any[]).find(node => node.id === "episode-role"));
     const reviewed = f.episode.edit("ep", { operationId: "review-before-promotion", expectedRevision: f.episode.get("ep").revision, ops: [{ type: "review_director_asset",
         assetId: "ROLE", version: published.publishedVersion, sourceHash: d.sourceHash, nodeId: "episode-role", storageKey, sha256, verdict: "approved", evidence: "Reviewed the original archived character image" }] });
-    const originalNodeBefore = structuredClone((f.db.getCanvasProject(sourceCanvas)!.nodes as any[]).find(node => node.id === "episode-role"));
+    // 归属已标记剧目共享：审核通过即自动迁移，共享画布与批准版本在审核编辑内直接登记。
+    const autoApproved = listApprovedSharedAssets(f.db, "drama").find(asset => asset.assetId === "ROLE")!;
+    assert.equal(autoApproved.storageKey, storageKey); assert.equal(autoApproved.sha256, sha256);
+    assert.equal(autoApproved.snapshot.metadata.sharedPromotionOrigin.sourceNodeId, "episode-role");
+    const sharedCanvasId = autoApproved.sourceProjectId;
     const preview = f.episode.previewSharedAssetPromotion("ep", "ROLE", reviewed.revision);
-    assert.equal(preview.storageKey, storageKey); assert.equal(preview.sha256, sha256); assert.equal(preview.sharedCanvasId, null);
+    assert.equal(preview.storageKey, storageKey); assert.equal(preview.sha256, sha256); assert.equal(preview.approvedId, autoApproved.id);
+    assert.equal(preview.sharedCanvasId, sharedCanvasId);
     assert.equal(preview.sourceGenerationTaskId, "original-image-task");
     const promoted = f.episode.promoteExistingSharedAsset("ep", { assetId: "ROLE", expectedRevision: reviewed.revision, expectedSourceCanvasRevision: preview.sourceCanvasRevision,
         expectedSharedCanvasRevision: preview.sharedCanvasRevision, operationId: "promote-role" });
-    assert.equal(promoted.replayed, false);
-    const sharedProject = f.db.getCanvasProject(promoted.canvasId!)!;
+    assert.equal(promoted.replayed, true);
+    const sharedProject = f.db.getCanvasProject(sharedCanvasId)!;
     const importedNode = (sharedProject.nodes as any[]).find(node => node.id === promoted.nodeId);
     assert.equal(importedNode.metadata.storageKey, storageKey);
     assert.deepEqual(importedNode.metadata.sharedPromotionOrigin, { episodeId: "ep", sourceCanvasId: sourceCanvas, sourceNodeId: "episode-role", sourceVersion: published.publishedVersion,
         sourceGenerationTaskId: "original-image-task", sourceStorageKey: storageKey, sourceSha256: sha256 });
-    assert.throws(() => f.db.applyCanvasProjectOperations(promoted.canvasId!, Number(sharedProject.revision), [{ type: "update_node", id: promoted.nodeId, metadata: { sharedPromotionOrigin: {} } }]), /接入来源由 Backend 登记/);
-    const approved = listApprovedSharedAssets(f.db, "drama").find(asset => asset.assetId === "ROLE")!;
-    assert.equal(approved.storageKey, storageKey); assert.equal(approved.sha256, sha256);
-    assert.equal(approved.snapshot.metadata.sharedPromotionOrigin.sourceNodeId, "episode-role");
+    assert.throws(() => f.db.applyCanvasProjectOperations(sharedCanvasId, Number(sharedProject.revision), [{ type: "update_node", id: promoted.nodeId, metadata: { sharedPromotionOrigin: {} } }]), /接入来源由 Backend 登记/);
     assert.deepEqual((f.db.getCanvasProject(sourceCanvas)!.nodes as any[]).find(node => node.id === "episode-role"), originalNodeBefore);
-    assert.equal(f.episode.promoteExistingSharedAsset("ep", { assetId: "ROLE", expectedRevision: reviewed.revision, expectedSourceCanvasRevision: preview.sourceCanvasRevision,
-        expectedSharedCanvasRevision: preview.sharedCanvasRevision, operationId: "promote-role" }).replayed, true);
-    approve(f, promoted.canvasId!, 2);
+    approve(f, sharedCanvasId, 2);
     assert.throws(() => f.episode.previewSharedAssetPromotion("ep", "ROLE", reviewed.revision), /其他媒体版本/);
 });
 

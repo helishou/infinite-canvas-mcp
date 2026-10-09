@@ -41,3 +41,13 @@ test("reviewed source changes retain remote fields and saving emits only the edi
     assert.equal(shotDraftSourceChanged(rebased, remote), false);
     assert.deepEqual(shotFormChanges(rebased), { patch: { camera: { ...remote.camera, path: "push in" } } });
 });
+
+
+test("machine Subject editing uses its original prompt_description without making a blank appearance copy", async () => {
+    const { subjectDescriptionField } = await import("./subject-shot-draft");
+    const row = { name: "铆钉", appearance: "", prompt_description: "钛灰与褪色橙装甲，右臂液压冲锤。" };
+    const before = structuredClone(row);
+    assert.equal(subjectDescriptionField("character", row), "prompt_description");
+    assert.equal(subjectDescriptionField("environment", { prompt_description: "湿钢轨与闸门" }), "prompt_description");
+    assert.deepEqual(row, before);
+});

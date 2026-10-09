@@ -423,6 +423,7 @@ const BACKEND_OWNED_TOOL_NAMES = new Set<string>([
   "canvas_diagnose_project",
   "canvas_fix_diagnostics",
   "drama_create_project",
+  "drama_get_project",
   "drama_list_episodes",
   "drama_get_episode",
   "drama_create_episode",
@@ -1723,6 +1724,10 @@ function registerBackendCanvasTools(
       .optional()
       .describe("新的画布 ID；传 null 解除绑定"),
   });
+  server.registerTool("drama_get_project", {
+    description: toolDescriptions.drama_get_project,
+    inputSchema: toolInputSchemas.drama_get_project,
+  }, async (input) => textResult({ drama: await backendApi.getDramaProject(input.dramaId) }));
   server.registerTool(
     "drama_list_episodes",
     {

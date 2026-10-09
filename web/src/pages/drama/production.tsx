@@ -1,6 +1,6 @@
 import { ensureCanvasProjectLoaded, flushCanvasProjectBeforeGeneration } from "@/stores/canvas/use-canvas-store";
 import { withH3ParameterEdits } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, App, Button, Input, Select, Tag } from "antd";
 import { Activity, ArrowLeft, Clapperboard, ExternalLink, FileText, Image, ListChecks, PackageOpen, Settings2 } from "lucide-react";
 import localforage from "localforage";
@@ -54,10 +54,13 @@ function writeLocalDraft(key: string, value: LocalDraft | null) {
 }
 const workspaces: Array<{ key: DirectorWorkspace; icon: typeof ListChecks }> = [
   { key: "series", icon: Clapperboard },
+  { key: "assets", icon: PackageOpen },
   { key: "overview", icon: ListChecks }, { key: "story", icon: FileText },
-  { key: "assets", icon: PackageOpen }, { key: "shots", icon: Clapperboard }, { key: "continuity", icon: Activity },
+  { key: "shots", icon: Clapperboard }, { key: "continuity", icon: Activity },
   { key: "production", icon: Image }, { key: "advanced", icon: Settings2 },
 ];
+/** 页签分组：剧目 / 角色与素材是全剧产物（全局），概览及之后是本集产物，设置与历史单独一组。 */
+const workspaceScope = (key: DirectorWorkspace) => key === "advanced" ? "settings" : key === "series" || key === "assets" ? "series" : "episode";
 
 export default function ProductionRoute({ dramaId }: { dramaId?: string } = {}) {
   const [query, setQuery] = useSearchParams(), navigate = useNavigate(), { t } = useTranslation();
@@ -673,7 +676,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false, seri
       "人工协作：定向读取目标时同时查看 canvasInputs 的当前画布内容、人工差异和导演基线。重新编译保留人工修改；只有用户明确指定的目标和字段可以采用导演更新。生成默认采用当前已保存内容，不要求为了手改重新发布。",
       "保留项：不覆盖已确认的源稿和未编辑字段；完整保存对白、参考职责、资产版本与工作流游标。只提交本次模块产物和编译证据，使用 Backend expectedRevision/operationId 处理写入冲突。",
       "媒体权限：本请求只授权创作、修订和编译，不授权图片或视频生成。只有用户在工作台点击生成目标时，才使用对应生产 runId；前段 MP4 不得自动加入输入。",
-      "局部修改固定走：按 sourceSection/targetIds 定向读取并核对 targetStatus → 局部源稿修改 → 目标 scope 检查编译 → 预览发布 → 获得生成授权后仅提交该目标。工具短回执不代表字段缺失，context 的 omittedSourceSections 和 ledgerSummary 指向需要另读的源条目；失败按诊断处理，源稿与状态未变不换键重提，未知响应恢复原 operationId 的回执。",
+      "新合同局部修改固定走：读取 subject_workbench/shot_workbench/clip_workbench 并核对 targetStatus → 一次合并结构化源操作 → 消费 Backend 自动校验、编译和同步回执；不另手动重复编译或发布。旧合同走其兼容流程。发布和媒体生成独立执行，均不因自动刷新而推进。工具短回执不代表字段缺失，context 的 omittedSourceSections 和 ledgerSummary 指向需要另读的源条目；失败按诊断处理，源稿与状态未变不换键重提，未知响应恢复原 operationId 的回执。",
       "请先读取 Backend 正式制作稿、缺项与运行记录，再从此游标继续。聊天中说已完成不算提交；完成后回读 Backend 版本回执。",
     ].filter(Boolean).join("\n");
     handledAgentResultRef.current = "";
@@ -1123,6 +1126,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false, seri
   const pendingRunNotice = pendingRunStart && <div className="mb-4 rounded-xl border border-amber-400/60 bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-950/30 dark:text-amber-100"><p>{t("director.workspace.runReceiptUnknown")} · {pendingRunStart.runId}</p><Button className="mt-2" size="small" disabled={busy} onClick={() => void recoverRunStart()}>{t("drama.production.recoverReceipt")}</Button></div>;
   const run = batches[0] || null;
   const activeTargetIds = [...new Set(batches.filter(item => ["pending", "running", "paused", "awaiting_review"].includes(item.status)).flatMap(item => item.targets))];
+  const visibleWorkspaces = workspaces.filter(item => series || item.key !== "series");
 
   return <main ref={editorRootRef} data-production-inspector={embedded && !dialog || undefined} data-production-dialog={dialog || undefined} className={embedded ? "min-h-full bg-background p-3 text-foreground" : "min-h-full bg-background px-4 py-4 text-foreground sm:px-6 lg:px-8"}>
     <div className="mx-auto max-w-[1440px]">
@@ -1137,15 +1141,13 @@ export function ProductionEditor({ owner, embedded = false, dialog = false, seri
         <div className="min-w-0">
           <aside className="min-w-0 border-b border-border">
             <nav aria-label={t("director.workspace.navigation")} className="flex w-full gap-1 overflow-x-auto py-2">
-              {workspaces.filter(item => item.key !== "advanced" && (series || item.key !== "series")).map(({ key, icon: Icon }) => <button
-                key={key} type="button" aria-label={t(`director.workspace.tab.${key}`)} aria-current={workspace === key ? "page" : undefined}
-                onClick={() => selectWorkspace(key)}
-                className={`flex min-h-11 shrink-0 items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm transition-colors ${workspace === key ? "border-border bg-muted font-medium text-foreground" : "border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground"}`}
-              ><Icon className="size-4 shrink-0" /><span className="min-w-0"><span className="block whitespace-nowrap">{t(`director.workspace.tab.${key}`)}</span></span></button>)}
-              <div className="mx-1 border-r border-border" />
-              <button type="button" aria-label={t("director.workspace.tab.advanced")} aria-current={workspace === "advanced" ? "page" : undefined} onClick={() => selectWorkspace("advanced")}
-                className={`flex min-h-11 shrink-0 items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm transition-colors ${workspace === "advanced" ? "border-border bg-muted font-medium text-foreground" : "border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground"}`}
-              ><Settings2 className="size-4 shrink-0" /><span className="whitespace-nowrap">{t("director.workspace.tab.advanced")}</span></button>
+              {visibleWorkspaces.map(({ key, icon: Icon }, index) => <Fragment key={key}>
+                {index > 0 && workspaceScope(visibleWorkspaces[index - 1].key) !== workspaceScope(key) && <div data-workspace-divider aria-hidden className="mx-2 h-6 w-px shrink-0 self-center bg-border" />}
+                <button type="button" aria-label={t(`director.workspace.tab.${key}`)} aria-current={workspace === key ? "page" : undefined}
+                  onClick={() => selectWorkspace(key)}
+                  className={`flex min-h-11 shrink-0 items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm transition-colors ${workspace === key ? "border-border bg-muted font-medium text-foreground" : "border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground"}`}
+                ><Icon className="size-4 shrink-0" /><span className="min-w-0"><span className="block whitespace-nowrap">{t(`director.workspace.tab.${key}`)}</span></span></button>
+              </Fragment>)}
             </nav>
           </aside>
           <section aria-label={t(`director.workspace.tab.${workspace}`)} className="min-w-0 py-6">

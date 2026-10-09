@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { App, ConfigProvider } from "antd";
 import { createRoot } from "react-dom/client";
+import { MemoryRouter } from "react-router-dom";
 import { directorModules, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import type { EpisodeProduction, ProductionBatch, ProductionContinuity, ProductionReadiness } from "../src/services/backend-api";
 import { DirectorPanel, type DirectorWorkspace } from "../src/pages/drama/director-panel";
@@ -159,4 +160,4 @@ function Harness() {
     <output aria-label="evidence">{JSON.stringify({ saves, published, asks, director, production, readiness, batches, continuityReport })}</output>
   </main></App></ConfigProvider>;
 }
-createRoot(document.getElementById("root")!).render(<Harness />);
+createRoot(document.getElementById("root")!).render(<MemoryRouter><Harness /></MemoryRouter>);

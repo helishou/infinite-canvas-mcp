@@ -15,6 +15,23 @@ export function dialogueBody(block: DirectorRecord) {
     return prefix ? text.slice(prefix.length).trimStart() : text;
 }
 
+/**
+ * 对白说话人：① 注册表 id（character_id / speaker_id / speaker 命中 nameMap）→ 注册名；
+ * ② 否则按 speaker_name 反查注册表（同一角色在注册表里可能有更规范的名字）；
+ * ③ 都没有就退回原始字符串，最后才是占位文案。
+ * 注意 v2 稿把说话人放在 speaker_id + speaker_name，旧的 character_id / speaker 常为空。
+ */
+export function dialogueSpeakerLabel(dialogue: DirectorRecord, nameMap: Record<string, string>, labels: { narration: string; speaker: string }) {
+    const keys = [dialogue.character_id, dialogue.speaker_id, dialogue.speaker].map(value => String(value || ''));
+    if (keys.some(key => key.toUpperCase() === 'NARRATOR')) return labels.narration;
+    const registered = keys.find(key => key && nameMap[key]);
+    if (registered) return nameMap[registered];
+    const raw = humanName(dialogue.speaker_name, keys[0], '');
+    const matched = raw && Object.keys(nameMap).find(key => nameMap[key].toLowerCase() === raw.toLowerCase());
+    if (matched) return nameMap[matched];
+    return raw || humanName(dialogue.speaker, keys[0], labels.speaker);
+}
+
 export function readableText(value: unknown, names: Record<string, string> = {}): string {
     if (value === null || value === undefined) return '';
     if (typeof value === 'string') return names[value] || value;
@@ -50,6 +67,20 @@ export function storyBeatCards(beats: DirectorRecord[], sceneId?: string) {
     const selected = sceneId ? beats.filter(beat => String(beat.scene_id) === sceneId) : beats;
     const repeatedFields = ["goal", "obstacle", "cost"].filter(field => selected.length > 1 && selected.every(beat => typeof beat[field] === "string" && beat[field].trim() && beat[field].trim() === selected[0][field]?.trim()));
     return selected.map(beat => ({ beat, text: readableText(beat.summary || beat.description || beat.choice || beat.result || beat.goal), repeatedFields }));
+}
+
+
+/**
+ * 时长（秒）→ 帧数补丁：start_frame 由前序镜头决定，所以只推 end_frame；
+ * 原稿已登记 duration_frames 时一起同步，避免两个字段各说各话。
+ */
+export function shotDurationPatch(shot: DirectorRecord, seconds: number, fps: number) {
+    const startFrame = Number(shot.start_frame || 0);
+    const rate = Number(fps) > 0 ? Number(fps) : 24;
+    const frames = Math.max(1, Math.round(Number(seconds) * rate));
+    const patch: Record<string, unknown> = { end_frame: startFrame + frames };
+    if (Number.isFinite(Number(shot.duration_frames))) patch.duration_frames = frames;
+    return patch;
 }
 
 

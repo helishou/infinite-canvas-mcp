@@ -4,6 +4,8 @@
 
 导演工作台提供概览、剧本、主体与图片（旧稿为角色与素材）、分镜、连续性、生成与交付、设置与历史。页面按当前对象集中编辑，图片历史仅浏览，正式选用沿 Backend 操作。镜头分镜图绑定智能图片节点，图片卡片定位精确 projectId/nodeId；连续性视图查询同一 ledger，不另创建显示台账。七模块仍是内部职责，不是固定生产关卡。
 
+恢复剧目规划先用 `drama_get_project` 核对剧目本体与已保存决定，再用 `drama_list_episodes` 查分集。空分集目录不代表剧目不存在；剧目 ID 不可当作 episode/canvas 传给 `production_get`。没有分集且用户已明确开始本集制作时，沿正式创建与绑定操作建立第一集。
+
 进入剧目直接打开全页制作工作台并选择分集；剧目管理、共享资产和画布是明确入口，不自动把工作台跳转成画布弹窗。画布用于节点原位迭代、历史查看和授权媒体生产。普通画布不自动进入制作 SOP，旧稿不自动迁移；布局变化不重排已有节点或生成媒体。
 
 创意对话确认对象后，先保存 brief 与 `workflow.currentWork`，回读 Backend `workflow/readiness`，再通过 `site_navigate({ production: { kind, id, workId, runId? } })` 呈现正式画布目标；无节点时打开对象编辑面板。需要节点时用 `production_prepare_targets` 幂等准备 asset/frame/segment，不把准备或跟随视为生成授权。推进同一制作沿用 workId；待决定项绑定源哈希，用户答复先保存再继续，不凭聊天文字或同名节点推断导航位置。

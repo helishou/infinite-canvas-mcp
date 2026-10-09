@@ -6,8 +6,9 @@ import { useTranslation } from "react-i18next";
 import { directorModules, resolveSubjectPictureBindingIds, directorProductionSchema, isSubjectPromptAssembly, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 import { backendMediaUrl, fetchProductionWorkbench, type ProductionTarget, type ProductionSceneAction, type BackendRuntimeTask, type EpisodeProduction, type ProductionBatch, type ProductionReadiness } from "@/services/backend-api";
 import { MediaImage } from "@/components/media/media-image";
-import { groupScriptScenes, dialogueBody, readableText, humanName, records, formatSeconds, shotDisplayText, storyBeatCards, assetImagePreview } from "./director-display";
+import { groupScriptScenes, dialogueBody, dialogueSpeakerLabel, readableText, humanName, records, formatSeconds, storyBeatCards, assetImagePreview, shotDurationPatch } from "./director-display";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
+import { useMediaPreviewStore } from "@/stores/use-media-preview-store";
 import { saveAs } from "file-saver";
 import { ContinuityPanel } from "./continuity-panel";
 import { SceneProductionPanel } from "./scene-production-panel";
@@ -15,7 +16,7 @@ import { H3_STYLE_TEMPLATES } from "../../../../canvas-agent/src/plugins/minimax
 import { subjectShotWindows } from "@basketikun/canvas-agent/drama/subject-assembly";
 import { SubjectShotEditor } from "./subject-shot-editor";
 import { SubjectStoryboardWorkbench } from "./subject-storyboard-workbench";
-import { productionWorkbenchValue, subjectDisplayName } from "./subject-shot-draft";
+import { productionWorkbenchValue, subjectDisplayName, subjectDescriptionField } from "./subject-shot-draft";
 import { ReferenceNodeLink } from "./reference-node-link";
 import { PictureBindingEditor } from "./picture-binding-editor";
 import { readClipPartitionDraft } from "./subject-clip-draft";
@@ -153,6 +154,85 @@ function SourceField({ value, draftValue, onDraftChange, multiline, rows = 3, nu
   return multiline
     ? <Input.TextArea value={draft} autoSize={{ minRows: rows, maxRows: 12 }} disabled={disabled} placeholder={placeholder} onChange={event => { setDraft(event.target.value); onDraftChange?.(event.target.value); }} onBlur={() => { if (commitOnBlur) void save(); }} />
     : <Input value={draft} disabled={disabled} placeholder={placeholder} onChange={event => { setDraft(event.target.value); onDraftChange?.(event.target.value); }} onBlur={() => { if (commitOnBlur) void save(); }} />;
+}
+
+const SHOT_SOURCE_FIELDS = ["visual", "camera"] as const;
+const SHOT_STATE_FIELDS = ["state_in", "state_out"] as const;
+
+/**
+ * 镜头源字段（画面与动作 / 机位与运镜 / 起止状态 / 相关素材 / 时长）的内联编辑器。
+ * 原先这些字段装在「修改画面、摄影与起止状态」弹窗里；现在直接摊在页面上：
+ * 右上角一枚「修改」，点开变成「保存 / 取消」，编辑期只动本地草稿，保存时把有改动的字段一次提交。
+ * ⚠️ 这是页面上「画面」的唯一展示位——别处不要再渲染 shot.visual / display_summary，否则同一段文字会重复出现。
+ */
+function ShotSourceFields({ shot, busy, names, assetIds, assetName, fps, onNavigate, onSave, includeCompleteSource = false }: {
+  shot: Record<string, any>; busy: boolean; names: Record<string, string>;
+  assetIds: string[]; assetName: (id: string) => string; fps: number;
+  onNavigate: (workspace: DirectorWorkspace, target?: { kind: string; id: string }) => void;
+  onSave: (patch: Record<string, unknown>) => Promise<boolean | void>;
+  includeCompleteSource?: boolean;
+}) {
+  const { t } = useTranslation();
+  const id = String(shot.id || "");
+  const values: Record<string, string> = {
+    visual: proseOf(shot.visual), camera: proseOf(shot.camera), state_in: proseOf(shot.state_in), state_out: proseOf(shot.state_out),
+  };
+  // 起止状态可能是结构化对象（没有 prose 正文）：这时用提示文案代替空值。
+  const structured = (field: string) => Boolean(shot[field]) && !proseOf(shot[field]);
+  const startFrame = Number(shot.start_frame || 0);
+  const frameCount = Math.max(0, Number(shot.end_frame || 0) - startFrame);
+  const seconds = frameCount / fps;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [secondsDraft, setSecondsDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { setEditing(false); setDraft({}); setSecondsDraft(""); }, [id]);
+  const save = async () => {
+    const patch: Record<string, unknown> = {};
+    [...SHOT_SOURCE_FIELDS, ...SHOT_STATE_FIELDS].forEach(field => { if ((draft[field] ?? "") !== values[field]) patch[field] = patchProse(shot[field], draft[field] ?? ""); });
+    // 时长按秒录入，帧数由制作帧率换算：只推 end_frame（start_frame 由前序镜头决定）。
+    const nextSeconds = Number(secondsDraft);
+    if (secondsDraft.trim() !== "" && Number.isFinite(nextSeconds)) {
+      const frames = Math.max(1, Math.round(nextSeconds * fps));
+      if (frames !== frameCount) Object.assign(patch, shotDurationPatch(shot, nextSeconds, fps));
+    }
+    if (!Object.keys(patch).length) { setEditing(false); setDraft({}); setSecondsDraft(""); return; }
+    setSaving(true);
+    const saved = await onSave(patch);
+    setSaving(false);
+    if (saved !== false) { setEditing(false); setDraft({}); setSecondsDraft(""); }
+  };
+  return <section className="space-y-4" data-shot-source-fields={id}>
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <h3 className="text-sm font-medium">{t("director.studio.shotSource")}</h3>
+      {editing ? <div className="flex items-center gap-2" data-shot-source-actions>
+        <Button size="small" type="primary" icon={<Check className="size-3.5" />} loading={saving} disabled={busy || saving} onClick={() => void save()}>{t("common.save")}</Button>
+        <Button size="small" disabled={saving} onClick={() => { setDraft({}); setSecondsDraft(""); setEditing(false); }}>{t("common.cancel")}</Button>
+      </div> : <Button size="small" type="text" data-shot-source-edit icon={<Pencil className="size-3.5" />} disabled={busy} onClick={() => { setDraft({ ...values }); setSecondsDraft(String(Number(seconds.toFixed(3)))); setEditing(true); }}>{t("director.studio.editShotFields")}</Button>}
+    </div>
+    <div className="space-y-4">
+      {SHOT_SOURCE_FIELDS.map(field => <div key={field} className="grid gap-2">
+        <span className="text-xs text-muted-foreground">{t(`director.studio.shotField.${field}`)}</span>
+        {editing
+          ? <Input.TextArea value={draft[field] ?? ""} autoSize={{ minRows: 3, maxRows: 12 }} disabled={busy || saving} placeholder={structured(field) ? t("director.studio.structuredState") : undefined} onChange={event => setDraft(current => ({ ...current, [field]: event.target.value }))} />
+          : values[field] ? <p className="whitespace-pre-wrap text-sm leading-7">{values[field]}</p> : <p className="text-sm text-muted-foreground">{structured(field) ? t("director.studio.structuredState") : "—"}</p>}
+      </div>)}
+      <div className="grid gap-4 sm:grid-cols-2">{SHOT_STATE_FIELDS.map(field => <div key={field} className="grid gap-2">
+        <span className="text-xs text-muted-foreground">{t(`director.studio.shotField.${field}`)}</span>
+        {editing
+          ? <Input.TextArea value={draft[field] ?? ""} autoSize={{ minRows: 2, maxRows: 8 }} disabled={busy || saving} placeholder={structured(field) ? t("director.studio.structuredState") : undefined} onChange={event => setDraft(current => ({ ...current, [field]: event.target.value }))} />
+          : values[field] ? <p className="whitespace-pre-wrap text-sm leading-7">{values[field]}</p> : <p className="text-sm text-muted-foreground">{structured(field) ? t("director.studio.structuredState") : "—"}</p>}
+      </div>)}</div>
+    </div>
+    {assetIds.length > 0 && <div className="flex flex-wrap items-center gap-2"><span className="text-xs text-muted-foreground">{t("director.studio.shotAssets")}</span>{assetIds.map(assetId => <button key={assetId} type="button" className="rounded border border-border px-2 py-1 text-xs hover:bg-muted/40" onClick={() => onNavigate("assets", { kind: "asset", id: assetId })}>{assetName(assetId)}</button>)}</div>}
+    <div className="grid gap-2" data-shot-duration>
+      <span className="text-xs text-muted-foreground">{t("director.studio.durationSeconds")}</span>
+      {editing
+        ? <div className="flex flex-wrap items-baseline gap-3"><InputNumber className="w-32" min={0.1} step={0.5} precision={2} addonAfter={t("director.studio.secondsUnit")} value={secondsDraft === "" ? null : Number(secondsDraft)} disabled={busy || saving} onChange={value => setSecondsDraft(value === null || value === undefined ? "" : String(value))} /><span className="text-xs text-muted-foreground">{t("director.studio.frameRange", { start: startFrame, end: startFrame + Math.max(1, Math.round(Number(secondsDraft || seconds) * fps)) })}</span></div>
+        : <p className="text-sm tabular-nums">{formatSeconds(seconds)}s · {t("director.studio.frameRange", { start: startFrame, end: startFrame + frameCount })}</p>}
+    </div>
+    {includeCompleteSource && <details className="text-xs text-muted-foreground" data-shot-complete-source-details><summary className="cursor-pointer">{t("director.studio.shotCompleteSource")}</summary><div className="mt-3" data-shot-complete-source><SourceData value={shot} names={names} /></div></details>}
+  </section>;
 }
 
 function BoundaryCard({ from, to, fromLabel, toLabel, boundary, draftValue, onDraftChange, disabled, onSave }: {
@@ -377,7 +457,12 @@ export function DirectorPanel({
   const [evidence, setEvidence] = useState<Record<string, string>>({});
   const [reviewingAssets, setReviewingAssets] = useState<Record<string, boolean>>({});
   const [decisionReplies, setDecisionReplies] = useState<Record<string, string>>({});
-  const [mediaPreview, setMediaPreview] = useState<{ assetId: string; title: string; storageKey: string } | null>(null);
+  // 预览统一走全站唯一弹窗（MediaPreviewHost）：这里只提交请求，不再自带 Modal。
+  const previewOpen = useMediaPreviewStore(state => Boolean(state.request));
+  const setMediaPreview = (next: { assetId: string; title: string; storageKey: string } | null) => {
+    if (!next?.storageKey) { useMediaPreviewStore.getState().close(); return; }
+    useMediaPreviewStore.getState().open({ url: backendMediaUrl(next.storageKey), name: next.title, type: /\.(mp4|webm|mov)(?:$|\?)/i.test(next.storageKey) ? "video" : "image" });
+  };
   const [includeGeneratedMedia, setIncludeGeneratedMedia] = useState(false);
   const [downloadingAllClips, setDownloadingAllClips] = useState(false);
   const d = director;
@@ -429,11 +514,11 @@ export function DirectorPanel({
   const publishedDirector = production.published?.director;
   useEffect(() => {
     const reason = json !== null ? t("productionHub.follow.modalOpen")
-      : mediaPreview ? t("productionHub.follow.modalOpen")
+      : previewOpen ? t("productionHub.follow.modalOpen")
         : briefDraft !== String(source.brief || "") ? t("productionHub.follow.saveEditsFirst") : "";
     useProductionFollowStore.getState().setGuardReason("director-panel", reason);
     return () => useProductionFollowStore.getState().setGuardReason("director-panel", "");
-  }, [json, mediaPreview, briefDraft, source.brief, t]);
+  }, [json, previewOpen, briefDraft, source.brief, t]);
 
   const readinessCounts = useMemo(() => {
     const items = readiness?.targets || [];
@@ -610,16 +695,71 @@ export function DirectorPanel({
   // 分镜图（关键帧素材）是否可审核：草稿或已发布的这次生成都能审。
   const reviewableAsset = (assetId: string, media: ReturnType<typeof mediaForAsset>) => Boolean(media.nodeId && media.storageKey && media.status === "generated"
     && (media.asset?.generationTaskId || (publishedDirector?.assets[assetId]?.nodeId === media.nodeId && publishedDirector?.assets[assetId]?.storageKey === media.storageKey && production.publishedVersion)));
-  const renderAssetCard = (assetId: string, item?: Record<string, any>, keyframeShot?: string, options: { gallery?: boolean; review?: boolean; target?: boolean } = {}) => {
-    const { gallery = false, review = true, target = true } = options;
+  // 人物/资产名称字段：解析顺序＝显式名称(asset_name/name/title) → entity_id 关联的注册表名（权威人物/场景名，如 Lixi）→ 画布节点标题主段（兜底，格式不统一）→ 回退 asset_title。
+  // 源稿 asset 条目通常不带名称字段（assetTitle 会回退到内部 id），注册表名是权威来源；节点标题只读不动。
+  const assetDisplayName = (assetId: string, item?: Record<string, any>) => {
+    if (!item) return "";
+    const explicit = String(item.asset_name || item.name || item.title || "").trim();
+    if (explicit && explicit !== String(item.asset_id || item.id || "")) return explicit;
+    const registryName = item.entity_id ? String(nameMap[String(item.entity_id)] || "").trim() : "";
+    if (registryName) return registryName;
+    const node = canvasNodes.find(node => node.id === d?.assets[assetId]?.nodeId);
+    const title = String(node?.title || "").trim();
+    const primary = title && title !== node?.id ? title.split(/\s*[|｜]\s*/)[0].trim() : "";
+    if (primary) return primary;
+    return explicit || assetTitle(item);
+  };
+  const assetNameLabelKey = (assetId: string, item?: Record<string, any>) => {
+    const kind = String(item?.kind || "").toLowerCase() || assetCategory(assetId);
+    return /character|person|角色/.test(kind) ? "director.workspace.assetCharacterName"
+      : /scene|location|场景/.test(kind) ? "director.workspace.assetSceneName"
+      : /prop|道具/.test(kind) ? "director.workspace.assetPropName"
+      : "director.workspace.assetItemName";
+  };
+  const renderAssetNameField = (assetId: string, item: Record<string, any> | undefined, className: string) => item ? <label className={className}>{t(assetNameLabelKey(assetId, item))}<SourceField value={assetDisplayName(assetId, item)} draftValue={sourceDrafts[`asset:${assetId}:asset_name`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:asset_name`, value)} disabled={busy}   onCommit={async value => {
+    const name = String(value), previousName = assetDisplayName(assetId, item);
+    const saved = await onPatch("asset", assetId, { asset_name: name });
+    if (saved === false) return false;
+    onSourceDraftChange(`asset:${assetId}:asset_name`, undefined);
+    // 同步注册表名：对白说话人、镜头与场景标题消费 character_registry/scene_registry 的 name，只改 asset_name 不会传播。
+    const kind = String(item.kind || "").toLowerCase(), entityId = String(item.entity_id || "");
+    try {
+      if (entityId && /character/.test(kind)) await onPatch("character", entityId, { name });
+      else if (entityId && /scene/.test(kind)) await onPatch("environment", entityId, { name });
+    } catch { /* 注册表缺该对象时保留资产级名称 */ }
+    // 同步镜头对白里的字面量说话人名（speaker_name 是快照文本，不随注册表刷新）。
+    const key = previousName.trim().toLowerCase(), next = name.trim().toLowerCase();
+    if (key && key !== next) {
+      for (const shot of sourceShots) {
+        const dialogues = Array.isArray(shot.dialogues) ? shot.dialogues : [];
+        if (!dialogues.some(dialogue => String(dialogue?.speaker_name || "").trim().toLowerCase() === key)) continue;
+        try { await onPatch("shot", String(shot.id), { dialogues: dialogues.map(dialogue => String(dialogue?.speaker_name || "").trim().toLowerCase() === key ? { ...dialogue, speaker_name: name } : dialogue) }); }
+        catch { /* 单个镜头同步失败不阻塞整体改名 */ }
+      }
+    }
+    return saved;
+  }} /></label> : null;
+  // 资产合同字段（描述/职责、版本、前置依赖、关联画布图）：素材大卡与分镜图详情共用这一份，避免两处维护。
+  const renderAssetContractFields = (assetId: string, item: Record<string, any> | undefined, media: ReturnType<typeof mediaForAsset>, options: { description?: boolean } = {}) => {
+    const field = item?.description !== undefined || item?.prompt === undefined ? "description" : "prompt";
+    const dependencies = Array.isArray(item?.depends_on) ? item!.depends_on.map((value: unknown) => typeof value === "string" ? value : String((value as Record<string, unknown>)?.asset_id || (value as Record<string, unknown>)?.id || "")).filter(Boolean) : [];
+    return <>
+      {options.description && item && renderAssetNameField(assetId, item, "grid gap-1 text-xs text-muted-foreground")}
+      {options.description && item && <label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.description")}<SourceField value={proseOf(item[field] ?? item.visual ?? item.purpose)} draftValue={sourceDrafts[`asset:${assetId}:${field}`] ?? sourceDrafts[`asset:${assetId}:visual`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:${field}`, value)} multiline rows={3} disabled={busy} onCommit={async value => { const saved = await onPatch("asset", assetId, { [field]: patchProse(item[field], value) }); if (saved !== false) onSourceDraftChange(`asset:${assetId}:visual`, undefined); return saved; }} /></label>}
+      {item && <label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.assetVersion")}<SourceField value={item.version || item.asset_version || "v1"} draftValue={sourceDrafts[`asset:${assetId}:version`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:version`, value)} disabled={busy} onCommit={value => onPatch("asset", assetId, { version: String(value) })} /></label>}
+      {item && <label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.assetDependencies")}<Select mode="multiple" value={dependencies} disabled={busy} options={assetPlan.filter(value => assetIdOf(value) !== assetId).map(value => ({ value: assetIdOf(value), label: assetName(assetIdOf(value)) }))} onChange={value => void onPatch("asset", assetId, { depends_on: value })} /></label>}
+      <label className="grid gap-1 text-xs text-muted-foreground">{t("director.studio.linkImage")}<Select value={media.nodeId || undefined} disabled={busy || !imageNodes.length} placeholder={t("director.workspace.bindCanvasImage")} options={imageNodes.map((node, index) => ({ value: node.id, label: humanName(node.title, node.id, t("director.studio.imageNumber", { number: index + 1 })) }))} onChange={nodeId => nodeId && onBindAsset(assetId, nodeId)} /></label>
+    </>;
+  };
+  const renderAssetCard = (assetId: string, item?: Record<string, any>, keyframeShot?: string, options: { gallery?: boolean } = {}) => {
+    const { gallery = false } = options;
     const media = mediaForAsset(assetId, keyframeShot);
     const imageNode = canvasNodes.find(node => node.id === media.nodeId);
     const { images: previewImages, previewKey, browsingHistory } = assetImagePreview(media.storageKey, imageNode?.metadata?.images, gallery ? assetPreviewKeys[assetId] : undefined);
-    const dependencies = Array.isArray(item?.depends_on) ? item.depends_on.map((value: unknown) => typeof value === "string" ? value : String((value as Record<string, unknown>)?.asset_id || (value as Record<string, unknown>)?.id || "")).filter(Boolean) : [];
     const title = keyframeShot ? `${shotTitle(keyframeShot)} · ${t("director.studio.keyframe")}` : assetName(assetId);
-    const reviewTargetMatches = review && !browsingHistory && reviewableAsset(assetId, media);
+    const reviewTargetMatches = !browsingHistory && reviewableAsset(assetId, media);
     const field = item?.description !== undefined || item?.prompt === undefined ? "description" : "prompt";
-    return <article key={`${assetId}:${keyframeShot || "asset"}`} data-production-target={target ? (keyframeShot ? `frame:${keyframeShot}` : `asset:${assetId}`) : undefined} className={gallery ? "grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_320px]" : compact ? "grid min-w-0 items-start gap-4 md:grid-cols-[280px_minmax(0,1fr)]" : "min-w-0 overflow-hidden rounded-xl border border-border bg-card"}>
+    return <article key={`${assetId}:${keyframeShot || "asset"}`} data-production-target={keyframeShot ? `frame:${keyframeShot}` : `asset:${assetId}`} className={gallery ? "grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_320px]" : compact ? "grid min-w-0 items-start gap-4 md:grid-cols-[280px_minmax(0,1fr)]" : "min-w-0 overflow-hidden rounded-xl border border-border bg-card"}>
       <section className={gallery ? "flex min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-card" : "contents"}>
       {gallery && <header className="flex items-center justify-between gap-3 border-b border-border px-4 py-3"><h3 className="min-w-0 truncate text-sm font-semibold">{title}</h3><Button size="small" type="text" disabled={!previewKey} onClick={() => setMediaPreview({ assetId, title, storageKey: previewKey })}>{t("director.workspace.viewOriginal")}</Button></header>}
       <button type="button" disabled={!previewKey} aria-label={t("director.studio.previewAsset", { title })} onClick={() => setMediaPreview({ assetId, title, storageKey: previewKey })} className={`flex w-full items-center justify-center overflow-hidden bg-muted/30 ${gallery ? "h-[min(52dvh,36rem)] p-4" : compact ? "h-[min(50dvh,420px)] rounded-lg" : "aspect-[4/3]"}`}>
@@ -629,14 +769,11 @@ export function DirectorPanel({
       </section>
       <div className={gallery ? "min-w-0 rounded-xl border border-border bg-card p-4 xl:max-h-[72dvh] xl:overflow-y-auto" : compact ? "min-w-0" : "p-4"}><div className="flex items-start justify-between gap-2"><div className="min-w-0">{!compact && <h3 className="text-base font-semibold">{title}</h3>}<p className="mt-1 text-xs text-muted-foreground">{t(`director.studio.filter.${assetCategory(assetId)}`)}</p></div><Tag color={media.status === "approved" ? "green" : media.status === "generated" ? "blue" : media.status === "rejected" ? "red" : "default"}>{t(`director.workspace.assetStatus.${media.status}`)}</Tag></div>
       {gallery && media.nodeId && <div className="mt-3"><ReferenceNodeLink sourceNode={{ projectId: media.asset?.sharedSource?.sourceProjectId || canvasId, nodeId: media.asset?.sharedSource?.sourceNodeId || media.nodeId }} /></div>}
-      {(compact || gallery) && item ? <label className="mt-4 grid gap-2 text-sm">{t("director.workspace.description")}<SourceField value={proseOf(item[field] ?? item.visual ?? item.purpose)} draftValue={sourceDrafts[`asset:${assetId}:${field}`] ?? sourceDrafts[`asset:${assetId}:visual`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:${field}`, value)} multiline disabled={busy || Boolean(media.asset?.sharedSource)} onCommit={async value => { const saved = await onPatch("asset", assetId, { [field]: patchProse(item[field], value) }); if (saved !== false) onSourceDraftChange(`asset:${assetId}:visual`, undefined); return saved; }} /></label> : proseOf(item?.description || item?.prompt || item?.visual || item?.purpose) && <p className="mt-3 line-clamp-3 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{proseOf(item?.description || item?.prompt || item?.visual || item?.purpose)}</p>}
+      {(compact || gallery) && item ? <>{renderAssetNameField(assetId, item, "mt-4 grid gap-2 text-sm")}<label className="grid gap-2 text-sm">{t("director.workspace.description")}<SourceField value={proseOf(item[field] ?? item.visual ?? item.purpose)} draftValue={sourceDrafts[`asset:${assetId}:${field}`] ?? sourceDrafts[`asset:${assetId}:visual`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:${field}`, value)} multiline disabled={busy || Boolean(media.asset?.sharedSource)} onCommit={async value => { const saved = await onPatch("asset", assetId, { [field]: patchProse(item[field], value) }); if (saved !== false) onSourceDraftChange(`asset:${assetId}:visual`, undefined); return saved; }} /></label></> : proseOf(item?.description || item?.prompt || item?.visual || item?.purpose) && <p className="mt-3 line-clamp-3 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{proseOf(item?.description || item?.prompt || item?.visual || item?.purpose)}</p>}
       {media.evidence && (!compact || media.status === "rejected") && <p className="mt-3 text-xs leading-5 text-muted-foreground">{media.evidence}</p>}
       {item && !keyframeShot && ["episode", "shared-assets"].includes(canvasRole) && <div className="mt-3 grid gap-2"><label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.assetCanvasScope")}<Select value={String(item.canvas_scope || (media.asset?.sharedSource || canvasRole === "shared-assets" ? "shared" : "episode"))} disabled={busy || Boolean(media.asset?.sharedSource) || canvasRole === "shared-assets"} options={[{ value: "episode", label: t("director.workspace.assetCanvasScopeEpisode") }, { value: "shared", label: t("director.workspace.assetCanvasScopeShared") }]} onChange={value => void onPatch("asset", assetId, { canvas_scope: value })} /></label>{canvasRole === "episode" && String(item.canvas_scope || (media.asset?.sharedSource ? "shared" : "episode")) === "shared" && <div className="flex flex-wrap items-center gap-2"><p className="m-0 text-xs text-muted-foreground">{t("director.workspace.sharedAssetNeedsAdoption")}</p>{media.status === "approved" && !media.asset?.sharedSource && <Button size="small" disabled={busy} onClick={() => onPromoteExistingSharedAsset(assetId, title)}>{t("director.workspace.promoteExistingSharedAsset")}</Button>}<Button size="small" disabled={busy} onClick={() => onOpenSharedAsset(assetId, title)}>{t("director.workspace.openSharedCanvas")}</Button></div>}</div>}
       <div className="mt-4 flex flex-wrap gap-2">{media.storageKey && !gallery && <Button size="small" onClick={() => setMediaPreview({ assetId, title, storageKey: media.storageKey })}>{t("director.workspace.viewOriginal")}</Button>}<Button icon={<WandSparkles className="size-3" />} size="small" onClick={() => onAskDirector({ workspace: "assets", targetId: assetId, instruction: t("director.workspace.reviseAssetContract") })}>{t("director.studio.collaborate")}</Button></div>
-      <details className="mt-3 border-t border-border pt-3"><summary className="cursor-pointer text-xs text-muted-foreground">{t(compact ? "productionCanvas.objectDetails" : "director.studio.assetDetails")}</summary><div className="mt-3 space-y-3">
-        {item && <>{!compact && !gallery && <label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.description")}<SourceField value={proseOf(item[field] ?? item.visual ?? item.purpose)} draftValue={sourceDrafts[`asset:${assetId}:${field}`] ?? sourceDrafts[`asset:${assetId}:visual`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:${field}`, value)} multiline rows={3} disabled={busy} onCommit={async value => { const saved = await onPatch("asset", assetId, { [field]: patchProse(item[field], value) }); if (saved !== false) onSourceDraftChange(`asset:${assetId}:visual`, undefined); return saved; }} /></label>}<label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.assetVersion")}<SourceField value={item.version || item.asset_version || "v1"} draftValue={sourceDrafts[`asset:${assetId}:version`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:version`, value)} disabled={busy} onCommit={value => onPatch("asset", assetId, { version: String(value) })} /></label><label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.assetDependencies")}<Select mode="multiple" value={dependencies} disabled={busy} options={assetPlan.filter(value => assetIdOf(value) !== assetId).map(value => ({ value: assetIdOf(value), label: assetName(assetIdOf(value)) }))} onChange={value => void onPatch("asset", assetId, { depends_on: value })} /></label></>}
-        <label className="grid gap-1 text-xs text-muted-foreground">{t("director.studio.linkImage")}<Select value={media.nodeId || undefined} disabled={busy || !imageNodes.length} placeholder={t("director.workspace.bindCanvasImage")} options={imageNodes.map((node, index) => ({ value: node.id, label: humanName(node.title, node.id, t("director.studio.imageNumber", { number: index + 1 })) }))} onChange={nodeId => nodeId && onBindAsset(assetId, nodeId)} /></label>
-      </div></details>
+      <details className="mt-3 border-t border-border pt-3"><summary className="cursor-pointer text-xs text-muted-foreground">{t(compact ? "productionCanvas.objectDetails" : "director.studio.assetDetails")}</summary><div className="mt-3 space-y-3">{renderAssetContractFields(assetId, item, media, { description: !compact && !gallery })}</div></details>
       {media.inputOutdated && <p className="mt-2 text-xs">{t("productionCanvas.outdatedMedia")}</p>}
       {reviewTargetMatches && <div className="mt-3 space-y-2 border-t border-border pt-3"><Input.TextArea value={evidence[assetId] ?? media.evidence} disabled={busy || Boolean(reviewingAssets[assetId])} autoSize={{ minRows: 1, maxRows: 3 }} placeholder={t("director.workspace.reviewReason")} onChange={event => setEvidence(current => ({ ...current, [assetId]: event.target.value }))} /><div className="flex flex-wrap gap-2"><Button size="small" type="primary" loading={Boolean(reviewingAssets[assetId])} disabled={busy || Boolean(reviewingAssets[assetId])} onClick={() => void submitReview(assetId, media.nodeId, media.storageKey, media.sha256, "approved")}>{t("director.workspace.approve")}</Button><Button size="small" danger loading={Boolean(reviewingAssets[assetId])} disabled={busy || Boolean(reviewingAssets[assetId])} onClick={() => void submitReview(assetId, media.nodeId, media.storageKey, media.sha256, "rejected")}>{t("director.workspace.returnAsset")}</Button></div></div>}
       </div>
@@ -760,8 +897,9 @@ export function DirectorPanel({
           <details open className="min-w-0 border-t border-border pt-3 xl:col-start-2 xl:row-start-2"><summary className="cursor-pointer text-sm">{t("director.crud.editSubject")}</summary><div className="mt-3 space-y-3">{(() => {
             const entityType = entity.kind === "character" ? "character" : entity.kind === "scene" ? "environment" : "asset";
             const row = entity.kind === "character" ? character : entity.kind === "scene" ? scene : asset;
+            const descriptionField = subjectDescriptionField(entityType, row || {});
             const own = entity.ownerId === (typeof subjectOwner === "string" ? subjectOwner : canvasId);
-            return row ? <><label className="grid gap-1 text-xs"><span>{t("director.crud.subjectName")}</span><SourceField value={row.name || row.asset_name || ""} draftValue={sourceDrafts[`subject:${subject.id}:name`]} onDraftChange={value => onSourceDraftChange(`subject:${subject.id}:name`, value)} disabled={busy || !own} onCommit={name => onPatch(entityType, entityId, { [entityType === "asset" ? "asset_name" : "name"]: name })} /></label><label className="grid gap-1 text-xs"><span>{t("director.crud.subjectDescription")}</span><SourceField value={proseOf(entityType === "character" ? row.appearance || row.description : row.description)} draftValue={sourceDrafts[`subject:${subject.id}:description`]} onDraftChange={value => onSourceDraftChange(`subject:${subject.id}:description`, value)} multiline rows={3} disabled={busy || !own} onCommit={value => onPatch(entityType, entityId, { [entityType === "character" ? "appearance" : "description"]: value })} /></label>{!own && <p className="text-xs text-muted-foreground">{t("director.crud.sharedEntityReadOnly")}</p>}</> : null;
+            return row ? <><label className="grid gap-1 text-xs"><span>{t("director.crud.subjectName")}</span><SourceField value={row.name || row.asset_name || ""} draftValue={sourceDrafts[`subject:${subject.id}:name`]} onDraftChange={value => onSourceDraftChange(`subject:${subject.id}:name`, value)} disabled={busy || !own} onCommit={name => onPatch(entityType, entityId, { [entityType === "asset" ? "asset_name" : "name"]: name })} /></label><label className="grid gap-1 text-xs"><span>{t("director.crud.subjectDescription")}</span><SourceField value={proseOf(row[descriptionField])} draftValue={sourceDrafts[`subject:${subject.id}:description`]} onDraftChange={value => onSourceDraftChange(`subject:${subject.id}:description`, value)} multiline rows={3} disabled={busy || !own} onCommit={value => onPatch(entityType, entityId, { [descriptionField]: patchProse(row[descriptionField], value) })} /></label>{!own && <p className="text-xs text-muted-foreground">{t("director.crud.sharedEntityReadOnly")}</p>}</> : null;
           })()}<Button size="small" danger type="text" disabled={busy || usageCount > 0} onClick={() => void onDeleteSubject?.(String(subject.id))}>{t("director.crud.removeSubject")}</Button><p className="text-xs text-muted-foreground">{t("director.crud.removeSubjectHint")}</p></div></details>
          <div className="min-w-0 xl:col-start-1 xl:row-start-2"><SubjectPictureBindings subject={subject} canvasNodes={canvasNodes} canvasId={canvasId} owner={subjectOwner} busy={busy} usageCount={usageCount} usages={records(source.shots).flatMap(shot => records(shot.subject_usages).filter(usage => usage.subjectId === subject.id))} sourceDrafts={sourceDrafts} onSourceDraftChange={onSourceDraftChange} onSave={next => onUpsertSubject ? onUpsertSubject(next as Extract<ProductionOperation, { type: "upsert_director_subject" }>["subject"]) : Promise.resolve(false)} /></div>
         </article>;
@@ -796,9 +934,6 @@ export function DirectorPanel({
       </div>;
     })() : <Alert type="info" message={t("director.workspace.noAssets")} description={t("director.workspace.noAssetsHint")} />}
     {d && allAssetIds.length > 0 && !allAssetIds.some(id => (assetFilter === "all" || assetCategory(id) === assetFilter) && assetName(id).toLowerCase().includes(assetSearch.toLowerCase())) && <p className="py-12 text-center text-sm text-muted-foreground">{t("director.studio.emptySearch")}</p>}
-    <Modal open={Boolean(mediaPreview)} title={mediaPreview?.title} footer={null} width={960} onCancel={() => setMediaPreview(null)}>
-      {mediaPreview && /\.(mp4|webm|mov)(?:$|\?)/i.test(mediaPreview.storageKey) ? <video className="max-h-[72dvh] w-full" controls src={backendMediaUrl(mediaPreview.storageKey)} onError={() => setError(t("director.workspace.mediaReadFailed"))} /> : mediaPreview && <img className="max-h-[72dvh] w-full object-contain" src={backendMediaUrl(mediaPreview.storageKey)} alt={mediaPreview.title} onError={() => setError(t("director.workspace.mediaReadFailed"))} />}
-    </Modal>
   </div>;
 
   // 分镜图跟随镜头，但只占一小条：缩略图 + 状态 + 审核；点缩略图看大图，合同编辑收进「详情」。
@@ -815,18 +950,19 @@ export function DirectorPanel({
         <button type="button" onClick={openPreview} title={title} aria-label={t("director.studio.previewAsset", { title })} className="h-[54px] w-[96px] shrink-0 overflow-hidden rounded border border-border bg-muted/30">
           <img className="h-full w-full object-cover" src={backendMediaUrl(storageKey)} alt={title} loading="lazy" />
         </button>
-        <div className="min-w-0 flex-1">
-          <p className="flex items-center gap-2 text-xs font-medium"><ImageIcon className="size-3.5 shrink-0 text-muted-foreground" />{t("director.studio.keyframe")}{media && <Tag className="m-0" color={media.status === "approved" ? "green" : media.status === "generated" ? "blue" : media.status === "rejected" ? "red" : "default"}>{t(`director.workspace.assetStatus.${media.status}`)}</Tag>}</p>
-          <p className="mt-1 truncate text-[11px] text-muted-foreground">{assetId ? assetName(assetId) : t("director.studio.canvasKeyframe")}</p>
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+          <span className="min-w-0 truncate text-xs font-medium">{assetId ? assetName(assetId) : t("director.studio.canvasKeyframe")}</span>
+          {media && <Tag className="m-0" color={media.status === "approved" ? "green" : media.status === "generated" ? "blue" : media.status === "rejected" ? "red" : "default"}>{t(`director.workspace.assetStatus.${media.status}`)}</Tag>}
         </div>
-        <Button size="small" type="text" onClick={openPreview}>{t("director.workspace.viewOriginal")}</Button>
+        {/* 跳画布：直接定位到这张分镜图所在的画布节点（缩略图仍可点开大图预览）。 */}
+        {media?.nodeId && <ReferenceNodeLink sourceNode={{ projectId: media.asset?.sharedSource?.sourceProjectId || canvasId, nodeId: media.nodeId }} />}
       </div>
       {pendingReview && assetId && media && <div className="flex flex-wrap items-center gap-2 border-t border-border px-3 py-2">
         <Input size="small" className="min-w-40 flex-1" value={evidence[assetId] ?? media.evidence} disabled={busy || Boolean(reviewingAssets[assetId])} placeholder={t("director.workspace.reviewReason")} onChange={event => setEvidence(current => ({ ...current, [assetId]: event.target.value }))} />
         <Button size="small" type="primary" loading={Boolean(reviewingAssets[assetId])} disabled={busy || Boolean(reviewingAssets[assetId])} onClick={() => void submitReview(assetId, media.nodeId, media.storageKey, media.sha256, "approved")}>{t("director.workspace.approve")}</Button>
         <Button size="small" danger loading={Boolean(reviewingAssets[assetId])} disabled={busy || Boolean(reviewingAssets[assetId])} onClick={() => void submitReview(assetId, media.nodeId, media.storageKey, media.sha256, "rejected")}>{t("director.workspace.returnAsset")}</Button>
       </div>}
-      {assetId && <details className="border-t border-border px-3 py-2"><summary className="cursor-pointer text-[11px] text-muted-foreground">{t("director.studio.keyframeDetails")}</summary><div className="mt-3">{renderAssetCard(assetId, assetPlan.find(item => assetIdOf(item) === assetId), shotId, { review: false, target: false })}</div></details>}
+      {assetId && media && <details className="border-t border-border px-3 py-2"><summary className="cursor-pointer text-[11px] text-muted-foreground">{t("director.studio.keyframeDetails")}</summary><div className="mt-3 space-y-3">{renderAssetContractFields(assetId, assetPlan.find(item => assetIdOf(item) === assetId), media, { description: true })}</div></details>}
     </section>;
   };
 
@@ -837,20 +973,15 @@ export function DirectorPanel({
       <SubjectShotEditor key={id} shot={shot} source={d.source} canvasNodes={canvasNodes} canvasId={canvasId} busy={busy} workbench={workbench}
         draftValue={sourceDrafts[`v2shot:${id}`]} onDraftChange={value => onSourceDraftChange(`v2shot:${id}`, value)} onSave={onSaveV2Shot || (async () => false)} />
     </div>;
-    const input = d?.shotInputs[id];
     const segment = segments.find(item => (item.shot_ids || []).includes(id));
-    const boundary = segment && d?.boundaries.find(item => item.from === segment.id);
     return <div className="space-y-5" data-shot-reading={id}>
       {renderShotKeyframe(id)}
-      <section className="space-y-2">
-        <h4 className="text-xs font-medium text-muted-foreground">{t("director.studio.readingSummary")}</h4>
-        <p className="whitespace-pre-wrap text-sm leading-7">{shotDisplayText(shot) || t("director.studio.noVisual")}</p>
-      </section>
+      {/* 画面与摄影（含起止状态 / 素材 / 时长）：页面里「画面」的唯一展示位，自带「修改 / 保存 / 取消」。 */}
+      {renderShotFields(shot, includeCompleteSource)}
       {(records(shot.dialogues).length > 0 || !includeCompleteSource) && <section className="space-y-2">
         <h4 className="text-xs font-medium text-muted-foreground">{t("director.studio.dialogue")}</h4>
         {records(shot.dialogues).length ? <dl className="space-y-3">{records(shot.dialogues).map((dialogue, index) => {
-          const speakerId = String(dialogue.character_id || dialogue.speaker || "");
-          const speaker = speakerId === "NARRATOR" ? t("director.studio.narration") : nameMap[speakerId] || humanName(dialogue.speaker, "", t("director.studio.speaker"));
+          const speaker = dialogueSpeakerLabel(dialogue, nameMap, { narration: t("director.studio.narration"), speaker: t("director.studio.speaker") });
           return <div key={String(dialogue.id || index)} className="flex gap-3"><dt className="w-16 shrink-0 pt-1 text-xs text-muted-foreground">{speaker}</dt><dd className="min-w-0 whitespace-pre-wrap text-sm leading-7">{dialogueBody({ ...dialogue, speaker })}</dd></div>;
         })}</dl> : <p className="text-sm text-muted-foreground">{t("director.studio.noDialogue")}</p>}
       </section>}
@@ -858,27 +989,44 @@ export function DirectorPanel({
         <Button size="small" type="text" icon={<WandSparkles className="size-3.5" />} disabled={busy} onClick={() => onAskDirector({ workspace: "shots", targetId: id, instruction: t("director.workspace.reviseShot") })}>{t("productionCanvas.discussObject")}</Button>
         {segment && <Button size="small" type="text" icon={<Film className="size-3.5" />} onClick={() => onNavigate("production", { kind: "segment", id: String(segment.id) })}>{segmentTitle(String(segment.id))}<ArrowRight className="ml-1 size-3" /></Button>}
       </div>}
-      {includeCompleteSource && <dl className="grid gap-3 text-sm sm:grid-cols-2" data-shot-reading-notes>{(["camera", "state_in", "state_out"] as const).map(field => {
-        const text = readableText(shot[field], nameMap);
-        return text ? <div key={field}><dt className="text-xs text-muted-foreground">{t(`director.studio.clipReading.${field}`)}</dt><dd className="mt-1 whitespace-pre-wrap leading-6">{text}</dd></div> : null;
-      })}</dl>}
-      {!includeCompleteSource && boundary && <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted-foreground" data-shot-continuity>
-        <span>{t("director.studio.tailFrameLabel")} · {t(boundary.tailFrame ? "director.studio.flagOn" : "director.studio.flagOff")}</span>
-        <span>{t("director.studio.motionContextLabel")} · {t(boundary.motionContext ? "director.studio.flagOn" : "director.studio.flagOff")}</span>
-      </div>}
-      <details className="border-t border-border pt-3" data-shot-source-details>
-        <summary className="cursor-pointer text-xs text-muted-foreground">{t("director.studio.sourceDetails")}</summary>
-        <div className="mt-4 space-y-4">{(["visual", "camera", "state_in", "state_out"] as const).map(field => <label key={field} className="grid gap-2 text-xs text-muted-foreground"><span>{t(`director.studio.shotField.${field}`)}</span><SourceField value={proseOf(shot[field])} draftValue={sourceDrafts[`shot:${id}:${field}`]} onDraftChange={value => onSourceDraftChange(`shot:${id}:${field}`, value)} multiline rows={3} disabled={busy} placeholder={(field === "state_in" || field === "state_out") && shot[field] && !proseOf(shot[field]) ? t("director.studio.structuredState") : undefined} onCommit={value => onPatch("shot", id, { [field]: patchProse(shot[field], value) })} /></label>)}</div>
-        <div className="mt-4 flex flex-wrap gap-2">{input?.assetIds?.map(assetId => <button key={assetId} type="button" className="rounded border border-border px-2 py-1 text-xs" onClick={() => onNavigate("assets", { kind: "asset", id: assetId })}>{assetName(assetId)}</button>)}</div>
-        <div className="mt-4 grid gap-3 sm:grid-cols-2">{(["start_frame", "end_frame"] as const).map(field => <label key={field} className="grid gap-1 text-xs text-muted-foreground"><span>{t(field === "start_frame" ? "director.workspace.startFrame" : "director.workspace.endFrame")}</span><SourceField value={shot[field]} draftValue={sourceDrafts[`shot:${id}:${field}`]} onDraftChange={value => onSourceDraftChange(`shot:${id}:${field}`, value)} numeric disabled={busy} onCommit={value => onPatch("shot", id, { [field]: value })} /></label>)}</div>
-        {includeCompleteSource && <div className="mt-4" data-shot-complete-source><SourceData value={shot} names={nameMap} /></div>}
-      </details>
+    </div>;
+  };
+
+  // 镜头源字段（画面 / 摄影 / 起止状态 / 素材 / 时长）：直接摊在页面上（不再开弹窗），右上角「修改」就地切换成「保存 / 取消」。
+  // 由 renderShotDetails 统一渲染，workbench 不再单独注入一份，避免同一批字段在页面上出现两遍。
+  const renderShotFields = (shot: Record<string, any>, includeCompleteSource = false) => {
+    const id = String(shot.id || "");
+    return <ShotSourceFields key={id} shot={shot} busy={busy} names={nameMap} fps={fps} assetIds={(d?.shotInputs[id]?.assetIds || []).map(String)} assetName={assetName}
+      onNavigate={onNavigate} includeCompleteSource={includeCompleteSource}
+      onSave={async patch => { const saved = await onPatch("shot", id, patch); return saved !== false; }} />;
+  };
+
+  // 连续性动作（与下一段的边界开关）：归左栏编辑区下方的「连续性状态」模块。
+  const renderShotContinuity = (shot: Record<string, any>) => {
+    const id = String(shot.id || "");
+    const segment = segments.find(item => (item.shot_ids || []).includes(id));
+    const boundary = segment && d?.boundaries.find(item => item.from === segment.id);
+    // 边界开关要有初值：本段还没存过边界时，按「本段 → 下一段」补一个全关闭的草稿，
+    // 这样用户能直接把开关打开（后端只接受相邻 Segment 的边界）。
+    const nextSegment = segment ? segments[segments.indexOf(segment) + 1] : undefined;
+    const boundaryDraft = boundary || (segment && nextSegment ? { from: String(segment.id), to: String(nextSegment.id), tailFrame: false, motionContext: false, reason: "" } : undefined);
+    // 没有相邻段就没有边界可设：返回 null，避免在「连续性状态」里留一条空分隔线。
+    if (!boundaryDraft) return null;
+    return <div className="flex flex-wrap items-center gap-x-5 gap-y-2" data-shot-continuity>
+      {([["tailFrame", "director.studio.tailFrameLabel"], ["motionContext", "director.studio.motionContextLabel"]] as const).map(([key, label]) => <label key={key} className="flex cursor-pointer items-center gap-2">
+        <span>{t(label)}</span>
+        {/* 两个边界互斥：打开一个自动关掉另一个（同一次提交里把另一个置 false）。开态用手工绿色，默认主题的 primary 在暗色下是近白色，开关几乎看不出差别。 */}
+        <Switch size="small" checked={Boolean(boundaryDraft[key])} disabled={busy} aria-label={t(label)}
+          style={boundaryDraft[key] ? { backgroundColor: "#10b981" } : undefined}
+          onChange={checked => void onBoundary({ ...boundaryDraft, tailFrame: key === "tailFrame" && checked, motionContext: key === "motionContext" && checked })} />
+      </label>)}
     </div>;
   };
 
   const renderShots = () => {
     if (d) return <SubjectStoryboardWorkbench director={d} production={production} owner={subjectOwner} canvasNodes={canvasNodes}
       initialShotId={focusTarget?.startsWith("shot:") ? focusedId : undefined} renderEditor={(shot, workbench) => renderShotDetails(shot, false, workbench)}
+      renderContinuity={isSubjectPromptAssembly(d.source) ? undefined : shot => renderShotContinuity(shot)}
       clipEditor={subjectAssembly ? <SubjectClipPartitionEditor shots={sourceShots} segments={segments} fps={fps} busy={busy} shotTitle={shotTitle} draftValue={sourceDrafts.v2clips} onDraftChange={value => onSourceDraftChange("v2clips", value)} onSave={onRepartitionClips || (async () => false)} /> : <div className="space-y-4">{segments.map(segment => <section key={segment.id} className="border-b border-border pb-4"><h3 className="text-sm font-medium">{segmentTitle(String(segment.id))}</h3><SegmentGroupEditor segment={segment} shots={sourceShots} segments={segments} fps={fps} draftValue={sourceDrafts[`segment:${segment.id}:shot_ids`]} onDraftChange={value => onSourceDraftChange(`segment:${segment.id}:shot_ids`, value)} disabled={busy} onSave={onRegroup} /></section>)}</div>}
       onSubjects={() => onNavigate("assets")} onContinuity={() => onNavigate("continuity")} onClip={id => onNavigate("production", { kind: "segment", id })}
       onDiscuss={targetId => onAskDirector({ workspace: "shots", targetId })} />;
@@ -988,7 +1136,6 @@ export function DirectorPanel({
   const focusedSegment = focusTarget?.startsWith("segment:") ? segments.find(segment => String(segment.id) === focusedId) : undefined;
   if (compact && workspace === "assets" && focusedAsset) return <section data-production-object-editor className="space-y-4">
     {renderAssetCard(focusedAsset, assetPlan.find(item => assetIdOf(item) === focusedAsset), focusTarget?.startsWith("frame:") ? focusedId : undefined)}
-    <Modal open={Boolean(mediaPreview)} title={mediaPreview?.title} footer={null} width={960} onCancel={() => setMediaPreview(null)}>{mediaPreview && <img className="max-h-[72dvh] w-full object-contain" src={backendMediaUrl(mediaPreview.storageKey)} alt={mediaPreview.title} onError={() => setError(t("director.workspace.mediaReadFailed"))} />}</Modal>
     {error && <Alert type="error" message={error} />}
   </section>;
   if (compact && workspace === "shots" && focusedShot) {
@@ -999,6 +1146,7 @@ export function DirectorPanel({
         <div className="flex items-center gap-1"><Button size="small" type="text" onClick={() => { onNavigate("shots"); }}>{t("director.studio.allShots")}</Button><Button size="small" type="text" aria-label={t("director.studio.previousShot")} icon={<ArrowLeft className="size-3.5" />} disabled={index <= 0} onClick={() => onNavigate("shots", { kind: "shot", id: String(sourceShots[index - 1].id) })} /><Button size="small" type="text" aria-label={t("director.studio.nextShot")} icon={<ArrowRight className="size-3.5" />} disabled={index >= sourceShots.length - 1} onClick={() => onNavigate("shots", { kind: "shot", id: String(sourceShots[index + 1].id) })} /></div>
       </header>
       {renderShotDetails(focusedShot)}
+      <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3 text-xs text-muted-foreground">{renderShotContinuity(focusedShot)}</div>
     </section>;
   }
   if (compact && workspace === "production" && focusedSegment) {

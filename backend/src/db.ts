@@ -2420,10 +2420,10 @@ export class BackendDatabase {
         return Number(this.db.prepare("DELETE FROM canvas_projects WHERE id = ?").run(id).changes);
     }
 
-    listCanvasFolders(): CanvasFolder[] {
+    listCanvasFolders(id?: string): CanvasFolder[] {
         const rows = this.db.prepare(
-            "SELECT f.*, d.outline, d.description, d.cover_storage_key, d.tags_json, d.shared_asset_canvas_id, d.production_plan_json, d.updated_at AS drama_updated_at, CASE WHEN d.folder_id IS NULL THEN 0 ELSE 1 END AS is_drama FROM canvas_folders f LEFT JOIN drama_projects d ON d.folder_id = f.id ORDER BY f.created_at ASC"
-        ).all() as Array<Record<string, unknown>>;
+            "SELECT f.*, d.outline, d.description, d.cover_storage_key, d.tags_json, d.shared_asset_canvas_id, d.production_plan_json, d.updated_at AS drama_updated_at, CASE WHEN d.folder_id IS NULL THEN 0 ELSE 1 END AS is_drama FROM canvas_folders f LEFT JOIN drama_projects d ON d.folder_id = f.id" + (id ? " WHERE f.id = ?" : "") + " ORDER BY f.created_at ASC"
+        ).all(...(id ? [id] : [])) as Array<Record<string, unknown>>;
         return rows.map((row) => {
             const value = JSON.parse(String(row.tags_json || "[]"));
             const tags = Array.isArray(value) ? value.map(String) : [];

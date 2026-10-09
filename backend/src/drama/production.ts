@@ -468,7 +468,7 @@ export class EpisodeProductionService {
         const linked = this.linked(id); if (linked) return linked.service.checkContinuity(linked.id, raw);
         const input = productionContinuityCheckSchema.parse(raw);
         const owner = { kind: this.ownerKind, id };
-        const requestHash = fingerprint({ owner, expectedRevision: input.expectedRevision, snapshot: input.snapshot, targetIds: input.targetIds || [] });
+        const requestHash = fingerprint({ owner, snapshot: input.snapshot, targetIds: input.targetIds || [] });
         const reports = this.continuityReports();
         const prior = reports.operation(owner, input.operationId);
         if (prior) {
@@ -764,6 +764,32 @@ export class EpisodeProductionService {
             return { approvedId: listApprovedSharedAssets(this.db, episode.dramaId).find(item => item.assetId === input.assetId)?.id || "", canvasId: sharedCanvasId,
                 nodeId: preview.targetNodeId, replayed: Boolean(result.duplicated), mediaSubmitted: false };
         } catch (error) { try { this.db.db.exec("ROLLBACK"); } catch { /* Preserve the original failure after a completed transaction. */ } throw error; }
+    }
+
+    /** 归属切到剧目共享后自动迁移：发布版本里 scope=shared 且素材已审核时直接接入共享画布，失败只广播不阻断触发动作。 */
+    private autoPromoteSharedAssets(episodeId: string, assetIds?: string[]) {
+        if (this.ownerKind !== "episode" || this.projectScope) return;
+        const current = this.get(episodeId);
+        const director = current.published?.director;
+        if (!director) return;
+        const plans = (Array.isArray(director.source.asset_plan) ? director.source.asset_plan : []).map(record);
+        const wanted = new Set(assetIds?.length ? assetIds : plans.map(item => String(item.asset_id || item.id || "")));
+        for (const assetId of wanted) {
+            if (!assetId) continue;
+            const plan = plans.find(item => String(item.asset_id || item.id || "") === assetId);
+            if (!plan || String(plan.canvas_scope || "episode") !== "shared") continue;
+            if (director.assets[assetId]?.sharedSource) continue;
+            try {
+                const preview = this.previewSharedAssetPromotion(episodeId, assetId, current.revision);
+                if (preview.approvedId) continue;
+                this.promoteExistingSharedAsset(episodeId, { assetId, expectedRevision: preview.episodeRevision,
+                    expectedSourceCanvasRevision: preview.sourceCanvasRevision, expectedSharedCanvasRevision: preview.sharedCanvasRevision,
+                    operationId: `shared-auto-promote:${crypto.createHash("sha256").update([episodeId, assetId, preview.sha256].join("\0")).digest("hex").slice(0, 24)}` });
+            } catch (error) {
+                this.events?.publish({ type: "drama-production.updated", entityId: episodeId,
+                    payload: { sharedAssetAutoPromote: { assetId, error: error instanceof Error ? error.message : String(error) } } });
+            }
+        }
     }
 
     sharedAssets(id: string): { assets: ApprovedSharedAsset[]; versions: ApprovedSharedAsset[]; updates: Record<string, unknown>[] } {
@@ -1681,7 +1707,7 @@ export class EpisodeProductionService {
             if (!input) return [];
             const fields = group ? ["prompt", "referenceBindings", "storyboardShots", "duration", "styleTemplateId", "motionContextEnabled", "tailFrameContinuation"] : ["prompt", "model", "comfyParams", "size", "quality", "count"];
             return [{ targetId, nodeId, segmentId: group?.segmentId, canvasRevision: project.revision, current: Object.fromEntries(fields.map(field => [field, input[field]])),
-                directorBaseline: projection?.nextValues || {}, manualFields: fields.filter(field => projection?.fieldHashes?.[field] && projection.fieldHashes[field] !== inputHash(input[field])), directorChanges: projection?.conflicts || [], inputOutdated: input.inputOutdated || false }];
+                directorBaseline: projection?.nextValues || {}, manualFields: fields.filter(field => projection?.fieldHashes?.[field] && projection.fieldHashes[field] !== inputHash(input[field])), directorChanges: (projection?.conflicts || []).filter((field: string) => !fields.includes(field) || !projection?.fieldHashes?.[field] || projection.fieldHashes[field] !== inputHash(input[field])), inputOutdated: input.inputOutdated || false }];
         });
     }
 
@@ -2289,6 +2315,8 @@ export class EpisodeProductionService {
             (result as any).clipRefreshes = editRefreshes.map(clipRefreshReceipt);
             if (editRefreshes.length === 1) (result as any).clipRefresh = clipRefreshReceipt(editRefreshes[0]);
         }
+        const approvedAssetIds = input.ops.flatMap(op => op.type === "review_director_asset" && op.verdict === "approved" ? [op.assetId] : []);
+        if (approvedAssetIds.length && !result.replayed) this.autoPromoteSharedAssets(episodeId, approvedAssetIds);
         return result;
     }
 
@@ -2322,7 +2350,7 @@ export class EpisodeProductionService {
     publish(episodeId: string, raw: unknown): ProductionRecord & { replayed?: boolean; impact?: ProductionImpact } {
         const linked = this.linked(episodeId); if (linked) return linked.service.publish(linked.id, raw);
         const input = productionPublishSchema.parse(raw);
-        return this.commit(episodeId, input.operationId, input.expectedRevision, fingerprint(input), (record) => {
+        const result = this.commit(episodeId, input.operationId, input.expectedRevision, fingerprint(input), (record) => {
             const candidate = this.publishedCandidate(record, input.stage, input.scope);
             if (input.stage === "director" && candidate.director && (candidate.director.source.ledger as any)?.contract_version === 2) {
                 const scopedIds = input.scope ? compilationScopeInput(candidate.director, input.scope).targetIds : undefined;
@@ -2356,6 +2384,8 @@ export class EpisodeProductionService {
             if (input.stage !== "script") draft.clipGroups = candidate.clipGroups;
             return { ...record, revision: record.revision + 1, draft, published: candidate, publishedVersion, updatedAt, impact };
         });
+        if (input.stage === "director" && !result.replayed) this.autoPromoteSharedAssets(episodeId);
+        return result;
     }
 
     /** Runtime outcome binding; source content stays at the published version. */

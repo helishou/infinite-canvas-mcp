@@ -71,3 +71,10 @@ export function subjectDisplayName(source: Record<string, any>, subjectId: strin
 export function productionWorkbenchValue(production: Record<string, any>, view: "subject" | "shot" | "clip") {
     return production.workbench || production[`${view}Workbench`];
 }
+
+
+/** Edit the actual entity field rather than creating a second display description. */
+export function subjectDescriptionField(kind: string, row: Record<string, any>) {
+    const fields = kind === "character" ? ["appearance", "description", "prompt_description", "identity"] : kind === "environment" ? ["description", "prompt_description"] : ["description", "prompt"];
+    return fields.find(field => typeof row[field] === "string" ? Boolean(row[field].trim()) : Boolean(row[field] && typeof row[field] === "object")) || fields[0];
+}

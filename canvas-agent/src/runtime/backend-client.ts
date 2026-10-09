@@ -281,6 +281,11 @@ export class BackendClient {
     return data.project;
   }
 
+  async getDramaProject(dramaId: string) {
+    const data = await this.get<{ ok: boolean; drama: Record<string, unknown> }>(`/drama/projects/${encodeURIComponent(dramaId)}`);
+    return data.drama;
+  }
+
   async listDramaEpisodes(dramaId: string) {
     const data = await this.get<{
       ok: boolean;
