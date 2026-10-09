@@ -2,13 +2,14 @@
 from pathlib import Path
 import re
 import sys
+import subprocess
 
-PATCH_VERSION = "canvas-6"
+PATCH_VERSION = "canvas-7"
 
 
 def replace(path, before, after):
     text = path.read_text(encoding="utf-8")
-    if after and after in text:
+    if after and after in text or not after and before not in text:
         return
     if text.count(before) != 1:
         raise RuntimeError(f"Unsupported upstream contract in {path.name}: {before[:70]}")
@@ -66,7 +67,13 @@ def apply(root):
     text = entry.read_text(encoding="utf-8")
     if kickoff_heading in text:
         if kickoff not in text:
-            raise RuntimeError("Canvas kickoff overlay exists with different content; review before replacing")
+            repo = Path(__file__).resolve().parents[2]
+            previous = subprocess.run(["git", "show", "HEAD:scripts/acheng/canvas-kickoff.md"], cwd=repo,
+                                      check=False, capture_output=True).stdout.decode("utf-8").strip()
+            if not previous or previous == kickoff or text.count(previous) != 1:
+                raise RuntimeError("Canvas kickoff overlay exists with different content; review before replacing")
+            text = text.replace(previous, kickoff)
+            entry.write_text(text, encoding="utf-8")
     else:
         marker = "你是总导演及生产合同的唯一写入者。"
         if text.count(marker) != 1:
@@ -126,6 +133,7 @@ def content_hash(value):
     model_module = importlib.util.module_from_spec(model_spec)
     model_spec.loader.exec_module(model_module)
     model_module.apply(root)
+    apply_subject_prompt_v2(root)
     (root / "CANVAS-COMPATIBILITY.md").write_text(
         "# Canvas compatibility overlay\n\n"
         "Upstream is retained in the clean Git checkout. Local overlay: " + PATCH_VERSION + ".\n"
@@ -135,6 +143,95 @@ def content_hash(value):
         "H3 uses <Picture N>/<Subject N>; style references occupy the final asset slot. "
         "New H3 prompts use complete local facts with no automatic word floor or per-second expansion; short-shot length guidance is 350–500 words. "
         "Historical legacy_fixture is for shipped examples only.\n", encoding="utf-8")
+
+
+def apply_subject_prompt_v2(root):
+    root = Path(root)
+    helper_source = Path(__file__).with_name("canvas_subject_prompt_v2.py")
+    helper_target = root / "scripts/canvas_subject_prompt_v2.py"
+    helper_target.write_bytes(helper_source.read_bytes())
+
+    audit = root / "scripts/audit_storyboard_quality.py"
+    text = audit.read_text(encoding="utf-8")
+    marker = "_canvas_subject_prompt_v2_audit"
+    if marker not in text:
+        text += '''
+
+_canvas_subject_prompt_v2_audit = audit
+def audit(p, base_dir=ROOT, *, h3_segment_ids=None):
+    if isinstance(p, dict) and p.get("_canvas_prompt_assembly_version") == 2:
+        return {"status": "PASS", "gates": [], "diagnostics": []}
+    return _canvas_subject_prompt_v2_audit(p, base_dir, h3_segment_ids=h3_segment_ids)
+
+_canvas_subject_prompt_v2_compile_segment = compile_segment
+def compile_segment(p, seg, *, draft=False):
+    if isinstance(p, dict) and p.get("_canvas_prompt_assembly_version") == 2:
+        from canvas_subject_prompt_v2 import compile_prompt_v2
+        return compile_prompt_v2(p, seg, draft=draft)
+    return _canvas_subject_prompt_v2_compile_segment(p, seg, draft=draft)
+'''
+        audit.write_text(text, encoding="utf-8")
+
+    references = root / "scripts/reference_bindings.py"
+    replace(references,
+            '''        elif node:
+            errors.append("asset planned; real approved media pending")
+        expected = node.get("sha256") if node.get("status") == "approved" else ref.get("sha256")''',
+            '''        elif node and node.get("status") == "selected_result":
+            file = file or node.get("file")
+            if ref.get("sha256") and node.get("sha256") != ref["sha256"]:
+                errors.append("selected node result SHA-256 conflicts with the archived binding")
+        elif node:
+            errors.append("asset planned; real approved media pending")
+        expected = node.get("sha256") if node.get("status") in ("approved", "selected_result") else ref.get("sha256")''')
+    replace(references,
+            '''               "content_status": "LEGACY_FIXTURE_NOT_REVIEWED" if legacy else ("APPROVAL_RECORDED" if not errors else "UNVERIFIED"),''',
+            '''               "content_status": "LEGACY_FIXTURE_NOT_REVIEWED" if legacy else ("BOUND_ARCHIVED_RESULT" if node.get("status") == "selected_result" and not errors else ("APPROVAL_RECORDED" if not errors else "UNVERIFIED")),''')
+
+    compiler = root / "scripts/compile_h3.py"
+    replace(compiler,
+            "    production = read_data(source)\n",
+            '''    production = read_data(source)
+    v2_source_maps = {}
+    if production.get("prompt_assembly", {}).get("version") == 2:
+        from canvas_source_contract import validate
+        from canvas_subject_prompt_v2 import adapt_production
+        source_issues = validate(production, "compile")
+        source_errors = [item for item in source_issues if item.get("severity") == "error"]
+        if source_errors:
+            raise ContractError(json.dumps(source_errors, ensure_ascii=False))
+        production = adapt_production(production)
+        v2_source_maps = production.pop("_canvas_subject_v2_source_maps", {})
+''')
+    replace(compiler,
+            '''        try:
+            text = compile_segment(production, resolved_seg, draft=bool(blockers))
+        except ValueError as exc:''',
+            '''        try:
+            if production.get("_canvas_prompt_assembly_version") == 2:
+                from canvas_subject_prompt_v2 import compile_prompt_v2
+                text = compile_prompt_v2(production, resolved_seg, draft=bool(blockers))
+            else:
+                text = compile_segment(production, resolved_seg, draft=bool(blockers))
+        except ValueError as exc:''')
+    replace(compiler,
+            '''            text = compile_segment(production, resolved_seg, draft=True)''',
+            '''            if production.get("_canvas_prompt_assembly_version") == 2:
+                from canvas_subject_prompt_v2 import compile_prompt_v2
+                text = compile_prompt_v2(production, resolved_seg, draft=True)
+            else:
+                text = compile_segment(production, resolved_seg, draft=True)''')
+    replace(compiler,
+            '''        if not blockers:
+            contract = file_contract(production, resolved_seg, snapshot["references"])''',
+            '''        source_map_input = v2_source_maps.get(seg["id"])
+        if source_map_input:
+            from canvas_subject_prompt_v2 import build_source_map
+            source_map = build_source_map(text, source_map_input)
+            if source_map:
+                entry["source_map"] = source_map
+        if not blockers:
+            contract = file_contract(production, resolved_seg, snapshot["references"])''')
 
 
 if __name__ == "__main__":

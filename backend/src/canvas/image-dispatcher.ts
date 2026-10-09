@@ -441,32 +441,18 @@ export class CanvasImageDispatcher {
     this.stores.tasks.update(task.id, { status: "running", progress: 0.02 });
     const result = await this.dispatch(plan, task.id);
     if (this.stores.tasks.get(task.id)?.status === "cancelled") return;
-    let aspectFailure: Error | undefined;
+    // 画幅验收已移除：工作流输出尺寸由工作流自身决定，不再按请求比例判失败，仅回填真实宽高。
     if (plan.executor === "comfy-workflow") {
-      const expectedRatio = requestedImageRatio(plan.input);
       for (const media of result.media) {
+        if (!media.storageKey) continue;
         try {
-          if (!media.storageKey) throw new Error("结果缺少归档 storageKey");
           const actual = await sharp(await this.stores.media.read(media.storageKey)).metadata();
           media.width = actual.width ?? null;
           media.height = actual.height ?? null;
-          if (expectedRatio !== null && (!actual.width || !actual.height || Math.abs(actual.width / actual.height - expectedRatio) >= 0.01)) {
-            throw new Error(`目标 ${plan.input.width && plan.input.height ? `${plan.input.width}×${plan.input.height}` : plan.input.size}，实际 ${actual.width || "?"}×${actual.height || "?"}`);
-          }
-        } catch (error) {
-          aspectFailure = new Error(`工作流输出画幅未通过验收：${error instanceof Error ? error.message : String(error)}；已归档媒体未绑定为正式结果`);
-          break;
+        } catch {
+          // 读不到尺寸时保留 executor 返回值，不做验收拦截。
         }
       }
-    }
-    if (aspectFailure) {
-      this.stores.tasks.update(task.id, { status: "failed", error: aspectFailure.message, result: { media: result.media } });
-      this.stores.tasks.addEvent(task.id, "result", { media: result.media, partial: true, error: aspectFailure.message });
-      if (logId) this.logs.update(logId, { status: "failed", error: aspectFailure.message,
-        outputs: result.media.map((media) => ({ url: media.url, storageKey: media.storageKey, mimeType: media.mimeType, width: media.width, height: media.height })),
-        finishedAt: new Date().toISOString(), durationMs: Date.now() - startedAt });
-      await hooks?.onFailed?.(aspectFailure, this.stores.tasks.get(task.id) || task);
-      return;
     }
     await hooks?.onCompleted?.(result, { ...task, status: "succeeded", progress: 1, result: { media: result.media } });
     if (this.stores.tasks.get(task.id)?.status === "cancelled") return;

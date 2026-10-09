@@ -7,7 +7,7 @@ import crypto from "node:crypto";
 import { currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { buildCharacterGroupFromExistingNode } from "@basketikun/canvas-agent/plugins/minimax-h3/character-groups";
 import { assertReferenceCompilation, compileReferenceSubmission } from "@basketikun/canvas-agent/reference-contract";
-import { canonicalProduction, type EpisodeProductionData, type ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/production-contract";
+import { canonicalProduction, isSubjectPromptAssembly, promptSourceMapSchema, type EpisodeProductionData, type ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/production-contract";
 import { directorArtifact } from "./director.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
 const stableId = (kind: string, ...parts: string[]) => `${kind}-${crypto.createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24)}`;
@@ -76,7 +76,11 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
     const preflight = compileReferenceSubmission(project, segment);
     assertReferenceCompilation(preflight);
     if (preflight.compiledPrompt !== prompt) throw new Error(`Segment ${group.id} 的参考顺序需要重新绑定并编译；不能自动改写正式正文`);
-    segment.productionClipProjection = { targetId: group.id, sourceHash: authored.sourceHash, styleTemplateDeclared: Object.hasOwn(planned, "styleTemplateId"), fieldHashes: Object.fromEntries(CLIP_PROJECTION_FIELDS.map(key => [key, clipFieldHash(segment[key])])) };
+    const promptSourceMap = promptSourceMapSchema.safeParse((authored.receipt as Record<string, any>).sourceMap);
+    segment.productionClipProjection = { targetId: group.id, sourceHash: authored.sourceHash, artifactId: authored.id, promptHash: authored.sha256,
+        promptAssemblyVersion: isSubjectPromptAssembly(d.source) ? 2 : 1, promptSourceMapAvailable: authored.status === "ready" && isSubjectPromptAssembly(d.source) && promptSourceMap.success && promptSourceMap.data.entries.length > 0,
+        styleTemplateDeclared: Object.hasOwn(planned, "styleTemplateId"),
+        fieldHashes: Object.fromEntries(CLIP_PROJECTION_FIELDS.map(key => [key, clipFieldHash(segment[key])])) };
     segment.productionClipProjection.inputHash = clipInputHash(segment);
     return segment;
 }

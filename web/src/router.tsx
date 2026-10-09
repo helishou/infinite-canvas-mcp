@@ -11,6 +11,9 @@ const CanvasProjectPage = lazy(loadCanvasProjectPage);
 const CanvasPerformanceFixture = lazy(() => import("@/pages/canvas/performance-fixture"));
 const EpisodeProductionPage = lazy(() => import("@/pages/drama/production"));
 const ProductionHubPage = lazy(() => import("@/pages/production"));
+const ProductionAliasRedirect = lazy(() => import("@/pages/drama/legacy-routes").then(module => ({ default: module.ProductionAliasRedirect })));
+const EpisodeProductionRedirect = lazy(() => import("@/pages/drama/legacy-routes").then(module => ({ default: module.EpisodeProductionRedirect })));
+const SceneProductionRedirect = lazy(() => import("@/pages/drama/legacy-routes").then(module => ({ default: module.SceneProductionRedirect })));
 const LegacyDirectorPage = lazy(() => import("@/pages/director"));
 const ConfigPage = lazy(() => import("@/pages/config"));
 const HomePage = lazy(() => import("@/pages/home"));
@@ -52,8 +55,9 @@ export const router = createBrowserRouter([
             { path: "/canvas", element: lazyPage(CanvasPage) },
             { path: "/canvas/performance", element: lazyPage(CanvasPerformanceFixture) },
             { path: "/canvas/:id", element: lazyPage(CanvasProjectPage) },
-            { path: "/drama", element: lazyPage(ProductionHubPage) },
-            { path: "/drama/episodes/:episodeId/production", element: lazyPage(EpisodeProductionPage) },
+            { path: "/drama", element: lazyPage(ProductionAliasRedirect) },
+            { path: "/drama/episodes/:episodeId/production", element: lazyPage(EpisodeProductionRedirect) },
+            { path: "/drama/scenes/:sceneId/production", element: lazyPage(SceneProductionRedirect) },
             { path: "/workflows", element: lazyPage(WorkflowsPage) },
             { path: "/config", element: lazyPage(ConfigPage) },
             { path: "/diagnostics/mcp", element: lazyPage(McpObservabilityPage) },

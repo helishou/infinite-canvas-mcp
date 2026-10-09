@@ -945,6 +945,19 @@ export class BackendDatabase {
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }
+        if (currentVersion < 36) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                this.db.exec(`CREATE TABLE IF NOT EXISTS production_clip_source_dependencies (
+                    owner_kind TEXT NOT NULL, owner_id TEXT NOT NULL, segment_id TEXT NOT NULL,
+                    source_project_id TEXT NOT NULL, source_node_id TEXT NOT NULL, binding_id TEXT NOT NULL,
+                    asset_id TEXT NOT NULL, subject_id TEXT, role TEXT NOT NULL,
+                    PRIMARY KEY(owner_kind, owner_id, segment_id, binding_id));
+                    CREATE INDEX IF NOT EXISTS production_source_node_consumers ON production_clip_source_dependencies(source_project_id, source_node_id, owner_kind, owner_id);`);
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (36, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
     }
 
     /** A rolled-back schema_migrations row leaves its column behind, so every ADD COLUMN must be checked first. */
@@ -1963,7 +1976,7 @@ export class BackendDatabase {
                 nodes: formalImageNodes.map(node => ({ id: node.id, metadata: { productionImageInput: node.metadata.productionImageInput } })),
                 connections: (project.connections as Record<string, any>[] || []).filter(edge => formalSourceIds.has(edge.toNodeId)),
             }) : undefined;
-            const scriptBaseline = context?.source?.clientId !== "production:scripts" ? { nodes: structuredClone((Array.isArray(project.nodes) ? project.nodes as Record<string, any>[] : []).filter(node => node.metadata?.productionScriptId)) } : undefined;
+            const scriptBaseline = !context?.runtimeWrite && context?.source?.clientId !== "production:scripts" ? { nodes: structuredClone((Array.isArray(project.nodes) ? project.nodes as Record<string, any>[] : []).filter(node => node.metadata?.productionScriptId)) } : undefined;
             if (!this.db.prepare("SELECT 1 FROM canvas_collaboration_checkpoints WHERE project_id = ?").get(id)) {
                 this.db.prepare("INSERT INTO canvas_collaboration_checkpoints (project_id, revision, data_json) VALUES (?, ?, ?)").run(id, currentRevision, JSON.stringify(current));
             }
@@ -2104,6 +2117,7 @@ export class BackendDatabase {
         task: RuntimeTask,
         binding: { projectId: string; nodeId: string; segmentId: string; generationLogId?: string },
         output: Record<string, unknown> | null,
+        completion?: { cacheFingerprint?: string; firstPassReady?: boolean },
     ): { project: CanvasProject; log: GenerationLog | null; operations: CanvasOperation[] } | null {
         // 日志描述的是任务本身的终态，不受画布 Clip 是否已被另一任务接管影响。
         // 先收口日志，再用 runtimeTaskId CAS 尝试更新画布投影；否则 CAS 失败会留下永久 running 日志。
@@ -2142,6 +2156,8 @@ export class BackendDatabase {
         const terminalStatus = task.status === "succeeded" ? "success" : task.status === "cancelled" ? "cancelled" : "error";
         const active = segments.find((segment) => ["queued", "loading", "awaiting_confirmation"].includes(String(segment.status || "")) && String(segment.id || "") !== binding.segmentId);
         const segmentPatch: Record<string, unknown> = {
+            ...(completion?.cacheFingerprint !== undefined ? { cacheFingerprint: completion.cacheFingerprint } : {}),
+            ...(completion?.firstPassReady !== undefined ? { firstPassReady: completion.firstPassReady } : {}),
             inputOutdated,
             status: terminalStatus,
             progress: task.progress,
@@ -2157,7 +2173,7 @@ export class BackendDatabase {
             const previousResults = Array.isArray(segments[index].results) ? segments[index].results as Array<Record<string, unknown>> : [];
             segmentPatch.results = [
                 ...previousResults.filter((item) => String(item.url || "") !== String(output.url || "")),
-                { ...output, name: `Clip ${index + 1}`, taskId: task.id, inputHash: frozenHash },
+                { ...output, name: `Clip ${index + 1}`, taskId: task.id, ...(binding.generationLogId ? { generationLogId: binding.generationLogId } : {}), inputHash: frozenHash },
             ];
         }
         const operations: CanvasOperation[] = [{
@@ -2235,7 +2251,7 @@ export class BackendDatabase {
             }
             if (input.imageIds) {
                 if (!media.length) throw new Error("生成完成但没有返回图片");
-                const slots = completedImageSlots(sourceMetadata, input.imageIds, media, task.id);
+                const slots = completedImageSlots(sourceMetadata, input.imageIds, media, task.id, this.getTaskSequence(task.id));
                 const initialSize = recordOf(task.params.imageTargetSize);
                 const keepSmartLayout = source.type === "config" && sourceMetadata.smart === true;
                 const resultSize = slots.content && !keepSmartLayout && !sourceMetadata.freeResize && source.width === initialSize.width && source.height === initialSize.height
@@ -3522,6 +3538,11 @@ export class BackendDatabase {
     getTask(id: string): RuntimeTask | null {
         const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Record<string, unknown> | undefined;
         return row ? this.taskFromRow(row) : null;
+    }
+
+    getTaskSequence(id: string): number | undefined {
+        const row = this.db.prepare("SELECT rowid AS sequence FROM tasks WHERE id = ?").get(id) as { sequence?: number } | undefined;
+        return row && Number.isSafeInteger(Number(row.sequence)) ? Number(row.sequence) : undefined;
     }
 
     /** 启动恢复只读取最新候选；已结束任务仅限仍被 H3 画布绑定或日志未收口。 */

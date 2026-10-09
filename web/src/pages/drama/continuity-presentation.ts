@@ -10,7 +10,8 @@ export function continuityPresentation(input: { facts: Row[]; timelines: Row[]; 
         const row = find(input.facts, id);
         if (!row) return label("missingFact");
         const objectName = object(row.object_kind, row.object_id);
-        const title = name(row) || label("factNumber", { count: input.facts.indexOf(row) + 1 });
+        const readableName = name(row);
+        const title = readableName || label("factNumber", { count: input.facts.indexOf(row) + 1 });
         return title.includes(objectName) ? title : `${objectName} · ${title}`;
     };
     const value = (factId: string, raw: unknown): string => {
@@ -18,11 +19,13 @@ export function continuityPresentation(input: { facts: Row[]; timelines: Row[]; 
         const row = find(input.facts, factId);
         const displays = row?.display_values;
         const display = Array.isArray(displays) ? displays[(row?.allowed_values || []).indexOf(raw)] : displays?.[String(raw)];
-        return typeof display === "string" && display.trim() ? display : String(raw);
+        const description = row?.value_descriptions?.[String(raw)];
+        return typeof description === "string" && description.trim() ? description : typeof display === "string" && display.trim() ? display : String(raw);
     };
     const timeline = (id: string) => {
         const row = find(input.timelines, id);
-        return name(row) || String(row?.description || "") || (row ? label("timelineNumber", { count: input.timelines.indexOf(row) + 1 }) : label("missingTimeline"));
+        const text = name(row) || String(row?.description || "");
+        return text || (row ? label("timelineNumber", { count: input.timelines.indexOf(row) + 1 }) : label("missingTimeline"));
     };
     const scene = (id: string) => name(input.scenes.find(row => String(row.scene_id || row.id) === id)) || name(find(input.locations, id)) || label("missingScene");
     const target = (id: string) => {

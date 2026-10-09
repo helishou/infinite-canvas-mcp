@@ -1,6 +1,7 @@
 import { inspectH3Result } from "../canvas/h3-execution-contract.js";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { Readable } from "node:stream";
 import path from "node:path";
 import WebSocket from "ws";
 import { runningHubConfigPatchSchema, runningHubWorkflowProfileSchema, type RunningHubField, type RunningHubConfig, type RunningHubWorkflowProfile } from "@basketikun/canvas-agent/generation-contract";
@@ -427,11 +428,19 @@ export class RunningHubBackend {
                 try {
                     const response = await fetch(url, { signal: this.controllers.get(id)?.signal });
                     if (!response.ok) { reason = `HTTP ${response.status}`; continue; }
-                    const bytes = Buffer.from(await response.arrayBuffer());
-                    if (bytes.length <= WS_MIN_FILE_BYTES) { reason = `response_too_small:${bytes.length}`; continue; }
-                    const mimeType = runningHubMediaType(bytes, response.headers.get("content-type") || "", file.filename);
-                    const media = this.media.store(bytes, { name: file.filename, mimeType, category: "output" });
-                    this.tasks.addEvent(id, "intermediate", { nodeId, field: file.field, filename: file.filename, media: { url: this.media.url(media), storageKey: media.storageKey, mimeType: media.mimeType, bytes: bytes.length } });
+                    if (!response.body) { reason = "empty_response_body"; continue; }
+                    const header = response.headers.get("content-type") || "";
+                    const media = await this.media.storeStream(Readable.fromWeb(response.body as unknown as import("node:stream/web").ReadableStream), {
+                        name: file.filename,
+                        category: "output",
+                        resolveMimeType: (prefix, bytes) => runningHubMediaType({ prefix, bytes }, header, file.filename),
+                    });
+                    if (media.bytes <= WS_MIN_FILE_BYTES) {
+                        this.media.delete(media.storageKey);
+                        reason = `response_too_small:${media.bytes}`;
+                        continue;
+                    }
+                    this.tasks.addEvent(id, "intermediate", { nodeId, field: file.field, filename: file.filename, media: { url: this.media.url(media), storageKey: media.storageKey, mimeType: media.mimeType, bytes: media.bytes } });
                     reason = "";
                     break;
                 } catch (error) { reason = redact(error instanceof Error ? error.message : String(error), config); }
@@ -450,14 +459,20 @@ export class RunningHubBackend {
             if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("RunningHub 结果地址协议无效");
             const response = await fetch(source, { signal });
             if (!response.ok) throw new Error(`RunningHub 结果下载失败：HTTP ${response.status}`);
-            const bytes = Buffer.from(await response.arrayBuffer());
+            if (!response.body) throw new Error("RunningHub 结果下载失败：响应没有媒体数据");
             const name = path.basename(parsed.pathname) || `runninghub-${item.nodeId || "output"}.${item.outputType || item.fileType || "mp4"}`;
-            const mimeType = runningHubMediaType(bytes, response.headers.get("content-type") || "", name);
-            const hash = fingerprint(bytes);
-            if (seen.has(hash)) continue;
-            seen.add(hash);
-            const media = this.media.store(bytes, { name, mimeType, category: "output" });
-            outputs.push({ url: this.media.url(media), storageKey: media.storageKey, mimeType: media.mimeType, filename: name, bytes: bytes.length });
+            const header = response.headers.get("content-type") || "";
+            const media = await this.media.storeStream(Readable.fromWeb(response.body as unknown as import("node:stream/web").ReadableStream), {
+                name,
+                category: "output",
+                resolveMimeType: (prefix, bytes) => runningHubMediaType({ prefix, bytes }, header, name),
+            });
+            if (seen.has(media.sha256)) {
+                this.media.delete(media.storageKey);
+                continue;
+            }
+            seen.add(media.sha256);
+            outputs.push({ url: this.media.url(media), storageKey: media.storageKey, mimeType: media.mimeType, filename: name, bytes: media.bytes });
         }
         return outputs;
     }
@@ -729,10 +744,12 @@ export function normalizeRunningHubQuery(response: Json) {
     const data = record(response.data || response);
     return { status: String(data.status || data.taskStatus || "").toUpperCase(), results: Array.isArray(data.results) ? data.results as Json[] : [], error: typeof data.failedReason === "string" ? data.failedReason : String(data.errorMessage || data.msg || data.message || record(data.failedReason).exception_message || "") };
 }
-export function runningHubMediaType(bytes: Buffer, header: string, name: string) {
+export function runningHubMediaType(data: Buffer | { prefix: Buffer; bytes: number }, header: string, name: string) {
+    const bytes = Buffer.isBuffer(data) ? data : data.prefix;
+    const size = Buffer.isBuffer(data) ? data.length : data.bytes;
     const prefix = bytes.subarray(0, 64).toString().trimStart();
-    if (!bytes.length || /^(?:<!doctype|<html)/i.test(prefix) || /text\/html/i.test(header) || /application\/json/i.test(header) && !/\.json$/i.test(name)) throw new Error("RunningHub 返回了空文件或错误页面，未作为媒体归档");
-    if (bytes.length > 12 && ["ftyp", "moov", "mdat", "wide"].includes(bytes.subarray(4, 8).toString())) return "video/mp4";
+    if (!size || /^(?:<!doctype|<html)/i.test(prefix) || /text\/html/i.test(header) || /application\/json/i.test(header) && !/\.json$/i.test(name)) throw new Error("RunningHub 返回了空文件或错误页面，未作为媒体归档");
+    if (size > 12 && ["ftyp", "moov", "mdat", "wide"].includes(bytes.subarray(4, 8).toString())) return "video/mp4";
     if (bytes.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) return "video/webm";
     if (bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return "image/png";
     if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";

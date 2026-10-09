@@ -20,7 +20,6 @@ import { h3Label, useH3Locale } from "../h3-locale";
 import { promptEnhanceImagePayload } from "../services/prompt-enhance-references";
 import { captureH3PromptRequest } from "../services/h3-prompt-request";
 import { translateH3Prompt } from "../services/h3-prompt-translation";
-import type { TranslationProgress } from "../services/h3-prompt-translation";
 import { literalPromptSubjects } from "../services/prompt-subject-definitions";
 import type { StoryboardPromptReference } from "../services/storyboard-prompt";
 import { assembleH3Prompt, readH3PromptSection } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
@@ -652,12 +651,64 @@ export function H3PromptSection({
   const textStatus = getReact().useSyncExternalStore(textDocument.subscribe, textDocument.getSnapshot);
   const suggestions = useMemo(() => ctx.textSuggestions(textTarget), [ctx.projectId, ctx.node.id, selected?.id]);
   const suggestionState = getReact().useSyncExternalStore(suggestions.subscribe, suggestions.getSnapshot);
-  const prompt = textStatus.ready ? textStatus.text : String(selected?.prompt || "");
+ const prompt = textStatus.ready ? textStatus.text : String(selected?.prompt || "");
+  const productionProjection = selected?.productionClipProjection as Record<string, unknown> | undefined;
   const promptSubjectSection = readPromptSection(prompt, "subject_definitions");
   const literalSubjects = useMemo(() => literalPromptSubjects(`subject_definitions:\n${promptSubjectSection}`), [promptSubjectSection]);
   const TextEditor = ctx.TextEditor;
   const mode = String(selected?.mode || selected?.taskMode || "ref2va");
   const promptMode = mode in H3_PROMPT_MODE_CONFIG ? mode as keyof typeof H3_PROMPT_MODE_CONFIG : "ref2va";
+  const structuredPromptV2 = productionProjection?.promptAssemblyVersion === 2;
+  const [manualOverrideSegmentId, setManualOverrideSegmentId] = useState<string | null>(null);
+  const [manualPromptModeError, setManualPromptModeError] = useState<string | null>(null);
+  const [promptDiffersFromCompiled, setPromptDiffersFromCompiled] = useState(false);
+  const compilerPromptHash = typeof productionProjection?.promptHash === "string" ? productionProjection.promptHash : "";
+  useEffect(() => {
+    let current = true;
+    if (!structuredPromptV2 || !textStatus.ready || !compilerPromptHash) {
+      setPromptDiffersFromCompiled(false);
+      return () => { current = false; };
+    }
+    void crypto.subtle.digest("SHA-256", new TextEncoder().encode(prompt)).then((digest) => {
+      const hash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      if (current) setPromptDiffersFromCompiled(hash !== compilerPromptHash);
+    }).catch(() => { if (current) setPromptDiffersFromCompiled(false); });
+    return () => { current = false; };
+  }, [structuredPromptV2, textStatus.ready, prompt, compilerPromptHash]);
+  const manualPromptEditMode = structuredPromptV2 && Boolean(selected?.id) && manualOverrideSegmentId === selected?.id;
+  const manualPromptOverride = structuredPromptV2 && (manualPromptEditMode || promptDiffersFromCompiled);
+  const showPromptEditor = !structuredPromptV2 || manualPromptEditMode;
+  const canReverseSyncPrompt = structuredPromptV2 && promptDiffersFromCompiled && productionProjection?.promptSourceMapAvailable === true
+    && Boolean(productionProjection.artifactId && productionProjection.promptHash && productionProjection.sourceHash);
+  const [promptReverseSyncing, setPromptReverseSyncing] = useState(false);
+  const [promptReverseSyncError, setPromptReverseSyncError] = useState<string | null>(null);
+  const promptReverseRequest = useRef(0);
+  useEffect(() => { promptReverseRequest.current++; setPromptReverseSyncing(false); setPromptReverseSyncError(null); }, [ctx.projectId, ctx.node.id, selected?.id]);
+  const requestPromptReverseSync = async () => {
+    if (!canReverseSyncPrompt || !selected?.id || promptReverseSyncing) return;
+    const input = { nodeId: ctx.node.id, segmentId: selected.id, prompt,
+      artifactId: String(productionProjection!.artifactId), sourceHash: String(productionProjection!.sourceHash), basePromptHash: String(productionProjection!.promptHash) };
+    const request = ++promptReverseRequest.current;
+    setPromptReverseSyncing(true); setPromptReverseSyncError(null);
+    try {
+      if (!ctx.production) throw new Error("宿主制作编辑服务尚未就绪，人工 Prompt 已保留。");
+      await textDocument.flush();
+      const result = await ctx.production.reverseSyncPrompt(input);
+      if (!result.sourceSaved) throw new Error("源稿尚未保存，请在制作工作台核对诊断或恢复原回执。人工 Prompt 已保留。");
+    } catch (error) { if (request === promptReverseRequest.current) setPromptReverseSyncError(error instanceof Error ? error.message : String(error)); }
+    finally { if (request === promptReverseRequest.current) setPromptReverseSyncing(false); }
+  };
+  const toggleManualPromptOverride = async () => {
+    if (!selected?.id) return;
+    setManualPromptModeError(null);
+    if (!manualPromptEditMode) { setManualOverrideSegmentId(selected.id); return; }
+    try {
+      await ctx.flush();
+      setManualOverrideSegmentId(null);
+    } catch (error) {
+      setManualPromptModeError(error instanceof Error ? error.message : String(error));
+    }
+  };
   const modeConfig = H3_PROMPT_MODE_CONFIG[promptMode];
   const toolBlocks = modeConfig.tools as Record<string, string>;
   const storyboardSection = promptMode === "ref2va" ? "detailed_description" : "integrated_multimodal_description";
@@ -716,7 +767,6 @@ export function H3PromptSection({
   type Translation = { segmentId: string; prompt: string; text: string };
   const [translation, setTranslation] = useState<Translation | null>(null);
   const [translating, setTranslating] = useState(false);
-  const [translationProgress, setTranslationProgress] = useState<TranslationProgress>({ completed: 0, total: 0 });
   const [isTranslated, setIsTranslated] = useState(false);
   const [translateError, setTranslateError] = useState<string | null>(null);
   const [copiedError, setCopiedError] = useState(false);
@@ -1381,7 +1431,6 @@ export function H3PromptSection({
       const controller = new AbortController();
       translationRequestRef.current = { controller, prompt: promptAtCall, segmentId: segmentIdAtCall };
       setTranslating(true);
-      setTranslationProgress({ completed: 0, total: 0 });
       setTranslateError(null);
       try {
         const model = String(
@@ -1394,8 +1443,6 @@ export function H3PromptSection({
           model,
           signal: controller.signal,
           log: { taskMode: "翻译", nodeId: ctx.node.id, segmentId: segmentIdAtCall },
-        }, (progress) => {
-          if (!controller.signal.aborted && translationRequestRef.current?.controller === controller) setTranslationProgress(progress);
         });
         // Only cache and show a complete translation of the still-current Clip and source.
         if (!controller.signal.aborted && promptRef.current.prompt === promptAtCall && promptRef.current.segmentId === segmentIdAtCall) {
@@ -1602,7 +1649,7 @@ export function H3PromptSection({
       <span key="prompt-header" className="nfh3-prompt-header">
         <span className="nfh3-prompt-header-main">
           <H3Icon key="prompt-icon" name="prompt" /> <span key="prompt-label">{h3Label(locale, "prompt")}</span>{" "}
-          {!storyboardMode ? <>
+          {!storyboardMode && showPromptEditor ? <>
             <button
               key="enhance"
               type="button"
@@ -1627,11 +1674,26 @@ export function H3PromptSection({
             </label>
           </> : null}
         </span>
-        {mode === "ref2va" ? <button type="button" className="nfh3-prompt-view-toggle" title="打开结构化分镜提示词编辑器" onClick={openStoryboard}>
+        {structuredPromptV2 ? <Button size="small" disabled={!selected?.id || (!manualPromptOverride && (!textStatus.ready || textStatus.blocked))} onClick={() => void toggleManualPromptOverride()}>
+          {manualPromptEditMode ? "完成人工编辑" : manualPromptOverride ? "继续编辑人工覆盖" : "人工覆盖 Prompt"}
+        </Button> : null}
+        {mode === "ref2va" && !structuredPromptV2 ? <button type="button" className="nfh3-prompt-view-toggle" title="打开结构化分镜提示词编辑器" onClick={openStoryboard}>
           {storyboardSaving ? "保存中…" : "分镜编辑"}
         </button> : null}
       </span>
-      {!storyboardMode ? <div key="prompt-modes" className="minimax-prompt-modes">
+      {structuredPromptV2 && !manualPromptEditMode ? <div className="minimax-prompt-help-panel" role="note">
+        {manualPromptOverride
+          ? "检测到画布 Prompt 与最近一次编译结果不同；此人工覆盖已保留。需要常规修改时请维护分镜源稿。"
+          : compilerPromptHash
+            ? "Prompt 由 Subject、Shot、连续性和已选图片自动编译。日常修改请在制作工作台维护分镜源稿；人工覆盖仅用于特殊修正。"
+            : "当前 Clip 尚无可用的编译 Prompt；源稿修改后由 Backend 自动编译。"}
+        {manualPromptOverride && canReverseSyncPrompt ? <Button size="small" loading={promptReverseSyncing} disabled={promptReverseSyncing || !textStatus.ready || textStatus.blocked} onClick={() => void requestPromptReverseSync()}>反向同步到分镜源稿</Button> : null}
+        {manualPromptOverride && !canReverseSyncPrompt ? <span>当前编译回执没有可用的唯一来源映射，不能自动反向同步。</span> : null}
+        {manualPromptOverride && !manualPromptEditMode ? <Input.TextArea value={prompt} readOnly aria-label="保留的人工 Prompt 覆盖" autoSize={{ minRows: 8, maxRows: 22 }} /> : null}
+      </div> : null}
+      {promptReverseSyncError ? <div className="minimax-prompt-reference-error" role="alert">反向同步未完成：{promptReverseSyncError}</div> : null}
+      {manualPromptModeError ? <div className="minimax-prompt-reference-error" role="alert">切换回编译预览失败：{manualPromptModeError}</div> : null}
+      {!storyboardMode && showPromptEditor ? <div key="prompt-modes" className="minimax-prompt-modes">
         <span className="minimax-prompt-mode-tools">
         {Object.keys(toolBlocks).map((label) => (
           <button
@@ -1653,12 +1715,12 @@ export function H3PromptSection({
           说明
         </button>
       </div> : null}
-      {!storyboardMode && helpOpen ? <div key="prompt-help" className="minimax-prompt-help-panel" role="note">
+      {!storyboardMode && showPromptEditor && helpOpen ? <div key="prompt-help" className="minimax-prompt-help-panel" role="note">
         <b>{modeConfig.title}</b>
         <span>字段：{modeConfig.fields}</span>
         <span>{modeConfig.refs}</span>
       </div> : null}
-      {!storyboardMode ? <small key="prompt-syntax" className="minimax-prompt-syntax">
+      {!storyboardMode && showPromptEditor ? <small key="prompt-syntax" className="minimax-prompt-syntax">
         <code key="subject">&lt;Subject N&gt; 指认主体（独立编号）</code>{" "}
         <code key="picture">&lt;Picture P&gt; 指认第 P 张参考图</code>{" "}
         <code key="video">&lt;Video V&gt; 指认第 V 段参考视频</code>{" "}
@@ -1694,11 +1756,11 @@ export function H3PromptSection({
           </span>
         ) : null}
       </small> : null}
-      {!storyboardMode && (suggestionState.error || suggestionState.pending) ? <div role="status" className="minimax-prompt-help-panel">
+      {!storyboardMode && showPromptEditor && (suggestionState.error || suggestionState.pending) ? <div role="status" className="minimax-prompt-help-panel">
         {suggestionState.error || "候选正在保存"}{suggestionState.pending ? "；未确认结果已保留为本地草稿" : ""}
         <button type="button" onClick={() => void suggestions.refresh(true).catch(() => {})}>重新同步候选</button>
       </div> : null}
-      {!storyboardMode ? suggestionState.items.filter((item) => item.status === "pending").map((item) => (
+      {!storyboardMode && showPromptEditor ? suggestionState.items.filter((item) => item.status === "pending").map((item) => (
         <details key={item.id} className="minimax-prompt-help-panel">
           <summary>{item.documentId !== textDocument.getDocumentId() ? "旧文本对象的强化候选（只读保留）" : "待确认的强化候选（仅对应此 Clip）"}</summary>
           <textarea value={item.text} readOnly aria-label="待确认的强化提示词" />
@@ -1707,23 +1769,27 @@ export function H3PromptSection({
           <button type="button" disabled={!item.revision} onClick={() => void suggestions.dismiss(item.id).catch(() => {})}>保留原文并忽略此候选</button>
         </details>
       )) : null}
-      {!storyboardMode && enhancement?.text && enhancement.status === "suggestion" && !suggestionState.items.some((item) => item.id === enhancement.requestId) ? <details className="minimax-prompt-help-panel">
+      {!storyboardMode && showPromptEditor && enhancement?.text && enhancement.status === "suggestion" && !suggestionState.items.some((item) => item.id === enhancement.requestId) ? <details className="minimax-prompt-help-panel">
         <summary>候选尚未存入草稿，请先复制保留</summary>
         <textarea value={enhancement.text} readOnly aria-label="未保存的强化提示词" />
       </details> : null}
-      {!storyboardMode ? <div key="prompt-actions" className="nfh3-prompt-actions">
-        <Select
-          className="minimax-prompt-model"
-          size="medium"
+      {!storyboardMode && showPromptEditor ? <div key="prompt-actions" className="nfh3-prompt-actions">
+       <Select
+         className="minimax-prompt-model"
+
+         size="medium"
           value={promptModel || undefined}
           placeholder="提示词增强模型"
           options={models.map((model) => ({
             value: model.value,
             label: model.label,
           }))}
-          onChange={(value) => ctx.updateMetadata({ minimaxLlmModel: value })}
-        />
-        <button
+         onChange={(value) => ctx.updateMetadata({ minimaxLlmModel: value })}
+       />
+        {canReverseSyncPrompt ? <Button size="small"
+          title="仅将能唯一定位到一个 Shot 或对白字段的人工改动反向同步；无法判定时保留画布 Prompt。"
+          loading={promptReverseSyncing} disabled={promptReverseSyncing || !textStatus.ready || textStatus.blocked} onClick={() => void requestPromptReverseSync()}>反向同步到分镜源稿</Button> : null}
+       <button
           type="button"
           className={`minimax-aux-storyboard${String(ctx.node.metadata?.smartStoryboardStatus || "") === "error" ? " is-error" : ""}`}
           onClick={onOpenStoryboard}
@@ -1733,7 +1799,7 @@ export function H3PromptSection({
           {String(ctx.node.metadata?.smartStoryboardStatus || "") === "loading" ? "智能分镜生成中…" : String(ctx.node.metadata?.smartStoryboardStatus || "") === "error" ? "分镜失败·点击重试" : "智能分镜"}
         </button>
       </div> : null}
-      {!storyboardMode ? <div key="prompt-options" className="nfh3-prompt-options">
+      {!storyboardMode && showPromptEditor ? <div key="prompt-options" className="nfh3-prompt-options">
         <label>
           <span>恒定触发词</span>
           <input
@@ -1752,12 +1818,14 @@ export function H3PromptSection({
               : "输入 @ 选择图片引用；插入后显示为缩略图块"}
         </span>
       </div> : null}
-      {unresolvedReferenceMarkers.length ? <div className="minimax-prompt-reference-error" role="alert">
+      {showPromptEditor && unresolvedReferenceMarkers.length ? <div className="minimax-prompt-reference-error" role="alert">
         发现 {unresolvedReferenceMarkers.length} 处未匹配的主体或素材引用（见红色标记）。点击红色标记可从当前 Clip 引用中重新选择，也可以删除。
       </div> : null}
       <div key="prompt-textarea-wrap" className={`minimax-prompt-translate-wrap${selected ? " has-line-map" : ""}`}>
         {/* 原提示词编辑器始终挂载：翻译只做叠加展示，绝不卸载/改写原文。 */}
-        {selected ? <TextEditor key={selected.id} projectId={ctx.projectId} target={textTarget} editorRef={editorRef} references={editorReferences} chips clipReferenceTags speakers={speakerRoster} dialogue lineMap placeholder="请输入提示词" className="minimax-collaborative-prompt minimax-prompt-line-map-enabled" style={{ minHeight: 160, height: 240, fontSize: 29 }} /> : null}
+        {selected && structuredPromptV2 && !manualPromptOverride ? <div className="minimax-compiled-prompt-preview">
+          <Input.TextArea value={prompt} readOnly aria-label="编译生成的 Prompt（只读）" autoSize={{ minRows: 8, maxRows: 22 }} />
+        </div> : selected ? <TextEditor key={selected.id} projectId={ctx.projectId} target={textTarget} editorRef={editorRef} references={editorReferences} chips clipReferenceTags speakers={speakerRoster} dialogue lineMap placeholder="请输入提示词" className="minimax-collaborative-prompt minimax-prompt-line-map-enabled" style={{ minHeight: 160, height: 240, fontSize: 29 }} /> : null}
         {/* 翻译结果：纯只读展示面板，独立存在，不影响上面的原提示词编辑器与文档。 */}
         {isTranslated && translation && translation.segmentId === selected?.id && translation.prompt === prompt
           ? <textarea readOnly value={translation.text} aria-label="中文翻译（只读）" className="minimax-prompt-translation" />
@@ -1769,11 +1837,11 @@ export function H3PromptSection({
           disabled={translating || (!isTranslated && !prompt.trim())}
           className={`minimax-prompt-translate${isTranslated ? " is-translated" : ""}`}
           aria-label={isTranslated ? "切换回原提示词" : translating ? "正在翻译" : "查看中文翻译"}
-          title={isTranslated ? "切换回原提示词" : translating ? `正在翻译，已完成 ${translationProgress.completed}/${translationProgress.total} 段` : !prompt.trim() ? "请先输入提示词" : "查看中文翻译"}
+          title={isTranslated ? "切换回原提示词" : translating ? "正在翻译" : !prompt.trim() ? "请先输入提示词" : "查看中文翻译"}
         >
           {translating ? "…" : isTranslated ? "EN" : "译"}
         </button>
-        {translating ? <div className="minimax-prompt-translate-status" role="status">正在翻译，已完成 {translationProgress.completed}/{translationProgress.total} 段…</div> : null}
+        {translating ? <div className="minimax-prompt-translate-status" role="status">正在翻译…</div> : null}
         {translateError ? <div key="prompt-translate-error" className="minimax-prompt-translate-error" role="alert">翻译失败：{translateError}</div> : null}
       </div>
       <Modal

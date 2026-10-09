@@ -1,9 +1,11 @@
 import { useMemo, useState } from "react";
 import { Alert, App, Button, Empty, Input, Modal, Progress, Segmented, Skeleton, Tag, Tooltip } from "antd";
-import { ArrowRight, Bookmark, BookmarkCheck, Clapperboard, ImagePlus, LayoutGrid, List, ListChecks, Plus, RefreshCw, Search, Workflow, Sparkles, Eye } from "lucide-react";
+import { ArrowRight, Bookmark, BookmarkCheck, Clapperboard, ImagePlus, LayoutGrid, List, ListChecks, Plus, RefreshCw, Search, Trash2, Workflow, Sparkles, Eye } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
+import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
+import { CanvasDeleteProjectsDialog } from "@/components/canvas/canvas-delete-projects-dialog";
 import { cn } from "@/lib/utils";
 import { collectOutputs, projectCover, taskDestination, type WorkbenchOutput } from "./workbench-data";
 import { WorkbenchMediaPreview } from "./workbench-media";
@@ -20,6 +22,7 @@ export default function IndexPage() {
     const folders = useCanvasStore((s) => s.folders);
     const hydrated = useCanvasStore((s) => s.hydrated);
     const createProject = useCanvasStore((s) => s.createProject);
+    const setDeleteProjectIds = useCanvasUiStore((s) => s.setDeleteProjectIds);
     const data = useWorkbenchData();
     const [query, setQuery] = useState("");
     const [filter, setFilter] = useState<ProjectFilter>("all");
@@ -141,7 +144,7 @@ export default function IndexPage() {
                     <div className={cn(surface, "flex min-h-60 min-w-0 overflow-hidden")}>
                         {!hydrated ? <div className="w-full p-5"><Skeleton active paragraph={{rows:3}} /></div> : latest ? <>
                             <button type="button" className="relative w-2/5 shrink-0 overflow-hidden bg-muted/30" onClick={() => openProject(latest.id)} aria-label={t("landing.openCanvasNamed",{name:latest.title})}><div className="absolute inset-0"><WorkbenchMediaPreview media={cover(latest)} label={cover(latest) ? latest.title : t("landing.noPreview")} /></div></button>
-                            <div className="flex min-w-0 flex-1 flex-col items-start justify-center gap-3 p-5 sm:p-6"><span className="text-xs text-muted-foreground">{t("home.workbench.lastEdited")}</span><h2 className="line-clamp-3 text-xl font-semibold leading-snug">{latest.title}</h2><p className="text-xs text-muted-foreground">{date(latest.updatedAt)}</p><Button icon={<ArrowRight className="size-4" />} iconPlacement="end" onClick={() => openProject(latest.id)}>{t("home.workbench.continue")}</Button><div className="h-4">{isDrama(latest) && <Link to={`/production?dramaId=${encodeURIComponent(folderFor(latest)?.id || "")}`} className="text-xs text-muted-foreground hover:text-foreground">{t("productionCanvas.backDrama")}<ArrowRight className="ml-1 inline size-3" /></Link>}</div></div>
+                            <div className="flex min-w-0 flex-1 flex-col items-start justify-center gap-3 p-5 sm:p-6"><span className="text-xs text-muted-foreground">{t("home.workbench.lastEdited")}</span><h2 className="line-clamp-3 text-xl font-semibold leading-snug">{latest.title}</h2><p className="text-xs text-muted-foreground">{date(latest.updatedAt)}</p><Button icon={<ArrowRight className="size-4" />} iconPlacement="end" onClick={() => openProject(latest.id)}>{t("home.workbench.continue")}</Button><div className="h-4">{isDrama(latest) && <Link to={`/production?dramaId=${encodeURIComponent(folderFor(latest)?.id || "")}&workspace=series`} className="text-xs text-muted-foreground hover:text-foreground">{t("productionCanvas.backDrama")}<ArrowRight className="ml-1 inline size-3" /></Link>}</div></div>
                         </> : <div className="flex flex-col items-start justify-center p-6"><Workflow className="mb-4 size-8 text-muted-foreground" /><h2 className="text-lg font-medium">{t("home.workbench.firstProject")}</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">{t("home.workbench.firstProjectHint")}</p></div>}
                     </div>
                 </section>
@@ -254,7 +257,7 @@ export default function IndexPage() {
                                                 />
                                             </Tooltip>
                                         </div>
-                                        <div className={cn("flex items-center justify-between gap-2 border-t border-border px-3.5 py-2.5", view === "list" && "w-full")}>{isDrama(p) && <Link className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground" to={`/production?dramaId=${encodeURIComponent(folderFor(p)?.id || "")}`}>{t("productionCanvas.backDrama")}<ArrowRight className="size-3" /></Link>}<Button type="text" size="small" icon={<Eye className="size-3.5" />} aria-label={t("home.workbench.previewNamed", { name: p.title })} onClick={() => setPreviewProject(p)}>{t("landing.preview")}</Button></div>
+                                        <div className={cn("flex items-center justify-between gap-2 border-t border-border px-3.5 py-2.5", view === "list" && "w-full")}>{isDrama(p) && <Link className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground" to={`/production?dramaId=${encodeURIComponent(folderFor(p)?.id || "")}&workspace=series`}>{t("productionCanvas.backDrama")}<ArrowRight className="size-3" /></Link>}<Button type="text" size="small" icon={<Eye className="size-3.5" />} aria-label={t("home.workbench.previewNamed", { name: p.title })} onClick={() => setPreviewProject(p)}>{t("landing.preview")}</Button></div>
                                     </article>
                                 );
                             })}
@@ -297,10 +300,15 @@ export default function IndexPage() {
                 onCancel={() => setPreviewProject(null)}
                 footer={
                     previewProject ? (
-                        <Button type="primary" onClick={() => openProject(previewProject.id)}>
-                            {t("home.workbench.continue")}
-                            <ArrowRight className="size-4" />
-                        </Button>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                            <Button danger type="text" icon={<Trash2 className="size-4" />} onClick={() => { setDeleteProjectIds([previewProject.id]); setPreviewProject(null); }}>
+                                {t("common.delete")}
+                            </Button>
+                            <Button type="primary" onClick={() => openProject(previewProject.id)}>
+                                {t("home.workbench.continue")}
+                                <ArrowRight className="size-4" />
+                            </Button>
+                        </div>
                     ) : null
                 }
                 width={800}
@@ -404,6 +412,7 @@ export default function IndexPage() {
                     )}
                 </div>
             </Modal>
+            <CanvasDeleteProjectsDialog />
         </main>
     );
 }

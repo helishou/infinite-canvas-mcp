@@ -40,7 +40,7 @@ export function useH3RunEvents(ctx: CanvasNodeContext, run: RunH3) {
         const state = clipRuntimeState(currentClip(ctxRef.current.getNode(ctx.node.id)?.metadata || {}));
         const taskId = state.taskId;
         if (!taskId) { message.error("当前没有可取消的 H3 任务"); return; }
-        void cancelActiveH3Task(taskId, (id) => ctxRef.current.ai.getCanvasH3Task(id), (id) => ctxRef.current.ai.cancelCanvasH3Task(id))
+        void cancelActiveH3Task(taskId, (id) => ctxRef.current.ai.getCanvasH3TaskStatus(id), (id) => ctxRef.current.ai.cancelCanvasH3Task(id))
             .catch((error) => message.error(error instanceof Error ? error.message : String(error)));
     }), [ctx.node.id]);
 
@@ -60,7 +60,7 @@ export function useH3RunEvents(ctx: CanvasNodeContext, run: RunH3) {
         const taskId = state.taskId;
         void (async () => {
             try {
-                if (taskId && state.busy) await resetAndRunH3Task(taskId, (id) => ctxRef.current.ai.getCanvasH3Task(id), (id) => ctxRef.current.ai.cancelCanvasH3Task(id), restart);
+                if (taskId && state.busy) await resetAndRunH3Task(taskId, (id) => ctxRef.current.ai.getCanvasH3TaskStatus(id), (id) => ctxRef.current.ai.cancelCanvasH3Task(id), restart);
                 else await restart();
             } catch (error) {
                 message.error(error instanceof Error ? error.message : String(error));

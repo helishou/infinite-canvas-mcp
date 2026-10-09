@@ -2,7 +2,7 @@ type TaskState = { status: string };
 
 const terminal = new Set(["succeeded", "failed", "cancelled"]);
 
-/** 以 Backend 父任务状态决定是否取消，容忍查询与取消之间任务恰好结束。 */
+/** 先读取轻量状态，避免正常取消路径传输完整冻结任务；容忍读取与取消之间的状态竞态。 */
 export async function cancelActiveH3Task(
     taskId: string,
     read: (taskId: string) => Promise<TaskState>,
@@ -20,6 +20,8 @@ export async function cancelActiveH3Task(
         try { latest = await read(taskId); }
         catch { throw error; }
         if (terminal.has(latest.status)) return false;
+        if (latest.status === "awaiting_confirmation") throw new Error("当前任务待确认，请先确认、保留一采或放弃任务");
+        if (!["queued", "running"].includes(latest.status)) throw new Error(`H3 任务状态 ${latest.status} 无法取消`);
         throw error;
     }
 }

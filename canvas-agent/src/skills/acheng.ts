@@ -5,7 +5,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
-import { directorModules, directorProductionSchema, canonicalProduction, productionContractVersion, productionPreflightRequestSchema, type DirectorProduction, type ProductionDiagnostic, type ProductionPreflight } from "../drama/production-contract.js";
+import { directorModules, directorProductionSchema, canonicalProduction, isSubjectPromptAssembly, resolveSubjectPictureBindingIds, productionContractVersion, productionPreflightRequestSchema, type DirectorProduction, type ProductionDiagnostic, type ProductionPreflight } from "../drama/production-contract.js";
 import { productionOperationContract, schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch, ref2vaPromptDiagnostics, continuityBoundaryDiagnostics } from "../drama/production-validation.js";
 
 let discoveredPython: string | undefined;
@@ -46,6 +46,49 @@ function hydrateScopedApprovedInputs(director: DirectorProduction, resolver?: (t
         ref.file = file; ref.sha256 = asset.sha256;
     }
     director.sourceHash = crypto.createHash("sha256").update(canonicalProduction(director.source)).digest("hex");
+}
+
+/** Freeze only the selected Subject and keyframe image results into the compiler's scratch source. */
+function hydrateSubjectPictureSources(director: DirectorProduction, resolver?: (targetId: string, label: string) => string | undefined) {
+    if (!isSubjectPromptAssembly(director.source) || !resolver) return;
+    const subjects = (Array.isArray(director.source.subject_registry) ? director.source.subject_registry : []) as Array<Record<string, any>>;
+    const subjectById = new Map(subjects.map(subject => [String(subject.id), subject]));
+    const selected = new Map<string, { assetId: string; subjectId: string; kind: "subject" | "keyframe"; role: string; binding: Record<string, any> }>();
+    for (const shot of (Array.isArray(director.source.shots) ? director.source.shots : []) as Array<Record<string, any>>) {
+        for (const usage of Array.isArray(shot.subject_usages) ? shot.subject_usages : []) {
+            const subjectId = String(usage.subjectId || "");
+            const subject = subjectById.get(subjectId);
+            for (const bindingId of resolveSubjectPictureBindingIds(subject, usage).bindingIds) {
+                const binding = (subject?.pictureBindings || []).find((item: Record<string, any>) => String(item.id) === bindingId);
+                if (binding) selected.set(bindingId, { assetId: String(binding.assetId), subjectId, kind: "subject", role: String((binding.provides || [])[0] || "identity"), binding });
+            }
+        }
+        for (const frame of (Array.isArray(shot.keyframes) ? shot.keyframes.filter((item: Record<string, any>) => item.requiredForSubmission) : []) as Array<Record<string, any>>) {
+            selected.set(String(frame.id), { assetId: String(frame.assetId || frame.id), subjectId: String((frame.subjectIds || [])[0] || ""), kind: "keyframe", role: "keyframe", binding: frame });
+        }
+    }
+    const snapshots: Record<string, Record<string, unknown>> = {};
+    for (const [bindingId, item] of selected) {
+        const asset = director.assets[item.assetId];
+        const file = resolver(item.assetId, "asset");
+        if (!asset?.storageKey || !asset.sha256 || !file || !fs.existsSync(file)) throw new Error("Subject picture " + bindingId + " has no frozen verified compiler file");
+        const digest = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+        if (digest !== asset.sha256) throw new Error("Subject picture " + bindingId + " bytes differ from the frozen source result");
+        const selectedResult = asset.selectedResult && typeof asset.selectedResult === "object"
+            ? asset.selectedResult as Record<string, unknown>
+            : undefined;
+        snapshots[bindingId] = {
+            id: bindingId, assetId: item.assetId, subjectId: item.subjectId, kind: item.kind, role: item.role,
+            file, sha256: digest, storageKey: asset.storageKey, nodeId: asset.nodeId || item.binding.sourceNode?.nodeId,
+            resultId: item.binding.selection?.resultId || selectedResult?.imageId || "",
+            generationTaskId: asset.generationTaskId || selectedResult?.taskId || "",
+            retain: item.binding.retain || [], exclude: item.binding.exclude || [],
+            applicableState: item.binding.applicableState || {}, defaultFor: item.binding.defaultFor || [],
+            anchor: item.binding.anchor, localFrame: item.binding.localFrame, requiredForSubmission: item.binding.requiredForSubmission === true,
+        };
+    }
+    (director.source as Record<string, unknown>)._canvas_subject_picture_sources = snapshots;
+    (director.source as Record<string, unknown>)._canvas_subject_source_hash = director.sourceHash;
 }
 /** Resolve once; a configured executable never silently falls back. */
 export function resolveAchengPython() {
@@ -162,8 +205,10 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
             }
         }
     }
-    director.sourceHash = crypto.createHash("sha256").update(canonicalProduction(director.source)).digest("hex");
-    fs.writeFileSync(sourceFile, JSON.stringify(director.source), "utf8");
+   director.sourceHash = crypto.createHash("sha256").update(canonicalProduction(director.source)).digest("hex");
+    const sourceHashForArtifacts = director.sourceHash;
+    hydrateSubjectPictureSources(director, resolveReferenceFile);
+   fs.writeFileSync(sourceFile, JSON.stringify(director.source), "utf8");
     const onlyAssets = !Array.isArray(director.source.segments) || !director.source.segments.length;
     let exitCode = 0;
     try {
@@ -208,9 +253,17 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
                     ...(sourceRef?.preserve !== undefined ? { preserve: sourceRef.preserve } : {}), ...(sourceRef?.exclude !== undefined ? { exclude: sourceRef.exclude } : {}) });
             }
             director.artifacts.push({ id: `${kind}-${targetId}`, kind, targetId, prompt, sha256, sourceHash: director.sourceHash, status: ready ? "ready" : "draft", references,
-                receipt: { sourceHash: director.sourceHash, promptHash: sha256, engineRuntimeId: runtime.runtimeId, engine: director.engine, validator: onlyAssets ? "compile_assets/validate_asset_entries" : "compile_h3/validate_package",
-                    diagnostics: { englishWords: entry.detailed_description_english_words ?? null, detailPolicy: entry.h3_detail_policy ?? null, blockers: entry.blockers || [], formatPass: entry.format_pass || null, accepted: entry.accepted ?? ready } } });
+               receipt: { sourceHash: director.sourceHash, promptHash: sha256, engineRuntimeId: runtime.runtimeId, engine: director.engine, validator: onlyAssets ? "compile_assets/validate_asset_entries" : "compile_h3/validate_package",
+                    ...(entry.source_map ? { sourceMap: entry.source_map } : {}),
+                   diagnostics: { englishWords: entry.detailed_description_english_words ?? null, detailPolicy: entry.h3_detail_policy ?? null, blockers: entry.blockers || [], formatPass: entry.format_pass || null, accepted: entry.accepted ?? ready } } });
         }
+    }
+   delete (director.source as Record<string, unknown>)._canvas_subject_picture_sources;
+    delete (director.source as Record<string, unknown>)._canvas_subject_source_hash;
+    director.sourceHash = sourceHashForArtifacts;
+    for (const artifact of director.artifacts) {
+        artifact.sourceHash = sourceHashForArtifacts;
+        artifact.receipt.sourceHash = sourceHashForArtifacts;
     }
     const audit = JSON.parse(readFile("audit.json").toString("utf8"));
     const located: ProductionDiagnostic[] = Array.isArray(audit.diagnostics) ? audit.diagnostics.filter((item: ProductionDiagnostic) => item.code === "PROMPT_EXTERNAL_CONTEXT") : [];

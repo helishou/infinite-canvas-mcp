@@ -1,27 +1,35 @@
 import { ProductionInputDiff } from "./production-input-diff";
 import { useEffect, useMemo, useState } from "react";
-import { Alert, App, Button, Image as AntdImage, Input, Modal, Select, Switch, Tag } from "antd";
-import { ArrowRight, ArrowLeft, Check, Pause, Play, RotateCcw, WandSparkles, Users, MapPin, Image as ImageIcon, Film, Pencil, BookOpen, Search, ChevronDown } from "lucide-react";
+import { Alert, App, Button, Input, InputNumber, Modal, Select, Switch, Tag } from "antd";
+import { ArrowRight, ArrowLeft, ArrowDownToLine, Check, Pause, Play, RotateCcw, WandSparkles, Users, MapPin, Image as ImageIcon, Film, Pencil, BookOpen, Search, ChevronDown } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { directorModules, directorProductionSchema, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
-import { backendMediaUrl, type ProductionSceneAction, type BackendRuntimeTask, type EpisodeProduction, type ProductionBatch, type ProductionReadiness } from "@/services/backend-api";
-import { groupScriptScenes, dialogueBody, readableText, humanName, records, formatSeconds, shotDisplayText } from "./director-display";
+import { directorModules, resolveSubjectPictureBindingIds, directorProductionSchema, isSubjectPromptAssembly, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
+import { backendMediaUrl, fetchProductionWorkbench, type ProductionTarget, type ProductionSceneAction, type BackendRuntimeTask, type EpisodeProduction, type ProductionBatch, type ProductionReadiness } from "@/services/backend-api";
+import { MediaImage } from "@/components/media/media-image";
+import { groupScriptScenes, dialogueBody, readableText, humanName, records, formatSeconds, shotDisplayText, storyBeatCards, assetImagePreview } from "./director-display";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { saveAs } from "file-saver";
 import { ContinuityPanel } from "./continuity-panel";
 import { SceneProductionPanel } from "./scene-production-panel";
 import { H3_STYLE_TEMPLATES } from "../../../../canvas-agent/src/plugins/minimax-h3/style-templates";
+import { subjectShotWindows } from "@basketikun/canvas-agent/drama/subject-assembly";
+import { SubjectShotEditor } from "./subject-shot-editor";
+import { SubjectStoryboardWorkbench } from "./subject-storyboard-workbench";
+import { productionWorkbenchValue, subjectDisplayName } from "./subject-shot-draft";
+import { ReferenceNodeLink } from "./reference-node-link";
+import { PictureBindingEditor } from "./picture-binding-editor";
+import { readClipPartitionDraft } from "./subject-clip-draft";
 
-export type DirectorWorkspace = "overview" | "story" | "assets" | "shots" | "continuity" | "production" | "advanced";
+export type DirectorWorkspace = "series" | "overview" | "story" | "assets" | "shots" | "continuity" | "production" | "advanced";
 type CanvasNodeOption = { id: string; title?: string; type?: string; metadata?: Record<string, unknown> };
 type LegacySource = { source: "fullPlot" | "script.md" | "storyboard.md"; text: string; sha256?: string };
 type ProductionVersion = { version: number; stage: string; createdAt: string };
 export type AssetReview = { assetId: string; version: number; sourceHash: string; nodeId: string; storageKey: string; sha256: string; verdict: "approved" | "rejected"; evidence: string };
 type DirectorDecision = NonNullable<DirectorProduction["workflow"]["pendingDecisions"]>[number];
-const objectWorkspaces: Array<{ key: Exclude<DirectorWorkspace, "overview" | "advanced">; modules: Array<(typeof directorModules)[number]>; targetKinds: Array<"asset" | "keyframe" | "segment"> }> = [
+const objectWorkspaces: Array<{ key: Exclude<DirectorWorkspace, "overview" | "advanced" | "series">; modules: Array<(typeof directorModules)[number]>; targetKinds: Array<"asset" | "keyframe" | "segment"> }> = [
   { key: "story", modules: ["story"], targetKinds: [] },
-  { key: "assets", modules: ["assets"], targetKinds: ["asset", "keyframe"] },
-  { key: "shots", modules: ["shots", "performance", "effects"], targetKinds: [] },
+  { key: "assets", modules: ["assets"], targetKinds: ["asset"] },
+  { key: "shots", modules: ["shots", "performance", "effects"], targetKinds: ["keyframe"] },
   { key: "continuity", modules: ["continuity"], targetKinds: ["segment"] },
   { key: "production", modules: ["model"], targetKinds: ["segment"] },
 ];
@@ -29,7 +37,74 @@ const objectWorkspaces: Array<{ key: Exclude<DirectorWorkspace, "overview" | "ad
 function Image({ src, alt, className }: { src: string; alt: string; className?: string }) {
   if (alt.startsWith("<Video")) return <video className="max-h-24 max-w-48 rounded object-contain" controls preload="metadata" src={src} aria-label={alt} />;
   if (alt.startsWith("<Audio")) return <audio className="max-w-64" controls preload="metadata" src={src} aria-label={alt} />;
-  return <AntdImage preview={false} className={className} src={src} alt={alt} />;
+  // 图片预览统一走全局 MediaPreviewHost，不再使用 antd 自带预览。
+  return <MediaImage className={className} src={src} alt={alt} />;
+}
+
+function SubjectPictureBindings({ subject, canvasNodes, canvasId, owner, busy, usageCount, usages, onSave, sourceDrafts, onSourceDraftChange }: {
+  usages: Array<Record<string, any>>; sourceDrafts: Record<string, string>; onSourceDraftChange: (key: string, value?: string) => void; subject: Record<string, any>; canvasNodes: CanvasNodeOption[]; canvasId: string; owner: ProductionTarget; busy: boolean; usageCount: number; onSave: (subject: Record<string, any>) => Promise<boolean>;
+}) {
+  const { t } = useTranslation();
+  const [nodeId, setNodeId] = useState<string>();
+  const [expanded, setExpanded] = useState(true);
+  const [workbench, setWorkbench] = useState<Record<string, any>>();
+  const bindings = records(subject.pictureBindings);
+  const ownerKey = JSON.stringify(owner);
+  const sources = canvasNodes.filter(node => node.type === "config" && node.metadata?.smart === true && (node.metadata?.generationMode || "image") === "image");
+  const bindingStamp = JSON.stringify(bindings);
+  const mediaStamp = JSON.stringify(sources.filter(node => bindings.some(binding => binding.sourceNode?.nodeId === node.id)).map(node => [node.id, node.metadata?.images, node.metadata?.storageKey, node.metadata?.smartImageReferenceSelection]));
+  useEffect(() => {
+    if (!expanded) return;
+    let current = true;
+    setWorkbench(undefined);
+    void fetchProductionWorkbench(owner, "subject_workbench", String(subject.id), "draft")
+      .then(result => { if (current) setWorkbench(productionWorkbenchValue(result.production, "subject")); })
+      .catch(() => { if (current) setWorkbench(undefined); });
+    return () => { current = false; };
+  }, [expanded, ownerKey, subject.id, bindingStamp, mediaStamp]);
+  const add = async () => {
+    if (!nodeId || bindings.some(binding => binding.sourceNode?.nodeId === nodeId && binding.sourceNode?.projectId === canvasId)) return;
+    const node = sources.find(item => item.id === nodeId); if (!node) return;
+    const binding = { id: `picture:${subject.id}:${node.id}`, assetId: `picture:${subject.id}:${node.id}`,
+      sourceNode: { projectId: canvasId, nodeId: node.id }, selection: { mode: "node_selection" },
+      provides: ["identity"], retain: ["主体身份与已登记外观"], exclude: ["原图姿势", "无关背景"], applicableState: {}, defaultFor: bindings.some(item => (item.defaultFor || []).includes("identity")) ? [] : ["identity"] };
+    if (await onSave({ ...subject, pictureBindings: [...bindings, binding] })) setNodeId(undefined);
+  };
+  const updateSelection = async (binding: Record<string, any>, value: string) => {
+    const selection = value === "node" ? { mode: "node_selection" } : value === "latest" ? { mode: "latest_success" } : { mode: "selected_result", resultId: value.slice(7) };
+    await onSave({ ...subject, pictureBindings: bindings.map(item => item.id === binding.id ? { ...item, selection } : item) });
+  };
+  const remove = async (binding: Record<string, any>) => {
+    await onSave({ ...subject, pictureBindings: bindings.filter(item => item.id !== binding.id) });
+  };
+  return <details className="rounded-lg border border-border p-3" data-subject-picture-bindings={String(subject.id)} open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
+    <summary className="cursor-pointer text-sm font-medium">{t("director.workspace.subjectPictures")}</summary>
+    <div className="mt-3 space-y-3">
+    {bindings.map(binding => {
+      const node = sources.find(item => item.id === binding.sourceNode?.nodeId);
+      const images = records(node?.metadata?.images).filter(image => image.status === "success" && image.storageKey);
+      const selection = binding.selection || { mode: "latest_success" };
+      const value = selection.mode === "node_selection" ? "node" : selection.mode === "selected_result" ? `result:${selection.resultId}` : "latest";
+      const resolved = records(workbench?.pictureBindings).find(item => item.id === binding.id)?.resolved;
+      return <article key={binding.id} className="grid gap-3 rounded-lg bg-muted/30 p-3 sm:grid-cols-[auto_minmax(0,1fr)]">
+        {resolved?.storageKey ? <MediaImage className="h-[72px] w-[88px] rounded object-contain" src={backendMediaUrl(String(resolved.storageKey))} alt={String(subject.id)} /> : <div className="flex h-[72px] w-[88px] items-center justify-center rounded border border-border text-xs text-muted-foreground">{t("director.workspace.noActivePicture")}</div>}
+        <div className="min-w-0 space-y-2">
+          <div className="flex flex-wrap items-center gap-2"><strong className="text-sm">{node?.title || t("director.crud.imageNode")}</strong><Tag>{selection.mode === "node_selection" ? t("director.atomic.followNodeReference") : selection.mode === "selected_result" ? t("director.workspace.selectedHistory") : t("director.workspace.followLatest")}</Tag></div>
+          <Select size="small" className="w-full" value={value} disabled={busy} onChange={choice => void updateSelection(binding, choice)} options={[{ value: "node", label: t("director.atomic.followNodeReference") }, { value: "latest", label: t("director.workspace.followLatest") }, ...images.map((image, index) => ({ value: `result:${image.id}`, label: t("director.workspace.pictureHistoryItem", { number: index + 1 }) }))]} />
+          <ReferenceNodeLink sourceNode={binding.sourceNode} /><label className="grid gap-1 text-xs"><span>{t("director.crud.replaceImage")}</span><Select value={binding.sourceNode?.nodeId} disabled={busy} options={[...sources.map(node => ({ value: node.id, label: node.title || t("director.crud.imageNode") })), ...(!sources.some(node => node.id === binding.sourceNode?.nodeId) ? [{ value: binding.sourceNode?.nodeId, label: t("director.crud.boundImage") }] : [])]} onChange={nodeId => void onSave({ ...subject, pictureBindings: bindings.map(item => item.id === binding.id ? { ...item, sourceNode: { projectId: canvasId, nodeId }, selection: { mode: "node_selection" } } : item) })} /></label>
+          <PictureBindingEditor binding={binding} busy={busy} draftValue={sourceDrafts[`picture:${subject.id}:${binding.id}`]} onDraftChange={value => onSourceDraftChange(`picture:${subject.id}:${binding.id}`, value)} onSave={patch => onSave({ ...subject, pictureBindings: bindings.map(item => item.id === binding.id ? { ...item, ...patch } : item) })} />
+          <p className="text-xs text-muted-foreground">{t("director.workspace.pictureUsage", { retain: (binding.retain || []).join(", "), exclude: (binding.exclude || []).join(", ") })}</p>
+          <label className="flex items-center justify-between gap-3 text-xs text-muted-foreground"><span>{t("director.atomic.defaultIdentity")}</span><Switch size="small" checked={(binding.defaultFor || []).includes("identity")} disabled={busy} onChange={checked => void onSave({ ...subject, pictureBindings: bindings.map(item => ({ ...item, defaultFor: item.id === binding.id ? [...(item.defaultFor || []).filter((purpose: string) => purpose !== "identity"), ...(checked ? ["identity"] : [])] : checked ? (item.defaultFor || []).filter((purpose: string) => purpose !== "identity") : item.defaultFor || [] })) })} /></label>
+          <Button size="small" type="text" disabled={busy || usages.some(usage => resolveSubjectPictureBindingIds(subject, usage).bindingIds.includes(String(binding.id)))} onClick={() => void remove(binding)}>{t("director.workspace.removePictureBinding")}</Button>
+        </div>
+      </article>;
+    })}
+    <div className="flex flex-wrap gap-2">
+      <Select size="small" className="min-w-56 flex-1" value={nodeId} disabled={busy} placeholder={t("director.workspace.chooseSmartImageNode")} options={sources.filter(node => !bindings.some(binding => binding.sourceNode?.nodeId === node.id)).map(node => ({ value: node.id, label: node.title || node.id }))} onChange={setNodeId} />
+      <Button size="small" disabled={busy || !nodeId} onClick={() => void add()}>{t("director.workspace.bindSmartImageNode")}</Button>
+    </div>
+    </div>
+  </details>;
 }
 
 function textOf(value: unknown) {
@@ -156,9 +231,78 @@ function SegmentGroupEditor({ segment, shots, segments, fps, draftValue, onDraft
   </div>;
 }
 
+function SubjectClipPartitionEditor({ shots, segments, fps, busy, shotTitle, onSave, draftValue, onDraftChange }: {
+  shots: Array<Record<string, any>>; segments: Array<Record<string, any>>; fps: number; busy: boolean;
+  shotTitle: (id: string) => string;
+  onSave: (shotIds: string[], groups: Array<Record<string, unknown>>) => Promise<boolean>;
+  draftValue?: string; onDraftChange: (value: string | undefined) => void;
+}) {
+  const { t } = useTranslation();
+  const { message } = App.useApp();
+  const [saving, setSaving] = useState(false);
+  const adjacency = (left: Record<string, any>, right: Record<string, any>) => `${left.id}\0${right.id}`;
+  const initialCuts = () => {
+    const groups = new Map(segments.flatMap(segment => (segment.shot_ids || []).map((id: string) => [String(id), String(segment.id)] as const)));
+    return new Set(shots.slice(0, -1).flatMap((shot, index) => {
+      const next = shots[index + 1];
+      return shot.timeline_id !== next.timeline_id || groups.get(String(shot.id)) !== groups.get(String(next.id)) ? [adjacency(shot, next)] : [];
+    }));
+  };
+  const base = JSON.stringify({ shots: shots.map(shot => [shot.id, shot.timeline_id, shot.duration_frames]), clips: segments.map(segment => [segment.id, segment.shot_ids, segment.mode, segment.mode_lock, segment.mode_selection_reason, segment.styleTemplateId]) });
+  const { draft: preserved, invalid: invalidDraft, sourceChanged } = readClipPartitionDraft(draftValue, base);
+  const cuts = new Set(preserved?.cuts || initialCuts()), profileChoices = preserved?.profileChoices || {};
+  const disabled = busy || saving || sourceChanged || invalidDraft;
+  const updatePartition = (nextCuts: Set<string>, nextProfiles = profileChoices) => onDraftChange(JSON.stringify({ base: preserved?.base || base, cuts: [...nextCuts], profileChoices: nextProfiles }));
+  const dirty = JSON.stringify([...cuts].sort()) !== JSON.stringify([...initialCuts()].sort()) || Object.keys(profileChoices).length > 0;
+  const groups: Array<Record<string, any>> = [];
+  let current: Record<string, any>[] = [];
+  for (let index = 0; index < shots.length; index++) {
+    const shot = shots[index]; current.push(shot);
+    if (index === shots.length - 1 || shot.timeline_id !== shots[index + 1].timeline_id || cuts.has(adjacency(shot, shots[index + 1]))) { if (current.length) groups.push({ shots: current }); current = []; }
+  }
+  const groupProfiles = groups.map(group => {
+    const ids = group.shots.map((shot: Record<string, any>) => String(shot.id));
+    const old = segments.filter(segment => (segment.shot_ids || []).some((id: string) => ids.includes(String(id))));
+    const profiles = new Map(old.map(segment => [JSON.stringify({ mode: segment.mode, mode_lock: segment.mode_lock, mode_selection_reason: segment.mode_selection_reason, styleTemplateId: segment.styleTemplateId }), segment]));
+    return { ids, old, profiles, exact: old.find(segment => JSON.stringify(segment.shot_ids || []) === JSON.stringify(ids)) };
+  });
+  const materialize = () => groups.map(group => {
+    const ids = group.shots.map((shot: Record<string, any>) => String(shot.id)), profile = groupProfiles.find(item => JSON.stringify(item.ids) === JSON.stringify(ids))!;
+    const chosenProfile = profile.exact || (profile.profiles.size === 1 ? [...profile.profiles.values()][0] : profile.old.find(item => item.id === profileChoices[ids.join("|")]));
+    return { ...(profile.exact ? { id: profile.exact.id } : {}), shot_ids: ids,
+      ...(!profile.exact && profile.profiles.size > 1 && chosenProfile ? { executionProfileSourceId: chosenProfile.id } : {}),
+      ...(chosenProfile ? { mode: chosenProfile.mode, mode_lock: chosenProfile.mode_lock, mode_selection_reason: chosenProfile.mode_selection_reason, ...(Object.hasOwn(chosenProfile, "styleTemplateId") ? { styleTemplateId: chosenProfile.styleTemplateId } : {}) } : {}) };
+  });
+  const unresolvedProfile = groupProfiles.some(profile => !profile.exact && profile.profiles.size > 1 && !profileChoices[profile.ids.join("|")]);
+  const save = async () => {
+    if (disabled) return;
+    setSaving(true);
+    try { if (await onSave(shots.map(shot => String(shot.id)), materialize())) { onDraftChange(undefined); message.success(t("director.workspace.clipPartitionSaved")); } }
+    catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
+    finally { setSaving(false); }
+  };
+  if (!shots.length) return <Alert type="info" message={t("director.workspace.noSegments")} />;
+  return <section className="space-y-3 rounded-xl border border-border bg-card p-4" data-subject-clip-partition>
+    <div><h3 className="font-semibold">{t("director.workspace.clipPartition")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("director.workspace.clipPartitionHint")}</p></div>
+    {(sourceChanged || invalidDraft) && <Alert type="warning" message={t(invalidDraft ? "director.atomic.invalidDraft" : "director.atomic.sourceChanged")} description={<div className="space-y-2"><details><summary>{t("director.atomic.reviewDraft")}</summary><pre className="max-h-48 overflow-auto whitespace-pre-wrap text-xs">{draftValue}</pre></details><Button size="small" disabled={busy || saving} onClick={() => onDraftChange(undefined)}>{t("director.atomic.resetDraft")}</Button></div>} />}
+    {groupProfiles.filter(profile => !profile.exact && profile.profiles.size > 1).map(profile => <label key={profile.ids.join("|")} className="grid gap-1 text-sm"><span>{t("director.workspace.chooseExecutionProfile", { shots: profile.ids.length })}</span><Select value={profileChoices[profile.ids.join("|")]} disabled={disabled} placeholder={t("director.workspace.chooseExecutionProfilePlaceholder")} options={profile.old.map(item => ({ value: String(item.id), label: `${item.mode || "H3"} · ${String(item.id)}` }))} onChange={value => updatePartition(cuts, { ...profileChoices, [profile.ids.join("|")]: value })} /></label>)}
+    <div className="space-y-2">{shots.map((shot, index) => {
+      const duration = Number(shot.duration_frames || 0) / fps;
+      const cut = index < shots.length - 1 && (shot.timeline_id !== shots[index + 1].timeline_id || cuts.has(adjacency(shot, shots[index + 1])));
+      return <div key={shot.id}>
+        <div className="flex items-center justify-between gap-3 rounded-lg bg-muted/30 p-3"><div className="min-w-0"><strong className="block truncate text-sm">{shotTitle(String(shot.id))}</strong><span className="text-xs text-muted-foreground">{formatSeconds(duration)}s · {String(shot.mode || "Shot")}</span></div><Tag>{(shot.subject_usages || []).length} {t("director.workspace.subjectCount")}</Tag></div>
+        {index < shots.length - 1 && <label className="flex items-center justify-between gap-3 border-l border-border py-2 pl-4 text-xs text-muted-foreground"><span>{t("director.workspace.clipBoundaryBetween", { left: shotTitle(String(shot.id)), right: shotTitle(String(shots[index + 1].id)) })}</span><Switch checked={cut} disabled={disabled || shot.timeline_id !== shots[index + 1].timeline_id} onChange={value => { const next = new Set(cuts); const key = adjacency(shot, shots[index + 1]); if (value) next.add(key); else next.delete(key); updatePartition(next); }} /></label>}
+      </div>;
+    })}</div>
+    <p className="text-xs text-muted-foreground">{groups.map(group => t("director.workspace.clipDerivedDuration", { duration: formatSeconds(group.shots.reduce((sum: number, shot: Record<string, any>) => sum + Number(shot.duration_frames || 0), 0) / fps), count: group.shots.length })).join(" · ")}</p>
+    <Button type="primary" size="small" loading={saving} disabled={disabled || unresolvedProfile || !dirty} onClick={() => void save()}>{t("director.workspace.saveClipPartition")}</Button>
+  </section>;
+}
+
 export function DirectorPanel({
   workspace, director, production, readiness, run, batches, runtimeTasks = [], canvasNodes, legacy, versions, busy, canvasId, canvasRole, focusTarget, embedded = false, continuityReport,
   briefDraft, onBriefDraftChange, onOpenSharedAsset, onPromoteExistingSharedAsset,
+  onUpsertSubject, onDeleteSubject, onSaveV2Shot, onRepartitionClips,
   compact = false, onSaveScript, generationSupported = true,
   onBrief, onPatch, onEditCanvasClip, onAdoptDirectorFields, onAdoptClipStyle, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onReview, onPublish, onReplace, onAskDirector, onRequestContinuityUpgrade, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRestore, onRefresh, onSceneCommand, sceneCommandPending, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onPreviewContinuityUpgrade, onCheckContinuity, onContinuitySnapshot,
 }: {
@@ -177,7 +321,11 @@ export function DirectorPanel({
   onPromoteExistingSharedAsset: (assetId: string, title: string) => void;
   runtimeTasks?: BackendRuntimeTask[];
   onBrief: (brief: string) => Promise<void> | void;
-  onPatch: (entity: "style" | "scene" | "asset" | "shot" | "segment", id: string | undefined, patch: Record<string, unknown>) => Promise<boolean> | void;
+  onPatch: (entity: "style" | "scene" | "environment" | "character" | "asset" | "shot" | "segment", id: string | undefined, patch: Record<string, unknown>) => Promise<boolean> | void;
+  onUpsertSubject?: (subject: Extract<ProductionOperation, { type: "upsert_director_subject" }>["subject"]) => Promise<boolean>;
+  onDeleteSubject?: (id: string) => Promise<boolean>;
+  onSaveV2Shot?: (shotId: string, patch: Record<string, unknown>, keyframes?: Extract<ProductionOperation, { type: "set_director_shot_keyframes" }>["keyframes"]) => Promise<boolean>;
+  onRepartitionClips?: (shotIds: string[], segments: Array<Record<string, unknown>>) => Promise<boolean>;
   onEditCanvasClip?: (nodeId: string, segmentId: string, patch: Record<string, unknown>) => Promise<boolean>;
   onAdoptDirectorFields?: (targetId: string, nodeId: string, segmentId: string | undefined, fields: string[]) => Promise<boolean>;
   onAdoptClipStyle?: (targetId: string, styleTemplateId: string | null) => Promise<boolean>;
@@ -218,9 +366,12 @@ export function DirectorPanel({
   const [editingScript, setEditingScript] = useState(false);
   const [assetFilter, setAssetFilter] = useState('all');
   const [assetSearch, setAssetSearch] = useState('');
+  const [newSubjectOpen, setNewSubjectOpen] = useState(false);
+  const [newSubjectEntity, setNewSubjectEntity] = useState<string>();
   const [selectedReviewAssetId, setSelectedReviewAssetId] = useState('');
-  const [selectedShot, setSelectedShot] = useState('');
-  const [shotSearch, setShotSearch] = useState("");
+  const [selectedSubjectId, setSelectedSubjectId] = useState('');
+  const [selectedDeliveryId, setSelectedDeliveryId] = useState('');
+  const [assetPreviewKeys, setAssetPreviewKeys] = useState<Record<string, string>>({});
   const [json, setJson] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [evidence, setEvidence] = useState<Record<string, string>>({});
@@ -228,12 +379,20 @@ export function DirectorPanel({
   const [decisionReplies, setDecisionReplies] = useState<Record<string, string>>({});
   const [mediaPreview, setMediaPreview] = useState<{ assetId: string; title: string; storageKey: string } | null>(null);
   const [includeGeneratedMedia, setIncludeGeneratedMedia] = useState(false);
+  const [downloadingAllClips, setDownloadingAllClips] = useState(false);
   const d = director;
+  const subjectOwner: ProductionTarget = canvasRole === "scene" ? { sceneId: production.episodeId } : canvasRole === "ordinary" || canvasRole === "standalone" || canvasRole === "shared-assets" ? { projectId: canvasId } : production.episodeId;
   const source = d?.source || {};
   const scriptScenes = Array.isArray(source.script_scenes) ? source.script_scenes.map(value => value && typeof value === "object" ? value as Record<string, any> : {}) : [];
   const assetPlan = Array.isArray(source.asset_plan) ? source.asset_plan.map(value => value && typeof value === "object" ? value as Record<string, any> : {}) : [];
-  const sourceShots = Array.isArray(source.shots) ? source.shots.map(value => value && typeof value === "object" ? value as Record<string, any> : {}) : [];
-  const displayedShots = embedded && focusTarget?.startsWith("shot:") ? sourceShots.filter(shot => String(shot.id) === focusTarget.slice(5)) : sourceShots;
+  const subjectAssembly = isSubjectPromptAssembly(source);
+  const subjectWindows = subjectAssembly ? subjectShotWindows(source) : new Map();
+  const sourceShots = Array.isArray(source.shots) ? source.shots.map(value => {
+    const shot = value && typeof value === "object" ? value as Record<string, any> : {};
+    const window = subjectWindows.get(String(shot.id));
+    return window ? { ...shot, start_frame: window.startFrame, end_frame: window.endFrame } : shot;
+  }) : [];
+  if (subjectAssembly) sourceShots.sort((a, b) => Number(a.story_order) - Number(b.story_order));
   const segments = Array.isArray(source.segments) ? source.segments.map(value => value && typeof value === "object" ? value as Record<string, any> : {}) : [];
   const characters = records(source.character_registry);
   const locations = records(source.scene_registry);
@@ -246,7 +405,7 @@ export function DirectorPanel({
     if (focused) setActiveSceneKey(focused.key);
     else if (!sceneGroups.some(group => group.key === activeSceneKey)) setActiveSceneKey(sceneGroups[0]?.key || '');
   }, [focusedId, JSON.stringify(sceneGroups.map(group => group.key))]);
-  useEffect(() => { if (focusTarget?.startsWith('shot:')) setSelectedShot(focusedId); if (focusTarget?.startsWith('asset:') || focusTarget?.startsWith('frame:')) { setAssetFilter('all'); setAssetSearch(''); } }, [focusTarget]);
+  useEffect(() => { if (focusTarget?.startsWith('asset:') || focusTarget?.startsWith('frame:')) { setAssetFilter('all'); setAssetSearch(''); } }, [focusTarget]);
   const activeSceneIndex = Math.max(0, sceneGroups.findIndex(group => group.key === activeSceneKey));
   const activeScene = sceneGroups[activeSceneIndex];
   const fps = Number(source.fps_num || 24) / Number(source.fps_den || 1);
@@ -265,8 +424,6 @@ export function DirectorPanel({
     const key = d?.shotInputs[id]?.keyframeAssetId;
     return key ? d?.assets[key]?.storageKey || publishedDirector?.assets[key]?.storageKey : production.draft.keyframes[id]?.storageKey || production.published?.keyframes[id]?.storageKey;
   };
-  const timelineStart = sourceShots.length ? Math.min(...sourceShots.map(shot => Number(shot.start_frame) || 0)) : 0;
-  const timelineEnd = sourceShots.length ? Math.max(...sourceShots.map(shot => Number(shot.end_frame) || 0)) : 0;
   const mode = d?.workflow.mediaProductionMode || "per_item";
   const delivery = d?.workflow.contentDeliveryMode || "auto_file_batch";
   const publishedDirector = production.published?.director;
@@ -327,7 +484,7 @@ export function DirectorPanel({
     return { ...item, current, status, summary };
   });
 
-  const imageNodes = canvasNodes.filter(node => ["image", "character", "scene"].includes(String(node.type)) || (node.type === "config" && node.metadata?.generationMode === "image"));
+  const imageNodes = canvasNodes.filter(node => ["image", "character", "scene"].includes(String(node.type)) || (node.type === "config" && (node.metadata?.generationMode || "image") === "image"));
   const mediaForAsset = (assetId: string, shotId?: string) => {
     const mapped = d?.assets[assetId] || publishedDirector?.assets[assetId];
     const frame = shotId ? production.draft.keyframes[shotId] || production.published?.keyframes[shotId] : undefined;
@@ -344,6 +501,60 @@ export function DirectorPanel({
     const storageKey = String(segment?.resultStorageKey || "");
     return storageKey ? [{ group, storageKey }] : [];
   });
+  const downloadDeliveredClip = async (storageKey: string, fileName: string) => {
+    const response = await fetch(backendMediaUrl(storageKey));
+    if (!response.ok) throw new Error(t("director.workspace.mediaReadFailed"));
+    saveAs(await response.blob(), fileName);
+  };
+  const clipFileName = (index: number, label: string, contentType: string | null) => `${String(index + 1).padStart(2, "0")}-${label.replace(/[\\/:*?"<>|]/g, "_")}.${contentType?.includes("webm") ? "webm" : "mp4"}`;
+  const downloadAllDeliveredClips = async () => {
+    if (!deliveredClips.length || downloadingAllClips) return;
+    setDownloadingAllClips(true);
+    try {
+      // 优先让用户选择保存目录（File System Access API，Chrome/Edge 支持；localhost/https 为安全上下文）
+      const picker = (window as unknown as { showDirectoryPicker?: (opts?: { mode?: "readwrite" | "read" }) => Promise<any> }).showDirectoryPicker;
+      let dirHandle: any = null;
+      if (typeof picker === "function") {
+        try {
+          dirHandle = await picker({ mode: "readwrite" });
+        } catch (pickErr: any) {
+          if (pickErr?.name === "AbortError") {
+            // 用户取消目录选择，静默退出
+            setDownloadingAllClips(false);
+            return;
+          }
+          dirHandle = null; // 权限/其他异常，降级到 saveAs 逐个下载
+        }
+      }
+      let saved = 0;
+      for (let index = 0; index < deliveredClips.length; index++) {
+        const { group, storageKey } = deliveredClips[index];
+        const response = await fetch(backendMediaUrl(storageKey));
+        if (!response.ok) throw new Error(t("director.workspace.mediaReadFailed"));
+        const blob = await response.blob();
+        const fileName = clipFileName(index, segmentTitle(group.id), response.headers.get("content-type"));
+        if (dirHandle) {
+          const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+          const writable = await fileHandle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+        } else {
+          saveAs(blob, fileName);
+          await new Promise(resolve => setTimeout(resolve, 400));
+        }
+        saved++;
+      }
+      if (dirHandle) {
+        message.success(t("director.workspace.downloadAllClipsToDirDone", { count: saved, dir: String(dirHandle.name) }));
+      } else {
+        message.success(t("director.workspace.downloadAllClipsDone", { count: saved }));
+      }
+    } catch (error) {
+      message.error(String(error));
+    } finally {
+      setDownloadingAllClips(false);
+    }
+  };
   const assetTitle = (item: Record<string, any>) => String(item.asset_name || item.name || item.title || item.asset_id || item.id || t("director.workspace.untitledAsset"));
   const assetIdOf = (item: Record<string, any>) => String(item.asset_id || item.id || "");
   const keyframeAssetIds = new Set(Object.values(d?.shotInputs || {}).map(input => input.keyframeAssetId).filter((id): id is string => Boolean(id)));
@@ -396,24 +607,34 @@ export function DirectorPanel({
     const names = { ...nameMap, ...Object.fromEntries(allAssetIds.map(id => [id, assetName(id)])), ...Object.fromEntries(sourceShots.map(shot => [String(shot.id), shotTitle(String(shot.id))])), ...Object.fromEntries(segments.map(segment => [String(segment.id), segmentTitle(String(segment.id))])) };
     return Object.entries(names).sort(([a], [b]) => b.length - a.length).reduce((value, [id, name]) => id ? value.split(id).join(String(name)) : value, text);
   };
-  const renderAssetCard = (assetId: string, item?: Record<string, any>, keyframeShot?: string) => {
+  // 分镜图（关键帧素材）是否可审核：草稿或已发布的这次生成都能审。
+  const reviewableAsset = (assetId: string, media: ReturnType<typeof mediaForAsset>) => Boolean(media.nodeId && media.storageKey && media.status === "generated"
+    && (media.asset?.generationTaskId || (publishedDirector?.assets[assetId]?.nodeId === media.nodeId && publishedDirector?.assets[assetId]?.storageKey === media.storageKey && production.publishedVersion)));
+  const renderAssetCard = (assetId: string, item?: Record<string, any>, keyframeShot?: string, options: { gallery?: boolean; review?: boolean; target?: boolean } = {}) => {
+    const { gallery = false, review = true, target = true } = options;
     const media = mediaForAsset(assetId, keyframeShot);
+    const imageNode = canvasNodes.find(node => node.id === media.nodeId);
+    const { images: previewImages, previewKey, browsingHistory } = assetImagePreview(media.storageKey, imageNode?.metadata?.images, gallery ? assetPreviewKeys[assetId] : undefined);
     const dependencies = Array.isArray(item?.depends_on) ? item.depends_on.map((value: unknown) => typeof value === "string" ? value : String((value as Record<string, unknown>)?.asset_id || (value as Record<string, unknown>)?.id || "")).filter(Boolean) : [];
     const title = keyframeShot ? `${shotTitle(keyframeShot)} · ${t("director.studio.keyframe")}` : assetName(assetId);
-    const publishedMedia = publishedDirector?.assets[assetId];
-    const reviewTargetMatches = Boolean(media.nodeId && media.storageKey && media.status === "generated" && (media.asset?.generationTaskId || publishedMedia?.nodeId === media.nodeId && publishedMedia?.storageKey === media.storageKey && production.publishedVersion));
+    const reviewTargetMatches = review && !browsingHistory && reviewableAsset(assetId, media);
     const field = item?.description !== undefined || item?.prompt === undefined ? "description" : "prompt";
-    return <article key={`${assetId}:${keyframeShot || "asset"}`} data-production-target={keyframeShot ? `frame:${keyframeShot}` : `asset:${assetId}`} className={compact ? "grid min-w-0 items-start gap-4 md:grid-cols-[280px_minmax(0,1fr)]" : "min-w-0 overflow-hidden rounded-xl border border-border bg-card"}>
-      <button type="button" disabled={!media.storageKey} aria-label={t("director.studio.previewAsset", { title })} onClick={() => setMediaPreview({ assetId, title, storageKey: media.storageKey })} className={`flex w-full items-center justify-center overflow-hidden bg-muted/40 ${compact ? "h-[min(50dvh,420px)] rounded-lg" : "aspect-[4/3]"}`}>
-        {media.storageKey && /\.(mp4|webm|mov)(?:$|\?)/i.test(media.storageKey) ? <Film className="size-10 text-muted-foreground" /> : media.storageKey ? <img className="h-full w-full object-contain" src={backendMediaUrl(media.storageKey)} alt={title} loading="lazy" /> : <div className="space-y-2 text-center text-muted-foreground"><ImageIcon className="mx-auto size-8 opacity-40" /><span className="text-xs">{t("director.studio.noImage")}</span></div>}
+    return <article key={`${assetId}:${keyframeShot || "asset"}`} data-production-target={target ? (keyframeShot ? `frame:${keyframeShot}` : `asset:${assetId}`) : undefined} className={gallery ? "grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_320px]" : compact ? "grid min-w-0 items-start gap-4 md:grid-cols-[280px_minmax(0,1fr)]" : "min-w-0 overflow-hidden rounded-xl border border-border bg-card"}>
+      <section className={gallery ? "flex min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-card" : "contents"}>
+      {gallery && <header className="flex items-center justify-between gap-3 border-b border-border px-4 py-3"><h3 className="min-w-0 truncate text-sm font-semibold">{title}</h3><Button size="small" type="text" disabled={!previewKey} onClick={() => setMediaPreview({ assetId, title, storageKey: previewKey })}>{t("director.workspace.viewOriginal")}</Button></header>}
+      <button type="button" disabled={!previewKey} aria-label={t("director.studio.previewAsset", { title })} onClick={() => setMediaPreview({ assetId, title, storageKey: previewKey })} className={`flex w-full items-center justify-center overflow-hidden bg-muted/30 ${gallery ? "h-[min(52dvh,36rem)] p-4" : compact ? "h-[min(50dvh,420px)] rounded-lg" : "aspect-[4/3]"}`}>
+        {previewKey && /\.(mp4|webm|mov)(?:$|\?)/i.test(previewKey) ? <Film className="size-10 text-muted-foreground" /> : previewKey ? <img className="h-full w-full object-contain" src={backendMediaUrl(previewKey)} alt={title} loading="lazy" /> : <div className="space-y-2 text-center text-muted-foreground"><ImageIcon className="mx-auto size-8 opacity-40" /><span className="text-xs">{t("director.studio.noImage")}</span></div>}
       </button>
-      <div className={compact ? "min-w-0" : "p-4"}><div className="flex items-start justify-between gap-2"><div className="min-w-0">{!compact && <h3 className="text-base font-semibold">{title}</h3>}<p className="mt-1 text-xs text-muted-foreground">{t(`director.studio.filter.${assetCategory(assetId)}`)}</p></div><Tag color={media.status === "approved" ? "green" : media.status === "generated" ? "blue" : media.status === "rejected" ? "red" : "default"}>{t(`director.workspace.assetStatus.${media.status}`)}</Tag></div>
-      {compact && item ? <label className="mt-4 grid gap-2 text-sm">{t("director.workspace.description")}<SourceField value={proseOf(item[field] ?? item.visual ?? item.purpose)} draftValue={sourceDrafts[`asset:${assetId}:${field}`] ?? sourceDrafts[`asset:${assetId}:visual`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:${field}`, value)} multiline disabled={busy || Boolean(media.asset?.sharedSource)} onCommit={async value => { const saved = await onPatch("asset", assetId, { [field]: patchProse(item[field], value) }); if (saved !== false) onSourceDraftChange(`asset:${assetId}:visual`, undefined); return saved; }} /></label> : proseOf(item?.description || item?.prompt || item?.visual || item?.purpose) && <p className="mt-3 line-clamp-3 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{proseOf(item?.description || item?.prompt || item?.visual || item?.purpose)}</p>}
+      {gallery && <footer className="space-y-2 border-t border-border p-3"><p className="text-xs text-muted-foreground">{t(browsingHistory ? "director.studio.browsingImageHistory" : "director.studio.currentImage")}</p><div className="flex gap-2 overflow-x-auto">{previewImages.map((storageKey, index) => <button type="button" key={storageKey} aria-pressed={previewKey === storageKey} aria-label={index === 0 ? t("director.studio.currentImage") : t("director.workspace.pictureHistoryItem", { number: index })} onClick={() => setAssetPreviewKeys(current => ({ ...current, [assetId]: storageKey }))} className={`h-16 w-16 shrink-0 overflow-hidden rounded border p-1 ${previewKey === storageKey ? "border-primary bg-primary/5" : "border-border hover:bg-muted"}`}><img className="h-full w-full object-contain" src={backendMediaUrl(storageKey)} alt="" loading="lazy" /></button>)}</div></footer>}
+      </section>
+      <div className={gallery ? "min-w-0 rounded-xl border border-border bg-card p-4 xl:max-h-[72dvh] xl:overflow-y-auto" : compact ? "min-w-0" : "p-4"}><div className="flex items-start justify-between gap-2"><div className="min-w-0">{!compact && <h3 className="text-base font-semibold">{title}</h3>}<p className="mt-1 text-xs text-muted-foreground">{t(`director.studio.filter.${assetCategory(assetId)}`)}</p></div><Tag color={media.status === "approved" ? "green" : media.status === "generated" ? "blue" : media.status === "rejected" ? "red" : "default"}>{t(`director.workspace.assetStatus.${media.status}`)}</Tag></div>
+      {gallery && media.nodeId && <div className="mt-3"><ReferenceNodeLink sourceNode={{ projectId: media.asset?.sharedSource?.sourceProjectId || canvasId, nodeId: media.asset?.sharedSource?.sourceNodeId || media.nodeId }} /></div>}
+      {(compact || gallery) && item ? <label className="mt-4 grid gap-2 text-sm">{t("director.workspace.description")}<SourceField value={proseOf(item[field] ?? item.visual ?? item.purpose)} draftValue={sourceDrafts[`asset:${assetId}:${field}`] ?? sourceDrafts[`asset:${assetId}:visual`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:${field}`, value)} multiline disabled={busy || Boolean(media.asset?.sharedSource)} onCommit={async value => { const saved = await onPatch("asset", assetId, { [field]: patchProse(item[field], value) }); if (saved !== false) onSourceDraftChange(`asset:${assetId}:visual`, undefined); return saved; }} /></label> : proseOf(item?.description || item?.prompt || item?.visual || item?.purpose) && <p className="mt-3 line-clamp-3 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{proseOf(item?.description || item?.prompt || item?.visual || item?.purpose)}</p>}
       {media.evidence && (!compact || media.status === "rejected") && <p className="mt-3 text-xs leading-5 text-muted-foreground">{media.evidence}</p>}
       {item && !keyframeShot && ["episode", "shared-assets"].includes(canvasRole) && <div className="mt-3 grid gap-2"><label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.assetCanvasScope")}<Select value={String(item.canvas_scope || (media.asset?.sharedSource || canvasRole === "shared-assets" ? "shared" : "episode"))} disabled={busy || Boolean(media.asset?.sharedSource) || canvasRole === "shared-assets"} options={[{ value: "episode", label: t("director.workspace.assetCanvasScopeEpisode") }, { value: "shared", label: t("director.workspace.assetCanvasScopeShared") }]} onChange={value => void onPatch("asset", assetId, { canvas_scope: value })} /></label>{canvasRole === "episode" && String(item.canvas_scope || (media.asset?.sharedSource ? "shared" : "episode")) === "shared" && <div className="flex flex-wrap items-center gap-2"><p className="m-0 text-xs text-muted-foreground">{t("director.workspace.sharedAssetNeedsAdoption")}</p>{media.status === "approved" && !media.asset?.sharedSource && <Button size="small" disabled={busy} onClick={() => onPromoteExistingSharedAsset(assetId, title)}>{t("director.workspace.promoteExistingSharedAsset")}</Button>}<Button size="small" disabled={busy} onClick={() => onOpenSharedAsset(assetId, title)}>{t("director.workspace.openSharedCanvas")}</Button></div>}</div>}
-      <div className="mt-4 flex flex-wrap gap-2">{media.storageKey && <Button size="small" onClick={() => setMediaPreview({ assetId, title, storageKey: media.storageKey })}>{t("director.workspace.viewOriginal")}</Button>}<Button icon={<WandSparkles className="size-3" />} size="small" onClick={() => onAskDirector({ workspace: "assets", targetId: assetId, instruction: t("director.workspace.reviseAssetContract") })}>{t("director.studio.collaborate")}</Button></div>
+      <div className="mt-4 flex flex-wrap gap-2">{media.storageKey && !gallery && <Button size="small" onClick={() => setMediaPreview({ assetId, title, storageKey: media.storageKey })}>{t("director.workspace.viewOriginal")}</Button>}<Button icon={<WandSparkles className="size-3" />} size="small" onClick={() => onAskDirector({ workspace: "assets", targetId: assetId, instruction: t("director.workspace.reviseAssetContract") })}>{t("director.studio.collaborate")}</Button></div>
       <details className="mt-3 border-t border-border pt-3"><summary className="cursor-pointer text-xs text-muted-foreground">{t(compact ? "productionCanvas.objectDetails" : "director.studio.assetDetails")}</summary><div className="mt-3 space-y-3">
-        {item && <>{!compact && <label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.description")}<SourceField value={proseOf(item[field] ?? item.visual ?? item.purpose)} draftValue={sourceDrafts[`asset:${assetId}:${field}`] ?? sourceDrafts[`asset:${assetId}:visual`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:${field}`, value)} multiline rows={3} disabled={busy} onCommit={async value => { const saved = await onPatch("asset", assetId, { [field]: patchProse(item[field], value) }); if (saved !== false) onSourceDraftChange(`asset:${assetId}:visual`, undefined); return saved; }} /></label>}<label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.assetVersion")}<SourceField value={item.version || item.asset_version || "v1"} draftValue={sourceDrafts[`asset:${assetId}:version`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:version`, value)} disabled={busy} onCommit={value => onPatch("asset", assetId, { version: String(value) })} /></label><label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.assetDependencies")}<Select mode="multiple" value={dependencies} disabled={busy} options={assetPlan.filter(value => assetIdOf(value) !== assetId).map(value => ({ value: assetIdOf(value), label: assetName(assetIdOf(value)) }))} onChange={value => void onPatch("asset", assetId, { depends_on: value })} /></label></>}
+        {item && <>{!compact && !gallery && <label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.description")}<SourceField value={proseOf(item[field] ?? item.visual ?? item.purpose)} draftValue={sourceDrafts[`asset:${assetId}:${field}`] ?? sourceDrafts[`asset:${assetId}:visual`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:${field}`, value)} multiline rows={3} disabled={busy} onCommit={async value => { const saved = await onPatch("asset", assetId, { [field]: patchProse(item[field], value) }); if (saved !== false) onSourceDraftChange(`asset:${assetId}:visual`, undefined); return saved; }} /></label>}<label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.assetVersion")}<SourceField value={item.version || item.asset_version || "v1"} draftValue={sourceDrafts[`asset:${assetId}:version`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:version`, value)} disabled={busy} onCommit={value => onPatch("asset", assetId, { version: String(value) })} /></label><label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.assetDependencies")}<Select mode="multiple" value={dependencies} disabled={busy} options={assetPlan.filter(value => assetIdOf(value) !== assetId).map(value => ({ value: assetIdOf(value), label: assetName(assetIdOf(value)) }))} onChange={value => void onPatch("asset", assetId, { depends_on: value })} /></label></>}
         <label className="grid gap-1 text-xs text-muted-foreground">{t("director.studio.linkImage")}<Select value={media.nodeId || undefined} disabled={busy || !imageNodes.length} placeholder={t("director.workspace.bindCanvasImage")} options={imageNodes.map((node, index) => ({ value: node.id, label: humanName(node.title, node.id, t("director.studio.imageNumber", { number: index + 1 })) }))} onChange={nodeId => nodeId && onBindAsset(assetId, nodeId)} /></label>
       </div></details>
       {media.inputOutdated && <p className="mt-2 text-xs">{t("productionCanvas.outdatedMedia")}</p>}
@@ -470,7 +691,7 @@ export function DirectorPanel({
       </button>)}
     </section>
     {readiness?.targets.some(item => item.status !== "complete") && <section className="space-y-2"><div className="flex items-center justify-between"><h2 className="font-semibold">{t("director.workspace.targetsNeedingWork")}</h2><Tag>{readiness.targets.length}</Tag></div>
-      {readiness.targets.filter(item => item.status !== "complete").slice(0, 8).map(item => <article key={item.id} data-production-target={item.kind === "keyframe" ? `frame:${item.targetId}` : `${item.kind}:${item.targetId}`} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card p-3"><div className="min-w-0"><p className="font-medium">{targetName(item.kind, item.targetId, item.title)}<Tag className="ml-2">{t(`director.workspace.targetKind.${item.kind}`)}</Tag></p><p className="mt-1 text-sm text-muted-foreground">{humanMessage(item.blockers[0] || item.notice || t(`director.workspace.targetStatus.${item.status}`))}</p></div><Button size="small" onClick={() => item.status === "needs_review" ? onNavigate(item.kind === "segment" ? "production" : "assets", { kind: item.kind === "keyframe" ? "frame" : item.kind, id: item.targetId }) : onAskDirector({ workspace: item.kind === "segment" ? "production" : item.kind === "keyframe" ? "shots" : "assets", targetId: item.targetId })}>{item.status === "needs_review" ? t(item.kind === "segment" ? "director.workspace.reviewInProduction" : "director.workspace.reviewInAssets") : t("director.workspace.askDirector")}</Button></article>)}
+      {readiness.targets.filter(item => item.status !== "complete").slice(0, 8).map(item => <article key={item.id} data-production-target={item.kind === "keyframe" ? `frame:${item.targetId}` : `${item.kind}:${item.targetId}`} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card p-3"><div className="min-w-0"><p className="font-medium">{targetName(item.kind, item.targetId, item.title)}<Tag className="ml-2">{t(`director.workspace.targetKind.${item.kind}`)}</Tag></p><p className="mt-1 text-sm text-muted-foreground">{humanMessage(item.blockers[0] || item.notice || t(`director.workspace.targetStatus.${item.status}`))}</p></div><Button size="small" onClick={() => item.status === "needs_review" ? onNavigate(item.kind === "segment" ? "production" : item.kind === "keyframe" ? "shots" : "assets", { kind: item.kind === "keyframe" ? "shot" : item.kind, id: item.targetId }) : onAskDirector({ workspace: item.kind === "segment" ? "production" : item.kind === "keyframe" ? "shots" : "assets", targetId: item.targetId })}>{item.status === "needs_review" ? t(item.kind === "segment" ? "director.workspace.reviewInProduction" : item.kind === "keyframe" ? "director.workspace.reviewInShots" : "director.workspace.reviewInAssets") : t("director.workspace.askDirector")}</Button></article>)}
     </section>}
     {readiness?.unresolved.length ? <Alert type="warning" showIcon message={t("director.workspace.openIssues")} description={humanMessage(readiness.unresolved.join("；"))} /> : null}
 
@@ -492,7 +713,7 @@ export function DirectorPanel({
           <div className="mb-7 border-b border-border pb-5"><p className="mb-2 text-xs font-medium text-muted-foreground">{t("director.studio.sceneNumber", { number: activeSceneIndex + 1 })}</p>{editingScript ? <SourceField value={activeScene.blocks[0].scene_name || activeScene.blocks[0].heading || ""} placeholder={t("director.workspace.sceneName")} draftValue={sourceDrafts[`scene:${activeScene.key}:scene_name`]} onDraftChange={value => onSourceDraftChange(`scene:${activeScene.key}:scene_name`, value)} disabled={busy} onCommit={value => onPatch("scene", activeScene.key, { scene_name: value })} /> : <h3 className="text-xl font-semibold">{sceneTitle(activeScene, activeSceneIndex)}</h3>}{(activeScene.blocks[0].location || activeScene.blocks[0].time_of_day) && <p className="mt-2 text-sm text-muted-foreground">{[readableText(activeScene.blocks[0].location, nameMap), readableText(activeScene.blocks[0].time_of_day)].filter(Boolean).join(" · ")}</p>}</div>
           <div className="space-y-6">{activeScene.blocks.map((block, index) => {
             const id = String(block.id || block.scene_id || ""); const isDialogue = Boolean(block.speaker) || block.kind === "dialogue" || block.type === "dialogue"; const localText = sourceDrafts[`scene:${id}:text`];
-            return <div key={`${id}:${index}`} data-production-target={`scene:${id}`} className={isDialogue && !editingScript ? "mx-auto max-w-md" : ""}>
+            return <div key={`${id}:${index}`} data-production-target={`scene:${id}`} className={isDialogue && !editingScript ? "ml-6 max-w-xl border-l-2 border-border pl-4 sm:ml-10" : ""}>
               {isDialogue && <p className="mb-2 text-sm font-semibold">{nameMap[block.speaker] || block.speaker || t("director.studio.dialogue")}</p>}
               {editingScript ? <SourceField value={block.text || ""} draftValue={localText} onDraftChange={value => onSourceDraftChange(`scene:${id}:text`, value)} multiline rows={3} disabled={busy} placeholder={t("director.workspace.scriptText")} onCommit={value => id ? onPatch("scene", id, { text: value }) : false} /> : <p className="whitespace-pre-wrap break-words text-base leading-8">{localText ?? (isDialogue ? dialogueBody(block) : String(block.text || ""))}</p>}
               {localText !== undefined && <p className="mt-2 text-xs text-amber-600">{t("director.studio.unsavedText")}</p>}
@@ -505,13 +726,15 @@ export function DirectorPanel({
       <aside className="min-w-0 space-y-6 md:col-start-2 xl:col-start-auto">
         <section><h3 className="mb-3 flex items-center gap-2 text-xs font-medium text-muted-foreground"><Users className="size-4" />{t("director.studio.characters")}</h3><div className="space-y-4">{characters.map((character, index) => <div key={character.id || index}><h4 className="text-sm font-medium">{humanName(character.name, String(character.id), t("director.studio.characterNumber", { number: index + 1 }))}</h4><p className="mt-1 line-clamp-3 text-xs leading-6 text-muted-foreground">{readableText(character.appearance || character.description || character.prompt_description || character.role, nameMap) || t("director.studio.detailsInAssets")}</p></div>)}</div><Button className="mt-3" size="small" type="text" onClick={() => onNavigate("assets")}>{t("director.studio.viewAssets")}<ArrowRight className="size-3" /></Button></section>
         <section><h3 className="mb-3 flex items-center gap-2 text-xs font-medium text-muted-foreground"><MapPin className="size-4" />{t("director.studio.locations")}</h3><div className="space-y-3">{locations.map((location, index) => <p key={location.id || index} className="text-sm">{humanName(location.name, String(location.id), t("director.studio.sceneNumber", { number: index + 1 }))}</p>)}</div></section>
-        {records(story.beats).some(beat => readableText(beat, nameMap)) && <section><h3 className="mb-3 text-xs font-medium text-muted-foreground">{t("director.studio.storyBeats")}</h3>{records(story.beats).map((beat, index) => <p key={index} className="mb-3 text-sm leading-6">{readableText(beat, nameMap)}</p>)}</section>}
+        {storyBeatCards(records(story.beats), activeScene?.sceneId).length > 0 && <section><h3 className="mb-3 text-xs font-medium text-muted-foreground">{t("director.studio.storyBeats")}</h3>{storyBeatCards(records(story.beats), activeScene?.sceneId).map(({ beat, text, repeatedFields }, index) => <article key={beat.id || index} className="mb-4 border-b border-border pb-3"><p className="text-sm leading-6">{text}</p>{repeatedFields.length > 0 && <p className="mt-1 text-xs text-amber-600">{t("director.studio.repeatedBeatAnalysis")}</p>}<details className="mt-2 text-xs text-muted-foreground"><summary className="cursor-pointer">{t("director.studio.beatAnalysis")}</summary>{["goal", "obstacle", "choice", "cost", "result"].map(field => beat[field] ? <p key={field} className="mt-2 leading-5"><strong>{t("director.studio.beatField." + field)}：</strong>{readableText(beat[field], nameMap)}</p> : null)}</details></article>)}</section>}
       </aside>
     </div>}
   </div>;
 
+  const visibleSubjects = records(source.subject_registry).filter(subject => (assetFilter === "all" || assetFilter === (["character", "animal"].includes(String(subject.kind)) ? "characters" : subject.kind === "scene" ? "locations" : "props")) && subjectDisplayName(source, String(subject.id)).toLocaleLowerCase().includes(assetSearch.toLocaleLowerCase()));
+  const activeSubject = visibleSubjects.find(subject => subject.id === selectedSubjectId) || visibleSubjects[0];
   const renderAssets = () => <div className="space-y-4">
-    <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-2xl font-semibold">{t("director.studio.assets")}</h2><p className="mt-1 text-sm text-muted-foreground">{t("director.studio.assetsHint")}</p></div><Button icon={<WandSparkles className="size-4" />} disabled={busy} onClick={() => onAskDirector({ workspace: "assets" })}>{t("director.studio.collaborate")}</Button></div>
+    <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-2xl font-semibold">{t(subjectAssembly ? "director.atomic.subjects" : "director.studio.assets")}</h2><p className="mt-1 text-sm text-muted-foreground">{t(subjectAssembly ? "director.workspace.subjectBindingHint" : "director.studio.assetsHint")}</p></div><Button icon={<WandSparkles className="size-4" />} disabled={busy} onClick={() => onAskDirector({ workspace: "assets" })}>{t("director.studio.collaborate")}</Button></div>
     {error && <Alert type="error" showIcon message={error} />}
     {d && <details className="border-b border-border pb-4"><summary className="cursor-pointer text-sm text-muted-foreground">{t("director.studio.styleSettings")}</summary><section className="mt-3 grid gap-3 md:grid-cols-2">
       <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.styleMother")}</span><Select allowClear value={String((source.style_lock as Record<string, unknown> | undefined)?.anchor_asset_id || "") || undefined} disabled={busy} placeholder={t("director.workspace.chooseStyleMother")} options={assetPlan.filter(item => String(item.role || item.asset_type || "").toUpperCase() === "STYLE_MOTHER" || String(item.kind || "").toLowerCase() === "style").map(item => ({ value: assetIdOf(item), label: assetTitle(item) }))} onChange={value => void onPatch("style", undefined, { anchor_asset_id: value || "" })} /></label>
@@ -519,32 +742,57 @@ export function DirectorPanel({
       {source.style_policy === "waived" && <label className="grid gap-1 text-sm md:col-span-2"><span>{t("director.workspace.styleWaiverReason")}</span><SourceField value={source.style_policy_reason || ""} draftValue={sourceDrafts["style:style_policy_reason"]} onDraftChange={value => onSourceDraftChange("style:style_policy_reason", value)} multiline rows={2} disabled={busy} onCommit={value => onPatch("style", undefined, { style_policy_reason: value })} /></label>}
 
     </section></details>}
-    <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex flex-wrap gap-1">{["all", "characters", "locations", "props", "frames"].map(filter => <button type="button" key={filter} aria-pressed={assetFilter === filter} className={`rounded-lg px-3 py-2 text-sm ${assetFilter === filter ? "bg-muted font-medium" : "text-muted-foreground hover:bg-muted/50"}`} onClick={() => setAssetFilter(filter)}>{t(`director.studio.filter.${filter}`)}</button>)}</div><Input className="max-w-60" prefix={<Search className="size-4 text-muted-foreground" />} placeholder={t("director.studio.searchAssets")} aria-label={t("director.studio.searchAssets")} value={assetSearch} onChange={event => setAssetSearch(event.target.value)} /></div>
-    {!d ? <Alert type="info" message={t("director.workspace.assetsNeedDirector")} /> : allAssetIds.length ? (() => {
-      const visibleAssetIds = allAssetIds.filter(id => (!embedded || !focusTarget?.startsWith("asset:") || id === focusedId) && (assetFilter === "all" || assetCategory(id) === assetFilter) && assetName(id).toLowerCase().includes(assetSearch.toLowerCase()));
+    <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex flex-wrap gap-1">{["all", "characters", "locations", "props"].map(filter => <button type="button" key={filter} aria-pressed={assetFilter === filter} className={`rounded-lg px-3 py-2 text-sm ${assetFilter === filter ? "bg-muted font-medium" : "text-muted-foreground hover:bg-muted/50"}`} onClick={() => setAssetFilter(filter)}>{t(`director.studio.filter.${filter}`)}</button>)}</div><Input className="max-w-60" prefix={<Search className="size-4 text-muted-foreground" />} placeholder={t("director.studio.searchAssets")} aria-label={t("director.studio.searchAssets")} value={assetSearch} onChange={event => setAssetSearch(event.target.value)} /></div>
+    {!d ? <Alert type="info" message={t("director.workspace.assetsNeedDirector")} /> : isSubjectPromptAssembly(source) ? <section className="space-y-3" data-subject-registry-editor>
+      <div className="flex items-center justify-between gap-3"><p className="text-sm text-muted-foreground">{t("director.workspace.subjectBindingHint")}</p><Button disabled={busy} onClick={() => setNewSubjectOpen(true)}>{t("director.crud.addSubject")}</Button></div>
+      <Modal open={newSubjectOpen} title={t("director.crud.addSubject")} onCancel={() => setNewSubjectOpen(false)} footer={<Button type="primary" disabled={busy || !newSubjectEntity} onClick={() => {
+        if (!newSubjectEntity || !onUpsertSubject) return;
+        const subjectId = `SUBJECT_${crypto.randomUUID()}`;
+        const entity = JSON.parse(newSubjectEntity), ownerKind = typeof subjectOwner === "string" ? "episode" : "canvas", ownerId = typeof subjectOwner === "string" ? subjectOwner : canvasId;
+        void onUpsertSubject({ id: subjectId, kind: entity.kind === "character" ? "character" : entity.kind === "scene" ? "scene" : "prop", entityRef: { ownerKind, ownerId, kind: entity.kind, id: entity.id }, pictureBindings: [] }).then(saved => { if (saved) { setSelectedSubjectId(subjectId); setNewSubjectOpen(false); setNewSubjectEntity(undefined); } });
+      }}>{t("director.crud.registerSubject")}</Button>}><p className="mb-3 text-sm text-muted-foreground">{t("director.crud.subjectRegisterHint")}</p><Select className="w-full" value={newSubjectEntity} onChange={setNewSubjectEntity} options={[...characters.map(row => ({ kind: "character", row })), ...locations.map(row => ({ kind: "scene", row })), ...assetPlan.map(row => ({ kind: "asset", row }))].filter(({ kind, row }) => !records(source.subject_registry).some(subject => subject.entityRef?.kind === kind && subject.entityRef?.id === String(row.id || row.asset_id))).map(({ kind, row }) => ({ value: JSON.stringify({ kind, id: String(row.id || row.asset_id) }), label: String(row.name || row.asset_name || row.scene_name || row.title || t("director.crud.unnamedEntity")) }))} /></Modal>
+      <div className="grid items-start gap-4 lg:grid-cols-[220px_minmax(0,1fr)]"><nav className="max-h-64 overflow-y-auto rounded-xl border border-border lg:max-h-[70dvh]" aria-label={t("director.atomic.subjects")}>{visibleSubjects.map(subject => <button type="button" key={subject.id} aria-current={activeSubject?.id === subject.id ? "true" : undefined} onClick={() => setSelectedSubjectId(subject.id)} className={`block w-full border-b border-border px-3 py-3 text-left last:border-0 ${activeSubject?.id === subject.id ? "bg-muted" : "hover:bg-muted/40"}`}><span className="block truncate text-sm font-medium">{subjectDisplayName(source, String(subject.id))}</span><span className="mt-1 block text-xs text-muted-foreground">{t(`director.workspace.subjectKind.${String(subject.kind || "other")}`)} · {t("director.studio.boundPictures", { count: records(subject.pictureBindings).length })}</span></button>)}</nav><div className="min-w-0">{(activeSubject ? [activeSubject] : []).map(subject => {
+        const entity = subject.entityRef || {}, entityId = String(entity.id || ""), character = records(source.character_registry).find(row => row.id === entityId), scene = records(source.scene_registry).find(row => row.id === entityId), asset = assetPlan.find(row => assetIdOf(row) === entityId);
+        const title = String(character?.name || scene?.name || asset?.asset_name || asset?.name || entityId || subject.id);
+        const usageCount = records(source.shots).filter(shot => records(shot.subject_usages).some(usage => usage.subjectId === subject.id)).length;
+        return <article key={String(subject.id)} className="grid min-w-0 gap-4 rounded-xl border border-border bg-card p-4 xl:grid-cols-[minmax(0,1fr)_300px]">
+          <div className="flex flex-wrap items-center justify-between gap-2 xl:col-span-2"><div><h3 className="font-semibold">{title}</h3><p className="text-xs text-muted-foreground">{t("director.workspace.subjectConsumers", { count: usageCount })}</p></div><Tag>{t(`director.workspace.subjectKind.${String(subject.kind || "other")}`)}</Tag></div>
+          <details open className="min-w-0 border-t border-border pt-3 xl:col-start-2 xl:row-start-2"><summary className="cursor-pointer text-sm">{t("director.crud.editSubject")}</summary><div className="mt-3 space-y-3">{(() => {
+            const entityType = entity.kind === "character" ? "character" : entity.kind === "scene" ? "environment" : "asset";
+            const row = entity.kind === "character" ? character : entity.kind === "scene" ? scene : asset;
+            const own = entity.ownerId === (typeof subjectOwner === "string" ? subjectOwner : canvasId);
+            return row ? <><label className="grid gap-1 text-xs"><span>{t("director.crud.subjectName")}</span><SourceField value={row.name || row.asset_name || ""} draftValue={sourceDrafts[`subject:${subject.id}:name`]} onDraftChange={value => onSourceDraftChange(`subject:${subject.id}:name`, value)} disabled={busy || !own} onCommit={name => onPatch(entityType, entityId, { [entityType === "asset" ? "asset_name" : "name"]: name })} /></label><label className="grid gap-1 text-xs"><span>{t("director.crud.subjectDescription")}</span><SourceField value={proseOf(entityType === "character" ? row.appearance || row.description : row.description)} draftValue={sourceDrafts[`subject:${subject.id}:description`]} onDraftChange={value => onSourceDraftChange(`subject:${subject.id}:description`, value)} multiline rows={3} disabled={busy || !own} onCommit={value => onPatch(entityType, entityId, { [entityType === "character" ? "appearance" : "description"]: value })} /></label>{!own && <p className="text-xs text-muted-foreground">{t("director.crud.sharedEntityReadOnly")}</p>}</> : null;
+          })()}<Button size="small" danger type="text" disabled={busy || usageCount > 0} onClick={() => void onDeleteSubject?.(String(subject.id))}>{t("director.crud.removeSubject")}</Button><p className="text-xs text-muted-foreground">{t("director.crud.removeSubjectHint")}</p></div></details>
+         <div className="min-w-0 xl:col-start-1 xl:row-start-2"><SubjectPictureBindings subject={subject} canvasNodes={canvasNodes} canvasId={canvasId} owner={subjectOwner} busy={busy} usageCount={usageCount} usages={records(source.shots).flatMap(shot => records(shot.subject_usages).filter(usage => usage.subjectId === subject.id))} sourceDrafts={sourceDrafts} onSourceDraftChange={onSourceDraftChange} onSave={next => onUpsertSubject ? onUpsertSubject(next as Extract<ProductionOperation, { type: "upsert_director_subject" }>["subject"]) : Promise.resolve(false)} /></div>
+        </article>;
+      })}</div></div>
+      {!records(source.subject_registry).length && <Alert type="info" message={t("director.workspace.subjectsEmpty")} />}
+    </section> : allAssetIds.length ? (() => {
+      // 分镜图（关键帧素材）归分镜工作台，资产页审核队列不再收。
+      const visibleAssetIds = allAssetIds.filter(id => !keyframeAssetIds.has(id) && (!embedded || !focusTarget?.startsWith("asset:") || id === focusedId) && (assetFilter === "all" || assetCategory(id) === assetFilter) && assetName(id).toLowerCase().includes(assetSearch.toLowerCase()));
       const shotForAsset = (id: string) => Object.entries(d.shotInputs).find(([, input]) => input.keyframeAssetId === id)?.[0];
       const isPendingReview = (id: string) => mediaForAsset(id, shotForAsset(id)).status === "generated";
       const orderedAssetIds = [...visibleAssetIds].sort((a, b) => Number(isPendingReview(b)) - Number(isPendingReview(a)) || visibleAssetIds.indexOf(a) - visibleAssetIds.indexOf(b));
       const activeAssetId = orderedAssetIds.includes(selectedReviewAssetId) ? selectedReviewAssetId : orderedAssetIds.find(isPendingReview) || orderedAssetIds[0];
       const activeShotId = activeAssetId ? shotForAsset(activeAssetId) : undefined;
       if (embedded && focusTarget?.startsWith("asset:") && activeAssetId) return renderAssetCard(activeAssetId, assetPlan.find(value => assetIdOf(value) === activeAssetId), activeShotId);
-      return <div className="grid min-h-[28rem] gap-4 lg:grid-cols-[minmax(15rem,0.8fr)_minmax(0,1.6fr)]">
+      return <div className="grid min-h-[28rem] items-start gap-4 lg:grid-cols-[220px_minmax(0,1fr)]">
         <nav aria-label={t("director.workspace.reviewQueue")} className="overflow-hidden rounded-xl border border-border bg-card">
-          <div className="flex items-center justify-between border-b border-border px-4 py-3"><h3 className="font-semibold">{t("director.workspace.reviewQueue")}</h3><Tag>{orderedAssetIds.filter(isPendingReview).length}</Tag></div>
-          <div className="max-h-[65vh] overflow-y-auto">
+          <div className="flex items-center justify-between border-b border-border px-4 py-3"><h3 className="text-sm font-semibold">{t("director.studio.assetList")}</h3><Tag>{orderedAssetIds.length}</Tag></div>
+          <div className="max-h-64 overflow-y-auto lg:max-h-[70dvh]">
             {orderedAssetIds.map(assetId => {
               const shotId = shotForAsset(assetId);
               const media = mediaForAsset(assetId, shotId);
               const active = assetId === activeAssetId;
-              return <button key={assetId} type="button" aria-current={active ? "true" : undefined} onClick={() => setSelectedReviewAssetId(assetId)} className={`flex w-full items-center justify-between gap-3 border-b border-border px-4 py-3 text-left last:border-b-0 ${active ? "bg-muted/60" : "hover:bg-muted/30"}`}>
-                <span className="min-w-0"><strong className="block truncate text-sm font-medium">{shotId ? `${shotTitle(shotId)} · ${t("director.studio.keyframe")}` : assetName(assetId)}</strong><span className="mt-1 block truncate text-xs text-muted-foreground">{t(`director.studio.filter.${assetCategory(assetId)}`)}</span></span>
+              return <button key={assetId} type="button" aria-current={active ? "true" : undefined} onClick={() => setSelectedReviewAssetId(assetId)} className={`flex w-full items-center gap-2 border-b border-border px-3 py-3 text-left last:border-b-0 ${active ? "bg-muted/60" : "hover:bg-muted/30"}`}>
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded border border-border">{media.storageKey ? <img className="h-full w-full object-contain" src={backendMediaUrl(media.storageKey)} alt="" loading="lazy" /> : <ImageIcon className="size-4 text-muted-foreground" />}</span><span className="min-w-0 flex-1"><strong className="block truncate text-sm font-medium" title={assetName(assetId)}>{shotId ? `${shotTitle(shotId)} · ${t("director.studio.keyframe")}` : assetName(assetId)}</strong><span className="mt-1 block truncate text-xs text-muted-foreground">{t(`director.studio.filter.${assetCategory(assetId)}`)}</span></span>
                 <Tag className="shrink-0" color={media.status === "generated" ? "blue" : media.status === "approved" ? "green" : media.status === "rejected" ? "red" : undefined}>{t(`director.workspace.assetStatus.${media.status}`)}</Tag>
               </button>;
             })}
             {!orderedAssetIds.length && <p className="p-5 text-sm text-muted-foreground">{t("director.studio.emptySearch")}</p>}
           </div>
         </nav>
-        <div className="min-w-0">{activeAssetId ? renderAssetCard(activeAssetId, assetPlan.find(value => assetIdOf(value) === activeAssetId), activeShotId) : <div className="flex h-full items-center justify-center rounded-xl border border-border bg-card p-8 text-sm text-muted-foreground">{t("director.workspace.noPendingReviews")}</div>}</div>
+        <div className="min-w-0">{activeAssetId ? renderAssetCard(activeAssetId, assetPlan.find(value => assetIdOf(value) === activeAssetId), activeShotId, { gallery: true }) : <div className="flex h-full items-center justify-center rounded-xl border border-border bg-card p-8 text-sm text-muted-foreground">{t("director.workspace.noPendingReviews")}</div>}</div>
       </div>;
     })() : <Alert type="info" message={t("director.workspace.noAssets")} description={t("director.workspace.noAssetsHint")} />}
     {d && allAssetIds.length > 0 && !allAssetIds.some(id => (assetFilter === "all" || assetCategory(id) === assetFilter) && assetName(id).toLowerCase().includes(assetSearch.toLowerCase())) && <p className="py-12 text-center text-sm text-muted-foreground">{t("director.studio.emptySearch")}</p>}
@@ -553,12 +801,47 @@ export function DirectorPanel({
     </Modal>
   </div>;
 
-  const renderShotDetails = (shot: Record<string, any>, includeCompleteSource = false) => {
+  // 分镜图跟随镜头，但只占一小条：缩略图 + 状态 + 审核；点缩略图看大图，合同编辑收进「详情」。
+  const renderShotKeyframe = (shotId: string) => {
+    const assetId = d?.shotInputs[shotId]?.keyframeAssetId;
+    const media = assetId ? mediaForAsset(assetId, shotId) : undefined;
+    const storageKey = media?.storageKey || frameForShot(shotId) || "";
+    if (!storageKey) return null;
+    const title = `${shotTitle(shotId)} · ${t("director.studio.keyframe")}`;
+    const openPreview = () => setMediaPreview({ assetId: assetId || "", title, storageKey });
+    const pendingReview = Boolean(assetId && media && reviewableAsset(assetId, media));
+    return <section data-production-target={`frame:${shotId}`} className="rounded-lg border border-border bg-card">
+      <div className="flex flex-wrap items-center gap-3 px-3 py-2">
+        <button type="button" onClick={openPreview} title={title} aria-label={t("director.studio.previewAsset", { title })} className="h-[54px] w-[96px] shrink-0 overflow-hidden rounded border border-border bg-muted/30">
+          <img className="h-full w-full object-cover" src={backendMediaUrl(storageKey)} alt={title} loading="lazy" />
+        </button>
+        <div className="min-w-0 flex-1">
+          <p className="flex items-center gap-2 text-xs font-medium"><ImageIcon className="size-3.5 shrink-0 text-muted-foreground" />{t("director.studio.keyframe")}{media && <Tag className="m-0" color={media.status === "approved" ? "green" : media.status === "generated" ? "blue" : media.status === "rejected" ? "red" : "default"}>{t(`director.workspace.assetStatus.${media.status}`)}</Tag>}</p>
+          <p className="mt-1 truncate text-[11px] text-muted-foreground">{assetId ? assetName(assetId) : t("director.studio.canvasKeyframe")}</p>
+        </div>
+        <Button size="small" type="text" onClick={openPreview}>{t("director.workspace.viewOriginal")}</Button>
+      </div>
+      {pendingReview && assetId && media && <div className="flex flex-wrap items-center gap-2 border-t border-border px-3 py-2">
+        <Input size="small" className="min-w-40 flex-1" value={evidence[assetId] ?? media.evidence} disabled={busy || Boolean(reviewingAssets[assetId])} placeholder={t("director.workspace.reviewReason")} onChange={event => setEvidence(current => ({ ...current, [assetId]: event.target.value }))} />
+        <Button size="small" type="primary" loading={Boolean(reviewingAssets[assetId])} disabled={busy || Boolean(reviewingAssets[assetId])} onClick={() => void submitReview(assetId, media.nodeId, media.storageKey, media.sha256, "approved")}>{t("director.workspace.approve")}</Button>
+        <Button size="small" danger loading={Boolean(reviewingAssets[assetId])} disabled={busy || Boolean(reviewingAssets[assetId])} onClick={() => void submitReview(assetId, media.nodeId, media.storageKey, media.sha256, "rejected")}>{t("director.workspace.returnAsset")}</Button>
+      </div>}
+      {assetId && <details className="border-t border-border px-3 py-2"><summary className="cursor-pointer text-[11px] text-muted-foreground">{t("director.studio.keyframeDetails")}</summary><div className="mt-3">{renderAssetCard(assetId, assetPlan.find(item => assetIdOf(item) === assetId), shotId, { review: false, target: false })}</div></details>}
+    </section>;
+  };
+
+  const renderShotDetails = (shot: Record<string, any>, includeCompleteSource = false, workbench?: Record<string, any>) => {
     const id = String(shot.id || "");
+    if (d && isSubjectPromptAssembly(d.source)) return <div className="space-y-5">
+      {renderShotKeyframe(id)}
+      <SubjectShotEditor key={id} shot={shot} source={d.source} canvasNodes={canvasNodes} canvasId={canvasId} busy={busy} workbench={workbench}
+        draftValue={sourceDrafts[`v2shot:${id}`]} onDraftChange={value => onSourceDraftChange(`v2shot:${id}`, value)} onSave={onSaveV2Shot || (async () => false)} />
+    </div>;
     const input = d?.shotInputs[id];
     const segment = segments.find(item => (item.shot_ids || []).includes(id));
     const boundary = segment && d?.boundaries.find(item => item.from === segment.id);
     return <div className="space-y-5" data-shot-reading={id}>
+      {renderShotKeyframe(id)}
       <section className="space-y-2">
         <h4 className="text-xs font-medium text-muted-foreground">{t("director.studio.readingSummary")}</h4>
         <p className="whitespace-pre-wrap text-sm leading-7">{shotDisplayText(shot) || t("director.studio.noVisual")}</p>
@@ -573,7 +856,6 @@ export function DirectorPanel({
       </section>}
       {!includeCompleteSource && <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
         <Button size="small" type="text" icon={<WandSparkles className="size-3.5" />} disabled={busy} onClick={() => onAskDirector({ workspace: "shots", targetId: id, instruction: t("director.workspace.reviseShot") })}>{t("productionCanvas.discussObject")}</Button>
-        {input?.keyframeAssetId && <Button size="small" type="text" icon={<ImageIcon className="size-3.5" />} onClick={() => onNavigate("assets", { kind: "frame", id })}>{t("director.studio.viewFrame")}</Button>}
         {segment && <Button size="small" type="text" icon={<Film className="size-3.5" />} onClick={() => onNavigate("production", { kind: "segment", id: String(segment.id) })}>{segmentTitle(String(segment.id))}<ArrowRight className="ml-1 size-3" /></Button>}
       </div>}
       {includeCompleteSource && <dl className="grid gap-3 text-sm sm:grid-cols-2" data-shot-reading-notes>{(["camera", "state_in", "state_out"] as const).map(field => {
@@ -595,54 +877,25 @@ export function DirectorPanel({
   };
 
   const renderShots = () => {
-    const sceneForShot = (shot: Record<string, any>) => sceneGroups.find(group => group.key === shot.source_scene_id || group.blocks.some(block => block.id === shot.source_scene_id)) || sceneGroups.find(group => group.sceneId === shot.scene_id);
-    const visible = displayedShots.filter(shot => !shotSearch.trim() || `${shot.id} ${shotTitle(String(shot.id))} ${shotDisplayText(shot)} ${sceneForShot(shot)?.title || nameMap[shot.scene_id] || ""}`.toLocaleLowerCase().includes(shotSearch.trim().toLocaleLowerCase()));
-    return <div className="space-y-4" data-storyboard-view>
-    <header className="space-y-3 border-b border-border pb-4">
-      <div className="flex flex-wrap items-center justify-between gap-3"><div>{!compact && <h2 className="text-xl font-semibold">{t("director.studio.storyboard")}</h2>}<p className="text-xs text-muted-foreground">{t("director.studio.shotsSummary", { shots: sourceShots.length, clips: segments.length, seconds: formatSeconds((timelineEnd - timelineStart) / fps) })}</p></div><Button type="text" size="small" icon={<WandSparkles className="size-3.5" />} disabled={busy} onClick={() => onAskDirector({ workspace: "shots" })}>{t("director.studio.collaborate")}</Button></div>
-      <Input allowClear prefix={<Search className="size-3.5 text-muted-foreground" />} value={shotSearch} onChange={event => setShotSearch(event.target.value)} placeholder={t("director.studio.searchShots")} aria-label={t("director.studio.searchShots")} />
-    </header>
-    {displayedShots.length ? <div className="divide-y divide-border">{visible.map((shot, index) => {
-      const id = String(shot.id || ""), number = sourceShots.findIndex(item => item.id === shot.id) + 1;
-      const scene = sceneForShot(shot), sceneKey = String(shot.source_scene_id || shot.scene_id || "");
-      const previous = visible[index - 1];
-      const startScene = !previous || sceneKey !== String(previous.source_scene_id || previous.scene_id || "");
-      const input = d?.shotInputs[id], segment = segments.find(item => (item.shot_ids || []).includes(id));
-      const linkedFrame = frameForShot(id), referenceId = input?.assetIds?.find(assetId => assetCategory(assetId) === "frames" && d?.assets[assetId]?.storageKey);
-      const image = linkedFrame || (referenceId ? d?.assets[referenceId]?.storageKey : undefined), expanded = selectedShot === id;
-      return <div key={id}>
-        {startScene && <div className="flex items-center gap-2 px-3 pt-5 pb-2 text-xs font-medium text-muted-foreground" data-storyboard-scene={sceneKey}><MapPin className="size-3.5" /><span>{scene?.title || nameMap[shot.scene_id] || sceneKey}</span></div>}
-        <article data-production-target={`shot:${id}`} data-storyboard-row className={expanded ? "bg-muted/20" : ""}>
-          <button type="button" aria-label={t("director.studio.openShot", { number })} aria-expanded={expanded} onClick={() => setSelectedShot(expanded ? "" : id)} className="flex w-full items-start gap-3 rounded px-3 py-3 text-left transition-colors hover:bg-muted/40">
-            <span className="w-6 shrink-0 pt-1 text-xs tabular-nums text-muted-foreground">{String(number).padStart(2, "0")}</span>
-            <span className="relative hidden h-12 w-20 shrink-0 items-center justify-center overflow-hidden rounded bg-muted/40 sm:flex">{image ? <img className="h-full w-full object-contain" src={backendMediaUrl(image)} alt={shotTitle(id)} loading="lazy" /> : <Film className="size-4 text-muted-foreground/50" />}</span>
-            <span className="min-w-0 flex-1"><span className="flex flex-wrap items-center gap-x-3 gap-y-1"><strong className="text-sm font-medium">{shotTitle(id)}</strong><span className="text-xs tabular-nums text-muted-foreground">{formatSeconds((Number(shot.end_frame) - Number(shot.start_frame)) / fps)}s</span>{segment && <span className="text-xs text-muted-foreground">{segmentTitle(String(segment.id))}</span>}</span>{!expanded && <span className="mt-1 block text-sm leading-6 text-muted-foreground line-clamp-2">{shotDisplayText(shot) || t("director.studio.noVisual")}</span>}</span>
-            <ChevronDown className={`mt-1 size-4 shrink-0 text-muted-foreground transition-transform ${expanded ? "rotate-180" : ""}`} />
-          </button>
-          {expanded && <div className="px-3 pb-5 sm:pl-12">{renderShotDetails(shot)}</div>}
-        </article>
-      </div>;
-    })}{!visible.length && <p className="px-3 py-8 text-center text-sm text-muted-foreground">{t("director.studio.emptyShotSearch")}</p>}</div> : <Alert type="info" message={t("director.workspace.noShots")} description={t("director.workspace.noShotsHint")} />}
-    <details className="border-t border-border pt-4" data-storyboard-arrangement>
-      <summary className="cursor-pointer text-sm font-medium">{t("director.studio.arrangementDetails")}</summary>
-      <div className="mt-4 space-y-6">
-    <section className="space-y-3"><div><h3 className="font-semibold">{t("director.workspace.segmentsTitle")}</h3><p className="mt-1 text-sm text-muted-foreground">{t("director.workspace.segmentsHint")}</p></div>
-      {segments.length ? segments.map((segment, index) => { const id = String(segment.id || index); const draftKey = `segment:${id}:shot_ids`; return <article key={id} data-production-target={`segment:${id}`} className="rounded-xl border border-border bg-card p-4"><div className="flex flex-wrap items-center justify-between gap-2"><div><h4 className="font-semibold">{segmentTitle(id)}</h4><p className="mt-1 text-sm text-muted-foreground">{(segment.shot_ids || []).map((shotId: string) => shotTitle(String(shotId))).join(" → ") || t("director.workspace.noShotInSegment")}</p></div><Tag color="blue">{String(segment.generation_clip_duration || "—")}s</Tag></div><div className="mt-3 flex flex-wrap gap-2"><Tag>{String(segment.mode || "H3")}</Tag><span className="text-xs text-muted-foreground">{formatSeconds(Number(segment.start_frame) / fps)}–{formatSeconds(Number(segment.end_frame) / fps)}s</span></div><SegmentGroupEditor segment={segment} shots={sourceShots} segments={segments} fps={Number(source.fps_num || 24) / Number(source.fps_den || 1)} draftValue={sourceDrafts[draftKey]} onDraftChange={value => onSourceDraftChange(draftKey, value)} disabled={busy} onSave={onRegroup} /></article>; }) : <Alert type="info" message={t("director.workspace.noSegments")} />}
-    </section>
-    {d && <section className="space-y-3"><div><h3 className="font-semibold">{t("director.workspace.continuityTitle")}</h3><p className="mt-1 text-sm text-muted-foreground">{t("director.workspace.continuityHint")}</p></div>{segments.slice(0, -1).map((segment, index) => {
-      const from = String(segment.id || ""); const to = String(segments[index + 1].id || "");
-      const draftKey = `boundary:${from}:${to}`;
-      return <BoundaryCard key={from} from={from} to={to} fromLabel={segmentTitle(from)} toLabel={segmentTitle(to)} boundary={d.boundaries.find(item => item.from === from && item.to === to)} draftValue={sourceDrafts[draftKey]} onDraftChange={value => onSourceDraftChange(draftKey, value)} disabled={busy} onSave={onBoundary} />;
-    })}</section>}
-      </div>
-    </details>
-  </div>;
+    if (d) return <SubjectStoryboardWorkbench director={d} production={production} owner={subjectOwner} canvasNodes={canvasNodes}
+      initialShotId={focusTarget?.startsWith("shot:") ? focusedId : undefined} renderEditor={(shot, workbench) => renderShotDetails(shot, false, workbench)}
+      clipEditor={subjectAssembly ? <SubjectClipPartitionEditor shots={sourceShots} segments={segments} fps={fps} busy={busy} shotTitle={shotTitle} draftValue={sourceDrafts.v2clips} onDraftChange={value => onSourceDraftChange("v2clips", value)} onSave={onRepartitionClips || (async () => false)} /> : <div className="space-y-4">{segments.map(segment => <section key={segment.id} className="border-b border-border pb-4"><h3 className="text-sm font-medium">{segmentTitle(String(segment.id))}</h3><SegmentGroupEditor segment={segment} shots={sourceShots} segments={segments} fps={fps} draftValue={sourceDrafts[`segment:${segment.id}:shot_ids`]} onDraftChange={value => onSourceDraftChange(`segment:${segment.id}:shot_ids`, value)} disabled={busy} onSave={onRegroup} /></section>)}</div>}
+      onSubjects={() => onNavigate("assets")} onContinuity={() => onNavigate("continuity")} onClip={id => onNavigate("production", { kind: "segment", id })}
+      onDiscuss={targetId => onAskDirector({ workspace: "shots", targetId })} />;
+    return <div className="space-y-3"><Alert type="info" message={t("director.workspace.noShots")} /><Button type="text" disabled={busy} icon={<WandSparkles className="size-3.5" />} onClick={() => onAskDirector({ workspace: "shots" })}>{t("director.studio.collaborate")}</Button></div>;
   };
 
   const continuitySource = continuityReport?.snapshot === "published" ? (production.published?.director || d) : d;
-  const renderContinuity = () => <ContinuityPanel locations={records(continuitySource?.source.scene_registry)} ledger={continuitySource?.source.ledger as Record<string, unknown> | undefined} sourceHash={continuitySource?.sourceHash || ""} editable={continuityReport?.snapshot !== "published"}
+  const continuityWindows = subjectShotWindows(continuitySource?.source || {});
+  const continuityShots = records(continuitySource?.source.shots || sourceShots).map(shot => {
+    const window = continuityWindows.get(String(shot.id));
+    return window ? { ...shot, start_frame: window.startFrame, end_frame: window.endFrame } : shot;
+  });
+  const renderContinuity = () => <ContinuityPanel key={JSON.stringify(subjectOwner) + ":" + (continuityReport?.snapshot || "draft")} locations={records(continuitySource?.source.scene_registry)} ledger={continuitySource?.source.ledger as Record<string, unknown> | undefined} sourceHash={continuitySource?.sourceHash || ""} editable={continuityReport?.snapshot !== "published"}
+    draftValue={continuityReport?.snapshot !== "published" ? sourceDrafts.v2ledger : undefined} onDraftChange={continuityReport?.snapshot !== "published" ? value => onSourceDraftChange("v2ledger", value) : undefined}
+    subjectAssembly={isSubjectPromptAssembly(continuitySource?.source || {})}
     workId={readiness?.presentation?.workId || continuitySource?.workflow.currentWork?.workId}
-    scenes={Array.isArray(continuitySource?.source.script_scenes) ? records(continuitySource.source.script_scenes) : scriptScenes} shots={Array.isArray(continuitySource?.source.shots) ? records(continuitySource.source.shots) : sourceShots} segments={Array.isArray(continuitySource?.source.segments) ? records(continuitySource.source.segments) : segments} boundaries={continuitySource?.boundaries || []} characters={Array.isArray(continuitySource?.source.character_registry) ? records(continuitySource.source.character_registry) : characters} assets={Array.isArray(continuitySource?.source.asset_plan) ? records(continuitySource.source.asset_plan) : assetPlan} report={continuityReport} busy={busy}
+    scenes={Array.isArray(continuitySource?.source.script_scenes) ? records(continuitySource.source.script_scenes) : scriptScenes} shots={continuityShots} segments={Array.isArray(continuitySource?.source.segments) ? records(continuitySource.source.segments) : segments} boundaries={continuitySource?.boundaries || []} characters={Array.isArray(continuitySource?.source.character_registry) ? records(continuitySource.source.character_registry) : characters} assets={Array.isArray(continuitySource?.source.asset_plan) ? records(continuitySource.source.asset_plan) : assetPlan} report={continuityReport} busy={busy}
     onSave={onSaveContinuity || (async () => false)} onPreviewUpgrade={onPreviewContinuityUpgrade || (async () => ({}))} onCheck={onCheckContinuity || (async () => undefined)} onBoundary={value => onBoundary(value as DirectorProduction["boundaries"][number])} onLocate={(kind, id) => onLocateTarget?.(kind, id)} onAskDirector={onAskDirector} onRequestAgentUpgrade={onRequestContinuityUpgrade} agentThreadId={d?.workflow.agentThreadId} onSnapshot={onContinuitySnapshot} />;
 
   const renderProduction = () => <div className="space-y-5">
@@ -656,7 +909,12 @@ export function DirectorPanel({
 </div></details>
     {!generationSupported && <Alert type="info" showIcon message={t("director.workspace.sceneGenerationUnavailable")} />}
     {run && <section className="rounded-2xl border border-border bg-card p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs uppercase tracking-wide text-muted-foreground">{t("director.workspace.activeRun")}</p><h3 className="mt-1 font-semibold">{t(`director.studio.runStatus.${run.status}`, { defaultValue: run.status })}</h3></div><div className="flex gap-2">{["pending", "running"].includes(run.status) && <Button size="small" icon={<Pause className="size-3" />} onClick={() => onPause(run.runId)}>{t("director.workspace.pause")}</Button>}{["paused", "awaiting_review"].includes(run.status) && <Button size="small" type="primary" icon={<Play className="size-3" />} onClick={() => onResume(run.runId)}>{t("director.workspace.resume")}</Button>}</div></div><p className="mt-2 text-sm text-muted-foreground">{run.executionSnapshot?.inputBasis === "canvas" ? t("director.workspace.canvasRunSummary", { count: run.targets.length }) : t("director.studio.runSummary", { version: run.version, count: run.targets.length })}</p>{run.error && <Alert className="mt-3" type={run.status === "failed" ? "error" : "warning"} showIcon message={run.error} />}</section>}
-    {deliveredClips.length > 0 && <section className="space-y-3"><div><h3 className="font-semibold">{t("director.workspace.deliveredVideos")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("director.workspace.technicalCloseout")}</p></div><div className="grid gap-3 md:grid-cols-2">{deliveredClips.map(({ group, storageKey }) => <article key={`${group.id}:${storageKey}`} className="rounded-xl border border-border bg-card p-3"><video className="w-full rounded-lg bg-black" controls preload="metadata" src={backendMediaUrl(storageKey)} /><p className="mt-2 text-sm font-medium">{segmentTitle(group.id)}</p></article>)}</div></section>}
+    {deliveredClips.length > 0 && (() => {
+      const selected = deliveredClips.find(item => item.group.id === selectedDeliveryId) || deliveredClips[0];
+      const index = deliveredClips.indexOf(selected);
+      return <section className="space-y-3"><div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="font-semibold">{t("director.workspace.deliveredVideos")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("director.workspace.technicalCloseout")}</p></div><Button size="small" icon={<ArrowDownToLine className="size-3" />} loading={downloadingAllClips} onClick={() => void downloadAllDeliveredClips()}>{t("director.workspace.downloadAllClips")}</Button></div><div className="grid items-start gap-4 lg:grid-cols-[220px_minmax(0,1fr)]"><nav className="max-h-64 overflow-y-auto rounded-xl border border-border lg:max-h-[60dvh]" aria-label={t("director.workspace.deliveredVideos")}>{deliveredClips.map(({ group }) => <button key={group.id} type="button" aria-current={selected.group.id === group.id ? "true" : undefined} onClick={() => setSelectedDeliveryId(group.id)} className={`flex w-full items-center gap-2 border-b border-border px-3 py-3 text-left last:border-0 ${selected.group.id === group.id ? "bg-muted" : "hover:bg-muted/40"}`}><Film className="size-4 shrink-0 text-muted-foreground" /><span className="truncate text-sm">{segmentTitle(group.id)}</span></button>)}</nav><article className="min-w-0 space-y-3 rounded-xl border border-border bg-card p-3"><video key={selected.storageKey} className="max-h-[52dvh] w-full rounded-lg" controls preload="metadata" src={backendMediaUrl(selected.storageKey)} /><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-medium">{segmentTitle(selected.group.id)}</p><div className="flex flex-wrap gap-2"><Button size="small" onClick={() => onNavigate("shots", segments.find(segment => segment.id === selected.group.id)?.shot_ids?.[0] ? { kind: "shot", id: String(segments.find(segment => segment.id === selected.group.id)?.shot_ids?.[0]) } : undefined)}>{t("director.workspace.tab.shots")}</Button><Button size="small" onClick={() => onLocateTarget?.("segment", selected.group.id)}>{t("productionCanvas.locateResult")}</Button><Button size="small" icon={<ArrowDownToLine className="size-3" />} onClick={() => void downloadDeliveredClip(selected.storageKey, clipFileName(index, segmentTitle(selected.group.id), null)).catch(cause => message.error(String(cause)))}>{t("common.download")}</Button></div></div></article></div></section>;
+    })()}
+
     {!deliveredClips.length && <div className="flex min-h-36 flex-col items-center justify-center rounded-xl border border-dashed border-border bg-muted/20 p-6 text-center"><Film className="mb-3 size-7 text-muted-foreground" /><h3 className="font-medium">{t("director.studio.noResults")}</h3><p className="mt-2 text-sm text-muted-foreground">{t("director.studio.noResultsHint")}</p></div>}
     {mode === "automatic" && <Button icon={<Play className="size-4" />} disabled={!generationSupported || busy || runStartPending || !readiness?.targets.some(item => item.status === "ready" && !activeTargetIds.includes(item.id))} onClick={() => onStart((readiness?.targets || []).filter(item => item.status === "ready" && !activeTargetIds.includes(item.id)).map(item => item.id), "all_ready")}>{t("director.workspace.startAutomatic")}</Button>}
     {mode === "prompt_only" && <Alert type="info" showIcon message={t("director.workspace.promptOnlyHint")} />}
@@ -738,10 +996,9 @@ export function DirectorPanel({
     return <section data-production-object-editor className="space-y-5">
       <header className="flex flex-wrap items-start justify-between gap-3 border-b border-border pb-4">
         <div><p className="text-xs text-muted-foreground">{t("director.studio.shotNumber", { number: index + 1 })} · {formatSeconds((Number(focusedShot.end_frame) - Number(focusedShot.start_frame)) / fps)}s</p><h2 className="mt-1 text-lg font-semibold">{shotTitle(focusedId)}</h2></div>
-        <div className="flex items-center gap-1"><Button size="small" type="text" onClick={() => { setSelectedShot(""); onNavigate("shots"); }}>{t("director.studio.allShots")}</Button><Button size="small" type="text" aria-label={t("director.studio.previousShot")} icon={<ArrowLeft className="size-3.5" />} disabled={index <= 0} onClick={() => onNavigate("shots", { kind: "shot", id: String(sourceShots[index - 1].id) })} /><Button size="small" type="text" aria-label={t("director.studio.nextShot")} icon={<ArrowRight className="size-3.5" />} disabled={index >= sourceShots.length - 1} onClick={() => onNavigate("shots", { kind: "shot", id: String(sourceShots[index + 1].id) })} /></div>
+        <div className="flex items-center gap-1"><Button size="small" type="text" onClick={() => { onNavigate("shots"); }}>{t("director.studio.allShots")}</Button><Button size="small" type="text" aria-label={t("director.studio.previousShot")} icon={<ArrowLeft className="size-3.5" />} disabled={index <= 0} onClick={() => onNavigate("shots", { kind: "shot", id: String(sourceShots[index - 1].id) })} /><Button size="small" type="text" aria-label={t("director.studio.nextShot")} icon={<ArrowRight className="size-3.5" />} disabled={index >= sourceShots.length - 1} onClick={() => onNavigate("shots", { kind: "shot", id: String(sourceShots[index + 1].id) })} /></div>
       </header>
       {renderShotDetails(focusedShot)}
-      {frameForShot(focusedId) && <details className="border-t border-border pt-3"><summary className="cursor-pointer text-xs text-muted-foreground">{t("director.studio.viewFrame")}</summary><img className="mt-3 max-h-[32dvh] w-full object-contain" src={backendMediaUrl(frameForShot(focusedId)!)} alt={shotTitle(focusedId)} /></details>}
     </section>;
   }
   if (compact && workspace === "production" && focusedSegment) {
@@ -786,7 +1043,7 @@ export function DirectorPanel({
         <summary className="cursor-pointer text-sm text-muted-foreground">{t("director.studio.clipSourceDetails")}</summary>
         <div className="mt-4 space-y-4"><p className="text-xs text-muted-foreground">{t("director.studio.clipSourceHint")}</p><SourceData value={focusedSegment} names={nameMap} />{Boolean(ledger) && <details><summary className="cursor-pointer text-sm text-muted-foreground">{t("director.studio.continuityLedger")}</summary><div className="mt-3"><SourceData value={ledger} names={nameMap} /></div></details>}</div>
       </details>
-      <details className="border-t border-border pt-4"><summary className="cursor-pointer text-sm text-muted-foreground">{t("productionCanvas.objectDetails")}</summary>{target?.blockers.slice(1).map(reason => <p key={reason} className="mt-2 text-sm text-muted-foreground">{humanMessage(reason)}</p>)}<SegmentGroupEditor segment={focusedSegment} shots={sourceShots} segments={segments} fps={fps} draftValue={sourceDrafts[`segment:${focusedId}:shot_ids`]} onDraftChange={value => onSourceDraftChange(`segment:${focusedId}:shot_ids`, value)} disabled={busy} onSave={onRegroup} /></details>
+      <details className="border-t border-border pt-4"><summary className="cursor-pointer text-sm text-muted-foreground">{t("productionCanvas.objectDetails")}</summary>{target?.blockers.slice(1).map(reason => <p key={reason} className="mt-2 text-sm text-muted-foreground">{humanMessage(reason)}</p>)}{subjectAssembly ? <SubjectClipPartitionEditor shots={sourceShots} segments={segments} fps={fps} busy={busy} shotTitle={shotTitle} draftValue={sourceDrafts.v2clips} onDraftChange={value => onSourceDraftChange("v2clips", value)} onSave={onRepartitionClips || (async () => false)} /> : <SegmentGroupEditor segment={focusedSegment} shots={sourceShots} segments={segments} fps={fps} draftValue={sourceDrafts[`segment:${focusedId}:shot_ids`]} onDraftChange={value => onSourceDraftChange(`segment:${focusedId}:shot_ids`, value)} disabled={busy} onSave={onRegroup} />}</details>
     </section>;
   }
   const batchTasks = new Set(batches.flatMap(batch => batch.submitted.map(task => task.taskId)));
@@ -799,9 +1056,13 @@ export function DirectorPanel({
     {currentTasks.map(task => { const nodeId = String(task.nodeId || task.input?.nodeId || ""), segmentId = String(task.segmentId || task.input?.segmentId || ""); const group = production.draft.clipGroups.find(group => group.nodeId === nodeId && group.segmentId === segmentId); const frame = Object.entries(production.draft.keyframes).find(([, frame]) => frame.nodeId === nodeId); const asset = Object.entries(d?.assets || {}).find(([, asset]) => asset.nodeId === nodeId); const kind = group ? "segment" : frame ? "keyframe" : "asset", id = group?.id || frame?.[0] || asset?.[0]; return <article key={task.id} className="rounded-lg border border-border p-4"><div className="flex flex-wrap items-center justify-between gap-2"><span>{id ? targetName(kind, id) : t("productionCanvas.videoTarget")}</span><Tag>{t(`productionCanvas.historyStatus.${task.status === "succeeded" ? "success" : task.status === "awaiting_confirmation" ? "confirmation" : task.status}`)}</Tag></div>{task.status === "running" && <p className="mt-2 text-xs text-muted-foreground">{Math.round((task.progress || 0) * 100)}%</p>}{task.error && <p className="mt-2 whitespace-pre-wrap text-sm text-muted-foreground">{humanMessage(task.error)}</p>}{id && <Button className="mt-2" type="text" size="small" onClick={() => onLocateTarget?.(kind, id)}>{t("productionCanvas.locateResult")}</Button>}</article>; })}
     {!batches.length && !currentTasks.length && <p className="text-sm text-muted-foreground">{t("productionCanvas.noTasks")}</p>}
     {readiness?.targets.some(target => ["blocked", "needs_review"].includes(target.status)) && <details className="border-t border-border pt-4"><summary className="cursor-pointer text-sm">{t("productionCanvas.needsAttention")}</summary><div className="mt-3 space-y-3">{readiness.targets.filter(target => ["blocked", "needs_review"].includes(target.status)).map(target => <div key={target.id}><Button size="small" type="text" onClick={() => onLocateTarget?.(target.kind, target.targetId)}>{targetName(target.kind, target.targetId, target.title)}</Button><p className="mt-1 text-sm text-muted-foreground">{humanMessage(target.blockers[0] || target.notice || t(`director.workspace.targetStatus.${target.status}`))}</p></div>)}</div></details>}
-    <section className="space-y-3 border-t border-border pt-4"><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-medium">{t("productionCanvas.deliveries")}</h3><Button size="small" loading={exporting} disabled={!d || exporting} onClick={() => void onExport(true)}>{t("productionCanvas.downloadPackage")}</Button></div>{deliveredClips.length ? deliveredClips.map(({ group, storageKey }) => <article key={`${group.id}:${storageKey}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border p-3"><span>{segmentTitle(group.id)}</span><div className="flex gap-2"><Button size="small" type="text" onClick={() => onLocateTarget?.("segment", group.id)}>{t("productionCanvas.locateResult")}</Button><Button size="small" aria-label={t("common.download")} onClick={() => { void fetch(backendMediaUrl(storageKey)).then(async response => { if (!response.ok) throw new Error(t("director.workspace.mediaReadFailed")); saveAs(await response.blob(), `${segmentTitle(group.id).replace(/[\\/:*?"<>|]/g, "_")}.${response.headers.get("content-type")?.includes("webm") ? "webm" : "mp4"}`); }).catch(error => message.error(String(error))); }}>{t("common.download")}</Button></div></article>) : <p className="text-sm text-muted-foreground">{t("productionCanvas.noDeliveries")}</p>}</section>
+    <section className="space-y-3 border-t border-border pt-4"><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-medium">{t("productionCanvas.deliveries")}</h3><div className="flex gap-2"><Button size="small" icon={<ArrowDownToLine className="size-3" />} loading={downloadingAllClips} disabled={!deliveredClips.length} onClick={() => void downloadAllDeliveredClips()}>{t("director.workspace.downloadAllClips")}</Button><Button size="small" loading={exporting} disabled={!d || exporting} onClick={() => void onExport(true)}>{t("productionCanvas.downloadPackage")}</Button></div></div>{deliveredClips.length ? deliveredClips.map(({ group, storageKey }) => <article key={`${group.id}:${storageKey}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border p-3"><span>{segmentTitle(group.id)}</span><div className="flex gap-2"><Button size="small" type="text" onClick={() => onLocateTarget?.("segment", group.id)}>{t("productionCanvas.locateResult")}</Button><Button size="small" aria-label={t("common.download")} onClick={() => { void fetch(backendMediaUrl(storageKey)).then(async response => { if (!response.ok) throw new Error(t("director.workspace.mediaReadFailed")); saveAs(await response.blob(), `${segmentTitle(group.id).replace(/[\\/:*?"<>|]/g, "_")}.${response.headers.get("content-type")?.includes("webm") ? "webm" : "mp4"}`); }).catch(error => message.error(String(error))); }}>{t("common.download")}</Button></div></article>) : <p className="text-sm text-muted-foreground">{t("productionCanvas.noDeliveries")}</p>}</section>
   </section>;
   return <section className="space-y-4">
+    {production.clipRefreshes?.map(job => <Alert key={job.operationId} showIcon
+      type={["blocked", "failed", "interrupted"].includes(job.status) ? "warning" : "info"}
+      message={t("director.workspace.clipRefreshStatus." + job.status, { segment: segmentTitle(job.segmentId) })}
+      description={job.blockingDiagnostic?.message} />)}
     {workspace === "overview" && renderOverview()}
     {workspace === "story" && renderStory()}
     {workspace === "assets" && renderAssets()}

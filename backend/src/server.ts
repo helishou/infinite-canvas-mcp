@@ -1823,6 +1823,12 @@ export function startServer(
         });
     res.json({ ok: true, tasks });
   });
+  app.get(`${CANVAS_TASK_ROUTE}/status`, (req, res) => {
+    const task = stores.tasks.get(req.params.id);
+    if (!task)
+      return void res.status(404).json({ ok: false, error: "task not found", code: "TASK_NOT_FOUND" });
+    res.json({ ok: true, task: { id: task.id, status: task.status } });
+  });
   app.get(CANVAS_TASK_ROUTE, (req, res) => {
     const task = stores.tasks.get(req.params.id);
     if (!task)
@@ -1903,12 +1909,21 @@ export function startServer(
       const task = deps.cancelTask
         ? deps.cancelTask(current)
         : stores.tasks.cancel(taskId);
+      const h3TaskSummary = current.kind === "canvas-h3-run" ? {
+        id: task.id,
+        kind: task.kind,
+        status: task.status,
+        projectId: String((task.input as Record<string, unknown> | undefined)?.projectId || ""),
+        nodeId: String((task.input as Record<string, unknown> | undefined)?.nodeId || ""),
+        segmentId: String((task.input as Record<string, unknown> | undefined)?.segmentId || ""),
+        updatedAt: task.updatedAt,
+      } : null;
       events.publish({
         type: "task.updated",
         entityId: task.id,
-        payload: task,
+        payload: h3TaskSummary || task,
       });
-      res.json({ ok: true, task });
+      res.json({ ok: true, task: h3TaskSummary || task });
     } catch (error) {
       res.status(409).json({ ok: false, error: (error as Error).message });
     }

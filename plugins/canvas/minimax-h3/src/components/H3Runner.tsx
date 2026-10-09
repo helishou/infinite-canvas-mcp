@@ -52,7 +52,8 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
             if (!segments.length) throw new Error("当前节点没有可生成的 Clip");
             const selectedId = String(selected?.id || metadata.selectedSegmentId || "");
             if (!selectedId) throw new Error("当前节点没有可定位的 Clip");
-            await ctx.flush();
+            // The host's runCanvasGeneration path flushes the canvas before submitting this H3 command.
+            if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("minimax-h3:submit-pending", { detail: { nodeId: ctx.node.id, segmentId: selectedId, pending: true } }));
             await ctx.ai.runCanvasGeneration({ mode: "video", operation: "h3-run", projectId: ctx.projectId, nodeId: ctx.node.id, segmentId: selectedId, runFromCurrent, forceRegenerate });
         } catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
@@ -61,6 +62,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 : detail;
             message.error(!runFromCurrent && clipNumber > 0 && !/\bClip\s+\d+\b/iu.test(readable) ? `Clip ${clipNumber}：${readable}` : readable);
         } finally {
+            if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("minimax-h3:submit-pending", { detail: { nodeId: ctx.node.id, segmentId, pending: false } }));
             runInFlight.current.delete(segmentId);
         }
     };

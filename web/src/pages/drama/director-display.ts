@@ -43,3 +43,19 @@ export function formatSeconds(value: unknown) {
     const number = Number(value);
     return Number.isFinite(number) && number >= 0 ? String(Math.round(number * 10) / 10) : '—';
 }
+
+
+/** Story has its own semantics; a generic goal must not hide the authored action. */
+export function storyBeatCards(beats: DirectorRecord[], sceneId?: string) {
+    const selected = sceneId ? beats.filter(beat => String(beat.scene_id) === sceneId) : beats;
+    const repeatedFields = ["goal", "obstacle", "cost"].filter(field => selected.length > 1 && selected.every(beat => typeof beat[field] === "string" && beat[field].trim() && beat[field].trim() === selected[0][field]?.trim()));
+    return selected.map(beat => ({ beat, text: readableText(beat.summary || beat.description || beat.choice || beat.result || beat.goal), repeatedFields }));
+}
+
+
+/** Preview selection is local UI state and never selects a production reference. */
+export function assetImagePreview(currentStorageKey: string, nodeImages: unknown, selectedKey?: string) {
+    const images = [...new Set([currentStorageKey, ...records(nodeImages).filter(image => image.status === "success" && image.storageKey).map(image => String(image.storageKey))].filter(Boolean))];
+    const previewKey = selectedKey && images.includes(selectedKey) ? selectedKey : currentStorageKey;
+    return { images, previewKey, browsingHistory: previewKey !== currentStorageKey };
+}

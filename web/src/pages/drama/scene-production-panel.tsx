@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Alert, App, Button, Image, Input, Modal, Tag } from "antd";
+import { Alert, App, Button, Input, Modal, Tag } from "antd";
+import { MediaImage } from "@/components/media/media-image";
 import { useTranslation } from "react-i18next";
 import { productionSceneEntries } from "@basketikun/canvas-agent/drama/production-contract";
 import { backendMediaUrl, fetchProductionSceneWork, type ProductionSceneAction, type EpisodeProduction, type ProductionTarget, type SceneWorkInspection } from "@/services/backend-api";
@@ -84,7 +85,7 @@ export function SceneProductionPanel({ production, owner, onRefresh, onCommand, 
             <div className="max-h-[65vh] space-y-4 overflow-y-auto">
                 <h4 className="font-medium">{t("sceneProduction.source")}</h4>
                 {(sourceEntries || []).map((item: any, index: number) => <article key={String(item.id || index)} className="rounded border border-border p-3"><strong>{item.title || item.display_summary || item.heading || item.id}</strong><p className="whitespace-pre-wrap">{readableText(item.visual || item.text || item.prompt || item.description || item)}</p>{item.performance && <p className="whitespace-pre-wrap">{readableText(item.performance)}</p>}{item.combat && <p className="whitespace-pre-wrap">{readableText(item.combat)}</p>}</article>)}
-                {active?.media?.length ? <div className="grid grid-cols-2 gap-3">{active.media.map(item => <div key={item.targetId}><p className="text-xs">{item.targetId}</p><Image src={backendMediaUrl(item.storageKey)} alt={item.targetId} /></div>)}</div> : <p className="text-muted-foreground">{t("sceneProduction.noMedia")}</p>}
+                {active?.media?.length ? <div className="grid grid-cols-2 gap-3">{active.media.map(item => <div key={item.targetId}><p className="text-xs">{item.targetId}</p><MediaImage src={backendMediaUrl(item.storageKey)} alt={item.targetId} /></div>)}</div> : <p className="text-muted-foreground">{t("sceneProduction.noMedia")}</p>}
                 {reviewRecords.length > 0 && <details className="rounded border border-border p-3"><summary className="cursor-pointer font-medium">{t("sceneProduction.reviewHistory")}</summary><div className="mt-3 space-y-3">{reviewRecords.map((record, index) => <article key={`${record.checkedAt}:${index}`}><p className="text-xs text-muted-foreground">{t(`sceneProduction.verdict.${record.verdict}`)} · {new Date(record.checkedAt).toLocaleString()} · {record.media.map(item => item.targetId).join(", ")}</p><p className="whitespace-pre-wrap">{record.evidence}</p></article>)}</div></details>}
                 <Input.TextArea value={evidence} onChange={event => setEvidence(event.target.value)} placeholder={t("sceneProduction.evidence")} autoSize={{ minRows: 3 }} />
             </div>

@@ -44,9 +44,9 @@ test("独立节点、字段和 Clip 编辑重放保留双方修改，同字段�
     assert.deepEqual(detectCanvasConflicts(local, remote, base), []);
     const merged = applyBackendCanvasDelta(remote, local, 2);
     assert.equal(merged.nodes[0].title, "Local title");
-    assert.equal(merged.nodes[0].metadata.prompt, "Remote prompt");
-    assert.equal(merged.nodes[1].metadata.prompt, "Local B prompt");
-    const segments = merged.nodes[2].metadata.segments;
+    assert.equal(merged.nodes[0].metadata?.prompt, "Remote prompt");
+    assert.equal(merged.nodes[1].metadata?.prompt, "Local B prompt");
+    const segments = merged.nodes[2].metadata?.segments as Array<Record<string, any>>;
     assert.equal(segments[0].prompt, "Remote clip");
     assert.equal(segments[0].duration, 6);
     assert.equal(segments[1].prompt, "Local clip");
@@ -61,7 +61,7 @@ test("Clip 派生起点不提交，排序生成移动命令并能通过回放恢
     const operations = diffCanvasProject(base, next);
     assert.deepEqual(operations, [{ type: "update_h3_segment", nodeId: "h3", segmentId: "a", patch: { duration: 8 } }, { type: "move_h3_segment", nodeId: "h3", segmentId: "b", beforeSegmentId: "a" }]);
     assert.deepEqual(detectCanvasConflicts(operations, base, base), []);
-    const replayed = applyBackendCanvasDelta(base, operations);
+    const replayed = applyBackendCanvasDelta(base, operations, 1);
     assert.deepEqual(replayed.nodes[0].metadata?.segments, next.nodes[0].metadata.segments);
     assert.deepEqual(diffCanvasProject(replayed, next), []);
     assert.equal(detectCanvasConflicts(operations, replayed, base).length, 2);

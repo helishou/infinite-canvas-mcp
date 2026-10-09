@@ -102,6 +102,8 @@ export type CanvasNodeMetadata = {
     /** 新建的智能生成节点把提示词、参数和结果收在同一个 Config 节点里。 */
     smart?: boolean;
     prompt?: string;
+    /** H3 节点保存的 Clip 投影；V2 正式提示词只由 Backend 从 Shot 源稿编译。 */
+    segments?: Array<Record<string, unknown>>;
     status?: CanvasNodeStatus;
     /** 后端回写的运行进度（0–1），仅生成中有效；前端只读，不得回写。 */
     runProgress?: number;
@@ -145,6 +147,8 @@ export type CanvasNodeMetadata = {
     freeResize?: boolean;
     images?: CanvasNodeImage[];
     primaryImageId?: string;
+    /** Reference selection is independent of browsing and generation settings. */
+    smartImageReferenceSelection?: { mode: "latest_success" } | { mode: "selected_result"; resultId: string };
     /** 当前显示的智能图片历史版本。 */
     activeImageHistoryId?: string | null;
     /** 只有用户主动选中历史版本时，才用该版本的参考图快照覆盖实时连线。 */

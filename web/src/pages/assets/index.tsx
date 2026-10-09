@@ -1,6 +1,6 @@
 import { Check, Clapperboard, Copy, Download, FolderPlus, PencilLine, Search, Trash2, Upload, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
-import { App, Alert, Button, Card, Drawer, Dropdown, Empty, Form, Image, Input, Modal, Pagination, Select, Space, Tag, Typography } from "antd";
+import { App, Alert, Button, Card, Drawer, Dropdown, Empty, Form, Input, Modal, Pagination, Select, Space, Tag, Typography } from "antd";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
@@ -11,6 +11,7 @@ import { getImageBlob, resolveImageUrl, uploadImage } from "@/services/image-sto
 import { getMediaBlob, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { cn } from "@/lib/utils";
 import { VoiceAssetSelect } from "@/components/assets/voice-asset-select";
+import { MediaImage } from "@/components/media/media-image";
 import { SceneColorPaletteEditor } from "@/components/canvas/scene-color-palette-editor";
 import { findCharacterVoiceAsset, hasCharacterVoiceSource, resolveCharacterVoiceName } from "@/lib/character-voice";
 import { extractSceneColorPalette, normalizeSceneColorPalette } from "@/lib/canvas/scene-color-palette";
@@ -1253,7 +1254,7 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload, onDownloadCharacter }
             {asset ? (
                 <div className="space-y-5">
                     {cover ? (
-                        <Image src={cover} alt={asset.title} className="rounded-lg" />
+                        <MediaImage src={cover} alt={asset.title} name={asset.title} className="rounded-lg" />
                     ) : (
                         <div className="rounded-lg border border-stone-200 bg-stone-50 p-5 text-sm leading-6 text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">{asset.kind === "text" ? asset.data.content : t("assets.noCover")}</div>
                     )}
@@ -1298,7 +1299,7 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload, onDownloadCharacter }
                                  {asset.data.images.length ? (
                                     <div className="grid grid-cols-3 gap-2">
                                         {asset.data.images.map((image, idx) => (
-                                            <Image key={idx} src={image.url} alt={image.outfit || image.name} className="!rounded-md" />
+                                            <MediaImage key={idx} src={image.url} alt={image.outfit || image.name} name={image.outfit || image.name} className="!rounded-md" />
                                         ))}
                                     </div>
                                 ) : null}
@@ -1306,7 +1307,7 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload, onDownloadCharacter }
                         ) : asset.kind === "scene" ? (
                             <div className="mt-2 space-y-3">
                                 {asset.data.description ? <Typography.Paragraph className="!mb-0 whitespace-pre-wrap">{asset.data.description}</Typography.Paragraph> : null}
-                                {asset.data.colorCard ? <Image src={asset.data.colorCard.url} alt={t("assets.fields.sceneColorCard")} className="!max-h-40 !rounded-md !object-cover" /> : null}
+                                {asset.data.colorCard ? <MediaImage src={asset.data.colorCard.url} alt={t("assets.fields.sceneColorCard")} className="!max-h-40 !rounded-md !object-cover" /> : null}
                                 {asset.data.colorCardPrompt ? <Typography.Paragraph type="secondary" className="!mb-0 whitespace-pre-wrap">{asset.data.colorCardPrompt}</Typography.Paragraph> : null}
                             </div>
                         ) : (
@@ -1451,7 +1452,7 @@ function CharacterEditor({ images, primaryIndex, onPrimaryIndexChange, onChange 
                     <div className="flex gap-3">
                         <div className="size-20 shrink-0 overflow-hidden rounded-md border border-stone-200 bg-stone-50 dark:border-stone-700 dark:bg-stone-900">
                             {previews[idx] ? (
-                                <Image src={previews[idx]} alt={image.outfit || image.name} preview={{ src: previews[idx] }} className="!size-full !object-cover" />
+                                <MediaImage src={previews[idx]} alt={image.outfit || image.name} name={image.outfit || image.name} className="!size-full !object-cover" />
                             ) : (
                                 <div className="flex size-full items-center justify-center text-xs text-stone-400">无图</div>
                             )}

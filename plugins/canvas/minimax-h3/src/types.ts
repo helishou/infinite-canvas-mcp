@@ -44,7 +44,7 @@ export type H3CharacterGroupEditPatch = {
     voiceEnabled?: boolean;
 };
 
-export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; generationLogId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; storyboardSubjectIds?: string[]; order?: number; groupId?: string; outfitId?: string; bindingId?: string; assetId?: string; tags?: string[]; description?: string; enabled?: boolean; usage?: H3ReferenceUsage; retentionLevel?: H3ReferenceRetention; analysis?: Record<string, unknown>; runtime?: boolean };
+export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; generationLogId?: string; taskId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; storyboardSubjectIds?: string[]; order?: number; groupId?: string; outfitId?: string; bindingId?: string; assetId?: string; tags?: string[]; description?: string; enabled?: boolean; usage?: H3ReferenceUsage; retentionLevel?: H3ReferenceRetention; analysis?: Record<string, unknown>; runtime?: boolean };
 export type H3StoryboardShot = { id: string; duration?: number; referenceBindingId?: string };
 
 /**

@@ -1,6 +1,6 @@
 import { useRef, useState } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
-import { Select, Switch } from "antd";
+import { message, Select, Switch } from "antd";
 import type { H3Segment } from "../types";
 import { exportH3Settings, importH3Settings } from "../services/h3-segment-utils";
 import { useDefaultParams, writeDefaultParams } from "../services/h3-defaults";
@@ -13,9 +13,37 @@ import { H3Icon } from "./H3Icon";
 import { requestH3Run, resolveH3PaneSizes } from "./H3WorkbenchPrimitives";
 import { h3Label, useH3Locale } from "../h3-locale";
 
-type Props = { ctx: CanvasNodeContext; metadata: Record<string, unknown>; selected?: H3Segment; patchSelected: (patch: Partial<H3Segment>) => void; patchAllSettings: (patch: Partial<H3Segment>) => void };
+type Props = { ctx: CanvasNodeContext; metadata: Record<string, unknown>; selected?: H3Segment; submitting?: boolean; patchSelected: (patch: Partial<H3Segment>) => void; patchAllSettings: (patch: Partial<H3Segment>) => void };
 
-export function H3ClipSettingsPanel({ ctx, metadata, selected, patchSelected, patchAllSettings }: Props) {
+function H3RunActionButtons({ ctx, selected, runtimeTaskId, busy, stuck, canCancel, canResetAndRun, locale }: { ctx: CanvasNodeContext; selected?: H3Segment; runtimeTaskId: string; busy: boolean; stuck: boolean; canCancel: boolean; canResetAndRun: boolean; locale: ReturnType<typeof useH3Locale> }) {
+    const [cancelBusy, setCancelBusy] = useState(false);
+    const cancelInFlight = useRef(false);
+    const cancelRun = async () => {
+        if (cancelInFlight.current || !runtimeTaskId) return;
+        cancelInFlight.current = true;
+        setCancelBusy(true);
+        const messageKey = `h3-cancel:${runtimeTaskId}`;
+        message.loading({ key: messageKey, content: h3Label(locale, "cancellingGeneration"), duration: 0 });
+        try {
+            const cancelled = await cancelActiveH3Task(runtimeTaskId,
+                (id) => ctx.ai.getCanvasH3TaskStatus(id), (id) => ctx.ai.cancelCanvasH3Task(id));
+            if (cancelled) message.success({ key: messageKey, content: h3Label(locale, "generationCancelled") });
+            else message.info({ key: messageKey, content: h3Label(locale, "generationAlreadyFinished") });
+        } catch (error) {
+            message.error({ key: messageKey, content: error instanceof Error ? error.message : String(error) });
+        } finally {
+            cancelInFlight.current = false;
+            setCancelBusy(false);
+        }
+    };
+    return <>
+        {busy ? <button type="button" className="minimax-reset" style={{ gridColumn: "1 / -1" }} disabled={cancelBusy || !canCancel} title={canCancel ? h3Label(locale, "cancelScopeHint") : "正在创建后台任务，任务创建后即可取消"} onClick={() => void cancelRun()}><H3Icon name="close" /> {h3Label(locale, cancelBusy ? "cancellingGeneration" : "cancelGeneration")}</button> : null}
+        <button type="button" disabled={cancelBusy || !canResetAndRun} className={busy || stuck ? "minimax-reset" : "minimax-run"} onClick={() => { ctx.openPanel(); if (busy) { ctx.emit("minimax-h3:reset-and-run", { nodeId: ctx.node.id, all: false, segmentId: selected?.id || "" }); return; } requestH3Run(ctx, false, Boolean(selected?.result)); }}><H3Icon name={busy || stuck ? "restore" : "sparkles"} /> {busy || stuck ? "重置并重新生成" : selected?.result ? "重新生成当前 Clip" : "生成当前 Clip"}</button>
+        <button type="button" disabled={cancelBusy || !canResetAndRun} className={busy ? "minimax-reset" : "minimax-run-all"} onClick={() => { ctx.openPanel(); if (busy) { ctx.emit("minimax-h3:reset-and-run", { nodeId: ctx.node.id, all: true, segmentId: selected?.id || "" }); return; } requestH3Run(ctx, true); }}><H3Icon name={busy ? "restore" : "forward"} /> {busy ? "重置并重新运行" : "运行当前及后续"}</button>
+    </>;
+}
+
+export function H3ClipSettingsPanel({ ctx, metadata, selected, submitting = false, patchSelected, patchAllSettings }: Props) {
     const globalScope = metadata.h3SettingsScope === "global";
     const patchSettings = globalScope ? patchAllSettings : patchSelected;
     const locale = useH3Locale();
@@ -46,32 +74,18 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, patchSelected, pa
     // 按钮显示“生成当前 Clip”，但 requestH3Run 的 status
     // 守卫会静默吞掉点击，表现成“点不了生成按钮”。原注释担心的“任务成功后残留 taskId
     // 让按钮卡在取消”不会发生：成功时 status 已是 success，busy 本就为假。
-    const busy = ["queued", "loading"].includes(status);
+    const taskBusy = ["queued", "loading"].includes(status);
+    const busy = taskBusy || submitting;
     const confirmationEnabled = selected?.latentUpscaleEnabled === true ? selected.latentUpscaleConfirmationMode === true : selected?.faceRefineEnabled === true && selected.confirmationMode === true;
     const awaitingConfirmation = status === "awaiting_confirmation" && selected?.firstPassReady === true && String(selected.status || "") === "awaiting_confirmation";
     // stuck = 处于运行态却拿不到真实后端任务 id（任务失联 / 日志丢失 / 刷新后轮询无法恢复）。
     // 此时 cancel 后端无意义，应直接清状态回 idle 让用户重新点生成（见下方 onClick 的 stuck 分支）。
-    const stuck = busy && !runtimeTaskId;
+    const stuck = taskBusy && !runtimeTaskId;
+    const canCancel = taskBusy && Boolean(runtimeTaskId);
+    const canResetAndRun = !submitting || taskBusy && Boolean(runtimeTaskId);
     const fileRef = useRef<HTMLInputElement | null>(null);
     const [transferMessage, setTransferMessage] = useState("");
     const [decisionBusy, setDecisionBusy] = useState(false);
-    const [cancelBusy, setCancelBusy] = useState(false);
-    const cancelInFlight = useRef(false);
-    const cancelRun = async () => {
-        if (cancelInFlight.current || !runtimeTaskId) return;
-        cancelInFlight.current = true;
-        setCancelBusy(true);
-        try {
-            const cancelled = await cancelActiveH3Task(runtimeTaskId,
-                (id) => ctx.ai.getCanvasH3Task(id), (id) => ctx.ai.cancelCanvasH3Task(id));
-            setTransferMessage(h3Label(locale, cancelled ? "generationCancelled" : "generationAlreadyFinished"));
-        } catch (error) {
-            setTransferMessage(error instanceof Error ? error.message : String(error));
-        } finally {
-            cancelInFlight.current = false;
-            setCancelBusy(false);
-        }
-    };
     const resolveConfirmation = async (action: "confirm" | "keep_first_pass" | "discard") => {
         if (decisionBusy) return;
         if (!runtimeTaskId || !selected?.id || !selected.firstPassFingerprint) { setTransferMessage("缺少待确认任务或一采快照，请刷新后重试"); return; }
@@ -138,6 +152,6 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, patchSelected, pa
         <p className="nfh3-hint">{h3Label(locale, "parameterPolicy")}：{h3Label(locale, resolved?.policy === "defaults" ? "inheritDefaults" : "explicitOverrides")} · {h3Label(locale, "effectiveParameters")}</p>
         {motionGroup ? <p className="nfh3-hint" role="status">{locale === "en-US" ? `Motion group: Clip ${motionGroup.head + 1}–${motionGroup.tail + 1}. Generate current Clip from the group head to run the entire group in order.` : `接续组：Clip ${motionGroup.head + 1}–${motionGroup.tail + 1}。从组首点击「生成当前 Clip」会依次运行全组。`}</p> : null}
         <ClipSettings key="clip-settings" ctx={ctx} metadata={metadata} segment={selected} patch={patchSettings} />
-        <div key="panel-actions" className="nfh3-panel-actions">{awaitingConfirmation ? <><button type="button" className="minimax-run" disabled={decisionBusy || !confirmationEnabled} onClick={() => void resolveConfirmation("confirm")}><H3Icon name="sparkles" /> {selected?.latentUpscaleEnabled ? "确认一采并继续二采" : "确认并精修"}</button><button type="button" disabled={decisionBusy} onClick={() => void resolveConfirmation("keep_first_pass")}>保留一采</button><button type="button" disabled={decisionBusy} onClick={() => void resolveConfirmation("discard")}>放弃任务</button></> : status === "awaiting_confirmation" ? <span>请选中待确认的 Clip</span> : <>{busy ? <button type="button" className="minimax-reset" style={{ gridColumn: "1 / -1" }} disabled={cancelBusy || !runtimeTaskId} title={h3Label(locale, runtimeTaskId ? "cancelScopeHint" : "cancelUnavailableHint")} onClick={() => void cancelRun()}><H3Icon name="close" /> {h3Label(locale, cancelBusy ? "cancellingGeneration" : "cancelGeneration")}</button> : null}<button type="button" disabled={cancelBusy} className={busy || stuck ? "minimax-reset" : "minimax-run"} onClick={() => { ctx.openPanel(); if (busy) { ctx.emit("minimax-h3:reset-and-run", { nodeId: ctx.node.id, all: false, segmentId: selected?.id || "" }); return; } requestH3Run(ctx, false, Boolean(selected?.result)); }}><H3Icon name={busy || stuck ? "restore" : "sparkles"} /> {busy || stuck ? "重置并重新生成" : selected?.result ? "重新生成当前 Clip" : "生成当前 Clip"}</button><button type="button" disabled={cancelBusy} className={busy ? "minimax-reset" : "minimax-run-all"} onClick={() => { ctx.openPanel(); if (busy) { ctx.emit("minimax-h3:reset-and-run", { nodeId: ctx.node.id, all: true, segmentId: selected?.id || "" }); return; } requestH3Run(ctx, true); }}><H3Icon name={busy ? "restore" : "forward"} /> {busy ? "重置并重新运行" : "运行当前及后续"}</button></>}</div>
+        <div key="panel-actions" className="nfh3-panel-actions">{awaitingConfirmation ? <><button type="button" className="minimax-run" disabled={decisionBusy || !confirmationEnabled} onClick={() => void resolveConfirmation("confirm")}><H3Icon name="sparkles" /> {selected?.latentUpscaleEnabled ? "确认一采并继续二采" : "确认并精修"}</button><button type="button" disabled={decisionBusy} onClick={() => void resolveConfirmation("keep_first_pass")}>保留一采</button><button type="button" disabled={decisionBusy} onClick={() => void resolveConfirmation("discard")}>放弃任务</button></> : status === "awaiting_confirmation" ? <span>请选中待确认的 Clip</span> : <H3RunActionButtons ctx={ctx} selected={selected} runtimeTaskId={runtimeTaskId} busy={busy} stuck={stuck} canCancel={canCancel} canResetAndRun={canResetAndRun} locale={locale} />}</div>
     </div>;
 }

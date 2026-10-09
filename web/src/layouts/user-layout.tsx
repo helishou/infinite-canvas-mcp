@@ -4,6 +4,7 @@ import { BackendBanner } from "@/components/backend-banner";
 import { AgentPanel } from "@/components/agent/agent-panel";
 import { AppTopNav } from "@/components/layout/app-top-nav";
 import { CanvasStorageBanner } from "@/components/canvas/canvas-storage-banner";
+import { MediaPreviewHost } from "@/components/media/media-preview-host";
 import { ProductionFollowController } from "@/components/production/production-follow-controller";
 
 export default function UserLayout({ children }: { children: ReactNode }) {
@@ -17,6 +18,7 @@ export default function UserLayout({ children }: { children: ReactNode }) {
             </div>
             <AgentPanel />
             <ProductionFollowController />
+            <MediaPreviewHost />
         </div>
     );
 }

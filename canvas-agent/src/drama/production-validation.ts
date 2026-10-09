@@ -9,6 +9,16 @@ const scene = { id: "scene-1", heading: "Interior", location: "Room", timeOfDay:
 const block = { id: "block-1", kind: "action", text: "The door opens." };
 const examples: Record<string, unknown> = {
     set_director_production: { director: { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "example", runtimeId: "a".repeat(40) + "-" + "b".repeat(16), version: "example" }, source: {}, sourceHash: "0".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], unresolved: [] } },
+    delete_director_subject: { id: "SUBJECT1" },
+    upsert_director_subject: { subject: { id: "SUBJECT1", kind: "character", entityRef: { ownerKind: "episode", ownerId: "episode1", kind: "character", id: "CHARACTER1" }, pictureBindings: [
+        { id: "BINDING1", assetId: "ASSET1", sourceNode: { projectId: "canvas1", nodeId: "image1" }, selection: { mode: "latest_success" }, provides: ["identity"], retain: ["face and hair"], exclude: ["pose and background"], applicableState: {}, defaultFor: ["identity"] },
+    ] } },
+    set_director_shot_keyframes: { shotId: "SHOT1", keyframes: [] },
+    repartition_director_clips: { shotIds: ["SHOT1", "SHOT2"], segments: [{ shot_ids: ["SHOT1"] }, { shot_ids: ["SHOT2"] }] },
+    reverse_sync_director_prompt: { segmentId: "CLIP1", artifactId: "ARTIFACT1", sourceHash: "0".repeat(64), basePromptHash: "1".repeat(64), prompt: "Edited source-backed Prompt text", canvasRevision: 1 },
+    edit_director_continuity: { changes: [{ collection: "facts", action: "upsert", id: "FACT1", value: { id: "FACT1", object_kind: "character", object_id: "CHARACTER1", allowed_values: ["outside"], value_descriptions: { outside: "The character stays outside." } } }] },
+    replace_director_clip_storyboard: { segmentId: "CLIP1", segment: { id: "CLIP1", shot_ids: ["SHOT1"] }, shots: [{ id: "SHOT1", start_frame: 0, end_frame: 48 }], shotInputs: { SHOT1: { keyframePolicy: "none", assetIds: [] } } },
+    request_director_clip_refresh: { segmentId: "CLIP1" },
     set_director_brief: { brief: "A traveller returns home." },
     patch_director_source: { entity: "asset", id: "character-1", patch: { description: "Authored character appearance." } },
     replace_director_scene_storyboard: { sceneId: "SC1", shots: [{ id: "SH1", source_scene_id: "SC1", start_frame: 0, end_frame: 120 }], segments: [{ id: "SEG1", shot_ids: ["SH1"], start_frame: 0, end_frame: 120 }], shotInputs: { SH1: { keyframePolicy: "none", assetIds: [] } } },
@@ -48,6 +58,7 @@ export function productionOperationContract(operationType?: string) {
                 ? ["Director exists; scene edits script_scenes, environment edits scene_registry, asset edits asset_plan, and asset_card edits asset_cards. Each object requires an existing stable ID and allowed fields; brief/style accept no ID; brief accepts only string value."]
                 : type === "select_director_result" ? ["Successful archived output must belong to the original formal task and exact node/Clip; both revisions must match; active generation and shared reference replacement are rejected. Images require review after selection. No media generation or prompt/timeline replacement occurs."]
                 : type === "restore_archived_scene_results" ? ["Episode draft only. Verifies the archive node, exact Clip identity, succeeded task, generation log and media bytes before restoring outputs to matching scene H3 nodes. Preserves the original archive and provenance; creates no task and does not modify the published version."]
+                : type === "upsert_director_subject" || type === "set_director_shot_keyframes" ? ["Use selection.mode=node_selection to follow the smart node's independent reference choice. latest_success and selected_result are explicit binding overrides. Browsing history does not restore generation settings."]
                 : type === "set_director_production" ? ["Example is schema-valid only; replace hashes and engine with actual validated receipts."]
                 : ["Target IDs, ownership, revision and production stage are checked against the current production."] };
         }),
@@ -111,7 +122,7 @@ export function applyDirectorSourcePatch(director: DirectorProduction, entity: k
             if (patch.anchor_asset_id !== undefined) director.source.style_lock = { ...record(director.source.style_lock), anchor_asset_id: patch.anchor_asset_id };
         } else {
             if (!id) throw new Error("源对象修改缺少稳定 ID");
-            const collection = ({ scene: "script_scenes", environment: "scene_registry", asset: "asset_plan", asset_card: "asset_cards", shot: "shots", segment: "segments" } as const)[entity];
+            const collection = ({ scene: "script_scenes", environment: "scene_registry", character: "character_registry", asset: "asset_plan", asset_card: "asset_cards", shot: "shots", segment: "segments" } as const)[entity];
             const items = Array.isArray(director.source[collection]) ? director.source[collection] as Array<Record<string, unknown>> : [];
             const fieldId = (item: Record<string, unknown>) => String(item.id || item.scene_id || item.asset_id || "");
             const target = items.find(item => fieldId(item) === id);

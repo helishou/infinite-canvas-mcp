@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { canonicalProduction, directorProductionSchema, type DirectorProduction, type ProductionEdit } from "@basketikun/canvas-agent/drama/production-contract";
 import { currentCompilationArtifact, compilationHash } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
@@ -70,12 +71,18 @@ export function repartitionDirectorClips(d: DirectorProduction, op: { shotIds: s
         if (createdIds.has(id) || allSegments.some(segment => segment.id === id && !oldIds.has(id))) reject("CLIP_ID_CONFLICT", `segments.${index}.id`, `新 Clip ID 已被使用：${id}`);
         if (oldIds.has(id) && !matchingOld) reject("CLIP_ID_REUSE", `segments.${index}.id`, "覆盖范围改变时不能沿用旧 Clip ID");
         createdIds.add(id);
-        const priorProfiles = oldGroups.filter(segment => (segment.shot_ids || []).some((shotId: string) => ids.includes(shotId))).map(segment => ({ mode: segment.mode, mode_lock: segment.mode_lock, mode_selection_reason: segment.mode_selection_reason, styleTemplateId: segment.styleTemplateId }));
+        const profileSources = oldGroups.filter(segment => (segment.shot_ids || []).some((shotId: string) => ids.includes(shotId)));
+        const priorProfiles = profileSources.map(segment => ({ mode: segment.mode, mode_lock: segment.mode_lock, mode_selection_reason: segment.mode_selection_reason, styleTemplateId: segment.styleTemplateId }));
         const sameProfile = priorProfiles.length > 0 && priorProfiles.every(profile => canonicalProduction(profile) === canonicalProduction(priorProfiles[0]));
-        if (!sameProfile && !raw.mode) reject("CLIP_EXECUTION_PROFILE_CONFLICT", `segments.${index}.mode`, "组合了不同执行配置的旧 Clip；新分组必须明确选择 mode");
-        const sourceFields = Object.fromEntries(Object.entries(raw).filter(([key]) => !["references", "subjects", "definition", "retention", "duration", "duration_frames", "start_frame", "end_frame", "summary", "overall_soundscape", "non_diegetic_music"].includes(key)));
+        const selectedProfileSourceId = String(raw.executionProfileSourceId || "");
+        const selectedProfile = sameProfile ? profileSources[0] : profileSources.find(segment => String(segment.id) === selectedProfileSourceId);
+        if (!sameProfile && !selectedProfile) reject("CLIP_EXECUTION_PROFILE_CONFLICT", `segments.${index}.executionProfileSourceId`, "组合了不同执行配置的旧 Clip；必须明确选择一个完整的旧 Clip 配置");
+        const sourceFields = Object.fromEntries(Object.entries(raw).filter(([key]) => !["references", "subjects", "definition", "retention", "duration", "duration_frames", "start_frame", "end_frame", "summary", "overall_soundscape", "non_diegetic_music", "executionProfileSourceId"].includes(key)));
+        const inheritedProfile = selectedProfile || {};
+        const profileFields = Object.fromEntries(["mode", "mode_lock", "mode_selection_reason", "styleTemplateId"].flatMap(key =>
+            Object.hasOwn(raw, key) ? [[key, raw[key]]] : Object.hasOwn(inheritedProfile, key) ? [[key, inheritedProfile[key]]] : []));
         groups.push({ ...(matchingOld && sameProfile ? structuredClone(matchingOld) : {}), ...sourceFields, id, shot_ids: ids,
-            mode: raw.mode || matchingOld?.mode, ...(sameProfile && raw.mode === undefined ? { mode_lock: matchingOld?.mode_lock, mode_selection_reason: matchingOld?.mode_selection_reason } : {}) });
+            ...profileFields });
     }
     if (cursor !== op.shotIds.length) reject("CLIP_PARTITION_COVERAGE", "segments", "新分组没有覆盖到所选范围末端");
     const firstSegment = Math.min(...oldGroups.map(segment => allSegments.findIndex(candidate => candidate.id === segment.id)));

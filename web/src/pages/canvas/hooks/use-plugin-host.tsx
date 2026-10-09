@@ -24,6 +24,7 @@ import { flushCanvasProjectBeforeGeneration, useCanvasStore } from "@/stores/can
 import type { CanvasGraphIndex } from "@/lib/canvas/canvas-graph-index";
 import { createPluginGraphAccess } from "./plugin-graph-access";
 import { requestFormalH3OutputSelection } from "@/lib/canvas/h3-output-restore";
+import { createProductionEditing } from "@/lib/canvas/production-editing";
 
 type CanvasTheme = (typeof canvasThemes)[keyof typeof canvasThemes];
 
@@ -166,14 +167,12 @@ export function usePluginHost(params: PluginHostParams) {
             },
             previewH3Generation,
             runCanvasGeneration: async (command: CanvasGenerationCommand) => {
-                let checkedCommand = command;
                 if (command.operation === 'h3-run') {
                     await flushCanvasProjectBeforeGeneration(projectId);
-                    const preview = await previewH3Generation(command);
-                    if (!preview.ready) throw new Error(preview.diagnostics.map(issue => issue.message).join('；') || 'H3 预检未就绪');
-                    checkedCommand = { ...command, expectedPlanHash: command.expectedPlanHash || preview.planHash };
                 }
-                const data = await startCanvasGeneration(checkedCommand);
+                // Backend freezes and validates H3 inputs in the submission request. A separate
+                // preview here re-reads and hashes every reference before the same check runs again.
+                const data = await startCanvasGeneration(command);
                 if (!data.task) throw new Error("画布生成失败：Backend 未返回任务");
                 return data.task;
             },
@@ -191,9 +190,15 @@ export function usePluginHost(params: PluginHostParams) {
                 if (!response.ok || !data.task) throw new Error(data.error || `读取 H3 运行失败（HTTP ${response.status}）`);
                 return data.task;
             },
+            getCanvasH3TaskStatus: async (taskId) => {
+                const response = await fetch(`${getBackendUrl()}${canvasTaskPath(taskId)}/status?token=${encodeURIComponent(getBackendTokenShared())}`);
+                const data = await response.json() as { task?: { status?: string }; error?: string };
+                if (!response.ok || !data.task) throw new Error(data.error || `读取 H3 运行状态失败（HTTP ${response.status}）`);
+                return { status: String(data.task.status || "") };
+            },
             cancelCanvasH3Task: async (taskId) => {
                 const response = await fetch(`${getBackendUrl()}${canvasTaskActionPath(taskId, "cancel")}?token=${encodeURIComponent(getBackendTokenShared())}`, { method: "POST" });
-                const data = await response.json() as { task?: import("@/types/canvas-plugin").LocalH3Task; error?: string };
+                const data = await response.json() as { task?: Pick<import("@/types/canvas-plugin").LocalH3Task, "id" | "status">; error?: string };
                 if (!response.ok || !data.task) throw new Error(data.error || `取消 H3 运行失败（HTTP ${response.status}）`);
                 return data.task;
             },
@@ -272,6 +277,7 @@ export function usePluginHost(params: PluginHostParams) {
             openAssetPicker,
             openMediaPreview,
             generationLogs,
+            production: createProductionEditing(projectId, graphAccess.getNode, () => flushCanvasProjectBeforeGeneration(projectId)),
         }),
         [applyAgentOps, generationLogs, graphAccess, h3Defaults, openAssetPicker, openMediaPreview, pluginAi, projectId, references, setNodes],
     );

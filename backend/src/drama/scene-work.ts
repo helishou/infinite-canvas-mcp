@@ -325,13 +325,33 @@ export class SceneWorkCoordinator {
         return this.service.get(id);
     }
     resume(id: string, workId: string, operationId?: string) {
-        const work = this.service.get(id).draft.director?.workflow.sceneWorks?.[workId];
+        const current = this.service.get(id);
+        const work = current.draft.director?.workflow.sceneWorks?.[workId];
         if (!work || ["succeeded", "failed"].includes(work.status)) throw new Error("场次工作不存在或已结束；退回或失败请明确新建返修工作");
         if (work.runIds.some(runId => this.service.getBatch(id, runId)?.status === "failed")) throw new Error("媒体运行已失败；请明确返修并新建生成运行，不自动重提交");
         for (const runId of work.runIds) if (this.service.getBatch(id, runId)?.status === "paused" || this.service.getBatch(id, runId)?.pauseRequested) {
             this.service.resumeBatch(id, runId); if (this.runner) void this.runner.runBatch(id, runId);
         }
-        this.update(id, workId, { status: "pending", error: null }, true, operationId); void this.advance(id, workId);
+        // A create-stage work may legitimately wait for the human to supply the shared
+        // ledger it asked for; once that shared input lands, re-anchor the work to the
+        // fresh projection instead of dead-locking on SCENE_INPUT_CHANGED forever.
+        let reanchor: Partial<SceneWork> = {};
+        if (work.stage === "create" && current.draft.director) {
+            const projection = compilationScopeInput({ ...current.draft.director, engine: work.inputEngine || current.draft.director.engine }, { sceneId: work.sceneId });
+            const stalePacket = Boolean(work.workPackage) && (work.workPackage as Record<string, any>).sourceHash !== current.draft.director.sourceHash;
+            if (projection.inputHash !== work.inputHash || stalePacket) {
+                for (const key of new Set([work.cursor || "", ""])) {
+                    const stale = this.file(workId, key);
+                    if (fs.existsSync(stale)) fs.rmSync(stale);
+                }
+                // The frozen work package carries the old source snapshot; drop it so the
+                // next turn rebuilds the packet from the current projection. The old agent
+                // thread argued against the missing shared input it just received, so its
+                // stale context must not steer the next turn either — start a fresh thread.
+                reanchor = { inputHash: projection.inputHash, sourceHash: current.draft.director.sourceHash, workPackage: undefined, agentThreadId: undefined, agentTurnId: undefined, cursor: "" };
+            }
+        }
+        this.update(id, workId, { status: "pending", error: null, ...reanchor }, true, operationId); void this.advance(id, workId);
         return this.service.get(id);
     }
     async review(id: string, input: { operationId?: string; workId?: string; assetIds?: string[]; inputHash: string; verdict: "approved" | "rejected"; evidence: string; artifactHash?: string; artifactWorkId?: string }, mode: "manual" | "automatic" = "manual") {

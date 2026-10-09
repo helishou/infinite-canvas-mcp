@@ -1,4 +1,5 @@
 import path from "node:path";
+import type { Readable } from "node:stream";
 import type {
     Asset, AssetFolder, CanvasFolder, CanvasProject,
     GenerationLog, GenerationLogStatus, MediaFile,
@@ -51,6 +52,7 @@ export type CanvasProjectStore = {
         task: RuntimeTask,
         binding: { projectId: string; nodeId: string; segmentId: string; generationLogId?: string },
         output: Record<string, unknown> | null,
+        completion?: { cacheFingerprint?: string; firstPassReady?: boolean },
     ): { project: CanvasProject; log: GenerationLog | null; operations: CanvasOperation[] } | null;
     writeBackCanvasImageTask(
         task: RuntimeTask,
@@ -92,6 +94,8 @@ export type NamedMedia = RuntimeMedia & { id: string; mimeType: string; url: str
 export type MediaStore = {
     /** 入库媒体（web 双写 / 生成结果落地），storageKey 由后台生成。 */
     store(data: Buffer, options: { name?: string; mimeType?: string; storageKey?: string; category?: MediaCategory } & MediaStats): MediaFile;
+    /** 流式归档媒体，避免视频下载与落盘期间同时保留整文件 Buffer。 */
+    storeStream(source: Readable, options: { name?: string; mimeType?: string; storageKey?: string; category?: MediaCategory; resolveMimeType?: (prefix: Buffer, bytes: number) => string } & MediaStats): Promise<MediaFile & { sha256: string; prefix: Buffer }>;
     /** 按 base64 dataUrl 落地（兼容旧 Agent /runtime/media 与 H3 ref），返回带本地路径的完整记录。 */
     storeDataUrl(dataUrl: string, name: string, extra?: MediaStats & { storageKey?: string; category?: MediaCategory }): MediaFile & { path: string; url: string };
     /** 按 name 幂等读写 runtime 媒体（H3 ref 落地），对应旧 Agent 的 storeRuntimeMedia。 */

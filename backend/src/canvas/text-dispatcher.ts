@@ -333,7 +333,15 @@ export class CanvasTextDispatcher {
             source.type === "text" && sourceMetadata.generationEngine === "backend" ? input.nodeId : ""
         ));
         if (!input.loopOutput && (input.resultPolicy || "replace-active") === "replace-active") {
-            for (const id of previousIds) if (id !== targetTextNodeId && nodes.some((node) => String(node.id || "") === id)) operations.push({ type: "delete_node", id });
+            for (const id of previousIds) {
+                if (id === targetTextNodeId) continue;
+                const previous = nodes.find((node) => String(node.id || "") === id);
+                // 只清理独立文本结果节点。智能节点回写会把自身 id 记入 generatedTextResultIds，
+                // 复制粘贴会把这个 id 克隆进副本元数据；不拦住 config 类型的话，
+                // 运行副本会把被复制的原智能节点当「旧结果」删掉。
+                if (!previous || String(previous.type || "") === "config") continue;
+                operations.push({ type: "delete_node", id });
+            }
         }
         const textItems = contents.map((content) => ({ id: `text-value-${crypto.randomUUID()}`, status: "success", content }));
         if (targetTextNodeId) {

@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { BackendDatabase } from "../db.js";
+import { DATABASE_SCHEMA_VERSION } from "../database-upgrade.js";
 import { createStores } from "../stores/index.js";
 import { BackendEventBus } from "../events.js";
 import { EpisodeProductionService } from "./production.js";
@@ -1004,13 +1005,13 @@ test("version 23 installations gain layout plans, preparation receipts and nativ
     f.db.db.exec("DELETE FROM schema_migrations WHERE version>=24; DROP TABLE production_preparations; DROP TABLE production_task_bindings; ALTER TABLE drama_projects DROP COLUMN production_plan_json");
     const upgraded = new BackendDatabase(f.file);
     try {
-        assert.equal(upgraded.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, 32);
+        assert.equal(upgraded.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, DATABASE_SCHEMA_VERSION);
         assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE name='production_preparations'").get());
         assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE name='production_task_bindings'").get());
         assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE name='production_layout_plans'").get());
         assert.equal(listApprovedSharedAssets(upgraded, "drama")[0].id, approved.id);
         assert.equal(upgraded.listCanvasFolders().find(folder => folder.id === "drama")?.sharedAssetCanvasId, sharedId);
-        assert.ok(fs.readdirSync(f.directory).some(name => name.includes('pre-schema-v23-to-v32')));
+        assert.ok(fs.readdirSync(f.directory).some(name => name.includes("pre-schema-v23-to-v" + DATABASE_SCHEMA_VERSION)));
     } finally { upgraded.close(); }
 });
 

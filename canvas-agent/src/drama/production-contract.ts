@@ -38,6 +38,7 @@ export const directorPatchFields = {
     style: ["style_policy", "style_policy_reason", "anchor_asset_id"],
     scene: ["scene_name", "heading", "location", "time_of_day", "text"],
     environment: ["name", "description", "prompt_description"],
+    character: ["name", "appearance", "description", "voice_description"],
     asset_card: ["prompt", "seven_steps"],
     asset: ["asset_name", "name", "title", "kind", "description", "prompt", "depends_on", "role", "version", "reference_role", "canvas_scope"],
     shot: ["title", "visual", "camera", "start_frame", "end_frame", "duration_frames", "dialogues", "audio", "required_assets", "description", "shot_type", "timeline_id", "story_order", "continuity_facts", "characters", "performance", "state_description", "continuity_cues", "reference_requirements", "prompt_contract_version", "identity_context", "offscreen_character_ids", "subject_usages", "keyframes", "utterance_refs"],
@@ -124,7 +125,6 @@ export const directorProductionSchema = z.object({
             if (segment && typeof segment === "object" && Object.hasOwn(segment, "styleTemplateId") && segment.styleTemplateId !== null && !isH3StyleTemplateId(segment.styleTemplateId)) context.addIssue({ code: "custom", path: ["segments", index, "styleTemplateId"], message: "未知 H3 风格模板，使用已登记的模板 ID 或 null" });
         });
         for (const issue of directorSourceV2Diagnostics(source)) context.addIssue({ code: "custom", path: issue.path, message: issue.message });
-        for (const issue of directorSourceV2Diagnostics(source)) context.addIssue({ code: "custom", path: issue.path, message: issue.message });
     }),
     sourceHash: hash,
     modules: z.record(z.enum(directorModules), z.object({ status: z.enum(["planned", "partial", "committed", "blocked"]), cursor: z.unknown().optional(), evidence: z.array(z.string()).default([]), unresolved: z.array(z.string()).default([]) })),
@@ -146,13 +146,61 @@ export type DirectorProduction = z.infer<typeof directorProductionSchema>;
 export function isSubjectPromptAssembly(source: Record<string, unknown>) {
     return (source.prompt_assembly as Record<string, unknown> | undefined)?.version === 2;
 }
+export function resolveSubjectPictureBindingIds(subjectValue: unknown, usageValue: unknown) {
+    const subject = subjectValue && typeof subjectValue === "object" ? subjectValue as Record<string, any> : {};
+    const usage = usageValue && typeof usageValue === "object" ? usageValue as Record<string, any> : {};
+    const bindings = Array.isArray(subject.pictureBindings) ? subject.pictureBindings as Array<Record<string, any>> : [];
+    const explicit = Array.isArray(usage.pictureBindingIds) ? usage.pictureBindingIds.map(String) : [];
+    const requirements = new Map((Array.isArray(usage.stateRequirements) ? usage.stateRequirements : [])
+        .map((item: Record<string, unknown>) => [String(item.factId), String(item.value)]));
+    const applicable = (binding: Record<string, any>) => Object.entries(binding.applicableState || {})
+        .every(([factId, value]) => requirements.get(factId) === String(value));
+    if (explicit.length) {
+        const selected = explicit.map(id => bindings.find(binding => String(binding.id) === id));
+        const missing = explicit.filter((_id, index) => !selected[index]);
+        const mismatched = selected.filter((binding): binding is Record<string, any> => binding !== undefined && !applicable(binding));
+        return { bindingIds: explicit.filter((_id, index) => Boolean(selected[index])), issues: [
+            ...missing.map(id => "图片绑定 " + id + " 不属于 Subject " + String(subject.id || "")),
+            ...mismatched.map(binding => "图片绑定 " + String(binding.id) + " 的适用状态与本镜状态要求冲突"),
+        ] };
+    }
+    if (usage.presentation !== "visible") return { bindingIds: [] as string[], issues: [] as string[] };
+    const purposes = [...new Set((Array.isArray(usage.referencePurpose) && usage.referencePurpose.length ? usage.referencePurpose : ["identity"]).map(String))];
+    const selected: string[] = [], issues: string[] = [];
+    for (const purpose of purposes) {
+        const matches = bindings.filter(binding => Array.isArray(binding.defaultFor) && binding.defaultFor.map(String).includes(purpose) && applicable(binding));
+        if (!matches.length) issues.push("缺少适用于 " + purpose + " 的默认图片绑定");
+        else if (matches.length > 1) issues.push(purpose + " 默认图片绑定有歧义：" + matches.map(binding => binding.id).join(", "));
+        else selected.push(String(matches[0].id));
+    }
+    return { bindingIds: [...new Set(selected)], issues };
+}
 export const productionCompilationScopeSchema = z.object({ sceneId: id.optional(), targetIds: z.array(id).min(1).optional(), output: z.literal("selected").optional() }).strict().refine(scope => Boolean(scope.sceneId || scope.targetIds?.length), "编译范围不能为空");
 export const productionCompileSchema = z.object({ operationId: id.optional(), expectedRevision: z.number().int().nonnegative(), director: directorProductionSchema.optional(), scope: productionCompilationScopeSchema.optional() }).strict();
 export const productionApplyCompilationSchema = z.object({ preparedId: z.string().uuid() }).strict();
+export const promptSourceMapSchema = z.object({
+    version: z.literal(1), offsetUnit: z.literal("utf16"), segmentId: id, sourceHash: hash, promptHash: hash,
+    entries: z.array(z.object({
+        start: z.number().int().nonnegative(), end: z.number().int().nonnegative(),
+        sourceKind: z.enum(["shot", "utterance"]), sourceId: id,
+        field: z.enum(["visual", "action", "audio", "camera.editorial_reason", "text"]), sourceText: z.string(),
+        sourceValue: z.string(), sourceStart: z.number().int().nonnegative(), sourceEnd: z.number().int().nonnegative(),
+    }).strict()),
+}).strict().superRefine((map, context) => {
+    const ordered = [...map.entries].sort((a, b) => a.start - b.start || a.end - b.end);
+    for (const [index, entry] of ordered.entries()) {
+        if (entry.end <= entry.start) context.addIssue({ code: "custom", path: ["entries", index], message: "SourceMap span must be non-empty" });
+        if (entry.sourceEnd < entry.sourceStart || entry.sourceEnd > entry.sourceValue.length || entry.sourceValue.slice(entry.sourceStart, entry.sourceEnd) !== entry.sourceText) context.addIssue({ code: "custom", path: ["entries", index], message: "SourceMap source span does not match its source value" });
+        if (index > 0 && ordered[index - 1].end > entry.start) context.addIssue({ code: "custom", path: ["entries", index], message: "SourceMap spans must not overlap" });
+        if (entry.sourceKind === "shot" && entry.field === "text" || entry.sourceKind === "utterance" && entry.field !== "text") context.addIssue({ code: "custom", path: ["entries", index, "field"], message: "SourceMap field is incompatible with its source kind" });
+    }
+});
+export type PromptSourceMap = z.infer<typeof promptSourceMapSchema>;
 
 const subjectPictureBindingSchema = z.object({
     id, assetId: id, sourceNode: z.object({ projectId: id, nodeId: id }).strict(),
     selection: z.discriminatedUnion("mode", [
+        z.object({ mode: z.literal("node_selection") }).strict(),
         z.object({ mode: z.literal("latest_success") }).strict(),
         z.object({ mode: z.literal("selected_result"), resultId: id }).strict(),
     ]),
@@ -174,6 +222,7 @@ const shotSubjectUsageSchema = z.object({
 const shotKeyframeSchema = z.object({
     id, assetId: id, sourceNode: z.object({ projectId: id, nodeId: id }).strict(),
     selection: z.discriminatedUnion("mode", [
+        z.object({ mode: z.literal("node_selection") }).strict(),
         z.object({ mode: z.literal("latest_success") }).strict(),
         z.object({ mode: z.literal("selected_result"), resultId: id }).strict(),
     ]),
@@ -223,7 +272,6 @@ export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
             const path = ["subject_registry", subjectIndex, "pictureBindings", bindingIndex];
             if (bindingIds.has(binding.id)) add([...path, "id"], `重复图片绑定 ID：${binding.id}`);
             bindingIds.add(binding.id); bindingOwners.set(binding.id, subject.id);
-            if (!assets.includes(binding.assetId)) add([...path, "assetId"], `Subject 图片绑定的资产 ${binding.assetId} 未登记在 asset_plan`);
         }
     }
     const shotById = new Map<string, Record<string, any>>();
@@ -235,6 +283,7 @@ export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
         else shotById.set(String(shot.id), shot);
         if (!Number.isInteger(shot.duration_frames) || shot.duration_frames <= 0) add([...path, "duration_frames"], "新合同 Shot 必须使用正整数 duration_frames");
         if (Object.hasOwn(shot, "start_frame") || Object.hasOwn(shot, "end_frame")) add(path, "prompt v2 Shot 的全局帧窗由 duration_frames、timeline 与 story_order 派生");
+        for (const field of ["state_description", "state_in", "state_out", "continuity_cues", "required_assets", "reference_requirements", "dialogues"]) if (Object.hasOwn(shot, field)) add([...path, field], "prompt v2 Shot 状态、参考与对白必须使用各自的结构化来源");
         if (!shot.timeline_id || !Number.isInteger(shot.story_order) || shot.story_order < 0) add(path, "Shot 必须登记 timeline_id 和非负 story_order");
         const orderKey = `${shot.timeline_id}\0${shot.story_order}`;
         if (timelineOrder.has(orderKey)) add([...path, "story_order"], "同一 timeline 的 story_order 不能重复");
@@ -247,10 +296,14 @@ export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
         }
         if (usages.success) for (const [usageIndex, usage] of usages.data.entries()) {
             if (!subjectById.has(usage.subjectId)) add([...path, "subject_usages", usageIndex, "subjectId"], "Shot 引用了未登记 Subject");
-            for (const bindingId of usage.pictureBindingIds) if (bindingOwners.get(bindingId) !== usage.subjectId) add([...path, "subject_usages", usageIndex, "pictureBindingIds"], `图片绑定 ${bindingId} 不属于 Subject ${usage.subjectId}`);
+           for (const bindingId of usage.pictureBindingIds) if (bindingOwners.get(bindingId) !== usage.subjectId) add([...path, "subject_usages", usageIndex, "pictureBindingIds"], `图片绑定 ${bindingId} 不属于 Subject ${usage.subjectId}`);
+            if (usage.localStartFrame !== undefined && usage.localStartFrame >= Number(shot.duration_frames) || usage.localEndFrame !== undefined && usage.localEndFrame > Number(shot.duration_frames) || usage.localStartFrame !== undefined && usage.localEndFrame !== undefined && usage.localEndFrame <= usage.localStartFrame) add([...path, "subject_usages", usageIndex], "Subject 出现范围必须位于 Shot 时长内且起止递增");
+       }
+        if (usages.success) for (const [usageIndex, usage] of usages.data.entries()) {
+            const subject = subjectById.get(usage.subjectId);
+            if (subject) for (const issue of resolveSubjectPictureBindingIds(subject, usage).issues) add([...path, "subject_usages", usageIndex, "pictureBindingIds"], issue);
         }
         if (keyframes.success) for (const [keyframeIndex, keyframe] of keyframes.data.entries()) {
-            if (!assets.includes(keyframe.assetId)) add([...path, "keyframes", keyframeIndex, "assetId"], `关键帧资产 ${keyframe.assetId} 未登记在 asset_plan`);
             if (keyframe.localFrame !== undefined && keyframe.localFrame >= Number(shot.duration_frames)) add([...path, "keyframes", keyframeIndex, "localFrame"], "关键帧时刻超出 Shot 时长");
             for (const subjectId of keyframe.subjectIds) if (!subjectById.has(subjectId)) add([...path, "keyframes", keyframeIndex, "subjectIds"], `关键帧引用未登记 Subject ${subjectId}`);
         }
@@ -306,8 +359,8 @@ export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
         }
         if (ids.some(id => shotOrder.get(id) === undefined)) continue;
         const durationFrames = ids.reduce((sum, id) => sum + Number(shotById.get(id)!.duration_frames), 0);
-        if (segment.duration_frames !== undefined && segment.duration_frames !== durationFrames) add(["segments", segmentIndex, "duration_frames"], "Clip 时长由 Shot 时长求和派生，不能单独修改");
-        for (const field of ["references", "subjects", "definition", "retention"]) if (Object.hasOwn(segment, field)) add(["segments", segmentIndex, field], "prompt v2 Clip 的 Subject、Picture 与保留范围由 Shots 编译派生");
+        if (Object.hasOwn(segment, "duration_frames") || Object.hasOwn(segment, "generation_clip_duration")) add(["segments", segmentIndex], "Clip 时长由 Shot 时长求和派生，不作为源稿字段保存");
+        for (const field of ["references", "subjects", "definition", "retention", "prompt", "subject_definitions", "retention_analysis", "detailed_description"]) if (Object.hasOwn(segment, field)) add(["segments", segmentIndex, field], "prompt v2 Clip 的 Subject、Picture 与 Prompt 由 Shots 编译派生");
     }
     for (const shot of shots) if ((!compiledShotIds || compiledShotIds.has(String(shot.id))) && !partitioned.has(String(shot.id))) add(["shots", shotOrder.get(String(shot.id)) ?? 0], "新合同每个输出 Shot 必须且只能归属一个 Clip");
     const ledger = source.ledger as Record<string, any> | undefined;
@@ -441,6 +494,7 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("set_director_production"), director: directorProductionSchema }).strict(),
     z.object({ type: z.literal("replace_director_scene_storyboard"), sceneId: id, shots: z.array(z.record(z.unknown())).min(1), segments: z.array(z.record(z.unknown())).min(1), shotInputs: z.record(z.unknown()) }).strict(),
     z.object({ type: z.literal("upsert_director_subject"), subject: subjectEntrySchema }).strict(),
+    z.object({ type: z.literal("delete_director_subject"), id }).strict(),
     z.object({ type: z.literal("set_director_shot_keyframes"), shotId: id, keyframes: z.array(shotKeyframeSchema) }).strict(),
     z.object({ type: z.literal("repartition_director_clips"), shotIds: z.array(id).min(1), segments: z.array(z.record(z.unknown())).min(1) }).strict(),
     z.object({ type: z.literal("reverse_sync_director_prompt"), segmentId: id, artifactId: id, sourceHash: hash, basePromptHash: hash, prompt: z.string(), canvasRevision: z.number().int().nonnegative() }).strict(),
@@ -448,7 +502,7 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("replace_director_clip_storyboard"), segmentId: id, segment: z.record(z.unknown()), shots: z.array(z.record(z.unknown())).min(1), shotInputs: z.record(z.unknown()) }).strict(),
     z.object({ type: z.literal("request_director_clip_refresh"), segmentId: id }).strict(),
     z.object({ type: z.literal("set_director_brief"), brief: z.string() }).strict(),
-    z.object({ type: z.literal("patch_director_source"), entity: z.enum(["brief", "style", "scene", "environment", "asset", "asset_card", "shot", "segment"]), id: id.optional(), patch: z.record(z.unknown()) }).strict(),
+    z.object({ type: z.literal("patch_director_source"), entity: z.enum(["brief", "style", "scene", "environment", "character", "asset", "asset_card", "shot", "segment"]), id: id.optional(), patch: z.record(z.unknown()) }).strict(),
     z.object({ type: z.literal("adopt_director_fields"), targetId: id, nodeId: id, segmentId: id.optional(), canvasRevision: z.number().int().nonnegative(), fields: z.array(id).min(1) }).strict(),
     z.object({ type: z.literal("adopt_director_clip_style"), targetId: id, nodeId: id, segmentId: id, canvasRevision: z.number().int().nonnegative(), styleTemplateId: z.string().nullable() }).strict(),
     z.object({ type: z.literal("patch_director_continuity"), ledger: z.record(z.unknown()) }).strict(),

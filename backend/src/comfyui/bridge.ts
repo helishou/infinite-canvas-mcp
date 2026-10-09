@@ -1,4 +1,6 @@
 import path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { assertH3WorkflowContract, inspectH3Result } from '../canvas/h3-execution-contract.js';
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -458,7 +460,7 @@ export class ComfyUiBackend {
             const actualSubmission = segments.length ? segments[segments.length - 1].actualSubmission : undefined;
             const combined = localResults.length > 1 ? await concatLocalVideos(localResults) : undefined;
             if (!combined) return actualSubmission ? { segments, media: segmentMedia, actualSubmission } : { segments, media: segmentMedia };
-            const stored = this.deps.media.store(await readFile(combined), { name: path.basename(combined), mimeType: "video/mp4", category: "output" });
+            const stored = await this.deps.media.storeStream(fs.createReadStream(combined), { name: path.basename(combined), mimeType: "video/mp4", category: "output" });
             await rm(combined, { force: true });
             const result = { segments, media: [{ url: this.deps.media.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType, filename: path.basename(combined) }, ...segmentMedia] };
             return actualSubmission ? { ...result, actualSubmission } : result;
@@ -853,8 +855,8 @@ async function materializeComfyMedia(url: string, comfyUrl: string, target: stri
     const source = new URL(url);
     const response = await fetch(`${comfyUrl}/view${source.search}`);
     if (!response.ok) throw new Error(`读取 H3 分段结果失败：HTTP ${response.status}`);
-    const buffer = Buffer.from(await response.arrayBuffer());
-    await import("node:fs/promises").then(({ writeFile }) => writeFile(target, buffer));
+    if (!response.body) throw new Error("读取 H3 分段结果失败：响应没有媒体数据");
+    await pipeline(Readable.fromWeb(response.body as unknown as import("node:stream/web").ReadableStream), fs.createWriteStream(target, { flags: "wx", mode: 0o600 }));
     return target;
 }
 
@@ -1806,7 +1808,8 @@ export async function collectOutputMedia(outputs: Record<string, any>, baseUrl: 
         const sourceUrl = `${baseUrl}/view?${query.toString()}`;
         const response = await fetchWithRetry(sourceUrl, signal);
         if (!response.ok) return [{ url: sourceUrl, mimeType: mimeForOutput(item), filename: String(item.filename) }];
-        const stored = mediaStore.store(Buffer.from(await response.arrayBuffer()), { name: String(item.filename), mimeType: mimeForOutput(item), category: "output" });
+        if (!response.body) throw new Error(`ComfyUI 输出没有媒体数据：${String(item.filename)}`);
+        const stored = await mediaStore.storeStream(Readable.fromWeb(response.body as unknown as import("node:stream/web").ReadableStream), { name: String(item.filename), mimeType: mimeForOutput(item), category: "output" });
         return [{ url: mediaStore.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType, filename: String(item.filename), sourceUrl }];
     }))).flat();
 }

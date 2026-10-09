@@ -167,11 +167,12 @@ export function h3RefCandidates(nodes: CanvasNodeData[], selfId: string, allNode
         const images = node.type === "config" && metadata.smart === true && (metadata.generationMode || "image") === "image" && Array.isArray(metadata.images) ? metadata.images.map(imageRecordOf) : [];
         const primary = images.find((image) => image.id === metadata.primaryImageId && (image.content || image.storageKey)) || images.find((image) => image.content || image.storageKey);
         const url = String(primary?.content || metadata.content || metadata.url || metadata.localUrl || metadata.sourceUrl || "").trim();
-        if (!url) continue;
+        const storageKey = storageKeyOf(primary || metadata);
+        if (!url && !storageKey) continue;
         const mime = String(metadata.mimeType || "");
         const type: H3Ref["type"] = mime.startsWith("video/") || node.type === "video" ? "video" : mime.startsWith("audio/") || node.type === "audio" ? "audio" : "image";
         const role = inferredRole(String(node.type || ""), node.title);
-        push(node, { url, type, name: node.title || type, storageKey: storageKeyOf(primary || metadata), mimeType: primary?.mimeType ? String(primary.mimeType) : mime || undefined, ...(role ? { role } : {}) });
+        push(node, { url, type, name: node.title || type, storageKey, mimeType: primary?.mimeType ? String(primary.mimeType) : mime || undefined, ...(role ? { role } : {}) });
     }
     return out.filter((item, index, all) => all.findIndex((other) => sameRef(other.ref, item.ref)) === index);
 }

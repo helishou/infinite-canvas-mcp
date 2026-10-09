@@ -5,6 +5,33 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Subject storyboard workbench
+
+- MCP descriptions and the bundled director SOP route Subject v2 edits through targeted workbenches and automatic refresh. Source prose is authored in Chinese; no separate display translation is required. Legacy requests keep their compatibility flow. Verify live contract examples and new-turn skill loading; in-flight agent snapshots remain unchanged.
+
+- Subject editing selects one object from a compact navigator; pictures and entity edits sit together. Continuity selects one Shot and compares start/end states with changes marked. Deliveries mount one selected video with explicit Shot, canvas and download actions; no auto-play. Shot save controls remain visible at the editor bottom. Verify narrow screens, theme, selection, drafts and unchanged generation/submission behavior.
+
+- Asset review uses a narrow thumbnail navigator, bounded full-image preview and a separate editing/review panel on wide screens. Node history is preview-only; reviewing is available only for the current formal result. Verify selection, drafts, canvas navigation, portrait/landscape images and responsive layouts without changing references or submitting generation tasks.
+
+- Shot frames can bind, preview, replace and detach smart image nodes; image cards link to the exact canvas node. Optional design frames can preview without becoming submitted references. Shot changes save together and preserve historical media.
+- Register Subjects from existing characters, scenes or props. Name and description edits update the authoritative entity; image purposes, retained information and exclusions are editable. Referenced Subjects and bindings cannot be removed directly; shared entities remain edited at their source.
+- Director instructions author descriptive source fields in Chinese; no separate Chinese display copy is required. Continuity presents the original state prose and valid ledger trajectories; legacy technical snapshots remain in details. Story cards show current-scene actions and flag repeated analysis without rewriting story facts.
+- Verify refresh after binding, reference replacement, retained history after detachment, canvas navigation and draft recovery. Engineering checks do not establish live-page interaction acceptance.
+
+- H3 manual Prompt reverse synchronization uses the host SDK and existing persistent production commands. Collaborative text and canvas edits are confirmed first; formal bindings resolve the source Segment. Verify differing source/canvas Clip IDs, stale prior compilation, retained manual drafts on failure, late feedback after Clip switches and replayed edit receipts.
+
+- Opening a series from Home or Production goes directly to the full-page workbench, with episode selection, canvas and series-management actions. The first episode is the default; explicit links retain their selected episode. Empty series lead to planning and episode creation. Episode production routes no longer redirect to canvas dialogs. Verify switching, refresh, stale cross-series reads, draft recovery and unchanged legacy source contracts.
+- Existing director drafts also use the new timeline, shot list, editor and sidebar, displaying their original frame windows, character registry and image bindings. Saves retain the original contract; no Subjects or ledger migration are created. V2 drafts retain structured editing and automatic compilation.
+
+- Smart image nodes separate history browsing, use for production references, follow latest, and restore generation settings. New Subject/keyframe bindings follow the node's reference selection; explicit binding overrides retain their meaning. Verify atomic selections, replay, rejected invalid results, actual-consumer refresh and frozen in-flight inputs.
+- V2 continuity events use Shot-local frames with derived global positions; earlier events cannot read future state. State prose is editable in the ledger. Ledger drafts reuse persistent local storage and retain local edits after source changes; reviewed merges keep unrelated remote entries.
+
+- V2 productions provide a Shot/Clip timeline, shot navigator, focused editor and reference/state sidebar, with Clip grouping in the same workbench. Explicit navigation wins; existing V2 storyboards open in Shots when no target is specified.
+- Edit framing, attention Subjects, camera movement, editorial reason, duration and Subject usage through structured controls. One save uses the existing automatic compile/sync flow. Keyframes bind smart nodes with anchor and required-submission controls; reference previews consume Backend workbenches.
+- Unsaved shot and grouping edits use the existing persistent local drafts across shot/tab changes and source refreshes. Concurrent source changes require review before overwrite, and unreadable draft text remains available.
+- Shot saves submit only changed fields; explicitly keeping a reviewed draft retains remote fields that were not edited. Backend shot workbenches report compilation validity, so the browser does not hash compiler inputs. Missing consumed images invalidate compilation; design-only image issues are reported separately.
+- Verify both languages, both themes, narrow layouts, selection, grouping saves, smart-image updates and stale compiled-output labels. The page does not auto-play or submit media. Legacy drafts use the new layout with their original editing and save contracts; no data migration is performed.
+
 ## Local storyboard repair and model-facing prompts
 
 - Replace one scene's storyboard while retaining its Segment IDs and total frame range. Verify conflict rejection, operation replay, cross-scene protection and refreshed dialogue/reference windows.
@@ -186,7 +213,7 @@ description: Implemented changes that still need manual verification
 
 ## Home canvas preview
 
-- Canvas preview opens without a page error and shows node and connection counts from the project summary or loaded canvas. Check opening, closing and reopening the preview in grid and list views, including canvases without a cover.
+- Canvas preview opens without a page error and shows node and connection counts from the project summary or loaded canvas. A delete button sits beside "Continue editing" in the footer; it closes the preview and opens the shared delete confirmation ("Delete canvas?"), which cancels without deleting and removes the project from both the home page and the backend on confirm. Check opening, closing and reopening the preview in grid and list views, including canvases without a cover.
 
 ## MCP large payload governance
 
@@ -235,8 +262,8 @@ description: Implemented changes that still need manual verification
 
 ## H3 long-prompt translation
 
-- A Clip's Chinese translation combines lines into batches of at most 4,000 source characters, requests the selected text model sequentially and displays completion progress. Oversized lines split at punctuation or whitespace while retaining reference markers and Unicode characters. The complete preview preserves headers, blank lines, indentation and N/A. Switching back and reopening reuses the complete translation; the source prompt is preserved.
-- Translation records retain their identities, including complete JSON returned within Markdown or document wrappers. Length notices, empty output, missing/duplicate records and changed reference tags or shot markers fail, stop later batches and neither cache partial translations nor retry automatically. Switching Clips, editing the source or leaving the panel cancels the old translation and prevents late results from appearing. Check real-channel long prompts through the final shot, completion progress, manual retry after failure, switching/editing during requests, both themes and narrow screens.
+- A Clip's Chinese translation sends the whole prompt to the selected text model in one request, with no character-based batching and no segment progress during the request. The complete preview preserves headers, blank lines, indentation and N/A. Switching back and reopening reuses the complete translation; the source prompt is preserved.
+- Translation records retain their identities, including complete JSON returned within Markdown or document wrappers. Length notices, empty output, missing/duplicate records and changed reference tags or shot markers fail, neither cache partial translations nor retry automatically. Switching Clips, editing the source or leaving the panel cancels the old translation and prevents late results from appearing. Check real-channel long prompts through the final shot, manual retry after failure, switching/editing during requests, both themes and narrow screens.
 
 ## Asset preflight and production tools
 

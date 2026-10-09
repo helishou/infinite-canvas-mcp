@@ -3,7 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { compileAchengDirector, resolveAchengEngine, resolveAchengRuntime, achengEngineIdentity } from "@basketikun/canvas-agent/skills/acheng";
-import { canonicalProduction, directorProductionSchema, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
+import { canonicalProduction, directorProductionSchema, isSubjectPromptAssembly, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import { EpisodeProductionService, ProductionConflictError } from "./production.js";
 import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
 import { continuityTargetBlockers } from "./continuity-reports.js";
@@ -39,7 +39,13 @@ export class ProductionCompilationService {
     private compilationDirector(input: DirectorProduction) {
         const director = directorProductionSchema.parse(structuredClone(input));
         preserveCompilationProvenance(director);
-        if (this.compiler === compileAchengDirector) director.engine = achengEngineIdentity(resolveAchengEngine());
+        if (this.compiler === compileAchengDirector) {
+            const runtime = resolveAchengEngine();
+            if (isSubjectPromptAssembly(director.source) && !((runtime.sourceContract as any)?.promptAssemblyVersions || []).includes(2)) {
+                throw Object.assign(new Error("当前激活的 Acheng 编译器尚未支持 Subject Prompt v2；源稿已保存，尚未生成或同步 Prompt。"), { code: "SUBJECT_PROMPT_COMPILER_UNSUPPORTED" });
+            }
+            director.engine = achengEngineIdentity(runtime);
+        }
         return director;
     }
 
@@ -127,7 +133,7 @@ export class ProductionCompilationService {
         const current = this.service.get(id);
         if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
         if (!current.draft.director) throw new Error("缺少正式导演源稿");
-        const director = this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director));
+        const director = this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director), scope?.targetIds, true);
         if (scope && this.compiler === compileAchengDirector && !resolveAchengRuntime(director.engine.runtimeId).sourceContract?.scopedCompilation) throw new Error("SCOPED_COMPILATION_UNSUPPORTED: 当前激活引擎不支持按场次编译，请更新本机引擎");
         const effective = this.effectiveInput(director, scope);
         const boundFiles = this.service.compilationReferenceFiles(id, effective.input);
@@ -158,7 +164,7 @@ export class ProductionCompilationService {
         const current = this.service.get(id);
         if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
         if (!current.draft.director) throw new Error("COMPILE_STAGE_NOT_READY: 请先保存正式导演源稿");
-        const director = this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director));
+        const director = this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director), scope?.targetIds, true);
         const scoped = scope ? compilationScopeInput(director, scope) : undefined;
         const references = this.service.compilationReferenceFiles(id, scoped?.director || director);
         const compileInput = scope ? scopedCompilerInput(scoped!.director, scope) : director;
@@ -257,7 +263,7 @@ export class ProductionCompilationService {
                     const artifacts = compiled.director.artifacts.filter(artifact => projection.targetIds.includes(artifact.targetId)).map(artifact => {
                         const prior = reusable.find(item => item.kind === artifact.kind && item.targetId === artifact.targetId && item.sha256 === artifact.sha256);
                         if (prior) return prior;
-                        const targetScope = { targetIds: [artifact.targetId], ...(job.scope.output ? { output: job.scope.output } : {}) };
+                        const targetScope = { targetIds: [artifact.targetId], ...(job.scope?.output ? { output: job.scope.output } : {}) };
                         return { ...artifact, sourceHash: job.director.sourceHash, receipt: { ...artifact.receipt, sourceHash: job.director.sourceHash,
                             compilationScope: { scope: targetScope, inputHash: compilationScopeInput(job.director, targetScope).inputHash, engine: artifact.receipt.engine || job.director.engine, projectedSourceHash } } };
                     });
@@ -326,7 +332,7 @@ export class ProductionCompilationService {
         const current = this.service.get(id);
         if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
         if (!current.draft.director) throw new Error("Missing formal director source");
-        const director = this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director));
+        const director = this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director), undefined, true);
         const checked = this.service.preflight(id, { action: "compile", request: { expectedRevision, director } }, this.compiler === compileAchengDirector ? director.engine.runtimeId : undefined);
         if (!checked.valid) throw new ProductionValidationError(checked.diagnostics);
         const boundFiles = this.service.compilationReferenceFiles(id, director);
@@ -361,7 +367,7 @@ export class ProductionCompilationService {
             if (committed) return { revision: committed.revision, sourceHash: committed.draft.director?.sourceHash, referenceSync: committed.referenceSync, replayed: true, mediaSubmitted: false };
             const director = current.draft.director;
             if (!director) throw new ProductionConflictError(current);
-            const latest = this.service.resolveSubjectPictureInputs(id, { ...director, engine: packet.director.engine });
+            const latest = this.service.resolveSubjectPictureInputs(id, { ...director, engine: packet.director.engine }, packet.scope?.targetIds, true);
             const input = compilationScopeInput(latest, packet.scope);
             if (input.inputHash !== packet.scopeHash && input.legacyInputHash !== packet.scopeHash) throw new ProductionConflictError(current);
             const targets = new Set<string>(packet.targetIds);

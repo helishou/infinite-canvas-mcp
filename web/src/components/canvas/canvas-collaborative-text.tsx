@@ -1,6 +1,5 @@
 import { useEffect, useImperativeHandle, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
-import { Image } from "antd";
 import { Compartment, EditorState, Prec } from "@codemirror/state";
 import { Decoration, EditorView, keymap, placeholder as placeholderExtension, ViewPlugin, WidgetType, type DecorationSet } from "@codemirror/view";
 import { autocompletion, completionKeymap, startCompletion } from "@codemirror/autocomplete";
@@ -10,6 +9,7 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { canvasTextKey } from "@/lib/canvas/collaborative-text-session";
 import { unresolvedClipReferenceTokens } from "@/lib/canvas/canvas-text-reference-tags";
 import { getCanvasTextSession } from "@/services/api/canvas-text";
+import { useMediaPreviewStore } from "@/stores/use-media-preview-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasSpeakerOption, CanvasTextEditorProps, CanvasTextReference } from "@/types/canvas-plugin";
 import { canvasTextPresenceExtension } from "./canvas-text-presence-extension";
@@ -556,6 +556,12 @@ function CanvasStandaloneText(props: CanvasTextEditorProps) {
     const speakersRef = useRef<CanvasSpeakerOption[]>(props.speakers || []);
     speakersRef.current = props.speakers || [];
     const [imagePreview, setImagePreview] = useState<string | null>(null);
+    // 预览统一交给全局 MediaPreviewHost（全站单一弹窗），这里只做转交。
+    useEffect(() => {
+        if (!imagePreview) return;
+        useMediaPreviewStore.getState().open({ url: imagePreview, type: "image" });
+        setImagePreview(null);
+    }, [imagePreview]);
     const [dialogueMenu, setDialogueMenu] = useState<DialogueMenuState | null>(null);
     const appearance = useMemo(() => new Compartment(), []);
     const mentions = useMemo(() => new Compartment(), []);
@@ -604,6 +610,8 @@ function CanvasStandaloneText(props: CanvasTextEditorProps) {
 
     useEffect(() => {
         if (!parent.current) return;
+        // 同 CanvasYjsText：销毁视图派发的 blur 不算用户移开焦点，不能触发 onBlur。
+        let disposed = false;
         const view = new EditorView({
             parent: parent.current,
             state: EditorState.create({ doc: props.value || "", extensions: [
@@ -619,12 +627,12 @@ function CanvasStandaloneText(props: CanvasTextEditorProps) {
                     if (update.docChanged && !applyingValue.current) callbacks.current.onChange?.(update.state.doc.toString());
                 }),
                 EditorView.contentAttributes.of({ "aria-label": placeholder }),
-                EditorView.domEventHandlers({ blur: () => { callbacks.current.onBlur?.(); } }),
+                EditorView.domEventHandlers({ blur: () => { if (!disposed) callbacks.current.onBlur?.(); } }),
             ] }),
         });
         editor.current = view;
         if (autoFocus) view.focus();
-        return () => { editor.current = null; view.destroy(); };
+        return () => { disposed = true; editor.current = null; view.destroy(); };
     }, [placeholder, appearance, mentions]);
     useEffect(() => {
         const view = editor.current;
@@ -647,7 +655,6 @@ function CanvasStandaloneText(props: CanvasTextEditorProps) {
     }} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()}>
         <div ref={parent} style={{ height: autoHeight ? "auto" : "100%", minHeight: 80 }} />
         {dialogueMenu ? <DialogueContextMenu menu={dialogueMenu} onClose={() => setDialogueMenu(null)} theme={theme} /> : null}
-        {imagePreview ? <Image style={{ display: "none" }} src={imagePreview} preview={{ visible: true, onVisibleChange: (visible) => { if (!visible) setImagePreview(null); } }} /> : null}
     </div>;
 }
 
@@ -666,6 +673,12 @@ function CanvasYjsText(props: CanvasTextEditorProps) {
     const speakersRef = useRef<CanvasSpeakerOption[]>(props.speakers || []);
     speakersRef.current = props.speakers || [];
     const [imagePreview, setImagePreview] = useState<string | null>(null);
+    // 预览统一交给全局 MediaPreviewHost（全站单一弹窗），这里只做转交。
+    useEffect(() => {
+        if (!imagePreview) return;
+        useMediaPreviewStore.getState().open({ url: imagePreview, type: "image" });
+        setImagePreview(null);
+    }, [imagePreview]);
     const [dialogueMenu, setDialogueMenu] = useState<DialogueMenuState | null>(null);
     const appearance = useMemo(() => new Compartment(), []);
     const editable = useMemo(() => new Compartment(), []);
@@ -715,6 +728,10 @@ function CanvasYjsText(props: CanvasTextEditorProps) {
 
     useEffect(() => {
         if (!parent.current || !status.ready) return;
+        // 销毁视图（StrictMode 双执行、依赖重挂载、组件卸载）会让浏览器对仍持焦点的
+        // contenteditable 派发原生 blur；这属于生命周期产物而非用户移开焦点，
+        // 不能触发 onBlur 结束编辑，否则文本节点二次进入编辑会被立刻关闭。
+        let disposed = false;
         const view = new EditorView({
             parent: parent.current,
             state: EditorState.create({ doc: session.text.toString(), extensions: [
@@ -731,12 +748,12 @@ function CanvasYjsText(props: CanvasTextEditorProps) {
                 mentions.of(mentionExtensions(references, chips, clipReferenceTags, setImagePreview)),
                 ...(dialogue ? [dialogueHighlightExtension(setDialogueMenu, speakersRef), dialogueContextMenuExtension(setDialogueMenu, speakersRef)] : []),
                 EditorView.contentAttributes.of({ "aria-label": placeholder }),
-                EditorView.domEventHandlers({ blur: () => { callbacks.current.onBlur?.(); } }),
+                EditorView.domEventHandlers({ blur: () => { if (!disposed) callbacks.current.onBlur?.(); } }),
             ] }),
         });
         editor.current = view;
         if (autoFocus) view.focus();
-        return () => { editor.current = null; view.destroy(); };
+        return () => { disposed = true; editor.current = null; view.destroy(); };
     }, [session, status.ready, placeholder, appearance, editable, mentions]);
     useEffect(() => { editor.current?.dispatch({ effects: appearance.reconfigure(themeExtension) }); }, [appearance, themeExtension]);
     useEffect(() => { editor.current?.dispatch({ effects: editable.reconfigure(EditorView.editable.of(!status.blocked)) }); }, [editable, status.blocked]);
@@ -756,6 +773,5 @@ function CanvasYjsText(props: CanvasTextEditorProps) {
             <button type="button" className="ml-2 hover:underline" onClick={() => void session.reconnect(true)}>重试同步</button>
             {status.blocked ? <details><summary>查看保留的草稿</summary><textarea readOnly value={status.text} aria-label="未同步文本草稿" /></details> : null}
         </div> : status.pending ? <small style={{ color: theme.node.muted }}>正在保存文字…</small> : null}
-        {imagePreview ? <Image style={{ display: "none" }} src={imagePreview} preview={{ visible: true, onVisibleChange: (visible) => { if (!visible) setImagePreview(null); } }} /> : null}
     </div>;
 }

@@ -75,6 +75,8 @@
 
 ## 媒体与执行结果
 
+- Subject 图片及 Shot 关键帧的 `node_selection` 绑定消费智能节点独立的 `smartImageReferenceSelection`：缺省跟随最新成功归档结果，显式历史选择只改变引用。绑定声明的 `latest_success` 或 `selected_result` 保持自身覆盖。浏览历史不恢复生成输入；恢复生成设置必须显式执行，且不改引用策略。选择、归档及实际消费者刷新沿现有 ops／事件与持久刷新链处理；不改在途快照或旧 Clip 的兼容引用语义。
+
 - MEDIA_DIR 独立于 ComfyUI 安装目录；ComfyUI 只用执行缓存，输出归档回 Backend。迁出旧耦合目录先备份、复制并校验，再切换索引，保留原文件。
 - WebP 缩略图仅为浏览器本地可丢弃渲染缓存，不进入节点、媒体记录、导出或模型参考；下载、编辑、生成、导出始终解析原 storageKey。
 - ComfyUI 结果必须对应本轮精确 promptId，且最终媒体非空。禁止扫描 history 取最近成功记录补结果，时间接近不是任务身份证据。

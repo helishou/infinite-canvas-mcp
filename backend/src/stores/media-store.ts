@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 import type { BackendDatabase, MediaFile } from "../db.js";
 import { MEDIA_DIR } from "../config.js";
@@ -40,6 +42,54 @@ export function createMediaStore(db: BackendDatabase): MediaStore {
             return media;
         },
 
+        async storeStream(source, options) {
+            const name = path.basename(options.name || "media.bin");
+            const categoryDir = path.join(MEDIA_DIR, safeCategory(options.category));
+            const tempPath = path.join(categoryDir, `.incoming-${randomUUID()}.tmp`);
+            fs.mkdirSync(categoryDir, { recursive: true, mode: 0o700 });
+            let bytes = 0;
+            let prefix = Buffer.alloc(0);
+            const digest = createHash("sha256");
+            const limit = new Transform({
+                transform(chunk, _encoding, callback) {
+                    const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+                    bytes += data.length;
+                    if (bytes > MAX_MEDIA_BYTES) callback(new Error("媒体超过 200 MB 限制"));
+                    else {
+                        digest.update(data);
+                        if (prefix.length < 64) prefix = Buffer.concat([prefix, data.subarray(0, 64 - prefix.length)]);
+                        callback(null, data);
+                    }
+                },
+            });
+            let filePath = "";
+            try {
+                await pipeline(source, limit, fs.createWriteStream(tempPath, { flags: "wx", mode: 0o600 }));
+                if (!bytes) throw new Error("媒体为空");
+                const mimeType = options.resolveMimeType?.(prefix, bytes) || options.mimeType || "application/octet-stream";
+                const storageKey = options.storageKey || `${kindFor(mimeType, name)}:${randomUUID()}`;
+                const extension = path.extname(name).replace(/[^a-z0-9.]/gi, "").slice(0, 12) || extensionForMime(mimeType);
+                filePath = path.join(categoryDir, `${randomUUID()}${extension}`);
+                await fs.promises.rename(tempPath, filePath);
+                const media: MediaFile = {
+                    storageKey,
+                    filePath,
+                    mimeType,
+                    bytes,
+                    width: options.width ?? null,
+                    height: options.height ?? null,
+                    durationMs: options.durationMs ?? null,
+                    createdAt: new Date().toISOString(),
+                };
+                db.upsertMediaFile(media);
+                return { ...media, sha256: digest.digest("hex"), prefix };
+            } catch (error) {
+                try { fs.unlinkSync(tempPath); } catch { /* partial media may not have been created */ }
+                if (filePath) try { fs.unlinkSync(filePath); } catch { /* archived media may not have been committed */ }
+                throw error;
+            }
+        },
+
         /** 按 base64 dataUrl 落地（兼容旧 Agent /runtime/media 与 H3 ref 落地），返回稳定可读路径。 */
         storeDataUrl(dataUrl: string, name: string, extra: MediaStats & { storageKey?: string } = {}): MediaFile & { path: string; url: string } {
             const match = /^data:([^;,]+);base64,(.+)$/s.exec(String(dataUrl).trim());
@@ -73,7 +123,7 @@ export function createMediaStore(db: BackendDatabase): MediaStore {
             const media = db.getMediaFile(storageKey);
             if (!media) throw new Error("media not found");
             try {
-                return fs.readFileSync(media.filePath);
+                return await fs.promises.readFile(media.filePath);
             } catch {
                 throw new Error("媒体文件丢失");
             }

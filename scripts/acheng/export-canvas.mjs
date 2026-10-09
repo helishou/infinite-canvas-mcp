@@ -50,8 +50,9 @@ for (const [kind, entries] of [['image', index.asset_prompts || index.assets || 
       return [{ ...binding, label, sha256: digest }];
     });
     artifacts.push({ id: `${kind}-${targetId}`, kind, targetId, prompt, sha256: sha(prompt), sourceHash, status: ready ? 'ready' : 'draft', references,
-      receipt: { sourceHash, promptHash: sha(prompt), engineRuntimeId: engine.runtimeId, engine: { commit: engine.commit, patchVersion: engine.patchVersion, runtimeId: engine.runtimeId, version: engine.version }, validator: onlyAssets ? 'compile_assets/validate_asset_entries' : 'compile_h3/validate_package',
-        diagnostics: { englishWords: entry.detailed_description_english_words ?? null, detailPolicy: entry.h3_detail_policy ?? null, blockers: entry.blockers || [], formatPass: entry.format_pass || null, accepted: entry.accepted ?? ready } } });
+     receipt: { sourceHash, promptHash: sha(prompt), engineRuntimeId: engine.runtimeId, engine: { commit: engine.commit, patchVersion: engine.patchVersion, runtimeId: engine.runtimeId, version: engine.version }, validator: onlyAssets ? 'compile_assets/validate_asset_entries' : 'compile_h3/validate_package',
+        ...(entry.source_map ? { sourceMap: entry.source_map } : {}),
+       diagnostics: { englishWords: entry.detailed_description_english_words ?? null, detailPolicy: entry.h3_detail_policy ?? null, blockers: entry.blockers || [], formatPass: entry.format_pass || null, accepted: entry.accepted ?? ready } } });
   }
 }
 const director = { schemaVersion: 1, engine: { commit: engine.commit, patchVersion: engine.patchVersion, runtimeId: engine.runtimeId, version: engine.version },

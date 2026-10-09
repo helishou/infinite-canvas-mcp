@@ -1,6 +1,7 @@
 import { effectiveTargetInput, inputHash } from "../drama/canvas-inputs.js";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { Readable } from "node:stream";
 import { readFile } from "node:fs/promises";
 import fs from "node:fs";
 import { assertReferenceCompilation, compileReferenceSubmission } from "@basketikun/canvas-agent/reference-contract";
@@ -111,7 +112,7 @@ export class CanvasH3Runner {
     ) {}
 
     /** Pure preview: no canonical ops, seed generation, task creation or media writes. */
-    preview(input: H3RunInput) {
+    preview(input: H3RunInput, inspectedReferenceDigests?: Map<string, string>) {
         const normalized = normalizeInput(input);
         const project = this.stores.projects.get(normalized.projectId);
         if (!project) throw new Error(`画布不存在: ${normalized.projectId}`);
@@ -124,6 +125,7 @@ export class CanvasH3Runner {
             try { this.resolveResumeSeed(normalized, firstPlan, project, defaults); }
             catch (error) { diagnostics.push({ code: 'H3_LATENT_RESUME_UNAVAILABLE', nodeId: firstPlan.nodeId, segmentId: firstPlan.segmentId, message: (error as Error).message }); }
         }
+        const hashedReferences = new Map<string, string | null>();
         const clips = plans.map(plan => {
             const node = (project.nodes as Array<Record<string, unknown>>).find(item => item.id === plan.nodeId)!;
             const metadata = recordOf(node.metadata);
@@ -166,8 +168,15 @@ export class CanvasH3Runner {
                     params: Object.fromEntries(Object.entries(clip.effectiveRuntime).filter(([key]) => (H3_PARAM_KEYS as readonly string[]).includes(key))),
                     storyboard: segment.storyboardShots || [], composite: segment.storyboardCompositeEnabled === true,
                     references: clip.referenceMap.map(reference => {
-                        const media = reference.storageKey && this.stores.media.meta(String(reference.storageKey));
-                        return { ...reference, sha256: media && fs.existsSync(media.filePath) ? createHash('sha256').update(fs.readFileSync(media.filePath)).digest('hex') : null };
+                        const key = String(reference.storageKey || "");
+                        if (!key) return { ...reference, sha256: null };
+                        if (!hashedReferences.has(key)) {
+                            const media = this.stores.media.meta(key);
+                            const digest = media && fs.existsSync(media.filePath) ? createHash('sha256').update(fs.readFileSync(media.filePath)).digest('hex') : null;
+                            hashedReferences.set(key, digest);
+                            if (digest) inspectedReferenceDigests?.set(key, digest);
+                        }
+                        return { ...reference, sha256: hashedReferences.get(key) || null };
                     }),
                 };
             }),
@@ -201,10 +210,11 @@ export class CanvasH3Runner {
                 } } } as Stores;
         const planner = new CanvasH3Runner(stores, this.events, this.comfy, this.runningHub, this.videoDispatcher);
         const normalized = normalizeInput(input);
-        const checked = planner.preview(normalized);
+        const inspectedReferenceDigests = new Map<string, string>();
+        const checked = planner.preview(normalized, inspectedReferenceDigests);
         if (!checked.ready || checked.diagnostics.some(issue => issue.code === 'H3_UI_PARAMETER_MISMATCH')) throw new Error(checked.diagnostics.map(issue => issue.message).join("；"));
         if (normalized.expectedPlanHash && normalized.expectedPlanHash !== checked.planHash) throw new Error("所选生成输入已变化，请刷新预览");
-        return this.start({ ...normalized, expectedPlanHash: undefined }, clientTaskId, planner.buildRunPlan(normalized));
+        return this.start({ ...normalized, expectedPlanHash: undefined }, clientTaskId, planner.buildRunPlan(normalized, [], inspectedReferenceDigests));
     }
 
     start(input: H3RunInput, clientTaskId?: string, preparedPlan?: H3RunPlan) {
@@ -447,7 +457,7 @@ export class CanvasH3Runner {
         throw new Error(`Clip ${plan.segmentIndex + 1} 找不到与上一段当前成片匹配的潜空间续写任务，请从组首运行`);
     }
 
-    private buildRunPlan(input: H3RunInput, blockedPlans: Array<{ nodeId: string; segmentId: string; clipNumber: number; reason: string }> = []): H3RunPlan {
+    private buildRunPlan(input: H3RunInput, blockedPlans: Array<{ nodeId: string; segmentId: string; clipNumber: number; reason: string }> = [], inspectedReferenceDigests?: Map<string, string>): H3RunPlan {
         const blockedKeys = new Set(blockedPlans.map((item) => `${item.nodeId}:${item.segmentId}`));
         const allPlans = this.plansFor(input);
         const plans = allPlans.filter((plan) => !blockedKeys.has(`${plan.nodeId}:${plan.segmentId}`));
@@ -526,13 +536,16 @@ export class CanvasH3Runner {
         }
         const catalog = Array.isArray(project.referenceCatalog) ? project.referenceCatalog as Array<Record<string, unknown>> : [];
         for (const asset of catalog) if (assetIds.has(String(asset.id)) && asset.sourceNodeId) sourceNodeIds.add(String(asset.sourceNodeId));
+        const referenceKeys = [...new Set([...assetIds].map(id => String(catalog.find(asset => asset.id === id)?.storageKey || "")).filter(Boolean))];
+        const referenceDigests = (before as any).canvasReferenceDigests || Object.fromEntries(referenceKeys.flatMap(key => {
+            const inspected = inspectedReferenceDigests?.get(key);
+            if (inspected) return [[key, inspected]];
+            const media = this.stores.media.meta(key);
+            return media && fs.existsSync(media.filePath) ? [[key, createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex")]] : [];
+        }));
         return structuredClone({
             version: 1, plans,
-            referenceDigests: (before as any).canvasReferenceDigests || Object.fromEntries([...assetIds].flatMap(id => {
-                const asset = catalog.find(asset => asset.id === id), key = String(asset?.storageKey || "");
-                const media = key && this.stores.media.meta(key);
-                return media && fs.existsSync(media.filePath) ? [[key, createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex")]] : [];
-            })),
+            referenceDigests,
             project: {
                 nodes: nodes.filter((node) => selectedNodeIds.has(String(node.id)) || sourceNodeIds.has(String(node.id))),
                 referenceCatalog: catalog.filter((asset) => assetIds.has(String(asset.id))),
@@ -600,7 +613,6 @@ export class CanvasH3Runner {
             if (child) void writeBackH3Task(this.stores, this.events, child);
         }
         this.finishParentNode(task, "cancelled", "任务已取消");
-        this.publish(task, "task.updated");
         return task;
     }
 
@@ -727,7 +739,10 @@ export class CanvasH3Runner {
                 if (child.status !== "succeeded" || !output) throw new Error(child.error || `Clip ${plan.segmentIndex + 1} 生成失败或缺少视频`);
                 const segment = this.segmentFor(input.projectId, plan);
                 const alreadyWritten = String(segment.resultStorageKey || "") === String(output.storageKey || "") && segment.status === "success";
-                if (!alreadyWritten && !await writeBackH3Task(this.stores, this.events, child)) throw new Error(`Clip ${plan.segmentIndex + 1} 终态回写失败`);
+                if (!alreadyWritten && !await writeBackH3Task(this.stores, this.events, child, { cacheFingerprint: cache.fingerprint, firstPassReady: false })) throw new Error(`Clip ${plan.segmentIndex + 1} 终态回写失败`);
+                if (alreadyWritten && (segment.cacheFingerprint !== cache.fingerprint || segment.firstPassReady !== false)) {
+                    this.patchSegment(input.projectId, plan.nodeId, plan.segmentId, { cacheFingerprint: cache.fingerprint, firstPassReady: false });
+                }
                 const media = [...completedOutput(), output];
                 if (h3ConfirmationKind(cache.segment, cache.params) && !secondPass) {
                     const snapshot = confirmation.prepared || {};
@@ -738,7 +753,6 @@ export class CanvasH3Runner {
                     this.publish(task, "task.updated");
                     return;
                 }
-                this.patchSegment(input.projectId, plan.nodeId, plan.segmentId, { cacheFingerprint: cache.fingerprint, firstPassReady: false, status: "success", runtimeTaskId: "", parentTaskId: "" });
                 task = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "running", progress: Math.min(0.99, (planIndex + 1) / plans.length), result: { ...recordOf(task.result), phase: "remaining", confirmation: { ...confirmation, pending: [], inFlight: undefined, cursor: planIndex + 1, revision: confirmation.revision + 1 }, media, ...output } }, { type: "clip_completed", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: child.id, output, fingerprint: cache.fingerprint } })!;
                 if (!task) throw new Error("H3 Clip 收口状态冲突");
                 completedByKey.set(key, { output, fingerprint: cache.fingerprint });
@@ -1071,7 +1085,7 @@ export class CanvasH3Runner {
         for (const reference of compilation.references) {
             const key = String(reference.storageKey || ""), digest = input.runPlan?.referenceDigests?.[key];
             const media = key && this.stores.media.meta(key);
-            if (digest && (!media || !fs.existsSync(media.filePath) || createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex") !== digest)) throw new Error(`参考文件在提交前已变化：${key}`);
+            if (digest && (!media || !fs.existsSync(media.filePath) || await sha256File(media.filePath) !== digest)) throw new Error(`参考文件在提交前已变化：${key}`);
         }
         const submission = {
             authoredPrompt: String(segment.prompt || ""),
@@ -1316,7 +1330,8 @@ export class CanvasH3Runner {
         if (/^https?:\/\//i.test(url)) {
             const response = await fetch(url);
             if (!response.ok) throw new Error(`读取参考失败 HTTP ${response.status}: ${String(ref.name || url)}`);
-            return this.stores.media.store(Buffer.from(await response.arrayBuffer()), { name: String(ref.name || "ref"), mimeType: response.headers.get("content-type") || undefined, category: "input" }).filePath;
+            if (!response.body) throw new Error(`读取参考失败：响应没有媒体数据 ${String(ref.name || url)}`);
+            return (await this.stores.media.storeStream(Readable.fromWeb(response.body as unknown as import("node:stream/web").ReadableStream), { name: String(ref.name || "ref"), mimeType: response.headers.get("content-type") || undefined, category: "input" })).filePath;
         }
         return url;
     }
@@ -1460,6 +1475,12 @@ function mediaStorageKey(url: string) {
         const parsed = new URL(url, "http://local");
         return parsed.pathname.startsWith("/media/") ? decodeURIComponent(parsed.pathname.slice(7)).split("/")[0] : "";
     } catch { return ""; }
+}
+
+async function sha256File(filePath: string) {
+    const hash = createHash("sha256");
+    for await (const chunk of fs.createReadStream(filePath)) hash.update(chunk);
+    return hash.digest("hex");
 }
 
 function stableReferenceInputs(references: unknown[]) {

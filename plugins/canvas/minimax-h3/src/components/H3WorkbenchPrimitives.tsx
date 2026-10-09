@@ -23,7 +23,7 @@ export function requestH3Run(ctx: CanvasNodeContext, all = false, forceRegenerat
 export function H3StatusBadge({ status, error, onRetry }: { status: string; error: string; onRetry: () => void }) {
     const [copiedError, setCopiedError] = useState(false);
     if (!status || status === "idle") return null;
-    const label = status === "queued" ? "排队中…" : status === "loading" ? "生成中…" : status === "awaiting_confirmation" ? "一采待确认" : status === "success" ? "已完成" : status === "cancelled" ? "已取消" : status === "error" ? `失败：${error || "未知错误"}` : status;
+    const label = status === "preparing" ? "正在检查输入并提交…" : status === "queued" ? "排队中…" : status === "loading" ? "生成中…" : status === "awaiting_confirmation" ? "一采待确认" : status === "success" ? "已完成" : status === "cancelled" ? "已取消" : status === "error" ? `失败：${error || "未知错误"}` : status;
     const copyError = async () => {
         const text = error || "未知错误";
         let copied = false;
@@ -364,7 +364,7 @@ export function H3RulerScrubber({ ctx, segments, total, previewH }: { ctx: Canva
     return <div ref={scrubRef} className="minimax-ruler-scrubber" style={{ top: origin?.top ?? `calc(58px + ${previewH}px + 10px)`, left: origin?.left ?? 62, width: origin?.width ?? "calc(100% - 126px)", height: origin?.height ?? 28 }} title="点击跳转播放指针" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* synthetic/无指针ID 的测试事件无活动指针，忽略 */ } event.currentTarget.setAttribute("data-scrubbing", "1"); apply(event); }} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) apply(event); }} onPointerUp={(event) => { try { event.currentTarget.releasePointerCapture(event.pointerId); } catch { /* 同上 */ } event.currentTarget.removeAttribute("data-scrubbing"); ctx.updateMetadata({ h3Scrubbing: false }); }} onPointerCancel={(event) => { event.currentTarget.removeAttribute("data-scrubbing"); ctx.updateMetadata({ h3Scrubbing: false }); }} />;
 }
 
-export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageKey, name, livePreview = false, playhead, timelineOffset = 0, clipDuration, playToken, playRequest, nextUrl, onEnded, onPlayheadTick }: { ctx: CanvasNodeContext; url: string; kind: H3Ref["type"]; aspectRatio?: string; storageKey?: string; name?: string; livePreview?: boolean; playhead: number; timelineOffset?: number; clipDuration?: number; playToken: number; playRequest: number; nextUrl?: string; onEnded?: (continuedFromSlot?: boolean) => void; onPlayheadTick?: (absoluteTime: number) => void }) {
+export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageKey, name, livePreview = false, playhead, timelineOffset = 0, clipDuration, playToken, playRequest, nextUrl, preloadNext = false, onEnded, onPlayheadTick }: { ctx: CanvasNodeContext; url: string; kind: H3Ref["type"]; aspectRatio?: string; storageKey?: string; name?: string; livePreview?: boolean; playhead: number; timelineOffset?: number; clipDuration?: number; playToken: number; playRequest: number; nextUrl?: string; preloadNext?: boolean; onEnded?: (continuedFromSlot?: boolean) => void; onPlayheadTick?: (absoluteTime: number) => void }) {
     // 双槽交叉淡入续播：当前段在 active 槽播放，下一段提前预载进另一槽；
     // 当前段 ended 时直接切换到已就绪的 buffer 槽播放，消除「换 src 重载」造成的卡顿。
     const videosRef = useRef<[HTMLMediaElement | null, HTMLMediaElement | null]>([null, null]);
@@ -372,6 +372,8 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
     const activeRef = useRef(0);
     const [active, setActive] = useState(0);
     const [slotSrc, setSlotSrc] = useState<[string, string]>([url || "", ""]);
+    const [preloadIntentUrl, setPreloadIntentUrl] = useState("");
+    const lastSelectedUrlRef = useRef(url);
     const playerContentRef = useRef<HTMLDivElement | null>(null);
     const [mediaResolution, setMediaResolution] = useState<{ width: number; height: number } | null>(null);
     const [aspectFrame, setAspectFrame] = useState<{ width: number; height: number } | null>(null);
@@ -379,6 +381,15 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
     const parsedRatio = ratioMatch ? Number(ratioMatch[1]) / Number(ratioMatch[2]) : 16 / 9;
     const frameRatio = mediaResolution ? mediaResolution.width / mediaResolution.height
         : Number.isFinite(parsedRatio) && parsedRatio > 0 ? parsedRatio : 16 / 9;
+    useEffect(() => {
+        const onPreload = (event: Event) => {
+            const detail = (event as CustomEvent<{ nodeId?: string; url?: string }>).detail;
+            if (kind !== "video" || livePreview || detail?.nodeId !== ctx.node.id || !detail.url || detail.url === url) return;
+            setPreloadIntentUrl(detail.url);
+        };
+        window.addEventListener("minimax-h3-preload-clip", onPreload);
+        return () => window.removeEventListener("minimax-h3-preload-clip", onPreload);
+    }, [ctx.node.id, kind, livePreview, url]);
     useEffect(() => {
         const content = playerContentRef.current;
         if (!content) return;
@@ -585,6 +596,26 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
         loadedUrlRef.current[i] = nextUrl;
         setSlotSrc((cur) => { const next = [...cur] as [string, string]; next[i] = nextUrl; return next; });
     }, [nextUrl, active, livePreview]);
+    // Hovering a timeline Clip warms only that intentional target in the inactive player slot.
+    // The active video is left untouched; a click can promote the warmed slot without another fetch.
+    useEffect(() => {
+        if (kind !== "video" || livePreview || !preloadIntentUrl || preloadIntentUrl === url) return;
+        if (lastSelectedUrlRef.current !== url) {
+            lastSelectedUrlRef.current = url;
+            setPreloadIntentUrl("");
+            return;
+        }
+        const a = activeRef.current;
+        const i = a === 0 ? 1 : 0;
+        if (loadedUrlRef.current[a] === preloadIntentUrl || loadedUrlRef.current[i] === preloadIntentUrl) return;
+        loadedUrlRef.current[i] = preloadIntentUrl;
+        setSlotSrc((current) => {
+            const next = [...current] as [string, string];
+            next[i] = preloadIntentUrl;
+            return next;
+        });
+    }, [preloadIntentUrl, url, kind, livePreview]);
+    useEffect(() => { lastSelectedUrlRef.current = url; }, [url]);
     // playToken 由 H3Workbench 在用户真正发起播放时（playAll / 续播换段）显式递增。
     // 只看 playToken 是否变化，**不**依赖 h3PlayRequest：metadata 里的 h3PlayRequest 残留值、
     // MCP / 多端同步、StrictMode dev 模式下 useEffect 跑两次都不会触发自动播放。
@@ -667,14 +698,14 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
                 <video
                     key={slot}
                     ref={(node) => { videosRef.current[slot] = node; }}
-                    src={slotSrc[slot] ? resultUrl(slotSrc[slot]) : undefined}
+                    src={slotSrc[slot] && (slot === active || livePreview || preloadNext && Boolean(nextUrl) || preloadIntentUrl === slotSrc[slot]) ? resultUrl(slotSrc[slot]) : undefined}
                     controls={active === slot}
                     // 只有生成中的实时视频自动循环；普通成片仍由用户起播，播完停帧或续播下一段。
                     autoPlay={livePreview && active === slot}
                     loop={livePreview && active === slot}
                     muted={isMuted}
                     playsInline
-                    preload="auto"
+                    preload={livePreview || preloadNext && (slot === active || Boolean(nextUrl)) || preloadIntentUrl === slotSrc[slot] ? "auto" : slot === active ? "metadata" : "none"}
                     draggable={false}
                     style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", background: "#0b0c0e", transition: "opacity .15s ease", opacity: active === slot ? 1 : 0, pointerEvents: active === slot ? "auto" : "none" }}
                     onLoadedMetadata={(event) => {

@@ -10,7 +10,7 @@ Acheng Director 本身就是 Skill，完整上游文件和模块位于项目 `.a
 
 ## 创作权属
 
-H3 编译按对白说话者和帧窗自动插入近景与反打，不要求普通 Shot 手工填写对白景别。用户需固定/覆盖机位时才显式采用 `storyboard_policy.version=1` 登记景别、关注对象和剪辑理由。Shot/Clip 时长和边界沿原合同保留。
+新制作采用 `prompt_assembly.version=2`：Shot 是摄影原子，摄影切点、时长和观看对象由结构化镜头明确设计；编译器组装 Prompt，不在单个 Shot 内暗中插入切镜。Subject、智能节点引用、台账与 Clip 分区沿当前激活导演合同。未启用新合同的旧稿保持原编译策略，不自动迁移。
 
 story、assets、shots、performance、effects、model、continuity 按 Acheng 原合同协作。空间设计在 assets 的 scene-design 支路，shots 消费空间事实；站位图是按需资产。多资产新制作采用 STYLE_MOTHER，新四视图默认采用等高的正脸近景、正面全身、侧面全身、背面全身和空手；色卡为辅助信息，不另建强制前置阶段。旧批准资产可保留并登记适用范围，缺项只补本轮所需。
 
@@ -18,7 +18,7 @@ story、assets、shots、performance、effects、model、continuity 按 Acheng �
 
 ### 制作内容语言
 
-中文用户未指定其他语言时，Agent 对话、问题与说明，以及导演工作台可读的制作源稿使用简体中文：`story` 与 `script_scenes` 的非对白内容、角色/场景/资产显示名称和说明、Shot 标题与中文 `display_summary`、阻塞原因及审核说明。对应地填写 `character_registry[].name`/`appearance`、`scene_registry[].name`、`asset_plan[].asset_name`/`description` 等显示字段。对白、歌词和画面内文字逐字保留原语言。`prompt_description`、`state_description` 与最终 H3 正文属于编译字段，按固定 Acheng/模型合同使用英文；不得把它们作为唯一的中文界面说明。已有确认稿不自动翻译，局部修改只按用户指定范围更新。
+描述性源内容遵循当前激活导演入口的“制作内容语言”规则：原字段直接用中文，人和编译器共用同一份内容，不另要求中文显示副本。`prompt_description`、`state_description` 和连续性状态正文也属于原描述字段，不能在适配层另规定必须英文；最终模型请求的格式与语言由编译器处理。旧稿与确认对白保留其修改范围。
 
 Shot 是叙事镜头，Segment 是请求，Clip 对应 Segment。本项目导演规划的每段 Clip 必须为 4–12 秒（含边界），收紧上游 4–15 秒生成窗口。按题材、对白和动作容量，沿镜头与事件安全边界装箱；保存源稿和提交编译前，逐段核对 `generation_clip_duration` 与帧窗换算秒数一致且均在范围内。超长段拆分，不足 4 秒的短尾与同场次相邻段合并或重新分配边界后再次检查所有段；不得加速对白、压缩动作或无意义填充。无法合理满足时返回具体边界问题；已有确认稿超窗时先说明受影响片段及调整方案，不静默改写或重新生成。不得自动一镜一段、强制正反打或仅允许动作镜合并。关键帧依真实锚点需要制作。
 

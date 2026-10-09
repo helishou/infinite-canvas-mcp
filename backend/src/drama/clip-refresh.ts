@@ -43,6 +43,10 @@ export class ClipRefreshStore {
     pending(): ClipRefreshJob[] {
         return this.db.prepare("SELECT job_json FROM production_clip_refresh_jobs WHERE owner_kind=? AND owner_id=? AND status IN ('queued','checking','compiling','applying')").all(this.owner.kind, this.owner.id).map(r => JSON.parse(String(r.job_json)));
     }
+    currentBySegment(): ClipRefreshJob[] {
+        const query = "SELECT job_json FROM (SELECT job_json, ROW_NUMBER() OVER(PARTITION BY json_extract(job_json,'$.segmentId') ORDER BY json_extract(job_json,'$.updatedAt') DESC, operation_id DESC) AS rank FROM production_clip_refresh_jobs WHERE owner_kind=? AND owner_id=?) WHERE rank=1";
+        return this.db.prepare(query).all(this.owner.kind, this.owner.id).map(row => JSON.parse(String(row.job_json)));
+    }
     owners(): string[] {
         return this.db.prepare("SELECT DISTINCT owner_id FROM production_clip_refresh_jobs WHERE owner_kind=? AND status IN ('queued','checking','compiling','applying')").all(this.owner.kind).map(r => String(r.owner_id));
     }
@@ -54,10 +58,12 @@ export class ClipRefreshStore {
 }
 
 export function clipRefreshReceipt(job: ClipRefreshJob) {
-    return { sourceSaved: true, status: job.status, segmentId: job.segmentId, savedRevision: job.savedRevision,
+    return { sourceSaved: true, operationId: job.operationId, status: job.status, segmentId: job.segmentId, savedRevision: job.savedRevision,
         sourceHash: job.sourceHash, compilationOperationId: job.compilationOperationId, selectedTargets: [job.segmentId],
         affectedTargets: job.affectedTargets, affectedReason: "Registered target inputs changed", blockingDiagnostic: job.diagnostics[0],
-        timings: job.timings, application: job.application, mediaSubmitted: false };
+        timings: job.timings, ...(job.application ? { application: { revision: job.application.revision, sourceHash: job.application.sourceHash,
+            referenceSync: (job.application.referenceSync || []).map((item: any) => ({ targetId: item.targetId, status: item.status,
+                referenceCount: item.referenceCount, ...(item.diagnostics?.length ? { diagnostics: item.diagnostics } : {}) })) } } : {}), mediaSubmitted: false };
 }
 
 /** Durable orchestration only: compiler packets and canvas ops remain authoritative. */
@@ -69,6 +75,31 @@ export class ClipRefreshCoordinator {
         let store: ClipRefreshStore;
         try { store = this.service.clipRefreshStore(id); } catch { return; }
         for (const job of store.pending()) void this.advance(id, job, store);
+    }
+    wakeSourceCanvas(projectId: string, nodeIds: string[], revision: number, eventId: string) {
+        const consumers = this.service.subjectClipConsumers(projectId, nodeIds);
+        for (const consumer of consumers) {
+            let record: any;
+            try { record = this.service.get(consumer.owner_id); } catch { continue; }
+            const director = record.draft.director as DirectorProduction | undefined;
+            if (!director || !clipRefreshScope(consumer.segment_id).targetIds.every(target => (director.source.segments as any[] || []).some(segment => segment.id === target))) continue;
+            let resolved: DirectorProduction;
+            try { resolved = this.service.resolveSubjectPictureInputs(consumer.owner_id, director, [consumer.segment_id], true); }
+            catch (error) {
+                const store = this.service.clipRefreshStore(consumer.owner_id);
+                const parent = `smart-result:${projectId}:${revision}:${eventId}`;
+                const prior = store.byEditAll(parent).some(job => job.segmentId === consumer.segment_id);
+                if (!prior) store.register(parent, record.revision, director, director, consumer.segment_id);
+                this.wake(consumer.owner_id);
+                continue;
+            }
+            const priorInput = compilationScopeInput(director, clipRefreshScope(consumer.segment_id)).inputHash;
+            const nextInput = compilationScopeInput(resolved, clipRefreshScope(consumer.segment_id)).inputHash;
+            if (priorInput === nextInput) continue;
+            const store = this.service.clipRefreshStore(consumer.owner_id), parent = `smart-result:${projectId}:${revision}:${eventId}`;
+            if (!store.byEditAll(parent).some(job => job.segmentId === consumer.segment_id)) store.register(parent, record.revision, director, resolved, consumer.segment_id);
+            this.wake(consumer.owner_id);
+        }
     }
     inspect(id: string, operationId: string, view: "status" | "targets" | "diagnostics" = "status", offset = 0, pageSize?: number) {
         const job = this.service.clipRefreshStore(id).get(operationId);
@@ -93,8 +124,10 @@ export class ClipRefreshCoordinator {
                 job.application = compilation.application;
                 job.status = this.syncStatus(job); store.save(job); return;
             }
-            const current = this.service.get(id), d = current.draft.director;
-            if (!d || compilationScopeInput(d, clipRefreshScope(job.segmentId)).inputHash !== job.inputHash) { step("superseded"); return; }
+            const current = this.service.get(id), stored = current.draft.director;
+            if (!stored) { step("superseded"); return; }
+            const d = this.service.resolveSubjectPictureInputs(id, stored, [job.segmentId], true);
+            if (compilationScopeInput(d, clipRefreshScope(job.segmentId)).inputHash !== job.inputHash) { step("superseded"); return; }
             const occupied = this.service.targetOccupancy(id, [job.segmentId]);
             if (occupied.length) { job.diagnostics = occupied.map(o => ({ code: "TARGET_OCCUPIED", targetId: job.segmentId, message: o.nextAction.message, nextAction: o.nextAction })); step("blocked"); return; }
             if (!compilation) {
@@ -123,8 +156,9 @@ export class ClipRefreshCoordinator {
             job.status = this.syncStatus(job);
             job.timings.totalMs = Date.now() - Date.parse(job.createdAt); store.save(job);
         } catch (error) {
-            job.diagnostics = (error as any)?.diagnostics || [{ code: "CLIP_REFRESH_FAILED", targetId: job.segmentId, message: error instanceof Error ? error.message : String(error) }];
-            step("failed");
+            const code = String((error as any)?.code || "CLIP_REFRESH_FAILED");
+            job.diagnostics = (error as any)?.diagnostics || [{ code, targetId: job.segmentId, message: error instanceof Error ? error.message : String(error) }];
+            step(code === "SUBJECT_PROMPT_COMPILER_UNSUPPORTED" || (error as any)?.diagnostics ? "blocked" : "failed");
         } finally { this.active.delete(key); }
     }
     private syncStatus(job: ClipRefreshJob): Status {

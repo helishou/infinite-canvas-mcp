@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent, MouseEvent, PointerEvent } from "react";
-import { Button, Image } from "antd";
+import { Button } from "antd";
 import { FileText, Group, Image as ImageIcon, Music2, Video, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { useMediaPreviewStore } from "@/stores/use-media-preview-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { NodeGenerationInput } from "./canvas-node-generation";
 import { CanvasNodeReferenceBar } from "./canvas-node-reference-bar";
@@ -43,6 +44,12 @@ export function CanvasConfigComposer({ nodeId, nodes, value, inputs, connectedNo
     const [mention, setMention] = useState<MentionState | null>(null);
     const [activeIndex, setActiveIndex] = useState(0);
     const [imagePreview, setImagePreview] = useState<string | null>(null);
+    // 预览统一交给全局 MediaPreviewHost（全站单一弹窗），这里只做转交。
+    useEffect(() => {
+        if (!imagePreview) return;
+        useMediaPreviewStore.getState().open({ url: imagePreview, name: t("canvas.composer.imagePreview"), type: "image" });
+        setImagePreview(null);
+    }, [imagePreview, t]);
     const tokens = useMemo(() => parseComposerTokens(value), [value]);
     const referenceById = useMemo(() => new Map(inputs.map((input) => [input.nodeId, input])), [inputs]);
     const candidates = useMemo(() => {
@@ -186,8 +193,7 @@ export function CanvasConfigComposer({ nodeId, nodes, value, inputs, connectedNo
                 />
                 {mention && candidates.length ? <MentionMenu inputs={candidates} allInputs={inputs} activeIndex={Math.min(activeIndex, candidates.length - 1)} theme={theme} onSelect={insertReference} /> : null}
             </div>
-            {imagePreview ? <Image src={imagePreview} alt={t("canvas.composer.imagePreview")} style={{ display: "none" }} preview={{ visible: true, src: imagePreview, onVisibleChange: (visible) => !visible && setImagePreview(null) }} /> : null}
-        </div>
+            </div>
     );
 
 }

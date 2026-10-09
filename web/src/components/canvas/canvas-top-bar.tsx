@@ -101,7 +101,7 @@ export function CanvasTopBar({
                         trigger={["click"]}
                         menu={{
                             items: [
-                                ...(productionDramaId ? [{ key: "drama", icon: <Images className="size-4" />, label: <Link to={`/production?dramaId=${encodeURIComponent(productionDramaId)}`}>{t("productionCanvas.backDrama")}</Link> }] : []),
+                                ...(productionDramaId ? [{ key: "drama", icon: <Images className="size-4" />, label: <Link to={`/production?dramaId=${encodeURIComponent(productionDramaId)}&workspace=series`}>{t("productionCanvas.backDrama")}</Link> }] : []),
                                 { key: "home", icon: <Home className="size-4" />, label: t("productionCanvas.backHome"), onClick: onHome },
                                 { key: "projects", icon: <Images className="size-4" />, label: t("canvas.projects"), onClick: onProjects },
                                 { type: "divider" },

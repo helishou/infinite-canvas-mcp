@@ -14,7 +14,7 @@ export type ReferenceRole = (typeof REFERENCE_ROLES)[number];
 export type ReferenceMediaType = "image" | "video" | "audio";
 export type ReferenceUsage = "reference" | "first_frame" | "last_frame";
 export type ReferenceRetention = "fully_preserved" | "partially_preserved" | "attribute_transfer" | "weak_reference";
-export type NodeImageSelectionPolicy = { mode: "latest_success" } | { mode: "selected_result"; resultId: string };
+export type NodeImageSelectionPolicy = { mode: "node_selection" } | { mode: "latest_success" } | { mode: "selected_result"; resultId: string };
 
 export type ProjectReferenceAsset = {
     id: string;
@@ -319,10 +319,27 @@ function sourceMediaOf(project: Record<string, unknown>, binding: ReferenceBindi
 /** Resolve one image for a formal binding. Existing clips retain their legacy primary-image rule. */
 export function selectSmartImageResult(metadataValue: unknown, policy?: NodeImageSelectionPolicy) {
     const metadata = recordOf(metadataValue);
+    if (policy?.mode === "node_selection") {
+        const nodePolicy = recordOf(metadata.smartImageReferenceSelection);
+        if (nodePolicy.mode === "selected_result" && typeof nodePolicy.resultId === "string" && nodePolicy.resultId) policy = { mode: "selected_result", resultId: nodePolicy.resultId };
+        else if (nodePolicy.mode === undefined || nodePolicy.mode === "latest_success") policy = { mode: "latest_success" };
+        else return { error: "智能节点的引用选择策略无效；不会回退到浏览中的图片。" };
+    }
     const images = Array.isArray(metadata.images) ? metadata.images.map(recordOf) : [];
     const completed = (item: Record<string, unknown>) => item.status === "success" && Boolean(item.storageKey);
     if (policy?.mode === "latest_success") {
-        const image = [...images].reverse().find(completed);
+        const image = images.map((item, index) => ({ item, index })).filter(entry => completed(entry.item)).sort((left, right) => {
+            const leftSequence = Number.isSafeInteger(Number(left.item.generationTaskSequence)) ? Number(left.item.generationTaskSequence) : undefined;
+            const rightSequence = Number.isSafeInteger(Number(right.item.generationTaskSequence)) ? Number(right.item.generationTaskSequence) : undefined;
+            if (leftSequence !== undefined && rightSequence !== undefined && leftSequence !== rightSequence) return leftSequence - rightSequence;
+            if (leftSequence !== undefined && rightSequence === undefined) return 1;
+            if (leftSequence === undefined && rightSequence !== undefined) return -1;
+            const leftTime = String(left.item.generationTaskCreatedAt || ""), rightTime = String(right.item.generationTaskCreatedAt || "");
+            if (leftTime !== rightTime) return leftTime.localeCompare(rightTime);
+            const leftOutput = Number.isSafeInteger(Number(left.item.generationOutputIndex)) ? Number(left.item.generationOutputIndex) : left.index;
+            const rightOutput = Number.isSafeInteger(Number(right.item.generationOutputIndex)) ? Number(right.item.generationOutputIndex) : right.index;
+            return leftOutput - rightOutput || left.index - right.index;
+        }).at(-1)?.item;
         return image ? { image } : { error: "智能节点没有成功归档的图片结果；不会引用运行中、失败或占位图片。" };
     }
     if (policy?.mode === "selected_result") {
@@ -452,7 +469,7 @@ function normalizeBinding(value: unknown): ReferenceBinding | null {
     const assetId = String(item.assetId || "");
     if (!id || !assetId) return null;
     const rawSelection = recordOf(item.resultSelectionPolicy);
-    const resultSelectionPolicy: NodeImageSelectionPolicy | undefined = rawSelection.mode === "latest_success" ? { mode: "latest_success" }
+    const resultSelectionPolicy: NodeImageSelectionPolicy | undefined = rawSelection.mode === "node_selection" ? { mode: "node_selection" } : rawSelection.mode === "latest_success" ? { mode: "latest_success" }
         : rawSelection.mode === "selected_result" && typeof rawSelection.resultId === "string" && rawSelection.resultId ? { mode: "selected_result", resultId: rawSelection.resultId } : undefined;
     return {
         ...item, id, assetId, label: String(item.label || item.name || assetId), role: inferReferenceRole(item),

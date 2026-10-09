@@ -7,6 +7,8 @@ description: 使用当前激活的 Acheng Director 创作，在真实画布上�
 
 开始或恢复制作先读[适配核心](references/acheng-canvas-adapter.md)，解析当前激活的 Acheng Skill，并按本次缺项加载其专业模块。创作合同、完整提示词与 partial/commit 由 Acheng 维护；画布承担正式存储和授权执行。已有确认内容直接复用，七模块不是强制顺序阶段，也不默认启动多代理。
 
+新合同常规返修使用目标工作包读取和一次结构化编辑，由 Backend 自动校验、编译与同步；具体操作和兼容分支仅维护在[源稿编译与发布](references/canvas-compilation.md)。不手工维护正式 Prompt，不因页面改版迁移旧稿。
+
 批量制作与返修按变化影响范围推进：[编译参考](references/canvas-compilation.md#批次复核与回执复用)规定复核、编译和回执复用，[运行参考](references/canvas-production-runs.md#目标清单与失败恢复)规定完成判定与定点恢复。先读短状态确定缺项，不把恢复变成整项目重新创作、检查或生成；连续组的恢复范围另按 Clip 参考确定。
 
 | 当前工作 | Acheng 模块 | 本次按需读取的画布参考 |

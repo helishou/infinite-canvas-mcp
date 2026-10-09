@@ -243,7 +243,14 @@ export function deleteBackendDramaEpisode(episodeId: string) {
     return request<{ ok: boolean; deleted?: number }>("DELETE", `/drama/episodes/${encodeURIComponent(episodeId)}`);
 }
 
-export type EpisodeProduction = { episodeId: string; revision: number; draft: EpisodeProductionData; published: EpisodeProductionData | null; publishedVersion: number; updatedAt: string; impact?: { changedSceneIds: string[]; affectedShotIds: string[]; imageShotIds: string[]; clipGroupIds: string[]; missingAssetNodeIds: string[]; assetIds?: string[] }; replayed?: boolean };
+export type ProductionClipRefreshReceipt = {
+    sourceSaved: true; operationId: string; status: "queued" | "checking" | "compiling" | "applying" | "succeeded" | "blocked" | "failed" | "superseded" | "interrupted";
+    segmentId: string; savedRevision: number; compilationOperationId: string; selectedTargets: string[]; affectedTargets: string[];
+    blockingDiagnostic?: { code: string; message: string; targetId?: string; path?: string };
+    application?: { revision?: number; referenceSync?: Array<{ targetId: string; status: string; referenceCount?: number; diagnostics?: Array<{ code: string; message: string }> }> };
+    mediaSubmitted: false;
+};
+export type EpisodeProduction = { episodeId: string; revision: number; draft: EpisodeProductionData; published: EpisodeProductionData | null; publishedVersion: number; updatedAt: string; impact?: { changedSceneIds: string[]; affectedShotIds: string[]; imageShotIds: string[]; clipGroupIds: string[]; missingAssetNodeIds: string[]; assetIds?: string[] }; clipRefreshes?: ProductionClipRefreshReceipt[]; replayed?: boolean };
 export type ProductionTarget = string | { projectId: string } | { sceneId: string };
 export type ProductionCanvasContext = { role: "ordinary" | "episode" | "scene" | "shared-assets" | "standalone"; canvasId: string; dramaId?: string; episodeId?: string; sceneId?: string; owner?: { kind: "episode" | "canvas" | "scene"; id: string }; sharedAssetCanvasId?: string | null };
 export function fetchProductionCanvasContext(id: string) { return request<{ ok: boolean; context: ProductionCanvasContext }>("GET", `/canvas/projects/${encodeURIComponent(id)}/production-context`); }
@@ -265,6 +272,10 @@ const productionPath = (target: ProductionTarget) => typeof target === "string"
         ? `/drama/scenes/${encodeURIComponent(target.sceneId)}/production`
         : `/canvas/projects/${encodeURIComponent(target.projectId)}/production`;
 export function fetchEpisodeProduction(episodeId: ProductionTarget) { return request<{ ok: boolean; production: EpisodeProduction }>("GET", productionPath(episodeId)); }
+export function fetchProductionWorkbench(owner: ProductionTarget, view: "subject_workbench" | "shot_workbench" | "clip_workbench", targetId: string, snapshot: "draft" | "published" = "draft") {
+    const query = new URLSearchParams({ view, targetIds: targetId, snapshot });
+    return request<{ ok: boolean; production: Record<string, any> }>("GET", productionPath(owner) + "?" + query.toString());
+}
 export function fetchEpisodeProductionLegacy(episodeId: ProductionTarget) { return request<{ ok: boolean; sources: Array<{ source: "fullPlot" | "script.md" | "storyboard.md"; sha256: string; text: string }> }>("GET", `${productionPath(episodeId)}/legacy`); }
 export function editEpisodeProduction(episodeId: ProductionTarget, expectedRevision: number, ops: ProductionOperation[], operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/ops`, { operationId, expectedRevision, ops }); }
 export function previewEpisodeProductionImpact(episodeId: ProductionTarget, stage: "script" | "shots" | "director") { return request<{ ok: boolean; impact: NonNullable<EpisodeProduction["impact"]> }>("GET", `${productionPath(episodeId)}/impact?stage=${stage}`); }

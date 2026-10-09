@@ -824,7 +824,7 @@ export function diffCanvasProject(base: CanvasProject, next: CanvasProject): Arr
         if (previous === node) continue;
         const patch: Record<string, unknown> = {};
         for (const key of ["type", "title", "position", "width", "height"] as const) {
-            if (JSON.stringify(previous[key]) !== JSON.stringify(node[key])) patch[key] = node[key];
+            if (previous[key] !== node[key] && JSON.stringify(previous[key]) !== JSON.stringify(node[key])) patch[key] = node[key];
         }
         const previousMetadata = (previous.metadata || {}) as Record<string, unknown>;
         const nextMetadata = (node.metadata || {}) as Record<string, unknown>;
@@ -842,7 +842,7 @@ export function diffCanvasProject(base: CanvasProject, next: CanvasProject): Arr
             if (metadataKeysToSkip.has(key)) continue;
             if (isH3 && H3_BACKEND_NODE_METADATA_FIELDS.has(key)) continue;
             if (backendTaskActive && ACTIVE_TASK_NODE_METADATA_FIELDS.has(key)) continue;
-            if (JSON.stringify(previousMetadata[key]) === JSON.stringify(nextMetadata[key])) continue;
+            if (previousMetadata[key] === nextMetadata[key] || JSON.stringify(previousMetadata[key]) === JSON.stringify(nextMetadata[key])) continue;
             if (key in nextMetadata && nextMetadata[key] !== undefined) metadataPatch[key] = nextMetadata[key];
             else metadataDelete.push(key);
         }
@@ -870,21 +870,23 @@ export function diffCanvasProject(base: CanvasProject, next: CanvasProject): Arr
                         segment: segment,
                         ...(previousId ? { afterSegmentId: previousId } : nextId ? { beforeSegmentId: nextId } : {}),
                     });
-                } else if (JSON.stringify(baseById.get(id)) !== JSON.stringify(segment)) {
+                } else if (baseById.get(id) !== segment && JSON.stringify(baseById.get(id)) !== JSON.stringify(segment)) {
                     // 字段级 patch：只把真正变化的字段放进 patch，减少带宽 / 减少冲突面
                     const baseSegment = baseById.get(id)!;
                     const segmentPatch: Record<string, unknown> = {};
                     const segmentDelete: string[] = [];
-                    // 续接开关允许人工编辑，必须进入保存 op，不能只留下乐观显示。
-                    // 其他正式投影字段继续沿既有过滤；编译身份由 Backend 维护。
+                    // 参考绑定和续接开关允许人工编辑，必须进入保存 op，不能只留下乐观显示。
+                    // 编译身份与源稿专属字段仍由 Backend 维护。
                     const formalClipFields = segment.productionClipProjection || (baseSegment as Record<string, unknown>).productionClipProjection
-                        ? new Set(["prompt", "referenceBindings", "directorEngine", "directorSourceHash", "h3CharacterGroups", "storyboardShots", "productionClipProjection"])
+                        ? new Set(["prompt", "directorEngine", "directorSourceHash", "h3CharacterGroups", "storyboardShots", "productionClipProjection"])
                         : null;
                     for (const field of new Set([...Object.keys(baseSegment), ...Object.keys(segment)])) {
                         if (field === "id" || field === "start") continue;
                         if (H3_BACKEND_SEGMENT_FIELDS.has(field)) continue;
                         if (formalClipFields?.has(field)) continue;
-                        if (JSON.stringify((baseSegment as Record<string, unknown>)[field]) === JSON.stringify((segment as Record<string, unknown>)[field])) continue;
+                        const previousValue = (baseSegment as Record<string, unknown>)[field];
+                        const nextValue = (segment as Record<string, unknown>)[field];
+                        if (previousValue === nextValue || JSON.stringify(previousValue) === JSON.stringify(nextValue)) continue;
                         if (field in segment && (segment as Record<string, unknown>)[field] !== undefined) segmentPatch[field] = (segment as Record<string, unknown>)[field];
                         else segmentDelete.push(field);
                     }
@@ -922,14 +924,14 @@ export function diffCanvasProject(base: CanvasProject, next: CanvasProject): Arr
     if (removedConnections.length) operations.push({ type: "delete_connections", ids: removedConnections });
     for (const connection of next.connections) {
         const previous = baseConnections.get(connection.id);
-        if (!previous || JSON.stringify(previous) !== JSON.stringify(connection)) {
+        if (!previous || previous !== connection && JSON.stringify(previous) !== JSON.stringify(connection)) {
             if (previous) operations.push({ type: "delete_connections", ids: [connection.id] });
             operations.push({ type: "connect_nodes", id: connection.id, fromNodeId: connection.fromNodeId, toNodeId: connection.toNodeId, role: connection.role, order: connection.order });
         }
     }
     const projectPatch: Record<string, unknown> = {};
     for (const key of ["title", "folderId", "chatSessions", "activeChatId", "backgroundMode", "showImageInfo", "globalPrompt"] as const) {
-        if (JSON.stringify(base[key]) !== JSON.stringify(next[key])) projectPatch[key] = next[key];
+        if (base[key] !== next[key] && JSON.stringify(base[key]) !== JSON.stringify(next[key])) projectPatch[key] = next[key];
     }
     if (Object.keys(projectPatch).length) operations.push({ type: "update_project", patch: projectPatch });
     return operations;

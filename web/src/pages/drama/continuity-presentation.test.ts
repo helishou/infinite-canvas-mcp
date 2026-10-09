@@ -44,3 +44,17 @@ test("diagnostic identifiers resolve at token boundaries while the complete raw 
     assert.equal(display.message("F_GRIP 在 S01 与 SEG01 之间不一致。"), "翠子 · 抓握状态 在 翠子伸手 与 翠子伸手 之间不一致。");
     assert.equal(display.message("F_GRIP_EXTRA S010"), "F_GRIP_EXTRA S010");
 });
+test("model-readable state prose is displayed when no separate display label is registered", () => {
+    const withProse = { ...input, facts: [...input.facts, { id: "F_PROSE", object_kind: "character", object_id: "C_CUI", allowed_values: ["outside"], value_descriptions: { outside: "人在鸡窝窗外" } }] };
+    const projection = continuityPresentation(withProse, key => key);
+    assert.equal(projection.value("F_PROSE", "outside"), "人在鸡窝窗外");
+    assert.equal(projection.value("F_GRIP", "not holding"), "尚未抓住手臂");
+});
+test("source prose remains visible without a separate Chinese display field", () => {
+    const data = { ...input, facts: [{ id: "F", object_kind: "character", object_id: "C_CUI", name: "位置", allowed_values: ["outside"], value_descriptions: { outside: "The person is outside." }, display_values: { outside: "另一个显示版本" } }] };
+    const display = continuityPresentation(data, key => key);
+    assert.equal(display.value("F", "outside"), "The person is outside.");
+    assert.equal(display.message("Initial state is missing"), "Initial state is missing");
+    data.facts[0].value_descriptions.outside = "翠子站在门外。";
+    assert.equal(display.value("F", "outside"), "翠子站在门外。");
+});

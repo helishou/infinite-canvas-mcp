@@ -26,7 +26,7 @@ function mediaRef(item: Record<string, unknown> | undefined) {
 }
 
 /** ComfyUI 任务终态统一回写 H3 Clip；不依赖 MCP 进程存活。 */
-export async function writeBackH3Task(stores: Stores, events: BackendEventBus, task: RuntimeTask) {
+export async function writeBackH3Task(stores: Stores, events: BackendEventBus, task: RuntimeTask, completion?: { cacheFingerprint?: string; firstPassReady?: boolean }) {
     const binding = bindingOf(task);
     if (!binding?.projectId || !binding.nodeId || !binding.segmentId) return false;
     const output = mediaRef(resultVideo(task));
@@ -40,7 +40,7 @@ export async function writeBackH3Task(stores: Stores, events: BackendEventBus, t
         nodeId: binding.nodeId,
         segmentId: binding.segmentId,
         ...(binding.generationLogId ? { generationLogId: binding.generationLogId } : {}),
-    }, persistedOutput);
+    }, persistedOutput, completion);
     if (!saved) {
         return false;
     }

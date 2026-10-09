@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { App, Button, Dropdown, Image, Input, Modal, Select, Tag } from "antd";
+import { App, Button, Dropdown, Input, Modal, Select, Tag } from "antd";
 import { ArrowLeft, Check, ChevronDown, Clapperboard, Pencil, Search, Settings2 } from "lucide-react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -7,6 +7,8 @@ import { productionSceneEntries } from "@basketikun/canvas-agent/drama/productio
 import { fetchProductionCanvasContext, fetchBackendDramaEpisodes, ensureSharedAssetCanvas, fetchProductionSharedAssets, retryProductionSharedUpdate,
     fetchBackendCanvasFolders, type ApprovedSharedAsset, type SharedAssetUpdate, type DramaEpisode } from "@/services/backend-api";
 import { productionTarget } from "@/lib/production-navigation";
+import { MediaImage } from "@/components/media/media-image";
+import { dramaWorkbenchPath } from "@/pages/drama/workbench-entry";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { useAgentStore } from "@/stores/use-agent-store";
@@ -78,7 +80,7 @@ export function CanvasProductionToolbar() {
             if (id === "shared") {
                 const { project } = await ensureSharedAssetCanvas(context.dramaId!);
                 navigate(`/canvas/${encodeURIComponent(String(project.id))}`);
-            } else navigate(`/drama/episodes/${encodeURIComponent(id)}/production`);
+            } else navigate(dramaWorkbenchPath(context.dramaId!, id));
         } catch (error) { message.error(String(error)); }
         finally { setSwitching(false); }
     };
@@ -92,7 +94,7 @@ export function CanvasProductionToolbar() {
         useAgentStore.getState().openPanel();
     };
     return <div className="flex min-w-0 items-center gap-1 text-xs" data-canvas-shortcuts-ignore>
-        {context.dramaId && <Link to={`/production?dramaId=${encodeURIComponent(context.dramaId)}`} aria-label={t("productionCanvas.backDrama")} title={t("productionCanvas.backDrama")} className="grid size-7 shrink-0 place-items-center rounded hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={() => useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"))}><ArrowLeft className="size-4" /></Link>}
+        {context.dramaId && <Link to={`/production?dramaId=${encodeURIComponent(context.dramaId)}&workspace=series`} aria-label={t("productionCanvas.backDrama")} title={t("productionCanvas.backDrama")} className="grid size-7 shrink-0 place-items-center rounded hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={() => useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"))}><ArrowLeft className="size-4" /></Link>}
         {context.dramaId && <Dropdown trigger={["click"]} menu={{ selectedKeys: [context.role === "shared-assets" ? "shared" : context.episodeId || ""], items: [
             { key: "shared", label: t("productionCanvas.sharedCanvas"), icon: context.role === "shared-assets" ? <Check className="size-4" /> : undefined, onClick: () => void switchCanvas("shared") },
             { type: "divider" },
@@ -178,7 +180,7 @@ export function SharedAssetsPicker() {
         return Promise.resolve();
     };
     useEffect(() => { let active = true; if (owner && ["episode", "shared-assets"].includes(context?.role || "")) void fetchProductionSharedAssets(productionTarget(owner)).then(result => { if (active) { setAssets(result.assets); setVersions(result.versions); setUpdates(result.updates); } }).catch(error => { if (active) message.error(String(error)); }); return () => { active = false; }; }, [owner?.kind, owner?.id, context?.role, production?.revision, message]);
-    if (context?.role === "shared-assets") return <details className="mb-3 border-b border-border pb-3" data-canvas-shortcuts-ignore><summary className="cursor-pointer text-sm">{t("productionCanvas.approvedHistory")}</summary><div className="mt-2 space-y-3">{versions.filter(version => !query.get("target")?.startsWith("asset:") || version.assetId === query.get("target")?.slice(6)).map(version => <article key={version.id} className="flex items-start gap-3 text-xs"><Image width={64} src={backendMediaUrl(version.storageKey)} alt={version.snapshot.title} /><div className="min-w-0"><p>{version.snapshot.title} · v{version.sourceVersion}</p><p className="mt-1 break-words opacity-70">{version.evidence}</p></div></article>)}</div></details>;
+    if (context?.role === "shared-assets") return <details className="mb-3 border-b border-border pb-3" data-canvas-shortcuts-ignore><summary className="cursor-pointer text-sm">{t("productionCanvas.approvedHistory")}</summary><div className="mt-2 space-y-3">{versions.filter(version => !query.get("target")?.startsWith("asset:") || version.assetId === query.get("target")?.slice(6)).map(version => <article key={version.id} className="flex items-start gap-3 text-xs"><MediaImage className="w-16" src={backendMediaUrl(version.storageKey)} alt={version.snapshot.title} /><div className="min-w-0"><p>{version.snapshot.title} · v{version.sourceVersion}</p><p className="mt-1 break-words opacity-70">{version.evidence}</p></div></article>)}</div></details>;
     if (context?.role !== "episode" || !owner || !production?.draft.director) return null;
     const plan = Array.isArray(production.draft.director.source.asset_plan) ? production.draft.director.source.asset_plan as Record<string, any>[] : [];
     return <section className="mb-3 border-b border-border pb-3" data-canvas-shortcuts-ignore>

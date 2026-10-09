@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
-export const DATABASE_SCHEMA_VERSION = 35;
+export const DATABASE_SCHEMA_VERSION = 36;
 
 /** Inspect without writes; snapshot every existing older database before migration. */
 export function prepareDatabaseUpgrade(file: string): string | undefined {

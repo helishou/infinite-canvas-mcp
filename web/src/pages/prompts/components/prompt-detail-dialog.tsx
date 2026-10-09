@@ -1,9 +1,9 @@
 import { Copy, FileText, FolderPlus, Pencil } from "lucide-react";
-import { Button, Image, Modal, Space, Tag } from "antd";
-import { cloneElement, type CSSProperties, type ReactElement } from "react";
+import { Button, Modal, Space, Tag } from "antd";
 import { useTranslation } from "react-i18next";
 
 import { formatPromptDate, type Prompt } from "@/services/api/prompts";
+import { MediaImage } from "@/components/media/media-image";
 
 export function PromptDetailDialog({ prompt, onClose, onCopy, onSaveAsset, onEdit }: { prompt: Prompt | null; onClose: () => void; onCopy: (prompt: string) => void; onSaveAsset?: (prompt: Prompt) => void; onEdit?: (prompt: Prompt) => void }) {
     const { i18n, t } = useTranslation();
@@ -13,8 +13,8 @@ export function PromptDetailDialog({ prompt, onClose, onCopy, onSaveAsset, onEdi
             {prompt ? (
                 <div className="flex h-full min-h-0 flex-col">
                     <div className="shrink-0 space-y-3 pb-4">
-                        {prompt.coverUrl ? <div className="h-48 w-full overflow-hidden rounded-lg sm:h-56"><Image src={prompt.coverUrl} alt={prompt.title} width="100%" height="100%" style={{ objectFit: "cover" }} preview={{ mask: <span className="text-sm">{t("canvas.sidePanel.preview")}</span>, imageRender: enlargePreviewImage }} /></div> : <div className="grid h-48 w-full place-items-center rounded-lg bg-stone-100 text-stone-400 dark:bg-stone-900 dark:text-stone-600 sm:h-56"><FileText className="size-9" /></div>}
-                        {prompt.referenceImageUrls.length > 1 ? <div className="grid grid-cols-6 gap-2">{prompt.referenceImageUrls.filter((url) => url !== prompt.coverUrl).slice(0, 6).map((url, index) => <div key={`${url}-${index}`} className="aspect-square overflow-hidden rounded-md"><Image src={url} alt="" width="100%" height="100%" style={{ objectFit: "cover" }} loading="lazy" preview={{ mask: <span className="text-xs">{t("canvas.sidePanel.preview")}</span>, imageRender: enlargePreviewImage }} /></div>)}</div> : null}
+                        {prompt.coverUrl ? <div className="h-48 w-full overflow-hidden rounded-lg sm:h-56"><MediaImage src={prompt.coverUrl} alt={prompt.title} name={prompt.title} className="h-full w-full object-cover" /></div> : <div className="grid h-48 w-full place-items-center rounded-lg bg-stone-100 text-stone-400 dark:bg-stone-900 dark:text-stone-600 sm:h-56"><FileText className="size-9" /></div>}
+                        {prompt.referenceImageUrls.length > 1 ? <div className="grid grid-cols-6 gap-2">{prompt.referenceImageUrls.filter((url) => url !== prompt.coverUrl).slice(0, 6).map((url, index) => <div key={`${url}-${index}`} className="aspect-square overflow-hidden rounded-md"><MediaImage src={url} alt={prompt.title} className="h-full w-full object-cover" /></div>)}</div> : null}
                     </div>
                     <div className="min-h-0 min-w-0 flex-1 overflow-y-auto border-y border-stone-200 py-4 pr-2 dark:border-stone-800">
                         <div className="flex flex-wrap gap-1.5">
@@ -50,9 +50,4 @@ export function PromptDetailDialog({ prompt, onClose, onCopy, onSaveAsset, onEdi
             ) : null}
         </Modal>
     );
-}
-
-function enlargePreviewImage(image: ReactElement<unknown>, _info: { transform: unknown; image: unknown }) {
-    const element = image as ReactElement<{ style?: CSSProperties }>;
-    return cloneElement(element, { style: { ...element.props.style, maxHeight: "calc(100vh - 32px)", maxWidth: "100vw" } });
 }

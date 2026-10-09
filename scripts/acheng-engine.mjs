@@ -16,7 +16,7 @@ const run = (cmd, args, cwd, env) => execFileSync(cmd, args, { cwd, ...(env ? { 
 const ignored = new Set(['.git', '__pycache__', '.pytest_cache', 'output']);
 export function applyRuntimeSkillOverlay(directory) {
   const entry = path.join(directory, 'SKILL.md');
-  const fragment = fs.readFileSync(projectOverlayPath, 'utf8').trim();
+  const fragment = fs.readFileSync(projectOverlayPath, 'utf8').replaceAll('\r\n', '\n').trim();
   const newline = fs.readFileSync(entry, 'utf8').includes('\r\n') ? '\r\n' : '\n';
   let text = fs.readFileSync(entry, 'utf8').replaceAll('\r\n', '\n');
   // Keep production choices while removing upstream's mandatory promotional output.
@@ -56,13 +56,31 @@ export function inventory(root, directory = root) {
     return entry.isDirectory() ? Object.entries(inventory(root, file)) : [[path.relative(root, file).replaceAll('\\', '/'), sha(fs.readFileSync(file))]];
   }).sort(([a], [b]) => a.localeCompare(b)));
 }
+export function sourceSnapshotHash(directory) {
+  return sha(Buffer.from(JSON.stringify(inventory(directory))));
+}
+export function runtimeIdentity(commit, patchVersion, sourceTreeHash) {
+  if (!/^[a-f0-9]{40}$/.test(commit) || !/^[a-f0-9]{16}$/.test(patchVersion) || sourceTreeHash && !/^[a-f0-9]{64}$/.test(sourceTreeHash)) {
+    throw new Error('Invalid Acheng runtime identity input');
+  }
+  const boundPatchVersion = sourceTreeHash ? sha(Buffer.from(`${patchVersion}\n${sourceTreeHash}`)).slice(0, 16) : patchVersion;
+  return { patchVersion: boundPatchVersion, runtimeId: `${commit}-${boundPatchVersion}` };
+}
+export function copySourceSnapshot(source, destination) {
+  for (const relative of Object.keys(inventory(source))) {
+    const from = path.join(source, ...relative.split('/'));
+    const to = path.join(destination, ...relative.split('/'));
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    fs.copyFileSync(from, to);
+  }
+}
 export function verifyRuntime(directory) {
   const manifest = read(path.join(directory, 'canvas-engine.json'));
   if (JSON.stringify(inventory(directory)) !== JSON.stringify(manifest.files)) throw new Error('Acheng runtime was modified; preserve local changes before updating');
   return manifest;
 }
 export function runtimePatchVersion(upstream) {
-  const files = ['compat.py', 'character-layout.py', 'h3-prompt-policy.py', 'model-contract.py', 'prompt-diagnostics.py', 'shot-diagnostics.py', 'model-contract.test.py', 'verify.py', 'contracts.json', 'restore-source-bytes.py', 'source-contract.py', 'canvas-kickoff.md'];
+  const files = ['compat.py', 'canvas_subject_prompt_v2.py', 'character-layout.py', 'h3-prompt-policy.py', 'model-contract.py', 'prompt-diagnostics.py', 'shot-diagnostics.py', 'model-contract.test.py', 'verify.py', 'contracts.json', 'restore-source-bytes.py', 'source-contract.py', 'canvas-kickoff.md'];
   return sha(Buffer.concat([Buffer.from(upstream + '\n'), fs.readFileSync(path.join(scripts, 'acheng-engine.mjs')), ...files.map(file => fs.readFileSync(path.join(scripts, 'acheng', file)))])).slice(0, 16);
 }
 export class AchengEngine {
@@ -125,13 +143,18 @@ export class AchengEngine {
     catch { throw new Error('Acheng source has local commits ahead of or diverged from origin/main; use update --local to build HEAD, or reconcile the branches explicitly.'); }
     return target;
   }
-  update(check = false, local = false) { return this.locked(() => {
+  update(check = false, local = false, workingTree = false) { return this.locked(() => {
     const old = this.state();
     if (old) this.status();
-    const commit = local ? this.cleanSource().commit : this.fetch();
-    const changes = old ? run('git', ['diff', '--name-only', old.active.commit, commit], this.source).trim().split('\n').filter(Boolean) : ['initial managed installation'];
-    const patchVersion = runtimePatchVersion(this.upstream);
-    const runtimeId = `${commit}-${patchVersion}`;
+    if (local && workingTree) throw new Error('Choose either --local committed HEAD or --working-tree snapshot, not both.');
+    const sourceStatus = workingTree ? this.projectSkillStatus() : (local ? this.cleanSource() : null);
+    if (workingTree && (!sourceStatus?.installed || !sourceStatus.managed)) throw new Error('Working-tree snapshots require the configured independent Acheng Git checkout.');
+    const commit = local || workingTree ? sourceStatus.commit : this.fetch();
+    const treeHash = workingTree ? sourceSnapshotHash(this.source) : null;
+    const baseChanges = old ? run('git', ['diff', '--name-only', old.active.commit, commit], this.source).trim().split('\n').filter(Boolean) : [];
+    const changes = old ? [...new Set([...baseChanges, ...(workingTree ? sourceStatus.modifiedFiles : [])])] : ['initial managed installation'];
+    const identity = runtimeIdentity(commit, runtimePatchVersion(this.upstream), treeHash);
+    const { patchVersion, runtimeId } = identity;
     const runtime = path.join(this.base, 'versions', runtimeId);
     if (fs.existsSync(runtime)) verifyRuntime(runtime);
     else {
@@ -139,9 +162,12 @@ export class AchengEngine {
       const candidate = fs.mkdtempSync(path.join(this.base, 'candidate-'));
       const archive = path.join(candidate, 'upstream.tar');
       const directory = path.join(candidate, 'skill'); fs.mkdirSync(directory);
-      run('git', ['archive', '--format=tar', `--output=${archive}`, commit], this.source);
       const python = resolveAchengPython();
-      run(python, ['-B', '-X', 'utf8', '-c', 'import tarfile,sys; tarfile.open(sys.argv[1]).extractall(sys.argv[2], filter="data")', archive, directory]);
+      if (workingTree) copySourceSnapshot(this.source, directory);
+      else {
+        run('git', ['archive', '--format=tar', `--output=${archive}`, commit], this.source);
+        run(python, ['-B', '-X', 'utf8', '-c', 'import tarfile,sys; tarfile.open(sys.argv[1]).extractall(sys.argv[2], filter="data")', archive, directory]);
+      }
       const contracts = read(path.join(scripts, 'acheng', 'contracts.json'));
       const changedContracts = [];
       for (const [file, expected] of Object.entries(contracts)) {
@@ -168,17 +194,19 @@ export class AchengEngine {
       run(python, ['-B', '-X', 'utf8', 'scripts/validate_director_contract.py'], directory);
       applyRuntimeSkillOverlay(directory);
       const version = fs.readFileSync(path.join(directory, 'SKILL.md'), 'utf8').match(/version:\s*"([^"]+)"/)?.[1] || 'unknown';
-      const manifest = { upstream: this.upstream, branch: 'main', commit, version, patchVersion, runtimeId, overlayApplied: !upstreamFixed, files: inventory(directory), verifiedAt: new Date().toISOString() };
+      const manifest = { upstream: this.upstream, branch: 'main', commit, version, patchVersion, runtimeId, ...(treeHash ? { sourceTreeHash: treeHash } : {}), overlayApplied: !upstreamFixed, files: inventory(directory), verifiedAt: new Date().toISOString() };
       fs.writeFileSync(path.join(directory, 'canvas-engine.json'), JSON.stringify(manifest, null, 2));
       fs.renameSync(directory, runtime);
-      fs.unlinkSync(archive); fs.rmdirSync(candidate);
+      if (fs.existsSync(archive)) fs.unlinkSync(archive);
+      fs.rmdirSync(candidate);
     }
     const manifest = verifyRuntime(runtime);
-    const active = { path: runtime, runtimeId, commit, patchVersion, version: manifest.version };
+    const active = { path: runtime, runtimeId, commit, patchVersion, version: manifest.version, ...(manifest.sourceTreeHash ? { sourceTreeHash: manifest.sourceTreeHash } : {}) };
     if (!check) {
-      const current = this.cleanSource();
+      const current = workingTree ? this.projectSkillStatus() : this.cleanSource();
+      if (workingTree && sourceSnapshotHash(this.source) !== treeHash) throw new Error('Acheng working tree changed during verification; rerun against a stable snapshot.');
       if (local && current.commit !== commit) throw new Error('Acheng HEAD changed during verification; rerun against the current commit');
-      if (!local && current.commit !== commit) run('git', ['merge', '--ff-only', commit], this.source);
+      if (!local && !workingTree && current.commit !== commit) run('git', ['merge', '--ff-only', commit], this.source);
       if (old?.active.runtimeId !== runtimeId) this.activate(active, old?.active || null);
     }
     return { ...active, changes, activated: !check, unchanged: old?.active.runtimeId === runtimeId,
@@ -217,7 +245,7 @@ export class AchengEngine {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const engine = new AchengEngine(); const command = process.argv[2] || 'status';
-    const result = command === 'status' ? engine.status() : command === 'update' ? engine.update(process.argv.includes('--check'), process.argv.includes('--local')) : command === 'rollback' ? engine.rollback() : command === 'vendor' ? engine.vendor() : (() => { throw new Error('Use status, update [--check] [--local], rollback, or vendor'); })();
+    const result = command === 'status' ? engine.status() : command === 'update' ? engine.update(process.argv.includes('--check'), process.argv.includes('--local'), process.argv.includes('--working-tree')) : command === 'rollback' ? engine.rollback() : command === 'vendor' ? engine.vendor() : (() => { throw new Error('Use status, update [--check] [--local|--working-tree], rollback, or vendor'); })();
     console.log(JSON.stringify(result, null, 2));
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

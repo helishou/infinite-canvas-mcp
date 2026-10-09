@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import test from 'node:test';
-import { AchengEngine, inventory, verifyRuntime, runtimePatchVersion, applyRuntimeSkillOverlay } from './acheng-engine.mjs';
+import { AchengEngine, inventory, verifyRuntime, runtimePatchVersion, runtimeIdentity, applyRuntimeSkillOverlay, copySourceSnapshot, sourceSnapshotHash } from './acheng-engine.mjs';
 
 function fixture(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'acheng-manager-'));
@@ -40,6 +40,32 @@ function commitFiles(engine, files) {
   git(engine.source, ['commit', '-m', 'upstream snapshot']);
   return git(engine.source, ['rev-parse', 'HEAD']);
 }
+test('working-tree snapshot includes authored local edits and verifies exact source bytes', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acheng-source-snapshot-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, 'source'), destination = path.join(root, 'snapshot');
+  fs.mkdirSync(path.join(source, 'scripts'), { recursive: true });
+  fs.mkdirSync(path.join(source, 'output'), { recursive: true });
+  fs.writeFileSync(path.join(source, 'scripts/dialogue_editing.py'), 'authored local change\n');
+  fs.writeFileSync(path.join(source, 'output/transient.txt'), 'ignored build output');
+  fs.writeFileSync(path.join(source, 'canvas-engine.json'), 'ignored runtime manifest');
+  const before = sourceSnapshotHash(source);
+  fs.mkdirSync(destination);
+  copySourceSnapshot(source, destination);
+  assert.equal(fs.readFileSync(path.join(destination, 'scripts/dialogue_editing.py'), 'utf8'), 'authored local change\n');
+  assert.equal(fs.existsSync(path.join(destination, 'output')), false);
+  assert.equal(fs.existsSync(path.join(destination, 'canvas-engine.json')), false);
+  assert.equal(sourceSnapshotHash(source), before);
+  fs.writeFileSync(path.join(source, 'scripts/dialogue_editing.py'), 'changed during next build\n');
+  assert.notEqual(sourceSnapshotHash(source), before);
+});
+test('working-tree fingerprints bind the runtime without changing the loader identity format', () => {
+  const commit = 'a'.repeat(40), patch = 'b'.repeat(16), firstTree = 'c'.repeat(64), secondTree = 'd'.repeat(64);
+  const first = runtimeIdentity(commit, patch, firstTree), second = runtimeIdentity(commit, patch, secondTree);
+  assert.match(first.runtimeId, /^[a-f0-9]{40}-[a-f0-9]{16}$/);
+  assert.notEqual(first.runtimeId, second.runtimeId);
+  assert.equal(runtimeIdentity(commit, patch, undefined).runtimeId, `${commit}-${patch}`);
+});
 test('unmanaged install is backed up; old runtimes stay usable across activation and rollback', t => {
   const engine = fixture(t); const first = version(engine, 'v1'), second = version(engine, 'v2');
   fs.mkdirSync(engine.entry, { recursive: true }); fs.writeFileSync(path.join(engine.entry, 'SKILL.md'), 'original');
@@ -199,5 +225,21 @@ test('runtime adaptation removes promotions without altering source or license n
     assert.equal(fs.readFileSync(path.join(candidate, 'NOTICE'), 'utf8'), notice);
     assert.equal(fs.readFileSync(path.join(engine.source, 'SKILL.md'), 'utf8'), skill);
     assert.deepEqual(engine.projectSkillStatus().modifiedFiles, []);
+  }
+});
+
+
+test('Canvas instructions remain a single block with Windows line endings', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acheng-overlay-crlf-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fragment = fs.readFileSync(new URL('./acheng/canvas-kickoff.md', import.meta.url), 'utf8').replaceAll('\r\n', '\n').trim();
+  const entry = path.join(root, 'SKILL.md');
+  fs.writeFileSync(entry, `你是总导演及生产合同的唯一写入者。\n\n${fragment}\n\n## 后续正文\n`.replaceAll('\n', '\r\n'));
+  for (let pass = 0; pass < 2; pass++) {
+    applyRuntimeSkillOverlay(root);
+    const output = fs.readFileSync(entry, 'utf8');
+    assert.equal(output.split(fragment.split('\n')[0]).length, 2);
+    assert.ok(output.replaceAll('\r\n', '\n').includes(fragment));
+    assert.ok(!output.includes('\r\r\n'));
   }
 });

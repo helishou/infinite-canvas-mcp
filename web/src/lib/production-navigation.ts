@@ -22,13 +22,14 @@ export function productionPresentationPath(presentation: ProductionPresentation)
         return `/canvas/${encodeURIComponent(canvasId)}?${query.toString()}`;
     }
 
+    // 制作归属只有画布与分集（Backend ownerKind 仅 canvas | episode）；场景没有独立页面。
     const base = presentation.owner.kind === "canvas"
         ? `/director/${encodeURIComponent(presentation.owner.id)}`
-        : presentation.owner.kind === "scene"
-            ? `/drama/scenes/${encodeURIComponent(presentation.owner.id)}/production`
-            : `/drama/episodes/${encodeURIComponent(presentation.owner.id)}/production`;
+        : presentation.owner.kind === "episode"
+            ? `/drama/episodes/${encodeURIComponent(presentation.owner.id)}/production`
+            : "/production";
     const query = new URLSearchParams();
-    if (presentation.owner.kind === "episode" || presentation.owner.kind === "scene") query.set("from", "dramas");
+    if (presentation.owner.kind === "episode") query.set("from", "dramas");
     query.set("workspace", presentation.workspace);
     if (presentation.targetKind && presentation.targetId) query.set("target", `${presentation.targetKind}:${presentation.targetId}`);
     query.set("workId", presentation.workId);

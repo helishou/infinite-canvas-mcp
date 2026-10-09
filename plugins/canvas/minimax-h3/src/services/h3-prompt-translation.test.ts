@@ -4,28 +4,25 @@ import { planH3Translation, translateH3Prompt } from "./h3-prompt-translation";
 
 const resultFor = (prompt: string, transform = (text: string) => text) => ({ text: JSON.stringify({ translations: JSON.parse(prompt).source.map((entry: { id: number; text: string }) => ({ id: entry.id, text: transform(entry.text) })) }) });
 
-test("a 34k multiline prompt uses batches, preserves source layout and reaches the final line", async () => {
+test("a 34k multiline prompt goes out in a single request and preserves source layout", async () => {
     const source = `subject_definitions:\r\n<Subject 1> is Alex.\r\n\r\ndetailed_description:\r\n${Array.from({ length: 49 }, (_, i) => `  [Shot ${i + 1}] <Picture 1> ${"Camera tracks the hero. ".repeat(30)}\t`).join("\r\n")}\r\n\r\noverall_soundscape: Final wind.\r\nnon_diegetic_music:\r\nN/A\r\n`;
     const calls: string[] = [];
-    const progress: Array<{ completed: number; total: number }> = [];
     const translated = await translateH3Prompt(source, async (prompt, options) => {
         calls.push(prompt);
         assert.equal(options?.model, "configured-model");
         assert.equal(options?.log?.segmentId, "a");
-        const records = JSON.parse(prompt).source;
-        assert.ok(records.reduce((count: number, record: { text: string }) => count + record.text.length, 0) <= 4000);
         return resultFor(prompt, (text) => text.replaceAll("Camera tracks the hero.", "镜头跟随主角。").replace("Final wind.", "最终风声。"));
-    }, { model: "configured-model", log: { taskMode: "翻译", segmentId: "a" } }, (value) => progress.push(value));
+    }, { model: "configured-model", log: { taskMode: "翻译", segmentId: "a" } });
     assert.ok(source.length > 34000);
-    assert.ok(calls.length < 15);
+    assert.equal(calls.length, 1);
     assert.equal(translated, source.replaceAll("Camera tracks the hero.", "镜头跟随主角。").replace("Final wind.", "最终风声。"));
-    assert.deepEqual(progress, Array.from({ length: calls.length + 1 }, (_, completed) => ({ completed, total: calls.length })));
 });
 
-test("single long lines split losslessly without breaking tags or surrogate pairs", async () => {
+test("long lines stay whole in one record and round-trip losslessly", async () => {
     for (const source of ["Word ".repeat(3000), "😀".repeat(6000), "x".repeat(3995) + "<Picture 1>" + "y".repeat(4100)]) {
         const plan = planH3Translation(source);
-        assert.ok(plan.records.every(({ text }) => text.length <= 4000));
+        assert.equal(plan.records.length, 1);
+        assert.ok(plan.records[0].text.length > 4000);
         assert.equal(await translateH3Prompt(source, async (prompt) => resultFor(prompt)), source);
         assert.ok(plan.records.every(({ text }) => !/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/.test(text)));
     }
@@ -38,11 +35,11 @@ test("unordered IDs and writing/fence wrappers from real channels preserve recor
     }
 });
 
-test("missing, duplicate, unknown and empty records fail without publishing partial results", async () => {
+test("missing, duplicate, unknown and empty records fail without publishing a partial translation", async () => {
     for (const entries of [[{ id: 0, text: "A" }], [{ id: 0, text: "A" }, { id: 0, text: "B" }], [{ id: 0, text: "A" }, { id: 8, text: "B" }], [{ id: 0, text: "A" }, { id: 1, text: "" }]]) {
-        await assert.rejects(translateH3Prompt("First.\nSecond.", async () => ({ text: JSON.stringify({ translations: entries }) })), /分段译文/);
+        await assert.rejects(translateH3Prompt("First.\nSecond.", async () => ({ text: JSON.stringify({ translations: entries }) })), /译文/);
     }
-    await assert.rejects(translateH3Prompt("First.", async () => ({ text: "Not JSON" })), /分段译文/);
+    await assert.rejects(translateH3Prompt("First.", async () => ({ text: "Not JSON" })), /译文/);
     await assert.rejects(translateH3Prompt("First.", async () => ({ text: "" })), /未返回内容/);
 });
 
@@ -53,7 +50,7 @@ test("length notices and changed markers fail; quoted dialogue remains content",
     assert.equal(await translateH3Prompt(dialogue, async (prompt) => resultFor(prompt)), dialogue);
 });
 
-test("a failed or cancelled request stops remaining batches with no automatic retry", async () => {
+test("a failed or cancelled request is not retried automatically", async () => {
     const source = "Line text. ".repeat(900);
     let count = 0;
     await assert.rejects(translateH3Prompt(source, async () => { count++; throw new Error("channel unavailable"); }), /channel unavailable/);

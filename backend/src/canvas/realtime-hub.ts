@@ -38,8 +38,9 @@ export class CanvasRealtimeHub {
     constructor(private readonly config: ResolvedConfig, private readonly db: BackendDatabase, events: BackendEventBus) {
         this.unsubscribe = events.subscribe((event) => {
             if (event.type !== "canvas.updated") return;
+            const serialized = JSON.stringify({ type: "canvas.event", event });
             for (const [socket, peer] of this.sockets) {
-                if (!event.entityId || event.entityId === peer.projectId) this.send(socket, { type: "canvas.event", event });
+                if ((!event.entityId || event.entityId === peer.projectId) && socket.readyState === WebSocket.OPEN) socket.send(serialized);
             }
         });
         this.heartbeat = setInterval(() => {

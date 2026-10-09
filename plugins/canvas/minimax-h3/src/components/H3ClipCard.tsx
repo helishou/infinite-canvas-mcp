@@ -1,19 +1,35 @@
+import { useEffect, useRef, useState } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3Segment } from "../types";
 import { compactSegmentStarts } from "../hooks/useH3Segments";
-import { refsForSegment, withSegmentRefs } from "../services/h3-data";
+import { refsForSegment, resultUrl, withSegmentRefs } from "../services/h3-data";
 import { normalizeDroppedH3Ref } from "../services/h3-refs";
 import { H3Icon } from "./H3Icon";
-import { h3MotionGroup, resolveH3Runtime } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
-import { useDefaultParams } from "../services/h3-defaults";
 import { useH3Locale } from "../h3-locale";
 
-export function H3ClipCard({ ctx, segment, index, segments, selectedId, fmt }: { ctx: CanvasNodeContext; segment: H3Segment; index: number; segments: H3Segment[]; selectedId?: string; fmt: (value: number) => string }) {
-    const defaults = useDefaultParams();
+export function H3ClipCard({ ctx, segment, index, segments, selectedId, fmt, motionGroup }: { ctx: CanvasNodeContext; segment: H3Segment; index: number; segments: H3Segment[]; selectedId?: string; fmt: (value: number) => string; motionGroup?: { head: number; tail: number } | null }) {
     const locale = useH3Locale();
-    const group = h3MotionGroup(segments.length, index, (i) => resolveH3Runtime(segments[i] as unknown as Record<string, unknown>, {}, ctx.node.metadata || {}, defaults).params.motionContextEnabled === true);
+    const group = motionGroup;
     const groupLabel = group ? `${locale === "en-US" ? "Motion group" : "接续组"} ${group.head + 1}–${group.tail + 1}` : "";
     const compactMedia = ctx.scale < 0.2;
+    const cardRef = useRef<HTMLDivElement | null>(null);
+    const resultIdentity = String(segment.resultStorageKey || segment.result || "");
+    const [previewIdentity, setPreviewIdentity] = useState("");
+    useEffect(() => {
+        if (!resultIdentity || compactMedia) return;
+        const card = cardRef.current;
+        if (!card || typeof IntersectionObserver === "undefined") {
+            setPreviewIdentity(resultIdentity);
+            return;
+        }
+        const observer = new IntersectionObserver(([entry]) => {
+            if (!entry?.isIntersecting) return;
+            setPreviewIdentity(resultIdentity);
+            observer.disconnect();
+        }, { root: card.closest(".minimax-tracks-scroll"), rootMargin: "120px" });
+        observer.observe(card);
+        return () => observer.disconnect();
+    }, [compactMedia, resultIdentity]);
     const left = Number(segment.start || 0) * 100;
     const width = Math.max(100, Number(segment.duration || 1) * 100);
     const refs = refsForSegment(segment);
@@ -25,8 +41,11 @@ export function H3ClipCard({ ctx, segment, index, segments, selectedId, fmt }: {
     const segStatus = String(segment.status || "idle");
     const statusClass = segStatus === "error" ? "is-error" : segStatus === "loading" || segStatus === "queued" ? "is-loading" : segStatus === "success" ? "is-success" : segStatus === "cancelled" ? "is-cancelled" : "";
     const updateSegments = (next: H3Segment[]) => ctx.updateMetadata({ segments: next });
-    return <div key={segment.id} data-segment-id={segment.id} draggable title={`Clip ${index + 1} · 内部 ID：${segment.id}${segStatus === "error" ? `\n${String(segment.errorDetails || "生成失败，请查看右侧状态详情或重试")}` : ""}`} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("application/x-infinite-canvas-clip", segment.id); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); const ref = normalizeDroppedH3Ref(event); if (ref) { if (refs.some((item) => item.url === ref.url)) return; const nextRefs = [...refs, ref]; updateSegments(segments.map((item) => item.id === segment.id ? withSegmentRefs(item, nextRefs) : item)); return; } const id = event.dataTransfer.getData("application/x-infinite-canvas-clip"); if (!id || id === segment.id) return; const from = segments.findIndex((item) => item.id === id); const to = segments.findIndex((item) => item.id === segment.id); if (from < 0 || to < 0) return; const next = [...segments]; const [moved] = next.splice(from, 1); next.splice(to, 0, moved); ctx.updateMetadata({ segments: compactSegmentStarts(next), selectedSegmentId: id }); }} onClick={() => { window.dispatchEvent(new CustomEvent("minimax-h3-select-clip", { detail: { projectId: ctx.projectId, nodeId: ctx.node.id, segmentId: segment.id } })); ctx.updateMetadata({ selectedSegmentId: segment.id, playhead: Number(segment.start || 0), h3PlaybackAll: false }); }} className={`minimax-tl-clip ${selected ? "active" : ""} ${statusClass}`} style={{ left: `${left}px`, width: `${width}px` }}>
-        <div className="minimax-clip-media">{segment.result && !compactMedia ? <video src={segment.resultStorageKey ? ctx.mediaUrl(segment.resultStorageKey) : segment.result} muted playsInline preload="metadata" /> : <div className="minimax-clip-empty">{segStatus === "error" ? <H3Icon name="close" /> : <H3Icon name="clapperboard" />}</div>}</div>
+    return <div ref={cardRef} key={segment.id} data-segment-id={segment.id} draggable title={`Clip ${index + 1} · 内部 ID：${segment.id}${segStatus === "error" ? `\n${String(segment.errorDetails || "生成失败，请查看右侧状态详情或重试")}` : ""}`} onPointerEnter={() => {
+        const url = segment.resultStorageKey ? ctx.mediaUrl(segment.resultStorageKey) : resultUrl(segment.result);
+        if (url) window.dispatchEvent(new CustomEvent("minimax-h3-preload-clip", { detail: { nodeId: ctx.node.id, url } }));
+    }} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("application/x-infinite-canvas-clip", segment.id); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); const ref = normalizeDroppedH3Ref(event); if (ref) { if (refs.some((item) => item.url === ref.url)) return; const nextRefs = [...refs, ref]; updateSegments(segments.map((item) => item.id === segment.id ? withSegmentRefs(item, nextRefs) : item)); return; } const id = event.dataTransfer.getData("application/x-infinite-canvas-clip"); if (!id || id === segment.id) return; const from = segments.findIndex((item) => item.id === id); const to = segments.findIndex((item) => item.id === segment.id); if (from < 0 || to < 0) return; const next = [...segments]; const [moved] = next.splice(from, 1); next.splice(to, 0, moved); ctx.updateMetadata({ segments: compactSegmentStarts(next), selectedSegmentId: id }); }} onClick={() => { window.dispatchEvent(new CustomEvent("minimax-h3-select-clip", { detail: { projectId: ctx.projectId, nodeId: ctx.node.id, segmentId: segment.id } })); ctx.updateMetadata({ selectedSegmentId: segment.id, playhead: Number(segment.start || 0), h3PlaybackAll: false }); }} className={`minimax-tl-clip ${selected ? "active" : ""} ${statusClass}`} style={{ left: `${left}px`, width: `${width}px` }}>
+        <div className="minimax-clip-media">{resultIdentity && !compactMedia && previewIdentity === resultIdentity ? <video src={segment.resultStorageKey ? ctx.mediaUrl(segment.resultStorageKey) : segment.result} muted playsInline preload="metadata" /> : <div className="minimax-clip-empty">{segStatus === "error" ? <H3Icon name="close" /> : <H3Icon name="clapperboard" />}</div>}</div>
         <div className="minimax-clip-meta"><b>Clip {index + 1}{group ? <small title={groupLabel}> · {groupLabel}</small> : null}</b><span>{fmt(Number(segment.start || 0))} - {fmt(Number(segment.start || 0) + Number(segment.duration || 0))}</span></div>
         {segments.length > 1 ? <button type="button" className="minimax-clip-delete" title="删除 Clip" onClick={(event) => { event.stopPropagation(); const next = segments.filter((item) => item.id !== segment.id); ctx.updateMetadata({ segments: compactSegmentStarts(next), selectedSegmentId: next[Math.max(0, index - 1)]?.id || "" }); }}><H3Icon name="close" /></button> : null}
     </div>;

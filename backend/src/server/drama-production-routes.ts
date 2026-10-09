@@ -10,6 +10,7 @@ import { ProductionValidationError } from "@basketikun/canvas-agent/drama/produc
 import { productionCompileSchema, productionApplyCompilationSchema, productionReadSchema, projectProductionRead, projectProductionVersion } from "@basketikun/canvas-agent/drama/production-contract";
 import { ProductionCompilationService } from "../drama/compilation.js";
 import { ClipRefreshCoordinator } from "../drama/clip-refresh.js";
+import { clipRefreshReceipt } from "../drama/clip-refresh.js";
 import { z } from "zod";
 import { SceneWorkCoordinator } from "../drama/scene-work.js";
 import type { BackendEventBus } from "../events.js";
@@ -40,6 +41,16 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
     compilations.onSettled = id => { queueMicrotask(() => { scenes.wake(id); refreshes.wake(id); }); };
     events?.subscribe(event => {
         if (event.type === "drama-production.updated" && service.sceneWorkOwners().includes(event.entityId || "")) queueMicrotask(() => scenes.wake(event.entityId!));
+        if (event.type === "canvas.updated" && event.entityId) {
+            const payload = event.payload && typeof event.payload === "object" ? event.payload as Record<string, any> : {};
+            const operations = Array.isArray(payload.operations) ? payload.operations as Array<Record<string, any>> : [];
+            const sourceNodeIds = [...new Set(operations.flatMap(operation => {
+                if (operation.type === "update_node") return [String(operation.id || "")];
+                if (operation.type === "add_node") return [String(operation.id || "")];
+                return [];
+            }).filter(Boolean))];
+            if (sourceNodeIds.length) queueMicrotask(() => refreshes.wakeSourceCanvas(event.entityId!, sourceNodeIds, Number(event.revision || 0), event.id));
+        }
     });
     for (const id of service.sceneWorkOwners()) scenes.recover(id);
     refreshes.recover();
@@ -66,7 +77,12 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             const prior = coordinator.commandReceipt(id, input.operationId, { action, input: { ...input, id, kind: current.episodeId !== req.params.episodeId ? "episode" : input.kind } });
             if (prior) return void res.json({ ok: true, production: prior, replayed: true });
             // Reviews independently recheck their frozen source/media digest in the coordinator.
-            if (input.expectedRevision > current.revision || (action !== "review" && current.revision !== input.expectedRevision)) throw new ProductionConflictError(current);
+            // resume/pause are pure state transitions: the coordinator re-reads the current
+            // record inside its own transaction and re-validates every precondition, and the
+            // operationId receipt already deduplicates replays. Background auto-publish bumps
+            // the revision between client reads, so requiring an exact match there only turns
+            // harmless races into retry storms. Source-editing actions keep the exact lock.
+            if (input.expectedRevision > current.revision || (!["review", "resume", "pause"].includes(action) && current.revision !== input.expectedRevision)) throw new ProductionConflictError(current);
             const production = action === "start" ? coordinator.start(id, input as Parameters<SceneWorkCoordinator["start"]>[1])
                 : action === "review" ? await coordinator.review(id, input as Parameters<SceneWorkCoordinator["review"]>[1])
                 : action === "pause" ? coordinator.pause(id, (input as { workId: string }).workId, input.operationId)
@@ -174,6 +190,12 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             res.json({ ok: true, production: service.adoptSharedAsset(req.params.episodeId, input), mediaSubmitted: false });
         } catch (error) { handle(res, error); }
     });
+    router.post<Record<string, string>>(`${base}/shared-assets/adopt-batch`, (req, res) => {
+        try {
+            const input = z.object({ assets: z.array(z.object({ assetId: z.string().min(1), approvedId: z.string().min(1) }).strict()).min(1), expectedRevision: z.number().int().nonnegative(), operationId: z.string().min(1) }).parse(req.body);
+            res.json({ ok: true, production: service.adoptSharedAssets(req.params.episodeId, input), mediaSubmitted: false });
+        } catch (error) { handle(res, error); }
+    });
     router.post<Record<string, string>>(`${base}/shared-assets/updates/:adoptionId/retry`, (req, res) => {
         try { const input = z.object({ expectedRevision: z.number().int().nonnegative() }).parse(req.body); res.json({ ok: true, ...service.retrySharedUpdate(req.params.episodeId, req.params.adoptionId, input.expectedRevision) }); }
         catch (error) { handle(res, error); }
@@ -195,6 +217,9 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             }
             const owner = base.startsWith("/canvas") ? { projectId: req.params.episodeId } : base.startsWith("/drama/scenes") ? { sceneId: req.params.episodeId } : {};
             const selected = projectProductionRead(query.view === "full" ? production : { ...production, ...owner }, query, value => crypto.createHash("sha256").update(value).digest("hex"));
+            const activeClipRefreshes = service.clipRefreshStore(req.params.episodeId).currentBySegment()
+                .filter(job => job.status !== "succeeded").map(clipRefreshReceipt);
+            if (activeClipRefreshes.length && selected && typeof selected === "object") (selected as any).clipRefreshes = activeClipRefreshes;
             if (!(selected as any).unchanged && query.targetIds?.length && !["summary", "clip_workbench", "shot_workbench", "subject_workbench"].includes(query.view) && !query.chunkBytes) { (selected as any).targetStatus = service.targetOccupancy(req.params.episodeId, query.targetIds); (selected as any).canvasInputs = service.canvasEditorialState(req.params.episodeId, query.targetIds); }
             res.json({ ok: true, production: selected });
         } catch (error) { handle(res, error); }

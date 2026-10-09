@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useId, useState, type MouseEvent, type ReactNode } from "react";
-import { App, Button, Image, Modal, Popover } from "antd";
+import { App, Button, Modal, Popover } from "antd";
 import { Brain, CheckCircle2, ChevronDown, ChevronRight, Circle, CircleAlert, Copy, ExternalLink, FilePenLine, FileText, FolderOpen, ListChecks, LoaderCircle, Search, ShieldAlert, TerminalSquare, Wrench, XCircle } from "lucide-react";
 import { extractTableDataFromElement, Streamdown, tableDataToMarkdown, type LinkSafetyModalProps } from "streamdown";
 import { useTranslation } from "react-i18next";
@@ -8,6 +8,7 @@ import i18n from "@/i18n";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useAgentStore, type AgentCanvasReference, type AgentPendingApproval, type AgentSkillReference } from "@/stores/use-agent-store";
+import { useMediaPreviewStore } from "@/stores/use-media-preview-store";
 import { resolveAgentMessageAssetUrl, revealAgentLocalFile } from "@/services/api/canvas-agent";
 import { AgentCanvasReferencePreview, canvasReferenceIcon, canvasReferenceKindLabel } from "./agent-canvas-reference-preview";
 import { agentInlineTokenClass, agentInlineTokenIconClass, agentInlineTokenMediaClass, agentReferenceMarker, parseAgentInlineTokens } from "./agent-chat-inline-tokens";
@@ -512,6 +513,12 @@ function AgentDetailBlock({ detail, theme }: { detail: UserDetail; theme: (typeo
 function AgentMessageAttachments({ attachments, alignRight }: { attachments: AgentChatAttachment[]; alignRight?: boolean }) {
     const { t } = useTranslation();
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+    // 预览统一交给全局 MediaPreviewHost（全站单一弹窗），这里只做转交。
+    useEffect(() => {
+        if (!previewUrl) return;
+        useMediaPreviewStore.getState().open({ url: previewUrl, name: t("agent.message.attachmentPreview"), type: "image" });
+        setPreviewUrl(null);
+    }, [previewUrl, t]);
     return (
         <>
             <div className={`mt-1.5 flex flex-wrap gap-1.5 ${alignRight ? "justify-end" : "justify-start"}`}>
@@ -527,11 +534,6 @@ function AgentMessageAttachments({ attachments, alignRight }: { attachments: Age
                     />
                 ))}
             </div>
-            {previewUrl ? (
-                <div className="hidden">
-                    <Image src={previewUrl} alt={t("agent.message.attachmentPreview")} preview={{ visible: true, src: previewUrl, onVisibleChange: (visible) => !visible && setPreviewUrl(null) }} />
-                </div>
-            ) : null}
         </>
     );
 }

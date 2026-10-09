@@ -22,6 +22,7 @@ import { ensureVideoPreview, getVideoPreviewRevision, subscribeVideoPreview, vid
 import { getPluginNodeView } from "@/stores/canvas/plugin-node-view";
 import { orderedGroupColumnCount, orderedGroupDisplaySlots, orderedGroupLayout } from "@/lib/canvas/ordered-group";
 import { canvasNodeImage, hasRenderableCanvasImage } from "@/lib/canvas/canvas-image-renderability";
+import { SmartImageHistoryActions } from "./smart-image-history-actions";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 const selectionBlue = "#2f80ff";
@@ -117,7 +118,7 @@ function nodeAccentColor(node: CanvasNodeData, theme: CanvasTheme) {
  * 概览壳与紧凑壳都据此补上活动标记，避免缩小后和普通节点长得一样。
  */
 function isNodeGenerating(node: CanvasNodeData) {
-    const pending = (status?: string) => status === "loading" || status === "queued";
+    const pending = (status: unknown) => status === "loading" || status === "queued";
     const metadata = node.metadata as (CanvasNodeData["metadata"] & { segments?: Array<{ status?: string }> }) | undefined;
     if (!metadata) return false;
     if (pending(metadata.status)) return true;
@@ -796,9 +797,12 @@ export const CanvasNode = React.memo(function CanvasNode({
                 // body 拖拽路径，只能走这里。若沿用全量黑名单（button/input/textarea/select/video），
                 // 节点上几乎任何可见区域都命中被排除，导致“拖不动”。故对 H3 仅屏蔽纯文本编辑控件，
                 // H3 只允许从自己的标题栏拖动，其他区域全部保留给控件和内容交互。
+                // contenteditable（CodeMirror 文本编辑器）与 data-canvas-shortcuts-ignore（编辑器容器）
+                // 必须排除：capture 先于编辑器自身的 stopPropagation 执行，命中拖拽会掐断 mousedown，
+                // 导致文本节点双击进入编辑后光标放不进去、拖动变成移动节点。
                 const target = event.target as HTMLElement;
                 const isH3 = data.type === "minimax-h3:video";
-                const interactive = target.closest("button, input, textarea, select, video, .ant-select-dropdown");
+                const interactive = target.closest("button, input, textarea, select, video, .ant-select-dropdown, [contenteditable='true'], [data-canvas-shortcuts-ignore]");
                 const isExplicitDragHandle = target.closest("[data-canvas-node-drag-handle]");
                 // 四角缩放手柄是纯 div，会命中上面的拖拽分支；但若在此处触发拖拽，
                 // handleNodeMouseDown 的 event.stopPropagation() 会掐断事件，使 ResizeHandle 自己的
@@ -1367,6 +1371,7 @@ function ImageNodeContent(props: NodeContentRendererProps) {
     return (
         <ImageContent
             node={props.node}
+            pluginContext={props.pluginContext}
             scale={props.scale}
             batchExpanded={props.batchExpanded}
             onToggleBatch={props.onToggleBatch}
@@ -1826,6 +1831,7 @@ function AudioNodeContent({ node, theme }: NodeContentRendererProps) {
 
 function ImageContent({
     node,
+    pluginContext,
     scale,
     batchExpanded,
     onToggleBatch,
@@ -1837,6 +1843,7 @@ function ImageContent({
     onViewBatchImage,
 }: {
     node: CanvasNodeData;
+    pluginContext?: CanvasNodeContext | null;
     scale: number;
     batchExpanded: boolean;
     onToggleBatch?: () => void;
@@ -1889,6 +1896,7 @@ function ImageContent({
 
     return (
         <BatchFrame batchCount={batchCount} batchExpanded={batchExpanded}>
+            {node.type === CanvasNodeType.Config && node.metadata?.smart && pluginContext && <div className="absolute bottom-2 left-2 z-30" onDoubleClick={event => event.stopPropagation()}><SmartImageHistoryActions ctx={pluginContext} image={primaryImage} /></div>}
             {batchExpanded
                 ? images
                       .filter((image) => image.id !== primaryImageId)
@@ -2089,11 +2097,11 @@ function ExpandedImageCard({
                         type="button"
                         className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]"
                         style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }}
-                        title={t("canvas.node.setPrimary")}
+                        title={t(node.type === CanvasNodeType.Config && node.metadata?.smart ? "director.atomic.browseImage" : "canvas.node.setPrimary")}
                         onClick={(event) => (event.stopPropagation(), onSetPrimary())}
                     >
                         <Star className="size-3 shrink-0" style={{ color: selectionBlue }} />
-                        {node.width >= 200 ? <span className="truncate">{t("canvas.node.setPrimary")}</span> : null}
+                        {node.width >= 200 ? <span className="truncate">{t(node.type === CanvasNodeType.Config && node.metadata?.smart ? "director.atomic.browseImage" : "canvas.node.setPrimary")}</span> : null}
                     </button>
                 </div>
             ) : null}

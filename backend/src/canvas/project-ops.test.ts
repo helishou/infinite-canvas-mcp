@@ -3,6 +3,17 @@ import test from "node:test";
 
 import { applyCanvasProjectOperations } from "./project-ops.js";
 
+test("smart image reference selection preserves generation settings and rejects unarchived results", () => {
+    const project = { nodes: [{ id: "IMG", type: "config", metadata: { smart: true, generationMode: "image", prompt: "Current prompt", model: "Current model", primaryImageId: "displayed",
+        images: [{ id: "old", status: "success", storageKey: "image:old" }, { id: "pending", status: "loading", storageKey: "" }] } }], connections: [] };
+    applyCanvasProjectOperations(project, [{ type: "update_node", id: "IMG", metadata: { smartImageReferenceSelection: { mode: "selected_result", resultId: "old" } } }]);
+    assert.equal(project.nodes[0].metadata.prompt, "Current prompt");
+    assert.equal(project.nodes[0].metadata.model, "Current model");
+    assert.equal(project.nodes[0].metadata.primaryImageId, "displayed");
+    assert.throws(() => applyCanvasProjectOperations(project, [{ type: "update_node", id: "IMG", metadata: { smartImageReferenceSelection: { mode: "selected_result", resultId: "pending" } } }]), /SMART_IMAGE_REFERENCE_SELECTION_INVALID/);
+    assert.throws(() => applyCanvasProjectOperations(project, [{ type: "update_node", id: "IMG", metadata: { smartImageReferenceSelection: { mode: "latest_success", resultId: "old" } } }]), /SMART_IMAGE_REFERENCE_SELECTION_INVALID/);
+});
+
 type Project = { revision?: number; nodes: Array<Record<string, unknown>>; connections: Array<Record<string, unknown>>; selectedNodeIds?: string[]; viewport?: Record<string, unknown> };
 
 function makeH3Node(overrides: Partial<{ id: string; segments: Array<Record<string, unknown>> }> = {}): Record<string, unknown> {

@@ -270,15 +270,33 @@ export function prepareCanvasGenerationTarget(
     };
 }
 
+/**
+ * 收集智能节点元数据里指向「旧独立结果节点」的 id（replace-active 清理名单）。
+ * 智能节点的文本回写会把自身 id 记入 generatedTextResultIds/primaryTextNodeId，
+ * 复制粘贴（Ctrl+C/V、右键复制）会把这些指向原节点的 id 原样克隆进副本元数据；
+ * 因此清理名单里出现 config 节点时一律剔除，否则运行副本会把被复制的原节点删掉。
+ */
+function legacySmartResultIds(project: CanvasProject, metadata: Record<string, any>, sourceId: string, imageSlotIds?: Set<string>): string[] {
+    const nodes = records(project.nodes);
+    const candidates = [
+        ...(Array.isArray(metadata.generatedResultIds) ? metadata.generatedResultIds.map(String) : []),
+        ...(metadata.primaryImageId && !(imageSlotIds || new Set(records(metadata.images).map((image) => String(image.id || "")))).has(String(metadata.primaryImageId)) ? [String(metadata.primaryImageId)] : []),
+        ...(Array.isArray(metadata.generatedTextResultIds) ? metadata.generatedTextResultIds.map(String) : []),
+        ...(metadata.primaryTextNodeId ? [String(metadata.primaryTextNodeId)] : []),
+    ];
+    return [...new Set(candidates.filter((id) => {
+        if (!id || id === sourceId) return false;
+        const target = nodes.find((node) => String(node.id || "") === id);
+        // 结果 id 只允许指向独立结果节点（text/image/video/audio）；节点不存在时
+        // 删除本来就是 no-op，这里直接丢弃。config 节点（含智能节点本体）绝不能删。
+        return target && String(target.type || "") !== "config";
+    }))];
+}
+
 function prepareSmartMedia(project: CanvasProject, source: Record<string, any>, command: CanvasGenerationCommand): PreparedCanvasGenerationTarget {
     const metadata = record(source.metadata);
     const imageSlotIds = new Set(records(metadata.images).map((image) => String(image.id || "")));
-    const legacyResultIds = [...new Set([
-        ...(Array.isArray(metadata.generatedResultIds) ? metadata.generatedResultIds.map(String) : []),
-        ...(metadata.primaryImageId && !imageSlotIds.has(String(metadata.primaryImageId)) ? [String(metadata.primaryImageId)] : []),
-        ...(Array.isArray(metadata.generatedTextResultIds) ? metadata.generatedTextResultIds.map(String) : []),
-        ...(metadata.primaryTextNodeId ? [String(metadata.primaryTextNodeId)] : []),
-    ].filter((id) => id && id !== String(source.id)))];
+    const legacyResultIds = legacySmartResultIds(project, metadata, String(source.id), imageSlotIds);
     return {
         command,
         project,
@@ -316,14 +334,7 @@ function prepareImage(stores: Stores, project: CanvasProject, source: Record<str
     if (useExisting) {
         const imageIds = command.imageIds?.length ? command.imageIds : Array.from({ length: count }, () => `image-slot-${crypto.randomUUID()}`);
         const imageSlotIds = new Set(records(metadata.images).map((image) => String(image.id || "")));
-        const legacyResultIds = useSmartNode
-            ? [...new Set([
-                ...(Array.isArray(metadata.generatedResultIds) ? metadata.generatedResultIds.map(String) : []),
-                ...(metadata.primaryImageId && !imageSlotIds.has(String(metadata.primaryImageId)) ? [String(metadata.primaryImageId)] : []),
-                ...(Array.isArray(metadata.generatedTextResultIds) ? metadata.generatedTextResultIds.map(String) : []),
-                ...(metadata.primaryTextNodeId ? [String(metadata.primaryTextNodeId)] : []),
-            ].filter((id) => id && id !== String(source.id)))]
-            : [];
+        const legacyResultIds = useSmartNode ? legacySmartResultIds(project, metadata, String(source.id), imageSlotIds) : [];
         const historySnapshot = useSmartNode ? imageGenerationSnapshot(metadata, command, count) : undefined;
         const newImages = imageIds.map((id) => ({
             id,

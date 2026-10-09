@@ -2,15 +2,15 @@
 
 触发：开始制作、保存源稿或用户决定、导航、准备节点、采用共享资产。先遵循[适配核心](acheng-canvas-adapter.md)。
 
-导演工作台按制作对象展示「总览、故事、风格与资产、镜头与片段、生产与交付」，JSON、旧稿接入、引擎和版本恢复集中在高级与历史。七模块仍是内部职责；不要把页面标签、partial 或模块顺序解释为必须依次通过的生产关卡。首页、独立画布和单集入口引用同一 Backend 制作记录。
+导演工作台提供概览、剧本、主体与图片（旧稿为角色与素材）、分镜、连续性、生成与交付、设置与历史。页面按当前对象集中编辑，图片历史仅浏览，正式选用沿 Backend 操作。镜头分镜图绑定智能图片节点，图片卡片定位精确 projectId/nodeId；连续性视图查询同一 ledger，不另创建显示台账。七模块仍是内部职责，不是固定生产关卡。
 
-产品导航分为「制作」和「画布」。制作先进入剧目总览，确认全剧规划及分类图片模型、视频模型与画幅，再由用户选择分集进入固定制作画布；共享资产画布作为剧目级独立入口显示。普通画布直接使用原生节点与生成，不自动进入制作 SOP。历史独立制作链接保留显式兼容访问。每集一张制作画布，每剧目一张共享资产画布；场次组织见本文件的制作画布布局。首次准备画布不授权生成，已开始制作的分集和已提交任务保留原设置。
+进入剧目直接打开全页制作工作台并选择分集；剧目管理、共享资产和画布是明确入口，不自动把工作台跳转成画布弹窗。画布用于节点原位迭代、历史查看和授权媒体生产。普通画布不自动进入制作 SOP，旧稿不自动迁移；布局变化不重排已有节点或生成媒体。
 
 创意对话确认对象后，先保存 brief 与 `workflow.currentWork`，回读 Backend `workflow/readiness`，再通过 `site_navigate({ production: { kind, id, workId, runId? } })` 呈现正式画布目标；无节点时打开对象编辑面板。需要节点时用 `production_prepare_targets` 幂等准备 asset/frame/segment，不把准备或跟随视为生成授权。推进同一制作沿用 workId；待决定项绑定源哈希，用户答复先保存再继续，不凭聊天文字或同名节点推断导航位置。
 
 为每项资产在源稿中保存 `canvas_scope`：全剧可复用的风格母图、主要角色、常驻场景和道具设为 `shared`；单集造型、镜头关键帧和临时构图设为 `episode`。新制作按实际复用范围决定，不按资产名称猜测。缺少此字段的旧稿沿原分集生产路径兼容。共享资产必须在共享画布自己的正式制作记录中准备、编译、生成和审核；不可在分集画布生成后直接把它当成共享资产。已有分集素材只有处于本集发布版、真实媒体哈希匹配且已批准时，才可从资产卡“接入已有审核素材”；先读取来源与共享目标版本，在确认窗口后沿 Backend 事务接入同一归档媒体，保存来源分集、原节点、原任务及审核证据，不重新生成。接入后分集调用 `production_get_shared_assets`、`production_adopt_shared_asset` 采用当前批准版本，再重新编译受影响提示词。Backend 按当前 production owner 校验归属；共享画布拒绝本集资产、关键帧和视频 Clip，分集拒绝未采用的共享资产。新批准版本持久传播到采用方；相同媒体与参考语义只更新归属时保留旧媒体有效状态，实际输入变化则保留历史并标记下游过期。在冲突时回读草稿及更新原因，再按原 adoption ID 恢复。画布权威和版本边界见画布数据契约，跟随与手动接管见画布交互约束。
 
-早期 brief 和 partial 可保存，且不要求先创建全部画布节点。首次需求使用 `set_director_brief` 写入 `source.brief`；常见场景、风格策略、资产、Shot 与 Segment 编辑使用 `patch_director_source`，只改声明的源字段并保留其他 Acheng 字段；边界用 `set_director_boundary`，工作模式、稳定 workId、currentWork 和待决定事项用 `set_director_workflow`，资产节点映射用 `bind_director_asset`。完整模块回包仍可使用 `set_director_production`，但常见 UI 编辑不能整稿覆盖。`currentWork` 绑定源 revision/hash；用户决定卡绑定同一 workId 和源哈希，答复先保存再交回导演。
+早期 brief 和 partial 可保存，且不要求先创建全部画布节点。首次需求使用 `set_director_brief` 写入 `source.brief`；常见场景、风格策略、资产、Shot 与 Segment 编辑使用 `patch_director_source`，只改声明的源字段并保留其他 Acheng 字段；边界用 `set_director_boundary`，工作模式、稳定 workId、currentWork 和待决定事项用 `set_director_workflow`，旧合同资产节点映射用 `bind_director_asset`；新合同图片绑定只通过 Subject 或 Shot 关键帧绑定维护，不单独再写资产节点映射。完整模块回包仍可使用 `set_director_production`，但常见 UI 编辑不能整稿覆盖。`currentWork` 绑定源 revision/hash；用户决定卡绑定同一 workId 和源哈希，答复先保存再交回导演。
 
 变更阶段时沿用同一 workId，更新 `workflow.currentWork` 后回读 readiness 展示投影，再使用结构化 `site_navigate` 呈现当前目标。
 

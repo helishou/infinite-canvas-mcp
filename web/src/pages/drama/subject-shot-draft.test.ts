@@ -1,0 +1,43 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { readShotFormDraft, rebaseShotFormDraft, shotFormChanges, shotDraftChanged, shotDraftSourceChanged, subjectDisplayName, productionWorkbenchValue } from "./subject-shot-draft";
+
+const shot = { id: "S1", title: "Observe", duration_frames: 48, visual: "Look outside.", camera: { framing: "CU", path: "static", lens: 50 }, subject_usages: [], keyframes: [] };
+test("a Shot draft survives a source refresh and locates a conflicting update without dropping camera fields", () => {
+    const { draft } = readShotFormDraft(undefined, shot);
+    draft.value.visual = "Listen outside.";
+    const restored = readShotFormDraft(JSON.stringify(draft), { ...shot, visual: "Someone enters." });
+    assert.equal(restored.draft.value.visual, "Listen outside.");
+    assert.equal(restored.draft.value.camera.lens, 50);
+    assert.equal(shotDraftChanged(restored.draft), true);
+    assert.equal(shotDraftSourceChanged(restored.draft, { ...shot, visual: "Someone enters." }), true);
+    assert.equal(shotDraftSourceChanged(restored.draft, shot), false);
+    assert.equal(readShotFormDraft(JSON.stringify(draft), { ...shot, id: "S2" }).invalid, true);
+});
+test("Subject names use the registered entity and workbenches consume the Backend wire projection", () => {
+    const source = { subject_registry: [{ id: "stable-subject", entityRef: { kind: "character", id: "actor" } }], character_registry: [{ id: "actor", name: "栓子" }] };
+    assert.equal(subjectDisplayName(source, "stable-subject"), "栓子");
+    assert.deepEqual(productionWorkbenchValue({ workbench: { resolved: true } }, "shot"), { resolved: true });
+});
+test("malformed persisted fields do not crash the editor and incomplete frame input remains recoverable", () => {
+    const { draft } = readShotFormDraft(undefined, shot);
+    for (const patch of [{ camera: null }, { subject_usages: [null] }, { keyframes: [null] }, { title: 123 }, { camera: { attention_subject_ids: "actor" } }]) {
+        const restored = readShotFormDraft(JSON.stringify({ ...draft, value: { ...draft.value, ...patch } }), shot);
+        assert.equal(restored.invalid, true);
+        assert.equal(restored.draft.value.visual, shot.visual);
+    }
+    const restored = readShotFormDraft(JSON.stringify({ ...draft, value: { ...draft.value, duration_frames: 0 } }), shot);
+    assert.equal(restored.invalid, false);
+    assert.equal(restored.draft.value.duration_frames, 0);
+});
+test("reviewed source changes retain remote fields and saving emits only the edited fields", () => {
+    const { draft } = readShotFormDraft(undefined, shot);
+    draft.value.camera.path = "push in";
+    const remote = { ...shot, title: "Remote title", camera: { ...shot.camera, lens: 85 } };
+    const rebased = rebaseShotFormDraft(draft, remote);
+    assert.equal(rebased.value.camera.lens, 85);
+    assert.equal(rebased.value.camera.path, "push in");
+    assert.equal(rebased.value.title, "Remote title");
+    assert.equal(shotDraftSourceChanged(rebased, remote), false);
+    assert.deepEqual(shotFormChanges(rebased), { patch: { camera: { ...remote.camera, path: "push in" } } });
+});

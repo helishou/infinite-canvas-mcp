@@ -135,13 +135,21 @@ export function productionWriteReceipt(result: any, context: { tool?: string; in
     const layout = result.layoutReceipt || p.layoutReceipt || {};
     const syncReceipt = p.syncReceipt || result.syncReceipt;
     const sync = Array.isArray(p.referenceSync) ? p.referenceSync : [];
+    const clipRefreshJobs = Array.isArray(p.clipRefreshes) ? p.clipRefreshes : p.clipRefresh ? [p.clipRefresh] : [];
+    const clipRefreshes = clipRefreshJobs.map((job: any) => ({
+        operationId: job.operationId, status: job.status, segmentId: job.segmentId, savedRevision: job.savedRevision,
+        compilationOperationId: job.compilationOperationId, selectedTargets: job.selectedTargets, affectedTargets: job.affectedTargets,
+        blockingDiagnostic: job.blockingDiagnostic, applicationRevision: job.application?.revision,
+        referenceSync: Array.isArray(job.application?.referenceSync) ? job.application.referenceSync.map((item: any) => ({ targetId: item.targetId, status: item.status, diagnostics: item.diagnostics })) : [],
+        mediaSubmitted: false,
+    }));
     const diagnosticCodes = [...new Set([...sync.flatMap((item: any) => item.diagnostics || []), ...(layout.diagnostics || [])].map((item: any) => String(item.code || "UNKNOWN")))];
     const ownerId = input.id || input.projectId || input.sceneId || input.episodeId || p.episodeId;
     const kind = input.kind || (input.sceneId && !input.episodeId && !input.projectId ? "scene" : input.projectId || context.tool?.startsWith("canvas_") ? "canvas" : "episode");
     const tool = kind === "scene" ? "production_get_scene_production" : "production_get";
     const readInput = { ...(kind === "scene" ? { sceneId: ownerId } : { kind, id: ownerId }), view: "summary" };
     return migrateToolGuidance({ ...pick(result, ["ok", "replayed", "mediaSubmitted", "mediaAuthorized", "operationId", "workId", "runId", "status", "updated", "created", "reused", "skipped"]),
-        ...(p.clipRefresh ? { sourceSaved: true, clipRefresh: p.clipRefresh, mediaSubmitted: false } : {}),
+        ...(clipRefreshes.length ? { sourceSaved: true, clipRefreshes, ...(clipRefreshes.length === 1 ? { clipRefresh: clipRefreshes[0] } : {}), mediaSubmitted: false } : {}),
         ...pick(input, ["operationId", "sceneId", "projectId", "episodeId"]),
         production: { ...pick(p, ["episodeId", "revision", "publishedVersion", "updatedAt", "replayed"]), sourceHash: p.draft?.director?.sourceHash, engine: p.draft?.director?.engine },
         ...(result.canvas ? { canvas: { ...pick(result.canvas, ["id", "projectId", "revision"]), nodeCount: count(result.canvas.nodes), connectionCount: count(result.canvas.connections) } } : {}),

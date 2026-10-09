@@ -124,6 +124,17 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             if (operation.metadata && typeof operation.metadata === "object" && !Array.isArray(operation.metadata)) {
                 const metadata = recordOf(node.metadata);
                 let metadataPatch = operation.metadata as Record<string, unknown>;
+                if (Object.hasOwn(metadataPatch, "smartImageReferenceSelection")) {
+                    const policy = recordOf(metadataPatch.smartImageReferenceSelection);
+                    const images = Array.isArray(metadata.images) ? metadata.images as Array<Record<string, unknown>> : [];
+                    if (node.type !== "config" || metadata.smart !== true || (metadata.generationMode || "image") !== "image"
+                        || !["latest_success", "selected_result"].includes(String(policy.mode))
+                        || Object.keys(policy).some(key => !["mode", "resultId"].includes(key))
+                        || policy.mode === "latest_success" && Object.hasOwn(policy, "resultId")
+                        || policy.mode === "selected_result" && !images.some(image => image.id === policy.resultId && image.status === "success" && image.storageKey)) {
+                        throw new Error("SMART_IMAGE_REFERENCE_SELECTION_INVALID: 引用选择必须来自智能图片节点的成功归档结果");
+                    }
+                }
                 // metadata.segments 在 update_node 中必须是「完整替换」（同长同 id 集合）。
                 // 部分替换会冲突 MCP / 任务回写等并发写路径，强制改用 update_h3_segment 等细粒度 op。
                 if (Object.prototype.hasOwnProperty.call(metadataPatch, "segments")) {

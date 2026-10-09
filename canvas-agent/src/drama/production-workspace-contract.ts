@@ -29,12 +29,13 @@ export const productionWorkspaceSchemas = {
     production_preview_continuity_upgrade: owner.extend({ expectedRevision: z.number().int().nonnegative(), operationId: id, fromSourceHash: z.string().regex(/^[a-f0-9]{64}$/), ledger: z.record(z.unknown()) }),
     production_get_shared_assets: owner,
     production_adopt_shared_asset: episodeOwner.extend({ assetId: id, approvedId: id, expectedRevision: z.number().int().nonnegative(), operationId: id }),
+    production_adopt_shared_assets: episodeOwner.extend({ assets: z.array(z.object({ assetId: id, approvedId: id }).strict()).min(1), expectedRevision: z.number().int().nonnegative(), operationId: id }),
     production_retry_shared_update: episodeOwner.extend({ adoptionId: id, expectedRevision: z.number().int().nonnegative() }),
     production_arrange_scene: owner.extend({ sceneId: id, expectedRevision: z.number().int().nonnegative(), operationId: id }),
 };
 export const productionWorkspaceToolNames = Object.keys(productionWorkspaceSchemas) as Array<keyof typeof productionWorkspaceSchemas>;
 export const productionWorkspaceDescriptions = {
-    production_hash_source: "仅在首次或明确整稿替换、准备提交新的完整 source 对象时计算 canonical sourceHash；同一候选对象复用已算哈希。读取已保存源稿使用返回的 sourceHash；局部修改用 production_edit 的 patch_director_source/patch_director_continuity，由 Backend 重算，不回读整稿逐次哈希。只读，不保存、发布或生成。",
+    production_hash_source: "仅在首次或明确整稿替换、准备提交新的完整 source 对象时计算 canonical sourceHash；同一候选对象复用已算哈希。读取已保存源稿使用返回的 sourceHash；局部修改用 production_edit 的源字段与对应版本台账条目操作，新合同用 edit_director_continuity，由 Backend 重算，不回读整稿逐次哈希。只读，不保存、发布或生成。",
     production_start_shared_review: "启动当前就绪共同资产或完整共同基础的自动审核；沿用生产代理池，不提交图片或视频，不自动重生成。",
     production_get_scene_work: "读取场次工作、当前审核输入哈希、源稿与真实媒体摘要；只读，不启动代理、编译或生成。",
     production_start_scene_work: "启动选定正式场次的隔离代理制作；generateMedia 显式授权这些场次的媒体生成，false 只制作源稿。默认三代理与三编译任务并行。",
@@ -58,6 +59,7 @@ export const productionWorkspaceDescriptions = {
     production_preview_continuity_upgrade: "只读预览旧连续性源稿升级到 ledger v2 的诊断与版本影响；不会改动制作稿、发布版、历史媒体或生成任务。",
     production_get_shared_assets: "读取同剧目最新批准共享资产及当前集持久更新状态。",
     production_adopt_shared_asset: "将同剧目批准资产采用到已登记的集内目标；核验来源、媒体和版本，不生成。",
+    production_adopt_shared_assets: "一次事务批量采用多项同剧目批准资产；后台自动发布推版本时不会逐项冲突，全部核验来源、媒体和版本，不生成。",
     production_retry_shared_update: "核对当前 revision 后恢复一项被阻塞的共享引用更新；不授权新的生成范围。",
     production_arrange_scene: "显式整理一个正式剧本场次的已准备分镜节点；不修改镜头/Segment 或其他场次。",
 };
@@ -104,6 +106,6 @@ export function productionWorkspaceRequest(name: string, raw: unknown) {
     }
     if (name === "production_get_shared_assets") return { method: "GET" as const, path: `${base}/shared-assets` };
     if (name === "production_retry_shared_update") { const { adoptionId, ...request } = body; return { method: "POST" as const, path: `${base}/shared-assets/updates/${encodeURIComponent(adoptionId)}/retry`, body: request }; }
-    const suffix = name === "production_adopt_shared_asset" ? "shared-assets/adopt" : name === "production_arrange_scene" ? "arrange-scene" : "prepare-targets";
+    const suffix = name === "production_adopt_shared_asset" ? "shared-assets/adopt" : name === "production_adopt_shared_assets" ? "shared-assets/adopt-batch" : name === "production_arrange_scene" ? "arrange-scene" : "prepare-targets";
     return { method: "POST" as const, path: `${base}/${suffix}`, body };
 }

@@ -44,7 +44,7 @@ export type CanvasGenerationLog = {
 };
 export type CanvasGenerationLogInput = Omit<CanvasGenerationLog, "id" | "createdAt" | "updatedAt">;
 export type CanvasGenerationLogs = {
-    list: (options?: { projectId?: string; nodeId?: string; status?: CanvasGenerationLogStatus; limit?: number }) => Promise<CanvasGenerationLog[]>;
+    list: (options?: { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; status?: CanvasGenerationLogStatus; limit?: number; offset?: number }) => Promise<CanvasGenerationLog[]>;
     create: (input: CanvasGenerationLogInput) => Promise<CanvasGenerationLog>;
     update: (id: string, patch: Partial<CanvasGenerationLogInput>) => Promise<CanvasGenerationLog>;
     remove: (options: { id?: string; projectId?: string; nodeId?: string }) => Promise<number>;
@@ -58,8 +58,9 @@ export type CanvasPluginAi = {
     previewH3Generation: (command: CanvasGenerationCommand) => Promise<import('@basketikun/canvas-agent/generation-contract').H3ExecutionPreview>;
     resolveH3Confirmation: (input: { taskId: string; action: "confirm" | "keep_first_pass" | "discard"; segmentId: string; expectedRevision: number; postpassParams?: Record<string, unknown> }) => Promise<LocalH3Task>;
     getLocalH3Task: (taskId: string) => Promise<LocalH3Task>;
+    getCanvasH3TaskStatus: (taskId: string) => Promise<{ status: string }>;
     getCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;
-    cancelCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;
+    cancelCanvasH3Task: (taskId: string) => Promise<Pick<LocalH3Task, "id" | "status">>;
     restoreH3Output: (input: { nodeId: string; segmentId: string; generationLogId: string; storageKey?: string; settings: Record<string, unknown> }) => Promise<void>;
     runVideoConcat: (videos: Array<{ name: string; url?: string; storageKey?: string }>, options?: LocalH3Options) => Promise<LocalVideoConcatResult>;
     listLocalH3Models: () => Promise<{ models: string[]; loras: string[]; textEncoders?: string[]; videoVaes?: string[]; audioVaes?: string[]; latentUpscaleModels?: string[] }>;
@@ -143,6 +144,9 @@ export type CanvasTextEditorProps = {
     lineMap?: boolean;
 };
 
+export type CanvasProductionEditing = {
+    reverseSyncPrompt: (input: { nodeId: string; segmentId: string; prompt: string; artifactId: string; sourceHash: string; basePromptHash: string }) => Promise<{ sourceSaved: boolean }>;
+};
 export type CanvasNodeContext = {
     mediaUrl: (storageKey: string) => string;
     TextEditor: ComponentType<CanvasTextEditorProps>;
@@ -191,6 +195,7 @@ export type CanvasNodeContext = {
     // Plugin-private persistence isolated by namespace.
     storage: PluginStorage;
     generationLogs: CanvasGenerationLogs;
+    production?: CanvasProductionEditing;
 };
 
 export type PluginStorage = {
@@ -222,6 +227,7 @@ export type CanvasPluginHost = {
     openAssetPicker: (options?: { kind?: "image" }) => Promise<CanvasAssetPickerImage | null>;
     openMediaPreview: (item: CanvasMediaPreview) => void;
     generationLogs: CanvasGenerationLogs;
+    production?: CanvasProductionEditing;
 };
 
 /** 宿主统一媒体预览的入参：给 `beforeUrl` 时进入 Before / After 对比模式。 */

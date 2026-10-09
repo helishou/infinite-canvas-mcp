@@ -2,10 +2,11 @@ import { CanvasBatchRename } from "@/components/canvas/canvas-batch-rename";
 import { useCanvasProductionContext } from "@/components/production/canvas-production-workspace";
 import { productionObjectForNode, productionObjectPath, productionObjectState, type ProductionObject } from "@/lib/production-object";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
+import { useMediaPreviewStore } from "@/stores/use-media-preview-store";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
 import { viewportForCanvasNodes } from "@/lib/canvas/canvas-navigation";
 import { createCanvasGraphIndexSelector } from "@/lib/canvas/canvas-graph-index";
-import { startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { lazy, Suspense, startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ExternalLink, Group, History, MessageSquare, Pencil, Video } from "lucide-react";
@@ -53,29 +54,27 @@ import { CanvasH3RefLinks } from "@/components/canvas/canvas-h3-ref-links";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
 import { CanvasNodeContextMenu } from "@/components/canvas/canvas-context-menu";
-import { CanvasNodeAngleDialog, type CanvasImageAngleParams } from "@/components/canvas/canvas-node-angle-dialog";
-import { CanvasNodeCropDialog, type CanvasImageCropRect } from "@/components/canvas/canvas-node-crop-dialog";
-import { CanvasNodeMaskEditDialog, type CanvasImageMaskEditPayload } from "@/components/canvas/canvas-node-mask-edit-dialog";
-import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
-import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
+import type { CanvasImageAngleParams } from "@/components/canvas/canvas-node-angle-dialog";
+import type { CanvasImageCropRect } from "@/components/canvas/canvas-node-crop-dialog";
+import type { CanvasImageMaskEditPayload } from "@/components/canvas/canvas-node-mask-edit-dialog";
+import type { CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
+import type { CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
 import { buildLoopRunInputPlan, buildLoopSourceInputs, buildNodeGenerationContext, buildNodeGenerationInputs, hydrateNodeGenerationContext, recordLoopGenerationOutput, splitLoopPromptItems, type CanvasLoopRuntimeContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasLoopNode } from "@/components/canvas/canvas-loop-node";
 import { resolveLoopInputPlan, runLoopGenerationRounds, upstreamLoopForGeneration } from "@/lib/canvas/canvas-loop-execution";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
-import { CharacterNodeEditModal } from "@/components/canvas/character-node-edit-modal";
-import { SceneNodeEditModal } from "@/components/canvas/scene-node-edit-modal";
-import { MediaPreviewModal } from "@/components/canvas/media-preview-modal";
-import { CanvasVideoCompareModal, type CanvasVideoComparison, type CanvasVideoCompareItem } from "@/components/canvas/canvas-video-compare-modal";
+import type { CanvasVideoComparison, CanvasVideoCompareItem } from "@/components/canvas/canvas-video-compare-modal";
 import type { CanvasMediaPreview } from "@/types/canvas-plugin";
 import { InfiniteCanvas, type ViewportChangeOptions } from "@/components/canvas/infinite-canvas";
 import { Minimap } from "@/components/canvas/canvas-mini-map";
 import { CanvasNodeViewportItem } from "@/components/canvas/canvas-node";
-import { CanvasNodePromptPanel, type CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
+import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import { CanvasToolbar } from "@/components/canvas/canvas-toolbar";
-import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
+import type { InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { CanvasSidePanel } from "@/components/canvas/canvas-side-panel";
 import { CanvasZoomControls } from "@/components/canvas/canvas-zoom-controls";
 import { useAgentStore } from "@/stores/use-agent-store";
+import { smartImageBrowsePatch } from "@/components/canvas/smart-image-history";
 import { applyBackendCanvasEvent, ensureCanvasProjectLoaded, flushCanvasProjectBeforeGeneration, useCanvasStore, type CanvasCollaborator } from "@/stores/canvas/use-canvas-store";
 import { getPluginNodeView } from "@/stores/canvas/plugin-node-view";
 import { emitCanvasEvent } from "@/lib/canvas/canvas-event-bus";
@@ -109,10 +108,21 @@ import {
 } from "@/lib/canvas/canvas-generation-helpers";
 import { getNodeDefinition, isBuiltinNodeType as isBuiltinType, useNodeRegistryVersion } from "@/lib/canvas/node-registry";
 import { registerBuiltinNodes } from "@/components/canvas/nodes/builtin-nodes";
-import { CanvasPluginManagerModal } from "@/components/canvas/canvas-plugin-manager-modal";
 import { CanvasRefreshShell } from "@/components/canvas/canvas-refresh-shell";
 import { CanvasTopBar } from "@/components/canvas/canvas-top-bar";
-import { CanvasGenerationLogDialog } from "@/components/canvas/canvas-generation-log-dialog";
+
+const CanvasNodeAngleDialog = lazy(() => import("@/components/canvas/canvas-node-angle-dialog").then((module) => ({ default: module.CanvasNodeAngleDialog })));
+const CanvasNodeCropDialog = lazy(() => import("@/components/canvas/canvas-node-crop-dialog").then((module) => ({ default: module.CanvasNodeCropDialog })));
+const CanvasNodeMaskEditDialog = lazy(() => import("@/components/canvas/canvas-node-mask-edit-dialog").then((module) => ({ default: module.CanvasNodeMaskEditDialog })));
+const CanvasNodeSplitDialog = lazy(() => import("@/components/canvas/canvas-node-split-dialog").then((module) => ({ default: module.CanvasNodeSplitDialog })));
+const CanvasNodeUpscaleDialog = lazy(() => import("@/components/canvas/canvas-node-upscale-dialog").then((module) => ({ default: module.CanvasNodeUpscaleDialog })));
+const CanvasPluginManagerModal = lazy(() => import("@/components/canvas/canvas-plugin-manager-modal").then((module) => ({ default: module.CanvasPluginManagerModal })));
+const CanvasGenerationLogDialog = lazy(() => import("@/components/canvas/canvas-generation-log-dialog").then((module) => ({ default: module.CanvasGenerationLogDialog })));
+const CharacterNodeEditModal = lazy(() => import("@/components/canvas/character-node-edit-modal").then((module) => ({ default: module.CharacterNodeEditModal })));
+const SceneNodeEditModal = lazy(() => import("@/components/canvas/scene-node-edit-modal").then((module) => ({ default: module.SceneNodeEditModal })));
+const CanvasVideoCompareModal = lazy(() => import("@/components/canvas/canvas-video-compare-modal").then((module) => ({ default: module.CanvasVideoCompareModal })));
+const AssetPickerModal = lazy(() => import("@/components/canvas/asset-picker-modal").then((module) => ({ default: module.AssetPickerModal })));
+const CanvasNodePromptPanel = lazy(() => import("@/components/canvas/canvas-node-prompt-panel").then((module) => ({ default: module.CanvasNodePromptPanel })));
 import { CanvasRealtimePresenceLayer, useCanvasRealtimePresence, writeCanvasPresenceViewport } from "@/components/canvas/canvas-realtime-presence";
 import { ConnectionCreateMenu, NodeCreateMenu, type PendingConnectionCreate } from "@/components/canvas/canvas-create-menus";
 import {
@@ -1155,18 +1165,25 @@ function InfiniteCanvasPage() {
     );
     const [previewContent, setPreviewContent] = useState("");
     const [previewBeforeContent, setPreviewBeforeContent] = useState<string | null>(null);
-    // 插件经 ctx.openMediaPreview 打开的宿主预览，与节点双击预览共用同一个 MediaPreviewModal。
-    const [hostMediaPreview, setHostMediaPreview] = useState<CanvasMediaPreview | null>(null);
-    const mediaPreviewItem = hostMediaPreview
-        || (previewContent ? { url: previewContent, beforeUrl: previewBeforeContent || undefined, name: previewNode?.title || t("assets.kinds.image"), type: "image" as const } : null);
-    const closeMediaPreview = useCallback(() => {
-        if (hostMediaPreview) {
-            setHostMediaPreview(null);
-            return;
-        }
+    // 预览统一交给应用级 MediaPreviewHost（全站单一弹窗）：节点双击与插件 ctx.openMediaPreview 都写同一个 store。
+    const openGlobalMediaPreview = useMediaPreviewStore(state => state.open);
+    const globalMediaPreviewRequest = useMediaPreviewStore(state => state.request);
+    const nodePreviewRef = useRef(false);
+    // 记录上一次真正交给全局预览的载荷。媒体 URL 与「对比原图」都是异步解析的：
+    // 只按「节点:结果图」去重会把晚到的 beforeUrl 更新吞掉，Before/After 对比就丢了。
+    const nodePreviewPayloadRef = useRef<{ key: string; url: string; beforeUrl?: string } | null>(null);
+    const closeNodePreview = useCallback(() => {
+        if (!nodePreviewRef.current) return;
+        nodePreviewRef.current = false;
+        nodePreviewPayloadRef.current = null;
         setPreviewNodeId(null);
         setPreviewImageId(null);
-    }, [hostMediaPreview]);
+    }, []);
+    // 全局预览关闭后回收节点预览状态，避免双击标记留在节点上。
+    useEffect(() => {
+        if (globalMediaPreviewRequest) return;
+        closeNodePreview();
+    }, [globalMediaPreviewRequest, closeNodePreview]);
 
     useEffect(() => {
         let cancelled = false;
@@ -1188,6 +1205,24 @@ function InfiniteCanvasPage() {
             cancelled = true;
         };
     }, [previewBeforeReference, previewRawContent, previewStorageKey]);
+    // 节点双击（或切换结果图）后把解析好的媒体交给全局预览。
+    // 载荷（含对比原图）变化时会更新同一次打开，保证 Before/After 出现；完全重复才跳过。
+    useEffect(() => {
+        if (!previewNodeId || !previewContent) return;
+        const key = `${previewNodeId}:${previewImageId || ""}`;
+        const beforeUrl = previewBeforeContent || undefined;
+        const last = nodePreviewPayloadRef.current;
+        if (last && last.key === key && last.url === previewContent && last.beforeUrl === beforeUrl) return;
+        // 同一张图但用户已经切到别的预览（插件素材等）时不要把焦点抢回来。
+        const currentRequest = useMediaPreviewStore.getState().request;
+        if (last && last.key === key && currentRequest && currentRequest.item.url !== last.url) return;
+        nodePreviewPayloadRef.current = { key, url: previewContent, beforeUrl };
+        nodePreviewRef.current = true;
+        openGlobalMediaPreview(
+            { url: previewContent, beforeUrl, name: previewNode?.title || t("assets.kinds.image"), type: "image" },
+            { projectId },
+        );
+    }, [previewNodeId, previewImageId, previewContent, previewBeforeContent, previewNode?.title, projectId, openGlobalMediaPreview, t]);
     const hasMultipleSelectedNodes = selectedNodeIds.size > 1;
     const activeNodeId = hasMultipleSelectedNodes ? null : hoveredNodeId || (selectedNodeIds.size === 1 ? Array.from(selectedNodeIds)[0] : null);
     const focusedConnectionIds = useMemo(() => {
@@ -1353,8 +1388,11 @@ function InfiniteCanvasPage() {
             }),
         [],
     );
-    // 插件预览统一交给宿主的 MediaPreviewModal：插件不再自带灯箱，避免画布里出现多套预览弹窗。
-    const openMediaPreview = useCallback((item: CanvasMediaPreview) => setHostMediaPreview(item), []);
+    // 插件预览同样交给全局 MediaPreviewHost：插件不再自带灯箱，全站只有一套预览弹窗。
+    const openMediaPreview = useCallback((item: CanvasMediaPreview) => {
+        nodePreviewRef.current = false;
+        openGlobalMediaPreview(item, { projectId });
+    }, [openGlobalMediaPreview, projectId]);
     const { pluginHost, renderPluginPanel, buildNodeToolbarItems } = usePluginHost({
         selectGraphIndex,
         projectId,
@@ -3349,20 +3387,6 @@ function InfiniteCanvasPage() {
     }, []);
 
     const setBatchPrimary = useCallback((nodeId: string, itemId: string) => {
-        const selectedNode = nodesRef.current.find((node) => node.id === nodeId);
-        const selectedImage = selectedNode?.metadata?.images?.find((image) => image.id === itemId);
-        const snapshot = selectedImage?.generationSnapshot;
-        if (selectedNode?.type === CanvasNodeType.Config && selectedNode.metadata?.smart && snapshot) {
-            const target = { nodeId, field: "composerContent" as const };
-            void (async () => {
-                const session = getCanvasTextSession(projectId, target);
-                await session.initialize();
-                const documentId = session.getDocumentId();
-                if (!documentId) return;
-                const replaced = await replaceCanvasText(projectId, target, documentId, session.text.toString(), snapshot.prompt);
-                if (!replaced) message.warning("提示词正在被协作编辑，未覆盖当前文本");
-            })().catch(() => message.error("恢复历史提示词失败"));
-        }
         setNodes((prev) =>
             prev.map((node) => {
                 if (node.id !== nodeId) return node;
@@ -3402,8 +3426,6 @@ function InfiniteCanvasPage() {
                 const size = preserveNodeSize
                     ? { width: node.width, height: node.height }
                     : fitNodeSize(naturalWidth, naturalHeight, imageConfig.width, imageConfig.height);
-                const generation = image.generationSnapshot;
-                const historyReferences = generation?.references.map((reference) => reference.storageKey || reference.url || "").filter(Boolean);
                 return {
                     ...node,
                     position: { x: node.position.x + node.width / 2 - size.width / 2, y: node.position.y + node.height / 2 - size.height / 2 },
@@ -3417,23 +3439,7 @@ function InfiniteCanvasPage() {
                         bytes: image.bytes,
                         mimeType: image.mimeType,
                         primaryImageId: image.id,
-                        ...(node.type === CanvasNodeType.Config && node.metadata?.smart ? {
-                            activeImageHistoryId: generation ? image.id : null,
-                            activeImageHistoryExplicit: Boolean(generation),
-                            ...(generation ? {
-                                prompt: generation.prompt,
-                                model: generation.model,
-                                size: generation.size,
-                                quality: generation.quality,
-                                background: generation.background,
-                                count: generation.count,
-                                comfyParams: generation.params,
-                                generationType: generation.maskEdit || generation.references.length ? "edit" : "generation",
-                                generationMode: "image",
-                                maskEdit: generation.maskEdit,
-                                references: historyReferences,
-                            } : {}),
-                        } : {}),
+                        ...(node.type === CanvasNodeType.Config && node.metadata?.smart ? smartImageBrowsePatch(image) : {}),
                     },
                 };
             }),
@@ -5800,7 +5806,7 @@ function InfiniteCanvasPage() {
                         onStop={stopLoop}
                     />
                     {/* 智能生成配置：模型、提示词、参考图。循环节点自己就是生成节点，所以直接用同一套面板。 */}
-                    <CanvasNodePromptPanel
+                    <Suspense fallback={<div className="min-h-24 w-full" aria-busy="true" />}><CanvasNodePromptPanel
                         node={loopNode}
                         nodes={nodes}
                         isRunning={activeLoop}
@@ -5818,7 +5824,7 @@ function InfiniteCanvasPage() {
                             setNodeImageSettingsOpen(open);
                             if (open) setToolbarNodeId(null);
                         }}
-                    />
+                    /></Suspense>
                 </div>
             );
         },
@@ -5845,7 +5851,7 @@ function InfiniteCanvasPage() {
                 renderPluginPanel(target)
             ) : target.type === CanvasNodeType.Config ? (
                 target.metadata?.smart ? (
-                    <CanvasNodePromptPanel
+                    <Suspense fallback={<div className="min-h-24 w-full" aria-busy="true" />}><CanvasNodePromptPanel
                         node={target}
                         nodes={nodes}
                         isRunning={isRunning}
@@ -5863,7 +5869,7 @@ function InfiniteCanvasPage() {
                             setNodeImageSettingsOpen(open);
                             if (open) setToolbarNodeId(null);
                         }}
-                    />
+                    /></Suspense>
                 ) : (
                     <CanvasConfigComposer
                         nodeId={target.id}
@@ -5880,7 +5886,7 @@ function InfiniteCanvasPage() {
                     />
                 )
             ) : (
-                <CanvasNodePromptPanel
+                <Suspense fallback={<div className="min-h-24 w-full" aria-busy="true" />}><CanvasNodePromptPanel
                     node={target}
                     nodes={nodes}
                     isRunning={isRunning}
@@ -5899,7 +5905,7 @@ function InfiniteCanvasPage() {
                         setNodeImageSettingsOpen(open);
                         if (open) setToolbarNodeId(null);
                     }}
-                />
+                /></Suspense>
             );
         },
         [
@@ -6331,8 +6337,8 @@ function InfiniteCanvasPage() {
                 {isMiniMapOpen ? <Minimap nodes={nodes} viewport={viewport} viewportSize={size} onViewportChange={commitViewport} /> : null}
 
                 <CanvasZoomControls onFitAll={fitAllNodes} scale={viewport.k} onScaleChange={setZoomScale} onReset={resetViewport} isMiniMapOpen={isMiniMapOpen} onToggleMiniMap={() => setIsMiniMapOpen((value) => !value)} />
-                <CanvasGenerationLogDialog open={generationLogsOpen} projectId={projectId} onClose={() => setGenerationLogsOpen(false)} />
-                {objectHistory && <CanvasGenerationLogDialog open projectId={objectHistory.canvasId} nodeId={objectHistory.nodeId} segmentId={objectHistory.segmentId} objectTitle={objectHistory.clipIndex ? t("productionCanvas.clip", { number: objectHistory.clipIndex }) : objectHistory.title} currentStorageKey={String(productionRecord && nodes.find(node => node.id === objectHistory.nodeId) ? productionObjectState(productionRecord, objectHistory, nodes.find(node => node.id === objectHistory.nodeId)!).storageKey || "" : "")} onSelectResult={(log, output) => window.dispatchEvent(new CustomEvent("production-node-action", { detail: { owner: objectHistory.owner, object: objectHistory, action: "select-result", history: { generationLogId: log.id, storageKey: output.storageKey, mimeType: output.mimeType } } }))} onClose={() => setObjectHistory(null)} />}
+                <Suspense fallback={null}>{generationLogsOpen ? <CanvasGenerationLogDialog open projectId={projectId} onClose={() => setGenerationLogsOpen(false)} /> : null}</Suspense>
+                <Suspense fallback={null}>{objectHistory && <CanvasGenerationLogDialog open projectId={objectHistory.canvasId} nodeId={objectHistory.nodeId} segmentId={objectHistory.segmentId} objectTitle={objectHistory.clipIndex ? t("productionCanvas.clip", { number: objectHistory.clipIndex }) : objectHistory.title} currentStorageKey={String(productionRecord && nodes.find(node => node.id === objectHistory.nodeId) ? productionObjectState(productionRecord, objectHistory, nodes.find(node => node.id === objectHistory.nodeId)!).storageKey || "" : "")} onSelectResult={(log, output) => window.dispatchEvent(new CustomEvent("production-node-action", { detail: { owner: objectHistory.owner, object: objectHistory, action: "select-result", history: { generationLogId: log.id, storageKey: output.storageKey, mimeType: output.mimeType } } }))} onClose={() => setObjectHistory(null)} />}</Suspense>
 
                 {contextMenu ? (
                     <CanvasNodeContextMenu
@@ -6395,27 +6401,27 @@ function InfiniteCanvasPage() {
                 <input ref={imageInputRef} type="file" multiple accept="image/*,.svg,video/*,audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav" className="hidden" onChange={handleImageInputChange} />
 
                 <CanvasNodeInfoModal node={infoNode} open={Boolean(infoNode)} onClose={() => setInfoNodeId(null)} onRename={handleNodeTitleChange} />
-                <CanvasPluginManagerModal open={pluginManagerOpen} onClose={() => setPluginManagerOpen(false)} />
+                <Suspense fallback={null}>{pluginManagerOpen ? <CanvasPluginManagerModal open onClose={() => setPluginManagerOpen(false)} /> : null}</Suspense>
 
-                {cropNode && imageToolUrl?.nodeId === cropNode.id ? <CanvasNodeCropDialog dataUrl={imageToolUrl.url} open onClose={() => setCropNodeId(null)} onConfirm={(crop) => void cropImageNode(cropNode, crop)} /> : null}
+                <Suspense fallback={null}>{cropNode && imageToolUrl?.nodeId === cropNode.id ? <CanvasNodeCropDialog dataUrl={imageToolUrl.url} open onClose={() => setCropNodeId(null)} onConfirm={(crop) => void cropImageNode(cropNode, crop)} /> : null}</Suspense>
 
-                {maskEditNode && imageToolUrl?.nodeId === maskEditNode.id ? (
+                <Suspense fallback={null}>{maskEditNode && imageToolUrl?.nodeId === maskEditNode.id ? (
                     <CanvasNodeMaskEditDialog dataUrl={imageToolUrl.url} open onClose={() => setMaskEditNodeId(null)} onConfirm={(payload) => void maskEditImageNode(maskEditNode, payload)} />
-                ) : null}
+                ) : null}</Suspense>
 
-                {splitNode && imageToolUrl?.nodeId === splitNode.id ? <CanvasNodeSplitDialog dataUrl={imageToolUrl.url} open onClose={() => setSplitNodeId(null)} onConfirm={(params) => void splitImageNode(splitNode, params)} /> : null}
+                <Suspense fallback={null}>{splitNode && imageToolUrl?.nodeId === splitNode.id ? <CanvasNodeSplitDialog dataUrl={imageToolUrl.url} open onClose={() => setSplitNodeId(null)} onConfirm={(params) => void splitImageNode(splitNode, params)} /> : null}</Suspense>
 
-                {upscaleNode && imageToolUrl?.nodeId === upscaleNode.id ? (
+                <Suspense fallback={null}>{upscaleNode && imageToolUrl?.nodeId === upscaleNode.id ? (
                     <CanvasNodeUpscaleDialog dataUrl={imageToolUrl.url} open onClose={() => setUpscaleNodeId(null)} onConfirm={(params) => void upscaleImageNode(upscaleNode, params)} />
-                ) : null}
+                ) : null}</Suspense>
 
                 <Modal title={t("canvas.projectPage.superResolve")} open={Boolean(superResolveNode && canvasNodeImage(superResolveNode))} centered footer={null} onCancel={() => setSuperResolveNodeId(null)}>
                     <div className="py-8 text-center text-base font-medium">{t("canvas.projectPage.notImplemented")}</div>
                 </Modal>
 
-                {angleNode && imageToolUrl?.nodeId === angleNode.id ? <CanvasNodeAngleDialog dataUrl={imageToolUrl.url} open onClose={() => setAngleNodeId(null)} onConfirm={(params) => void generateAngleNode(angleNode, params)} /> : null}
+                <Suspense fallback={null}>{angleNode && imageToolUrl?.nodeId === angleNode.id ? <CanvasNodeAngleDialog dataUrl={imageToolUrl.url} open onClose={() => setAngleNodeId(null)} onConfirm={(params) => void generateAngleNode(angleNode, params)} /> : null}</Suspense>
 
-                <CharacterNodeEditModal
+                <Suspense fallback={null}>{characterEditNodeId ? <CharacterNodeEditModal
                     open={Boolean(characterEditNodeId)}
                     selectingCanvasImage={characterImagePickerActive}
                     canvasImagePick={characterCanvasImagePick}
@@ -6423,9 +6429,9 @@ function InfiniteCanvasPage() {
                     onClose={closeCharacterEditor}
                     onPickCanvasImage={startCharacterImageSelection}
                     onSave={saveCharacterEdit}
-                />
+                /> : null}</Suspense>
 
-                <SceneNodeEditModal
+                <Suspense fallback={null}>{sceneEditNodeId ? <SceneNodeEditModal
                     open={Boolean(sceneEditNodeId)}
                     selectingCanvasImage={Boolean(sceneImagePickerActive)}
                     canvasImagePick={sceneCanvasImagePick}
@@ -6433,10 +6439,9 @@ function InfiniteCanvasPage() {
                     onClose={closeSceneEditor}
                     onPickCanvasImage={startSceneImageSelection}
                     onSave={saveSceneEdit}
-                />
+                /> : null}</Suspense>
 
-                <MediaPreviewModal item={mediaPreviewItem} onClose={closeMediaPreview} projectId={projectId} />
-                {videoComparison ? <CanvasVideoCompareModal comparison={videoComparison} onClose={() => setVideoComparison(null)} /> : null}
+                <Suspense fallback={null}>{videoComparison ? <CanvasVideoCompareModal comparison={videoComparison} onClose={() => setVideoComparison(null)} /> : null}</Suspense>
 
                 <Modal
                     title={t("canvas.projectPage.clearTitle")}
@@ -6455,7 +6460,7 @@ function InfiniteCanvasPage() {
                     <p className="text-sm opacity-60">{t("canvas.projectPage.clearDescription")}</p>
                 </Modal>
 
-                <AssetPickerModal open={assetPickerOpen} allowedKinds={assetPickerAllowedKinds} onInsert={handleAssetInsert} onClose={closeAssetPicker} />
+                <Suspense fallback={null}>{assetPickerOpen ? <AssetPickerModal open allowedKinds={assetPickerAllowedKinds} onInsert={handleAssetInsert} onClose={closeAssetPicker} /> : null}</Suspense>
             </section>
         </main>
     );
