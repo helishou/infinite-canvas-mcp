@@ -3148,14 +3148,16 @@ class McpPayloadOverflowError extends Error {
   readonly bytes: number;
   readonly chars: number;
   readonly limitBytes: number;
+  readonly tool: string;
   constructor(bytes: number, chars: number, limitBytes: number, tool: string) {
     super(
-      `工具 ${tool} 的返回体为 ${bytes} 字节（${chars} 字符），超过单次输出上限 ${limitBytes} 字节。${tool === "h3_list_models" ? "使用 view: entries、categories、query 和显式 pageSize 分页读取。" : tool === "director_subagent" ? "使用 action:get、view:summary 获取状态；完整结果通过 view:result、chunkBytes/cursor 分块读取。" : /production|scene_version/.test(tool) ? "使用 view: summary 获取概况；source/artifacts 通过 sourceSection、targetIds、pageSize/cursor 或 chunkBytes 定向读取。" : tool === "canvas_get_state" ? "使用 nodeIds 定向读取，或 nodeLimit/nodeOffset 分页；H3 正文使用 h3_get_clip 定向工具。" : "请使用该工具 schema 支持的定向读取参数缩小范围。"}`,
+      `工具 ${tool} 的返回体为 ${bytes} 字节（${chars} 字符），超过单次输出上限 ${limitBytes} 字节。${tool === "h3_list_models" ? "使用 view: entries、categories、query 和显式 pageSize 分页读取。" : tool === "director_subagent" ? "使用 action:get、view:summary 获取状态；完整结果通过 view:result、chunkBytes/cursor 分块读取。" : tool === "production_get" ? "摘要使用 production_get；指定章节使用 production_get_source(sourceSection, pageSize/cursor)，产物目录使用 production_get_artifact_index 分页，单个提示词使用 production_get_artifact(targetId, chunkBytes/cursor)。不要请求完整制作稿。" : tool === "production_get_version" ? "摘要使用 production_get_version；历史章节使用 production_get_version_source，产物目录使用 production_get_version_artifact_index 分页，单个提示词使用 production_get_version_artifact(targetId, chunkBytes/cursor)。不要请求完整历史快照。" : /production|scene_version/.test(tool) ? "使用摘要视图；按 sourceSection、targetIds 定向读取，并用 pageSize/cursor 或 chunkBytes 分页和分块。" : tool === "canvas_get_state" ? "使用 nodeIds 定向读取，或 nodeLimit/nodeOffset 分页；H3 正文使用 h3_get_clip 定向工具。" : "请使用该工具 schema 支持的定向读取参数缩小范围。"}`,
     );
     this.name = "McpPayloadOverflowError";
     this.bytes = bytes;
     this.chars = chars;
     this.limitBytes = limitBytes;
+    this.tool = tool;
   }
 }
 
@@ -3460,8 +3462,9 @@ function classifyToolError(
           : { action: "原幂等键属于另一份生成输入；先查原任务，不能把它当作本次任务或重复排队" })
     : payloadOverflow
     ? {
-        action:
-          "缩小返回体后重试：为查询类工具传更小的 limit / nodeIds，或用 canvas_inspect 代替整图快照工具。",
+        action: error instanceof McpPayloadOverflowError && ["production_get", "production_get_version"].includes(error.tool)
+          ? "不要重读完整制作稿；改用摘要工具、指定 sourceSection 的源稿工具、分页产物索引或指定 targetId 的提示词分块工具。"
+          : "缩小返回体后重试：为查询类工具传更小的 limit / nodeIds，或用 canvas_inspect 代替整图快照工具。",
       }
     : selectionRequired
     ? { tool: "canvas_list_projects", input: {} }

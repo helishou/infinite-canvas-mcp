@@ -103,8 +103,9 @@ test("default summaries exclude growing collections and honor the selected publi
     assert.equal(summary.published.director.counts.artifacts, 28);
     assert.ok(JSON.stringify(summary).length < 2000);
     assert.ok(!JSON.stringify(summary).includes("private"));
-    assert.equal(summary.nextRead.input.pageSize, 100);
-    const index: any = projectProductionRead(production, summary.nextRead.input);
+    assert.equal(summary.nextRead.tool, "production_get_artifact_index");
+    assert.equal(summary.nextRead.input.pageSize, 50);
+    const index: any = projectProductionRead(production, { ...summary.nextRead.input, view: "artifact_index" });
     assert.equal(index.artifacts.items.length, 28);
     assert.equal(index.artifacts.nextCursor, null);
 });
@@ -128,7 +129,7 @@ test("write receipts discard top-level snapshots and retain operation replay ide
     const receipt: any = productionWriteReceipt(payload, { tool: "production_prepare_targets", input: { kind: "canvas", id: "c", operationId: "original" } });
     assert.equal(receipt.operationId, "original"); assert.equal(receipt.replayed, true);
     assert.equal(receipt.layoutReceipt.created, 100); assert.equal(receipt.canvas.prompt, undefined);
-    assert.deepEqual(receipt.nextRead, { tool: "production_get", input: { kind: "canvas", id: "c", view: "summary" } });
+    assert.deepEqual(receipt.nextRead, { tool: "production_get", input: { kind: "canvas", id: "c" } });
     assert.ok(JSON.stringify(receipt).length < 2000);
     console.log(`write projection: ${Buffer.byteLength(JSON.stringify(payload))} -> ${Buffer.byteLength(JSON.stringify(receipt))} bytes`);
 });

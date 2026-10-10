@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeH3Params, resolveH3Runtime, withH3ParameterEdits } from "./runtime-params.js";
+import { h3StoryboardIssues, normalizeH3Params, resolveH3Runtime, withH3ParameterEdits } from "./runtime-params.js";
 
 test("global defaults cannot enable continuation, while authored per-Clip choices remain effective", () => {
     const defaults = { motionContextEnabled: true, tailFrameContinuation: true };
@@ -40,4 +40,9 @@ test("manual continuation edits persist the opposite false under default policy"
         assert.equal(params[other], false);
     }
     assert.deepEqual(withH3ParameterEdits({}, { motionContextEnabled: false }), { motionContextEnabled: false, h3ParameterOverrides: ["motionContextEnabled"] });
+});
+
+test("storyboard tracks can omit image references while still validating explicit bindings", () => {
+    assert.deepEqual(h3StoryboardIssues({ storyboardShots: [{ id: "shot-1", duration: 5 }] }), []);
+    assert.ok(h3StoryboardIssues({ storyboardShots: [{ id: "shot-1", duration: 5, referenceBindingId: "missing" }] }).some(issue => issue.includes("缺少有效 storyboard 绑定")));
 });

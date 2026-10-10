@@ -47,11 +47,9 @@ def diagnose(runtime, source):
                 if field not in segment:
                     add("视频段落编译字段缺失", f"segments.{index}.{field}", str(segment.get("id") or ""))
         if source.get("asset_cards"):
-            def style_check():
-                policy = style_anchor.style_policy_report(source, base, strict=True)
-                if policy.get("status") == "BLOCKED":
-                    raise ContractError(policy["reason"])
-            check(style_check, "style_lock")
+            policy = style_anchor.style_policy_report(source, base, strict=False)
+            if policy.get("status") == "BLOCKED":
+                add(policy.get("reason", "风格策略尚未准备"), "style_lock", code="STYLE_POLICY", severity="warning")
         report = audit(source, base)
         for gate in report.get("gates", []):
             for error in gate.get("errors", []):
@@ -81,7 +79,9 @@ def diagnose(runtime, source):
         if plans:
             check(lambda: asset_plan.check_asset_plan(source, base), "asset_plan")
     check(lambda: style_anchor.check_style_lock(source, base), "style_lock")
-    check(lambda: style_anchor.style_policy_report(source, base, strict=True), "style_policy")
+    policy = style_anchor.style_policy_report(source, base, strict=False)
+    if policy.get("status") == "BLOCKED":
+        add(policy.get("reason", "风格策略尚未准备"), "style_policy", code="STYLE_POLICY", severity="warning")
 
     anchor_id = (source.get("style_lock") or {}).get("anchor_asset_id") if isinstance(source.get("style_lock"), dict) else None
     lock = source.get("style_lock") or {}

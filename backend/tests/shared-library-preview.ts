@@ -4,7 +4,7 @@ import { startServer } from "../src/server.js";
 import { CanvasRealtimeHub } from "../src/canvas/realtime-hub.js";
 const db = new BackendDatabase(":memory:");
 db.upsertCanvasFolder({ id: "preview-drama", name: "共享资产验证", isDrama: true, createdAt: new Date().toISOString() });
-for (const [index, id] of ["preview-a", "preview-b"].entries()) {
+for (const [index, id] of ["preview-live-a", "preview-live-b"].entries()) {
     db.createCanvasProject({ id, title: index ? "分集二" : "分集一", nodes: index ? [] : [{ id: "preview-text", type: "text", title: "共享文本测试", position: { x: 0, y: 0 }, width: 440, height: 260, metadata: { content: "共享资产初始内容", fontSize: 20, status: "success" } }], connections: [], viewport: { x: 100, y: 180, k: 1 } });
     db.upsertDramaEpisode({ id: `ep-${id}`, dramaId: "preview-drama", episodeNumber: index + 1, title: `分集${index + 1}`, synopsis: "", fullPlot: "", canvasId: id, createdAt: "now", updatedAt: "now" });
 }

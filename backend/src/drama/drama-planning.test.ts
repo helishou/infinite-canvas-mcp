@@ -38,6 +38,28 @@ test("confirmed category models persist, seed new production, and leave existing
     assert.equal(Object.hasOwn(renamed, "expectedPlanningUpdatedAt"), false);
 });
 
+test("v39 migrates old review policies to none without touching published production", t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "drama-review-policy-v39-"));
+    const file = path.join(directory, "db.sqlite");
+    let db = new BackendDatabase(file);
+    t.after(() => { db.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+    const folder = db.upsertCanvasFolder({ id: "drama", name: "Drama", isDrama: true, outline: "Story", createdAt: "2026-01-01", updatedAt: "2026-01-01" });
+    const manualPlan = dramaProductionPlanSchema.parse({ imageModel: "", imageModelsByKind: {}, h3Model: "", confirmedOutline: "Story", confirmedAt: new Date().toISOString(),
+        reviewPolicy: { mode: "manual", shared: "manual", scene: "manual" } });
+    db.upsertCanvasFolder({ ...folder, productionPlan: manualPlan, expectedPlanningUpdatedAt: folder.updatedAt });
+    db.upsertDramaEpisode({ dramaId: "drama", id: "episode", episodeNumber: 1, title: "Episode", synopsis: "" });
+    const service = new EpisodeProductionService(db, undefined, directory, false, () => {});
+    service.edit("episode", { operationId: "manual-review-setting", expectedRevision: 0, ops: [{ type: "set_settings", patch: { reviewPolicy: manualPlan.reviewPolicy } }] });
+    db.db.prepare("DELETE FROM schema_migrations WHERE version=39").run();
+    db.close();
+
+    db = new BackendDatabase(file);
+    const migratedService = new EpisodeProductionService(db, undefined, directory, false, () => {});
+    assert.equal(migratedService.get("episode").draft.settings.reviewPolicy.mode, "none");
+    assert.equal(db.listCanvasFolders()[0].productionPlan?.reviewPolicy?.mode, "none");
+    assert.equal(db.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, DATABASE_SCHEMA_VERSION);
+});
+
 test("a v24 database upgrades to the current schema, snapshots first and preserves existing outlines", t => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "drama-plan-upgrade-"));
     t.after(() => { assert.equal(path.dirname(directory), os.tmpdir()); fs.rmSync(directory, { recursive: true, force: true }); });

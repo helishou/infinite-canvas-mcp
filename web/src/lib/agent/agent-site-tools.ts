@@ -1,3 +1,5 @@
+import { nanoid } from "nanoid";
+import { flushCanvasProjectBeforeGeneration } from "@/stores/canvas/use-canvas-store";
 import type { NavigateFunction } from "react-router-dom";
 
 import i18n from "@/i18n";
@@ -7,7 +9,7 @@ import { uploadImage } from "@/services/image-storage";
 import { imageAspectOptions, imageQualityOptions } from "@/components/image-settings-panel";
 import { videoResolutionOptions, videoSecondOptions, videoSizeOptions } from "@/components/video-settings-panel";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
-import { useAssetStore } from "@/stores/use-asset-store";
+import { useAssetStore, saveLibraryAsset, type Asset } from "@/stores/use-asset-store";
 import { modelOptionLabel, modelOptionName, normalizeModelOptionValue, selectableModelsByCapability, useConfigStore } from "@/stores/use-config-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
 
@@ -300,10 +302,20 @@ async function addAsset(input: SiteToolInput) {
     const source = typeof input.source === "string" ? input.source : "Agent";
     const note = typeof input.note === "string" ? input.note : undefined;
     const store = useAssetStore.getState();
+    const add = async (asset: Parameters<typeof store.addAsset>[0]) => {
+        const dramaId = typeof input.dramaId === "string" ? input.dramaId : undefined;
+        if (!dramaId) return store.addAsset(asset);
+        const canvasSource = input.canvasSource as { projectId: string; nodeId: string } | undefined;
+        if (canvasSource) await flushCanvasProjectBeforeGeneration(canvasSource.projectId);
+        const now = new Date().toISOString();
+        const saved = await saveLibraryAsset({ ...asset, dramaId, id: typeof input.id === "string" ? input.id : nanoid(), createdAt: now, updatedAt: now, folderId: null, note: asset.note || null, metadata: { source: "agent" } } as Asset,
+            { operationId: typeof input.operationId === "string" ? input.operationId : nanoid(), ...(canvasSource ? { canvasSource } : {}) });
+        return saved.id;
+    };
     if (kind === "text") {
         const content = String(input.content || "").trim();
         if (!content) throw new Error(siteText("textContentRequired"));
-        const id = await store.addAsset({ kind: "text", title, coverUrl: "", tags, source, note, data: { content } });
+        const id = await add({ kind: "text", title, coverUrl: "", tags, source, note, data: { content } });
         return { ok: true, id, kind: "text" };
     }
     if (kind === "image") {
@@ -315,7 +327,7 @@ async function addAsset(input: SiteToolInput) {
         } catch {
             throw new Error(siteText("imageReadFailed"));
         }
-        const id = await store.addAsset({ kind: "image", title, coverUrl: stored.url, tags, source, note, data: { dataUrl: stored.url, storageKey: stored.storageKey, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType } });
+        const id = await add({ kind: "image", title, coverUrl: stored.url, tags, source, note, data: { dataUrl: stored.url, storageKey: stored.storageKey, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType } });
         return { ok: true, id, kind: "image" };
     }
     throw new Error(siteText("assetKindUnsupported"));

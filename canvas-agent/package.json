@@ -53,7 +53,7 @@
     "dev": "tsx src/index.ts",
     "debug": "tsx src/index.ts --debug",
     "test": "node ../scripts/test.mjs",
-    "build": "tsc -p tsconfig.json && node scripts/bundle-production-sop.mjs",
+    "build": "node scripts/build-tsc.mjs && node --stack-size=8000 scripts/bundle-production-sop.mjs",
     "start": "node dist/index.js",
     "prepack": "npm run build"
   },

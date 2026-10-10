@@ -37,7 +37,7 @@ import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { findCharacterVoiceAsset, resolveCharacterVoiceName } from "@/lib/character-voice";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { useAssetStore, saveLibraryAsset, acceptLibraryAsset, type Asset, type AudioAsset } from "@/stores/use-asset-store";
+import { useAssetStore, saveLibraryAsset, acceptLibraryAsset, libraryErrorText, type Asset, type AudioAsset } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
 import { canvasNodeImage } from "@/lib/canvas/canvas-image-renderability";
@@ -1777,7 +1777,11 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             position: { x: source.position.x + 36, y: source.position.y + 36 },
             metadata: source.metadata ? structuredClone(source.metadata) : undefined,
         };
-        if (next.metadata) delete next.metadata.sharedLibraryAssetId;
+        if (next.metadata?.sharedLibraryAssetId) {
+            delete next.metadata.sharedLibraryAssetId;
+            delete next.metadata.characterAssetId;
+            delete next.metadata.sceneAssetId;
+        }
         const nextConnections = connectionsRef.current.flatMap((connection) => {
             if (connection.toNodeId === nodeId) {
                 const input = currentNodes.find((node) => node.id === connection.fromNodeId);
@@ -3743,7 +3747,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         const ref = node.metadata?.sharedAssetReference as SharedAssetReference | undefined;
         const previous = useAssetStore.getState().assets.find(asset => asset.id === ref?.assetId || asset.id === node.metadata?.sharedLibraryAssetId || (asset.dramaId === input.dramaId && asset.metadata?.projectId === projectId && asset.metadata?.nodeId === node.id && (node.type !== CanvasNodeType.Config || (asset.data as Record<string, unknown>).storageKey === (input.data as Record<string, unknown>).storageKey)));
         const now = new Date().toISOString();
-        const asset = { ...input, id: previous?.id || nanoid(), createdAt: previous?.createdAt || now, updatedAt: now,
+        const asset = { ...previous, ...input, tags: previous?.tags || input.tags, folderId: previous?.folderId ?? input.folderId, note: previous?.note ?? input.note,
+            title: node.type === CanvasNodeType.Config ? input.title : node.title || input.title, id: previous?.id || nanoid(), createdAt: previous?.createdAt || now, updatedAt: now,
             metadata: { ...previous?.metadata, ...input.metadata, projectId, nodeId: node.id } } as Asset;
         const command = { operationId: nanoid(), canvasSource: { projectId: projectId!, nodeId: node.id } };
         try { return (await saveLibraryAsset(asset, command)).id; }
@@ -3765,7 +3770,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             const result = await updateBackendAsset(ref.assetId, {}, { operationId: nanoid(), canvasSource: { projectId: projectId!, nodeId: node.id }, discardLocal: true });
             acceptLibraryAsset(result.asset as unknown as Asset);
             message.success(t("canvas.sharedLibrary.discarded"));
-        } catch (error) { message.error(String(error)); }
+        } catch (error) { message.error(libraryErrorText(error)); }
     }, [projectId, message, t]);
 
     const saveNodeAsset = useCallback(
@@ -4231,7 +4236,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 { assetId: voiceAssetId, storageKey: voiceStorageKey, url: voiceUrl },
             );
             const assetPrimaryIndex = images.length
-                ? existing?.kind === "character"
+                    ? existing?.kind === "character" && !node.metadata?.sharedAssetReference
                     ? retainCharacterPrimaryIndex(existing.data.images, existing.data.primaryIndex || 0, images)
                     : Math.min(Math.max(node.metadata?.characterPrimaryIndex || 0, 0), images.length - 1)
                 : 0;
@@ -6414,7 +6419,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onGenerateImage={generateImageFromTextNode}
                     onUpload={(node) => handleUploadRequest(node.id)}
                     onDownload={downloadNodeImage}
-                    onSaveAsset={(node) => void saveNodeAsset(node).catch(error => message.error(String(error)))}
+                    onSaveAsset={(node) => void saveNodeAsset(node).catch(error => message.error(libraryErrorText(error)))}
                     onCompareVideo={openVideoComparison}
                     onTrimVideo={openVideoTrim}
                     onConvertToCharacter={convertImageNodeToCharacter}

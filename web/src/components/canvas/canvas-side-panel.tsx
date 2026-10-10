@@ -19,7 +19,7 @@ import { fetchBackendCanvasDrama } from "@/services/backend-api";
 import { fetchSourcePrompts, isCustomPrompt, withCustomPromptMeta, type Prompt } from "@/services/api/prompts";
 import { uploadMediaFile } from "@/services/file-storage";
 import { ensureImagePreview, getImagePreviewRevision, isImageFile, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
-import { useAssetStore, type Asset, type AssetKind, type AudioAsset, type ImageAsset } from "@/stores/use-asset-store";
+import { useAssetStore, libraryErrorText, type Asset, type AssetKind, type AudioAsset, type ImageAsset } from "@/stores/use-asset-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { CUSTOM_PROMPTS_CATEGORY, useCustomPromptsStore } from "@/stores/use-custom-prompts-store";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
@@ -625,7 +625,7 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
                                     {isCollapsed ? null : (
                                         <div className="grid grid-cols-2 gap-2 px-1 pb-2 pt-1">
                                             {group.items.map((asset) => (
-                                                <AssetCard key={asset.id} asset={asset} theme={theme} onInsert={() => onInsert({ ...buildInsertPayload(asset), sharedAssetSource: asset.metadata?.sharedAssetSource as SharedAssetSource | undefined })} onRemove={() => void removeAsset(asset.id).then(() => message.success(t("canvas.sidePanel.assetRemoved"))).catch(error => message.error(String(error)))} />
+                                                <AssetCard key={asset.id} asset={asset} theme={theme} onInsert={() => onInsert({ ...buildInsertPayload(asset), sharedAssetSource: asset.metadata?.sharedAssetSource as SharedAssetSource | undefined })} onRemove={() => void removeAsset(asset.id).then(() => message.success(t("canvas.sidePanel.assetRemoved"))).catch(error => message.error(libraryErrorText(error)))} />
                                             ))}
                                         </div>
                                     )}

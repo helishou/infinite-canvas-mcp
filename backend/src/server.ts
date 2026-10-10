@@ -7,7 +7,7 @@ import express, {
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { sourceOf, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
+import { assetConsumers, sourceOf, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
 import { ensureProductionCanvas, productionCanvasContext } from "./drama/production-canvas.js";
 
 import {
@@ -726,7 +726,7 @@ export function startServer(
       res.json({ ok: true, command });
     } catch (error) {
       const value = error as Error & { code?: string };
-      res.status(value.code === "OPERATION_ID_REUSED" ? 409 : 400).json({ ok: false, code: value.code || "INVALID_INPUT", error: value.message });
+      res.status(value.code === "OPERATION_ID_REUSED" || value.code === "ASSET_SOURCE_CHANGED" ? 409 : 400).json({ ok: false, code: value.code || "INVALID_INPUT", error: value.message });
     }
   });
   app.get("/mcp/commands/:operationId", (req, res) => {
@@ -1279,6 +1279,9 @@ export function startServer(
     const { operationId, canvasSource, discardLocal, resolveConflicts, assetBase, ...asset } = req.body;
     if (!asset?.id) return void res.status(400).json({ ok: false, error: "asset.id 必填" });
     try {
+      const current = db.getAssetRecord(asset.id);
+      if (sourceOf(current) && asset.dramaId !== undefined && asset.dramaId !== current?.dramaId)
+        throw new Error("共享资产剧目归属请使用单项编辑入口；拒绝旧资产列表覆盖共享来源");
       const replayed = Boolean(operationId && db.db.prepare("SELECT 1 FROM shared_library_receipts WHERE operation_id=?").get(operationId));
       const result = db.upsertAsset(asset as Asset, { operationId, canvasSource, discardLocal, resolveConflicts, assetBase, request: req.body } as AssetWriteCommand);
       events.publish({ type: "asset.updated", entityId: result.id, payload: result });
@@ -1302,6 +1305,9 @@ export function startServer(
   });
   app.delete("/canvas/assets/:id", (req, res) => {
     try {
+      const source = sourceOf(db.getAssetRecord(req.params.id));
+      if (source && !assetConsumers(db, source).length && (req.query.sourceProjectId !== source.sourceProjectId || req.query.sourceNodeId !== source.sourceNodeId))
+        throw Object.assign(new Error("资产已成为共享来源，请刷新资产库后再删除"), { code: "ASSET_SOURCE_CHANGED" });
       const deleted = stores.assets.delete(req.params.id);
       events.publish({ type: "asset.updated", entityId: req.params.id, payload: { deleted } });
       res.json({ ok: true, deleted });

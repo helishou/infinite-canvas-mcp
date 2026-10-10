@@ -10,16 +10,16 @@ import type { compileAchengDirector } from "@basketikun/canvas-agent/skills/ache
 import { ProductionCompilationService } from "./compilation.js";
 
 export type ApprovedSharedAsset = { id: string; dramaId: string; assetId: string; sourceProjectId: string; sourceNodeId: string; sourceVersion: number;
-    storageKey: string; sha256: string; evidence: string; snapshot: Record<string, any>; createdAt: string };
+    storageKey: string; sha256: string; evidence: string; reviewStatus: "unreviewed" | "approved"; snapshot: Record<string, any>; createdAt: string };
 const stable = (...parts: string[]) => crypto.createHash("sha256").update(parts.join("\0")).digest("hex");
 const record = (value: unknown): Record<string, any> => value && typeof value === "object" ? value as Record<string, any> : {};
 function fromRow(row: Record<string, any>): ApprovedSharedAsset {
     return { id: row.id, dramaId: row.drama_id, assetId: row.asset_id, sourceProjectId: row.source_project_id, sourceNodeId: row.source_node_id,
-        sourceVersion: row.source_version, storageKey: row.storage_key, sha256: row.sha256, evidence: row.evidence, snapshot: JSON.parse(row.snapshot_json), createdAt: row.created_at };
+        sourceVersion: row.source_version, storageKey: row.storage_key, sha256: row.sha256, evidence: row.evidence || "", reviewStatus: row.evidence ? "approved" : "unreviewed", snapshot: JSON.parse(row.snapshot_json), createdAt: row.created_at };
 }
 export function approvedSharedAsset(db: BackendDatabase, id: string): ApprovedSharedAsset {
     const row = db.db.prepare("SELECT * FROM drama_asset_versions WHERE id=?").get(id) as Record<string, any> | undefined;
-    if (!row) throw new Error("共享资产批准版本不存在");
+    if (!row) throw new Error("共享素材版本不存在");
     const asset = fromRow(row);
     const media = db.getMediaFile(asset.storageKey);
     if (!media || !fs.existsSync(media.filePath) || crypto.createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex") !== asset.sha256) throw new Error("共享资产媒体摘要不一致或归档文件不可访问");
@@ -33,16 +33,18 @@ export function sharedAssetHistory(db: BackendDatabase, dramaId: string) {
     return (db.db.prepare("SELECT * FROM drama_asset_versions WHERE drama_id=? ORDER BY rowid DESC").all(dramaId) as Record<string, any>[]).map(fromRow);
 }
 
-/** Called inside the production review transaction, after bytes and ownership were verified. */
-export function registerApprovedSharedAsset(db: BackendDatabase, projectId: string, version: number, assetId: string, director: DirectorProduction) {
+/** Register a usable media version; evidence stays empty until an actual review is recorded. */
+export function registerSharedAssetVersion(db: BackendDatabase, projectId: string, version: number, assetId: string, director: DirectorProduction) {
     const drama = db.db.prepare("SELECT folder_id FROM drama_projects WHERE shared_asset_canvas_id=?").get(projectId) as { folder_id: string } | undefined;
     const asset = director.assets[assetId];
-    if (!drama || asset?.status !== "approved" || !asset.nodeId || !asset.storageKey || !asset.sha256 || !asset.evidence) return;
+    const reviewed = asset?.status === "approved" && Boolean(asset.evidence?.trim());
+    if (!drama || !asset || !["approved", "generated"].includes(asset.status) || !asset.nodeId || !asset.storageKey || !asset.sha256 || asset.status === "approved" && !reviewed) return;
     const node = (db.getCanvasProject(projectId)?.nodes as Record<string, any>[] || []).find(item => item.id === asset.nodeId);
-    if (!node) throw new Error(`共享资产「${assetId}」的引用节点 ${asset.nodeId} 已不在画布上（可能被删除或重新布局），请重新采用该共享资产`);
+    if (!node) throw new Error(`共享素材「${assetId}」的引用节点 ${asset.nodeId} 已不在画布上，请重新绑定素材`);
     const now = new Date().toISOString();
-    const id = `approved-${stable(projectId, String(version), assetId, asset.storageKey, asset.sha256)}`;
-    const media = db.getMediaFile(asset.storageKey)!;
+    const media = db.getMediaFile(asset.storageKey);
+    if (!media || !fs.existsSync(media.filePath) || crypto.createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex") !== asset.sha256) throw new Error(`共享素材「${assetId}」的归档文件或摘要无效`);
+    const id = `${reviewed ? "approved" : "version"}-${stable(projectId, String(version), assetId, asset.storageKey, asset.sha256)}`;
     const character = node.type === "character";
     const snapshot = { title: node.title || assetId, type: character ? "character" : "image", width: node.width || 340, height: node.height || 260,
         version: asset.version, content: asset.storageKey, metadata: { storageKey: asset.storageKey, naturalWidth: media.width, naturalHeight: media.height, mimeType: media.mimeType,
@@ -51,11 +53,16 @@ export function registerApprovedSharedAsset(db: BackendDatabase, projectId: stri
                 characterImages: (Array.isArray(node.metadata?.characterImages) ? node.metadata.characterImages : []).filter((image: any) => image.storageKey === asset.storageKey), characterPrimaryIndex: 0 } : {}) } };
     db.db.prepare(`INSERT OR IGNORE INTO drama_asset_versions
         (id, drama_id, asset_id, source_project_id, source_node_id, source_version, storage_key, sha256, snapshot_json, evidence, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, drama.folder_id, assetId, projectId, asset.nodeId, version, asset.storageKey, asset.sha256, JSON.stringify(snapshot), asset.evidence, now);
-    db.upsertAsset({ id: `shared-${stable(drama.folder_id, assetId)}`, kind: "image", title: String(snapshot.title), coverUrl: "", tags: ["shared"],
-        folderId: null, dramaId: drama.folder_id, source: "production-shared", note: null,
-        data: { storageKey: asset.storageKey, width: media.width, height: media.height, bytes: media.bytes, mimeType: media.mimeType },
-        metadata: { approvedId: id, assetId, sourceProjectId: projectId, sourceNodeId: asset.nodeId }, createdAt: now, updatedAt: now });
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, drama.folder_id, assetId, projectId, asset.nodeId, version, asset.storageKey, asset.sha256, JSON.stringify(snapshot), reviewed ? asset.evidence || "" : "", now);
+    // The reviewed node already is the canonical shared instance. This caller owns the
+    // production transaction; bind the directory directly, without creating a second node.
+    const existingLibrary = db.listSharedAssetRecordsForProject(projectId).find(item => (item.metadata.sharedAssetSource as { sourceNodeId: string }).sourceNodeId === asset.nodeId);
+    const libraryId = existingLibrary?.id || `shared-${stable(drama.folder_id, assetId)}`;
+    db.upsertAssetRecord({ id: libraryId, kind: character ? "character" : node.type === "scene" ? "scene" : "image", title: String(snapshot.title), coverUrl: "", tags: existingLibrary?.tags || ["shared"],
+        folderId: existingLibrary?.folderId || null, dramaId: drama.folder_id, source: existingLibrary?.source || "production-shared", note: existingLibrary?.note || null,
+        data: {},
+        metadata: { ...existingLibrary?.metadata, approvedId: id, versionId: id, reviewStatus: reviewed ? "approved" : "unreviewed", assetId, sourceProjectId: projectId, sourceNodeId: asset.nodeId,
+            sharedAssetSource: { dramaId: drama.folder_id, assetId: libraryId, sourceProjectId: projectId, sourceNodeId: asset.nodeId } }, createdAt: existingLibrary?.createdAt || now, updatedAt: now });
     for (const row of db.db.prepare(`SELECT p.episode_id, p.revision, p.draft_json FROM episode_productions p
         JOIN drama_episodes e ON e.id=p.episode_id WHERE e.drama_id=?`).all(drama.folder_id) as Array<{ episode_id: string; revision: number; draft_json: string }>) {
         const draft = JSON.parse(row.draft_json);
@@ -68,20 +75,29 @@ export function registerApprovedSharedAsset(db: BackendDatabase, projectId: stri
     }
 }
 
+/** Compatibility wrapper for callers that record a real review. */
+export function registerApprovedSharedAsset(db: BackendDatabase, projectId: string, version: number, assetId: string, director: DirectorProduction) {
+    if (director.assets[assetId]?.status !== "approved" || !director.assets[assetId]?.evidence?.trim()) return;
+    return registerSharedAssetVersion(db, projectId, version, assetId, director);
+}
+
 export function validateSharedAssetSource(db: BackendDatabase, projectId: string, asset: DirectorProduction["assets"][string], latest = false) {
     if (!asset.sharedSource) return;
     const source = asset.sharedSource;
     const approved = approvedSharedAsset(db, source.approvedId);
     const episode = db.getDramaEpisodeByCanvasId(projectId);
     const name = source.assetId || asset.nodeId;
+    if (!episode || episode.dramaId !== approved.dramaId || source.dramaId !== approved.dramaId)
+        throw new Error(`共享素材「${name}」的剧目归属与所选版本不一致，请回读同剧目的素材后重新采用`);
     if (!episode || episode.dramaId !== approved.dramaId || source.dramaId !== approved.dramaId || source.assetId !== approved.assetId ||
-        source.sourceProjectId !== approved.sourceProjectId || source.sourceNodeId !== approved.sourceNodeId || asset.storageKey !== approved.storageKey || asset.sha256 !== approved.sha256 || asset.status !== "approved")
-        throw new Error(`共享资产「${name}」与已批准版本不一致（来源画布/节点、图片内容或状态已被改动），请回读共享资产后重新采用`);
+        source.sourceProjectId !== approved.sourceProjectId || source.sourceNodeId !== approved.sourceNodeId || asset.storageKey !== approved.storageKey || asset.sha256 !== approved.sha256 ||
+        (approved.reviewStatus === "approved" ? asset.status !== "approved" : asset.status !== "generated"))
+        throw new Error(`共享素材「${name}」与所选版本不一致（来源画布/节点或图片内容已改变），请回读素材后重新采用`);
     const node = (db.getCanvasProject(projectId)?.nodes as Record<string, any>[] || []).find(item => item.id === asset.nodeId);
     if (node?.metadata?.sharedAssetOrigin?.approvedId !== approved.id)
-        throw new Error(`共享资产「${name}」在制作画布上的引用节点已失效（节点 ${asset.nodeId} 缺失或未登记为批准版本 ${approved.id}），请在制作画布中重新采用该共享资产`);
+        throw new Error(`共享素材「${name}」在制作画布上的引用节点已失效（节点 ${asset.nodeId} 缺失或版本不匹配），请在制作画布中重新采用`);
     if (latest && listApprovedSharedAssets(db, approved.dramaId).find(item => item.assetId === approved.assetId)?.id !== approved.id) {
-        throw Object.assign(new Error("共享资产已批准新版本，等待引用更新及提示词重新校验"), { code: "SHARED_ASSET_UPDATE" });
+        throw Object.assign(new Error("共享素材已有新版本，等待引用更新及提示词重新校验"), { code: "SHARED_ASSET_UPDATE" });
     }
 }
 

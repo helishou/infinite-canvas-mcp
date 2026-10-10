@@ -15,6 +15,7 @@ const examples: Record<string, unknown> = {
         { id: "BINDING1", assetId: "ASSET1", sourceNode: { projectId: "canvas1", nodeId: "image1" }, selection: { mode: "latest_success" }, provides: ["identity"], retain: ["face and hair"], exclude: ["pose and background"], applicableState: {}, defaultFor: ["identity"] },
     ] } },
     set_director_shot_keyframes: { shotId: "SHOT1", keyframes: [] },
+    set_director_shot_utterances: { shotId: "SHOT1", utterances: [] },
     edit_director_shot: { action: "split", shotId: "SHOT1", newShotId: "SHOT2", splitFrame: 48, textOffsets: {} },
     repartition_director_clips: { shotIds: ["SHOT1", "SHOT2"], segments: [{ shot_ids: ["SHOT1"] }, { shot_ids: ["SHOT2"] }] },
     reverse_sync_director_prompt: { segmentId: "CLIP1", artifactId: "ARTIFACT1", sourceHash: "0".repeat(64), basePromptHash: "1".repeat(64), prompt: "Edited source-backed Prompt text", canvasRevision: 1 },
@@ -25,6 +26,7 @@ const examples: Record<string, unknown> = {
     patch_director_source: { entity: "asset", id: "character-1", patch: { description: "Authored character appearance." } },
     replace_director_scene_storyboard: { sceneId: "SC1", shots: [{ id: "SH1", source_scene_id: "SC1", start_frame: 0, end_frame: 120 }], segments: [{ id: "SEG1", shot_ids: ["SH1"], start_frame: 0, end_frame: 120 }], shotInputs: { SH1: { keyframePolicy: "none", assetIds: [] } } },
     archive_director_scene: { sceneId: "SC1", expectedCanvasRevision: 1, confirmed: true },
+    delete_director_asset: { id: "PROP1", confirmed: true },
     restore_director_scene: { archiveId: "archive-1", expectedCanvasRevision: 1 },
     delete_director_clip: { segmentId: "SEG1", expectedCanvasRevision: 1, confirmed: true },
     adopt_director_fields: { targetId: "SEG001", nodeId: "h3-1", segmentId: "clip-1", canvasRevision: 1, fields: ["prompt"] },
@@ -62,6 +64,7 @@ export function productionOperationContract(operationType?: string) {
             return { type, example: option.parse({ type, ...examples[type] as object }), preconditions: type === "patch_director_source"
                 ? ["Director exists; scene edits script_scenes, environment edits scene_registry, asset edits asset_plan, and asset_card edits asset_cards. Each object requires an existing stable ID and allowed fields; brief/style accept no ID; brief accepts only string value."]
                 : type === "archive_director_scene" ? ["Requires explicit user confirmation and the current canvas revision. The scene, its Shots/Clips, and bound H3 canvas nodes are archived and restorable for 30 days; ordinary node deletion cannot bypass this operation."]
+                : type === "delete_director_asset" ? ["Requires explicit user confirmation. Only assets marked created_by=manual and still planned, never published, referenced, bound, compiled, task-bound or generated/reviewed can be removed from the draft; references in Shots, scenes, Subjects, asset cards, dependencies, continuity, shot inputs or active batches block deletion. Canvas nodes/media are never deleted, and published versions remain immutable."]
                 : type === "restore_director_scene" ? ["Archive must belong to this production, remain within its 30-day retention window, and have no ID conflicts; both production and canvas revisions must match."]
                 : type === "delete_director_clip" ? ["Requires explicit confirmation; deletes the Clip and its owned Shots as one source transaction. A single Shot cannot be deleted while leaving an empty Clip."]
                 : type === "select_director_result" ? ["Successful archived output must belong to the original formal task and exact node/Clip; both revisions must match; active generation and shared reference replacement are rejected. Images require review after selection. No media generation or prompt/timeline replacement occurs."]
@@ -141,6 +144,20 @@ export function applyDirectorSourcePatch(director: DirectorProduction, entity: k
             if (entity === "segment" && Object.hasOwn(patch, "styleTemplateId") && patch.styleTemplateId !== null && !isH3StyleTemplateId(patch.styleTemplateId)) throw new Error("未知 H3 风格模板；styleTemplateId 必须为已登记模板 ID 或 null");
             if (entity === "asset" && patch.canvas_scope !== undefined && !["shared", "episode"].includes(String(patch.canvas_scope))) throw new Error("资产画布归属只能是 shared 或 episode");
             if (entity === "asset" && patch.canvas_scope === "episode" && director.assets[id]?.sharedSource) throw new Error("已采用的剧目共享资产必须保留 shared 归属；需要本集专用版本时请新建分集资产");
+            if (entity === "asset" && patch.status !== undefined && !["planned", "approved"].includes(String(patch.status))) throw new Error("资产计划状态只能是 planned 或 approved");
+            if (entity === "asset" && patch.status !== undefined && id && Object.hasOwn(director.source, "style_lock")) {
+                // style_lock 与锚点资产的审批状态必须同步：改锚点状态时校验不制造新的不一致。
+                const lock = record(director.source.style_lock);
+                const anchorId = String(lock.anchor_asset_id || "");
+                if (anchorId === id) {
+                    const lockStatus = String(lock.status || "planned");
+                    const otherPlan = (Array.isArray(director.source.asset_plan) ? director.source.asset_plan : []).map(record)
+                        .find(item => String(item.asset_id || item.id || "") === anchorId);
+                    const planStatus = String(patch.status);
+                    if (otherPlan && planStatus !== lockStatus && director.assets[anchorId]?.status !== planStatus)
+                        throw new Error(`STYLE_MOTHER 状态必须与 style_lock.status（${lockStatus}）一致；请一并调整 style_lock 或先审批资产`);
+                }
+            }
             const previousDuration = Number(target.duration_frames);
             Object.assign(target, patch);
             if (entity === "shot" && isSubjectPromptAssembly(director.source) && previousDuration > 0 && Object.hasOwn(patch, "duration_frames") && Number.isInteger(target.duration_frames) && Number(target.duration_frames) > 0 && Number(target.duration_frames) !== previousDuration) {
@@ -160,9 +177,9 @@ export function continuityBoundaryDiagnostics(director: DirectorProduction, stag
     const boundaries = Array.isArray(director.boundaries) ? director.boundaries : [];
     const ids = segments.map(segment => String(segment.id || ""));
     const expected = ids.slice(0, -1).map((from, index) => ({ from, to: ids[index + 1] }));
-    const severity = stage === "edit" ? "warning" as const : "error" as const;
     const diagnostics: ProductionDiagnostic[] = [];
-    const issue = (code: string, from: string, message: string) => diagnostics.push({ code, path: "director.boundaries", targetId: from, severity, message });
+    const issue = (code: string, from: string, message: string) => diagnostics.push({ code, path: "director.boundaries", targetId: from, severity: "warning", message,
+        ...(stage === "generate" && code === "CONTINUITY_MODES_CONFLICT" ? { blockingActions: ["generate"] as const } : {}) });
     for (const pair of expected) {
         const rows = boundaries.filter(edge => edge.from === pair.from && edge.to === pair.to);
         if (rows.length !== 1) issue(rows.length ? "DUPLICATE_CONTINUITY_BOUNDARY" : "MISSING_CONTINUITY_BOUNDARY", pair.from, `${pair.from} → ${pair.to} 必须登记唯一的尾帧与潜空间决定；缺项不能当作关闭`);
@@ -183,7 +200,7 @@ export function outgoingDirectorBoundary(director: DirectorProduction, segmentId
     if (index === segments.length - 1) return undefined;
     const to = String(segments[index + 1].id);
     const matches = director.boundaries.filter(edge => edge.from === segmentId);
-    if (matches.length !== 1 || matches[0].to !== to || typeof matches[0].tailFrame !== "boolean" || typeof matches[0].motionContext !== "boolean" || typeof matches[0].reason !== "string" || !matches[0].reason.trim()) throw new Error(`MISSING_CONTINUITY_DECISION: ${segmentId} → ${to} 缺少明确的相邻边界决定，请修正编译前源稿`);
-    if (matches[0].tailFrame && matches[0].motionContext) throw new Error(`CONTINUITY_MODES_CONFLICT: ${segmentId} → ${to} 尾帧参考与 Motion Context 不能同时开启；请选择一种衔接方式，或两项都关闭`);
+    if (matches.length !== 1 || matches[0].to !== to || typeof matches[0].tailFrame !== "boolean" || typeof matches[0].motionContext !== "boolean" || typeof matches[0].reason !== "string" || !matches[0].reason.trim()) return undefined;
+    if (matches[0].tailFrame && matches[0].motionContext) throw new Error(`CONTINUITY_MODES_CONFLICT: ${segmentId} → ${to} 尾帧参考与 Motion Context 不能同时开启`);
     return matches[0];
 }

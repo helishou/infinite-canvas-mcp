@@ -16,19 +16,21 @@ type MaterialItem = { bytes: Buffer; digest: string; extension: string; file: st
 type CompilationJob = { operationId: string; owner: string; id: string; expectedRevision: number; requestHash: string; baselineHash: string; preparedId: string; director: DirectorProduction; references: Record<string, string>; scope?: CompilationScope; scopeHash?: string; compilerInputFingerprint?: string; reusedFromOperationId?: string; status: "queued" | "running" | "succeeded" | "blocked" | "failed" | "interrupted"; diagnostics: any[]; result?: any; continuityReceipt?: any; application?: any; createdAt: string };
 const compilerPool = new WorkPool(3);
 const hasBlockingArtifactDiagnostics = (value: unknown) => {
-    if (Array.isArray(value)) return value.some(item => item && typeof item === "object" && (item as { severity?: unknown }).severity === "error");
+    if (Array.isArray(value)) return value.some(item => item && typeof item === "object" && (
+        Array.isArray((item as { blockingActions?: unknown }).blockingActions) && ((item as { blockingActions: unknown[] }).blockingActions.length > 0)
+        || (item as { blocksCompilation?: unknown }).blocksCompilation === true));
     if (!value || typeof value !== "object") return false;
     const report = value as Record<string, unknown>;
     if (Array.isArray(report.blockers)) return report.blockers.length > 0;
-    if (typeof report.accepted === "boolean") return !report.accepted;
-    return true;
+    return false;
 };
 function schedule(work: () => Promise<void>, _createdAt: string) {
     void compilerPool.submit(work).catch(error => console.error("COMPILATION_RECEIPT_WRITE_FAILED", error instanceof Error ? error.name : "Error"));
 }
 const activeJobs = new Set<string>();
 export const productionCompilationBusy = () => activeJobs.size > 0;
-const hasFatalCompilationError = (diagnostics: Array<{ severity?: string; targetId?: string; blocksCompilation?: boolean }>) => diagnostics.some(item => item.severity === "error" && (!item.targetId || item.blocksCompilation === true));
+const hasFatalCompilationError = (diagnostics: Array<{ severity?: string; targetId?: string; blocksCompilation?: boolean; blockingActions?: string[] }>) => diagnostics.some(item =>
+    item.blockingActions ? item.blockingActions.includes("compile") : item.severity === "error" && (!item.targetId || item.blocksCompilation === true));
 type CompilationAlias = { operationId: string; owner: string; id: string; expectedRevision: number; requestHash: string; compilerInputFingerprint: string; reusedFromOperationId: string; createdAt: string };
 
 /** Frozen compiler packets are sidecar files; only the existing ops transaction edits production. */
@@ -101,14 +103,15 @@ export class ProductionCompilationService {
         if (!job || job.id !== id || job.owner !== owner) throw new Error("编译回执不存在或不属于当前制作对象");
         const kind = owner.includes("/canvas/") || owner === "canvas" ? "canvas" : owner.includes("/scenes/") || owner === "scene" ? "scene" : "episode";
         const application = job.application || this.applicationReceipt(job);
-        const blocking = job.diagnostics.find((item: any) => item.severity === "error" && (!item.targetId || item.blocksCompilation === true));
+        const blocking = job.diagnostics.find((item: any) => item.blockingActions ? item.blockingActions.includes("compile")
+            : item.severity === "error" && (!item.targetId || item.blocksCompilation === true));
         const blockingDiagnostic = blocking ? { code: blocking.code, path: blocking.path, targetId: blocking.targetId, shotId: blocking.shotId,
             origin: blocking.origin, matchedText: blocking.matchedText, blocksCompilation: blocking.blocksCompilation, message: blocking.message, nextAction: blocking.nextAction } : undefined;
         const nextAction = job.status === "queued" || job.status === "running"
             ? { action: "wait", tool: "production_get_compilation", input: { kind, id, operationId }, message: "沿原 operationId 查询；不要换 ID 重提。" }
             : job.status === "succeeded" ? { action: application ? "read_run" : "review", tool: application ? "production_get_compilation" : "production_apply_compilation", input: { kind, id, ...(application ? { operationId } : { preparedId: job.preparedId }) }, message: application ? "编译已应用，读取原应用回执。" : "编译成功，应用 preparedId。" }
             : blocking?.nextAction || { action: "correct_source", message: "读取本次诊断并定位原因；确认输入或故障条件改变后再提交。" };
-        const base = { operationId, status: job.status, verdict: job.diagnostics.some((item: any) => item.severity === "error") ? "blocked" : "passed", expectedRevision: job.expectedRevision, sourceHash: job.result?.sourceHash || job.director.sourceHash,
+        const base = { operationId, status: job.status, verdict: job.status === "blocked" ? "blocked" : job.diagnostics.some((item: any) => item.severity === "warning") ? "passed_with_warnings" : "passed", expectedRevision: job.expectedRevision, sourceHash: job.result?.sourceHash || job.director.sourceHash,
             ...(job.compilerInputFingerprint ? { compilerInputFingerprint: job.compilerInputFingerprint } : {}),
             ...(job.reusedFromOperationId ? { reused: true, reusedFromOperationId: job.reusedFromOperationId } : {}),
             ...(blockingDiagnostic ? { blockingDiagnostic } : {}), nextAction,
@@ -123,16 +126,26 @@ export class ProductionCompilationService {
         const committed = this.service.operationReceipt?.(job.id, `compilation:${job.preparedId}`);
         return committed ? { revision: committed.revision, sourceHash: committed.draft.director?.sourceHash, operationId: `compilation:${job.preparedId}`, referenceSync: committed.referenceSync, mediaSubmitted: false } : undefined;
     }
+    /** Subject Prompt v2 的源稿不保存 Clip 帧窗与时长（由 Shot 派生）；全量编译必须经 scoped 投影补齐这些编译字段，
+     *  否则引擎预检报「视频段落编译字段缺失」。范围=全部 Segment 时 apply 走合并回写，不改写人工源稿。 */
+    private authoredScope(candidate: DirectorProduction, scope?: CompilationScope) {
+        if (scope) return scope;
+        if (!isSubjectPromptAssembly(candidate.source)) return undefined;
+        const segments = Array.isArray(candidate.source.segments) ? candidate.source.segments : [];
+        return segments.length ? { targetIds: segments.map(segment => String((segment as Record<string, any>).asset_id || segment.id)) } : undefined;
+    }
+
     enqueue(id: string, owner: string, operationId: string, expectedRevision: number, candidate?: DirectorProduction, scope?: CompilationScope) {
+        const current = this.service.get(id);
+        if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
+        if (!current.draft.director) throw new Error("缺少正式导演源稿");
+        scope = this.authoredScope(candidate || current.draft.director, scope);
         const requestHash = hash({ id, owner, expectedRevision, candidate, scope });
         const prior = this.loadJob(operationId);
         if (prior) {
             if (prior.requestHash !== requestHash) throw new Error("IDEMPOTENCY_CONFLICT: operationId 已用于不同编译请求");
             return { ...this.getCompilation(id, owner, operationId), replayed: true };
         }
-        const current = this.service.get(id);
-        if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
-        if (!current.draft.director) throw new Error("缺少正式导演源稿");
         const director = this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director), scope?.targetIds, true);
         if (scope && this.compiler === compileAchengDirector && !resolveAchengRuntime(director.engine.runtimeId).sourceContract?.scopedCompilation) throw new Error("SCOPED_COMPILATION_UNSUPPORTED: 当前激活引擎不支持按场次编译，请更新本机引擎");
         const effective = this.effectiveInput(director, scope);
@@ -204,10 +217,9 @@ export class ProductionCompilationService {
         for (const artifact of director.artifacts.filter(item => item.kind === "h3" && item.status === "ready" && (!targetIds || targetIds.includes(item.targetId)))) {
             const blockers = continuityTargetBlockers(continuity, [artifact.targetId]);
             if (!blockers.length) continue;
-            artifact.status = "draft";
             artifact.receipt = { ...artifact.receipt, continuityDiagnostics: blockers };
             diagnostics.push(...blockers.map(blocker => ({ code: blocker.code, path: `artifacts.${artifact.targetId}.continuity`, targetId: artifact.targetId,
-                message: blocker.message, severity: "error" })));
+                message: blocker.message, severity: "warning", blockingActions: [] })));
         }
         return { sourceHash: director.sourceHash, runtimeId: director.engine.runtimeId, reportSourceHash: continuity.report?.sourceHash || null,
             reportRuntimeId: continuity.report?.runtimeId || null, reportOperationId: continuity.report?.operationId || null,
@@ -332,23 +344,26 @@ export class ProductionCompilationService {
         const current = this.service.get(id);
         if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
         if (!current.draft.director) throw new Error("Missing formal director source");
-        const director = this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director), undefined, true);
+        const scope = this.authoredScope(candidate || current.draft.director);
+        const director = this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director), scope?.targetIds, true);
         const checked = this.service.preflight(id, { action: "compile", request: { expectedRevision, director } }, this.compiler === compileAchengDirector ? director.engine.runtimeId : undefined);
         if (!checked.valid) throw new ProductionValidationError(checked.diagnostics);
-        const boundFiles = this.service.compilationReferenceFiles(id, director);
-        const references = this.writePool(this.collectMaterial(boundFiles, director));
+        const effective = this.effectiveInput(director, scope);
+        const boundFiles = this.service.compilationReferenceFiles(id, effective.input);
+        const references = this.writePool(this.collectMaterial(boundFiles, effective.input));
         const preparedId = crypto.randomUUID();
         const directory = path.join(this.root, preparedId);
         const targets = this.compilationTargets(director), reusable = this.reusableArtifacts(director, targets);
         const compiled: ReturnType<Compiler> = targets.length > 0 && targets.every(id => reusable.some(artifact => artifact.targetId === id))
-            ? { director: structuredClone(director), exitCode: 0, diagnostics: reusable.flatMap(artifact => artifact.receipt.diagnostics || []) as ReturnType<Compiler>["diagnostics"], audit: { status: "REUSED", artifactIds: reusable.map(item => item.id) }, sourceAdjustments: [], acceptance: { reused: true } }
-            : this.compiler(director, directory, (targetId, label) => references[`${targetId}\0${label}`], this.compiler === compileAchengDirector ? director.engine.runtimeId : undefined);
+            ? { director: structuredClone(effective.input), exitCode: 0, diagnostics: reusable.flatMap(artifact => artifact.receipt.diagnostics || []) as ReturnType<Compiler>["diagnostics"], audit: { status: "REUSED", artifactIds: reusable.map(item => item.id) }, sourceAdjustments: [], acceptance: { reused: true } }
+            : this.compiler(effective.input, directory, (targetId, label) => references[`${targetId}\0${label}`], this.compiler === compileAchengDirector ? director.engine.runtimeId : undefined);
         const continuityReceipt = this.applyContinuityGate(id, compiled.director, compiled.diagnostics);
         if (compiled.director.workflow.currentWork) {
             compiled.director.workflow.currentWork = { ...compiled.director.workflow.currentWork, inputRevision: expectedRevision, sourceHash: compiled.director.sourceHash };
         }
         if (hash(this.service.get(id).draft.director) !== hash(current.draft.director) || this.service.get(id).revision !== expectedRevision) throw new ProductionConflictError(this.service.get(id));
-        const packet = { owner, id, expectedRevision, baselineHash: hash(current.draft.director), assetIds: Object.keys(director.assets), operationId: `compilation:${preparedId}`, resultHash: hash(compiled.director), ...compiled, continuityReceipt };
+        const scopeHash = scope ? compilationScopeInput(director, scope).inputHash : undefined;
+        const packet = { owner, id, expectedRevision, baselineHash: hash(current.draft.director), assetIds: Object.keys(director.assets), operationId: `compilation:${preparedId}`, resultHash: hash(compiled.director), ...(scope ? { scope, scopeHash, targetIds: effective.targetIds } : {}), ...compiled, continuityReceipt };
         fs.mkdirSync(directory, { recursive: true });
         fs.writeFileSync(this.file(preparedId), JSON.stringify({ ...packet, packetHash: hash(packet) }), { encoding: "utf8", flag: "wx" });
         return { preparedId, operationId: packet.operationId, expectedRevision, sourceHash: compiled.director.sourceHash, engine: director.engine, continuityReceipt, diagnostics: compiled.diagnostics,
@@ -375,13 +390,6 @@ export class ProductionCompilationService {
             for (const assetId of packet.assetIds || []) if (packet.director.assets[assetId]) preserved.assets[assetId] = structuredClone(packet.director.assets[assetId]);
             const merged = { ...preserved, engine: packet.director.engine, artifacts: [...preserved.artifacts.filter(item => !targets.has(item.targetId)), ...packet.director.artifacts.filter((item: any) => targets.has(item.targetId))] };
             this.service.verifyCompilationBindings(id, merged);
-            if ((merged.source.ledger as any)?.contract_version === 2) {
-                const readyTargets = merged.artifacts.filter(item => targets.has(item.targetId) && item.kind === "h3" && item.status === "ready").map(item => item.targetId);
-                if (readyTargets.length) {
-                    const blockers = continuityTargetBlockers(this.service.continuityForDirector(id, merged), readyTargets);
-                    if (blockers.length) throw new Error(`CONTINUITY_PACKET_BLOCKED: ${blockers.map(item => item.message).join("；")}`);
-                }
-            }
             const result = this.service.edit(id, { operationId: packet.operationId, expectedRevision: current.revision, ops: [{ type: "set_director_production", director: merged }] });
             return { referenceSync: result.referenceSync, revision: result.revision, sourceHash: result.draft.director?.sourceHash, replayed: result.replayed === true, operationId: packet.operationId, mediaSubmitted: false };
         }
@@ -390,16 +398,6 @@ export class ProductionCompilationService {
         if (current.revision === packet.expectedRevision) {
             if (hash(current.draft.director) !== packet.baselineHash) throw new ProductionConflictError(current);
             this.service.verifyCompilationBindings(id, packet.director);
-            if (packet.continuityReceipt) {
-                const readyTargets = packet.director.artifacts.filter((item: any) => item.kind === "h3" && item.status === "ready").map((item: any) => item.targetId);
-                if (readyTargets.length) {
-                    const continuity = this.service.continuityForDirector(id, packet.director);
-                    if (continuity.report?.sourceHash !== packet.continuityReceipt.reportSourceHash || continuity.report?.runtimeId !== packet.continuityReceipt.reportRuntimeId ||
-                        (continuity.report?.operationId || null) !== packet.continuityReceipt.reportOperationId) throw new Error("CONTINUITY_PACKET_STALE: 连续性检查回执在编译后已变化，请重新编译");
-                    const blockers = continuityTargetBlockers(continuity, readyTargets);
-                    if (blockers.length) throw new Error(`CONTINUITY_PACKET_BLOCKED: ${blockers.map(item => item.message).join("；")}`);
-                }
-            }
         }
         const result = this.service.edit(id, { operationId: packet.operationId, expectedRevision: packet.expectedRevision, ops: [{ type: "set_director_production", director: packet.director }] });
         const receipt = { referenceSync: result.referenceSync, revision: result.revision, replayed: result.replayed === true, publishedVersion: result.publishedVersion, sourceHash: result.draft.director?.sourceHash, operationId: packet.operationId, mediaSubmitted: false };

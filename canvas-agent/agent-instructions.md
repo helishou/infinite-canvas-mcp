@@ -4,7 +4,7 @@
 
 ## 导演子代理
 
-- 制作数据读取按对象、snapshot、范围和 revision 复用；已读完整内容只需核验变化时给 `production_get` 传 `ifRevision`，`unchanged` 后沿用原内容。续页按 cursor 读完，不从头重复读或把第一页当全集；写回执 revision 不能冒充未读内容的版本。已有导演稿局部修改优先 `production_edit` 的 `patch_director_source`／`patch_director_continuity`，Backend 重算哈希；成功回执即保存确认，按需补读缺少的章节／目标，不整稿回读或反复 `production_hash_source`。运行状态沿 readiness 或精确 runId/taskId 查询。首次创建或明确整稿替换才提交完整导演稿，同一候选对象的哈希复用一次计算结果。
+- 制作数据按对象与范围读取：`production_get`／`production_get_version` 只读摘要；目录用 `production_get_artifact_index`／`production_get_version_artifact_index` 分页，源稿用 `production_get_source`／`production_get_version_source` 并指定 `sourceSection`，单个提示词用 `production_get_artifact`／`production_get_version_artifact` 并按 cursor 读完，工作台用 `production_get_workbench` 指定唯一 `targetId` 和视图。历史版本固定不变，不传 `ifRevision`。同一草稿对象已完整读取后，只有核验变化才给摘要工具传 `ifRevision`；`unchanged` 后沿用原内容。续页按 cursor 读完，不从头重复读或把第一页当全集；写回执 revision 不能冒充未读内容的版本。已有导演稿局部修改优先 `production_edit` 的 `patch_director_source`／`patch_director_continuity`，Backend 重算哈希；成功回执即保存确认，按需补读缺少的章节／目标，不整稿回读或反复 `production_hash_source`。运行状态沿 readiness 或精确 runId/taskId 查询。首次创建或明确整稿替换才提交完整导演稿，同一候选对象的哈希复用一次计算结果。
 
 - 当用户授权的制作任务需要独立分工时，用 `director_subagent` 的 `spawn` 派发剧情、分镜、资产、连续性或审核子任务；现有 `production_start_scene_work` 是自动场次流水线，不为同一工作再开另一套委派。
 - 使用本轮提供的 parentThreadId、当前画布 projectId、稳定 operationId 和可读 title；给子代理充分的冻结上下文、已确认事实、范围与交付要求，不让它猜其他会话内容。模型沿用主导演渠道。

@@ -111,19 +111,19 @@ export function validateDirectorMedia(db: BackendDatabase, projectId: string, d:
             const scope = String(plan.get(String(id))?.canvas_scope || (d.assets[String(id)]?.sharedSource || canvasRole === "shared-assets" ? "shared" : "episode"));
             if (!["shared", "episode"].includes(scope)) throw new Error(`资产 ${id} 的画布归属无效：${scope}`);
             if (canvasRole === "shared-assets" && scope !== "shared") throw new Error(`资产 ${id} 标记为本集专用，不能在剧目共享资产画布生产`);
-            if (canvasRole !== "shared-assets" && scope === "shared" && !d.assets[String(id)]?.sharedSource) throw new Error(`共享资产 ${id} 尚未采用同剧目已批准版本；请先在共享资产画布制作并审核，再回到分集采用`);
+            if (canvasRole !== "shared-assets" && scope === "shared" && !d.assets[String(id)]?.sharedSource) throw new Error(`共享资产 ${id} 尚未从共享素材库采用`);
         }
         for (const id of dependencies) {
             const asset = d.assets[String(id)];
-            if (asset?.inputOutdated) throw new Error(`依赖 ${id} 的媒体来自旧共享输入，请明确处理后继续`);
-            if (!asset || asset.status !== "approved" || !asset.evidence?.trim() || (plan.get(String(id))?.version && plan.get(String(id))?.version !== asset.version)) throw new Error(`产物 ${artifact.id} 依赖未批准或版本不一致：${id}`);
+            if (!asset || !["approved", "generated"].includes(asset.status) || asset.status === "approved" && !asset.evidence?.trim()
+                || !asset.storageKey || !asset.sha256 || (plan.get(String(id))?.version && plan.get(String(id))?.version !== asset.version)) throw new Error(`产物 ${artifact.id} 依赖媒体未就绪或版本不一致：${id}`);
         }
         if (d.source.style_policy === "waived" && !String(d.source.style_policy_reason || "").trim()) throw new Error("风格豁免缺少用户决定与理由");
         const styleRequired = d.source.style_policy === "required" || (plan.size > 1 && d.source.style_policy !== "waived");
         if (artifact.kind === "image" && styleRequired && artifact.targetId !== obj(d.source.style_lock).anchor_asset_id) {
             const styleId = String(obj(d.source.style_lock).anchor_asset_id || "");
             const style = d.assets[styleId];
-            if (!style || style.status !== "approved" || artifact.references.at(-1)?.storageKey !== style.storageKey || !dependencies.includes(styleId)) throw new Error("缺少已批准的末槽 STYLE_MOTHER 引用");
+            if (!style || !["approved", "generated"].includes(style.status) || artifact.references.at(-1)?.storageKey !== style.storageKey || !dependencies.includes(styleId)) throw new Error("缺少有效的末槽 STYLE_MOTHER 引用");
         }
         for (const ref of artifact.references) {
             const node = nodes.find(n => n.id === ref.nodeId);
@@ -132,7 +132,8 @@ export function validateDirectorMedia(db: BackendDatabase, projectId: string, d:
             if (!node || !keys.includes(ref.storageKey)) throw new Error(`参考不属于目标画布节点：${ref.label}`);
             const media = db.getMediaFile(ref.storageKey);
             if (!media || !fs.existsSync(media.filePath) || crypto.createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex") !== ref.sha256) throw new Error(`参考媒体字节或版本不一致：${ref.label}`);
-            if (!Object.values(d.assets).some(a => a.nodeId === ref.nodeId && a.storageKey === ref.storageKey && a.sha256 === ref.sha256 && a.status === "approved" && a.evidence?.trim())) throw new Error(`参考缺少真实媒体批准证据：${ref.label}`);
+            if (!Object.values(d.assets).some(a => a.nodeId === ref.nodeId && a.storageKey === ref.storageKey && a.sha256 === ref.sha256
+                && ["approved", "generated"].includes(a.status) && (a.status === "generated" || Boolean(a.evidence?.trim())))) throw new Error(`参考媒体未就绪或缺少可验证归属：${ref.label}`);
         }
     }
 }

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { productionEditSchema, productionOperationSchema, productionPreflightSchema, type ProductionOperation } from "./production-contract.js";
-import { productionReadSchema, productionReadQuery, productionWriteReceipt } from "./production-read.js";
+import { productionReadQuery, productionSourceSectionSchema, productionWriteReceipt } from "./production-read.js";
 import { migrateToolGuidance } from "../canvas/tool-migrations.js";
 import { productionOwnerPath } from "./production-owner.js";
 export { productionOwnerPath } from "./production-owner.js";
@@ -11,14 +11,13 @@ const stage = z.enum(["script", "shots", "director"]);
 const run = identity.extend({ runId: z.string().min(1) });
 const version = identity.extend({ version: z.number().int().min(1) });
 const readSnapshot = { snapshot: z.enum(["draft", "published"]).default("draft"), ifRevision: z.number().int().nonnegative().optional() };
-const sourceRead = z.object({ ...owner, ...readSnapshot, sourceSection: z.enum(["context", "asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "subject_registry", "utterances", "ledger.facts", "ledger.timelines", "ledger.initial", "ledger.events", "ledger.requirements", "ledger.coverage"]), targetIds: z.array(z.string().min(1)).optional(), pageSize: z.number().int().min(1).max(100).default(50), cursor: z.string().optional() }).strict();
+const sourceRead = z.object({ ...owner, ...readSnapshot, sourceSection: productionSourceSectionSchema, targetIds: z.array(z.string().min(1)).optional(), pageSize: z.number().int().min(1).max(100).default(50), chunkBytes: z.number().int().min(1).max(65536).optional(), cursor: z.string().optional() }).strict();
 const artifactIndexRead = z.object({ ...owner, ...readSnapshot, targetIds: z.array(z.string().min(1)).optional(), pageSize: z.number().int().min(1).max(100).default(50), cursor: z.string().optional() }).strict();
 const artifactRead = z.object({ ...owner, ...readSnapshot, targetId: z.string().min(1), chunkBytes: z.number().int().min(1).max(65536).default(32768), cursor: z.string().optional() }).strict();
-const versionSourceRead = z.object({ kind: owner.kind, id: owner.id, version: z.number().int().min(1), snapshot: z.enum(["draft", "published"]).default("published"), sourceSection: sourceRead.shape.sourceSection, targetIds: sourceRead.shape.targetIds, pageSize: sourceRead.shape.pageSize, cursor: sourceRead.shape.cursor }).strict();
+const versionSourceRead = z.object({ kind: owner.kind, id: owner.id, version: z.number().int().min(1), snapshot: z.enum(["draft", "published"]).default("published"), sourceSection: sourceRead.shape.sourceSection, targetIds: sourceRead.shape.targetIds, pageSize: sourceRead.shape.pageSize, chunkBytes: sourceRead.shape.chunkBytes, cursor: sourceRead.shape.cursor }).strict();
 const versionArtifactIndexRead = z.object({ kind: owner.kind, id: owner.id, version: z.number().int().min(1), snapshot: z.enum(["draft", "published"]).default("published"), targetIds: artifactIndexRead.shape.targetIds, pageSize: artifactIndexRead.shape.pageSize, cursor: artifactIndexRead.shape.cursor }).strict();
 const versionArtifactRead = z.object({ kind: owner.kind, id: owner.id, version: z.number().int().min(1), snapshot: z.enum(["draft", "published"]).default("published"), targetId: artifactRead.shape.targetId, chunkBytes: artifactRead.shape.chunkBytes, cursor: artifactRead.shape.cursor }).strict();
 const workbenchRead = z.object({ ...owner, ...readSnapshot, targetId: z.string().min(1), view: z.enum(["subject_workbench", "shot_workbench", "clip_workbench"]), chunkBytes: z.number().int().min(1).max(65536).optional() }).strict();
-const versionWorkbenchRead = z.object({ kind: owner.kind, id: owner.id, version: z.number().int().min(1), snapshot: z.enum(["draft", "published"]).default("published"), targetId: z.string().min(1), view: z.enum(["subject_workbench", "shot_workbench", "clip_workbench"]), chunkBytes: z.number().int().min(1).max(65536).optional() }).strict();
 const write = { operationId: z.string().min(1), expectedRevision: z.number().int().nonnegative() };
 const edit = productionEditSchema.extend(owner).strict();
 export const productionToolSchemas = {
@@ -39,7 +38,6 @@ export const productionToolSchemas = {
     production_get_version_source: versionSourceRead,
     production_get_version_artifact_index: versionArtifactIndexRead,
     production_get_version_artifact: versionArtifactRead,
-    production_get_version_workbench: versionWorkbenchRead,
     production_list_legacy: identity,
     production_preview_impact: identity.extend({ stage }),
     production_edit: edit,
@@ -54,8 +52,8 @@ export const productionToolNames = Object.keys(productionToolSchemas) as Product
 export const isProductionTool = (name: string): name is ProductionToolName => Object.hasOwn(productionToolSchemas, name);
 export const productionToolDescriptions: Record<ProductionToolName, string> = {
     production_preflight: "按显式 kind/id 检查制作请求；只读，不提交媒体。",
-    production_get: "只读取 kind/id 制作摘要。source、artifact index、单个提示词或工作台内容请分别使用 production_get_source、production_get_artifact_index、production_get_artifact、production_get_workbench；不接受全量视图。",
-    production_get_source: "读取指定 sourceSection，默认每页 50 条、最多 100 条；用 cursor 续页。不要请求完整 source 对象。",
+    production_get: "只读取 kind/id 制作摘要。源稿、产物目录、单个提示词或单目标工作台内容分别使用 production_get_source、production_get_artifact_index、production_get_artifact、production_get_workbench；本工具不接受全量视图。",
+    production_get_source: "只读取一个指定 sourceSection；script、production_shots、clip_groups、keyframes、keyframe_reviews、settings 是制作正文分区，其余章节来自导演源稿。默认每页 50 条、最多 100 条；用 cursor 续页。读取单个对象可传唯一 targetIds 和 chunkBytes 分块。",
     production_get_artifact_index: "分页读取轻量产物目录，不含提示词和引用；默认每页 50 条，最多 100 条。",
     production_get_artifact: "按 targetId 分块读取单个产物提示词；使用返回的 cursor 读完并核对 sha256。",
     production_get_workbench: "只读取一个 targetId 的指定 Subject、Shot 或 Clip 工作台；动态工作包按 workbenchVersion 核验。",
@@ -69,7 +67,6 @@ export const productionToolDescriptions: Record<ProductionToolName, string> = {
     production_get_version_source: "分页读取指定历史版本的 sourceSection；默认每页 50 条，最多 100 条。",
     production_get_version_artifact_index: "分页读取指定历史版本的轻量产物目录，不含提示词和引用。",
     production_get_version_artifact: "按 targetId 分块读取指定历史版本的单个产物提示词；使用 cursor 读完并核对 sha256。",
-    production_get_version_workbench: "只读取指定历史版本中一个 targetId 的工作台数据。",
     production_list_legacy: "读取 kind/id 的旧剧情与剧本文件及哈希，供明确选择导入。",
     production_preview_impact: "按 kind/id/stage 预览发布影响，不提交媒体。",
     production_edit: "以 operationId/expectedRevision 原子编辑 kind/id draft。Subject Prompt v2 用 upsert_director_subject/delete_director_subject、原实体字段、Shot/关键帧字段、edit_director_continuity 和 repartition_director_clips；人工 Prompt 仅在编译器 SourceMap 可唯一定位时用 reverse_sync_director_prompt 回写，否则保留画布文本并返回诊断。新合同编辑会登记真实受影响 Clip 的后台局部编译同步，不提交媒体或发布。响应丢失恢复原 operationId 回执。",
@@ -103,7 +100,6 @@ export function productionToolRequest(name: ProductionToolName, raw: unknown) {
         case "production_get_version_source": return get(`${base}/versions/${input.version}${productionReadQuery({ ...input, view: "source" })}`);
         case "production_get_version_artifact_index": return get(`${base}/versions/${input.version}${productionReadQuery({ ...input, view: "artifact_index" })}`);
         case "production_get_version_artifact": return get(`${base}/versions/${input.version}${productionReadQuery({ ...input, view: "artifacts", targetIds: [input.targetId] })}`);
-        case "production_get_version_workbench": return get(`${base}/versions/${input.version}${productionReadQuery({ ...input, targetIds: [input.targetId] })}`);
         case "production_list_legacy": return get(base + "/legacy");
         case "production_preview_impact": return get(`${base}/impact?stage=${input.stage}`);
         case "production_edit": return post(base + "/ops", input);

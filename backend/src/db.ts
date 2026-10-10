@@ -23,7 +23,7 @@ import { H3_RUNTIME_SEGMENT_FIELDS } from "@basketikun/canvas-agent/runtime-fiel
 import { editedTextTargets, loadTextDocument, readText, replaceText, textKey, textOperation, textTargetSchema, type CanvasTextTarget } from "./canvas/collaborative-text.js";
 import type { McpObservabilityReportOptions } from "./stores/types.js";
 import { reconstructCanvasHistory, migrateCanvasReceipts } from "./canvas/history-maintenance.js";
-import { captureAssetEdits, deleteDramaAsset, migrateDramaAssets, projectAsset, propagateAssetChanges, resolveProjectAssets, stripProjectAssets, validateAssetOperation, writeDramaAsset, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
+import { captureAssetEdits, deleteDramaAsset, migrateDramaAssets, normalizeAssetInsertion, projectAsset, propagateAssetChanges, resolveProjectAssets, stripProjectAssets, validateAssetOperation, writeDramaAsset, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -991,6 +991,25 @@ export class BackendDatabase {
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }
+        if (currentVersion < 39) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                const none = { mode: "none", shared: "none", scene: "none" };
+                for (const row of this.db.prepare("SELECT episode_id, draft_json FROM episode_productions").all() as Array<{ episode_id: string; draft_json: string }>) {
+                    const draft = JSON.parse(row.draft_json) as Record<string, any>;
+                    if (!draft.settings || typeof draft.settings !== "object") continue;
+                    draft.settings.reviewPolicy = none;
+                    this.db.prepare("UPDATE episode_productions SET draft_json=? WHERE episode_id=?").run(JSON.stringify(draft), row.episode_id);
+                }
+                for (const row of this.db.prepare("SELECT folder_id, production_plan_json FROM drama_projects WHERE production_plan_json IS NOT NULL").all() as Array<{ folder_id: string; production_plan_json: string }>) {
+                    const plan = JSON.parse(row.production_plan_json) as Record<string, unknown>;
+                    plan.reviewPolicy = none;
+                    this.db.prepare("UPDATE drama_projects SET production_plan_json=? WHERE folder_id=?").run(JSON.stringify(plan), row.folder_id);
+                }
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (39, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
     }
 
     /** A rolled-back schema_migrations row leaves its column behind, so every ADD COLUMN must be checked first. */
@@ -1935,7 +1954,8 @@ export class BackendDatabase {
             const duplicateIds = input.assets.map(asset => asset.id).filter((id, index, all) => all.indexOf(id) !== index);
             if (duplicateIds.length) throw collaborationError("INVALID_INPUT", `批次内资产 ID 重复: ${[...new Set(duplicateIds)].join(", ")}`);
             const saved = input.assets.map(asset => this.upsertAsset(asset, { withinTransaction: true, deferredCommits: commits, canvasSource: (asset as Asset & { canvasSource?: AssetWriteCommand["canvasSource"] }).canvasSource }));
-            const receipt = { ok: true, committed: true, operationId: input.operationId, replayed: false, count: saved.length, assetIds: saved.map(asset => asset.id), changesHash: commandFingerprint(saved.map(asset => ({ id: asset.id, kind: asset.kind, title: asset.title, tags: asset.tags, updatedAt: asset.updatedAt }))) };
+            const sharedAssets = saved.flatMap(asset => { const source = asset.metadata.sharedAssetSource as { sourceProjectId: string; sourceNodeId: string } | undefined; return source ? [{ assetId: asset.id, ...source, revision: this.getCanvasProjectRevision(source.sourceProjectId) }] : []; });
+            const receipt = { ok: true, committed: true, operationId: input.operationId, replayed: false, count: saved.length, assetIds: saved.map(asset => asset.id), ...(sharedAssets.length ? { sharedAssets } : {}), changesHash: commandFingerprint(saved.map(asset => ({ id: asset.id, kind: asset.kind, title: asset.title, tags: asset.tags, updatedAt: asset.updatedAt }))) };
             this.db.prepare("UPDATE mcp_command_receipts SET status = 'committed', payload_json = NULL, receipt_json = ?, updated_at = ? WHERE operation_id = ?")
                 .run(JSON.stringify(receipt), new Date().toISOString(), input.operationId);
             this.db.exec("COMMIT");
@@ -2029,6 +2049,7 @@ export class BackendDatabase {
             const committedOperations: CanvasOperation[] = [];
             const operationResults = operations.flatMap((operation, index) => {
                 validateAssetOperation(this, id, project, operation, context);
+                normalizeAssetInsertion(this, operation);
                 if (!context?.runtimeWrite) {
                     const node = (Array.isArray(project.nodes) ? project.nodes as Record<string, any>[] : []).find(item => item.id === (operation.id || operation.nodeId));
                     const metadata = operation.metadata as Record<string, unknown> | undefined;

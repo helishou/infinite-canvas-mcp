@@ -21,7 +21,10 @@ export function setAssetField(node: AssetNode, field: string, value: unknown) {
 export function resolveSharedAssetNode(node: AssetNode, source: AssetNode): AssetNode {
     const result = { ...node, metadata: { ...node.metadata } };
     const ref = node.metadata?.sharedAssetReference as SharedAssetReference;
-    for (const field of sharedAssetFields(source.type)) {
+    delete result.metadata.sharedAssetMissing;
+    if (node.type === "character") result.metadata.characterAssetId = ref.assetId;
+    if (node.type === "scene") result.metadata.sceneAssetId = ref.assetId;
+    for (const field of sharedAssetFields(node.type)) {
         const edit = ref?.edits?.[field];
         setAssetField(result, field, edit ? edit.deleted ? undefined : edit.value : assetField(source, field));
     }
@@ -37,7 +40,7 @@ export function stripSharedAssetContent(node: AssetNode): AssetNode {
 
 export function libraryAssetNode(asset: { id: string; kind: string; title: string; data: Record<string, any> }): AssetNode {
     const d = asset.data as Record<string, any>;
-    const metadata: Record<string, any> = { content: d.url || d.dataUrl || d.content || "", storageKey: d.storageKey, naturalWidth: d.width, naturalHeight: d.height, bytes: d.bytes, mimeType: d.mimeType, durationMs: d.durationMs };
+    const metadata: Record<string, any> = { content: d.url || d.dataUrl || d.imageUrl || d.content || "", storageKey: d.storageKey, naturalWidth: d.width, naturalHeight: d.height, bytes: d.bytes, mimeType: d.mimeType, durationMs: d.durationMs };
     if (asset.kind === "character") Object.assign(metadata, { characterName: asset.title, characterAssetId: asset.id, characterEnglishName: d.englishName || "", characterDescription: d.description || "", characterImages: d.images || [], characterPrimaryIndex: d.primaryIndex || 0, characterVoiceUrl: d.voice || "", characterVoiceName: d.voiceName || "", characterVoiceDescription: d.voiceDescription || "", characterVoiceStorageKey: d.voiceStorageKey || "", characterVoiceAssetId: d.voiceAssetId || "" });
     if (asset.kind === "scene") Object.assign(metadata, { sceneName: asset.title, sceneDescription: d.description || "", sceneImage: d.image, sceneColorCard: d.colorCard, sceneColorPalette: d.colorPalette, sceneColorCardPrompt: d.colorCardPrompt || "" });
     if (asset.kind === "character" || asset.kind === "scene") {

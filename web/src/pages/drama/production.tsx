@@ -754,28 +754,34 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     const active = batches.find(run => ["pending", "running", "paused", "awaiting_review"].includes(run.status) && run.targets.some(id => targets.includes(id)));
     if (active) return void message.warning(t("director.workspace.runTargetActive", { runId: active.runId }));
     if (!draftKey) return void message.warning(t("drama.production.draftNotReady"));
-    if (Object.keys(sourceDrafts).length || briefDraft !== String(production.draft.director?.source.brief || "")) return void message.warning(t("productionHub.follow.saveEditsFirst"));
     if (!production.draft.director) return void message.warning(t("director.workspace.engineUnavailable"));
+    const director = production.draft.director;
+    const targetIds = new Set<string>();
+    const source = director.source as Record<string, any>;
+    const shots = Array.isArray(source.shots) ? source.shots : [];
+    const segments = Array.isArray(source.segments) ? source.segments : [];
+    const addShot = (shotId: string) => {
+      targetIds.add(shotId);
+      const shot = shots.find((item: any) => String(item.id) === shotId);
+      if (shot?.source_scene_id) targetIds.add(String(shot.source_scene_id));
+      const shotInput = director.shotInputs[shotId];
+      for (const assetId of [...(shotInput?.assetIds || []), ...((shot?.required_assets || []).map((item: any) => String(typeof item === "string" ? item : item?.asset_id || item?.id || ""))), ...(shotInput?.keyframeAssetId ? [shotInput.keyframeAssetId] : [])]) if (assetId) targetIds.add(String(assetId));
+    };
+    for (const id of targets) {
+      const [kind, ...parts] = id.split(":");
+      const targetId = parts.join(":"); targetIds.add(targetId);
+      if (kind === "frame") addShot(targetId);
+      if (kind === "segment") for (const shotId of segments.find((item: any) => String(item.id) === targetId)?.shot_ids || []) addShot(String(shotId));
+    }
+    const draftHasCurrentTargetEdits = Object.keys(sourceDrafts).some(key => key.split(":").slice(1).some(part => targetIds.has(part)));
+    if (draftHasCurrentTargetEdits || briefDraft !== String(director.source.brief || "")) return void message.warning(t("productionHub.follow.saveEditsFirst"));
     startingRunRef.current = true;
     const runId = nanoid();
     try {
-      const [targetKindRaw, ...targetParts] = targets[0].split(":");
-      const targetId = targetParts.join(":");
-      const targetKind: "keyframe" | "segment" | "asset" = targetKindRaw === "frame" ? "keyframe" : targetKindRaw === "segment" ? "segment" : "asset";
       if (canvasId) await flushCanvasProjectBeforeGeneration(canvasId);
-      const latestSaved = await fetchEpisodeProduction(target).then(value => value.production);
-      const workId = latestSaved.draft.director?.workflow.currentWork?.workId || nanoid();
-      const currentWork = {
-        workId, module: targetKind === "segment" ? "model" as const : "assets" as const, action: "produce" as const,
-        targetKind, targetId, inputRevision: latestSaved.revision + 1, sourceHash: latestSaved.draft.director!.sourceHash,
-      };
-      if (!await edit([{ type: "set_director_workflow", patch: { currentWork } }], latestSaved.revision)) return;
-      const focussedProduction = await fetchEpisodeProduction(target).then(value => value.production);
-      setProduction(focussedProduction);
-      setReadiness((await fetchProductionReadiness(target)).readiness);
-      useProductionFollowStore.getState().setTarget({ ...productionOwner, workId, threadId: focussedProduction.draft.director?.workflow.agentThreadId || useAgentStore.getState().activeThreadId || undefined });
-      const savedCanvas = canvasId ? (await fetchBackendProject(canvasId)).project : undefined;
-      const request: PendingRunStart = { inputBasis: "canvas", expectedCanvasRevision: savedCanvas ? Number(savedCanvas.revision) : undefined, runId, idempotencyKey: runId, workId, expectedRevision: focussedProduction.revision, version: focussedProduction.publishedVersion, targets: [...targets], scope };
+      const workId = director.workflow.currentWork?.workId || runId;
+      const canvasRevision = canvasId ? useCanvasStore.getState().projects.find(project => project.id === canvasId)?.revision : undefined;
+      const request: PendingRunStart = { inputBasis: "canvas", expectedCanvasRevision: canvasRevision === undefined ? undefined : Number(canvasRevision), runId, idempotencyKey: runId, workId, expectedRevision: production.revision, version: production.publishedVersion, targets: [...targets], scope };
       setPendingRun(request);
       pendingRunStartRef.current = request;
       await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: commandNoticeRef.current, pendingRunStart: request } satisfies LocalDraft);
@@ -786,6 +792,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         setPendingRun(null);
         pendingRunStartRef.current = null;
         await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: commandNoticeRef.current, pendingRunStart: null } satisfies LocalDraft);
+        if (error.status === 409) void refreshRemote();
       }
       fail(error);
     }
@@ -982,7 +989,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     if (utterances !== undefined) ops.push({ type: "set_director_shot_utterances", shotId, utterances });
     return ops.length ? edit(ops) : true;
   };
-  const patchSource = async (entity: "style" | "scene" | "environment" | "character" | "asset" | "shot" | "segment", id: string | undefined, patch: Record<string, unknown>) => edit([{ type: "patch_director_source", entity, ...(id ? { id } : {}), patch }]);
+  const patchSource = async (entity: "style" | "scene" | "environment" | "character" | "asset" | "asset_card" | "shot" | "segment", id: string | undefined, patch: Record<string, unknown>) => edit([{ type: "patch_director_source", entity, ...(id ? { id } : {}), patch }]);
   const editCanvasClip = async (nodeId: string, segmentId: string, patch: Record<string, unknown>) => {
     if (!canvasId) return false;
     try {
@@ -1125,6 +1132,10 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     const { project } = await fetchBackendProject(canvasId);
     return edit([{ type: "archive_director_scene", sceneId, expectedCanvasRevision: Number(project.revision), confirmed: true }]);
   };
+  const deleteManualAsset = async (assetId: string) => {
+    if (!production || busy || !assetId) return false;
+    return edit([{ type: "delete_director_asset", id: assetId, confirmed: true }]);
+  };
   const exportBundle = async (includeGeneratedMedia: boolean) => {
     if (!production || !readiness) return;
     setExporting(true);
@@ -1226,7 +1237,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
               sourceDrafts={sourceDrafts} onSourceDraftChange={setSourceDraft}
               briefDraft={briefDraft} onBriefDraftChange={setBriefDraft}
               onBrief={saveBrief} onEditCanvasClip={editCanvasClip} onAdoptDirectorFields={adoptDirectorFields} onPatch={patchSource} onAdoptClipStyle={adoptClipStyle} onRegroup={regroupSegment} onWorkflow={setWorkflow} onSettings={patch => void edit([{ type: 'set_settings', patch }])} onBindAsset={(assetId, nodeId) => void bindAsset(assetId, nodeId)}
-              onUpsertSubject={upsertSubject} onDeleteSubject={deleteSubject} onDeleteScene={deleteScene} onSaveV2Shot={saveV2Shot} onRepartitionClips={repartitionV2} onEditShot={editV2Shot}
+              onUpsertSubject={upsertSubject} onDeleteSubject={deleteSubject} onDeleteScene={deleteScene} onDeleteManualAsset={deleteManualAsset} onSaveV2Shot={saveV2Shot} onRepartitionClips={repartitionV2} onEditShot={editV2Shot}
               onOpenSharedAsset={(assetId, title) => void openSharedAsset(assetId, title).catch(fail)} onPromoteExistingSharedAsset={(assetId, title) => void promoteExistingSharedAsset(assetId, title).catch(fail)}
               onBoundary={setBoundary} onReview={reviewAsset} onPublish={() => void publish()} onSaveContinuity={saveContinuity} onPreviewContinuityUpgrade={previewContinuityUpgrade} onCheckContinuity={checkContinuity} onContinuitySnapshot={changeContinuitySnapshot}
               onReplace={value => void replaceDirector(value)} onAskDirector={scope => void askDirector(scope)} onRequestContinuityUpgrade={requestContinuityUpgradeFromAgent} onNavigate={navigateWorkspace}

@@ -2,7 +2,6 @@ import crypto from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { compilationScopeInput, currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
-import { continuityTargetBlockers } from "./continuity-reports.js";
 import type { EpisodeProductionService } from "./production.js";
 import type { ProductionCompilationService } from "./compilation.js";
 
@@ -141,14 +140,6 @@ export class ClipRefreshCoordinator {
             if (occupied.length) { job.diagnostics = occupied.map(o => ({ code: "TARGET_OCCUPIED", targetId: job.segmentId, message: o.nextAction.message, nextAction: o.nextAction })); step("blocked"); return; }
             if (!compilation) {
                 step("checking");
-                if ((d.source.ledger as any)?.contract_version === 2) {
-                    if (continuityTargetBlockers(this.service.continuityForDirector(id, d), [job.segmentId]).length) {
-                        job.continuityRevision ??= current.revision; store.save(job);
-                        measure("continuityMs", () => this.service.checkContinuity(id, { expectedRevision: job.continuityRevision, operationId: job.continuityOperationId, targetIds: [job.segmentId] }));
-                    }
-                    const blockers = continuityTargetBlockers(this.service.continuityForDirector(id, d), [job.segmentId]);
-                    if (blockers.length) { job.diagnostics = blockers; step("blocked"); return; }
-                }
                 // Persist intent before enqueue; an enqueue crash can be recovered by its exact identity.
                 job.compileRevision = current.revision; store.save(job);
                 compilation = measure("enqueueMs", () => this.compilations.enqueue(id, this.owner, key, current.revision, undefined, clipRefreshScope(job.segmentId)));

@@ -40,7 +40,7 @@ export const directorPatchFields = {
     environment: ["name", "description", "prompt_description"],
     character: ["name", "appearance", "description", "prompt_description", "identity", "voice_description"],
     asset_card: ["prompt", "seven_steps", "references"],
-    asset: ["asset_name", "name", "title", "kind", "description", "prompt", "depends_on", "role", "version", "reference_role", "canvas_scope"],
+    asset: ["asset_name", "name", "title", "kind", "description", "prompt", "depends_on", "role", "version", "reference_role", "canvas_scope", "status"],
     shot: ["title", "visual", "camera", "start_frame", "end_frame", "duration_frames", "dialogues", "audio", "required_assets", "description", "shot_type", "timeline_id", "story_order", "continuity_facts", "characters", "performance", "state_description", "continuity_cues", "reference_requirements", "prompt_contract_version", "identity_context", "offscreen_character_ids", "subject_usages", "keyframes", "utterance_refs"],
     segment: ["shot_ids", "start_frame", "end_frame", "generation_clip_duration", "mode", "audio", "sound", "overall_soundscape", "non_diegetic_music", "references", "subjects", "execution_gate", "styleTemplateId"],
 } as const;
@@ -75,12 +75,18 @@ export const directorDecisionSchema = z.object({
     sourceRevision: z.number().int().nonnegative(),
 }).passthrough();
 export const directorReviewPolicySchema = z.object({
-    mode: z.enum(["automatic", "mixed", "manual"]),
-    shared: z.enum(["automatic", "manual"]),
-    scene: z.enum(["automatic", "manual"]),
+    mode: z.enum(["none", "automatic", "mixed", "manual"]),
+    shared: z.enum(["none", "automatic", "manual"]),
+    scene: z.enum(["none", "automatic", "manual"]),
 }).strict().superRefine((policy, context) => {
-    if (policy.mode !== "mixed" && (policy.shared !== policy.mode || policy.scene !== policy.mode)) context.addIssue({ code: "custom", message: "审核预设与审核点配置不一致" });
+    if (policy.mode === "none" && (policy.shared !== "none" || policy.scene !== "none")
+        || policy.mode !== "none" && policy.mode !== "mixed" && (policy.shared !== policy.mode || policy.scene !== policy.mode)
+        || policy.mode === "mixed" && (policy.shared === "none" || policy.scene === "none")) context.addIssue({ code: "custom", message: "审核预设与审核点配置不一致" });
 });
+export const defaultDirectorReviewPolicy = { mode: "none", shared: "none", scene: "none" } as const;
+export type DirectorReviewPolicy = z.infer<typeof directorReviewPolicySchema>;
+export const resolveDirectorReviewPolicy = (policy?: DirectorReviewPolicy | null): DirectorReviewPolicy =>
+    policy ? directorReviewPolicySchema.parse(policy) : { ...defaultDirectorReviewPolicy };
 export const directorSceneReviewSchema = z.object({
     sourceHash: hash, inputHash: hash, mediaInputHash: hash.optional(), verdict: z.enum(["approved", "rejected", "needs_human"]),
     mode: z.enum(["automatic", "manual"]), evidence: z.string().trim().min(1),
@@ -441,7 +447,7 @@ export const clipGroupSchema = z.object({
 
 export const productionSettingsSchema = z.object({
     parallelScenes: z.boolean().optional(),
-    reviewPolicy: directorReviewPolicySchema.optional(),
+    reviewPolicy: directorReviewPolicySchema.default(defaultDirectorReviewPolicy),
     videoAspectRatio: z.string().regex(/^[1-9]\d*:[1-9]\d*$/).nullable().optional(),
     videoAspectRatioConfirmed: z.boolean().optional(),
     storyboardImageMode: z.enum(["generate", "skip"]).optional(),
@@ -458,7 +464,7 @@ export const productionSettingsSchema = z.object({
 
 export const dramaProductionPlanSchema = z.object({
     parallelScenes: productionSettingsSchema.shape.parallelScenes,
-    reviewPolicy: productionSettingsSchema.shape.reviewPolicy,
+    reviewPolicy: directorReviewPolicySchema.default(defaultDirectorReviewPolicy),
     requirements: z.string().default(""),
     imageModel: z.string().default(""),
     imageModelsByKind: productionSettingsSchema.shape.imageModelsByKind,
@@ -499,6 +505,7 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("upsert_director_subject"), subject: subjectEntrySchema }).strict(),
     z.object({ type: z.literal("repair_director_subject_bindings") }).strict(),
     z.object({ type: z.literal("delete_director_subject"), id }).strict(),
+    z.object({ type: z.literal("delete_director_asset"), id, confirmed: z.literal(true) }).strict(),
     z.object({ type: z.literal("set_director_shot_keyframes"), shotId: id, keyframes: z.array(shotKeyframeSchema) }).strict(),
     z.object({
         type: z.literal("set_director_shot_utterances"), shotId: id,
@@ -563,7 +570,10 @@ export const productionPreflightRequestSchema = z.discriminatedUnion("action", [
     z.object({ action: z.literal("generate"), request: directorRunStartSchema }),
 ]);
 export type ProductionNextAction = { action: "correct_source" | "refresh" | "configure" | "read_run" | "review" | "wait"; message: string; tool?: string; input?: Record<string, unknown> };
-export type ProductionDiagnostic = { code: string; path: string; targetId?: string; shotId?: string; origin?: "source" | "compiler"; matchedText?: string; blocksCompilation?: boolean; message: string; severity: "error" | "warning" | "unverified"; example?: unknown; blockingRun?: { runId: string; status: string; taskIds: string[] }; nextAction?: ProductionNextAction };
+export type ProductionBlockingAction = "edit" | "compile" | "apply" | "publish" | "generate";
+export type ProductionDiagnostic = { code: string; path: string; targetId?: string; shotId?: string; origin?: "source" | "compiler"; matchedText?: string; blockingActions?: ProductionBlockingAction[]; blocksCompilation?: boolean; message: string; severity: "error" | "warning" | "unverified"; example?: unknown; blockingRun?: { runId: string; status: string; taskIds: string[] }; nextAction?: ProductionNextAction };
+export const diagnosticBlocksAction = (diagnostic: ProductionDiagnostic, action: ProductionBlockingAction) =>
+    diagnostic.blockingActions ? diagnostic.blockingActions.includes(action) : diagnostic.severity === "error" && (action !== "compile" || diagnostic.blocksCompilation !== false);
 export type ProductionPreflight = { readyTargets?: string[]; blockedTargets?: Array<{ targetId: string; code: string; message: string }>; warnings?: Array<{ targetId: string; code: string; message: string }>; planHash?: string; canvasRevision?: number; valid: boolean; contractVersion: string; engine: DirectorProduction["engine"] | null; revision: number | null; diagnostics: ProductionDiagnostic[]; generationReady: boolean; compileReady?: boolean; replayed?: boolean; nextActions?: ProductionNextAction[] };
 export type DirectorRunStart = z.infer<typeof directorRunStartSchema>;
 
@@ -575,5 +585,5 @@ export type ProductionEdit = z.infer<typeof productionEditSchema>;
 export type ProductionPublish = z.infer<typeof productionPublishSchema>;
 
 export function emptyEpisodeProduction(): EpisodeProductionData {
-    return { scenes: [], shots: [], keyframes: {}, keyframeReviews: {}, clipGroups: [], settings: { mode: "manual", imageModel: "", h3Model: "", imageModels: {}, imageModelsByKind: {}, h3Models: {} }, legacyImports: [] };
+    return { scenes: [], shots: [], keyframes: {}, keyframeReviews: {}, clipGroups: [], settings: { mode: "manual", imageModel: "", h3Model: "", imageModels: {}, imageModelsByKind: {}, h3Models: {}, reviewPolicy: { ...defaultDirectorReviewPolicy } }, legacyImports: [] };
 }

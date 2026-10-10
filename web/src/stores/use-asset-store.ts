@@ -1,3 +1,7 @@
+import localforage from "localforage";
+import i18n from "@/i18n";
+import { writeAssetIntent } from "@/services/asset-write-intent";
+import { request, getBackendUrl, getCanvasDraftSessionId } from "@/services/backend-api";
 import { create } from "zustand";
 
 import { nanoid } from "nanoid";
@@ -113,7 +117,7 @@ async function syncAssetsToBackend(assets: Asset[], folders: AssetFolder[]) {
             ...[...knownAssetIds].filter((id) => !assetIds.has(id)).map((id) => deleteBackendAsset(id)),
             ...[...knownFolderIds].filter((id) => !folderIds.has(id)).map((id) => deleteBackendAssetFolder(id)),
         ]);
-        knownAssetIds = assetIds;
+        knownAssetIds = new Set(useAssetStore.getState().assets.filter(asset => !asset.dramaId && !asset.metadata?.sharedAssetSource).map(asset => asset.id));
         knownFolderIds = folderIds;
     } catch { /* Backend 是唯一写入目标，失败由下一次同步重试 */ }
 }
@@ -321,7 +325,7 @@ export const useAssetStore = create<AssetStore>()((set, get) => ({
             updateAsset: async (id, patch, base, resolveConflicts) => {
                 const current = get().assets.find(asset => asset.id === id);
                 if (current && (current.dramaId || patch.dramaId || current.metadata?.sharedAssetSource)) {
-                    const response = await updateBackendAsset(id, { ...patch, ...(base ? { assetBase: { title: base.title, data: base.data } } : {}), ...(resolveConflicts ? { resolveConflicts } : {}) }, { operationId: nanoid() });
+                    const response = await commitLibraryWrite("PATCH", `/canvas/assets/${encodeURIComponent(id)}`, { ...patch, ...(base ? { assetBase: { title: base.title, data: base.data } } : {}), ...(resolveConflicts ? { resolveConflicts } : {}), operationId: nanoid() }, `asset:${id}`);
                     acceptLibraryAsset(response.asset as unknown as Asset);
                     return;
                 }
@@ -332,7 +336,7 @@ export const useAssetStore = create<AssetStore>()((set, get) => ({
             },
             removeAsset: async (id) => {
                 const current = get().assets.find(asset => asset.id === id);
-                if (current?.dramaId || current?.metadata?.sharedAssetSource) await deleteBackendAsset(id);
+                if (current?.dramaId || current?.metadata?.sharedAssetSource) await deleteBackendAsset(id, current.metadata?.sharedAssetSource as { sourceProjectId: string; sourceNodeId: string } | undefined);
                 set((state) => {
                     const assets = state.assets.filter((asset) => asset.id !== id);
                     get().cleanupImages({ assets });
@@ -405,10 +409,23 @@ if (typeof window !== "undefined") {
 export { syncAssetsToBackend, migrateAssetsInPlace, isLegacyComposite };
 
 export function acceptLibraryAsset(asset: Asset) {
+    if (asset.dramaId || asset.metadata?.sharedAssetSource) knownAssetIds.delete(asset.id);
+    else knownAssetIds.add(asset.id);
     useAssetStore.setState(state => ({ assets: [asset, ...state.assets.filter(item => item.id !== asset.id)] }));
 }
+export function libraryErrorText(error: unknown) {
+    return error instanceof BackendApiError ? String(error.details.error || error.message) : error instanceof Error ? error.message : String(error);
+}
+const assetIntents = localforage.createInstance({ name: "infinite-canvas-asset-write-intents" });
+async function commitLibraryWrite(method: "POST" | "PATCH", path: string, body: Record<string, unknown>, key: string) {
+    const scope = `${getBackendUrl()}\0${getCanvasDraftSessionId()}\0${key}`;
+    return writeAssetIntent<{ ok: boolean; asset: Record<string, unknown> }>(assetIntents, scope, { method, path, body },
+        intent => request(intent.method, intent.path, intent.body), i18n.t("canvas.sharedLibrary.restoredRequest"));
+}
 export async function saveLibraryAsset(asset: Asset, command?: SharedAssetWrite) {
-    const response = await upsertBackendAsset({ ...asset, ...command });
+    const source = command?.canvasSource;
+    const key = source ? `${source.projectId}:${source.nodeId}:${asset.kind}` : `asset:${asset.id}`;
+    const response = await commitLibraryWrite("POST", "/canvas/assets", { ...asset, operationId: command?.operationId || nanoid(), ...command }, key);
     if (!response.asset) throw new Error("Backend 未返回资产保存结果");
     const saved = response.asset as unknown as Asset;
     acceptLibraryAsset(saved);

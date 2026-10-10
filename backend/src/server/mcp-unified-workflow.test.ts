@@ -50,8 +50,8 @@ test("unified MCP keeps same-ID owners isolated across sessions and completes ed
         const check = await call("production_preflight", { ...input, action: "publish", request: { operationId: `publish-${kind}`, expectedRevision: changed.production.revision, stage: "script" } });
         assert.equal(check.preflight.valid, true);
         const published = await call("production_publish", { ...input, operationId: `publish-${kind}`, expectedRevision: changed.production.revision, stage: "script" });
-        const historical = await call("production_get_version", { ...input, version: published.production.publishedVersion, view: "full" });
-        assert.equal(historical.version.snapshot.scenes[0].blocks[0].text, `${kind} 中文\n正文😀`);
+        const historical = await call("production_get_version_source", { ...input, version: published.production.publishedVersion, sourceSection: "script", targetIds: ["scene"] });
+        assert.equal(historical.version.snapshot.source.items[0].blocks[0].text, `${kind} 中文\n正文😀`);
         await call("production_list_versions", input); await call("production_get_readiness", input);
         const task = stores.tasks.create(`existing-${kind}`, "canvas-image", { projectId: kind === "episode" ? "episode-canvas" : "same", nodeId: "existing" }, {});
         stores.tasks.update(task.id, { status: "succeeded", progress: 1, result: { media: [] } });

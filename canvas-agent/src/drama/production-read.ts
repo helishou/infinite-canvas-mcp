@@ -1,11 +1,12 @@
 import { migrateToolGuidance } from "../canvas/tool-migrations.js";
 import { z } from "zod";
 
+export const productionSourceSectionSchema = z.enum(["context", "script", "production_shots", "clip_groups", "keyframes", "keyframe_reviews", "settings", "asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "subject_registry", "utterances", "ledger.facts", "ledger.timelines", "ledger.initial", "ledger.events", "ledger.requirements", "ledger.coverage"]);
 export const productionReadSchema = z.object({
     view: z.enum(["summary", "source", "artifacts", "artifact_index", "full", "subject_workbench", "shot_workbench", "clip_workbench"]).default("summary"),
     snapshot: z.enum(["draft", "published"]).default("draft"),
     targetIds: z.array(z.string().min(1)).optional(),
-    sourceSection: z.enum(["context", "asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "subject_registry", "utterances", "ledger.facts", "ledger.timelines", "ledger.initial", "ledger.events", "ledger.requirements", "ledger.coverage"]).optional(),
+    sourceSection: productionSourceSectionSchema.optional(),
     pageSize: z.coerce.number().int().positive().optional(),
     cursor: z.string().optional(),
     chunkBytes: z.coerce.number().int().positive().optional(),
@@ -66,7 +67,8 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
     if (input.view === "source") {
         if (input.targetIds && !input.sourceSection) throw new Error("定向源稿读取必须指定 sourceSection");
         const source = d?.source || null;
-        const section = input.sourceSection === "context" ? Object.fromEntries(Object.entries(source || {}).filter(([key]) => !["asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "subject_registry", "utterances", "ledger"].includes(key))) : input.sourceSection?.startsWith("ledger.") ? source?.ledger?.[input.sourceSection.split(".")[1]] : input.sourceSection ? source?.[input.sourceSection] : source;
+        const rootSections: Record<string, unknown> = { script: selected?.scenes, production_shots: selected?.shots, clip_groups: selected?.clipGroups, keyframes: selected?.keyframes, keyframe_reviews: selected?.keyframeReviews, settings: selected?.settings };
+        const section = input.sourceSection === "context" ? Object.fromEntries(Object.entries(source || {}).filter(([key]) => !["asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "subject_registry", "utterances", "ledger"].includes(key))) : input.sourceSection && Object.hasOwn(rootSections, input.sourceSection) ? rootSections[input.sourceSection] : input.sourceSection?.startsWith("ledger.") ? source?.ledger?.[input.sourceSection.split(".")[1]] : input.sourceSection ? source?.[input.sourceSection] : source;
         const filtered = Array.isArray(section) && input.targetIds ? section.filter((item: any) => input.targetIds!.includes(String(item.id || item.asset_id || item.shot_id || item.segment_id || item.fact_id))) : section;
         if (input.chunkBytes) {
             const value = Array.isArray(filtered) ? (filtered.length === 1 ? filtered[0] : undefined) : filtered;
@@ -74,7 +76,7 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
             return { ...header, snapshot: input.snapshot, sourceHash: d?.sourceHash, chunk: chunk(JSON.stringify(value)) };
         }
         return { ...header, snapshot: input.snapshot, engine: d?.engine, sourceHash: d?.sourceHash,
-            ...(input.sourceSection === "context" ? { omittedSourceSections: ["asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "subject_registry", "utterances", "ledger"], ledgerSummary: source?.ledger ? { contractVersion: source.ledger.contract_version, counts: Object.fromEntries(["facts", "timelines", "initial", "events", "requirements", "coverage"].map(key => [key, Array.isArray(source.ledger[key]) ? source.ledger[key].length : 0])) } : null } : {}),
+            ...(input.sourceSection === "context" ? { omittedSourceSections: ["script", "production_shots", "clip_groups", "keyframes", "keyframe_reviews", "settings", "asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "subject_registry", "utterances", "ledger"], ledgerSummary: source?.ledger ? { contractVersion: source.ledger.contract_version, counts: Object.fromEntries(["facts", "timelines", "initial", "events", "requirements", "coverage"].map(key => [key, Array.isArray(source.ledger[key]) ? source.ledger[key].length : 0])) } : null } : {}),
             ...(Array.isArray(filtered) && input.pageSize ? { source: paginate(filtered) } : { source: filtered }) };
     }
     if (input.view === "artifacts" || input.view === "artifact_index") {
@@ -96,11 +98,12 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
         counts: { scenes: count(data.scenes), shots: count(data.shots), clipGroups: count(data.clipGroups), keyframes: count(data.keyframes), keyframeReviews: count(data.keyframeReviews) },
     } : null;
     const owner = production.sceneId ? { tool: "production_get_scene_production", input: { sceneId: production.sceneId } }
-        : production.projectId ? { tool: "production_get", input: { kind: "canvas", id: production.projectId } } : { tool: "production_get", input: { kind: "episode", id: production.episodeId } };
+        : production.projectId ? { tool: "production_get_artifact_index", input: { kind: "canvas", id: production.projectId } } : { tool: "production_get_artifact_index", input: { kind: "episode", id: production.episodeId } };
     return migrateToolGuidance({ ...header, view: "summary", snapshot: input.snapshot, [input.snapshot]: summarize(selected),
         omitted: ["source", "artifacts", "references", "scenes", "shots", "clipGroups", "keyframes", "keyframeReviews", "settings"],
-        nextRead: { tool: owner.tool, input: { ...owner.input, snapshot: input.snapshot, view: "artifact_index", pageSize: 100, ...(input.targetIds ? { targetIds: input.targetIds } : {}) } },
-        readOptions: { views: ["source", "artifact_index", "artifacts", "full"], selectors: ["sourceSection", "targetIds", "pageSize", "cursor", "chunkBytes"] } });
+        nextRead: { tool: owner.tool, input: { ...owner.input, snapshot: input.snapshot, pageSize: 50, ...(input.targetIds ? { targetIds: input.targetIds } : {}) } },
+        readOptions: production.sceneId ? { tool: "production_get_scene_production", selectors: ["sourceSection", "targetIds", "pageSize", "cursor", "chunkBytes"] }
+            : { tools: ["production_get_source", "production_get_artifact_index", "production_get_artifact", "production_get_workbench"] } });
 }
 
 function count(value: any): number { return Array.isArray(value) ? value.length : value && typeof value === "object" ? Object.keys(value).length : 0; }
@@ -117,8 +120,8 @@ export function projectProductionVersion(owner: { episodeId: string; projectId?:
         versionHash, draft: snapshot, published: snapshot }, input, digest, snapshot);
     if (input.view === "summary") {
         const summary = projected as any;
-        summary.nextRead = { tool: owner.sceneId ? "production_get_scene_version" : "production_get_version",
-            input: { ...(owner.sceneId ? { sceneId: owner.sceneId } : { kind: owner.projectId ? "canvas" : "episode", id: owner.projectId || owner.episodeId }), version: version.version, view: "artifact_index", pageSize: 100 } };
+        summary.nextRead = { tool: owner.sceneId ? "production_get_scene_version" : "production_get_version_artifact_index",
+            input: { ...(owner.sceneId ? { sceneId: owner.sceneId } : { kind: owner.projectId ? "canvas" : "episode", id: owner.projectId || owner.episodeId }), version: version.version, pageSize: 50 } };
     }
     if (input.view === "summary") (projected as any).nextRead = migrateToolGuidance({ nextRead: (projected as any).nextRead }).nextRead;
     return { ...pick(version, ["version", "stage", "createdAt"]), ...owner, sha256: versionHash,
@@ -147,7 +150,7 @@ export function productionWriteReceipt(result: any, context: { tool?: string; in
     const ownerId = input.id || input.projectId || input.sceneId || input.episodeId || p.episodeId;
     const kind = input.kind || (input.sceneId && !input.episodeId && !input.projectId ? "scene" : input.projectId || context.tool?.startsWith("canvas_") ? "canvas" : "episode");
     const tool = kind === "scene" ? "production_get_scene_production" : "production_get";
-    const readInput = { ...(kind === "scene" ? { sceneId: ownerId } : { kind, id: ownerId }), view: "summary" };
+    const readInput = kind === "scene" ? { sceneId: ownerId, view: "summary" } : { kind, id: ownerId };
     return migrateToolGuidance({ ...pick(result, ["ok", "replayed", "mediaSubmitted", "mediaAuthorized", "operationId", "workId", "runId", "status", "updated", "created", "reused", "skipped"]),
         ...(clipRefreshes.length ? { sourceSaved: true, clipRefreshes, ...(clipRefreshes.length === 1 ? { clipRefresh: clipRefreshes[0] } : {}), mediaSubmitted: false } : {}),
         ...pick(input, ["operationId", "sceneId", "projectId", "episodeId"]),

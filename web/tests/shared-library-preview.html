@@ -6,7 +6,9 @@
 const port = new URL(location.href).searchParams.get("backendPort");
 if (!/^\d+$/.test(port || "")) throw new Error("Start backend/tests/shared-library-preview.ts and pass its backendPort");
 sessionStorage.setItem("backend-connection", JSON.stringify({ url: `http://127.0.0.1:${port}`, token: "shared-library-test" }));
-history.replaceState(null, "", "/canvas/preview-a");
+const projectId = new URL(location.href).searchParams.get("projectId") || "preview-live-a";
+if (!/^preview-live-[ab]$/.test(projectId)) throw new Error("Only isolated preview canvases are supported");
+history.replaceState(null, "", `/canvas/${projectId}`);
 </script>
 <script type="module" src="/src/main.tsx"></script>
 </body></html>

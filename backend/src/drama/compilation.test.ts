@@ -205,7 +205,7 @@ test("legacy per-prepared inputs switch to the pool: apply, recheck and recompil
     const poolHash = first.sourceHash!;
     assert.notEqual(poolHash, legacyHash, "switching layouts changes the hash exactly once, as expected");
     const firstTargets: any = jobs.getCompilation("episode", "episode", "switch-1", "targets", 0, 10);
-    assert.equal(firstTargets.items[0].status, "draft", "the continuity gate downgrades ready H3 until the new hash is checked in");
+    assert.equal(firstTargets.items[0].status, "ready", "an unverified continuity report remains a warning and does not downgrade an executable prompt");
     // Apply stores the pool-path source in the draft.
     jobs.apply("episode", "episode", first.preparedId!);
     assert.equal(service.get("episode").draft.director!.sourceHash, poolHash);
@@ -222,7 +222,7 @@ test("legacy per-prepared inputs switch to the pool: apply, recheck and recompil
     assert.equal(second.status, "succeeded");
     assert.equal(second.sourceHash, poolHash, "zero drift once inputs live in the content-addressed pool");
     const secondTargets: any = jobs.getCompilation("episode", "episode", "switch-2", "targets", 0, 10);
-    assert.equal(secondTargets.items[0].status, "ready", "H3 stays ready now that draft, result and report hashes agree");
+    assert.equal(secondTargets.items[0].status, "ready", "H3 stays ready without waiting for a continuity report");
     jobs.apply("episode", "episode", second.preparedId!);
     const draft = service.get("episode").draft.director!;
     assert.equal(draft.sourceHash, poolHash);
@@ -368,7 +368,7 @@ test("three scoped compiler jobs overlap and merge disjoint results without over
     const compiler = async (input: DirectorProduction) => {
         concurrent++; peak = Math.max(peak, concurrent);
         await new Promise<void>(resolve => releases.push(resolve)); concurrent--;
-        const targetId = String((input.source.asset_plan as any[])[0].id), prompt = `compiled ${targetId}`;
+        const targetId = String((input.source.asset_plan as any[])[0]?.id || `K${(input.source.shots as any[])[0]?.source_scene_id}`), prompt = `compiled ${targetId}`;
         return { director: { ...input, artifacts: [{ id: `image-${targetId}`, kind: "image" as const, targetId, prompt, sha256: promptHash(prompt), sourceHash: input.sourceHash, status: "ready" as const, references: [], receipt: { sourceHash: input.sourceHash, promptHash: promptHash(prompt), engineRuntimeId: input.engine.runtimeId, validator: "fixture" } }] }, exitCode: 0, diagnostics: [], audit: {}, sourceAdjustments: [], acceptance: {} };
     };
     const jobs = new ProductionCompilationService(service, root, compiler as any);
@@ -378,7 +378,7 @@ test("three scoped compiler jobs overlap and merge disjoint results without over
     await new Promise(resolve => setImmediate(resolve));
     for (const sceneId of ["A", "B", "C"]) {
         const job = jobs.getCompilation("episode", "episode", `compile-${sceneId}`);
-        assert.equal(job.status, "succeeded"); jobs.apply("episode", "episode", job.preparedId!);
+        assert.equal(job.status, "succeeded", JSON.stringify(job)); jobs.apply("episode", "episode", job.preparedId!);
     }
     const current = service.get("episode");
     assert.equal(current.draft.director!.artifacts.length, 3);
@@ -444,7 +444,7 @@ test("tampered compiler packet is rejected without a revision change", t => {
     assert.equal(service.get("episode").revision, 1);
 });
 
-test("continuity issues downgrade only their H3 target and another covered target can be applied and published", t => {
+test("continuity issues remain target-level warnings while H3 prompts apply and publish", t => {
     const { root, service, director } = fixture(t);
     director.source = { ...director.source, ledger: { contract_version: 2 }, segments: [{ id: "SEG01" }, { id: "SEG02" }] };
     director.sourceHash = directorHash(director.source);
@@ -465,16 +465,17 @@ test("continuity issues downgrade only their H3 target and another covered targe
     assert.equal(preflight.valid, true);
     assert.ok(preflight.diagnostics.some(item => item.targetId === "SEG02" && item.code === "CONTINUITY_BLOCKED"));
     const prepared = compilations.prepare("episode", "episode", 2);
-    assert.deepEqual(prepared.targets.map(item => [item.targetId, item.status]), [["SEG01", "ready"], ["SEG02", "draft"]]);
+    assert.deepEqual(prepared.targets.map(item => [item.targetId, item.status]), [["SEG01", "ready"], ["SEG02", "ready"]]);
     assert.ok(prepared.diagnostics.some(item => item.targetId === "SEG02" && item.code === "CONTINUITY_BLOCKED"));
+    assert.ok(prepared.diagnostics.filter(item => item.targetId === "SEG02" && item.code === "CONTINUITY_BLOCKED").every(item => item.severity === "warning"));
     const applied = compilations.apply("episode", "episode", prepared.preparedId);
     assert.equal(applied.mediaSubmitted, false);
     const current = service.get("episode");
     assert.equal(current.draft.director?.artifacts.find(item => item.targetId === "SEG01")?.status, "ready");
-    assert.equal(current.draft.director?.artifacts.find(item => item.targetId === "SEG02")?.status, "draft");
+    assert.equal(current.draft.director?.artifacts.find(item => item.targetId === "SEG02")?.status, "ready");
     const published = service.publish("episode", { operationId: "publish-partial-continuity", expectedRevision: current.revision, stage: "director" });
     assert.equal(published.published?.director?.artifacts.find(item => item.targetId === "SEG01")?.status, "ready");
-    assert.equal(published.published?.director?.artifacts.find(item => item.targetId === "SEG02")?.status, "draft");
+    assert.equal(published.published?.director?.artifacts.find(item => item.targetId === "SEG02")?.status, "ready");
 });
 
 test("binding diagnostics expose source, draft and published versions separately", t => {

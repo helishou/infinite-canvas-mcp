@@ -4,7 +4,7 @@ import { inputHash, type CanvasExecutionTarget } from "./canvas-inputs.js";
 import { createH3NodeMetadata } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { H3_DEFAULTS_KEY } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
-import { canonicalProduction, isSubjectPromptAssembly, productionSceneEntries, productionImageModel, type ProductionLayoutPlan, type ProductionLayoutUnit, type ProductionLayoutReceipt } from "@basketikun/canvas-agent/drama/production-contract";
+import { canonicalProduction, isSubjectPromptAssembly, productionSceneEntries, productionImageModel, resolveDirectorReviewPolicy, type ProductionLayoutPlan, type ProductionLayoutUnit, type ProductionLayoutReceipt } from "@basketikun/canvas-agent/drama/production-contract";
 
 import type { CanvasGenerationService } from "../canvas/generation-service.js";
 import { resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
@@ -549,10 +549,6 @@ export class EpisodeProductionRunner {
             else await finish();
         }
         await this.finishIndependent(assetCompletions);
-        if (assetTasks.length || (!run.runId && Object.values(snapshot.director.assets).some(asset => asset.status === "generated"))) {
-            this.service.updateRun({ ...run, status: "awaiting_review", error: "资产已生成；请查看真实媒体，更新批准版本及依赖提示词后发布新导演稿" });
-            return;
-        }
         if (run.plan.imageShotIds.some((id) => !imageModelFor(id))) throw new Error("缺少图片模型，请在画布节点或配置页选择模型后发布新版本");
         if (run.plan.clipGroupIds.some((id) => !h3ModelFor(id))) throw new Error("缺少 H3 模型，请配置 H3 默认模型后发布新版本");
         if (run.plan.missingAssetNodeIds.length) throw new Error(`缺少资产引用：${run.plan.missingAssetNodeIds.join(", ")}`);
@@ -629,9 +625,10 @@ export class EpisodeProductionRunner {
         }
         await this.finishIndependent(frameCompletions);
         const latest = this.service.version(episodeId, version).snapshot;
-        const rejected = run.plan.imageShotIds.find((shotId) => ["needs-redo", "rejected"].includes(latest.keyframeReviews[shotId]?.verdict || ""));
+        const reviewRequired = resolveDirectorReviewPolicy(run.settings?.reviewPolicy as any).mode !== "none";
+        const rejected = reviewRequired ? run.plan.imageShotIds.find((shotId) => ["needs-redo", "rejected"].includes(latest.keyframeReviews[shotId]?.verdict || "")) : undefined;
         if (rejected) throw new Error(`镜头 ${rejected} 的关键帧自检要求返修；未提交后续 H3`);
-        const unreviewed = run.plan.imageShotIds.filter((shotId) => !["auto-accepted", "approved"].includes(latest.keyframeReviews[shotId]?.verdict || "") || latest.keyframeReviews[shotId]?.sourceVersion !== version);
+        const unreviewed = reviewRequired ? run.plan.imageShotIds.filter((shotId) => !["auto-accepted", "approved"].includes(latest.keyframeReviews[shotId]?.verdict || "") || latest.keyframeReviews[shotId]?.sourceVersion !== version) : [];
         if (unreviewed.length) {
             this.service.updateRun({ ...run, status: "awaiting_review", error: `等待 Agent 查看关键帧并记录视觉自检：${unreviewed.join(", ")}` });
             return;
@@ -747,7 +744,7 @@ export class EpisodeProductionRunner {
                 const media = [...task.outputs, ...(Array.isArray(task.result?.media) ? task.result.media as Record<string, unknown>[] : [])];
                 const output = media.find(output => output.storageKey);
                 if (!output) throw new Error(`前置任务缺少归档结果：${task.id}`);
-                if (run.settings?.reviewPolicy) {
+                if (resolveDirectorReviewPolicy(run.settings?.reviewPolicy as any).mode !== "none") {
                     const data = this.service.get(run.episodeId).draft;
                     const assetId = preceding.id.startsWith("frame:") ? data.director?.shotInputs[preceding.id.slice(6)]?.keyframeAssetId : preceding.id.slice(6);
                     const asset = assetId && data.director?.assets[assetId];
@@ -787,7 +784,7 @@ export class EpisodeProductionRunner {
                 done.add(target.id);
             }
         }
-        if (run.settings?.reviewPolicy) {
+        if (resolveDirectorReviewPolicy(run.settings?.reviewPolicy as any).mode !== "none") {
             const current = this.service.get(run.episodeId).draft;
             for (const target of snapshot.targets.filter(target => !target.segmentId)) {
                 const submitted = run.submitted.find(item => item.id === target.id);

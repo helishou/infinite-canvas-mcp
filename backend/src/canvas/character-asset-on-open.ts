@@ -7,7 +7,7 @@ type CharacterNode = { id: string; type: string; title?: string; metadata?: Reco
 export function syncCharacterAssetsForProject(stores: Stores, projectId: string) {
     const project = stores.projects.get(projectId);
     if (!project) throw new Error(`画布不存在: ${projectId}`);
-    const assets = stores.assets.list({ kind: "character" });
+    const assets = stores.assets.list({ kind: "character" }).filter(asset => !asset.metadata?.sharedAssetSource);
     const byId = new Map(assets.map((asset) => [asset.id, asset]));
     const nodes = Array.isArray(project.nodes) ? project.nodes as CharacterNode[] : [];
     const allProjects = stores.projects.list();

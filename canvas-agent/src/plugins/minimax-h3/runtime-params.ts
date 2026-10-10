@@ -103,8 +103,10 @@ export function h3StoryboardIssues(segment: Record<string, unknown>, expected?: 
     if (!shots.length && !expected?.length) return issues;
     if (ids.some(id => !id) || new Set(ids).size !== ids.length) issues.push('分镜轨必须使用唯一、稳定的镜头 ID');
     for (const shot of shots) {
-        const binding = bindings.find(ref => ref.id === shot.referenceBindingId && ref.enabled !== false);
-        if (!binding || binding.role !== 'storyboard') issues.push(`镜头 ${shot.id} 缺少有效 storyboard 绑定`);
+        if (shot.referenceBindingId) {
+            const binding = bindings.find(ref => ref.id === shot.referenceBindingId && ref.enabled !== false);
+            if (!binding || binding.role !== 'storyboard') issues.push(`镜头 ${shot.id} 缺少有效 storyboard 绑定`);
+        }
         if (!(Number(shot.duration) > 0)) issues.push(`镜头 ${shot.id} 缺少正时长`);
     }
     if (expected?.length) {

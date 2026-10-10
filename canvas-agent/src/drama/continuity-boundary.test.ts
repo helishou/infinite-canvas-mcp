@@ -9,7 +9,7 @@ test("tail-frame and Motion Context are exclusive in validation and formal Clip 
         if (tailFrame && motionContext) {
             const conflict = continuityBoundaryDiagnostics(d).find(item => item.code === "CONTINUITY_MODES_CONFLICT");
             assert.equal(conflict?.targetId, "A");
-            assert.equal(conflict?.severity, "error");
+            assert.equal(conflict?.severity, "warning");
             assert.match(conflict!.message, /A → B/);
             assert.equal(continuityBoundaryDiagnostics(d, "edit").find(item => item.code === "CONTINUITY_MODES_CONFLICT")?.severity, "warning");
             assert.throws(() => outgoingDirectorBoundary(d, "A"), /CONTINUITY_MODES_CONFLICT/);
@@ -19,12 +19,12 @@ test("tail-frame and Motion Context are exclusive in validation and formal Clip 
         }
     }
 });
-test("missing, duplicate and non-adjacent decisions block compilation instead of silently disabling continuation", () => {
+test("missing, duplicate and non-adjacent decisions stay visible without blocking prompt compilation", () => {
     assert.ok(continuityBoundaryDiagnostics(source([])).some(d => d.code === "MISSING_CONTINUITY_BOUNDARY"));
-    assert.throws(() => outgoingDirectorBoundary(source([]), "A"), /MISSING_CONTINUITY_DECISION/);
+    assert.equal(outgoingDirectorBoundary(source([]), "A"), undefined);
     assert.ok(continuityBoundaryDiagnostics(source([{ from: "A", to: "C", tailFrame: true, motionContext: true, reason: "wrong" }])).some(d => d.code === "NON_ADJACENT_CONTINUITY_BOUNDARY"));
     assert.equal(outgoingDirectorBoundary(source([]), "C"), undefined);
-    assert.throws(() => outgoingDirectorBoundary(source([{ from: "A", to: "B", reason: "flags missing" }]), "A"), /MISSING_CONTINUITY_DECISION/);
+    assert.equal(outgoingDirectorBoundary(source([{ from: "A", to: "B", reason: "flags missing" }]), "A"), undefined);
     assert.ok(continuityBoundaryDiagnostics(source([]), "edit").every(d => d.severity === "warning"));
 });
 test("an all-cut dialogue sequence is valid without manufacturing continuation", () => {

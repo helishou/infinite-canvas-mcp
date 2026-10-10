@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { App, Dropdown, Input, Modal, Segmented, Tooltip } from "antd";
-import { Columns2, Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, LayoutGrid, ListOrdered, Lock, MapPinned, MessageSquare, Minus, Music2, Package, Pencil, Plus, RefreshCw, Scissors, Settings2, Trash2, Unlock, Upload, User, Video } from "lucide-react";
+import { Columns2, Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, LayoutGrid, ListOrdered, Lock, MapPinned, MessageSquare, Minus, Music2, Package, Plus, RefreshCw, Scissors, Settings2, Trash2, Unlock, Upload, User, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -206,8 +206,7 @@ export function CanvasNodeHoverToolbar({
         ...(hasImage ? imageTools.map((tool) => ({ id: tool.id, title: tool.title, label: tool.label, icon: tool.icon, active: tool.active, onClick: tool.onClick })) : []),
     ];
     const sharedTools: ToolbarTool[] = node.metadata?.sharedAssetReference && Object.keys(node.metadata.sharedAssetReference.edits || {}).length ? [
-        { id: "sharedLocal", title: t("canvas.sharedLibrary.localChanges"), label: t("canvas.sharedLibrary.localChanges"), icon: <Pencil className="size-4" />, onClick: () => onInfo(node) },
-        { id: "discardShared", title: t("canvas.sharedLibrary.discard"), label: t("canvas.sharedLibrary.discard"), icon: <Trash2 className="size-4" />, onClick: () => onDiscardSharedEdits?.(node) },
+        { id: "discardShared", title: t("canvas.sharedLibrary.discard"), label: t("canvas.sharedLibrary.discard"), icon: <RefreshCw className="size-4" />, onClick: () => onDiscardSharedEdits?.(node) },
     ] : [];
     const toolbarTools = hasImage ? [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => quickImageToolIdSet.has(tool.id as ImageQuickToolId)).concat(sharedTools) : [...baseToolbarTools, ...nodeToolbarTools, ...extraTools, ...sharedTools];
     const selectableImageToolbarTools = [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => tool.id !== "retry") as ImageToolbarSettingsTool[];

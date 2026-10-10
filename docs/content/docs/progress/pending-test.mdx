@@ -5,6 +5,10 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- Drama asset libraries now use one canonical node per asset in the drama shared canvas. Adding an ordinary asset preserves its layout and links while turning it into a reference; smart generators share only the selected output. Verify insertion, local edits, explicit updates, discarding edits, cross-episode refresh, field conflicts, lost-response receipt recovery, referenced-asset deletion protection, and migration of existing assets without losing local differences or approval history. Ordinary libraries keep their existing behavior.
+
+- Production MCP reads now use separate summary, source-section, artifact-index, single-prompt and single-target workbench tools; summary tools reject detail selectors, collections page by cursor, and prompt reads return UTF-8 chunks with a hash. Verify tool discovery in HTTP MCP and Agent compatibility clients, current and historical owners, boundary-size outputs, cursor expiry, and Agent recovery from the former whole-record call.
+
 - Atomic Shot operations maintain keyframes, timed action/sound/ledger anchors, asset dependencies and outcome mappings. Split dialogue coverage is allocated automatically with an optional override. Deleting the final Shot removes its empty Clip, including drafts without a prepared canvas; new boundaries do not inherit old tail frames or motion context. Camera-only edits no longer resubmit untouched dialogue. Verify operation sequences, idempotency, historical media and legacy behavior; actual dialogue duration and differing camera/performance designs remain creative constraints.
 
 - Shot deletion cleans exclusive dialogue and ledger records without manual transfer, retaining surviving cross-Shot text/timing, other Shots, initial facts and historical media. Verify downstream compile diagnostics and retry after failure. Shortening merged Shots clips inherited Subject appearance windows and removes intervals wholly outside the new duration; extending a Shot extends appearances previously ending at its boundary.

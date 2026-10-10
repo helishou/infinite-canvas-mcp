@@ -27,20 +27,20 @@ function hydrateScopedApprovedInputs(director: DirectorProduction, resolver?: (t
     const files = new Map<string, string>();
     for (const plan of plans) {
         const id = String(plan.asset_id || plan.id || ""), asset = director.assets[id];
-        if (asset?.status !== "approved" || asset.inputOutdated) continue;
+        if (!asset || !["approved", "generated"].includes(asset.status)) continue;
         const file = resolver(id, "asset");
-        if (!file || !fs.existsSync(file)) throw new Error(`批准素材 ${id} 缺少真实编译输入`);
-        if (crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== asset.sha256) throw new Error(`批准素材 ${id} 字节已变化`);
-        if (plan.version && String(plan.version) !== asset.version) throw new Error(`批准素材 ${id} 的源版本未更新`);
-        plan.status = "approved"; plan.file = file; plan.sha256 = asset.sha256;
+        if (!file || !fs.existsSync(file)) throw new Error(`素材 ${id} 缺少真实编译输入`);
+        if (!asset.sha256 || crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== asset.sha256) throw new Error(`素材 ${id} 字节已变化`);
+        if (plan.version && String(plan.version) !== asset.version) throw new Error(`素材 ${id} 的源版本未更新`);
+        plan.status = asset.status; plan.file = file; plan.sha256 = asset.sha256;
         files.set(id, file);
     }
     const source = director.source as Record<string, any>;
     const anchor = source.style_lock && director.assets[source.style_lock.anchor_asset_id];
     const anchorFile = source.style_lock && files.get(source.style_lock.anchor_asset_id);
-    if (anchorFile && anchor?.status === "approved" && !anchor.inputOutdated) {
-        if (source.style_lock.anchor_version !== anchor.version) throw new Error("批准风格母图版本与风格绑定不符");
-        source.style_lock.status = "approved";
+    if (anchorFile && anchor && ["approved", "generated"].includes(anchor.status)) {
+        if (source.style_lock.anchor_version !== anchor.version) throw new Error("风格母图版本与风格绑定不符");
+        source.style_lock.status = anchor.status;
         source.style_lock.approved_file = anchorFile;
         source.style_lock.approved_sha256 = anchor.sha256;
     }
@@ -247,6 +247,10 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
             const prompt = readFile(entry.prompt_file || entry.file).toString("utf8");
             const sha256 = crypto.createHash("sha256").update(prompt).digest("hex");
             let ready = kind === "h3" ? entry.accepted === true && entry.format_pass === "PASSED" : ["PROMPT_READY", "ready-to-submit-not-generated"].includes(entry.status);
+            for (const item of Array.isArray(entry.quality_diagnostics) ? entry.quality_diagnostics : []) diagnostics.push({
+                code: String(item.code || "PROMPT_QUALITY"), path: String(item.path || `artifacts.${targetId}`), targetId,
+                message: String(item.message || "提示词质量建议"), severity: "warning", origin: "compiler", blockingActions: [],
+            });
             const references: DirectorProduction["artifacts"][number]["references"] = [];
             for (const ref of entry.references || entry.binding_snapshot?.references || []) {
                 if (!ref.file) continue;
@@ -281,12 +285,13 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
         artifact.receipt.sourceHash = sourceHashForArtifacts;
     }
     const audit = JSON.parse(readFile("audit.json").toString("utf8"));
-    const located: ProductionDiagnostic[] = Array.isArray(audit.diagnostics) ? audit.diagnostics.filter((item: ProductionDiagnostic) => item.code === "PROMPT_EXTERNAL_CONTEXT") : [];
+    const located: ProductionDiagnostic[] = Array.isArray(audit.diagnostics) ? audit.diagnostics.filter((item: ProductionDiagnostic) => item.code === "PROMPT_EXTERNAL_CONTEXT")
+        .map((item: ProductionDiagnostic) => ({ ...item, severity: "warning" as const, blocksCompilation: false, blockingActions: [] })) : [];
     diagnostics.push(...located);
     for (const gate of audit.gates || []) if (gate.status === "FAIL") {
         for (const message of gate.errors || []) {
             if (located.length && (message.startsWith("Prompt depends on external prose:") || message.startsWith("external-context dependency:"))) continue;
-            diagnostics.push({ code: "COMPILER_GATE_FAILED", path: `audit.${gate.gate}`, message, severity: "error" });
+            diagnostics.push({ code: "COMPILER_GATE_FAILED", path: `audit.${gate.gate}`, message, severity: "warning", origin: "compiler", blocksCompilation: false, blockingActions: [] });
         }
     }
     diagnostics.push(...preflightDirector(director, "edit", runtime).diagnostics.filter(d => d.severity === "error"));

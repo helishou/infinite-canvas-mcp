@@ -18,6 +18,10 @@ import { removedToolMigrations, removedToolNotice, migrateToolGuidance } from ".
 const cases: Record<string, { input?: Record<string, unknown>; method: string; suffix: string }> = {
     production_preflight: { input: { action: "generate", request: { expectedRevision: 2 } }, method: "POST", suffix: "/preflight" },
     production_get: { method: "GET", suffix: "?view=summary&snapshot=draft" },
+    production_get_source: { input: { sourceSection: "shots" }, method: "GET", suffix: "?view=source&snapshot=draft&sourceSection=shots&pageSize=50" },
+    production_get_artifact_index: { method: "GET", suffix: "?view=artifact_index&snapshot=draft&pageSize=50" },
+    production_get_artifact: { input: { targetId: "seg/1" }, method: "GET", suffix: "?view=artifacts&snapshot=draft&targetIds=seg%2F1&chunkBytes=32768" },
+    production_get_workbench: { input: { targetId: "seg/1", view: "clip_workbench" }, method: "GET", suffix: "?view=clip_workbench&snapshot=draft&targetIds=seg%2F1" },
     production_get_readiness: { method: "GET", suffix: "/readiness" },
     production_start_run: { input: { runId: "r", idempotencyKey: "original", expectedRevision: 2, targets: ["segment:s"], inputBasis: "canvas", expectedCanvasRevision: 7 }, method: "POST", suffix: "/runs" },
     production_get_batch: { input: { runId: "r" }, method: "GET", suffix: "/batches/r" },
@@ -25,6 +29,9 @@ const cases: Record<string, { input?: Record<string, unknown>; method: string; s
     production_resume_run: { input: { runId: "r" }, method: "POST", suffix: "/batches/r/resume" },
     production_list_versions: { method: "GET", suffix: "/versions" },
     production_get_version: { input: { version: 2 }, method: "GET", suffix: "/versions/2?view=summary&snapshot=draft" },
+    production_get_version_source: { input: { version: 2, sourceSection: "shots" }, method: "GET", suffix: "/versions/2?view=source&snapshot=published&sourceSection=shots&pageSize=50" },
+    production_get_version_artifact_index: { input: { version: 2 }, method: "GET", suffix: "/versions/2?view=artifact_index&snapshot=published&pageSize=50" },
+    production_get_version_artifact: { input: { version: 2, targetId: "seg/1" }, method: "GET", suffix: "/versions/2?view=artifacts&snapshot=published&targetIds=seg%2F1&chunkBytes=32768" },
     production_list_legacy: { method: "GET", suffix: "/legacy" },
     production_preview_impact: { input: { stage: "director" }, method: "GET", suffix: "/impact?stage=director" },
     production_edit: { input: { operationId: "original", expectedRevision: 2, ops: [{ type: "set_director_brief", brief: "中文\n原文" }] }, method: "POST", suffix: "/ops" },
@@ -34,8 +41,8 @@ const cases: Record<string, { input?: Record<string, unknown>; method: string; s
     production_get_run: { input: { version: 2 }, method: "GET", suffix: "/runs/2" },
     production_export_markdown: { input: { stage: "shots", version: 2 }, method: "GET", suffix: "/export?stage=shots&version=2" },
 };
-test("17 unified contracts route same IDs by explicit owner and reject mixed identities", () => {
-    assert.equal(productionToolNames.length, 17);
+test("24 unified contracts route same IDs by explicit owner and reject mixed identities", () => {
+    assert.equal(productionToolNames.length, 24);
     for (const name of productionToolNames) for (const kind of ["episode", "canvas"] as const) {
         const c = cases[name], raw = { kind, id: "same:id", ...c.input };
         const request = productionToolRequest(name, raw);
@@ -66,6 +73,6 @@ test("write routing preserves request identity and projects replies without carr
         return { ok: true, production: { episodeId: "c", revision: 3, replayed: true, draft: { huge: "x".repeat(1000000) } } };
     } }, "production_edit", input);
     assert.equal(count, 1); assert.equal(result.operationId, "original"); assert.equal(result.production.replayed, true);
-    assert.deepEqual(result.nextRead, { tool: "production_get", input: { kind: "canvas", id: "c", view: "summary" } });
+    assert.deepEqual(result.nextRead, { tool: "production_get", input: { kind: "canvas", id: "c" } });
     assert.ok(JSON.stringify(result).length < 2000);
 });

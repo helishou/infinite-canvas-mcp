@@ -18,6 +18,13 @@ test("all published operation examples use the actual edit contract", () => {
     assert.throws(() => productionOperationContract("invented"), /Unknown/);
 });
 
+test("asset deletion requires explicit confirmation in the revision-checked operation contract", () => {
+    const operation = productionOperationContract("delete_director_asset").operations[0];
+    assert.deepEqual(operation.preconditions?.length, 1);
+    assert.equal(productionEditSchema.safeParse({ operationId: "delete-asset", expectedRevision: 1, ops: [{ type: "delete_director_asset", id: "PROP1", confirmed: true }] }).success, true);
+    assert.equal(productionEditSchema.safeParse({ operationId: "delete-asset", expectedRevision: 1, ops: [{ type: "delete_director_asset", id: "PROP1", confirmed: false }] }).success, false);
+});
+
 test("MCP edit schemas reject formerly opaque invalid operations", () => {
     for (const schema of [toolInputSchemas.production_edit]) {
         for (const op of [{ type: "set_director_brief", brief: {} }, { type: "patch_director_source", patch: {} }]) {

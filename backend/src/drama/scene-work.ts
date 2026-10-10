@@ -4,7 +4,7 @@ import path from "node:path";
 import { z } from "zod";
 import { ProductionAgentPool, type ProductionAgentRequest } from "@basketikun/canvas-agent/agent/production";
 import { compilationHash, compilationScopeInput, currentCompilationArtifact, productionReviewHash } from "@basketikun/canvas-agent/drama/compilation-scope";
-import { directorProductionSchema, directorSceneWorkSchema, directorSharedReviewWorkSchema, productionSceneEntries, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
+import { directorProductionSchema, directorSceneWorkSchema, directorSharedReviewWorkSchema, productionSceneEntries, resolveDirectorReviewPolicy, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 import { resolveAchengEngine } from "@basketikun/canvas-agent/skills/acheng";
 import { EpisodeProductionService, ProductionConflictError } from "./production.js";
 import { ProductionCompilationService } from "./compilation.js";
@@ -291,7 +291,7 @@ export class SceneWorkCoordinator {
         if (prior) return { production: prior, replayed: true };
         const current = this.service.get(id), director = current.draft.director;
         if (current.revision !== input.expectedRevision) throw new ProductionConflictError(current);
-        if (!director || !current.draft.settings.parallelScenes || !current.draft.settings.reviewPolicy) throw new Error("SCENE_SETTINGS_REQUIRED: 请在剧目开局明确启用并行制作并选择审核模式");
+        if (!director || !current.draft.settings.parallelScenes) throw new Error("SCENE_SETTINGS_REQUIRED: 请先启用并行场次制作");
         const shared = this.shared(id);
         const known = new Set(productionSceneEntries(director.source).map(scene => scene.id));
         const sceneWorks = { ...director.workflow.sceneWorks };
@@ -309,8 +309,8 @@ export class SceneWorkCoordinator {
             }
             const workId = `scene:${compilationHash({ id, operationId: input.operationId, sceneId }).slice(0, 24)}`;
             sceneWorks[workId] = { workId, sceneId, inputRevision: current.revision + 1, sourceHash: director.sourceHash, inputHash: compilationScopeInput(director, { sceneId }).inputHash,
-                status: director.workflow.sharedReview?.inputHash === shared.inputHash && director.workflow.sharedReview.verdict === "approved" ? "pending" : "awaiting_review", stage: "create", runIds: [], artifactIds: [], generationAuthorized: input.generateMedia,
-                policy: structuredClone(current.draft.settings.reviewPolicy), model: input.model, effort: input.effort, updatedAt: new Date().toISOString() };
+                status: "pending", stage: "create", runIds: [], artifactIds: [], generationAuthorized: input.generateMedia,
+                policy: resolveDirectorReviewPolicy(current.draft.settings.reviewPolicy), model: input.model, effort: input.effort, updatedAt: new Date().toISOString() };
         }
         const production = this.service.edit(id, { operationId: input.operationId, expectedRevision: input.expectedRevision, ops: [{ type: "set_director_workflow", patch: { sceneWorks } }] }, undefined, true);
         for (const work of Object.values(sceneWorks).filter(work => work.inputRevision === current.revision + 1 && !["running", "paused"].includes(work.status))) void this.advance(id, work.workId);
@@ -325,11 +325,16 @@ export class SceneWorkCoordinator {
         return this.service.get(id);
     }
     resume(id: string, workId: string, operationId?: string) {
-        const current = this.service.get(id);
-        const work = current.draft.director?.workflow.sceneWorks?.[workId];
+        let current = this.service.get(id);
+        let work = current.draft.director?.workflow.sceneWorks?.[workId];
         if (!work || ["succeeded", "failed"].includes(work.status)) throw new Error("场次工作不存在或已结束；退回或失败请明确新建返修工作");
         if (work.runIds.some(runId => this.service.getBatch(id, runId)?.status === "failed")) throw new Error("媒体运行已失败；请明确返修并新建生成运行，不自动重提交");
-        for (const runId of work.runIds) if (this.service.getBatch(id, runId)?.status === "paused" || this.service.getBatch(id, runId)?.pauseRequested) {
+        const reviewPolicy = resolveDirectorReviewPolicy(current.draft.settings.reviewPolicy);
+        if (["awaiting_review", "paused"].includes(work.status) && work.stage !== "create" && reviewPolicy.mode === "none") {
+            this.update(id, workId, { status: "pending", policy: reviewPolicy, error: null }, false);
+            current = this.service.get(id); work = current.draft.director!.workflow.sceneWorks![workId];
+        }
+        for (const runId of work.runIds) if (["paused", "awaiting_review"].includes(this.service.getBatch(id, runId)?.status || "") || this.service.getBatch(id, runId)?.pauseRequested) {
             this.service.resumeBatch(id, runId); if (this.runner) void this.runner.runBatch(id, runId);
         }
         // A create-stage work may legitimately wait for the human to supply the shared
@@ -454,7 +459,7 @@ export class SceneWorkCoordinator {
             let current = this.service.get(id), work = current.draft.director!.workflow.sceneWorks![workId];
             if (!work || ["paused", "succeeded", "failed", "blocked"].includes(work.status)) return;
             const shared = this.shared(id);
-            if (current.draft.director!.workflow.sharedReview?.inputHash !== shared.inputHash || current.draft.director!.workflow.sharedReview?.verdict !== "approved") {
+            if (work.policy.shared !== "none" && (current.draft.director!.workflow.sharedReview?.inputHash !== shared.inputHash || current.draft.director!.workflow.sharedReview?.verdict !== "approved")) {
                 if (work.policy.shared === "automatic") await this.automaticReview(id, work, true);
                 else this.update(id, workId, { status: "awaiting_review", error: "等待共同基础导演审核" });
                 current = this.service.get(id); work = current.draft.director!.workflow.sceneWorks![workId];
@@ -484,7 +489,7 @@ export class SceneWorkCoordinator {
                 const artifact = directorArtifact(packet?.inputHash || work.inputHash, packet?.runtimeId || work.inputEngine?.runtimeId, raw as Record<string, unknown>, packet?.contractHash);
                 const priorArtifacts = latest.draft.director!.workflow.sceneWorks![workId].workArtifacts || [];
                 if (!priorArtifacts.some(item => item.artifactHash === artifact.artifactHash)) this.update(id, workId, { workArtifacts: [...priorArtifacts, artifact] });
-                if (!merged.director) { this.update(id, workId, { status: "awaiting_review", cursor: merged.result.cursor, agentTurnId: undefined, recoveryPending: false, error: merged.result.unresolved.join("；") || "源稿尚未完成" }); return; }
+                if (!merged.director) { this.update(id, workId, { status: "blocked", cursor: merged.result.cursor, agentTurnId: undefined, recoveryPending: false, error: merged.result.unresolved.join("；") || "源稿尚未完成" }); return; }
                 const beforeMerge = this.service.get(id);
                 merged.director.workflow = beforeMerge.draft.director!.workflow;
                 const operationId = `scene-merge:${workId}:${compilationHash(raw)}`;
@@ -523,10 +528,6 @@ export class SceneWorkCoordinator {
             const operationId = `scene-compile:${workId}:${work.stage}:${compilationScopeInput(current.draft.director!, { sceneId: work.sceneId }).inputHash}`;
             if (work.compilationId !== operationId) {
                 const segmentIds = rows(compilationScopeInput(current.draft.director!, { sceneId: work.sceneId }).director.source.segments).map(objectId);
-                if ((current.draft.director!.source.ledger as any)?.contract_version === 2 && segmentIds.length) {
-                    this.service.checkContinuity(id, { operationId: `scene-continuity:${workId}:${current.draft.director!.sourceHash}`, expectedRevision: current.revision, targetIds: segmentIds, snapshot: "draft" });
-                    current = this.service.get(id);
-                }
                 this.compilations.enqueue(id, this.owner, operationId, current.revision, undefined, { sceneId: work.sceneId });
                 this.update(id, workId, { compilationId: operationId, status: "awaiting_media" });
             }
@@ -572,9 +573,19 @@ export class SceneWorkCoordinator {
         if (work.stage === "review") {
             const missing = requiredSceneAssets(projection.director, current.draft.settings.storyboardImageMode === "skip").filter(assetId => !current.draft.director!.assets[assetId]?.storageKey);
             if (missing.length) {
+                if (!work.generationAuthorized) {
+                    this.update(id, workId, { stage: "complete", status: "succeeded", error: "源稿和提示词已交付；本次未授权生成媒体" });
+                    return;
+                }
                 const generated = projection.targetIds.filter(assetId => current.draft.director!.assets[assetId]?.status === "generated");
                 if (generated.length && work.policy.scene === "automatic") await this.automaticReview(id, work, false, generated);
-                else this.update(id, workId, { status: generated.length ? "awaiting_review" : work.generationAuthorized ? "awaiting_media" : "awaiting_review", error: generated.length ? "请先审核当前前置素材，批准后生成其下游" : work.generationAuthorized ? "本场素材依赖尚未就绪" : "源稿已完成；本次未授权生成媒体" });
+                else if (work.policy.scene === "none") this.update(id, workId, { status: "awaiting_media", error: "本场所需媒体尚未归档或绑定" });
+                else this.update(id, workId, { status: "awaiting_review", error: generated.length ? "等待已启用的审核策略" : "等待本场审核" });
+                return;
+            }
+            if (work.policy.scene === "none") {
+                this.update(id, workId, { stage: "produce", status: "pending", error: null });
+                await this.continueProduction(id, workId);
                 return;
             }
             if (work.policy.scene === "automatic") await this.automaticReview(id, work);
@@ -582,7 +593,8 @@ export class SceneWorkCoordinator {
         } else if (work.stage === "produce") {
             const segmentTargets = ready.targets.filter(item => item.kind === "segment" && allowed.has(item.targetId));
             if (segmentTargets.length && segmentTargets.every(item => item.status === "complete")) this.update(id, workId, { stage: "complete", status: "succeeded", inputHash: compilationScopeInput(this.service.get(id).draft.director!, { sceneId: work.sceneId }).inputHash, sourceHash: this.service.get(id).draft.director!.sourceHash, error: null });
-            else this.update(id, workId, { status: "awaiting_review", error: work.generationAuthorized ? segmentTargets.flatMap(item => item.blockers).join("；") || "等待 H3 技术收口" : "H3 提示词已编译；本次未授权生成" });
+            else if (!work.generationAuthorized) this.update(id, workId, { stage: "complete", status: "succeeded", error: "H3 提示词已编译；本次未授权生成媒体" });
+            else this.update(id, workId, { status: "awaiting_media", error: segmentTargets.flatMap(item => item.blockers).join("；") || "等待 H3 媒体任务" });
         }
     }
     wake(id: string) { this.continueSharedReview(id); for (const audit of Object.values(this.service.get(id).draft.director?.workflow.sharedReviewWorks || {})) if (audit.status === "pending") void this.advanceSharedReview(id, audit.workId); for (const work of Object.values(this.service.get(id).draft.director?.workflow.sceneWorks || {})) if (["pending", "awaiting_media"].includes(work.status)) void this.advance(id, work.workId); }
