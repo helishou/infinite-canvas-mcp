@@ -7,6 +7,7 @@ import express, {
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { sourceOf, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
 import { ensureProductionCanvas, productionCanvasContext } from "./drama/production-canvas.js";
 
 import {
@@ -96,6 +97,11 @@ export function startServer(
       operationId: commit.operationId,
       source: commit.source as CanvasEventSource,
     });
+    for (const asset of db.listSharedAssetRecordsForProject(commit.projectId)) {
+      const source = sourceOf(asset);
+      if (source?.sourceProjectId === commit.projectId) events.publish({ type: "asset.updated", entityId: asset.id, payload: db.getAsset(asset.id) });
+    }
+    for (const assetId of commit.deletedAssetIds || []) events.publish({ type: "asset.updated", entityId: assetId, payload: { deleted: 1 } });
     for (const update of commit.productionUpdates || []) events.publish({ type: "drama-production.updated", entityId: update.entityId, payload: { revision: update.revision } });
   });
   const app = express();
@@ -597,9 +603,7 @@ export function startServer(
     if (!db.getCanvasProject(req.params.id))
       return void res.status(404).json({ ok: false, error: "画布不存在" });
     const episode = db.getDramaEpisodeByCanvasId(req.params.id);
-    const drama = episode
-      ? stores.canvasFolders.list().find((item) => item.id === episode.dramaId) || null
-      : null;
+    const drama = stores.canvasFolders.list().find(item => episode ? item.id === episode.dramaId : item.sharedAssetCanvasId === req.params.id) || null;
     res.json({ ok: true, projectId: req.params.id, episode, drama });
   });
   app.get("/canvas/projects/:id/production-context", (req, res) => {
@@ -1266,44 +1270,42 @@ export function startServer(
     events.publish({ type: "asset.updated", payload: result });
     res.json({ ok: true, ...result });
   });
+  const assetError = (res: express.Response, error: unknown) => {
+    const value = error as Error & { code?: string; consumers?: unknown; conflictTargets?: unknown };
+    res.status(value.code === "FIELD_CONFLICT" || value.code === "ASSET_IN_USE" || value.code === "OPERATION_ID_REUSED" ? 409 : 400)
+      .json({ ok: false, code: value.code || "INVALID_ASSET", error: value.message, consumers: value.consumers, conflictTargets: value.conflictTargets });
+  };
   app.post("/canvas/assets", (req, res) => {
-    const asset = req.body as Asset;
-    if (!asset?.id)
-      return void res.status(400).json({ ok: false, error: "asset.id 必填" });
-    const result = stores.assets.upsert(asset);
-    events.publish({
-      type: "asset.updated",
-      entityId: result.id,
-      payload: result,
-    });
-    res.status(201).json({ ok: true, asset: result });
+    const { operationId, canvasSource, discardLocal, resolveConflicts, assetBase, ...asset } = req.body;
+    if (!asset?.id) return void res.status(400).json({ ok: false, error: "asset.id 必填" });
+    try {
+      const replayed = Boolean(operationId && db.db.prepare("SELECT 1 FROM shared_library_receipts WHERE operation_id=?").get(operationId));
+      const result = db.upsertAsset(asset as Asset, { operationId, canvasSource, discardLocal, resolveConflicts, assetBase, request: req.body } as AssetWriteCommand);
+      events.publish({ type: "asset.updated", entityId: result.id, payload: result });
+      const source = sourceOf(result);
+      res.status(201).json({ ok: true, asset: result, operationId, replayed,
+        ...(source ? { source, sourceRevision: db.getCanvasProjectRevision(source.sourceProjectId) } : {}) });
+    } catch (error) { assetError(res, error); }
   });
   app.patch("/canvas/assets/:id", (req, res) => {
     const current = stores.assets.get(req.params.id);
-    if (!current)
-      return void res.status(404).json({ ok: false, error: "asset not found" });
-    const next = {
-      ...current,
-      ...(req.body as Partial<Asset>),
-      id: current.id,
-      updatedAt: new Date().toISOString(),
-    };
-    const result = stores.assets.upsert(next);
-    events.publish({
-      type: "asset.updated",
-      entityId: result.id,
-      payload: result,
-    });
-    res.json({ ok: true, asset: result });
+    if (!current) return void res.status(404).json({ ok: false, error: "asset not found" });
+    const { operationId, canvasSource, discardLocal, resolveConflicts, assetBase, ...patch } = req.body;
+    try {
+      const replayed = Boolean(operationId && db.db.prepare("SELECT 1 FROM shared_library_receipts WHERE operation_id=?").get(operationId));
+      const result = db.upsertAsset({ ...current, ...patch, id: current.id }, { operationId, canvasSource, discardLocal, resolveConflicts, assetBase, request: { id: current.id, ...req.body } });
+      events.publish({ type: "asset.updated", entityId: result.id, payload: result });
+      const source = sourceOf(result);
+      res.json({ ok: true, asset: result, operationId, replayed,
+        ...(source ? { source, sourceRevision: db.getCanvasProjectRevision(source.sourceProjectId) } : {}) });
+    } catch (error) { assetError(res, error); }
   });
   app.delete("/canvas/assets/:id", (req, res) => {
-    const deleted = stores.assets.delete(req.params.id);
-    events.publish({
-      type: "asset.updated",
-      entityId: req.params.id,
-      payload: { deleted },
-    });
-    res.json({ ok: true, deleted });
+    try {
+      const deleted = stores.assets.delete(req.params.id);
+      events.publish({ type: "asset.updated", entityId: req.params.id, payload: { deleted } });
+      res.json({ ok: true, deleted });
+    } catch (error) { assetError(res, error); }
   });
 
   // ── Asset folders ────────────────────────────────────────────────────

@@ -298,6 +298,7 @@ const assetUpsertItemSchema = z.object({
   tags: z.array(z.string()).optional(),
   folderId: z.string().nullable().optional(),
   dramaId: z.string().nullable().optional(),
+  canvasSource: z.object({ projectId: z.string().min(1), nodeId: z.string().min(1) }).optional().describe("加入剧目资产库的来源节点；普通素材节点转为共享引用，智能生成只共享当前产物"),
   data: recordSchema.describe("资产业务数据；可保存 images、outfit、colorCard 等结构化字段"),
   note: z.string().nullable().optional(),
   source: z.string().nullable().optional(),
@@ -724,6 +725,8 @@ export const toolInputSchemas = {
   }),
   assets_get: z.object({ id: z.string().min(1).describe("assets_list 返回的精确素材 ID") }),
   assets_add: z.object({
+    dramaId: z.string().optional().describe("目标剧目；存在时保存到该剧目的唯一共享资产画布"),
+    canvasSource: z.object({ projectId: z.string().min(1), nodeId: z.string().min(1) }).optional(),
     operationId: z.string().min(1).describe("本次素材新增的稳定 UUID；响应未知时用同一 ID 和完全相同请求恢复回执"),
     kind: z.enum(["text", "image"]).describe("text=纯文本素材；image=图片素材"),
     title: z.string().describe("素材标题，必填"),

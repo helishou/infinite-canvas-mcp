@@ -486,6 +486,17 @@ export default {
         customAssets: { eyebrow: "剧目级文件", title: "自定义资产", description: "LUT、字体、剧本、参考文档或资产包，由整部剧共享。", upload: "上传资产", empty: "尚未上传剧目级自定义资产", loadFailed: "剧目资产读取失败", uploadFailed: "剧目资产上传失败", uploaded: "已上传 {{count}} 个剧目资产", deleteTitle: "删除剧目资产", deleteDescription: "确定删除「{{name}}」吗？", deleted: "剧目资产已删除", download: "下载资产", delete: "删除资产" },
     },
     canvas: {
+        sharedLibrary: {
+            update: "更新资产库",
+            localChanges: "有本地修改",
+            discard: "放弃本地修改",
+            discarded: "已恢复共享资产内容",
+            unavailable: "共享资产暂不可用，请刷新资产库后重试",
+            conflictTitle: "共享资产有内容冲突",
+            conflictDescription: "相同字段已被其他画布修改。可以保留本地修改，或明确用本地修改更新这些字段；其他字段保持最新内容。",
+            useLocal: "使用本地修改",
+            keepDraft: "保留本地修改",
+        },
         mediaPreview: {"previous":"上一个输出","next":"下一个输出","position":"第 {{current}} 项，共 {{total}} 项"},
         navigation: {
             "searchLabel": "搜索并筛选节点列表",
@@ -541,9 +552,9 @@ export default {
         miniMapClose: "关闭小地图",
         resetView: "重置视图",
         zoom: "放大/缩小画布",
-        nodeTypes: { image: "图片", text: "文本", config: "智能生成", video: "视频", audio: "音频", loop: "循环", group: "组", character: "角色", scene: "场景" },
+        nodeTypes: { image: "图片", text: "文本", config: "智能生成", video: "视频", audio: "音频", loop: "循环", group: "组", character: "角色", scene: "场景", prop: "道具" },
         toolbar: {
-            select: "选择", pan: "移动", text: "文本", image: "图片", video: "视频", audio: "音频", config: "智能生成", loop: "循环", character: "角色", scene: "场景", group: "组", extensions: "扩展节点", upload: "上传资产", appearance: "画布外观", clear: "清空画布", arrange: "整理布局",
+            select: "选择", pan: "移动", text: "文本", image: "图片", video: "视频", audio: "音频", config: "智能生成", loop: "循环", character: "角色", scene: "场景", prop: "道具", group: "组", extensions: "扩展节点", upload: "上传资产", appearance: "画布外观", clear: "清空画布", arrange: "整理布局",
             themeMode: "主题模式", light: "浅色", dark: "深色", gridStyle: "网格样式", dots: "点", lines: "线", blank: "空白", imageInfo: "图片信息",
         },
         project: {
@@ -621,17 +632,20 @@ export default {
             convertNoImage: "只能把有图片内容的节点转为场景节点",
             converted: "已转为场景节点",
         },
+        prop: {
+            empty: "空道具节点", editTitle: "编辑道具", name: "道具名称", namePlaceholder: "输入道具名称", image: "道具图片", addFromCanvas: "从画布选择", noImage: "尚未选择道具图片", description: "道具描述", descriptionPlaceholder: "描述道具的外观、材质、状态或使用方式", selectingImageHint: "从画布选择图片节点 · ESC 返回编辑", convertNoImage: "只能把有图片内容的节点转为道具节点", converted: "已转为道具节点",
+        },
         videoFrames: { first: "截取首帧", last: "截取尾帧", current: "截取当前帧", allShots: "截取全部分镜首帧", extracting: "正在截取…", firstTitle: "{{name}} 首帧", lastTitle: "{{name}} 尾帧", currentTitle: "{{name}} 当前帧", shotTitle: "镜 {{index}}", shotGroupTitle: "{{name}} · {{count}} 镜首帧", extracted: "已截取 {{count}} 个分镜首帧", noShots: "这段视频没有检测到镜头切换", captured: "已生成图片节点", failed: "无法截取该画面，请重试" },
         sidePanel: {
             gridView: "缩略图视图", listView: "列表视图",
             canvas: "画布", assets: "资产", prompts: "提示词库", resize: "调整左侧面板宽度", elements: "画布元素", select: "选择", searchNodes: "名称、类型、提示词或节点 ID", focusNode: "定位到节点", preview: "放大预览", noNodes: "画布暂无节点", clearAll: "取消全选", selected: "已选 {{count}}", exporting: "正在导出选中元素…", exportName: "画布元素-{{count}}个", exported: "已导出 {{count}} 个元素", exportFailed: "导出失败，请重试",
             addingAssets: "正在添加资产…", addedAssets: "已添加 {{count}} 个资产", mediaOnly: "仅支持图片或视频文件", addFailed: "添加失败，请重试", searchAssets: "搜索资产", add: "添加", noAssets: "暂无资产", inserted: "插入画布", removeAssetTitle: "移除该资产？", remove: "移除", removeAsset: "移除资产", assetRemoved: "资产已移除",
             searchPrompts: "搜索提示词", addPrompt: "新增提示词", noPrompts: "暂无提示词", promptCopied: "已复制提示词", copyFailed: "复制失败", loadFailedRetry: "加载失败，点击重试", noMatchingPrompts: "无匹配提示词", sourceEmpty: "该来源暂无提示词", customEmpty: "还没有自定义提示词，点上方 + 新增一条吧", viewDetails: "查看详情", mediaUnavailable: "总后台未连接，暂时读不到画布图片",
-            filter: { image: "图片", video: "视频", text: "文本", audio: "音频", config: "配置", loop: "循环", character: "角色", scene: "场景", group: "分组" },
+            filter: { image: "图片", video: "视频", text: "文本", audio: "音频", config: "配置", loop: "循环", character: "角色", scene: "场景", prop: "道具", group: "分组" },
         },
         assetPicker: { title: "选择资产", insert: "插入", search: "搜索资产", empty: "没有资产" },
         imageTools: { copyPrompt: "复制提示词", copyPromptTitle: "复制生成该图片的提示词", reversePrompt: "反推提示词", reversePromptTitle: "创建反推提示词的文本和配置节点", replace: "替换图片", locked: "锁比例", free: "自由比例", lockTitle: "切换为等比缩放", freeTitle: "切换为自由比例", mask: "局部编辑", maskTitle: "添加蒙版遮罩后局部修改", crop: "裁剪", cropTitle: "裁剪并生成新节点", split: "切图", splitTitle: "按行列切分图片", upscale: "放大", upscaleTitle: "放大图片分辨率", superResolve: "超分", superResolveTitle: "AI 超分", autoLevels: "自动色阶", autoLevelsTitle: "运行 moyou 自动色阶工作流", angle: "多角度", angleTitle: "生成角度", view: "查看大图", viewTitle: "查看图片详情", more: "更多", configure: "配置快捷工具", customize: "自定义工具栏", showLabels: "显示按钮文字", description: "选择你想在图片节点编辑栏中使用的快捷工具。", preview: "节点预览", imageNode: "图片节点", quickTools: "快捷工具" },
-        nodeToolbar: { noPrompt: "暂无可复制的提示词", infoTitle: "查看节点信息", info: "信息", removeTitle: "移除节点", arrangeGroupTitle: "把组内节点改成相近尺寸并顺序排列到组里", arrangeGroup: "整理", retryTitle: "重新生成", saveAsset: "存资产", convertToCharacter: "转为角色节点", convertToScene: "转为场景节点", saveCharacterToAsset: "存为角色资产", saveSceneToAsset: "存为场景资产", downloadAudio: "下载音频", downloadVideo: "下载视频", downloadImage: "下载图片", editTextTitle: "编辑文本", editText: "编辑文字", decreaseFont: "减小字号", increaseFont: "增大字号", zoomOut: "缩小", zoomIn: "放大", uploadImage: "上传图片", replaceVideo: "替换视频", uploadVideo: "上传视频", replaceAudio: "替换音频", uploadAudio: "上传音频", nodeInfo: "节点信息", name: "名称", type: "类型", size: "尺寸", position: "位置", status: "状态", imageGroup: "图片组", imageSize: "图片大小" },
+        nodeToolbar: { noPrompt: "暂无可复制的提示词", infoTitle: "查看节点信息", info: "信息", removeTitle: "移除节点", arrangeGroupTitle: "把组内节点改成相近尺寸并顺序排列到组里", arrangeGroup: "整理", retryTitle: "重新生成", saveAsset: "存资产", convertToCharacter: "转为角色节点", convertToScene: "转为场景节点", convertToProp: "转为道具节点", saveCharacterToAsset: "存为角色资产", saveSceneToAsset: "存为场景资产", downloadAudio: "下载音频", downloadVideo: "下载视频", downloadImage: "下载图片", editTextTitle: "编辑文本", editText: "编辑文字", decreaseFont: "减小字号", increaseFont: "增大字号", zoomOut: "缩小", zoomIn: "放大", uploadImage: "上传图片", replaceVideo: "替换视频", uploadVideo: "上传视频", replaceAudio: "替换音频", uploadAudio: "上传音频", nodeInfo: "节点信息", name: "名称", type: "类型", size: "尺寸", position: "位置", status: "状态", imageGroup: "图片组", imageSize: "图片大小" },
         videoCompare: { open: "对比", title: "视频同屏对比", selectingHint: "点击画布中的视频节点进行对比 · Esc 取消", selectingSource: "当前视频", chooseNode: "点击选择对比视频", choose: "添加更多画布视频", placeholder: "搜索并添加视频节点", noCandidates: "画布中没有其他视频", source: "当前视频", play: "播放全部", pause: "暂停全部", seek: "对齐播放进度", loadFailed: "视频加载失败", hint: "所有视频按同一时间点播放；较短视频结束后停在末帧。对比视频静音，仅播放当前视频声音。", hstackDownload: "下载横向拼接", hstackRunning: "正在横向拼接 {{count}} 路视频…", hstackNeedTwo: "横向拼接至少需要两路视频，请再添加一路对比视频。", hstackHint: "把当前选中的所有视频横向拼成一行下载：每格等高、各自保持宽高比，较短视频停在末帧，音频取第一路。", hstackDone: "横向拼接已下载：{{name}}", hstackFailed: "横向拼接失败：{{error}}" },
         configNode: { title: "智能生成", image: "生图", text: "文本", video: "视频", audio: "音频", prompt: "提示词", references: "参考图", videoReferences: "参考视频", audioReferences: "参考音频", items: "{{count}} 个", images: "{{count}} 张", compose: "组装提示词", stop: "停止", generate: "开始生成" },
         loopNode: { title: "循环", count: "循环次数", auto: "自动", serial: "串行", parallel: "并行", prompt: "提示词", image: "图片", video: "视频", audioInput: "音频", start: "起始序号", batchSize: "每轮数量", defaultPrompt: "生成第《计数》轮结果", videoHistory: "视频历史", currentResult: "当前结果", historyResult: "历史结果 {{count}}", upstreamPrompts: "已连接 {{count}} 条上游提示词", addPrompt: "新增提示词", removePrompt: "删除提示词", counterToken: "《计数》", promptPlaceholder: "可选：使用《计数》《总数》《进度》作为变量", inputHint: "轮数按输入自动计算，结果按顺序放入右侧有序组", run: "运行循环", stop: "停止循环", running: "已完成 {{current}} / {{total}} 轮", noTarget: "循环节点会自动准备右侧结果组", noInput: "请设置生成提示词或连接可用输入", noMediaAtStart: "起始序号超出输入数量，没有可运行的轮次", mixedMedia: "一个循环输入组只能使用一种媒体类型，请拆分为同类型素材组", mediaMismatch: "输入素材类型与当前生成模式不兼容", parallelMediaOnly: "并行模式当前只支持图片或视频输出", videoToImageUnsupported: "图片生成不能直接使用循环视频输入" },

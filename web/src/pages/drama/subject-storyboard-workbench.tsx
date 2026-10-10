@@ -60,6 +60,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const [search, setSearch] = useState("");
     const [view, setView] = useState<"shots" | "clips">("shots");
     const [workbench, setWorkbench] = useState<Record<string, any>>();
+    const [workbenchId, setWorkbenchId] = useState("");
     const [workbenchError, setWorkbenchError] = useState("");
     const [retry, setRetry] = useState(0);
     const [reading, setReading] = useState(false);
@@ -85,7 +86,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const readView = subjectAssembly ? "shot_workbench" : "clip_workbench";
     const readId = subjectAssembly ? activeId : String(clip?.id || "");
     useEffect(() => {
-        if (!readId) { setWorkbench(undefined); setReading(false); return; }
+        if (!readId) { setWorkbench(undefined); setWorkbenchId(""); setReading(false); return; }
         // 缓存键含源稿哈希与参考结果版本：命中即先展示旧数据并后台静默刷新，避免每次切换/保存都闪「正在读取」。
         const cacheKey = `${ownerKey}|${readView}|${readId}|${director.sourceHash}|${referenceVersion}|${referenceEvents}`;
         let current = true;
@@ -94,10 +95,12 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
         const apply = (value: Record<string, any>) => {
             if (workbenchCache.size >= 80) workbenchCache.delete(workbenchCache.keys().next().value!);
             workbenchCache.set(cacheKey, value);
-            if (current) setWorkbench(productionWorkbenchValue(value, subjectAssembly ? "shot" : "clip"));
+            if (current) { setWorkbench(productionWorkbenchValue(value, subjectAssembly ? "shot" : "clip")); setWorkbenchId(readId); }
         };
-        if (hit) { setWorkbench(productionWorkbenchValue(hit, subjectAssembly ? "shot" : "clip")); setReading(false); }
-        else { setReading(true); setWorkbench(undefined); }
+        if (hit) { setWorkbench(productionWorkbenchValue(hit, subjectAssembly ? "shot" : "clip")); setWorkbenchId(readId); setReading(false); }
+        // 同一镜头因保存/分割合并触发重读时保留旧内容，仅提示刷新中：整体卸载会导致页面抖动。
+        else if (workbenchId !== readId) { setReading(true); setWorkbench(undefined); }
+        else setReading(true);
         void fetchProductionWorkbench(owner, readView, readId).then(result => {
             if (!current) return;
             if (result.production.sourceHash !== director.sourceHash) { setWorkbenchError(t("director.atomic.changedRead")); return; }

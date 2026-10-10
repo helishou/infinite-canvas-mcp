@@ -5,6 +5,7 @@
   "type": "module",
   "main": "./dist/index.js",
   "exports": {
+    "./shared-asset-reference": "./dist/canvas/shared-asset-reference.js",
     "./agent/work-package": "./dist/agent/work-package.js",
     "./agent/llm": "./dist/agent/llm.js",
     "./agent/tool-result": "./dist/agent/tool-result.js",

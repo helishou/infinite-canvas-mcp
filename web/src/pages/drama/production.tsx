@@ -332,21 +332,34 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   }, [routeWorkId, projectId, episodeId, canvasId, production, sourceDrafts, briefDraft, pendingCommand, pendingRunStart, exporting, t]);
 
   const remoteSequence = useRef(0);
+  const refreshInFlight = useRef<Promise<EpisodeProduction | undefined> | null>(null);
+  const refreshQueued = useRef(false);
   useEffect(() => () => { remoteSequence.current++; useProductionFollowStore.getState().setGuardReason("editor", ""); }, [episodeId, projectId]);
   const refreshRemote = useCallback(async () => {
-    const sequence = ++remoteSequence.current;
-    const taskNodes = [...new Set([...(production?.draft.clipGroups || []).map(group => group.nodeId), ...Object.values(production?.draft.director?.assets || {}).map(asset => asset.nodeId)].filter((id): id is string => Boolean(id)))];
-    const [prod, ready, history, runHistory, canvas, tasks, continuity] = await Promise.all([
-      fetchEpisodeProduction(target), fetchProductionReadiness(target), fetchEpisodeProductionVersions(target), fetchProductionBatches(target),
-      fetchBackendProject(canvasId).then(value => value.project).catch(() => null),
-      canvasId && taskNodes.length ? fetchBackendTasks({ projectId: canvasId, nodeIds: taskNodes }).then(value => value.tasks || []) : Promise.resolve([]),
-      fetchProductionContinuity(target, { snapshot: continuitySnapshot }),
-    ]);
-    if (sequence !== remoteSequence.current) return prod.production;
-    setProduction(previous => !previous || previous.episodeId !== prod.production.episodeId || prod.production.revision > previous.revision ? prod.production : previous); setReadiness(ready.readiness); setContinuityReport(continuity.continuity); setVersions(history.versions); setBatches(runHistory.runs);
-    setRuntimeTasks(tasks);
-    if (canvas) setCanvasRead({ id: canvasId, revision: Number(canvas.revision || 0), nodes: (canvas.nodes || []) as ProductionCanvasSnapshot["nodes"] });
-    return prod.production;
+    // 一次编辑常触发两次刷新（显式调用 + drama-production.updated 事件）。合并成一次全量拉取，
+    // in-flight 期间的后续调用只挂起一次尾随刷新，避免 7 个请求 × 2 的重复耗时。
+    if (refreshInFlight.current) { refreshQueued.current = true; return refreshInFlight.current; }
+    const run = (async () => {
+      const sequence = ++remoteSequence.current;
+      const taskNodes = [...new Set([...(production?.draft.clipGroups || []).map(group => group.nodeId), ...Object.values(production?.draft.director?.assets || {}).map(asset => asset.nodeId)].filter((id): id is string => Boolean(id)))];
+      const [prod, ready, history, runHistory, canvas, tasks, continuity] = await Promise.all([
+        fetchEpisodeProduction(target), fetchProductionReadiness(target), fetchEpisodeProductionVersions(target), fetchProductionBatches(target),
+        fetchBackendProject(canvasId).then(value => value.project).catch(() => null),
+        canvasId && taskNodes.length ? fetchBackendTasks({ projectId: canvasId, nodeIds: taskNodes }).then(value => value.tasks || []) : Promise.resolve([]),
+        fetchProductionContinuity(target, { snapshot: continuitySnapshot }),
+      ]);
+      if (sequence !== remoteSequence.current) return prod.production;
+      setProduction(previous => !previous || previous.episodeId !== prod.production.episodeId || prod.production.revision > previous.revision ? prod.production : previous); setReadiness(ready.readiness); setContinuityReport(continuity.continuity); setVersions(history.versions); setBatches(runHistory.runs);
+      setRuntimeTasks(tasks);
+      if (canvas) setCanvasRead({ id: canvasId, revision: Number(canvas.revision || 0), nodes: (canvas.nodes || []) as ProductionCanvasSnapshot["nodes"] });
+      return prod.production;
+    })();
+    refreshInFlight.current = run;
+    try { return await run; }
+    finally {
+      refreshInFlight.current = null;
+      if (refreshQueued.current) { refreshQueued.current = false; void refreshRemote(); }
+    }
   }, [target, canvasId, continuitySnapshot, production?.draft.clipGroups, production?.draft.director?.assets]);
 
   useEffect(() => {

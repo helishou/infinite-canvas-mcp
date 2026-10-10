@@ -173,9 +173,9 @@ export default function AssetsPage() {
     const toggleSelect = (id: string) => setSelection((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
     const selectAllFiltered = () => setSelection(filteredAssets.map((asset) => asset.id));
     const selectNone = () => setSelection([]);
-    const confirmBulkDelete = () => {
+    const confirmBulkDelete = async () => {
         if (!selection.length) return;
-        removeAssets(selection);
+        try { await removeAssets(selection); } catch (error) { message.error(String(error)); return; }
         setSelection([]);
         message.success(t("assets.deletedBulk", { count: selection.length }));
     };
@@ -183,7 +183,7 @@ export default function AssetsPage() {
         const now = new Date().toISOString();
         selection.forEach((id) => {
             const asset = useAssetStore.getState().assets.find((a) => a.id === id);
-            if (asset) updateAsset(id, { folderId, updatedAt: now });
+            if (asset) void updateAsset(id, { folderId, updatedAt: now }).catch(error => message.error(String(error)));
         });
         setSelection([]);
         message.success(t("assets.movedToFolder", { count: selection.length }));
@@ -193,15 +193,15 @@ export default function AssetsPage() {
         selection.forEach((id) => {
             const asset = useAssetStore.getState().assets.find((a) => a.id === id);
             if (asset && asset.kind !== "character" && asset.kind !== "scene" && !(asset.tags || []).includes(tag)) {
-                updateAsset(id, { tags: [...(asset.tags || []), tag] });
+                void updateAsset(id, { tags: [...(asset.tags || []), tag] }).catch(error => message.error(String(error)));
                 count += 1;
             }
         });
         if (count) message.success(t("assets.tagged", { count, tag }));
     };
-    const bulkMoveToDrama = (dramaId: string | null) => {
+    const bulkMoveToDrama = async (dramaId: string | null) => {
         const count = selection.length;
-        selection.forEach((id) => updateAsset(id, { dramaId }));
+        try { await Promise.all(selection.map((id) => updateAsset(id, { dramaId }))); } catch (error) { message.error(String(error)); return; }
         setSelection([]);
         message.success(t("assets.drama.moved", { count }));
     };
@@ -224,13 +224,13 @@ export default function AssetsPage() {
             try {
                 if (file.type.startsWith("image/")) {
                     const image = await uploadImage(file, { category: "library" });
-                    addAsset({ ...base, kind: "image", data: { dataUrl: image.url, storageKey: image.storageKey, width: image.width, height: image.height, bytes: image.bytes, mimeType: image.mimeType } });
+                    await addAsset({ ...base, kind: "image", data: { dataUrl: image.url, storageKey: image.storageKey, width: image.width, height: image.height, bytes: image.bytes, mimeType: image.mimeType } });
                 } else if (file.type.startsWith("audio/")) {
                     const result = await uploadMediaFile(file, "audio", "library");
-                    addAsset({ ...base, kind: "audio", data: { url: result.url, storageKey: result.storageKey, bytes: result.bytes, mimeType: result.mimeType, durationMs: result.durationMs } });
+                    await addAsset({ ...base, kind: "audio", data: { url: result.url, storageKey: result.storageKey, bytes: result.bytes, mimeType: result.mimeType, durationMs: result.durationMs } });
                 } else {
                     const result = await uploadMediaFile(file, "video", "library");
-                    addAsset({ ...base, kind: "video", data: { url: result.url, storageKey: result.storageKey, width: result.width, height: result.height, bytes: result.bytes, mimeType: result.mimeType } });
+                    await addAsset({ ...base, kind: "video", data: { url: result.url, storageKey: result.storageKey, width: result.width, height: result.height, bytes: result.bytes, mimeType: result.mimeType } });
                 }
                 added += 1;
             } catch {
@@ -341,7 +341,7 @@ export default function AssetsPage() {
         setIsAssetOpen(true);
     };
 
-    const saveAsset = async () => {
+    const saveAsset = async (resolveConflicts?: "local") => {
         if (uploadingCharacterVoice) return;
         const values = await form.validateFields();
         const base = {
@@ -356,15 +356,15 @@ export default function AssetsPage() {
 
         if (values.kind === "text") {
             const asset = { ...base, kind: "text" as const, data: { content: (values.content || "").trim() } };
-            editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
+            await (editingAsset ? updateAsset(editingAsset.id, asset, editingAsset, resolveConflicts) : addAsset(asset));
         } else if (values.kind === "audio") {
             if (!audioDraft) { message.error(t("assets.selectAudio")); return; }
             const asset = { ...base, kind: "audio" as const, data: audioDraft };
-            editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
+            await (editingAsset ? updateAsset(editingAsset.id, asset, editingAsset, resolveConflicts) : addAsset(asset));
         } else if (values.kind === "video") {
             if (!videoDraft) { message.error(t("assets.selectVideo")); return; }
             const asset = { ...base, kind: "video" as const, data: videoDraft };
-            editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
+            await (editingAsset ? updateAsset(editingAsset.id, asset, editingAsset, resolveConflicts) : addAsset(asset));
         } else if (values.kind === "character") {
             const primaryIndex = characterImages.length
                 ? Math.min(Math.max(characterPrimaryIndex, 0), characterImages.length - 1)
@@ -388,7 +388,7 @@ export default function AssetsPage() {
             // 角色表单的"描述"从 form.content 读取（在表单里复用 content 字段避免再加一项）
             if (values.content) characterData.description = values.content;
             const asset = { ...base, kind: "character" as const, data: characterData, coverUrl: characterImages[primaryIndex]?.url || "" };
-            editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
+            await (editingAsset ? updateAsset(editingAsset.id, asset, editingAsset, resolveConflicts) : addAsset(asset));
         } else if (values.kind === "scene") {
             if (!sceneImageDraft) { message.error(t("assets.sceneRequireImage")); return; }
             const colorPalette = normalizeSceneColorPalette(sceneColorPaletteDraft);
@@ -401,11 +401,11 @@ export default function AssetsPage() {
                 colorCardPrompt: (values.sceneColorCardPrompt || "").trim(),
             };
             const asset = { ...base, kind: "scene" as const, data: sceneData, coverUrl: sceneImageDraft.url };
-            editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
+            await (editingAsset ? updateAsset(editingAsset.id, asset, editingAsset, resolveConflicts) : addAsset(asset));
         } else {
             if (!imageDraft) { message.error(t("assets.selectImage")); return; }
             const asset = { ...base, kind: "image" as const, data: imageDraft };
-            editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
+            await (editingAsset ? updateAsset(editingAsset.id, asset, editingAsset, resolveConflicts) : addAsset(asset));
         }
 
         message.success(editingAsset ? t("assets.updated") : t("assets.saved"));
@@ -514,7 +514,7 @@ export default function AssetsPage() {
             // 重新分配 id 并维护 旧→新 映射，保证跨资产引用仍然有效
             const idMap = new Map<string, string>();
             importedAssets.forEach((asset) => idMap.set(asset.id, nanoid()));
-            importedAssets.forEach((asset) => {
+            for (const asset of importedAssets) {
                 const importedDramaId = dropDramaId || (asset.dramaId && dramas.some((drama) => drama.id === asset.dramaId) ? asset.dramaId : null);
                 const remapped = asset.kind === "character" ? {
                     ...asset,
@@ -527,8 +527,13 @@ export default function AssetsPage() {
                 const payload = { ...remapped, id: idMap.get(asset.id), dramaId: importedDramaId } as Record<string, unknown>;
                 delete payload.createdAt;
                 delete payload.updatedAt;
-                addAsset(payload as Parameters<typeof addAsset>[0]);
-            });
+                const metadata = { ...(payload.metadata as Record<string, unknown> || {}) };
+                delete metadata.sharedAssetSource;
+                delete metadata.sharedAssetReference;
+                delete metadata.sharedLibraryAssetId;
+                payload.metadata = metadata;
+                await addAsset(payload as Parameters<typeof addAsset>[0]);
+            }
             message.success(t("assets.imported", { count: importedAssets.length }));
         } catch {
             message.error(t("assets.importFailed"));
@@ -537,9 +542,9 @@ export default function AssetsPage() {
         }
     };
 
-    const confirmDelete = () => {
+    const confirmDelete = async () => {
         if (!deletingAsset) return;
-        removeAsset(deletingAsset.id);
+        try { await removeAsset(deletingAsset.id); } catch (error) { message.error(String(error)); return; }
         message.success(t("assets.deleted"));
         setDeletingAsset(null);
     };
@@ -838,7 +843,7 @@ export default function AssetsPage() {
                 </div>
             </main>
 
-            <Modal title={editingAsset ? t("assets.edit") : t("assets.add")} open={isAssetOpen} width={980} onCancel={() => setIsAssetOpen(false)} onOk={() => void saveAsset()} okText={t("common.save")} okButtonProps={{ loading: uploadingCharacterVoice }} cancelText={t("common.cancel")} destroyOnHidden>
+            <Modal title={editingAsset ? t("assets.edit") : t("assets.add")} open={isAssetOpen} width={980} onCancel={() => setIsAssetOpen(false)} onOk={() => void saveAsset().catch(error => { message.error(String(error)); })} okText={t("common.save")} okButtonProps={{ loading: uploadingCharacterVoice }} cancelText={t("common.cancel")} destroyOnHidden>
                 <div className="grid gap-6 pt-1 lg:grid-cols-[minmax(0,1fr)_320px]">
                     <Form form={form} layout="vertical" requiredMark={false} initialValues={{ kind: "text", tags: [] }}>
                         <Form.Item name="kind" label={t("assets.type")}>

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { App, Dropdown, Input, Modal, Segmented, Tooltip } from "antd";
-import { Columns2, Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, LayoutGrid, ListOrdered, Lock, MapPinned, MessageSquare, Minus, Music2, Plus, RefreshCw, Scissors, Settings2, Trash2, Unlock, Upload, User, Video } from "lucide-react";
+import { Columns2, Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, LayoutGrid, ListOrdered, Lock, MapPinned, MessageSquare, Minus, Music2, Package, Pencil, Plus, RefreshCw, Scissors, Settings2, Trash2, Unlock, Upload, User, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -28,6 +28,7 @@ type CanvasNodeHoverToolbarProps = {
     onUpload: (node: CanvasNodeData) => void;
     onDownload: (node: CanvasNodeData) => void;
     onSaveAsset: (node: CanvasNodeData) => void;
+    onDiscardSharedEdits?: (node: CanvasNodeData) => void;
     onCompareVideo: (node: CanvasNodeData) => void;
     onTrimVideo: (node: CanvasNodeData) => void;
     onMaskEdit: (node: CanvasNodeData) => void;
@@ -42,6 +43,7 @@ type CanvasNodeHoverToolbarProps = {
     onRetry: (node: CanvasNodeData) => void;
     onConvertToCharacter: (node: CanvasNodeData) => void;
     onConvertToScene: (node: CanvasNodeData) => void;
+    onConvertToProp: (node: CanvasNodeData) => void;
     onSaveCharacterToAsset: (node: CanvasNodeData) => void;
     onSaveSceneToAsset: (node: CanvasNodeData) => void;
     onToggleFreeResize: (node: CanvasNodeData) => void;
@@ -79,6 +81,7 @@ export function CanvasNodeHoverToolbar({
     onUpload,
     onDownload,
     onSaveAsset,
+    onDiscardSharedEdits,
     onCompareVideo,
     onTrimVideo,
     onMaskEdit,
@@ -93,6 +96,7 @@ export function CanvasNodeHoverToolbar({
     onRetry,
     onConvertToCharacter,
     onConvertToScene,
+    onConvertToProp,
     onSaveCharacterToAsset,
     onSaveSceneToAsset,
     onToggleFreeResize,
@@ -182,7 +186,7 @@ export function CanvasNodeHoverToolbar({
     ];
     const nodeToolbarTools: ToolbarTool[] = [
         ...(canRetry ? [{ id: "retry", title: t("canvas.nodeToolbar.retryTitle"), label: t("canvas.node.retry"), icon: <RefreshCw className="size-4" />, onClick: () => onRetry(node) }] : []),
-        ...(hasImage || hasVideo || isText ? [{ id: "saveAsset", title: t("common.addToAssets"), label: t("canvas.nodeToolbar.saveAsset"), icon: <FolderPlus className="size-4" />, onClick: () => onSaveAsset(node) }] : []),
+        ...(hasImage || hasVideo || isText ? [{ id: "saveAsset", title: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "common.addToAssets"), label: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "canvas.nodeToolbar.saveAsset"), icon: <FolderPlus className="size-4" />, onClick: () => onSaveAsset(node) }] : []),
         ...(hasImage || hasVideo || hasAudio || hasText ? [{ id: "download", title: hasAudio ? t("canvas.nodeToolbar.downloadAudio") : hasVideo ? t("canvas.nodeToolbar.downloadVideo") : hasImage ? t("canvas.nodeToolbar.downloadImage") : t("common.download"), label: t("common.download"), icon: <Download className="size-4" />, onClick: () => onDownload(node) }] : []),
         ...(hasVideo ? [{ id: "compareVideo", title: t("canvas.videoCompare.title"), label: t("canvas.videoCompare.open"), icon: <Columns2 className="size-4" />, onClick: () => onCompareVideo(node) }] : []),
         ...(hasVideo ? [{ id: "trimVideo", title: t("canvas.videoTrim.range"), label: t("canvas.videoTrim.open"), icon: <Scissors className="size-4" />, onClick: () => onTrimVideo(node) }] : []),
@@ -196,11 +200,16 @@ export function CanvasNodeHoverToolbar({
         ...(isAudio && !isSmartGenerationNode ? [{ id: "uploadAudio", title: t(hasAudio ? "canvas.nodeToolbar.replaceAudio" : "canvas.nodeToolbar.uploadAudio"), label: t(hasAudio ? "canvas.nodeToolbar.replaceAudio" : "canvas.nodeToolbar.uploadAudio"), icon: <Music2 className="size-4" />, onClick: () => onUpload(node) }] : []),
         ...(hasImage ? [{ id: "convertToCharacter", title: t("canvas.nodeToolbar.convertToCharacter"), label: t("canvas.nodeToolbar.convertToCharacter"), icon: <User className="size-4" />, onClick: () => onConvertToCharacter(node) }] : []),
         ...(hasImage ? [{ id: "convertToScene", title: t("canvas.nodeToolbar.convertToScene"), label: t("canvas.nodeToolbar.convertToScene"), icon: <MapPinned className="size-4" />, onClick: () => onConvertToScene(node) }] : []),
-        ...(isCharacter ? [{ id: "saveCharacterToAsset", title: t("canvas.nodeToolbar.saveCharacterToAsset"), label: t("canvas.nodeToolbar.saveCharacterToAsset"), icon: <FolderPlus className="size-4" />, onClick: () => onSaveCharacterToAsset(node) }] : []),
-        ...(isScene ? [{ id: "saveSceneToAsset", title: t("canvas.nodeToolbar.saveSceneToAsset"), label: t("canvas.nodeToolbar.saveSceneToAsset"), icon: <FolderPlus className="size-4" />, onClick: () => onSaveSceneToAsset(node) }] : []),
+        ...(hasImage ? [{ id: "convertToProp", title: t("canvas.nodeToolbar.convertToProp"), label: t("canvas.nodeToolbar.convertToProp"), icon: <Package className="size-4" />, onClick: () => onConvertToProp(node) }] : []),
+        ...(isCharacter ? [{ id: "saveCharacterToAsset", title: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "canvas.nodeToolbar.saveCharacterToAsset"), label: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "canvas.nodeToolbar.saveCharacterToAsset"), icon: <FolderPlus className="size-4" />, onClick: () => onSaveCharacterToAsset(node) }] : []),
+        ...(isScene ? [{ id: "saveSceneToAsset", title: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "canvas.nodeToolbar.saveSceneToAsset"), label: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "canvas.nodeToolbar.saveSceneToAsset"), icon: <FolderPlus className="size-4" />, onClick: () => onSaveSceneToAsset(node) }] : []),
         ...(hasImage ? imageTools.map((tool) => ({ id: tool.id, title: tool.title, label: tool.label, icon: tool.icon, active: tool.active, onClick: tool.onClick })) : []),
     ];
-    const toolbarTools = hasImage ? [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => quickImageToolIdSet.has(tool.id as ImageQuickToolId)) : [...baseToolbarTools, ...nodeToolbarTools, ...extraTools];
+    const sharedTools: ToolbarTool[] = node.metadata?.sharedAssetReference && Object.keys(node.metadata.sharedAssetReference.edits || {}).length ? [
+        { id: "sharedLocal", title: t("canvas.sharedLibrary.localChanges"), label: t("canvas.sharedLibrary.localChanges"), icon: <Pencil className="size-4" />, onClick: () => onInfo(node) },
+        { id: "discardShared", title: t("canvas.sharedLibrary.discard"), label: t("canvas.sharedLibrary.discard"), icon: <Trash2 className="size-4" />, onClick: () => onDiscardSharedEdits?.(node) },
+    ] : [];
+    const toolbarTools = hasImage ? [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => quickImageToolIdSet.has(tool.id as ImageQuickToolId)).concat(sharedTools) : [...baseToolbarTools, ...nodeToolbarTools, ...extraTools, ...sharedTools];
     const selectableImageToolbarTools = [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => tool.id !== "retry") as ImageToolbarSettingsTool[];
 
     const closeImageToolSettings = () => {

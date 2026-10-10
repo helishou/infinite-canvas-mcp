@@ -8,7 +8,7 @@ export function canvasNodeSearchText(node: CanvasNodeData, typeLabel = "") {
         const prompt = segment && typeof segment === "object" ? (segment as { prompt?: unknown }).prompt : undefined;
         return typeof prompt === "string" ? [prompt] : [];
     }) : [];
-    return [node.id, node.title, typeLabel, metadata.prompt, text, metadata.characterName, metadata.sceneName, ...clipPrompts].filter((value) => typeof value === "string").join(" ").toLocaleLowerCase();
+    return [node.id, node.title, typeLabel, metadata.prompt, text, metadata.characterName, metadata.sceneName, metadata.propName, metadata.propDescription, ...clipPrompts].filter((value) => typeof value === "string").join(" ").toLocaleLowerCase();
 }
 
 /** Use the same fit margin and zoom range as the existing single-node focus. */

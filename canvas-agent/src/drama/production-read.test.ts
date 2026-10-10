@@ -103,6 +103,10 @@ test("default summaries exclude growing collections and honor the selected publi
     assert.equal(summary.published.director.counts.artifacts, 28);
     assert.ok(JSON.stringify(summary).length < 2000);
     assert.ok(!JSON.stringify(summary).includes("private"));
+    assert.equal(summary.nextRead.input.pageSize, 100);
+    const index: any = projectProductionRead(production, summary.nextRead.input);
+    assert.equal(index.artifacts.items.length, 28);
+    assert.equal(index.artifacts.nextCursor, null);
 });
 
 test("historical chunks bind immutable version and snapshot content, never the live draft", () => {

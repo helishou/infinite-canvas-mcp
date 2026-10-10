@@ -445,6 +445,11 @@ export function upsertBackendAsset(asset: Record<string, unknown>) {
     return request<{ ok: boolean; asset?: Record<string, unknown> }>("POST", "/canvas/assets", asset);
 }
 
+export type SharedAssetWrite = { operationId: string; canvasSource?: { projectId: string; nodeId: string }; discardLocal?: boolean; resolveConflicts?: "local" };
+export function updateBackendAsset(id: string, patch: Record<string, unknown>, command?: SharedAssetWrite) {
+    return request<{ ok: boolean; asset: Record<string, unknown>; replayed?: boolean }>("PATCH", `/canvas/assets/${encodeURIComponent(id)}`, { ...patch, ...command });
+}
+
 export function deleteBackendAsset(id: string) {
     return request<{ ok: boolean; deleted?: number }>("DELETE", `/canvas/assets/${encodeURIComponent(id)}`);
 }

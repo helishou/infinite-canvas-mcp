@@ -839,6 +839,7 @@ export function diffCanvasProject(base: CanvasProject, next: CanvasProject): Arr
         const metadataKeysToSkip = new Set<string>(["productionImageInput"]);
         if (isH3) metadataKeysToSkip.add("segments");
         for (const key of new Set([...Object.keys(previousMetadata), ...Object.keys(nextMetadata)])) {
+            if (key === "sharedAssetReference" || key === "sharedLibraryAssetId" || key === "sharedAssetMissing") continue;
             if (metadataKeysToSkip.has(key)) continue;
             if (isH3 && H3_BACKEND_NODE_METADATA_FIELDS.has(key)) continue;
             if (backendTaskActive && ACTIVE_TASK_NODE_METADATA_FIELDS.has(key)) continue;

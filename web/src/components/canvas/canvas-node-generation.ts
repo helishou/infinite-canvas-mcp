@@ -271,6 +271,7 @@ function readNodeGenerationResource(node: CanvasNodeData, characterSelection?: C
     if (node.type === CanvasNodeType.Loop && nodes && connections) return readLoopGenerationResources(node, nodes, connections, index, loopContext, visited);
     if (node.type === CanvasNodeType.Character) return readCharacterGenerationResources(node, characterSelection);
     if (node.type === CanvasNodeType.Scene) return readSceneGenerationResources(node);
+    if (node.type === CanvasNodeType.Prop) return readPropGenerationResources(node);
     const image = readReferenceImage(node);
     if (image) return [{ nodeId: node.id, type: "image", title: node.title, image }];
     const video = readReferenceVideo(node);
@@ -323,6 +324,17 @@ function readSceneGenerationResources(node: CanvasNodeData): NodeGenerationResou
         type: "image",
         title: `${node.title} · 场景图`,
         image: { id: `${node.id}-场景图`, name: image.name || `${node.title || node.id}.png`, type: image.mimeType || "image/png", dataUrl: image.url || "", storageKey: image.storageKey },
+    }];
+}
+
+function readPropGenerationResources(node: CanvasNodeData): NodeGenerationResourceInput[] {
+    const image = node.metadata?.propImage;
+    if (!image?.url && !image?.storageKey) return [];
+    return [{
+        nodeId: node.id,
+        type: "image",
+        title: `${node.metadata?.propName || node.title} · 道具图`,
+        image: { id: `${node.id}-道具图`, name: image.name || `${node.title || node.id}.png`, type: image.mimeType || "image/png", dataUrl: image.url || "", storageKey: image.storageKey },
     }];
 }
 

@@ -1,8 +1,9 @@
+import type { SharedAssetSource } from "@basketikun/canvas-agent/shared-asset-reference";
 import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { App, Empty, Input, Popconfirm, Select, Spin, Tag, type InputRef } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { BookOpen, Check, ChevronRight, Clapperboard, Download, Eye, FileText, Image as ImageIcon, LayoutGrid, Rows3, ListChecks, ListRestart, MapPinned, Music2, Plus, Search, Settings2, Sparkles, Square, Trash2, Type, User, Video, type LucideIcon } from "lucide-react";
+import { BookOpen, Check, ChevronRight, Clapperboard, Download, Eye, FileText, Image as ImageIcon, LayoutGrid, Rows3, ListChecks, ListRestart, MapPinned, Music2, Package, Plus, Search, Settings2, Sparkles, Square, Trash2, Type, User, Video, type LucideIcon } from "lucide-react";
 import { motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 
@@ -54,6 +55,7 @@ const NODE_TYPE_ICON: Record<string, typeof Square> = {
     [CanvasNodeType.Group]: Square,
     [CanvasNodeType.Character]: User,
     [CanvasNodeType.Scene]: MapPinned,
+    [CanvasNodeType.Prop]: Package,
 };
 
 const STATUS_COLOR: Record<string, string> = {
@@ -149,7 +151,7 @@ function TabButton({ label, active, theme, onClick }: { label: string; active: b
 // Canvas tab: list nodes and center, zoom, and select the clicked node.
 // ---------------------------------------------------------------------------
 
-const NODE_FILTER_VALUES = ["all", CanvasNodeType.Image, CanvasNodeType.Video, CanvasNodeType.Text, CanvasNodeType.Audio, CanvasNodeType.Config, CanvasNodeType.Loop, CanvasNodeType.Character, CanvasNodeType.Scene, CanvasNodeType.Group];
+const NODE_FILTER_VALUES = ["all", CanvasNodeType.Image, CanvasNodeType.Video, CanvasNodeType.Text, CanvasNodeType.Audio, CanvasNodeType.Config, CanvasNodeType.Loop, CanvasNodeType.Character, CanvasNodeType.Scene, CanvasNodeType.Prop, CanvasNodeType.Group];
 const H3_NODE_TYPES = new Set(["minimax-h3:video", "smart-minimax", "minimax", "minimax-h3"]);
 
 function isVideoCanvasNode(node: CanvasNodeData) {
@@ -158,6 +160,7 @@ function isVideoCanvasNode(node: CanvasNodeData) {
 
 function nodePreviewText(node: CanvasNodeData) {
     if (node.type === CanvasNodeType.Text) return node.metadata?.content || node.metadata?.prompt || "";
+    if (node.type === CanvasNodeType.Prop) return node.metadata?.propDescription || node.metadata?.propName || node.title || "";
     return getNodeDefinition(node.type)?.title || node.type;
 }
 
@@ -178,6 +181,9 @@ function imageCoverForNode(node: CanvasNodeData) {
     }
     if (node.type === CanvasNodeType.Image && (node.metadata?.content || node.metadata?.storageKey)) {
         return { content: node.metadata.content || "", storageKey: node.metadata.storageKey };
+    }
+    if (node.type === CanvasNodeType.Prop && (node.metadata?.propImage?.url || node.metadata?.propImage?.storageKey)) {
+        return { content: node.metadata.propImage.url || "", storageKey: node.metadata.propImage.storageKey };
     }
     return undefined;
 }
@@ -311,12 +317,13 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
                             const hasImageCover = Boolean(imageCoverForNode(node));
                             const isCharacter = node.type === CanvasNodeType.Character;
                             const isScene = node.type === CanvasNodeType.Scene;
+                            const isProp = node.type === CanvasNodeType.Prop;
                             const isChecked = checked.has(node.id);
                             const active = selectMode ? isChecked : selectedNodeIds.has(node.id);
                             if (nodeViewMode === "grid") return (
                                 <button key={node.id} type="button" data-canvas-node-row={node.id} aria-pressed={isChecked} onClick={(event) => selectMode || event.ctrlKey || event.metaKey ? toggleChecked(node.id) : onFocusNode(node.id)} onDoubleClick={() => onPreviewNode(node.id)} className="absolute top-0 flex flex-col gap-1 rounded-lg p-1.5 text-left hover:bg-black/5 dark:hover:bg-white/5" style={{ left: `${virtualRow.lane * 100 / gridColumns}%`, width: `${100 / gridColumns}%`, height: virtualRow.size, transform: `translateY(${virtualRow.start}px)`, ...(active ? { background: theme.toolbar.activeBg } : {}) }}>
                                     <span className="relative grid h-[96px] w-full place-items-center overflow-hidden rounded-md">
-                                        {hasImageCover || isCharacter || isScene ? <CanvasNodeCover node={node} /> : <Icon className="size-6 opacity-60" />}
+                                        {hasImageCover || isCharacter || isScene || isProp ? <CanvasNodeCover node={node} /> : <Icon className="size-6 opacity-60" />}
                                         {selectMode ? <span className="absolute left-1 top-1"><CheckMark checked={isChecked} theme={theme} /></span> : null}
                                         {node.metadata?.status && node.metadata.status !== "idle" ? <span className="absolute right-1 top-1 size-1.5 rounded-full" style={{ background: STATUS_COLOR[node.metadata.status] || "transparent" }} /> : null}
                                     </span>
@@ -334,7 +341,7 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
                                     <button type="button" data-canvas-node-row={node.id} aria-pressed={isChecked} onClick={(event) => (selectMode || event.ctrlKey || event.metaKey ? toggleChecked(node.id) : onFocusNode(node.id))} className={cn("flex min-w-0 flex-1 items-center gap-3 py-2 pr-2 text-left", node.type === CanvasNodeType.Group && hasChildren ? "pl-0" : "pl-2")} title={selectMode ? undefined : t("canvas.navigation.rowHint")}>
                                         {selectMode ? <CheckMark checked={isChecked} theme={theme} /> : null}
                                         <span className="grid size-10 shrink-0 place-items-center overflow-hidden rounded-md">
-                                            {hasImageCover || isCharacter || isScene ? <CanvasNodeCover node={node} /> : <Icon className="size-5 opacity-60" />}
+                                            {hasImageCover || isCharacter || isScene || isProp ? <CanvasNodeCover node={node} /> : <Icon className="size-5 opacity-60" />}
                                         </span>
                                         <span className="min-w-0 flex-1 space-y-0.5">
                                             <span className="block truncate text-sm font-medium leading-snug">{node.title || getNodeDefinition(node.type)?.title || t("canvas.node.untitled")}</span>
@@ -385,12 +392,13 @@ function CanvasNodeCover({ node }: { node: CanvasNodeData }) {
     const backendToken = useBackendStore((state) => state.token);
     const isCharacter = node.type === CanvasNodeType.Character;
     const isScene = node.type === CanvasNodeType.Scene;
+    const isProp = node.type === CanvasNodeType.Prop;
     const characterImages = node.metadata?.characterImages || [];
     const primaryIndex = Math.min(Math.max(node.metadata?.characterPrimaryIndex ?? 0, 0), Math.max(characterImages.length - 1, 0));
     const primaryImage = isCharacter ? characterImages[primaryIndex] || characterImages[0] : undefined;
     const imageCover = imageCoverForNode(node);
-    const content = isCharacter ? primaryImage?.url || "" : isScene ? node.metadata?.sceneImage?.url || "" : imageCover?.content || "";
-    const storageKey = isCharacter ? primaryImage?.storageKey : isScene ? node.metadata?.sceneImage?.storageKey : imageCover?.storageKey;
+    const content = isCharacter ? primaryImage?.url || "" : isScene ? node.metadata?.sceneImage?.url || "" : isProp ? node.metadata?.propImage?.url || "" : imageCover?.content || "";
+    const storageKey = isCharacter ? primaryImage?.storageKey : isScene ? node.metadata?.sceneImage?.storageKey : isProp ? node.metadata?.propImage?.storageKey : imageCover?.storageKey;
     useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
 
     useEffect(() => {
@@ -409,7 +417,7 @@ function CanvasNodeCover({ node }: { node: CanvasNodeData }) {
     }, [backendConnected, backendToken, content, storageKey]);
 
     const source = previewUrlFor(storageKey) || url;
-    return source ? <img src={source} alt={node.title} className="size-full object-cover" /> : isCharacter ? <User className="size-5 opacity-60" /> : isScene ? <MapPinned className="size-5 opacity-60" /> : <ImageIcon className="size-5 opacity-60" />;
+    return source ? <img src={source} alt={node.title} className="size-full object-cover" /> : isCharacter ? <User className="size-5 opacity-60" /> : isScene ? <MapPinned className="size-5 opacity-60" /> : isProp ? <Package className="size-5 opacity-60" /> : <ImageIcon className="size-5 opacity-60" />;
 }
 
 function CheckMark({ checked, theme }: { checked: boolean; theme: CanvasTheme }) {
@@ -617,7 +625,7 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
                                     {isCollapsed ? null : (
                                         <div className="grid grid-cols-2 gap-2 px-1 pb-2 pt-1">
                                             {group.items.map((asset) => (
-                                                <AssetCard key={asset.id} asset={asset} theme={theme} onInsert={() => onInsert(buildInsertPayload(asset))} onRemove={() => (removeAsset(asset.id), message.success(t("canvas.sidePanel.assetRemoved")))} />
+                                                <AssetCard key={asset.id} asset={asset} theme={theme} onInsert={() => onInsert({ ...buildInsertPayload(asset), sharedAssetSource: asset.metadata?.sharedAssetSource as SharedAssetSource | undefined })} onRemove={() => void removeAsset(asset.id).then(() => message.success(t("canvas.sidePanel.assetRemoved"))).catch(error => message.error(String(error)))} />
                                             ))}
                                         </div>
                                     )}

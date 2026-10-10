@@ -1,12 +1,76 @@
 import { spawn } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { watch, existsSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const backend = path.join(root, 'backend');
 const tsx = pathToFileURL(createRequire(path.join(backend, 'package.json')).resolve('tsx')).href;
+
+function backendDataDir(cwd) {
+    if (process.env.INFINITE_CANVAS_DATA_DIR) return path.resolve(cwd, process.env.INFINITE_CANVAS_DATA_DIR);
+    try {
+        const config = JSON.parse(readFileSync(path.join(os.homedir(), '.infinite-canvas-root.json'), 'utf8'));
+        if (config.dataDir) return path.resolve(cwd, config.dataDir);
+    } catch { /* use the Backend default */ }
+    return path.join(os.homedir(), '.infinite-canvas');
+}
+
+function processCommandLine(pid) {
+    if (process.platform === 'win32') {
+        return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+            `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`],
+        { encoding: 'utf8', timeout: 2500, windowsHide: true }).trim();
+    }
+    return execFileSync('ps', ['-p', String(pid), '-o', 'args='], { encoding: 'utf8', timeout: 2500 }).trim();
+}
+
+function isBackendFromThisProject(commandLine, cwd) {
+    const value = commandLine.toLowerCase().replaceAll('\\', '/');
+    const backendUrl = pathToFileURL(path.resolve(cwd)).href.toLowerCase();
+    const backendPath = backendUrl.replace(/^file:\/\//, '').replace(/\/$/, '').replaceAll('%20', ' ');
+    const ownsPath = value.includes(backendUrl) || value.includes(backendPath);
+    return ownsPath && /(?:src\/index\.ts|dist\/index\.js)(?:\s|$)/i.test(value);
+}
+
+function removeLockIfOwned(lockPath, pid) {
+    try {
+        const current = JSON.parse(readFileSync(lockPath, 'utf8'));
+        if (Number(current.pid) === pid) rmSync(lockPath, { force: true });
+    } catch { /* process shutdown or another instance already released it */ }
+}
+
+function clearPreviousBackend(cwd, log) {
+    const lockPath = path.join(backendDataDir(cwd), 'backend.lock');
+    let record;
+    try { record = JSON.parse(readFileSync(lockPath, 'utf8')); }
+    catch { return; }
+    const pid = Number(record.pid);
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return;
+    try {
+        process.kill(pid, 0);
+    } catch (error) {
+        if (error?.code === 'EPERM') throw error;
+        removeLockIfOwned(lockPath, pid);
+        log.log(`[backend-watch] removed stale Backend lock PID=${pid}`);
+        return;
+    }
+
+    let commandLine;
+    try { commandLine = processCommandLine(pid); }
+    catch { throw new Error(`Backend lock PID=${pid} is live but its command line could not be verified; refusing to stop it.`); }
+    if (!isBackendFromThisProject(commandLine, cwd)) {
+        throw new Error(`Backend lock PID=${pid} belongs to another process; refusing to stop it. Lock: ${lockPath}`);
+    }
+
+    process.kill(pid, 'SIGKILL');
+    removeLockIfOwned(lockPath, pid);
+    log.log(`[backend-watch] stopped previous Backend PID=${pid}`);
+}
+
 export function startBackendWatch({ cwd = backend, directories = [path.join(backend, 'src'), path.join(root, 'canvas-agent', 'dist')], log = console } = {}) {
     let child, ready = false, dirty = false, requested = false, restarting = false, stopped = false, reportedBusy = false;
     let debounce, retry;
@@ -22,19 +86,8 @@ export function startBackendWatch({ cwd = backend, directories = [path.join(back
 
     function start() {
         dirty = false; ready = false; requested = false; restarting = false; reportedBusy = false;
-        // spawn 前清掉占位的旧 backend（instance-lock 持有者），避免新实例撞 "Backend 已在运行" 直接退出。
-        // instance-lock 自己已有 stale 清理，但只在锁文件存在且进程已死时触发；若旧进程僵着占锁，
-        // 这里显式强杀，让 watch 的 restart 循环真正能接力。
-        try {
-            const lockPath = path.join(cwd, 'backend.lock');
-            const record = JSON.parse(readFileSync(lockPath, 'utf8'));
-            const pid = Number(record.pid);
-            if (Number.isInteger(pid) && pid > 0 && pid !== process.pid) {
-                try { process.kill(pid, 'SIGKILL'); log.log(`[backend-watch] killed stale Backend PID=${pid}`); }
-                catch { /* already gone */ }
-            }
-            rmSync(lockPath, { force: true });
-        } catch { /* no lock file, nothing to clean */ }
+        try { clearPreviousBackend(cwd, log); }
+        catch (error) { log.error(`[backend-watch] ${error.message}`); return; }
         child = spawn(process.execPath, ['--import', tsx, 'src/index.ts'], {
             cwd, env: { ...process.env, INFINITE_CANVAS_DEV_WATCH: '1' }, stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
         });

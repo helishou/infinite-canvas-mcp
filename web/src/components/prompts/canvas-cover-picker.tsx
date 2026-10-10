@@ -13,7 +13,7 @@ export type CanvasCoverCandidate = {
     storageKey?: string;
     /** 直接可渲染的地址：有 storageKey 走总后台媒体，否则用节点自带 URL。 */
     url: string;
-    kind: "image" | "smart" | "character" | "scene";
+    kind: "image" | "smart" | "character" | "scene" | "prop";
 };
 
 /**
@@ -35,6 +35,11 @@ export function collectCanvasCoverCandidates(nodes: CanvasNodeData[]): CanvasCov
         if (node.type === CanvasNodeType.Scene) {
             const image = node.metadata?.sceneImage;
             if (image && resolve(image.storageKey, image.url)) candidates.push({ nodeId: node.id, title, storageKey: image.storageKey, url: resolve(image.storageKey, image.url), kind: "scene" });
+            continue;
+        }
+        if (node.type === CanvasNodeType.Prop) {
+            const image = node.metadata?.propImage;
+            if (image && resolve(image.storageKey, image.url)) candidates.push({ nodeId: node.id, title, storageKey: image.storageKey, url: resolve(image.storageKey, image.url), kind: "prop" });
             continue;
         }
         const image = canvasNodeImage(node);

@@ -980,12 +980,13 @@ async function executeMcpAssetCommand(
           tags: Array.isArray(item.tags) ? item.tags.map(String) : [],
           folderId: item.folderId == null ? null : String(item.folderId),
           ...(item.dramaId == null ? {} : { dramaId: String(item.dramaId) }),
-          data: name === "assets_add" ? { content: input.content || "", imageUrl: input.imageUrl || "" } : recordOf(item.data),
+          data: name === "assets_add" ? { content: input.content || "", dataUrl: input.imageUrl || "" } : recordOf(item.data),
           note: item.note == null ? null : String(item.note),
           source: item.source == null ? null : String(item.source),
           metadata: name === "assets_add" ? {} : recordOf(item.metadata),
           createdAt: now,
           updatedAt: now,
+          ...(item.canvasSource ? { canvasSource: item.canvasSource } : {}),
           _batchIndex: index,
       }));
       for (const asset of assets) delete asset._batchIndex;
@@ -1851,7 +1852,7 @@ function registerBackendCanvasTools(
   server.registerTool("director_subagent", { description: toolDescriptions.director_subagent, inputSchema: toolInputSchemas.director_subagent }, async raw => { const value = await executeDirectorSubagentTool(backendApi, raw); enforceToolOutputLimit("director_subagent", value); return textResult(value); });
   for (const name of productionToolNames) {
     server.registerTool(name, { description: toolDescriptions[name], inputSchema: toolInputSchemas[name] }, async (raw: Record<string, unknown>) => {
-      const input = toolInputSchemas[name].parse(raw);
+      const input = toolInputSchemas[name].parse(raw) as Record<string, any>;
       const blocked = await productionToolPreflight(backendApi, name, input);
       return textResult(blocked || await executeProductionTool(backendApi, name, input));
     });

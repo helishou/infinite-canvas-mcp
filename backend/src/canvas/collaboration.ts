@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { CanvasOperation, CanvasOperationResult } from "./project-ops.js";
+import type { AssetNode } from "@basketikun/canvas-agent/shared-asset-reference";
 
 export type CanvasCommandContext = {
     /** 仅限进程内任务执行器传入；HTTP/MCP 入参不得透传此权限。 */
@@ -7,6 +8,8 @@ export type CanvasCommandContext = {
     /** Trusted production commands may include canvas ops in their outer transaction. Never accept from HTTP/MCP. */
     withinTransaction?: boolean;
     deferredCommits?: CanvasCommit[];
+    /** Trusted propagation baseline, so derived character references see the actual before/after. */
+    referenceSourceBefore?: { sourceProjectId: string; sourceNodeId: string; node: AssetNode };
     operationId?: string;
     source?: Record<string, unknown>;
     /** 与旧 expectedRevision 的整图 CAS 分离：新协议按写入字段检查并发。 */
@@ -16,6 +19,7 @@ export type CanvasCommandContext = {
 };
 
 export type CanvasCommit = {
+    deletedAssetIds?: string[];
     productionUpdates?: Array<{ entityId: string; revision: number }>;
     projectId: string;
     operationId: string;

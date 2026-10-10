@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>Shared library preview</title></head>
+<body><div id="root"></div>
+<script>
+const port = new URL(location.href).searchParams.get("backendPort");
+if (!/^\d+$/.test(port || "")) throw new Error("Start backend/tests/shared-library-preview.ts and pass its backendPort");
+sessionStorage.setItem("backend-connection", JSON.stringify({ url: `http://127.0.0.1:${port}`, token: "shared-library-test" }));
+history.replaceState(null, "", "/canvas/preview-a");
+</script>
+<script type="module" src="/src/main.tsx"></script>
+</body></html>

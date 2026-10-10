@@ -1,3 +1,4 @@
+import { resolveSharedAssetNode, type AssetNode } from "@basketikun/canvas-agent/shared-asset-reference";
 import { effectiveTargetInput, inputHash } from "./drama/canvas-inputs.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -22,6 +23,7 @@ import { H3_RUNTIME_SEGMENT_FIELDS } from "@basketikun/canvas-agent/runtime-fiel
 import { editedTextTargets, loadTextDocument, readText, replaceText, textKey, textOperation, textTargetSchema, type CanvasTextTarget } from "./canvas/collaborative-text.js";
 import type { McpObservabilityReportOptions } from "./stores/types.js";
 import { reconstructCanvasHistory, migrateCanvasReceipts } from "./canvas/history-maintenance.js";
+import { captureAssetEdits, deleteDramaAsset, migrateDramaAssets, projectAsset, propagateAssetChanges, resolveProjectAssets, stripProjectAssets, validateAssetOperation, writeDramaAsset, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -980,6 +982,15 @@ export class BackendDatabase {
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }
+        if (currentVersion < 38) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                this.db.exec("CREATE TABLE IF NOT EXISTS shared_library_receipts (operation_id TEXT PRIMARY KEY, request_hash TEXT NOT NULL, receipt_json TEXT NOT NULL)");
+                migrateDramaAssets(this);
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (38, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
     }
 
     /** A rolled-back schema_migrations row leaves its column behind, so every ADD COLUMN must be checked first. */
@@ -1477,7 +1488,7 @@ export class BackendDatabase {
         return rows.flatMap((row) => {
             try {
                 const value = stripCanvasLocalViewState(JSON.parse(row.data_json) as Record<string, unknown>) as unknown as CanvasProject;
-                return value && typeof value === "object" && value.id ? [value] : [];
+                return value && typeof value === "object" && value.id ? [resolveProjectAssets(this, value)] : [];
             } catch { return []; }
         });
     }
@@ -1541,7 +1552,7 @@ export class BackendDatabase {
             COALESCE(json_array_length(p.data_json, '$.connections'), 0) AS connectionCount,
             json_extract(n.value, '$.id') AS nodeId,
             json_extract(n.value, '$.type') AS nodeType,
-            json_extract(n.value, '$.title') AS nodeTitle,
+            COALESCE(json_extract(n.value, '$.metadata.sharedAssetReference.edits.title.value'), json_extract(n.value, '$.title'), (SELECT json_extract(s.value, '$.title') FROM canvas_projects sp, json_each(sp.data_json, '$.nodes') s WHERE sp.id=json_extract(n.value, '$.metadata.sharedAssetReference.sourceProjectId') AND json_extract(s.value, '$.id')=json_extract(n.value, '$.metadata.sharedAssetReference.sourceNodeId'))) AS nodeTitle,
             json_extract(n.value, '$.metadata.generationMode') AS generationMode
             FROM canvas_projects p
             LEFT JOIN json_each(p.data_json, '$.nodes') n
@@ -1577,7 +1588,7 @@ export class BackendDatabase {
             const nodeValues = nodes.map(row => JSON.parse(row.value));
             const connectionValues = connections.map(row => JSON.parse(row.value));
             this.db.exec("COMMIT");
-            return { id, title: String(header.title || ""), updatedAt: String(header.updatedAt || ""), revision: Number(header.revision || 0), nodes: nodeValues, connections: connectionValues };
+            return { id, title: String(header.title || ""), updatedAt: String(header.updatedAt || ""), revision: Number(header.revision || 0), nodes: resolveProjectAssets(this, { id, nodes: nodeValues }).nodes, connections: connectionValues };
         } catch (error) { this.db.exec("ROLLBACK"); throw error; }
     }
 
@@ -1631,11 +1642,11 @@ export class BackendDatabase {
             const referenceNodes = sources.map(row => JSON.parse(row.value));
             if (segmentId) metadata.segments = segments;
             this.db.exec("COMMIT");
-            return { id, title: String(header.title || ""), revision: Number(header.revision || 0), updatedAt: String(header.updatedAt || ""), nodes: [target, ...referenceNodes], referenceCatalog: referenceAssets };
+            return { id, title: String(header.title || ""), revision: Number(header.revision || 0), updatedAt: String(header.updatedAt || ""), nodes: resolveProjectAssets(this, { id, nodes: [target, ...referenceNodes] }).nodes, referenceCatalog: referenceAssets };
         } catch (error) { this.db.exec("ROLLBACK"); throw error; }
     }
 
-    createCanvasProject(input: CanvasProject) {
+    createCanvasProject(input: CanvasProject, withinTransaction = false) {
         if (typeof input?.id !== "string" || !input.id.trim()) throw new Error("project.id 必填");
         const project = stripCanvasLocalViewState(input as unknown as Record<string, unknown>) as unknown as CanvasProject;
         const referenceArchives: Array<{ nodeId: string; segmentId: string; legacy: string }> = [];
@@ -1655,7 +1666,7 @@ export class BackendDatabase {
             const { revision: _revision, updatedAt: _updatedAt, createdAt: _createdAt, folderId: _folderId, ...seed } = value;
             return commandFingerprint(seed);
         };
-        this.db.exec("BEGIN IMMEDIATE");
+        this.db.exec(withinTransaction ? "SAVEPOINT create_shared_canvas" : "BEGIN IMMEDIATE");
         try {
             const current = this.getCanvasProject(project.id);
             if (current) {
@@ -1663,7 +1674,7 @@ export class BackendDatabase {
                 if (!checkpoint || checkpoint.revision !== 0 || seedHash(JSON.parse(checkpoint.data_json)) !== seedHash(project)) {
                     throw Object.assign(collaborationError("PROJECT_EXISTS", "画布已存在，不能用整图覆盖；请提交增量操作或使用新 ID 导入"), { project: current, revision: current.revision });
                 }
-                this.db.exec("COMMIT");
+                this.db.exec(withinTransaction ? "RELEASE create_shared_canvas" : "COMMIT");
                 return { project: current, created: false };
             }
             const now = new Date().toISOString();
@@ -1674,10 +1685,10 @@ export class BackendDatabase {
             const archive = this.db.prepare("INSERT INTO h3_reference_legacy_archive (project_id, node_id, segment_id, legacy_json, archived_at) VALUES (?, ?, ?, ?, ?)");
             for (const item of referenceArchives) archive.run(project.id, item.nodeId, item.segmentId, item.legacy, now);
             this.db.prepare("INSERT INTO canvas_collaboration_checkpoints (project_id, revision, data_json) VALUES (?, 0, ?)").run(project.id, json);
-            this.db.exec("COMMIT");
+            this.db.exec(withinTransaction ? "RELEASE create_shared_canvas" : "COMMIT");
             return { project, created: true };
         } catch (error) {
-            this.db.exec("ROLLBACK");
+            this.db.exec(withinTransaction ? "ROLLBACK TO create_shared_canvas; RELEASE create_shared_canvas" : "ROLLBACK");
             throw error;
         }
     }
@@ -1889,21 +1900,26 @@ export class BackendDatabase {
         const values: Array<string | number> = [];
         if (options.kind && options.kind !== "all") { clauses.push("kind = ?"); values.push(options.kind); }
         if (options.keyword?.trim()) {
-            clauses.push("instr(lower(title || ' ' || COALESCE(json_extract(data_json, '$.description'), '') || ' ' || COALESCE(json_extract(data_json, '$.content'), '') || ' ' || COALESCE(json_extract(data_json, '$.data.description'), '') || ' ' || COALESCE(json_extract(data_json, '$.data.content'), '')), lower(?)) > 0");
-            values.push(options.keyword.trim());
+            clauses.push("(instr(lower(title || ' ' || COALESCE(json_extract(data_json, '$.description'), '') || ' ' || COALESCE(json_extract(data_json, '$.content'), '') || ' ' || COALESCE(json_extract(data_json, '$.data.description'), '') || ' ' || COALESCE(json_extract(data_json, '$.data.content'), '')), lower(?)) > 0 OR EXISTS (SELECT 1 FROM canvas_projects p, json_each(p.data_json, '$.nodes') n WHERE p.id=json_extract(assets.metadata_json, '$.sharedAssetSource.sourceProjectId') AND json_extract(n.value, '$.id')=json_extract(assets.metadata_json, '$.sharedAssetSource.sourceNodeId') AND instr(lower(COALESCE(json_extract(n.value, '$.metadata.characterDescription'), json_extract(n.value, '$.metadata.sceneDescription'), json_extract(n.value, '$.metadata.content'), '')), lower(?)) > 0))");
+            values.push(options.keyword.trim(), options.keyword.trim());
         }
         const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
         const total = Number((this.db.prepare(`SELECT COUNT(*) AS count FROM assets ${where}`).get(...values) as { count: number }).count);
         const page = Math.max(1, Math.floor(options.page || 1));
         const pageSize = Math.max(1, Math.floor(options.pageSize || 20));
         const offset = (page - 1) * pageSize;
-        const rows = this.db.prepare(`SELECT id, kind, title, tags_json, folder_id, drama_id, updated_at, length(COALESCE(json_extract(data_json, '$.content'), json_extract(data_json, '$.data.content'), '')) AS content_chars, (cover_url <> '') AS has_cover, COALESCE(json_extract(data_json, '$.storageKey'), json_extract(data_json, '$.assetRef.storageKey'), json_extract(data_json, '$.data.storageKey')) AS storage_key, COALESCE(json_extract(data_json, '$.mimeType'), json_extract(data_json, '$.assetRef.mimeType'), json_extract(data_json, '$.data.mimeType')) AS mime_type FROM assets ${where} ORDER BY updated_at DESC, id ASC LIMIT ? OFFSET ?`).all(...values, pageSize, offset) as Array<Record<string, unknown>>;
-        return { total, page, pageSize, items: rows.map(row => ({ id: String(row.id), kind: String(row.kind), title: String(row.title), tags: JSON.parse(String(row.tags_json || "[]")), folderId: row.folder_id == null ? null : String(row.folder_id), dramaId: row.drama_id == null ? null : String(row.drama_id), updatedAt: String(row.updated_at), hasContent: Number(row.content_chars) > 0, contentChars: Number(row.content_chars), hasCover: Number(row.has_cover) === 1, ...(row.storage_key ? { storageKey: String(row.storage_key) } : {}), ...(row.mime_type ? { mimeType: String(row.mime_type) } : {}) })) };
+        const rows = this.db.prepare(`SELECT id, kind, title, metadata_json, tags_json, folder_id, drama_id, updated_at, length(COALESCE(json_extract(data_json, '$.content'), json_extract(data_json, '$.data.content'), '')) AS content_chars, (cover_url <> '') AS has_cover, COALESCE(json_extract(data_json, '$.storageKey'), json_extract(data_json, '$.assetRef.storageKey'), json_extract(data_json, '$.data.storageKey')) AS storage_key, COALESCE(json_extract(data_json, '$.mimeType'), json_extract(data_json, '$.assetRef.mimeType'), json_extract(data_json, '$.data.mimeType')) AS mime_type FROM assets ${where} ORDER BY updated_at DESC, id ASC LIMIT ? OFFSET ?`).all(...values, pageSize, offset) as Array<Record<string, unknown>>;
+        return { total, page, pageSize, items: rows.map(row => {
+            const bound = JSON.parse(String(row.metadata_json || "{}"))?.sharedAssetSource;
+            const asset = bound ? this.getAsset(String(row.id)) : null;
+            if (asset) { row.content_chars = String(asset.data.content || "").length; row.has_cover = Boolean(asset.coverUrl); row.storage_key = asset.data.storageKey; row.mime_type = asset.data.mimeType; }
+            return ({ id: String(row.id), kind: String(row.kind), title: String(row.title), tags: JSON.parse(String(row.tags_json || "[]")), folderId: row.folder_id == null ? null : String(row.folder_id), dramaId: row.drama_id == null ? null : String(row.drama_id), updatedAt: String(row.updated_at), hasContent: Number(row.content_chars) > 0, contentChars: Number(row.content_chars), hasCover: Number(row.has_cover) === 1, ...(row.storage_key ? { storageKey: String(row.storage_key) } : {}), ...(row.mime_type ? { mimeType: String(row.mime_type) } : {}) }); }) };
     }
 
     commitMcpAssetCommand(input: { operationId: string; tool: string; request: unknown; assets: Asset[] }): Record<string, unknown> {
         const targetId = "asset-library";
         const requestHash = commandFingerprint({ tool: input.tool, targetId, request: input.request });
+        const commits: CanvasCommit[] = [];
         this.db.exec("BEGIN IMMEDIATE");
         try {
             const row = this.db.prepare("SELECT * FROM mcp_command_receipts WHERE operation_id = ?").get(input.operationId) as Record<string, unknown> | undefined;
@@ -1918,11 +1934,12 @@ export class BackendDatabase {
             if (commandFingerprint(frozenAssets) !== commandFingerprint(input.assets)) throw collaborationError("OPERATION_ID_REUSED", "素材命令负载与 Backend 冻结内容不一致");
             const duplicateIds = input.assets.map(asset => asset.id).filter((id, index, all) => all.indexOf(id) !== index);
             if (duplicateIds.length) throw collaborationError("INVALID_INPUT", `批次内资产 ID 重复: ${[...new Set(duplicateIds)].join(", ")}`);
-            const saved = input.assets.map(asset => this.upsertAsset(asset));
+            const saved = input.assets.map(asset => this.upsertAsset(asset, { withinTransaction: true, deferredCommits: commits, canvasSource: (asset as Asset & { canvasSource?: AssetWriteCommand["canvasSource"] }).canvasSource }));
             const receipt = { ok: true, committed: true, operationId: input.operationId, replayed: false, count: saved.length, assetIds: saved.map(asset => asset.id), changesHash: commandFingerprint(saved.map(asset => ({ id: asset.id, kind: asset.kind, title: asset.title, tags: asset.tags, updatedAt: asset.updatedAt }))) };
             this.db.prepare("UPDATE mcp_command_receipts SET status = 'committed', payload_json = NULL, receipt_json = ?, updated_at = ? WHERE operation_id = ?")
                 .run(JSON.stringify(receipt), new Date().toISOString(), input.operationId);
             this.db.exec("COMMIT");
+            for (const commit of commits) this.notifyCanvasCommit(commit);
             return receipt;
         } catch (error) {
             this.db.exec("ROLLBACK");
@@ -1940,6 +1957,7 @@ export class BackendDatabase {
         const fingerprint = commandFingerprint({ id, expectedRevision, baseRevision: context?.baseRevision, operations: inputOperations });
         const operations = structuredClone(inputOperations);
         let commit: CanvasCommit;
+        const dependentCommits: CanvasCommit[] = [];
         this.db.exec(beginSql);
         try {
             if (context?.mcpCommand) {
@@ -1955,8 +1973,12 @@ export class BackendDatabase {
                     if (typeof frozenRevision === "number" && typeof submittedRevision === "number" && frozenRevision !== submittedRevision) throw collaborationError("MCP_COMMAND_MISMATCH", "提交版本与 Backend 冻结版本不一致");
                 }
             }
-            const current = this.getCanvasProject(id);
+            let current = this.getCanvasProject(id);
             if (!current) throw new Error(`画布不存在: ${id}`);
+            if (context?.referenceSourceBefore) {
+                const before = context.referenceSourceBefore;
+                current = { ...current, nodes: (current.nodes as AssetNode[]).map(node => node.metadata?.sharedAssetReference?.sourceProjectId === before.sourceProjectId && node.metadata.sharedAssetReference.sourceNodeId === before.sourceNodeId ? resolveSharedAssetNode(node, before.node) : node) };
+            }
             const currentRevision = Number(current.revision || 0);
             {
                 const existing = this.db.prepare("SELECT r.project_id AS projectId, r.committed_revision AS revision, b.operations_json AS operationsJson, b.results_json AS resultsJson, r.request_hash AS requestHash FROM canvas_command_receipts r LEFT JOIN canvas_operation_batches b ON b.operation_id = r.operation_id WHERE r.operation_id = ?").get(operationId) as { projectId: string; revision: number; operationsJson: string | null; resultsJson: string | null; requestHash?: string } | undefined;
@@ -1989,9 +2011,11 @@ export class BackendDatabase {
                 throw error;
             }
             // getCanvasProject parses a fresh snapshot for this transaction; it has no shared owner.
-            const project = current as Record<string, unknown>;
+            const project = current as CanvasProject;
+            const assetBefore = structuredClone(current);
+            const sourceAssetsBefore = this.listSharedAssetRecordsForProject(id);
             const editorialCheck = operations.some(operation => ["connect_nodes", "disconnect_nodes", "delete_connections", "delete_node", "update_h3_segment", "replace_h3_segments"].includes(operation.type) || operation.type === "update_node" && (operation.metadata || operation.metadataDelete));
-            const editorialBefore = !context?.runtimeWrite && editorialCheck ? structuredClone(current) : null;
+            const editorialBefore = (!context?.runtimeWrite || context.referenceSourceBefore) && editorialCheck ? structuredClone(current) : null;
             const formalImageNodes = !context?.runtimeWrite ? (project.nodes as Record<string, any>[] || []).filter(node => node.metadata?.productionImageInput) : [];
             const formalSourceIds = new Set(formalImageNodes.map(node => node.metadata.productionImageInput.sourceNodeId));
             const imageInputBaseline = formalImageNodes.length ? structuredClone({
@@ -2004,6 +2028,7 @@ export class BackendDatabase {
             }
             const committedOperations: CanvasOperation[] = [];
             const operationResults = operations.flatMap((operation, index) => {
+                validateAssetOperation(this, id, project, operation, context);
                 if (!context?.runtimeWrite) {
                     const node = (Array.isArray(project.nodes) ? project.nodes as Record<string, any>[] : []).find(item => item.id === (operation.id || operation.nodeId));
                     const metadata = operation.metadata as Record<string, unknown> | undefined;
@@ -2036,6 +2061,7 @@ export class BackendDatabase {
                 const derivedOperations: CanvasOperation[] = [];
                 const result = applyCanvasProjectOperations(project, [operations[index]], { derivedOperations });
                 committedOperations.push(operations[index], ...derivedOperations);
+                committedOperations.push(...captureAssetEdits(this, project, operations[index], context));
                 if (!isText) {
                     // 每一步删除后立即清理；同批 delete + add 同 ID 也必须得到新文本身份。
                     if (["delete_node", "delete_h3_segment", "replace_h3_segments"].includes(operation.type) || (operation.type === "update_node" && (["segments", "texts"].some((key) => Object.hasOwn(operation.metadata as object || {}, key) || (operation.metadataDelete as string[] || []).includes(key)) || Object.hasOwn(operation.patch as object || {}, "type")))) {
@@ -2094,7 +2120,8 @@ export class BackendDatabase {
             project.revision = revision;
             project.updatedAt = new Date().toISOString();
             this.db.prepare("UPDATE canvas_projects SET data_json = ?, updated_at = ? WHERE id = ?")
-                .run(JSON.stringify(project), String(project.updatedAt), id);
+                .run(JSON.stringify(stripProjectAssets(project)), String(project.updatedAt), id);
+            propagateAssetChanges(this, id, assetBefore, project, dependentCommits);
             const source = context?.source || { clientId: "system:backend", kind: "system", label: "后台" };
             this.db.prepare("INSERT INTO canvas_operation_batches (operation_id, project_id, base_revision, revision, source_json, operations_json, results_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
                 .run(operationId, id, currentRevision, revision, JSON.stringify(source), JSON.stringify(committedOperations), JSON.stringify(operationResults), String(project.updatedAt));
@@ -2106,13 +2133,13 @@ export class BackendDatabase {
                 this.completeMcpCommand(operationId, revision, committedOperations);
             }
             this.db.exec(commitSql);
-            commit = { projectId: id, operationId, baseRevision: currentRevision, revision, operations: committedOperations, operationResults, source, updatedAt: String(project.updatedAt), ...(productionUpdates.length ? { productionUpdates } : {}) };
+            commit = { projectId: id, operationId, baseRevision: currentRevision, revision, operations: committedOperations, operationResults, source, updatedAt: String(project.updatedAt), ...(productionUpdates.length ? { productionUpdates } : {}), deletedAssetIds: sourceAssetsBefore.filter(asset => !this.getAssetRecord(asset.id)).map(asset => asset.id) };
         } catch (error) {
             this.db.exec(rollbackSql);
             throw error;
         }
         // 已提交的数据不能因为通知失败而被报告成事务失败，更不能尝试 ROLLBACK。
-        if (context?.withinTransaction) context.deferredCommits?.push(commit); else this.notifyCanvasCommit(commit);
+        if (context?.withinTransaction) context.deferredCommits?.push(commit, ...dependentCommits); else { this.notifyCanvasCommit(commit); for (const dependent of dependentCommits) this.notifyCanvasCommit(dependent); }
         return { project: this.getCanvasProject(id)!, revision: commit.revision, operationId, operationResults: commit.operationResults, operations: commit.operations, duplicated: false };
     }
 
@@ -2612,7 +2639,7 @@ export class BackendDatabase {
     getCanvasProject(id: string): CanvasProject | null {
         const row = this.db.prepare("SELECT data_json FROM canvas_projects WHERE id = ?").get(id) as { data_json?: string } | undefined;
         if (!row?.data_json) return null;
-        try { return stripCanvasLocalViewState(JSON.parse(row.data_json) as Record<string, unknown>) as unknown as CanvasProject; } catch { return null; }
+        try { return resolveProjectAssets(this, stripCanvasLocalViewState(JSON.parse(row.data_json) as Record<string, unknown>) as unknown as CanvasProject); } catch { return null; }
     }
 
     getProductionLayoutPlan(projectId: string): ProductionLayoutPlan | null {
@@ -2778,15 +2805,28 @@ export class BackendDatabase {
         if (options.dramaId) { clauses.push("drama_id = ?"); values.push(options.dramaId); }
         const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
         const rows = this.db.prepare(`SELECT * FROM assets ${where} ORDER BY updated_at DESC`).all(...values) as Array<Record<string, unknown>>;
-        return rows.map(assetFromRow);
+        return rows.map(row => projectAsset(this, assetFromRow(row)));
     }
 
     getAsset(id: string): Asset | null {
+        const asset = this.getAssetRecord(id);
+        return asset ? projectAsset(this, asset) : null;
+    }
+
+    getAssetRecord(id: string): Asset | null {
         const row = this.db.prepare("SELECT * FROM assets WHERE id = ?").get(id) as Record<string, unknown> | undefined;
         return row ? assetFromRow(row) : null;
     }
 
-    upsertAsset(asset: Asset) {
+    listSharedAssetRecordsForProject(projectId: string): Asset[] {
+        return (this.db.prepare("SELECT * FROM assets WHERE json_extract(metadata_json, '$.sharedAssetSource.sourceProjectId')=?").all(projectId) as Record<string, unknown>[]).map(assetFromRow);
+    }
+
+    listAssetRecords(): Asset[] { return (this.db.prepare("SELECT * FROM assets ORDER BY updated_at DESC").all() as Record<string, unknown>[]).map(assetFromRow); }
+
+    upsertAsset(asset: Asset, command?: AssetWriteCommand): Asset { return writeDramaAsset(this, asset, command); }
+
+    upsertAssetRecord(asset: Asset) {
         const now = new Date().toISOString();
         const updatedAt = asset.updatedAt || now;
         const dramaId = asset.dramaId && this.db.prepare("SELECT 1 FROM drama_projects WHERE folder_id = ?").get(asset.dramaId) ? asset.dramaId : null;
@@ -2806,37 +2846,30 @@ export class BackendDatabase {
             JSON.stringify(asset.metadata ?? {}),
             asset.createdAt ?? now, updatedAt,
         );
-        return this.getAsset(asset.id)!;
+        return this.getAssetRecord(asset.id)!;
     }
 
     replaceAssets(assets: Asset[], folders: AssetFolder[]) {
-        const now = new Date().toISOString();
+        const commits: CanvasCommit[] = [];
         this.db.exec("BEGIN IMMEDIATE");
         try {
-            this.db.prepare("DELETE FROM assets").run();
-            this.db.prepare("DELETE FROM asset_folders").run();
-            const insertFolder = this.db.prepare("INSERT INTO asset_folders (id, name, parent_id, created_at) VALUES (?, ?, ?, ?)");
-            for (const folder of folders) insertFolder.run(folder.id, folder.name, folder.parentId, folder.createdAt);
-            const insertAsset = this.db.prepare(`
-                INSERT INTO assets (id, kind, title, cover_url, tags_json, folder_id, drama_id, data_json, note, source, metadata_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `);
-            for (const asset of assets) {
-                const dramaId = asset.dramaId && this.db.prepare("SELECT 1 FROM drama_projects WHERE folder_id = ?").get(asset.dramaId) ? asset.dramaId : null;
-                insertAsset.run(
-                    asset.id, asset.kind, asset.title ?? "", asset.coverUrl ?? "", JSON.stringify(asset.tags ?? []),
-                    asset.folderId ?? null, dramaId, JSON.stringify(asset.data ?? {}), asset.note ?? null, asset.source ?? null,
-                    JSON.stringify(asset.metadata ?? {}), asset.createdAt ?? now, asset.updatedAt ?? now,
-                );
+            const incoming = new Set(assets.map(a => a.id));
+            // No deletion bypass for referenced shared assets through a full-list import.
+            for (const current of this.listAssetRecords()) if (!incoming.has(current.id)) {
+                if (current.metadata.sharedAssetSource) throw new Error("共享资产不能通过整库替换删除，请使用单项删除入口");
+                this.deleteAssetRecord(current.id);
             }
+            this.db.prepare("DELETE FROM asset_folders").run();
+            for (const folder of folders) this.upsertAssetFolder(folder);
+            for (const asset of assets) this.upsertAsset(asset, { withinTransaction: true, deferredCommits: commits });
             this.db.exec("COMMIT");
-        } catch (error) {
-            this.db.exec("ROLLBACK");
-            throw error;
-        }
+        } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        for (const commit of commits) this.notifyCanvasCommit(commit);
     }
 
-    deleteAsset(id: string): number {
+    deleteAsset(id: string): number { return deleteDramaAsset(this, id); }
+
+    deleteAssetRecord(id: string): number {
         return Number(this.db.prepare("DELETE FROM assets WHERE id = ?").run(id).changes);
     }
 

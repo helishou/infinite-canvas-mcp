@@ -1,3 +1,5 @@
+import { libraryAssetNode } from "@/lib/canvas/library-asset-node";
+import type { SharedAssetSource, SharedAssetReference } from "@basketikun/canvas-agent/shared-asset-reference";
 import { CanvasBatchRename } from "@/components/canvas/canvas-batch-rename";
 import { useCanvasProductionContext } from "@/components/production/canvas-production-workspace";
 import { productionObjectForNode, productionObjectPath, productionObjectState, type ProductionObject } from "@/lib/production-object";
@@ -21,7 +23,7 @@ import { fetchWorkflowDetail, isWorkflowImageField } from "@/services/api/workfl
 import { resolveComfyImageSize } from "@/services/api/comfyui";
 import { uploadImage, resolveImageUrl, isImageFile, isSvgFile, type UploadedImage } from "@/services/image-storage";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
-import { backendMediaUrl, createBackendGenerationLog, createBackendTask, fetchBackendCanvasDrama, prepareCanvasLoop, request, resolveComfyMediaUrl, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
+import { BackendApiError, updateBackendAsset, backendMediaUrl, createBackendGenerationLog, createBackendTask, fetchBackendCanvasDrama, prepareCanvasLoop, request, resolveComfyMediaUrl, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
 import { runCanvasImageTask } from "@/services/api/canvas-image";
 import { runCanvasVideoTask } from "@/services/api/canvas-video";
 import { runCanvasAudioTask } from "@/services/api/canvas-audio";
@@ -35,10 +37,11 @@ import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { findCharacterVoiceAsset, resolveCharacterVoiceName } from "@/lib/character-voice";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { useAssetStore, type AudioAsset } from "@/stores/use-asset-store";
+import { useAssetStore, saveLibraryAsset, acceptLibraryAsset, type Asset, type AudioAsset } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
 import { canvasNodeImage } from "@/lib/canvas/canvas-image-renderability";
+import { convertImageNodeToProp as convertImageToPropNode } from "@/lib/canvas/prop-node-conversion";
 import { arrangeGroupMembers, computeFlowLayout } from "@/lib/canvas/canvas-agent-ops";
 import { fitNodeSize } from "@/lib/canvas/canvas-node-size";
 import { retainCharacterPrimaryIndex } from "@/lib/canvas/character-primary";
@@ -121,6 +124,7 @@ const CanvasPluginManagerModal = lazy(() => import("@/components/canvas/canvas-p
 const CanvasGenerationLogDialog = lazy(() => import("@/components/canvas/canvas-generation-log-dialog").then((module) => ({ default: module.CanvasGenerationLogDialog })));
 const CharacterNodeEditModal = lazy(() => import("@/components/canvas/character-node-edit-modal").then((module) => ({ default: module.CharacterNodeEditModal })));
 const SceneNodeEditModal = lazy(() => import("@/components/canvas/scene-node-edit-modal").then((module) => ({ default: module.SceneNodeEditModal })));
+const PropNodeEditModal = lazy(() => import("@/components/canvas/prop-node-edit-modal").then((module) => ({ default: module.PropNodeEditModal })));
 const CanvasVideoCompareModal = lazy(() => import("@/components/canvas/canvas-video-compare-modal").then((module) => ({ default: module.CanvasVideoCompareModal })));
 const AssetPickerModal = lazy(() => import("@/components/canvas/asset-picker-modal").then((module) => ({ default: module.AssetPickerModal })));
 const CanvasNodePromptPanel = lazy(() => import("@/components/canvas/canvas-node-prompt-panel").then((module) => ({ default: module.CanvasNodePromptPanel })));
@@ -570,6 +574,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const [expandedBatchNodeIds, setExpandedBatchNodeIds] = useState<Set<string>>(new Set());
     const [characterEditNodeId, setCharacterEditNodeId] = useState<string | null>(null);
     const [sceneEditNodeId, setSceneEditNodeId] = useState<string | null>(null);
+    const [propEditNodeId, setPropEditNodeId] = useState<string | null>(null);
     const [isNodeDragging, setIsNodeDragging] = useState(false);
     const [isNodeResizing, setIsNodeResizing] = useState(false);
     const [dropTargetGroupId, setDropTargetGroupId] = useState<string | null>(null);
@@ -582,6 +587,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const [characterCanvasImagePick, setCharacterCanvasImagePick] = useState<{ id: string; image: NonNullable<CanvasNodeMetadata["characterImages"]>[number] } | null>(null);
     const [sceneImagePickerActive, setSceneImagePickerActive] = useState<"image" | "colorCard" | null>(null);
     const [sceneCanvasImagePick, setSceneCanvasImagePick] = useState<{ id: string; slot: "image" | "colorCard"; image: NonNullable<CanvasNodeMetadata["sceneImage"]> } | null>(null);
+    const [propImagePickerActive, setPropImagePickerActive] = useState(false);
+    const [propCanvasImagePick, setPropCanvasImagePick] = useState<{ id: string; image: NonNullable<CanvasNodeMetadata["propImage"]> } | null>(null);
 
     const nodesRef = useRef(nodes);
     const previousNodeMetadataRef = useRef(new Map(nodes.map((node) => [node.id, node.metadata])));
@@ -955,7 +962,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     );
 
     const createConnectedNode = useCallback(
-        (type: CanvasNodeType.Image | CanvasNodeType.Text | CanvasNodeType.Config | CanvasNodeType.Video | CanvasNodeType.Audio | CanvasNodeType.Loop | CanvasNodeType.Scene, pending: PendingConnectionCreate) => {
+        (type: CanvasNodeType.Image | CanvasNodeType.Text | CanvasNodeType.Config | CanvasNodeType.Video | CanvasNodeType.Audio | CanvasNodeType.Loop | CanvasNodeType.Scene | CanvasNodeType.Prop, pending: PendingConnectionCreate) => {
             const metadata = type === CanvasNodeType.Config ? { model: effectiveConfig.imageModel || effectiveConfig.model, size: effectiveConfig.size, count: getGenerationCount(effectiveConfig.count || effectiveConfig.canvasImageCount) } : undefined;
             const newNode = createCanvasNode(type, pending.position, metadata);
             if (pending.connection) {
@@ -1493,7 +1500,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                   ? Boolean(definition.autoOpenPanel)
                   : definition?.useBuiltinPanel
                     ? true
-                    : isBuiltinType(type) && type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio && type !== CanvasNodeType.Group && type !== CanvasNodeType.Character && type !== CanvasNodeType.Scene && type !== CanvasNodeType.Loop;
+                    : isBuiltinType(type) && type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio && type !== CanvasNodeType.Group && type !== CanvasNodeType.Character && type !== CanvasNodeType.Scene && type !== CanvasNodeType.Prop && type !== CanvasNodeType.Loop;
             if (wantsPanel) setDialogNodeId(newNode.id);
         },
         [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, getCanvasCenter],
@@ -1770,6 +1777,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             position: { x: source.position.x + 36, y: source.position.y + 36 },
             metadata: source.metadata ? structuredClone(source.metadata) : undefined,
         };
+        if (next.metadata) delete next.metadata.sharedLibraryAssetId;
         const nextConnections = connectionsRef.current.flatMap((connection) => {
             if (connection.toNodeId === nodeId) {
                 const input = currentNodes.find((node) => node.id === connection.fromNodeId);
@@ -3729,6 +3737,37 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         [extractingKeyframeNodeId, message, projectId, t],
     );
 
+    const saveCanvasAsset = useCallback(async (node: CanvasNodeData, input: Parameters<typeof addAsset>[0]) => {
+        if (!input.dramaId) { if (input.id) { await useAssetStore.getState().updateAsset(input.id, input); return input.id; } return addAsset(input); }
+        await flushCanvasProjectBeforeGeneration(projectId!);
+        const ref = node.metadata?.sharedAssetReference as SharedAssetReference | undefined;
+        const previous = useAssetStore.getState().assets.find(asset => asset.id === ref?.assetId || asset.id === node.metadata?.sharedLibraryAssetId || (asset.dramaId === input.dramaId && asset.metadata?.projectId === projectId && asset.metadata?.nodeId === node.id && (node.type !== CanvasNodeType.Config || (asset.data as Record<string, unknown>).storageKey === (input.data as Record<string, unknown>).storageKey)));
+        const now = new Date().toISOString();
+        const asset = { ...input, id: previous?.id || nanoid(), createdAt: previous?.createdAt || now, updatedAt: now,
+            metadata: { ...previous?.metadata, ...input.metadata, projectId, nodeId: node.id } } as Asset;
+        const command = { operationId: nanoid(), canvasSource: { projectId: projectId!, nodeId: node.id } };
+        try { return (await saveLibraryAsset(asset, command)).id; }
+        catch (error) {
+            if (!(error instanceof BackendApiError) || error.details.code !== "FIELD_CONFLICT") throw error;
+            return await new Promise<string>((resolve, reject) => {
+                modal.confirm({ title: t("canvas.sharedLibrary.conflictTitle"), content: t("canvas.sharedLibrary.conflictDescription"), okText: t("canvas.sharedLibrary.useLocal"), cancelText: t("canvas.sharedLibrary.keepDraft"),
+                    onOk: async () => { try { resolve((await saveLibraryAsset(asset, { ...command, operationId: nanoid(), resolveConflicts: "local" })).id); } catch (failure) { reject(failure); } },
+                    onCancel: () => reject(error) });
+            });
+        }
+    }, [addAsset, modal, projectId, t]);
+
+    const discardSharedAssetEdits = useCallback(async (node: CanvasNodeData) => {
+        const ref = node.metadata?.sharedAssetReference as SharedAssetReference | undefined;
+        if (!ref) return;
+        try {
+            await flushCanvasProjectBeforeGeneration(projectId!);
+            const result = await updateBackendAsset(ref.assetId, {}, { operationId: nanoid(), canvasSource: { projectId: projectId!, nodeId: node.id }, discardLocal: true });
+            acceptLibraryAsset(result.asset as unknown as Asset);
+            message.success(t("canvas.sharedLibrary.discarded"));
+        } catch (error) { message.error(String(error)); }
+    }, [projectId, message, t]);
+
     const saveNodeAsset = useCallback(
         async (node: CanvasNodeData) => {
             const isSmartGenerationNode = node.type === CanvasNodeType.Config && node.metadata?.smart === true;
@@ -3737,14 +3776,14 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 const content = node.metadata?.content?.trim();
                 if (!content) return message.error(t("canvas.projectPage.noTextToSave"));
                 const dramaId = await getCurrentCanvasDramaId();
-                addAsset({ kind: "text", title: node.metadata?.prompt?.slice(0, 24) || t("canvas.projectPage.canvasText"), coverUrl: "", tags: [], dramaId, source: "Canvas", data: { content }, metadata: { source: "canvas", nodeId: node.id } });
+                await saveCanvasAsset(node, { kind: "text", title: node.metadata?.prompt?.slice(0, 24) || t("canvas.projectPage.canvasText"), coverUrl: "", tags: [], dramaId, source: "Canvas", data: { content }, metadata: { source: "canvas", nodeId: node.id } });
                 message.success(t("common.addedToAssets"));
                 return;
             }
             if (outputType === CanvasNodeType.Video) {
                 if (!node.metadata?.content) return message.error(t("canvas.projectPage.noVideoToSave"));
                 const dramaId = await getCurrentCanvasDramaId();
-                addAsset({
+                await saveCanvasAsset(node, {
                     kind: "video",
                     title: node.metadata?.prompt?.slice(0, 24) || t("canvas.projectPage.canvasVideo"),
                     coverUrl: "",
@@ -3760,7 +3799,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             if (outputType === CanvasNodeType.Audio) {
                 if (!node.metadata?.content) return message.error(t("canvas.projectPage.noImageToSave"));
                 const dramaId = await getCurrentCanvasDramaId();
-                addAsset({
+                await saveCanvasAsset(node, {
                     kind: "audio",
                     title: node.metadata?.prompt?.slice(0, 24) || "画布音频",
                     coverUrl: "",
@@ -3777,7 +3816,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             if (!sourceImage) return message.error(t("canvas.projectPage.noImageToSave"));
             const dramaId = await getCurrentCanvasDramaId();
             const dataUrl = sourceImage.storageKey ? "" : sourceImage.content;
-            addAsset({
+            await saveCanvasAsset(node, {
                 kind: "image",
                 title: node.metadata?.prompt?.slice(0, 24) || t("canvas.projectPage.canvasImage"),
                 coverUrl: sourceImage.storageKey ? backendMediaUrl(sourceImage.storageKey) : sourceImage.content,
@@ -3796,7 +3835,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             });
             message.success(t("common.addedToAssets"));
         },
-        [addAsset, getCurrentCanvasDramaId, message, t],
+        [saveCanvasAsset, getCurrentCanvasDramaId, message, t],
     );
 
     // 把当前画布上的图片节点就地转成角色节点：保留位置 / 大小 / 标题，把原图作为
@@ -3900,6 +3939,13 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         },
         [message, t],
     );
+
+    const convertImageNodeToProp = useCallback((node: CanvasNodeData) => {
+        const converted = convertImageToPropNode(node);
+        if (!converted) { message.warning(t("canvas.prop.convertNoImage")); return; }
+        setNodes(prev => prev.map(item => item.id === node.id ? convertImageToPropNode(item) || item : item));
+        message.success(t("canvas.prop.converted"));
+    }, [message, setNodes, t]);
 
     // 把拖入的资源（图片/音频）落到角色节点上：图片 -> outfit，音频 -> 声线。
     const dropOnCharacterNode = useCallback((node: CanvasNodeData, ref: { url: string; type: "image" | "audio"; name?: string; storageKey?: string; mimeType?: string }) => {
@@ -4015,6 +4061,39 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         setSceneImagePickerActive(null);
     }, [sceneImagePickerActive, t]);
 
+    const startPropImageSelection = useCallback(() => {
+        if (!propEditNodeId) return;
+        setPropImagePickerActive(true);
+        setSelectedNodeIds(new Set([propEditNodeId]));
+        setSelectedConnectionId(null);
+        setDialogNodeId(null);
+    }, [propEditNodeId]);
+
+    const exitPropImageSelection = useCallback(() => {
+        setPropImagePickerActive(false);
+        if (propEditNodeId) setSelectedNodeIds(new Set([propEditNodeId]));
+    }, [propEditNodeId]);
+
+    const selectPropCanvasImage = useCallback((sourceNodeId: string) => {
+        if (!propImagePickerActive) return;
+        const source = nodesRef.current.find((node) => node.id === sourceNodeId);
+        const resource = source ? nodeResourceItems(source).find((item) => item.kind === "image" && item.url) : undefined;
+        if (!source || !resource?.url) return;
+        setPropCanvasImagePick({
+            id: nanoid(),
+            image: {
+                url: resource.storageKey ? backendMediaUrl(resource.storageKey) : resource.url,
+                storageKey: resource.storageKey,
+                name: source.title || t("canvas.prop.image"),
+                width: source.metadata?.naturalWidth || source.width,
+                height: source.metadata?.naturalHeight || source.height,
+                bytes: source.metadata?.bytes || 0,
+                mimeType: source.metadata?.mimeType || "image/png",
+            },
+        });
+        setPropImagePickerActive(false);
+    }, [propImagePickerActive, t]);
+
     const handleSelectReference = useCallback(
         (sourceNodeId: string) => {
             if (pendingVideoComparison) {
@@ -4032,6 +4111,10 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 selectSceneCanvasImage(sourceNodeId);
                 return;
             }
+            if (propImagePickerActive) {
+                selectPropCanvasImage(sourceNodeId);
+                return;
+            }
             // 插件发起的选参考：不回写画布连线，只把选中节点回抛给插件，由插件写进被点的 ref 槽。
             if (pluginReferencePickNodeId) {
                 window.dispatchEvent(new CustomEvent("canvas-reference-pick", { detail: { targetNodeId: pluginReferencePickNodeId, sourceNodeId } }));
@@ -4043,7 +4126,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             }
             selectNodeReference(sourceNodeId);
         },
-        [characterImagePickerActive, compareCandidateIds, pendingVideoComparison, pluginReferencePickNodeId, sceneImagePickerActive, selectCharacterCanvasImage, selectNodeReference, selectSceneCanvasImage],
+        [characterImagePickerActive, compareCandidateIds, pendingVideoComparison, pluginReferencePickNodeId, propImagePickerActive, sceneImagePickerActive, selectCharacterCanvasImage, selectNodeReference, selectPropCanvasImage, selectSceneCanvasImage],
     );
 
     useEffect(() => {
@@ -4071,6 +4154,18 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         window.addEventListener("keydown", exit, true);
         return () => window.removeEventListener("keydown", exit, true);
     }, [exitSceneImageSelection, sceneImagePickerActive]);
+
+    useEffect(() => {
+        if (!propImagePickerActive) return;
+        const exit = (event: KeyboardEvent) => {
+            if (!activeRef.current || event.key !== "Escape") return;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            exitPropImageSelection();
+        };
+        window.addEventListener("keydown", exit, true);
+        return () => window.removeEventListener("keydown", exit, true);
+    }, [exitPropImageSelection, propImagePickerActive]);
 
     const saveCharacterEdit = useCallback(
         (patch: {
@@ -4129,7 +4224,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 return;
             }
             const existing = useAssetStore.getState().assets.find((asset) => asset.kind === "character" && asset.id === node.metadata?.characterAssetId)
-                || useAssetStore.getState().assets.find((asset) => asset.kind === "character" && (asset.data.name || asset.title) === name);
+                || useAssetStore.getState().assets.find((asset) => asset.kind === "character" && asset.metadata?.projectId === projectId && asset.metadata?.nodeId === node.id);
             const voiceAssetId = node.metadata?.characterVoiceAssetId || "";
             const voiceAsset = findCharacterVoiceAsset(
                 useAssetStore.getState().assets.filter((asset): asset is AudioAsset => asset.kind === "audio"),
@@ -4155,37 +4250,16 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             };
             try {
                 const dramaId = await getCurrentCanvasDramaId();
-                let assetId = existing?.id;
-                if (existing) {
-                    useAssetStore.getState().updateAsset(existing.id, {
-                        title: name,
-                        coverUrl,
-                        ...(dramaId ? { dramaId } : {}),
-                        data,
-                        metadata: { source: "canvas", projectId, nodeId: node.id, replaced: true },
-                    });
-                } else {
-                    assetId = useAssetStore.getState().addAsset({
-                        kind: "character",
-                        title: name,
-                        coverUrl,
-                        tags: [],
-                        dramaId,
-                        source: "Canvas",
-                        data,
-                        metadata: { source: "canvas", projectId, nodeId: node.id },
-                    });
-                }
-                setNodes((prev) => prev.map((item) => item.id === node.id
-                    ? { ...item, metadata: { ...item.metadata, characterAssetId: assetId } }
-                    : item));
+                const assetId = await saveCanvasAsset(node, { kind: "character", title: name, coverUrl, tags: existing?.tags || [], dramaId, source: "Canvas", data,
+                    metadata: { source: "canvas", projectId, nodeId: node.id }, ...(existing ? { id: existing.id } : {}) });
+                if (!dramaId) setNodes(prev => prev.map(item => item.id === node.id ? { ...item, metadata: { ...item.metadata, characterAssetId: assetId } } : item));
                 message.success(t("canvas.character.saveToAssetsSuccess"));
             } catch (error) {
                 const message_ = error instanceof Error ? error.message : String(error);
                 message.error(t("canvas.character.saveToAssetsFailed", { error: message_ }));
             }
         },
-        [getCurrentCanvasDramaId, message, projectId, setNodes, t],
+        [getCurrentCanvasDramaId, saveCanvasAsset, message, projectId, setNodes, t],
     );
 
     const openSceneEditor = useCallback((node: CanvasNodeData) => {
@@ -4200,6 +4274,30 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         setSceneCanvasImagePick(null);
         setSceneEditNodeId(null);
     }, []);
+
+    const openPropEditor = useCallback((node: CanvasNodeData) => {
+        if (node.type !== CanvasNodeType.Prop) return;
+        setPropImagePickerActive(false);
+        setPropCanvasImagePick(null);
+        setPropEditNodeId(node.id);
+    }, []);
+
+    const closePropEditor = useCallback(() => {
+        setPropImagePickerActive(false);
+        setPropCanvasImagePick(null);
+        setPropEditNodeId(null);
+    }, []);
+
+    const savePropEdit = useCallback((patch: { title: string; propName: string; propDescription: string; propImage?: NonNullable<CanvasNodeMetadata["propImage"]> }) => {
+        if (!propEditNodeId) return;
+        setNodes(prev => prev.map(item => {
+            if (item.id !== propEditNodeId || item.type !== CanvasNodeType.Prop) return item;
+            const metadata = { ...item.metadata, propName: patch.propName, propDescription: patch.propDescription };
+            if (patch.propImage) metadata.propImage = patch.propImage;
+            else delete metadata.propImage;
+            return { ...item, title: patch.title, metadata };
+        }));
+    }, [propEditNodeId, setNodes]);
 
     const startSceneImageSelection = useCallback((slot: "image" | "colorCard") => {
         if (!sceneEditNodeId) return;
@@ -4230,20 +4328,17 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             message.warning(t("canvas.scene.saveNameRequired"));
             return;
         }
-        const existing = useAssetStore.getState().assets.find((asset) => asset.kind === "scene" && (asset.data.name || asset.title) === name);
+        const existing = useAssetStore.getState().assets.find((asset) => asset.kind === "scene" && (asset.id === node.metadata?.sceneAssetId || asset.metadata?.projectId === projectId && asset.metadata?.nodeId === node.id));
         const data = { name, description: node.metadata?.sceneDescription || "", image, colorCard: node.metadata?.sceneColorCard, colorPalette: node.metadata?.sceneColorPalette, colorCardPrompt: node.metadata?.sceneColorCardPrompt || "" };
         try {
             const dramaId = await getCurrentCanvasDramaId();
-            if (existing) {
-                useAssetStore.getState().updateAsset(existing.id, { title: name, coverUrl: image.url, ...(dramaId ? { dramaId } : {}), data, metadata: { source: "canvas", nodeId: node.id, replaced: true } });
-            } else {
-                useAssetStore.getState().addAsset({ kind: "scene", title: name, coverUrl: image.url, tags: [], dramaId, source: "Canvas", data, metadata: { source: "canvas", nodeId: node.id } });
-            }
+            const assetId = await saveCanvasAsset(node, { kind: "scene", title: name, coverUrl: image.url, tags: [], dramaId, source: "Canvas", data, metadata: { source: "canvas", projectId, nodeId: node.id }, ...(existing ? { id: existing.id } : {}) });
+            if (!dramaId) setNodes(prev => prev.map(item => item.id === node.id ? { ...item, metadata: { ...item.metadata, sceneAssetId: assetId } } : item));
             message.success(t("canvas.scene.saveToAssetsSuccess"));
         } catch (error) {
             message.error(t("canvas.scene.saveToAssetsFailed", { error: error instanceof Error ? error.message : String(error) }));
         }
-    }, [getCurrentCanvasDramaId, message, t]);
+    }, [getCurrentCanvasDramaId, saveCanvasAsset, message, projectId, setNodes, t]);
 
     const dropOnSceneNode = useCallback((node: CanvasNodeData, ref: { url: string; name?: string; storageKey?: string; mimeType?: string }) => {
         if (node.type !== CanvasNodeType.Scene || !ref.url) return;
@@ -4252,6 +4347,14 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             metadata: { ...item.metadata, sceneImage: item.metadata?.sceneImage || { url: ref.url, storageKey: ref.storageKey, name: ref.name || "scene", width: 0, height: 0, bytes: 0, mimeType: ref.mimeType || "image/*" } },
         } : item));
     }, []);
+
+    const dropOnPropNode = useCallback((node: CanvasNodeData, ref: { url: string; name?: string; storageKey?: string; mimeType?: string }) => {
+        if (node.type !== CanvasNodeType.Prop || (!ref.url && !ref.storageKey)) return;
+        setNodes(prev => prev.map(item => item.id === node.id ? {
+            ...item,
+            metadata: { ...item.metadata, propImage: { url: ref.url || "", storageKey: ref.storageKey, name: ref.name || item.metadata?.propName || item.title || "道具", width: item.metadata?.propImage?.width || item.width, height: item.metadata?.propImage?.height || item.height, bytes: item.metadata?.propImage?.bytes || 0, mimeType: ref.mimeType || item.metadata?.propImage?.mimeType || "image/*" } },
+        } : item));
+    }, [setNodes]);
 
     const createImageReversePromptNodes = useCallback(
         (node: CanvasNodeData) => {
@@ -5624,6 +5727,19 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 else resolver(null);
                 return;
             }
+            if (payload.sharedAssetSource) {
+                const asset = useAssetStore.getState().assets.find(asset => asset.id === payload.sharedAssetSource!.assetId);
+                if (!asset) { message.error(t("canvas.sharedLibrary.unavailable")); return; }
+                const source = payload.sharedAssetSource;
+                const center = screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
+                const spec = NODE_DEFAULT_SIZE[asset.kind as CanvasNodeType];
+                const id = nanoid();
+                const sourceNode = libraryAssetNode(asset);
+                setNodes(prev => [...prev, { ...sourceNode, id, position: { x: center.x - spec.width / 2, y: center.y - spec.height / 2 }, width: spec.width, height: spec.height,
+                    metadata: { ...sourceNode.metadata, sharedAssetReference: source, status: NODE_STATUS_SUCCESS } }]);
+                setSelectedNodeIds(new Set([id]));
+                return;
+            }
             if (payload.kind === "text") {
                 insertAssistantText(payload.content, payload.title);
             } else if (payload.kind === "video") {
@@ -6145,8 +6261,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                                         ? node.id === pendingVideoComparison.source.id
                                             ? "target"
                                             : compareCandidateIds.has(node.id) ? "available" : "disabled"
-                                        : characterImagePickerActive || sceneImagePickerActive
-                                        ? node.id === (characterImagePickerActive ? characterEditNodeId : sceneEditNodeId)
+                                        : characterImagePickerActive || sceneImagePickerActive || propImagePickerActive
+                                        ? node.id === (characterImagePickerActive ? characterEditNodeId : sceneImagePickerActive ? sceneEditNodeId : propEditNodeId)
                                             ? "target"
                                             : nodeResourceItems(node).some((item) => item.kind === "image" && item.url)
                                               ? "available"
@@ -6195,6 +6311,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                                 onCharacterDrop={dropOnCharacterNode}
                                 onEditScene={openSceneEditor}
                                 onSceneDrop={dropOnSceneNode}
+                                onEditProp={openPropEditor}
+                                onPropDrop={dropOnPropNode}
                             />
                         );
                     })}
@@ -6262,6 +6380,10 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                         <button type="button" className="absolute left-1/2 top-4 z-[90] -translate-x-1/2 border px-4 py-2 text-sm font-medium backdrop-blur" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} onClick={exitSceneImageSelection}>
                             {t("canvas.scene.selectingImageHint")}
                         </button>
+                    ) : propImagePickerActive ? (
+                        <button type="button" className="absolute left-1/2 top-4 z-[90] -translate-x-1/2 border px-4 py-2 text-sm font-medium backdrop-blur" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} onClick={exitPropImageSelection}>
+                            {t("canvas.prop.selectingImageHint")}
+                        </button>
                     ) : refPickActive ? (
                         <button
                             type="button"
@@ -6278,6 +6400,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     node={isNodeDragging || isNodeResizing || nodeImageSettingsOpen || Boolean(referencePickerNodeId) || expandedBatchNodeIds.has(toolbarNode?.id || "") ? null : toolbarNode}
                     viewport={viewport}
                     extraTools={[...productionMoreActions, ...(pluginToolbarItems || [])]}
+                    onDiscardSharedEdits={(node) => void discardSharedAssetEdits(node)}
                     productionActions={productionPrimaryActions}
                     productionStatus={toolbarState ? t(`productionCanvas.nodeStatus.${toolbarState.status}`) : undefined}
                     productionSelected={Boolean(toolbarNode && selectedNodeIds.has(toolbarNode.id))}
@@ -6291,11 +6414,12 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onGenerateImage={generateImageFromTextNode}
                     onUpload={(node) => handleUploadRequest(node.id)}
                     onDownload={downloadNodeImage}
-                    onSaveAsset={(node) => void saveNodeAsset(node)}
+                    onSaveAsset={(node) => void saveNodeAsset(node).catch(error => message.error(String(error)))}
                     onCompareVideo={openVideoComparison}
                     onTrimVideo={openVideoTrim}
                     onConvertToCharacter={convertImageNodeToCharacter}
                     onConvertToScene={convertImageNodeToScene}
+                    onConvertToProp={convertImageNodeToProp}
                     onSaveCharacterToAsset={(node) => void saveCharacterNodeToAsset(node)}
                     onSaveSceneToAsset={(node) => void saveSceneNodeToAsset(node)}
                     onMaskEdit={(node) => setMaskEditNodeId(node.id)}
@@ -6335,6 +6459,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onAddLoop={() => createNode(CanvasNodeType.Loop)}
                     onAddCharacter={() => createNode(CanvasNodeType.Character)}
                     onAddScene={() => createNode(CanvasNodeType.Scene)}
+                    onAddProp={() => createNode(CanvasNodeType.Prop)}
                     onAddGroup={addGroupNode}
                     groupSelection={groupableSelectedCount >= 2}
                     onAddExtensionNode={(type) => createNode(type)}
@@ -6454,6 +6579,15 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onClose={closeSceneEditor}
                     onPickCanvasImage={startSceneImageSelection}
                     onSave={saveSceneEdit}
+                /> : null}</Suspense>
+                <Suspense fallback={null}>{propEditNodeId ? <PropNodeEditModal
+                    open={Boolean(propEditNodeId)}
+                    selectingCanvasImage={propImagePickerActive}
+                    canvasImagePick={propCanvasImagePick}
+                    node={nodesRef.current.find((node) => node.id === propEditNodeId) || null}
+                    onClose={closePropEditor}
+                    onPickCanvasImage={startPropImageSelection}
+                    onSave={savePropEdit}
                 /> : null}</Suspense>
 
                 <Suspense fallback={null}>{videoComparison ? <CanvasVideoCompareModal comparison={videoComparison} onClose={() => setVideoComparison(null)} /> : null}</Suspense>

@@ -99,7 +99,7 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
         : production.projectId ? { tool: "production_get", input: { kind: "canvas", id: production.projectId } } : { tool: "production_get", input: { kind: "episode", id: production.episodeId } };
     return migrateToolGuidance({ ...header, view: "summary", snapshot: input.snapshot, [input.snapshot]: summarize(selected),
         omitted: ["source", "artifacts", "references", "scenes", "shots", "clipGroups", "keyframes", "keyframeReviews", "settings"],
-        nextRead: { tool: owner.tool, input: { ...owner.input, snapshot: input.snapshot, view: "artifact_index", ...(input.targetIds ? { targetIds: input.targetIds } : {}) } },
+        nextRead: { tool: owner.tool, input: { ...owner.input, snapshot: input.snapshot, view: "artifact_index", pageSize: 100, ...(input.targetIds ? { targetIds: input.targetIds } : {}) } },
         readOptions: { views: ["source", "artifact_index", "artifacts", "full"], selectors: ["sourceSection", "targetIds", "pageSize", "cursor", "chunkBytes"] } });
 }
 
@@ -118,7 +118,7 @@ export function projectProductionVersion(owner: { episodeId: string; projectId?:
     if (input.view === "summary") {
         const summary = projected as any;
         summary.nextRead = { tool: owner.sceneId ? "production_get_scene_version" : "production_get_version",
-            input: { ...(owner.sceneId ? { sceneId: owner.sceneId } : { kind: owner.projectId ? "canvas" : "episode", id: owner.projectId || owner.episodeId }), version: version.version, view: "artifact_index" } };
+            input: { ...(owner.sceneId ? { sceneId: owner.sceneId } : { kind: owner.projectId ? "canvas" : "episode", id: owner.projectId || owner.episodeId }), version: version.version, view: "artifact_index", pageSize: 100 } };
     }
     if (input.view === "summary") (projected as any).nextRead = migrateToolGuidance({ nextRead: (projected as any).nextRead }).nextRead;
     return { ...pick(version, ["version", "stage", "createdAt"]), ...owner, sha256: versionHash,

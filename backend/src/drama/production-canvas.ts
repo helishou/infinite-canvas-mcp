@@ -21,7 +21,7 @@ export function productionCanvasContext(db: BackendDatabase, canvasId: string): 
 }
 
 /** A stable seed makes preparation recoverable without overwriting any project. */
-export function ensureProductionCanvas(db: BackendDatabase, kind: "episode" | "shared-assets", id: string, events?: BackendEventBus) {
+export function ensureProductionCanvas(db: BackendDatabase, kind: "episode" | "shared-assets", id: string, events?: BackendEventBus, withinTransaction = false) {
     const episode = kind === "episode" ? db.getDramaEpisode(id) : undefined;
     if (kind === "episode" && !episode) throw new Error("分集不存在");
     const dramaId = episode?.dramaId || id;
@@ -38,7 +38,7 @@ export function ensureProductionCanvas(db: BackendDatabase, kind: "episode" | "s
     if (project && JSON.stringify(project.productionBindingSeed) !== JSON.stringify({ kind, id })) throw new Error("画布准备身份冲突，拒绝覆盖");
     const created = !project;
     if (!project) project = db.createCanvasProject({ id: canvasId, title: kind === "episode" ? `${drama.name} · ${episode!.title || `第 ${episode!.episodeNumber} 集`}` : `${drama.name} · 共享资产`,
-        productionBindingSeed: { kind, id }, nodes: [], connections: [], viewport: { x: 0, y: 0, k: 1 } }).project;
+        productionBindingSeed: { kind, id }, nodes: [], connections: [], viewport: { x: 0, y: 0, k: 1 } }, withinTransaction).project;
     if (kind === "episode") db.updateDramaEpisode(id, { canvasId });
     else db.db.prepare("UPDATE drama_projects SET shared_asset_canvas_id=?, updated_at=? WHERE folder_id=? AND shared_asset_canvas_id IS NULL")
         .run(canvasId, new Date().toISOString(), dramaId);
