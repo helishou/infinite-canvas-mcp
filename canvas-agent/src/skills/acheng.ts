@@ -38,7 +38,12 @@ function hydrateScopedApprovedInputs(director: DirectorProduction, resolver?: (t
     const source = director.source as Record<string, any>;
     const anchor = source.style_lock && director.assets[source.style_lock.anchor_asset_id];
     const anchorFile = source.style_lock && files.get(source.style_lock.anchor_asset_id);
-    if (anchorFile && anchor?.sha256 === source.style_lock.approved_sha256) source.style_lock.approved_file = anchorFile;
+    if (anchorFile && anchor?.status === "approved" && !anchor.inputOutdated) {
+        if (source.style_lock.anchor_version !== anchor.version) throw new Error("批准风格母图版本与风格绑定不符");
+        source.style_lock.status = "approved";
+        source.style_lock.approved_file = anchorFile;
+        source.style_lock.approved_sha256 = anchor.sha256;
+    }
     for (const item of [...(source.asset_cards || []), ...(source.segments || [])]) for (const ref of item.references || []) {
         const id = String(ref.asset_id || ""), asset = director.assets[id], file = files.get(id);
         if (!file || !asset) continue;
@@ -54,7 +59,10 @@ function hydrateSubjectPictureSources(director: DirectorProduction, resolver?: (
     const subjects = (Array.isArray(director.source.subject_registry) ? director.source.subject_registry : []) as Array<Record<string, any>>;
     const subjectById = new Map(subjects.map(subject => [String(subject.id), subject]));
     const selected = new Map<string, { assetId: string; subjectId: string; kind: "subject" | "keyframe"; role: string; binding: Record<string, any> }>();
+    const videoShotIds = new Set(((Array.isArray(director.source.segments) ? director.source.segments : []) as Array<Record<string, any>>)
+        .flatMap(segment => (segment.shot_ids || []).map(String)));
     for (const shot of (Array.isArray(director.source.shots) ? director.source.shots : []) as Array<Record<string, any>>) {
+        if (!videoShotIds.has(String(shot.id))) continue;
         for (const usage of Array.isArray(shot.subject_usages) ? shot.subject_usages : []) {
             const subjectId = String(usage.subjectId || "");
             const subject = subjectById.get(subjectId);
@@ -121,7 +129,7 @@ export function resolveAchengPython() {
 export function runAchengPython(args: string[], options: ExecFileSyncOptionsWithStringEncoding) {
     try { return execFileSync(resolveAchengPython(), args, options); }
     catch (error: any) {
-        if (process.platform !== "win32" || process.env.ACHENG_PYTHON || !["EPERM", "ENOENT"].includes(error.code)) throw error;
+        if (process.platform !== "win32" || process.env.ACHENG_PYTHON || !["EPERM", "ENOENT", "EBUSY"].includes(error.code)) throw error;
         const literal = (s: string) => `'${s.replace(/'/g, "''")}'`;
         const invocation = `& python ${args.map(literal).join(" ")}`;
         const command = `$OutputEncoding=[Text.UTF8Encoding]::new($false); [Console]::InputEncoding=$OutputEncoding; [Console]::OutputEncoding=$OutputEncoding; $payload=[Console]::In.ReadToEnd(); if($payload.Length){$payload | ${invocation}}else{${invocation}}; exit $LASTEXITCODE`;
@@ -132,11 +140,18 @@ export function runAchengPython(args: string[], options: ExecFileSyncOptionsWith
 /** Compile authored source using the locally active compiler; never call a media model. */
 /** Compiler prompts stay inside the package; media may use only exact verified resolver paths. */
 export function readCompilationReference(output: string, filename: string, verifiedFiles: Array<string | undefined>) {
-    const resolved = path.resolve(output, filename);
+    // The compiler reports reference files relative to the compilation root that stages `assets/`
+    // (the parent of the package output), and may report an absolute frozen path. Try the package
+    // first, then that root; both stay behind the same inside-package-or-verified-snapshot check.
+    const roots = [output, path.dirname(output)];
+    const candidates = path.isAbsolute(filename) ? [filename] : roots.map(root => path.resolve(root, filename));
     const canonical = (file: string) => process.platform === "win32" ? path.resolve(file).toLowerCase() : path.resolve(file);
-    const inside = canonical(resolved).startsWith(canonical(output) + path.sep);
-    if (!inside && !verifiedFiles.some(file => file && canonical(file) === canonical(resolved))) throw new Error("Compiler reference path is not in the package or verified media snapshot");
-    return fs.readFileSync(resolved);
+    for (const resolved of candidates) {
+        const inside = roots.some(root => canonical(resolved).startsWith(canonical(root) + path.sep));
+        if (!inside && !verifiedFiles.some(file => file && canonical(file) === canonical(resolved))) continue;
+        if (fs.existsSync(resolved)) return fs.readFileSync(resolved);
+    }
+    throw new Error("Compiler reference path is not in the package or verified media snapshot");
 }
 
 export function compileAchengDirector(input: DirectorProduction, directory: string, resolveReferenceFile?: (targetId: string, label: string) => string | undefined, selectedRuntimeId?: string) {

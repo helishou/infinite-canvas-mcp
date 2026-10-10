@@ -1,4 +1,5 @@
 import { canonicalProduction } from "@basketikun/canvas-agent/drama/production-contract";
+import { draftFieldConflicts, mergeDraftFields } from "./draft-field-merge";
 
 export type ShotFormValue = {
     title: string; visual: string; camera: Record<string, any>; duration_frames: number;
@@ -30,14 +31,14 @@ export function readShotFormDraft(raw: string | undefined, shot: Record<string, 
         const draft = JSON.parse(raw) as ShotFormDraft;
         if (!object(draft) || draft.version !== 1 || draft.shotId !== String(shot.id)
             || !validFormValue(draft.base) || !validFormValue(draft.value)) throw new Error("Invalid Shot draft");
-        return { draft, invalid: false };
+        return { draft: draftFieldConflicts(draft.base, draft.value, formal).length ? draft : rebaseShotFormDraft(draft, shot), invalid: false };
     } catch {
         return { draft: { version: 1, shotId: String(shot.id), base: formal, value: structuredClone(formal) } as ShotFormDraft, invalid: true };
     }
 }
 
 export const shotDraftChanged = (draft: ShotFormDraft) => canonicalProduction(draft.base) !== canonicalProduction(draft.value);
-export const shotDraftSourceChanged = (draft: ShotFormDraft, shot: Record<string, any>) => canonicalProduction(draft.base) !== canonicalProduction(shotFormValue(shot));
+export const shotDraftSourceChanged = (draft: ShotFormDraft, shot: Record<string, any>) => draftFieldConflicts(draft.base, draft.value, shotFormValue(shot)).length > 0;
 
 export function shotFormChanges(draft: ShotFormDraft) {
     const patch: Record<string, unknown> = {};
@@ -49,15 +50,7 @@ export function shotFormChanges(draft: ShotFormDraft) {
 
 /** Explicitly keep the reviewed edits while retaining remote fields the user did not edit. */
 export function rebaseShotFormDraft(draft: ShotFormDraft, shot: Record<string, any>): ShotFormDraft {
-    const base = shotFormValue(shot), value = { ...structuredClone(base), ...shotFormChanges(draft).patch } as ShotFormValue;
-    value.camera = structuredClone(base.camera);
-    for (const key of new Set([...Object.keys(draft.base.camera), ...Object.keys(draft.value.camera)])) {
-        if (canonicalProduction(draft.base.camera[key]) !== canonicalProduction(draft.value.camera[key])) {
-            if (Object.hasOwn(draft.value.camera, key)) value.camera[key] = draft.value.camera[key];
-            else delete value.camera[key];
-        }
-    }
-    if (canonicalProduction(draft.base.keyframes) !== canonicalProduction(draft.value.keyframes)) value.keyframes = draft.value.keyframes;
+    const base = shotFormValue(shot), value = mergeDraftFields(draft.base, draft.value, base) as ShotFormValue;
     return { version: 1, shotId: draft.shotId, base, value };
 }
 

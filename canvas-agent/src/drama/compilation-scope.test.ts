@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { compilationHash, compilationScopeInput, currentCompilationArtifact, preserveCompilationProvenance, scopedCompilerInput } from "./compilation-scope.js";
 import type { DirectorProduction } from "./production-contract.js";
+import { directorProductionSchema } from "./production-contract.js";
 import { auditAchengContinuity, resolveAchengEngine } from "../skills/acheng.js";
 
 export function scopedDirector(): DirectorProduction {
@@ -26,6 +27,33 @@ test("Clip scope skips dormant storyboard frames but retains explicitly requeste
     assert.deepEqual(clip.targetIds, ["GA", "ROLE"]);
     const explicit = compilationScopeInput(d, { targetIds: ["KA"] });
     assert.ok(explicit.targetIds.includes("KA"));
+});
+
+test("V2 frame-only scope retains replay binding declarations and flat-block coverage", () => {
+    const d = scopedDirector();
+    d.source.prompt_assembly = { version: 2 };
+    d.source.character_registry = [{ id: "P", name: "人物" }];
+    d.source.subject_registry = [{ id: "P", kind: "character", entityRef: { ownerKind: "episode", ownerId: "EP", kind: "character", id: "P" }, pictureBindings: [
+        { id: "P_ID", assetId: "ROLE", sourceNode: { projectId: "CANVAS", nodeId: "IMAGE" }, selection: { mode: "node_selection" }, provides: ["identity"], retain: ["identity"], exclude: ["pose"], applicableState: {}, defaultFor: ["identity"] }
+    ] }];
+    d.source.shots = (d.source.shots as any[]).map((shot, order) => ({ ...shot, timeline_id: "T", story_order: order, duration_frames: 96,
+        subject_usages: [{ subjectId: "P", presentation: "visible", pictureBindingIds: ["P_ID"], referencePurpose: ["identity"], continuityFactIds: [], stateRequirements: [] }], keyframes: [], utterance_refs: [] }));
+    for (const shot of d.source.shots as any[]) delete shot.required_assets;
+    (d.source.script_scenes as any[])[0].text = "人物进入。";
+    const block = (d.source.script_scenes as any[])[0];
+    d.source.ledger = { contract_version: 2, facts: [], timelines: [{ id: "T" }], initial: [], events: [], requirements: [], coverage: [
+        { id: "COV", source_anchor: { block_id: "A" }, source_digest: compilationHash({ scene_id: "ROOM", block }), evidence_kind: "not_applicable_with_rule", fact_ids: [], event_ids: [], shot_ids: ["SA"], rule: "non_narrative_note" }
+    ] };
+    d.sourceHash = compilationHash(d.source);
+    const before = structuredClone(d);
+    const input = compilationScopeInput(d, { targetIds: ["KA"], output: "selected" });
+    assert.deepEqual(input.targetIds, ["KA"]);
+    assert.deepEqual(input.director.source.segments, []);
+    assert.deepEqual((input.director.source.subject_registry as any[])[0].pictureBindings.map(binding => binding.id), ["P_ID"]);
+    assert.equal((input.director.source.ledger as any).coverage[0].id, "COV");
+    const checked = directorProductionSchema.safeParse(scopedCompilerInput(input.director, { targetIds: ["KA"], output: "selected" }));
+    assert.equal(checked.success, true, checked.success ? "" : JSON.stringify(checked.error.issues));
+    assert.deepEqual(d, before);
 });
 test("scoped ledger retains coverage using the authored source anchor", () => {
     const d = scopedDirector();

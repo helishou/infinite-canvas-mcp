@@ -222,8 +222,13 @@ export function modelMatchesCapability(config: AiConfig, value: string, capabili
 export function resolveModelForCapability(config: AiConfig, currentModel: string | undefined, capability: ModelCapability) {
     const defaultModel = capability === "image" ? config.imageModel : capability === "video" ? config.videoModel : capability === "audio" ? config.audioModel : config.textModel;
     const fallbackModel = capability === "image" ? defaultConfig.imageModel : capability === "video" ? defaultConfig.videoModel : capability === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
-    if (currentModel && modelMatchesCapability(config, currentModel, capability)) return currentModel;
-    if (defaultModel && modelMatchesCapability(config, defaultModel, capability)) return defaultModel;
+    for (const model of [currentModel, defaultModel]) {
+        if (!model) continue;
+        const configuredCapability = modelCapabilityOf(config, model);
+        // Keep unavailable selections visible so the readiness check blocks the
+        // request. Only a known capability switch may choose another model.
+        if (!configuredCapability || configuredCapability === capability) return model;
+    }
     return fallbackModel;
 }
 
@@ -289,7 +294,10 @@ export function resolveModelWorkflowParams(config: AiConfig, value: string, refe
 }
 
 function isAiConfigReady(config: AiConfig, model: string) {
-    const channel = resolveModelChannel(config, model);
+    if (model === VIDEO_CONCAT_MODEL) return true;
+    const match = findChannelModel(config, model);
+    if (!match) return false;
+    const channel = match.channel;
     if (channel.kind === "codex-cli") return Boolean(model.trim());
     if (channel.kind === "comfyui") return Boolean(model.trim() && channel.baseUrl.trim());
     return Boolean(model.trim() && channel.baseUrl.trim() && channel.apiKey.trim());

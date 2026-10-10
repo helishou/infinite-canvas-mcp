@@ -641,6 +641,84 @@ test("first target preparation rejects shared-scope assets and cross-owner opera
     assert.equal(f.db.getDramaEpisode("ep")!.canvasId, null);
 });
 
+test("saving a newly created formal scene materializes exactly one H3 node immediately", t => {
+    const f = fixture(t), { project } = ensureProductionCanvas(f.db, "episode", "ep");
+    const d = director();
+    d.source.script_scenes = [
+        { id: "occ-a", scene_id: "room", scene_name: "Morning", text: "Morning scene", beat_ids: ["beat-a"] },
+        { id: "occ-b", scene_id: "room", scene_name: "Night", text: "Night scene", beat_ids: ["beat-b"] },
+    ];
+    d.source.shots = [
+        { ...(d.source.shots as any[])[0], id: "shot-a", source_scene_id: "occ-a", scene_id: "room", story_beat_ids: ["beat-a"] },
+        { ...(d.source.shots as any[])[1], id: "shot-b", source_scene_id: "occ-b", scene_id: "room", story_beat_ids: ["beat-b"] },
+    ];
+    d.source.segments = [];
+    d.shotInputs = {};
+    d.assets = {};
+    d.artifacts = [];
+    d.sourceHash = directorHash(d.source);
+
+    const saved = save(f.episode, "ep", d);
+    const nodes = f.db.getCanvasProject(project.id)!.nodes as any[];
+    const sceneVideos = nodes.filter(node => node.type === "minimax-h3:video" && node.metadata?.productionSceneId);
+    assert.deepEqual(sceneVideos.map(node => node.metadata.productionSceneId).sort(), ["occ-a", "occ-b"]);
+    assert.equal(new Set(sceneVideos.map(node => node.id)).size, 2);
+    assert.ok(sceneVideos.every(node => Array.isArray(node.metadata.segments) && node.metadata.segments.length === 0));
+    assert.equal(saved.revision, 1);
+});
+
+test("new scene Clips materialize one H3 segment whose storyboard cells use stable Shot IDs", t => {
+    const f = fixture(t), { project } = ensureProductionCanvas(f.db, "episode", "ep");
+    const d = director();
+    (d.source.shots as any[])[0].source_scene_id = "morning";
+    (d.source.shots as any[])[1].source_scene_id = "night";
+    d.shotInputs = { s1: { keyframePolicy: "none", assetIds: [] }, s2: { keyframePolicy: "none", assetIds: [] } };
+    d.sourceHash = directorHash(d.source);
+    d.artifacts = d.artifacts.map(item => ({ ...item, sourceHash: d.sourceHash, receipt: { ...item.receipt, sourceHash: d.sourceHash } }));
+
+    const saved = save(f.episode, "ep", d);
+    const nodes = (f.db.getCanvasProject(project.id)!.nodes as any[]).filter(node => node.type === "minimax-h3:video");
+    assert.equal(nodes.length, 2);
+    const clipByScene = new Map(nodes.map(node => [node.metadata.productionSceneId, node.metadata.segments[0]]));
+    assert.deepEqual((clipByScene.get("morning").storyboardShots || []).map((shot: any) => shot.id), ["s1"]);
+    assert.deepEqual((clipByScene.get("night").storyboardShots || []).map((shot: any) => shot.id), ["s2"]);
+    assert.ok(nodes.every(node => node.metadata.segments.length === 1 && node.metadata.segments[0].productionClipProjection));
+    assert.equal(saved.draft.clipGroups.every(group => Boolean(group.nodeId && group.segmentId)), true);
+});
+
+test("confirmed scene deletion is 30-day restorable with its H3 node and exact source IDs", t => {
+    const f = fixture(t), { project } = ensureProductionCanvas(f.db, "episode", "ep");
+    const d = director();
+    (d.source.shots as any[])[0].source_scene_id = "morning";
+    (d.source.shots as any[])[1].source_scene_id = "night";
+    d.sourceHash = directorHash(d.source);
+    d.artifacts = d.artifacts.map(item => ({ ...item, sourceHash: d.sourceHash, receipt: { ...item.receipt, sourceHash: d.sourceHash } }));
+    save(f.episode, "ep", d);
+    const beforeProject = f.db.getCanvasProject(project.id)!;
+    const beforeNodes = beforeProject.nodes as any[];
+    const morningNode = beforeNodes.find(node => node.metadata?.productionSceneId === "morning");
+    assert.ok(morningNode);
+    const current = f.episode.get("ep");
+    assert.throws(() => f.episode.edit("ep", { operationId: "archive-missing-confirm", expectedRevision: current.revision, ops: [{ type: "archive_director_scene", sceneId: "morning", expectedCanvasRevision: Number(beforeProject.revision), confirmed: false } as any] }), /confirmed|true/);
+
+    const removed = f.episode.edit("ep", { operationId: "archive-morning", expectedRevision: current.revision, ops: [{ type: "archive_director_scene", sceneId: "morning", expectedCanvasRevision: Number(beforeProject.revision), confirmed: true }] as any });
+    assert.deepEqual((removed.draft.director!.source.shots as any[]).map(shot => shot.id), ["s2"]);
+    assert.deepEqual(removed.draft.clipGroups.map(group => group.id), ["seg2"]);
+    assert.equal((f.db.getCanvasProject(project.id)!.nodes as any[]).some(node => node.id === morningNode.id), false);
+    const archive = f.episode.listArchivedScenes("ep")[0];
+    assert.equal(archive.sceneId, "morning");
+    assert.equal(archive.shotCount, 1);
+    assert.equal(archive.clipCount, 1);
+    assert.equal(Date.parse(archive.expiresAt) - Date.parse(archive.deletedAt), 30 * 24 * 60 * 60 * 1000);
+
+    const currentCanvas = f.db.getCanvasProject(project.id)!;
+    const restored = f.episode.edit("ep", { operationId: "restore-morning", expectedRevision: removed.revision, ops: [{ type: "restore_director_scene", archiveId: archive.archiveId, expectedCanvasRevision: Number(currentCanvas.revision) }] as any });
+    assert.deepEqual((restored.draft.director!.source.shots as any[]).map(shot => shot.id).sort(), ["s1", "s2"]);
+    assert.equal(restored.draft.clipGroups.length, 2);
+    assert.ok((f.db.getCanvasProject(project.id)!.nodes as any[]).some(node => node.id === morningNode.id));
+    assert.equal(f.episode.listArchivedScenes("ep").some(item => item.archiveId === archive.archiveId), false);
+});
+
 test("fixed episode and shared canvases: repeated preparation, ownership, initial binding and protected deletion", t => {
     const f = fixture(t);
     const a = ensureProductionCanvas(f.db, "episode", "ep"), b = ensureProductionCanvas(f.db, "episode", "ep");

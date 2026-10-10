@@ -227,6 +227,35 @@ test("Subject CRUD edits the original character registry and refuses referenced 
     assert.equal((deleted.draft.director!.source.scene_registry as any[])[0].id, "SCENE");
 });
 
+test("binding reuse deduplicates identical semantics and rejects unknown Shot references", t => {
+    let database!: BackendDatabase;
+    const service = fixture(t, false, db => { database = db; }), d = directorV2();
+    const source = d.source as any;
+    const subject = source.subject_registry[0];
+    const duplicate = { ...structuredClone(subject.pictureBindings[0]), id: "P_DUP" };
+    subject.pictureBindings.push(duplicate);
+    source.shots[0].subject_usages[0].pictureBindingIds = ["P_DUP"];
+    d.sourceHash = directorHash(source);
+    const saved = service.edit("ep", { operationId: "duplicate-bindings", expectedRevision: service.get("ep").revision,
+        ops: [{ type: "set_director_production", director: d }] });
+    assert.equal((service.get("ep").draft.director!.source.subject_registry as any[])[0].pictureBindings.length, 2, "read must preserve source identity and hash");
+    const repaired = service.edit("ep", { operationId: "reuse-binding", expectedRevision: saved.revision,
+        ops: [{ type: "upsert_director_subject", subject }] });
+    assert.equal((repaired.draft.director!.source.subject_registry as any[])[0].pictureBindings.length, 1);
+    assert.deepEqual((repaired.draft.director!.source.shots as any[])[0].subject_usages[0].pictureBindingIds, ["P_ID"]);
+    assert.equal(database.db.prepare("SELECT COUNT(*) AS count FROM production_clip_source_dependencies WHERE owner_id='ep'").get().count, 1);
+    const unknown = structuredClone((repaired.draft.director!.source.shots as any[])[0].subject_usages);
+    unknown[0].pictureBindingIds = ["MISSING_BINDING"];
+    assert.throws(() => service.edit("ep", { operationId: "unknown-binding", expectedRevision: repaired.revision,
+        ops: [{ type: "patch_director_source", entity: "shot", id: "S1", patch: { subject_usages: unknown } }] }), /MISSING_BINDING/);
+    assert.equal(service.get("ep").revision, repaired.revision);
+    const distinct = structuredClone((repaired.draft.director!.source.subject_registry as any[])[0]);
+    distinct.pictureBindings.push({ ...structuredClone(distinct.pictureBindings[0]), id: "P_SIDE", retain: ["侧脸身份"], selection: { mode: "node_selection" }, defaultFor: [] });
+    const preserved = service.edit("ep", { operationId: "distinct-semantics", expectedRevision: repaired.revision,
+        ops: [{ type: "upsert_director_subject", subject: distinct }] });
+    assert.equal((preserved.draft.director!.source.subject_registry as any[])[0].pictureBindings.length, 2, "same node with a different purpose must remain distinct");
+});
+
 
 test("optional Shot frame preview resolves node media without changing submission or formal source", t => {
     const service = fixture(t, true, (db, directory) => {

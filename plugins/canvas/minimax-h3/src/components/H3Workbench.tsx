@@ -659,6 +659,9 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         "--minimax-timeline-h": `${effTimelineH}px`,
         "--minimax-ref-h": `${effRefLaneH}px`,
     };
+    if (metadata.productionSceneId && segments.length === 0) return <div className="minimax-canvas-workbench" data-canvas-no-zoom style={themeStyle} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
+        <div className="minimax-wb-status">本场暂无 Clip。请先在制作台添加镜头并分配 Clip。</div>
+    </div>;
     return <div ref={workbenchRef} className={`minimax-canvas-workbench${canvasReferenceDragOver ? " is-canvas-ref-drag-over" : ""}`} data-canvas-no-zoom data-canvas-ref-drop-target={ctx.node.id} style={themeStyle} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()} onDragOver={(event) => { event.preventDefault(); event.stopPropagation(); }} onDrop={addDroppedReference}>
         <H3Runner key="runner" ctx={ctx} />
         <H3PaneHandles key="pane-handles" ctx={ctx} />

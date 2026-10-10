@@ -36,8 +36,9 @@ import { DramaManagePanel } from "./manage-panel";
 import "./production.css";
 import { registerProductionPromptEditor, sourceSegmentForCanvasClip } from "@/lib/canvas/production-editing";
 import { dramaWorkbenchEpisode, dramaWorkbenchPath } from "./workbench-entry";
+import { commandNeedsRecovery } from "./production-command-recovery";
 
-type PendingCommand = { operationId: string; expectedRevision: number; status: "unknown" | "rejected"; error?: string } & (
+type PendingCommand = { operationId: string; expectedRevision: number; status: "unknown" | "rejected"; error?: string; httpStatus?: number; errorCode?: string; workspace?: DirectorWorkspace } & (
   { kind: "scene"; command: ProductionSceneAction } | { kind: "edit"; ops: ProductionOperation[] } | { kind: "publish"; stage: "director" } | { kind: "restore"; version: number }
   | { kind: "prepare"; targets: string[] } | { kind: "arrange"; sceneId: string } | { kind: "adopt"; assetId: string; approvedId: string }
 );
@@ -157,7 +158,9 @@ export function ProductionEditor({ owner, embedded = false, dialog = false, seri
   const [agentError, setAgentError] = useState("");
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null);
   const [draftKey, setDraftKey] = useState<string | null>(null);
-  const [pendingCommand, setPendingCommand] = useState<PendingCommand | null>(null);
+  const [commandNotice, setPendingCommand] = useState<PendingCommand | null>(null);
+  const commandNoticeRef = useRef<PendingCommand | null>(null);
+  const pendingCommand = commandNeedsRecovery(commandNotice) ? commandNotice : null;
   const pendingCommandRef = useRef<PendingCommand | null>(null);
   const [pendingRunStart, setPendingRunStart] = useState<PendingRunStart | null>(null);
   const pendingRunStartRef = useRef<PendingRunStart | null>(null);
@@ -167,7 +170,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false, seri
   const agentTaskResult = useAgentStore(state => state.scopedTaskResult);
   const agentConversation = useAgentStore(state => state.conversation);
   const agentBusy = useAgentStore(state => state.sending || state.waiting);
-  const pending = (value: PendingCommand | null) => { pendingCommandRef.current = value; setPendingCommand(value); };
+  const pending = (value: PendingCommand | null) => { commandNoticeRef.current = value; pendingCommandRef.current = commandNeedsRecovery(value) ? value : null; setPendingCommand(value); };
   const setPendingRun = (value: PendingRunStart | null) => { pendingRunStartRef.current = value; setPendingRunStart(value); };
   const editorRootRef = useRef<HTMLElement>(null);
   const routeWorkspace = searchParams.get("workspace") as DirectorWorkspace | null;
@@ -265,12 +268,12 @@ export function ProductionEditor({ owner, embedded = false, dialog = false, seri
 
   useEffect(() => {
     if (!draftKey) return;
-    const value: LocalDraft = { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: pendingCommandRef.current, pendingRunStart: pendingRunStartRef.current };
+    const value: LocalDraft = { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: commandNoticeRef.current, pendingRunStart: pendingRunStartRef.current };
     void (briefDraft.trim() || Object.keys(sourceDrafts).length || remoteRevision !== null || value.pendingCommand || value.pendingRunStart
       ? writeLocalDraft(draftKey, value)
       : writeLocalDraft(draftKey, null))
       .catch(error => message.error({ key: "episode-local-draft", content: error instanceof Error ? error.message : String(error) }));
-  }, [draftKey, briefDraft, sourceDrafts, remoteRevision, pendingCommand, pendingRunStart, message]);
+  }, [draftKey, briefDraft, sourceDrafts, remoteRevision, commandNotice, pendingRunStart, message]);
 
   useEffect(() => {
     if (routeWorkspace === "series" ? !series : !workspaces.some(item => item.key === routeWorkspace)) return;
@@ -471,7 +474,8 @@ export function ProductionEditor({ owner, embedded = false, dialog = false, seri
     message.warning(command ? pendingCommandMessage(command) : t("drama.production.commandInProgress"));
   };
 
-  const sendCommand = async (command: PendingCommand) => {
+  const sendCommand = async (input: PendingCommand) => {
+    const command = { ...input, workspace: input.workspace || workspace };
     if (!draftKey) throw new Error(t("drama.production.draftNotReady"));
     await ensureCanvasDraftLease();
     const previous = pendingCommandRef.current;
@@ -493,11 +497,11 @@ export function ProductionEditor({ owner, embedded = false, dialog = false, seri
       pending(null); setProduction(previous => !previous || previous.episodeId !== result.production.episodeId || result.production.revision > previous.revision ? result.production : previous); setRemoteRevision(null);
       return result.production;
     } catch (error) {
-      const rejected = error instanceof BackendApiError && error.status >= 400 && error.status < 500;
-      const saved: PendingCommand = { ...command, status: rejected ? "rejected" : "unknown", error: error instanceof Error ? error.message : String(error) };
-      pendingCommandRef.current = saved;
-      await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: saved, pendingRunStart } satisfies LocalDraft);
+      const rejected = error instanceof BackendApiError && error.status >= 400 && error.status < 500 && error.status !== 408;
+      const saved: PendingCommand = { ...command, status: rejected ? "rejected" : "unknown", error: error instanceof Error ? error.message : String(error),
+        ...(error instanceof BackendApiError ? { httpStatus: error.status, errorCode: String(error.details.code || "") } : {}) };
       pending(saved);
+      await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: saved, pendingRunStart } satisfies LocalDraft);
       throw error;
     }
   };
@@ -597,15 +601,17 @@ export function ProductionEditor({ owner, embedded = false, dialog = false, seri
     finally { setBusy(false); }
   };
 
-  const resolveRejected = () => modal.confirm({
-    title: t("drama.production.resolveTitle"), content: t("drama.production.resolveDescription"),
-    onOk: async () => {
+  const resolveRejected = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
       await load(() => true, true);
       pendingCommandRef.current = null;
       if (draftKey) await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision: null, pendingCommand: null, pendingRunStart } satisfies LocalDraft);
       pending(null); setRemoteRevision(null);
-    },
-  });
+    } catch (error) { fail(error); }
+    finally { setBusy(false); }
+  };
 
   const restoreVersion = (version: number) => {
     if (!production) return;
@@ -700,7 +706,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false, seri
     setBatches(current => [run, ...current.filter(item => item.runId !== run.runId)]);
     setPendingRun(null);
     pendingRunStartRef.current = null;
-    if (draftKey) await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand, pendingRunStart: null } satisfies LocalDraft);
+    if (draftKey) await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: commandNoticeRef.current, pendingRunStart: null } satisfies LocalDraft);
     message.success(t("director.workspace.runStarted"));
     const follow = useProductionFollowStore.getState();
     const owner = productionOwner;
@@ -743,14 +749,14 @@ export function ProductionEditor({ owner, embedded = false, dialog = false, seri
       const request: PendingRunStart = { inputBasis: "canvas", expectedCanvasRevision: savedCanvas ? Number(savedCanvas.revision) : undefined, runId, idempotencyKey: runId, workId, expectedRevision: focussedProduction.revision, version: focussedProduction.publishedVersion, targets: [...targets], scope };
       setPendingRun(request);
       pendingRunStartRef.current = request;
-      await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand, pendingRunStart: request } satisfies LocalDraft);
+      await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: commandNoticeRef.current, pendingRunStart: request } satisfies LocalDraft);
       const result = await startProductionRun(target, request);
       await acceptRunStart(result.run);
     } catch (error) {
       if (error instanceof BackendApiError && error.status >= 400 && error.status < 500) {
         setPendingRun(null);
         pendingRunStartRef.current = null;
-        await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand, pendingRunStart: null } satisfies LocalDraft);
+        await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: commandNoticeRef.current, pendingRunStart: null } satisfies LocalDraft);
       }
       fail(error);
     }
@@ -769,7 +775,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false, seri
       if (error instanceof BackendApiError && error.status >= 400 && error.status < 500) {
         setPendingRun(null);
         pendingRunStartRef.current = null;
-        if (draftKey) await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand, pendingRunStart: null } satisfies LocalDraft);
+        if (draftKey) await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: commandNoticeRef.current, pendingRunStart: null } satisfies LocalDraft);
       }
       fail(error);
     }
@@ -1117,12 +1123,16 @@ export function ProductionEditor({ owner, embedded = false, dialog = false, seri
   if (loadError) return <main className="p-8"><Alert type="error" message={t("director.loadFailed")} description={loadError} /><Button className="mt-4" onClick={() => { setLoadError(""); void load(() => true, true).catch(error => setLoadError(String(error))); }}>{t("director.refresh")}</Button><Button onClick={() => navigate(backPath)}>{t("director.back")}</Button></main>;
   if (!production) return <div className="p-8 text-muted-foreground">{t("drama.production.loading")}</div>;
 
-  const pendingNotice = pendingCommand && <div className="mb-4 rounded-xl border border-amber-400/60 bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
-    <p className="font-medium">{pendingCommandDescription(pendingCommand)}</p>
-    <p>{pendingCommand.status === "unknown" ? t("drama.production.receiptUnknown") : t("drama.production.commandRejected")}{pendingCommand.error ? ` · ${pendingCommand.error}` : ""}</p>
-    <details className="mt-1 text-xs text-amber-800 dark:text-amber-200"><summary className="cursor-pointer">{t("drama.production.pendingDetails")}</summary><p className="mt-1 break-all">{pendingCommand.operationId}</p></details>
-    <Button className="mt-2" size="small" disabled={busy} onClick={pendingCommand.status === "unknown" ? () => void recoverPending() : resolveRejected}>{pendingCommand.status === "unknown" ? t("drama.production.recoverReceipt") : t("drama.production.resolveWithServer")}</Button>
-  </div>;
+  const showCommandNotice = commandNotice && (pendingCommand || commandNotice.workspace === workspace || (!commandNotice.workspace && workspace === "advanced"));
+  const pendingNotice = showCommandNotice && commandNotice && <details className="mb-4 border-b border-border pb-3 text-sm">
+    <summary className="cursor-pointer text-muted-foreground">{t(commandNotice.status === "unknown" ? "drama.production.receiptUnknown" : pendingCommand ? "drama.production.commandRejected" : "drama.production.commandRejectedEditable")}</summary>
+    <div className="mt-2 space-y-1">
+    <p className="font-medium">{pendingCommandDescription(commandNotice)}</p>
+    <p>{commandNotice.status === "unknown" ? t("drama.production.receiptUnknown") : t(pendingCommand ? "drama.production.commandRejected" : "drama.production.commandRejectedEditable")}{commandNotice.error ? ` · ${commandNotice.error}` : ""}</p>
+    <details className="mt-1 text-xs text-amber-800 dark:text-amber-200"><summary className="cursor-pointer">{t("drama.production.pendingDetails")}</summary><p className="mt-1 break-all">{commandNotice.operationId}</p></details>
+    {pendingCommand && <Button className="mt-2" size="small" disabled={busy} onClick={pendingCommand.status === "unknown" ? () => void recoverPending() : resolveRejected}>{pendingCommand.status === "unknown" ? t("drama.production.recoverReceipt") : t("drama.production.resolveWithServer")}</Button>}
+    </div>
+  </details>;
   const pendingRunNotice = pendingRunStart && <div className="mb-4 rounded-xl border border-amber-400/60 bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-950/30 dark:text-amber-100"><p>{t("director.workspace.runReceiptUnknown")} · {pendingRunStart.runId}</p><Button className="mt-2" size="small" disabled={busy} onClick={() => void recoverRunStart()}>{t("drama.production.recoverReceipt")}</Button></div>;
   const run = batches[0] || null;
   const activeTargetIds = [...new Set(batches.filter(item => ["pending", "running", "paused", "awaiting_review"].includes(item.status)).flatMap(item => item.targets))];
@@ -1135,7 +1145,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false, seri
         <div className="flex flex-wrap items-center gap-2">{series && <Select aria-label={t("director.atomic.chooseEpisode")} value={episodeId} className="min-w-44" showSearch optionFilterProp="label" options={[...series.episodes].sort((a, b) => a.episodeNumber - b.episodeNumber).map(item => ({ value: item.id, label: `${t("drama.episodeLabel", { number: item.episodeNumber })} · ${item.title}` }))} onChange={id => navigate(dramaWorkbenchPath(series.id, id, workspace))} />}<span className="text-xs text-muted-foreground">{t(Object.keys(sourceDrafts).length ? "director.studio.localDraft" : "director.studio.saved")}</span>{production.publishedVersion > 0 && <Tag>{t("director.studio.published", { number: production.publishedVersion })}</Tag>}{canvasId && <Button icon={<ExternalLink className="size-4" />} onClick={() => navigate(`/canvas/${encodeURIComponent(canvasId)}`)}>{t("drama.production.openCanvas")}</Button>}</div>
       </div>}
       {agentError && <Alert className="mb-4" type="warning" showIcon message={agentError} closable onClose={() => setAgentError("")} />}
-      {(remoteRevision !== null || pendingCommand) && <div className="mb-4 rounded-xl border border-amber-400/60 p-3 text-sm">{remoteRevision !== null && <p>{t("drama.production.conflictDetail", { number: remoteRevision })}</p>}{pendingNotice}</div>}
+      {(remoteRevision !== null || showCommandNotice) && <div className="mb-4 text-sm">{remoteRevision !== null && <p>{t("drama.production.conflictDetail", { number: remoteRevision })}</p>}{pendingNotice}</div>}
       {pendingRunNotice}
       <div className="mb-4">
         <div className="min-w-0">

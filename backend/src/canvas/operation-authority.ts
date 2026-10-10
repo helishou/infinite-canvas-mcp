@@ -31,9 +31,50 @@ function checkPatch(previous: Record<string, unknown>, patch: Record<string, unk
     }
 }
 
+function isProductionBoundNode(node: Record<string, unknown>) {
+    const metadata = recordOf(node.metadata);
+    return Boolean(metadata.productionSceneId) || (Array.isArray(metadata.segments) && metadata.segments.some(value => Boolean(recordOf(recordOf(value).productionClipProjection).targetId)));
+}
+function assertProductionSegmentMembership(previousMetadata: Record<string, unknown>, incoming: unknown) {
+    if (!Array.isArray(incoming)) return;
+    const previous = Array.isArray(previousMetadata.segments) ? previousMetadata.segments.map(recordOf) : [];
+    const ownedIds = previous.filter(segment => Boolean(recordOf(segment.productionClipProjection).targetId)).map(segment => String(segment.id));
+    if (!ownedIds.length && !previousMetadata.productionSceneId) return;
+    const nextIds = incoming.map(recordOf).map(segment => String(segment.id || ""));
+    const expected = previous.map(segment => String(segment.id));
+    if (expected.length !== nextIds.length || expected.some((id, index) => id !== nextIds[index])) {
+        throw collaborationError("PRODUCTION_CLIP_MEMBERSHIP_OWNED", "制作绑定的 Clip 列表由制作台维护，不能从画布独立新增、删除或重排");
+    }
+}
+function assertProductionStoryboardUnchanged(previous: Record<string, unknown>, incoming: Record<string, unknown>, deleted?: unknown) {
+    if (!recordOf(previous.productionClipProjection).targetId) return;
+    const removed = Array.isArray(deleted) ? deleted.map(String) : [];
+    for (const field of ["storyboardShots", "storyboardDurations"]) {
+        if (removed.includes(field) || Object.hasOwn(incoming, field) && commandFingerprint(incoming[field]) !== commandFingerprint(previous[field])) {
+            throw collaborationError("PRODUCTION_SHOTBOARD_SOURCE_OWNED", `字段 ${field} 必须通过制作台 Shot 数据写入`);
+        }
+    }
+    if (removed.includes("referenceBindings")) {
+        if (productionStoryboardRefs(previous.referenceBindings).length) throw collaborationError("PRODUCTION_SHOTBOARD_SOURCE_OWNED", "制作分镜图绑定必须通过 Shot 关键帧操作修改");
+    } else if (Object.hasOwn(incoming, "referenceBindings")
+        && commandFingerprint(productionStoryboardRefs(incoming.referenceBindings)) !== commandFingerprint(productionStoryboardRefs(previous.referenceBindings))) {
+        throw collaborationError("PRODUCTION_SHOTBOARD_SOURCE_OWNED", "制作分镜图绑定必须通过 Shot 关键帧操作修改");
+    }
+}
+function productionStoryboardRefs(value: unknown) {
+    return Array.isArray(value) ? value.map(recordOf).filter(ref => String(ref.role || "") === "storyboard") : [];
+}
+
 /** 客户端携带的 source.kind 只是展示信息，不是写后台状态的权限。 */
 export function prepareClientCanvasOperation(project: Record<string, unknown>, operation: CanvasOperation) {
     let patch = recordOf(operation.patch);
+    if (operation.type === "delete_node") {
+        const ids = new Set(Array.isArray(operation.ids) ? operation.ids.map(String) : [String(operation.id || "")]);
+        const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
+        if (nodes.some(node => ids.has(String(node.id)) && isH3CanvasNode(node) && isProductionBoundNode(node))) {
+            throw collaborationError("PRODUCTION_SCENE_NODE_OWNED", "场次 H3 节点由制作台维护；请在制作台确认删除场次");
+        }
+    }
     if (operation.type === "update_node" && (Object.hasOwn(patch, "id") || Object.hasOwn(patch, "metadata"))) {
         throw collaborationError("INVALID_NODE_PATCH", "节点 ID 不可修改；metadata 必须使用独立的增量字段，不能放在 patch 中整体覆盖");
     }
@@ -64,6 +105,10 @@ export function prepareClientCanvasOperation(project: Record<string, unknown>, o
     if (!isH3CanvasNode(node)) return;
     const metadata = recordOf(node!.metadata);
     const segments = Array.isArray(metadata.segments) ? metadata.segments as Record<string, unknown>[] : [];
+    if (operation.type === "delete_h3_segment") {
+        const previous = segments.find(segment => segment.id === operation.segmentId);
+        if (previous && recordOf(previous.productionClipProjection).targetId) throw collaborationError("PRODUCTION_CLIP_OWNED", "制作 Clip 由制作台维护；不能从画布单独删除");
+    }
     const protectFormal = (previous: Record<string, unknown>, incoming: Record<string, unknown>, deleted?: unknown) => {
         if (Object.hasOwn(incoming, "productionClipProjection") && commandFingerprint(incoming.productionClipProjection) !== commandFingerprint(previous.productionClipProjection) || Array.isArray(deleted) && deleted.includes("productionClipProjection")) throw collaborationError("FORMAL_CLIP_OWNED", "制作投影摘要由 Backend 管理");
         if (!previous.productionClipProjection) return;
@@ -76,6 +121,7 @@ export function prepareClientCanvasOperation(project: Record<string, unknown>, o
             const segment = recordOf(value);
             const previous = segments.find((item) => item.id === segment.id);
             if (!previous) continue; // 新实体/导入不是对已有任务状态的覆盖。
+            assertProductionStoryboardUnchanged(previous, segment);
             const changed = Object.fromEntries(Object.entries(segment).filter(([key, value]) => commandFingerprint(value) !== commandFingerprint(previous[key])));
             Object.assign(segment, withH3ParameterEdits(previous, changed));
             protectFormal(previous, segment);
@@ -95,6 +141,15 @@ export function prepareClientCanvasOperation(project: Record<string, unknown>, o
         }
         const update = withoutH3LocalViewFields(operation.metadata);
         operation.metadata = update;
+        if (isProductionBoundNode(node!)) {
+            for (const field of ["productionSceneId", "productionOwnerKind", "productionOwnerId"]) {
+                if (Array.isArray(operation.metadataDelete) && operation.metadataDelete.includes(field)
+                    || Object.hasOwn(update, field) && commandFingerprint(update[field]) !== commandFingerprint(metadata[field])) {
+                    throw collaborationError("PRODUCTION_SCENE_BINDING_OWNED", "制作场次绑定由制作台维护");
+                }
+            }
+            assertProductionSegmentMembership(metadata, update.segments);
+        }
         if (Array.isArray(operation.metadataDelete)) operation.metadataDelete = operation.metadataDelete.filter((field) => !H3_LOCAL_VIEW_FIELDS.includes(field as typeof H3_LOCAL_VIEW_FIELDS[number]));
         checkPatch(metadata, update, operation.metadataDelete, H3_RUNTIME_NODE_FIELDS);
         preserveSegments(update.segments);
@@ -104,9 +159,13 @@ export function prepareClientCanvasOperation(project: Record<string, unknown>, o
         const previous = segments.find((segment) => segment.id === operation.segmentId);
         if (previous) {
             Object.assign(patch, withH3ParameterEdits(previous, patch));
+            assertProductionStoryboardUnchanged(previous, patch, operation.patchDelete);
             protectFormal(previous, patch, operation.patchDelete);
             checkPatch(previous, patch, operation.patchDelete, H3_RUNTIME_SEGMENT_FIELDS);
         }
         validateH3Edit(Object.fromEntries(Object.entries(patch).filter(([key]) => !H3_RUNTIME_SEGMENT_FIELDS.includes(key as any) && key !== "productionClipProjection")), true);
-    } else if (operation.type === "replace_h3_segments") preserveSegments(operation.segments);
+    } else if (operation.type === "replace_h3_segments") {
+        assertProductionSegmentMembership(metadata, operation.segments);
+        preserveSegments(operation.segments);
+    }
 }

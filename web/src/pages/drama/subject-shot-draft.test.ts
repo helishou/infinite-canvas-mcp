@@ -42,6 +42,19 @@ test("reviewed source changes retain remote fields and saving emits only the edi
     assert.deepEqual(shotFormChanges(rebased), { patch: { camera: { ...remote.camera, path: "push in" } } });
 });
 
+test("unrelated source updates merge automatically without making Shot editing a conflict", () => {
+    const { draft } = readShotFormDraft(undefined, shot);
+    draft.value.visual = "听窗内动静。";
+    draft.value.camera.path = "缓推";
+    const remote = { ...shot, title: "后台更新的名称", camera: { ...shot.camera, lens: 85 } };
+    const restored = readShotFormDraft(JSON.stringify(draft), remote);
+    assert.equal(shotDraftSourceChanged(restored.draft, remote), false);
+    assert.equal(restored.draft.value.visual, "听窗内动静。");
+    assert.equal(restored.draft.value.camera.lens, 85);
+    assert.equal(restored.draft.value.title, remote.title);
+    assert.deepEqual(shotFormChanges(restored.draft).patch, { visual: "听窗内动静。", camera: { ...remote.camera, path: "缓推" } });
+});
+
 
 test("machine Subject editing uses its original prompt_description without making a blank appearance copy", async () => {
     const { subjectDescriptionField } = await import("./subject-shot-draft");

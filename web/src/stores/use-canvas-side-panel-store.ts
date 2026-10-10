@@ -16,6 +16,8 @@ type CanvasSidePanelStore = {
     panelMounted: boolean;
     panelClosing: boolean;
     nodeSearchFocusRequest: number;
+    nodeViewMode: "list" | "grid";
+    setNodeViewMode: (mode: "list" | "grid") => void;
     setWidth: (width: number) => void;
     openPanel: () => void;
     closePanel: () => void;
@@ -30,6 +32,11 @@ export const useCanvasSidePanelStore = create<CanvasSidePanelStore>((set, get) =
     panelMounted: false,
     panelClosing: false,
     nodeSearchFocusRequest: 0,
+    nodeViewMode: "list",
+    setNodeViewMode: (mode) => {
+        set({ nodeViewMode: mode });
+        void saveSettings({ canvasSidePanelNodeView: mode });
+    },
     setWidth: (width) => {
         const clamped = Math.min(CANVAS_SIDE_PANEL_MAX_WIDTH, Math.max(CANVAS_SIDE_PANEL_MIN_WIDTH, width));
         set({ width: clamped });
@@ -71,6 +78,7 @@ async function hydrateCanvasSidePanelSettings() {
         patch.panelMounted = settings.canvasSidePanelOpen;
         patch.panelClosing = false;
     }
+    if (settings.canvasSidePanelNodeView === "list" || settings.canvasSidePanelNodeView === "grid") patch.nodeViewMode = settings.canvasSidePanelNodeView;
     if (Object.keys(patch).length > 0) useCanvasSidePanelStore.setState(patch);
 }
 

@@ -43,6 +43,7 @@ export type FrontendSettings = {
     agentPanelWidth?: number;
     canvasSidePanelWidth?: number;
     canvasSidePanelOpen?: boolean;
+    canvasSidePanelNodeView?: "list" | "grid";
     locale?: string;
     imageQuickTools?: Record<string, unknown>;
 };

@@ -150,6 +150,32 @@ def apply_subject_prompt_v2(root):
     helper_source = Path(__file__).with_name("canvas_subject_prompt_v2.py")
     helper_target = root / "scripts/canvas_subject_prompt_v2.py"
     helper_target.write_bytes(helper_source.read_bytes())
+    asset_plan = root / "scripts/asset_plan.py"
+    asset_plan_text = asset_plan.read_text(encoding="utf-8")
+    if "_canvas_subject_base_asset_plan" not in asset_plan_text:
+        asset_plan_text += '''
+
+_canvas_subject_base_asset_plan = check_asset_plan
+def check_asset_plan(payload, base):
+    # Authored v2 Shot references are validated through Subject usages. The
+    # legacy plan checker still owns asset cards, versions and dependencies.
+    # Compiled video projections retain their derived legacy Shot checks.
+    if (payload.get("prompt_assembly") or {}).get("version") == 2 and not payload.get("_canvas_compiled_subject_projection"):
+        return _canvas_subject_base_asset_plan({**payload, "shots": []}, base)
+    return _canvas_subject_base_asset_plan(payload, base)
+'''
+        asset_plan.write_text(asset_plan_text, encoding="utf-8")
+    continuity = root / "scripts/continuity_v2.py"
+    continuity_text = continuity.read_text(encoding="utf-8")
+    if "_canvas_continuity_base_audit" not in continuity_text:
+        wrapper = "\n\n_canvas_continuity_base_audit = audit\ndef audit(source, target_ids=None):\n    if isinstance(source, dict) and (source.get('prompt_assembly') or {}).get('version') == 2:\n        from canvas_subject_prompt_v2 import project_continuity_source\n        result = _canvas_continuity_base_audit(project_continuity_source(source), target_ids)\n        result['sourceDigest'] = digest(source)\n        return result\n    return _canvas_continuity_base_audit(source, target_ids)\n"
+        # CLI must resolve the adapted audit before its __main__ call.
+        entry = 'if __name__ == "__main__":'
+        if entry not in continuity_text:
+            raise RuntimeError("continuity_v2.py CLI entry missing")
+        continuity_text = continuity_text.replace(entry, wrapper + "\n" + entry, 1)
+        continuity.write_text(continuity_text, encoding="utf-8")
+
 
     audit = root / "scripts/audit_storyboard_quality.py"
     text = audit.read_text(encoding="utf-8")

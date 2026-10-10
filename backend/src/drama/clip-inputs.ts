@@ -1,13 +1,13 @@
 import { mergeDirectorInput } from "./input-merge.js";
 import { outgoingDirectorBoundary } from "@basketikun/canvas-agent/drama/production-validation";
 import { isH3StyleTemplateId } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
-import { BASE_H3_NODE_METADATA } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
+import { BASE_H3_NODE_METADATA, createH3NodeMetadata } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { resolveH3Runtime, H3_PARAM_KEYS } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import crypto from "node:crypto";
 import { currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { buildCharacterGroupFromExistingNode } from "@basketikun/canvas-agent/plugins/minimax-h3/character-groups";
 import { assertReferenceCompilation, compileReferenceSubmission } from "@basketikun/canvas-agent/reference-contract";
-import { canonicalProduction, isSubjectPromptAssembly, promptSourceMapSchema, type EpisodeProductionData, type ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/production-contract";
+import { canonicalProduction, isSubjectPromptAssembly, productionSceneEntries, promptSourceMapSchema, type EpisodeProductionData, type ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/production-contract";
 import { directorArtifact } from "./director.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
 const stableId = (kind: string, ...parts: string[]) => `${kind}-${crypto.createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24)}`;
@@ -55,19 +55,27 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
     if (!taskMode) throw new Error(`未知 Acheng 模式 ${planned.mode}`);
     const prompt = authored.prompt;
     const boundary = outgoingDirectorBoundary(d, group.id);
-    // A partial set of opening anchors is not a per-shot storyboard table.
-    // The compiled prompt retains those scoped anchors and the complete motion timeline.
-    const storyboardShots = taskMode !== "t2v" && settings.storyboardImageMode !== "skip" && shots.every(shot => d.shotInputs[shot.id]?.keyframeAssetId && d.shotInputs[shot.id]?.keyframePolicy !== "none") ? shots.map(shot => {
+    // Production Shot identity must survive independently of generated/approved keyframe media.
+    // H3 renders unbound cells as placeholders; storyboardImageMode controls image references,
+    // never the Shot-to-cell mapping itself.
+    const fps = Number(d.source.fps_num || 24) / Number(d.source.fps_den || 1);
+    const storyboardShots = shots.map(shot => {
         const input = d.shotInputs[shot.id];
-        const asset = input?.keyframeAssetId && d.assets[input.keyframeAssetId];
-        const sourceNodeId = asset && asset.nodeId || input?.keyframeAssetId;
+        const frames = Number(shot.duration_frames);
+        const start = Number(shot.start_frame), end = Number(shot.end_frame);
+        const duration = Number.isFinite(frames) && frames > 0 ? frames / fps
+            : Number.isFinite(start) && Number.isFinite(end) && end > start && fps > 0 ? (end - start) / fps
+                : Number(shot.duration || 0);
+        if (settings.storyboardImageMode === "skip" || input?.keyframePolicy === "none" || !input?.keyframeAssetId) return { id: shot.id, duration };
+        const asset = d.assets[input.keyframeAssetId];
+        const sourceNodeId = asset?.nodeId || input.keyframeAssetId;
         const binding = bindings.find(ref => ref.sourceNodeId === sourceNodeId);
         if (!binding) throw new Error(`镜头 ${shot.id} 的正式关键帧未进入本段参考绑定`);
-        binding.role = 'storyboard';
-        return { id: shot.id, referenceBindingId: String(binding.id), duration: shot.duration };
-    }) : undefined;
+        binding.role = "storyboard";
+        return { id: shot.id, referenceBindingId: String(binding.id), duration };
+    });
     const segment: Record<string, any> = { id: segmentId, sourceShotId: group.shotIds.join("~"), title: shots.map(shot => shot.title).join(" / "),
-        duration: shots.reduce((sum, shot) => sum + shot.duration, 0), taskMode, prompt, referenceBindings: bindings,
+        duration: storyboardShots.reduce((sum, shot) => sum + Number(shot.duration || 0), 0), taskMode, prompt, referenceBindings: bindings,
         tailFrameContinuation: boundary?.tailFrame === true, motionContextEnabled: boundary?.motionContext === true,
         directorEngine: authored.receipt.engine || (authored.receipt.compilationScope as any)?.engine || d.engine, directorSourceHash: authored.sourceHash, styleTemplateId, h3CharacterGroups: characterGroups,
         ...(storyboardShots ? { storyboardShots } : {}),
@@ -117,17 +125,84 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
         return { segment, result };
     } catch (error) { result.diagnostics.push({ code: "CLIP_INPUT_BLOCKED", message: error instanceof Error ? error.message : String(error) }); return { result }; }
 }
-/** Project existing formal Clips during the same transaction as source/compilation changes. */
-export function clipInputOperations(project: Record<string, any>, data: EpisodeProductionData, layout: ProductionLayoutPlan) {
+function emptyProductionClip(project: Record<string, any>, data: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], segmentId: string, defaults: Record<string, unknown>) {
+    const director = data.director!;
+    const sourceSegment = (Array.isArray(director.source.segments) ? director.source.segments : []).map(object).find(item => item.id === group.id) || {};
+    const sourceShots = (Array.isArray(director.source.shots) ? director.source.shots : []).map(object);
+    const shots = group.shotIds.map(id => sourceShots.find(shot => String(shot.id) === id)).filter(Boolean) as Array<Record<string, any>>;
+    const fps = Number(director.source.fps_num || 24) / Number(director.source.fps_den || 1);
+    const durationOf = (shot: Record<string, any>) => {
+        const frames = Number(shot.duration_frames), start = Number(shot.start_frame), end = Number(shot.end_frame);
+        if (Number.isFinite(frames) && frames > 0 && fps > 0) return frames / fps;
+        if (Number.isFinite(start) && Number.isFinite(end) && end > start && fps > 0) return (end - start) / fps;
+        return Number(data.shots.find(item => item.id === shot.id)?.duration || 0);
+    };
+    const storyboardShots = shots.map(shot => ({ id: String(shot.id), duration: durationOf(shot) }));
+    const taskMode = ({ T2VA: "t2v", I2VA: "i2v", FL2VA: "fl2v", L2VA: "l2v", Ref2VA: "ref2va" } as Record<string, string>)[String(sourceSegment.mode)] || "ref2va";
+    const node = (project.nodes || []).find((item: Record<string, any>) => item.id === group.nodeId);
+    const segment: Record<string, any> = {
+        id: segmentId, sourceShotId: group.shotIds.join("~"), title: shots.map(shot => String(shot.title || shot.id)).join(" / "),
+        duration: storyboardShots.reduce((sum, shot) => sum + shot.duration, 0), taskMode, prompt: "", referenceBindings: [],
+        storyboardModeEnabled: true, storyboardShots, tailFrameContinuation: false, motionContextEnabled: false,
+        directorSourceHash: director.sourceHash, styleTemplateId: sourceSegment.styleTemplateId ?? null,
+        h3CharacterGroups: {}, aspectRatio: object(node?.metadata).aspectRatio || BASE_H3_NODE_METADATA.aspectRatio,
+        modelName: object(node?.metadata).modelName || defaults.modelName || BASE_H3_NODE_METADATA.modelName,
+    };
+    segment.productionClipProjection = { targetId: group.id, sourceHash: director.sourceHash,
+        fieldHashes: Object.fromEntries(CLIP_PROJECTION_FIELDS.map(key => [key, clipFieldHash(segment[key])])) };
+    segment.productionClipProjection.inputHash = clipInputHash(segment);
+    return segment;
+}
+
+function layoutSceneForClip(data: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number]) {
+    const ids = new Set(group.shotIds);
+    const scenes = data.director ? productionSceneEntries(data.director.source) : [];
+    return scenes.find(scene => scene.shotIds.some(id => ids.has(id)))?.id;
+}
+
+/** Project formal Clips; new groups are materialized only when their source operation explicitly creates them. */
+export function clipInputOperations(project: Record<string, any>, data: EpisodeProductionData, layout: ProductionLayoutPlan,
+    defaults: Record<string, unknown> = {}, materializeTargets: ReadonlySet<string> = new Set()) {
     const operations: CanvasOperation[] = [], referenceSync: ReferenceSync[] = [];
+    const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, any>> : [];
+    const pendingNodes = new Map<string, CanvasOperation>();
     for (const group of data.clipGroups) {
-        const nodeId = group.nodeId || layout.units.find(unit => unit.targets.includes(`segment:${group.id}`))?.members.find(member => member.role === "video")?.nodeId;
-        const node = (project.nodes || []).find((node: any) => node.id === nodeId);
-        const existing = (node?.metadata?.segments || []).find((segment: any) => segment.id === group.segmentId || segment.productionClipProjection?.targetId === group.id);
-        if (!existing) continue;
-        const projected = productionClipProjection(project, data, group, existing.id, existing);
+        const unit = layout.units.find(unit => unit.targets.includes(`segment:${group.id}`) && unit.members.some(member => member.role === "video"));
+        const member = unit?.members.find(member => member.role === "video");
+        const nodeId = group.nodeId || member?.nodeId;
+        if (!nodeId) continue;
+        const segmentId = group.segmentId || stableId("clip", layout.owner.id, group.id);
+        const node = nodes.find(item => item.id === nodeId);
+        const pendingNode = pendingNodes.get(nodeId);
+        const nodeMetadata = pendingNode ? object(pendingNode.metadata) : object(node?.metadata);
+        const existingSegments = Array.isArray(nodeMetadata.segments) ? nodeMetadata.segments as Array<Record<string, any>> : [];
+        const existing = existingSegments.find(segment => segment.id === segmentId || segment.productionClipProjection?.targetId === group.id);
+        const projected = productionClipProjection(project, data, group, segmentId, existing);
         referenceSync.push(projected.result);
-        if (projected.segment && (clipInputHash(existing) !== clipInputHash(projected.segment) || canonicalProduction(existing.productionClipProjection) !== canonicalProduction(projected.segment.productionClipProjection))) operations.push({ type: "update_h3_segment", nodeId, segmentId: existing.id, patch: projected.segment });
+        if (existing) {
+            if (projected.segment && (clipInputHash(existing) !== clipInputHash(projected.segment) || canonicalProduction(existing.productionClipProjection) !== canonicalProduction(projected.segment.productionClipProjection))) {
+                if (pendingNode) nodeMetadata.segments = existingSegments.map(segment => segment.id === existing.id ? projected.segment! : segment);
+                else operations.push({ type: "update_h3_segment", nodeId, segmentId: existing.id, patch: projected.segment });
+            }
+            continue;
+        }
+        if (!materializeTargets.has(group.id)) continue;
+        const segment = projected.segment || emptyProductionClip(project, data, group, segmentId, defaults);
+        if (pendingNode) {
+            nodeMetadata.segments = [...existingSegments, segment];
+            pendingNode.metadata = nodeMetadata;
+        } else if (node) {
+            operations.push({ type: "add_h3_segment", nodeId, segment });
+        } else {
+            if (!member || !unit) continue;
+            const sceneId = unit.sceneId || layoutSceneForClip(data, group);
+            const scene = sceneId && data.director ? productionSceneEntries(data.director.source).find(item => item.id === sceneId) : undefined;
+            const groupId = sceneId ? stableId("production-scene", layout.owner.id, sceneId) : undefined;
+            const metadata = { ...createH3NodeMetadata(defaults, { segments: [segment] }), ...(sceneId ? { productionSceneId: sceneId, productionOwnerKind: layout.owner.kind, productionOwnerId: layout.owner.id, groupId } : {}), productionLayoutUnitId: unit.id, productionLayoutBounds: unit.bounds.size };
+            const operation = { type: "add_node", id: nodeId, nodeType: member.nodeType, title: `${scene?.title || sceneId || "场次"} · H3`, position: member.position, width: member.size.width, height: member.size.height, metadata } as Extract<CanvasOperation, { type: "add_node" }>;
+            pendingNodes.set(nodeId, operation);
+            operations.push(operation);
+        }
     }
     return { operations, referenceSync };
 }

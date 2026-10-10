@@ -86,7 +86,7 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
         let changed = true;
         while (changed) {
             const before = contextShots.size + sceneIds.size;
-            const blockIds = new Set(rows(source.script_scenes).filter(item => sceneIds.has(String(item.id || item.scene_id))).flatMap(item => rows(item.blocks).map(block => String(block.id))));
+            const blockIds = new Set(rows(source.script_scenes).filter(item => sceneIds.has(String(item.id || item.scene_id))).flatMap(item => rows(Array.isArray(item.blocks) ? item.blocks : typeof item.text === "string" ? [item] : []).map(block => String(block.id))));
             const coverage = rows(ledger.coverage).filter(item => blockIds.has(String(item.source_anchor?.block_id || item.block_id)));
             const eventIds = new Set(coverage.flatMap(item => (item.event_ids || []).map(String)));
             for (const requirement of rows(ledger.requirements).filter(item => contextShots.has(String(item.shot_id)))) for (const eventId of requirement.event_ids || []) eventIds.add(String(eventId));
@@ -101,7 +101,7 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
         }
         projected.source.shots = allShots.filter(item => contextShots.has(key(item)));
         projected.source.script_scenes = rows(source.script_scenes).filter(item => sceneIds.has(String(item.id || item.scene_id)));
-        const blocks = new Set(rows(projected.source.script_scenes).flatMap(item => rows(item.blocks).map(block => String(block.id))));
+        const blocks = new Set(rows(projected.source.script_scenes).flatMap(item => rows(Array.isArray(item.blocks) ? item.blocks : typeof item.text === "string" ? [item] : []).map(block => String(block.id))));
         projected.source.ledger = { ...structuredClone(ledger),
             events: rows(ledger.events).filter(item => contextShots.has(String(item.shot_id))),
             requirements: rows(ledger.requirements).filter(item => contextShots.has(String(item.shot_id))),
@@ -137,7 +137,9 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
                 if (subjectId && usedFacts.has(String(fact.id))) usedSubjects.add(subjectId);
             }
             projected.source.subject_registry = allSubjectRows.filter(subject => usedSubjects.has(String(subject.id))).map(subject => {
-                const selectedBindings = new Set(rows(source.shots).filter(shot => outputShotIds.has(key(shot)) && subjectReferenceShotIds.has(key(shot))).flatMap(shot => rows(shot.subject_usages).filter(usage => usage.subjectId === subject.id).flatMap(usage => resolveSubjectPictureBindingIds(subject, usage).bindingIds)));
+                // Replay context keeps valid identity declarations; its media is
+                // materialized separately only when an output Shot consumes it.
+                const selectedBindings = new Set(rows(source.shots).filter(shot => contextShots.has(key(shot))).flatMap(shot => rows(shot.subject_usages).filter(usage => usage.subjectId === subject.id).flatMap(usage => resolveSubjectPictureBindingIds(subject, usage).bindingIds)));
                 return { ...subject, pictureBindings: rows(subject.pictureBindings).filter(binding => selectedBindings.has(String(binding.id))) };
             });
             scopedLedger.facts = facts.filter(fact => usedFacts.has(String(fact.id)));

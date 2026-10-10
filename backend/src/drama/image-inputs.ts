@@ -1,6 +1,6 @@
 import { mergeDirectorInput } from "./input-merge.js";
 import crypto from "node:crypto";
-import { canonicalProduction, type DirectorProduction, type EpisodeProductionData } from "@basketikun/canvas-agent/drama/production-contract";
+import { canonicalProduction, isSubjectPromptAssembly, type DirectorProduction, type EpisodeProductionData } from "@basketikun/canvas-agent/drama/production-contract";
 import { productionImageInput, type ProductionImageInput } from "@basketikun/canvas-agent/reference-contract";
 import type { CanvasOperation } from "../canvas/project-ops.js";
 import type { BackendDatabase } from "../db.js";
@@ -56,7 +56,7 @@ export function imageInputOperations(project: Record<string, any>, data: Episode
         const target = nodes.find(node => node.id === targetId);
         if (!target) continue;
         const shotId = Object.entries(director.shotInputs).find(([, input]) => input.keyframeAssetId === artifact.targetId)?.[0];
-        const sourceId = shotId ? stableId("production-source", ownerId, shotId) : target.id;
+        const sourceId = shotId && !isSubjectPromptAssembly(director.source) ? stableId("production-source", ownerId, shotId) : target.id;
         const source = nodes.find(node => node.id === sourceId);
         const boundReferences = artifact.references.every(ref => Object.values(director.assets).some(asset => asset.nodeId === ref.nodeId && asset.storageKey === ref.storageKey && asset.sha256 === ref.sha256));
         if (artifact.status !== "ready" || !boundReferences) {
@@ -83,8 +83,10 @@ export function imageInputOperations(project: Record<string, any>, data: Episode
             const nextValues = { prompt: artifact.prompt, referenceNodeIds: [...new Set(input.references.map(ref => ref.nodeId))] };
             const projection = node.metadata?.productionImageProjection;
             const baseline = projection?.fieldHashes || (oldArtifact && node.metadata?.prompt !== undefined ? { prompt: hash(oldArtifact.prompt) } : undefined);
-            const merged = mergeDirectorInput({ ...(node.metadata || {}), referenceNodeIds: currentIncoming }, nextValues, baseline, [["prompt"], ["referenceNodeIds"]]);
-            operations.push({ type: "update_node", id: node.id, metadata: { productionImageInput: input, prompt: merged.merged.prompt, canvasReferenceNodeIds: keepReferences ? currentIncoming : nextValues.referenceNodeIds,
+            const smart = node.type === "config" && node.metadata?.smart === true;
+            const currentPrompt = smart && typeof node.metadata?.composerContent === "string" ? node.metadata.composerContent : node.metadata?.prompt;
+            const merged = mergeDirectorInput({ ...(node.metadata || {}), prompt: currentPrompt, referenceNodeIds: currentIncoming }, nextValues, baseline, [["prompt"], ["referenceNodeIds"]]);
+            operations.push({ type: "update_node", id: node.id, metadata: { productionImageInput: input, prompt: merged.merged.prompt, ...(smart ? { composerContent: merged.merged.prompt } : {}), canvasReferenceNodeIds: keepReferences ? currentIncoming : nextValues.referenceNodeIds,
                 productionImageProjection: { targetId: artifact.targetId, sourceNodeId: sourceId, fieldHashes: { prompt: hash(artifact.prompt), referenceNodeIds: hash(nextValues.referenceNodeIds) }, nextValues, fieldGroups: [["prompt"], ["referenceNodeIds"]], conflicts: merged.conflicts, manualFields: merged.manualFields, referenceChanged: keepReferences } } });
         }
         const expected = [...new Set(input.references.map(ref => ref.nodeId))];

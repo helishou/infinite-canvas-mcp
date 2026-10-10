@@ -11,7 +11,7 @@ export function segmentsFor(metadata: Record<string, unknown>): H3Segment[] {
     const value = metadata.segments;
     const raw: H3Segment[] = Array.isArray(value) && value.length
         ? value as H3Segment[]
-        : [{ id: "segment-1", prompt: String(metadata.prompt || defaultPrompt), duration: Number(metadata.duration || 8), status: "idle" }];
+        : metadata.productionSceneId ? [] : [{ id: "segment-1", prompt: String(metadata.prompt || defaultPrompt), duration: Number(metadata.duration || 8), status: "idle" }];
     let start = 0;
     return raw.map((segment, index) => {
         const duration = Math.max(0.5, Math.min(60, Number(segment.duration || metadata.duration || 5)));

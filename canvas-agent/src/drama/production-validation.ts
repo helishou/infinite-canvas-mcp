@@ -22,6 +22,9 @@ const examples: Record<string, unknown> = {
     set_director_brief: { brief: "A traveller returns home." },
     patch_director_source: { entity: "asset", id: "character-1", patch: { description: "Authored character appearance." } },
     replace_director_scene_storyboard: { sceneId: "SC1", shots: [{ id: "SH1", source_scene_id: "SC1", start_frame: 0, end_frame: 120 }], segments: [{ id: "SEG1", shot_ids: ["SH1"], start_frame: 0, end_frame: 120 }], shotInputs: { SH1: { keyframePolicy: "none", assetIds: [] } } },
+    archive_director_scene: { sceneId: "SC1", expectedCanvasRevision: 1, confirmed: true },
+    restore_director_scene: { archiveId: "archive-1", expectedCanvasRevision: 1 },
+    delete_director_clip: { segmentId: "SEG1", expectedCanvasRevision: 1, confirmed: true },
     adopt_director_fields: { targetId: "SEG001", nodeId: "h3-1", segmentId: "clip-1", canvasRevision: 1, fields: ["prompt"] },
     adopt_director_clip_style: { targetId: "segment-1", nodeId: "h3-node", segmentId: "clip-1", canvasRevision: 1, styleTemplateId: "soft-light" },
     patch_director_continuity: { ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } },
@@ -56,6 +59,9 @@ export function productionOperationContract(operationType?: string) {
             const type = option.shape.type.value;
             return { type, example: option.parse({ type, ...examples[type] as object }), preconditions: type === "patch_director_source"
                 ? ["Director exists; scene edits script_scenes, environment edits scene_registry, asset edits asset_plan, and asset_card edits asset_cards. Each object requires an existing stable ID and allowed fields; brief/style accept no ID; brief accepts only string value."]
+                : type === "archive_director_scene" ? ["Requires explicit user confirmation and the current canvas revision. The scene, its Shots/Clips, and bound H3 canvas nodes are archived and restorable for 30 days; ordinary node deletion cannot bypass this operation."]
+                : type === "restore_director_scene" ? ["Archive must belong to this production, remain within its 30-day retention window, and have no ID conflicts; both production and canvas revisions must match."]
+                : type === "delete_director_clip" ? ["Requires explicit confirmation; deletes the Clip and its owned Shots as one source transaction. A single Shot cannot be deleted while leaving an empty Clip."]
                 : type === "select_director_result" ? ["Successful archived output must belong to the original formal task and exact node/Clip; both revisions must match; active generation and shared reference replacement are rejected. Images require review after selection. No media generation or prompt/timeline replacement occurs."]
                 : type === "restore_archived_scene_results" ? ["Episode draft only. Verifies the archive node, exact Clip identity, succeeded task, generation log and media bytes before restoring outputs to matching scene H3 nodes. Preserves the original archive and provenance; creates no task and does not modify the published version."]
                 : type === "upsert_director_subject" || type === "set_director_shot_keyframes" ? ["Use selection.mode=node_selection to follow the smart node's independent reference choice. latest_success and selected_result are explicit binding overrides. Browsing history does not restore generation settings."]

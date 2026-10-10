@@ -72,7 +72,7 @@ export function repartitionDirectorClips(d: DirectorProduction, op: { shotIds: s
         if (oldIds.has(id) && !matchingOld) reject("CLIP_ID_REUSE", `segments.${index}.id`, "覆盖范围改变时不能沿用旧 Clip ID");
         createdIds.add(id);
         const profileSources = oldGroups.filter(segment => (segment.shot_ids || []).some((shotId: string) => ids.includes(shotId)));
-        const priorProfiles = profileSources.map(segment => ({ mode: segment.mode, mode_lock: segment.mode_lock, mode_selection_reason: segment.mode_selection_reason, styleTemplateId: segment.styleTemplateId }));
+        const priorProfiles = profileSources.map(segment => ({ mode: segment.mode, mode_lock: segment.mode_lock, styleTemplateId: segment.styleTemplateId }));
         const sameProfile = priorProfiles.length > 0 && priorProfiles.every(profile => canonicalProduction(profile) === canonicalProduction(priorProfiles[0]));
         const selectedProfileSourceId = String(raw.executionProfileSourceId || "");
         const selectedProfile = sameProfile ? profileSources[0] : profileSources.find(segment => String(segment.id) === selectedProfileSourceId);

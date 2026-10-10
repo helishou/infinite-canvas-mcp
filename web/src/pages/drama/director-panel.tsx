@@ -1,4 +1,5 @@
 import { ProductionInputDiff } from "./production-input-diff";
+import { currentClipRefreshes, groupedRefreshIssues } from "./production-refresh-display";
 import { useEffect, useMemo, useState } from "react";
 import { Alert, App, Button, Input, InputNumber, Modal, Select, Switch, Tag } from "antd";
 import { ArrowRight, ArrowLeft, ArrowDownToLine, Check, Pause, Play, RotateCcw, WandSparkles, Users, MapPin, Image as ImageIcon, Film, Pencil, BookOpen, Search, ChevronDown } from "lucide-react";
@@ -160,24 +161,25 @@ const SHOT_SOURCE_FIELDS = ["visual", "camera"] as const;
 const SHOT_STATE_FIELDS = ["state_in", "state_out"] as const;
 
 /**
- * 镜头源字段（画面与动作 / 机位与运镜 / 起止状态 / 相关素材 / 时长）的内联编辑器。
+ * 镜头源字段（画面与动作 / 机位与运镜 / 时长）的内联编辑器。
  * 原先这些字段装在「修改画面、摄影与起止状态」弹窗里；现在直接摊在页面上：
  * 右上角一枚「修改」，点开变成「保存 / 取消」，编辑期只动本地草稿，保存时把有改动的字段一次提交。
+ * ⚠️ 起止状态（镜头开始时 / 镜头结束时）已按用户要求挪进左栏「连续性状态」模块（ShotStateFields），这里不再渲染，避免同一段文字重复出现。
  * ⚠️ 这是页面上「画面」的唯一展示位——别处不要再渲染 shot.visual / display_summary，否则同一段文字会重复出现。
+ * ⚠️ 镜头素材不在「画面与摄影」里列（与右栏「本镜图片参考」重复）：右栏那份负责展示与跳转。
  */
-function ShotSourceFields({ shot, busy, names, assetIds, assetName, fps, onNavigate, onSave, includeCompleteSource = false }: {
+function ShotSourceFields({ shot, busy, names, fps, onSave, includeCompleteSource = false }: {
   shot: Record<string, any>; busy: boolean; names: Record<string, string>;
-  assetIds: string[]; assetName: (id: string) => string; fps: number;
-  onNavigate: (workspace: DirectorWorkspace, target?: { kind: string; id: string }) => void;
+  fps: number;
   onSave: (patch: Record<string, unknown>) => Promise<boolean | void>;
   includeCompleteSource?: boolean;
 }) {
   const { t } = useTranslation();
   const id = String(shot.id || "");
   const values: Record<string, string> = {
-    visual: proseOf(shot.visual), camera: proseOf(shot.camera), state_in: proseOf(shot.state_in), state_out: proseOf(shot.state_out),
+    visual: proseOf(shot.visual), camera: proseOf(shot.camera),
   };
-  // 起止状态可能是结构化对象（没有 prose 正文）：这时用提示文案代替空值。
+  // 字段可能是结构化对象（没有 prose 正文）：这时用提示文案代替空值。
   const structured = (field: string) => Boolean(shot[field]) && !proseOf(shot[field]);
   const startFrame = Number(shot.start_frame || 0);
   const frameCount = Math.max(0, Number(shot.end_frame || 0) - startFrame);
@@ -189,7 +191,7 @@ function ShotSourceFields({ shot, busy, names, assetIds, assetName, fps, onNavig
   useEffect(() => { setEditing(false); setDraft({}); setSecondsDraft(""); }, [id]);
   const save = async () => {
     const patch: Record<string, unknown> = {};
-    [...SHOT_SOURCE_FIELDS, ...SHOT_STATE_FIELDS].forEach(field => { if ((draft[field] ?? "") !== values[field]) patch[field] = patchProse(shot[field], draft[field] ?? ""); });
+    SHOT_SOURCE_FIELDS.forEach(field => { if ((draft[field] ?? "") !== values[field]) patch[field] = patchProse(shot[field], draft[field] ?? ""); });
     // 时长按秒录入，帧数由制作帧率换算：只推 end_frame（start_frame 由前序镜头决定）。
     const nextSeconds = Number(secondsDraft);
     if (secondsDraft.trim() !== "" && Number.isFinite(nextSeconds)) {
@@ -217,14 +219,7 @@ function ShotSourceFields({ shot, busy, names, assetIds, assetName, fps, onNavig
           ? <Input.TextArea value={draft[field] ?? ""} autoSize={{ minRows: 3, maxRows: 12 }} disabled={busy || saving} placeholder={structured(field) ? t("director.studio.structuredState") : undefined} onChange={event => setDraft(current => ({ ...current, [field]: event.target.value }))} />
           : values[field] ? <p className="whitespace-pre-wrap text-sm leading-7">{values[field]}</p> : <p className="text-sm text-muted-foreground">{structured(field) ? t("director.studio.structuredState") : "—"}</p>}
       </div>)}
-      <div className="grid gap-4 sm:grid-cols-2">{SHOT_STATE_FIELDS.map(field => <div key={field} className="grid gap-2">
-        <span className="text-xs text-muted-foreground">{t(`director.studio.shotField.${field}`)}</span>
-        {editing
-          ? <Input.TextArea value={draft[field] ?? ""} autoSize={{ minRows: 2, maxRows: 8 }} disabled={busy || saving} placeholder={structured(field) ? t("director.studio.structuredState") : undefined} onChange={event => setDraft(current => ({ ...current, [field]: event.target.value }))} />
-          : values[field] ? <p className="whitespace-pre-wrap text-sm leading-7">{values[field]}</p> : <p className="text-sm text-muted-foreground">{structured(field) ? t("director.studio.structuredState") : "—"}</p>}
-      </div>)}</div>
     </div>
-    {assetIds.length > 0 && <div className="flex flex-wrap items-center gap-2"><span className="text-xs text-muted-foreground">{t("director.studio.shotAssets")}</span>{assetIds.map(assetId => <button key={assetId} type="button" className="rounded border border-border px-2 py-1 text-xs hover:bg-muted/40" onClick={() => onNavigate("assets", { kind: "asset", id: assetId })}>{assetName(assetId)}</button>)}</div>}
     <div className="grid gap-2" data-shot-duration>
       <span className="text-xs text-muted-foreground">{t("director.studio.durationSeconds")}</span>
       {editing
@@ -233,6 +228,53 @@ function ShotSourceFields({ shot, busy, names, assetIds, assetName, fps, onNavig
     </div>
     {includeCompleteSource && <details className="text-xs text-muted-foreground" data-shot-complete-source-details><summary className="cursor-pointer">{t("director.studio.shotCompleteSource")}</summary><div className="mt-3" data-shot-complete-source><SourceData value={shot} names={names} /></div></details>}
   </section>;
+}
+
+/**
+ * 起止状态（镜头开始时 / 镜头结束时）的展示与内联编辑，归左栏「连续性状态」模块：
+ * 原先摊在「画面与摄影」里，与连续性语境割裂；挪过来后和台账状态、边界开关同区阅读。
+ * 保存仍走 shot patch 链路（onPatch("shot", id, patch)），只提交有改动的字段。
+ */
+function ShotStateFields({ shot, busy, onSave }: {
+  shot: Record<string, any>; busy: boolean;
+  onSave: (patch: Record<string, unknown>) => Promise<boolean | void>;
+}) {
+  const { t } = useTranslation();
+  const id = String(shot.id || "");
+  const values: Record<string, string> = {
+    state_in: proseOf(shot.state_in), state_out: proseOf(shot.state_out),
+  };
+  // 起止状态可能是结构化对象（没有 prose 正文）：这时用提示文案代替空值。
+  const structured = (field: string) => Boolean(shot[field]) && !proseOf(shot[field]);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { setEditing(false); setDraft({}); }, [id]);
+  const save = async () => {
+    const patch: Record<string, unknown> = {};
+    SHOT_STATE_FIELDS.forEach(field => { if ((draft[field] ?? "") !== values[field]) patch[field] = patchProse(shot[field], draft[field] ?? ""); });
+    if (!Object.keys(patch).length) { setEditing(false); setDraft({}); return; }
+    setSaving(true);
+    const saved = await onSave(patch);
+    setSaving(false);
+    if (saved !== false) { setEditing(false); setDraft({}); }
+  };
+  return <div className="space-y-2" data-shot-state-fields={id}>
+    <div className="flex items-center justify-end gap-2" data-shot-state-actions>
+      {editing ? <>
+        <Button size="small" type="primary" icon={<Check className="size-3.5" />} loading={saving} disabled={busy || saving} onClick={() => void save()}>{t("common.save")}</Button>
+        <Button size="small" disabled={saving} onClick={() => { setDraft({}); setEditing(false); }}>{t("common.cancel")}</Button>
+      </> : <Button size="small" type="text" data-shot-state-edit icon={<Pencil className="size-3.5" />} disabled={busy} onClick={() => { setDraft({ ...values }); setEditing(true); }}>{t("director.studio.editShotFields")}</Button>}
+    </div>
+    <div className="grid gap-4 sm:grid-cols-2">
+      {SHOT_STATE_FIELDS.map(field => <div key={field} className="grid gap-2">
+        <span className="text-xs text-muted-foreground">{t(`director.studio.shotField.${field}`)}</span>
+        {editing
+          ? <Input.TextArea value={draft[field] ?? ""} autoSize={{ minRows: 2, maxRows: 8 }} disabled={busy || saving} placeholder={structured(field) ? t("director.studio.structuredState") : undefined} onChange={event => setDraft(current => ({ ...current, [field]: event.target.value }))} />
+          : values[field] ? <p className="whitespace-pre-wrap text-sm leading-7">{values[field]}</p> : <p className="text-sm text-muted-foreground">{structured(field) ? t("director.studio.structuredState") : "—"}</p>}
+      </div>)}
+    </div>
+  </div>;
 }
 
 function BoundaryCard({ from, to, fromLabel, toLabel, boundary, draftValue, onDraftChange, disabled, onSave }: {
@@ -973,7 +1015,6 @@ export function DirectorPanel({
       <SubjectShotEditor key={id} shot={shot} source={d.source} canvasNodes={canvasNodes} canvasId={canvasId} busy={busy} workbench={workbench}
         draftValue={sourceDrafts[`v2shot:${id}`]} onDraftChange={value => onSourceDraftChange(`v2shot:${id}`, value)} onSave={onSaveV2Shot || (async () => false)} />
     </div>;
-    const segment = segments.find(item => (item.shot_ids || []).includes(id));
     return <div className="space-y-5" data-shot-reading={id}>
       {renderShotKeyframe(id)}
       {/* 画面与摄影（含起止状态 / 素材 / 时长）：页面里「画面」的唯一展示位，自带「修改 / 保存 / 取消」。 */}
@@ -985,10 +1026,17 @@ export function DirectorPanel({
           return <div key={String(dialogue.id || index)} className="flex gap-3"><dt className="w-16 shrink-0 pt-1 text-xs text-muted-foreground">{speaker}</dt><dd className="min-w-0 whitespace-pre-wrap text-sm leading-7">{dialogueBody({ ...dialogue, speaker })}</dd></div>;
         })}</dl> : <p className="text-sm text-muted-foreground">{t("director.studio.noDialogue")}</p>}
       </section>}
-      {!includeCompleteSource && <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
-        <Button size="small" type="text" icon={<WandSparkles className="size-3.5" />} disabled={busy} onClick={() => onAskDirector({ workspace: "shots", targetId: id, instruction: t("director.workspace.reviseShot") })}>{t("productionCanvas.discussObject")}</Button>
-        {segment && <Button size="small" type="text" icon={<Film className="size-3.5" />} onClick={() => onNavigate("production", { kind: "segment", id: String(segment.id) })}>{segmentTitle(String(segment.id))}<ArrowRight className="ml-1 size-3" /></Button>}
-      </div>}
+    </div>;
+  };
+
+  // 镜头操作（和导演讨论 / 跳到所在片段）：原先夹在「对白」和「连续性状态」之间，打断阅读顺序；
+  // 现在统一挪到左栏最底部，由 renderShotActions 渲染（workbench 与 compact 两种布局共用）。
+  const renderShotActions = (shot: Record<string, any>) => {
+    const id = String(shot.id || "");
+    const segment = segments.find(item => (item.shot_ids || []).includes(id));
+    return <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3" data-shot-actions>
+      <Button size="small" type="text" icon={<WandSparkles className="size-3.5" />} disabled={busy} onClick={() => onAskDirector({ workspace: "shots", targetId: id, instruction: t("director.workspace.reviseShot") })}>{t("productionCanvas.discussObject")}</Button>
+      {segment && <Button size="small" type="text" icon={<Film className="size-3.5" />} onClick={() => onNavigate("production", { kind: "segment", id: String(segment.id) })}>{segmentTitle(String(segment.id))}<ArrowRight className="ml-1 size-3" /></Button>}
     </div>;
   };
 
@@ -996,9 +1044,15 @@ export function DirectorPanel({
   // 由 renderShotDetails 统一渲染，workbench 不再单独注入一份，避免同一批字段在页面上出现两遍。
   const renderShotFields = (shot: Record<string, any>, includeCompleteSource = false) => {
     const id = String(shot.id || "");
-    return <ShotSourceFields key={id} shot={shot} busy={busy} names={nameMap} fps={fps} assetIds={(d?.shotInputs[id]?.assetIds || []).map(String)} assetName={assetName}
-      onNavigate={onNavigate} includeCompleteSource={includeCompleteSource}
+    return <ShotSourceFields key={id} shot={shot} busy={busy} names={nameMap} fps={fps}
+      includeCompleteSource={includeCompleteSource}
       onSave={async patch => { const saved = await onPatch("shot", id, patch); return saved !== false; }} />;
+  };
+
+  // 起止状态（镜头开始时 / 镜头结束时）：从「画面与摄影」挪进左栏「连续性状态」模块，与边界开关同区展示。
+  const renderShotState = (shot: Record<string, any>) => {
+    const id = String(shot.id || "");
+    return <ShotStateFields key={id} shot={shot} busy={busy} onSave={async patch => { const saved = await onPatch("shot", id, patch); return saved !== false; }} />;
   };
 
   // 连续性动作（与下一段的边界开关）：归左栏编辑区下方的「连续性状态」模块。
@@ -1025,11 +1079,14 @@ export function DirectorPanel({
 
   const renderShots = () => {
     if (d) return <SubjectStoryboardWorkbench director={d} production={production} owner={subjectOwner} canvasNodes={canvasNodes}
-      initialShotId={focusTarget?.startsWith("shot:") ? focusedId : undefined} renderEditor={(shot, workbench) => renderShotDetails(shot, false, workbench)}
+      initialShotId={focusTarget?.startsWith("shot:") ? focusedId : undefined} renderEditor={(shot, workbench) => renderShotDetails(shot, false, workbench)} onRepartitionClips={subjectAssembly ? onRepartitionClips : undefined}
       renderContinuity={isSubjectPromptAssembly(d.source) ? undefined : shot => renderShotContinuity(shot)}
+      renderShotState={shot => renderShotState(shot)}
+      renderShotActions={subjectAssembly ? undefined : shot => renderShotActions(shot)}
       clipEditor={subjectAssembly ? <SubjectClipPartitionEditor shots={sourceShots} segments={segments} fps={fps} busy={busy} shotTitle={shotTitle} draftValue={sourceDrafts.v2clips} onDraftChange={value => onSourceDraftChange("v2clips", value)} onSave={onRepartitionClips || (async () => false)} /> : <div className="space-y-4">{segments.map(segment => <section key={segment.id} className="border-b border-border pb-4"><h3 className="text-sm font-medium">{segmentTitle(String(segment.id))}</h3><SegmentGroupEditor segment={segment} shots={sourceShots} segments={segments} fps={fps} draftValue={sourceDrafts[`segment:${segment.id}:shot_ids`]} onDraftChange={value => onSourceDraftChange(`segment:${segment.id}:shot_ids`, value)} disabled={busy} onSave={onRegroup} /></section>)}</div>}
-      onSubjects={() => onNavigate("assets")} onContinuity={() => onNavigate("continuity")} onClip={id => onNavigate("production", { kind: "segment", id })}
-      onDiscuss={targetId => onAskDirector({ workspace: "shots", targetId })} />;
+      onClip={id => onNavigate("production", { kind: "segment", id })}
+      busy={busy} onRefresh={onRefresh}
+      onDiscuss={targetId => onAskDirector({ workspace: "shots", targetId })} onNavigate={onNavigate} />;
     return <div className="space-y-3"><Alert type="info" message={t("director.workspace.noShots")} /><Button type="text" disabled={busy} icon={<WandSparkles className="size-3.5" />} onClick={() => onAskDirector({ workspace: "shots" })}>{t("director.studio.collaborate")}</Button></div>;
   };
 
@@ -1072,6 +1129,7 @@ export function DirectorPanel({
 
   const renderAdvanced = () => <div className="space-y-5">
     <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">{t("director.workspace.advancedTitle")}</h2><p className="mt-1 text-sm text-muted-foreground">{t("director.workspace.advancedHint")}</p></div><details><summary className="cursor-pointer text-sm text-muted-foreground">{t("director.advanced")}</summary><Button className="mt-2" disabled={!d} onClick={() => { setJson(JSON.stringify(d || {}, null, 2)); setError(""); }}>{t("director.workspace.editJson")}</Button></details></div>
+    {!!production.clipRefreshes?.length && <details className="border-b border-border pb-3"><summary className="cursor-pointer text-sm">{t("director.workspace.refreshHistory", { count: production.clipRefreshes.length })}</summary><div className="mt-3 space-y-2">{production.clipRefreshes.map(job => <details key={job.operationId} className="text-xs text-muted-foreground"><summary className="cursor-pointer">{segmentTitle(job.segmentId)} · {t("director.atomic.clipRefreshPhase." + job.status)} · {job.savedRevision}</summary>{job.blockingDiagnostic && <p className="mt-1 whitespace-pre-wrap">{job.blockingDiagnostic.message}</p>}</details>)}</div></details>}
     {compact && <details className="border-b border-border pb-4"><summary className="cursor-pointer font-medium">{t("productionCanvas.productionSettings")}</summary><div className="mt-4">{renderProduction()}</div></details>}
     {d && <section className="rounded-2xl border border-border bg-card p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs uppercase tracking-wide text-muted-foreground">{t("director.workspace.internalModules")}</p><h2 className="mt-1 text-lg font-semibold">{t("director.workspace.moduleRoles")}</h2></div><span className="text-xs text-muted-foreground">{t("director.workspace.modulesNotGates")}</span></div><div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">{directorModules.map(module => <div key={module} className="rounded-lg border border-border p-3"><div className="flex items-center justify-between gap-2"><strong>{t(`director.workspace.moduleName.${module}`)}</strong><Tag color={["committed", "continuity_passed"].includes(moduleViewStatus(module)) ? "green" : moduleViewStatus(module) === "blocked" ? "red" : undefined}>{t(`director.workspace.moduleStatus.${moduleViewStatus(module)}`)}</Tag></div><p className="mt-1 text-xs text-muted-foreground">{t("director.workspace.declaredModuleStatus", { status: t(`director.workspace.moduleStatus.${d.modules[module]?.status || "planned"}`) })}</p>{d.modules[module]?.unresolved.length ? <p className="mt-2 text-xs text-amber-600">{d.modules[module]?.unresolved[0]}</p> : null}</div>)}</div></section>}
     {d && <details className="rounded-xl border border-border bg-card p-4"><summary className="cursor-pointer font-medium">{t("director.studio.rawSource")}</summary><pre className="mt-4 max-h-[36rem] overflow-auto whitespace-pre-wrap break-words text-xs">{JSON.stringify({ revision: production.revision, localEdits: sourceDrafts, source: d.source, assets: d.assets, shotInputs: d.shotInputs, boundaries: d.boundaries, artifacts: d.artifacts, run, readiness }, null, 2)}</pre></details>}
@@ -1146,7 +1204,9 @@ export function DirectorPanel({
         <div className="flex items-center gap-1"><Button size="small" type="text" onClick={() => { onNavigate("shots"); }}>{t("director.studio.allShots")}</Button><Button size="small" type="text" aria-label={t("director.studio.previousShot")} icon={<ArrowLeft className="size-3.5" />} disabled={index <= 0} onClick={() => onNavigate("shots", { kind: "shot", id: String(sourceShots[index - 1].id) })} /><Button size="small" type="text" aria-label={t("director.studio.nextShot")} icon={<ArrowRight className="size-3.5" />} disabled={index >= sourceShots.length - 1} onClick={() => onNavigate("shots", { kind: "shot", id: String(sourceShots[index + 1].id) })} /></div>
       </header>
       {renderShotDetails(focusedShot)}
+      {renderShotState(focusedShot)}
       <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3 text-xs text-muted-foreground">{renderShotContinuity(focusedShot)}</div>
+      {!subjectAssembly && renderShotActions(focusedShot)}
     </section>;
   }
   if (compact && workspace === "production" && focusedSegment) {
@@ -1206,11 +1266,9 @@ export function DirectorPanel({
     {readiness?.targets.some(target => ["blocked", "needs_review"].includes(target.status)) && <details className="border-t border-border pt-4"><summary className="cursor-pointer text-sm">{t("productionCanvas.needsAttention")}</summary><div className="mt-3 space-y-3">{readiness.targets.filter(target => ["blocked", "needs_review"].includes(target.status)).map(target => <div key={target.id}><Button size="small" type="text" onClick={() => onLocateTarget?.(target.kind, target.targetId)}>{targetName(target.kind, target.targetId, target.title)}</Button><p className="mt-1 text-sm text-muted-foreground">{humanMessage(target.blockers[0] || target.notice || t(`director.workspace.targetStatus.${target.status}`))}</p></div>)}</div></details>}
     <section className="space-y-3 border-t border-border pt-4"><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-medium">{t("productionCanvas.deliveries")}</h3><div className="flex gap-2"><Button size="small" icon={<ArrowDownToLine className="size-3" />} loading={downloadingAllClips} disabled={!deliveredClips.length} onClick={() => void downloadAllDeliveredClips()}>{t("director.workspace.downloadAllClips")}</Button><Button size="small" loading={exporting} disabled={!d || exporting} onClick={() => void onExport(true)}>{t("productionCanvas.downloadPackage")}</Button></div></div>{deliveredClips.length ? deliveredClips.map(({ group, storageKey }) => <article key={`${group.id}:${storageKey}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border p-3"><span>{segmentTitle(group.id)}</span><div className="flex gap-2"><Button size="small" type="text" onClick={() => onLocateTarget?.("segment", group.id)}>{t("productionCanvas.locateResult")}</Button><Button size="small" aria-label={t("common.download")} onClick={() => { void fetch(backendMediaUrl(storageKey)).then(async response => { if (!response.ok) throw new Error(t("director.workspace.mediaReadFailed")); saveAs(await response.blob(), `${segmentTitle(group.id).replace(/[\\/:*?"<>|]/g, "_")}.${response.headers.get("content-type")?.includes("webm") ? "webm" : "mp4"}`); }).catch(error => message.error(String(error))); }}>{t("common.download")}</Button></div></article>) : <p className="text-sm text-muted-foreground">{t("productionCanvas.noDeliveries")}</p>}</section>
   </section>;
+  const refreshIssues = groupedRefreshIssues(currentClipRefreshes(production.clipRefreshes || [], records(d?.source.segments).map(segment => String(segment.id)), d?.sourceHash));
   return <section className="space-y-4">
-    {production.clipRefreshes?.map(job => <Alert key={job.operationId} showIcon
-      type={["blocked", "failed", "interrupted"].includes(job.status) ? "warning" : "info"}
-      message={t("director.workspace.clipRefreshStatus." + job.status, { segment: segmentTitle(job.segmentId) })}
-      description={job.blockingDiagnostic?.message} />)}
+    {["overview", "production"].includes(workspace) && refreshIssues.length > 0 && <details className="border-b border-border pb-3 text-sm"><summary className="cursor-pointer text-muted-foreground">{t("director.workspace.refreshIssueSummary", { count: refreshIssues.length })}</summary><div className="mt-3 space-y-3">{refreshIssues.map(issue => <div key={JSON.stringify([issue.code, issue.message])}><p className="text-xs text-muted-foreground">{issue.segmentIds.map(segmentTitle).join("、")}</p><p className="mt-1 whitespace-pre-wrap">{issue.message}</p></div>)}</div></details>}
     {workspace === "overview" && renderOverview()}
     {workspace === "story" && renderStory()}
     {workspace === "assets" && renderAssets()}

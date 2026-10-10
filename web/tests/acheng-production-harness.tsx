@@ -66,6 +66,13 @@ const data: EpisodeProduction["draft"] = {
   ], settings: { mode: "manual", imageModel: "test-image", h3Model: "test-h3", imageModels: {}, h3Models: {} }, legacyImports: [],
 };
 const initialProduction: EpisodeProduction = { episodeId: "fixture", revision: 4, draft: data, published: structuredClone(data), publishedVersion: 1, updatedAt: new Date().toISOString() };
+if (clipScenario === "diagnostics") {
+  const refresh = (segmentId: string, revision: number, message: string) => ({ sourceSaved: true as const, operationId: `${segmentId}:${revision}`, status: "blocked" as const,
+    sourceHash: hash, segmentId, savedRevision: revision, compilationOperationId: "fixture", selectedTargets: [segmentId], affectedTargets: [], mediaSubmitted: false as const,
+    blockingDiagnostic: { code: "MISSING_IMAGE", message } });
+  initialProduction.clipRefreshes = [...Array.from({ length: 8 }, (_, i) => refresh(`ARCHIVED_${i}`, 1, "HISTORICAL_IMAGE_ERROR")),
+    refresh("SEG1", 1, "OLD_SEGMENT_ERROR"), refresh("SEG1", 4, "CURRENT_IMAGE_ERROR"), refresh("SEG2", 4, "CURRENT_IMAGE_ERROR")];
+}
 const initialReadiness: ProductionReadiness = {
   revision: 4, publishedVersion: 1, source: "draft", modules: {}, unresolved: [], nextAction: "待审核：信使确认封口 · 关键帧",
   targets: [

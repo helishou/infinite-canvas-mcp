@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type 
 import { App, Empty, Input, Popconfirm, Select, Spin, Tag, type InputRef } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { BookOpen, Check, ChevronRight, Clapperboard, Download, Eye, FileText, Image as ImageIcon, ListChecks, ListRestart, MapPinned, Music2, Plus, Search, Settings2, Sparkles, Square, Trash2, Type, User, Video, type LucideIcon } from "lucide-react";
+import { BookOpen, Check, ChevronRight, Clapperboard, Download, Eye, FileText, Image as ImageIcon, LayoutGrid, Rows3, ListChecks, ListRestart, MapPinned, Music2, Plus, Search, Settings2, Sparkles, Square, Trash2, Type, User, Video, type LucideIcon } from "lucide-react";
 import { motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 
@@ -189,6 +189,10 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
     const [keyword, setKeyword] = useState("");
     const [typeFilter, setTypeFilter] = useState<string>("all");
     const [selectMode, setSelectMode] = useState(false);
+    const nodeViewMode = useCanvasSidePanelStore((state) => state.nodeViewMode);
+    const setNodeViewMode = useCanvasSidePanelStore((state) => state.setNodeViewMode);
+    const panelWidth = useCanvasSidePanelStore((state) => state.width);
+    const gridColumns = nodeViewMode === "grid" ? Math.max(2, Math.floor((panelWidth - 24) / 110)) : 1;
     const checked = selectedNodeIds;
     const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
     const [exporting, setExporting] = useState(false);
@@ -220,12 +224,17 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
             return [{ node, depth: 0, hasChildren: groupChildren.length > 0 }, ...(collapsedGroups.has(node.id) ? [] : groupChildren.map((child) => ({ node: child, depth: 1, hasChildren: false })))];
         });
     }, [collapsedGroups, filtered, nodes]);
+    const displayRows = nodeViewMode === "grid" ? filtered.map((node) => ({ node, depth: 0, hasChildren: false })) : treeRows;
     const rowVirtualizer = useVirtualizer({
-        count: treeRows.length,
+        count: displayRows.length,
+        lanes: gridColumns,
+        getItemKey: (index) => displayRows[index].node.id,
         getScrollElement: () => listRef.current,
-        estimateSize: () => 52,
+        estimateSize: () => nodeViewMode === "grid" ? 132 : 52,
         overscan: 8,
     });
+
+    useEffect(() => { rowVirtualizer.measure(); }, [nodeViewMode, gridColumns, rowVirtualizer]);
 
     useEffect(() => {
         if (!focusSearchRequest) return;
@@ -272,12 +281,15 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
     return (
         <div className="flex h-full flex-col">
             <div className="flex items-center gap-2 px-3 pb-2.5 pt-1">
-                <span className="text-xs font-medium opacity-60">{t("canvas.sidePanel.elements")}</span>
+                <span className="shrink-0 whitespace-nowrap text-xs font-medium opacity-60">{t("canvas.sidePanel.elements")}</span>
                 {filtered.length ? <span className="text-xs opacity-35">{filtered.length}</span> : null}
+                <button type="button" onClick={() => setNodeViewMode(nodeViewMode === "grid" ? "list" : "grid")} className="ml-auto grid size-7 shrink-0 place-items-center rounded-md opacity-70 hover:bg-black/5 dark:hover:bg-white/10" title={t(nodeViewMode === "grid" ? "canvas.sidePanel.listView" : "canvas.sidePanel.gridView")} aria-label={t(nodeViewMode === "grid" ? "canvas.sidePanel.listView" : "canvas.sidePanel.gridView")}>
+                    {nodeViewMode === "grid" ? <Rows3 className="size-3.5" /> : <LayoutGrid className="size-3.5" />}
+                </button>
                 <button
                     type="button"
                     onClick={() => (selectMode ? exitSelect() : setSelectMode(true))}
-                    className="ml-auto flex items-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium opacity-70 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10"
+                    className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-1 text-xs font-medium opacity-70 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10"
                     style={selectMode ? { color: theme.toolbar.activeText, opacity: 1 } : undefined}
                 >
                     <ListChecks className="size-3.5" />
@@ -289,10 +301,10 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
                 <Input ref={searchInputRef} size="small" allowClear prefix={<Search className="size-3.5 text-stone-400" />} aria-label={t("canvas.navigation.searchLabel")} placeholder={t("canvas.sidePanel.searchNodes")} value={keyword} onChange={(e) => setKeyword(e.target.value)} onPressEnter={() => { if (filtered[0]) onFocusNode(filtered[0].id); }} />
             </div>
             <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-                {treeRows.length ? (
+                {displayRows.length ? (
                     <div className="relative w-full" style={{ height: rowVirtualizer.getTotalSize() }}>
                         {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                            const { node, depth, hasChildren } = treeRows[virtualRow.index];
+                            const { node, depth, hasChildren } = displayRows[virtualRow.index];
                             const smartMode = node.type === CanvasNodeType.Config && node.metadata?.smart === true ? node.metadata.generationMode || "image" : undefined;
                             const Icon = NODE_TYPE_ICON[smartMode || node.type] || FileText;
                             const isImage = node.type === CanvasNodeType.Image && node.metadata?.content;
@@ -301,6 +313,16 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
                             const isScene = node.type === CanvasNodeType.Scene;
                             const isChecked = checked.has(node.id);
                             const active = selectMode ? isChecked : selectedNodeIds.has(node.id);
+                            if (nodeViewMode === "grid") return (
+                                <button key={node.id} type="button" data-canvas-node-row={node.id} aria-pressed={isChecked} onClick={(event) => selectMode || event.ctrlKey || event.metaKey ? toggleChecked(node.id) : onFocusNode(node.id)} onDoubleClick={() => onPreviewNode(node.id)} className="absolute top-0 flex flex-col gap-1 rounded-lg p-1.5 text-left hover:bg-black/5 dark:hover:bg-white/5" style={{ left: `${virtualRow.lane * 100 / gridColumns}%`, width: `${100 / gridColumns}%`, height: virtualRow.size, transform: `translateY(${virtualRow.start}px)`, ...(active ? { background: theme.toolbar.activeBg } : {}) }}>
+                                    <span className="relative grid h-[96px] w-full place-items-center overflow-hidden rounded-md">
+                                        {hasImageCover || isCharacter || isScene ? <CanvasNodeCover node={node} /> : <Icon className="size-6 opacity-60" />}
+                                        {selectMode ? <span className="absolute left-1 top-1"><CheckMark checked={isChecked} theme={theme} /></span> : null}
+                                        {node.metadata?.status && node.metadata.status !== "idle" ? <span className="absolute right-1 top-1 size-1.5 rounded-full" style={{ background: STATUS_COLOR[node.metadata.status] || "transparent" }} /> : null}
+                                    </span>
+                                    <span className="w-full truncate text-xs">{node.title || getNodeDefinition(node.type)?.title || t("canvas.node.untitled")}</span>
+                                </button>
+                            );
                             return (
                                 <div key={node.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className={cn("group absolute left-0 top-0 flex w-full items-center rounded-lg transition", depth && "ml-5", active ? "" : "hover:bg-black/5 dark:hover:bg-white/5")} style={{ height: virtualRow.size, transform: `translateY(${virtualRow.start}px)`, ...(active ? { background: theme.toolbar.activeBg } : {}) }}>
                                     {depth ? <span className="pointer-events-none absolute -left-3 top-[calc(-50%-0.4rem)] h-[calc(100%+0.4rem)] w-3 rounded-bl-md border-b border-l opacity-45" style={{ borderColor: theme.node.stroke }} /> : null}

@@ -14,7 +14,13 @@ continuity_spec = importlib.util.spec_from_file_location("continuity_v2", contin
 continuity_module = importlib.util.module_from_spec(continuity_spec)
 sys.modules["continuity_v2"] = continuity_module
 continuity_spec.loader.exec_module(continuity_module)
-audit_continuity_v2, continuity_v2_contract = continuity_module.audit, continuity_module.contract
+def audit_continuity_v2(source, target_ids=None):
+    if (source.get("prompt_assembly") or {}).get("version") == 2:
+        from canvas_subject_prompt_v2 import audit_subject_continuity
+        return audit_subject_continuity(source, target_ids)
+    return continuity_module.audit(source, target_ids)
+
+continuity_v2_contract = continuity_module.contract
 
 RECIPES = ("portrait", "dark", "fantasy", "hard_surface", "ink", "monochrome", "product", "clean_slate", "style")
 MODES = ("T2VA", "I2VA", "FL2VA", "L2VA", "Ref2VA")

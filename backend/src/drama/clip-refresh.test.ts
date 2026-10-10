@@ -102,3 +102,15 @@ test("automatic Clip refresh is superseded when the target input changes and nev
     assert.equal(enqueues, 0);
     db.close();
 });
+
+
+test("refresh receipts resolve both public operation identity and compilation identity within their owner", () => {
+ const { db, store } = makeStore();
+ try {
+  const d = director(), entry = store.register("edit", 1, d, d, "CLIP_A");
+  assert.equal(store.get(entry.operationId)?.segmentId, "CLIP_A");
+  assert.equal(store.get(entry.compilationOperationId)?.operationId, entry.operationId);
+  assert.equal(new ClipRefreshStore(db, {kind:"episode",id:"OTHER"}).get(entry.operationId), undefined);
+  assert.equal(store.get("edit"), undefined);
+ } finally { db.close(); }
+});

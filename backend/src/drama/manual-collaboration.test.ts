@@ -135,15 +135,15 @@ test('batch executes saved inputs, continues an independent target after failure
 
 test('migration adds nullable frozen snapshots, backs up persisted databases, and preserves old batches', t => {
     const f = fixture(t, true);
-    assert.equal(f.db.db.prepare('SELECT MAX(version) as version FROM schema_migrations').get()!.version, 33);
+    assert.equal(f.db.db.prepare('SELECT MAX(version) as version FROM schema_migrations').get()!.version, 36);
     for (const table of ['episode_production_batches', 'canvas_production_batches', 'scene_production_batches']) {
         assert.ok(f.db.db.prepare(`PRAGMA table_info(${table})`).all().some(row => row.name === 'execution_snapshot_json'));
     }
     const legacy = f.db.db.prepare("INSERT INTO episode_production_batches (run_id,episode_id,idempotency_key,request_hash,version,source_revision,status,targets_json,plan_json,settings_json,submitted_json,created_at,updated_at) VALUES ('old','ep','old','old',1,0,'paused','[]','{}','{}','[]','now','now')"); legacy.run();
     assert.equal(f.service.getBatch('ep', 'old')?.executionSnapshot, null);
-    f.db.db.exec('DELETE FROM schema_migrations WHERE version=33');
+    f.db.db.exec('DELETE FROM schema_migrations WHERE version=36');
     const reopened = new BackendDatabase(f.file); reopened.close();
-    assert.ok(fs.readdirSync(f.directory).some(name => name.includes('pre-schema-v32-to-v33')));
+    assert.ok(fs.readdirSync(f.directory).some(name => name.includes('pre-schema-v35-to-v36')));
 });
 
 test('field adoption is read-only in preflight and applies only selected director fields', t => {

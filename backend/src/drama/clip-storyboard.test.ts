@@ -34,6 +34,16 @@ test("repartition preserves Shot order, duration and a shared execution profile"
     assert.deepEqual(source.shots.map((item: any) => item.id), ["S1", "S2", "S3", "S4"]);
 });
 
+test("different mode-selection prose does not create an execution-profile conflict", () => {
+    const value = director([
+        { id: "C1", shot_ids: ["S1", "S2"], mode: "Ref2VA", mode_lock: "Ref2VA", mode_selection_reason: "Read the listener reaction.", styleTemplateId: null },
+        { id: "C2", shot_ids: ["S3", "S4"], mode: "Ref2VA", mode_lock: "Ref2VA", mode_selection_reason: "Show the speaker response.", styleTemplateId: null },
+    ]);
+    repartitionDirectorClips(value, { shotIds: ["S1", "S2", "S3", "S4"], segments: [{ shot_ids: ["S1", "S2", "S3", "S4"] }] });
+    assert.equal((value.source.segments as any[]).length, 1);
+    assert.equal((value.source.segments as any[])[0].mode, "Ref2VA");
+});
+
 test("repartition rejects gaps and requires an explicit existing profile when old Clip settings differ", () => {
     const gapped = director([{ id: "C1", shot_ids: ["S1", "S2", "S3", "S4"], mode: "Ref2VA" }]);
     assert.throws(() => repartitionDirectorClips(gapped, { shotIds: ["S1", "S2", "S3", "S4"], segments: [{ shot_ids: ["S1", "S3"] }, { shot_ids: ["S2", "S4"] }] }), error => (error as any).diagnostics?.some((item: any) => item.code === "CLIP_PARTITION_ORDER"));

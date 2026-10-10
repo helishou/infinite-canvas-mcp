@@ -2,6 +2,21 @@
 from collections import defaultdict
 from copy import deepcopy
 from fractions import Fraction
+import importlib.util
+import sys
+from pathlib import Path
+
+_continuity_path = Path(__file__).with_name("continuity_v2.py")
+if not _continuity_path.is_file():
+    _continuity_path = Path(__file__).resolve().parents[2] / ".agents" / "skills" / "acheng-director" / "scripts" / "continuity_v2.py"
+_runtime_scripts = _continuity_path.parent
+if str(_runtime_scripts) not in sys.path:
+    sys.path.insert(0, str(_runtime_scripts))
+if _continuity_path.is_file() and "continuity_v2" not in sys.modules:
+    _continuity_spec = importlib.util.spec_from_file_location("continuity_v2", _continuity_path)
+    _continuity_module = importlib.util.module_from_spec(_continuity_spec)
+    sys.modules["continuity_v2"] = _continuity_module
+    _continuity_spec.loader.exec_module(_continuity_module)
 
 
 def rows(value):
@@ -90,11 +105,55 @@ def _render_state_end(source, report, shot, subjects):
     return "; ".join(chunks) if chunks else "No registered continuity facts change at this shot's ending."
 
 
+def project_continuity_source(production):
+    """In-memory time/block compatibility projection; authored frames remain local."""
+    if (production.get("prompt_assembly") or {}).get("version") != 2:
+        return production
+    source = deepcopy(production)
+    origins = {str(row.get("id")): row.get("start_frame", 0) for row in rows((source.get("ledger") or {}).get("timelines"))}
+    streams = defaultdict(list)
+    for shot in rows(source.get("shots")):
+        streams[str(shot.get("timeline_id") or "")].append(shot)
+    windows = {}
+    for timeline, stream in streams.items():
+        cursor = origins.get(timeline, 0)
+        if type(cursor) is not int:
+            continue
+        for shot in sorted(stream, key=lambda row: row.get("story_order", 0)):
+            duration = shot.get("duration_frames")
+            if type(duration) is not int or duration <= 0:
+                continue
+            shot["start_frame"], shot["end_frame"] = cursor, cursor + duration
+            windows[str(shot.get("id"))] = (cursor, cursor + duration)
+            cursor += duration
+    for event in rows((source.get("ledger") or {}).get("events")):
+        window = windows.get(str(event.get("shot_id")))
+        if window and type(event.get("local_frame")) is int:
+            event["frame"] = window[0] + event["local_frame"]
+    for segment in rows(source.get("segments")):
+        ids = segment.get("shot_ids") or []
+        if ids and all(str(key) in windows for key in ids):
+            segment["start_frame"], segment["end_frame"] = windows[str(ids[0])][0], windows[str(ids[-1])][1]
+    for scene in rows(source.get("script_scenes")):
+        if not isinstance(scene.get("blocks"), list) and isinstance(scene.get("text"), str) and scene.get("id"):
+            # Flat screenplay rows are themselves source blocks; keep their exact content for digests.
+            scene["blocks"] = [deepcopy(scene)]
+    return source
+
+
+def audit_subject_continuity(production, target_ids=None):
+    from continuity_v2 import audit
+    report = audit(project_continuity_source(production), target_ids)
+    from continuity_v2 import digest
+    report["sourceDigest"] = digest(production)
+    return report
+
+
 def adapt_production(production):
     """Project authored v2 data to the mature H3 packaging schema without writing it back."""
     if (production.get("prompt_assembly") or {}).get("version") != 2:
         return production
-    source = deepcopy(production)
+    source = project_continuity_source(production)
     source["_canvas_prompt_assembly_version"] = 2
     source["_canvas_compiled_subject_projection"] = True
     source["_canvas_subject_source_hash"] = str(production.get("_canvas_subject_source_hash") or "")
@@ -115,8 +174,7 @@ def adapt_production(production):
             cursor += int(shot.get("duration_frames", 0))
             windows[str(shot["id"])] = (start, cursor)
 
-    from continuity_v2 import audit as audit_continuity
-    continuity = audit_continuity(source)
+    continuity = audit_subject_continuity(source)
     assets = {str(item.get("asset_id") or item.get("id")): item for item in rows(source.get("asset_plan"))}
     reference_cache = {}
     transformed_segments = []
@@ -574,6 +632,14 @@ def _shot_prompt_v2(production, segment, shot, shot_number, speakers):
     return " ".join(part for part in parts if part)
 
 
+def _load_runtime_helper(name):
+    if name in sys.modules:
+        return sys.modules[name]
+    candidate = Path(__file__).resolve().parents[2] / ".agents" / "skills" / "acheng-director" / "scripts" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, candidate)
+    module = importlib.util.module_from_spec(spec); sys.modules[name] = module; spec.loader.exec_module(module); return module
+
+
 def compile_prompt_v2(production, segment, *, draft=False):
     mode = str(segment["mode"])
     shot_ids = [str(value) for value in segment["shot_ids"]]
@@ -618,8 +684,10 @@ def compile_prompt_v2(production, segment, *, draft=False):
         anchor_text = " ".join(str(item["label"]) + " anchors the " + str(item.get("role") or "frame") + " for its declared Shot scope." for item in references)
         fields = [("integrated_multimodal_description", anchor_text + "\n" + detail), ("overall_soundscape", soundscape), ("non_diegetic_music", music)]
     raw = "\n\n".join(key + ":\n" + value for key, value in fields) + "\n"
-    from h3_contract import speech_map
-    from h3_final_format import finalize_h3_prompt, normalize_h3_prompt
+    h3_contract = _load_runtime_helper("h3_contract")
+    speech_map = h3_contract.speech_map
+    h3_final_format = _load_runtime_helper("h3_final_format")
+    finalize_h3_prompt, normalize_h3_prompt = h3_final_format.finalize_h3_prompt, h3_final_format.normalize_h3_prompt
     speech_expectations = []
     for shot in shots:
         for line in rows(shot.get("dialogues")):

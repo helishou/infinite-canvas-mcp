@@ -95,5 +95,27 @@ class SubjectPromptV2ProjectionTest(unittest.TestCase):
                 self.assertTrue(index[0]["source_map"]["entries"])
 
 
+class ContinuityProjectionTest(unittest.TestCase):
+    def test_local_events_and_flat_screenplay_are_projected_without_rewriting_source(self):
+        from copy import deepcopy
+        from canvas_subject_prompt_v2 import project_continuity_source, audit_subject_continuity
+        scene = {"id": "SC1", "scene_id": "ENV", "text": "铆钉护甲受损，仍守在门前。"}
+        source = {"prompt_assembly": {"version": 2}, "shots": [
+            {"id": "S1", "timeline_id": "T", "story_order": 0, "duration_frames": 48},
+            {"id": "S2", "timeline_id": "T", "story_order": 1, "duration_frames": 72}],
+            "segments": [{"id": "C", "shot_ids": ["S1", "S2"]}], "script_scenes": [scene],
+            "ledger": {"contract_version": 2, "timelines": [{"id": "T", "start_frame": 100}], "facts": [], "initial": [], "requirements": [], "coverage": [],
+                "events": [{"id": "E1", "shot_id": "S2", "local_frame": 0}, {"id": "E2", "shot_id": "S2", "local_frame": 1}]}}
+        before = deepcopy(source)
+        projected = project_continuity_source(source)
+        self.assertEqual([(s["start_frame"], s["end_frame"]) for s in projected["shots"]], [(100, 148), (148, 220)])
+        self.assertEqual([e["frame"] for e in projected["ledger"]["events"]], [148, 149])
+        self.assertEqual(projected["script_scenes"][0]["blocks"][0], scene)
+        self.assertEqual(source, before)
+        self.assertEqual(project_continuity_source(projected), projected)
+        from continuity_v2 import digest
+        self.assertEqual(audit_subject_continuity(source)["sourceDigest"], digest(source))
+
+
 if __name__ == "__main__":
     unittest.main()

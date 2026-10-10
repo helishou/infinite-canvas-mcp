@@ -30,7 +30,7 @@ export class ClipRefreshStore {
         return job;
     }
     get(compilationId: string): ClipRefreshJob | undefined {
-        const row = this.db.prepare("SELECT job_json FROM production_clip_refresh_jobs WHERE owner_kind=? AND owner_id=? AND compilation_id=?").get(this.owner.kind, this.owner.id, compilationId);
+        const row = this.db.prepare("SELECT job_json FROM production_clip_refresh_jobs WHERE owner_kind=? AND owner_id=? AND (compilation_id=? OR operation_id=?)").get(this.owner.kind, this.owner.id, compilationId, compilationId);
         return row ? JSON.parse(String(row.job_json)) : undefined;
     }
     byEdit(operationId: string): ClipRefreshJob | undefined {

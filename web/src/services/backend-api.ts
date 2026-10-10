@@ -244,6 +244,7 @@ export function deleteBackendDramaEpisode(episodeId: string) {
 }
 
 export type ProductionClipRefreshReceipt = {
+    sourceHash?: string;
     sourceSaved: true; operationId: string; status: "queued" | "checking" | "compiling" | "applying" | "succeeded" | "blocked" | "failed" | "superseded" | "interrupted";
     segmentId: string; savedRevision: number; compilationOperationId: string; selectedTargets: string[]; affectedTargets: string[];
     blockingDiagnostic?: { code: string; message: string; targetId?: string; path?: string };
@@ -283,6 +284,24 @@ export function publishEpisodeProduction(episodeId: ProductionTarget, expectedRe
 export function fetchEpisodeProductionVersions(episodeId: ProductionTarget) { return request<{ ok: boolean; versions: Array<{ version: number; stage: "script" | "shots" | "director"; impact: NonNullable<EpisodeProduction["impact"]>; createdAt: string }> }>("GET", `${productionPath(episodeId)}/versions`); }
 export function restoreEpisodeProduction(episodeId: ProductionTarget, expectedRevision: number, version: number, operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/restore`, { operationId, expectedRevision, version }); }
 export function syncEpisodeProductionClips(episodeId: ProductionTarget) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/sync-clips`); }
+// 编译：提交后返回 operationId，沿同一 operationId 轮询状态；成功后用 preparedId 应用回执写回正式源稿。
+export type ProductionCompilationStatus = {
+    operationId: string; status: "queued" | "running" | "succeeded" | "blocked" | "interrupted" | "failed"; verdict: "passed" | "blocked";
+    expectedRevision: number; sourceHash: string; preparedId?: string; diagnosticCount?: number; targetCount?: number; reused?: boolean;
+    blockingDiagnostic?: { code: string; path?: string; targetId?: string; shotId?: string; message: string };
+    application?: { revision?: number; sourceHash?: string; operationId?: string; replayed?: boolean; referenceSync?: Array<{ targetId: string; status: string; referenceCount?: number }> };
+    mediaSubmitted: false;
+};
+export function compileProduction(target: ProductionTarget, expectedRevision: number, operationId: string) {
+    return request<{ ok: boolean; compilation: ProductionCompilationStatus }>("POST", `${productionPath(target)}/compile`, { expectedRevision, operationId });
+}
+export function fetchProductionCompilation(target: ProductionTarget, operationId: string, view: "status" | "targets" | "diagnostics" = "status", extra?: { offset?: number; pageSize?: number }) {
+    const query = new URLSearchParams({ view, ...(extra?.offset === undefined ? {} : { offset: String(extra.offset) }), ...(extra?.pageSize === undefined ? {} : { pageSize: String(extra.pageSize) }) });
+    return request<{ ok: boolean; compilation: ProductionCompilationStatus & { items?: unknown[]; total?: number; nextOffset?: number | null } }>("GET", `${productionPath(target)}/compilations/${encodeURIComponent(operationId)}?${query.toString()}`);
+}
+export function applyProductionCompilation(target: ProductionTarget, preparedId: string) {
+    return request<{ ok: boolean; receipt: { revision: number; sourceHash?: string; operationId: string; replayed?: boolean; publishedVersion?: number; referenceSync?: Array<{ targetId: string; status: string; referenceCount?: number }>; mediaSubmitted: false } }>("POST", `${productionPath(target)}/apply-compilation`, { preparedId });
+}
 export function fetchEpisodeProductionRun(episodeId: ProductionTarget, version: number) { return request<{ ok: boolean; run: { status: string; submitted: Array<{ kind: "image" | "h3"; id: string; taskId: string }>; error: string | null } | null }>("GET", `${productionPath(episodeId)}/runs/${version}`); }
 export type ProductionReadinessTarget = { id: string; targetId: string; kind: "asset" | "keyframe" | "segment"; title: string; status: "ready" | "blocked" | "needs_review" | "complete"; blockers: string[]; artifactId?: string; executionTargets?: string[]; notice?: string };
 export type ProductionPresentation = { key: string; workId: string; owner: { kind: "canvas" | "episode" | "scene"; id: string }; aliases?: string[]; workspace: "overview" | "story" | "assets" | "shots" | "continuity" | "production" | "advanced"; action: "author" | "compile" | "produce" | "review" | "deliver" | "blocked"; targetKind?: string; targetId?: string; canvasId?: string; nodeId?: string; segmentId?: string; runId?: string; taskId?: string; status: "ready" | "working" | "needs_review" | "blocked" | "complete"; reason?: string };

@@ -202,7 +202,7 @@ if (images.length === 0) {
     method: "post",
     url: \`\${baseUrl}/v1/images/generations\`,
     headers: { "Content-Type": "application/json", Authorization: \`Bearer \${apiKey}\` },
-    data: { model, prompt, n: params.count, size: params.size, response_format: "b64_json" },
+    data: { model, prompt, n: params.count, size: params.size, quality: params.quality, response_format: "b64_json" },
   });
   return (data.data || []).map((item) => item.b64_json ? \`data:image/png;base64,\${item.b64_json}\` : item.url);
 }
@@ -212,6 +212,8 @@ const form = new FormData();
 form.set("model", model);
 form.set("prompt", prompt);
 form.set("n", String(params.count));
+if (params.size) form.set("size", params.size);
+if (params.quality) form.set("quality", params.quality);
 form.set("response_format", "b64_json");
 const imageField = images.length > 1 ? "image[]" : "image";
 for (const dataUrl of images) {
@@ -238,7 +240,7 @@ const data = await request({
   method: "post",
   url: \`\${baseUrl}/v1beta/models/\${model}:generateContent\`,
   headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-  data: { contents: [{ role: "user", parts }], generationConfig: { responseModalities: ["IMAGE"] } },
+  data: { contents: [{ role: "user", parts }], generationConfig: { responseModalities: ["IMAGE"], ...(params.resolution && params.resolution !== "auto" ? { imageConfig: { imageSize: params.resolution.toUpperCase() } } : {}) } },
 });
 return (data.candidates || [])
   .flatMap((c) => c.content?.parts || [])

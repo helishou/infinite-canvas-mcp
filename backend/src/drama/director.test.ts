@@ -177,7 +177,7 @@ test("skipping storyboard images retains written shots and allows ready H3 segme
     const group = synced.clipGroups[0];
     const node = (stores.projects.get("canvas")?.nodes as Array<{ id: string; metadata?: Record<string, unknown> }>).find(item => item.id === group.nodeId);
     const clip = (node?.metadata?.segments as Array<Record<string, unknown>>).find(item => item.id === group.segmentId);
-    assert.equal(Object.hasOwn(clip || {}, "storyboardShots"), false);
+    assert.deepEqual(clip?.storyboardShots, [{ id: "s0", duration: 5 }]);
 });
 
 test('Clip sync loads saved defaults, persists episode aspect and keeps existing user parameters and history', async t => {

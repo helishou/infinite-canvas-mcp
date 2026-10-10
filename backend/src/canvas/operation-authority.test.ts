@@ -212,17 +212,26 @@ test("正式 Clip 可手动编辑正文，协作增量、条件替换与幂等�
     }
 });
 
-test("正式 Clip 的参考、分镜和续接可手动修改，完整替换仍继承编译身份及输出", (t) => {
+test("formal Clip Shot storyboard is source-owned while ordinary H3 reference fields remain editable", (t) => {
     const db = fixture(t);
     const projection = { targetId: "formal-1", inputHash: "compiled-input" };
-    db.applyCanvasProjectOperations("p", undefined, [{ type: "update_h3_segment", nodeId: "h3", segmentId: "s1", patch: { productionClipProjection: projection, directorSourceHash: "compiled-source" } }], { runtimeWrite: true });
+    const storyboardShots = [{ id: "shot-1", duration: 5 }];
+    db.applyCanvasProjectOperations("p", undefined, [{ type: "update_h3_segment", nodeId: "h3", segmentId: "s1", patch: { productionClipProjection: projection, directorSourceHash: "compiled-source", storyboardModeEnabled: true, storyboardShots } }], { runtimeWrite: true });
+    const before = db.getCanvasProject("p");
+    assert.throws(() => db.applyCanvasProjectOperations("p", undefined, [{ type: "update_h3_segment", nodeId: "h3", segmentId: "s1", patch: {
+        referenceBindings: [{ id: "board", role: "storyboard", mediaType: "image", storageKey: "image:frame" }],
+        storyboardShots: [{ id: "shot-2", duration: 5 }],
+    } }]), /制作.*Shot|制作分镜/);
+    assert.throws(() => db.applyCanvasProjectOperations("p", undefined, [{ type: "replace_h3_segments", nodeId: "h3", segments: [{ id: "s1", prompt: "replacement" }] }]), /Clip 列表由制作台维护/);
+    assert.deepEqual(db.getCanvasProject("p"), before);
+
     db.applyCanvasProjectOperations("p", undefined, [{ type: "update_h3_segment", nodeId: "h3", segmentId: "s1", patch: {
-        referenceBindings: [{ id: "manual-ref", assetId: "manual-asset", label: "Manual image", role: "storyboard", tags: [], enabled: true, usage: "reference", mediaType: "image", storageKey: "image:manual" }],
-        h3CharacterGroups: {}, storyboardShots: [{ id: "shot-1", referenceBindingId: "manual-ref", duration: 5 }], tailFrameContinuation: true, motionContextEnabled: false,
+        referenceBindings: [{ id: "manual-ref", assetId: "manual-asset", label: "Manual image", role: "other", tags: [], enabled: true, usage: "reference", mediaType: "image", storageKey: "image:manual" }],
+        tailFrameContinuation: true, motionContextEnabled: false,
     } }]);
     let clip = (db.getCanvasProject("p")!.nodes as any[])[0].metadata.segments[0];
     assert.equal(clip.referenceBindings[0].storageKey, "image:manual");
-    assert.equal(clip.storyboardShots[0].referenceBindingId, "manual-ref");
+    assert.deepEqual(clip.storyboardShots, storyboardShots);
     assert.equal(clip.tailFrameContinuation, true);
     assert.equal(clip.motionContextEnabled, false);
     db.applyCanvasProjectOperations("p", undefined, [{ type: "replace_h3_segments", nodeId: "h3", segments: [{ id: "s1", prompt: "replacement" }, { id: "s2", prompt: "二" }] }]);
@@ -230,6 +239,7 @@ test("正式 Clip 的参考、分镜和续接可手动修改，完整替换仍�
     assert.equal(clip.prompt, "replacement");
     assert.deepEqual(clip.productionClipProjection, projection);
     assert.equal(clip.directorSourceHash, "compiled-source");
+    assert.equal(clip.storyboardShots[0].id, "shot-1");
     assert.equal(clip.result, "one.mp4");
 });
 
@@ -251,4 +261,25 @@ test("真实任务回写仍可落库并记录增量，旧任务不能覆盖已�
     const before = db.getCanvasProject("p");
     assert.equal(db.writeBackH3Task(task, binding, { ...output, url: "stale.mp4" }), null);
     assert.deepEqual(db.getCanvasProject("p"), before);
+});
+
+test("production scene H3 nodes and storyboard membership cannot be removed or edited through ordinary canvas ops", t => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "owned", nodes: [{ id: "scene-h3", type: "minimax-h3:video", metadata: {
+        productionSceneId: "scene-1", productionOwnerKind: "episode", productionOwnerId: "ep",
+        segments: [{ id: "clip-1", productionClipProjection: { targetId: "clip-source-1" }, storyboardShots: [{ id: "shot-1", duration: 5 }] }],
+    } }], connections: [] });
+    const before = db.getCanvasProject("owned");
+    for (const [index, operations] of [
+        [{ type: "delete_node", id: "scene-h3" }],
+        [{ type: "delete_h3_segment", nodeId: "scene-h3", segmentId: "clip-1" }],
+        [{ type: "update_h3_segment", nodeId: "scene-h3", segmentId: "clip-1", patch: { storyboardShots: [] } }],
+        [{ type: "update_node", id: "scene-h3", metadata: { segments: [] } }],
+    ].entries()) {
+        assert.throws(() => db.applyCanvasProjectOperations("owned", undefined, operations, { operationId: `ordinary-delete-${index}` }), /制作|场次|Shot|H3/);
+        assert.deepEqual(db.getCanvasProject("owned"), before);
+    }
+    const archived = db.applyCanvasProjectOperations("owned", undefined, [{ type: "delete_node", id: "scene-h3" }], { runtimeWrite: true, operationId: "confirmed-scene-archive" });
+    assert.equal(archived.project.nodes.length, 0, "the production archive transaction may remove the active scene node");
 });

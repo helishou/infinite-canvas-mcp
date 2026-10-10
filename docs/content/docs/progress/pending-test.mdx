@@ -5,7 +5,24 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## Selected upstream updates
+
+- Element lists switch between the existing virtualized tree and a virtualized thumbnail grid, retaining search, selection and Backend display preferences. Verify image/character/scene covers, scrolling, reload and narrow panel widths. Double-click a grid item to preview it.
+- Removed model or provider selections stay visible and block generation and task recovery instead of silently selecting another provider. Local ComfyUI and Codex CLI retain their credential rules.
+- Default image/video resolutions are configurable. Image quality supports xhigh/max independently of size; Gemini resolution comes from the selected dimensions. Verify standard API and custom-script requests with the configured provider.
+- Reference-picking hints stay above the untransformed viewport and suppress the node hover toolbar. Node creation and extension menus follow the selected application language.
+
 ## Subject storyboard workbench
+
+- Refresh diagnostics use current Clips and their latest source-matching receipts. Overview and production group shared causes in collapsed summaries; Shot editing shows only selected-Shot details, and Settings/History retains all records. Confirmed submission failures stay in their originating workspace; unknown outcomes and conflicts retain a compact recovery entry. Verify archived targets, obsolete inputs, grouped targets and readable history.
+
+- Shot, picture-use and continuity drafts merge independent fields/entries automatically without disabling Save. Conflicting edits or deletions remain explicitly resolved. Verify reload, submitted field changes, draft restoration and retained unedited remote content.
+- Clip merging compares actual execution settings rather than mode-selection prose. Matching settings within existing duration bounds merge directly without confirmation; different modes or explicit style choices still require a choice. Reading the latest revision after a conflict no longer opens a second confirmation dialog.
+
+- A confirmed HTTP 400 validation rejection keeps the error and draft while allowing a corrected submission immediately. Persisted legacy 400 records no longer lock the workbench after reload. Verify resubmission, reload and other commands, while retaining guards for HTTP 409 conflicts and unknown outcomes.
+
+- Subject edits deduplicate only semantically identical bindings and update Shot selections atomically. Different purposes, retention scopes and result selections remain distinct. Verify rejected unknown references, unchanged source on read, and repeated use across Shots without dependency-index conflicts.
+- V2 continuity projects Shot durations and local event frames into replay without rewriting authored anchors. Verified style-image approval hydrates the compiler copy from the media review record. Verify the actual CLI, stale coverage diagnostics and downstream style compilation without a second editable approval status.
 
 - `drama_get_project` reads a single drama and its saved plan, including when it has no episodes. Test existing/no-episode and missing drama cases, shared HTTP MCP and Agent compatibility, and distinguish drama, episode and canvas IDs before creating production data.
 

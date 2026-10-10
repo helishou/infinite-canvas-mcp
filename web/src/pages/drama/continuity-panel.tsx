@@ -5,7 +5,7 @@ import type { ProductionContinuity } from "@/services/backend-api";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { continuityPresentation } from "./continuity-presentation";
 import { continuityEventAnchor, continuityEventFrame } from "./continuity-event-anchor";
-import { readContinuityLedgerDraft, rebaseContinuityLedger } from "./continuity-ledger-draft";
+import { readContinuityLedgerDraft, rebaseContinuityLedger, continuityLedgerConflicts } from "./continuity-ledger-draft";
 
 type Row = Record<string, any>;
 const blankLedger = () => ({ contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] });
@@ -93,7 +93,12 @@ export function ContinuityPanel({ ledger: savedLedger, sourceHash, subjectAssemb
   useEffect(() => {
     if (savedLedger?.contract_version === 2) {
       const localChanged = previousSource.current.ledgerKey !== "legacy" && stable(ledger) !== stable(baselineLedger.current);
-      if (localChanged && stable(ledger) !== savedLedgerKey) { setSourceConflict(true); previousSource.current = { sourceHash, ledgerKey: savedLedgerKey }; return; }
+      if (localChanged && stable(ledger) !== savedLedgerKey) {
+        if (continuityLedgerConflicts(baselineLedger.current, ledger, savedLedger).length) { setSourceConflict(true); previousSource.current = { sourceHash, ledgerKey: savedLedgerKey }; return; }
+        const merged = rebaseContinuityLedger(baselineLedger.current, ledger, savedLedger);
+        baselineLedger.current = structuredClone(savedLedger); setLedger(merged); setSourceConflict(false);
+        previousSource.current = { sourceHash, ledgerKey: savedLedgerKey }; return;
+      }
       baselineLedger.current = structuredClone(savedLedger); setLedger(structuredClone(savedLedger)); setSourceConflict(false);
     }
     else if (!savedLedger) setLedger(blankLedger());

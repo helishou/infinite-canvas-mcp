@@ -48,11 +48,16 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
     const scenes = director ? productionSceneEntries(director.source) : [];
     const sceneByShot = new Map<string, string>();
     for (const scene of scenes) for (const shotId of scene.shotIds) if (!sceneByShot.has(shotId)) sceneByShot.set(shotId, scene.id);
-    const videoGroups = production.clipGroups.map(group => {
+    const videoGroups: Array<{ group: EpisodeProductionData["clipGroups"][number] | null; sceneId?: string; nodeId: string }> = production.clipGroups.map(group => {
         const sceneIds = productionSceneIdsForShots(scenes, group.shotIds);
         const sceneId = sceneIds.length === 1 ? sceneIds[0] : undefined;
         return { group, sceneId, nodeId: String(group.nodeId || (sceneId ? productionLayoutStableId("production-h3-scene", owner.id, sceneId) : productionLayoutStableId("production-h3", owner.id))) };
     });
+    // A formal scene owns its H3 node even before it has any Clip groups.
+    for (const scene of scenes) {
+        if (videoGroups.some(item => item.sceneId === scene.id)) continue;
+        videoGroups.push({ group: null, sceneId: scene.id, nodeId: productionLayoutStableId("production-h3-scene", owner.id, scene.id) });
+    }
     const scenesByVideoNode = new Map<string, Set<string>>();
     for (const item of videoGroups) {
         const scenesForNode = scenesByVideoNode.get(item.nodeId) || new Set<string>();
@@ -189,7 +194,7 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
         const heightBefore = sceneVideoIds.slice(0, videoIndex).reduce((total, priorNodeId) => total + videoSize(priorNodeId).height + 100, 0);
         const position = existing?.position || (geometry ? { x: geometry.position.x + 40, y: geometry.position.y + geometry.videoTopOffset + heightBefore } : { x: 0, y: sceneY + videoNodeIds.slice(0, index).reduce((total, priorNodeId) => total + videoSize(priorNodeId).height + 160, 0) });
         const { width, height } = videoSize(nodeId);
-        const targets = videoGroups.filter(item => item.nodeId === nodeId).map(item => `segment:${item.group.id}`);
+        const targets = [...videoGroups.filter(item => item.nodeId === nodeId && item.group).map(item => `segment:${item.group!.id}`), ...(sceneId ? [`scene:${sceneId}`] : [])];
         createUnit(`video:${nodeId}`, "video", targets, sceneId, position, { width, height }, [{ role: "video", nodeId, nodeType: "minimax-h3:video", position, size: { width, height } }]);
     }
 

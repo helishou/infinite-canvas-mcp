@@ -4,7 +4,7 @@ import { inputHash, type CanvasExecutionTarget } from "./canvas-inputs.js";
 import { createH3NodeMetadata } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { H3_DEFAULTS_KEY } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
-import { canonicalProduction, productionSceneEntries, productionImageModel, type ProductionLayoutPlan, type ProductionLayoutUnit, type ProductionLayoutReceipt } from "@basketikun/canvas-agent/drama/production-contract";
+import { canonicalProduction, isSubjectPromptAssembly, productionSceneEntries, productionImageModel, type ProductionLayoutPlan, type ProductionLayoutUnit, type ProductionLayoutReceipt } from "@basketikun/canvas-agent/drama/production-contract";
 
 import type { CanvasGenerationService } from "../canvas/generation-service.js";
 import { resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
@@ -170,11 +170,19 @@ export class EpisodeProductionRunner {
                 const unit = selectedUnits.find(item => item.targets.includes(`asset:${assetId}`) || item.targets.includes(`frame:${targetId}`));
                 const member = unit?.members.find(item => item.role === "asset" || item.role === "keyframe");
                 if (!unit || !member) throw new Error(`布局目标 ${target} 没有对应图片节点`);
+                const smartImage = isSubjectPromptAssembly(director.source);
+                const existingImage = nodesOf(project).find(node => node.id === member.nodeId);
+                if (smartImage && existingImage && (existingImage.type !== "config" || object(existingImage.metadata).smart !== true || (object(existingImage.metadata).generationMode || "image") !== "image")) {
+                    const metadata = object(existingImage.metadata);
+                    const hasMedia = metadata.storageKey || metadata.content || (Array.isArray(metadata.images) && metadata.images.length);
+                    if (hasMedia || metadata.productionAssetId !== assetId || (metadata.generationMode && metadata.generationMode !== "image")) throw new Error(`SUBJECT_IMAGE_NODE_UPGRADE_REQUIRED: ${member.nodeId} 含已有内容，需显式选择智能图片来源`);
+                    canvasOps.push({ type: "update_node", id: member.nodeId, patch: { type: "config" }, metadata: { smart: true, generationMode: "image", composerContent: metadata.composerContent ?? metadata.prompt ?? "" } });
+                }
                 if (!plannedNodeIds.has(member.nodeId)) {
                     const artifact = director.artifacts.find(item => item.kind === "image" && item.targetId === assetId);
                     const scene = kind === "frame" ? productionSceneEntries(director.source).find(item => item.id === unit.sceneId) : undefined;
-                    canvasOps.push({ type: "add_node", id: member.nodeId, nodeType: member.nodeType, title: kind === "frame" ? current.draft.shots.find(shot => shot.id === targetId)?.title || assetTitleFor(assetId!) : assetTitleFor(assetId!), position: member.position, width: member.size.width, height: member.size.height,
-                        metadata: { productionAssetId: assetId, ...(kind === "frame" && !unit.targets.includes(`asset:${assetId}`) ? { productionShotId: targetId } : {}), ...(scene ? { groupId: stableId("production-scene", id, scene.id) } : {}), prompt: artifact?.prompt || "", model: productionImageModel(current.draft.settings, director.source, assetId!, kind === "frame" ? "keyframe" : undefined), status: "idle", productionLayoutUnitId: unit.id, productionLayoutBounds: member.size } });
+                    canvasOps.push({ type: "add_node", id: member.nodeId, nodeType: smartImage ? "config" : member.nodeType, title: kind === "frame" ? current.draft.shots.find(shot => shot.id === targetId)?.title || assetTitleFor(assetId!) : assetTitleFor(assetId!), position: member.position, width: member.size.width, height: member.size.height,
+                        metadata: { ...(smartImage ? { smart: true, generationMode: "image", composerContent: artifact?.prompt || "" } : {}), productionAssetId: assetId, ...(kind === "frame" && !unit.targets.includes(`asset:${assetId}`) ? { productionShotId: targetId } : {}), ...(scene ? { groupId: stableId("production-scene", id, scene.id) } : {}), prompt: artifact?.prompt || "", model: productionImageModel(current.draft.settings, director.source, assetId!, kind === "frame" ? "keyframe" : undefined), status: "idle", productionLayoutUnitId: unit.id, productionLayoutBounds: member.size } });
                     plannedNodeIds.add(member.nodeId);
                 }
                 if (director.assets[assetId]?.nodeId !== member.nodeId) bindings.push({ type: "bind_director_asset", assetId, nodeId: member.nodeId });
@@ -219,7 +227,7 @@ export class EpisodeProductionRunner {
                 } else if (existingNode || plannedNodeIds.has(member.nodeId)) canvasOps.push({ type: "add_h3_segment", nodeId: member.nodeId, segment });
                 else {
                     const scene = unit.sceneId ? productionSceneEntries(director.source).find(item => item.id === unit.sceneId) : undefined;
-                    canvasOps.push({ type: "add_node", id: member.nodeId, nodeType: member.nodeType, title: `${scene?.title || "场次"} · H3 Clips`, position: member.position, width: member.size.width, height: member.size.height, metadata: { ...createH3NodeMetadata(object(this.stores.settings.get(H3_DEFAULTS_KEY)), { segments: [segment] }), ...(scene ? { groupId: stableId("production-scene", id, scene.id) } : {}), productionLayoutUnitId: unit.id, productionLayoutBounds: unit.bounds.size } });
+                    canvasOps.push({ type: "add_node", id: member.nodeId, nodeType: member.nodeType, title: `${scene?.title || "场次"} · H3 Clips`, position: member.position, width: member.size.width, height: member.size.height, metadata: { ...createH3NodeMetadata(object(this.stores.settings.get(H3_DEFAULTS_KEY)), { segments: [segment] }), ...(scene ? { productionSceneId: scene.id, productionOwnerKind: "episode", productionOwnerId: id, groupId: stableId("production-scene", id, scene.id) } : {}), productionLayoutUnitId: unit.id, productionLayoutBounds: unit.bounds.size } });
                 }
                 plannedNodeIds.add(member.nodeId);
                 if (group.nodeId !== member.nodeId || group.segmentId !== (group.segmentId || stableId("clip", id, group.id))) bindings.push({ type: "bind_director_segment", targetId: group.id, nodeId: member.nodeId, segmentId });
@@ -380,7 +388,7 @@ export class EpisodeProductionRunner {
                 ? clipInputHash(existingClip!) === clipInputHash(segment) && canonicalProduction(existingClip!.productionClipProjection) === canonicalProduction(segment.productionClipProjection)
                     ? [] : [{ type: "update_h3_segment", nodeId, segmentId, patch: { ...segment } }]
                 : node ? [{ type: "add_h3_segment", nodeId, segment }]
-                : [{ type: "add_node", id: nodeId, nodeType: "minimax-h3:video", title: `${scene?.title || "场次"} · H3 Clips`, position: layoutMember.position, width: layoutMember.size.width, height: layoutMember.size.height, metadata: { ...createH3NodeMetadata(object(this.stores.settings.get(H3_DEFAULTS_KEY)), { segments: [segment] }), ...(scene ? { groupId: stableId("production-scene", episodeId, scene.id) } : {}), productionLayoutUnitId: layoutUnit.id, productionLayoutBounds: layoutUnit.bounds.size } }];
+                : [{ type: "add_node", id: nodeId, nodeType: "minimax-h3:video", title: `${scene?.title || "场次"} · H3 Clips`, position: layoutMember.position, width: layoutMember.size.width, height: layoutMember.size.height, metadata: { ...createH3NodeMetadata(object(this.stores.settings.get(H3_DEFAULTS_KEY)), { segments: [segment] }), ...(scene ? { productionSceneId: scene.id, productionOwnerKind: "episode", productionOwnerId: episodeId, groupId: stableId("production-scene", episodeId, scene.id) } : {}), productionLayoutUnitId: layoutUnit.id, productionLayoutBounds: layoutUnit.bounds.size } }];
             if (operations.length) {
                 this.stores.projects.applyOperations(episode.canvasId, Number(project.revision || 0), operations, { operationId: stableId("production-sync", episodeId, String(version), group.id, String(project.revision || 0), crypto.createHash("sha256").update(prompt + JSON.stringify(bindings)).digest("hex")), runtimeWrite: true, source: { clientId: "episode-production", kind: "system", label: "同步单集 Clip" } });
                 syncReceipt.updated++;

@@ -5,6 +5,7 @@ import { CircleDot, Eraser, Focus, Grid2x2, Group, Hand, Image as ImageIcon, Inf
 
 import { canvasThemes, type CanvasBackgroundMode, type CanvasColorTheme, type CanvasTheme } from "@/lib/canvas-theme";
 import { getNodePluginId, listNodeDefinitions, useNodeRegistryVersion } from "@/lib/canvas/node-registry";
+import { getNodeSpec } from "@/constant/canvas";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { AnimatedThemeToggler } from "@/components/ui/animated-theme-toggler";
 import { useTranslation } from "react-i18next";
@@ -232,7 +233,7 @@ export function CanvasToolbar({
                                 <span className="grid size-7 shrink-0 place-items-center rounded-md text-base" style={{ background: theme.toolbar.itemHover }}>
                                     {def.icon}
                                 </span>
-                                <span className="min-w-0 flex-1 truncate">{def.title}</span>
+                                <span className="min-w-0 flex-1 truncate">{getNodeSpec(def.type).title}</span>
                             </button>
                         ))}
                     </div>

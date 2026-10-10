@@ -958,6 +958,28 @@ export class BackendDatabase {
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }
+        if (currentVersion < 37) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                this.db.exec(`CREATE TABLE IF NOT EXISTS production_scene_archives (
+                    archive_id TEXT PRIMARY KEY,
+                    owner_kind TEXT NOT NULL CHECK(owner_kind IN ('episode','canvas')),
+                    owner_id TEXT NOT NULL,
+                    scene_id TEXT NOT NULL,
+                    scene_title TEXT NOT NULL,
+                    delete_operation_id TEXT NOT NULL UNIQUE,
+                    deleted_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL,
+                    restored_at TEXT,
+                    restore_operation_id TEXT
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS production_scene_archives_active ON production_scene_archives(owner_kind, owner_id, scene_id) WHERE restored_at IS NULL;
+                CREATE INDEX IF NOT EXISTS production_scene_archives_expiry ON production_scene_archives(owner_kind, owner_id, expires_at, restored_at);`);
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (37, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
     }
 
     /** A rolled-back schema_migrations row leaves its column behind, so every ADD COLUMN must be checked first. */
