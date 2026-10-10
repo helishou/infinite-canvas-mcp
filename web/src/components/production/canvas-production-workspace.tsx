@@ -1,4 +1,4 @@
-import { useCanvasRoute } from "@/lib/canvas/canvas-host";
+import { useCanvasRoute, useCanvasHost } from "@/lib/canvas/canvas-host";
 import { useEffect, useState } from "react";
 import { App, Button, Dropdown, Input, Modal, Select, Tag } from "antd";
 import { ArrowLeft, Check, ChevronDown, Clapperboard, Pencil, Search, Settings2 } from "lucide-react";
@@ -53,6 +53,8 @@ export function CanvasProductionToolbar() {
     const { message } = App.useApp();
     const { navigate } = useCanvasRoute();
     const { search: query } = useCanvasRoute();
+    // 制作画布覆盖层里已有「收起画布」（收起后就是工作台），返回按钮只在独立打开的画布页保留。
+    const overlayHost = useCanvasHost();
     const theme = canvasThemes[useThemeStore(state => state.theme)];
     const [directoryOpen, setDirectoryOpen] = useState(false);
     const [filter, setFilter] = useState("");
@@ -95,7 +97,7 @@ export function CanvasProductionToolbar() {
         useAgentStore.getState().openPanel();
     };
     return <div className="flex min-w-0 items-center gap-1 text-xs" data-canvas-shortcuts-ignore>
-        {context.dramaId && <Link to={`/production?dramaId=${encodeURIComponent(context.dramaId)}&workspace=series`} aria-label={t("productionCanvas.backDrama")} title={t("productionCanvas.backDrama")} className="grid size-7 shrink-0 place-items-center rounded hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={() => useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"))}><ArrowLeft className="size-4" /></Link>}
+        {!overlayHost && context.dramaId && <Link to={`/production?dramaId=${encodeURIComponent(context.dramaId)}&workspace=series`} aria-label={t("productionCanvas.backDrama")} title={t("productionCanvas.backDrama")} className="grid size-7 shrink-0 place-items-center rounded hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={() => useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"))}><ArrowLeft className="size-4" /></Link>}
         {context.dramaId && <Dropdown trigger={["click"]} menu={{ selectedKeys: [context.role === "shared-assets" ? "shared" : context.episodeId || ""], items: [
             { key: "shared", label: t("productionCanvas.sharedCanvas"), icon: context.role === "shared-assets" ? <Check className="size-4" /> : undefined, onClick: () => void switchCanvas("shared") },
             { type: "divider" },

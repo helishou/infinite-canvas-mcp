@@ -39,7 +39,7 @@ export function registerApprovedSharedAsset(db: BackendDatabase, projectId: stri
     const asset = director.assets[assetId];
     if (!drama || asset?.status !== "approved" || !asset.nodeId || !asset.storageKey || !asset.sha256 || !asset.evidence) return;
     const node = (db.getCanvasProject(projectId)?.nodes as Record<string, any>[] || []).find(item => item.id === asset.nodeId);
-    if (!node) throw new Error("共享资产源节点不存在");
+    if (!node) throw new Error(`共享资产「${assetId}」的引用节点 ${asset.nodeId} 已不在画布上（可能被删除或重新布局），请重新采用该共享资产`);
     const now = new Date().toISOString();
     const id = `approved-${stable(projectId, String(version), assetId, asset.storageKey, asset.sha256)}`;
     const media = db.getMediaFile(asset.storageKey)!;
@@ -73,10 +73,13 @@ export function validateSharedAssetSource(db: BackendDatabase, projectId: string
     const source = asset.sharedSource;
     const approved = approvedSharedAsset(db, source.approvedId);
     const episode = db.getDramaEpisodeByCanvasId(projectId);
+    const name = source.assetId || asset.nodeId;
     if (!episode || episode.dramaId !== approved.dramaId || source.dramaId !== approved.dramaId || source.assetId !== approved.assetId ||
-        source.sourceProjectId !== approved.sourceProjectId || source.sourceNodeId !== approved.sourceNodeId || asset.storageKey !== approved.storageKey || asset.sha256 !== approved.sha256 || asset.status !== "approved") throw new Error("共享资产来源、剧目或批准版本不一致");
+        source.sourceProjectId !== approved.sourceProjectId || source.sourceNodeId !== approved.sourceNodeId || asset.storageKey !== approved.storageKey || asset.sha256 !== approved.sha256 || asset.status !== "approved")
+        throw new Error(`共享资产「${name}」与已批准版本不一致（来源画布/节点、图片内容或状态已被改动），请回读共享资产后重新采用`);
     const node = (db.getCanvasProject(projectId)?.nodes as Record<string, any>[] || []).find(item => item.id === asset.nodeId);
-    if (node?.metadata?.sharedAssetOrigin?.approvedId !== approved.id) throw new Error("共享资产未登记为当前画布引用");
+    if (node?.metadata?.sharedAssetOrigin?.approvedId !== approved.id)
+        throw new Error(`共享资产「${name}」在制作画布上的引用节点已失效（节点 ${asset.nodeId} 缺失或未登记为批准版本 ${approved.id}），请在制作画布中重新采用该共享资产`);
     if (latest && listApprovedSharedAssets(db, approved.dramaId).find(item => item.assetId === approved.assetId)?.id !== approved.id) {
         throw Object.assign(new Error("共享资产已批准新版本，等待引用更新及提示词重新校验"), { code: "SHARED_ASSET_UPDATE" });
     }

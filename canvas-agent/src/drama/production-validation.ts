@@ -1,9 +1,10 @@
 import crypto from "node:crypto";
+import { resizeShotAnchors } from "./subject-assembly.js";
 import { isH3StyleTemplateId } from "../plugins/minimax-h3/style-templates.js";
 import { currentCompilationArtifact } from "./compilation-scope.js";
 import { toJsonSchemaCompat } from "@modelcontextprotocol/sdk/server/zod-json-schema-compat.js";
 import { z } from "zod";
-import { directorPatchFields, productionContractVersion, productionOperationSchema, productionEditSchema, productionPublishSchema, productionCompileSchema, directorRunStartSchema, canonicalProduction, type DirectorProduction, type ProductionDiagnostic } from "./production-contract.js";
+import { directorPatchFields, productionContractVersion, productionOperationSchema, productionEditSchema, productionPublishSchema, productionCompileSchema, directorRunStartSchema, canonicalProduction, isSubjectPromptAssembly, type DirectorProduction, type ProductionDiagnostic } from "./production-contract.js";
 
 const scene = { id: "scene-1", heading: "Interior", location: "Room", timeOfDay: "Day", blocks: [] };
 const block = { id: "block-1", kind: "action", text: "The door opens." };
@@ -14,6 +15,7 @@ const examples: Record<string, unknown> = {
         { id: "BINDING1", assetId: "ASSET1", sourceNode: { projectId: "canvas1", nodeId: "image1" }, selection: { mode: "latest_success" }, provides: ["identity"], retain: ["face and hair"], exclude: ["pose and background"], applicableState: {}, defaultFor: ["identity"] },
     ] } },
     set_director_shot_keyframes: { shotId: "SHOT1", keyframes: [] },
+    edit_director_shot: { action: "split", shotId: "SHOT1", newShotId: "SHOT2", splitFrame: 48, textOffsets: {} },
     repartition_director_clips: { shotIds: ["SHOT1", "SHOT2"], segments: [{ shot_ids: ["SHOT1"] }, { shot_ids: ["SHOT2"] }] },
     reverse_sync_director_prompt: { segmentId: "CLIP1", artifactId: "ARTIFACT1", sourceHash: "0".repeat(64), basePromptHash: "1".repeat(64), prompt: "Edited source-backed Prompt text", canvasRevision: 1 },
     edit_director_continuity: { changes: [{ collection: "facts", action: "upsert", id: "FACT1", value: { id: "FACT1", object_kind: "character", object_id: "CHARACTER1", allowed_values: ["outside"], value_descriptions: { outside: "The character stays outside." } } }] },
@@ -64,6 +66,7 @@ export function productionOperationContract(operationType?: string) {
                 : type === "delete_director_clip" ? ["Requires explicit confirmation; deletes the Clip and its owned Shots as one source transaction. A single Shot cannot be deleted while leaving an empty Clip."]
                 : type === "select_director_result" ? ["Successful archived output must belong to the original formal task and exact node/Clip; both revisions must match; active generation and shared reference replacement are rejected. Images require review after selection. No media generation or prompt/timeline replacement occurs."]
                 : type === "restore_archived_scene_results" ? ["Episode draft only. Verifies the archive node, exact Clip identity, succeeded task, generation log and media bytes before restoring outputs to matching scene H3 nodes. Preserves the original archive and provenance; creates no task and does not modify the published version."]
+                : type === "edit_director_shot" ? ["Prompt v2 only. Insert/duplicate/delete/move maintain stable Shot and Clip identities. Split/merge rebase local ledger events, timed performance, keyframes and utterance coverage without changing dialogue text or duration. Crossing dialogue text is allocated from the existing audio window by default; textOffsets is an optional override; supply cameraShotId when merging different cameras. Delete removes the Shot and its exclusive dialogue/events, retaining other Shots and remaining cross-Shot dialogue slices; dependent ledger references are cleaned atomically. Shot duration edits synchronize inherited appearances, keyframe anchors, timed actions/sounds and ledger anchors while leaving dialogue speed unchanged. Deleting the last Shot removes its Clip atomically; no separate command is required. Move stays within a Clip; Clip partition changes use repartition_director_clips."]
                 : type === "upsert_director_subject" || type === "set_director_shot_keyframes" ? ["Use selection.mode=node_selection to follow the smart node's independent reference choice. latest_success and selected_result are explicit binding overrides. Browsing history does not restore generation settings."]
                 : type === "set_director_production" ? ["Example is schema-valid only; replace hashes and engine with actual validated receipts."]
                 : ["Target IDs, ownership, revision and production stage are checked against the current production."] };
@@ -138,7 +141,11 @@ export function applyDirectorSourcePatch(director: DirectorProduction, entity: k
             if (entity === "segment" && Object.hasOwn(patch, "styleTemplateId") && patch.styleTemplateId !== null && !isH3StyleTemplateId(patch.styleTemplateId)) throw new Error("未知 H3 风格模板；styleTemplateId 必须为已登记模板 ID 或 null");
             if (entity === "asset" && patch.canvas_scope !== undefined && !["shared", "episode"].includes(String(patch.canvas_scope))) throw new Error("资产画布归属只能是 shared 或 episode");
             if (entity === "asset" && patch.canvas_scope === "episode" && director.assets[id]?.sharedSource) throw new Error("已采用的剧目共享资产必须保留 shared 归属；需要本集专用版本时请新建分集资产");
+            const previousDuration = Number(target.duration_frames);
             Object.assign(target, patch);
+            if (entity === "shot" && isSubjectPromptAssembly(director.source) && previousDuration > 0 && Object.hasOwn(patch, "duration_frames") && Number.isInteger(target.duration_frames) && Number(target.duration_frames) > 0 && Number(target.duration_frames) !== previousDuration) {
+                resizeShotAnchors(director.source, target, previousDuration);
+            }
         }
         director.sourceHash = crypto.createHash("sha256").update(canonicalProduction(director.source)).digest("hex");
         // A changed source revision invalidates compile receipts. Recompilation may

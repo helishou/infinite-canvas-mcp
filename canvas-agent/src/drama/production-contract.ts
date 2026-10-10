@@ -500,6 +500,14 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("repair_director_subject_bindings") }).strict(),
     z.object({ type: z.literal("delete_director_subject"), id }).strict(),
     z.object({ type: z.literal("set_director_shot_keyframes"), shotId: id, keyframes: z.array(shotKeyframeSchema) }).strict(),
+    z.object({
+        type: z.literal("set_director_shot_utterances"), shotId: id,
+        utterances: z.array(z.object({
+            utteranceId: id.optional(), speakerSubjectId: id, text: z.string().min(1), delivery: z.string().optional(), voiceover: z.boolean(),
+            localStartFrame: z.number().int().nonnegative(), localEndFrame: z.number().int().positive(),
+        }).strict()).max(32),
+    }).strict(),
+    z.object({ type: z.literal("edit_director_shot"), action: z.enum(["insert", "duplicate", "delete", "move", "split", "merge"]), shotId: id.optional(), targetShotId: id.optional(), newShotId: id.optional(), position: z.enum(["before", "after"]).optional(), splitFrame: z.number().int().positive().optional(), textOffsets: z.record(z.number().int().nonnegative()).optional(), reaction: z.boolean().optional(), shot: z.record(z.unknown()).optional(), firstShotPatch: z.record(z.unknown()).optional(), segment: z.record(z.unknown()).optional(), cameraShotId: id.optional() }).strict(),
     z.object({ type: z.literal("repartition_director_clips"), shotIds: z.array(id).min(1), segments: z.array(z.record(z.unknown())).min(1) }).strict(),
     z.object({ type: z.literal("reverse_sync_director_prompt"), segmentId: id, artifactId: id, sourceHash: hash, basePromptHash: hash, prompt: z.string(), canvasRevision: z.number().int().nonnegative() }).strict(),
     z.object({ type: z.literal("edit_director_continuity"), changes: z.array(z.object({ collection: z.enum(["facts", "timelines", "initial", "events", "requirements", "coverage"]), action: z.enum(["upsert", "delete"]), id, value: z.record(z.unknown()).optional() }).strict()).min(1) }).strict(),

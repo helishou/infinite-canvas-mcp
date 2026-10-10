@@ -13,9 +13,14 @@ import { continuityPresentation } from "./continuity-presentation";
 import { currentClipRefreshes } from "./production-refresh-display";
 import { ReferenceNodeLink } from "./reference-node-link";
 import { useReferenceResultVersion } from "./use-reference-result-version";
+import { ShotOperations, type ShotOperation } from "./shot-operations";
+import { readShotFormDraft } from "./subject-shot-draft";
 import type { DirectorWorkspace } from "./director-panel";
 import { storyboardDurationFrames, storyboardPeople, storyboardReportedState } from "./storyboard-display";
 import { boundaryCounts, clipDurationSeconds, clipProfileKey, clipShotIds, materializeClipPartition, nearestBoundaryCount, outsideClipWindow, partitionAt } from "./clip-boundary";
+
+/** 工作包读取缓存（LRU）：同一镜头、同一源稿版本、同一参考结果版本直接命中，避免反复「正在读取镜头工作包」。 */
+const workbenchCache = new Map<string, Record<string, any>>();
 
 type Props = {
     director: DirectorProduction; production: EpisodeProduction; owner: ProductionTarget; initialShotId?: string;
@@ -29,6 +34,9 @@ type Props = {
     renderShotActions?: (shot: Record<string, any>) => ReactNode;
     /** v2 源稿的 Clip 重新装箱入口：时间线上的分割块拖动/右键都落到这个 op。 */
     onRepartitionClips?: (shotIds: string[], segments: Array<Record<string, unknown>>) => Promise<boolean>;
+    onEditShot?: (operation: ShotOperation) => Promise<boolean>;
+
+    shotDrafts?: Record<string, string>;
     /** Clip 组合视图的「一键编译」：本组件直接提交/轮询/应用编译回执，完成后回调 refresh 重读正式源稿。 */
     busy?: boolean; onRefresh?: () => void;
     onClip: (id: string) => void;
@@ -38,7 +46,7 @@ type Props = {
 };
 
 /** The v2 authoring surface: stable Shots, derived Clip packaging, and compiler evidence. */
-export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, canvasNodes, renderEditor, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, busy, onRefresh, onClip, onDiscuss, onNavigate }: Props) {
+export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, canvasNodes, renderEditor, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onEditShot, shotDrafts = {}, busy, onRefresh, onClip, onDiscuss, onNavigate }: Props) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const source = director.source as Record<string, any>;
@@ -46,7 +54,9 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const humanState = continuityPresentation({ facts: records(source.ledger?.facts), timelines: records(source.ledger?.timelines), scenes: records(source.script_scenes), locations: records(source.scene_registry), characters: records(source.character_registry), assets: records(source.asset_plan), shots: records(source.shots), segments: records(source.segments), sourceBlocks: [] }, (key, values) => t(`director.workspace.continuity.${key}`, values));
     const fps = Number(source.fps_num || 24) / Number(source.fps_den || 1);
     const shots = records(source.shots).sort((a, b) => Number(a.story_order) - Number(b.story_order)), clips = records(source.segments), subjects = records(source.subject_registry);
+    const operationShots = shots.map(shot => { const draft = readShotFormDraft(shotDrafts[`v2shot:${shot.id}`], shot); return draft.invalid ? shot : { ...shot, ...draft.draft.value }; });
     const [selectedId, setSelectedId] = useState(initialShotId || "");
+    const [draggingShotId, setDraggingShotId] = useState("");
     const [search, setSearch] = useState("");
     const [view, setView] = useState<"shots" | "clips">("shots");
     const [workbench, setWorkbench] = useState<Record<string, any>>();
@@ -76,13 +86,23 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const readId = subjectAssembly ? activeId : String(clip?.id || "");
     useEffect(() => {
         if (!readId) { setWorkbench(undefined); setReading(false); return; }
+        // 缓存键含源稿哈希与参考结果版本：命中即先展示旧数据并后台静默刷新，避免每次切换/保存都闪「正在读取」。
+        const cacheKey = `${ownerKey}|${readView}|${readId}|${director.sourceHash}|${referenceVersion}|${referenceEvents}`;
         let current = true;
-        setReading(true); setWorkbench(undefined); setWorkbenchError("");
+        setWorkbenchError("");
+        const hit = workbenchCache.get(cacheKey);
+        const apply = (value: Record<string, any>) => {
+            if (workbenchCache.size >= 80) workbenchCache.delete(workbenchCache.keys().next().value!);
+            workbenchCache.set(cacheKey, value);
+            if (current) setWorkbench(productionWorkbenchValue(value, subjectAssembly ? "shot" : "clip"));
+        };
+        if (hit) { setWorkbench(productionWorkbenchValue(hit, subjectAssembly ? "shot" : "clip")); setReading(false); }
+        else { setReading(true); setWorkbench(undefined); }
         void fetchProductionWorkbench(owner, readView, readId).then(result => {
             if (!current) return;
             if (result.production.sourceHash !== director.sourceHash) { setWorkbenchError(t("director.atomic.changedRead")); return; }
-            setWorkbench(productionWorkbenchValue(result.production, subjectAssembly ? "shot" : "clip"));
-        }).catch(error => { if (current) setWorkbenchError(error instanceof Error ? error.message : String(error)); })
+            apply(result.production);
+        }).catch(error => { if (current && !hit) setWorkbenchError(error instanceof Error ? error.message : String(error)); })
             .finally(() => { if (current) setReading(false); });
         return () => { current = false; };
     }, [readId, readView, ownerKey, director.sourceHash, production.revision, referenceVersion, referenceEvents, retry, t]);
@@ -184,6 +204,17 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const clipEntries = clips.map((group, index) => ({ group, index, members: shots.filter(shot => clipShotIds(group).includes(String(shot.id))) }))
         .map(entry => ({ ...entry, shown: entry.members.filter(shot => visible.includes(shot)) })).filter(entry => entry.shown.length);
     const partitionEnabled = Boolean(onRepartitionClips) && !busy;
+    const moveShotByDrop = (event: React.DragEvent<HTMLButtonElement>, targetShotId: string) => {
+        event.preventDefault();
+        const sourceShotId = event.dataTransfer.getData("text/plain") || draggingShotId;
+        setDraggingShotId("");
+        if (!sourceShotId || sourceShotId === targetShotId || !onEditShot || busy) return;
+        const sourceClip = clips.find(item => clipShotIds(item).includes(sourceShotId));
+        const targetClip = clips.find(item => clipShotIds(item).includes(targetShotId));
+        if (!sourceClip || sourceClip.id !== targetClip?.id) return;
+        const rect = event.currentTarget.getBoundingClientRect();
+        void onEditShot({ type: "edit_director_shot", action: "move", shotId: sourceShotId, targetShotId, position: event.clientX < rect.left + rect.width / 2 ? "before" : "after" });
+    };
     return <div className="space-y-5" data-subject-storyboard-workbench>
         {/* 紧凑头部：标题 + 统计 + 视图页签合一行；「主体与图片 / 连续性台账」与顶部工作区页签重复，已去掉（连续性入口就是顶部工作区页签）。 */}
         <header className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-border pb-2">
@@ -213,29 +244,42 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                 </span>)}
             </div>}
             {clipEditor}
-        </div> : !shots.length ? <Alert type="info" message={t("director.workspace.noShots")} /> : <>
+        </div> : !shots.length ? <div className="space-y-3"><p className="text-sm text-muted-foreground">{t("director.workspace.noShots")}</p>{subjectAssembly && onEditShot && <ShotOperations source={source} busy={busy} onEdit={onEditShot} onSelect={setSelectedId} />}</div> : <>
             {/* 镜头检索并到时间线上方：原先左侧那份「镜头列表」与这条时间线是同一批镜头的两套入口，已合并（只保留时间线）。 */}
             <div className="flex flex-wrap items-center gap-3">
                 {/* antd 的 affix 输入框自带 width:100%，所以宽度要挂在外层容器上。 */}
                 <div className="w-64 shrink-0"><Input size="small" allowClear className="w-full" prefix={<Search className="size-3.5" />} value={search} onChange={event => setSearch(event.target.value)} placeholder={t("director.studio.searchShots")} aria-label={t("director.studio.searchShots")} /></div>
                 <span className="text-xs text-muted-foreground">{t("director.atomic.shotListCount", { visible: visible.length, total: shots.length })}</span>
+                {subjectAssembly && onEditShot && <ShotOperations source={{ ...source, shots: operationShots }} busy={busy} onEdit={onEditShot} onSelect={setSelectedId} />}
             </div>
             <div ref={trackRef} data-clip-track className="relative flex gap-4 overflow-x-auto pb-2" aria-label={t("director.atomic.timeline")}>
                 {clipEntries.map((entry, position) => { const next = clipEntries[position + 1]; const boundary = next && next.index === entry.index + 1 ? next : undefined;
                     const preceded = position > 0 && clipEntries[position - 1].index === entry.index - 1; // 前面已有分割块时不再画 section 自带的左边框，避免双线
                     return <Fragment key={String(entry.group.id)}>
-                    <section className={`min-w-fit${preceded ? "" : " border-l border-border"} pl-3`}><div className="mb-2 flex items-center justify-between gap-5 text-xs text-muted-foreground"><button type="button" onClick={() => onClip(String(entry.group.id))} className="flex items-center gap-1 hover:text-foreground">{clipLabel(entry.index)}<ArrowRight className="size-3" /></button><span>{formatSeconds(entry.members.reduce((sum, shot) => sum + duration(shot), 0))}s</span></div><div className="flex gap-1.5">{entry.shown.map(shot => <button type="button" key={shot.id} data-track-shot={String(shot.id)} ref={element => { if (element) chipRefs.current.set(String(shot.id), element); else chipRefs.current.delete(String(shot.id)); }} onClick={() => setSelectedId(String(shot.id))} aria-pressed={activeId === String(shot.id)} title={title(shot)} className={`max-w-56 min-w-40 rounded-md border px-3 py-2 text-left ${activeId === String(shot.id) ? "border-primary/40 bg-primary/10" : "border-border hover:bg-muted/40"}`}><span className="block truncate text-xs font-medium">{String(shots.findIndex(item => item.id === shot.id) + 1).padStart(2, "0")} · {title(shot)}</span><span className="mt-1 block text-[11px] tabular-nums text-muted-foreground">{framing(shot)} · {formatSeconds(duration(shot))}s</span></button>)}</div></section>
+                    <section className={`min-w-fit${preceded ? "" : " border-l border-border"} pl-3`}>
+                        <div className="mb-2 flex items-center justify-between gap-5 text-xs text-muted-foreground"><button type="button" onClick={() => onClip(String(entry.group.id))} className="flex items-center gap-1 hover:text-foreground">{clipLabel(entry.index)}<ArrowRight className="size-3" /></button><span>{formatSeconds(entry.members.reduce((sum, shot) => sum + duration(shot), 0))}s</span></div>
+                        <div className="flex gap-1.5">
+                            {entry.shown.map((shot, shotIndex) => {
+                                const nextShot = entry.shown[shotIndex + 1];
+                                const ids = clipShotIds(entry.group), boundaryIndex = ids.indexOf(String(shot.id)) + 1;
+                                const canSplitHere = Boolean(nextShot && ids[boundaryIndex] === String(nextShot.id));
+                                const leftIds = ids.slice(0, boundaryIndex), rightIds = ids.slice(boundaryIndex);
+                                return <Fragment key={String(shot.id)}>
+                                    <ShotOperations source={{ ...source, shots: operationShots }} shot={operationShots.find(item => item.id === shot.id)} busy={busy} onEdit={onEditShot || (async () => false)} onSelect={setSelectedId} contextMenu={subjectAssembly && Boolean(onEditShot)}>
+                                        <button type="button" draggable={Boolean(subjectAssembly && onEditShot && !busy)} data-track-shot={String(shot.id)} ref={element => { if (element) chipRefs.current.set(String(shot.id), element); else chipRefs.current.delete(String(shot.id)); }} onClick={() => setSelectedId(String(shot.id))} onContextMenu={() => setSelectedId(String(shot.id))} onDragStart={event => { if (!subjectAssembly || !onEditShot || busy) return event.preventDefault(); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(shot.id)); setDraggingShotId(String(shot.id)); }} onDragOver={event => { const sourceId = event.dataTransfer.getData("text/plain") || draggingShotId; if (sourceId && sourceId !== String(shot.id) && clips.some(item => clipShotIds(item).includes(sourceId) && clipShotIds(item).includes(String(shot.id)))) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={event => moveShotByDrop(event, String(shot.id))} onDragEnd={() => setDraggingShotId("")} aria-pressed={activeId === String(shot.id)} title={title(shot)} className={`max-w-56 min-w-40 rounded-md border px-3 py-2 text-left ${draggingShotId === String(shot.id) ? "opacity-50" : ""} ${activeId === String(shot.id) ? "border-primary/40 bg-primary/10" : "border-border hover:bg-muted/40"} ${subjectAssembly && onEditShot && !busy ? "cursor-grab active:cursor-grabbing" : ""}`}><span className="block truncate text-xs font-medium">{String(shots.findIndex(item => item.id === shot.id) + 1).padStart(2, "0")} · {title(shot)}</span><span className="mt-1 block text-[11px] tabular-nums text-muted-foreground">{framing(shot)} · {formatSeconds(duration(shot))}s</span></button>
+                                    </ShotOperations>
+                                    {canSplitHere && <ShotClipSplitHandle disabled={!partitionEnabled} onSplit={() => {
+                                        void saveClipPartition(ids, materializeClipPartition(clips, [{ ids: leftIds }, { ids: rightIds }]));
+                                    }} />}
+                                </Fragment>;
+                            })}
+                        </div>
+                    </section>
                     {boundary ? <ClipBoundaryHandle pairIndex={entry.index} leftClipId={String(entry.group.id)} rightClipId={String(boundary.group.id)} leftIds={clipShotIds(entry.group)} rightIds={clipShotIds(boundary.group)} profileConflict={clipProfileKey(entry.group) !== clipProfileKey(boundary.group)} shots={shots} fps={fps} chips={chipRefs} track={trackRef} disabled={!partitionEnabled} onCommit={count => commitBoundary(entry.index, count)} onMerge={profileSourceId => mergeBoundaryClips(entry.index, profileSourceId)} /> : null}
                 </Fragment>; })}
                 {!visible.length && <p className="py-2 text-xs text-muted-foreground">{t("director.studio.emptyShotSearch")}</p>}
             </div>
-            <div className="grid min-w-0 gap-5 lg:grid-cols-[220px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(0,1fr)_320px]">
-                <nav aria-label={t("director.studio.searchShots")} className="max-h-60 overflow-y-auto border-b border-border lg:max-h-[65dvh] lg:border-b-0 lg:border-r lg:pr-3">
-                    {visible.map(shot => <button type="button" key={shot.id} aria-current={activeId === String(shot.id) ? "true" : undefined} onClick={() => setSelectedId(String(shot.id))} className={`mb-1 block w-full rounded-md px-3 py-3 text-left ${activeId === String(shot.id) ? "bg-muted" : "hover:bg-muted/40"}`}>
-                        <span className="flex items-center gap-2">{production.draft.keyframes[String(shot.id)]?.storageKey && <img className="h-10 w-14 shrink-0 object-contain" src={backendMediaUrl(production.draft.keyframes[String(shot.id)].storageKey)} alt="" loading="lazy" />}<span className="block min-w-0 truncate text-sm font-medium">{String(shots.findIndex(item => item.id === shot.id) + 1).padStart(2, "0")} · {title(shot)}</span></span>
-                        <span className="mt-1 block text-xs text-muted-foreground">{framing(shot)} · {formatSeconds(duration(shot))}s{(shot.utterance_refs?.length || shot.dialogue?.length) ? ` · ${t("director.atomic.dialogue")}` : ""}</span>
-                    </button>)}
-                </nav>
+            <div className="grid min-w-0 gap-5 lg:grid-cols-[minmax(0,1fr)] xl:grid-cols-[minmax(0,1fr)_320px]">
                 <section className="min-w-0 lg:max-h-[65dvh] lg:overflow-y-auto lg:pr-2" data-production-target={`shot:${activeId}`}>
                     <div className="mb-4 flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs text-muted-foreground">{t("director.studio.shotNumber", { number })} · {clip ? t("director.studio.clipNumber", { number: clipIndex + 1 }) : "—"} · {formatSeconds((windows.get(activeId)?.startFrame || 0) / fps)}–{formatSeconds((windows.get(activeId)?.endFrame || 0) / fps)}s</p></div><Tag color={refresh?.blockingDiagnostic ? "orange" : compiled ? "green" : undefined}>{statusLabel}</Tag></div>
                     {(referenceDiagnostics.length > 0 || (!compiled && refresh?.blockingDiagnostic)) && <details className="mb-4 text-sm"><summary className="cursor-pointer text-muted-foreground">{t("director.workspace.shotIssueDetails")}</summary><div className="mt-2 space-y-2">{[...new Set([...(referenceDiagnostics.map(diagnostic => String(diagnostic.message || diagnostic.code))), ...(!compiled && refresh?.blockingDiagnostic ? [refresh.blockingDiagnostic.message] : [])])].map(message => <p key={message} className="whitespace-pre-wrap text-muted-foreground">{message}</p>)}</div></details>}
@@ -243,7 +287,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                     {/* 镜头操作行（和导演讨论 / 跳到所在片段）：整个左栏的最后一块，不再夹在对白与连续性状态之间。 */}
                     {renderShotActions?.(selected)}
                 </section>
-                <aside className="min-w-0 space-y-5 lg:col-start-2 xl:col-start-3 xl:max-h-[65dvh] xl:overflow-y-auto border-t border-border pt-4 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-4">                    {/* 连续性状态块：从右侧栏挪到左栏编辑区下方（右栏 250px 太窄，英文状态正文读不开）。 */}
+                <aside className="min-w-0 space-y-5 xl:col-start-2 xl:max-h-[65dvh] xl:overflow-y-auto border-t border-border pt-4 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-4">
                     <section className="border-t border-border pt-4"><h3 className="text-sm font-medium">{t("director.atomic.state")}</h3><p className="mt-1 text-xs text-muted-foreground">{t(subjectAssembly ? "director.atomic.derivedState" : "director.atomic.legacyStateHint")}</p>{!subjectAssembly && shotStateFields && <div className="mt-3" data-shot-state>{shotStateFields}</div>}{continuityActions && <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-border pb-3 text-xs text-muted-foreground" data-shot-continuity-actions>{continuityActions}</div>}
                         {records(state?.start).length + records(state?.end).length > 0 ? <div className="mt-3 grid gap-4 ">{(["start", "end"] as const).map(phase => <div key={phase}><p className="text-[11px] font-medium text-muted-foreground">{t("director.atomic.statePhase." + phase)}</p>{records(state?.[phase]).map(item => <div key={item.factId} className="mt-2"><p className="text-[10px] text-muted-foreground">{item.subjectId ? subjectDisplayName(source, String(item.subjectId)) : item.property}</p><p className="text-xs leading-5">{humanState.value(String(item.factId), item.value)}</p></div>)}{!records(state?.[phase]).length && <p className="mt-1 text-xs text-muted-foreground">{t("director.atomic.noState")}</p>}</div>)}</div> : <p className="mt-3 text-xs text-muted-foreground">{t("director.atomic.noState")}</p>}{records(state?.unresolved).length > 0 && <p className="mt-3 text-xs text-amber-600">{t("director.atomic.stateIssue")} · {records(state?.unresolved).map(item => humanState.fact(String(item.factId))).join(" · ")}</p>}</section>
 
@@ -254,6 +298,14 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
             </div>
         </>}
     </div>;
+}
+
+function ShotClipSplitHandle({ disabled, onSplit }: { disabled: boolean; onSplit: () => void }) {
+    const { t } = useTranslation();
+    return <button type="button" disabled={disabled} onClick={onSplit} aria-label={t("director.atomic.clipBoundarySplit")} title={disabled ? undefined : t("director.atomic.clipBoundarySplitHint")} data-shot-clip-split-boundary
+        className="group flex w-7 min-h-12 shrink-0 cursor-pointer items-stretch justify-center rounded-sm border-0 bg-transparent p-0 hover:bg-primary/10 disabled:cursor-not-allowed">
+        <span className="my-1 w-0.5 rounded-full bg-border group-hover:bg-primary/70 group-disabled:bg-transparent" />
+    </button>;
 }
 
 /**

@@ -58,14 +58,9 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
     // Production Shot identity must survive independently of generated/approved keyframe media.
     // H3 renders unbound cells as placeholders; storyboardImageMode controls image references,
     // never the Shot-to-cell mapping itself.
-    const fps = Number(d.source.fps_num || 24) / Number(d.source.fps_den || 1);
     const storyboardShots = shots.map(shot => {
         const input = d.shotInputs[shot.id];
-        const frames = Number(shot.duration_frames);
-        const start = Number(shot.start_frame), end = Number(shot.end_frame);
-        const duration = Number.isFinite(frames) && frames > 0 ? frames / fps
-            : Number.isFinite(start) && Number.isFinite(end) && end > start && fps > 0 ? (end - start) / fps
-                : Number(shot.duration || 0);
+        const duration = Number(shot.duration || 0);
         if (settings.storyboardImageMode === "skip" || input?.keyframePolicy === "none" || !input?.keyframeAssetId) return { id: shot.id, duration };
         const asset = d.assets[input.keyframeAssetId];
         const sourceNodeId = asset?.nodeId || input.keyframeAssetId;

@@ -6,6 +6,10 @@
 
 新合同局部返修先通过 `production_get` 的 `subject_workbench`、`shot_workbench` 或 `clip_workbench` 读取一个实际目标工作包，再用一次 `production_edit` 合并修改。Subject 索引和图片绑定用 `upsert_director_subject`，解除无引用主体登记用 `delete_director_subject`；原角色登记用 `patch_director_source` 的 `character`，场景用 `environment`，道具用 `asset`。镜头摄影、动作、时长与对象使用修改 Shot，分镜图绑定用 `set_director_shot_keyframes`；连续性用 `edit_director_continuity` 修改唯一台账条目，Clip 重组用 `repartition_director_clips`。Backend 默认登记新合同真实消费者的校验、编译和同步，不再由 Agent 重复手动编译、应用。沿写回执给出的原流程身份查询状态；阻塞只读定位字段，不换 ID 重跑。
 
+新合同镜头增删、复制、排序、拆分和合并使用 `edit_director_shot`，与本镜未保存字段修改合并为一次提交。新增镜头分配稳定 ID；复制只复用摄影与对象设计，不复制对白、事件或关键帧。排序限定当前 Clip，跨 Clip 包装调整用 `repartition_director_clips`。拆镜指定局部整数帧；对白跨切点时默认按已有声音窗分配原文片段，保留逐字内容和声音总时长；textOffsets 仅用于明确调整默认切字位置。听者反应镜头显式选择反应安排，不能把画外说话者变成可见人物。合镜有不同摄影时明确选择摄影来源，有不同主要表演节拍时先设计承接，不能静默丢弃。删除镜头同时删除本镜独占的对白与台账事件，跨镜对白保留其他镜头部分并更新原文覆盖；依赖引用在同一事务清理，历史媒体保留。不要要求用户手动移交每条记录才能删除；删除后的上下游事实矛盾由连续性检查定位，不伪造补全。镜头时长修改同步裁剪既有 Subject 出现范围，完全位于删去时段的出现条目移除；关键帧、定时动作／声音与台账事件局部锚点同步适配时长，稳定 ID 不变。声音窗保留原速度，缩短到对白所需时长以下属于创作冲突，不能用加速或删字掩盖。删除唯一镜头自动删除其空 Clip，清理引用和新相邻边界；不要求再执行另一条删除命令。合镜保留两镜输入资产并集，拆镜和复制不留下错误的结果事件关联。
+
+图片和关键帧选择使用完整 projectId/nodeId，不用节点名称或局部 ID 猜测来源。可选择当前画布智能图片节点及已正式采用的共享来源；未采用的其他项目图片不直接绑定。共享选择保留采用资产 ID，节点引用策略沿既有历史选择规则处理。创建或绑定节点不表示已生成图片，编译不自动提交媒体请求。
+
 旧稿未启用新合同时，沿现有 `patch_director_source`、`patch_director_continuity` 和替换入口兼容；需要单段自动刷新时在同批 ops 显式登记 `request_director_clip_refresh`。只有首次创建或用户明确整稿替换才回传完整导演稿。Backend 保留其他源稿并重算哈希，不能为局部编辑整稿回写。
 
 `patch_director_source` 的 `scene` 修改剧本场次 `script_scenes`，`environment` 修改编译引用的 `scene_registry`，`asset` 修改 `asset_plan`，`asset_card` 修改 `asset_cards` 的提示词与七步正文。环境文字返修须定向检查登记与资产卡中实际被消费的文字，不能把修改资产计划当作已更新环境正文。

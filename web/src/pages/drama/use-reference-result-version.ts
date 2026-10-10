@@ -6,11 +6,15 @@ export function useReferenceResultVersion(sources: Array<{ projectId?: string; n
     const [version, setVersion] = useState(0);
     useEffect(() => {
         const bindings = JSON.parse(scope) as typeof sources;
+        const referenceFields = ["images", "storageKey", "smartImageReferenceSelection"];
         const updated = (event: Event) => {
             const value = (event as CustomEvent).detail;
             if (value?.type !== "canvas.updated") return;
             const operations = value.payload?.operations || [];
-            if (bindings.some(binding => binding.projectId === value.entityId && operations.some((op: { id?: string; type?: string; metadata?: Record<string, unknown> }) => op.id === binding.nodeId && (op.type === "delete_node" || op.metadata && ["images", "storageKey", "smartImageReferenceSelection"].some(key => key in op.metadata!))))) setVersion(current => current + 1);
+            if (bindings.some(binding => binding.projectId === value.entityId && operations.some((op: { id?: string; ids?: string[]; type?: string; metadata?: Record<string, unknown>; metadataDelete?: string[] }) => {
+                if (op.type === "delete_node") return op.id === binding.nodeId || Boolean(op.ids?.includes(binding.nodeId!));
+                return op.id === binding.nodeId && (Boolean(op.metadata && referenceFields.some(key => key in op.metadata!)) || Boolean(op.metadataDelete?.some(key => referenceFields.includes(key))));
+            }))) setVersion(current => current + 1);
         };
         window.addEventListener("backend-event", updated);
         return () => window.removeEventListener("backend-event", updated);

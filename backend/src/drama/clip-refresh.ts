@@ -14,6 +14,8 @@ export type ClipRefreshJob = {
     createdAt: string; updatedAt: string; preparedId?: string; application?: any; compileRevision?: number; continuityRevision?: number;
 };
 const activeStatuses = ["queued", "checking", "compiling", "applying"];
+/** Terminal jobs never resume, so their embedded DirectorProduction snapshot is dead weight (multi-MB rows made currentBySegment scan seconds). */
+const prunedOwners = new Set<string>();
 export const clipRefreshScope = (segmentId: string) => ({ targetIds: [segmentId], output: "selected" as const });
 
 export class ClipRefreshStore {
@@ -44,6 +46,12 @@ export class ClipRefreshStore {
         return this.db.prepare("SELECT job_json FROM production_clip_refresh_jobs WHERE owner_kind=? AND owner_id=? AND status IN ('queued','checking','compiling','applying')").all(this.owner.kind, this.owner.id).map(r => JSON.parse(String(r.job_json)));
     }
     currentBySegment(): ClipRefreshJob[] {
+        const ownerKey = `${this.owner.kind}:${this.owner.id}`;
+        if (!prunedOwners.has(ownerKey)) {
+            this.db.prepare("UPDATE production_clip_refresh_jobs SET job_json=json_remove(job_json,'$.snapshot') WHERE owner_kind=? AND owner_id=? AND status NOT IN ('queued','checking','compiling','applying') AND json_extract(job_json,'$.snapshot') IS NOT NULL")
+                .run(this.owner.kind, this.owner.id);
+            prunedOwners.add(ownerKey);
+        }
         const query = "SELECT job_json FROM (SELECT job_json, ROW_NUMBER() OVER(PARTITION BY json_extract(job_json,'$.segmentId') ORDER BY json_extract(job_json,'$.updatedAt') DESC, operation_id DESC) AS rank FROM production_clip_refresh_jobs WHERE owner_kind=? AND owner_id=?) WHERE rank=1";
         return this.db.prepare(query).all(this.owner.kind, this.owner.id).map(row => JSON.parse(String(row.job_json)));
     }
@@ -52,8 +60,9 @@ export class ClipRefreshStore {
     }
     save(job: ClipRefreshJob) {
         job.updatedAt = new Date().toISOString();
+        const payload = activeStatuses.includes(job.status) ? job : { ...job, snapshot: undefined };
         this.db.prepare("UPDATE production_clip_refresh_jobs SET status=?, job_json=? WHERE owner_kind=? AND owner_id=? AND compilation_id=?")
-            .run(job.status, JSON.stringify(job), this.owner.kind, this.owner.id, job.compilationOperationId);
+            .run(job.status, JSON.stringify(payload), this.owner.kind, this.owner.id, job.compilationOperationId);
     }
 }
 

@@ -17,6 +17,8 @@ import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
 import { useWorkbenchCanvas, useCanvasHost } from "@/lib/canvas/canvas-host";
 import { WorkbenchCanvas } from "./workbench-canvas";
+import { productionCanvasNodes, type ProductionCanvasSnapshot } from "./production-canvas-nodes";
+import { readShotFormDraft, shotFormChanges, shotDraftSourceChanged } from "./subject-shot-draft";
 import { startSingleFlightPoller } from "@/lib/single-flight-poll";
 import { productionObjectPath, type ProductionObject } from "@/lib/production-object";
 import { applyBackendCanvasEvent, useCanvasStore } from "@/stores/canvas/use-canvas-store";
@@ -151,7 +153,9 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   const [canvasId, setCanvasId] = useState(projectId);
   const [productionContext, setProductionContext] = useState<ProductionCanvasContext | null>(null);
   const [episode, setEpisode] = useState<DramaEpisode | null>(null);
-  const [canvasNodes, setCanvasNodes] = useState<Array<{ id: string; title?: string; type?: string; metadata?: Record<string, unknown> }>>([]);
+  const [canvasRead, setCanvasRead] = useState<ProductionCanvasSnapshot>();
+  const liveCanvas = useCanvasStore(state => state.projects.find(project => project.id === canvasId));
+  const canvasNodes = productionCanvasNodes(canvasId, liveCanvas, canvasRead);
   const [production, setProduction] = useState<EpisodeProduction | null>(null);
   const [readiness, setReadiness] = useState<ProductionReadiness | null>(null);
   const [continuityReport, setContinuityReport] = useState<ProductionContinuity | undefined>();
@@ -223,7 +227,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     setProductionContext(context.productionContext);
     setTitle(context.episode?.title || String(context.canvas?.title || ""));
     setCanvasId(resolvedCanvasId);
-    setCanvasNodes((context.canvas?.nodes || []) as Array<{ id: string; title?: string; type?: string; metadata?: Record<string, unknown> }>);
+    setCanvasRead(context.canvas && Array.isArray(context.canvas.nodes) ? { id: resolvedCanvasId, revision: Number(context.canvas.revision || 0), nodes: context.canvas.nodes as ProductionCanvasSnapshot["nodes"] } : undefined);
     setProduction(prod.production);
     setReadiness(ready.readiness);
     setContinuityReport(continuity.continuity);
@@ -341,7 +345,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     if (sequence !== remoteSequence.current) return prod.production;
     setProduction(previous => !previous || previous.episodeId !== prod.production.episodeId || prod.production.revision > previous.revision ? prod.production : previous); setReadiness(ready.readiness); setContinuityReport(continuity.continuity); setVersions(history.versions); setBatches(runHistory.runs);
     setRuntimeTasks(tasks);
-    if (canvas) setCanvasNodes((canvas.nodes || []) as Array<{ id: string; title?: string; type?: string; metadata?: Record<string, unknown> }>);
+    if (canvas) setCanvasRead({ id: canvasId, revision: Number(canvas.revision || 0), nodes: (canvas.nodes || []) as ProductionCanvasSnapshot["nodes"] });
     return prod.production;
   }, [target, canvasId, continuitySnapshot, production?.draft.clipGroups, production?.draft.director?.assets]);
 
@@ -935,12 +939,34 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   }, [embedded, owner?.kind, owner?.id, production, canvasId, busy, draftKey, briefDraft, sourceDrafts, remoteRevision, pendingRunStart, batches, navigate, t]);
   const regroupSegment = async (segmentId: string, shotIds: string[], removeSegmentIds: string[]) => edit([{ type: "set_director_segment_group", segmentId, shotIds, removeSegmentIds }]);
   const repartitionV2 = async (shotIds: string[], segments: Array<Record<string, unknown>>) => edit([{ type: "repartition_director_clips", shotIds, segments }]);
+  const editV2Shot = async (operation: Extract<ProductionOperation, { type: "edit_director_shot" }>) => {
+    const director = production?.draft.director;
+    if (!director) return false;
+    const captured: Record<string, string> = {}, ops: ProductionOperation[] = [];
+    for (const id of [...new Set([operation.shotId, operation.targetShotId].filter((id): id is string => Boolean(id)))]) {
+      const key = `v2shot:${id}`, raw = sourceDrafts[key];
+      if (!raw) continue;
+      const shot = (director.source.shots as Array<Record<string, any>>).find(shot => shot.id === id);
+      if (!shot) continue;
+      const { draft, invalid } = readShotFormDraft(raw, shot, director.source);
+      if (invalid || shotDraftSourceChanged(draft, shot, director.source)) { message.error(t(invalid ? "director.atomic.invalidDraft" : "director.atomic.sourceChanged")); return false; }
+      const changes = shotFormChanges(draft);
+      if (Object.keys(changes.patch).length) ops.push({ type: "patch_director_source", entity: "shot", id, patch: changes.patch });
+      if (changes.keyframes !== undefined) ops.push({ type: "set_director_shot_keyframes", shotId: id, keyframes: changes.keyframes as Extract<ProductionOperation, { type: "set_director_shot_keyframes" }>["keyframes"] });
+      if (changes.utterances !== undefined) ops.push({ type: "set_director_shot_utterances", shotId: id, utterances: changes.utterances as Extract<ProductionOperation, { type: "set_director_shot_utterances" }>["utterances"] });
+      captured[key] = raw;
+    }
+    const saved = await edit([...ops, operation]);
+    if (saved) setSourceDrafts(current => Object.fromEntries(Object.entries(current).filter(([key, value]) => captured[key] !== value)));
+    return saved;
+  };
   const upsertSubject = async (subject: Extract<ProductionOperation, { type: "upsert_director_subject" }>["subject"]) => edit([{ type: "upsert_director_subject", subject }]);
   const deleteSubject = async (id: string) => edit([{ type: "delete_director_subject", id }]);
-  const saveV2Shot = async (shotId: string, patch: Record<string, unknown>, keyframes?: Extract<ProductionOperation, { type: "set_director_shot_keyframes" }>["keyframes"]) => {
+  const saveV2Shot = async (shotId: string, patch: Record<string, unknown>, keyframes?: Extract<ProductionOperation, { type: "set_director_shot_keyframes" }>["keyframes"], utterances?: Extract<ProductionOperation, { type: "set_director_shot_utterances" }>["utterances"]) => {
     const ops: ProductionOperation[] = [];
     if (Object.keys(patch).length) ops.push({ type: "patch_director_source", entity: "shot", id: shotId, patch });
     if (keyframes !== undefined) ops.push({ type: "set_director_shot_keyframes", shotId, keyframes });
+    if (utterances !== undefined) ops.push({ type: "set_director_shot_utterances", shotId, utterances });
     return ops.length ? edit(ops) : true;
   };
   const patchSource = async (entity: "style" | "scene" | "environment" | "character" | "asset" | "shot" | "segment", id: string | undefined, patch: Record<string, unknown>) => edit([{ type: "patch_director_source", entity, ...(id ? { id } : {}), patch }]);
@@ -1081,6 +1107,11 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     return true;
   };
   const replaceDirector = async (director: NonNullable<EpisodeProduction["draft"]["director"]>) => edit([{ type: "set_director_production", director }]);
+  const deleteScene = async (sceneId: string) => {
+    if (!production || busy || !sceneId || !canvasId) return false;
+    const { project } = await fetchBackendProject(canvasId);
+    return edit([{ type: "archive_director_scene", sceneId, expectedCanvasRevision: Number(project.revision), confirmed: true }]);
+  };
   const exportBundle = async (includeGeneratedMedia: boolean) => {
     if (!production || !readiness) return;
     setExporting(true);
@@ -1182,7 +1213,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
               sourceDrafts={sourceDrafts} onSourceDraftChange={setSourceDraft}
               briefDraft={briefDraft} onBriefDraftChange={setBriefDraft}
               onBrief={saveBrief} onEditCanvasClip={editCanvasClip} onAdoptDirectorFields={adoptDirectorFields} onPatch={patchSource} onAdoptClipStyle={adoptClipStyle} onRegroup={regroupSegment} onWorkflow={setWorkflow} onSettings={patch => void edit([{ type: 'set_settings', patch }])} onBindAsset={(assetId, nodeId) => void bindAsset(assetId, nodeId)}
-              onUpsertSubject={upsertSubject} onDeleteSubject={deleteSubject} onSaveV2Shot={saveV2Shot} onRepartitionClips={repartitionV2}
+              onUpsertSubject={upsertSubject} onDeleteSubject={deleteSubject} onDeleteScene={deleteScene} onSaveV2Shot={saveV2Shot} onRepartitionClips={repartitionV2} onEditShot={editV2Shot}
               onOpenSharedAsset={(assetId, title) => void openSharedAsset(assetId, title).catch(fail)} onPromoteExistingSharedAsset={(assetId, title) => void promoteExistingSharedAsset(assetId, title).catch(fail)}
               onBoundary={setBoundary} onReview={reviewAsset} onPublish={() => void publish()} onSaveContinuity={saveContinuity} onPreviewContinuityUpgrade={previewContinuityUpgrade} onCheckContinuity={checkContinuity} onContinuitySnapshot={changeContinuitySnapshot}
               onReplace={value => void replaceDirector(value)} onAskDirector={scope => void askDirector(scope)} onRequestContinuityUpgrade={requestContinuityUpgradeFromAgent} onNavigate={navigateWorkspace}

@@ -3,6 +3,18 @@ import test from "node:test";
 import { readShotFormDraft, rebaseShotFormDraft, shotFormChanges, shotDraftChanged, shotDraftSourceChanged, subjectDisplayName, productionWorkbenchValue } from "./subject-shot-draft";
 
 const shot = { id: "S1", title: "Observe", duration_frames: 48, visual: "Look outside.", camera: { framing: "CU", path: "static", lens: 50 }, subject_usages: [], keyframes: [] };
+
+test("camera and duration edits do not resubmit untouched cross-Shot dialogue with an empty delivery", () => {
+    const speaking = { ...shot, utterance_refs: [{ utteranceId: "U", role: "speaker", localStartFrame: 0, localEndFrame: 48, textStart: 0, textEnd: 2 }] };
+    const source = { utterances: [{ id: "U", speakerSubjectId: "SUB", text: "回来先问蛋", start: { shotId: "S1", localFrame: 0 }, end: { shotId: "S2", localFrame: 48 } }] };
+    const { draft } = readShotFormDraft(undefined, speaking, source);
+    draft.value.camera.framing = "MCU";
+    assert.equal(shotFormChanges(draft).utterances, undefined);
+    draft.value.utterances!.push({ utteranceId: "", speakerSubjectId: "SUB", text: "", delivery: "", voiceover: false, localStartFrame: 0, localEndFrame: 12 });
+    assert.equal(shotFormChanges(draft).utterances, undefined);
+    draft.value.utterances![0].delivery = "轻声";
+    assert.equal(shotFormChanges(draft).utterances![0].delivery, "轻声");
+});
 test("a Shot draft survives a source refresh and locates a conflicting update without dropping camera fields", () => {
     const { draft } = readShotFormDraft(undefined, shot);
     draft.value.visual = "Listen outside.";

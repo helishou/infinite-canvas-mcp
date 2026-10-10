@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { useParams } from "react-router-dom";
+import { useCanvasRoute } from "@/lib/canvas/canvas-host";
 import { getCanvasTextSession } from "@/services/api/canvas-text";
 import type { CanvasTextEditorHandle, CanvasTextTarget } from "@/types/canvas-plugin";
 import { ArrowUp, Image as ImageIcon, LoaderCircle, Maximize2, MessageSquare, Music2, Square, Video } from "lucide-react";
@@ -50,7 +50,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
     const hasTextContent = (node.type === CanvasNodeType.Text || (isSmartGenerationNode && mode === "text")) && Boolean(node.metadata?.content?.trim());
     const hasImageContent = mode === "image" && Boolean(canvasNodeImage(node) || (node.type === CanvasNodeType.Loop && node.metadata?.content));
     const isEditingExistingContent = hasTextContent || hasImageContent;
-    const { id: projectId = "" } = useParams();
+    const { projectId } = useCanvasRoute();
     const field = resolveCanvasNodePromptField(node.type, isEditingExistingContent);
     const target = useMemo<CanvasTextTarget>(() => ({ nodeId: node.id, field }), [node.id, field]);
     const session = useMemo(() => getCanvasTextSession(projectId, target), [projectId, target]);

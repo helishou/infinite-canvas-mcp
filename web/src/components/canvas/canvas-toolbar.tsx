@@ -1,7 +1,7 @@
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode, RefObject } from "react";
 import { useEffect, useRef, useState } from "react";
 import { Button, Segmented, Switch } from "antd";
-import { CircleDot, Eraser, Focus, Grid2x2, Group, Hand, Image as ImageIcon, Info, ListRestart, MapPinned, Moon, MousePointer2, Music2, Palette, PencilLine, Puzzle, Redo2, Settings2, Square, Sun, Trash2, Type, Undo2, Upload, User, Video } from "lucide-react";
+import { CircleDot, Eraser, Focus, Grid2x2, Group, Hand, Image as ImageIcon, Info, ListRestart, MapPinned, Moon, MousePointer2, Music2, Package, Palette, PencilLine, Puzzle, Redo2, Settings2, Square, Sun, Trash2, Type, Undo2, Upload, User, Video } from "lucide-react";
 
 import { canvasThemes, type CanvasBackgroundMode, type CanvasColorTheme, type CanvasTheme } from "@/lib/canvas-theme";
 import { getNodePluginId, listNodeDefinitions, useNodeRegistryVersion } from "@/lib/canvas/node-registry";
@@ -30,6 +30,7 @@ export function CanvasToolbar({
     groupSelection,
     onAddCharacter,
     onAddScene,
+    onAddProp,
     onAddExtensionNode,
     onUndo,
     onRedo,
@@ -61,6 +62,7 @@ export function CanvasToolbar({
     groupSelection: boolean;
     onAddCharacter: () => void;
     onAddScene: () => void;
+    onAddProp: () => void;
     onAddExtensionNode: (type: string) => void;
     onUndo: () => void;
     onRedo: () => void;
@@ -145,6 +147,9 @@ export function CanvasToolbar({
                 </ToolbarButton>
                 <ToolbarButton id="tool-scene" label={t("canvas.toolbar.scene")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddScene}>
                     <MapPinned className="size-4.5" />
+                </ToolbarButton>
+                <ToolbarButton id="tool-prop" label={t("canvas.toolbar.prop")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddProp}>
+                    <Package className="size-4.5" />
                 </ToolbarButton>
                 <ToolbarButton id="tool-group" label={t(groupSelection ? "canvas.controls.group" : "canvas.toolbar.group")} active={groupSelection} activeStyle={activeStyle} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddGroup}>
                     <Group className="size-4.5" />

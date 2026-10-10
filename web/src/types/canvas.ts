@@ -26,6 +26,8 @@ export enum CanvasNodeType {
     Character = "character",
     /** 场景节点：承载场景图、描述和可选色卡。 */
     Scene = "scene",
+    /** 道具节点：承载单张道具图与道具说明，可作为生成参考。 */
+    Prop = "prop",
 }
 
 // Node types are open strings: built-ins use CanvasNodeType and plugins use "<pluginId>:<name>".
@@ -195,6 +197,10 @@ export type CanvasNodeMetadata = {
     sceneColorCard?: { url: string; storageKey?: string; name: string; width: number; height: number; bytes: number; mimeType: string };
     sceneColorPalette?: string[];
     sceneColorCardPrompt?: string;
+    propAssetId?: string;
+    propName?: string;
+    propDescription?: string;
+    propImage?: { url: string; storageKey?: string; name: string; width: number; height: number; bytes: number; mimeType: string };
     loopCount?: number;
     loopCountMode?: "auto" | "manual";
     loopMode?: "serial" | "parallel";

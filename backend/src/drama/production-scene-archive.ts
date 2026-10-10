@@ -1,11 +1,12 @@
 import crypto from "node:crypto";
+import { removeShotContent, reconcileShotClipBoundaries } from "./shot-edit.js";
 import type { BackendDatabase } from "../db.js";
 import type { CanvasCommit } from "../canvas/collaboration.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
 import { directorHash, projectDirector } from "./director.js";
 import { productionLayoutStableId } from "./production-layout-geometry.js";
 import { isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
-import { productionSceneEntries, productionScriptGroups, canonicalProduction, type EpisodeProductionData, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionSceneEntries, productionScriptGroups, canonicalProduction, isSubjectPromptAssembly, type EpisodeProductionData, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 type Owner = { kind: "episode" | "canvas"; id: string };
@@ -14,11 +15,11 @@ type Snapshot = {
     version: 1; sceneId: string;
     scriptRows: Indexed<Record<string, any>>[]; registryRows: Indexed<Record<string, any>>[];
     shots: Indexed<Record<string, any>>[]; segments: Indexed<Record<string, any>>[];
-    shotInputs: Array<[string, Record<string, any>]>; boundaries: Indexed<Record<string, any>>[];
-    artifacts: Indexed<Record<string, any>>[]; sceneWork?: Record<string, any>;
+    shotInputs: Array<[string, DirectorProduction["shotInputs"][string]]>; boundaries: Indexed<DirectorProduction["boundaries"][number]>[];
+    artifacts: Indexed<DirectorProduction["artifacts"][number]>[]; sceneWork?: NonNullable<DirectorProduction["workflow"]["sceneWorks"]>[string];
     ledgerRows: Record<string, Indexed<Record<string, any>>[]>;
     utterances: Indexed<Record<string, any>>[]; externalShotUtteranceRefs: Array<{ shotId: string; before: any[]; after: any[] }>;
-    keyframes: Array<[string, Record<string, any>]>; keyframeReviews: Array<[string, Record<string, any>]>;
+    keyframes: Array<[string, EpisodeProductionData["keyframes"][string]]>; keyframeReviews: Array<[string, EpisodeProductionData["keyframeReviews"][string]]>;
     nodes: Array<Record<string, any>>; connections: Array<Record<string, any>>;
 };
 const rows = (value: unknown): Record<string, any>[] => Array.isArray(value) ? value.filter(item => item && typeof item === "object" && !Array.isArray(item)) : [];
@@ -131,12 +132,12 @@ export function archiveDirectorScene(input: {
     const nodeIds = new Set(nodes.map(node => String(node.id)));
     const connections = (Array.isArray(project.connections) ? project.connections as Array<Record<string, any>> : [])
         .filter(edge => nodeIds.has(String(edge.fromNodeId)) || nodeIds.has(String(edge.toNodeId))).map(edge => structuredClone(edge));
-    const shotInputs = Object.entries(director.shotInputs).filter(([id]) => shotIds.has(id)).map(([id, value]) => [id, structuredClone(value)] as [string, Record<string, any>]);
-    const boundaries = indexed(director.boundaries as Array<Record<string, any>>, edge => segmentIds.has(String(edge.from)) || segmentIds.has(String(edge.to)));
-    const artifacts = indexed(director.artifacts as Array<Record<string, any>>, artifact => artifact.kind === "h3" && segmentIds.has(String(artifact.targetId)));
+    const shotInputs = Object.entries(director.shotInputs).filter(([id]) => shotIds.has(id)).map(([id, value]) => [id, structuredClone(value)] as [string, typeof value]);
+    const boundaries = indexed(director.boundaries, edge => segmentIds.has(String(edge.from)) || segmentIds.has(String(edge.to)));
+    const artifacts = indexed(director.artifacts, artifact => artifact.kind === "h3" && segmentIds.has(String(artifact.targetId)));
     const sceneWork = director.workflow.sceneWorks?.[sceneId] ? structuredClone(director.workflow.sceneWorks[sceneId]) : undefined;
-    const keyframes = Object.entries(draft.keyframes).filter(([id]) => shotIds.has(id)).map(([id, value]) => [id, structuredClone(value)] as [string, Record<string, any>]);
-    const keyframeReviews = Object.entries(draft.keyframeReviews).filter(([id]) => shotIds.has(id)).map(([id, value]) => [id, structuredClone(value)] as [string, Record<string, any>]);
+    const keyframes = Object.entries(draft.keyframes).filter(([id]) => shotIds.has(id)).map(([id, value]) => [id, structuredClone(value)] as [string, typeof value]);
+    const keyframeReviews = Object.entries(draft.keyframeReviews).filter(([id]) => shotIds.has(id)).map(([id, value]) => [id, structuredClone(value)] as [string, typeof value]);
     const ledger = record(source.ledger), ledgerRows: Snapshot["ledgerRows"] = {};
     for (const field of ["events", "requirements", "coverage"]) {
         const list = rows(ledger[field]);
@@ -260,6 +261,7 @@ export function deleteDirectorClip(input: { db: BackendDatabase; owner: Owner; d
     const director = draft.director;
     if (!director) throw new Error("缺少 Acheng 制作稿");
     const source = director.source as Record<string, any>;
+    const previousClips = rows(source.segments).map(row => String(row.id));
     const segment = rows(source.segments).find(item => String(item.id) === segmentId);
     const group = draft.clipGroups.find(item => item.id === segmentId);
     if (!segment || !group) throw new Error(`CLIP_NOT_FOUND: Clip ${segmentId} 不存在`);
@@ -270,27 +272,34 @@ export function deleteDirectorClip(input: { db: BackendDatabase; owner: Owner; d
     const episode = owner.kind === "episode" ? db.getDramaEpisode(owner.id) : null;
     const projectId = episode?.canvasId || (owner.kind === "canvas" ? owner.id : null);
     const project = projectId ? db.getCanvasProject(projectId) : null;
-    if (!projectId || !project) throw new Error("CLIP_DELETE_CANVAS_MISSING: 绑定画布不存在");
-    if (Number(project.revision || 0) !== expectedCanvasRevision) throw new Error("CLIP_DELETE_CANVAS_STALE: 画布版本已变化，请刷新后重试");
+    if (project && Number(project.revision || 0) !== expectedCanvasRevision) throw new Error("CLIP_DELETE_CANVAS_STALE: 画布版本已变化，请刷新后重试");
     if (group.nodeId && group.segmentId) {
+        if (!projectId || !project) throw new Error("CLIP_DELETE_CANVAS_MISSING: 已绑定的原画布不存在");
         db.applyCanvasProjectOperations(projectId, expectedCanvasRevision, [{ type: "delete_h3_segment", nodeId: group.nodeId, segmentId: group.segmentId }], {
             operationId: `${crypto.randomUUID()}:clip-delete`, runtimeWrite: true, withinTransaction: true, deferredCommits: canvasCommits,
             source: { kind: "system", clientId: "production:clip-delete", label: "删除制作 Clip" },
         });
     }
+    if (isSubjectPromptAssembly(source)) removeShotContent(source, shotIds);
     source.shots = rows(source.shots).filter(shot => !shotIds.has(String(shot.id || "")));
     source.segments = rows(source.segments).filter(item => String(item.id) !== segmentId);
     director.shotInputs = Object.fromEntries(Object.entries(director.shotInputs).filter(([id]) => !shotIds.has(id))) as DirectorProduction["shotInputs"];
     director.boundaries = director.boundaries.filter(edge => edge.from !== segmentId && edge.to !== segmentId);
     director.artifacts = director.artifacts.filter(artifact => !(artifact.kind === "h3" && artifact.targetId === segmentId)).map(artifact => artifact.status === "ready" ? { ...artifact, status: "stale" as const } : artifact);
     for (const id of shotIds) { delete draft.keyframes[id]; delete draft.keyframeReviews[id]; }
-    const ledger = record(source.ledger);
-    for (const field of ["events", "requirements", "coverage"]) ledger[field] = rows(ledger[field]).filter(item => !hasShot(item, shotIds));
-    source.ledger = ledger;
-    const utterances = rows(source.utterances);
-    const deletedUtteranceIds = new Set(utterances.filter(item => hasShot(item, shotIds)).map(item => String(item.id || "")));
-    source.utterances = utterances.filter(item => !deletedUtteranceIds.has(String(item.id || "")));
-    source.shots = rows(source.shots).map(shot => ({ ...shot, ...(Array.isArray(shot.utterance_refs) ? { utterance_refs: shot.utterance_refs.filter((ref: Record<string, any>) => !deletedUtteranceIds.has(String(ref.utteranceId))) } : {}) }));
+    if (isSubjectPromptAssembly(source)) {
+        const counters = new Map<string, number>();
+        source.shots = rows(source.shots).map(shot => { const order = counters.get(shot.timeline_id) || 0; counters.set(shot.timeline_id, order + 1); return { ...shot, story_order: order }; });
+        reconcileShotClipBoundaries(director, previousClips);
+    } else {
+        const ledger = record(source.ledger);
+        for (const field of ["events", "requirements", "coverage"]) ledger[field] = rows(ledger[field]).filter(item => !hasShot(item, shotIds));
+        source.ledger = ledger;
+        const utterances = rows(source.utterances);
+        const deletedUtteranceIds = new Set(utterances.filter(item => hasShot(item, shotIds)).map(item => String(item.id || "")));
+        source.utterances = utterances.filter(item => !deletedUtteranceIds.has(String(item.id || "")));
+        source.shots = rows(source.shots).map(shot => ({ ...shot, ...(Array.isArray(shot.utterance_refs) ? { utterance_refs: shot.utterance_refs.filter((ref: Record<string, any>) => !deletedUtteranceIds.has(String(ref.utteranceId))) } : {}) }));
+    }
     director.sourceHash = directorHash(source);
     director.executionAuthorized = false;
     projectDirector(draft);

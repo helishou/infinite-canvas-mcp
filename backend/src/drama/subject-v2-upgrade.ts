@@ -95,7 +95,7 @@ export function convertDirectorSourceToSubjectV2(episodeId: string, input: Row):
             refs.push({ utteranceId, role: "speaker", localStartFrame: localStart, localEndFrame: localEnd, textStart: 0, textEnd: text.length });
         }
         const next: Row = {
-            id: shotId, title: shot.title, visual: shot.visual, scene_id: shot.scene_id, camera: shot.camera,
+            id: shotId, title: str(shot.title || shot.display_name) || undefined, visual: shot.visual, scene_id: shot.scene_id, camera: shot.camera,
             audio: shot.audio, features: shot.features, outcome_events: shot.outcome_events,
             timeline_id: timelineId, story_order: order, duration_frames: duration,
             subject_usages: usages, keyframes: [], utterance_refs: refs,

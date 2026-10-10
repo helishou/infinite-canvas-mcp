@@ -4,6 +4,34 @@ type Row = Record<string, any>;
 const rows = (value: unknown): Row[] => Array.isArray(value) ? value.filter(item => item && typeof item === "object" && !Array.isArray(item)) : [];
 const entityKey = (kind: unknown, id: unknown) => `${String(kind || "")}:${String(id || "")}`;
 
+/** Resize inherited appearance windows without leaving stale intervals outside a Shot. */
+export function resizeSubjectUsages(usages: unknown, previousDuration: number, duration: number): Row[] {
+    return rows(usages).flatMap(usage => {
+        if (usage.localStartFrame === undefined && usage.localEndFrame === undefined) return [usage];
+        const start = Number(usage.localStartFrame ?? 0);
+        const oldEnd = Number(usage.localEndFrame ?? previousDuration);
+        const end = Math.min(duration, oldEnd === previousDuration ? duration : oldEnd);
+        if (start >= duration || end <= start) return [];
+        return [{ ...usage, localStartFrame: start, localEndFrame: end }];
+    });
+}
+
+/** Local non-dialogue anchors follow the authored Shot duration; IDs and facts stay unchanged. */
+export function resizeShotAnchors(source: Row, shot: Row, previousDuration: number) {
+    const duration = Number(shot.duration_frames);
+    const frame = (value: number, end = false) => Math.min(end ? duration : duration - 1, Math.max(0, Math.round(value * duration / previousDuration)));
+    shot.subject_usages = resizeSubjectUsages(shot.subject_usages, previousDuration, duration);
+    for (const keyframe of rows(shot.keyframes)) if (keyframe.anchor === "at_frame" && Number.isInteger(keyframe.localFrame)) keyframe.localFrame = frame(keyframe.localFrame);
+    for (const container of [shot.performance, shot.audio, shot.vfx]) if (container && Array.isArray(container.events)) {
+        container.events = rows(container.events).map(event => {
+            if (!Number.isInteger(event.start) || !Number.isInteger(event.end)) return event;
+            const start = frame(event.start), end = Math.max(start + 1, frame(event.end, true));
+            return { ...event, start, end };
+        });
+    }
+    for (const event of rows(source.ledger?.events)) if (event.shot_id === shot.id && Number.isInteger(event.local_frame)) event.local_frame = frame(event.local_frame);
+}
+
 export type SubjectShotWindow = { shotId: string; timelineId: string; startFrame: number; endFrame: number };
 export function subjectShotWindows(source: Record<string, unknown>): Map<string, SubjectShotWindow> {
     const result = new Map<string, SubjectShotWindow>();

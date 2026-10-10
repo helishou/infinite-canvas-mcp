@@ -667,6 +667,25 @@ test("saving a newly created formal scene materializes exactly one H3 node immed
     assert.equal(saved.revision, 1);
 });
 
+test("the director addScene bare block (unique scene_id, no beat_ids) materializes its own H3 node", t => {
+    const f = fixture(t), { project } = ensureProductionCanvas(f.db, "episode", "ep");
+    const d = director();
+    // Mirrors director-panel.tsx addScene: a lone block with its own scene_id and no beats.
+    const addedId = "scene-bare";
+    const nextSource = { ...d.source, script_scenes: [...(d.source.script_scenes as any[]), { id: addedId, scene_id: addedId, scene_name: "Untitled scene", kind: "action", text: "" }] };
+    d.source = nextSource as any;
+    d.sourceHash = directorHash(nextSource);
+    d.artifacts = d.artifacts.map(item => ({ ...item, sourceHash: d.sourceHash, receipt: { ...item.receipt, sourceHash: d.sourceHash } }));
+
+    const saved = save(f.episode, "ep", d);
+    const nodes = f.db.getCanvasProject(project.id)!.nodes as any[];
+    const sceneVideos = nodes.filter(node => node.type === "minimax-h3:video" && node.metadata?.productionSceneId);
+    assert.ok(sceneVideos.some(node => node.metadata.productionSceneId === addedId), "new bare scene owns an H3 node");
+    const bareNode = sceneVideos.find(node => node.metadata.productionSceneId === addedId)!;
+    assert.equal(productionLayoutStableId("production-h3-scene", "ep", addedId), bareNode.id, "stable H3 node id");
+    assert.equal(saved.revision, 1);
+});
+
 test("new scene Clips materialize one H3 segment whose storyboard cells use stable Shot IDs", t => {
     const f = fixture(t), { project } = ensureProductionCanvas(f.db, "episode", "ep");
     const d = director();
@@ -1217,8 +1236,8 @@ test("first and repeated Clip preparation persist approved references and identi
     assert.deepEqual(read().productionClipProjection, projection);
     assert.equal(edit.revision, Number(canvas.revision) + 1);
     const prepared = f.runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1"], "preserve-manual-edit");
-    assert.equal(prepared.referenceSync?.[0].status, "blocked");
-    assert.match(JSON.stringify(prepared.referenceSync), /CLIP_EDIT_CONFLICT/);
+    assert.equal(prepared.referenceSync?.[0].status, "ready");
+    assert.deepEqual(read().productionClipProjection, projection, "unchanged formal inputs do not rewrite the manual edit baseline");
     assert.equal(read().prompt, "hand rewritten", "recompilation must retain the edited Clip prompt");
 });
 test("unapproved references remain explicitly blocked and applying a new compiled input repairs an existing Clip", t => {

@@ -1,4 +1,4 @@
-import { FileText, Group, Image as ImageIcon, ListRestart, MapPinned, Music2, Settings2, User, Video } from "lucide-react";
+import { FileText, Group, Image as ImageIcon, ListRestart, MapPinned, Music2, Package, Settings2, User, Video } from "lucide-react";
 
 import i18n from "@/i18n";
 
@@ -43,6 +43,12 @@ function builtinResource(node: CanvasNodeData): CanvasNodeResource | null | Canv
             ? [{ kind: "image", url: sceneImage.url, storageKey: sceneImage.storageKey, text: "场景图" }]
             : [];
     }
+    if (node.type === CanvasNodeType.Prop) {
+        const propImage = node.metadata?.propImage;
+        return propImage?.url || propImage?.storageKey
+            ? [{ kind: "image", url: propImage.url || undefined, storageKey: propImage.storageKey, text: propImage.name || node.metadata?.propName || node.title }]
+            : [];
+    }
     return null;
 }
 
@@ -58,6 +64,7 @@ const BUILTIN_DEFINITIONS: CanvasNodeDefinition[] = ([
     { type: CanvasNodeType.Group, title: i18n.t("canvas.node.group"), icon: <Group className={iconClass} />, minimapColor: "#94a3b8" },
     { type: CanvasNodeType.Character, title: i18n.t("assets.kinds.character"), icon: <User className={iconClass} />, minimapColor: "#f43f5e", resource: builtinResource },
     { type: CanvasNodeType.Scene, title: i18n.t("assets.kinds.scene"), icon: <MapPinned className={iconClass} />, minimapColor: "#0ea5e9", resource: builtinResource },
+    { type: CanvasNodeType.Prop, title: i18n.t("assets.kinds.prop"), icon: <Package className={iconClass} />, minimapColor: "#d97706", resource: builtinResource },
     h3SystemDefinition as unknown as CanvasNodeDefinition,
 ] as Array<Partial<CanvasNodeDefinition> & { type: string }>).map((def) => {
     const spec = NODE_SPECS[def.type as CanvasNodeType];

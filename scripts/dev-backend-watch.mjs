@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { watch, existsSync } from 'node:fs';
+import { watch, existsSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -22,6 +22,19 @@ export function startBackendWatch({ cwd = backend, directories = [path.join(back
 
     function start() {
         dirty = false; ready = false; requested = false; restarting = false; reportedBusy = false;
+        // spawn 前清掉占位的旧 backend（instance-lock 持有者），避免新实例撞 "Backend 已在运行" 直接退出。
+        // instance-lock 自己已有 stale 清理，但只在锁文件存在且进程已死时触发；若旧进程僵着占锁，
+        // 这里显式强杀，让 watch 的 restart 循环真正能接力。
+        try {
+            const lockPath = path.join(cwd, 'backend.lock');
+            const record = JSON.parse(readFileSync(lockPath, 'utf8'));
+            const pid = Number(record.pid);
+            if (Number.isInteger(pid) && pid > 0 && pid !== process.pid) {
+                try { process.kill(pid, 'SIGKILL'); log.log(`[backend-watch] killed stale Backend PID=${pid}`); }
+                catch { /* already gone */ }
+            }
+            rmSync(lockPath, { force: true });
+        } catch { /* no lock file, nothing to clean */ }
         child = spawn(process.execPath, ['--import', tsx, 'src/index.ts'], {
             cwd, env: { ...process.env, INFINITE_CANVAS_DEV_WATCH: '1' }, stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
         });

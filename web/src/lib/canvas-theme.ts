@@ -22,7 +22,7 @@ export const canvasThemes = {
             muted: "#78716c",
             faint: "#a8a29e",
             generating: "#d97706",
-            typeStroke: { character: "#7c3aed", scene: "#0f766e", group: "#b45309" },
+            typeStroke: { character: "#7c3aed", scene: "#0f766e", prop: "#b45309", group: "#b45309" },
         },
         toolbar: {
             panel: "rgba(251,250,247,.96)",
@@ -53,7 +53,7 @@ export const canvasThemes = {
             muted: "#d6d3d1",
             faint: "#78716c",
             generating: "#fbbf24",
-            typeStroke: { character: "#c4b5fd", scene: "#5eead4", group: "#fbbf24" },
+            typeStroke: { character: "#c4b5fd", scene: "#5eead4", prop: "#fbbf24", group: "#fbbf24" },
         },
         toolbar: {
             panel: "rgba(31,29,26,.96)",

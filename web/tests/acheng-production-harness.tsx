@@ -37,6 +37,10 @@ if (clipScenario === "middle") {
   source.shots.push({ ...source.shots[1], id: "s3", title: "信使接过信封", start_frame: 240, end_frame: 360 });
   source.segments.push({ ...source.segments[1], id: "SEG3", shot_ids: ["s3"], start_frame: 240, end_frame: 360 });
 }
+if (clipScenario === "references") {
+  Object.assign(source, { prompt_assembly: { version: 2 }, subject_registry: [{ id: "SUBJECT_MESSENGER", kind: "character", entityRef: { ownerKind: "episode", ownerId: "fixture", kind: "character", id: "C_MESSENGER" }, pictureBindings: [{ id: "BIND_MESSENGER", assetId: "STYLE_MOTHER", sourceNode: { projectId: "fixture", nodeId: "image-style" }, selection: { mode: "node_selection" }, provides: ["identity"], retain: ["信使身份"], exclude: ["原图姿势"], applicableState: {}, defaultFor: ["identity"] }] }] });
+  source.shots.forEach(shot => Object.assign(shot, { duration_frames: shot.end_frame - shot.start_frame, subject_usages: [{ subjectId: "SUBJECT_MESSENGER", presentation: "visible" }], keyframes: [] }));
+}
 const initial: DirectorProduction = {
   schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "canvas-1", runtimeId: "test-runtime", version: "4.3.9" },
   source, sourceHash: hash,
@@ -140,6 +144,7 @@ function Harness() {
   return <ConfigProvider theme={getAntThemeConfig(dark)}><App><main className={`${dark ? "dark " : ""}min-h-screen bg-background p-6 text-foreground`}>
     <div className="mb-4 flex gap-2"><button onClick={() => setDark(!dark)}>theme</button><button onClick={() => { const next = locale === "zh-CN" ? "en-US" : "zh-CN"; setLocale(next); void i18n.changeLanguage(next); }}>language</button></div>
     <button onClick={() => { setWorkspace("production"); setFocusTarget("segment:SEG1"); }}>Edit Clip style</button>
+    {clipScenario === "references" && <button onClick={() => { const subjects = director.source.subject_registry as Array<Record<string, any>>; updateDirector({ ...director, source: { ...director.source, subject_registry: subjects.map(subject => ({ ...subject, pictureBindings: subject.pictureBindings.map((binding: Record<string, any>) => ({ ...binding, sourceNode: { projectId: "fixture", nodeId: "image-replacement" } })) })) } }); }}>更换测试图片来源</button>}
     <nav className="mb-4 flex flex-wrap gap-2">{(["overview", "story", "assets", "shots", "continuity", "production", "advanced"] as DirectorWorkspace[]).map(key => <button key={key} onClick={() => setWorkspace(key)}>{i18n.t(`director.workspace.tab.${key}`)}</button>)}</nav>
     <DirectorPanel
       workspace={workspace} focusTarget={focusTarget} compact={Boolean(focusTarget)} director={director} production={production} readiness={readiness} continuityReport={continuityReport} run={activeRun} batches={batches}
