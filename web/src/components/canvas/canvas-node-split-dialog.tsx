@@ -1,3 +1,4 @@
+import { useCanvasHost } from "@/lib/canvas/canvas-host";
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Button, InputNumber, Modal, Tooltip } from "antd";
 import { Grid2x2, ListRestart, PanelTop, Redo2, Rows3, Trash2, Undo2, ZoomIn, ZoomOut } from "lucide-react";
@@ -17,6 +18,8 @@ const maxLineWidth = 16;
 type ActiveLine = { axis: "horizontal" | "vertical"; index: number } | null;
 
 export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { dataUrl: string; open: boolean; onClose: () => void; onConfirm: (params: CanvasImageSplitParams) => void }) {
+    const canvasActive = useCanvasHost()?.active ?? true;
+    const canvasActiveRef = useRef(canvasActive); canvasActiveRef.current = canvasActive;
     const { t } = useTranslation();
     const [params, setParams] = useState(fallbackParams);
     const [image, setImage] = useState<{ width: number; height: number } | null>(null);
@@ -160,6 +163,7 @@ export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { d
     useEffect(() => {
         if (!open) return;
         const handleKeyDown = (event: KeyboardEvent) => {
+            if (!canvasActiveRef.current) return;
             const target = event.target instanceof Element ? event.target : null;
             if (target?.closest("input,textarea,[contenteditable='true']")) return;
             const key = event.key.toLowerCase();

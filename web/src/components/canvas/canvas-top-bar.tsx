@@ -1,3 +1,4 @@
+import { useCanvasRoute } from "@/lib/canvas/canvas-host";
 import { useEffect, useRef, useState } from "react";
 import { Download, FileText, Home, Images, LoaderCircle, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Trash2, Undo2, Upload, UsersRound } from "lucide-react";
 import { Button, Dropdown, Modal, Popover, Tooltip } from "antd";
@@ -64,7 +65,7 @@ export function CanvasTopBar({
 }) {
     const colorTheme = useThemeStore((state) => state.theme);
     const { t } = useTranslation();
-    const [searchParams] = useSearchParams();
+    const { search: searchParams } = useCanvasRoute();
     const productionOrigin = searchParams.get("from") === "dramas" ? "?from=dramas" : "";
     const theme = canvasThemes[colorTheme];
     const titleRef = useRef<HTMLDivElement>(null);

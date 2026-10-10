@@ -66,7 +66,7 @@ export function formatSeconds(value: unknown) {
 export function storyBeatCards(beats: DirectorRecord[], sceneId?: string) {
     const selected = sceneId ? beats.filter(beat => String(beat.scene_id) === sceneId) : beats;
     const repeatedFields = ["goal", "obstacle", "cost"].filter(field => selected.length > 1 && selected.every(beat => typeof beat[field] === "string" && beat[field].trim() && beat[field].trim() === selected[0][field]?.trim()));
-    return selected.map(beat => ({ beat, text: readableText(beat.summary || beat.description || beat.choice || beat.result || beat.goal), repeatedFields }));
+    return selected.map(beat => ({ beat, text: readableText(beat.summary || beat.description || beat.choice || beat.result || (repeatedFields.includes("goal") ? undefined : beat.goal)), repeatedFields }));
 }
 
 

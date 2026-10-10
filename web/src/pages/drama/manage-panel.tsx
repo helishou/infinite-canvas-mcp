@@ -1,6 +1,6 @@
 import { dramaWorkbenchPath } from "./workbench-entry";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import { App, Button, Input, Modal, Select, Tag } from "antd";
+import { App, Button, Input, Modal, Select, Switch, Tag } from "antd";
 import { ArrowUpRight, Clapperboard, Download, FileArchive, ImagePlus, Images, PencilLine, Plus, Trash2, Upload } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -8,7 +8,7 @@ import type { TFunction } from "i18next";
 
 import { loadCanvasProjectPage } from "@/lib/canvas-project-loader";
 import { cn } from "@/lib/utils";
-import { backendMediaUrl, createBackendDramaEpisode, deleteBackendDramaAsset, deleteBackendDramaEpisode, fetchBackendDramaAssets, fetchBackendDramaEpisodes, updateBackendDramaEpisode, uploadBackendDramaAsset, ensureSharedAssetCanvas, upsertBackendCanvasFolder, type DramaCustomAsset, type DramaEpisode } from "@/services/backend-api";
+import { backendMediaUrl, createBackendDramaEpisode, deleteBackendDramaAsset, deleteBackendDramaEpisode, fetchBackendDramaAssets, fetchBackendDramaEpisodes, updateBackendDramaEpisode, uploadBackendDramaAsset, ensureSharedAssetCanvas, ensureEpisodeCanvas, upsertBackendCanvasFolder, type DramaCustomAsset, type DramaEpisode } from "@/services/backend-api";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { useCanvasStore, type CanvasFolder, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { dramaProductionPlanSchema, type DramaProductionPlan } from "@basketikun/canvas-agent/drama/production-contract";
@@ -35,6 +35,7 @@ type EpisodeDraft = {
     synopsis: string;
     fullPlot: string;
     canvasId: string | null;
+    withCanvas?: boolean;
 };
 
 /**
@@ -109,12 +110,14 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode 
             synopsis: episode.synopsis,
             fullPlot: episode.fullPlot || "",
             canvasId: episode.canvasId,
+            withCanvas: !episode.canvasId,
         } : {
             episodeNumber: Math.max(0, ...episodes.map((item) => item.episodeNumber)) + 1,
             title: `第 ${Math.max(0, ...episodes.map((item) => item.episodeNumber)) + 1} 集`,
             synopsis: "",
             fullPlot: "",
             canvasId: null,
+            withCanvas: true,
         });
         setEpisodeEditorOpen(true);
     };
@@ -125,11 +128,17 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode 
         const creating = !episodeDraft.id;
         try {
             setEpisodeSaving(true);
-            const canvasId = episodeDraft.canvasId;
+            let canvasId = episodeDraft.canvasId;
             const result = episodeDraft.id
                 ? await updateBackendDramaEpisode(episodeDraft.id, { episodeNumber, title, synopsis: episodeDraft.synopsis, fullPlot: episodeDraft.fullPlot, canvasId })
                 : await createBackendDramaEpisode(dramaId, { episodeNumber, title, synopsis: episodeDraft.synopsis, fullPlot: episodeDraft.fullPlot, canvasId });
             if (!result.episode) throw new Error("后端没有返回分集");
+            if (creating && !result.episode.canvasId && episodeDraft.withCanvas) {
+                await ensureEpisodeCanvas(result.episode.id);
+                const updated = await fetchBackendDramaEpisodes(dramaId);
+                const fresh = (updated.episodes || []).find(item => item.id === result.episode!.id);
+                if (fresh) result.episode = fresh;
+            }
             replaceEpisodes([...episodes.filter((item) => item.id !== result.episode!.id), result.episode!].sort((a, b) => a.episodeNumber - b.episodeNumber));
             setEpisodeEditorOpen(false);
             setEpisodeDraft(null);
@@ -352,6 +361,7 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode 
                     </div>
                     <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.episodeSynopsis")}</span><Input.TextArea rows={4} value={episodeDraft.synopsis} onChange={(event) => setEpisodeDraft({ ...episodeDraft, synopsis: event.target.value })} placeholder={t("drama.episodeSynopsisPlaceholder")} /></label>
                     <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.episodeFullPlot")}</span><Input.TextArea autoSize={{ minRows: 8, maxRows: 18 }} value={episodeDraft.fullPlot} onChange={(event) => setEpisodeDraft({ ...episodeDraft, fullPlot: event.target.value })} placeholder={t("drama.episodeFullPlotPlaceholder")} /></label>
+                    {!episodeDraft.id && <div className="flex items-center justify-between rounded-lg border border-stone-200 px-3 py-3 dark:border-stone-800"><span className="text-sm text-stone-500 dark:text-stone-400">{t("drama.withCanvas")}</span><Switch checked={Boolean(episodeDraft.withCanvas)} onChange={(value) => setEpisodeDraft({ ...episodeDraft, withCanvas: value })} /></div>}
                     <div className="rounded-lg border border-stone-200 px-3 py-3 text-sm text-stone-500 dark:border-stone-800 dark:text-stone-400">{episodeDraft.canvasId ? t("drama.legacyEpisodeCanvasBound", { name: projects.find(project => project.id === episodeDraft.canvasId)?.title || episodeDraft.canvasId }) : t("drama.sceneCanvasWorkflowHint")}</div>
                 </div> : null}
             </Modal>

@@ -1,3 +1,4 @@
+import { useCanvasHost } from "@/lib/canvas/canvas-host";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 
 type ImageSize = { width: number; height: number };
@@ -8,6 +9,8 @@ const zoomStep = 1.2;
 const viewportPadding = 16;
 
 export function useImageEditorViewport(image: ImageSize | null, open: boolean) {
+    const canvasActive = useCanvasHost()?.active ?? true;
+    const canvasActiveRef = useRef(canvasActive); canvasActiveRef.current = canvasActive;
     const viewportNodeRef = useRef<HTMLDivElement>(null);
     const stageRef = useRef<HTMLDivElement>(null);
     const panRef = useRef<{ pointerId: number; x: number; y: number; scrollLeft: number; scrollTop: number } | null>(null);
@@ -36,6 +39,7 @@ export function useImageEditorViewport(image: ImageSize | null, open: boolean) {
             setSpacePressed(false);
         };
         const handleKeyDown = (event: KeyboardEvent) => {
+            if (!canvasActiveRef.current) return;
             if (event.code !== "Space" || event.repeat) return;
             const target = event.target instanceof Element ? event.target : null;
             if (target?.closest("input,textarea,[contenteditable='true']")) return;

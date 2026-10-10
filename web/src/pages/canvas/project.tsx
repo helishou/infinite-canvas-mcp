@@ -8,7 +8,7 @@ import { viewportForCanvasNodes } from "@/lib/canvas/canvas-navigation";
 import { createCanvasGraphIndexSelector } from "@/lib/canvas/canvas-graph-index";
 import { lazy, Suspense, startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
-import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { ExternalLink, Group, History, MessageSquare, Pencil, Video } from "lucide-react";
 import { isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { productionImageInput } from "@basketikun/canvas-agent/reference-contract";
@@ -110,6 +110,7 @@ import { getNodeDefinition, isBuiltinNodeType as isBuiltinType, useNodeRegistryV
 import { registerBuiltinNodes } from "@/components/canvas/nodes/builtin-nodes";
 import { CanvasRefreshShell } from "@/components/canvas/canvas-refresh-shell";
 import { CanvasTopBar } from "@/components/canvas/canvas-top-bar";
+import { useCanvasHost, useCanvasRoute } from "@/lib/canvas/canvas-host";
 
 const CanvasNodeAngleDialog = lazy(() => import("@/components/canvas/canvas-node-angle-dialog").then((module) => ({ default: module.CanvasNodeAngleDialog })));
 const CanvasNodeCropDialog = lazy(() => import("@/components/canvas/canvas-node-crop-dialog").then((module) => ({ default: module.CanvasNodeCropDialog })));
@@ -389,7 +390,7 @@ export default function CanvasPage() {
 
     if (!mounted) return <CanvasRefreshShell />;
 
-    return <InfiniteCanvasPage key={id} />;
+    return <CanvasSurface key={id} projectId={id || ""} />;
 }
 
 type OrderedGroupDropPreview = { groupId: string; draggedId: string; drop: NonNullable<ReturnType<typeof orderedGroupDropTarget>> };
@@ -408,18 +409,21 @@ function findOrderedGroupDrop(nodes: CanvasNodeData[], point: Position) {
     return drop ? { group, drop } : null;
 }
 
-function InfiniteCanvasPage() {
+export function CanvasSurface({ projectId }: { projectId: string }) {
     const { message, modal } = App.useApp();
     const { t } = useTranslation();
     const copyText = useCopyText();
     const { exportCanvasProjects: runCanvasExport, exporting, busy: canvasTransferBusy } = useExportCanvas();
     // Subscribe to the registry version so plugin registration changes rerender the canvas.
     const nodeRegistryVersion = useNodeRegistryVersion((state) => state.version);
-    const params = useParams<{ id: string }>();
-    const navigate = useNavigate();
-    const [searchParams] = useSearchParams();
-    const location = useLocation();
-    const projectId = params.id || "";
+    const canvasHost = useCanvasHost();
+    const { navigate, search: searchParams, navigationKey, active } = useCanvasRoute();
+    const activeRef = useRef(active); activeRef.current = active;
+    useEffect(() => {
+        if (active) return;
+        containerRef.current?.querySelectorAll<HTMLMediaElement>("video, audio").forEach(media => media.pause());
+        if (focusAnimRef.current) { cancelAnimationFrame(focusAnimRef.current); focusAnimRef.current = null; }
+    }, [active]);
     useCanvasProductionContext(projectId);
     const productionContext = useProductionWorkspaceStore(state => state.context);
     const productionRecord = useProductionWorkspaceStore(state => state.production);
@@ -864,6 +868,7 @@ function InfiniteCanvasPage() {
 
         const updateSize = () => {
             const rect = el.getBoundingClientRect();
+            if (!activeRef.current || rect.width <= 0 || rect.height <= 0) return;
             canvasRectRef.current = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
             setSize({ width: rect.width, height: rect.height });
             if (!didInitialCenterRef.current) {
@@ -1717,6 +1722,7 @@ function InfiniteCanvasPage() {
     useEffect(() => {
         if (!refPickActive) return;
         const exit = (event: KeyboardEvent) => {
+            if (!activeRef.current) return;
             if (event.key !== "Escape") return;
             event.preventDefault();
             event.stopImmediatePropagation();
@@ -1974,6 +1980,7 @@ function InfiniteCanvasPage() {
         setContextMenu(null);
     }, []);
     const focusNode = useCallback((nodeId: string, options?: { automatic: boolean }) => {
+        if (!activeRef.current) return;
         const node = nodesRef.current.find((item) => item.id === nodeId);
         if (!node) return;
         if (!options?.automatic) {
@@ -2019,8 +2026,8 @@ function InfiniteCanvasPage() {
         })?.id || "" : "";
         const targetNodeId = nodeId || segmentNodeId;
         // A new navigation can explicitly select the same target after the user has deselected it.
-        const key = `${location.key}:${projectId}:${targetNodeId}:${requestedSegmentId}`;
-        if (!projectLoaded || !targetNodeId || deepLinkFocusRef.current === key || !nodes.some((node) => node.id === targetNodeId)) return;
+        const key = `${navigationKey}:${projectId}:${targetNodeId}:${requestedSegmentId}`;
+        if (!active || !projectLoaded || !targetNodeId || deepLinkFocusRef.current === key || !nodes.some((node) => node.id === targetNodeId)) return;
         deepLinkFocusRef.current = key;
         focusNode(targetNodeId, { automatic: true });
         if (requestedSegmentId) {
@@ -2028,7 +2035,7 @@ function InfiniteCanvasPage() {
             view.update({ selectedSegmentId: requestedSegmentId, h3FocusRequest: Number(view.getSnapshot().h3FocusRequest || 0) + 1 });
             h3FocusTicketRef.current = { nodeId: targetNodeId, requestId: Number(view.getSnapshot().h3FocusRequest), epoch: focusEpochRef.current };
         }
-    }, [focusNode, location.key, nodes, projectId, projectLoaded, searchParams]);
+    }, [active, focusNode, navigationKey, nodes, projectId, projectLoaded, searchParams]);
 
     useEffect(() => () => void (focusAnimRef.current && cancelAnimationFrame(focusAnimRef.current)), []);
 
@@ -2186,7 +2193,7 @@ function InfiniteCanvasPage() {
         const segmentId = getPluginNodeView(projectId, nodeId).getSnapshot().selectedSegmentId;
         const clip = production?.draft.clipGroups.find(group => group.nodeId === nodeId && (!segmentId || group.segmentId === segmentId));
         const target = shotId ? `shot:${shotId}` : asset ? `asset:${asset[0]}` : clip ? `segment:${clip.id}` : "";
-        if (target && searchParams.get("target") !== target) {
+        if (!canvasHost && target && searchParams.get("target") !== target) {
             const query = new URLSearchParams(searchParams);
             query.set("target", target); query.set("workspace", clip && !asset ? "production" : shotId ? "shots" : "assets");
             query.delete("nodeId"); query.delete("segmentId");
@@ -2767,6 +2774,7 @@ function InfiniteCanvasPage() {
             finishNodeDrag();
             if (!finishCtrlGroupMarquee(undefined, undefined, true)) finishSelectionBox();
         };
+        if (!active) { cancelNodeDrag(); setConnecting(null); return; }
         window.addEventListener("mousemove", handleGlobalMouseMove);
         window.addEventListener("mouseup", handleGlobalMouseUp);
         window.addEventListener("pointerup", handlePointerUp);
@@ -2786,7 +2794,7 @@ function InfiniteCanvasPage() {
             connectionPreviewRafRef.current = null;
             connectionPreviewPointerRef.current = null;
         };
-    }, [finishCtrlGroupMarquee, finishNodeDrag, finishSelectionBox, handleGlobalMouseMove, handleGlobalPointerMove, handleGlobalMouseUp]);
+    }, [active, finishCtrlGroupMarquee, finishNodeDrag, finishSelectionBox, handleGlobalMouseMove, handleGlobalPointerMove, handleGlobalMouseUp, setConnecting]);
 
     const createImageFileNode = useCallback(async (file: File, position: Position) => {
         if (isSvgFile(file) && getNodeDefinition("svg:vector")) {
@@ -3162,6 +3170,7 @@ function InfiniteCanvasPage() {
 
     useEffect(() => {
         const handlePaste = (event: ClipboardEvent) => {
+            if (!activeRef.current) return;
             const target = event.target instanceof Element ? event.target : null;
             if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || target?.closest("[contenteditable='true'],[data-canvas-no-zoom],[data-canvas-shortcuts-ignore]")) return;
             const data = event.clipboardData;
@@ -3198,6 +3207,7 @@ function InfiniteCanvasPage() {
             });
         };
         const handleKeyDown = (event: KeyboardEvent) => {
+            if (!activeRef.current) return;
             const target = event.target instanceof Element ? event.target : null;
             const key = event.key.toLowerCase();
             const isModifierShortcut = event.metaKey || event.ctrlKey;
@@ -4039,6 +4049,7 @@ function InfiniteCanvasPage() {
     useEffect(() => {
         if (!characterImagePickerActive) return;
         const exit = (event: KeyboardEvent) => {
+            if (!activeRef.current) return;
             if (event.key !== "Escape") return;
             event.preventDefault();
             event.stopImmediatePropagation();
@@ -4051,6 +4062,7 @@ function InfiniteCanvasPage() {
     useEffect(() => {
         if (!sceneImagePickerActive) return;
         const exit = (event: KeyboardEvent) => {
+            if (!activeRef.current) return;
             if (event.key !== "Escape") return;
             event.preventDefault();
             event.stopImmediatePropagation();
@@ -5978,12 +5990,14 @@ function InfiniteCanvasPage() {
                 </Button>
             </div>
         );
+    const missingTarget = active && projectLoaded && (searchParams.get("nodeId") ? !nodes.some(node => node.id === searchParams.get("nodeId")) : searchParams.get("segmentId") ? !nodes.some(node => Array.isArray(node.metadata?.segments) && (node.metadata.segments as Array<{ id: string }>).some(segment => segment.id === searchParams.get("segmentId"))) : false);
     if (!projectLoaded) return <CanvasRefreshShell />;
 
     return (
         <main className="flex h-full min-h-0 overflow-hidden" style={{ background: theme.canvas.background, color: theme.node.text }}>
             <CanvasSidePanel onSelectionChange={selectCanvasNodes} projectId={projectId} nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNode} onPreviewNode={setPreviewNodeId} onInsertAsset={handleAssetInsert} />
             <section className="relative min-w-0 flex-1 overflow-hidden">
+                {missingTarget && <p role="status" className="absolute left-4 top-14 z-20 rounded bg-background px-3 py-2 text-xs text-muted-foreground">{t("director.canvasOverlay.targetMissing")}</p>}
                 <CanvasTopBar
                     title={currentProject?.title || t("canvas.projectPage.untitledCanvas")}
                     titleDraft={titleDraft}
@@ -5994,8 +6008,8 @@ function InfiniteCanvasPage() {
                     onCancelTitleEditing={() => setTitleEditing(false)}
                     canUndo={historyState.canUndo}
                     canRedo={historyState.canRedo}
-                    onHome={() => navigate("/")}
-                    onProjects={() => navigate("/canvas")}
+                    onHome={() => canvasHost ? canvasHost.collapse() : navigate("/")}
+                    onProjects={() => canvasHost ? canvasHost.collapse() : navigate("/canvas")}
                     onCreateProject={createAndOpenProject}
                     onDeleteProject={deleteCurrentProject}
                     onExportProject={exportCurrentProject}

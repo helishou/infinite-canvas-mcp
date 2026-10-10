@@ -6,7 +6,7 @@ import { Activity, ArrowLeft, Clapperboard, ExternalLink, FileText, Image, ListC
 import localforage from "localforage";
 import { nanoid } from "nanoid";
 import { useTranslation } from "react-i18next";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams, createSearchParams } from "react-router-dom";
 import { directorModules, isSubjectPromptAssembly, productionSceneEntries, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 import { backendConnection } from "@/lib/backend-connection";
 import { ensureCanvasDraftLease, getCanvasDraftSessionId } from "@/lib/canvas/canvas-draft-session";
@@ -15,6 +15,8 @@ import { ACHENG_CANVAS_LANGUAGE_RULE } from "@/lib/agent/creative-launch";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
+import { useWorkbenchCanvas, useCanvasHost } from "@/lib/canvas/canvas-host";
+import { WorkbenchCanvas } from "./workbench-canvas";
 import { startSingleFlightPoller } from "@/lib/single-flight-poll";
 import { productionObjectPath, type ProductionObject } from "@/lib/production-object";
 import { applyBackendCanvasEvent, useCanvasStore } from "@/stores/canvas/use-canvas-store";
@@ -121,13 +123,23 @@ function SeriesSetupWorkbench({ dramaId, onEpisodesChanged }: { dramaId: string;
   </main>;
 }
 
-export function ProductionEditor({ owner, embedded = false, dialog = false, series, onSeriesEpisodesChanged }: { owner?: ProductionCanvasContext["owner"]; embedded?: boolean; dialog?: boolean; series?: { id: string; episodes: DramaEpisode[] }; onSeriesEpisodesChanged?: () => void }) {
+type ProductionEditorProps = { owner?: ProductionCanvasContext["owner"]; embedded?: boolean; dialog?: boolean; series?: { id: string; episodes: DramaEpisode[] }; onSeriesEpisodesChanged?: () => void };
+export function ProductionEditor(props: ProductionEditorProps) {
+  const params = useParams();
+  if (props.embedded) return <ProductionEditorContent {...props} />;
+  return <WorkbenchCanvas key={`${props.owner?.kind || ""}:${props.owner?.id || params.episodeId || params.projectId || ""}`}><ProductionEditorContent {...props} /></WorkbenchCanvas>;
+}
+function ProductionEditorContent({ owner, embedded = false, dialog = false, series, onSeriesEpisodesChanged }: ProductionEditorProps) {
+  const canvasHost = useWorkbenchCanvas();
+  const surfaceHost = useCanvasHost();
   const params = useParams();
   const seriesName = useCanvasStore(state => state.folders.find(folder => folder.id === series?.id)?.name);
   const episodeId = owner?.kind === "episode" ? owner.id : owner ? "" : params.episodeId || "";
   const projectId = owner?.kind === "canvas" ? owner.id : owner ? "" : params.projectId || "";
   const contextProjectId = projectId;
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [routeSearchParams, routeSetSearchParams] = useSearchParams();
+  const searchParams = embedded && surfaceHost ? surfaceHost.search : routeSearchParams;
+  const setSearchParams: typeof routeSetSearchParams = embedded && surfaceHost ? (next, options) => surfaceHost.navigate({ search: createSearchParams(typeof next === "function" ? next(searchParams) : next).toString() }, options) : routeSetSearchParams;
   const returnToDramas = searchParams.get("from") === "dramas" || Boolean(episodeId);
   const backPath = returnToDramas ? "/production" : "/director";
   const target = useMemo<ProductionTarget>(() => projectId ? { projectId } : episodeId, [projectId, episodeId]);
@@ -1142,7 +1154,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false, seri
     <div className="mx-auto max-w-[1440px]">
       {!embedded && <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3"><Button type="text" icon={<ArrowLeft className="size-4" />} onClick={() => navigate(backPath)}>{t("director.back")}</Button><div><h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{series ? seriesName || t("director.atomic.seriesWorkbench") : title || t("director.title")}</h1><p className="mt-1 text-xs text-muted-foreground">{episode ? `${t("director.episodeContext", { number: episode.episodeNumber })} · ${title}` : t("director.canvasContext")}</p></div></div>
-        <div className="flex flex-wrap items-center gap-2">{series && <Select aria-label={t("director.atomic.chooseEpisode")} value={episodeId} className="min-w-44" showSearch optionFilterProp="label" options={[...series.episodes].sort((a, b) => a.episodeNumber - b.episodeNumber).map(item => ({ value: item.id, label: `${t("drama.episodeLabel", { number: item.episodeNumber })} · ${item.title}` }))} onChange={id => navigate(dramaWorkbenchPath(series.id, id, workspace))} />}<span className="text-xs text-muted-foreground">{t(Object.keys(sourceDrafts).length ? "director.studio.localDraft" : "director.studio.saved")}</span>{production.publishedVersion > 0 && <Tag>{t("director.studio.published", { number: production.publishedVersion })}</Tag>}{canvasId && <Button icon={<ExternalLink className="size-4" />} onClick={() => navigate(`/canvas/${encodeURIComponent(canvasId)}`)}>{t("drama.production.openCanvas")}</Button>}</div>
+        <div className="flex flex-wrap items-center gap-2">{series && <Select aria-label={t("director.atomic.chooseEpisode")} value={episodeId} className="min-w-44" showSearch optionFilterProp="label" options={[...series.episodes].sort((a, b) => a.episodeNumber - b.episodeNumber).map(item => ({ value: item.id, label: `${t("drama.episodeLabel", { number: item.episodeNumber })} · ${item.title}` }))} onChange={id => navigate(dramaWorkbenchPath(series.id, id, workspace))} />}<span className="text-xs text-muted-foreground">{t(Object.keys(sourceDrafts).length ? "director.studio.localDraft" : "director.studio.saved")}</span>{production.publishedVersion > 0 && <Tag>{t("director.studio.published", { number: production.publishedVersion })}</Tag>}{canvasId && <Button icon={<ExternalLink className="size-4" />} onClick={() => canvasHost ? canvasHost.hasCanvas ? canvasHost.restoreCanvas() : canvasHost.openCanvas({ projectId: canvasId }) : navigate(`/canvas/${encodeURIComponent(canvasId)}`)}>{t(canvasHost?.hasCanvas ? "director.canvasOverlay.expand" : "drama.production.openCanvas")}</Button>}</div>
       </div>}
       {agentError && <Alert className="mb-4" type="warning" showIcon message={agentError} closable onClose={() => setAgentError("")} />}
       {(remoteRevision !== null || showCommandNotice) && <div className="mb-4 text-sm">{remoteRevision !== null && <p>{t("drama.production.conflictDetail", { number: remoteRevision })}</p>}{pendingNotice}</div>}
@@ -1175,6 +1187,7 @@ export function ProductionEditor({ owner, embedded = false, dialog = false, seri
               onBoundary={setBoundary} onReview={reviewAsset} onPublish={() => void publish()} onSaveContinuity={saveContinuity} onPreviewContinuityUpgrade={previewContinuityUpgrade} onCheckContinuity={checkContinuity} onContinuitySnapshot={changeContinuitySnapshot}
               onReplace={value => void replaceDirector(value)} onAskDirector={scope => void askDirector(scope)} onRequestContinuityUpgrade={requestContinuityUpgradeFromAgent} onNavigate={navigateWorkspace}
               onLocateTarget={(kind, id) => {
+                if (kind === "shot") { navigateWorkspace("shots", { kind, id }); return; }
                 const group = production.draft.clipGroups.find(group => group.id === id);
                 const frame = production.draft.keyframes[id];
                 const assetId = kind === "keyframe" || kind === "frame" ? production.draft.director?.shotInputs[id]?.keyframeAssetId : id;
@@ -1182,7 +1195,9 @@ export function ProductionEditor({ owner, embedded = false, dialog = false, seri
                 if (!nodeId) { navigateWorkspace(kind === "segment" ? "production" : kind === "frame" || kind === "keyframe" ? "shots" : "assets", { kind: kind === "keyframe" || kind === "frame" ? "shot" : kind, id }); return; }
                 const object: ProductionObject = { owner: owner || productionOwner, canvasId, workspace: kind === "segment" ? "production" : kind === "frame" || kind === "keyframe" ? "shots" : "assets", targetKind: kind === "frame" || kind === "keyframe" ? "shot" : kind, targetId: id, nodeId, ...(kind === "segment" && group?.segmentId ? { segmentId: group.segmentId } : {}), title: id };
                 useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"));
-                navigate(productionObjectPath(object)); useAgentStore.getState().closePanel();
+                if (canvasHost) canvasHost.openCanvas({ projectId: canvasId, nodeId, segmentId: object.segmentId });
+                else navigate(productionObjectPath(object));
+                useAgentStore.getState().closePanel();
               }}
               onAnswerDecision={answerDecision}
               onExport={exportBundle} exporting={exporting}

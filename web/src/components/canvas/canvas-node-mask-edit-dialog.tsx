@@ -1,5 +1,5 @@
+import { CanvasPortal, useCanvasHost } from "@/lib/canvas/canvas-host";
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { createPortal } from "react-dom";
 import { Button, Input, Modal, Slider, Tooltip } from "antd";
 import { Brush, Eraser, ImagePlus, Redo2, RotateCcw, Undo2, WandSparkles, ZoomIn, ZoomOut } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -23,6 +23,8 @@ const maskOverlayColor = "#2563eb";
 const maskOverlayAlpha = 0.4;
 
 export function CanvasNodeMaskEditDialog({ dataUrl, open, onClose, onConfirm }: { dataUrl: string; open: boolean; onClose: () => void; onConfirm: (payload: CanvasImageMaskEditPayload) => void }) {
+    const canvasActive = useCanvasHost()?.active ?? true;
+    const canvasActiveRef = useRef(canvasActive); canvasActiveRef.current = canvasActive;
     const { t } = useTranslation();
     const maskCanvasRef = useRef<HTMLCanvasElement>(null);
     const previewCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -186,6 +188,7 @@ export function CanvasNodeMaskEditDialog({ dataUrl, open, onClose, onConfirm }: 
     useEffect(() => {
         if (!open) return;
         const handleKeyDown = (event: KeyboardEvent) => {
+            if (!canvasActiveRef.current) return;
             const target = event.target instanceof Element ? event.target : null;
             if (target?.closest("input,textarea,[contenteditable='true']")) return;
             const key = event.key.toLowerCase();
@@ -251,15 +254,14 @@ export function CanvasNodeMaskEditDialog({ dataUrl, open, onClose, onConfirm }: 
                     </div>
                 </div>
                 {brushPreview
-                    ? createPortal(
+                    ? <CanvasPortal>
                           <div
                               className={`pointer-events-none fixed z-[1100] rounded-full border-2 ${brushPreview.adjusting ? "border-[#fbbf24] bg-black/10" : "border-white/90 bg-black/5"} shadow-[0_0_0_1px_rgba(0,0,0,.8)]`}
                               style={{ left: brushPreview.x, top: brushPreview.y, width: Math.max(4, brushPreview.size * viewport.imageScale), aspectRatio: 1, transform: "translate(-50%, -50%)" }}
                           >
                               {brushPreview.adjusting ? <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded bg-black/75 px-1.5 py-0.5 text-xs font-semibold text-white">{brushSize}px</span> : null}
-                          </div>,
-                          document.body,
-                      )
+                          </div>
+                      </CanvasPortal>
                     : null}
 
                 <div className="flex min-h-[360px] flex-col gap-5">

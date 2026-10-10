@@ -133,6 +133,10 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         try { res.json({ ok: true, preview: service.previewContinuityUpgrade(req.params.episodeId, req.body) }); }
         catch (error) { handle(res, error); }
     });
+    router.post<Record<string, string>>(`${base}/subject-v2-upgrade`, (req, res) => {
+        try { res.json({ ok: true, production: service.upgradeSubjectV2(req.params.episodeId, req.body) }); }
+        catch (error) { handle(res, error); }
+    });
     if (base === "/drama/episodes/:episodeId/production") router.post("/canvas/production/hash", (req, res) => {
         try {
             const { source } = productionWorkspaceSchemas.production_hash_source.parse(req.body);

@@ -1,3 +1,4 @@
+import { useCanvasRoute } from "@/lib/canvas/canvas-host";
 import { useEffect, useState } from "react";
 import { App, Button, Dropdown, Input, Modal, Select, Tag } from "antd";
 import { ArrowLeft, Check, ChevronDown, Clapperboard, Pencil, Search, Settings2 } from "lucide-react";
@@ -19,7 +20,7 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { backendMediaUrl } from "@/services/backend-api";
 
 export function useCanvasProductionContext(projectId: string) {
-    const [query] = useSearchParams();
+    const { search: query } = useCanvasRoute();
     const { message } = App.useApp();
     const productionKind = query.get("productionKind"), productionId = query.get("productionId");
     useEffect(() => {
@@ -50,8 +51,8 @@ export function CanvasProductionToolbar() {
     const context = useProductionWorkspaceStore(state => state.context);
     const { t } = useTranslation();
     const { message } = App.useApp();
-    const navigate = useNavigate();
-    const [query] = useSearchParams();
+    const { navigate } = useCanvasRoute();
+    const { search: query } = useCanvasRoute();
     const theme = canvasThemes[useThemeStore(state => state.theme)];
     const [directoryOpen, setDirectoryOpen] = useState(false);
     const [filter, setFilter] = useState("");
@@ -116,8 +117,8 @@ export function CanvasProductionToolbar() {
 export function ProductionDirectory({ filter = "", onLocate }: { filter?: string; onLocate?: () => void } = {}) {
     const { context, production, readiness } = useProductionWorkspaceStore();
     const { t } = useTranslation();
-    const navigate = useNavigate();
-    const [query] = useSearchParams();
+    const { navigate } = useCanvasRoute();
+    const { search: query } = useCanvasRoute();
     const busy = useProductionWorkspaceStore(state => state.commandBusy);
     const canvasNodes = useCanvasStore(state => state.projects.find(project => project.id === context?.canvasId)?.nodes);
     if (!context?.owner || !production?.draft.director) return <div className="p-3 text-xs">{t("productionCanvas.ready")}</div>;
@@ -171,7 +172,7 @@ export function SharedAssetsPicker() {
     const { t } = useTranslation(); const { message } = App.useApp();
     const [assets, setAssets] = useState<ApprovedSharedAsset[]>([]), [updates, setUpdates] = useState<SharedAssetUpdate[]>([]);
     const [versions, setVersions] = useState<ApprovedSharedAsset[]>([]);
-    const [query] = useSearchParams();
+    const { search: query } = useCanvasRoute();
     const [assetId, setAssetId] = useState<string>(), [approvedId, setApprovedId] = useState<string>(), [busy, setBusy] = useState(false);
     const commandBusy = useProductionWorkspaceStore(state => state.commandBusy);
     const owner = context?.owner;

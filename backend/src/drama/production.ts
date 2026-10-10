@@ -51,6 +51,7 @@ import { resolveAchengEngine, resolveAchengRuntime } from "@basketikun/canvas-ag
 import { assertAchengSource, auditAchengContinuity, validateAchengSource, preflightCompilationDirector } from "@basketikun/canvas-agent/skills/acheng";
 import { schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch } from "@basketikun/canvas-agent/drama/production-validation";
 import { selectSmartImageResult } from "@basketikun/canvas-agent/reference-contract";
+import { convertDirectorSourceToSubjectV2 } from "./subject-v2-upgrade.js";
 
 import { directorHash, projectDirector, validateDirectorMedia, assertDirectorEngine } from "./director.js";
 import { DATA_DIR } from "../config.js";
@@ -2473,6 +2474,36 @@ export class EpisodeProductionService {
             }
             return { ...record, revision: record.revision + 1, draft, updatedAt: new Date().toISOString() };
         });
+    }
+
+    upgradeSubjectV2(id: string, raw: unknown): Record<string, any> {
+        const linked = this.linked(id); if (linked) return linked.service.upgradeSubjectV2(linked.id, raw);
+        const input = (raw || {}) as Record<string, unknown>;
+        const operationId = String(input.operationId || "");
+        const expectedRevision = Number(input.expectedRevision);
+        if (!operationId) throw new Error("SUBJECT_V2_UPGRADE_OPERATION_ID_REQUIRED: 必须提供稳定 operationId");
+        if (!Number.isInteger(expectedRevision) || expectedRevision < 0) throw new Error("SUBJECT_V2_UPGRADE_REVISION_REQUIRED: 必须提供当前 expectedRevision");
+        const requestHash = fingerprint({ owner: { kind: this.ownerKind, id }, op: "subject-v2-upgrade" });
+        const upgradeNotes: string[] = [];
+        const receipt = this.commit(id, operationId, expectedRevision, requestHash, record => {
+            const director = record.draft.director;
+            if (!director) throw new Error("CONTINUITY_SOURCE_MISSING: 缺少正式 Acheng 制作稿");
+            if ((director.source as any).prompt_assembly?.version === 2) throw new Error("SUBJECT_SOURCE_ALREADY_V2: 源稿已经是 Subject Prompt v2");
+            const activeRuns = this.continuityUpgradeActiveRuns(id);
+            if (activeRuns.length) throw new Error(`CONTINUITY_UPGRADE_WAIT: 活动生成任务仍在占用版本：${activeRuns.map(run => run.runId).join(", ")}`);
+            const { source, notes, issues } = convertDirectorSourceToSubjectV2(id, director.source as Record<string, any>);
+            if (issues.length) throw new Error(`SUBJECT_V2_UPGRADE_INVALID: 迁移结果未通过 v2 合同校验：${JSON.stringify(issues.slice(0, 6))}`);
+            const runtime = resolveAchengEngine();
+            director.source = source;
+            director.engine = { commit: runtime.commit, patchVersion: runtime.patchVersion, runtimeId: runtime.runtimeId, version: runtime.version };
+            director.sourceHash = directorHash(source);
+            director.executionAuthorized = false;
+            director.artifacts = director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));
+            projectDirector(record.draft);
+            upgradeNotes.push(...notes);
+            return { ...record, revision: record.revision + 1, updatedAt: new Date().toISOString() };
+        });
+        return { ...receipt, notes: upgradeNotes };
     }
 
     private patchDirectorSource(director: NonNullable<EpisodeProductionData["director"]>, entity: keyof typeof directorPatchFields, id: string | undefined, patch: Record<string, unknown>) {

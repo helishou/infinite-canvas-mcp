@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
-import { createPortal } from "react-dom";
+import { CanvasPortal, useCanvasTransientEscape } from "@/lib/canvas/canvas-host";
 import { Settings2 } from "lucide-react";
 import { Button, InputNumber } from "antd";
 import { useTranslation } from "react-i18next";
@@ -24,6 +24,7 @@ export function CanvasTextSettingsPopover({ config, onConfigChange, count, onCou
     const buttonRef = useRef<HTMLSpanElement>(null);
     const panelRef = useRef<HTMLDivElement>(null);
     const [open, setOpen] = useState(false);
+    useCanvasTransientEscape(open, () => setOpen(false));
     const [buttonRect, setButtonRect] = useState<DOMRect | null>(null);
 
     useEffect(() => {
@@ -90,7 +91,7 @@ function TextSettingsPortal({ buttonRect, panelRef, placement, theme, config, co
         color: theme.node.text,
     } as const;
 
-    return createPortal(
+    return <CanvasPortal>
         <div ref={panelRef} style={style} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
             <TextSettingsPanel config={config} onConfigChange={onConfigChange} theme={theme} />
             {onCountChange ? (
@@ -99,7 +100,5 @@ function TextSettingsPortal({ buttonRect, panelRef, placement, theme, config, co
                     <InputNumber className="w-full" min={1} max={15} precision={0} value={count} onChange={(value) => onCountChange(value || 1)} />
                 </div>
             ) : null}
-        </div>,
-        document.body,
-    );
+        </div></CanvasPortal>;
 }

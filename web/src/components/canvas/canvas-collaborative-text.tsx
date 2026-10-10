@@ -1,5 +1,5 @@
 import { useEffect, useImperativeHandle, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { createPortal } from "react-dom";
+import { CanvasPortal, useCanvasTransientEscape } from "@/lib/canvas/canvas-host";
 import { Compartment, EditorState, Prec } from "@codemirror/state";
 import { Decoration, EditorView, keymap, placeholder as placeholderExtension, ViewPlugin, WidgetType, type DecorationSet } from "@codemirror/view";
 import { autocompletion, completionKeymap, startCompletion } from "@codemirror/autocomplete";
@@ -354,9 +354,10 @@ function dialogueContextMenuExtension(openMenu: (menu: DialogueMenuState) => voi
 }
 
 function DialogueContextMenu({ menu, onClose, theme }: { menu: DialogueMenuState; onClose: () => void; theme: (typeof canvasThemes)[keyof typeof canvasThemes] }) {
+    useCanvasTransientEscape(true, onClose);
     // 画布节点容器带 transform（平移/缩放），祖先有 transform 时 position:fixed 会退化成相对该祖先定位，
     // 菜单会飞到左上角。portal 到 body 后 fixed 坐标恢复按视口解释。
-    return createPortal(<>
+    return <CanvasPortal><>
         <div style={{ position: "fixed", inset: 0, zIndex: 1099 }} onMouseDown={onClose} onContextMenu={(event) => { event.preventDefault(); onClose(); }} />
         <div style={{ position: "fixed", left: menu.x, top: menu.y, zIndex: 1100, minWidth: 128, maxWidth: 260, padding: 4, borderRadius: 8, border: `1px solid ${theme.toolbar.border}`, background: theme.toolbar.panel, boxShadow: "0 4px 16px rgba(0,0,0,.18)" }}>
             {menu.options.map((option) => (
@@ -372,7 +373,7 @@ function DialogueContextMenu({ menu, onClose, theme }: { menu: DialogueMenuState
                 </button>
             ))}
         </div>
-    </>, document.body);
+    </></CanvasPortal>;
 }
 
 class ReferenceChip extends WidgetType {

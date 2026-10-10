@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
-import { createPortal } from "react-dom";
+import { CanvasPortal, useCanvasTransientEscape } from "@/lib/canvas/canvas-host";
 import { Settings2 } from "lucide-react";
 import { Button } from "antd";
 import { useTranslation } from "react-i18next";
@@ -36,6 +36,7 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
     const buttonRef = useRef<HTMLSpanElement>(null);
     const panelRef = useRef<HTMLDivElement>(null);
     const [open, setOpen] = useState(false);
+    useCanvasTransientEscape(open, () => setOpen(false));
     const [buttonRect, setButtonRect] = useState<DOMRect | null>(null);
     const [workflowDetail, setWorkflowDetail] = useState<WorkflowDetail | null>(null);
     const workflowDetailRef = useRef<WorkflowDetail | null>(null);
@@ -255,7 +256,7 @@ function ImageSettingsPortal({
         color: theme.node.text,
     } as const;
 
-    return createPortal(
+    return <CanvasPortal>
         <div ref={panelRef} className="canvas-image-settings-popover" style={style} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
             <ImageSettingsPanel
                 config={config}
@@ -270,7 +271,5 @@ function ImageSettingsPortal({
                 workflowParamsBlockedByScenario={workflowParamsBlockedByScenario}
                 debugScenario={debugScenario}
             />
-        </div>,
-        document.body,
-    );
+        </div></CanvasPortal>;
 }

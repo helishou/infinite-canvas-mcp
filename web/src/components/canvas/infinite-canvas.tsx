@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useCanvasHost } from "@/lib/canvas/canvas-host";
 
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -26,6 +27,7 @@ type InfiniteCanvasProps = {
 };
 
 export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWriter, tool, backgroundMode = "lines", onViewportChange, onCanvasMouseDown, onCanvasDeselect, onCanvasDoubleClick, onContextMenu, onDrop, overlay, children }: InfiniteCanvasProps) {
+    const active = useCanvasHost()?.active ?? true;
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const transformRef = useRef<HTMLDivElement | null>(null);
     const gridRef = useRef<HTMLDivElement | null>(null);
@@ -85,6 +87,13 @@ export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWrit
     const [isSpacePressed, setIsSpacePressed] = useState(false);
     const [isControlPressed, setIsControlPressed] = useState(false);
     const [isPanning, setIsPanning] = useState(false);
+    useEffect(() => {
+        if (active) return;
+        flushPendingWheelViewport();
+        setIsSpacePressed(false); setIsControlPressed(false); setIsPanning(false);
+        panState.current.isPanning = false;
+        document.body.style.cursor = "";
+    }, [active, flushPendingWheelViewport]);
 
     useEffect(
         () => () => {
@@ -96,6 +105,7 @@ export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWrit
 
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
+            if (!active) return;
             if (event.key === "Control") setIsControlPressed(true);
             if (event.code !== "Space") return;
             const target = event.target instanceof Element ? event.target : null;
@@ -105,6 +115,7 @@ export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWrit
         };
 
         const handleKeyUp = (event: KeyboardEvent) => {
+            if (!active) return;
             if (event.code === "Space") {
                 const target = event.target instanceof Element ? event.target : null;
                 if (!(event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || target?.closest("[contenteditable='true']"))) event.preventDefault();
@@ -130,7 +141,7 @@ export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWrit
             window.removeEventListener("keyup", handleKeyUp);
             window.removeEventListener("blur", handleBlur);
         };
-    }, [flushPendingWheelViewport]);
+    }, [active, flushPendingWheelViewport]);
 
     const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
         const target = event.target instanceof Element ? event.target : null;

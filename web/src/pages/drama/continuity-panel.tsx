@@ -1,9 +1,11 @@
+import { subjectStateProjection } from "@basketikun/canvas-agent/drama/subject-assembly";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Input, message, Select, Switch, Tag } from "antd";
 import { useTranslation } from "react-i18next";
 import type { ProductionContinuity } from "@/services/backend-api";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { continuityPresentation } from "./continuity-presentation";
+import { records } from "./director-display";
 import { continuityEventAnchor, continuityEventFrame } from "./continuity-event-anchor";
 import { readContinuityLedgerDraft, rebaseContinuityLedger, continuityLedgerConflicts } from "./continuity-ledger-draft";
 
@@ -40,8 +42,8 @@ function BoundaryContinuityRow({ from, to, fromLabel, toLabel, boundary, disable
   </article>;
 }
 
-export function ContinuityPanel({ ledger: savedLedger, sourceHash, subjectAssembly = false, draftValue, onDraftChange, scenes, locations = [], shots, segments, boundaries, characters, assets, report, workId, agentThreadId, busy, editable, onSave, onPreviewUpgrade, onCheck, onLocate, onAskDirector, onRequestAgentUpgrade, onBoundary, onSnapshot }: {
-  ledger?: Row; sourceHash: string; scenes: Row[]; locations?: Row[]; shots: Row[]; segments: Row[]; boundaries: Row[]; characters: Row[]; assets: Row[]; report?: ProductionContinuity;
+export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subjectAssembly = false, draftValue, onDraftChange, scenes, locations = [], shots, segments, boundaries, characters, assets, report, workId, agentThreadId, busy, editable, onSave, onPreviewUpgrade, onCheck, onLocate, onAskDirector, onRequestAgentUpgrade, onBoundary, onSnapshot }: {
+  source?: Row; ledger?: Row; sourceHash: string; scenes: Row[]; locations?: Row[]; shots: Row[]; segments: Row[]; boundaries: Row[]; characters: Row[]; assets: Row[]; report?: ProductionContinuity;
   workId?: string; agentThreadId?: string;
   subjectAssembly?: boolean;
   draftValue?: string; onDraftChange?: (value: string | undefined) => void;
@@ -57,8 +59,17 @@ export function ContinuityPanel({ ledger: savedLedger, sourceHash, subjectAssemb
   const [sourceConflict, setSourceConflict] = useState(stable(retained.base) !== stable(formalLedger) && stable(retained.value) !== stable(formalLedger));
   const savedLedgerKey = savedLedger?.contract_version === 2 ? stable(savedLedger) : "legacy";
   const previousSource = useRef({ sourceHash, ledgerKey: savedLedgerKey });
-  const [activeView, setActiveView] = useState<"ledger" | "issues" | "timeline" | "boundaries">("ledger");
+  const [activeView, setActiveView] = useState<"objects" | "shots" | "ledger" | "issues" | "timeline" | "boundaries">("objects");
   const [ledgerCategory, setLedgerCategory] = useState("facts");
+  const [entryFocus, setEntryFocus] = useState("");
+  useEffect(() => {
+    if (activeView !== "ledger" || !entryFocus) return;
+    const frame = requestAnimationFrame(() => {
+      const entry = document.querySelector<HTMLElement>(`[data-continuity-entry-id="${CSS.escape(entryFocus)}"]`);
+      entry?.scrollIntoView({ block: "nearest" }); entry?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [activeView, ledgerCategory, entryFocus]);
   const [timelineId, setTimelineId] = useState("");
   const [selectedTimelineShot, setSelectedTimelineShot] = useState("");
   const [filterScene, setFilterScene] = useState("all");
@@ -259,7 +270,7 @@ export function ContinuityPanel({ ledger: savedLedger, sourceHash, subjectAssemb
   const entryCard = (collection: string, row: Row, index: number) => {
     const sourceId = String(row.source_anchor?.block_id || "");
     const title = collection === "facts" ? display.fact(row.id) : collection === "timelines" ? display.timeline(row.id) : collection === "coverage" ? display.scene(String(sourceBlocks.find(block => block.id === sourceId)?.sceneId || "")) : display.fact(row.fact_id);
-    return <article key={`${collection}:${row.id || index}`} className="min-w-0 rounded-xl border border-border p-4" data-continuity-entry={collection}>
+    return <article key={`${collection}:${row.id || index}`} className="min-w-0 rounded-xl border border-border p-4" data-continuity-entry={collection} data-continuity-entry-id={`${collection}:${row.id || index}`} tabIndex={-1}>
       <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-sm font-semibold">{title}</h4>{collection === "facts" ? <span className="text-xs text-muted-foreground">{t(`director.workspace.continuity.objectKindValue.${row.object_kind}`, { defaultValue: t("director.workspace.continuity.objectKindValue.asset") })}</span> : row.timeline_id ? <span className="text-xs text-muted-foreground">{display.timeline(row.timeline_id)}</span> : null}</div>
       {collection === "facts" && <><label className="mt-3 grid gap-1 text-xs"><span>{t("director.crud.factName")}</span><Input value={row.display_name || row.name || ""} disabled={busy || !editable || sourceConflict} onChange={event => setLedger(current => ({ ...current, facts: current.facts.map((fact: Row) => fact.id === row.id ? { ...fact, display_name: event.target.value } : fact) }))} /></label>
         {subjectAssembly && editable && <div className="mt-3 space-y-2">{(row.allowed_values || []).map((value: string) => <label key={value} className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.atomic.stateDescription", { value: display.value(row.id, value) })}</span><Input.TextArea value={row.value_descriptions?.[value] || ""} disabled={busy || sourceConflict} autoSize={{ minRows: 1, maxRows: 4 }} onChange={event => setLedger(current => ({ ...current, facts: current.facts.map((fact: Row) => fact.id === row.id ? { ...fact, value_descriptions: { ...fact.value_descriptions, [value]: event.target.value } } : fact) }))} /></label>)}</div>}
@@ -283,7 +294,36 @@ export function ContinuityPanel({ ledger: savedLedger, sourceHash, subjectAssemb
     {invalidLedgerDraft && <Alert type="warning" showIcon message={t("director.atomic.invalidDraft")} description={<details><summary>{t("director.atomic.reviewDraft")}</summary><pre className="max-h-48 overflow-auto whitespace-pre-wrap text-xs">{draftValue}</pre><Button disabled={busy} size="small" onClick={() => { baselineLedger.current = structuredClone(formalLedger); setLedger(structuredClone(formalLedger)); setInvalidLedgerDraft(false); setSourceConflict(false); onDraftChange?.(undefined); }}>{t("director.atomic.resetDraft")}</Button></details>} />}
     {!editable && <Alert type="info" showIcon message={t("director.workspace.continuity.publishedReadOnly")} />}
     {report?.report?.semanticDiscovery === "not_performed" && <p className="rounded-lg border border-border px-3 py-2 text-xs text-muted-foreground">{t("director.workspace.continuity.registeredCoverageOnly")}</p>}
-    <nav className="flex flex-wrap gap-2" aria-label={t("director.workspace.continuity.views")}>{(["ledger", "issues", "timeline", "boundaries"] as const).map(view => <Button key={view} size="small" type={activeView === view ? "primary" : "default"} onClick={() => setActiveView(view)}>{t(`director.workspace.continuity.view.${view}`)}{view === "issues" && issues.length > 0 ? ` · ${issues.length}` : ""}</Button>)}</nav>
+    <nav className="flex flex-wrap gap-2" aria-label={t("director.workspace.continuity.views")}>{(["objects", "shots", "timeline", "ledger", "issues", "boundaries"] as const).map(view => <Button key={view} size="small" type={activeView === view ? "primary" : "default"} onClick={() => setActiveView(view)}>{t(`director.workspace.continuity.view.${view}`)}{view === "issues" && issues.length > 0 ? ` · ${issues.length}` : ""}</Button>)}</nav>
+    {(activeView === "objects" || activeView === "shots") && <section className="space-y-4" data-continuity-readable>
+      <Select className="w-full sm:max-w-80" aria-label={t(activeView === "objects" ? "director.workspace.continuity.filterObject" : "director.workspace.continuity.filterTarget")} value={activeView === "objects" ? filterObject : filterTarget} options={[{ value: "all", label: t("director.studio.filter.all") }, ...(activeView === "objects" ? objectOptions : targetOptions)]} onChange={activeView === "objects" ? setFilterObject : setFilterTarget} />
+      <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="border-b border-border text-xs text-muted-foreground"><tr>{["objectProperty", "beforeChange", "eventDescription", "afterChange"].map(key => <th key={key} className="min-w-40 px-3 py-3 font-medium">{t("director.workspace.continuity." + key)}</th>)}</tr></thead><tbody>
+        {factRows.filter(fact => activeView !== "objects" || filterObject === "all" || String(fact.object_id) === filterObject).flatMap(fact => {
+          const events = records(ledger.events).filter(event => event.fact_id === fact.id && (activeView !== "shots" || filterTarget === "all" || event.shot_id === filterTarget || (segments.find(segment => segment.id === filterTarget)?.shot_ids || []).includes(event.shot_id))).sort((a, b) => continuityEventFrame(a, shots) - continuityEventFrame(b, shots));
+          if (activeView === "shots" && filterTarget !== "all") {
+            const ids = segments.find(segment => segment.id === filterTarget)?.shot_ids || [filterTarget];
+            const states = source ? subjectStateProjection({ ...source, ledger }) : {};
+            const held = ids.flatMap((shotId: string) => {
+              const state = states[shotId], start = state?.start.find(row => row.factId === fact.id), end = state?.end.find(row => row.factId === fact.id);
+              if (!start && !end) return [];
+              const changes = events.filter(event => event.shot_id === shotId);
+              return [{ id: `state:${shotId}:${fact.id}`, timeline_id: shots.find(shot => shot.id === shotId)?.timeline_id, shot_id: shotId, before: start?.value, after: end?.value, reason: changes.map(event => event.reason || event.description).filter(Boolean).join("；") || t("director.workspace.continuity.heldState"), local_frame: 0 }];
+            });
+            if (held.length) events.splice(0, events.length, ...held);
+            else if (!events.length) return [];
+          }
+          const rows: Row[] = events.length ? events : records(ledger.initial).filter(row => row.fact_id === fact.id).map(row => ({ ...row, before: row.value, after: row.value, initial: true }));
+          if (!rows.length) rows.push({ initial: true });
+          return rows.map((event, index) => <tr key={`${fact.id}:${event.id || index}`} className="border-b border-border align-top"><td className="px-3 py-3"><button type="button" className="text-left font-medium hover:text-primary" onClick={() => { setActiveView("ledger"); setLedgerCategory("facts"); setEntryFocus(`facts:${fact.id}`); }}>{display.fact(fact.id)}</button><p className="mt-1 text-xs text-muted-foreground">{display.timeline(event.timeline_id)}</p></td><td className="px-3 py-3">{display.value(fact.id, event.before)}</td><td className="px-3 py-3"><button type="button" className="text-left hover:text-primary" onClick={() => { setActiveView("ledger");
+            const original = records(ledger.events).find(row => row.id === event.id || row.fact_id === fact.id && row.shot_id === event.shot_id);
+            const collection = original ? "events" : "initial";
+            const rows = records(ledger[collection]), row = original || rows.find(row => row.fact_id === fact.id && (!event.timeline_id || row.timeline_id === event.timeline_id));
+            setLedgerCategory(collection); if (row) setEntryFocus(`${collection}:${row.id || rows.indexOf(row)}`);
+          }}>{event.reason || event.description || t(event.initial ? "director.workspace.continuity.initialValue" : "director.workspace.continuity.openEvent")}</button>{event.shot_id && <button type="button" className="mt-1 block text-xs text-primary" onClick={() => onLocate("shot", event.shot_id)}>{display.target(event.shot_id)} · {t("director.workspace.continuity.atFrame", { frame: continuityEventFrame(event, shots) })}</button>}</td><td className="px-3 py-3">{display.value(fact.id, event.after)}</td></tr>);
+        })}
+      </tbody></table></div>
+      {!factRows.length && <p className="text-sm text-muted-foreground">{t("director.atomic.noState")}</p>}
+    </section>}
     {activeView === "ledger" && <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3"><p className="text-sm text-muted-foreground">{t("director.workspace.continuity.readableLedgerHint")}</p>{!legacy && editable && <Button type="primary" disabled={busy || sourceConflict || invalidLedgerDraft} onClick={saveLedger}>{t("director.workspace.continuity.saveLedger")}</Button>}</div>
       <nav className="flex flex-wrap gap-1" aria-label={t("director.workspace.continuity.registeredEntries")}>{ledgerSections.map(({ collection, rows }) => <Button key={collection} type="text" size="small" className={ledgerCategory === collection ? "bg-muted font-medium" : "text-muted-foreground"} aria-pressed={ledgerCategory === collection} onClick={() => setLedgerCategory(collection)}>{t(`director.workspace.continuity.entryType.${collection}`)} <span className="ml-1 text-muted-foreground">{rows.length}</span></Button>)}</nav>

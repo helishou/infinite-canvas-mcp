@@ -8,6 +8,7 @@ test("story beats show scoped authored action instead of repeated abstract goals
  assert.deepEqual(cards[0].repeatedFields, ["goal"]);
  assert.deepEqual(beats, before);
  assert.equal(storyBeatCards(beats, "B")[0].text, "张伟签下契约。");
+ assert.deepEqual(storyBeatCards([{ goal: "The speaking character pursues the explicit action or information in the source line." }, { goal: "The speaking character pursues the explicit action or information in the source line." }]).map(card => card.text), ["", ""]);
 });
 
 
