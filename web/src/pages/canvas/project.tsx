@@ -6436,8 +6436,6 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 {isMiniMapOpen ? <Minimap nodes={nodes} viewport={viewport} viewportSize={size} onViewportChange={commitViewport} /> : null}
 
                 <CanvasZoomControls onFitAll={fitAllNodes} scale={viewport.k} onScaleChange={setZoomScale} onReset={resetViewport} isMiniMapOpen={isMiniMapOpen} onToggleMiniMap={() => setIsMiniMapOpen((value) => !value)} />
-                <Suspense fallback={null}>{generationLogsOpen ? <CanvasGenerationLogDialog open projectId={projectId} onClose={() => setGenerationLogsOpen(false)} /> : null}</Suspense>
-                <Suspense fallback={null}>{objectHistory && <CanvasGenerationLogDialog open projectId={objectHistory.canvasId} nodeId={objectHistory.nodeId} segmentId={objectHistory.segmentId} objectTitle={objectHistory.clipIndex ? t("productionCanvas.clip", { number: objectHistory.clipIndex }) : objectHistory.title} currentStorageKey={String(productionRecord && nodes.find(node => node.id === objectHistory.nodeId) ? productionObjectState(productionRecord, objectHistory, nodes.find(node => node.id === objectHistory.nodeId)!).storageKey || "" : "")} onSelectResult={(log, output) => window.dispatchEvent(new CustomEvent("production-node-action", { detail: { owner: objectHistory.owner, object: objectHistory, action: "select-result", history: { generationLogId: log.id, storageKey: output.storageKey, mimeType: output.mimeType } } }))} onClose={() => setObjectHistory(null)} />}</Suspense>
 
                 {contextMenu ? (
                     <CanvasNodeContextMenu
@@ -6501,19 +6499,21 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
 
                 <CanvasDialogHost>
                     <CanvasNodeInfoModal key="node-info" node={infoNode} open={Boolean(infoNode)} onClose={() => setInfoNodeId(null)} onRename={handleNodeTitleChange} />
+                    {generationLogsOpen ? <CanvasGenerationLogDialog key="generation-logs" open projectId={projectId} onClose={() => setGenerationLogsOpen(false)} /> : null}
+                    {objectHistory ? <CanvasGenerationLogDialog key="object-history" open projectId={objectHistory.canvasId} nodeId={objectHistory.nodeId} segmentId={objectHistory.segmentId} objectTitle={objectHistory.clipIndex ? t("productionCanvas.clip", { number: objectHistory.clipIndex }) : objectHistory.title} currentStorageKey={String(productionRecord && nodes.find(node => node.id === objectHistory.nodeId) ? productionObjectState(productionRecord, objectHistory, nodes.find(node => node.id === objectHistory.nodeId)!).storageKey || "" : "")} onSelectResult={(log, output) => window.dispatchEvent(new CustomEvent("production-node-action", { detail: { owner: objectHistory.owner, object: objectHistory, action: "select-result", history: { generationLogId: log.id, storageKey: output.storageKey, mimeType: output.mimeType } } }))} onClose={() => setObjectHistory(null)} /> : null}
                     {pluginManagerOpen ? <CanvasPluginManagerModal key="plugin-manager" open onClose={() => setPluginManagerOpen(false)} /> : null}
 
                     {cropNode && imageToolUrl?.nodeId === cropNode.id ? <CanvasNodeCropDialog key="crop" dataUrl={imageToolUrl.url} open onClose={() => setCropNodeId(null)} onConfirm={(crop) => void cropImageNode(cropNode, crop)} /> : null}
 
                     {maskEditNode && imageToolUrl?.nodeId === maskEditNode.id ? (
-                    <CanvasNodeMaskEditDialog key="mask-edit" dataUrl={imageToolUrl.url} open onClose={() => setMaskEditNodeId(null)} onConfirm={(payload) => void maskEditImageNode(maskEditNode, payload)} />
-                ) : null}
+                        <CanvasNodeMaskEditDialog key="mask-edit" dataUrl={imageToolUrl.url} open onClose={() => setMaskEditNodeId(null)} onConfirm={(payload) => void maskEditImageNode(maskEditNode, payload)} />
+                    ) : null}
 
                     {splitNode && imageToolUrl?.nodeId === splitNode.id ? <CanvasNodeSplitDialog key="split" dataUrl={imageToolUrl.url} open onClose={() => setSplitNodeId(null)} onConfirm={(params) => void splitImageNode(splitNode, params)} /> : null}
 
                     {upscaleNode && imageToolUrl?.nodeId === upscaleNode.id ? (
-                    <CanvasNodeUpscaleDialog key="upscale" dataUrl={imageToolUrl.url} open onClose={() => setUpscaleNodeId(null)} onConfirm={(params) => void upscaleImageNode(upscaleNode, params)} />
-                ) : null}
+                        <CanvasNodeUpscaleDialog key="upscale" dataUrl={imageToolUrl.url} open onClose={() => setUpscaleNodeId(null)} onConfirm={(params) => void upscaleImageNode(upscaleNode, params)} />
+                    ) : null}
 
                 <Modal key="super-resolve" title={t("canvas.projectPage.superResolve")} open={Boolean(superResolveNode && canvasNodeImage(superResolveNode))} centered footer={null} onCancel={() => setSuperResolveNodeId(null)}>
                     <div className="py-8 text-center text-base font-medium">{t("canvas.projectPage.notImplemented")}</div>
