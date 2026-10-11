@@ -41,6 +41,11 @@ test("purpose and reference policy examples repair the same pinned source withou
         const result = preflightCompilationDirector(input);
         const issue = result.diagnostics.find(item => field === "purpose" ? item.path.endsWith(".purpose") : item.message.includes("reference_policy must explicitly")) as any;
         assert.ok(issue?.example, JSON.stringify(result.diagnostics));
+        if (field === "purpose") {
+            assert.equal(issue.code, "ASSET_PURPOSE_QUALITY");
+            assert.equal(issue.severity, "warning");
+            assert.equal(result.compileReady, true, JSON.stringify(result.diagnostics));
+        }
         assert.deepEqual(input, before);
         const repaired = structuredClone(source);
         Object.assign(field === "purpose" ? repaired.asset_plan[0] : repaired.asset_cards[0], issue.example);

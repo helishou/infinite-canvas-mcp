@@ -100,6 +100,11 @@ export type DirectorReadiness = { revision: number; publishedVersion: number; so
 const fingerprint = (value: unknown) => crypto.createHash("sha256").update(JSON.stringify(value ?? null)).digest("hex");
 const batchRequestHash = (input: DirectorRunStart) => fingerprint({ idempotencyKey: input.idempotencyKey, workId: input.workId, expectedRevision: input.expectedRevision, version: input.version, targets: input.targets, scope: input.scope, inputBasis: input.inputBasis, expectedCanvasRevision: input.expectedCanvasRevision, expectedPlanHash: input.expectedPlanHash });
 const promptHashBytes = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+const productionMediaDependencyBlockers = (target: DirectorReadinessTarget | undefined) => (target?.blockers || []).filter(message =>
+    message.startsWith("依赖资产 ")
+    || message.includes("关键帧尚未生成或绑定")
+    || message.includes("缺少参考与关键帧映射")
+    || message.startsWith("Shot ") && message.includes(": "));
 
 export class ProductionConflictError extends Error {
     constructor(readonly current: ProductionRecord) { super("制作稿版本已变化，请核对当前版本后重试"); }
@@ -1367,8 +1372,15 @@ export class EpisodeProductionService {
             const dependencyBlocked = new Map(checked.targets.filter(target => target.dependencies.length && data.director!.workflow.mediaProductionMode !== "automatic").map(target => [target.id, target.dependencies.map(dependency => dependency.targetId)]));
             const targets = ids.map(id => {
                 const previous = baseline.targets.find(target => target.id === id);
+                const mediaBlockers = productionMediaDependencyBlockers(previous);
+                const blockers = [...new Set([
+                    ...checked.blockedTargets.filter(target => target.targetId === id).map(target => target.message),
+                    ...mediaBlockers,
+                    ...(dependencyBlocked.has(id) ? [`请先生成前置目标：${dependencyBlocked.get(id)!.join(", ")}`] : []),
+                ])];
+                const targetReady = ready.has(id) && !dependencyBlocked.has(id) && mediaBlockers.length === 0;
                 return { ...(previous || { id, targetId: id.slice(id.indexOf(":") + 1), kind: id.startsWith("segment:") ? "segment" as const : id.startsWith("frame:") ? "keyframe" as const : "asset" as const, title: id }),
-                    status: ready.has(id) && !dependencyBlocked.has(id) ? previous?.status === "complete" ? "complete" as const : "ready" as const : "blocked" as const, blockers: [...checked.blockedTargets.filter(target => target.targetId === id).map(target => target.message), ...(dependencyBlocked.has(id) ? [`请先生成前置目标：${dependencyBlocked.get(id)!.join(", ")}`] : [])], notice: "使用当前已保存内容" };
+                    status: targetReady ? previous?.status === "complete" ? "complete" as const : "ready" as const : "blocked" as const, blockers, notice: "使用当前已保存内容" };
             });
             const next = targets.find(target => target.status === "ready") || targets.find(target => target.status === "blocked");
             const current = this.get(episodeId);
@@ -1414,59 +1426,13 @@ export class EpisodeProductionService {
         const invalidBoundaryIssues = director.boundaries.filter(boundary => !knownSegmentIds.has(boundary.from) || !knownSegmentIds.has(boundary.to)).map(boundary => `连续性边界 ${boundary.from} → ${boundary.to} 引用了尚未登记的 Segment`);
         const planById = new Map(plan.map(item => [String(item.asset_id || item.id || ""), item]));
         const keyframeAssetIds = new Set(Object.values(director.shotInputs).map(input => input.keyframeAssetId).filter((id): id is string => Boolean(id)));
-        let publicationWide = source === "draft" && !current.published?.director;
-        const unpublishedTargets = new Set<string>();
-        const publishedDirector = current.published?.director;
-        const shotById = new Map(shots.map(shot => [String(shot.id || ""), shot]));
-        const markAssetTargets = (assetId: string) => {
-            const keyframeShots = Object.entries(director.shotInputs).filter(([, input]) => input.keyframeAssetId === assetId).map(([shotId]) => shotId);
-            if (keyframeShots.length) keyframeShots.forEach(shotId => unpublishedTargets.add(`frame:${shotId}`));
-            else unpublishedTargets.add(`asset:${assetId}`);
-            for (const segment of segments) {
-                const shotIds = Array.isArray(segment.shot_ids) ? segment.shot_ids.map(String) : [];
-                if (shotIds.some(shotId => {
-                    const shot = shotById.get(shotId);
-                    return director.shotInputs[shotId]?.assetIds.includes(assetId) || idList(shot?.required_assets).includes(assetId);
-                })) unpublishedTargets.add(`segment:${String(segment.id || "")}`);
-            }
-        };
-        if (source === "draft" && publishedDirector) {
-            if (director.sourceHash !== publishedDirector.sourceHash || fingerprint(director.engine) !== fingerprint(publishedDirector.engine)) publicationWide = true;
-            const signature = (artifact: NonNullable<DirectorProduction["artifacts"][number]> | undefined) => artifact ? {
-                prompt: artifact.sha256, status: artifact.status, sourceHash: artifact.sourceHash, receipt: artifact.receipt,
-                references: artifact.references.map(ref => [ref.label, ref.nodeId, ref.storageKey, ref.sha256, ref.role]),
-            } : null;
-            const artifactKeys = [...new Set([...director.artifacts, ...publishedDirector.artifacts].map(item => `${item.kind}:${item.targetId}`))];
-            for (const key of artifactKeys) {
-                const [kind, targetId] = key.split(":", 2) as ["image" | "h3", string];
-                const before = publishedDirector.artifacts.find(item => item.kind === kind && item.targetId === targetId);
-                const after = director.artifacts.find(item => item.kind === kind && item.targetId === targetId);
-                if (fingerprint(signature(before)) === fingerprint(signature(after))) continue;
-                if (kind === "h3") unpublishedTargets.add(`segment:${targetId}`);
-                else markAssetTargets(targetId);
-            }
-            for (const id of new Set([...Object.keys(director.assets), ...Object.keys(publishedDirector.assets)])) {
-                const before = publishedDirector.assets[id], after = director.assets[id];
-                if (fingerprint(before) !== fingerprint(after)) markAssetTargets(id);
-            }
-            for (const shotId of new Set([...Object.keys(director.shotInputs), ...Object.keys(publishedDirector.shotInputs)])) {
-                if (fingerprint(director.shotInputs[shotId]) === fingerprint(publishedDirector.shotInputs[shotId])) continue;
-                unpublishedTargets.add(`frame:${shotId}`);
-                for (const segment of segments) if (Array.isArray(segment.shot_ids) && segment.shot_ids.map(String).includes(shotId)) unpublishedTargets.add(`segment:${String(segment.id || "")}`);
-            }
-            const boundaries = new Map(director.boundaries.map(item => [item.from, item]));
-            const publishedBoundaries = new Map(publishedDirector.boundaries.map(item => [item.from, item]));
-            for (const from of new Set([...boundaries.keys(), ...publishedBoundaries.keys()])) {
-                if (fingerprint(boundaries.get(from)) === fingerprint(publishedBoundaries.get(from))) continue;
-                unpublishedTargets.add(`segment:${from}`);
-                const to = boundaries.get(from)?.to || publishedBoundaries.get(from)?.to;
-                if (to) unpublishedTargets.add(`segment:${to}`);
-            }
-        }
         const canvasId = this.episodeInfo(episodeId).canvasId || "";
         const project = canvasId ? this.db.getCanvasProject(canvasId) : null;
         const canvasRole = canvasId ? productionCanvasContext(this.db, canvasId).role : "ordinary";
         const nodes = project?.nodes as Array<Record<string, any>> | undefined;
+        const subjectRows = objectList(director.source.subject_registry);
+        const subjectById = new Map(subjectRows.map(subject => [String(subject.id || ""), subject]));
+        const pictureBindingsById = new Map(subjectRows.flatMap(subject => objectList(subject.pictureBindings).map(binding => [String(binding.id || ""), binding] as const)));
         const continuityReport = this.getContinuity(episodeId, { snapshot: source, view: "summary" });
         const hasContinuityV2 = (director.source.ledger as any)?.contract_version === 2;
         const moduleStates = Object.fromEntries(Object.entries(director.modules).map(([name, item]) => [name, {
@@ -1479,9 +1445,7 @@ export class EpisodeProductionService {
         const targets: DirectorReadinessTarget[] = [];
         const addTarget = (input: Omit<DirectorReadinessTarget, "status"> & { status?: DirectorReadinessTarget["status"] }) => {
             const blockers = [...input.blockers];
-            const unpublished = source === "draft" && (publicationWide || unpublishedTargets.has(input.id));
-            if (unpublished) blockers.push("当前工作稿或引用映射尚未发布；先发布再生产。");
-            const item = { ...input, blockers: [...new Set(blockers)], status: unpublished ? "blocked" as const : input.status || (blockers.length ? "blocked" as const : "ready" as const) };
+            const item = { ...input, blockers: [...new Set(blockers)], status: input.status || (blockers.length ? "blocked" as const : "ready" as const) };
             targets.push(item);
         };
         const artifactFor = (kind: "image" | "h3", id: string) => director.artifacts.find(item => item.kind === kind && item.targetId === id);
@@ -1592,6 +1556,21 @@ export class EpisodeProductionService {
                 const input = director.shotInputs[id];
                 return [...(input?.assetIds || []), ...idList(shot?.required_assets)].filter(Boolean);
             });
+            const subjectAssetIds: string[] = [];
+            if (isSubjectPromptAssembly(director.source)) {
+                for (const shotId of shotIds) {
+                    const shot = sourceShots.get(shotId);
+                    for (const usage of objectList(shot?.subject_usages)) {
+                        const resolved = resolveSubjectPictureBindingIds(subjectById.get(String(usage.subjectId || "")), usage);
+                        blockers.push(...resolved.issues.map(issue => `Shot ${shotId}: ${issue}`));
+                        for (const bindingId of resolved.bindingIds) {
+                            const binding = pictureBindingsById.get(String(bindingId));
+                            if (binding) subjectAssetIds.push(String(binding.assetId || binding.id));
+                        }
+                    }
+                }
+            }
+            requiredAssets.push(...subjectAssetIds);
             blockers.push(...dependencyBlockers(requiredAssets));
             for (const shotId of shotIds) {
                 const input = director.shotInputs[shotId];
@@ -1865,6 +1844,12 @@ export class EpisodeProductionService {
         const director = current.draft.director;
         if (!director) throw new Error("生产对象缺少导演登记信息");
         const executionSnapshot = this.canvasExecution(id, input.targets, input.expectedCanvasRevision);
+        const draftReadiness = this.formalWorkflowReadiness(id, "draft");
+        const readinessById = new Map(draftReadiness.targets.map(target => [target.id, target]));
+        const missingMedia: ProductionDiagnostic[] = input.targets.flatMap(targetId => productionMediaDependencyBlockers(readinessById.get(targetId)).map(message => ({
+            code: "PRODUCTION_MEDIA_DEPENDENCY", path: "targets", targetId, message, severity: "error" as const, blockingActions: ["generate"],
+        })));
+        if (missingMedia.length) throw new ProductionValidationError(missingMedia);
         if (input.expectedPlanHash && input.expectedPlanHash !== executionSnapshot.planHash) throw new Error("生成预检已过期，请刷新当前输入");
         for (const batch of this.listBatches(id)) if (["pending", "running", "paused", "awaiting_review"].includes(batch.status) && batch.targets.some(target => input.targets.includes(target))) {
             throw new ProductionValidationError([{ code: "TARGET_OCCUPIED", path: "targets", message: `目标已由运行 ${batch.runId} 占用`, severity: "error", blockingRun: { runId: batch.runId, status: batch.status, taskIds: batch.submitted.map(item => item.taskId) } }]);

@@ -247,10 +247,23 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
             const prompt = readFile(entry.prompt_file || entry.file).toString("utf8");
             const sha256 = crypto.createHash("sha256").update(prompt).digest("hex");
             let ready = kind === "h3" ? entry.accepted === true && entry.format_pass === "PASSED" : ["PROMPT_READY", "ready-to-submit-not-generated"].includes(entry.status);
-            for (const item of Array.isArray(entry.quality_diagnostics) ? entry.quality_diagnostics : []) diagnostics.push({
-                code: String(item.code || "PROMPT_QUALITY"), path: String(item.path || `artifacts.${targetId}`), targetId,
-                message: String(item.message || "提示词质量建议"), severity: "warning", origin: "compiler", blockingActions: [],
-            });
+            for (const item of Array.isArray(entry.quality_diagnostics) ? entry.quality_diagnostics : []) {
+                const actions = Array.isArray(item.blockingActions) ? item.blockingActions.filter((action: unknown): action is NonNullable<ProductionDiagnostic["blockingActions"]>[number] =>
+                    ["edit", "compile", "apply", "publish", "generate"].includes(String(action))) : [];
+                diagnostics.push({
+                    code: String(item.code || "PROMPT_QUALITY"), path: String(item.path || `artifacts.${targetId}`), targetId,
+                    message: String(item.message || "提示词质量建议"), severity: item.severity === "error" ? "error" : "warning", origin: "compiler", blockingActions: actions,
+                });
+            }
+            for (const message of Array.isArray(entry.blockers) ? entry.blockers : []) {
+                const missingReference = entry.status === "DRAFT_MISSING_REFERENCES";
+                diagnostics.push({
+                    code: missingReference ? "COMPILED_REFERENCE_NOT_READY" : "COMPILED_TARGET_INVALID",
+                    path: `artifacts.${targetId}.references`, targetId, message: String(message),
+                    severity: missingReference ? "warning" : "error", origin: "compiler",
+                    blocksCompilation: !missingReference, blockingActions: [missingReference ? "generate" : "compile"],
+                });
+            }
             const references: DirectorProduction["artifacts"][number]["references"] = [];
             for (const ref of entry.references || entry.binding_snapshot?.references || []) {
                 if (!ref.file) continue;
@@ -261,7 +274,8 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
                 const old = prior.find(a => a.targetId === targetId && a.kind === kind)?.references.find(r => r.label === label && r.sha256 === digest);
                 const binding = asset?.nodeId && asset.storageKey && asset.sha256 === digest ? asset : old;
                 if (!binding?.nodeId || !binding.storageKey || ref.sha256 !== digest) {
-                    diagnostics.push({ code: "MISSING_REFERENCE_BINDING", path: `artifacts.${kind}-${targetId}.references`, targetId, message: `No matching Canvas media binding for ${label}`, severity: "error" });
+                    diagnostics.push({ code: "MISSING_REFERENCE_BINDING", path: `artifacts.${kind}-${targetId}.references`, targetId,
+                        message: `No matching Canvas media binding for ${label}`, severity: "warning", blocksCompilation: false, blockingActions: ["generate"] });
                     ready = false; continue;
                 }
                 const assetId = ref.asset_id || Object.keys(director.assets).find(id => director.assets[id].nodeId === binding.nodeId && director.assets[id].storageKey === binding.storageKey);
@@ -294,7 +308,7 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
             diagnostics.push({ code: "COMPILER_GATE_FAILED", path: `audit.${gate.gate}`, message, severity: "warning", origin: "compiler", blocksCompilation: false, blockingActions: [] });
         }
     }
-    diagnostics.push(...preflightDirector(director, "edit", runtime).diagnostics.filter(d => d.severity === "error"));
+    diagnostics.push(...preflightDirector(director, "edit", runtime).diagnostics.filter(d => diagnosticBlocksAction(d, "compile")));
     return { director, exitCode, diagnostics, audit, sourceAdjustments, acceptance: JSON.parse(readFile("delivery.acceptance.json").toString("utf8")) };
 }
 
@@ -433,7 +447,7 @@ export function preflightCompilationDirector(raw: unknown, resolveReferenceFile?
     }
     result.valid = !result.diagnostics.some(item => diagnosticBlocksAction(item, "compile"));
     result.compileReady = result.valid;
-    result.nextActions = result.diagnostics.filter(item => item.severity === "error").map(item => item.nextAction || { action: "correct_source", message: item.message });
+    result.nextActions = result.diagnostics.filter(item => diagnosticBlocksAction(item, "compile")).map(item => item.nextAction || { action: "correct_source", message: item.message });
     return result;
 }
 
@@ -453,7 +467,7 @@ export function preflightDirector(raw: unknown, stage: "edit" | "publish" | "gen
     try { const runtime = selectedRuntime || resolveAchengEngine(); result.engine = achengEngineIdentity(runtime); diagnostics.push(...validateAchengSource(director, stage, runtime)); }
     catch (error) { diagnostics.push({ code: "ENGINE_UNAVAILABLE", path: "director.engine", message: error instanceof Error ? error.message : String(error), severity: "error" }); }
     diagnostics.push({ code: "ONLINE_CONTEXT_UNVERIFIED", path: "director.assets", message: "Media ownership, approvals, model availability and current revision require Backend preflight", severity: "unverified" });
-    result.valid = !diagnostics.some(item => item.severity === "error");
+    result.valid = !diagnostics.some(item => diagnosticBlocksAction(item, stage));
     return result;
 }
 
@@ -478,11 +492,11 @@ export function preflightProductionRequest(raw: unknown, production?: { revision
             else diagnostics.push({ code: "OPERATION_CONTEXT_UNVERIFIED", path: `request.ops.${index}`, message: "This operation requires Backend object/ownership checks", severity: "unverified" });
         } catch (error) { diagnostics.push({ code: "INVALID_OPERATION", path: `request.ops.${index}`, targetId: "id" in operation ? String(operation.id) : undefined, message: error instanceof Error ? error.message : String(error), severity: "error" }); break; }
     }
-    if (!diagnostics.some(item => item.severity === "error") && director) {
+    if (!diagnostics.some(item => diagnosticBlocksAction(item, input.action)) && director) {
         const checked = input.action === "compile" ? preflightCompilationDirector(director) : preflightDirector(director, input.action === "edit" ? "edit" : input.action === "publish" ? "publish" : "generate");
         diagnostics.push(...checked.diagnostics); result.engine = checked.engine;
         result.compileReady = input.action === "compile" && checked.compileReady;
     } else diagnostics.push({ code: "ONLINE_CONTEXT_UNVERIFIED", path: "production", message: "Current production and Backend checks remain unverified", severity: "unverified" });
-    result.valid = !diagnostics.some(item => item.severity === "error");
+    result.valid = !diagnostics.some(item => diagnosticBlocksAction(item, input.action));
     return result;
 }

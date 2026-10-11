@@ -57,7 +57,7 @@ export const productionWorkspaceDescriptions = {
     production_get_continuity: "只读读取正式连续性检查状态、问题、对象轨迹或单镜状态；不会触发检查或修改制作稿。",
     production_check_continuity: "按正式 owner 和 revision 执行 Acheng 固定 runtime 的连续性检查并持久化回执；检查完成不表示 verdict passed，不发布或生成。",
     production_preview_continuity_upgrade: "只读预览旧连续性源稿升级到 ledger v2 的诊断与版本影响；不会改动制作稿、发布版、历史媒体或生成任务。",
-    production_get_shared_assets: "读取同剧目最新批准共享资产及当前集持久更新状态。",
+    production_get_shared_assets: "读取同剧目最新共享素材版本、真实审核状态及当前集持久更新状态。",
     production_adopt_shared_asset: "将同剧目批准资产采用到已登记的集内目标；核验来源、媒体和版本，不生成。",
     production_adopt_shared_assets: "一次事务批量采用多项同剧目批准资产；后台自动发布推版本时不会逐项冲突，全部核验来源、媒体和版本，不生成。",
     production_retry_shared_update: "核对当前 revision 后恢复一项被阻塞的共享引用更新；不授权新的生成范围。",

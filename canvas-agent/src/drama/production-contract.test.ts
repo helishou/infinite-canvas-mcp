@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { applyDirectorSourcePatch, productionOperationContract, ref2vaPromptDiagnostics } from "./production-validation.js";
-import { dramaProductionPlanSchema, productionEditSchema, productionSettingsSchema, type DirectorProduction } from "./production-contract.js";
+import { diagnosticBlocksAction, dramaProductionPlanSchema, productionEditSchema, productionSettingsSchema, type DirectorProduction, type ProductionDiagnostic } from "./production-contract.js";
 import { toolInputSchemas } from "../canvas/schemas.js";
 
 test("all published operation examples use the actual edit contract", () => {
@@ -155,4 +155,17 @@ test("production compilation tools have explicit owner, revision and frozen hand
     assert.equal(toolInputSchemas.production_apply_compilation.safeParse({ kind: "episode", id: "episode", preparedId: "../../packet" }).success, false);
     assert.ok(toolInputSchemas.production_preflight.safeParse({ kind: "episode", id: "episode", action: "compile", request: { expectedRevision: 1 } }).success);
     assert.ok((productionOperationContract().requests.compile as any).required.includes("operationId"));
+});
+
+test("diagnostic actions override severity and retain legacy error compatibility", () => {
+    const qualityError: ProductionDiagnostic = { code: "QUALITY_ADVICE", path: "segment.prompt", targetId: "SEG1", message: "Improve wording", severity: "error", blockingActions: [] };
+    assert.equal(diagnosticBlocksAction(qualityError, "compile"), false);
+    assert.equal(diagnosticBlocksAction(qualityError, "generate"), false);
+
+    const missingMedia: ProductionDiagnostic = { code: "REFERENCE_MISSING", path: "segment.references", targetId: "SEG1", message: "Selected image is unavailable", severity: "warning", blockingActions: ["generate"] };
+    assert.equal(diagnosticBlocksAction(missingMedia, "compile"), false);
+    assert.equal(diagnosticBlocksAction(missingMedia, "generate"), true);
+
+    const legacy: ProductionDiagnostic = { code: "LEGACY_SOURCE_INVALID", path: "director.source", message: "Invalid source", severity: "error" };
+    assert.equal(diagnosticBlocksAction(legacy, "compile"), true);
 });

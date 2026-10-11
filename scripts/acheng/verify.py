@@ -114,11 +114,10 @@ with tempfile.TemporaryDirectory() as tmp:
     prompt.write_text(text, encoding="utf-8")
     body = text.split("detailed_description:\n", 1)[1].split("\n\noverall_soundscape:", 1)[0]
     receipt_contract["minimum_words"] = english_word_count(body) + 1
-    try:
-        validate_h3_file(prompt, receipt_contract)
-        raise AssertionError("insufficient detail accepted")
-    except ValueError as error:
-        assert "minimum" in str(error), str(error)
+    short_receipt = validate_h3_file(prompt, receipt_contract)
+    assert short_receipt["format_pass"] == "PASSED"
+    assert any(item["code"] == "REF2VA_DETAIL_BELOW_RECOMMENDED_MINIMUM"
+               for item in short_receipt.get("quality_diagnostics", [])), short_receipt
 assert detail_policy({"shots": []}, {"generation_clip_duration": 10, "prompt_detail_policy": {"ref2va_max_words": 100, "ref2va_target_words": 6000}})["target_words"] == 6000
 assert contract()["ref2vaMaximumWords"] is None
 assert contract()["scopedCompilation"] is True

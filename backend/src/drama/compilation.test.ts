@@ -3,6 +3,7 @@ import test from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { setImmediate as immediate } from "node:timers/promises";
 import { BackendDatabase } from "../db.js";
 import { EpisodeProductionService, ProductionConflictError } from "./production.js";
 import { ProductionCompilationService } from "./compilation.js";
@@ -12,6 +13,14 @@ import type { DirectorProduction } from "@basketikun/canvas-agent/drama/producti
 import { compilationScopeInput, currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 
 const externalBlock = { code: "PROMPT_EXTERNAL_CONTEXT", path: "director.source.shots.SH1.visual", targetId: "SEG1", shotId: "SH1", origin: "source" as const, matchedText: "preceding segment", blocksCompilation: true, message: "Prompt depends on external prose: preceding segment", severity: "error" as const };
+async function done(compilations: ProductionCompilationService, operationId: string) {
+    for (let attempt = 0; attempt < 20; attempt++) {
+        await immediate();
+        const status = compilations.getCompilation("episode", "episode", operationId);
+        if (!["queued", "running"].includes(status.status)) return status;
+    }
+    throw new Error(`Compilation did not finish: ${operationId}`);
+}
 
 test("located hard blockers reuse across IDs and restart without recompiling or editing production", async t => {
     const { root, service, director, db } = fixture(t);
@@ -46,6 +55,29 @@ test("located hard blockers reuse across IDs and restart without recompiling or 
     assert.equal(JSON.stringify(service.get("episode")), before);
     assert.equal(db.listTasks().length, 0);
     assert.ok(Buffer.byteLength(JSON.stringify(alias)) < 2500);
+});
+
+test("a compile blocker without targetId is retained as a diagnostic, not promoted to a global block", async t => {
+    const { root, service, director } = fixture(t);
+    const prompt = "The authored image prompt";
+    const unscopedBlocker = { code: "UNSCOPED_QUALITY_DIAGNOSTIC", path: "compile.quality", message: "Review this prompt", severity: "error" as const, blockingActions: ["compile"] };
+    const compiler = (input: DirectorProduction) => ({
+        director: { ...input, artifacts: [{ id: "image-STYLE", targetId: "STYLE", kind: "image" as const, prompt, sha256: promptHash(prompt), sourceHash: input.sourceHash,
+            status: "ready" as const, references: [], receipt: { sourceHash: input.sourceHash, promptHash: promptHash(prompt), engineRuntimeId: input.engine.runtimeId, validator: "fixture" } }] },
+        exitCode: 0, diagnostics: [unscopedBlocker], audit: {}, sourceAdjustments: [], acceptance: {},
+    });
+    const compilations = new ProductionCompilationService(service, path.join(root, "unscoped-diagnostic"), compiler);
+    const started = compilations.enqueue("episode", "episode", "unscoped-diagnostic", 1);
+    await new Promise(resolve => setImmediate(resolve));
+    const job = compilations.getCompilation("episode", "episode", started.operationId);
+    assert.equal(job.status, "succeeded");
+    assert.equal(job.verdict, "passed_with_warnings");
+    assert.equal(job.blockingDiagnostic?.code, unscopedBlocker.code, "the diagnostic stays visible without making the job globally blocked");
+    const diagnostics = compilations.getCompilation("episode", "episode", started.operationId, "diagnostics", 0, 10);
+    assert.ok(diagnostics.items.some((item: any) => item.code === unscopedBlocker.code));
+    const applied = compilations.apply("episode", "episode", job.preparedId!);
+    assert.equal(applied.mediaSubmitted, false);
+    assert.equal(service.get("episode").draft.director?.artifacts.some(item => item.targetId === "STYLE" && item.status === "ready"), true);
 });
 
 test("fingerprint changes for input, scope, engine and reference bytes; workflow-only updates reuse", async t => {
@@ -283,8 +315,7 @@ test("unchanged full compilation reuses artifacts and a scoped edit compiles onl
     const jobs = new ProductionCompilationService(service, path.join(root, "packets"), compiler);
     const run = async (operationId: string, scope?: { targetIds: string[] }) => {
         jobs.enqueue("episode", "episode", operationId, service.get("episode").revision, undefined, scope);
-        await new Promise(resolve => setImmediate(resolve));
-        const job = jobs.getCompilation("episode", "episode", operationId);
+        const job = await done(jobs, operationId);
         assert.equal(job.status, "succeeded");
         jobs.apply("episode", "episode", job.preparedId!);
         return job;

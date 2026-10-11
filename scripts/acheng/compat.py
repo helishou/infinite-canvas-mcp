@@ -266,17 +266,20 @@ def compile_segment(p, seg, *, draft=False):
                 text = compile_prompt_v2(production, resolved_seg, draft=True)
             else:
                 text = compile_segment(production, resolved_seg, draft=True)''')
-    replace(compiler,
-            '''        if not blockers:
-            contract = file_contract(production, resolved_seg, snapshot["references"])''',
-            '''        source_map_input = v2_source_maps.get(seg["id"])
+    source_map_marker = '        source_map_input = v2_source_maps.get(seg["id"])'
+    if source_map_marker not in compiler.read_text(encoding="utf-8"):
+        compiler_text = compiler.read_text(encoding="utf-8")
+        compile_gate = "        if not blockers:\n"
+        if compiler_text.count(compile_gate) != 1:
+            raise RuntimeError("Unsupported compile_h3.py contract: expected one per-Segment format gate")
+        source_map = '''        source_map_input = v2_source_maps.get(seg["id"])
         if source_map_input:
             from canvas_subject_prompt_v2 import build_source_map
             source_map = build_source_map(text, source_map_input)
             if source_map:
                 entry["source_map"] = source_map
-        if not blockers:
-            contract = file_contract(production, resolved_seg, snapshot["references"])''')
+'''
+        compiler.write_text(compiler_text.replace(compile_gate, source_map + compile_gate, 1), encoding="utf-8")
     replace(compiler,
             '        (output / name).write_text(text, encoding="utf-8")',
             '''        if production.get("_canvas_prompt_assembly_version") == 2:

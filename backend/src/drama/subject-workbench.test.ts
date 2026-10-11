@@ -111,6 +111,28 @@ test("saving visible Shot text is allowed while its required identity image is s
     assert.equal(saved.revision, current.revision + 1);
 });
 
+test("a visible Subject image dependency keeps its Segment blocked until the archived asset is available", t => {
+    const service = fixture(t, true, db => {
+        db.applyCanvasProjectOperations("CANVAS_EP", undefined, [{ type: "add_node", id: "IMAGE_P", nodeType: "image", position: { x: 0, y: 0 }, metadata: { prompt: "Character identity reference" } }], { runtimeWrite: true });
+    }), director = directorV2();
+    const current = service.get("ep");
+    service.edit("ep", { operationId: "save-visible-subject-plan", expectedRevision: current.revision,
+        ops: [{ type: "set_director_production", director }] });
+
+    const readiness = service.workflowReadiness("ep", "draft");
+    const segment = readiness.targets.find(item => item.id === "segment:C1");
+    const asset = readiness.targets.find(item => item.id === "asset:A1");
+    assert.equal(segment?.status, "blocked");
+    assert.ok(segment?.blockers.some(item => item.includes("依赖资产 A1 的媒体未就绪")), JSON.stringify(segment?.blockers));
+    assert.ok(!segment?.blockers.some(item => item.includes("先发布再生产")), JSON.stringify(segment?.blockers));
+    assert.equal(asset?.status, "blocked");
+
+    assert.throws(() => service.startBatch("ep", { runId: "missing-subject-media-run", idempotencyKey: "missing-subject-media-request",
+        expectedRevision: service.get("ep").revision, expectedCanvasRevision: readiness.canvasRevision, targets: ["segment:C1"] }),
+    error => (error as any).diagnostics?.some((item: any) => item.code === "PRODUCTION_MEDIA_DEPENDENCY" && item.targetId === "segment:C1" && item.blockingActions?.includes("generate")));
+    assert.equal(service.listBatches("ep").some(batch => batch.runId === "missing-subject-media-run"), false);
+});
+
 test("Clip compilation infers text mode for offscreen voices instead of stale reference mode", t => {
     let database!: BackendDatabase;
     const service = fixture(t, true, db => { database = db; });

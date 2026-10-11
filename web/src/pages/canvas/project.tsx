@@ -88,13 +88,18 @@ import { useCanvasDocument } from "@/pages/canvas/hooks/use-canvas-document";
 import { useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
 import { useAgentBridge } from "@/pages/canvas/hooks/use-agent-bridge";
 import { usePluginHost } from "@/pages/canvas/hooks/use-plugin-host";
+import { useCanvasMarqueeSelection } from "@/pages/canvas/hooks/use-canvas-marquee-selection";
+import { useCanvasDragFrame } from "@/pages/canvas/hooks/use-canvas-drag-frame";
 import { createMentionReferenceSelector, getFixedReferenceNodes, getGroupResourceNodes, isCanvasReferenceNode, nodeResourceItems, reorderCanvasReferenceConnections, type CanvasGraphIndex, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { useExportCanvas } from "@/hooks/use-export-canvas";
 import { applyNodeConfigPatch, audioMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
-import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, keepNodesInLockedGroups, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
-import { arrangeOrderedGroupMembers, inheritOrderedGroupOutputs, insertOrderedGroupSlot, moveOrderedGroupSlot, orderedGroupColumnCount, orderedGroupDisplaySlots, orderedGroupDraggedCenter, orderedGroupDropTarget, orderedGroupLayout, orderedGroupMemberPosition, orderedGroupMemberSize, orderedGroupResizeLayout, orderedGroupSlots, replaceOrderedGroupSlot, swapOrderedGroupSlot, transferOrderedGroupH3References } from "@/lib/canvas/ordered-group";
-import { collectCanvasSelectionIds } from "@/lib/canvas/canvas-selection";
+import { findGroupDropTarget, getConnectionTargetAnchor, normalizeConnection } from "@/lib/canvas/canvas-node-geometry";
+import { arrangeOrderedGroupMembers, inheritOrderedGroupOutputs, orderedGroupColumnCount, orderedGroupDisplaySlots, orderedGroupDraggedCenter, orderedGroupDropTarget, orderedGroupLayout, orderedGroupResizeLayout, orderedGroupSlots, transferOrderedGroupH3References } from "@/lib/canvas/ordered-group";
+import { buildOrderedGroupDragCommit } from "@/lib/canvas/canvas-ordered-group-drag";
+import { buildCanvasNodeDragCommit } from "@/lib/canvas/canvas-node-drag-commit";
+import { buildCanvasNodeDragSelection, buildCanvasReferenceDragPayload, canvasNodeDragOffset, canvasNodeDragPreviewPositions, hasCanvasNodeDragMoved, type AnyReferenceDrag, type CanvasReferenceDrag, type CharacterReferenceDrag } from "@/lib/canvas/canvas-node-drag";
+import { canvasSelectionOverlayBounds } from "@/lib/canvas/canvas-selection";
 import { clearCanvasDragPreview, clearCanvasResizePreview, writeCanvasDragPreview, writeCanvasResizePreview, type CanvasResizePreviewBounds } from "@/lib/canvas/canvas-drag-preview";
 import {
     audioExtension,
@@ -267,49 +272,10 @@ const EMPTY_RESIZE_PREVIEW = new Map<string, CanvasResizePreviewBounds>();
 const CONNECTION_HANDLE_HIT_RADIUS = 40;
 const CONNECTION_NODE_HIT_PADDING = 32;
 
-function sameIdSet(first: ReadonlySet<string>, second: ReadonlySet<string>) {
-    if (first.size !== second.size) return false;
-    for (const id of first) if (!second.has(id)) return false;
-    return true;
-}
-
 const NODE_STATUS_IDLE = "idle" as const;
 const NODE_STATUS_LOADING = "loading" as const;
 const NODE_STATUS_SUCCESS = "success" as const;
 const NODE_STATUS_ERROR = "error" as const;
-type CanvasReferenceRole = "character_turnaround" | "storyboard" | "scene" | "motion_reference" | "audio_reference";
-type CanvasReferenceDrag = { nodeId: string; url: string; type: "image"; name: string; storageKey?: string; mimeType?: string; role?: CanvasReferenceRole; subjectId?: string };
-// 角色派发：H3 端按 characterGroupInput 建/复用角色组，由 group 派生 outfit image refs + voice audio ref
-type CharacterReferenceDrag = {
-    nodeId: string;
-    type: "character";
-    kind: "character";
-    characterAssetId?: string;
-    characterNodeId?: string;
-    characterName: string;
-    characterImages: Array<{ url: string; name: string; storageKey?: string; mimeType?: string }>;
-    characterPrimaryIndex?: number;
-    characterVoiceUrl?: string;
-    characterVoiceName?: string;
-    characterVoiceDescription?: string;
-    characterVoiceStorageKey?: string;
-    characterVoiceAssetId?: string;
-    voice?: string;
-    voiceName?: string;
-    voiceDescription?: string;
-    voiceAssetId?: string;
-};
-type AnyReferenceDrag = CanvasReferenceDrag | CharacterReferenceDrag;
-
-function canvasReferenceRole(node: CanvasNodeData): CanvasReferenceRole | undefined {
-    const value = `${node.type} ${node.title || ""}`.toLowerCase();
-    // 角色节点是身份资产，不是四视图；拖到 ref 槽时只展开为普通 image ref。
-    if (/四视图|turnaround/.test(value)) return "character_turnaround";
-    if (/分镜|storyboard/.test(value)) return "storyboard";
-    if (/场景|scene/.test(value)) return "scene";
-    return undefined;
-}
-
 function h3DropTargetAt(clientX: number, clientY: number) {
     const directTarget = document.elementFromPoint(clientX, clientY)?.closest<HTMLElement>("[data-canvas-ref-drop-target]");
     if (directTarget) return directTarget;
@@ -394,7 +360,6 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const restoreGenerationRef = useRef(0);
     const viewportSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const didInitialCenterRef = useRef(false);
-    const rafRef = useRef<number | null>(null);
     const nodeDraggingRef = useRef(false);
     const pendingNodeClickRef = useRef<{ nodeId: string; clientX: number; clientY: number } | null>(null);
     const dragRef = useRef<{
@@ -631,9 +596,6 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         shiftKey: boolean;
         started: boolean;
     } | null>(null);
-    const selectionOverlayRef = useRef<SVGSVGElement | null>(null);
-    const selectionRafRef = useRef<number | null>(null);
-    const selectionPointerRef = useRef<{ clientX: number; clientY: number } | null>(null);
     const connectionPreviewRafRef = useRef<number | null>(null);
     const connectionPreviewPointerRef = useRef<{ clientX: number; clientY: number } | null>(null);
     const pendingConnectionCreateRef = useRef(pendingConnectionCreate);
@@ -941,6 +903,22 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const selectGraphIndex = useMemo(() => createCanvasGraphIndexSelector(), []);
     const graphIndex = useMemo(() => selectGraphIndex(nodes, connections), [selectGraphIndex, connections, nodes]);
     const nodeById = graphIndex.nodeById;
+    const {
+        selectionOverlayRef,
+        updateSelectionPreview,
+        finishSelectionBox,
+        scheduleSelectionPreview,
+        cancelSelectionFrame,
+    } = useCanvasMarqueeSelection({
+        canvasRectRef,
+        selectionBoxRef,
+        selectedNodeIdsRef,
+        nodeSpatialIndex: graphIndex.nodeSpatialIndex,
+        screenToCanvas,
+        setSelectionBox,
+        setSelectedNodeIds,
+    });
+    const dragFrame = useCanvasDragFrame();
 
     const getConnectionDropTarget = useCallback(
         (clientX: number, clientY: number, current: ConnectionHandle): ConnectionDropTarget => {
@@ -2221,72 +2199,18 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             const currentNodes = nodesRef.current;
             const nextSelected = pendingSelectionRef.current ?? selectNodeByEvent(event, nodeId).nextSelected;
             pendingSelectionRef.current = null;
-            const dragIds = new Set(nextSelected);
-            currentNodes.forEach((node) => {
-                if (!nextSelected.has(node.id)) return;
-                if (node.type === CanvasNodeType.Group) {
-                    const childIds = node.metadata?.orderedGroup
-                        ? orderedGroupSlots(node, currentNodes)
-                        : currentNodes.filter((child) => child.metadata?.groupId === node.id).map((child) => child.id);
-                    childIds.forEach((childId) => dragIds.add(childId));
-                }
-            });
-            const movedNodes = currentNodes.filter((node) => dragIds.has(node.id));
+            const dragSelection = buildCanvasNodeDragSelection(currentNodes, nextSelected);
             dragRef.current = {
                 isDraggingNode: true,
                 hasMoved: false,
                 startX: event.clientX,
                 startY: event.clientY,
-                initialSelectedNodes: new Map(currentNodes.filter((node) => dragIds.has(node.id)).map((node) => [node.id, node.position])),
-                movedIds: dragIds,
-                hasMovedGroup: movedNodes.some((node) => node.type === CanvasNodeType.Group),
-                movingNodes: movedNodes.filter((node) => node.type !== CanvasNodeType.Group),
-                groupDropCandidates: currentNodes.filter((node) => node.type === CanvasNodeType.Group && !dragIds.has(node.id) && !node.metadata?.groupLocked),
-                referenceDrag: (() => {
-                    if (nextSelected.size !== 1) return undefined;
-                    const node = currentNodes.find((item) => nextSelected.has(item.id));
-                    if (!node) return undefined;
-                    if (node.type === CanvasNodeType.Image) {
-                        const url = String(node.metadata?.content || "").trim();
-                        return url
-                            ? {
-                                  nodeId: node.id,
-                                  url,
-                                  type: "image" as const,
-                                  name: node.title || "图片",
-                                  storageKey: node.metadata?.storageKey,
-                                  mimeType: node.metadata?.mimeType,
-                                  role: canvasReferenceRole(node),
-                                  subjectId: canvasReferenceRole(node) === "character_turnaround" ? node.id : undefined,
-                              }
-                            : undefined;
-                    }
-                    // Character 节点：作为单个 character 派发到 H3 ref 槽，由 H3 端建/复用角色组并把 outfit/voice 拆为 refs。
-                    if (node.type === CanvasNodeType.Character) {
-                        const images = (node.metadata?.characterImages || []).filter((image) => image.url);
-                        return {
-                            nodeId: node.id,
-                            type: "character" as const,
-                            kind: "character" as const,
-                            characterNodeId: node.id,
-                            characterName: node.title || "角色",
-                            characterImages: images.map((image) => ({ url: image.url, name: image.outfit || image.name || "outfit", storageKey: image.storageKey, mimeType: image.mimeType })),
-                            characterPrimaryIndex: node.metadata?.characterPrimaryIndex || 0,
-                            characterVoiceUrl: node.metadata?.characterVoiceUrl,
-                            characterVoiceName: node.metadata?.characterVoiceName,
-                            characterVoiceDescription: node.metadata?.characterVoiceDescription,
-                            characterVoiceStorageKey: node.metadata?.characterVoiceStorageKey,
-                            characterVoiceAssetId: node.metadata?.characterVoiceAssetId,
-                        };
-                    }
-                    if (node.type === CanvasNodeType.Scene) {
-                        const image = node.metadata?.sceneImage;
-                        return image?.url
-                            ? { nodeId: node.id, url: image.url, type: "image" as const, name: node.title || "场景", storageKey: image.storageKey, mimeType: image.mimeType, role: "scene" as const }
-                            : undefined;
-                    }
-                    return undefined;
-                })(),
+                initialSelectedNodes: dragSelection.initialSelectedNodes,
+                movedIds: dragSelection.movedIds,
+                hasMovedGroup: dragSelection.hasMovedGroup,
+                movingNodes: dragSelection.movingNodes,
+                groupDropCandidates: dragSelection.groupDropCandidates,
+                referenceDrag: nextSelected.size === 1 ? buildCanvasReferenceDragPayload(currentNodes.find((item) => nextSelected.has(item.id))) : undefined,
             };
             dragPreviewPositionsRef.current = EMPTY_DRAG_PREVIEW;
             writeCanvasDragPreview(projectId, EMPTY_DRAG_PREVIEW);
@@ -2305,62 +2229,9 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         const { group: targetGroup, drop } = target;
         let inheritedOutputSourceId: string | undefined;
         setNodes((prev) => {
-            const sourceGroup = prev.find((item) => item.type === CanvasNodeType.Group && item.metadata?.orderedGroup && orderedGroupSlots(item, prev).includes(draggedId));
-            const target = prev.find((item) => item.id === targetGroup.id);
-            if (!target) return prev;
-            const sourceSlots = sourceGroup ? orderedGroupSlots(sourceGroup, prev) : null;
-            const targetSlots = orderedGroupSlots(target, prev);
-            const sourceIndex = sourceSlots?.indexOf(draggedId) ?? -1;
-            const targetIndex = Math.max(0, Math.min(drop.index, targetSlots.length));
-            let nextTargetSlots = [...targetSlots];
-            let nextSourceSlots = sourceSlots ? [...sourceSlots] : null;
-            let displacedId: string | undefined;
-            if (sourceGroup?.id === target.id && sourceIndex >= 0) {
-                if (drop.kind === "slot" && nextTargetSlots[targetIndex] && nextTargetSlots[targetIndex] !== draggedId) {
-                    nextTargetSlots = swapOrderedGroupSlot(nextTargetSlots, sourceIndex, targetIndex);
-                } else {
-                    nextTargetSlots = moveOrderedGroupSlot(nextTargetSlots, sourceIndex, targetIndex);
-                }
-            } else {
-                if (drop.kind === "slot" && targetIndex < nextTargetSlots.length) {
-                    const replacement = replaceOrderedGroupSlot(nextTargetSlots, draggedId, targetIndex);
-                    nextTargetSlots = replacement.slots;
-                    displacedId = replacement.displacedId;
-                    inheritedOutputSourceId = displacedId;
-                    if (nextSourceSlots && sourceIndex >= 0 && displacedId) nextSourceSlots[sourceIndex] = displacedId;
-                } else {
-                    if (nextSourceSlots && sourceIndex >= 0) nextSourceSlots = nextSourceSlots.filter((id) => id !== draggedId);
-                    nextTargetSlots = insertOrderedGroupSlot(nextTargetSlots, draggedId, targetIndex);
-                }
-            }
-            const targetSlotIndex = nextTargetSlots.indexOf(draggedId);
-            const sourceSlotMap = new Map((nextSourceSlots || []).map((id, index) => [id, index]));
-            const targetSlotMap = new Map(nextTargetSlots.map((id, index) => [id, index]));
-            const targetDisplayCount = orderedGroupDisplaySlots(nextTargetSlots, orderedGroupColumnCount(target)).length;
-            const sourceDisplayCount = orderedGroupDisplaySlots(nextSourceSlots || [], sourceGroup ? orderedGroupColumnCount(sourceGroup) : 4).length;
-            return prev.map((item) => {
-                if (item.id === target.id) return { ...item, metadata: { ...item.metadata, orderedGroup: true, groupSlots: nextTargetSlots } };
-                if (sourceGroup && item.id === sourceGroup.id && sourceGroup.id !== target.id) return { ...item, metadata: { ...item.metadata, groupSlots: nextSourceSlots || [] } };
-                if (item.id === draggedId) {
-                    const size = orderedGroupMemberSize(target, targetSlotIndex, item, targetDisplayCount);
-                    return { ...item, metadata: { ...item.metadata, groupId: target.id }, position: orderedGroupMemberPosition(target, targetSlotIndex, item, targetDisplayCount), width: size.width, height: size.height };
-                }
-                if (item.id === displacedId && !sourceGroup) {
-                    const { groupId: _groupId, ...metadata } = item.metadata || {};
-                    return { ...item, metadata, position: dragged.position };
-                }
-                const targetSlot = targetSlotMap.get(item.id);
-                if (targetSlot !== undefined) {
-                    const size = orderedGroupMemberSize(target, targetSlot, item, targetDisplayCount);
-                    return { ...item, metadata: { ...item.metadata, groupId: target.id }, position: orderedGroupMemberPosition(target, targetSlot, item, targetDisplayCount), width: size.width, height: size.height };
-                }
-                const sourceSlot = sourceSlotMap.get(item.id);
-                if (sourceGroup && sourceGroup.id !== target.id && sourceSlot !== undefined) {
-                    const size = orderedGroupMemberSize(sourceGroup, sourceSlot, item, sourceDisplayCount);
-                    return { ...item, metadata: { ...item.metadata, groupId: sourceGroup.id }, position: orderedGroupMemberPosition(sourceGroup, sourceSlot, item, sourceDisplayCount), width: size.width, height: size.height };
-                }
-                return item;
-            });
+            const result = buildOrderedGroupDragCommit(prev, dragged, targetGroup.id, drop);
+            inheritedOutputSourceId = result.inheritedOutputSourceId;
+            return result.nodes;
         });
         if (inheritedOutputSourceId) {
             const resources = nodeResourceItems(dragged).map((resource) => ({ ...resource, mimeType: dragged.metadata?.mimeType }));
@@ -2380,17 +2251,15 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 if (clickedNode && clickedNode.type !== CanvasNodeType.Group && !clickedDefinition?.hidePanel) setDialogNodeId(clickedNode.id);
             }
             publishRealtimeDrag(EMPTY_DRAG_PREVIEW);
-            if (rafRef.current) {
-                cancelAnimationFrame(rafRef.current);
-                rafRef.current = null;
-            }
+            dragFrame.cancel();
             if (!dragRef.current.isDraggingNode) return;
 
             const wasClick = !dragRef.current.hasMoved && dragRef.current.initialSelectedNodes.size === 1;
             const clickedNodeId = dragRef.current.initialSelectedNodes.keys().next().value as string | undefined;
             const currentViewport = viewportRef.current;
-            const dx = clientX == null ? 0 : (clientX - dragRef.current.startX) / currentViewport.k;
-            const dy = clientY == null ? 0 : (clientY - dragRef.current.startY) / currentViewport.k;
+            const dragStart = { x: dragRef.current.startX, y: dragRef.current.startY };
+            const dragPointer = { x: clientX ?? dragStart.x, y: clientY ?? dragStart.y };
+            const { x: dx, y: dy } = canvasNodeDragOffset(dragStart, dragPointer, currentViewport.k);
             const initialPositions = dragRef.current.initialSelectedNodes;
             const previewPositions = dragPreviewPositionsRef.current;
 
@@ -2419,58 +2288,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 const pointerPoint = screenToCanvas(clientX, clientY);
                 const orderedDropPoint = draggedNode && draggedInitialPosition ? orderedGroupDraggedCenter(draggedInitialPosition, { x: dx, y: dy }, draggedNode) : pointerPoint;
                 const orderedHandled = draggedId ? applyOrderedGroupDrop(draggedId, orderedDropPoint) : false;
-                if (!orderedHandled) setNodes((prev) => {
-                    const moved = prev.map((node) => {
-                        const initial = initialPositions.get(node.id);
-                        const position = initial ? previewPositions.get(node.id) || { x: initial.x + dx, y: initial.y + dy } : null;
-                        return position ? { ...node, position } : node;
-                    });
-                    const movingGroup = moved.some((node) => movedIds.has(node.id) && node.type === CanvasNodeType.Group);
-                    const targetGroup = movingGroup ? null : findGroupDropTarget(movedIds, moved);
-                    // 组拖动只移动已记录的组和成员，不重新按矩形命中关系改写成员归属；
-                    // 否则有序组移动到普通组附近时，会把成员从 groupSlots 中错误移走。
-                    const grouped = movingGroup
-                        ? moved.map((node) => {
-                              if (node.type !== CanvasNodeType.Group || !node.metadata?.orderedGroup) return node;
-                              // 兼容 MCP/旧快照只写 groupId 的有序组：首次拖动时把解析出的成员固化为 slots。
-                              return { ...node, metadata: { ...node.metadata, groupSlots: orderedGroupSlots(node, prev) } };
-                          })
-                        : targetGroup
-                          ? snapNodesIntoGroup(movedIds, moved, targetGroup)
-                          : moved.map((node) => {
-                                if (!movedIds.has(node.id) || node.type === CanvasNodeType.Group) return node;
-                                const groupId = findContainingGroupId(node, moved);
-                                if (node.metadata?.groupId === groupId) return node;
-                                return { ...node, metadata: { ...node.metadata, groupId } };
-                            });
-                    const movedOutOfOrderedGroups = new Map<string, Set<string>>();
-                    prev.forEach((node) => {
-                        if (!movedIds.has(node.id) || !node.metadata?.groupId) return;
-                        const group = prev.find((item) => item.id === node.metadata?.groupId);
-                        if (group?.metadata?.orderedGroup && grouped.find((item) => item.id === node.id)?.metadata?.groupId !== group.id) {
-                            const ids = movedOutOfOrderedGroups.get(group.id) || new Set<string>();
-                            ids.add(node.id);
-                            movedOutOfOrderedGroups.set(group.id, ids);
-                        }
-                    });
-                    const constrained = keepNodesInLockedGroups(movedIds, prev, grouped);
-                    const orderedReflows = new Map([...movedOutOfOrderedGroups].flatMap(([groupId, movedOut]) => {
-                        const group = prev.find((item) => item.id === groupId);
-                        if (!group) return [];
-                        const slots = orderedGroupSlots(group, prev).filter((id) => typeof id === "string" && !movedOut.has(id));
-                        return [[groupId, { group, slots, displayCount: orderedGroupDisplaySlots(slots, orderedGroupColumnCount(group)).length }] as const];
-                    }));
-                    return constrained.map((node) => {
-                        const ownReflow = orderedReflows.get(node.id);
-                        if (ownReflow) return { ...node, metadata: { ...node.metadata, groupSlots: ownReflow.slots } };
-                        const memberReflow = node.metadata?.groupId ? orderedReflows.get(node.metadata.groupId) : undefined;
-                        if (!memberReflow) return node;
-                        const slotIndex = memberReflow.slots.indexOf(node.id);
-                        if (slotIndex < 0) return node;
-                        const size = orderedGroupMemberSize(memberReflow.group, slotIndex, node, memberReflow.displayCount);
-                        return { ...node, position: orderedGroupMemberPosition(memberReflow.group, slotIndex, node, memberReflow.displayCount), width: size.width, height: size.height };
-                    });
-                });
+                if (!orderedHandled) setNodes((prev) => buildCanvasNodeDragCommit(prev, movedIds, initialPositions, previewPositions, { x: dx, y: dy }));
                 dragPreviewPositionsRef.current = EMPTY_DRAG_PREVIEW;
                 writeCanvasDragPreview(projectId, EMPTY_DRAG_PREVIEW);
             } else {
@@ -2498,7 +2316,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 }
             }
         },
-        [applyOrderedGroupDrop, projectId, publishRealtimeDrag, screenToCanvas, updateDropTargetGroupId, updateOrderedGroupDropPreview],
+        [applyOrderedGroupDrop, dragFrame, projectId, publishRealtimeDrag, screenToCanvas, updateDropTargetGroupId, updateOrderedGroupDropPreview],
     );
 
     const handleGlobalMouseMove = useCallback(
@@ -2510,12 +2328,13 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             );
 
             if (dragRef.current.isDraggingNode) {
-                const dx = (event.clientX - dragRef.current.startX) / currentViewport.k;
-                const dy = (event.clientY - dragRef.current.startY) / currentViewport.k;
+                const dragStart = { x: dragRef.current.startX, y: dragRef.current.startY };
+                const dragPointer = { x: event.clientX, y: event.clientY };
+                const { x: dx, y: dy } = canvasNodeDragOffset(dragStart, dragPointer, currentViewport.k);
                 const pendingClick = pendingNodeClickRef.current;
-                if (pendingClick && (Math.abs(event.clientX - pendingClick.clientX) > 3 || Math.abs(event.clientY - pendingClick.clientY) > 3)) pendingNodeClickRef.current = null;
+                if (pendingClick && hasCanvasNodeDragMoved({ x: pendingClick.clientX, y: pendingClick.clientY }, dragPointer)) pendingNodeClickRef.current = null;
                 const initialPositions = dragRef.current.initialSelectedNodes;
-                if (Math.abs(event.clientX - dragRef.current.startX) > 3 || Math.abs(event.clientY - dragRef.current.startY) > 3) {
+                if (hasCanvasNodeDragMoved(dragStart, dragPointer)) {
                     dragRef.current.hasMoved = true;
                     const follow = useProductionFollowStore.getState();
                     if (follow.presentation?.nodeId && !dragRef.current.movedIds.has(follow.presentation.nodeId)) follow.pause(t("productionCanvas.manualPause"));
@@ -2531,10 +2350,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                         dispatchCanvasReferenceDrag("canvas-reference-drag-start", { ...referenceDrag, targetNodeId: h3Target.dataset.canvasRefDropTarget || "" });
                     }
                     dispatchCanvasReferenceDrag("canvas-reference-drag-over", { ...referenceDrag, targetNodeId: h3Target.dataset.canvasRefDropTarget || "", clientX: event.clientX, clientY: event.clientY });
-                    if (rafRef.current) {
-                        cancelAnimationFrame(rafRef.current);
-                        rafRef.current = null;
-                    }
+                    dragFrame.cancel();
                     dragPreviewPositionsRef.current = EMPTY_DRAG_PREVIEW;
                     writeCanvasDragPreview(projectId, EMPTY_DRAG_PREVIEW);
                     updateDropTargetGroupId(null);
@@ -2545,18 +2361,13 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     dispatchCanvasReferenceDrag("canvas-reference-drag-end", { ...referenceDrag, targetNodeId: dragRef.current.referenceTargetNodeId, clientX: event.clientX, clientY: event.clientY });
                     dragRef.current.referenceTargetNodeId = undefined;
                 }
-                if (rafRef.current) cancelAnimationFrame(rafRef.current);
                 const groupDropCandidates = {
                     hasMovedGroup: dragRef.current.hasMovedGroup,
                     movingNodes: dragRef.current.movingNodes,
                     groups: dragRef.current.groupDropCandidates,
                 };
-                rafRef.current = requestAnimationFrame(() => {
-                    const previewPositions = new Map<string, Position>();
-                    initialPositions.forEach((initial, nodeId) => {
-                        const position = { x: initial.x + dx, y: initial.y + dy };
-                        previewPositions.set(nodeId, position);
-                    });
+                dragFrame.schedule(() => {
+                    const previewPositions = canvasNodeDragPreviewPositions(initialPositions, { x: dx, y: dy });
                     dragPreviewPositionsRef.current = previewPositions;
                     publishRealtimeDrag(previewPositions);
                     writeCanvasDragPreview(projectId, previewPositions);
@@ -2567,7 +2378,6 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     const point = draggedNode && initial ? orderedGroupDraggedCenter(initial, { x: dx, y: dy }, draggedNode) : null;
                     const orderedTarget = point ? findOrderedGroupDrop(nodesRef.current, point) : null;
                     updateOrderedGroupDropPreview(orderedTarget && draggedId ? { groupId: orderedTarget.group.id, draggedId, drop: orderedTarget.drop } : null);
-                    rafRef.current = null;
                 });
                 return;
             }
@@ -2576,73 +2386,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 scheduleConnectionPreview(event.clientX, event.clientY);
             }
         },
-        [finishNodeDrag, projectId, publishRealtimeCursor, publishRealtimeDrag, scheduleConnectionPreview, screenToCanvas, updateOrderedGroupDropPreview],
-    );
-
-    const writeSelectionOverlay = useCallback((selection: SelectionBox) => {
-        const overlay = selectionOverlayRef.current;
-        if (!overlay) return;
-        overlay.style.left = `${Math.min(selection.startLocalX, selection.currentLocalX)}px`;
-        overlay.style.top = `${Math.min(selection.startLocalY, selection.currentLocalY)}px`;
-        overlay.style.width = `${Math.abs(selection.currentLocalX - selection.startLocalX)}px`;
-        overlay.style.height = `${Math.abs(selection.currentLocalY - selection.startLocalY)}px`;
-    }, []);
-
-    const updateSelectionPreview = useCallback(
-        (clientX: number, clientY: number) => {
-            const currentSelection = selectionBoxRef.current;
-            if (!currentSelection) return;
-
-            const world = screenToCanvas(clientX, clientY);
-            const rect = canvasRectRef.current;
-            const localX = clientX - (rect?.left || 0);
-            const localY = clientY - (rect?.top || 0);
-            const rectX = Math.min(currentSelection.startWorldX, world.x);
-            const rectY = Math.min(currentSelection.startWorldY, world.y);
-            const rectW = Math.abs(world.x - currentSelection.startWorldX);
-            const rectH = Math.abs(world.y - currentSelection.startWorldY);
-            const nextSelected = collectCanvasSelectionIds(
-                queryCanvasSpatialIndex(graphIndex.nodeSpatialIndex, {
-                    left: rectX,
-                    top: rectY,
-                    right: rectX + rectW,
-                    bottom: rectY + rectH,
-                }).map((node) => node.id),
-                currentSelection.initialSelectedNodeIds,
-                currentSelection.additive,
-                currentSelection.excludeNodeIds,
-            );
-
-            const nextSelectionBox = { ...currentSelection, currentWorldX: world.x, currentWorldY: world.y, currentLocalX: localX, currentLocalY: localY };
-            selectionBoxRef.current = nextSelectionBox;
-            // 框选框是临时的 DOM 绘制状态；每帧直接改 SVG 尺寸，避免整张画布随选框重渲染。
-            writeSelectionOverlay(nextSelectionBox);
-            if (!sameIdSet(selectedNodeIdsRef.current, nextSelected)) {
-                selectedNodeIdsRef.current = nextSelected;
-                setSelectedNodeIds(nextSelected);
-            }
-        },
-        [graphIndex.nodeSpatialIndex, screenToCanvas, writeSelectionOverlay],
-    );
-
-    const flushSelectionFrame = useCallback(() => {
-        if (selectionRafRef.current !== null) {
-            cancelAnimationFrame(selectionRafRef.current);
-            selectionRafRef.current = null;
-        }
-        const pointer = selectionPointerRef.current;
-        if (pointer) updateSelectionPreview(pointer.clientX, pointer.clientY);
-    }, [updateSelectionPreview]);
-
-    const finishSelectionBox = useCallback(
-        (clientX?: number, clientY?: number) => {
-            if (clientX != null && clientY != null) selectionPointerRef.current = { clientX, clientY };
-            flushSelectionFrame();
-            selectionPointerRef.current = null;
-            selectionBoxRef.current = null;
-            setSelectionBox(null);
-        },
-        [flushSelectionFrame],
+        [dragFrame, finishNodeDrag, projectId, publishRealtimeCursor, publishRealtimeDrag, scheduleConnectionPreview, screenToCanvas, updateOrderedGroupDropPreview],
     );
 
     const finishCtrlGroupMarquee = useCallback((clientX?: number, clientY?: number, cancelled = false) => {
@@ -2674,22 +2418,9 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     updateSelectionPreview(event.clientX, event.clientY);
                 }
             }
-            if (!selectionBoxRef.current) return;
-            selectionPointerRef.current = { clientX: event.clientX, clientY: event.clientY };
-
-            if (event.buttons === 0) {
-                finishSelectionBox();
-                return;
-            }
-
-            if (selectionRafRef.current !== null) return;
-            selectionRafRef.current = requestAnimationFrame(() => {
-                selectionRafRef.current = null;
-                const pointer = selectionPointerRef.current;
-                if (pointer) updateSelectionPreview(pointer.clientX, pointer.clientY);
-            });
+            scheduleSelectionPreview(event.clientX, event.clientY, event.buttons);
         },
-        [finishSelectionBox, startSelectionBoxAt, updateSelectionPreview],
+        [scheduleSelectionPreview, startSelectionBoxAt, updateSelectionPreview],
     );
 
     const handleGlobalMouseUp = useCallback(
@@ -2740,13 +2471,12 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             window.removeEventListener("pointercancel", cancelNodeDrag);
             window.removeEventListener("blur", cancelNodeDrag);
             window.removeEventListener("pointermove", handleGlobalPointerMove);
-            if (selectionRafRef.current !== null) cancelAnimationFrame(selectionRafRef.current);
-            selectionRafRef.current = null;
+            cancelSelectionFrame();
             if (connectionPreviewRafRef.current !== null) cancelAnimationFrame(connectionPreviewRafRef.current);
             connectionPreviewRafRef.current = null;
             connectionPreviewPointerRef.current = null;
         };
-    }, [active, finishCtrlGroupMarquee, finishNodeDrag, finishSelectionBox, handleGlobalMouseMove, handleGlobalPointerMove, handleGlobalMouseUp, setConnecting]);
+    }, [active, cancelSelectionFrame, finishCtrlGroupMarquee, finishNodeDrag, finishSelectionBox, handleGlobalMouseMove, handleGlobalPointerMove, handleGlobalMouseUp, setConnecting]);
 
     const createImageFileNode = useCallback(async (file: File, position: Position) => {
         if (isSvgFile(file) && getNodeDefinition("svg:vector")) {
@@ -6141,12 +5871,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                             <svg
                                 ref={selectionOverlayRef}
                                 className="pointer-events-none absolute z-[100] overflow-visible"
-                                style={{
-                                    left: Math.min(selectionBox.startLocalX, selectionBox.currentLocalX),
-                                    top: Math.min(selectionBox.startLocalY, selectionBox.currentLocalY),
-                                    width: Math.abs(selectionBox.currentLocalX - selectionBox.startLocalX),
-                                    height: Math.abs(selectionBox.currentLocalY - selectionBox.startLocalY),
-                                }}
+                                style={canvasSelectionOverlayBounds(selectionBox.startLocalX, selectionBox.startLocalY, selectionBox.currentLocalX, selectionBox.currentLocalY)}
                             >
                                 <rect width="100%" height="100%" fill={theme.canvas.selectionFill} stroke={theme.canvas.selectionStroke} strokeOpacity={0.95} strokeWidth="2" strokeDasharray="7 5" vectorEffect="non-scaling-stroke" />
                             </svg>

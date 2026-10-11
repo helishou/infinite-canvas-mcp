@@ -119,7 +119,7 @@ export function prepareSharedAssetProjection(db: BackendDatabase, episodeId: str
     const operations = node ? [{ type: "update_node", id: nodeId, patch: { content: approved.storageKey }, metadata: layoutMetadata }]
         : [{ type: "add_node", id: nodeId, nodeType: approved.snapshot.type, title: approved.snapshot.title, position: member.position, width: member.size.width, height: member.size.height, content: approved.storageKey, metadata: layoutMetadata }];
     const same = node?.metadata?.sharedAssetOrigin?.approvedId === approvedId && node?.metadata?.storageKey === approved.storageKey;
-    if (!same) db.applyCanvasProjectOperations(episode.canvasId, Number(project.revision || 0), operations, { runtimeWrite: true, source: { kind: "system", clientId: "production:shared-assets", label: "采用共享批准资产" } });
+    if (!same) db.applyCanvasProjectOperations(episode.canvasId, Number(project.revision || 0), operations, { runtimeWrite: true, source: { kind: "system", clientId: "production:shared-assets", label: "采用共享素材版本" } });
     return { nodeId, approved, origin };
 }
 export const sharedProjectionNodeId = productionSharedProjectionNodeId;

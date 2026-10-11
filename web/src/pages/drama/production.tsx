@@ -8,7 +8,7 @@ import localforage from "localforage";
 import { nanoid } from "nanoid";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams, useSearchParams, createSearchParams } from "react-router-dom";
-import { directorModules, isSubjectPromptAssembly, productionSceneEntries, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
+import { diagnosticBlocksAction, directorModules, isSubjectPromptAssembly, productionSceneEntries, type ProductionBlockingAction, type ProductionDiagnostic, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 import { backendConnection } from "@/lib/backend-connection";
 import { ensureCanvasDraftLease, getCanvasDraftSessionId } from "@/lib/canvas/canvas-draft-session";
 import { exportAchengDeliveryBundle } from "@/lib/acheng-delivery-export";
@@ -53,6 +53,37 @@ type PendingCompilation = { operationId: string; expectedRevision: number };
 type LocalDraft = { brief?: string; sourceDrafts?: Record<string, string>; remoteRevision: number | null; pendingCommand?: PendingCommand | null; pendingRunStart?: PendingRunStart | null };
 type LegacySource = { source: "fullPlot" | "script.md" | "storyboard.md"; sha256: string; text: string };
 type VersionItem = { version: number; stage: string; createdAt: string };
+function sourceDraftDiffersFromSaved(key: string, value: string, director: NonNullable<EpisodeProduction["draft"]["director"]>) {
+  const source = director.source as Record<string, any>;
+  if (key.startsWith("v2shot:")) {
+    const shotId = key.slice("v2shot:".length);
+    const shot = (Array.isArray(source.shots) ? source.shots : []).find((item: Record<string, any>) => String(item.id) === shotId);
+    if (!shot) return true;
+    const parsed = readShotFormDraft(value, shot, source);
+    if (parsed.invalid || shotDraftSourceChanged(parsed.draft, shot, source)) return true;
+    const changes = shotFormChanges(parsed.draft);
+    return Object.keys(changes.patch).length > 0 || changes.keyframes !== undefined || changes.utterances !== undefined;
+  }
+  if (key.startsWith("scene:")) {
+    const [, sceneId, field] = key.split(":");
+    if (field !== "text") return true;
+    const scene = (Array.isArray(source.script_scenes) ? source.script_scenes : []).find((item: Record<string, any>) => String(item.id || item.scene_id) === sceneId);
+    return !scene || String(scene.text || "") !== value;
+  }
+  return true;
+}
+function blocksCompilationDiagnostic(item: ProductionCompilationDiagnostic) {
+  const severity = item.severity === "error" || item.severity === "unverified" ? item.severity : "warning";
+  return diagnosticBlocksAction({
+    code: item.code || "UNKNOWN_COMPILATION_DIAGNOSTIC",
+    path: item.path || "compile",
+    message: item.message || "",
+    severity,
+    ...(item.targetId ? { targetId: item.targetId } : {}),
+    ...(Array.isArray(item.blockingActions) ? { blockingActions: item.blockingActions as ProductionBlockingAction[] } : {}),
+    ...(typeof item.blocksCompilation === "boolean" ? { blocksCompilation: item.blocksCompilation } : {}),
+  } as ProductionDiagnostic, "compile");
+}
 const localDrafts = localforage.createInstance({ name: "episode-production-drafts", storeName: "unfinished" });
 const pendingCompilationStorageKey = (draftKey: string) => `${draftKey}:pending-compilation`;
 let draftWrites: Promise<unknown> = Promise.resolve();
@@ -172,6 +203,10 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   const [briefDraft, setBriefDraft] = useState("");
   const priorFormalBrief = useRef<string | null>(null);
   const [sourceDrafts, setSourceDrafts] = useState<Record<string, string>>({});
+  const dirtySourceDraftKeys = useMemo(() => Object.keys(sourceDrafts).filter(key => {
+    const director = production?.draft.director;
+    return !director || sourceDraftDiffersFromSaved(key, sourceDrafts[key], director);
+  }), [sourceDrafts, production?.draft.director]);
   const [busy, setBusy] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -338,14 +373,15 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     const owner = productionOwner;
     const active = useProductionFollowStore.getState().target;
     if (active?.workId !== routeWorkId || active.kind !== owner.kind || active.id !== owner.id) return;
-    const reasons = Object.keys(sourceDrafts).length || briefDraft !== String(production.draft.director?.source.brief || "")
+    const reasons = dirtySourceDraftKeys.length || briefDraft !== String(production.draft.director?.source.brief || "")
       ? "存在尚未保存的制作编辑" : pendingCommand ? t("productionHub.follow.pendingWrite") : pendingRunStart ? t("productionHub.follow.unknownRun") : exporting ? t("productionHub.follow.exportInProgress") : "";
     useProductionFollowStore.getState().setGuardReason("editor", reasons);
-  }, [routeWorkId, projectId, episodeId, canvasId, production, sourceDrafts, briefDraft, pendingCommand, pendingRunStart, exporting, t]);
+  }, [routeWorkId, projectId, episodeId, canvasId, production, dirtySourceDraftKeys, briefDraft, pendingCommand, pendingRunStart, exporting, t]);
 
   const remoteSequence = useRef(0);
   const refreshInFlight = useRef<Promise<EpisodeProduction | undefined> | null>(null);
   const refreshQueued = useRef(false);
+  const skipProductionRefreshRevision = useRef<number | null>(null);
   useEffect(() => () => { remoteSequence.current++; useProductionFollowStore.getState().setGuardReason("editor", ""); }, [episodeId, projectId]);
   const refreshRemote = useCallback(async () => {
     // 一次编辑常触发两次刷新（显式调用 + drama-production.updated 事件）。合并成一次全量拉取，
@@ -373,6 +409,13 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       if (refreshQueued.current) { refreshQueued.current = false; void refreshRemote(); }
     }
   }, [target, canvasId, continuitySnapshot, production?.draft.clipGroups, production?.draft.director?.assets]);
+
+  const refreshCompilationProjection = useCallback(async () => {
+    const [prod, ready] = await Promise.all([fetchEpisodeProduction(target), fetchProductionReadiness(target)]);
+    setProduction(previous => !previous || previous.episodeId !== prod.production.episodeId || prod.production.revision > previous.revision ? prod.production : previous);
+    setReadiness(previous => previous && previous.revision > ready.readiness.revision ? previous : ready.readiness);
+    return prod.production;
+  }, [target]);
 
   const persistPendingCompilation = async (value: PendingCompilation | null) => {
     pendingCompilationRef.current = value;
@@ -405,14 +448,20 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       }
       const started = await compileProduction(target, pending.expectedRevision, pending.operationId);
       let status: ProductionCompilationStatus = started.compilation;
-      for (let attempt = 0; attempt < 600 && ["queued", "running"].includes(status.status); attempt++) {
-        await new Promise(resolve => window.setTimeout(resolve, 1200));
+      let waitedMs = 0;
+      let pollDelayMs = 1200;
+      const maxWaitMs = 600 * 1200;
+      while (["queued", "running"].includes(status.status) && waitedMs < maxWaitMs) {
+        const delayMs = Math.min(pollDelayMs, maxWaitMs - waitedMs);
+        await new Promise(resolve => window.setTimeout(resolve, delayMs));
+        waitedMs += delayMs;
         status = (await fetchProductionCompilation(target, pending.operationId)).compilation;
+        pollDelayMs = Math.min(5000, Math.ceil(pollDelayMs * 1.6));
       }
       const diagnostics: ProductionCompilationDiagnostic[] = status.diagnosticCount
         ? (await fetchProductionCompilation(target, pending.operationId, "diagnostics", { pageSize: 100 })).compilation.items || [] : [];
       const describe = (item: ProductionCompilationDiagnostic) => [item.targetId, item.path, item.code, item.message].filter(Boolean).join(" · ");
-      const warningDetails = diagnostics.filter(item => item.severity === "warning").map(describe).filter(Boolean).slice(0, 10);
+      const warningDetails = diagnostics.map(describe).filter(Boolean).slice(0, 10);
       const completionNotice = () => {
         const warningNotice = status.verdict === "passed_with_warnings" && status.diagnosticCount
           ? ` · ${t("director.atomic.compileWarnings", { count: status.diagnosticCount })}` : "";
@@ -421,20 +470,23 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       };
       if (status.application?.revision !== undefined) {
         await persistPendingCompilation(null);
+        skipProductionRefreshRevision.current = status.application.revision;
         setCompileNotice(completionNotice());
-        void refreshRemote().catch(() => undefined);
+        void refreshCompilationProjection().catch(() => undefined);
         return;
       }
       if (status.status === "succeeded" && status.verdict !== "blocked" && status.preparedId) {
-        await applyProductionCompilation(target, status.preparedId);
+        skipProductionRefreshRevision.current = compileSource.revision + 1;
+        const applied = await applyProductionCompilation(target, status.preparedId);
+        skipProductionRefreshRevision.current = applied.receipt.revision ?? skipProductionRefreshRevision.current;
         await persistPendingCompilation(null);
         setCompileNotice(completionNotice());
-        void refreshRemote().catch(() => undefined);
+        void refreshCompilationProjection().catch(() => undefined);
         return;
       }
       if (["succeeded", "blocked", "interrupted", "failed"].includes(status.status)) await persistPendingCompilation(null);
       const blocker = status.blockingDiagnostic;
-      const blockingDetails = diagnostics.filter(item => item.blockingActions?.includes("compile") || item.severity === "error" || item.blocksCompilation).map(describe).filter(Boolean).slice(0, 10);
+      const blockingDetails = diagnostics.filter(blocksCompilationDiagnostic).map(describe).filter(Boolean).slice(0, 10);
       setCompileError(blockingDetails.length ? blockingDetails.join("\n") : blocker
         ? [blocker.targetId, blocker.path, blocker.code, blocker.message].filter(Boolean).join(" · ")
         : t("director.atomic.compileBlocked", { status: status.status === "succeeded" ? status.verdict : status.status }));
@@ -448,8 +500,12 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
 
   useEffect(() => {
     const onProductionEvent = (event: Event) => {
-      const value = (event as CustomEvent<{ type?: string; entityId?: string; payload?: { runId?: string } }>).detail;
+      const value = (event as CustomEvent<{ type?: string; entityId?: string; payload?: { runId?: string; revision?: number } }>).detail;
       const aliases = new Set([projectId, episodeId, canvasId, episode?.id, episode?.canvasId, ...(readiness?.presentation?.aliases || [])].filter(Boolean));
+      if (value?.payload?.revision && value.payload.revision === skipProductionRefreshRevision.current) {
+        skipProductionRefreshRevision.current = null;
+        return;
+      }
       // Run receipts are covered by the active single-flight poller and task events.
       // A full refresh here fans each progress write into seven reads.
       if (value?.type === "drama-production.updated" && value.entityId && aliases.has(value.entityId) && !value.payload?.runId) void refreshRemote();
@@ -885,7 +941,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       if (kind === "frame") addShot(targetId);
       if (kind === "segment") for (const shotId of segments.find((item: any) => String(item.id) === targetId)?.shot_ids || []) addShot(String(shotId));
     }
-    const draftHasCurrentTargetEdits = Object.keys(sourceDrafts).some(key => key.split(":").slice(1).some(part => targetIds.has(part)));
+    const draftHasCurrentTargetEdits = dirtySourceDraftKeys.some(key => key.split(":").slice(1).some(part => targetIds.has(part)));
     if (draftHasCurrentTargetEdits || briefDraft !== String(director.source.brief || "")) return void message.warning(t("productionHub.follow.saveEditsFirst"));
     startingRunRef.current = true;
     const runId = nanoid();
@@ -1068,7 +1124,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     };
     window.addEventListener("production-node-action", receive);
     return () => window.removeEventListener("production-node-action", receive);
-  }, [embedded, owner?.kind, owner?.id, production, canvasId, busy, draftKey, briefDraft, sourceDrafts, remoteRevision, pendingRunStart, batches, navigate, t]);
+  }, [embedded, owner?.kind, owner?.id, production, canvasId, busy, draftKey, briefDraft, dirtySourceDraftKeys, sourceDrafts, remoteRevision, pendingRunStart, batches, navigate, t]);
   const regroupSegment = async (segmentId: string, shotIds: string[], removeSegmentIds: string[]) => edit([{ type: "set_director_segment_group", segmentId, shotIds, removeSegmentIds }]);
   const repartitionV2 = async (shotIds: string[], segments: Array<Record<string, unknown>>) => edit([{ type: "repartition_director_clips", shotIds, segments }]);
   const editV2Shot = async (operation: Extract<ProductionOperation, { type: "edit_director_shot" }>) => {
@@ -1332,7 +1388,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     <div className="mx-auto max-w-[1440px]">
       {!embedded && <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3"><Button type="text" icon={<ArrowLeft className="size-4" />} onClick={() => navigate(backPath)}>{t("director.back")}</Button><div><h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{series ? seriesName || t("director.atomic.seriesWorkbench") : title || t("director.title")}</h1><p className="mt-1 text-xs text-muted-foreground">{episode ? `${t("director.episodeContext", { number: episode.episodeNumber })} · ${title}` : t("director.canvasContext")}</p></div></div>
-        <div className="flex flex-wrap items-center gap-2">{series && <Select aria-label={t("director.atomic.chooseEpisode")} value={episodeId} className="min-w-44" showSearch optionFilterProp="label" options={[...series.episodes].sort((a, b) => a.episodeNumber - b.episodeNumber).map(item => ({ value: item.id, label: `${t("drama.episodeLabel", { number: item.episodeNumber })} · ${item.title}` }))} onChange={id => navigate(dramaWorkbenchPath(series.id, id, workspace))} />}<span className="text-xs text-muted-foreground">{t(Object.keys(sourceDrafts).length ? "director.studio.localDraft" : "director.studio.saved")}</span>{production.publishedVersion > 0 && <Tag>{t("director.studio.published", { number: production.publishedVersion })}</Tag>}{canvasId && <Button icon={<ExternalLink className="size-4" />} onClick={() => canvasHost ? canvasHost.hasCanvas ? canvasHost.restoreCanvas() : canvasHost.openCanvas({ projectId: canvasId }) : navigate(`/canvas/${encodeURIComponent(canvasId)}`)}>{t(canvasHost?.hasCanvas ? "director.canvasOverlay.expand" : "drama.production.openCanvas")}</Button>}</div>
+        <div className="flex flex-wrap items-center gap-2">{series && <Select aria-label={t("director.atomic.chooseEpisode")} value={episodeId} className="min-w-44" showSearch optionFilterProp="label" options={[...series.episodes].sort((a, b) => a.episodeNumber - b.episodeNumber).map(item => ({ value: item.id, label: `${t("drama.episodeLabel", { number: item.episodeNumber })} · ${item.title}` }))} onChange={id => navigate(dramaWorkbenchPath(series.id, id, workspace))} />}<span className="text-xs text-muted-foreground">{t(dirtySourceDraftKeys.length ? "director.studio.localDraft" : "director.studio.saved")}</span>{production.publishedVersion > 0 && <Tag>{t("director.studio.published", { number: production.publishedVersion })}</Tag>}{canvasId && <Button icon={<ExternalLink className="size-4" />} onClick={() => canvasHost ? canvasHost.hasCanvas ? canvasHost.restoreCanvas() : canvasHost.openCanvas({ projectId: canvasId }) : navigate(`/canvas/${encodeURIComponent(canvasId)}`)}>{t(canvasHost?.hasCanvas ? "director.canvasOverlay.expand" : "drama.production.openCanvas")}</Button>}</div>
       </div>}
       {agentError && <Alert className="mb-4" type="warning" showIcon message={agentError} closable onClose={() => setAgentError("")} />}
       {(remoteRevision !== null || showCommandNotice) && <div className="mb-4 text-sm">{remoteRevision !== null && <p>{t("drama.production.conflictDetail", { number: remoteRevision })}</p>}{pendingNotice}</div>}

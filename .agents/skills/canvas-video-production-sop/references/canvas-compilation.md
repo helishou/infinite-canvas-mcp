@@ -26,9 +26,9 @@ source 原样保存 Acheng production 数据。sourceHash 是递归键排序、�
 
 Agent 负责编译前的创作和结构化源稿。自动刷新已登记时消费其短回执，不再另发 `production_compile` 或重复应用。明确独立编译或旧兼容流程才调用 `production_compile`，使用稳定 `operationId` 和 `production_get_compilation` 恢复原状态；只有成功后应用 `preparedId`，中断不自动重跑。
 
-编译器与 Backend 的校验回执是编译结果的技术依据。Agent 默认不读取、复查、润色或重写编译正文，也不整段回读 Clip 对照正文。需要调整时修改正式源稿并重新编译，不手工组装正式 Clip 正文、参考编号或引擎身份。用户明确编辑 Prompt 时保留人工稿，仅用 `reverse_sync_director_prompt` 对精确编译基线和 SourceMap 做确定性回写；有歧义保留草稿与诊断，不猜测创作修改。媒体批准与生成授权仍沿既有合同。
+编译器与 Backend 的校验回执是编译结果的技术依据。Agent 默认不读取、复查、润色或重写编译正文，也不整段回读 Clip 对照正文。需要调整时修改正式源稿并重新编译，不手工组装正式 Clip 正文、参考编号或引擎身份。用户明确编辑 Prompt 时保留人工稿，仅用 `reverse_sync_director_prompt` 对精确编译基线和 SourceMap 做确定性回写；有歧义保留草稿与诊断，不猜测创作修改。质量提示不要求先审核；媒体生成仍须有用户授权，真实审核证据只在用户主动启用审核时记录。
 
-准备和应用编译包会自动投影引用，消费短回执的 `referenceSync`；`blocked` 表示缺少依赖、批准媒体、当前编译或存在编辑冲突，不能当作可生成。源稿使用 `sourceSection`、`targetIds` 定向读取；产物默认读取 `artifact_index`。长列表用 `pageSize`/`cursor`，单个长对象显式用 `chunkBytes`；游标过期时从新版本读取，不拼接不同版本。编译诊断与目标索引使用 `view`、`offset` 和 `pageSize`，不回传全量 audit 或正文。
+准备和应用编译包会自动投影引用，消费短回执的 `referenceSync`。提示词能组装时保留编译产物；引用缺失、未归档或哈希不匹配只阻止消费该引用的生成目标，并在目标诊断中说明。`blocked` 依据当前动作的技术阻塞判断；连续性、风格和提示词长度建议可查看但不阻止编译。源稿使用 `sourceSection`、`targetIds` 定向读取；产物默认读取 `artifact_index`。长列表用 `pageSize`/`cursor`，单个长对象显式用 `chunkBytes`；游标过期时从新版本读取，不拼接不同版本。编译诊断与目标索引使用 `view`、`offset` 和 `pageSize`，不回传全量 audit 或正文。
 
 ## 编译输入与产物
 
