@@ -6522,40 +6522,41 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     {angleNode && imageToolUrl?.nodeId === angleNode.id ? <CanvasNodeAngleDialog key="angle" dataUrl={imageToolUrl.url} open onClose={() => setAngleNodeId(null)} onConfirm={(params) => void generateAngleNode(angleNode, params)} /> : null}
 
                     {characterEditNodeId ? <CharacterNodeEditModal
-                    key="character-edit"
-                    open={Boolean(characterEditNodeId)}
-                    selectingCanvasImage={characterImagePickerActive}
-                    canvasImagePick={characterCanvasImagePick}
-                    node={characterEditNodeId ? nodesRef.current.find((node) => node.id === characterEditNodeId) || null : null}
-                    onClose={closeCharacterEditor}
-                    onPickCanvasImage={startCharacterImageSelection}
-                    onSave={saveCharacterEdit}
-                /> : null}
+                        key="character-edit"
+                        open={Boolean(characterEditNodeId)}
+                        selectingCanvasImage={characterImagePickerActive}
+                        canvasImagePick={characterCanvasImagePick}
+                        node={characterEditNodeId ? nodesRef.current.find((node) => node.id === characterEditNodeId) || null : null}
+                        onClose={closeCharacterEditor}
+                        onPickCanvasImage={startCharacterImageSelection}
+                        onSave={saveCharacterEdit}
+                    /> : null}
 
                     {sceneEditNodeId ? <SceneNodeEditModal
-                    key="scene-edit"
-                    open={Boolean(sceneEditNodeId)}
-                    selectingCanvasImage={Boolean(sceneImagePickerActive)}
-                    canvasImagePick={sceneCanvasImagePick}
-                    node={sceneEditNodeId ? nodesRef.current.find((node) => node.id === sceneEditNodeId) || null : null}
-                    onClose={closeSceneEditor}
-                    onPickCanvasImage={startSceneImageSelection}
-                    onSave={saveSceneEdit}
-                /> : null}
+                        key="scene-edit"
+                        open={Boolean(sceneEditNodeId)}
+                        selectingCanvasImage={Boolean(sceneImagePickerActive)}
+                        canvasImagePick={sceneCanvasImagePick}
+                        node={sceneEditNodeId ? nodesRef.current.find((node) => node.id === sceneEditNodeId) || null : null}
+                        onClose={closeSceneEditor}
+                        onPickCanvasImage={startSceneImageSelection}
+                        onSave={saveSceneEdit}
+                    /> : null}
+
                     {propEditNodeId ? <PropNodeEditModal
-                    key="prop-edit"
-                    open={Boolean(propEditNodeId)}
-                    selectingCanvasImage={propImagePickerActive}
-                    canvasImagePick={propCanvasImagePick}
-                    node={nodesRef.current.find((node) => node.id === propEditNodeId) || null}
-                    onClose={closePropEditor}
-                    onPickCanvasImage={startPropImageSelection}
-                    onSave={savePropEdit}
-                /> : null}
+                        key="prop-edit"
+                        open={Boolean(propEditNodeId)}
+                        selectingCanvasImage={propImagePickerActive}
+                        canvasImagePick={propCanvasImagePick}
+                        node={nodesRef.current.find((node) => node.id === propEditNodeId) || null}
+                        onClose={closePropEditor}
+                        onPickCanvasImage={startPropImageSelection}
+                        onSave={savePropEdit}
+                    /> : null}
 
                     {videoComparison ? <CanvasVideoCompareModal key="video-comparison" comparison={videoComparison} onClose={() => setVideoComparison(null)} /> : null}
 
-                <Modal
+                    <Modal key="clear-confirm"
                     title={t("canvas.projectPage.clearTitle")}
                     open={clearConfirmOpen}
                     centered
@@ -6572,7 +6573,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     <p className="text-sm opacity-60">{t("canvas.projectPage.clearDescription")}</p>
                 </Modal>
 
-                <Suspense fallback={null}>{assetPickerOpen ? <AssetPickerModal open allowedKinds={assetPickerAllowedKinds} onInsert={handleAssetInsert} onClose={closeAssetPicker} /> : null}</Suspense>
+                    {assetPickerOpen ? <AssetPickerModal key="asset-picker" open allowedKinds={assetPickerAllowedKinds} onInsert={handleAssetInsert} onClose={closeAssetPicker} /> : null}
                 </CanvasDialogHost>
             </section>
         </main>
