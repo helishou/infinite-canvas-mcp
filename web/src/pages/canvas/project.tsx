@@ -6515,9 +6515,9 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                         <CanvasNodeUpscaleDialog key="upscale" dataUrl={imageToolUrl.url} open onClose={() => setUpscaleNodeId(null)} onConfirm={(params) => void upscaleImageNode(upscaleNode, params)} />
                     ) : null}
 
-                <Modal key="super-resolve" title={t("canvas.projectPage.superResolve")} open={Boolean(superResolveNode && canvasNodeImage(superResolveNode))} centered footer={null} onCancel={() => setSuperResolveNodeId(null)}>
-                    <div className="py-8 text-center text-base font-medium">{t("canvas.projectPage.notImplemented")}</div>
-                </Modal>
+                    <Modal key="super-resolve" title={t("canvas.projectPage.superResolve")} open={Boolean(superResolveNode && canvasNodeImage(superResolveNode))} centered footer={null} onCancel={() => setSuperResolveNodeId(null)}>
+                        <div className="py-8 text-center text-base font-medium">{t("canvas.projectPage.notImplemented")}</div>
+                    </Modal>
 
                     {angleNode && imageToolUrl?.nodeId === angleNode.id ? <CanvasNodeAngleDialog key="angle" dataUrl={imageToolUrl.url} open onClose={() => setAngleNodeId(null)} onConfirm={(params) => void generateAngleNode(angleNode, params)} /> : null}
 
@@ -6557,21 +6557,21 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     {videoComparison ? <CanvasVideoCompareModal key="video-comparison" comparison={videoComparison} onClose={() => setVideoComparison(null)} /> : null}
 
                     <Modal key="clear-confirm"
-                    title={t("canvas.projectPage.clearTitle")}
-                    open={clearConfirmOpen}
-                    centered
-                    onCancel={() => setClearConfirmOpen(false)}
-                    footer={
-                        <>
-                            <Button onClick={() => setClearConfirmOpen(false)}>{t("common.cancel")}</Button>
-                            <Button danger type="primary" onClick={clearCanvas}>
-                                {t("canvas.projectPage.clear")}
-                            </Button>
-                        </>
-                    }
-                >
-                    <p className="text-sm opacity-60">{t("canvas.projectPage.clearDescription")}</p>
-                </Modal>
+                        title={t("canvas.projectPage.clearTitle")}
+                        open={clearConfirmOpen}
+                        centered
+                        onCancel={() => setClearConfirmOpen(false)}
+                        footer={
+                            <>
+                                <Button onClick={() => setClearConfirmOpen(false)}>{t("common.cancel")}</Button>
+                                <Button danger type="primary" onClick={clearCanvas}>
+                                    {t("canvas.projectPage.clear")}
+                                </Button>
+                            </>
+                        }
+                    >
+                        <p className="text-sm opacity-60">{t("canvas.projectPage.clearDescription")}</p>
+                    </Modal>
 
                     {assetPickerOpen ? <AssetPickerModal key="asset-picker" open allowedKinds={assetPickerAllowedKinds} onInsert={handleAssetInsert} onClose={closeAssetPicker} /> : null}
                 </CanvasDialogHost>
