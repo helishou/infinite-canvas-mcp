@@ -1,15 +1,17 @@
+import type { SharedAssetSource } from "@basketikun/canvas-agent/shared-asset-reference";
 import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { App, Empty, Input, Popconfirm, Select, Spin, Tag } from "antd";
+import { App, Empty, Input, Popconfirm, Select, Spin, Tag, type InputRef } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { BookOpen, Check, ChevronRight, Clapperboard, Download, Eye, FileText, Image as ImageIcon, ListChecks, ListRestart, MapPinned, Music2, Plus, Search, Settings2, Sparkles, Square, Trash2, Type, User, Video, type LucideIcon } from "lucide-react";
+import { BookOpen, Check, ChevronRight, Clapperboard, Download, Eye, FileText, Image as ImageIcon, LayoutGrid, Rows3, ListChecks, ListRestart, MapPinned, Music2, Package, Plus, Search, Settings2, Sparkles, Square, Trash2, Type, User, Video, type LucideIcon } from "lucide-react";
 import { motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
 import { findCharacterVoiceAsset, resolveCharacterVoiceName } from "@/lib/character-voice";
 import { exportCanvasNodes } from "@/lib/canvas/canvas-export";
-import { getNodeDefinition } from "@/lib/canvas/node-registry";
+import { canvasNodeSearchText } from "@/lib/canvas/canvas-navigation";
+import { getNodeDefinition, useNodeRegistryVersion } from "@/lib/canvas/node-registry";
 import { cn } from "@/lib/utils";
 import { PromptDetailDialog } from "@/pages/prompts/components/prompt-detail-dialog";
 import { CustomPromptDialog } from "@/components/prompts/custom-prompt-dialog";
@@ -17,7 +19,7 @@ import { fetchBackendCanvasDrama } from "@/services/backend-api";
 import { fetchSourcePrompts, isCustomPrompt, withCustomPromptMeta, type Prompt } from "@/services/api/prompts";
 import { uploadMediaFile } from "@/services/file-storage";
 import { ensureImagePreview, getImagePreviewRevision, isImageFile, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
-import { useAssetStore, type Asset, type AssetKind, type AudioAsset, type ImageAsset } from "@/stores/use-asset-store";
+import { useAssetStore, libraryErrorText, type Asset, type AssetKind, type AudioAsset, type ImageAsset } from "@/stores/use-asset-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { CUSTOM_PROMPTS_CATEGORY, useCustomPromptsStore } from "@/stores/use-custom-prompts-store";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
@@ -34,6 +36,7 @@ const PANEL_EASE = [0.22, 1, 0.36, 1] as const;
 type PanelTab = "canvas" | "assets" | "prompts";
 
 type Props = {
+    onSelectionChange: (ids: Set<string>) => void;
     projectId: string;
     nodes: CanvasNodeData[];
     selectedNodeIds: Set<string>;
@@ -52,6 +55,7 @@ const NODE_TYPE_ICON: Record<string, typeof Square> = {
     [CanvasNodeType.Group]: Square,
     [CanvasNodeType.Character]: User,
     [CanvasNodeType.Scene]: MapPinned,
+    [CanvasNodeType.Prop]: Package,
 };
 
 const STATUS_COLOR: Record<string, string> = {
@@ -61,7 +65,7 @@ const STATUS_COLOR: Record<string, string> = {
     idle: "transparent",
 };
 
-export const CanvasSidePanel = memo(function CanvasSidePanel({ projectId, nodes, selectedNodeIds, onFocusNode, onPreviewNode, onInsertAsset }: Props) {
+export const CanvasSidePanel = memo(function CanvasSidePanel({ projectId, nodes, selectedNodeIds, onFocusNode, onPreviewNode, onInsertAsset, onSelectionChange }: Props) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [tab, setTab] = useState<PanelTab>("canvas");
@@ -69,8 +73,13 @@ export const CanvasSidePanel = memo(function CanvasSidePanel({ projectId, nodes,
     const panelOpen = useCanvasSidePanelStore((state) => state.panelOpen);
     const panelMounted = useCanvasSidePanelStore((state) => state.panelMounted);
     const panelClosing = useCanvasSidePanelStore((state) => state.panelClosing);
+    const nodeSearchFocusRequest = useCanvasSidePanelStore((state) => state.nodeSearchFocusRequest);
     const setWidth = useCanvasSidePanelStore((state) => state.setWidth);
     const [resizing, setResizing] = useState(false);
+
+    useEffect(() => {
+        if (nodeSearchFocusRequest > 0) setTab("canvas");
+    }, [nodeSearchFocusRequest]);
 
     const startResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
         event.preventDefault();
@@ -116,7 +125,7 @@ export const CanvasSidePanel = memo(function CanvasSidePanel({ projectId, nodes,
                 </div>
                 <div className="mt-2 min-h-0 flex-1 overflow-hidden">
                     {tab === "canvas" ? (
-                        <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={onFocusNode} onPreviewNode={onPreviewNode} theme={theme} />
+                        <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onSelectionChange={onSelectionChange} onFocusNode={onFocusNode} onPreviewNode={onPreviewNode} theme={theme} focusSearchRequest={nodeSearchFocusRequest} />
                     ) : tab === "assets" ? (
                         <CanvasAssetsTab projectId={projectId} onInsert={onInsertAsset} theme={theme} />
                     ) : (
@@ -142,7 +151,7 @@ function TabButton({ label, active, theme, onClick }: { label: string; active: b
 // Canvas tab: list nodes and center, zoom, and select the clicked node.
 // ---------------------------------------------------------------------------
 
-const NODE_FILTER_VALUES = ["all", CanvasNodeType.Image, CanvasNodeType.Video, CanvasNodeType.Text, CanvasNodeType.Audio, CanvasNodeType.Config, CanvasNodeType.Loop, CanvasNodeType.Character, CanvasNodeType.Scene, CanvasNodeType.Group];
+const NODE_FILTER_VALUES = ["all", CanvasNodeType.Image, CanvasNodeType.Video, CanvasNodeType.Text, CanvasNodeType.Audio, CanvasNodeType.Config, CanvasNodeType.Loop, CanvasNodeType.Character, CanvasNodeType.Scene, CanvasNodeType.Prop, CanvasNodeType.Group];
 const H3_NODE_TYPES = new Set(["minimax-h3:video", "smart-minimax", "minimax", "minimax-h3"]);
 
 function isVideoCanvasNode(node: CanvasNodeData) {
@@ -151,6 +160,7 @@ function isVideoCanvasNode(node: CanvasNodeData) {
 
 function nodePreviewText(node: CanvasNodeData) {
     if (node.type === CanvasNodeType.Text) return node.metadata?.content || node.metadata?.prompt || "";
+    if (node.type === CanvasNodeType.Prop) return node.metadata?.propDescription || node.metadata?.propName || node.title || "";
     return getNodeDefinition(node.type)?.title || node.type;
 }
 
@@ -172,24 +182,38 @@ function imageCoverForNode(node: CanvasNodeData) {
     if (node.type === CanvasNodeType.Image && (node.metadata?.content || node.metadata?.storageKey)) {
         return { content: node.metadata.content || "", storageKey: node.metadata.storageKey };
     }
+    if (node.type === CanvasNodeType.Prop && (node.metadata?.propImage?.url || node.metadata?.propImage?.storageKey)) {
+        return { content: node.metadata.propImage.url || "", storageKey: node.metadata.propImage.storageKey };
+    }
     return undefined;
 }
 
-const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, theme }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onFocusNode: (nodeId: string) => void; onPreviewNode: (nodeId: string) => void; theme: CanvasTheme }) {
+const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, onSelectionChange, onFocusNode, onPreviewNode, theme, focusSearchRequest }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onSelectionChange: (ids: Set<string>) => void; onFocusNode: (nodeId: string) => void; onPreviewNode: (nodeId: string) => void; theme: CanvasTheme; focusSearchRequest: number }) {
     const { message } = App.useApp();
     const { t } = useTranslation();
+    const registryVersion = useNodeRegistryVersion((state) => state.version);
     const [keyword, setKeyword] = useState("");
     const [typeFilter, setTypeFilter] = useState<string>("all");
     const [selectMode, setSelectMode] = useState(false);
-    const [checked, setChecked] = useState<Set<string>>(new Set());
+    const nodeViewMode = useCanvasSidePanelStore((state) => state.nodeViewMode);
+    const setNodeViewMode = useCanvasSidePanelStore((state) => state.setNodeViewMode);
+    const panelWidth = useCanvasSidePanelStore((state) => state.width);
+    const gridColumns = nodeViewMode === "grid" ? Math.max(2, Math.floor((panelWidth - 24) / 110)) : 1;
+    const checked = selectedNodeIds;
     const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
     const [exporting, setExporting] = useState(false);
     const listRef = useRef<HTMLDivElement>(null);
+    const searchInputRef = useRef<InputRef>(null);
 
     const filtered = useMemo(() => {
-        const query = keyword.trim().toLowerCase();
-        return nodes.filter((node) => matchesNodeTypeFilter(node, typeFilter) && (!query || [node.title, node.metadata?.content, node.metadata?.prompt].filter(Boolean).join(" ").toLowerCase().includes(query)));
-    }, [nodes, keyword, typeFilter]);
+        const query = keyword.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+        return nodes.filter((node) => {
+            if (!matchesNodeTypeFilter(node, typeFilter)) return false;
+            const typeLabel = t(`canvas.sidePanel.filter.${node.type}`, { defaultValue: getNodeDefinition(node.type)?.title || node.type });
+            const searchText = canvasNodeSearchText(node, typeLabel);
+            return query.every((word) => searchText.includes(word));
+        });
+    }, [nodes, keyword, typeFilter, registryVersion, t]);
     const treeRows = useMemo(() => {
         const filteredIds = new Set(filtered.map((node) => node.id));
         const groups = new Set(nodes.filter((node) => node.type === CanvasNodeType.Group).map((node) => node.id));
@@ -206,25 +230,41 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
             return [{ node, depth: 0, hasChildren: groupChildren.length > 0 }, ...(collapsedGroups.has(node.id) ? [] : groupChildren.map((child) => ({ node: child, depth: 1, hasChildren: false })))];
         });
     }, [collapsedGroups, filtered, nodes]);
+    const displayRows = nodeViewMode === "grid" ? filtered.map((node) => ({ node, depth: 0, hasChildren: false })) : treeRows;
     const rowVirtualizer = useVirtualizer({
-        count: treeRows.length,
+        count: displayRows.length,
+        lanes: gridColumns,
+        getItemKey: (index) => displayRows[index].node.id,
         getScrollElement: () => listRef.current,
-        estimateSize: () => 52,
+        estimateSize: () => nodeViewMode === "grid" ? 132 : 52,
         overscan: 8,
     });
 
+    useEffect(() => { rowVirtualizer.measure(); }, [nodeViewMode, gridColumns, rowVirtualizer]);
+
+    useEffect(() => {
+        if (!focusSearchRequest) return;
+        const frame = requestAnimationFrame(() => {
+            searchInputRef.current?.focus({ cursor: "all" });
+            useCanvasSidePanelStore.getState().clearNodeSearchFocusRequest(focusSearchRequest);
+        });
+        return () => cancelAnimationFrame(frame);
+    }, [focusSearchRequest]);
+
     const exitSelect = () => {
         setSelectMode(false);
-        setChecked(new Set());
     };
-    const toggleChecked = (id: string) =>
-        setChecked((prev) => {
-            const next = new Set(prev);
-            next.has(id) ? next.delete(id) : next.add(id);
-            return next;
-        });
+    const toggleChecked = (id: string) => {
+        const next = new Set(checked);
+        next.has(id) ? next.delete(id) : next.add(id);
+        onSelectionChange(next);
+    };
     const allChecked = filtered.length > 0 && filtered.every((node) => checked.has(node.id));
-    const toggleAll = () => setChecked(allChecked ? new Set() : new Set(filtered.map((node) => node.id)));
+    const toggleAll = () => {
+        const next = new Set(checked);
+        for (const node of filtered) { if (allChecked) next.delete(node.id); else next.add(node.id); }
+        onSelectionChange(next);
+    };
 
     const handleExport = async () => {
         const targets = nodes.filter((node) => checked.has(node.id));
@@ -247,35 +287,49 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
     return (
         <div className="flex h-full flex-col">
             <div className="flex items-center gap-2 px-3 pb-2.5 pt-1">
-                <span className="text-xs font-medium opacity-60">{t("canvas.sidePanel.elements")}</span>
+                <span className="shrink-0 whitespace-nowrap text-xs font-medium opacity-60">{t("canvas.sidePanel.elements")}</span>
                 {filtered.length ? <span className="text-xs opacity-35">{filtered.length}</span> : null}
+                <button type="button" onClick={() => setNodeViewMode(nodeViewMode === "grid" ? "list" : "grid")} className="ml-auto grid size-7 shrink-0 place-items-center rounded-md opacity-70 hover:bg-black/5 dark:hover:bg-white/10" title={t(nodeViewMode === "grid" ? "canvas.sidePanel.listView" : "canvas.sidePanel.gridView")} aria-label={t(nodeViewMode === "grid" ? "canvas.sidePanel.listView" : "canvas.sidePanel.gridView")}>
+                    {nodeViewMode === "grid" ? <Rows3 className="size-3.5" /> : <LayoutGrid className="size-3.5" />}
+                </button>
                 <button
                     type="button"
                     onClick={() => (selectMode ? exitSelect() : setSelectMode(true))}
-                    className="ml-auto flex items-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium opacity-70 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10"
+                    className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-1 text-xs font-medium opacity-70 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10"
                     style={selectMode ? { color: theme.toolbar.activeText, opacity: 1 } : undefined}
                 >
                     <ListChecks className="size-3.5" />
-                    {selectMode ? t("common.cancel") : t("canvas.sidePanel.select")}
+                    {selectMode ? t("canvas.navigation.finishSelection") : t("canvas.sidePanel.select")}
                 </button>
                 {selectMode ? null : <Select size="small" variant="borderless" className="w-20" value={typeFilter} onChange={setTypeFilter} options={NODE_FILTER_VALUES.map((value) => ({ value, label: value === "all" ? t("common.all") : t(`canvas.sidePanel.filter.${value}`) }))} />}
             </div>
             <div className="px-3 pb-2.5">
-                <Input size="small" allowClear prefix={<Search className="size-3.5 text-stone-400" />} placeholder={t("canvas.sidePanel.searchNodes")} value={keyword} onChange={(e) => setKeyword(e.target.value)} />
+                <Input ref={searchInputRef} size="small" allowClear prefix={<Search className="size-3.5 text-stone-400" />} aria-label={t("canvas.navigation.searchLabel")} placeholder={t("canvas.sidePanel.searchNodes")} value={keyword} onChange={(e) => setKeyword(e.target.value)} onPressEnter={() => { if (filtered[0]) onFocusNode(filtered[0].id); }} />
             </div>
             <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-                {treeRows.length ? (
+                {displayRows.length ? (
                     <div className="relative w-full" style={{ height: rowVirtualizer.getTotalSize() }}>
                         {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                            const { node, depth, hasChildren } = treeRows[virtualRow.index];
+                            const { node, depth, hasChildren } = displayRows[virtualRow.index];
                             const smartMode = node.type === CanvasNodeType.Config && node.metadata?.smart === true ? node.metadata.generationMode || "image" : undefined;
                             const Icon = NODE_TYPE_ICON[smartMode || node.type] || FileText;
                             const isImage = node.type === CanvasNodeType.Image && node.metadata?.content;
                             const hasImageCover = Boolean(imageCoverForNode(node));
                             const isCharacter = node.type === CanvasNodeType.Character;
                             const isScene = node.type === CanvasNodeType.Scene;
+                            const isProp = node.type === CanvasNodeType.Prop;
                             const isChecked = checked.has(node.id);
                             const active = selectMode ? isChecked : selectedNodeIds.has(node.id);
+                            if (nodeViewMode === "grid") return (
+                                <button key={node.id} type="button" data-canvas-node-row={node.id} aria-pressed={isChecked} onClick={(event) => selectMode || event.ctrlKey || event.metaKey ? toggleChecked(node.id) : onFocusNode(node.id)} onDoubleClick={() => onPreviewNode(node.id)} className="absolute top-0 flex flex-col gap-1 rounded-lg p-1.5 text-left hover:bg-black/5 dark:hover:bg-white/5" style={{ left: `${virtualRow.lane * 100 / gridColumns}%`, width: `${100 / gridColumns}%`, height: virtualRow.size, transform: `translateY(${virtualRow.start}px)`, ...(active ? { background: theme.toolbar.activeBg } : {}) }}>
+                                    <span className="relative grid h-[96px] w-full place-items-center overflow-hidden rounded-md">
+                                        {hasImageCover || isCharacter || isScene || isProp ? <CanvasNodeCover node={node} /> : <Icon className="size-6 opacity-60" />}
+                                        {selectMode ? <span className="absolute left-1 top-1"><CheckMark checked={isChecked} theme={theme} /></span> : null}
+                                        {node.metadata?.status && node.metadata.status !== "idle" ? <span className="absolute right-1 top-1 size-1.5 rounded-full" style={{ background: STATUS_COLOR[node.metadata.status] || "transparent" }} /> : null}
+                                    </span>
+                                    <span className="w-full truncate text-xs">{node.title || getNodeDefinition(node.type)?.title || t("canvas.node.untitled")}</span>
+                                </button>
+                            );
                             return (
                                 <div key={node.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className={cn("group absolute left-0 top-0 flex w-full items-center rounded-lg transition", depth && "ml-5", active ? "" : "hover:bg-black/5 dark:hover:bg-white/5")} style={{ height: virtualRow.size, transform: `translateY(${virtualRow.start}px)`, ...(active ? { background: theme.toolbar.activeBg } : {}) }}>
                                     {depth ? <span className="pointer-events-none absolute -left-3 top-[calc(-50%-0.4rem)] h-[calc(100%+0.4rem)] w-3 rounded-bl-md border-b border-l opacity-45" style={{ borderColor: theme.node.stroke }} /> : null}
@@ -284,10 +338,10 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
                                             <ChevronRight className={cn("size-3.5 transition-transform", !collapsedGroups.has(node.id) && "rotate-90")} />
                                         </button>
                                     ) : null}
-                                    <button type="button" onClick={() => (selectMode ? toggleChecked(node.id) : onFocusNode(node.id))} className={cn("flex min-w-0 flex-1 items-center gap-3 py-2 pr-2 text-left", node.type === CanvasNodeType.Group && hasChildren ? "pl-0" : "pl-2")} title={selectMode ? undefined : t("canvas.sidePanel.focusNode")}>
+                                    <button type="button" data-canvas-node-row={node.id} aria-pressed={isChecked} onClick={(event) => (selectMode || event.ctrlKey || event.metaKey ? toggleChecked(node.id) : onFocusNode(node.id))} className={cn("flex min-w-0 flex-1 items-center gap-3 py-2 pr-2 text-left", node.type === CanvasNodeType.Group && hasChildren ? "pl-0" : "pl-2")} title={selectMode ? undefined : t("canvas.navigation.rowHint")}>
                                         {selectMode ? <CheckMark checked={isChecked} theme={theme} /> : null}
                                         <span className="grid size-10 shrink-0 place-items-center overflow-hidden rounded-md">
-                                            {hasImageCover || isCharacter || isScene ? <CanvasNodeCover node={node} /> : <Icon className="size-5 opacity-60" />}
+                                            {hasImageCover || isCharacter || isScene || isProp ? <CanvasNodeCover node={node} /> : <Icon className="size-5 opacity-60" />}
                                         </span>
                                         <span className="min-w-0 flex-1 space-y-0.5">
                                             <span className="block truncate text-sm font-medium leading-snug">{node.title || getNodeDefinition(node.type)?.title || t("canvas.node.untitled")}</span>
@@ -338,12 +392,13 @@ function CanvasNodeCover({ node }: { node: CanvasNodeData }) {
     const backendToken = useBackendStore((state) => state.token);
     const isCharacter = node.type === CanvasNodeType.Character;
     const isScene = node.type === CanvasNodeType.Scene;
+    const isProp = node.type === CanvasNodeType.Prop;
     const characterImages = node.metadata?.characterImages || [];
     const primaryIndex = Math.min(Math.max(node.metadata?.characterPrimaryIndex ?? 0, 0), Math.max(characterImages.length - 1, 0));
     const primaryImage = isCharacter ? characterImages[primaryIndex] || characterImages[0] : undefined;
     const imageCover = imageCoverForNode(node);
-    const content = isCharacter ? primaryImage?.url || "" : isScene ? node.metadata?.sceneImage?.url || "" : imageCover?.content || "";
-    const storageKey = isCharacter ? primaryImage?.storageKey : isScene ? node.metadata?.sceneImage?.storageKey : imageCover?.storageKey;
+    const content = isCharacter ? primaryImage?.url || "" : isScene ? node.metadata?.sceneImage?.url || "" : isProp ? node.metadata?.propImage?.url || "" : imageCover?.content || "";
+    const storageKey = isCharacter ? primaryImage?.storageKey : isScene ? node.metadata?.sceneImage?.storageKey : isProp ? node.metadata?.propImage?.storageKey : imageCover?.storageKey;
     useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
 
     useEffect(() => {
@@ -362,7 +417,7 @@ function CanvasNodeCover({ node }: { node: CanvasNodeData }) {
     }, [backendConnected, backendToken, content, storageKey]);
 
     const source = previewUrlFor(storageKey) || url;
-    return source ? <img src={source} alt={node.title} className="size-full object-cover" /> : isCharacter ? <User className="size-5 opacity-60" /> : isScene ? <MapPinned className="size-5 opacity-60" /> : <ImageIcon className="size-5 opacity-60" />;
+    return source ? <img src={source} alt={node.title} className="size-full object-cover" /> : isCharacter ? <User className="size-5 opacity-60" /> : isScene ? <MapPinned className="size-5 opacity-60" /> : isProp ? <Package className="size-5 opacity-60" /> : <ImageIcon className="size-5 opacity-60" />;
 }
 
 function CheckMark({ checked, theme }: { checked: boolean; theme: CanvasTheme }) {
@@ -570,7 +625,7 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
                                     {isCollapsed ? null : (
                                         <div className="grid grid-cols-2 gap-2 px-1 pb-2 pt-1">
                                             {group.items.map((asset) => (
-                                                <AssetCard key={asset.id} asset={asset} theme={theme} onInsert={() => onInsert(buildInsertPayload(asset))} onRemove={() => (removeAsset(asset.id), message.success(t("canvas.sidePanel.assetRemoved")))} />
+                                                <AssetCard key={asset.id} asset={asset} theme={theme} onInsert={() => onInsert({ ...buildInsertPayload(asset), sharedAssetSource: asset.metadata?.sharedAssetSource as SharedAssetSource | undefined })} onRemove={() => void removeAsset(asset.id).then(() => message.success(t("canvas.sidePanel.assetRemoved"))).catch(error => message.error(libraryErrorText(error)))} />
                                             ))}
                                         </div>
                                     )}

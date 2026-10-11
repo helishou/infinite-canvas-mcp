@@ -2,6 +2,14 @@
 import { definePlugin, useEffect, useRef, useSyncExternalStore } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContentProps } from "@infinite-canvas/plugin-sdk";
 
+function previewUrl(svg: string) {
+    const root = /<svg\b[^>]*>/i.exec(svg);
+    const source = root && !/\sxmlns\s*=/.test(root[0])
+        ? svg.slice(0, root.index) + root[0].replace(/^<svg\b/i, '$& xmlns="http://www.w3.org/2000/svg"') + svg.slice(root.index + root[0].length)
+        : svg;
+    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(source)}`;
+}
+
 function SvgContent({ ctx }: CanvasNodeContentProps) {
     const editing = useSyncExternalStore(ctx.view.subscribe, () => Boolean(ctx.view.getSnapshot().editing));
     const setEditing = (value: boolean) => ctx.view.update({ editing: value });
@@ -59,8 +67,8 @@ function SvgContent({ ctx }: CanvasNodeContentProps) {
                     style={{ height: "100%", width: "100%", resize: "none", background: ctx.theme.node.fill, borderRadius: 16, padding: 16, boxSizing: "border-box", fontFamily: "monospace", fontSize: 12, outline: "none", border: `1px solid ${ctx.theme.node.stroke}`, color: ctx.theme.node.text }}
                 />
             ) : svg ? (
-                // pointerEvents:none 让整块可拖动移动,双击/拖拽都命中外层节点
-                <div style={{ height: "100%", width: "100%", display: "flex", alignItems: "center", justifyContent: "center", padding: 12, boxSizing: "border-box", pointerEvents: "none" }} dangerouslySetInnerHTML={{ __html: svg }} />
+                // SVG 文件与编辑器源码都以图片模式预览，保留透明度并隔离内嵌脚本。
+                <img src={previewUrl(svg)} alt={ctx.node.title || "SVG"} draggable={false} style={{ height: "100%", width: "100%", objectFit: "contain", padding: 12, boxSizing: "border-box", pointerEvents: "none" }} />
             ) : (
                 <div style={{ height: "100%", width: "100%", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, boxSizing: "border-box", color: ctx.theme.node.placeholder, fontSize: 13, textAlign: "center", pointerEvents: "none" }}>双击编辑,粘贴 SVG 源码</div>
             )}

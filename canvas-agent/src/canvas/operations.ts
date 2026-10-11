@@ -32,7 +32,6 @@ export function buildCanvasToolRequest(name: ToolName, input: Record<string, unk
         const gap = Number(data.gap ?? 40);
         return applyOps(data.items.map((item, index) => textNodeOp(item, item.x ?? (data.direction === "row" ? x + index * (340 + gap) : x), item.y ?? (data.direction === "row" ? y : y + index * (240 + gap)))));
     }
-    if (name === "canvas_create_image_prompt_flow") return applyOps(generationFlowOps({ ...input, mode: "image" }, state));
     if (name === "canvas_create_config_node") {
         const x = Number(input.x ?? nextCanvasX(state));
         const y = Number(input.y ?? 0);
@@ -71,10 +70,6 @@ export function buildCanvasToolRequest(name: ToolName, input: Record<string, unk
     if (name === "canvas_update_node") {
         const data = input as { id: string; patch?: Record<string, unknown>; metadata?: Record<string, unknown> };
         return applyOps([{ type: "update_node", id: data.id, patch: data.patch, metadata: data.metadata }]);
-    }
-    if (name === "canvas_update_node_text") {
-        const data = input as { id: string; text: string; title?: string };
-        return applyOps([{ type: "update_node", id: data.id, patch: { ...(data.title ? { title: data.title } : {}) }, metadata: { content: data.text, status: "success" } }]);
     }
     if (name === "canvas_move_nodes") {
         const data = input as { items: Array<{ id: string; x?: number; y?: number; dx?: number; dy?: number }> };

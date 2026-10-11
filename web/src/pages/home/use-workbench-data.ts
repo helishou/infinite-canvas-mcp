@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useQueries, useQueryClient } from "@tanstack/react-query";
 import { fetchBackendDramaEpisodes, fetchBackendGenerationLogs, fetchBackendTasks, request, type BackendGenerationLog, type BackendRuntimeTask } from "@/services/backend-api";
 import { saveSettings, type FrontendSettings } from "@/services/settings-api";
 import { useBackendStore } from "@/stores/use-backend-store";
@@ -18,34 +19,18 @@ export function useStableProjectCovers(candidates: Array<{ key: string; media: W
 export function useProjectCoverResults(projectVersions: Array<[string, string]>) {
     const connected = useBackendStore((state) => state.connected);
     const backendUrl = useBackendStore((state) => state.url);
-    const key = JSON.stringify(projectVersions);
-    const [cache, setCache] = useState<Record<string, WorkbenchMedia | null>>({});
-    useEffect(() => {
-        if (!connected) return;
-        let disposed = false;
-        const versions = JSON.parse(key) as Array<[string, string]>;
-        const missing = versions.filter(([id, version]) => !Object.hasOwn(cache, JSON.stringify([backendUrl, id, version])));
-        if (!missing.length) return;
-        void Promise.allSettled(
-            missing.map(async ([id, version]) => {
+    const results = useQueries({
+        queries: projectVersions.map(([id, version]) => ({
+            queryKey: ["project-cover", backendUrl, id, version],
+            enabled: connected,
+            queryFn: async () => {
                 const logs = (await fetchBackendGenerationLogs({ projectId: id, status: "success", limit: 1 })).logs || [];
-                const media = collectOutputs(logs).find((output) => output.kind !== "audio") || null;
-                return { key: JSON.stringify([backendUrl, id, version]), media };
-            }),
-        ).then((results) => {
-            if (disposed) return;
-            const next: Record<string, WorkbenchMedia | null> = {};
-            results.forEach((result, index) => {
-                const [id, version] = missing[index];
-                next[JSON.stringify([backendUrl, id, version])] = result.status === "fulfilled" ? result.value.media : null;
-            });
-            setCache((current) => ({ ...current, ...next }));
-        });
-        return () => {
-            disposed = true;
-        };
-    }, [connected, backendUrl, key, cache]);
-    return (id: string, version: string) => cache[JSON.stringify([backendUrl, id, version])] || null;
+                return collectOutputs(logs).find((output) => output.kind !== "audio") || null;
+            },
+        })),
+    });
+    const covers = new Map(projectVersions.map(([id, version], index) => [JSON.stringify([id, version]), results[index].data]));
+    return (id: string, version: string) => covers.get(JSON.stringify([id, version])) || null;
 }
 
 export function useWorkbenchData() {
@@ -61,10 +46,29 @@ export function useWorkbenchData() {
     const [logCount, setLogCount] = useState(30);
     const [hasMore, setHasMore] = useState(false);
     const [refreshKey, setRefreshKey] = useState(0);
-    const [episodeFolders, setEpisodeFolders] = useState<Record<string, string>>({});
-    const [dramaError, setDramaError] = useState(false);
+    const queryClient = useQueryClient();
+    const dramas = folders.filter((folder) => folder.isDrama);
+    const ownershipQueries = useQueries({
+        queries: dramas.flatMap((folder) => [
+            {
+                queryKey: ["canvas-library-episodes", backendUrl, folder.id],
+                enabled: connected,
+                queryFn: async () => ((await fetchBackendDramaEpisodes(folder.id)).episodes || []).map((episode) => episode.canvasId || ""),
+            },
+        ]),
+    });
+    const episodeFolders: Record<string, string> = {};
+    ownershipQueries.forEach((result, index) => {
+        for (const id of result.data || []) if (id) episodeFolders[id] = dramas[index].id;
+    });
+    for (const folder of dramas) if (folder.sharedAssetCanvasId) episodeFolders[folder.sharedAssetCanvasId] = folder.id;
+    const dramaReady = ownershipQueries.every((result) => result.data !== undefined);
+    const dramaError = ownershipQueries.some((result) => result.isError);
     const [pinning, setPinning] = useState(false);
-    const refresh = useCallback(() => setRefreshKey((value) => value + 1), []);
+    const refresh = useCallback(() => {
+        setRefreshKey((value) => value + 1);
+        void queryClient.invalidateQueries({ predicate: (query) => query.queryKey[1] === backendUrl && query.queryKey[0] === "canvas-library-episodes" });
+    }, [backendUrl, queryClient]);
     useEffect(() => {
         setLogs([]);
         setTasks([]);
@@ -137,23 +141,6 @@ export function useWorkbenchData() {
             window.removeEventListener("backend-connected", onReconnect);
         };
     }, [connected, backendUrl, logCount, refreshKey]);
-    useEffect(() => {
-        let disposed = false;
-        setEpisodeFolders({});
-        setDramaError(false);
-        if (!connected) return;
-        const dramas = folders.filter((folder) => folder.isDrama);
-        void Promise.allSettled(dramas.map(async (folder) => ({ id: folder.id, episodes: (await fetchBackendDramaEpisodes(folder.id)).episodes || [] }))).then((results) => {
-            if (disposed) return;
-            const byCanvas: Record<string, string> = {};
-            for (const result of results) if (result.status === "fulfilled") for (const episode of result.value.episodes) if (episode.canvasId) byCanvas[episode.canvasId] = result.value.id;
-            setEpisodeFolders(byCanvas);
-            setDramaError(results.some((result) => result.status === "rejected"));
-        });
-        return () => {
-            disposed = true;
-        };
-    }, [folders, connected, backendUrl, refreshKey]);
     const togglePin = async (projectId: string) => {
         if (pinning || !settingsReady || !connected) return;
         const key = `homePinnedProject:${projectId}` as const,
@@ -166,5 +153,5 @@ export function useWorkbenchData() {
             setPinning(false);
         }
     };
-    return { connected, backendUrl, logs, tasks, settings, settingsReady, loading, errors, hasMore, refresh, episodeFolders, dramaError, pinning, togglePin, loadMore: () => setLogCount((count) => count + 30) };
+    return { connected, backendUrl, logs, tasks, settings, settingsReady, loading, errors, hasMore, refresh, episodeFolders, dramaReady, dramaError, pinning, togglePin, loadMore: () => setLogCount((count) => count + 30) };
 }

@@ -9,13 +9,15 @@ import { normalizeViewportTransform } from "@/lib/canvas/canvas-viewport";
 import type { CanvasAssistantSession, CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
 import { applyBackendCanvasOperations, backendMediaUrl, BackendApiError, createBackendGenerationLog, createBackendProject, deleteBackendCanvasFolder, deleteBackendDramaProject, deleteBackendProject, fetchBackendCanvasFolders, fetchBackendCanvasOperationReceipt, fetchBackendProject, fetchBackendProjects, upsertBackendCanvasFolder } from "@/services/backend-api";
 import { recoverCompactedCanvasReceipt } from "@/lib/canvas/canvas-compacted-receipt";
+import { hasCanvasPatchChanges } from "@/lib/canvas/canvas-patch-equality";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { getBackendUrl, getCanvasCollaborationClient, getCanvasDraftSessionId } from "@/services/backend-api";
 import { CanvasCommandQueue, type CanvasCommand } from "@/lib/canvas/canvas-command-queue";
 import { buildCanvasConflictBaseline, isCanvasConflictBaseline, type CanvasConflictBaseline } from "@/lib/canvas/canvas-conflict-baseline";
 import { canvasDraftPersistence } from "@/lib/canvas/canvas-draft-persistence";
 import { syncOrderedGroupMembership } from "@/lib/canvas/ordered-group";
-import { CANVAS_ACTIVE_TASK_NODE_FIELDS, H3_RUNTIME_NODE_FIELDS, H3_RUNTIME_SEGMENT_FIELDS, H3_LOCAL_VIEW_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
+import { compactH3SegmentStarts, CANVAS_ACTIVE_TASK_NODE_FIELDS, H3_RUNTIME_NODE_FIELDS, H3_RUNTIME_SEGMENT_FIELDS, H3_LOCAL_VIEW_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
+import { h3SegmentOrderOperations, recoverH3StartOperations } from "@/lib/canvas/h3-timeline-operations";
 import { flushCanvasTexts, invalidateDeletedCanvasTextSessions, onCanvasTextCommit, prepareCanvasTextWith, receiveCanvasTextEvent } from "@/services/api/canvas-text";
 
 export type CanvasProject = {
@@ -33,6 +35,7 @@ export type CanvasProject = {
     activeChatId: string | null;
     backgroundMode: CanvasBackgroundMode;
     showImageInfo: boolean;
+    /** Legacy text retained for existing projects and draft recovery; no generation consumer. */
     globalPrompt: string;
     referenceCatalog?: Array<Record<string, unknown>>;
     viewport: ViewportTransform;
@@ -48,6 +51,11 @@ type CanvasConflictTarget = {
 };
 
 type CanvasConflictRecord = {
+    reason?: "rejected" | "conflict";
+    canRecoverTimeline?: boolean;
+    canRetryStoryboardDurations?: boolean;
+    canRetryFormalClip?: boolean;
+    canRetryBackendFailure?: boolean;
     remoteDeleted?: boolean;
     message: string;
     /** 后端最新 revision（采纳 / 保留后都要把这个写进 syncBase）。 */
@@ -94,6 +102,8 @@ type CanvasStore = {
 };
 
 export type CanvasFolder = {
+    sharedAssetCanvasId?: string | null;
+    productionPlan?: import("@basketikun/canvas-agent/drama/production-contract").DramaProductionPlan;
     id: string; name: string; createdAt: string; updatedAt?: string;
     outline?: string; description?: string; coverStorageKey?: string | null; tags?: string[]; isDrama?: boolean;
 };
@@ -392,12 +402,42 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number,
 
 function setCanvasCommandConflict(id: string, remote: CanvasProject, message: string, targets?: CanvasConflictTarget[]) {
     const commands = pendingCommands.list(id);
+    const rejected = commands.some((command) => Boolean(command.rejected) && !command.rejected!.includes("HTTP 409"));
+    const canRecoverTimeline = rejected && commands.some((command) => command.rejected?.includes("INVALID_CLIP_FIELD: patch.start"))
+        && commands.every((command) => recoverH3StartOperations(command.operations, command.base) !== null);
+    const storyboardDurationRejection = (value: string) => /字段 storyboardDurations 必须通过制作台 Shot 数据写入/.test(value);
+    const canRetryStoryboardDurations = rejected && commands.some(command => command.rejected && storyboardDurationRejection(command.rejected))
+        && commands.every(command => !command.rejected || storyboardDurationRejection(command.rejected));
+    const legacyFormalRejection = (message: string) => /字段 (prompt|referenceBindings|h3CharacterGroups|storyboardShots|tailFrameContinuation|motionContextEnabled) 属于正式编译产物/.test(message)
+        || /INVALID_CLIP_FIELD: patch\.(h3CharacterGroups|storyboardDurations|storyboardModeEnabled|storyboardCompositeEnabled|storyboardPromptCache|subjectDefinitions) 不属于可编辑 Clip 配置/.test(message);
+    const canRetryFormalClip = rejected && commands.some(command => command.rejected && legacyFormalRejection(command.rejected))
+        && commands.every(command => !command.rejected || legacyFormalRejection(command.rejected));
+    // This fixed hashing failure rolled back the entire ops transaction. Keep the
+    // rejection durable until the user explicitly resubmits; never retry on events.
+    const legacyHashFailure = (message: string) => /HTTP 400 The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView\. Received undefined/.test(message);
+    const canRetryBackendFailure = rejected && commands.some(command => command.rejected && legacyHashFailure(command.rejected))
+        && commands.every(command => !command.rejected || legacyHashFailure(command.rejected));
     useCanvasStore.setState((state) => ({ canvasConflicts: { ...state.canvasConflicts, [id]: {
-        message, revision: Number(remote.revision || 0),
+        message, reason: rejected ? "rejected" : "conflict", canRecoverTimeline, canRetryStoryboardDurations, canRetryFormalClip, canRetryBackendFailure, revision: Number(remote.revision || 0),
         pendingOperations: commands.reduce((count, command) => count + command.operations.length, 0),
-        conflictTargets: targets?.length ? targets : [{ id, kind: "update", detail: message }],
+        conflictTargets: targets || [],
         remoteProject: remote,
     } } }));
+}
+
+/** 旧 H3 画布草稿可能夹带正式 Shot 时长的派生投影；重提时只剔除此字段。 */
+function omitProductionStoryboardDurations(operations: Array<Record<string, unknown>>) {
+    return operations.flatMap((operation) => {
+        if (operation.type !== "update_h3_segment") return [operation];
+        const patch = { ...((operation.patch && typeof operation.patch === "object" ? operation.patch : {}) as Record<string, unknown>) };
+        delete patch.storyboardDurations;
+        const patchDelete = Array.isArray(operation.patchDelete) ? operation.patchDelete.map(String).filter(field => field !== "storyboardDurations") : [];
+        if (!Object.keys(patch).length && !patchDelete.length) return [];
+        const next: Record<string, unknown> = { ...operation, patch };
+        if (patchDelete.length) next.patchDelete = patchDelete;
+        else delete next.patchDelete;
+        return [next];
+    });
 }
 
 function replayPendingCommandEvents(projectId: string) {
@@ -523,7 +563,10 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
         const local = get().projects.find((project) => project.id === id);
         if (!local) return;
         try {
-            const operations = pendingCommands.list(id).flatMap((command) => command.operations);
+            if (conflict.reason === "rejected" && !conflict.canRecoverTimeline && !conflict.canRetryStoryboardDurations && !conflict.canRetryFormalClip && !conflict.canRetryBackendFailure) return;
+            const operations = pendingCommands.list(id).flatMap((command) => conflict.canRecoverTimeline
+                ? recoverH3StartOperations(command.operations, command.base)!
+                : conflict.canRetryStoryboardDurations ? omitProductionStoryboardDurations(command.operations) : command.operations);
             const remote = conflict.remoteDeleted ? local : conflict.remoteProject;
             const replacement = { operationId: nanoid(), projectId: id, backend: commandBackend, ownerId: draftSessionId, source: getCanvasCollaborationClient(), order: ++commandOrder, base: remote, operations: conflict.remoteDeleted ? [] : operations };
             await pendingCommands.replace(replacement);
@@ -710,16 +753,8 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
             }
             normalizedPatch = { ...normalizedPatch, nodes };
         }
-        // patch 实际未改变 project 时跳过 setState：节点 / 连线 / 会话字段
-        // 是 map/filter/concat 之类函数式 action，每次都生成新数组引用，Object.is
-        // 浅比较挡不住；React 18 StrictMode dev 模式或 zustand 通知顺序中反复
-        // setState 会直接报 Maximum update depth exceeded。这里用 JSON 浅比对，
-        // 跳过无变化写入；差异检查成本只在画布编辑路径上跑一次字符串序列化。
-        let hasRealChange = false;
-        for (const key of Object.keys(normalizedPatch)) {
-            if (JSON.stringify((before as Record<string, unknown>)[key]) !== JSON.stringify((normalizedPatch as Record<string, unknown>)[key])) { hasRealChange = true; break; }
-        }
-        if (!hasRealChange) return;
+        // Preserve no-op protection for equivalent fresh arrays without serializing unchanged nodes.
+        if (!hasCanvasPatchChanges(before as unknown as Record<string, unknown>, normalizedPatch)) return;
         captureCanvasAction(before, { ...before, ...normalizedPatch });
         set((state) => ({
             projects: state.projects.map((project) => (project.id === id ? { ...project, ...normalizedPatch, updatedAt: new Date().toISOString() } : project)),
@@ -809,7 +844,7 @@ export function diffCanvasProject(base: CanvasProject, next: CanvasProject): Arr
         if (previous === node) continue;
         const patch: Record<string, unknown> = {};
         for (const key of ["type", "title", "position", "width", "height"] as const) {
-            if (JSON.stringify(previous[key]) !== JSON.stringify(node[key])) patch[key] = node[key];
+            if (previous[key] !== node[key] && JSON.stringify(previous[key]) !== JSON.stringify(node[key])) patch[key] = node[key];
         }
         const previousMetadata = (previous.metadata || {}) as Record<string, unknown>;
         const nextMetadata = (node.metadata || {}) as Record<string, unknown>;
@@ -821,13 +856,14 @@ export function diffCanvasProject(base: CanvasProject, next: CanvasProject): Arr
         const previousSegments = isH3 && Array.isArray(previousMetadata.segments) ? previousMetadata.segments as Array<Record<string, unknown>> : [];
         const nextSegments = isH3 && Array.isArray(nextMetadata.segments) ? nextMetadata.segments as Array<Record<string, unknown>> : [];
         const backendTaskActive = !isH3 && Boolean(previousMetadata.runtimeTaskId || nextMetadata.runtimeTaskId);
-        const metadataKeysToSkip = new Set<string>();
+        const metadataKeysToSkip = new Set<string>(["productionImageInput"]);
         if (isH3) metadataKeysToSkip.add("segments");
         for (const key of new Set([...Object.keys(previousMetadata), ...Object.keys(nextMetadata)])) {
+            if (key === "sharedAssetReference" || key === "sharedLibraryAssetId" || key === "sharedAssetMissing") continue;
             if (metadataKeysToSkip.has(key)) continue;
             if (isH3 && H3_BACKEND_NODE_METADATA_FIELDS.has(key)) continue;
             if (backendTaskActive && ACTIVE_TASK_NODE_METADATA_FIELDS.has(key)) continue;
-            if (JSON.stringify(previousMetadata[key]) === JSON.stringify(nextMetadata[key])) continue;
+            if (previousMetadata[key] === nextMetadata[key] || JSON.stringify(previousMetadata[key]) === JSON.stringify(nextMetadata[key])) continue;
             if (key in nextMetadata && nextMetadata[key] !== undefined) metadataPatch[key] = nextMetadata[key];
             else metadataDelete.push(key);
         }
@@ -855,15 +891,23 @@ export function diffCanvasProject(base: CanvasProject, next: CanvasProject): Arr
                         segment: segment,
                         ...(previousId ? { afterSegmentId: previousId } : nextId ? { beforeSegmentId: nextId } : {}),
                     });
-                } else if (JSON.stringify(baseById.get(id)) !== JSON.stringify(segment)) {
+                } else if (baseById.get(id) !== segment && JSON.stringify(baseById.get(id)) !== JSON.stringify(segment)) {
                     // 字段级 patch：只把真正变化的字段放进 patch，减少带宽 / 减少冲突面
                     const baseSegment = baseById.get(id)!;
                     const segmentPatch: Record<string, unknown> = {};
                     const segmentDelete: string[] = [];
+                    // 参考绑定和续接开关允许人工编辑，必须进入保存 op，不能只留下乐观显示。
+                    // 编译身份与源稿专属字段仍由 Backend 维护。
+                    const formalClipFields = segment.productionClipProjection || (baseSegment as Record<string, unknown>).productionClipProjection
+                        ? new Set(["prompt", "directorEngine", "directorSourceHash", "h3CharacterGroups", "storyboardShots", "storyboardDurations", "productionClipProjection"])
+                        : null;
                     for (const field of new Set([...Object.keys(baseSegment), ...Object.keys(segment)])) {
-                        if (field === "id") continue;
+                        if (field === "id" || field === "start") continue;
                         if (H3_BACKEND_SEGMENT_FIELDS.has(field)) continue;
-                        if (JSON.stringify((baseSegment as Record<string, unknown>)[field]) === JSON.stringify((segment as Record<string, unknown>)[field])) continue;
+                        if (formalClipFields?.has(field)) continue;
+                        const previousValue = (baseSegment as Record<string, unknown>)[field];
+                        const nextValue = (segment as Record<string, unknown>)[field];
+                        if (previousValue === nextValue || JSON.stringify(previousValue) === JSON.stringify(nextValue)) continue;
                         if (field in segment && (segment as Record<string, unknown>)[field] !== undefined) segmentPatch[field] = (segment as Record<string, unknown>)[field];
                         else segmentDelete.push(field);
                     }
@@ -883,6 +927,14 @@ export function diffCanvasProject(base: CanvasProject, next: CanvasProject): Arr
                 if (!id) continue;
                 if (!nextById.has(id)) operations.push({ type: "delete_h3_segment", nodeId: node.id, segmentId: id });
             }
+            const previousOrder = previousSegments.filter((item) => nextById.has(String(item.id))).map((item) => String(item.id));
+            const retainedOrder = nextSegments.filter((item) => baseById.has(String(item.id))).map((item) => String(item.id));
+            if (nextSegments.some((item) => !baseById.has(String(item.id))) || JSON.stringify(previousOrder) !== JSON.stringify(retainedOrder)) {
+                // 仅对顺序/成员变化回放当前节点，普通参数编辑不复制整张画布。
+                const nodeOperations = operations.filter((operation) => operation.nodeId === node.id || operation.id === node.id);
+                const projectedOrder = (applyBackendCanvasDelta({ ...base, nodes: [previous], connections: [] }, nodeOperations, Number(base.revision || 0)).nodes[0]?.metadata as Record<string, unknown> | undefined)?.segments;
+                if (Array.isArray(projectedOrder)) operations.push(...h3SegmentOrderOperations(node.id, projectedOrder.map((item: any) => String(item.id)), nextSegments.map((item) => String(item.id))));
+            }
         }
     }
     for (const node of base.nodes) if (!nextNodes.has(node.id)) operations.push({ type: "delete_node", id: node.id });
@@ -893,14 +945,14 @@ export function diffCanvasProject(base: CanvasProject, next: CanvasProject): Arr
     if (removedConnections.length) operations.push({ type: "delete_connections", ids: removedConnections });
     for (const connection of next.connections) {
         const previous = baseConnections.get(connection.id);
-        if (!previous || JSON.stringify(previous) !== JSON.stringify(connection)) {
+        if (!previous || previous !== connection && JSON.stringify(previous) !== JSON.stringify(connection)) {
             if (previous) operations.push({ type: "delete_connections", ids: [connection.id] });
             operations.push({ type: "connect_nodes", id: connection.id, fromNodeId: connection.fromNodeId, toNodeId: connection.toNodeId, role: connection.role, order: connection.order });
         }
     }
     const projectPatch: Record<string, unknown> = {};
     for (const key of ["title", "folderId", "chatSessions", "activeChatId", "backgroundMode", "showImageInfo", "globalPrompt"] as const) {
-        if (JSON.stringify(base[key]) !== JSON.stringify(next[key])) projectPatch[key] = next[key];
+        if (base[key] !== next[key] && JSON.stringify(base[key]) !== JSON.stringify(next[key])) projectPatch[key] = next[key];
     }
     if (Object.keys(projectPatch).length) operations.push({ type: "update_project", patch: projectPatch });
     return operations;
@@ -965,7 +1017,7 @@ export function detectCanvasConflicts(pendingOps: Array<Record<string, unknown>>
             for (const key of Object.keys((op.patch || {}) as object)) {
                 if (JSON.stringify(base[key as keyof CanvasProject]) !== JSON.stringify(remote[key as keyof CanvasProject])) targets.push({ id: key, kind: "update", detail: `画布字段「${key}」已被远端修改` });
             }
-        } else if (type === "add_h3_segment" || type === "update_h3_segment" || type === "delete_h3_segment") {
+        } else if (type === "add_h3_segment" || type === "update_h3_segment" || type === "delete_h3_segment" || type === "move_h3_segment") {
             // H3 细粒度 op 的冲突检测：节点 + 段 + 字段三元组。
             const nodeId = String(op.nodeId || "");
             const segmentId = type === "add_h3_segment" ? String((op.segment as Record<string, unknown> | undefined)?.id || "") : String(op.segmentId || "");
@@ -979,7 +1031,16 @@ export function detectCanvasConflicts(pendingOps: Array<Record<string, unknown>>
             const baseSegments = Array.isArray(baseMetadata.segments) ? baseMetadata.segments as Array<Record<string, unknown>> : [];
             const remoteSeg = remoteSegments.find((s) => String(s.id || "") === segmentId);
             const baseSeg = baseSegments.find((s) => String(s.id || "") === segmentId);
-            if (type === "add_h3_segment") {
+            if (type === "move_h3_segment") {
+                const anchor = String(op.beforeSegmentId || op.afterSegmentId || "");
+                const addedIds = new Set(pendingOps.filter((item) => item.type === "add_h3_segment" && item.nodeId === nodeId).map((item) => String((item.segment as Record<string, unknown>)?.id)));
+                const order = (items: Array<Record<string, unknown>>) => items.map((item) => String(item.id || ""));
+                if ((!remoteSeg && !addedIds.has(segmentId)) || (anchor && !remoteSegments.some((item) => String(item.id) === anchor) && !addedIds.has(anchor))) {
+                    targets.push({ id: `${nodeId}:${segmentId}`, kind: "update", detail: i18n.t("canvasSave.orderTargetMissing") });
+                } else if (base && JSON.stringify(order(baseSegments)) !== JSON.stringify(order(remoteSegments))) {
+                    targets.push({ id: `${nodeId}:${segmentId}`, kind: "update", detail: i18n.t("canvasSave.orderConflict") });
+                }
+            } else if (type === "add_h3_segment") {
                 // 自己的增量 SSE 可能先于 POST 回执到达；内容一致说明请求已落库，
                 // 不是协作者冲突，等待原命令回执即可。
                 if (remoteSeg && JSON.stringify(remoteSeg) !== JSON.stringify(op.segment)) {
@@ -1073,7 +1134,7 @@ export function applyBackendCanvasDelta(base: CanvasProject, operations: Array<R
         } else if (type === "connect_nodes") {
             const id = String(operation.id || "");
             if (id && !connections.some((connection) => connection.id === id)) connections.push({ id, fromNodeId: String(operation.fromNodeId || ""), toNodeId: String(operation.toNodeId || ""), ...(operation.role ? { role: String(operation.role) } : {}), ...(operation.order === undefined ? {} : { order: Number(operation.order) }) });
-        } else if (type === "update_h3_segment" || type === "add_h3_segment" || type === "delete_h3_segment" || type === "replace_h3_segments") {
+        } else if (type === "update_h3_segment" || type === "add_h3_segment" || type === "delete_h3_segment" || type === "replace_h3_segments" || type === "move_h3_segment") {
             const node = nodes.find((item) => item.id === String(operation.nodeId || ""));
             if (!node) continue;
             const metadata = { ...((node.metadata || {}) as Record<string, unknown>) };
@@ -1098,6 +1159,17 @@ export function applyBackendCanvasDelta(base: CanvasProject, operations: Array<R
                 segments.splice(index < 0 ? segments.length : index, 0, incoming);
                 metadata.segments = segments;
             }
+            else if (type === "move_h3_segment") {
+                const from = segments.findIndex((segment) => String(segment.id) === String(operation.segmentId));
+                if (from >= 0) {
+                    const [segment] = segments.splice(from, 1);
+                    const anchor = String(operation.beforeSegmentId || operation.afterSegmentId || "");
+                    const anchorIndex = anchor ? segments.findIndex((item) => String(item.id) === anchor) : segments.length;
+                    if (anchorIndex < 0) segments.splice(from, 0, segment);
+                    else segments.splice(anchorIndex + (operation.afterSegmentId ? 1 : 0), 0, segment);
+                }
+                metadata.segments = segments;
+            }
             else if (type === "delete_h3_segment") metadata.segments = segments.filter((segment) => String(segment.id || "") !== String(operation.segmentId || ""));
             else if (type === "update_h3_segment") {
                 const segment = segments.find((item) => String(item.id || "") === String(operation.segmentId || ""));
@@ -1120,6 +1192,12 @@ export function applyBackendCanvasDelta(base: CanvasProject, operations: Array<R
         } else if (type === "delete_reference_asset") {
             projectPatch.referenceCatalog = (Array.isArray(projectPatch.referenceCatalog) ? projectPatch.referenceCatalog as Array<Record<string, unknown>> : base.referenceCatalog || []).filter((item) => String(item.id || "") !== String(operation.assetId || ""));
         }
+    }
+    const timelineNodeIds = new Set(operations.map((operation) => String(operation.nodeId || operation.id || "")));
+    for (const node of nodes) {
+        if (!timelineNodeIds.has(node.id) || !isH3NodeType(String(node.type))) continue;
+        const metadata = node.metadata as Record<string, unknown> | undefined;
+        if (Array.isArray(metadata?.segments)) node.metadata = { ...metadata, segments: compactH3SegmentStarts(metadata.segments, metadata.duration) } as CanvasNodeData["metadata"];
     }
     return { ...base, ...projectPatch, nodes, connections, revision, ...(updatedAt ? { updatedAt } : {}) };
 }

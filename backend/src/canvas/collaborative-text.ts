@@ -11,6 +11,10 @@ function isEditableTextNode(node: Record<string, unknown>, metadata: Record<stri
     return node.type === "text" || (node.type === "config" && metadata.smart === true && metadata.generationMode === "text");
 }
 
+function isEditableContentNode(node: Record<string, unknown>, metadata: Record<string, unknown>): boolean {
+    return isEditableTextNode(node, metadata) || node.type === "svg:vector";
+}
+
 export function readText(project: Record<string, unknown>, target: CanvasTextTarget): string {
     if (!target.nodeId) {
         if (target.field !== "globalPrompt" || target.segmentId || target.textItemId) throw new Error("项目级协作文本仅支持 globalPrompt");
@@ -31,7 +35,7 @@ export function readText(project: Record<string, unknown>, target: CanvasTextTar
         if (!segment) throw new Error(`找不到 Clip：${target.segmentId}`);
         return String(segment.prompt || "");
     }
-    if (target.field === "globalPrompt" || (target.field === "content" && !isEditableTextNode(node, metadata))) throw new Error("该字段不是可协作文本");
+    if (target.field === "globalPrompt" || (target.field === "content" && !isEditableContentNode(node, metadata))) throw new Error("该字段不是可协作文本");
     return String(metadata[target.field] || "");
 }
 
@@ -58,8 +62,10 @@ export function editedTextTargets(operation: CanvasOperation, project: Record<st
     if (operation.type !== "update_node") return [];
     const node = (project.nodes as Array<Record<string, unknown>> || []).find((node) => node.id === operation.id);
     const keys = new Set([...Object.keys(operation.metadata as object || {}), ...(operation.metadataDelete as string[] || [])]);
-    const editableText = node ? isEditableTextNode(node, (node.metadata || {}) as Record<string, unknown>) : false;
-    const targets: CanvasTextTarget[] = (["prompt", "composerContent", ...(editableText ? ["content"] : [])] as CanvasTextTarget["field"][]).filter((field) => keys.has(field)).map((field) => ({ nodeId: String(operation.id), field }));
+    const metadata = (node?.metadata || {}) as Record<string, unknown>;
+    const editableText = node ? isEditableTextNode(node, metadata) : false;
+    const editableContent = node ? isEditableContentNode(node, metadata) : false;
+    const targets: CanvasTextTarget[] = (["prompt", "composerContent", ...(editableContent ? ["content"] : [])] as CanvasTextTarget["field"][]).filter((field) => keys.has(field)).map((field) => ({ nodeId: String(operation.id), field }));
     if (keys.has("segments")) {
         const segments = (node?.metadata as { segments?: Array<{ id: string }> } | undefined)?.segments || [];
         targets.push(...segments.map((segment): CanvasTextTarget => ({ nodeId: String(operation.id), segmentId: segment.id, field: "prompt" })));

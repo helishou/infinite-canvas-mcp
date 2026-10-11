@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { App, Input, Modal, Segmented, Tooltip } from "antd";
-import { Columns2, Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, LayoutGrid, ListOrdered, Lock, MapPinned, MessageSquare, Minus, Music2, Plus, RefreshCw, Scissors, Settings2, Trash2, Unlock, Upload, User, Video } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { App, Dropdown, Input, Modal, Segmented, Tooltip } from "antd";
+import { Columns2, Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, LayoutGrid, ListOrdered, LoaderCircle, Lock, MapPinned, MessageSquare, Minus, Music2, Package, Plus, RefreshCw, Scissors, Settings2, Trash2, Unlock, Upload, User, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -28,6 +28,8 @@ type CanvasNodeHoverToolbarProps = {
     onUpload: (node: CanvasNodeData) => void;
     onDownload: (node: CanvasNodeData) => void;
     onSaveAsset: (node: CanvasNodeData) => void;
+    savingAsset?: boolean;
+    onDiscardSharedEdits?: (node: CanvasNodeData) => void;
     onCompareVideo: (node: CanvasNodeData) => void;
     onTrimVideo: (node: CanvasNodeData) => void;
     onMaskEdit: (node: CanvasNodeData) => void;
@@ -42,6 +44,7 @@ type CanvasNodeHoverToolbarProps = {
     onRetry: (node: CanvasNodeData) => void;
     onConvertToCharacter: (node: CanvasNodeData) => void;
     onConvertToScene: (node: CanvasNodeData) => void;
+    onConvertToProp: (node: CanvasNodeData) => void;
     onSaveCharacterToAsset: (node: CanvasNodeData) => void;
     onSaveSceneToAsset: (node: CanvasNodeData) => void;
     onToggleFreeResize: (node: CanvasNodeData) => void;
@@ -50,6 +53,10 @@ type CanvasNodeHoverToolbarProps = {
     onToggleGroupLock: (node: CanvasNodeData) => void;
     onDelete: (node: CanvasNodeData) => void;
     extraTools?: CanvasNodeToolbarItem[];
+    productionActions?: CanvasNodeToolbarItem[];
+    productionSelected?: boolean;
+    productionStatus?: string;
+    canvasSize?: { width: number; height: number };
 };
 
 type ToolbarTool = {
@@ -60,6 +67,8 @@ type ToolbarTool = {
     onClick: () => void;
     active?: boolean;
     danger?: boolean;
+    disabled?: boolean;
+    loading?: boolean;
 };
 
 export function CanvasNodeHoverToolbar({
@@ -75,6 +84,8 @@ export function CanvasNodeHoverToolbar({
     onUpload,
     onDownload,
     onSaveAsset,
+    savingAsset = false,
+    onDiscardSharedEdits,
     onCompareVideo,
     onTrimVideo,
     onMaskEdit,
@@ -89,6 +100,7 @@ export function CanvasNodeHoverToolbar({
     onRetry,
     onConvertToCharacter,
     onConvertToScene,
+    onConvertToProp,
     onSaveCharacterToAsset,
     onSaveSceneToAsset,
     onToggleFreeResize,
@@ -97,21 +109,39 @@ export function CanvasNodeHoverToolbar({
     onToggleGroupLock,
     onDelete,
     extraTools = [],
+    productionActions,
+    productionSelected = false,
+    productionStatus,
+    canvasSize,
 }: CanvasNodeHoverToolbarProps) {
     const quickImageToolIds = useImageQuickToolsStore((state) => state.ids);
     const showImageToolLabels = useImageQuickToolsStore((state) => state.showLabels);
     const [draftImageToolIds, setDraftImageToolIds] = useState<ImageQuickToolId[]>(quickImageToolIds);
     const [draftShowImageToolLabels, setDraftShowImageToolLabels] = useState(showImageToolLabels);
     const [imageToolSettingsOpen, setImageToolSettingsOpen] = useState(false);
+    const productionToolbarRef = useRef<HTMLDivElement>(null);
+    const [productionToolbarHeight, setProductionToolbarHeight] = useState(0);
+    const hasProductionActions = Boolean(productionActions);
     const { message } = App.useApp();
     const { t } = useTranslation();
     const copyText = useCopyText();
+    const theme = canvasThemes[useThemeStore(state => state.theme)];
 
     useEffect(() => {
         setImageToolSettingsOpen(false);
     }, [node?.id]);
 
-    if (!node) return null;
+    useLayoutEffect(() => {
+        const element = productionToolbarRef.current;
+        if (!element) return;
+        const measure = () => setProductionToolbarHeight(element.getBoundingClientRect().height);
+        measure();
+        const observer = new ResizeObserver(measure);
+        observer.observe(element);
+        return () => observer.disconnect();
+    }, [node?.id, hasProductionActions, productionSelected]);
+
+    if (!node || productionActions && !productionSelected) return null;
 
     const activeNode = node;
     const left = viewport.x + (node.position.x + node.width / 2) * viewport.k;
@@ -160,7 +190,7 @@ export function CanvasNodeHoverToolbar({
     ];
     const nodeToolbarTools: ToolbarTool[] = [
         ...(canRetry ? [{ id: "retry", title: t("canvas.nodeToolbar.retryTitle"), label: t("canvas.node.retry"), icon: <RefreshCw className="size-4" />, onClick: () => onRetry(node) }] : []),
-        ...(hasImage || hasVideo || isText ? [{ id: "saveAsset", title: t("common.addToAssets"), label: t("canvas.nodeToolbar.saveAsset"), icon: <FolderPlus className="size-4" />, onClick: () => onSaveAsset(node) }] : []),
+        ...(hasImage || hasVideo || isText ? [{ id: "saveAsset", disabled: savingAsset, loading: savingAsset, title: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "common.addToAssets"), label: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "canvas.nodeToolbar.saveAsset"), icon: <FolderPlus className="size-4" />, onClick: () => onSaveAsset(node) }] : []),
         ...(hasImage || hasVideo || hasAudio || hasText ? [{ id: "download", title: hasAudio ? t("canvas.nodeToolbar.downloadAudio") : hasVideo ? t("canvas.nodeToolbar.downloadVideo") : hasImage ? t("canvas.nodeToolbar.downloadImage") : t("common.download"), label: t("common.download"), icon: <Download className="size-4" />, onClick: () => onDownload(node) }] : []),
         ...(hasVideo ? [{ id: "compareVideo", title: t("canvas.videoCompare.title"), label: t("canvas.videoCompare.open"), icon: <Columns2 className="size-4" />, onClick: () => onCompareVideo(node) }] : []),
         ...(hasVideo ? [{ id: "trimVideo", title: t("canvas.videoTrim.range"), label: t("canvas.videoTrim.open"), icon: <Scissors className="size-4" />, onClick: () => onTrimVideo(node) }] : []),
@@ -174,11 +204,15 @@ export function CanvasNodeHoverToolbar({
         ...(isAudio && !isSmartGenerationNode ? [{ id: "uploadAudio", title: t(hasAudio ? "canvas.nodeToolbar.replaceAudio" : "canvas.nodeToolbar.uploadAudio"), label: t(hasAudio ? "canvas.nodeToolbar.replaceAudio" : "canvas.nodeToolbar.uploadAudio"), icon: <Music2 className="size-4" />, onClick: () => onUpload(node) }] : []),
         ...(hasImage ? [{ id: "convertToCharacter", title: t("canvas.nodeToolbar.convertToCharacter"), label: t("canvas.nodeToolbar.convertToCharacter"), icon: <User className="size-4" />, onClick: () => onConvertToCharacter(node) }] : []),
         ...(hasImage ? [{ id: "convertToScene", title: t("canvas.nodeToolbar.convertToScene"), label: t("canvas.nodeToolbar.convertToScene"), icon: <MapPinned className="size-4" />, onClick: () => onConvertToScene(node) }] : []),
-        ...(isCharacter ? [{ id: "saveCharacterToAsset", title: t("canvas.nodeToolbar.saveCharacterToAsset"), label: t("canvas.nodeToolbar.saveCharacterToAsset"), icon: <FolderPlus className="size-4" />, onClick: () => onSaveCharacterToAsset(node) }] : []),
-        ...(isScene ? [{ id: "saveSceneToAsset", title: t("canvas.nodeToolbar.saveSceneToAsset"), label: t("canvas.nodeToolbar.saveSceneToAsset"), icon: <FolderPlus className="size-4" />, onClick: () => onSaveSceneToAsset(node) }] : []),
+        ...(hasImage ? [{ id: "convertToProp", title: t("canvas.nodeToolbar.convertToProp"), label: t("canvas.nodeToolbar.convertToProp"), icon: <Package className="size-4" />, onClick: () => onConvertToProp(node) }] : []),
+        ...(isCharacter ? [{ id: "saveCharacterToAsset", disabled: savingAsset, loading: savingAsset, title: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "canvas.nodeToolbar.saveCharacterToAsset"), label: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "canvas.nodeToolbar.saveCharacterToAsset"), icon: <FolderPlus className="size-4" />, onClick: () => onSaveCharacterToAsset(node) }] : []),
+        ...(isScene ? [{ id: "saveSceneToAsset", disabled: savingAsset, loading: savingAsset, title: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "canvas.nodeToolbar.saveSceneToAsset"), label: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "canvas.nodeToolbar.saveSceneToAsset"), icon: <FolderPlus className="size-4" />, onClick: () => onSaveSceneToAsset(node) }] : []),
         ...(hasImage ? imageTools.map((tool) => ({ id: tool.id, title: tool.title, label: tool.label, icon: tool.icon, active: tool.active, onClick: tool.onClick })) : []),
     ];
-    const toolbarTools = hasImage ? [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => quickImageToolIdSet.has(tool.id as ImageQuickToolId)) : [...baseToolbarTools, ...nodeToolbarTools, ...extraTools];
+    const sharedTools: ToolbarTool[] = node.metadata?.sharedAssetReference && Object.keys(node.metadata.sharedAssetReference.edits || {}).length ? [
+        { id: "discardShared", title: t("canvas.sharedLibrary.discard"), label: t("canvas.sharedLibrary.discard"), icon: <RefreshCw className="size-4" />, onClick: () => onDiscardSharedEdits?.(node) },
+    ] : [];
+    const toolbarTools = hasImage ? [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => quickImageToolIdSet.has(tool.id as ImageQuickToolId)).concat(sharedTools) : [...baseToolbarTools, ...nodeToolbarTools, ...extraTools, ...sharedTools];
     const selectableImageToolbarTools = [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => tool.id !== "retry") as ImageToolbarSettingsTool[];
 
     const closeImageToolSettings = () => {
@@ -200,6 +234,12 @@ export function CanvasNodeHoverToolbar({
         useImageQuickToolsStore.getState().setConfig(config);
         closeImageToolSettings();
     };
+
+    if (productionActions) return <div ref={productionToolbarRef} data-production-node-actions className="absolute z-[70] flex flex-wrap items-center gap-1 rounded-lg border p-2 text-sm shadow-lg" style={{ left: Math.min(Math.max(16, left - 160), Math.max(16, (canvasSize?.width || window.innerWidth) - 336)), top: Math.min(Math.max(72, top - productionToolbarHeight - 24), Math.max(72, (canvasSize?.height || window.innerHeight) - productionToolbarHeight - 16)), width: Math.min(320, (canvasSize?.width || window.innerWidth) - 32), background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }} onMouseDown={event => event.stopPropagation()} onPointerDown={event => event.stopPropagation()}>
+        {productionStatus && <span data-production-node-status className="w-full px-2 pb-1 text-xs" style={{ color: theme.node.muted }}>{productionStatus}</span>}
+        {productionActions.map(action => <button key={action.id} type="button" disabled={action.disabled} className="rounded px-2 py-1.5 hover:bg-black/5 disabled:cursor-default disabled:opacity-40 dark:hover:bg-white/10" aria-label={action.title} onClick={action.onClick}>{action.label}</button>)}
+        <Dropdown trigger={["click"]} menu={{ items: [...new Map([...extraTools, ...toolbarTools].map(tool => [tool.id, tool])).values()].map(tool => ({ key: tool.id, label: tool.label || tool.title, icon: tool.icon, danger: tool.danger, disabled: "disabled" in tool && tool.disabled === true, onClick: tool.onClick })) }}><button type="button" aria-label={t("productionCanvas.moreNodeActions")} className="inline-flex items-center gap-1 rounded px-2 py-1.5 hover:bg-black/5 dark:hover:bg-white/10">{t("productionCanvas.more")}<Ellipsis className="size-4" /></button></Dropdown>
+    </div>;
 
     return (
         <>
@@ -322,13 +362,13 @@ export function CanvasNodeInfoModal({ node, open, onClose, onRename }: { node: C
     );
 }
 
-function ToolbarAction({ title, label, icon, onClick, showLabel, active = false, danger = false }: ToolbarTool & { showLabel: boolean }) {
+function ToolbarAction({ title, label, icon, onClick, showLabel, active = false, danger = false, disabled = false, loading = false }: ToolbarTool & { showLabel: boolean }) {
     const hasText = showLabel && Boolean(label);
     return (
         <Tooltip title={title} placement="top" mouseEnterDelay={0.2} color="#ffffff" styles={{ root: { color: "#242529", boxShadow: "0 8px 24px rgba(15,23,42,.16)", fontSize: 13, fontWeight: 500 } }}>
-            <button type="button" className={`group relative flex h-12 items-center whitespace-nowrap px-1.5 ${danger ? "text-[#ef4444]" : ""}`} onClick={onClick} aria-label={title}>
+            <button type="button" className={`group relative flex h-12 items-center whitespace-nowrap px-1.5 ${danger ? "text-[#ef4444]" : ""}`} onClick={onClick} disabled={disabled} aria-busy={loading || undefined} aria-label={title}>
                 <span className={`flex h-9 items-center ${hasText ? "gap-2 px-2.5" : "justify-center px-2"} rounded-lg transition group-hover:bg-[#f0f0f1] ${active ? "bg-[#eeeeef]" : ""}`}>
-                    {icon}
+                    {loading ? <LoaderCircle className="size-4 animate-spin" /> : icon}
                     {hasText ? <span>{label}</span> : null}
                 </span>
             </button>

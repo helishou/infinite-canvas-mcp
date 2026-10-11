@@ -1,0 +1,488 @@
+import fs from "node:fs";
+import { currentCompilationArtifact } from "../drama/compilation-scope.js";
+import path from "node:path";
+import os from "node:os";
+import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
+import { directorModules, directorProductionSchema, canonicalProduction, isSubjectPromptAssembly, resolveSubjectPictureBindingIds, productionContractVersion, productionPreflightRequestSchema, diagnosticBlocksAction, type DirectorProduction, type ProductionDiagnostic, type ProductionPreflight } from "../drama/production-contract.js";
+import { productionOperationContract, schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch, ref2vaPromptDiagnostics, continuityBoundaryDiagnostics } from "../drama/production-validation.js";
+
+let discoveredPython: string | undefined;
+/** Only isolated compilation copies consume Backend-approved bindings; never change authored source. */
+function hydrateScopedApprovedInputs(director: DirectorProduction, resolver?: (targetId: string, label: string) => string | undefined) {
+    if (!director.source._canvas_compilation_scope || !resolver) return;
+    const scope = director.source._canvas_compilation_scope as Record<string, any>;
+    for (const segment of (director.source.segments || []) as Array<Record<string, any>>) {
+        const shift = scope.frameShifts?.[segment.shot_ids?.[0]] || 0;
+        for (const ref of [...(segment.references || []), ...(segment.subjects || [])]) {
+            if (typeof ref.start_frame !== "number" || typeof ref.end_frame !== "number") continue;
+            const outside = ref.start_frame < segment.start_frame || ref.end_frame > segment.end_frame;
+            if (outside && ref.start_frame + shift >= segment.start_frame && ref.end_frame + shift <= segment.end_frame) {
+                ref.start_frame += shift; ref.end_frame += shift;
+            }
+        }
+    }
+    const plans = Array.isArray(director.source.asset_plan) ? director.source.asset_plan as Array<Record<string, any>> : [];
+    const files = new Map<string, string>();
+    for (const plan of plans) {
+        const id = String(plan.asset_id || plan.id || ""), asset = director.assets[id];
+        if (!asset || !["approved", "generated"].includes(asset.status)) continue;
+        const file = resolver(id, "asset");
+        if (!file || !fs.existsSync(file)) throw new Error(`素材 ${id} 缺少真实编译输入`);
+        if (!asset.sha256 || crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== asset.sha256) throw new Error(`素材 ${id} 字节已变化`);
+        if (plan.version && String(plan.version) !== asset.version) throw new Error(`素材 ${id} 的源版本未更新`);
+        plan.status = asset.status; plan.file = file; plan.sha256 = asset.sha256;
+        files.set(id, file);
+    }
+    const source = director.source as Record<string, any>;
+    const anchor = source.style_lock && director.assets[source.style_lock.anchor_asset_id];
+    const anchorFile = source.style_lock && files.get(source.style_lock.anchor_asset_id);
+    if (anchorFile && anchor && ["approved", "generated"].includes(anchor.status)) {
+        if (source.style_lock.anchor_version !== anchor.version) throw new Error("风格母图版本与风格绑定不符");
+        source.style_lock.status = anchor.status;
+        source.style_lock.approved_file = anchorFile;
+        source.style_lock.approved_sha256 = anchor.sha256;
+    }
+    for (const item of [...(source.asset_cards || []), ...(source.segments || [])]) for (const ref of item.references || []) {
+        const id = String(ref.asset_id || ""), asset = director.assets[id], file = files.get(id);
+        if (!file || !asset) continue;
+        if (ref.asset_version && ref.asset_version !== asset.version || ref.sha256 && ref.sha256 !== asset.sha256) throw new Error(`参考 ${id} 声明的批准版本已过期`);
+        ref.file = file; ref.sha256 = asset.sha256;
+    }
+    director.sourceHash = crypto.createHash("sha256").update(canonicalProduction(director.source)).digest("hex");
+}
+
+/** Freeze only the selected Subject and keyframe image results into the compiler's scratch source. */
+function hydrateSubjectPictureSources(director: DirectorProduction, resolver?: (targetId: string, label: string) => string | undefined) {
+    if (!isSubjectPromptAssembly(director.source) || !resolver) return;
+    const subjects = (Array.isArray(director.source.subject_registry) ? director.source.subject_registry : []) as Array<Record<string, any>>;
+    const subjectById = new Map(subjects.map(subject => [String(subject.id), subject]));
+    const selected = new Map<string, { assetId: string; subjectId: string; kind: "subject" | "keyframe"; role: string; binding: Record<string, any> }>();
+    const videoShotIds = new Set(((Array.isArray(director.source.segments) ? director.source.segments : []) as Array<Record<string, any>>)
+        .flatMap(segment => (segment.shot_ids || []).map(String)));
+    for (const shot of (Array.isArray(director.source.shots) ? director.source.shots : []) as Array<Record<string, any>>) {
+        if (!videoShotIds.has(String(shot.id))) continue;
+        for (const usage of Array.isArray(shot.subject_usages) ? shot.subject_usages : []) {
+            const subjectId = String(usage.subjectId || "");
+            const subject = subjectById.get(subjectId);
+            for (const bindingId of resolveSubjectPictureBindingIds(subject, usage).bindingIds) {
+                const binding = (subject?.pictureBindings || []).find((item: Record<string, any>) => String(item.id) === bindingId);
+                if (binding) selected.set(bindingId, { assetId: String(binding.assetId), subjectId, kind: "subject", role: String((binding.provides || [])[0] || "identity"), binding });
+            }
+        }
+        for (const frame of (Array.isArray(shot.keyframes) ? shot.keyframes.filter((item: Record<string, any>) => item.requiredForSubmission) : []) as Array<Record<string, any>>) {
+            selected.set(String(frame.id), { assetId: String(frame.assetId || frame.id), subjectId: String((frame.subjectIds || [])[0] || ""), kind: "keyframe", role: "keyframe", binding: frame });
+        }
+    }
+    const snapshots: Record<string, Record<string, unknown>> = {};
+    for (const [bindingId, item] of selected) {
+        const asset = director.assets[item.assetId];
+        const file = resolver(item.assetId, "asset");
+        if (!asset?.storageKey || !asset.sha256 || !file || !fs.existsSync(file)) throw new Error("Subject picture " + bindingId + " has no frozen verified compiler file");
+        const digest = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+        if (digest !== asset.sha256) throw new Error("Subject picture " + bindingId + " bytes differ from the frozen source result");
+        const selectedResult = asset.selectedResult && typeof asset.selectedResult === "object"
+            ? asset.selectedResult as Record<string, unknown>
+            : undefined;
+        snapshots[bindingId] = {
+            id: bindingId, assetId: item.assetId, subjectId: item.subjectId, kind: item.kind, role: item.role,
+            file, sha256: digest, storageKey: asset.storageKey, nodeId: asset.nodeId || item.binding.sourceNode?.nodeId,
+            resultId: item.binding.selection?.resultId || selectedResult?.imageId || "",
+            generationTaskId: asset.generationTaskId || selectedResult?.taskId || "",
+            retain: item.binding.retain || [], exclude: item.binding.exclude || [],
+            applicableState: item.binding.applicableState || {}, defaultFor: item.binding.defaultFor || [],
+            anchor: item.binding.anchor, localFrame: item.binding.localFrame, requiredForSubmission: item.binding.requiredForSubmission === true,
+        };
+    }
+    (director.source as Record<string, unknown>)._canvas_subject_picture_sources = snapshots;
+    (director.source as Record<string, unknown>)._canvas_subject_source_hash = director.sourceHash;
+}
+/** Resolve once; a configured executable never silently falls back. */
+export function resolveAchengPython() {
+    if (process.env.ACHENG_PYTHON) {
+        if (!fs.existsSync(process.env.ACHENG_PYTHON)) throw new Error("Configured ACHENG_PYTHON executable does not exist");
+        return process.env.ACHENG_PYTHON;
+    }
+    if (!discoveredPython) {
+        const launchers = process.platform === "win32" ? [["py", "-3"], ["python"]] : [["python3"]];
+        for (const [launcher, ...flags] of launchers) {
+            try {
+                const candidate = execFileSync(launcher, [...flags, "-c", "import sys; print(sys.executable)"], { windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+                if (path.isAbsolute(candidate) && fs.existsSync(candidate)) { discoveredPython = candidate; break; }
+            } catch { /* A stale system launcher may coexist with a working Python. */ }
+        }
+        if (!discoveredPython && process.platform === "win32") {
+            // Windows Store app aliases can run through PowerShell but not spawn directly.
+            try {
+                const prefix = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "python -c 'import sys; print(sys.base_prefix)'"], { windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+                const candidate = path.join(prefix, "python.exe");
+                if (path.isAbsolute(candidate) && fs.existsSync(candidate)) discoveredPython = candidate;
+            } catch { /* Report unavailable below; never install a replacement interpreter. */ }
+        }
+        if (!discoveredPython) throw new Error("Cannot resolve Acheng Python; set ACHENG_PYTHON to an existing Python executable");
+        if (!path.isAbsolute(discoveredPython) || !fs.existsSync(discoveredPython)) throw new Error("Resolved Acheng Python executable does not exist");
+    }
+    return discoveredPython;
+}
+
+export function runAchengPython(args: string[], options: ExecFileSyncOptionsWithStringEncoding) {
+    try { return execFileSync(resolveAchengPython(), args, options); }
+    catch (error: any) {
+        if (process.platform !== "win32" || process.env.ACHENG_PYTHON || !["EPERM", "ENOENT", "EBUSY"].includes(error.code)) throw error;
+        const literal = (s: string) => `'${s.replace(/'/g, "''")}'`;
+        const invocation = `& python ${args.map(literal).join(" ")}`;
+        const command = `$OutputEncoding=[Text.UTF8Encoding]::new($false); [Console]::InputEncoding=$OutputEncoding; [Console]::OutputEncoding=$OutputEncoding; $payload=[Console]::In.ReadToEnd(); if($payload.Length){$payload | ${invocation}}else{${invocation}}; exit $LASTEXITCODE`;
+        return execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], options);
+    }
+}
+
+/** Compile authored source using the locally active compiler; never call a media model. */
+/** Compiler prompts stay inside the package; media may use only exact verified resolver paths. */
+export function readCompilationReference(output: string, filename: string, verifiedFiles: Array<string | undefined>) {
+    // The compiler reports reference files relative to the compilation root that stages `assets/`
+    // (the parent of the package output), and may report an absolute frozen path. Try the package
+    // first, then that root; both stay behind the same inside-package-or-verified-snapshot check.
+    const roots = [output, path.dirname(output)];
+    const candidates = path.isAbsolute(filename) ? [filename] : roots.map(root => path.resolve(root, filename));
+    const canonical = (file: string) => process.platform === "win32" ? path.resolve(file).toLowerCase() : path.resolve(file);
+    for (const resolved of candidates) {
+        const inside = roots.some(root => canonical(resolved).startsWith(canonical(root) + path.sep));
+        if (!inside && !verifiedFiles.some(file => file && canonical(file) === canonical(resolved))) continue;
+        if (fs.existsSync(resolved)) return fs.readFileSync(resolved);
+    }
+    throw new Error("Compiler reference path is not in the package or verified media snapshot");
+}
+
+export function compileAchengDirector(input: DirectorProduction, directory: string, resolveReferenceFile?: (targetId: string, label: string) => string | undefined, selectedRuntimeId?: string) {
+    const director = directorProductionSchema.parse(structuredClone(input));
+    hydrateScopedApprovedInputs(director, resolveReferenceFile);
+    const runtime = selectedRuntimeId ? resolveAchengRuntime(selectedRuntimeId) : resolveAchengEngine();
+    director.engine = achengEngineIdentity(runtime);
+    if (JSON.stringify(director.source).includes('"legacy_fixture"')) throw new Error("Historical fixtures cannot be submitted as new production");
+    fs.mkdirSync(directory, { recursive: true });
+    const sourceFile = path.join(directory, "source.json"), output = path.join(directory, "compiled");
+    const plans = (Array.isArray(director.source.asset_plan) ? director.source.asset_plan : []) as Array<Record<string, any>>;
+    const style = director.source.style_lock as Record<string, any> | undefined;
+    const sourceAdjustments: Array<{ path: string; before: string; after: string; reason: string }> = [];
+    if (style?.approved_file && path.isAbsolute(style.approved_file) && resolveReferenceFile) {
+        const frozen = resolveReferenceFile(style.anchor_asset_id, "asset");
+        if (frozen && frozen !== style.approved_file) { sourceAdjustments.push({ path: "style_lock.approved_file", before: style.approved_file, after: frozen, reason: "Use frozen verified style input" }); style.approved_file = frozen; }
+    }
+    if (style?.approved_file && !path.isAbsolute(style.approved_file)) {
+        const anchor = plans.find(p => p.id === style.anchor_asset_id);
+        const original = anchor?.file && path.isAbsolute(anchor.file) ? anchor.file : resolveReferenceFile?.(style.anchor_asset_id, "asset");
+        if (original) {
+            const bytes = fs.readFileSync(original);
+            if (crypto.createHash("sha256").update(bytes).digest("hex") !== style.approved_sha256) throw new Error("Style reference bytes changed");
+            if (anchor?.file && path.isAbsolute(anchor.file)) {
+                sourceAdjustments.push({ path: "style_lock.approved_file", before: style.approved_file, after: anchor.file, reason: "Resolve the same verified anchor file independently of the original working directory" });
+                style.approved_file = anchor.file;
+            } else {
+                const destination = path.resolve(directory, style.approved_file);
+                if (!destination.startsWith(directory + path.sep)) throw new Error("Style reference escapes the compilation directory");
+                fs.mkdirSync(path.dirname(destination), { recursive: true }); fs.writeFileSync(destination, bytes);
+            }
+        }
+    }
+    for (const plan of plans) if (plan.file && path.isAbsolute(plan.file) && resolveReferenceFile) {
+        const original = resolveReferenceFile(String(plan.id || plan.asset_id), "asset");
+        if (original && original !== plan.file) { sourceAdjustments.push({ path: `asset_plan.${plan.id || plan.asset_id}.file`, before: plan.file, after: original, reason: "Use frozen verified compilation input" }); plan.file = original; }
+    }
+    for (const plan of plans) if (plan.file && !path.isAbsolute(plan.file)) {
+        const original = resolveReferenceFile?.(plan.id, "asset");
+        const destination = path.resolve(directory, plan.file);
+        if (!destination.startsWith(directory + path.sep)) throw new Error("Asset path escapes the compilation directory");
+        if (original) { fs.mkdirSync(path.dirname(destination), { recursive: true }); fs.copyFileSync(original, destination); }
+    }
+    for (const card of (Array.isArray(director.source.asset_cards) ? director.source.asset_cards : []) as Array<Record<string, any>>) {
+        for (const ref of card.references || []) {
+            if (!ref.file) continue;
+            if (path.isAbsolute(ref.file)) {
+                const frozen = (ref.asset_id ? resolveReferenceFile?.(ref.asset_id, "asset") : undefined) || resolveReferenceFile?.(card.id, ref.label || `<Picture ${ref.image}>`);
+                if (frozen && frozen !== ref.file) { sourceAdjustments.push({ path: `asset_cards.${card.id}.references.${ref.label || ref.image}.file`, before: ref.file, after: frozen, reason: "Use frozen verified compilation input" }); ref.file = frozen; }
+                continue;
+            }
+            const destination = path.resolve(directory, ref.file);
+            if (!destination.startsWith(directory + path.sep)) throw new Error("Reference path escapes the compilation directory");
+            const original = (ref.asset_id ? resolveReferenceFile?.(ref.asset_id, "asset") : undefined) || resolveReferenceFile?.(card.id, ref.label || `<Picture ${ref.image}>`);
+            if (original) { fs.mkdirSync(path.dirname(destination), { recursive: true }); fs.copyFileSync(original, destination); }
+        }
+    }
+    // Every segment must name the same frozen file as its approved asset plan.
+    // Matching bytes with different paths would otherwise become a blocked draft.
+    for (const segment of (Array.isArray(director.source.segments) ? director.source.segments : []) as Array<Record<string, any>>) {
+        for (const ref of segment.references || []) {
+            const frozen = (ref.asset_id ? resolveReferenceFile?.(ref.asset_id, "asset") : undefined) || resolveReferenceFile?.(segment.id, ref.label || `<Picture ${ref.image}>`);
+            if (frozen && ref.file !== frozen) {
+                sourceAdjustments.push({ path: `segments.${segment.id}.references.${ref.label || ref.image}.file`, before: String(ref.file || ""), after: frozen, reason: "Keep approved asset and segment reference on the same verified frozen file" });
+                ref.file = frozen;
+            }
+        }
+    }
+   director.sourceHash = crypto.createHash("sha256").update(canonicalProduction(director.source)).digest("hex");
+    const sourceHashForArtifacts = director.sourceHash;
+    hydrateSubjectPictureSources(director, resolveReferenceFile);
+   fs.writeFileSync(sourceFile, JSON.stringify(director.source), "utf8");
+    const onlyAssets = !Array.isArray(director.source.segments) || !director.source.segments.length;
+    let exitCode = 0;
+    try {
+        runAchengPython(["-B", "-X", "utf8", path.join(runtime.path, "scripts", onlyAssets ? "compile_assets.py" : "compile_h3.py"), sourceFile, "--out", output, "--draft"], { cwd: runtime.path, windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error: any) {
+        exitCode = error.status;
+        if (exitCode !== 2 || !fs.existsSync(path.join(output, "index.json"))) throw new Error(`Acheng compiler failed: ${String(error.stderr || error.stdout || error.message).trim()}`);
+    }
+    const readFile = (name: string) => {
+        const file = path.resolve(output, name);
+        if (!file.startsWith(output + path.sep)) throw new Error("Compiler output path escapes its package");
+        return fs.readFileSync(file);
+    };
+    const index = JSON.parse(readFile("index.json").toString("utf8"));
+    const prior = director.artifacts;
+    const diagnostics: ProductionDiagnostic[] = [];
+    director.artifacts = [];
+    for (const [kind, entries] of [["image", index.asset_prompts || index.assets || []], ["h3", index.segments || []]] as const) {
+        for (const entry of entries) {
+            const targetId = entry.asset_id || entry.segment_id;
+            const prompt = readFile(entry.prompt_file || entry.file).toString("utf8");
+            const sha256 = crypto.createHash("sha256").update(prompt).digest("hex");
+            let ready = kind === "h3" ? entry.accepted === true && entry.format_pass === "PASSED" : ["PROMPT_READY", "ready-to-submit-not-generated"].includes(entry.status);
+            for (const item of Array.isArray(entry.quality_diagnostics) ? entry.quality_diagnostics : []) diagnostics.push({
+                code: String(item.code || "PROMPT_QUALITY"), path: String(item.path || `artifacts.${targetId}`), targetId,
+                message: String(item.message || "提示词质量建议"), severity: "warning", origin: "compiler", blockingActions: [],
+            });
+            const references: DirectorProduction["artifacts"][number]["references"] = [];
+            for (const ref of entry.references || entry.binding_snapshot?.references || []) {
+                if (!ref.file) continue;
+                const label = ref.label || `<Picture ${ref.image}>`;
+                const bytes = readCompilationReference(output, ref.file, [ref.asset_id ? resolveReferenceFile?.(ref.asset_id, "asset") : undefined, resolveReferenceFile?.(targetId, label)]);
+                const digest = crypto.createHash("sha256").update(bytes).digest("hex");
+                const asset = ref.asset_id ? director.assets[ref.asset_id] : undefined;
+                const old = prior.find(a => a.targetId === targetId && a.kind === kind)?.references.find(r => r.label === label && r.sha256 === digest);
+                const binding = asset?.nodeId && asset.storageKey && asset.sha256 === digest ? asset : old;
+                if (!binding?.nodeId || !binding.storageKey || ref.sha256 !== digest) {
+                    diagnostics.push({ code: "MISSING_REFERENCE_BINDING", path: `artifacts.${kind}-${targetId}.references`, targetId, message: `No matching Canvas media binding for ${label}`, severity: "error" });
+                    ready = false; continue;
+                }
+                const assetId = ref.asset_id || Object.keys(director.assets).find(id => director.assets[id].nodeId === binding.nodeId && director.assets[id].storageKey === binding.storageKey);
+                const card = (director.source.asset_cards as Array<Record<string, any>> || []).find(card => card.id === targetId);
+                const sourceRef = card?.references?.find((item: Record<string, any>) => item.image === ref.image);
+                references.push({ label, nodeId: binding.nodeId, storageKey: binding.storageKey, sha256: digest, role: ref.role || old?.role || "reference",
+                    ...(assetId ? { assetId, assetVersion: director.assets[assetId]?.version } : {}),
+                    ...(sourceRef?.preserve !== undefined ? { preserve: sourceRef.preserve } : {}), ...(sourceRef?.exclude !== undefined ? { exclude: sourceRef.exclude } : {}) });
+            }
+            director.artifacts.push({ id: `${kind}-${targetId}`, kind, targetId, prompt, sha256, sourceHash: director.sourceHash, status: ready ? "ready" : "draft", references,
+               receipt: { sourceHash: director.sourceHash, promptHash: sha256, engineRuntimeId: runtime.runtimeId, engine: director.engine, validator: onlyAssets ? "compile_assets/validate_asset_entries" : "compile_h3/validate_package",
+                    ...(entry.source_map ? { sourceMap: entry.source_map } : {}),
+                   diagnostics: { englishWords: entry.detailed_description_english_words ?? null, detailPolicy: entry.h3_detail_policy ?? null, blockers: entry.blockers || [], formatPass: entry.format_pass || null, accepted: entry.accepted ?? ready } } });
+        }
+    }
+   delete (director.source as Record<string, unknown>)._canvas_subject_picture_sources;
+    delete (director.source as Record<string, unknown>)._canvas_subject_source_hash;
+    director.sourceHash = sourceHashForArtifacts;
+    for (const artifact of director.artifacts) {
+        artifact.sourceHash = sourceHashForArtifacts;
+        artifact.receipt.sourceHash = sourceHashForArtifacts;
+    }
+    const audit = JSON.parse(readFile("audit.json").toString("utf8"));
+    const located: ProductionDiagnostic[] = Array.isArray(audit.diagnostics) ? audit.diagnostics.filter((item: ProductionDiagnostic) => item.code === "PROMPT_EXTERNAL_CONTEXT")
+        .map((item: ProductionDiagnostic) => ({ ...item, severity: "warning" as const, blocksCompilation: false, blockingActions: [] })) : [];
+    diagnostics.push(...located);
+    for (const gate of audit.gates || []) if (gate.status === "FAIL") {
+        for (const message of gate.errors || []) {
+            if (located.length && (message.startsWith("Prompt depends on external prose:") || message.startsWith("external-context dependency:"))) continue;
+            diagnostics.push({ code: "COMPILER_GATE_FAILED", path: `audit.${gate.gate}`, message, severity: "warning", origin: "compiler", blocksCompilation: false, blockingActions: [] });
+        }
+    }
+    diagnostics.push(...preflightDirector(director, "edit", runtime).diagnostics.filter(d => d.severity === "error"));
+    return { director, exitCode, diagnostics, audit, sourceAdjustments, acceptance: JSON.parse(readFile("delivery.acceptance.json").toString("utf8")) };
+}
+
+/** Resolve, never install or update, the engine selected by the local manager. */
+export function resolveAchengEngine(home = process.env.CODEX_HOME || path.join(os.homedir(), ".codex")) {
+    const base = path.resolve(home, "skill-runtimes", "acheng-director");
+    const state = JSON.parse(fs.readFileSync(path.join(base, "active.json"), "utf8")) as { active: { path: string; runtimeId: string; commit: string; patchVersion: string; version: string } };
+    const resolved = resolveAchengRuntime(state.active.runtimeId, home);
+    if (path.resolve(state.active.path) !== resolved.path) throw new Error("Acheng 激活路径与运行包不一致");
+    return resolved;
+}
+
+export function resolveAchengRuntime(runtimeId: string, home = process.env.CODEX_HOME || path.join(os.homedir(), ".codex")) {
+    const base = path.resolve(home, "skill-runtimes", "acheng-director");
+    if (!/^[a-f0-9]{40}-[a-f0-9]{16}$/.test(runtimeId)) throw new Error("Acheng runtimeId 无效");
+    const directory = path.join(base, "versions", runtimeId);
+    if (!directory.startsWith(`${path.join(base, "versions")}${path.sep}`)) throw new Error("Acheng 运行版本不在受管理目录");
+    const manifest = JSON.parse(fs.readFileSync(path.join(directory, "canvas-engine.json"), "utf8")) as { runtimeId: string; commit: string; patchVersion: string; version: string; files: Record<string, string> };
+    if (manifest.runtimeId !== runtimeId) throw new Error("Acheng 激活记录与运行版本不一致");
+    for (const [file, hash] of Object.entries(manifest.files)) {
+        const target = path.resolve(directory, file);
+        if (!target.startsWith(`${directory}${path.sep}`) || crypto.createHash("sha256").update(fs.readFileSync(target)).digest("hex") !== hash) throw new Error(`Acheng 运行版本已改变：${file}`);
+    }
+    const contractPath = path.join(directory, "canvas-source-contract.json");
+    const sourceContract = fs.existsSync(contractPath) ? JSON.parse(fs.readFileSync(contractPath, "utf8")) : null;
+    return { runtimeId, commit: manifest.commit, patchVersion: manifest.patchVersion, version: manifest.version, path: directory, skillPath: path.join(directory, "SKILL.md"), sourceContract };
+}
+
+export function getProductionContract(runtimeId?: string, operationType?: string, moduleId?: typeof directorModules[number]) {
+    const runtime = resolveAchengEngine();
+    const moduleRegistryPath = path.join(runtime.path, "data", "module-registry.json");
+    const moduleRegistry = JSON.parse(fs.readFileSync(moduleRegistryPath, "utf8"));
+    const moduleRow = moduleId ? moduleRegistry.modules.find((item: any) => item.id === moduleId) : undefined;
+    if (moduleId && !moduleRow) throw new Error(`Active Acheng runtime does not define module ${moduleId}`);
+    const moduleFiles = moduleRow ? [moduleRow.entry, ...moduleRow.reads].map((relative: string) => {
+        const file = path.resolve(runtime.path, relative);
+        if (!file.startsWith(`${path.resolve(runtime.path)}${path.sep}`)) throw new Error("Module resource escaped its runtime");
+        const bytes = fs.readFileSync(file);
+        return { path: relative, sha256: crypto.createHash("sha256").update(bytes).digest("hex"), content: bytes.toString("utf8") };
+    }) : undefined;
+    return { ...productionOperationContract(operationType), engine: { runtimeId: runtime.runtimeId, commit: runtime.commit, patchVersion: runtime.patchVersion, version: runtime.version },
+        sourceContract: runtime.sourceContract, ref2vaMaximumWords: runtime.sourceContract ? runtime.sourceContract.ref2vaMaximumWords : 2900,
+        ...(moduleRow ? { module: { id: moduleRow.id, owns: moduleRow.owns, checks_with: moduleRow.checks_with, check_focus: moduleRow.check_focus, files: moduleFiles } } : {}),
+        ...(runtimeId ? { notice: "runtimeId is deprecated and does not select a compiler; this contract uses the locally active Acheng runtime." } : {}),
+        ...(runtime.sourceContract ? {} : { sourceContractNotice: "The active runtime has no machine-readable Canvas source contract; compiler validation remains authoritative." }) };
+}
+
+export type AchengRuntime = ReturnType<typeof resolveAchengRuntime>;
+export function achengEngineIdentity(runtime: AchengRuntime): DirectorProduction["engine"] {
+    return { runtimeId: runtime.runtimeId, commit: runtime.commit, patchVersion: runtime.patchVersion, version: runtime.version };
+}
+
+/** Each new check follows the locally active runtime; its report records the actual validator. */
+export function auditAchengContinuity(director: DirectorProduction, targetIds?: string[], diagnosticOnly = false) {
+    const runtime = resolveAchengEngine();
+    const response = runAchengPython(["-B", "-X", "utf8", path.join(runtime.path, "scripts", "continuity_v2.py")], {
+        cwd: runtime.path, windowsHide: true, encoding: "utf8", input: JSON.stringify({ source: director.source, target_ids: targetIds }),
+    });
+    return { ...JSON.parse(response), validatorRuntimeId: runtime.runtimeId, validatorEngine: achengEngineIdentity(runtime), diagnosticOnly };
+}
+
+export function validateAchengSource(director: DirectorProduction, stage: "edit" | "publish" | "generate", runtime = resolveAchengEngine()): ProductionDiagnostic[] {
+    if (!runtime.sourceContract) return [...ref2vaPromptDiagnostics(director, 2900), ...continuityBoundaryDiagnostics(director, stage), { code: "SOURCE_CONTRACT_UNAVAILABLE", path: "director.engine", message: "Active runtime has no source contract; final checks remain with the compiler", severity: "unverified" }];
+    const response = runAchengPython(["-B", "-X", "utf8", path.join(runtime.path, "scripts", "canvas_source_contract.py")], {
+        cwd: runtime.path, windowsHide: true, encoding: "utf8", input: JSON.stringify({ source: director.source, artifacts: director.artifacts || [], stage }),
+    });
+    const sourceDiagnostics: ProductionDiagnostic[] = JSON.parse(response).diagnostics;
+    for (const item of sourceDiagnostics) {
+        if (item.code === "INVALID_SUBJECT_SOURCE" && item.path.includes("subject_usages.pictureBindingIds")
+            && item.message.startsWith("Missing or ambiguous default binding for ")) {
+            item.blockingActions = ["generate"];
+            item.blocksCompilation = false;
+        }
+    }
+    // Continuity readiness is target-scoped and comes from the persisted Backend
+    // report. Source validation keeps a partial authored draft editable/publishable.
+    for (const item of sourceDiagnostics) if (String(item.code).startsWith("CONTINUITY_")) item.severity = "warning";
+    return [...sourceDiagnostics, ...continuityBoundaryDiagnostics(director, stage)];
+}
+
+export function assertAchengSource(director: DirectorProduction, stage: "edit" | "publish" | "generate") {
+    const diagnostics = validateAchengSource(director, stage).filter(item => diagnosticBlocksAction(item, stage));
+    if (diagnostics.length) throw new ProductionValidationError(diagnostics);
+}
+
+/** Read-only checks use the active compiler, or the runtime captured for this compilation request. */
+export function preflightCompilationDirector(raw: unknown, resolveReferenceFile?: (targetId: string, label: string) => string | undefined, selectedRuntimeId?: string): ProductionPreflight {
+    let runtime: AchengRuntime;
+    try { runtime = selectedRuntimeId ? resolveAchengRuntime(selectedRuntimeId) : resolveAchengEngine(); }
+    catch (error) { return { valid: false, compileReady: false, generationReady: false, contractVersion: productionContractVersion, engine: null, revision: null,
+        diagnostics: [{ code: "ENGINE_UNAVAILABLE", path: "director.engine", message: error instanceof Error ? error.message : String(error), severity: "error" }] }; }
+    const parsed = directorProductionSchema.safeParse(raw);
+    // Previous receipts are replaced by compilation, so their staleness must not block rebuilding.
+    const result = preflightDirector(parsed.success ? { ...parsed.data, artifacts: [] } : raw, "edit", runtime);
+    result.compileReady = false;
+    if (parsed.success) {
+        const decisions = continuityBoundaryDiagnostics(parsed.data, "compile");
+        result.diagnostics = result.diagnostics.filter(item => !decisions.some(issue => issue.code === item.code && issue.targetId === item.targetId));
+        result.diagnostics.push(...decisions.map(issue => ({ ...issue, severity: "warning" as const, blocksCompilation: false, blockingActions: [] })));
+    }
+    result.diagnostics = result.diagnostics.map(item => String(item.code).startsWith("CONTINUITY_")
+        ? { ...item, severity: "warning", blocksCompilation: false, blockingActions: [] } : item);
+    if (result.diagnostics.some(item => diagnosticBlocksAction(item, "compile") && ["INVALID_SCHEMA", "ENGINE_UNAVAILABLE", "ENGINE_MISMATCH"].includes(item.code))) return result;
+    const director = directorProductionSchema.parse(structuredClone(raw));
+    hydrateScopedApprovedInputs(director, resolveReferenceFile);
+    if (JSON.stringify(director.source).includes('"legacy_fixture"')) {
+        result.diagnostics.push({ code: "COMPILE_HISTORICAL_FIXTURE", path: "director.source", message: "历史示例不能作为新制作输入；请使用本次实际撰写的源稿。", severity: "error" });
+        result.valid = false;
+        return result;
+    }
+    const source = director.source;
+    const plans = (Array.isArray(source.asset_plan) ? source.asset_plan : []).filter(plan => plan && typeof plan === "object") as Array<Record<string, any>>;
+    for (const plan of plans) if (typeof plan.file === "string" && plan.file && !path.isAbsolute(plan.file)) {
+        const file = resolveReferenceFile?.(String(plan.id || plan.asset_id), "asset");
+        if (file) plan.file = file;
+    }
+    const style = source.style_lock as Record<string, any> | undefined;
+    if (typeof style?.approved_file === "string" && style.approved_file && !path.isAbsolute(style.approved_file)) {
+        const anchor = plans.find(plan => plan.id === style.anchor_asset_id);
+        const file = anchor?.file && path.isAbsolute(anchor.file) ? anchor.file : resolveReferenceFile?.(style.anchor_asset_id, "asset");
+        if (file) style.approved_file = file;
+    }
+    for (const card of (Array.isArray(source.asset_cards) ? source.asset_cards : []).filter(card => card && typeof card === "object") as Array<Record<string, any>>) {
+        for (const ref of Array.isArray(card.references) ? card.references : []) if (ref && typeof ref.file === "string" && ref.file && !path.isAbsolute(ref.file)) {
+            const file = resolveReferenceFile?.(card.id, ref.label || `<Picture ${ref.image}>`);
+            if (file) ref.file = file;
+        }
+    }
+    try {
+        const response = runAchengPython(["-B", "-X", "utf8", fileURLToPath(new URL("./compile-preflight.py", import.meta.url)), runtime.path], {
+            cwd: runtime.path, windowsHide: true, encoding: "utf8", input: JSON.stringify({ source }),
+        });
+        result.diagnostics.push(...JSON.parse(response).diagnostics);
+    } catch (error) {
+        result.diagnostics.push({ code: "COMPILE_PREFLIGHT_UNAVAILABLE", path: "director.engine", message: error instanceof Error ? error.message : String(error), severity: "error" });
+    }
+    result.valid = !result.diagnostics.some(item => diagnosticBlocksAction(item, "compile"));
+    result.compileReady = result.valid;
+    result.nextActions = result.diagnostics.filter(item => item.severity === "error").map(item => item.nextAction || { action: "correct_source", message: item.message });
+    return result;
+}
+
+/** Shared file/Backend check. File checks cannot establish online ownership. */
+export function preflightDirector(raw: unknown, stage: "edit" | "publish" | "generate" = "edit", selectedRuntime?: AchengRuntime): ProductionPreflight {
+    const diagnostics = schemaDiagnostics(directorProductionSchema, raw, "director");
+    const result: ProductionPreflight = { valid: false, contractVersion: productionContractVersion, engine: null, revision: null, diagnostics, generationReady: false };
+    if (diagnostics.length) return result;
+    const director = directorProductionSchema.parse(raw);
+    result.engine = director.engine;
+    const digest = (value: string) => crypto.createHash("sha256").update(value).digest("hex");
+    if (digest(canonicalProduction(director.source)) !== director.sourceHash) diagnostics.push({ code: "SOURCE_HASH_MISMATCH", path: "director.sourceHash", message: "Source hash differs from the full authored source", severity: "error" });
+    for (const [index, artifact] of director.artifacts.entries()) {
+        if (digest(artifact.prompt) !== artifact.sha256) diagnostics.push({ code: "PROMPT_HASH_MISMATCH", path: `director.artifacts.${index}.sha256`, targetId: artifact.targetId, message: "Prompt byte hash differs", severity: "error" });
+        if (artifact.status === "ready" && (!currentCompilationArtifact(director, artifact) || artifact.receipt.promptHash !== artifact.sha256)) diagnostics.push({ code: "STALE_RECEIPT", path: `director.artifacts.${index}.receipt`, targetId: artifact.targetId, message: "Receipt differs from its source or prompt", severity: "error" });
+    }
+    try { const runtime = selectedRuntime || resolveAchengEngine(); result.engine = achengEngineIdentity(runtime); diagnostics.push(...validateAchengSource(director, stage, runtime)); }
+    catch (error) { diagnostics.push({ code: "ENGINE_UNAVAILABLE", path: "director.engine", message: error instanceof Error ? error.message : String(error), severity: "error" }); }
+    diagnostics.push({ code: "ONLINE_CONTEXT_UNVERIFIED", path: "director.assets", message: "Media ownership, approvals, model availability and current revision require Backend preflight", severity: "unverified" });
+    result.valid = !diagnostics.some(item => item.severity === "error");
+    return result;
+}
+
+/** Offline formal-request envelope; missing Backend context stays unverified. */
+export function preflightProductionRequest(raw: unknown, production?: { revision: number; draft: { director?: DirectorProduction }; published?: { director?: DirectorProduction } | null; publishedVersion?: number }): ProductionPreflight {
+    const diagnostics = schemaDiagnostics(productionPreflightRequestSchema, raw);
+    const result: ProductionPreflight = { valid: false, contractVersion: productionContractVersion, engine: production?.draft.director?.engine || null, revision: production?.revision ?? null, diagnostics, generationReady: false };
+    if (diagnostics.length) return result;
+    const input = productionPreflightRequestSchema.parse(raw);
+    if (production && input.request.expectedRevision !== production.revision) diagnostics.push({ code: "REVISION_CONFLICT", path: "request.expectedRevision", message: `Snapshot revision is ${production.revision}`, severity: "error" });
+    let director = structuredClone(input.action === "generate" ? production?.published?.director : production?.draft.director);
+    if (input.action === "generate" && production && production.publishedVersion !== input.request.version) diagnostics.push({ code: "VERSION_CONFLICT", path: "request.version", message: "Published snapshot version differs", severity: "error" });
+    if (input.action === "compile" && input.request.director) director = structuredClone(input.request.director);
+    if (input.action === "edit") for (const [index, operation] of input.request.ops.entries()) {
+        try {
+            if (operation.type === "set_director_production") director = structuredClone(operation.director);
+            else if (operation.type === "patch_director_source") {
+                if (!director) throw new Error("缺少 Acheng 制作稿");
+                applyDirectorSourcePatch(director, operation.entity, operation.id, operation.patch);
+            } else if (operation.type === "set_director_brief" && director) applyDirectorSourcePatch(director, "brief", undefined, { value: operation.brief });
+            else if (operation.type === "set_director_workflow" && director) director.workflow = { ...director.workflow, ...operation.patch };
+            else diagnostics.push({ code: "OPERATION_CONTEXT_UNVERIFIED", path: `request.ops.${index}`, message: "This operation requires Backend object/ownership checks", severity: "unverified" });
+        } catch (error) { diagnostics.push({ code: "INVALID_OPERATION", path: `request.ops.${index}`, targetId: "id" in operation ? String(operation.id) : undefined, message: error instanceof Error ? error.message : String(error), severity: "error" }); break; }
+    }
+    if (!diagnostics.some(item => item.severity === "error") && director) {
+        const checked = input.action === "compile" ? preflightCompilationDirector(director) : preflightDirector(director, input.action === "edit" ? "edit" : input.action === "publish" ? "publish" : "generate");
+        diagnostics.push(...checked.diagnostics); result.engine = checked.engine;
+        result.compileReady = input.action === "compile" && checked.compileReady;
+    } else diagnostics.push({ code: "ONLINE_CONTEXT_UNVERIFIED", path: "production", message: "Current production and Backend checks remain unverified", severity: "unverified" });
+    result.valid = !diagnostics.some(item => item.severity === "error");
+    return result;
+}

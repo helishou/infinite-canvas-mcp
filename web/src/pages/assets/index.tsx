@@ -1,6 +1,7 @@
+import { BackendApiError } from "@/services/backend-api";
 import { Check, Clapperboard, Copy, Download, FolderPlus, PencilLine, Search, Trash2, Upload, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
-import { App, Alert, Button, Card, Drawer, Dropdown, Empty, Form, Image, Input, Modal, Pagination, Select, Space, Tag, Typography } from "antd";
+import { App, Alert, Button, Card, Drawer, Dropdown, Empty, Form, Input, Modal, Pagination, Select, Space, Tag, Typography } from "antd";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
@@ -11,11 +12,12 @@ import { getImageBlob, resolveImageUrl, uploadImage } from "@/services/image-sto
 import { getMediaBlob, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { cn } from "@/lib/utils";
 import { VoiceAssetSelect } from "@/components/assets/voice-asset-select";
+import { MediaImage } from "@/components/media/media-image";
 import { SceneColorPaletteEditor } from "@/components/canvas/scene-color-palette-editor";
 import { findCharacterVoiceAsset, hasCharacterVoiceSource, resolveCharacterVoiceName } from "@/lib/character-voice";
 import { extractSceneColorPalette, normalizeSceneColorPalette } from "@/lib/canvas/scene-color-palette";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
-import { useAssetStore, type Asset, type AssetKind, type CharacterAsset, type CharacterImage, type ImageAsset, type VideoAsset, type AudioAsset, type SceneAsset, type SceneImage } from "@/stores/use-asset-store";
+import { useAssetStore, libraryErrorText, type Asset, type AssetKind, type CharacterAsset, type CharacterImage, type ImageAsset, type VideoAsset, type AudioAsset, type SceneAsset, type SceneImage } from "@/stores/use-asset-store";
 import { exportAssets, exportCharacterImages, readAssetPackage } from "./asset-transfer";
 
 type AssetFormValues = {
@@ -38,7 +40,7 @@ const ALL_DRAMAS = "__all-dramas__";
 const UNASSIGNED_DRAMA = "__unassigned-drama__";
 
 export default function AssetsPage() {
-    const { message } = App.useApp();
+    const { message, modal } = App.useApp();
     const { t } = useTranslation();
     const copyText = useCopyText();
     const [form] = Form.useForm<AssetFormValues>();
@@ -70,6 +72,7 @@ export default function AssetsPage() {
     const [page, setPage] = useState(1);
     const [pageSize, setPageSize] = useState(10);
     const [editingAsset, setEditingAsset] = useState<Asset | null>(null);
+    const [newAssetId, setNewAssetId] = useState(() => nanoid());
     const [isAssetOpen, setIsAssetOpen] = useState(false);
     const [previewAsset, setPreviewAsset] = useState<Asset | null>(null);
     const [deletingAsset, setDeletingAsset] = useState<Asset | null>(null);
@@ -172,9 +175,9 @@ export default function AssetsPage() {
     const toggleSelect = (id: string) => setSelection((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
     const selectAllFiltered = () => setSelection(filteredAssets.map((asset) => asset.id));
     const selectNone = () => setSelection([]);
-    const confirmBulkDelete = () => {
+    const confirmBulkDelete = async () => {
         if (!selection.length) return;
-        removeAssets(selection);
+        try { await removeAssets(selection); } catch (error) { message.error(libraryErrorText(error)); return; }
         setSelection([]);
         message.success(t("assets.deletedBulk", { count: selection.length }));
     };
@@ -182,7 +185,7 @@ export default function AssetsPage() {
         const now = new Date().toISOString();
         selection.forEach((id) => {
             const asset = useAssetStore.getState().assets.find((a) => a.id === id);
-            if (asset) updateAsset(id, { folderId, updatedAt: now });
+            if (asset) void updateAsset(id, { folderId, updatedAt: now }).catch(error => message.error(libraryErrorText(error)));
         });
         setSelection([]);
         message.success(t("assets.movedToFolder", { count: selection.length }));
@@ -192,15 +195,15 @@ export default function AssetsPage() {
         selection.forEach((id) => {
             const asset = useAssetStore.getState().assets.find((a) => a.id === id);
             if (asset && asset.kind !== "character" && asset.kind !== "scene" && !(asset.tags || []).includes(tag)) {
-                updateAsset(id, { tags: [...(asset.tags || []), tag] });
+                void updateAsset(id, { tags: [...(asset.tags || []), tag] }).catch(error => message.error(libraryErrorText(error)));
                 count += 1;
             }
         });
         if (count) message.success(t("assets.tagged", { count, tag }));
     };
-    const bulkMoveToDrama = (dramaId: string | null) => {
+    const bulkMoveToDrama = async (dramaId: string | null) => {
         const count = selection.length;
-        selection.forEach((id) => updateAsset(id, { dramaId }));
+        try { await Promise.all(selection.map((id) => updateAsset(id, { dramaId }))); } catch (error) { message.error(libraryErrorText(error)); return; }
         setSelection([]);
         message.success(t("assets.drama.moved", { count }));
     };
@@ -223,13 +226,13 @@ export default function AssetsPage() {
             try {
                 if (file.type.startsWith("image/")) {
                     const image = await uploadImage(file, { category: "library" });
-                    addAsset({ ...base, kind: "image", data: { dataUrl: image.url, storageKey: image.storageKey, width: image.width, height: image.height, bytes: image.bytes, mimeType: image.mimeType } });
+                    await addAsset({ ...base, kind: "image", data: { dataUrl: image.url, storageKey: image.storageKey, width: image.width, height: image.height, bytes: image.bytes, mimeType: image.mimeType } });
                 } else if (file.type.startsWith("audio/")) {
                     const result = await uploadMediaFile(file, "audio", "library");
-                    addAsset({ ...base, kind: "audio", data: { url: result.url, storageKey: result.storageKey, bytes: result.bytes, mimeType: result.mimeType, durationMs: result.durationMs } });
+                    await addAsset({ ...base, kind: "audio", data: { url: result.url, storageKey: result.storageKey, bytes: result.bytes, mimeType: result.mimeType, durationMs: result.durationMs } });
                 } else {
                     const result = await uploadMediaFile(file, "video", "library");
-                    addAsset({ ...base, kind: "video", data: { url: result.url, storageKey: result.storageKey, width: result.width, height: result.height, bytes: result.bytes, mimeType: result.mimeType } });
+                    await addAsset({ ...base, kind: "video", data: { url: result.url, storageKey: result.storageKey, width: result.width, height: result.height, bytes: result.bytes, mimeType: result.mimeType } });
                 }
                 added += 1;
             } catch {
@@ -279,6 +282,7 @@ export default function AssetsPage() {
 
     const openCreate = () => {
             setEditingAsset(null);
+            setNewAssetId(nanoid());
             setImageDraft(null);
             setVideoDraft(null);
             setAudioDraft(null);
@@ -340,7 +344,7 @@ export default function AssetsPage() {
         setIsAssetOpen(true);
     };
 
-    const saveAsset = async () => {
+    const saveAsset = async (resolveConflicts?: "local") => {
         if (uploadingCharacterVoice) return;
         const values = await form.validateFields();
         const base = {
@@ -355,15 +359,15 @@ export default function AssetsPage() {
 
         if (values.kind === "text") {
             const asset = { ...base, kind: "text" as const, data: { content: (values.content || "").trim() } };
-            editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
+            await (editingAsset ? updateAsset(editingAsset.id, asset, editingAsset, resolveConflicts) : addAsset({ ...asset, id: newAssetId }));
         } else if (values.kind === "audio") {
             if (!audioDraft) { message.error(t("assets.selectAudio")); return; }
             const asset = { ...base, kind: "audio" as const, data: audioDraft };
-            editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
+            await (editingAsset ? updateAsset(editingAsset.id, asset, editingAsset, resolveConflicts) : addAsset({ ...asset, id: newAssetId }));
         } else if (values.kind === "video") {
             if (!videoDraft) { message.error(t("assets.selectVideo")); return; }
             const asset = { ...base, kind: "video" as const, data: videoDraft };
-            editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
+            await (editingAsset ? updateAsset(editingAsset.id, asset, editingAsset, resolveConflicts) : addAsset({ ...asset, id: newAssetId }));
         } else if (values.kind === "character") {
             const primaryIndex = characterImages.length
                 ? Math.min(Math.max(characterPrimaryIndex, 0), characterImages.length - 1)
@@ -387,7 +391,7 @@ export default function AssetsPage() {
             // 角色表单的"描述"从 form.content 读取（在表单里复用 content 字段避免再加一项）
             if (values.content) characterData.description = values.content;
             const asset = { ...base, kind: "character" as const, data: characterData, coverUrl: characterImages[primaryIndex]?.url || "" };
-            editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
+            await (editingAsset ? updateAsset(editingAsset.id, asset, editingAsset, resolveConflicts) : addAsset({ ...asset, id: newAssetId }));
         } else if (values.kind === "scene") {
             if (!sceneImageDraft) { message.error(t("assets.sceneRequireImage")); return; }
             const colorPalette = normalizeSceneColorPalette(sceneColorPaletteDraft);
@@ -400,11 +404,11 @@ export default function AssetsPage() {
                 colorCardPrompt: (values.sceneColorCardPrompt || "").trim(),
             };
             const asset = { ...base, kind: "scene" as const, data: sceneData, coverUrl: sceneImageDraft.url };
-            editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
+            await (editingAsset ? updateAsset(editingAsset.id, asset, editingAsset, resolveConflicts) : addAsset({ ...asset, id: newAssetId }));
         } else {
             if (!imageDraft) { message.error(t("assets.selectImage")); return; }
             const asset = { ...base, kind: "image" as const, data: imageDraft };
-            editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
+            await (editingAsset ? updateAsset(editingAsset.id, asset, editingAsset, resolveConflicts) : addAsset({ ...asset, id: newAssetId }));
         }
 
         message.success(editingAsset ? t("assets.updated") : t("assets.saved"));
@@ -513,7 +517,7 @@ export default function AssetsPage() {
             // 重新分配 id 并维护 旧→新 映射，保证跨资产引用仍然有效
             const idMap = new Map<string, string>();
             importedAssets.forEach((asset) => idMap.set(asset.id, nanoid()));
-            importedAssets.forEach((asset) => {
+            for (const asset of importedAssets) {
                 const importedDramaId = dropDramaId || (asset.dramaId && dramas.some((drama) => drama.id === asset.dramaId) ? asset.dramaId : null);
                 const remapped = asset.kind === "character" ? {
                     ...asset,
@@ -526,8 +530,13 @@ export default function AssetsPage() {
                 const payload = { ...remapped, id: idMap.get(asset.id), dramaId: importedDramaId } as Record<string, unknown>;
                 delete payload.createdAt;
                 delete payload.updatedAt;
-                addAsset(payload as Parameters<typeof addAsset>[0]);
-            });
+                const metadata = { ...(payload.metadata as Record<string, unknown> || {}) };
+                delete metadata.sharedAssetSource;
+                delete metadata.sharedAssetReference;
+                delete metadata.sharedLibraryAssetId;
+                payload.metadata = metadata;
+                await addAsset(payload as Parameters<typeof addAsset>[0]);
+            }
             message.success(t("assets.imported", { count: importedAssets.length }));
         } catch {
             message.error(t("assets.importFailed"));
@@ -536,9 +545,9 @@ export default function AssetsPage() {
         }
     };
 
-    const confirmDelete = () => {
+    const confirmDelete = async () => {
         if (!deletingAsset) return;
-        removeAsset(deletingAsset.id);
+        try { await removeAsset(deletingAsset.id); } catch (error) { message.error(libraryErrorText(error)); return; }
         message.success(t("assets.deleted"));
         setDeletingAsset(null);
     };
@@ -837,7 +846,10 @@ export default function AssetsPage() {
                 </div>
             </main>
 
-            <Modal title={editingAsset ? t("assets.edit") : t("assets.add")} open={isAssetOpen} width={980} onCancel={() => setIsAssetOpen(false)} onOk={() => void saveAsset()} okText={t("common.save")} okButtonProps={{ loading: uploadingCharacterVoice }} cancelText={t("common.cancel")} destroyOnHidden>
+            <Modal title={editingAsset ? t("assets.edit") : t("assets.add")} open={isAssetOpen} width={980} onCancel={() => setIsAssetOpen(false)} onOk={() => void saveAsset().catch(error => {
+                if (error instanceof BackendApiError && error.details.code === "FIELD_CONFLICT") modal.confirm({ title: t("canvas.sharedLibrary.conflictTitle"), content: t("canvas.sharedLibrary.conflictDescription"), okText: t("canvas.sharedLibrary.useLocal"), cancelText: t("canvas.sharedLibrary.keepDraft"), onOk: () => saveAsset("local").catch(failure => { message.error(libraryErrorText(failure)); throw failure; }) });
+                else message.error(libraryErrorText(error));
+            })} okText={t("common.save")} okButtonProps={{ loading: uploadingCharacterVoice }} cancelText={t("common.cancel")} destroyOnHidden>
                 <div className="grid gap-6 pt-1 lg:grid-cols-[minmax(0,1fr)_320px]">
                     <Form form={form} layout="vertical" requiredMark={false} initialValues={{ kind: "text", tags: [] }}>
                         <Form.Item name="kind" label={t("assets.type")}>
@@ -1253,7 +1265,7 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload, onDownloadCharacter }
             {asset ? (
                 <div className="space-y-5">
                     {cover ? (
-                        <Image src={cover} alt={asset.title} className="rounded-lg" />
+                        <MediaImage src={cover} alt={asset.title} name={asset.title} className="rounded-lg" />
                     ) : (
                         <div className="rounded-lg border border-stone-200 bg-stone-50 p-5 text-sm leading-6 text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">{asset.kind === "text" ? asset.data.content : t("assets.noCover")}</div>
                     )}
@@ -1298,7 +1310,7 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload, onDownloadCharacter }
                                  {asset.data.images.length ? (
                                     <div className="grid grid-cols-3 gap-2">
                                         {asset.data.images.map((image, idx) => (
-                                            <Image key={idx} src={image.url} alt={image.outfit || image.name} className="!rounded-md" />
+                                            <MediaImage key={idx} src={image.url} alt={image.outfit || image.name} name={image.outfit || image.name} className="!rounded-md" />
                                         ))}
                                     </div>
                                 ) : null}
@@ -1306,7 +1318,7 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload, onDownloadCharacter }
                         ) : asset.kind === "scene" ? (
                             <div className="mt-2 space-y-3">
                                 {asset.data.description ? <Typography.Paragraph className="!mb-0 whitespace-pre-wrap">{asset.data.description}</Typography.Paragraph> : null}
-                                {asset.data.colorCard ? <Image src={asset.data.colorCard.url} alt={t("assets.fields.sceneColorCard")} className="!max-h-40 !rounded-md !object-cover" /> : null}
+                                {asset.data.colorCard ? <MediaImage src={asset.data.colorCard.url} alt={t("assets.fields.sceneColorCard")} className="!max-h-40 !rounded-md !object-cover" /> : null}
                                 {asset.data.colorCardPrompt ? <Typography.Paragraph type="secondary" className="!mb-0 whitespace-pre-wrap">{asset.data.colorCardPrompt}</Typography.Paragraph> : null}
                             </div>
                         ) : (
@@ -1451,7 +1463,7 @@ function CharacterEditor({ images, primaryIndex, onPrimaryIndexChange, onChange 
                     <div className="flex gap-3">
                         <div className="size-20 shrink-0 overflow-hidden rounded-md border border-stone-200 bg-stone-50 dark:border-stone-700 dark:bg-stone-900">
                             {previews[idx] ? (
-                                <Image src={previews[idx]} alt={image.outfit || image.name} preview={{ src: previews[idx] }} className="!size-full !object-cover" />
+                                <MediaImage src={previews[idx]} alt={image.outfit || image.name} name={image.outfit || image.name} className="!size-full !object-cover" />
                             ) : (
                                 <div className="flex size-full items-center justify-center text-xs text-stone-400">无图</div>
                             )}

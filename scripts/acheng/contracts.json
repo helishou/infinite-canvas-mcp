@@ -1,0 +1,16 @@
+{
+  "SKILL.md": "a3006a439fc4ebf391766f21e378ab71f3cb903075d0efe8214f1ca7f528a4a2",
+  "data/module-registry.json": "7e7d656a0e2a051492b8e68ff46742ca0cfb565705e3350492578bdd3a842e35",
+  "references/90-production-contract.md": "db69bb156286b1075a885d6218f7f464b223f474dc7431e8ddfe312c44193288",
+  "scripts/h3_contract.py": "2d1270dc7836978f3d531012c5c2991ddb2f7122cdaa5cc77d8f3d3214c437fb",
+  "scripts/h3_final_format.py": "c64da6613917325b938afdd26371ec354894be0f4b808ba06a47bd220cd2ed96",
+  "scripts/style_anchor.py": "32680cc249172ceded158f43efb74558e3c5cd9e3b2ee7ffd35efb7efa004f21",
+  "scripts/director_pipeline.py": "8ec18b1c05a068ddbc3fe1498c78abae050d3cbfdc980817754a838e6127ed7d",
+  "scripts/compile_h3.py": "b7aeb3e7e7b77ae39b93724926763b1798be863f7753d0b2db01470d6ca61147",
+  "scripts/compile_assets.py": "9007346e155ad980c1d708de55d6952381aaac6949594baf26c8be4fbf65043a",
+  "scripts/reference_bindings.py": "4771b804e275ed58f65f2a0959e9b9ea965d74273d7cdf074f11bb0c4cd6f1cc",
+  "scripts/orchestrator_plan.py": "1c8d6cad705fd61c0273b91c4c3a595147568ef609a3a77ebc9a83218646d2e3",
+  "scripts/orchestrator_commit.py": "cf26cc4a6e803b4e7f95c3cbbdc5ea2796ccb1f6ff682c2f1ea885b6418244bf",
+  "scripts/asset_plan.py": "400a694f613f55b4e86c867a99fd7d133b5b11a8d5260fbddf7c787bead6b876",
+  "scripts/post_hooks.py": "ff59cb23018ac63b38cf0965584a10e1465d977f1050c73f5455046210455a68"
+}

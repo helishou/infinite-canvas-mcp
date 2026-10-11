@@ -54,6 +54,7 @@ export type CanvasNodeMetadata = {
     batchChildIds?: string[];
     batchUsesReferenceImages?: boolean;
     primaryImageId?: string;
+    smartImageReferenceSelection?: { mode: "latest_success" } | { mode: "selected_result"; resultId: string };
     imageBatchExpanded?: boolean;
     storageKey?: string;
     mimeType?: string;
@@ -196,6 +197,11 @@ export type LocalVideoConcatResult = { url: string; storageKey?: string; mimeTyp
 // 一个可选模型:value 传回给 generateXxx({ model }),label 用于展示
 export type ModelCapability = "image" | "video" | "text" | "audio";
 export type ModelOption = { value: string; label: string };
+export type CanvasVideoModelField = {
+    id: string; name: string; type: "text" | "number" | "slider" | "boolean" | "dropdown" | "image" | "audio" | "video";
+    required?: boolean; default?: unknown; min?: number; max?: number; step?: number; options?: string[]; randomEnabled?: boolean; isPrompt?: boolean;
+};
+export type CanvasVideoModelSchema = { model: string; kind: "workflow" | "direct" | "unsupported"; workflow?: string; supported: boolean; fields: CanvasVideoModelField[]; defaultValues?: Record<string, unknown>; error?: string };
 
 // 宿主注入的 AI 生成能力,挂在 ctx.ai 下。任何插件均可调用。
 export type CanvasPluginAi = {
@@ -203,10 +209,12 @@ export type CanvasPluginAi = {
     generateVideo: (prompt: string, options?: GenerateVideoOptions) => Promise<GenerateVideoResult>;
     generateText: (prompt: string, options?: GenerateTextOptions) => Promise<GenerateTextResult>;
     runCanvasGeneration: (command: CanvasGenerationCommand) => Promise<CanvasGenerationTask>;
+    previewH3Generation: (command: CanvasGenerationCommand) => Promise<import('@basketikun/canvas-agent/generation-contract').H3ExecutionPreview>;
     resolveH3Confirmation: (input: { taskId: string; action: "confirm" | "keep_first_pass" | "discard"; segmentId: string; expectedRevision: number; postpassParams?: Record<string, unknown> }) => Promise<LocalH3Task>;
     getLocalH3Task: (taskId: string) => Promise<LocalH3Task>;
+    getCanvasH3TaskStatus: (taskId: string) => Promise<{ status: string }>;
     getCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;
-    cancelCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;
+    cancelCanvasH3Task: (taskId: string) => Promise<Pick<LocalH3Task, "id" | "status">>;
     restoreH3Output: (input: { nodeId: string; segmentId: string; generationLogId: string; storageKey?: string; settings: Record<string, unknown> }) => Promise<void>;
     runVideoConcat: (videos: Array<{ name: string; url?: string; storageKey?: string }>, options?: LocalH3Options) => Promise<LocalVideoConcatResult>;
     listLocalH3Models: () => Promise<{
@@ -218,11 +226,11 @@ export type CanvasPluginAi = {
         latentUpscaleModels?: string[];
         nanfeng?: Record<string, unknown[]>;
     }>;
-    getRunningHubH3Task: (taskId: string) => Promise<LocalH3Task>;
-    // 列出某能力下用户已配置的可选模型;不传能力则返回全部
+      // 列出某能力下用户已配置的可选模型;不传能力则返回全部
     listModels: (capability?: ModelCapability) => ModelOption[];
     // 该能力当前默认选中的模型 value(可作为下拉框初始值)
     defaultModel: (capability: ModelCapability) => string;
+    describeVideoModel: (model: string, referenceCount: number) => Promise<CanvasVideoModelSchema>;
 };
 export type CanvasH3Defaults = {
     get: () => Promise<Record<string, unknown>>;
@@ -261,7 +269,7 @@ export type CanvasGenerationLog = {
 };
 export type CanvasGenerationLogInput = Omit<CanvasGenerationLog, "id" | "createdAt" | "updatedAt">;
 export type CanvasGenerationLogs = {
-    list: (options?: { projectId?: string; nodeId?: string; status?: CanvasGenerationLogStatus; limit?: number }) => Promise<CanvasGenerationLog[]>;
+    list: (options?: { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; status?: CanvasGenerationLogStatus; limit?: number; offset?: number }) => Promise<CanvasGenerationLog[]>;
     create: (input: CanvasGenerationLogInput) => Promise<CanvasGenerationLog>;
     update: (id: string, patch: Partial<CanvasGenerationLogInput>) => Promise<CanvasGenerationLog>;
     remove: (options: { id?: string; projectId?: string; nodeId?: string }) => Promise<number>;
@@ -296,11 +304,16 @@ export type CanvasSpeakerOption = { id: string; name?: string; previewUrl?: stri
  * 宿主统一媒体预览的入参。`beforeUrl` 存在时进入 Before / After 对比模式（都以图片渲染），
  * 其中 `url` 是结果（After）图，`beforeUrl` 是对比基准图。
  */
-export type CanvasMediaPreview = {
+export type CanvasMediaPreviewSource = {
     url: string;
     name?: string;
     type?: "image" | "video" | "audio";
     beforeUrl?: string;
+};
+export type CanvasMediaPreview = CanvasMediaPreviewSource & {
+    /** Ordered, transient preview playlist. Browsing never changes active canvas outputs. */
+    gallery?: CanvasMediaPreviewSource[];
+    galleryIndex?: number;
 };
 export type CanvasTextEditorProps = {
     projectId: string; target: CanvasTextTarget; placeholder?: string;
@@ -323,6 +336,11 @@ export type CanvasTextEditorProps = {
     lineMap?: boolean;
 };
 
+export type CanvasProductionStoryboardEditor = { nodeId: string; segmentId: string; segment: Record<string, unknown> };
+export type CanvasProductionEditing = {
+    reverseSyncPrompt: (input: { nodeId: string; segmentId: string; prompt: string; artifactId: string; sourceHash: string; basePromptHash: string }) => Promise<{ sourceSaved: boolean }>;
+    replaceStoryboardTrack: (input: CanvasProductionStoryboardEditor) => Promise<{ sourceSaved: boolean }>;
+};
 export type CanvasNodeContext = {
     mediaUrl: (storageKey: string) => string;
     TextEditor: ComponentType<CanvasTextEditorProps>;
@@ -371,6 +389,7 @@ export type CanvasNodeContext = {
     // 插件私有持久化,按插件 id 命名空间隔离
     storage: PluginStorage;
     generationLogs: CanvasGenerationLogs;
+    production?: CanvasProductionEditing;
 };
 
 // ---------------------------------------------------------------------------
@@ -474,7 +493,7 @@ export type CanvasPluginFactory = (runtime: PluginRuntime) => CanvasPlugin;
 // 插件 MCP 能力:让插件在 Agent(canvas-agent)侧动态暴露 MCP 工具
 //
 // 安全边界:MCP 不能运行在浏览器插件代码里,它由 Node.js stdio 服务(Agent)执行。
-// 第三方远程插件的 MCP 执行需经用户显式安装 + Agent 授权;官方/本地插件自动加载。
+// 第三方插件的 MCP 执行需经用户显式安装 + Agent 授权;宿主内置 MCP 模块自动加载。
 // ---------------------------------------------------------------------------
 
 // 单个 MCP 工具的声明(纯描述,供 Agent 校验与动态注册)
@@ -515,6 +534,6 @@ export type CanvasPluginMcp = {
     version: string;
     tools: readonly McpToolDefinition[];
     // 返回「工具 id -> 处理函数」映射,Agent 据此为每个工具调用 registerTool。
-    // 官方/本地插件由 Agent 侧打包的 MCP 模块提供,浏览器声明可省略。
+    // 宿主内置插件由 Agent 侧打包的 MCP 模块提供,浏览器声明可省略。
     createHandler?: (context: PluginMcpContext) => Record<string, McpToolHandler>;
 };

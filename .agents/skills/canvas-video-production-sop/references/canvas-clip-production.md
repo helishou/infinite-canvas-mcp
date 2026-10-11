@@ -1,0 +1,33 @@
+# Clip 规格、生成与连续性
+
+触发：规划 Segment、编译视频、调整 Clip 参数或生成视频。使用当前激活 Acheng 的 shots/model/continuity 合同。4–12 秒窗口和启动画幅见[适配核心](acheng-canvas-adapter.md)；编译见[源稿编译与发布](canvas-compilation.md)，任务操作另读[运行与恢复](canvas-production-runs.md)。
+
+## 生成参数与交付规格
+
+用户要求沿用默认参数时，H3 Clip 采用 h3ParameterPolicy=defaults，仅按制作稿指定画幅、时长、模式和连续性边界；模型、VAE、LoRA、采样、分辨率与放大消费 Backend 保存默认值。用户明确调整生成参数时采用 overrides。新节点须加载保存默认值；同步正文和参考不覆盖已有用户配置。每次新运行冻结默认快照，途中修改默认值不改变原批次。
+
+用户确认的视觉风格保存到正式 `segments[].styleTemplateId`，使用登记模板 ID 或 null；不要把模板正文搬进源稿。画布与正式稿冲突时，读取精确 nodeId/segmentId、风格和 canvas revision，经 `adopt_director_clip_style` 明确采用用户修改，再按目标 scope 编译、检查 referenceSync 并预览发布；不能自动覆盖其他人工编辑。编辑、准备和发布工具读取短回执；源对象用 sourceSection/targetIds，连续性条目用 `ledger.facts/events/requirements/coverage` 定向读取，不搬运整稿来修改单条。
+
+通过 h3_preview_run 或 canvas_validate_generation 核对生效值、来源、预计一采/二采尺寸、正式画幅和参考映射。使用与提交一致的范围与参数，提交携带 expectedPlanHash 和稳定 idempotencyKey；过期预检回读后重新准备，未知提交结果先恢复原幂等键。不擅自换模型、关闭 LoRA/放大、降规格或关闭确认开关来通过检查。
+
+正式镜头 ID、分镜轨顺序/时长、真实节点与 storageKey 必须一致；同图复用保留不同镜头身份。身份参考只继承脸、发型和指定服装，分镜帧只锚定其指定镜头的入镜构图/状态；真实画面与用途需实际查看。修改引用编号时保留完整导演源与逐字对白，用锁定脚本重算相关提示词和回执后再发布，禁止用摘要替代。Backend 核对源稿与正文哈希，并检查镜头覆盖的正式对白是否进入本段。
+
+工作流预计尺寸和归档媒体实测尺寸分别记录，一采和二采按各自规格核对。规格错误或无法测量时保留原媒体与任务，标记失败并停止剩余提交，不替换旧活动成片、不自动返修。参数就绪、已提交、技术收口和用户验收分别报告。
+
+## 连续性边界
+
+对每一对相邻 Segment 写 from、to、tailFrame、motionContext、reason。两项分别评估但互斥：允许都关闭、仅尾帧或仅 Motion Context，禁止同时开启；不能因同人物/同场景自动开启。
+
+编译前按 Acheng shots 的[Segment 边界判定](../../acheng-director/references/decisions/shots.md#segment-边界切镜尾帧与-motion-context)逐边界登记需求。默认允许切镜，两项关闭；只有明确不能切镜的同一连续摄影镜头拆段才开启 Motion Context，不能因同人物、同场景、对白或声音需要承接而自动开启。尾帧另行决定；已有明确用户决定直接沿用。
+
+缺少边界、非相邻或重复边界、空理由返回诊断。允许整场所有边界都选择切镜，不因重复的切镜理由要求开启续写。开关属于前段向后段的出边，实际作用在下一段的生成输入；末段两项关闭。准备/同步将正式决定投影到 Clip，默认参数不能覆盖；连续组按组首到组尾提交，旧独立成片不等于已有可续写 latent。
+
+- 尾帧参考：前段开关传给下一段，从成片提取尾帧，追加在原图片最后，保留原编号；传递姿态、持物、位置与动作进度，下一段可换机位。不能把动作重置。
+- Motion Context：前段开关传递 AV latent 与音频上下文；按连续组首尾提交，使用 runFromCurrent、skipCompleted=false 和 endSegmentId 限定范围。MP4 不等于可续写 latent；缺 latent 时先明确组首重渲范围。
+- 不再使用 previousVideoAsReference，不自动把前段 MP4 当模型输入。用户明确提供的普通视频参考不在此禁用范围。
+
+维持身份、服装或道具可使用专用资产。硬切与时间地点跳转按实际叙事断链；不兼容的尺寸/模型不能强行续写。
+
+### 连续组恢复范围
+
+批量跳过成功项或定点补跑前，先按正式边界识别连续组。独立 Clip 可以仅重试失败目标；仅依赖尾帧时核对前段有效成片和尾帧可取；Motion Context 还需核对实际可用的 AV latent、音频上下文及模型/尺寸兼容性。缺少上下文时明确从可用组首开始的必要重渲范围，保留原成功媒体；范围超出已有授权时先说明缺口并确认，不擅自扩大。跨场边界同样纳入依赖，场次分批不自动断链。有效独立成功项不为整场补跑重新生成；连续组不套用跳过成功项的独立目标策略。

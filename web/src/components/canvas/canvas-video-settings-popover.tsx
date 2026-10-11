@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
-import { createPortal } from "react-dom";
+import { CanvasPortal, useCanvasTransientEscape } from "@/lib/canvas/canvas-host";
 import { Settings2 } from "lucide-react";
 import { Button } from "antd";
 
@@ -20,6 +20,7 @@ export function CanvasVideoSettingsPopover({ config, onConfigChange, buttonClass
     const buttonRef = useRef<HTMLSpanElement>(null);
     const panelRef = useRef<HTMLDivElement>(null);
     const [open, setOpen] = useState(false);
+    useCanvasTransientEscape(open, () => setOpen(false));
     const [buttonRect, setButtonRect] = useState<DOMRect | null>(null);
 
     useEffect(() => {
@@ -95,7 +96,7 @@ function VideoSettingsPortal({
         color: theme.node.text,
     } as const;
 
-    return createPortal(
+    return <CanvasPortal>
         <div
             ref={panelRef}
             className="canvas-image-settings-popover"
@@ -105,7 +106,5 @@ function VideoSettingsPortal({
             onClick={(event) => event.stopPropagation()}
         >
             <VideoSettingsPanel config={config} onConfigChange={(key, value) => onConfigChange(key, value)} theme={theme} className="space-y-4" />
-        </div>,
-        document.body,
-    );
+        </div></CanvasPortal>;
 }

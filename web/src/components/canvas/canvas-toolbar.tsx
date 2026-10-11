@@ -1,15 +1,18 @@
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode, RefObject } from "react";
 import { useEffect, useRef, useState } from "react";
 import { Button, Segmented, Switch } from "antd";
-import { CircleDot, Eraser, Grid2x2, Group, Hand, Image as ImageIcon, Info, ListRestart, MapPinned, Moon, MousePointer2, Music2, Palette, Puzzle, Redo2, Settings2, Square, Sun, Trash2, Type, Undo2, Upload, User, Video } from "lucide-react";
+import { CircleDot, Eraser, Focus, Grid2x2, Group, Hand, Image as ImageIcon, Info, ListRestart, MapPinned, Moon, MousePointer2, Music2, Package, Palette, PencilLine, Puzzle, Redo2, Settings2, Square, Sun, Trash2, Type, Undo2, Upload, User, Video } from "lucide-react";
 
 import { canvasThemes, type CanvasBackgroundMode, type CanvasColorTheme, type CanvasTheme } from "@/lib/canvas-theme";
 import { getNodePluginId, listNodeDefinitions, useNodeRegistryVersion } from "@/lib/canvas/node-registry";
+import { getNodeSpec } from "@/constant/canvas";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { AnimatedThemeToggler } from "@/components/ui/animated-theme-toggler";
 import { useTranslation } from "react-i18next";
 
 export function CanvasToolbar({
+    onFocusSelection,
+    onBatchRename,
     selectedCount,
     canvasTool,
     canUndo,
@@ -27,6 +30,7 @@ export function CanvasToolbar({
     groupSelection,
     onAddCharacter,
     onAddScene,
+    onAddProp,
     onAddExtensionNode,
     onUndo,
     onRedo,
@@ -38,6 +42,8 @@ export function CanvasToolbar({
     onBackgroundModeChange,
     onShowImageInfoChange,
 }: {
+    onFocusSelection: () => void;
+    onBatchRename: () => void;
     selectedCount: number;
     canvasTool: "select" | "pan";
     canUndo: boolean;
@@ -56,6 +62,7 @@ export function CanvasToolbar({
     groupSelection: boolean;
     onAddCharacter: () => void;
     onAddScene: () => void;
+    onAddProp: () => void;
     onAddExtensionNode: (type: string) => void;
     onUndo: () => void;
     onRedo: () => void;
@@ -101,7 +108,7 @@ export function CanvasToolbar({
     }, [extensionsOpen, appearanceOpen]);
 
     return (
-        <div ref={rootRef} className="pointer-events-none absolute bottom-5 z-50 flex justify-center" style={{ left: 300, right: 16 }}>
+        <div ref={rootRef} data-canvas-create-tools className="pointer-events-none absolute bottom-20 left-4 right-4 z-[60] flex justify-center md:bottom-5 md:left-[340px] md:right-[124px]">
             {tip ? <DockTip label={tip} x={tipX} theme={theme} /> : null}
             <div ref={wrapRef} className="thin-scrollbar pointer-events-auto flex h-14 max-w-full items-center gap-1 overflow-x-auto rounded-xl border px-2 shadow-lg backdrop-blur [&>*]:shrink-0" style={dockStyle}>
                 <ToolbarButton id={`tool-${canvasTool}`} label={t(`canvas.toolbar.${canvasTool}`)} active hovered={hovered} activeStyle={activeStyle} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={() => onCanvasToolChange(canvasTool === "select" ? "pan" : "select")}>
@@ -140,6 +147,9 @@ export function CanvasToolbar({
                 </ToolbarButton>
                 <ToolbarButton id="tool-scene" label={t("canvas.toolbar.scene")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddScene}>
                     <MapPinned className="size-4.5" />
+                </ToolbarButton>
+                <ToolbarButton id="tool-prop" label={t("canvas.toolbar.prop")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddProp}>
+                    <Package className="size-4.5" />
                 </ToolbarButton>
                 <ToolbarButton id="tool-group" label={t(groupSelection ? "canvas.controls.group" : "canvas.toolbar.group")} active={groupSelection} activeStyle={activeStyle} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddGroup}>
                     <Group className="size-4.5" />
@@ -189,6 +199,8 @@ export function CanvasToolbar({
                 {selectedCount ? (
                     <>
                         <Divider theme={theme} />
+                        <ToolbarButton id="tool-focus-selection" label={t("canvas.navigation.focusSelection")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onFocusSelection}><Focus className="size-4.5" /></ToolbarButton>
+                        {selectedCount > 1 ? <ToolbarButton id="tool-batch-rename" label={t("canvas.navigation.rename")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onBatchRename}><PencilLine className="size-4.5" /></ToolbarButton> : null}
                         <ToolbarButton id="tool-arrange" label={t("canvas.toolbar.arrange")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onArrange}>
                             <Grid2x2 className="size-4.5" />
                         </ToolbarButton>
@@ -226,7 +238,7 @@ export function CanvasToolbar({
                                 <span className="grid size-7 shrink-0 place-items-center rounded-md text-base" style={{ background: theme.toolbar.itemHover }}>
                                     {def.icon}
                                 </span>
-                                <span className="min-w-0 flex-1 truncate">{def.title}</span>
+                                <span className="min-w-0 flex-1 truncate">{getNodeSpec(def.type).title}</span>
                             </button>
                         ))}
                     </div>

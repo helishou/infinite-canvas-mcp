@@ -12,6 +12,71 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { registerBackendMcpHttpRoutes } from "./mcp.js";
 import type { ResolvedConfig } from "./config.js";
 
+test("HTTP MCP exposes located compilation blockers, aliases and complete diagnostic pages", async t => {
+  const { ProductionCompilationService } = await import("./drama/compilation.js");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "mcp-compilation-blocker-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const director: any = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "1" }, source: { brief: "Authored source ".repeat(10000) }, sourceHash: "b".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
+  const service: any = { get: () => ({ revision: 1, draft: { director } }), compilationReferenceFiles: () => ({}) };
+  let compilerCalls = 0;
+  const diagnostics = ["SH1", "SH2"].map(shotId => ({ code: "PROMPT_EXTERNAL_CONTEXT", path: `director.source.shots.${shotId}.visual`, targetId: "SEG1", shotId, origin: "source" as const, matchedText: "preceding segment", blocksCompilation: true, severity: "error" as const, message: "Prompt depends on external prose: preceding segment" }));
+  const jobs = new ProductionCompilationService(service, root, (input: any) => { compilerCalls++; return { director: input, exitCode: 2, diagnostics, audit: {}, sourceAdjustments: [], acceptance: {} }; });
+  const app = express(); app.use(express.json());
+  app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
+  app.post("/mcp/observability/events", (_req, res) => res.status(201).json({ ok: true }));
+  app.post("/drama/episodes/:id/production/compile", (req, res) => res.json({ ok: true, compilation: jobs.enqueue(req.params.id, "episode", req.body.operationId, req.body.expectedRevision) }));
+  app.get("/drama/episodes/:id/production/compilations/:op", (req, res) => res.json({ ok: true, compilation: jobs.getCompilation(req.params.id, "episode", req.params.op, req.query.view as any, Number(req.query.offset || 0), req.query.pageSize ? Number(req.query.pageSize) : undefined) }));
+  const server = app.listen(0, "127.0.0.1"); await once(server, "listening"); t.after(() => server.close());
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const client = await mcpClient(t, await fixture(t, `http://127.0.0.1:${address.port}`));
+  const tools = (await client.listTools()).tools;
+  assert.match(tools.find(tool => tool.name === "production_compile")!.description!, /PROMPT_EXTERNAL_CONTEXT/);
+  let bytes = 0, calls = 0;
+  const started = performance.now();
+  const call = async (name: string, args: object) => { const response = await client.callTool({ name, arguments: args as any }); bytes += Buffer.byteLength(JSON.stringify(response)); calls++; return textPayload(response).compilation; };
+  await call("production_compile", { kind: "episode", id: "episode", expectedRevision: 1, operationId: "original" });
+  const status = await call("production_get_compilation", { kind: "episode", id: "episode", operationId: "original" });
+  assert.equal(status.status, "blocked"); assert.equal(status.blockingDiagnostic.shotId, "SH1"); assert.equal(status.items, undefined);
+  const alias = await call("production_compile", { kind: "episode", id: "episode", expectedRevision: 1, operationId: "alias" });
+  assert.equal(alias.reused, true); assert.equal(alias.reusedFromOperationId, "original");
+  const pages = [];
+  for (const offset of [0, 1]) pages.push(await call("production_get_compilation", { kind: "episode", id: "episode", operationId: "alias", view: "diagnostics", offset, pageSize: 1 }));
+  assert.deepEqual(pages.flatMap(page => page.items.map((item: any) => item.shotId)), ["SH1", "SH2"]);
+  assert.equal(pages[0].nextOffset, 1); assert.equal(pages[1].nextOffset, null);
+  assert.equal(compilerCalls, 1);
+  assert.ok(bytes < 20000);
+  console.log(JSON.stringify({ compilationRegression: { calls, bytes, compilerCalls, durationMs: Math.round(performance.now() - started) } }));
+});
+
+test("production workspace writes return compact receipts and scene reads use explicit selectors", async t => {
+  const app = express(); app.use(express.json());
+  app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
+  app.post("/mcp/observability/events", (_req, res) => res.status(201).json({ ok: true }));
+  const longText = "Authored source and prompt. ".repeat(10000);
+  const production = { episodeId: "owner", revision: 4, publishedVersion: 2, draft: { director: { sourceHash: "a".repeat(64), engine: { runtimeId: "fixed" }, workflow: {}, source: { brief: longText }, artifacts: [{ prompt: longText }] } }, referenceSync: [{ targetId: "SEG_A", status: "ready", referenceCount: 2 }] };
+  for (const endpoint of ["/canvas/projects/owner/production/prepare-targets", "/drama/scenes/scene/production/ops", "/drama/scenes/scene/production/publish"]) app.post(endpoint, (_req, res) => res.json({ ok: true, production, layoutReceipt: { planHash: "layout" }, mediaSubmitted: false }));
+  app.get("/drama/scenes/scene/production", (req, res) => {
+    assert.equal(req.query.view, "source"); assert.equal(req.query.sourceSection, "segments"); assert.equal(req.query.targetIds, "SEG_A");
+    res.json({ ok: true, production: { revision: 4, source: [{ id: "SEG_A", styleTemplateId: "soft-light" }] } });
+  });
+  const server = app.listen(0, "127.0.0.1"); await once(server, "listening");
+  t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+  const address = server.address(); if (!address || typeof address === "string") throw new Error("missing address");
+  const client = await mcpClient(t, await fixture(t, `http://127.0.0.1:${address.port}`));
+  for (const [name, args] of [
+    ["production_prepare_targets", { kind: "canvas", id: "owner", operationId: "prepare", expectedRevision: 3, targets: ["segment:SEG_A"] }],
+    ["production_edit_scene_production", { sceneId: "scene", operationId: "edit", expectedRevision: 3, ops: [{ type: "patch_director_source", entity: "segment", id: "SEG_A", patch: { styleTemplateId: "soft-light" } }] }],
+    ["production_publish_scene_production", { sceneId: "scene", operationId: "publish", expectedRevision: 3, stage: "director" }],
+  ] as const) {
+    const result = textPayload(await client.callTool({ name, arguments: args }));
+    assert.equal(result.production.revision, 4); assert.equal(result.production.draft, undefined);
+    assert.equal(result.counts.referenceSync, 1); assert.equal(result.production.referenceSync, undefined); assert.equal(result.layoutReceipt.planHash, "layout");
+    assert.equal(JSON.stringify(result).includes(longText), false);
+  }
+  const read = textPayload(await client.callTool({ name: "production_get_scene_production", arguments: { sceneId: "scene", view: "source", sourceSection: "segments", targetIds: ["SEG_A"] } }));
+  assert.deepEqual(read.production.source, [{ id: "SEG_A", styleTemplateId: "soft-light" }]);
+});
+
 function indexFixture(project: Record<string, unknown>, ifRevision: unknown) {
   const nodes = (project.nodes || []) as Array<Record<string, unknown>>;
   const connections = (project.connections || []) as unknown[];
@@ -165,27 +230,29 @@ async function mockOversizedBackend(t: import("node:test").TestContext, onMcpEve
     onMcpEvent?.(req.body as Record<string, unknown>);
     res.status(201).json({ ok: true });
   });
-  // 单个画布节点携带 ~1 MB 文本：canvas_export_snapshot（整图导出）会把它原样放进返回体，触发输出上限。
-  // canvas_get_state 自改为默认回节点摘要后已不会超限，故本用例改用导出工具验证同一道熔断。
+  // 显式选择节点详情仍受现有输出保护；整图导出已改为文件引用。
   const oversized = "x".repeat(1024 * 1024);
   app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
   // 素材库同样会超限：声明了 keyword/page/pageSize 但以前被忽略，永远返回全量。
   // 每个素材的内联 coverUrl 是 ~30KB 的 base64 dataURL（贴近真实：实测有资产是 2MB）。
   // 剥离后 pageSize=5 只剩几 KB（可正常返回）；不剥离则必然超限。
   const assetPayload = `data:image/png;base64,${"y".repeat(30 * 1024)}`;
-  app.get("/canvas/assets", (_req, res) =>
-    res.json({
-      ok: true,
-      folders: [],
-      assets: Array.from({ length: 60 }, (_, index) => ({
+  app.get("/canvas/assets", (req, res) => {
+    const all = Array.from({ length: 60 }, (_, index) => ({
         id: `asset-${index}`,
         kind: "image",
         title: index === 7 ? "霓虹猫耳少女" : `素材 ${index}`,
         content: index === 7 ? "oversized-probe" : undefined,
         coverUrl: assetPayload,
-      })),
-    }),
-  );
+      }));
+    if (req.query.view !== "summary") return void res.json({ ok: true, folders: [], assets: all });
+    const keyword = typeof req.query.keyword === "string" ? req.query.keyword.toLocaleLowerCase() : "";
+    const filtered = all.filter((asset) => !keyword || `${asset.title} ${asset.content || ""}`.toLocaleLowerCase().includes(keyword));
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const pageSize = Math.max(1, Number(req.query.pageSize) || 20);
+    const items = filtered.slice((page - 1) * pageSize, page * pageSize).map(({ id, kind, title, content }) => ({ id, kind, title, tags: [], folderId: null, updatedAt: "2026-09-17T00:00:00.000Z", coverUrl: "[inline-media:image/png]", hasContent: Boolean(content), contentLength: content?.length || 0 }));
+    res.json({ ok: true, items, total: filtered.length, page, pageSize });
+  });
   const project = {
           id: "canvas-oversized",
           title: "超大画布",
@@ -204,6 +271,7 @@ async function mockOversizedBackend(t: import("node:test").TestContext, onMcpEve
           selectedNodeIds: [],
         };
   app.get("/canvas/projects", (_req, res) => res.json({ ok: true, projects: [project] }));
+  app.get("/canvas/projects/:id/selection", (_req, res) => res.json({ ok: true, project }));
   app.get("/canvas/projects/:id", (_req, res) => res.json({ ok: true, project }));
   app.get("/canvas/projects/:id/collaboration", (req, res) =>
     res.json({ ok: true, projectId: req.params.id, revision: 3, participants: [] }),
@@ -236,6 +304,8 @@ async function mockH3ReadBackend(t: import("node:test").TestContext) {
   app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [{ id: "minimax-h3", name: "MiniMax H3", version: "1.5.5", enabled: true, tools: [] }] }));
   app.get("/canvas/projects", (_req, res) => res.json({ ok: true, projects: [project] }));
   app.get("/canvas/projects/:id", (_req, res) => res.json({ ok: true, project }));
+  app.get("/canvas/projects/:id/h3-context", (_req, res) => res.json({ ok: true, project }));
+  app.get("/canvas/projects/:id/h3-node-summary", (_req, res) => res.json({ ok: true, project }));
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   t.after(async () => { server.close(); await once(server, "close"); });
@@ -291,6 +361,7 @@ async function mockGenerationBackend(
     connections: [],
   };
   let generationCommand: Record<string, unknown> | null = null;
+  const mcpCommands = new Map<string, Record<string, unknown>>();
   let singleTaskRequests = 0;
   let bulkTaskRequests = 0;
   let aiConfigRequests = 0;
@@ -307,6 +378,16 @@ async function mockGenerationBackend(
     updatedAt: "2026-09-17T00:00:01.000Z",
   });
   app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
+  app.post("/mcp/commands/:operationId/check", (req, res) => {
+    const command = mcpCommands.get(String(req.params.operationId));
+    if (command && (command.tool !== req.body.tool || command.targetId !== req.body.targetId || command.projectId !== req.body.projectId)) return void res.status(409).json({ ok: false, code: "OPERATION_ID_REUSED", error: "operationId 已用于不同请求" });
+    res.json({ ok: true, command: command || null });
+  });
+  app.post("/mcp/commands/:operationId/prepare", (req, res) => {
+    const command = { ...req.body, status: "prepared" };
+    mcpCommands.set(String(req.params.operationId), command);
+    res.json({ ok: true, command });
+  });
   app.get("/canvas/projects", (_req, res) => res.json({ ok: true, projects: [project] }));
   app.get("/canvas/projects/:id", (_req, res) => res.json({ ok: true, project }));
   app.get("/settings/ai-config", (_req, res) => {
@@ -402,6 +483,54 @@ function textPayload(result: unknown) {
   assert.ok("text" in content && typeof content.text === "string");
   return JSON.parse(content.text);
 }
+
+test("production tools publish full operation schemas and forward read-only preflight requests", async t => {
+  const app = express(); app.use(express.json());
+  const calls: unknown[] = [];
+  app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, plugins: [] }));
+  app.get("/production/contract", (req, res) => res.json({ ok: true, contract: { runtimeId: req.query.runtimeId, operationType: req.query.operationType } }));
+  app.post("/canvas/production/hash", (req, res) => res.json({ ok: true, hash: "a".repeat(64), source: req.body.source }));
+  app.post(["/canvas/projects/:id/production/preflight", "/drama/episodes/:id/production/preflight"], (req, res) => {
+    calls.push({ id: req.params.id, ...req.body });
+    res.json({ ok: true, preflight: { valid: false, revision: 4, diagnostics: [{ code: "INVALID_SCHEMA", path: "request.ops.0.brief", severity: "error", message: "Expected string", example: { brief: "A complete authored brief." } }] } });
+  });
+  const server = app.listen(0, "127.0.0.1"); await once(server, "listening");
+  t.after(() => server.close());
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const client = await mcpClient(t, await fixture(t, `http://127.0.0.1:${address.port}`));
+  const { tools } = await client.listTools();
+  for (const name of ["production_hash_source", "production_get_contract", "production_preflight", "production_preflight"]) assert.ok(tools.some(item => item.name === name));
+  const hashSchema = tools.find(item => item.name === "production_hash_source")!.inputSchema;
+  assert.deepEqual(hashSchema.required, ["source"]);
+  const hashed = textPayload(await client.callTool({ name: "production_hash_source", arguments: { source: { brief: "hash the full authored source" } } }));
+  assert.equal(hashed.hash, "a".repeat(64));
+  assert.deepEqual(hashed.source, { brief: "hash the full authored source" });
+  for (const name of ["production_edit", "production_edit"]) {
+    const schema = JSON.stringify(tools.find(item => item.name === name)?.inputSchema);
+    assert.match(schema, /set_director_brief/); assert.match(schema, /committed/); assert.match(schema, /entity/);
+  }
+  const result = textPayload(await client.callTool({ name: "production_get_contract", arguments: { runtimeId: "pinned", operationType: "set_director_brief" } }));
+  assert.equal(result.contract.runtimeId, "pinned");
+  const request = { operationId: "op", expectedRevision: 4, ops: [{ type: "set_director_brief", brief: {} }] };
+  for (const [name, owner] of [["production_preflight", { kind: "canvas", id: "canvas" }], ["production_preflight", { kind: "episode", id: "episode" }]] as const) {
+    const response = textPayload(await client.callTool({ name, arguments: { ...owner, action: "edit", request } }));
+    assert.equal(response.preflight.diagnostics[0].path, "request.ops.0.brief");
+    assert.deepEqual(response.preflight.diagnostics[0].example, { brief: "A complete authored brief." });
+  }
+  assert.equal(calls.length, 2);
+});
+
+test("MCP forwards the authored compilation scope to Backend", async t => {
+  const app = express(); app.use(express.json());
+  app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
+  let received: unknown;
+  app.post("/drama/episodes/:id/production/compile", (req, res) => { received = req.body; res.json({ ok: true, compilation: { status: "running" } }); });
+  const server = app.listen(0, "127.0.0.1"); await once(server, "listening"); t.after(() => server.close());
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const client = await mcpClient(t, await fixture(t, `http://127.0.0.1:${address.port}`));
+  await client.callTool({ name: "production_compile", arguments: { kind: "episode", id: "episode", operationId: "compile-scene", expectedRevision: 4, scope: { targetIds: ["SEG_004"] } } });
+  assert.deepEqual(received, { operationId: "compile-scene", expectedRevision: 4, scope: { targetIds: ["SEG_004"] } });
+});
 
 test("MCP HTTP returns 404 for an expired session so clients can reconnect", async (t) => {
   const url = await fixture(t);
@@ -553,7 +682,7 @@ test("返回体超过上限时直接报错并给出可恢复建议", async (t) =
   const events: Array<Record<string, unknown>> = [];
   const backendUrl = await mockOversizedBackend(t, (event) => events.push(event));
   const client = await mcpClient(t, await fixture(t, backendUrl));
-  const result = await client.callTool({ name: "canvas_export_snapshot", arguments: { projectId: "canvas-oversized" } });
+  const result = await client.callTool({ name: "canvas_get_selection", arguments: { projectId: "canvas-oversized" } });
   const payload = textPayload(result);
 
   assert.equal(result.isError, true, "超限必须报错而不是把大返回体交给模型");
@@ -577,22 +706,19 @@ test("返回体超过上限时直接报错并给出可恢复建议", async (t) =
   assert.ok(!events.some((event) => event.event === "tool.succeeded"), "超限不得记为成功");
 });
 
-test("assets_list 剥离内联媒体并支持分页（超限时的退路）", async (t) => {
+test("assets_list 默认读取摘要并分页，完整媒体通过 assets_get 定向读取", async (t) => {
   const backendUrl = await mockOversizedBackend(t);
   const client = await mcpClient(t, await fixture(t, backendUrl));
 
-  // 剥离生效后，连「全量列出」都不再超限（修复前这里是必然超限的）
-  const full = await client.callTool({ name: "assets_list", arguments: {} });
-  assert.notEqual(full.isError, true, `剥离内联媒体后全量也不应超限: ${JSON.stringify(textPayload(full)).slice(0, 200)}`);
-  const fullBody = textPayload(full);
-  // 数组返回体会被 withTraceId 包成 { traceId, result: [...] }
-  const fullItems = (Array.isArray(fullBody) ? fullBody : fullBody.result) as unknown[];
-  assert.equal(fullItems.length, 60, "全量应返回 60 条");
-  assert.ok(
-    JSON.stringify(fullItems).length < 100_000,
-    `剥离后体积应很小，实际 ${JSON.stringify(fullItems).length} 字符`,
-  );
-  assert.ok(!JSON.stringify(fullItems).includes("data:image"), "返回体里不应残留任何 dataURL 原文");
+  const summary = await client.callTool({ name: "assets_list", arguments: {} });
+  assert.notEqual(summary.isError, true, `摘要页不应超限: ${JSON.stringify(textPayload(summary)).slice(0, 200)}`);
+  const summaryBody = textPayload(summary);
+  assert.equal(summaryBody.total, 60);
+  assert.equal(summaryBody.page, 1);
+  assert.equal(summaryBody.pageSize, 20);
+  assert.equal((summaryBody.items as unknown[]).length, 20);
+  assert.ok(!JSON.stringify(summaryBody).includes("data:image"), "摘要不得返回内联媒体正文");
+  assert.equal((summaryBody.items as Array<Record<string, unknown>>)[0].hasContent, false);
 
   // 分页与 keyword 过滤：声明过的参数必须真正生效
   const paged = await client.callTool({ name: "assets_list", arguments: { pageSize: 5, page: 1 } });
@@ -656,6 +782,8 @@ test("revision conflicts are returned without automatic replay", async (t) => {
     name: "canvas_apply_ops",
     arguments: {
       projectId: "canvas-generate",
+      operationId: "apply-conflict-test",
+      expectedRevision: 0,
       ops: [{ type: "add_node", id: "new-node", nodeType: "text", title: "保留冲突" }],
     },
   });
@@ -794,12 +922,13 @@ test("无效 SVG 本地导入在任何画布 ops 前拒绝", async (t) => {
   assert.equal((backend.project().nodes as unknown[]).length, 0);
 });
 
-test("assets_upsert_batch writes complete assets and verifies them by id", async (t) => {
+test("assets_upsert_batch requires a stable operationId", async (t) => {
   const backend = await mockGenerationBackend(t);
   const client = await mcpClient(t, await fixture(t, backend.url));
   const result = await client.callTool({
     name: "assets_upsert_batch",
     arguments: {
+      operationId: "",
       items: [
         {
           id: "asset-scene-1",
@@ -810,12 +939,9 @@ test("assets_upsert_batch writes complete assets and verifies them by id", async
       ],
     },
   });
-  const payload = textPayload(result);
-
-  assert.equal(payload.ok, true);
-  assert.equal(payload.count, 1);
-  assert.equal(payload.verifiedCount, 1);
-  assert.equal(payload.assets[0].id, "asset-scene-1");
+  assert.equal(result.isError, true);
+  const errorText = String((result as any).content?.[0]?.text || "");
+  assert.match(errorText, /operationId/, "SDK input validation must explain the required stable operationId");
 });
 
 test("canvas_get_state 默认回完整节点目录，而不是布局和 metadata", async (t) => {
@@ -909,6 +1035,13 @@ test("canvas_get_state 在 tools/list 中声明按需读取参数", async (t) =>
   const properties = state.inputSchema.properties as Record<string, { description?: string; enum?: string[] }>;
   assert.deepEqual(properties.view.enum, ["index", "graph"]);
   assert.match(String(properties.ifRevision.description), /revision/);
+  for (const name of ["production_get_readiness", "production_get_readiness", "production_start_run", "production_start_run", "production_get_batch", "production_get_batch", "production_pause_run", "production_pause_run", "production_resume_run", "production_resume_run"]) {
+    assert.ok(listed.tools.some(tool => tool.name === name), `${name} should be in the native MCP catalog`);
+  }
+  const start = listed.tools.find(tool => tool.name === "production_start_run");
+  assert.ok(start);
+  const runProperties = start.inputSchema.properties as Record<string, unknown>;
+  assert.ok(runProperties.runId && runProperties.idempotencyKey && runProperties.expectedRevision && runProperties.targets);
 });
 
 test("canvas_get_state 超过输出上限时自动分页并可取完全部节点", async (t) => {

@@ -6,6 +6,8 @@ import { WORKFLOW_ROUTE_UNSUPPORTED, builtinWorkflowName, resolveWorkflowForMode
 import i18n from "@/i18n";
 import { fetchStructuredSetting, saveStructuredSetting } from "@/services/settings-api";
 
+import { resolveWorkflowBindingForModel } from "@basketikun/canvas-agent/model-workflow";
+
 export { WORKFLOW_ROUTE_UNSUPPORTED, builtinWorkflowName, scenarioFromReferenceCount } from "@basketikun/canvas-agent/model-workflow";
 export type { ModelInputScenario } from "@basketikun/canvas-agent/model-workflow";
 
@@ -36,7 +38,16 @@ export type ChannelModel = {
     workflowRouting?: ModelWorkflowRouting;
     /** ComfyUI 渠道：三种输入场景各自的工作流参数覆盖（该场景走哪个工作流就用它的字段）。 */
     workflowParams?: ModelWorkflowParams;
+    /**
+     * 场景 → 内部实现的显式绑定。RunningHub 工作流档案用 profileId，本地工作流用文件名；
+     * 旧的 workflows / workflowRouting 仍按本地文件解析，两者可共存。
+     */
+    workflowBindings?: ModelWorkflowBindings;
 };
+
+/** 场景绑定的内部实现：comfyui 指本地工作流文件，runninghub 指云端工作流档案。 */
+export type ModelWorkflowBinding = { provider: "comfyui"; workflow: string } | { provider: "runninghub"; profileId: string };
+export type ModelWorkflowBindings = Partial<Record<ModelInputScenario, ModelWorkflowBinding>>;
 
 export type ModelChannel = {
     id: string;
@@ -45,7 +56,7 @@ export type ModelChannel = {
     apiKey: string;
     apiFormat: ApiCallFormat;
     models: ChannelModel[];
-    kind?: "api" | "comfyui";
+    kind?: "api" | "comfyui" | "codex-cli";
 };
 
 export type AiConfig = {
@@ -59,12 +70,19 @@ export type AiConfig = {
     imageModel: string;
     videoModel: string;
     textModel: string;
+    /** 画布右键翻译使用的文本模型；留空时按默认文本模型翻译。 */
+    translationModel: string;
     audioModel: string;
     audioVoice: string;
     audioFormat: string;
     audioSpeed: string;
     audioInstructions: string;
     videoSeconds: string;
+    /**
+     * 视频工作台内部实现字段的本次取值，key = `模型::实现`（部分调用方用扁平 key）。
+     * 后端 video-dispatcher 按 `model::workflow` 取值合并进工作流图。
+     */
+    selectedVideoModelFieldValues?: Record<string, Record<string, unknown>>;
     vquality: string;
     videoGenerateAudio: string;
     videoWatermark: string;
@@ -77,8 +95,6 @@ export type AiConfig = {
     background: string;
     count: string;
     canvasImageCount: string;
-    proxyEnabled: boolean;
-    proxyUrl: string;
 };
 
 export type WebdavSyncConfig = {
@@ -88,15 +104,13 @@ export type WebdavSyncConfig = {
     directory: string;
     lastSyncedAt: string;
 };
-export type ConfigTabKey = "channels" | "local-proxy" | "preferences" | "prompt-sources" | "webdav" | "local-storage" | "connection";
+export type ConfigTabKey = "channels" | "preferences" | "prompt-sources" | "webdav" | "local-storage" | "connection";
 export type ChannelCredentialsImportResult = { status: "created" | "updated" | "missing-base-url" | "invalid-base-url"; channelName?: string };
 
 export const CONFIG_STORE_KEY = "infinite-canvas:ai_config_store";
 const CHANNEL_MODEL_SEPARATOR = "::";
 const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
-export const LOCAL_PROXY_PACKAGE = "@basketikun/canvas-proxy";
-export const DEFAULT_LOCAL_PROXY_URL = "http://127.0.0.1:23210";
 
 export const defaultConfig: AiConfig = {
     localComfyuiEnabled: true,
@@ -123,6 +137,7 @@ export const defaultConfig: AiConfig = {
     imageModel: "default::gpt-image-2",
     videoModel: "default::grok-imagine-video",
     textModel: "default::gpt-5.5",
+    translationModel: "default::gpt-5.5",
     audioModel: "default::gpt-4o-mini-tts",
     audioVoice: "alloy",
     audioFormat: "mp3",
@@ -141,8 +156,6 @@ export const defaultConfig: AiConfig = {
     background: "",
     count: "1",
     canvasImageCount: "3",
-    proxyEnabled: false,
-    proxyUrl: DEFAULT_LOCAL_PROXY_URL,
 };
 
 export const defaultWebdavSyncConfig: WebdavSyncConfig = {
@@ -209,8 +222,13 @@ export function modelMatchesCapability(config: AiConfig, value: string, capabili
 export function resolveModelForCapability(config: AiConfig, currentModel: string | undefined, capability: ModelCapability) {
     const defaultModel = capability === "image" ? config.imageModel : capability === "video" ? config.videoModel : capability === "audio" ? config.audioModel : config.textModel;
     const fallbackModel = capability === "image" ? defaultConfig.imageModel : capability === "video" ? defaultConfig.videoModel : capability === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
-    if (currentModel && modelMatchesCapability(config, currentModel, capability)) return currentModel;
-    if (defaultModel && modelMatchesCapability(config, defaultModel, capability)) return defaultModel;
+    for (const model of [currentModel, defaultModel]) {
+        if (!model) continue;
+        const configuredCapability = modelCapabilityOf(config, model);
+        // Keep unavailable selections visible so the readiness check blocks the
+        // request. Only a known capability switch may choose another model.
+        if (!configuredCapability || configuredCapability === capability) return model;
+    }
     return fallbackModel;
 }
 
@@ -269,12 +287,18 @@ export function modelHasWorkflowConfig(config: AiConfig, value: string) {
  * 调用方把它作为字段默认值：节点/工作台上手填的值优先级更高。
  */
 export function resolveModelWorkflowParams(config: AiConfig, value: string, referenceCount: number): Record<string, unknown> {
-    const result = resolveWorkflowForModel(config, value, referenceCount);
+    // 必须走绑定版解析：RunningHub 档案的参数按场景存在 workflowBindings 对应的
+    // workflowParams 里，用旧的只认本地工作流名的解析会读不到这些值。
+    const result = resolveWorkflowBindingForModel(config, value, referenceCount);
     return result.ok ? result.params : {};
 }
 
 function isAiConfigReady(config: AiConfig, model: string) {
-    const channel = resolveModelChannel(config, model);
+    if (model === VIDEO_CONCAT_MODEL) return true;
+    const match = findChannelModel(config, model);
+    if (!match) return false;
+    const channel = match.channel;
+    if (channel.kind === "codex-cli") return Boolean(model.trim());
     if (channel.kind === "comfyui") return Boolean(model.trim() && channel.baseUrl.trim());
     return Boolean(model.trim() && channel.baseUrl.trim() && channel.apiKey.trim());
 }
@@ -298,7 +322,9 @@ function syncWebdavToBackend(webdav: WebdavSyncConfig) {
 }
 
 function normalizeConfig(input: Partial<AiConfig>): AiConfig {
-    const config = { ...defaultConfig, ...input };
+    // Discard retired proxy settings when loading Backend data or importing old exports.
+    const { proxyEnabled: _proxyEnabled, proxyUrl: _proxyUrl, ...current } = input as Partial<AiConfig> & { proxyEnabled?: unknown; proxyUrl?: unknown };
+    const config = { ...defaultConfig, ...current };
     if (!Array.isArray(input.channels)) config.channels = [];
     const channels = normalizeChannels(config);
     return {
@@ -311,6 +337,7 @@ function normalizeConfig(input: Partial<AiConfig>): AiConfig {
         imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
         videoModel: normalizeModelOptionValue(config.videoModel, channels),
         textModel: normalizeModelOptionValue(config.textModel || config.model, channels),
+        translationModel: normalizeModelOptionValue(config.translationModel || config.textModel || config.model, channels),
         audioModel: normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels),
         audioVoice: config.audioVoice || defaultConfig.audioVoice,
         audioFormat: config.audioFormat || defaultConfig.audioFormat,
@@ -323,8 +350,6 @@ function normalizeConfig(input: Partial<AiConfig>): AiConfig {
         videoWatermark: config.videoWatermark || "false",
         imageAlign16: config.imageAlign16 !== false,
         canvasImageCount: config.canvasImageCount || "3",
-        proxyEnabled: Boolean(config.proxyEnabled),
-        proxyUrl: normalizeLocalProxyUrl(config.proxyUrl || DEFAULT_LOCAL_PROXY_URL) || DEFAULT_LOCAL_PROXY_URL,
     };
 }
 
@@ -439,7 +464,8 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
         const workflows = typeof item === "string" ? [] : normalizeWorkflowList(item.workflows);
         const workflowRouting = typeof item === "string" ? undefined : normalizeWorkflowRouting(item.workflowRouting, workflows);
         const workflowParams = typeof item === "string" ? undefined : normalizeModelWorkflowParams(item.workflowParams, workflows, workflowRouting);
-        result.push({ name, capability, script, ...(workflows.length ? { workflows } : {}), ...(workflowRouting ? { workflowRouting } : {}), ...(workflowParams ? { workflowParams } : {}) });
+        const workflowBindings = typeof item === "string" ? undefined : normalizeWorkflowBindings(item.workflowBindings);
+        result.push({ name, capability, script, ...(workflows.length ? { workflows } : {}), ...(workflowRouting ? { workflowRouting } : {}), ...(workflowParams ? { workflowParams } : {}), ...(workflowBindings ? { workflowBindings } : {}) });
     }
     return result;
 }
@@ -447,6 +473,31 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
 function normalizeWorkflowList(value: unknown): string[] {
     if (!Array.isArray(value)) return [];
     return Array.from(new Set(value.map((item) => String(item || "").trim()).filter(Boolean)));
+}
+
+/**
+ * 显式绑定只保留结构完整的项：provider 必须是已知的两个之一，且带上对应标识。
+ * 半成品绑定会让场景既没有本地工作流、也没有可执行的云端档案。
+ */
+function normalizeWorkflowBindings(value: unknown): ModelWorkflowBindings | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const source = value as Record<string, unknown>;
+    const bindings: ModelWorkflowBindings = {};
+    for (const scenario of MODEL_INPUT_SCENARIOS) {
+        const raw = source[scenario];
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+        const provider = String((raw as Record<string, unknown>).provider || "");
+        if (provider === "runninghub") {
+            const profileId = String((raw as Record<string, unknown>).profileId || "").trim();
+            if (profileId) bindings[scenario] = { provider: "runninghub", profileId };
+            continue;
+        }
+        if (provider === "comfyui") {
+            const workflow = String((raw as Record<string, unknown>).workflow || "").trim();
+            if (workflow) bindings[scenario] = { provider: "comfyui", workflow };
+        }
+    }
+    return Object.keys(bindings).length ? bindings : undefined;
 }
 
 /** 路由里的工作流必须在挂载列表内；工作流被移除时回落到列表第一个。 */
@@ -502,7 +553,7 @@ export function createModelChannel(channel?: Partial<ModelChannel>): ModelChanne
     return {
         id: channel?.id?.trim() || nanoid(),
         name: channel?.name?.trim() || i18n.t("config.channels.newName"),
-        baseUrl: channel?.baseUrl?.trim() || defaultBaseUrlForApiFormat(apiFormat),
+        baseUrl: channel?.baseUrl?.trim() || (channel?.kind === "codex-cli" ? "" : defaultBaseUrlForApiFormat(apiFormat)),
         apiKey: channel?.apiKey || "",
         apiFormat,
         models: normalizeChannelModels(channel?.models),
@@ -552,11 +603,29 @@ export function modelOptionName(value: string) {
     return decodeChannelModel(value)?.model || value;
 }
 
+/**
+ * 模型实际使用的实现来源：任一输入场景绑定到 RunningHub 档案就算云端。
+ * ComfyUI 渠道本身可以挂云端实现，只显示渠道名会让人以为跑的是本地工作流。
+ */
+export function modelImplementationSource(config: AiConfig, value: string): "runninghub" | "comfyui" | null {
+    const decoded = decodeChannelModel(value);
+    if (!decoded) return null;
+    const channel = config.channels.find((item) => item.id === decoded.channelId);
+    const model = channel?.models?.find((item) => item.name === decoded.model);
+    if (!model) return null;
+    const bindings = Object.values(model.workflowBindings || {});
+    return bindings.some((binding) => binding?.provider === "runninghub") ? "runninghub" : "comfyui";
+}
+
 export function modelOptionLabel(config: AiConfig, value: string) {
     const decoded = decodeChannelModel(value);
     if (!decoded) return value;
     const channel = config.channels.find((item) => item.id === decoded.channelId);
-    return channel ? `${decoded.model}（${channel.name}）` : decoded.model;
+    if (!channel) return decoded.model;
+    // 云端实现优先说明真实执行来源，否则沿用渠道名。
+    const source = modelImplementationSource(config, value);
+    if (source === "runninghub") return `${decoded.model}（RunningHub）`;
+    return `${decoded.model}（${channel.name}）`;
 }
 
 export function modelOptionsFromChannels(channels: ModelChannel[]) {
@@ -651,31 +720,5 @@ export function buildApiUrl(baseUrl: string, path: string) {
     const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
     const lowerBaseUrl = normalizedBaseUrl.toLowerCase();
     const apiBaseUrl = lowerBaseUrl.endsWith("/v1") ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`;
-    return withLocalProxy(`${apiBaseUrl}${path}`);
-}
-
-export function normalizeLocalProxyUrl(value: string) {
-    const trimmed = value.trim().replace(/\/+$/, "");
-    if (!trimmed) return "";
-    return /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
-}
-
-/** Routes external provider traffic through the optional loopback proxy, never through itself or the local backend. */
-export function withLocalProxy(url: string) {
-    const { proxyEnabled, proxyUrl } = useConfigStore.getState().config;
-    if (!proxyEnabled || !/^https?:\/\//i.test(url)) return url;
-    const base = normalizeLocalProxyUrl(proxyUrl);
-    if (!base) return url;
-    try {
-        const target = new URL(url);
-        const proxy = new URL(base);
-        if (target.origin === proxy.origin || isLoopbackHost(target.hostname)) return url;
-    } catch {
-        return url;
-    }
-    return `${base}/${url}`;
-}
-
-function isLoopbackHost(hostname: string) {
-    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
+    return `${apiBaseUrl}${path}`;
 }

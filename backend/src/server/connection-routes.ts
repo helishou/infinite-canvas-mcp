@@ -1,6 +1,6 @@
 import os from "node:os";
 import type { Express, Request } from "express";
-import type { ResolvedConfig } from "../config.js";
+import { applyNetworkEnvironment, type ResolvedConfig } from "../config.js";
 import type { SettingStore } from "../stores/types.js";
 
 export const NETWORK_SETTINGS_KEY = "backend.network";
@@ -29,10 +29,12 @@ export function parseNetworkSettings(value: unknown): { lanEnabled: boolean; ori
 }
 
 export function applyNetworkSettings(config: ResolvedConfig, value: unknown) {
-    if (value === undefined) return;
-    const settings = parseNetworkSettings(value);
-    config.listenHost = settings.lanEnabled ? "0.0.0.0" : "127.0.0.1";
-    config.origins = settings.origins;
+    if (value !== undefined) {
+        const settings = parseNetworkSettings(value);
+        config.listenHost = settings.lanEnabled ? "0.0.0.0" : "127.0.0.1";
+        config.origins = settings.origins;
+    }
+    applyNetworkEnvironment(config);
 }
 
 export function registerConnectionRoutes(app: Express, config: ResolvedConfig, settings: SettingStore) {

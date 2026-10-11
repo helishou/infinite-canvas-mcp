@@ -6,8 +6,8 @@
 
 | 修改/消费者 | 生效路径 | 必要动作 |
 |---|---|---|
-| Backend dev | 当前 package 的 `tsx src/index.ts`，不自动重启 | 核对实际进程是否加载新源码，再处理必要重载 |
-| Backend watch | 显式 `npm run dev:watch --workspace backend` | 核对 watch 是否完成重启并加载新源码 |
+| Backend dev / dev:watch | 带空闲保护的开发重载器，监听 Backend src 和共享 Agent dist | 核对 pending / ready 日志与新 PID；运行任务、待确认、Agent 回合或写请求会延后重载 |
+| Backend dev:once | `tsx src/index.ts`，单次启动 | 核对实际进程是否加载源码，需要时再处理必要重载 |
 | Backend start 或明确的 dist 消费方 | `backend/dist` | 根目录 `npm run build --workspace backend` |
 | Backend 导入 canvas-agent | 包 exports 指向 `canvas-agent/dist` | 根目录 `npm run build --workspace canvas-agent`，确认消费进程加载 |
 | 普通画布插件 | 插件 bundle | 插件目录 `node build.mjs`，核对实际加载 URL |
@@ -20,6 +20,8 @@ H3 版本来源与 SDK 构建规则见[插件约定](../../../../plugins/canvas/
 
 ## 服务与会话
 
+- 生产代理池启用时，重载前除普通会话 `codexBusy` 和媒体任务外，还要读取 Backend `/production/worker-status`，确认生产／审核代理池 `busy=false`；旧进程未提供此接口时，核对持久工作记录与该进程已加载能力，不能把普通会话空闲当成生产代理空闲。
+- 开发重载同时等待已排队或正在执行的正式编译完成；编译请求返回后后台工作仍算忙碌，不能只用 HTTP 写请求结束判断可重载。
 - 核对端点、完整命令行、PID、创建时间及相关日志；LISTENING、lock 文件或同名进程不能单独证明正确版本。
 - `dev:local` 会清理旧服务，不作探活；不启动第二套服务或按进程名/端口批量停止。
 - 已授权重载只操作未加载变更的相关服务；已有 watch 更新不要再重启。Vite 与 ComfyUI 不因 Backend 变更一起重启。

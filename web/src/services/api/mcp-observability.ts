@@ -142,6 +142,8 @@ export type McpOptimizationMarker = {
 
 export async function fetchMcpObservabilityReport(options?: { from?: string; to?: string }) {
     const params = new URLSearchParams();
+    // 诊断页需要每日趋势和工具调用链；Backend 默认摘要不包含这些字段。
+    params.set("view", "full");
     if (options?.from) params.set("from", options.from);
     if (options?.to) params.set("to", options.to);
     const query = params.toString();

@@ -1,8 +1,11 @@
 import axios from "axios";
 
 import i18n from "@/i18n";
-import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, withLocalProxy, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
+import { imageSizePresets, inferMediaScale } from "@/lib/media-size";
+import { corsBlockedHint } from "@/lib/api-error";
+import { buildApiUrl, encodeChannelModel, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
+import { shouldProxyLocalModelList } from "./local-models";
 import { nanoid } from "nanoid";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
@@ -96,18 +99,7 @@ type GeminiPayload = {
 type GeminiStreamState = { buffer: string; text: string; toolCalls: ResponseToolCall[]; error?: string };
 type RequestOptions = { signal?: AbortSignal };
 
-const QUALITY_BASE: Record<string, number> = {
-    low: 1024,
-    medium: 2048,
-    high: 2880,
-    standard: 1024,
-    hd: 2048,
-};
-const QUALITY_ALIASES: Record<string, string> = {
-    "1k": "low",
-    "2k": "medium",
-    "4k": "high",
-};
+const IMAGE_QUALITY_VALUES = ["low", "medium", "high", "xhigh", "max"];
 const DEFAULT_IMAGE_SHORT_SIDE = 1024;
 const IMAGE_SIZE_STEP = 16;
 const IMAGE_MIN_PIXELS = 655360;
@@ -118,12 +110,10 @@ const IMAGE_OUTPUT_FORMAT = "png";
 const IMAGE_REQUEST_TIMEOUT_MS = 10 * 60_000;
 
 const GEMINI_SUPPORTED_RATIOS = ["1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1", "4:3", "4:5", "5:4", "8:1", "9:16", "16:9", "21:9"];
-const GEMINI_IMAGE_SIZE_BY_QUALITY: Record<string, string> = { low: "1K", medium: "2K", high: "4K", standard: "1K", hd: "2K" };
 
 function normalizeQuality(quality: string) {
     const value = quality.trim().toLowerCase();
-    const normalized = QUALITY_ALIASES[value] || value;
-    return QUALITY_BASE[normalized] ? normalized : undefined;
+    return IMAGE_QUALITY_VALUES.includes(value) ? value : undefined;
 }
 
 /** Only "transparent" is forwarded; any other value (incl. empty) means keep the default opaque background. */
@@ -131,25 +121,13 @@ function normalizeBackground(background: string | undefined) {
     return background?.trim().toLowerCase() === "transparent" ? "transparent" : undefined;
 }
 
-/** Map "quality + ratio" to an explicit pixel dimension like "3840x2160". */
-function resolveSize(quality: string | undefined, ratio: string): string {
+/** Map a bare ratio such as "1:1" to an explicit pixel dimension like "1024x1024". */
+function resolveSize(ratio: string): string {
     const parsedRatio = parseImageRatio(ratio);
-    const basePixels = quality ? QUALITY_BASE[quality] : undefined;
     const isLandscape = parsedRatio.width >= parsedRatio.height;
     const longRatio = isLandscape ? parsedRatio.width / parsedRatio.height : parsedRatio.height / parsedRatio.width;
-    let longSide: number;
-    let shortSide: number;
-
-    if (basePixels) {
-        const targetPixels = basePixels * basePixels;
-        const longSideRaw = Math.sqrt(targetPixels * longRatio);
-        longSide = Math.floor(longSideRaw / IMAGE_SIZE_STEP) * IMAGE_SIZE_STEP;
-        shortSide = Math.round(longSide / longRatio / IMAGE_SIZE_STEP) * IMAGE_SIZE_STEP;
-    } else {
-        shortSide = DEFAULT_IMAGE_SHORT_SIDE;
-        longSide = Math.round((shortSide * longRatio) / IMAGE_SIZE_STEP) * IMAGE_SIZE_STEP;
-    }
-
+    const shortSide = DEFAULT_IMAGE_SHORT_SIDE;
+    const longSide = Math.round((shortSide * longRatio) / IMAGE_SIZE_STEP) * IMAGE_SIZE_STEP;
     const width = isLandscape ? longSide : shortSide;
     const height = isLandscape ? shortSide : longSide;
     validateImageSize(width, height);
@@ -186,7 +164,7 @@ function validateImageSize(width: number, height: number) {
     if (pixels < IMAGE_MIN_PIXELS || pixels > IMAGE_MAX_PIXELS) throw new Error(apiText("imagePixelLimit"));
 }
 
-function resolveRequestSize(quality: string | undefined, size: string) {
+function resolveRequestSize(size: string) {
     const value = size.trim();
     if (!value || value.toLowerCase() === "auto") return undefined;
     const dimensions = parseImageDimensions(value);
@@ -194,7 +172,7 @@ function resolveRequestSize(quality: string | undefined, size: string) {
         validateImageSize(dimensions.width, dimensions.height);
         return `${dimensions.width}x${dimensions.height}`;
     }
-    if (value.includes(":")) return resolveSize(quality, value);
+    if (value.includes(":")) return resolveSize(value);
     throw new Error(apiText("invalidImageSizeFormat"));
 }
 
@@ -203,9 +181,9 @@ function resolveGeminiImageConfig(config: AiConfig) {
     const dimensions = parseImageDimensions(value);
     const ratio = dimensions ? `${dimensions.width}:${dimensions.height}` : value;
     const aspectRatio = value && value.toLowerCase() !== "auto" ? closestGeminiAspectRatio(ratio) : undefined;
-    const imageSize = supportsGeminiImageSize(config.model) ? resolveGeminiImageSize(config.quality, dimensions) : undefined;
+    const imageSize = resolveGeminiImageSize(dimensions);
     const image = { ...(aspectRatio ? { aspectRatio } : {}), ...(imageSize ? { imageSize } : {}) };
-    return Object.keys(image).length ? { responseFormat: { image } } : {};
+    return Object.keys(image).length ? { imageConfig: image } : {};
 }
 
 function closestGeminiAspectRatio(value: string) {
@@ -218,10 +196,12 @@ function closestGeminiAspectRatio(value: string) {
     });
 }
 
-function resolveGeminiImageSize(quality: string, dimensions: { width: number; height: number } | null) {
-    const normalizedQuality = normalizeQuality(quality);
-    if (normalizedQuality) return GEMINI_IMAGE_SIZE_BY_QUALITY[normalizedQuality];
+/** Gemini takes the resolution tier and the ratio separately; the tier comes from the size presets. */
+function resolveGeminiImageSize(dimensions: { width: number; height: number } | null) {
     if (!dimensions) return undefined;
+    const size = `${dimensions.width}x${dimensions.height}`;
+    const scale = Object.keys(imageSizePresets).find((key) => Object.values(imageSizePresets[key]).includes(size));
+    if (scale) return scale.toUpperCase();
     const edge = Math.max(dimensions.width, dimensions.height);
     if (edge <= 768) return "512";
     if (edge <= 1536) return "1K";
@@ -229,10 +209,6 @@ function resolveGeminiImageSize(quality: string, dimensions: { width: number; he
     return "4K";
 }
 
-function supportsGeminiImageSize(model: string) {
-    const value = model.toLowerCase();
-    return value.includes("gemini-3") || value.includes("3.1") || value.includes("3-pro");
-}
 
 function resolveImageSource(item: Record<string, unknown>) {
     if (typeof item.b64_json === "string" && item.b64_json) {
@@ -305,7 +281,7 @@ function readAxiosError(error: unknown, fallback: string) {
     if (axios.isCancel(error)) return apiText("requestCanceled");
     if (axios.isAxiosError(error)) {
         if (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT") return apiText("imageTimeout");
-        if (!error.response && error.code === "ERR_NETWORK") return apiText("requestFailed");
+        if (!error.response && error.code === "ERR_NETWORK") return corsBlockedHint();
         const responseData = error.response?.data;
         // Prefer the API error from the response body.
         const apiMsg = readApiErrorMessage(responseData);
@@ -796,7 +772,7 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     const script = resolveModelScript(config, config.model || config.imageModel);
     if (script) {
         const quality = normalizeQuality(config.quality);
-        const requestSize = resolveRequestSize(quality, config.size);
+        const requestSize = resolveRequestSize(config.size);
         const background = normalizeBackground(config.background);
         try {
             const result = await runModelPlugin({
@@ -805,7 +781,7 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
                 config: requestConfig,
                 prompt: withSystemPrompt(requestConfig, prompt),
                 images: [],
-                params: { size: requestSize, quality, count: n, ...(background ? { background } : {}) },
+                params: { size: requestSize, resolution: inferMediaScale(config.size), quality, count: n, ...(background ? { background } : {}) },
                 signal: options?.signal,
             });
             return normalizePluginImages(result).map((dataUrl) => ({ id: nanoid(), dataUrl }));
@@ -821,7 +797,7 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
         }
     }
     const quality = normalizeQuality(config.quality);
-    const requestSize = resolveRequestSize(quality, config.size);
+    const requestSize = resolveRequestSize(config.size);
     const background = normalizeBackground(config.background);
     try {
         const response = await axios.post<ImageApiResponse>(
@@ -857,7 +833,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     const script = resolveModelScript(config, config.model || config.imageModel);
     if (script) {
         const quality = normalizeQuality(config.quality);
-        const requestSize = resolveRequestSize(quality, config.size);
+        const requestSize = resolveRequestSize(config.size);
         const background = normalizeBackground(config.background);
         const refs = await Promise.all(references.map((image) => imageToDataUrl(image)));
         try {
@@ -867,7 +843,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
                 config: requestConfig,
                 prompt: withSystemPrompt(requestConfig, requestPrompt),
                 images: refs,
-                params: { size: requestSize, quality, count: n, ...(background ? { background } : {}) },
+                params: { size: requestSize, resolution: inferMediaScale(config.size), quality, count: n, ...(background ? { background } : {}) },
                 signal: options?.signal,
             });
             return normalizePluginImages(result).map((dataUrl) => ({ id: nanoid(), dataUrl }));
@@ -884,7 +860,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     }
 
     const quality = normalizeQuality(config.quality);
-    const requestSize = resolveRequestSize(quality, config.size);
+    const requestSize = resolveRequestSize(config.size);
     const background = normalizeBackground(config.background);
     const formData = new FormData();
     formData.set("model", requestConfig.model);
@@ -927,7 +903,7 @@ async function toDataUrl(url: string): Promise<string> {
     const absolute = url.startsWith("/")
         ? `${window.location.origin}${url}`
         : new URL(url, window.location.origin).href;
-    const res = await fetch(withLocalProxy(absolute));
+    const res = await fetch(absolute);
     if (!res.ok) throw new Error(`读取参考图失败（HTTP ${res.status}），请确认图片已保存且可访问`);
     const blob = await res.blob();
     if (blob.size === 0) throw new Error("参考图内容为空（HTTP 200 但 0 字节），请重新上传或保存该图片");
@@ -959,6 +935,23 @@ async function normalizeImageUrls(messages: AiTextMessage[]): Promise<AiTextMess
 export async function requestImageQuestion(config: AiConfig, messages: AiTextMessage[], onDelta: (text: string) => void, options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.textModel);
     const normalizedMessages = await normalizeImageUrls(messages);
+    const channel = resolveModelChannel(config, config.model || config.textModel);
+    if (channel.kind === "codex-cli") {
+        const references: Array<{ dataUrl: string }> = [];
+        const prompt = normalizedMessages.map(message => {
+            const content = typeof message.content === "string" ? message.content : message.content.map(part => {
+                if (part.type === "text") return part.text;
+                references.push({ dataUrl: part.image_url.url });
+                return `<Picture ${references.length}>`;
+            }).join("\n");
+            return `[${message.role}]\n${content}`;
+        }).join("\n\n");
+        const { observeCanvasGenerationTask } = await import("./canvas-generation-task");
+        const task = await observeCanvasGenerationTask({ mode: "text", model: encodeChannelModel(channel.id, requestConfig.model), prompt, references, params: { systemPrompt: requestConfig.systemPrompt, reasoningEffort: requestConfig.reasoningEffort } }, options?.signal || new AbortController().signal, i18n.t("config.channelEditor.capabilities.text"));
+        const answer = task.result?.texts?.[0]?.content || "";
+        if (!answer) throw new Error(apiText("requestFailed"));
+        onDelta(answer); return answer;
+    }
     const script = resolveModelScript(config, config.model || config.textModel);
     if (script) {
         try {
@@ -1078,6 +1071,19 @@ export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKe
 }
 
 export async function fetchChannelModels(channel: ModelChannel) {
+    if (channel.kind === "codex-cli") {
+        const { request } = await import("@/services/backend-api");
+        const response = await request<{ data?: Array<{ model: string; hidden?: boolean }> }>("GET", "/agent/codex/models?source=codex");
+        return (response.data || []).filter(model => !model.hidden).map(model => model.model);
+    }
+    if (shouldProxyLocalModelList(channel.baseUrl, channel.apiFormat)) {
+        const { request } = await import("@/services/backend-api");
+        const response = await request<{ models?: string[] }>("POST", "/api/local-models", {
+            baseUrl: channel.baseUrl,
+            apiKey: channel.apiKey,
+        });
+        return response.models || [];
+    }
     return fetchImageModels({ baseUrl: channel.baseUrl, apiKey: channel.apiKey, apiFormat: channel.apiFormat });
 }
 

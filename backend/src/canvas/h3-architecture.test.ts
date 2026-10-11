@@ -28,6 +28,9 @@ test("H3 旧引用迁移保留 Clip 语义并拆分冲突媒体", (t) => {
         { id: "c", prompt: "c", refItems: [{ bindingId: "bind-c", assetId: "shared", name: "另一个书房用途", type: "image", role: "storyboard", storageKey: "image:a" }] },
     ] } }] as typeof project.nodes;
     db.db.prepare("UPDATE canvas_projects SET data_json = ? WHERE id = 'p'").run(JSON.stringify(project));
+    // A simulated v13 database must not retain newer empty tables or their role triggers.
+    for (const row of db.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND sql LIKE '%canvas_productions%'").all() as Array<{ name: string }>) db.db.exec(`DROP TRIGGER "${row.name.replaceAll('"', '""')}"`);
+    for (const table of ["canvas_production_runs", "canvas_production_versions", "canvas_production_operations", "canvas_productions"]) db.db.exec(`DROP TABLE ${table}`);
     db.db.prepare("DELETE FROM schema_migrations WHERE version >= 14").run();
     db.close();
 
@@ -66,6 +69,8 @@ test("旧绑定与参考不一致时保留绑定真值并原样归档旧字段",
     assert.throws(() => canonicalizeH3References(structuredClone(legacyNode)), /拒绝丢弃原数据/);
     project.nodes = [legacyNode] as typeof project.nodes;
     db.db.prepare("UPDATE canvas_projects SET data_json = ? WHERE id = 'p'").run(JSON.stringify(project));
+    for (const row of db.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND sql LIKE '%canvas_productions%'").all() as Array<{ name: string }>) db.db.exec(`DROP TRIGGER "${row.name.replaceAll('"', '""')}"`);
+    for (const table of ["canvas_production_runs", "canvas_production_versions", "canvas_production_operations", "canvas_productions"]) db.db.exec(`DROP TABLE ${table}`);
     db.db.prepare("DELETE FROM schema_migrations WHERE version >= 14").run();
     db.close();
     migrated = new BackendDatabase(file);

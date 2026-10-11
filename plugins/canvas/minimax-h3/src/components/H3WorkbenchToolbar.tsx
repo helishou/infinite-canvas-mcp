@@ -14,14 +14,13 @@ type Props = {
     segments: H3Segment[];
     selected?: H3Segment;
     selectedIndex: number;
-    outputs: Array<{ url: string; name?: string }>;
     playhead: number;
     total: number;
     fmt: (value: number) => string;
     onPlayAll: () => void;
 };
 
-export function H3WorkbenchToolbar({ ctx, metadata, segments, selected, selectedIndex, outputs, playhead, total, fmt }: Props) {
+export function H3WorkbenchToolbar({ ctx, metadata, segments, selected, selectedIndex, playhead, total, fmt }: Props) {
     const [timelineDownloading, setTimelineDownloading] = useState(false);
     const addSegment = () => {
         const next = compactSegmentStarts([...segments, applyH3GlobalSettings({ id: `segment-${Date.now()}`, prompt: String(metadata.prompt || defaultPrompt), duration: 5, status: "idle" }, ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata)]);
@@ -41,10 +40,24 @@ export function H3WorkbenchToolbar({ ctx, metadata, segments, selected, selected
             setTimelineDownloading(false);
         }
     };
+    // 依次下载全部输出 = 每个 Clip 的最终成稿（segment.result），不是历史输出全量。
+    // 按 Clip1→N 顺序逐个触发下载；URL 优先走 ctx.mediaUrl(storageKey)（与素材卡单图下载一致，ref.url 可能过期或缺 token）。
+    const [allOutputsDownloading, setAllOutputsDownloading] = useState(false);
+    const downloadAllOutputs = () => {
+        if (!timelineVideos.length || allOutputsDownloading) return;
+        setAllOutputsDownloading(true);
+        timelineVideos.forEach((item, index) => {
+            setTimeout(() => {
+                const media = item.storageKey ? ctx.mediaUrl(item.storageKey) : item.url;
+                if (media) saveAs(media, item.name || `Clip-${index + 1}.mp4`);
+                if (index === timelineVideos.length - 1) setAllOutputsDownloading(false);
+            }, index * 400);
+        });
+    };
     return <>
         <div className="minimax-wb-toolbar" data-canvas-node-drag-handle>
             <div className="minimax-brand"><H3Icon name="clapperboard" /> <span>MiniMax H3</span><em title="已加载新版 H3 插件">v1.3</em><b>{fmt(playhead)} / {fmt(total)}</b></div>
-            <div className="minimax-top-actions"><button type="button" title="下载当前片段" disabled={!selected?.result} onClick={() => { if (selected?.result) saveAs(resultUrl(selected.result), `Clip-${selectedIndex + 1}.mp4`); }}><H3Icon name="download" /></button><button type="button" title={timelineVideos.length > 1 ? "拼接并下载完整时间轴" : "下载完整时间轴"} disabled={!timelineVideos.length || timelineDownloading} onClick={() => void downloadTimeline()}><H3Icon name="output" /></button><button type="button" title="依次下载全部输出" disabled={!outputs.length} onClick={() => outputs.forEach((item, index) => setTimeout(() => saveAs(item.url, item.name || `Clip-${index + 1}.mp4`), index * 120))}><H3Icon name="folder" /></button><button type="button" title="打开参数" onClick={() => ctx.openPanel()}><H3Icon name="settings" /></button></div>
+            <div className="minimax-top-actions"><button type="button" title="下载当前片段" disabled={!selected?.result} onClick={() => { if (selected?.result) saveAs(resultUrl(selected.result), `Clip-${selectedIndex + 1}.mp4`); }}><H3Icon name="download" /></button><button type="button" title={timelineVideos.length > 1 ? "拼接并下载完整时间轴" : "下载完整时间轴"} disabled={!timelineVideos.length || timelineDownloading} onClick={() => void downloadTimeline()}><H3Icon name="output" /></button><button type="button" title="依次下载全部输出（每个 Clip 的最终成稿）" disabled={!timelineVideos.length || allOutputsDownloading} onClick={downloadAllOutputs}><H3Icon name="folder" /></button><button type="button" title="打开参数" onClick={() => ctx.openPanel()}><H3Icon name="settings" /></button></div>
         </div>
     </>;
 }

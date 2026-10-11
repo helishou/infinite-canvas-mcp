@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { inferReferenceMediaType, inferReferenceRole, referenceBindingsOf, referenceCatalogOf } from "../../canvas/reference-contract.js";
+import { inferReferenceMediaType, inferReferenceRole, referenceBindingsOf, referenceCatalogOf, resolveCharacterGroupBindings } from "../../canvas/reference-contract.js";
 import { orderStoryboardImageReferences, orderStoryboardReferencesFirst, remapPictureTags } from "../../canvas/storyboard-reference-order.js";
 import { assembleH3Prompt } from "./prompt-sections.js";
 import { mergeSubjectDefinitions, subjectVisualSourceDetails, type H3SubjectDefinition, type StoryboardPromptSubject } from "./subject-definitions.js";
@@ -7,8 +7,8 @@ import { deriveStoryboardDurations, formatShotTimestamp, isReferenceNameEcho, no
 
 type RecordValue = Record<string, unknown>;
 type Transition = "continuous" | "cut" | "dissolve" | "fade_black";
-type StoryboardShotInput = { description: string; switchTime?: string; transitionType?: Transition; pictureBindingId?: string };
-type StoryboardInput = { summary?: string; openingDescription: string; shots: StoryboardShotInput[]; overallSoundscape: string; nonDiegeticMusic: string };
+type StoryboardShotInput = { id?: string; description: string; duration?: number; switchTime?: string; transitionType?: Transition; pictureBindingId?: string };
+type StoryboardInput = { summary?: string; openingDescription: string; shots: StoryboardShotInput[]; overallSoundscape: string; nonDiegeticMusic: string; referenceBindings?: RecordValue[] };
 type PromptSubject = StoryboardPromptSubject;
 type PromptReference = { tag: string; bindingId: string; type: "image" | "video" | "audio"; role: string; label: string; description: string; subjectId?: string; subjectIds?: string[]; subjectName?: string; speakerId?: string; usage?: string; retentionLevel?: "fully_preserved" | "partially_preserved" | "attribute_transfer" | "weak_reference"; shotNumbers: number[]; compositePanels?: Array<{ index: number; row: number; column: number; shotNumbers: number[] }> };
 type PromptShot = { description: string; referenceIds?: string[] };
@@ -143,7 +143,13 @@ function promptForShots(input: StoryboardInput, refs: RecordValue[], catalog: Re
 
 function subjectAppearsInShot(subject: PromptSubject, shot: PromptShot, subjectOrdinal: number) {
     const text = shot.description.toLocaleLowerCase();
-    const names = [subject.name, subject.englishName].filter((name): name is string => typeof name === "string" && Boolean(name.trim()));
+    const names = [...new Set([subject.name, subject.englishName]
+        .filter((name): name is string => typeof name === "string" && Boolean(name.trim()))
+        .flatMap((name) => {
+            const normalized = name.trim();
+            const shortName = normalized.split(/[|｜·•]/u, 1)[0]?.trim();
+            return shortName && shortName !== normalized ? [normalized, shortName] : [normalized];
+        }))];
     const nameMatch = names.some((name) => {
         const normalized = name.trim().toLocaleLowerCase();
         if (/[\p{Script=Han}]/u.test(normalized)) return [...normalized].length >= 2 && text.includes(normalized);
@@ -182,7 +188,12 @@ function buildPromptText(subjects: PromptSubject[], references: PromptReference[
         reference.usage === "first_frame" || reference.usage === "last_frame" ||
         reference.role === "storyboard" || reference.role === "blocking" || (reference.role === "keyframe" && reference.shotNumbers.length > 0)
     );
-    const trackedReferences = references.filter((reference) => reference.type !== "image" || isPictureAnchor(reference));
+    // Scene/prop/keyframe images need an explicit Picture-role definition. Character
+    // identity and turnaround images are already linked from their Subject definition;
+    // adding a second definition would duplicate and confuse the same Picture slot.
+    const trackedReferences = references.filter((reference) => reference.type !== "image"
+        || !["character_identity", "character_turnaround"].includes(reference.role)
+        || isPictureAnchor(reference));
     const referenceDefinitions = trackedReferences.map((reference) => {
         const mappedSubjects = ((reference.subjectIds?.length ? reference.subjectIds : reference.subjectId ? [reference.subjectId] : []))
             .flatMap((id) => subjects.filter((subject) => subject.id === id));
@@ -197,6 +208,18 @@ function buildPromptText(subjects: PromptSubject[], references: PromptReference[
             if (reference.role === "blocking") {
                 const scope = shotsForReference.join(", ") || "the target shot sequence";
                 return `${picture} is the blocking and 180-degree action-axis map for ${scope}, defining relative subject positions, orientation, sightlines, entrances, and movement paths${reference.description ? `: ${reference.description}` : ""}. It is a spatial plan, not a rendered frame or character identity source.`;
+            }
+            if (reference.role === "scene") {
+                const scope = shotsForReference.join(", ") || "the target shot sequence";
+                return `${picture} is the scene and location reference for ${scope}; use it for the authored environment, fixed landmarks, architecture, and lighting, not as a character identity or shot-composition lock${reference.description ? `: ${reference.description}` : ""}.`;
+            }
+            if (reference.role === "prop") {
+                const scope = shotsForReference.join(", ") || "the target shot sequence";
+                return `${picture} is a prop reference for ${scope}; preserve only the named object's design and state where the shot description uses it${reference.description ? `: ${reference.description}` : ""}.`;
+            }
+            if (["character_identity", "character_turnaround"].includes(reference.role)) {
+                const who = mappedSubject ? subjectMarker(mappedSubject) : reference.subjectId || "the named character";
+                return `${picture} is the identity and costume reference for ${who}; preserve identity and approved outfit attributes, not a fixed pose${reference.description ? `: ${reference.description}` : ""}.`;
             }
             if (reference.role === "storyboard" && reference.compositePanels?.length) {
                 const panelMap = reference.compositePanels.map((panel) => `Panel ${panel.index} (row ${panel.row}, column ${panel.column}) corresponds to ${panel.shotNumbers.map((number) => `[Shot ${number}]`).join(", ") || "no assigned shot"}`).join("; ");
@@ -250,6 +273,18 @@ function buildPromptText(subjects: PromptSubject[], references: PromptReference[
         if (reference.type === "video") {
             const scope = reference.role === "motion_reference" ? "camera movement and motion pacing" : "scene structure and pacing";
             return `${reference.tag} (${scope}): weak_reference - use the video for the role defined above without reproducing it frame by frame.`;
+        }
+        if (reference.role === "scene") {
+            const scope = shotsForReference.join(", ") || "target shot sequence";
+            return `${reference.tag} (${scope}): ${reference.retentionLevel || "fully_preserved"} - preserve the referenced location and stable environmental facts while following each shot's authored camera and blocking.`;
+        }
+        if (reference.role === "prop") {
+            const scope = shotsForReference.join(", ") || "target shot sequence";
+            return `${reference.tag} (${scope}): ${reference.retentionLevel || "fully_preserved"} - preserve the prop's authored design, holder, and state only in the shots that use it.`;
+        }
+        if (["character_identity", "character_turnaround"].includes(reference.role)) {
+            const who = mappedSubject ? subjectMarker(mappedSubject) : reference.subjectId || "the named character";
+            return `${reference.tag} (${who}): ${reference.retentionLevel || "fully_preserved"} - preserve identity and approved costume attributes; shot-specific pose and action follow the shot descriptions.`;
         }
         if (reference.role === "blocking") {
             const scope = shotsForReference.join(", ") || "target shot sequence";
@@ -354,7 +389,18 @@ function buildPromptSections(project: RecordValue, segment: RecordValue, input: 
             : string(record(asset?.analysis).summary || record(ref.analysis).summary || record(sourceGroup?.voice).description || sourceMetadata.characterVoiceDescription);
         const mappedIds = type === "image" ? [...new Set([declaredSubjectId, string(ref.groupId), ...(Array.isArray(ref.storyboardSubjectIds) ? ref.storyboardSubjectIds.map(String) : [])].filter(Boolean))] : [];
         const anchor = type === "image" && (string(ref.usage) === "first_frame" || string(ref.usage) === "last_frame" || role === "storyboard" || role === "blocking" || (role === "keyframe" && shotReferenceIds.has(string(ref.bindingId))));
-        const ids = mappedIds.length ? mappedIds : type === "image" && sourceCharacterId ? [sourceCharacterId] : type === "image" && !anchor && string(ref.bindingId) ? [string(ref.bindingId)] : [];
+        // Only bind semantic Subjects to explicit subject identities or character nodes.
+        // Scene, prop, style and storyboard assets stay Picture references unless a caller
+        // explicitly assigns storyboardSubjectIds; otherwise they displace character Subject
+        // ordinals without a matching subjectId in the Backend reference contract.
+        const semanticIdentityRole = ["character_identity", "character_turnaround"].includes(role);
+        const ids = mappedIds.length
+            ? mappedIds
+            : type === "image" && sourceCharacterId
+                ? [sourceCharacterId]
+                : type === "image" && semanticIdentityRole && string(ref.bindingId)
+                    ? [string(ref.bindingId)]
+                    : [];
         const subjectIds = new Set<string>();
         for (const id of ids) {
             const group = groupFor(id) || Object.values(groups).map(record).find((item) => item.subjectId === id || item.characterNodeId === id);
@@ -487,10 +533,12 @@ function buildPromptSections(project: RecordValue, segment: RecordValue, input: 
         const finalId = compositeSourceIds.has(id) ? representativeBindingId : id;
         return referencesWithSpeakers.find((reference) => reference.bindingId === finalId)?.tag || marker;
     });
-    const normalizedShots = input.shots.map((shot) => {
+    const normalizedShots = input.shots.map((shot, index) => {
         const description = normalizeLegacyReferences(string(shot.description));
         return {
+            id: string(shot.id) || `shot-${index + 1}`,
             description,
+            ...(Number.isFinite(Number(shot.duration)) && Number(shot.duration) > 0 ? { duration: Number(shot.duration) } : {}),
             switchTime: string(shot.switchTime),
             transitionType: shot.transitionType || "cut",
             pictureBindingId: compositeSourceIds.has(string(shot.pictureBindingId)) ? representativeBindingId : string(shot.pictureBindingId),
@@ -558,7 +606,37 @@ function buildPromptSections(project: RecordValue, segment: RecordValue, input: 
 export function writeStoryboardPrompt(project: RecordValue, segment: RecordValue, rawInput: RecordValue) {
     const originalInput = rawInput as StoryboardInput;
     if (!Array.isArray(originalInput.shots) || !originalInput.shots.length) throw new Error("分镜至少需要一镜");
-    const originalBindings = referenceBindingsOf(segment).bindings;
+    const storedBindings = referenceBindingsOf(segment).bindings;
+    const requestedBindings = Array.isArray(originalInput.referenceBindings)
+        ? referenceBindingsOf({ referenceBindings: originalInput.referenceBindings }).bindings
+        : storedBindings;
+    if (Array.isArray(originalInput.referenceBindings) && requestedBindings.length !== originalInput.referenceBindings.length) {
+        throw new Error("每个覆盖参考都必须有稳定 binding id 和 assetId");
+    }
+    // Character outfit references are derived from h3CharacterGroups. Use current
+    // derived media when available, retain an active legacy snapshot if its outfit
+    // still exists but is not materialized in the group, and never persist derived rows.
+    const derivedGroupBindings = resolveCharacterGroupBindings([], segment);
+    const usedDerived = new Set<string>();
+    const groups = record(segment.h3CharacterGroups);
+    const originalBindings = requestedBindings.flatMap((binding) => {
+        if (!binding.groupId) return [binding];
+        const current = derivedGroupBindings.find((item) => item.groupId === binding.groupId
+            && item.outfitId === binding.outfitId
+            && item.mediaType === (binding.mediaType || inferReferenceMediaType(binding)));
+        if (current) {
+            if (usedDerived.has(current.id)) return [];
+            usedDerived.add(current.id);
+            return [current];
+        }
+        const group = record(groups[binding.groupId]);
+        const outfit = Array.isArray(group.outfits) ? group.outfits.map(record).find((item) => string(item.id) === binding.outfitId) : undefined;
+        if (binding.outfitId && group.outfitEnabled === false) return [];
+        if (binding.outfitId && outfit?.enabled === false) return [];
+        if (binding.outfitId && !outfit) return [];
+        return [binding];
+    });
+    originalBindings.push(...derivedGroupBindings.filter((binding) => !usedDerived.has(binding.id)));
     const catalog = referenceCatalogOf(project);
     const resolvedBindings = originalBindings.map((binding) => {
         const asset = catalog.find((item) => item.id === binding.assetId);
@@ -570,12 +648,34 @@ export function writeStoryboardPrompt(project: RecordValue, segment: RecordValue
         (binding) => binding.id,
         (binding) => binding.enabled && Boolean(binding.url || binding.storageKey) && binding.role === "storyboard" && (binding.mediaType || inferReferenceMediaType(binding)) === "image");
     const orderChanged = bindings.some((binding, index) => binding.id !== originalBindings[index]?.id);
+    const storedBindingIds = new Set(requestedBindings.map((binding) => binding.id));
+    const persistedBindings = bindings.filter((binding) => storedBindingIds.has(binding.id));
+    const storedOrderChanged = Array.isArray(originalInput.referenceBindings)
+        || persistedBindings.some((binding, index) => binding.id !== requestedBindings[index]?.id);
     const storyboardIds = new Set(bindings.filter((binding) => binding.enabled && (binding.url || binding.storageKey) && binding.role === "storyboard").map((binding) => binding.id));
     const existingShots = Array.isArray(segment.storyboardShots) ? segment.storyboardShots.map(record) : undefined;
-    const orderedShots = existingShots && orderStoryboardImageReferences(existingShots,
-        originalInput.shots.flatMap((shot) => string(shot.pictureBindingId) ? [string(shot.pictureBindingId)] : []),
-        (shot) => string(shot.referenceBindingId), (shot) => storyboardIds.has(string(shot.referenceBindingId)));
-    const shotOrderChanged = Boolean(orderedShots?.some((shot, index) => shot.id !== existingShots?.[index]?.id));
+    const storyboardShotCandidates = originalInput.shots.map((shot, index) => {
+        const explicitId = string(shot.id);
+        const pictureBindingId = string(shot.pictureBindingId);
+        const previous = existingShots?.find((item) => explicitId && string(item.id) === explicitId)
+            || (pictureBindingId ? existingShots?.find((item) => string(item.referenceBindingId) === pictureBindingId) : undefined)
+            || existingShots?.[index];
+        const hasPictureBinding = Object.prototype.hasOwnProperty.call(originalInput.shots[index], "pictureBindingId");
+        const referenceBindingId = hasPictureBinding ? pictureBindingId : string(previous?.referenceBindingId);
+        return {
+            id: explicitId || string(previous?.id) || `shot-${index + 1}`,
+            ...(referenceBindingId && storyboardIds.has(referenceBindingId) ? { referenceBindingId } : {}),
+            ...(Number.isFinite(Number(shot.duration)) && Number(shot.duration) > 0
+                ? { duration: Number(shot.duration) }
+                : Number.isFinite(Number(previous?.duration)) && Number(previous?.duration) > 0
+                    ? { duration: Number(previous?.duration) }
+                    : {}),
+        };
+    });
+    // The authored shot list is already in production order. Keep duplicate frame
+    // bindings when two distinct Shots deliberately reuse one visual anchor.
+    const orderedShots = storyboardShotCandidates;
+    const shotOrderChanged = JSON.stringify(orderedShots) !== JSON.stringify(existingShots || []);
     const remap = (value: string) => orderChanged
         ? remapPictureTags(value, originalBindings.filter((binding) => binding.enabled && (binding.url || binding.storageKey)), bindings.filter((binding) => binding.enabled && (binding.url || binding.storageKey)),
             (binding) => binding.id, (binding) => (binding.mediaType || inferReferenceMediaType(binding)) === "image")
@@ -593,12 +693,12 @@ export function writeStoryboardPrompt(project: RecordValue, segment: RecordValue
     const generated = buildPromptSections(project, segment, input, bindings);
     const cache = record(segment.storyboardPromptCache);
     const promptMode = promptModeOf(segment);
-    if (!orderChanged && !shotOrderChanged && promptMode === "ref2va" && cache.version === 13 && cache.fingerprint === generated.fingerprint && string(segment.prompt) === generated.prompt) return { ...generated, unchanged: true as const };
-    if (!orderChanged && !shotOrderChanged && promptMode !== "ref2va" && string(segment.prompt) === generated.prompt) return { ...generated, unchanged: true as const };
+    if (!storedOrderChanged && !shotOrderChanged && promptMode === "ref2va" && cache.version === 13 && cache.fingerprint === generated.fingerprint && string(segment.prompt) === generated.prompt) return { ...generated, referenceBindings: persistedBindings, storyboardShots: orderedShots, unchanged: true as const };
+    if (!storedOrderChanged && !shotOrderChanged && promptMode !== "ref2va" && string(segment.prompt) === generated.prompt) return { ...generated, referenceBindings: persistedBindings, storyboardShots: orderedShots, unchanged: true as const };
     return {
         ...generated,
         unchanged: false as const,
-        ...(orderChanged ? { referenceBindings: bindings } : {}),
+        ...(storedOrderChanged ? { referenceBindings: persistedBindings } : {}),
         ...(shotOrderChanged ? { storyboardShots: orderedShots } : {}),
         ...(promptMode === "ref2va" ? { cache: { version: 13, fingerprint: generated.fingerprint, subjectDefinitions: generated.subjectDefinitions, retentionAnalysis: generated.retentionAnalysis } } : {}),
     };

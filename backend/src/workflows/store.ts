@@ -267,6 +267,13 @@ export class WorkflowStore {
         return { workflow };
     }
 
+    getFieldDefinitionsByIds(ids: string[]): Array<WorkflowField & { sourceWorkflow: string }> {
+        return this.db.getWorkflowFieldDefinitionsByIds(ids).map(({ workflowName, field }) => ({
+            ...field,
+            sourceWorkflow: workflowName,
+        }));
+    }
+
     getConfig(name: string): WorkflowConfig | null {
         const row = this.db.getWorkflowConfig(name);
         if (!row) return BUILTIN_CONFIGS[name] ? structuredClone(BUILTIN_CONFIGS[name]) : null;

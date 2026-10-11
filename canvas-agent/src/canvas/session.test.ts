@@ -5,6 +5,30 @@ import test from "node:test";
 
 import { CanvasSession } from "./session.js";
 
+test("状态变化立即推送完整版本，现有心跳补发终态并隔离新进程身份", t => {
+    t.mock.timers.enable({ apis: ["setInterval"] });
+    const session = new CanvasSession("thread"), client = connect(session, "first", "thread");
+    t.after(() => client.close());
+    const initial = session.runtimeStateSnapshot;
+    assert.deepEqual(field(client.event("hello"), "runtime"), initial);
+    session.setCodexState({ busy: true, threadId: "thread", turnId: "turn" });
+    session.markConversationRunning("thread");
+    const running = session.runtimeStateSnapshot;
+    assert.equal(running.codex.busy, true);
+    assert.equal(running.conversation.status, "running");
+    assert.ok(running.revision > initial.revision);
+    assert.deepEqual(client.events("runtime_state").at(-1), running);
+    session.setCodexState({ busy: false }); session.finishConversationRun("thread");
+    const terminal = session.runtimeStateSnapshot;
+    t.mock.timers.tick(15000);
+    assert.deepEqual(field(client.events("ping").at(-1), "runtime"), terminal);
+    assert.equal(terminal.codex.busy, false);
+    session.setCodexState({ turnId: "" });
+    assert.equal(session.runtimeStateSnapshot.codex.turnId, "turn", "terminal snapshots retain their exact turn after runtime cleanup");
+    assert.ok(terminal.revision > running.revision);
+    assert.notEqual(new CanvasSession("thread").runtimeStateSnapshot.instanceId, terminal.instanceId);
+});
+
 test("MCP 读取当前激活网页的画布", async (t) => {
     const session = new CanvasSession();
     const first = connect(session, "first");

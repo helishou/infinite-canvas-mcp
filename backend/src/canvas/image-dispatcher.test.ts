@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import sharp from "sharp";
+import crypto from "node:crypto";
 import { injectParams } from "../workflows/executor.js";
 
 import { CanvasImageDispatcher, type CanvasImageReference } from "./image-dispatcher.js";
@@ -25,6 +26,28 @@ function dispatcherWith(overrides: { tasks?: Record<string, unknown>; media?: Re
         {} as never,
     );
 }
+
+test("正式参考数量和顺序不一致时不创建任务；上传前字节变化不调用 provider", async () => {
+    const original = Buffer.from("approved"), sha256 = crypto.createHash("sha256").update(original).digest("hex");
+    const snapshot = { schemaVersion: 1, targetId: "FRAME", sourceNodeId: "source", sourceHash: "a".repeat(64), promptHash: "b".repeat(64), inputHash: "c".repeat(64),
+        references: [{ label: "<Picture 1>", nodeId: "role", assetId: "ROLE", assetVersion: "v1", storageKey: "image:approved", sha256, role: "identity" }] };
+    let created = 0, providerCalls = 0;
+    const parent = task("parent", {}, "queued");
+    const dispatcher = dispatcherWith({ tasks: { get: (id: string) => id === "parent" && created ? parent : null, list: () => [],
+        create: (_id: string, _kind: string, input: Record<string, unknown>) => { created++; parent.input = input; return parent; },
+        update: (_id: string, patch: Record<string, unknown>) => Object.assign(parent, patch), addEvent: () => ({}) },
+        media: { meta: () => ({ storageKey: "image:approved", mimeType: "image/png" }), read: () => Buffer.from("changed before upload") },
+        directImage: { supports: () => true, run: () => { providerCalls++; throw new Error("must never submit changed bytes"); } } });
+    const input = { model: "gpt-image-2", prompt: "Formal prompt", clientTaskId: "parent", params: { productionImageInput: snapshot } };
+    assert.throws(() => dispatcher.start({ ...input, references: [] }), /数量/);
+    assert.throws(() => dispatcher.start({ ...input, references: [{ storageKey: "image:other" }] }), /正式顺序/);
+    assert.equal(created, 0);
+    dispatcher.start({ ...input, references: [{ storageKey: "image:approved" }] });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(parent.status, "failed"); assert.match(String((parent as any).error), /字节在提交前变化/);
+    assert.equal(providerCalls, 0);
+    assert.equal((parent.input.references as any[])[0].sha256, sha256);
+});
 
 test("图片任务只保存参考图媒体句柄，不把 dataUrl 写入任务输入", async () => {
     const records = new Map<string, ReturnType<typeof task>>();
@@ -115,6 +138,7 @@ test("同一源节点的不同提示词不能复用运行中任务", () => {
 
 test("canvas workflow maps 16:9 into the submitted graph and blocks a saved 1:1 choice", async () => {
     const aspect = { id: "f_1790686390394_nzk9", node: "11", input: "aspect_ratio", name: "Aspect ratio", type: "dropdown", default: "9:16 (Portrait Widescreen)", options: ["1:1 (Square)", "9:16 (Portrait Widescreen)", "16:9 (Widescreen)"] };
+    const prompt = { id: "prompt", node: "11", input: "prompt", name: "Prompt", type: "text", isPrompt: true };
     const values: Array<Record<string, unknown>> = [];
     const workflow = { "11": { class_type: "EmptyLatentImage", inputs: { aspect_ratio: "9:16 (Portrait Widescreen)" } } };
     const dispatcher = new CanvasImageDispatcher(
@@ -124,7 +148,7 @@ test("canvas workflow maps 16:9 into the submitted graph and blocks a saved 1:1 
         {} as never,
         { get: async () => ({
             workflow,
-            config: { title: "2.1文生图", backend: "comfyui", operation: "image", description: "", fields: [aspect] },
+            config: { title: "2.1文生图", backend: "comfyui", operation: "image", description: "", fields: [prompt, aspect] },
         }) } as never,
         { run: async (_workflow: unknown, _config: unknown, fields: Record<string, unknown>) => { values.push(fields); return { media: [] }; } } as never,
     );
@@ -141,8 +165,96 @@ test("canvas workflow maps 16:9 into the submitted graph and blocks a saved 1:1 
     assert.equal((submitted["11"] as { inputs: { aspect_ratio: string } }).inputs.aspect_ratio, "16:9 (Widescreen)");
 });
 
-test("workflow 使用真实节点输入名映射 width/height 并拒绝旧尺寸", async () => {
+test("Canvas ComfyUI generation uses and logs custom params persisted on its source node", async () => {
     const fields = [
+        { id: "f_prompt", node: "1", input: "prompt", name: "Prompt", type: "text", isPrompt: true },
+        { id: "f_style", node: "1", input: "style", name: "Style", type: "dropdown", default: "default", options: ["default", "cinematic"] },
+        { id: "f_strength", node: "1", input: "strength", name: "Strength", type: "number", default: 0.25 },
+        { id: "f_api", node: "1", input: "api_key", name: "API key", type: "text", default: "" },
+    ];
+    const savedParams = { f_style: "cinematic", f_strength: 0.8, f_api: "do-not-log" };
+    const aiConfig = {
+        channels: [{
+            id: "test-channel",
+            kind: "comfyui",
+            models: [{
+                name: "test-image",
+                capability: "image",
+                workflows: ["custom/test.json"],
+                workflowRouting: { text: "custom/test.json" },
+            }],
+        }],
+    };
+    const project = {
+        id: "project-test",
+        revision: 1,
+        nodes: [{ id: "source-node", type: "config", title: "Source", width: 340, height: 240, metadata: { smart: true, generationMode: "image", comfyParams: savedParams } }],
+        connections: [],
+    };
+    const taskRecords = new Map<string, Record<string, any>>();
+    let createdLog: Record<string, any> | undefined;
+    let executedFields: Record<string, unknown> | undefined;
+    const workflow = {
+        "1": { class_type: "TestNode", inputs: { prompt: "", style: "default", strength: 0.25, api_key: "" } },
+    };
+    const dispatcher = new CanvasImageDispatcher(
+        { url: "http://127.0.0.1:17370" } as never,
+        {
+            tasks: {
+                get: (id: string) => taskRecords.get(id) || null,
+                list: () => [],
+                create: (id: string, kind: string, input: Record<string, unknown>, params: Record<string, unknown>) => {
+                    const record = { id, kind, status: "queued", progress: 0, input, params, result: null, error: null, createdAt: "", updatedAt: "" };
+                    taskRecords.set(id, record);
+                    return record;
+                },
+                update: (id: string, patch: Record<string, unknown>) => Object.assign(taskRecords.get(id)!, patch),
+                addEvent: () => ({}),
+            },
+            media: { meta: () => null },
+            settings: { get: (key: string) => key === "ai.config" ? aiConfig : undefined },
+            logs: {
+                create: (input: Record<string, unknown>) => { createdLog = { ...input, id: "log-test" }; return createdLog; },
+                update: () => ({}),
+            },
+            projects: { get: () => project, applyOperations: () => ({}) },
+        } as never,
+        {} as never,
+        { supports: () => false } as never,
+        {
+            getConfig: () => ({ fields }),
+            get: async () => ({ workflow, config: { title: "test", fields } }),
+        } as never,
+        {
+            run: async (_workflow: unknown, _config: unknown, values: Record<string, unknown>) => {
+                executedFields = values;
+                return { media: [] };
+            },
+        } as never,
+    );
+
+    dispatcher.start({
+        projectId: "project-test",
+        nodeId: "source-node",
+        model: "test-channel::test-image",
+        prompt: "test prompt",
+        clientTaskId: "task-test",
+        params: { writeBackToTarget: true, f_strength: 0.9 },
+    }, { onCompleted: () => {}, onFailed: () => {} });
+
+    const settings = (createdLog?.params as Record<string, any>)?.generationSettings as Record<string, any>;
+    assert.deepEqual(settings, { workflowParameters: { Style: "cinematic", Strength: 0.9 } });
+    assert.equal(JSON.stringify(createdLog?.params).includes("do-not-log"), false);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(executedFields?.f_style, "cinematic");
+    assert.equal(executedFields?.f_strength, 0.9);
+    assert.equal(executedFields?.f_api, "do-not-log");
+});
+
+test("workflow 使用真实节点输入名映射 width/height 并拒绝旧尺寸", async () => {
+    const prompt = { id: "prompt", node: "7", input: "prompt", name: "Prompt", type: "text", isPrompt: true };
+    const fields = [
+        prompt,
         { id: "field-width", node: "7", input: "width", name: "宽度", type: "number" },
         { id: "field-height", node: "7", input: "height", name: "高度", type: "number" },
     ];

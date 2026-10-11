@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 import { createAgentLogWriter } from "../utils/agent-runtime.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -9,6 +10,7 @@ import { createBackendClient } from "../runtime/comfy-client.js";
 import { logger } from "../utils/logger.js";
 import { field, type JsonRecord, errorMessage } from "../utils/value.js";
 import { codexEventHistory, type CodexEventHistory } from "./codex-event-history.js";
+import { beginTurnTrace, countTurnEvent, endTurnTrace, markFirstEvent, markTurnCompleted } from "./codex-perf.js";
 import type { CodexNotificationParams, CodexPlanUpdate, CodexReasoningEffort, CodexRequestMethod, CodexRequestParams, CodexRequestResult, CodexSkillSelector, CodexThreadItemEntry, CodexTurnInput } from "./codex-protocol.js";
 import type { AgentEmit, AgentPermissionMode } from "./types.js";
 import { requireCodexLaunch } from "./codex-executable.js";
@@ -33,9 +35,11 @@ export class CodexReportedError extends Error {
 /** 封装 Codex app-server 的 JSON-RPC 通信与事件转换。 */
 export class CodexAppClient {
     private nextId = 1;
-    private buffer = "";
+    private buffer: string[] = [];
+    private outputDecoder = new StringDecoder("utf8");
     private currentThreadId = "";
     private currentTurnId = "";
+    private turnRequestStartedAt = new Map<string, number>();
     private pendingTurnStart?: PendingTurnStart;
     private startedTurnKeys = new Set<string>();
     private textByItem = new Map<string, string>();
@@ -66,7 +70,7 @@ export class CodexAppClient {
     private constructor(private child: ChildProcess, private emit: AgentEmit, private eventHistory: Pick<CodexEventHistory, "record" | "recordTurn"> = codexEventHistory) {}
 
     /** 启动并初始化 Codex app-server。 */
-    static async start(emit: AgentEmit, onExit: () => void) {
+    static async start(emit: AgentEmit, onExit: () => void, signal?: AbortSignal) {
         const launch = requireCodexLaunch();
         logger.info("Starting Codex app-server", { executable: launch.command, source: launch.source });
         fixCcSwitchModelCatalog();
@@ -78,7 +82,7 @@ export class CodexAppClient {
             stopped = true;
             onExit();
         };
-        child.stdout?.on("data", (chunk) => client.read(chunk.toString()));
+        child.stdout?.on("data", (chunk) => client.read(chunk));
         const stderr = createAgentLogWriter((text) => {
             logger.warn("Codex app-server stderr", { text });
             emit("agent_log", { text });
@@ -101,17 +105,24 @@ export class CodexAppClient {
             stop();
             emit("agent_log", { text: `Codex app-server exited: ${code ?? 0}` });
         });
-        await client.request("initialize", { clientInfo: { name: "canvas-agent", title: "Infinite Canvas Agent", version: VERSION }, capabilities: { experimentalApi: true, requestAttestation: false } });
-        client.notify("initialized");
-        return client;
+        const abort = () => { client.failAll("Codex startup cancelled"); child.kill(); };
+        signal?.addEventListener("abort", abort, { once: true });
+        try {
+            signal?.throwIfAborted();
+            await client.request("initialize", { clientInfo: { name: "canvas-agent", title: "Infinite Canvas Agent", version: VERSION }, capabilities: { experimentalApi: true, requestAttestation: false } });
+            signal?.throwIfAborted();
+            client.notify("initialized");
+            return client;
+        } catch (error) { child.kill(); throw error; }
+        finally { signal?.removeEventListener("abort", abort); }
     }
 
     /** 创建新的 Codex 线程。 */
-    async startThread(cwd?: string, permissionMode: AgentPermissionMode = "request", preheat = false) {
+    async startThread(cwd?: string, permissionMode: AgentPermissionMode = "request", preheat = false, model?: string) {
         if (preheat) this.pendingPreheatThreadStarts += 1;
         let threadId = "";
         try {
-            const { thread } = await this.request("thread/start", { ...threadSettings(permissionMode), ...(cwd ? { cwd } : {}), threadSource: "user" });
+            const { thread } = await this.request("thread/start", { ...threadSettings(permissionMode), ...(cwd ? { cwd } : {}), ...(model ? { model } : {}), threadSource: "user" });
             if (!thread.id) throw new Error("Codex app-server 没有返回 thread id");
             threadId = thread.id;
             if (preheat) {
@@ -168,6 +179,51 @@ export class CodexAppClient {
             logger.info("Reading paginated Codex thread history", { threadId });
             return await this.readPaginatedThread(threadId);
         });
+    }
+
+    /** An ephemeral channel request reads only its input text and images. */
+    async startTextThread(cwd: string) {
+        return await this.startSilentThread("thread/start", {
+            ...skillDraftThreadSettings(cwd),
+            developerInstructions: "你是文本模型。只根据本轮输入的文本与图片回答，并遵循指定 JSON Schema。不得读取其他本地文件、执行命令、调用 MCP 或修改数据。最终 text 字段只放用户需要的回答，不加工作者说明。",
+            threadSource: "user",
+        });
+    }
+
+    /** Production workers return data only; they cannot write files or submit media. */
+    async startProductionThread(cwd: string) {
+        return await this.startSilentThread("thread/start", {
+            ...productionThreadSettings(cwd),
+            threadSource: "user",
+        });
+    }
+
+    async resumeProductionThread(threadId: string, cwd: string) {
+        const result = await this.request("thread/resume", { threadId, ...productionThreadSettings(cwd) });
+        this.silentThreadIds.add(threadId);
+        return result;
+    }
+
+    stopProductionClient() { this.child.kill(); }
+
+    async recoverProductionOutput(threadId: string, turnId?: string) {
+        const { thread } = await this.readThread(threadId, true);
+        const turn = thread.turns?.at(-1);
+        if (!turn || !turnId || turn.id !== turnId || field(turn, "status") !== "completed" || turn.error) throw new Error("AGENT_RECOVERY_REQUIRED: 原线程没有可恢复的已完成回合；未重跑代理");
+        const items = Array.isArray(turn.items) ? turn.items : [];
+        const message = items.filter(item => item?.type === "agentMessage").at(-1);
+        const output = String(message?.text || "").trim();
+        if (!output) throw new Error("AGENT_RECOVERY_REQUIRED: 原线程缺少结构化回包；未重跑代理");
+        JSON.parse(output);
+        return output;
+    }
+
+    async generateProductionOutput(threadId: string, prompt: string, outputSchema: JsonRecord, images: string[], model?: string, effort?: CodexReasoningEffort, onTurn?: (turnId: string) => void) {
+        this.silentThreadIds.add(threadId);
+        const result = await this.startTurn(threadId, prompt, images, "request", model, effort, onTurn, undefined, undefined, outputSchema);
+        const output = String(field(result, "output") || "").trim();
+        if (!output) throw new Error("场次制作工作者没有返回结构化结果");
+        return output;
     }
 
     private async readPaginatedThread(threadId: string) {
@@ -281,14 +337,17 @@ export class CodexAppClient {
         this.currentThreadId = threadId;
         this.currentTurnId = "";
         this.lastUsage = null;
+        const turnRequestStartedAt = Date.now();
+        this.turnRequestStartedAt.set(threadId, turnRequestStartedAt);
         const pendingStart: PendingTurnStart = { threadId, prompt, messageText, onTurn };
         this.pendingTurnStart = pendingStart;
         try {
-            const { turn } = await this.request("turn/start", { threadId, input: codexInput(prompt, images, skill), ...(outputSchema ? skillDraftTurnSettings() : turnSettings(permissionMode)), ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(outputSchema ? { outputSchema } : {}) }, Boolean(outputSchema));
+            const { turn } = await this.request("turn/start", { threadId, input: [...codexInput(prompt, images, skill), ...(!outputSchema ? [{ type: "text" as const, text: `导演委派上下文：parentThreadId=${threadId}${model ? `，model=${model}` : ""}。director_subagent 使用本线程身份与当前画布 projectId；子代理返回建议，由主导演核对后保存。`, text_elements: [] as [] }] : [])], ...(outputSchema ? skillDraftTurnSettings() : turnSettings(permissionMode)), ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(outputSchema ? { outputSchema } : {}) }, Boolean(outputSchema));
             const turnId = turn.id;
             if (!turnId) throw new Error("Codex app-server 没有返回 turn id");
             pendingStart.turnId = turnId;
             this.currentTurnId = turnId;
+            beginTurnTrace(turnCacheKey(threadId, turnId), turnRequestStartedAt);
             this.notifyTurnStarted(threadId, turnId, pendingStart);
             const turnKey = turnCacheKey(threadId, turnId);
             const completed = this.completedTurns.get(turnKey);
@@ -307,14 +366,15 @@ export class CodexAppClient {
             throw error;
         } finally {
             if (this.pendingTurnStart === pendingStart) this.pendingTurnStart = undefined;
+            if (this.turnRequestStartedAt.get(threadId) === turnRequestStartedAt) this.turnRequestStartedAt.delete(threadId);
             if (pendingStart.turnId) this.startedTurnKeys.delete(turnCacheKey(threadId, pendingStart.turnId));
         }
     }
 
     /** 在静默线程中生成结构化输出。 */
-    async generateSkillDraft(threadId: string, prompt: string, outputSchema: JsonRecord, model?: string, effort?: CodexReasoningEffort) {
+    async generateSkillDraft(threadId: string, prompt: string, outputSchema: JsonRecord, model?: string, effort?: CodexReasoningEffort, images: string[] = []) {
         this.silentThreadIds.add(threadId);
-        const result = await this.startTurn(threadId, prompt, [], "request", model, effort, undefined, undefined, undefined, outputSchema);
+        const result = await this.startTurn(threadId, prompt, images, "request", model, effort, undefined, undefined, undefined, outputSchema);
         const output = String(field(result, "output") || "").trim();
         if (!output) throw new Error("Codex 没有返回 Skill 草稿");
         return output;
@@ -388,11 +448,22 @@ export class CodexAppClient {
     }
 
     /** 按行解析 app-server 标准输出。 */
-    private read(chunk: string) {
-        this.buffer += chunk;
-        const lines = this.buffer.split(/\r?\n/);
-        this.buffer = lines.pop() || "";
-        lines.filter(Boolean).forEach((line) => {
+    private read(chunk: string | Buffer) {
+        const text = typeof chunk === "string" ? chunk : this.outputDecoder.write(chunk);
+        let start = 0;
+        let end: number;
+        // 仅扫描新到的块；长 JSON 响应未结束时不反复拼接和扫描完整前缀。
+        while ((end = text.indexOf("\n", start)) >= 0) {
+            const fragment = text.slice(start, end);
+            let line = fragment;
+            if (this.buffer.length) {
+                this.buffer.push(fragment);
+                line = this.buffer.join("");
+                this.buffer = [];
+            }
+            start = end + 1;
+            if (line.endsWith("\r")) line = line.slice(0, -1);
+            if (!line) continue;
             try {
                 this.handle(JSON.parse(line) as JsonRecord);
             } catch (error) {
@@ -401,7 +472,8 @@ export class CodexAppClient {
                     this.emit("agent_log", { text: line });
                 }
             }
-        });
+        }
+        if (start < text.length) this.buffer.push(text.slice(start));
     }
 
     /** 分派单条 JSON-RPC 响应、请求或通知。 */
@@ -482,6 +554,14 @@ export class CodexAppClient {
         const event = normalizeCodexNotification(method, params);
         if (!event) return;
         const eventScope = codexEventScope(params);
+        const traceThreadId = String(field(event, "thread_id") || field(params, "threadId") || this.currentThreadId);
+        const traceTurnId = String(field(event, "turn_id") || field(params, "turnId") || this.currentTurnId);
+        if (traceThreadId && traceTurnId) {
+            const traceKey = turnCacheKey(traceThreadId, traceTurnId);
+            beginTurnTrace(traceKey, this.turnRequestStartedAt.get(traceThreadId) ?? Date.now());
+            markFirstEvent(traceKey);
+            countTurnEvent(traceKey);
+        }
         if (event.type === "item.started" || event.type === "item.completed") {
             const item = field(event, "item") as JsonRecord | undefined;
             const id = String(field(item, "id") || "");
@@ -524,6 +604,7 @@ export class CodexAppClient {
             const turnId = String(field(turn, "id") || field(params, "turnId") || "");
             const threadId = String(field(params, "threadId") || field(event, "thread_id") || "");
             const planKey = turnCacheKey(threadId, turnId);
+            markTurnCompleted(planKey);
             const plan = this.plansByTurn.get(planKey);
             if (plan) this.plansByTurn.set(planKey, { ...plan, turnStatus: String(field(turn, "status") || "completed") });
             if (threadId && turnId) {
@@ -643,6 +724,7 @@ export class CodexAppClient {
             this.currentThreadId = "";
             this.currentTurnId = "";
         }
+        endTurnTrace(turnKey);
         this.emit("agent_done", { agent: "codex", usage: event.usage, ...eventScope });
     }
 
@@ -945,6 +1027,11 @@ function parseMaybeJson(value: unknown) {
     } catch {
         return value;
     }
+}
+
+function productionThreadSettings(cwd: string) {
+    return { ...skillDraftThreadSettings(cwd), ephemeral: false,
+        developerInstructions: "你是场次制作或导演审核工作者。只返回请求的结构化结果；不修改文件，不调用生成工具，不创建或委派其他代理，不改变共同资产或其他场次。源事实来自输入工作包。完整创作字段不得用摘要代替。证据缺失返回未决项，审核不能猜测通过。" };
 }
 
 function isPaginatedThreadReadError(error: unknown) {

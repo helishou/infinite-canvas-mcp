@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { App, Button, Tooltip } from "antd";
 import dayjs from "dayjs";
-import { Bot, History, MessageSquare, PanelRightClose, PlugZap, Plus, Sparkles, Terminal } from "lucide-react";
+import { Bot, History, LocateFixed, MessageSquare, Minus, PanelRightClose, PlugZap, Plus, Sparkles, Terminal } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
 import { readAgentUrlBootstrap } from "@/lib/agent/agent-url-bootstrap";
-import { CANVAS_CREATIVE_SKILL_NAME, creativeLaunchPrompt } from "@/lib/agent/creative-launch";
+import { ACHENG_DIRECTOR_SKILL_NAME, findProjectAchengDirectorSkill, creativeLaunchPrompt } from "@/lib/agent/creative-launch";
 import { selectAvailableAgentModel } from "@/lib/agent/agent-model-selection";
+import { enqueueAgentPrompt } from "@/lib/agent/agent-prompt-queue";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
 import { imageMetadata } from "@/lib/canvas/canvas-node-factory";
@@ -20,14 +21,21 @@ import { uploadImage } from "@/services/image-storage";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useAgentSkillStore } from "@/stores/use-agent-skill-store";
 import { useShallow } from "zustand/react/shallow";
-import { useAgentStore, type AgentAttachment, type AgentBootstrapStatus, type AgentCanvasContext, type AgentCanvasReference, type AgentChatItem, type AgentConversationState, type AgentCreativeLaunch, type AgentModel, type AgentPendingApproval, type AgentPendingToolCall, type AgentPermissionMode, type AgentReasoningEffort, type AgentThreadSummary } from "@/stores/use-agent-store";
+import { flushAgentPromptQueue, hydrateAgentPromptQueue, useAgentStore, type AgentAttachment, type AgentBootstrapStatus, type AgentCanvasContext, type AgentCanvasReference, type AgentChatItem, type AgentConversationState, type AgentCreativeLaunch, type AgentModel, type AgentPendingApproval, type AgentPendingToolCall, type AgentPermissionMode, type AgentQueuedPrompt, type AgentQueuedPromptPayload, type AgentReasoningEffort, type AgentScopedTask, type AgentThreadSummary } from "@/stores/use-agent-store";
 import { useBackendStore } from "@/stores/use-backend-store";
-import { discoverBackendToken } from "@/services/backend-api";
+import { useConfigStore } from "@/stores/use-config-store";
+import { discoverBackendToken, editEpisodeProduction, fetchEpisodeProduction, fetchProductionReadiness } from "@/services/backend-api";
+import { productionPresentationPath, productionTarget } from "@/lib/production-navigation";
+import { useProductionFollowStore } from "@/stores/use-production-follow-store";
+import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
+import { productionObjectForPresentation, productionObjectPath, productionObjectPrompt } from "@/lib/production-object";
 import { type CanvasAgentOp, type CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 import { isSiteTool, runSiteTool } from "@/lib/agent/agent-site-tools";
 import { acknowledgeCodexHistory, activateAgentClient, AgentApiError, fetchAgentJson, interruptCodexTurn, postCodexApproval, postState, postToolResult } from "@/services/api/canvas-agent";
 import { AgentChatTimeline, AgentTaskProgress, AgentUsageBar } from "./agent-chat";
 import { AgentChatComposer } from "./agent-chat-composer";
+import { AgentChatQueue } from "./agent-chat-queue";
+import { useAgentPromptQueue, type AgentPromptSubmissionResult } from "./use-agent-prompt-queue";
 import { AgentConnectView } from "./agent-connect-view";
 import {
     activityDeltaFallback,
@@ -85,8 +93,9 @@ type AgentThreadResponse = { ok?: boolean; workspace?: AgentWorkspace; conversat
 type AgentWorkspaceResponse = { ok?: boolean; workspace?: AgentWorkspace; conversation?: AgentConversationState };
 type AgentTurnResponse = { ok?: boolean; threadId?: string };
 type AgentCodexState = { busy?: boolean; threadId?: string; turnId?: string };
+type AgentRuntimeState = { instanceId: string; revision: number; heartbeatIntervalMs?: number; conversation: AgentConversationState; codex: AgentCodexState; pendingApprovals: AgentPendingApproval[] };
 
-type AgentHelloEvent = { ok?: boolean; protocolVersion?: number; clientId?: string; workspace?: { activeThreadId?: string }; conversation?: AgentConversationState; codex?: AgentCodexState; pendingApprovals?: AgentPendingApproval[] };
+type AgentHelloEvent = { ok?: boolean; protocolVersion?: number; clientId?: string; workspace?: { activeThreadId?: string }; conversation?: AgentConversationState; codex?: AgentCodexState; pendingApprovals?: AgentPendingApproval[]; runtime?: AgentRuntimeState };
 type AgentWorkspaceEvent = { activeThreadId?: string; threadId?: string; sourceClientId?: string; emptyThread?: boolean; draftThread?: boolean; conversation?: AgentConversationState };
 type AgentChatEvent = { threadId?: string; turnId?: string; sourceClientId?: string; replayed?: boolean; message?: AgentChatItem };
 type AgentBootstrapEvent = { type?: "codex.preparing" | "codex.prepare_failed" | "mcp.startup" | "mcp.complete"; phase?: "preheat" | "runtime"; threadId?: string; name?: string; status?: "starting" | "ready" | "failed" | "cancelled"; error?: string | null; failureReason?: string | null };
@@ -125,7 +134,10 @@ function conversationBootstrapView(conversation: AgentConversationState) {
     return { bootstrapStatus, mcpStartupStatuses };
 }
 
-export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?: boolean; headless?: boolean; autoConnect?: boolean }) {
+export function LocalAgentPanel({ embedded, headless, autoConnect, compact, headerAction }: { embedded?: boolean; headless?: boolean; autoConnect?: boolean; compact?: boolean; headerAction?: ReactNode }) {
+    const configuredChannels = useConfigStore(state => state.config.channels);
+    const [legacyHistory, setLegacyHistory] = useState(false);
+    const legacyHistoryRef = useRef(false);
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { message, modal } = App.useApp();
@@ -136,7 +148,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
     // canvasContext is intentionally excluded because project updates it every frame during dragging and resizing.
     // The panel uses it only for ref synchronization and debounced postState calls, never during rendering.
     // Subscribing here would rerender the panel every frame and amplify the #185 crash, so it is observed imperatively below.
-    const { width, url, token, connected, enabled, prompt, attachments, sending, waiting, tokenUsage, eventLogs, threads, activeThreadId, workspacePath, loadingThreads, activeTab, confirmTools, permissionMode, models, model, reasoningEffort, activity, conversation, connectError, pendingTool, pendingApprovals, creativeLaunch } = useAgentStore(
+    const { width, url, token, connected, enabled, prompt, attachments, sending, waiting, tokenUsage, eventLogs, threads, activeThreadId, workspacePath, loadingThreads, activeTab, confirmTools, permissionMode, models, model, reasoningEffort, activity, conversation, connectError, pendingTool, pendingApprovals, creativeLaunch, scopedTask, queuedPrompts, pausedPromptQueueScopes, codexRuntime } = useAgentStore(
         useShallow((state) => ({
             width: state.width,
             url: state.url,
@@ -165,10 +177,29 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             pendingTool: state.pendingTool,
             pendingApprovals: state.pendingApprovals,
             creativeLaunch: state.creativeLaunch,
+            scopedTask: state.scopedTask,
+            queuedPrompts: state.queuedPrompts,
+            pausedPromptQueueScopes: state.pausedPromptQueueScopes,
+            codexRuntime: state.codexRuntime,
         })),
     );
     const setAgentState = useAgentStore((state) => state.setAgentState);
+    const setCodexRuntime = useAgentStore((state) => state.setCodexRuntime);
+    const productionFollow = useProductionFollowStore(state => state.target);
+    const productionPresentation = useProductionFollowStore(state => state.presentation);
+    const followingProduction = useProductionFollowStore(state => state.following);
+    const draftObject = useAgentStore(state => state.productionDraftObject);
+    const turnObject = useAgentStore(state => state.productionTurnObject);
+    const unscopedDraft = useAgentStore(state => !state.productionDraftObject && Boolean(state.prompt.trim() || state.attachments.length || state.canvasReferences.length));
+    const hasCanvasSelection = useAgentStore(state => Boolean(state.canvasContext?.snapshot.selectedNodeIds.length));
+    const selectedObject = useProductionWorkspaceStore(state => state.selectedObject);
+    const workspacePresentation = useProductionWorkspaceStore(state => state.readiness?.presentation);
+    const workspaceProduction = useProductionWorkspaceStore(state => state.production);
+    const chatObject = draftObject || ((sending || waiting) ? turnObject : null) || (!unscopedDraft ? selectedObject || (!hasCanvasSelection && workspacePresentation ? productionObjectForPresentation(workspacePresentation, workspaceProduction) : null) : null);
     const conversationReady = conversation.status === "ready" || conversation.status === "warning";
+    const queueBusy = codexRuntime.busy || waiting || conversation.status === "running";
+    const queueWaiting = waiting || (codexRuntime.busy && codexRuntime.threadId === activeThreadId);
+    const conversationCanAcceptInput = conversationReady || conversation.status === "running";
     const conversationBusy = conversation.status === "preparing" || conversation.status === "running";
     const closePanel = useAgentStore((state) => state.closePanel);
     const pushMessage = useAgentStore((state) => state.addMessage);
@@ -177,6 +208,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
     const loadSkills = useAgentSkillStore((state) => state.loadSkills);
     const clearSkillSelection = useAgentSkillStore((state) => state.clearSelection);
     const skillCount = useAgentSkillStore((state) => state.skills.length);
+    const skillsLoaded = useAgentSkillStore((state) => state.loaded);
     const messageCount = useAgentStore((state) => state.messages.length);
     const canvasContextRef = useRef<AgentCanvasContext | null>(useAgentStore.getState().canvasContext);
     const confirmToolsRef = useRef(confirmTools);
@@ -189,11 +221,16 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
     const attachmentUrlsRef = useRef(new Set<string>());
     const clientIdRef = useRef("");
     const [clientReady, setClientReady] = useState(false);
+    const [reconnectEpoch, setReconnectEpoch] = useState(0);
     const loadThreadsSequenceRef = useRef(0);
     const threadMessagesRef = useRef(new Map<string, AgentChatItem[]>());
     const authoritativeHistoryTurnsRef = useRef(new Set<string>());
     const liveTurnKeysRef = useRef(new Set<string>());
+    const runtimeCursorRef = useRef<{ instanceId: string; revision: number } | null>(null);
+    const runtimeRequestSequenceRef = useRef(0);
+    const [runtimeHeartbeatMs, setRuntimeHeartbeatMs] = useState(0);
     const threadOperationRef = useRef(0);
+    const scopedTaskOperationRef = useRef("");
     const threadOperationSequenceRef = useRef(0);
     const endpoint = useMemo(() => url.trim().replace(/\/$/, ""), [url]);
     const backendUrl = useBackendStore((state) => state.url);
@@ -201,14 +238,17 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
     const urlAgentAutoConnect = searchParams.has("agentUrl") && searchParams.has("agentToken");
     useEffect(() => {
         let disposed = false;
-        void acquireAgentClientId().then((clientId) => {
+        void acquireAgentClientId().then(async (clientId) => {
+            if (disposed) return;
+            try { await hydrateAgentPromptQueue(endpoint, clientId); }
+            catch { message.error(i18n.t("agent.queue.storageFailed")); }
             if (!disposed) {
                 clientIdRef.current = clientId;
                 setClientReady(true);
             }
         });
         return () => { disposed = true; };
-    }, []);
+    }, [endpoint, message]);
     const loadThreadSnapshot = useCallback(async (threadId: string, sequence: number, response?: AgentThreadResponse, expectedTurnId = "") => {
         let thread = response;
         let lastError: unknown;
@@ -228,12 +268,13 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             if (sequence !== loadThreadsSequenceRef.current || latest.activeThreadId !== threadId) return false;
             const historyTurns = authoritativeHistoryTurnKeys(threadId, thread.settledTurnIds || []);
             const hasExpectedTurn = !expectedTurnId || historyTurns.has(`${threadId}\0${expectedTurnId}`);
+            const activeTurnSettled = Boolean(latest.activeTurnId && historyTurns.has(`${threadId}\0${latest.activeTurnId}`));
             historyTurns.forEach((key) => liveTurnKeysRef.current.delete(key));
-            if (latest.activeTurnId) liveTurnKeysRef.current.add(`${threadId}\0${latest.activeTurnId}`);
+            if (latest.activeTurnId && !activeTurnSettled) liveTurnKeysRef.current.add(`${threadId}\0${latest.activeTurnId}`);
             authoritativeHistoryTurnsRef.current = historyTurns;
             const messages = mergeAgentMessages(history, latest.messages, threadId, liveTurnKeysRef.current);
             threadMessagesRef.current.set(threadId, messages);
-            setAgentState({ messages, connectError: "" });
+            setAgentState({ messages, connectError: "", ...(activeTurnSettled ? { waiting: false, sending: false, activeTurnId: "", pendingTool: null, pendingApprovals: [], activity: history.some(item => item.turnId === latest.activeTurnId && item.role === "error") ? rt("processingFailed") : rt("completed") } : {}) });
             const coveredTurnIds = [...historyTurns].map((key) => key.slice(threadId.length + 1));
             if (coveredTurnIds.length) void acknowledgeCodexHistory(endpoint, token, threadId, coveredTurnIds).catch(() => undefined);
             if (hasExpectedTurn && (thread.historyReady !== false || Boolean(expectedTurnId))) return true;
@@ -300,7 +341,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
         let sequence = ++loadThreadsSequenceRef.current;
         setAgentState({ loadingThreads: true });
         try {
-            const data = await fetchAgentJson<AgentThreadsResponse>(endpoint, token, `/codex/threads`);
+            const data = await fetchAgentJson<AgentThreadsResponse>(endpoint, token, `/codex/threads?source=${legacyHistoryRef.current ? "codex" : "llm"}`);
             if (sequence !== loadThreadsSequenceRef.current) return;
             if (data.conversation) {
                 applyConversationState(data.conversation);
@@ -323,6 +364,63 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             if (sequence === loadThreadsSequenceRef.current && !threadOperationRef.current) setAgentState({ loadingThreads: false });
         }
     }, [applyConversationState, applyWorkspaceChange, endpoint, loadThreadSnapshot, setAgentState, token]);
+
+    useEffect(() => {
+        if (!activeThreadId) return;
+        const legacy = !activeThreadId.startsWith("llm-");
+        legacyHistoryRef.current = legacy;
+        setLegacyHistory(legacy);
+        void loadThreads(true);
+    }, [activeThreadId, loadThreads]);
+
+    const applyRuntimeState = useCallback((snapshot: AgentRuntimeState, allowNewInstance = false) => {
+        if (!snapshot?.instanceId || !Number.isInteger(snapshot.revision) || snapshot.revision < 1 || !snapshot.conversation || !snapshot.codex) return;
+        const cursor = runtimeCursorRef.current;
+        const newInstance = cursor?.instanceId !== snapshot.instanceId;
+        if (cursor && (newInstance && !allowNewInstance || !newInstance && snapshot.revision < cursor.revision)) return;
+        const before = useAgentStore.getState();
+        if (!newInstance && !snapshot.codex.busy && snapshot.codex.threadId === before.activeThreadId && snapshot.codex.turnId && before.activeTurnId && snapshot.codex.turnId !== before.activeTurnId) return;
+        runtimeCursorRef.current = { instanceId: snapshot.instanceId, revision: snapshot.revision };
+        setCodexRuntime({ instanceId: snapshot.instanceId, revision: snapshot.revision, busy: Boolean(snapshot.codex.busy), threadId: String(snapshot.codex.threadId || ""), turnId: String(snapshot.codex.turnId || "") });
+        if (Number.isInteger(snapshot.heartbeatIntervalMs) && snapshot.heartbeatIntervalMs! > 0) setRuntimeHeartbeatMs(snapshot.heartbeatIntervalMs!);
+        applyConversationState(snapshot.conversation, newInstance);
+        const current = useAgentStore.getState();
+        const busy = Boolean(snapshot.codex.busy && snapshot.codex.threadId === current.activeThreadId);
+        const activeTurnId = busy ? snapshot.codex.turnId || "" : "";
+        if (activeTurnId) liveTurnKeysRef.current.add(`${current.activeThreadId}\0${activeTurnId}`);
+        const pendingApprovals = busy ? (snapshot.pendingApprovals || []).filter(item => !item.threadId || item.threadId === current.activeThreadId) : [];
+        const keepSending = current.sending && !busy && !newInstance;
+        if (!busy) pendingToolRef.current = null;
+        setAgentState({ waiting: busy, sending: keepSending, activeTurnId, pendingApprovals, connectError: "", ...(!busy ? { pendingTool: null } : {}),
+            activity: pendingApprovals.length ? rt("awaitingApproval") : busy ? rt("codexRunning") : current.activity === rt("processingFailed") ? current.activity : rt("connected") });
+        if (!busy && before.activeThreadId === current.activeThreadId && (before.waiting || before.activeTurnId)) void loadThreads(false, before.activeTurnId);
+    }, [applyConversationState, loadThreads, setAgentState, setCodexRuntime]);
+
+    const reconcileRuntimeState = useCallback(async () => {
+        const sequence = ++runtimeRequestSequenceRef.current;
+        const cursor = runtimeCursorRef.current;
+        const state = useAgentStore.getState();
+        try {
+            const response = await fetchAgentJson<{ runtime?: AgentRuntimeState; codexBusy?: boolean; conversation?: AgentConversationState }>(endpoint, token, cursor ? "/codex/state" : "/health");
+            if (sequence !== runtimeRequestSequenceRef.current || useAgentStore.getState().activeThreadId !== state.activeThreadId) return;
+            if (response.runtime) applyRuntimeState(response.runtime, cursor === runtimeCursorRef.current);
+            else if (response.conversation?.threadId === state.activeThreadId && typeof response.codexBusy === "boolean") {
+                const latest = useAgentStore.getState();
+                if (latest.activeTurnId !== state.activeTurnId || latest.sending || response.conversation.revision < latest.conversation.revision) return;
+                applyConversationState(response.conversation);
+                setCodexRuntime({ instanceId: latest.codexRuntime.instanceId || "legacy", revision: Math.max(latest.codexRuntime.revision + 1, response.conversation.revision), busy: response.codexBusy, threadId: response.conversation.threadId, turnId: latest.codexRuntime.turnId || latest.activeTurnId });
+                if (response.codexBusy && response.conversation.status === "running") setAgentState({ waiting: true });
+                else if (!response.codexBusy && response.conversation.status !== "running") {
+                    if (state.activeTurnId) await loadThreads(false, state.activeTurnId);
+                    else setAgentState({ waiting: false });
+                }
+            } else if (state.activeTurnId) await loadThreads(false, state.activeTurnId);
+        } catch {
+            // Older servers still support history reconciliation; failures never imply completion.
+            if (sequence !== runtimeRequestSequenceRef.current) return;
+            setAgentState({ activity: rt("conversationSyncFailed"), connectError: rt("conversationSyncFailed") });
+        }
+    }, [applyConversationState, applyRuntimeState, endpoint, loadThreads, setAgentState, setCodexRuntime, token]);
     // Imperatively subscribe to canvasContext to keep the ref current and debounce snapshot reports without rerendering the panel.
     useEffect(() => {
         let timer: ReturnType<typeof setTimeout> | null = null;
@@ -350,8 +448,13 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
         if (!clientReady || !enabled || !token.trim()) return;
         const clientId = clientIdRef.current;
         let disposed = false;
+        connectedRef.current = false;
+        setAgentState({ connected: false });
         let protocolRejected = false;
         let eventQueue = Promise.resolve();
+        runtimeCursorRef.current = null;
+        setRuntimeHeartbeatMs(0);
+        runtimeRequestSequenceRef.current++;
         const isCurrentConnection = () => !disposed && clientIdRef.current === clientId;
         const enqueueEvent = (task: () => void | Promise<void>) => {
             eventQueue = eventQueue.then(async () => {
@@ -384,9 +487,18 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                 if (!headless) message.error(text);
                 return;
             }
+            const previousRuntime = useAgentStore.getState();
             const codex = hello?.codex;
             const busy = Boolean(codex?.busy);
             const nextThreadId = hello?.conversation?.threadId ?? hello?.workspace?.activeThreadId ?? useAgentStore.getState().activeThreadId;
+            const previousCodex = useAgentStore.getState().codexRuntime;
+            setCodexRuntime({
+                instanceId: hello?.runtime?.instanceId || previousCodex.instanceId || "legacy",
+                revision: hello?.runtime?.revision || previousCodex.revision + 1,
+                busy,
+                threadId: codex?.threadId || nextThreadId,
+                turnId: codex?.turnId || "",
+            });
             if (hello?.conversation) applyConversationState(hello.conversation, true);
             else applyWorkspaceChange({ activeThreadId: nextThreadId });
             const current = useAgentStore.getState();
@@ -413,10 +525,12 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                 pendingApprovals,
             });
             if (!headless) message.success(rt("localAgentConnected"));
+            if (hello?.runtime) applyRuntimeState(hello.runtime, true);
+            if (!busy && previousRuntime.activeThreadId === nextThreadId && previousRuntime.activeTurnId) void loadThreads(false, previousRuntime.activeTurnId);
             void postState(endpoint, token, clientId, canvasContextRef.current?.snapshot || null);
             if (document.visibilityState === "visible" && document.hasFocus()) void activateAgentClient(endpoint, token, clientId);
             if (!busy && !nextThreadId && (!hello?.conversation || hello.conversation.status === "idle")) {
-                void fetchAgentJson<AgentWorkspaceResponse>(endpoint, token, "/codex/threads/reset", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientId, permissionMode }) })
+                void fetchAgentJson<AgentWorkspaceResponse>(endpoint, token, "/codex/threads/reset", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientId, permissionMode, model: useAgentStore.getState().model }) })
                     .then((result) => result.conversation && applyConversationState(result.conversation))
                     .catch((error) => {
                         const state = agentErrorState(error);
@@ -426,6 +540,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             }
         });
         source.addEventListener("codex_state", (event) => {
+            if (runtimeCursorRef.current) return; // Modern servers send a versioned, complete runtime snapshot.
             const data = parseEventData<AgentCodexState>(event);
             if (!data) return;
             enqueueEvent(async () => {
@@ -433,9 +548,11 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                 const current = useAgentStore.getState();
                 const appliesToCurrentThread = !data.threadId || data.threadId === current.activeThreadId;
                 if (!appliesToCurrentThread) return;
+                if (data.turnId && current.activeTurnId && data.turnId !== current.activeTurnId && !busy) return;
                 const turnId = data.turnId || current.activeTurnId;
                 if (turnId) liveTurnKeysRef.current.add(`${current.activeThreadId}\0${turnId}`);
                 const activeTurnId = busy ? turnId : "";
+                setCodexRuntime({ instanceId: current.codexRuntime.instanceId || "legacy", revision: current.codexRuntime.revision + 1, busy, threadId: data.threadId || current.activeThreadId, turnId });
                 const messages = activeTurnId ? bindPendingTurnMessages(current.messages, current.activeThreadId, activeTurnId) : current.messages;
                 setAgentState({
                     activity: busy ? rt("codexRunning") : current.activity === rt("processingFailed") ? rt("processingFailed") : rt("completed"),
@@ -446,6 +563,15 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                 });
                 if (!busy && current.waiting) void loadThreads(false, turnId);
             });
+        });
+        source.addEventListener("runtime_state", event => {
+            const snapshot = parseEventData<AgentRuntimeState>(event);
+            if (snapshot) enqueueEvent(() => applyRuntimeState(snapshot));
+        });
+        source.addEventListener("ping", event => {
+            const ping = parseEventData<{ runtime?: AgentRuntimeState }>(event);
+            if (ping?.runtime) enqueueEvent(() => applyRuntimeState(ping.runtime!));
+            else if (isCurrentConnection() && useAgentStore.getState().waiting) void reconcileRuntimeState();
         });
         source.addEventListener("tool_call", (event) => {
             if (!isCurrentConnection()) return;
@@ -587,12 +713,14 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
         };
         return () => {
             disposed = true;
+            runtimeRequestSequenceRef.current++;
             source.close();
             connectedRef.current = false;
+            setAgentState({ connected: false });
             loadThreadsSequenceRef.current += 1;
             useAgentSkillStore.getState().reset();
         };
-    }, [applyConversationState, applyWorkspaceChange, clientReady, enabled, endpoint, loadSkills, loadThreads, message, setAgentState, token]);
+    }, [applyConversationState, applyRuntimeState, applyWorkspaceChange, clientReady, enabled, endpoint, loadSkills, loadThreads, message, reconnectEpoch, reconcileRuntimeState, setAgentState, token]);
 
     useEffect(() => {
         if (connected) void loadThreads();
@@ -617,41 +745,67 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                 addEventLog(rt("modelListFailed"), error);
             });
         return () => { disposed = true; };
-    }, [connected, endpoint, setAgentState, token]);
+    }, [activeThreadId, configuredChannels, connected, endpoint, setAgentState, token]);
 
     useEffect(() => {
         if (!connected) return;
-        const activate = () => void activateAgentClient(endpoint, token, clientIdRef.current);
+        const reconcileIfRunning = () => {
+            const current = useAgentStore.getState();
+            if (current.waiting || current.conversation.status === "running" || current.queuedPrompts.length || current.codexRuntime.busy) void reconcileRuntimeState();
+        };
+        const activate = () => {
+            void activateAgentClient(endpoint, token, clientIdRef.current);
+            reconcileIfRunning();
+        };
         const activateVisible = () => {
             if (document.visibilityState === "visible") activate();
         };
         window.addEventListener("focus", activate);
         document.addEventListener("visibilitychange", activateVisible);
+        const timer = runtimeHeartbeatMs ? window.setInterval(reconcileIfRunning, runtimeHeartbeatMs) : null;
         return () => {
+            if (timer) window.clearInterval(timer);
             window.removeEventListener("focus", activate);
             document.removeEventListener("visibilitychange", activateVisible);
         };
-    }, [connected, endpoint, token]);
-    const sendPrompt = async (launch?: AgentCreativeLaunch): Promise<boolean> => {
-        const text = launch?.text.trim() || prompt.trim();
-        const files = attachments;
+    }, [connected, endpoint, reconcileRuntimeState, runtimeHeartbeatMs, token]);
+    const sendPromptSource = async (launch?: AgentCreativeLaunch, scopedTaskInput?: AgentScopedTask, queuedItem?: AgentQueuedPrompt): Promise<boolean | AgentPromptSubmissionResult> => {
+        const queuedPayload = queuedItem?.payload;
+        const text = queuedPayload ? queuedPayload.text.trim() : scopedTaskInput?.text.trim() || launch?.text.trim() || prompt.trim();
+        const files = queuedPayload?.attachments || (scopedTaskInput ? [] : attachments);
         const skillState = useAgentSkillStore.getState();
-        const inheritedSkill = useAgentStore.getState().messages.some((item) => item.role === "user" && item.skill?.name === CANVAS_CREATIVE_SKILL_NAME)
-            ? skillState.skills.find((item) => item.name === CANVAS_CREATIVE_SKILL_NAME && item.enabled) || null
+        const inheritedSkill = useAgentStore.getState().messages.some((item) => item.role === "user" && item.skill?.name === ACHENG_DIRECTOR_SKILL_NAME)
+            ? findProjectAchengDirectorSkill(skillState.skills)
             : null;
-        const selectedSkill = launch
-            ? skillState.skills.find((item) => item.name === CANVAS_CREATIVE_SKILL_NAME && item.enabled) || null
-            : skillState.selectedSkill || inheritedSkill;
+        const selectedSkill = queuedPayload?.skill ? { name: queuedPayload.skill.name, path: queuedPayload.skill.path, interface: { displayName: queuedPayload.skill.displayName } } : queuedItem ? null : scopedTaskInput
+            ? findProjectAchengDirectorSkill(skillState.skills)
+            : launch
+                ? findProjectAchengDirectorSkill(skillState.skills)
+                : skillState.selectedSkill || inheritedSkill;
         const selectedSkillRevision = skillState.selectionRevision;
         const currentState = useAgentStore.getState();
         const canvasNodeIds = new Set(currentState.canvasContext?.snapshot.nodes.map((node) => node.id) || []);
-        const canvasReferences = currentState.canvasReferences.filter((item) => canvasNodeIds.has(item.nodeId));
-        if (canvasReferences.length !== currentState.canvasReferences.length) {
+        const canvasReferenceCandidates = queuedPayload?.canvasReferences || (scopedTaskInput ? [] : currentState.canvasReferences);
+        const canvasReferences = canvasReferenceCandidates.filter((item) => canvasNodeIds.has(item.nodeId));
+        if (queuedPayload && canvasReferences.length !== canvasReferenceCandidates.length) return { status: "failed", error: t("agent.queue.contextChanged") };
+        if (!queuedItem && !scopedTaskInput && canvasReferences.length !== currentState.canvasReferences.length) {
             setAgentState({ canvasReferences });
             message.warning(rt(canvasReferences.length ? "someCanvasReferencesMissing" : "canvasReferencesMissing"));
         }
-        const requestPrompt = promptWithCanvasReferences(promptWithAttachments(launch ? creativeLaunchPrompt(launch) : text, files), canvasReferences);
-        if (!currentState.connected || !requestPrompt || currentState.sending || currentState.waiting || currentState.loadingThreads || !["ready", "warning"].includes(currentState.conversation.status) || (launch && !selectedSkill)) return false;
+        const workspace = useProductionWorkspaceStore.getState();
+        const hasDraft = Boolean(currentState.prompt.trim() || currentState.attachments.length || currentState.canvasReferences.length);
+        const object = queuedPayload ? queuedPayload.productionObject : !scopedTaskInput && !launch ? currentState.productionDraftObject || (!hasDraft ? workspace.selectedObject || (workspace.readiness?.presentation ? productionObjectForPresentation(workspace.readiness.presentation, workspace.production) : null) : null) : null;
+        if (queuedPayload && queuedPayload.canvasProjectId !== (currentState.canvasContext?.snapshot.projectId || "")) return { status: "failed", error: t("agent.queue.contextChanged") };
+        if (object && object.canvasId !== currentState.canvasContext?.snapshot.projectId) {
+            message.warning(t("productionCanvas.returnToDraft"));
+            return queuedItem ? { status: "failed", error: t("agent.queue.contextChanged") } : false;
+        }
+        const basePrompt = queuedPayload
+            ? promptWithCanvasReferences(promptWithAttachments(text, files), canvasReferences)
+            : scopedTaskInput ? text : promptWithCanvasReferences(promptWithAttachments(launch ? creativeLaunchPrompt(launch) : text, files), canvasReferences);
+        const requestPrompt = object ? `${basePrompt}\n\n${productionObjectPrompt(object)}` : basePrompt;
+        const canSend = currentState.connected && Boolean(requestPrompt) && !currentState.sending && !currentState.waiting && !currentState.codexRuntime.busy && !currentState.loadingThreads && ["ready", "warning"].includes(currentState.conversation.status) && !((launch || scopedTaskInput) && !selectedSkill);
+        if (!canSend) return queuedItem ? currentState.codexRuntime.busy || currentState.waiting || currentState.conversation.status === "running" ? { status: "busy" } : { status: "failed", error: t("agent.queue.sendFailed") } : false;
         let referenceImages: AgentAttachment[] = [];
         if (canvasReferences.some((item) => item.kind === "image")) {
             setAgentState({ sending: true, activity: rt("readingCanvasImages") });
@@ -659,43 +813,56 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                 referenceImages = await resolveCanvasReferenceImages(canvasReferences, currentState.canvasContext?.snapshot.nodes || []);
             } catch (error) {
                 setAgentState({ sending: false, activity: rt("canvasImageReadFailed") });
-                addMessage({ role: "error", title: rt("canvasImageReadFailed"), text: error instanceof Error ? error.message : rt("canvasImageReadFailed") });
-                return false;
+                const errorText = error instanceof Error ? error.message : rt("canvasImageReadFailed");
+                if (!queuedItem) addMessage({ role: "error", title: rt("canvasImageReadFailed"), text: errorText });
+                return queuedItem ? { status: "failed", error: errorText } : false;
             }
         }
         const requestFiles = [...files, ...referenceImages.filter((reference) => !files.some((file) => file.dataUrl === reference.dataUrl))];
         if (requestFiles.length > MAX_ATTACHMENTS) {
             setAgentState({ sending: false, activity: rt("tooManyImages") });
-            addMessage({ role: "error", title: rt("tooManyImages"), text: rt("imageCountLimit", { count: MAX_ATTACHMENTS }) });
-            return false;
+            if (!queuedItem) addMessage({ role: "error", title: rt("tooManyImages"), text: rt("imageCountLimit", { count: MAX_ATTACHMENTS }) });
+            return queuedItem ? { status: "failed", error: rt("imageCountLimit", { count: MAX_ATTACHMENTS }) } : false;
         }
         if (attachmentPayloadBytes(requestFiles) > MAX_ATTACHMENT_PAYLOAD_BYTES) {
             setAgentState({ sending: false, activity: rt("imageTooLarge") });
-            addMessage({ role: "error", title: rt("imageTooLarge"), text: rt("imagePayloadTooLarge") });
-            return false;
+            if (!queuedItem) addMessage({ role: "error", title: rt("imageTooLarge"), text: rt("imagePayloadTooLarge") });
+            return queuedItem ? { status: "failed", error: rt("imagePayloadTooLarge") } : false;
         }
-        const messageId = createId();
-        const userText = text || rt(files.length ? "imagesSent" : "canvasReferencesSent", { count: files.length || canvasReferences.length });
+        const messageId = queuedItem?.id || createId();
+        const userText = queuedPayload?.messageText || text || rt(files.length ? "imagesSent" : "canvasReferencesSent", { count: files.length || canvasReferences.length });
         const messageReferences: AgentCanvasReference[] = await Promise.all(canvasReferences.map(async ({ nodeId, label, title, kind, previewUrl, text }) => {
             const image = referenceImages.find((item) => item.id === `canvas:${nodeId}`);
             return { nodeId, label, title, kind, previewUrl: image ? (await createMessageAttachmentMetadata(image)).url : previewUrl, text };
         }));
         const messageSkill = selectedSkill ? { name: selectedSkill.name, path: selectedSkill.path, displayName: selectedSkill.interface?.displayName || undefined } : undefined;
-        const availableModel = models.find((item) => item.model === model);
-        const requestedEffort = availableModel?.supportedReasoningEfforts.some((item) => item.reasoningEffort === reasoningEffort) ? reasoningEffort : undefined;
-        loadThreadsSequenceRef.current += 1;
+        const messageAttachments = await Promise.all(files.map(createMessageAttachmentMetadata));
+        const messageMetadata = {
+            ...(messageAttachments.length ? { attachments: messageAttachments } : {}),
+            ...(messageReferences.length ? { canvasReferences: messageReferences } : {}),
+            ...(messageSkill ? { skill: messageSkill } : {}),
+        };
         const currentBeforeSend = useAgentStore.getState();
-        const requestThreadId = currentBeforeSend.activeThreadId;
-        setAgentState({ prompt: "", attachments: [], canvasReferences: [], activity: rt("sending"), sending: true, loadingThreads: false, activeTurnId: "", messages: currentBeforeSend.messages });
+        const expectedThreadId = queuedItem?.threadId || scopedTaskInput?.threadId || currentBeforeSend.activeThreadId;
+        const expectedConversationId = queuedItem?.conversationId || currentBeforeSend.conversation.conversationId;
+        const sameTarget = currentBeforeSend.activeThreadId === expectedThreadId && currentBeforeSend.conversation.conversationId === expectedConversationId;
+        if (queuedItem && !sameTarget) {
+            setAgentState({ sending: false });
+            return { status: "failed", error: t("agent.queue.conversationChanged") };
+        }
+        const isBusyNow = currentBeforeSend.codexRuntime.busy || currentBeforeSend.waiting || currentBeforeSend.conversation.status === "running";
+        if (isBusyNow || currentBeforeSend.loadingThreads || !["ready", "warning"].includes(currentBeforeSend.conversation.status)) {
+            if (queuedItem) setAgentState({ sending: false });
+            return queuedItem && isBusyNow ? { status: "busy" } : queuedItem ? { status: "failed", error: t("agent.queue.sendFailed") } : false;
+        }
+        const availableModel = currentBeforeSend.models.find((item) => item.model === currentBeforeSend.model);
+        const requestedEffort = availableModel?.supportedReasoningEfforts.some((item) => item.reasoningEffort === currentBeforeSend.reasoningEffort) ? currentBeforeSend.reasoningEffort : undefined;
+        loadThreadsSequenceRef.current += 1;
+        const requestThreadId = expectedThreadId;
+        setAgentState({ ...(!queuedItem && !scopedTaskInput ? { prompt: "", attachments: [], canvasReferences: [] } : {}), productionTurnObject: object, activity: rt("sending"), sending: true, loadingThreads: false, activeTurnId: "", messages: currentBeforeSend.messages });
         addMessage({ id: messageId, itemId: "synthetic:user", clientMessageId: messageId, threadId: requestThreadId, turnId: "", role: "user", text: userText, attachments: files, canvasReferences: messageReferences, skill: messageSkill });
         let threadId = requestThreadId;
         try {
-            const messageAttachments = await Promise.all(files.map(createMessageAttachmentMetadata));
-            const messageMetadata = {
-                ...(messageAttachments.length ? { attachments: messageAttachments } : {}),
-                ...(messageReferences.length ? { canvasReferences: messageReferences } : {}),
-                ...(messageSkill ? { skill: messageSkill } : {}),
-            };
             const modelName = availableModel?.displayName || rt("defaultModel");
             const effortName = requestedEffort ? i18n.t(`agent.composer.effort.${requestedEffort}`) : rt("defaultEffort");
             addEventLog(rt("sendTask"), `${modelName} · ${effortName}${selectedSkill ? ` · Skill ${selectedSkill.name}` : ""}${files.length ? ` · ${rt("attachmentCount", { count: files.length })}` : ""}${canvasReferences.length ? ` · ${rt("canvasReferenceCount", { count: canvasReferences.length })}` : ""} · ${compactText(text) || rt(canvasReferences.length ? "canvasReferencesOnly" : "attachmentsOnly")}`);
@@ -710,7 +877,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                     threadId,
                     conversationId: currentBeforeSend.conversation.conversationId,
                     expectedRevision: currentBeforeSend.conversation.revision,
-                    permissionMode,
+                    permissionMode: queuedPayload?.permissionMode || currentBeforeSend.permissionMode,
                     model: availableModel?.model,
                     effort: requestedEffort,
                     skill: selectedSkill ? { name: selectedSkill.name, path: selectedSkill.path } : undefined,
@@ -720,16 +887,22 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             });
             threadId = accepted.threadId || threadId;
             if (!threadId) throw new Error(rt("startConversationFailed"));
-            if (skillState.selectedSkill) clearSkillSelection(selectedSkillRevision);
+            if (!queuedItem && !scopedTaskInput && skillState.selectedSkill) clearSkillSelection(selectedSkillRevision);
+            if (scopedTaskInput) setAgentState({ scopedTask: null, scopedTaskResult: { id: scopedTaskInput.id, status: "sent", threadId } });
             files.forEach((item) => {
-                URL.revokeObjectURL(item.url);
+                if (item.url.startsWith("blob:")) URL.revokeObjectURL(item.url);
                 attachmentUrlsRef.current.delete(item.url);
             });
-            return true;
+            return queuedItem ? { status: "sent" } : true;
         } catch (error) {
             const text = error instanceof Error ? error.message : rt("sendFailed");
             const response = error instanceof AgentApiError ? error.response as { code?: string; state?: AgentConversationState } : undefined;
-            if (response?.state) applyConversationState(response.state);
+            if (response?.code === "CLIENT_DISCONNECTED" || error instanceof AgentApiError && error.status === 409 && text === "发起任务的网页已断开，请重新连接后再试") {
+                connectedRef.current = false;
+                setAgentState({ connected: false, enabled: true });
+                setReconnectEpoch(value => value + 1);
+            }
+            if (response?.state && response.state.threadId === requestThreadId) applyConversationState(response.state);
             const stale = response?.code === "CONVERSATION_STALE";
             const busy = response?.code === "CONVERSATION_BUSY" || text.includes("Codex 正在运行");
             const state = useAgentStore.getState();
@@ -738,15 +911,16 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                 const next = removeFailedPending(messages);
                 if (next.length !== messages.length) threadMessagesRef.current.set(cachedThreadId, next);
             });
-            const ownsCurrentThread = state.activeThreadId === (threadId || requestThreadId);
-            const restoreDraft = state.prompt || state.attachments.length || state.canvasReferences.length ? {} : { prompt, attachments: files, canvasReferences };
+            const ownsCurrentThread = state.activeThreadId === requestThreadId;
+            if (queuedItem) {
+                if (ownsCurrentThread) setAgentState({ activity: rt(busy ? "codexRunning" : "sendFailed"), sending: false, messages: removeFailedPending(state.messages) });
+                addEventLog(rt("sendFailed"), error);
+                return busy ? { status: "busy" } : { status: "failed", error: text };
+            }
+            const restoreDraft = scopedTaskInput || state.prompt || state.attachments.length || state.canvasReferences.length ? {} : { prompt, attachments: files, canvasReferences, productionDraftObject: object };
+            if (scopedTaskInput) setAgentState({ scopedTask: null, scopedTaskResult: { id: scopedTaskInput.id, status: "failed", threadId: threadId || undefined, error: text } });
             if (ownsCurrentThread) {
-                setAgentState({
-                    activity: rt(stale ? "conversationSynced" : busy ? "codexRunning" : "sendFailed"),
-                    sending: false,
-                    messages: removeFailedPending(state.messages),
-                    ...restoreDraft,
-                });
+                setAgentState({ activity: rt(stale ? "conversationSynced" : busy ? "codexRunning" : "sendFailed"), sending: false, messages: removeFailedPending(state.messages), ...restoreDraft });
                 addMessage({ threadId: state.activeThreadId, turnId: "", role: "error", title: rt(stale ? "conversationSynced" : busy ? "taskStillRunning" : "sendFailed"), text });
             } else {
                 setAgentState({ sending: false, messages: removeFailedPending(state.messages), ...restoreDraft });
@@ -754,6 +928,14 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             addEventLog(rt("sendFailed"), error);
             return false;
         }
+    };
+    const sendPrompt = async (launch?: AgentCreativeLaunch, scopedTaskInput?: AgentScopedTask): Promise<boolean> => {
+        const result = await sendPromptSource(launch, scopedTaskInput);
+        return typeof result === "boolean" ? result : result.status === "sent";
+    };
+    const submitQueuedPrompt = async (item: AgentQueuedPrompt): Promise<AgentPromptSubmissionResult> => {
+        const result = await sendPromptSource(undefined, undefined, item);
+        return typeof result === "boolean" ? result ? { status: "sent" } : { status: "failed", error: t("agent.queue.sendFailed") } : result;
     };
 
     useEffect(() => {
@@ -765,7 +947,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             void fetchAgentJson<AgentWorkspaceResponse>(endpoint, token, "/codex/threads/reset", {
                 method: "POST",
                 headers: { "content-type": "application/json" },
-                body: JSON.stringify({ clientId: clientIdRef.current, permissionMode }),
+                body: JSON.stringify({ clientId: clientIdRef.current, permissionMode, model: useAgentStore.getState().model }),
             }).then((result) => {
                 if (useAgentStore.getState().creativeLaunch?.id !== creativeLaunch.id) return;
                 if (result.conversation) applyConversationState(result.conversation);
@@ -776,6 +958,12 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                 setAgentState({ creativeLaunch: null, loadingThreads: false, prompt: creativeLaunch.text, activity: rt("newConversationFailed") });
                 message.error(error instanceof Error ? error.message : rt("newConversationFailed"));
             });
+            return;
+        }
+        if (creativeLaunch.phase === "send" && !skillsLoaded) return;
+        if (creativeLaunch.phase === "send" && skillsLoaded && !findProjectAchengDirectorSkill(useAgentSkillStore.getState().skills)) {
+            setAgentState({ creativeLaunch: null, loadingThreads: false, prompt: useAgentStore.getState().prompt || creativeLaunch.text });
+            message.warning(i18n.t("productionHub.creative.skillUnavailable"));
             return;
         }
         if (creativeLaunch.phase === "send" && conversationReady && !loadingThreads && !sending && !waiting) {
@@ -790,20 +978,26 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                 message.error(error instanceof Error ? error.message : rt("sendFailed"));
             });
         }
-    }, [applyConversationState, clearSkillSelection, clientReady, connected, conversationReady, creativeLaunch, endpoint, loadingThreads, message, permissionMode, sending, setAgentState, token, waiting]);
+    }, [applyConversationState, clearSkillSelection, clientReady, connected, conversationReady, creativeLaunch, endpoint, loadingThreads, message, permissionMode, sending, setAgentState, skillsLoaded, token, waiting]);
 
     useEffect(() => {
-        if (connected || !creativeLaunch || creativeLaunch.phase === "sending") return;
+        if (connected || enabled || !creativeLaunch || creativeLaunch.phase === "sending") return;
         setAgentState({ creativeLaunch: null, loadingThreads: false, prompt: useAgentStore.getState().prompt || creativeLaunch.text });
-    }, [connected, creativeLaunch, setAgentState]);
+    }, [connected, enabled, creativeLaunch, setAgentState]);
 
     const stopTurn = async () => {
-        if (!connected || (!sending && !waiting)) return;
+        const current = useAgentStore.getState();
+        const activeRuntimeTurn = current.codexRuntime.busy && current.codexRuntime.threadId === current.activeThreadId;
+        if (!current.connected || (!current.sending && !current.waiting && !activeRuntimeTurn)) return;
+        const queueWasPaused = current.pausedPromptQueueScopes.includes(JSON.stringify([current.activeThreadId, current.conversation.conversationId]));
+        current.setPromptQueuePaused(current.activeThreadId, current.conversation.conversationId, true);
         setAgentState({ activity: rt("stopping") });
         try {
-            await interruptCodexTurn(endpoint, token, useAgentStore.getState().activeThreadId || undefined);
+            await interruptCodexTurn(endpoint, token, current.activeThreadId || undefined);
             addEventLog(rt("stopTask"), rt("taskStopped"));
+            void reconcileRuntimeState();
         } catch (error) {
+            if (!queueWasPaused) useAgentStore.getState().setPromptQueuePaused(current.activeThreadId, current.conversation.conversationId, false);
             setAgentState({ activity: rt("stopFailed") });
             addEventLog(rt("stopFailed"), error);
         }
@@ -847,6 +1041,77 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
         setAgentState({ attachments: attachments.filter((item) => item.id !== id) });
     };
 
+    const enqueueCurrentPrompt = async () => {
+        const current = useAgentStore.getState();
+        if (!current.connected || !current.activeThreadId || !current.conversation.conversationId) return;
+        const text = current.prompt.trim();
+        const files = current.attachments;
+        const nodeIds = new Set(current.canvasContext?.snapshot.nodes.map((node) => node.id) || []);
+        const canvasReferences = current.canvasReferences.filter((item) => nodeIds.has(item.nodeId));
+        if (canvasReferences.length !== current.canvasReferences.length) {
+            setAgentState({ canvasReferences });
+            message.warning(rt(canvasReferences.length ? "someCanvasReferencesMissing" : "canvasReferencesMissing"));
+        }
+        if (!text && !files.length && !canvasReferences.length) return;
+        const skillState = useAgentSkillStore.getState();
+        const inheritedSkill = current.messages.some((item) => item.role === "user" && item.skill?.name === ACHENG_DIRECTOR_SKILL_NAME)
+            ? findProjectAchengDirectorSkill(skillState.skills)
+            : null;
+        const selectedSkill = skillState.selectedSkill || inheritedSkill;
+        const workspace = useProductionWorkspaceStore.getState();
+        const hasDraft = Boolean(text || files.length || current.canvasReferences.length);
+        const productionObject = current.productionDraftObject || (!hasDraft ? workspace.selectedObject || (workspace.readiness?.presentation ? productionObjectForPresentation(workspace.readiness.presentation, workspace.production) : null) : null);
+        const canvasProjectId = current.canvasContext?.snapshot.projectId || "";
+        if (productionObject && productionObject.canvasId !== canvasProjectId) {
+            message.warning(t("productionCanvas.returnToDraft"));
+            return;
+        }
+        const payload: AgentQueuedPromptPayload = {
+            text,
+            messageText: text || rt(files.length ? "imagesSent" : "canvasReferencesSent", { count: files.length || canvasReferences.length }),
+            attachments: files.map((item) => ({ ...item, url: item.dataUrl })),
+            canvasReferences: canvasReferences.map((item) => ({ ...item })),
+            canvasProjectId,
+            skill: selectedSkill ? { name: selectedSkill.name, path: selectedSkill.path, displayName: selectedSkill.interface?.displayName || undefined } : undefined,
+            model: current.model,
+            reasoningEffort: current.reasoningEffort,
+            permissionMode: current.permissionMode,
+            productionObject,
+        };
+        const queued = { id: createId(), threadId: current.activeThreadId, conversationId: current.conversation.conversationId, payload, status: "queued" as const };
+        useAgentStore.getState().updatePromptQueue((items) => enqueueAgentPrompt(items, queued));
+        try { await flushAgentPromptQueue(); }
+        catch {
+            message.error(t("agent.queue.storageFailed"));
+            return;
+        }
+        files.forEach((item) => {
+            if (item.url.startsWith("blob:")) URL.revokeObjectURL(item.url);
+            attachmentUrlsRef.current.delete(item.url);
+        });
+        const latest = useAgentStore.getState();
+        if (latest.prompt === current.prompt && latest.attachments === files && latest.canvasReferences === current.canvasReferences) {
+            setAgentState({ prompt: "", attachments: [], canvasReferences: [] });
+        }
+    };
+
+    const promptQueue = useAgentPromptQueue({
+        endpoint,
+        token,
+        connected,
+        activeThreadId,
+        conversationId: conversation.conversationId,
+        conversationStatus: conversation.status,
+        codexBusy: codexRuntime.busy,
+        codexThreadId: codexRuntime.threadId,
+        codexTurnId: codexRuntime.turnId,
+        codexRevision: codexRuntime.revision,
+        sending,
+        loadingThreads,
+        onSubmit: submitQueuedPrompt,
+        onReconcile: reconcileRuntimeState,
+    });
+
     const handleToolCall = async (endpoint: string, token: string, payload: AgentPendingToolCall) => {
         if (confirmToolsRef.current && isCanvasWriteTool(payload.name)) {
             if (pendingToolRef.current) {
@@ -875,14 +1140,42 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             return;
         }
         try {
-            const input: { ops?: CanvasAgentOp[]; path?: string } = payload.input || {};
+            const input: { ops?: CanvasAgentOp[]; path?: string; production?: { kind?: "canvas" | "episode" | "scene"; id?: string; workId?: string; runId?: string } } = payload.input || {};
             addEventLog(toolName(payload.name), payload, payload);
             let result: unknown;
             let appliedOps = input.ops || [];
             if (payload.name === "site_navigate") {
-                const path = input.path || "/";
-                navigate(path);
-                result = { ok: true, path };
+                if (input.production) {
+                    const { kind, id, workId, runId } = input.production;
+                    if (!kind || !id || !workId) throw new Error("制作导航需要真实对象 ID 和当前 workId");
+                    const owner = { kind, id } as const;
+                    const productionOwner = productionTarget(owner);
+                    const [{ readiness }, { production }] = await Promise.all([fetchProductionReadiness(productionOwner, { runId }), fetchEpisodeProduction(productionOwner)]);
+                    const presentation = readiness.presentation;
+                    if (!presentation || presentation.owner.kind !== kind || presentation.owner.id !== id || presentation.workId !== workId) {
+                        throw new Error("Backend 当前制作目标与导航请求不一致；请回读正式工作状态后再导航");
+                    }
+                    const follow = useProductionFollowStore.getState();
+                    const activeThreadId = useAgentStore.getState().activeThreadId;
+                    if (activeThreadId && production.draft.director?.workflow.agentThreadId !== activeThreadId) {
+                        try { await editEpisodeProduction(productionOwner, production.revision, [{ type: "set_director_workflow", patch: { agentThreadId: activeThreadId } }], randomId()); }
+                        catch { /* Navigation remains useful if session association raced with a newer edit. */ }
+                    }
+                    follow.setTarget({ ...owner, workId, runId: presentation.runId || runId, threadId: activeThreadId });
+                    follow.setPresentation(presentation);
+                    const path = productionPresentationPath(presentation);
+                    if (follow.guardReason) follow.setPendingPresentation(presentation);
+                    else {
+                        follow.expectPath(path);
+                        navigate(path, { replace: true });
+                    }
+                    result = { ok: true, owner, workId, presentation, navigated: follow.guardReason ? false : path };
+                } else {
+                    const path = input.path || "/";
+                    useProductionFollowStore.getState().pause("Agent 已导航到其他页面；自动跟随已暂停");
+                    navigate(path);
+                    result = { ok: true, path };
+                }
             } else if (payload.name === "canvas_apply_ops") {
                 const context = canvasContextRef.current;
                 if (!context) throw new Error(rt("openCanvasFirst"));
@@ -1104,7 +1397,9 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
         clearSkillSelection();
         setAgentState({ activeTab: "chat", activity: rt("creatingConversation") });
         try {
-            const result = await fetchAgentJson<AgentWorkspaceResponse>(endpoint, token, "/codex/threads/reset", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientId: clientIdRef.current, permissionMode }) });
+            legacyHistoryRef.current = false;
+            setLegacyHistory(false);
+            const result = await fetchAgentJson<AgentWorkspaceResponse>(endpoint, token, "/codex/threads/reset", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientId: clientIdRef.current, permissionMode, model: useAgentStore.getState().model }) });
             if (threadOperationRef.current !== operation) return;
             if (result.conversation) applyConversationState(result.conversation);
             setAgentState({ activeTab: "chat", activity: rt("newConversation") });
@@ -1139,6 +1434,30 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
         }
     };
 
+    useEffect(() => {
+        if (!scopedTask) { scopedTaskOperationRef.current = ""; return; }
+        if (scopedTaskOperationRef.current === scopedTask.id) return;
+        const current = useAgentStore.getState();
+        const reject = (error: string) => setAgentState({ scopedTask: null, scopedTaskResult: { id: scopedTask.id, status: "failed", error } });
+        if (!current.enabled || !current.connected) { reject(current.connectError || rt("connectionRequired")); return; }
+        if (!clientReady || !useAgentSkillStore.getState().loaded) return;
+        if (!findProjectAchengDirectorSkill(useAgentSkillStore.getState().skills)) { reject(i18n.t("productionHub.creative.skillUnavailable")); return; }
+        if (current.sending || current.waiting || current.loadingThreads || !["ready", "warning"].includes(current.conversation.status)) { reject(rt("codexRunning")); return; }
+        scopedTaskOperationRef.current = scopedTask.id;
+        void (async () => {
+            if (scopedTask.threadId && scopedTask.threadId !== useAgentStore.getState().activeThreadId) {
+                await resumeThread(scopedTask.threadId);
+                const afterResume = useAgentStore.getState();
+                if (afterResume.activeThreadId !== scopedTask.threadId || !["ready", "warning"].includes(afterResume.conversation.status)) {
+                    reject(afterResume.connectError || rt("conversationSynced"));
+                    return;
+                }
+            }
+            const sent = await sendPrompt(undefined, scopedTask);
+            if (!sent && useAgentStore.getState().scopedTask?.id === scopedTask.id) reject(rt("sendFailed"));
+        })().catch(error => reject(error instanceof Error ? error.message : rt("sendFailed")));
+    }, [scopedTask, enabled, connected, clientReady, skillsLoaded, skillCount, sending, waiting, loadingThreads, conversation.status]);
+
     const deleteThreads = async (threadIds: string[]) => {
         if (!connected || !threadIds.length || sending || waiting || loadingThreads) return;
         const operation = beginThreadOperation();
@@ -1147,6 +1466,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             for (const threadId of new Set(threadIds)) {
                 await fetchAgentJson(endpoint, token, `/codex/threads/${encodeURIComponent(threadId)}/delete`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientId: clientIdRef.current }) });
                 threadMessagesRef.current.delete(threadId);
+                useAgentStore.getState().clearPromptQueueForThread(threadId);
                 deletedCount += 1;
             }
             await loadThreads();
@@ -1314,7 +1634,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             return;
         }
         if (event.type === "item.completed" && event.item?.type === "agent_message" && event.item.id) {
-            const scoped = scopeEventChatItem(event, { id: event.item.id, role: "assistant", title: "Codex", text: stringText(event.item.text) }, event.item.id);
+            const scoped = scopeEventChatItem(event, { id: event.item.id, role: "assistant", title: event.agent === "llm" ? event.item.model || "Agent" : "Codex", text: stringText(event.item.text) }, event.item.id);
             const currentMessages = useAgentStore.getState().messages;
             const index = currentMessages.findIndex((message) => message.id === scoped.id);
             if (index >= 0) {
@@ -1383,7 +1703,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
         if (!text) return;
         const itemId = event.item?.id;
         if (!itemId) return;
-        const scoped = scopeEventChatItem(event, { id: itemId, role: "assistant", title: "Codex", text, streamId: itemId }, itemId);
+        const scoped = scopeEventChatItem(event, { id: itemId, role: "assistant", title: event.agent === "llm" ? event.item?.model || "Agent" : "Codex", text, streamId: itemId }, itemId);
         const currentMessages = useAgentStore.getState().messages;
         const index = currentMessages.findIndex((message) => message.id === scoped.id);
         if (index < 0) {
@@ -1397,15 +1717,19 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
     const connectionStatusColor = connectError ? "#dc2626" : connected ? "#16a34a" : enabled ? "#d97706" : theme.node.muted;
     const content = (
         <>
+            {!compact && productionFollow && <div className="flex min-w-0 items-center justify-between gap-2 border-b px-3 py-2 text-xs" style={{ borderColor: theme.node.stroke, background: theme.node.panel }}>
+                <div className="min-w-0"><p className="font-medium">{t("productionHub.follow.current")}</p><p className="truncate text-[11px] opacity-75">{productionPresentation?.reason || productionPresentation?.targetId || productionFollow.id || productionFollow.workId}</p></div>
+                <Button size="small" type="text" onClick={() => followingProduction ? useProductionFollowStore.getState().pause("用户手动暂停自动跟随") : useProductionFollowStore.getState().resume()}>{followingProduction ? t("productionHub.follow.pause") : t("productionHub.follow.return")}</Button>
+            </div>}
             <AgentPanelTabs
                 value={activeTab}
                 theme={theme}
                 leading={
                     <div className="flex items-center gap-1">
-                        <span className="grid size-8 place-items-center">
+                        {headerAction || <span className="grid size-8 place-items-center">
                             <Bot className="size-4" />
-                        </span>
-                        <div className="hidden text-base font-semibold leading-5 @min-[560px]:block">Agent</div>
+                        </span>}
+                        <div className={compact ? "text-sm font-medium" : "hidden text-base font-semibold leading-5 @min-[560px]:block"}>{compact ? t("productionCanvas.director") : "Agent"}</div>
                         <Tooltip title={t("agent.panel.connectionSettings", { status: connectionStatus })} placement="bottom">
                             <Button size="small" type="text" className="!h-8 !w-8 !min-w-8 !px-0 @min-[560px]:!w-auto @min-[560px]:!min-w-0 @min-[560px]:!px-[7px]" aria-label={t("agent.panel.connectionSettingsLabel", { status: connectionStatus })} icon={<PlugZap className="size-3.5" style={{ color: connectionStatusColor }} />} onClick={() => setAgentState({ activeTab: "setup" })}>
                                 <span className="hidden @min-[560px]:inline">{connectionStatus}</span>
@@ -1431,11 +1755,18 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                             </Button>
                         </Tooltip>
                         <Tooltip title={t("agent.panel.collapse")}>
-                            <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" aria-label={t("agent.panel.collapseLabel")} style={{ color: theme.node.muted }} icon={<PanelRightClose className="size-4" />} onClick={closePanel} />
+                            <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" aria-label={t("agent.panel.collapseLabel")} style={{ color: theme.node.muted }} icon={compact ? <Minus className="size-4" /> : <PanelRightClose className="size-4" />} onClick={closePanel} />
                         </Tooltip>
                     </>
                 }
             />
+
+            {compact && chatObject && <div className="shrink-0 px-3 pt-3"><button type="button" className="inline-flex max-w-full items-center gap-2 rounded-md border px-2 py-1.5 text-xs" style={{ color: theme.node.text, borderColor: theme.node.stroke, background: theme.toolbar.panel }} aria-label={t("productionCanvas.locateChatObject")} onClick={() => {
+                const path = productionObjectPath(chatObject);
+                useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"));
+                navigate(path);
+                closePanel();
+            }}><span className="min-w-0 truncate">{chatObject.targetKind === "segment" ? chatObject.clipIndex ? t("productionCanvas.h3Context", { number: chatObject.clipIndex }) : t("productionCanvas.videoTarget") : chatObject.title || t("productionCanvas.object")}</span><LocateFixed className="size-3.5 shrink-0" /></button></div>}
 
             {activeTab === "setup" ? (
                 <AgentConnectView
@@ -1461,6 +1792,8 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                     loading={loadingThreads}
                     busy={sending || waiting || conversationBusy}
                     connected={connected}
+                    legacyHistory={legacyHistory}
+                    onLegacyHistoryChange={value => { legacyHistoryRef.current = value; setLegacyHistory(value); void loadThreads(true); }}
                     onRefresh={() => void loadThreads()}
                     onNewThread={() => void startNewThread()}
                     onResumeThread={(threadId) => void resumeThread(threadId)}
@@ -1480,25 +1813,29 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                     <AgentChatTimeline theme={theme} pendingTool={pendingTool} pendingApprovals={pendingApprovals} sending={sending} waiting={waiting} onRejectTool={rejectPendingTool} onApproveTool={approvePendingTool} onApprovalDecision={decideApproval} />
                     <AgentTaskProgress theme={theme} busy={sending || waiting} />
                     {tokenUsage ? <AgentUsageBar usage={tokenUsage} theme={theme} /> : null}
+                    <AgentChatQueue items={promptQueue.items} paused={promptQueue.paused} canInsert={promptQueue.canInsert} theme={theme} onRemove={promptQueue.remove} onInsert={(id) => void promptQueue.insert(id)} onRetry={promptQueue.retry} onResume={promptQueue.resume} />
                     <AgentChatComposer
                         prompt={prompt}
                         attachments={attachments.map((attachment) => agentAttachmentToChatAttachment(attachment, endpoint, token))}
-                        disabled={!connected || !conversationReady || loadingThreads || Boolean(creativeLaunch)}
-                        sending={sending || waiting || Boolean(creativeLaunch)}
+                        disabled={!connected || !conversationCanAcceptInput || loadingThreads || Boolean(creativeLaunch)}
+                        sending={sending || Boolean(creativeLaunch)}
+                        waiting={queueWaiting}
+                        queueBusy={queueBusy || Boolean(creativeLaunch)}
                         placeholder={conversation.status === "idle" || conversation.status === "preparing"
                             ? t("agent.panel.mcpInitializing")
                             : conversation.status === "failed"
                                 ? t("agent.panel.initFailed")
-                                : t("agent.panel.placeholder")}
+                                : t(compact ? "productionCanvas.chatPlaceholder" : "agent.panel.placeholder")}
                         theme={theme}
                         onPromptChange={(prompt) => setAgentState({ prompt })}
                         onSubmit={sendPrompt}
+                        onQueue={enqueueCurrentPrompt}
                         onStop={stopTurn}
                         onAddFiles={addAttachments}
                         onRemoveAttachment={removeAttachment}
                         confirmTools={confirmTools}
                         onConfirmToolsChange={(confirmTools) => setAgentState({ confirmTools })}
-                        permissionMode={permissionMode}
+                        permissionMode={models.find(item => item.model === model)?.runtime === "codex" || !model.includes("::") ? permissionMode : undefined}
                         onPermissionModeChange={changePermissionMode}
                         models={models}
                         model={model}
@@ -1507,7 +1844,8 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                             const selected = models.find((item) => item.model === model);
                             if (!selected) return;
                             const effort = selected.defaultReasoningEffort || selected.supportedReasoningEfforts[0]?.reasoningEffort;
-                            setAgentState({ model, ...(effort ? { reasoningEffort: effort } : {}) });
+                            setAgentState({ model, reasoningEffort: effort || "" });
+                            if (selected.runtime && Boolean(activeThreadId) && (activeThreadId.startsWith("llm-") ? selected.runtime === "codex" : selected.runtime === "llm")) message.info(t("agent.runtime.modelNeedsNewConversation"));
                         }}
                         onReasoningEffortChange={(reasoningEffort) => {
                             setAgentState({ reasoningEffort });

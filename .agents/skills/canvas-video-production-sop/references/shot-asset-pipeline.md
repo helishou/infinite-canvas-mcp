@@ -93,7 +93,7 @@ canvas_split_image(nodeId, rows, columns, inset, gap)
 机制：H3 会**学习参考图的色调风格**，所以 krea2 那 +3.0 b\* 的暖偏被放大后传进视频；原图直接喂反而比参考图更中性（H3 自身的电影质感 LoRA 在往回拉）。**洗图 → 更黄、更暗，锐度无优势。**
 
 做这个 A/B 的两个前提，缺一个结论就无效：
-1. **固定种子**：`h3_apply_video_plan` 会把 `noiseSeedMode` 静默改回 `random`，apply 之后必须补 `h3_update_clip({seed, noiseSeed, noiseSeedMode:"fixed"})`。
+1. **固定种子**：`h3_apply_video_plan` 会把 `noiseSeedMode` 静默改回 `random`，apply 之后必须补 `h3_update_clips({projectId,nodeId,operationId,expectedRevision,updates:[{segmentId,patch:{seed,noiseSeed,noiseSeedMode:"fixed"}}]})`（先读取当前 revision；未知响应复用本次 operationId 与原参数）。
 2. **别被上一轮结果骗**：重复跑同一 segment 时 `resultStorageKey` 在新结果落库前**一直保持上一轮的值**，只判 `status==="success"` 会读到旧结果、得出「两轮一模一样」。提交前记下旧值，**必须等它变了才算新结果**（或盯底层 `comfyui:minimax-h3` 那个新任务 id）。
 
 用户说「放弃洗图」时要把链拆干净：H3 参考换回切分原图，并删掉洗图/超分的中间节点（实测 107 个），不要留着占画布。
@@ -157,16 +157,10 @@ image field 是 `node 8` (`LoadImage`)，单图。
 
 清理前后各跑一次全段悬空检查：对每个 segment 的 `refs.image[].nodeId` 核对是否还在 `nodes[].id` 里；**删节点前先用 `refs` 的 nodeId 集合把在用的节点排除掉**（实测 107 个待删节点里就有 3 张正被 H3 引用，靠这步拦下）。
 
-## 七、产出后的画布布局（用户偏好）
+## 七、正式制作的场次区域
 
-用户明确要求「同功能的整合在一个区域，不要东一块西一块」。分区并按功能归位：
+分集正式制作由 Backend 布局计划管理，不能沿用这份旧手工坐标表或把所有 H3 节点集中到画布最右侧。按正式剧本场次分别组织区域，每个区域放本场剧本、镜头图片/提示词和一个 H3 Clips 节点；同场 Segment 共用该节点，不同场次使用独立节点。正式场次按剧本出现身份识别，不能按共享的场景环境 ID 合并。
 
-| 区 | x 范围 | 内容 |
-|---|---|---|
-| 角色资产 | 最左负坐标 | 各角色身份图（+ 各自 config）、四视图、场景图 |
-| 分镜素材 | 中段正坐标 | **每段一行**：config → 宫格原图 → 该段所有单格 |
-| H3 节点 | 最右 | 编排节点 |
-
-- 每段严格同行对齐（同一 `y`），段间按固定 `row_h` 递增（如 1200）；单格在其宫格右下方成矩阵。
-- 移动用 `canvas_move_nodes(projectId, items=[{id, x, y}])` —— 参数名是 **`items`**（不是 `deltas`），每项 `{id, x, y}` 或 `{id, dx, dy}`。
-- 归位前先 dump 一次画布拿准每个节点 id 与所属段落。
+- 创建新正式目标后通过制作准备操作读取 `layoutReceipt`；坐标由 Backend 分配，已有位置作为锚点。
+- 跨场 Segment 在准备前按场次拆分。旧稿已有显式 H3 绑定时保留，并处理布局诊断；未加入场次区域的旧节点不会被自动搬动或重新绑定，也不自动迁移媒体。
+- 用户明确要求整理某个场次时，只调用 Backend 的场次整理能力；自由画布的手动摆放流程不适用于正式分集制作。

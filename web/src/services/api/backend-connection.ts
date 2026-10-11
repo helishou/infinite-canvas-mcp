@@ -1,13 +1,9 @@
 import { request } from "@/services/backend-api";
+import { normalizeBackendAddress } from "@/lib/backend-connection";
+export { normalizeBackendAddress } from "@/lib/backend-connection";
 
 export type NetworkSettings = { lanEnabled: boolean; origins: string[] };
 export type BackendConnectionInfo = { ok: boolean; current: NetworkSettings; configured: NetworkSettings; canConfigure: boolean; restartRequired: boolean; addresses: string[] };
-
-export function normalizeBackendAddress(value: string) {
-    const url = new URL(value.trim());
-    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash || url.pathname !== "/") throw new Error("后台地址只填写 http/https、主机和端口，不包含路径或密钥");
-    return url.origin;
-}
 
 export async function testBackendConnection(address: string, token: string, signal?: AbortSignal): Promise<BackendConnectionInfo> {
     const response = await fetch(`${normalizeBackendAddress(address)}/connection`, { headers: { Authorization: `Bearer ${token.trim()}` }, signal });

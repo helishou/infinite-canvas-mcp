@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useNavigate } from "react-router-dom";
 import type { ReactNode } from "react";
-import { ChevronRight, Copy, Download, FileText, Image as ImageIcon, ListRestart, MapPinned, Music2, Puzzle, RefreshCw, Settings2, Star, Trash2, User, Video } from "lucide-react";
+import { ChevronRight, Copy, Download, FileText, Image as ImageIcon, ListRestart, MapPinned, Music2, Package, Puzzle, RefreshCw, Settings2, Star, Trash2, User, Video } from "lucide-react";
 
 import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
@@ -20,7 +21,8 @@ import { useCanvasNodePreview } from "@/lib/canvas/canvas-drag-preview";
 import { ensureVideoPreview, getVideoPreviewRevision, subscribeVideoPreview, videoPreviewUrlFor } from "@/lib/canvas/canvas-video-frame";
 import { getPluginNodeView } from "@/stores/canvas/plugin-node-view";
 import { orderedGroupColumnCount, orderedGroupDisplaySlots, orderedGroupLayout } from "@/lib/canvas/ordered-group";
-import { hasRenderableCanvasImage } from "@/lib/canvas/canvas-image-renderability";
+import { canvasNodeImage, hasRenderableCanvasImage } from "@/lib/canvas/canvas-image-renderability";
+import { SmartImageHistoryActions } from "./smart-image-history-actions";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 const selectionBlue = "#2f80ff";
@@ -72,6 +74,8 @@ export type CanvasNodeProps = {
     onCharacterDrop?: (node: CanvasNodeData, ref: { url: string; type: "image" | "audio"; name?: string; storageKey?: string; mimeType?: string }) => void;
     onEditScene?: (node: CanvasNodeData) => void;
     onSceneDrop?: (node: CanvasNodeData, ref: { url: string; name?: string; storageKey?: string; mimeType?: string }) => void;
+    onEditProp?: (node: CanvasNodeData) => void;
+    onPropDrop?: (node: CanvasNodeData, ref: { url: string; name?: string; storageKey?: string; mimeType?: string }) => void;
     onTitleChange: (nodeId: string, title: string) => void;
     onToggleBatch?: (nodeId: string) => void;
     onSetBatchPrimary?: (nodeId: string, itemId: string) => void;
@@ -92,6 +96,7 @@ function nodeTypeIcon(node: CanvasNodeData) {
     if (node.type === CanvasNodeType.Text) return FileText;
     if (node.type === CanvasNodeType.Character) return User;
     if (node.type === CanvasNodeType.Scene) return MapPinned;
+    if (node.type === CanvasNodeType.Prop) return Package;
     if (node.type === CanvasNodeType.Loop) return ListRestart;
     if (node.type === CanvasNodeType.Config) {
         const mode = node.metadata?.generationMode || (node.metadata?.smart ? "image" : undefined);
@@ -106,6 +111,7 @@ function nodeTypeIcon(node: CanvasNodeData) {
 function nodeAccentColor(node: CanvasNodeData, theme: CanvasTheme) {
     if (node.type === CanvasNodeType.Character) return theme.node.typeStroke.character;
     if (node.type === CanvasNodeType.Scene) return theme.node.typeStroke.scene;
+    if (node.type === CanvasNodeType.Prop) return theme.node.typeStroke.prop;
     if (node.type === CanvasNodeType.Group) return theme.node.typeStroke.group;
     if (node.type.includes("minimax-h3")) return theme.node.linkActive;
     return theme.node.muted;
@@ -116,7 +122,7 @@ function nodeAccentColor(node: CanvasNodeData, theme: CanvasTheme) {
  * 概览壳与紧凑壳都据此补上活动标记，避免缩小后和普通节点长得一样。
  */
 function isNodeGenerating(node: CanvasNodeData) {
-    const pending = (status?: string) => status === "loading" || status === "queued";
+    const pending = (status: unknown) => status === "loading" || status === "queued";
     const metadata = node.metadata as (CanvasNodeData["metadata"] & { segments?: Array<{ status?: string }> }) | undefined;
     if (!metadata) return false;
     if (pending(metadata.status)) return true;
@@ -142,19 +148,22 @@ function overviewImageForNode(node: CanvasNodeData): OverviewImage | undefined {
         const image = node.metadata?.sceneImage;
         return image ? { content: image.url, storageKey: image.storageKey, naturalWidth: image.width, naturalHeight: image.height } : undefined;
     }
+    if (node.type === CanvasNodeType.Prop) {
+        const image = node.metadata?.propImage;
+        return image ? { content: image.url, storageKey: image.storageKey, naturalWidth: image.width, naturalHeight: image.height } : undefined;
+    }
     const images = node.metadata?.images || [];
     const primary = images.find((image) => image.id === node.metadata?.primaryImageId) || images[0];
     if (primary) return primary;
-    if (node.type === CanvasNodeType.Image && (node.metadata?.content || node.metadata?.storageKey)) {
-        return { content: node.metadata?.content || "", storageKey: node.metadata?.storageKey, naturalWidth: node.metadata?.naturalWidth || 0, naturalHeight: node.metadata?.naturalHeight || 0 };
-    }
-    return undefined;
+    // Backend 单图结果可直接存于智能节点 metadata，概览与完整视图使用同一解析。
+    return canvasNodeImage(node) || undefined;
 }
 
 function overviewSummary(node: CanvasNodeData) {
     const metadata = node.metadata;
     if (node.type === CanvasNodeType.Character) return `${metadata?.characterName || node.title || "角色"} · ${metadata?.characterImages?.length || 0} 张参考图`;
     if (node.type === CanvasNodeType.Scene) return `${metadata?.sceneName || node.title || "场景"}${metadata?.sceneDescription ? ` · ${metadata.sceneDescription}` : ""}`;
+    if (node.type === CanvasNodeType.Prop) return `${metadata?.propName || node.title || "道具"}${metadata?.propDescription ? ` · ${metadata.propDescription}` : ""}`;
     if (node.type === CanvasNodeType.Text || metadata?.generationMode === "text") return metadata?.content || metadata?.prompt || metadata?.texts?.[0]?.content || node.title || "文本";
     if (node.type === CanvasNodeType.Audio || metadata?.generationMode === "audio") return `${node.title || "音频"}${metadata?.durationMs ? ` · ${Math.round(metadata.durationMs / 1000)} 秒` : ""}`;
     if (node.type === CanvasNodeType.Video || metadata?.generationMode === "video") return `${node.title || "视频"}${metadata?.status ? ` · ${metadata.status}` : ""}`;
@@ -414,7 +423,9 @@ export const CanvasNodeViewportItem = React.memo(function CanvasNodeViewportItem
     const adaptiveImageSize = isAspectLockedImage ? imageNaturalSize(props.data) : null;
     const adaptiveImageWidth = adaptiveImageSize?.width;
     const adaptiveImageHeight = adaptiveImageSize?.height;
+    const productionLayoutManaged = typeof props.data.metadata?.productionLayoutUnitId === "string";
     useEffect(() => {
+        if (productionLayoutManaged) return;
         if (!adaptiveImageWidth || !adaptiveImageHeight) {
             autoFitImageRef.current = "";
             return;
@@ -435,7 +446,7 @@ export const CanvasNodeViewportItem = React.memo(function CanvasNodeViewportItem
                 y: props.data.position.y + (props.data.height - height) / 2,
             },
         });
-    }, [adaptiveImageHeight, adaptiveImageWidth, props.data.height, props.data.id, props.data.position.x, props.data.position.y, props.data.width, props.onResizeEnd]);
+    }, [adaptiveImageHeight, adaptiveImageWidth, productionLayoutManaged, props.data.height, props.data.id, props.data.position.x, props.data.position.y, props.data.width, props.onResizeEnd]);
     const screenShortSide = Math.min(resolvedProps.data.width, resolvedProps.data.height) * resolvedProps.scale;
     const detailModeRef = useRef(screenShortSide > NODE_OVERVIEW_MODE_ENTER_SCREEN_SIZE);
     if (screenShortSide >= NODE_DETAIL_MODE_ENTER_SCREEN_SIZE) detailModeRef.current = true;
@@ -540,6 +551,8 @@ export const CanvasNode = React.memo(function CanvasNode({
     onCharacterDrop,
     onEditScene,
     onSceneDrop,
+    onEditProp,
+    onPropDrop,
 }: CanvasNodeProps) {
     const { t } = useTranslation();
     const [hovered, setHovered] = useState(false);
@@ -565,7 +578,9 @@ export const CanvasNode = React.memo(function CanvasNode({
     const isCharacter = data.type === CanvasNodeType.Character;
     const hasCharacterContent = isCharacter && (data.metadata?.characterImages?.length || 0) > 0;
     const isScene = data.type === CanvasNodeType.Scene;
-    const hasSceneContent = isScene && Boolean(data.metadata?.sceneImage?.url);
+    const hasSceneContent = isScene && Boolean(data.metadata?.sceneImage?.url || data.metadata?.sceneImage?.storageKey);
+    const isProp = data.type === CanvasNodeType.Prop;
+    const hasPropContent = isProp && Boolean(data.metadata?.propImage?.url || data.metadata?.propImage?.storageKey);
     const isGroup = data.type === CanvasNodeType.Group;
     const generating = isNodeGenerating(data);
     const batchCount =
@@ -592,6 +607,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     const smartBorderColor = isActive ? selectionBlue : isRelated ? theme.node.muted : theme.node.stroke;
     const characterBorderColor = isActive ? selectionBlue : isRelated ? theme.node.muted : theme.node.typeStroke.character;
     const sceneBorderColor = isActive ? selectionBlue : isRelated ? theme.node.muted : theme.node.typeStroke.scene;
+    const propBorderColor = isActive ? selectionBlue : isRelated ? theme.node.muted : theme.node.typeStroke.prop;
     const groupBorderColor = isGroupDropTarget || isActive ? selectionBlue : theme.node.typeStroke.group;
     const nodeBorderColor = isGroup
         ? groupBorderColor
@@ -602,9 +618,11 @@ export const CanvasNode = React.memo(function CanvasNode({
             ? characterBorderColor
             : isScene
               ? sceneBorderColor
-              : isSmartGenerationNode
+              : isProp
+                ? propBorderColor
+                : isSmartGenerationNode
                 ? smartBorderColor
-                : hasImageContent || hasCharacterContent || hasSceneContent
+                : hasImageContent || hasCharacterContent || hasSceneContent || hasPropContent
                   ? imageBorderColor
                   : isActive
                     ? selectionBlue
@@ -795,9 +813,12 @@ export const CanvasNode = React.memo(function CanvasNode({
                 // body 拖拽路径，只能走这里。若沿用全量黑名单（button/input/textarea/select/video），
                 // 节点上几乎任何可见区域都命中被排除，导致“拖不动”。故对 H3 仅屏蔽纯文本编辑控件，
                 // H3 只允许从自己的标题栏拖动，其他区域全部保留给控件和内容交互。
+                // contenteditable（CodeMirror 文本编辑器）与 data-canvas-shortcuts-ignore（编辑器容器）
+                // 必须排除：capture 先于编辑器自身的 stopPropagation 执行，命中拖拽会掐断 mousedown，
+                // 导致文本节点双击进入编辑后光标放不进去、拖动变成移动节点。
                 const target = event.target as HTMLElement;
                 const isH3 = data.type === "minimax-h3:video";
-                const interactive = target.closest("button, input, textarea, select, video, .ant-select-dropdown");
+                const interactive = target.closest("button, input, textarea, select, video, .ant-select-dropdown, [contenteditable='true'], [data-canvas-shortcuts-ignore]");
                 const isExplicitDragHandle = target.closest("[data-canvas-node-drag-handle]");
                 // 四角缩放手柄是纯 div，会命中上面的拖拽分支；但若在此处触发拖拽，
                 // handleNodeMouseDown 的 event.stopPropagation() 会掐断事件，使 ResizeHandle 自己的
@@ -858,6 +879,8 @@ export const CanvasNode = React.memo(function CanvasNode({
                                     onEditCharacter(data);
                                 } else if (data.type === CanvasNodeType.Scene && onEditScene) {
                                     onEditScene(data);
+                                } else if (data.type === CanvasNodeType.Prop && onEditProp) {
+                                    onEditProp(data);
                                 } else {
                                     setIsEditingTitle(true);
                                 }
@@ -871,9 +894,10 @@ export const CanvasNode = React.memo(function CanvasNode({
 
             <div
                 data-character-drop={data.type === CanvasNodeType.Character ? "true" : undefined}
+                data-prop-drop={data.type === CanvasNodeType.Prop ? "true" : undefined}
                 className={`relative h-full w-full overflow-visible rounded-3xl ${data.type === "minimax-h3:video" ? "border" : "border-2"} ${generating && !isActive ? "canvas-node-generating" : ""}`}
                 style={{
-                    background: isGroup || data.type === "minimax-h3:video" ? "transparent" : hasImageContent || hasVideoContent || hasCharacterContent || hasSceneContent || transparentBg ? "transparent" : theme.node.fill,
+                    background: isGroup || data.type === "minimax-h3:video" ? "transparent" : hasImageContent || hasVideoContent || hasCharacterContent || hasSceneContent || hasPropContent || transparentBg ? "transparent" : theme.node.fill,
                     borderColor: nodeBorderColor,
                     borderStyle: isGroup ? "dashed" : "solid",
                     borderWidth: isGroup ? 3 : undefined,
@@ -919,9 +943,14 @@ export const CanvasNode = React.memo(function CanvasNode({
                         onEditScene?.(data);
                         return;
                     }
+                    if (data.type === CanvasNodeType.Prop) {
+                        event.stopPropagation();
+                        onEditProp?.(data);
+                        return;
+                    }
                 }}
                 onDragOver={(event) => {
-                    if (data.type !== CanvasNodeType.Character && data.type !== CanvasNodeType.Scene) return;
+                    if (data.type !== CanvasNodeType.Character && data.type !== CanvasNodeType.Scene && data.type !== CanvasNodeType.Prop) return;
                     const types = Array.from(event.dataTransfer?.types || []);
                     if (types.includes("application/x-infinite-canvas-ref")) {
                         event.preventDefault();
@@ -929,7 +958,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                     }
                 }}
                 onDrop={(event) => {
-                    if (data.type !== CanvasNodeType.Character && data.type !== CanvasNodeType.Scene) return;
+                    if (data.type !== CanvasNodeType.Character && data.type !== CanvasNodeType.Scene && data.type !== CanvasNodeType.Prop) return;
                     const raw = event.dataTransfer.getData("application/x-infinite-canvas-ref") || event.dataTransfer.getData("application/json") || event.dataTransfer.getData("text/plain");
                     if (!raw) return;
                     try {
@@ -939,7 +968,8 @@ export const CanvasNode = React.memo(function CanvasNode({
                             event.preventDefault();
                             event.stopPropagation();
                             if (data.type === CanvasNodeType.Character) onCharacterDrop?.(data, { url: ref.url, type: "image", name: ref.name, storageKey: ref.storageKey, mimeType: ref.mimeType });
-                            else onSceneDrop?.(data, { url: ref.url, name: ref.name, storageKey: ref.storageKey, mimeType: ref.mimeType });
+                            else if (data.type === CanvasNodeType.Scene) onSceneDrop?.(data, { url: ref.url, name: ref.name, storageKey: ref.storageKey, mimeType: ref.mimeType });
+                            else onPropDrop?.(data, { url: ref.url, name: ref.name, storageKey: ref.storageKey, mimeType: ref.mimeType });
                         } else if (kind === "audio" && ref.url && data.type === CanvasNodeType.Character) {
                             event.preventDefault();
                             event.stopPropagation();
@@ -954,11 +984,13 @@ export const CanvasNode = React.memo(function CanvasNode({
                     className={`relative flex h-full w-full items-center justify-center rounded-[inherit] ${isBatchRoot ? "overflow-visible" : "overflow-hidden"}`}
                     style={
                         {
-                            background: isGroup ? "transparent" : hasImageContent || hasVideoContent || hasCharacterContent || hasSceneContent || transparentBg ? "transparent" : theme.node.fill,
+                            background: isGroup ? "transparent" : hasImageContent || hasVideoContent || hasCharacterContent || hasSceneContent || hasPropContent || transparentBg ? "transparent" : theme.node.fill,
                             pointerEvents: contentInteractive ? undefined : "none",
                         } as React.CSSProperties
                     }
                 >
+                    {data.metadata?.sharedAssetReference && <SharedReferenceSource origin={data.metadata.sharedAssetReference} theme={theme} localChanges={Boolean(Object.keys(data.metadata.sharedAssetReference.edits || {}).length)} />}
+                    {data.metadata?.sharedAssetOrigin && <SharedReferenceSource origin={data.metadata.sharedAssetOrigin as { sourceProjectId: string; sourceNodeId: string }} theme={theme} />}
                     <NodeContent
                         node={data}
                         theme={theme}
@@ -1118,6 +1150,7 @@ const nodeContentRenderers = {
     [CanvasNodeType.Group]: GroupNodeContent,
     [CanvasNodeType.Character]: CharacterNodeContent,
     [CanvasNodeType.Scene]: SceneNodeContent,
+    [CanvasNodeType.Prop]: PropNodeContent,
 } satisfies Record<CanvasNodeType, (props: NodeContentRendererProps) => ReactNode>;
 
 function EmptyLoopContent({ node, theme }: NodeContentRendererProps) {
@@ -1238,7 +1271,7 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
             {batchExpanded ? texts.filter((text) => text.id !== primaryTextId).map((text, index) => <ExpandedTextCard key={text.id} node={node} text={text} index={index} onSetPrimary={() => onSetBatchPrimary?.(text.id)} />) : null}
             <div className="flex h-full w-full flex-col overflow-hidden rounded-3xl">
                 {isEditingContent ? (
-                    <div ref={textareaRef} className="h-full w-full">
+                    <div ref={textareaRef} className="h-full w-full" data-canvas-no-zoom>
                         <CanvasCollaborativeText
                             projectId={projectId}
                             target={{ nodeId: node.id, field: "content", ...(primaryText ? { textItemId: primaryText.id } : {}) }}
@@ -1251,7 +1284,7 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
                         />
                     </div>
                 ) : content ? (
-                    <div className={`thin-scrollbar block h-full w-full overflow-y-auto whitespace-pre-wrap break-words bg-transparent font-mono ${paddingClass}`} style={textStyle} onWheel={(event) => event.stopPropagation()}>
+                    <div className={`thin-scrollbar block h-full w-full overflow-y-auto whitespace-pre-wrap break-words bg-transparent font-mono ${paddingClass}`} data-canvas-no-zoom style={textStyle} onWheel={(event) => event.stopPropagation()}>
                         {content}
                     </div>
                 ) : primaryText ? (
@@ -1316,7 +1349,7 @@ function ExpandedTextCard({ node, text, index, onSetPrimary }: { node: CanvasNod
         >
             {text.content ? (
                 <>
-                    <div className="thin-scrollbar h-full overflow-y-auto whitespace-pre-wrap break-words px-4 pb-4 pt-14 font-mono text-sm leading-6" style={{ color: theme.node.text }} onWheel={(event) => event.stopPropagation()}>
+                    <div className="thin-scrollbar h-full overflow-y-auto whitespace-pre-wrap break-words px-4 pb-4 pt-14 font-mono text-sm leading-6" data-canvas-no-zoom style={{ color: theme.node.text }} onWheel={(event) => event.stopPropagation()}>
                         {text.content}
                     </div>
                     <button
@@ -1365,6 +1398,7 @@ function ImageNodeContent(props: NodeContentRendererProps) {
     return (
         <ImageContent
             node={props.node}
+            pluginContext={props.pluginContext}
             scale={props.scale}
             batchExpanded={props.batchExpanded}
             onToggleBatch={props.onToggleBatch}
@@ -1471,12 +1505,36 @@ function SceneNodeContent({ node, theme, scale }: NodeContentRendererProps) {
     );
 }
 
+function PropNodeContent({ node, theme, scale }: NodeContentRendererProps) {
+    const { t } = useTranslation();
+    const image = node.metadata?.propImage;
+    const [imageUrl, setImageUrl] = useState("");
+    const backendConnected = useBackendStore((state) => state.connected);
+    const backendToken = useBackendStore((state) => state.token);
+    useImagePreviewRevision(image?.storageKey);
+
+    useEffect(() => {
+        let cancelled = false;
+        if (!image?.url && !image?.storageKey) { setImageUrl(""); return; }
+        void ensureImagePreview(image.storageKey);
+        resolveImageUrl(image.storageKey, image.url).then(url => { if (!cancelled) setImageUrl(url); }).catch(() => { if (!cancelled) setImageUrl(""); });
+        return () => { cancelled = true; };
+    }, [backendConnected, backendToken, image?.storageKey, image?.url]);
+
+    if (!image?.url && !image?.storageKey) return <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.placeholder }}><Package className="size-9 opacity-30" /><span className="text-[10px] tracking-[0.18em] opacity-50">{t("canvas.prop.noImage")}</span></div>;
+    const source = imageUrl ? pickImageSource({ previewUrl: previewUrlFor(image.storageKey), originalUrl: imageUrl, naturalWidth: image.width, naturalHeight: image.height, renderedWidth: node.width, renderedHeight: node.height, scale }) : "";
+    return <div className="relative h-full w-full overflow-hidden rounded-[inherit]" style={{ background: theme.node.panel }}>
+        {source ? <img src={source} alt={node.metadata?.propName || node.title} className="size-full object-contain" draggable={false} /> : <div className="flex size-full items-center justify-center"><Package className="size-9 opacity-30" /></div>}
+        {node.metadata?.propDescription ? <div className="absolute inset-x-2 bottom-2 line-clamp-2 rounded-md bg-black/55 px-2 py-1 text-[10px] leading-4 text-white">{node.metadata.propDescription}</div> : null}
+    </div>;
+}
+
 /** 角色节点：主图（大）+ 底部 outfit 缩略图条；多图时像多图片输出节点一样可横向展开，点缩略图或“设为主图”切换主图。
  *  角色封面始终由 metadata.characterPrimaryIndex 决定；引用它的生成节点选了哪张参考图，只在生成节点自己的参考卡上体现。 */
 function CharacterNodeContent(props: NodeContentRendererProps) {
     const { node, theme, scale, batchExpanded, onToggleBatch, onSetBatchPrimary, onDeleteBatchImage, onViewBatchImage } = props;
     const { t } = useTranslation();
-    const images = node.metadata?.characterImages || [];
+    const images = useMemo(() => node.metadata?.characterImages || [], [node.metadata?.characterImages]);
     const primaryIndex = Math.min(Math.max(node.metadata?.characterPrimaryIndex || 0, 0), Math.max(images.length - 1, 0));
     const primary = images[primaryIndex];
     const voiceUrl = node.metadata?.characterVoiceUrl || "";
@@ -1824,6 +1882,7 @@ function AudioNodeContent({ node, theme }: NodeContentRendererProps) {
 
 function ImageContent({
     node,
+    pluginContext,
     scale,
     batchExpanded,
     onToggleBatch,
@@ -1835,6 +1894,7 @@ function ImageContent({
     onViewBatchImage,
 }: {
     node: CanvasNodeData;
+    pluginContext?: CanvasNodeContext | null;
     scale: number;
     batchExpanded: boolean;
     onToggleBatch?: () => void;
@@ -1887,6 +1947,7 @@ function ImageContent({
 
     return (
         <BatchFrame batchCount={batchCount} batchExpanded={batchExpanded}>
+            {node.type === CanvasNodeType.Config && node.metadata?.smart && pluginContext && <div className="absolute bottom-2 left-2 z-30" onDoubleClick={event => event.stopPropagation()}><SmartImageHistoryActions ctx={pluginContext} image={primaryImage} /></div>}
             {batchExpanded
                 ? images
                       .filter((image) => image.id !== primaryImageId)
@@ -2087,11 +2148,11 @@ function ExpandedImageCard({
                         type="button"
                         className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]"
                         style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }}
-                        title={t("canvas.node.setPrimary")}
+                        title={t(node.type === CanvasNodeType.Config && node.metadata?.smart ? "director.atomic.browseImage" : "canvas.node.setPrimary")}
                         onClick={(event) => (event.stopPropagation(), onSetPrimary())}
                     >
                         <Star className="size-3 shrink-0" style={{ color: selectionBlue }} />
-                        {node.width >= 200 ? <span className="truncate">{t("canvas.node.setPrimary")}</span> : null}
+                        {node.width >= 200 ? <span className="truncate">{t(node.type === CanvasNodeType.Config && node.metadata?.smart ? "director.atomic.browseImage" : "canvas.node.setPrimary")}</span> : null}
                     </button>
                 </div>
             ) : null}
@@ -2210,4 +2271,13 @@ function ConnectionHandleDot({ side, visible, onMouseDown }: { side: "left" | "r
             <div className="size-3 rounded-full border-2 transition-all hover:scale-125" style={{ background: theme.node.panel, borderColor: theme.node.muted }} />
         </div>
     );
+}
+
+function SharedReferenceSource({ origin, theme, localChanges = false }: { origin: { sourceProjectId: string; sourceNodeId: string }; theme: CanvasTheme; localChanges?: boolean }) {
+    const navigate = useNavigate();
+    const { t } = useTranslation();
+    return <button type="button" className="absolute left-1 top-1 z-20 px-1 text-[10px]" style={{ color: theme.node.text, background: theme.node.panel, pointerEvents: "auto" }}
+        title={t("productionCanvas.sharedReference")} onMouseDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); navigate(`/canvas/${encodeURIComponent(origin.sourceProjectId)}?nodeId=${encodeURIComponent(origin.sourceNodeId)}`); }}>
+        {t(localChanges ? "canvas.sharedLibrary.localChanges" : "productionCanvas.sharedReference")} · {t("productionCanvas.source")}
+    </button>;
 }

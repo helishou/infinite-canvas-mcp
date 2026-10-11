@@ -1,9 +1,13 @@
+import localforage from "localforage";
+import i18n from "@/i18n";
+import { writeAssetIntent } from "@/services/asset-write-intent";
+import { request, getBackendUrl, getCanvasDraftSessionId } from "@/services/backend-api";
 import { create } from "zustand";
 
 import { nanoid } from "nanoid";
 import { cleanupUnusedImages } from "@/services/image-storage";
 import { cleanupUnusedMedia } from "@/services/file-storage";
-import { deleteBackendAsset, deleteBackendAssetFolder, fetchBackendAssets, upsertBackendAsset, upsertBackendAssetFolder, BackendApiError } from "@/services/backend-api";
+import { deleteBackendAsset, deleteBackendAssetFolder, fetchBackendAssets, upsertBackendAsset, upsertBackendAssetFolder, BackendApiError, updateBackendAsset, type SharedAssetWrite } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 
 export type AssetKind = "text" | "image" | "video" | "audio" | "character" | "scene";
@@ -86,10 +90,10 @@ type AssetStore = {
     hydrateError: string;
     assets: Asset[];
     folders: AssetFolder[];
-    addAsset: (asset: Omit<Asset, "id" | "createdAt" | "updatedAt"> & { id?: string }) => string;
-    updateAsset: (id: string, patch: Partial<Omit<Asset, "id" | "createdAt">>) => void;
-    removeAsset: (id: string) => void;
-    removeAssets: (ids: string[]) => void;
+    addAsset: (asset: Omit<Asset, "id" | "createdAt" | "updatedAt"> & { id?: string }) => Promise<string>;
+    updateAsset: (id: string, patch: Partial<Omit<Asset, "id" | "createdAt">>, base?: Asset, resolveConflicts?: "local") => Promise<void>;
+    removeAsset: (id: string) => Promise<void>;
+    removeAssets: (ids: string[]) => Promise<void>;
     replaceAssets: (assets: Asset[]) => void;
     addFolder: (name: string, parentId?: string | null) => string;
     renameFolder: (id: string, name: string) => void;
@@ -103,6 +107,7 @@ let knownFolderIds = new Set<string>();
 
 async function syncAssetsToBackend(assets: Asset[], folders: AssetFolder[]) {
     if (!useBackendStore.getState().connected) return;
+    assets = assets.filter(asset => !asset.dramaId && !asset.metadata?.sharedAssetSource);
     try {
         const assetIds = new Set(assets.map((asset) => asset.id));
         const folderIds = new Set(folders.map((folder) => folder.id));
@@ -112,7 +117,7 @@ async function syncAssetsToBackend(assets: Asset[], folders: AssetFolder[]) {
             ...[...knownAssetIds].filter((id) => !assetIds.has(id)).map((id) => deleteBackendAsset(id)),
             ...[...knownFolderIds].filter((id) => !folderIds.has(id)).map((id) => deleteBackendAssetFolder(id)),
         ]);
-        knownAssetIds = assetIds;
+        knownAssetIds = new Set(useAssetStore.getState().assets.filter(asset => !asset.dramaId && !asset.metadata?.sharedAssetSource).map(asset => asset.id));
         knownFolderIds = folderIds;
     } catch { /* Backend 是唯一写入目标，失败由下一次同步重试 */ }
 }
@@ -282,7 +287,7 @@ async function hydrateAssetsFromBackend() {
         const remoteFolders = Array.isArray(response.folders) ? response.folders as unknown as AssetFolder[] : [];
         // 任何来自后端的 composite 资产都要先做迁移，确保前端 store 不会有 composite
         const migrated = migrateAssetsInPlace(remoteAssets);
-        knownAssetIds = new Set(migrated.map((asset) => asset.id));
+        knownAssetIds = new Set(migrated.filter(asset => !asset.dramaId && !asset.metadata?.sharedAssetSource).map((asset) => asset.id));
         knownFolderIds = new Set(remoteFolders.map((folder) => folder.id));
         useAssetStore.setState({ assets: migrated, folders: remoteFolders, hydrateError: "" });
         // 如果发生了迁移，立即把清洗结果写回后端，避免老数据反复出现
@@ -309,20 +314,29 @@ export const useAssetStore = create<AssetStore>()((set, get) => ({
             hydrateError: "",
             assets: [],
             folders: [],
-            addAsset: (asset) => {
+            addAsset: async (asset) => {
                 const now = new Date().toISOString();
                 const id = asset.id || nanoid();
+                if (asset.dramaId) { await saveLibraryAsset({ ...asset, id, createdAt: now, updatedAt: now } as Asset); return id; }
                 set((state) => ({ assets: [{ ...asset, id, createdAt: now, updatedAt: now } as Asset, ...state.assets] }));
                 scheduleAssetSync();
                 return id;
             },
-            updateAsset: (id, patch) => {
+            updateAsset: async (id, patch, base, resolveConflicts) => {
+                const current = get().assets.find(asset => asset.id === id);
+                if (current && (current.dramaId || patch.dramaId || current.metadata?.sharedAssetSource)) {
+                    const response = await commitLibraryWrite("PATCH", `/canvas/assets/${encodeURIComponent(id)}`, { ...patch, ...(base ? { assetBase: { title: base.title, data: base.data } } : {}), ...(resolveConflicts ? { resolveConflicts } : {}), operationId: nanoid() }, `asset:${id}`);
+                    acceptLibraryAsset(response.asset as unknown as Asset);
+                    return;
+                }
                 set((state) => ({
                     assets: state.assets.map((asset) => (asset.id === id ? ({ ...asset, ...patch, updatedAt: new Date().toISOString() } as Asset) : asset)),
                 }));
                 scheduleAssetSync();
             },
-            removeAsset: (id) => {
+            removeAsset: async (id) => {
+                const current = get().assets.find(asset => asset.id === id);
+                if (current?.dramaId || current?.metadata?.sharedAssetSource) await deleteBackendAsset(id, current.metadata?.sharedAssetSource as { sourceProjectId: string; sourceNodeId: string } | undefined);
                 set((state) => {
                     const assets = state.assets.filter((asset) => asset.id !== id);
                     get().cleanupImages({ assets });
@@ -330,19 +344,14 @@ export const useAssetStore = create<AssetStore>()((set, get) => ({
                 });
                 scheduleAssetSync();
             },
-            removeAssets: (ids) => {
-                set((state) => {
-                    const idSet = new Set(ids);
-                    const assets = state.assets.filter((asset) => !idSet.has(asset.id));
-                    get().cleanupImages({ assets });
-                    return { assets };
-                });
-                scheduleAssetSync();
+            removeAssets: async (ids) => {
+                for (const id of ids) await get().removeAsset(id);
             },
             replaceAssets: (assets) => {
                 // 写入前先迁移：调用方如果传了 composite（如来自导入包或回放），由 store 兜底转换为 character
                 const migrated = migrateAssetsInPlace(assets);
-                set({ assets: migrated });
+                for (const asset of migrated.filter(asset => asset.dramaId || asset.metadata?.sharedAssetSource)) void saveLibraryAsset(asset).catch(error => useAssetStore.setState({ hydrateError: String(error) }));
+                set({ assets: [...migrated.filter(asset => !asset.dramaId && !asset.metadata?.sharedAssetSource), ...get().assets.filter(asset => asset.dramaId || asset.metadata?.sharedAssetSource)] });
                 scheduleAssetSync();
             },
             addFolder: (name, parentId = null) => {
@@ -398,3 +407,34 @@ if (typeof window !== "undefined") {
 }
 
 export { syncAssetsToBackend, migrateAssetsInPlace, isLegacyComposite };
+
+export function acceptLibraryAsset(asset: Asset) {
+    if (asset.dramaId || asset.metadata?.sharedAssetSource) knownAssetIds.delete(asset.id);
+    else knownAssetIds.add(asset.id);
+    useAssetStore.setState(state => ({ assets: [asset, ...state.assets.filter(item => item.id !== asset.id)] }));
+}
+export function libraryErrorText(error: unknown) {
+    return error instanceof BackendApiError ? String(error.details.error || error.message) : error instanceof Error ? error.message : String(error);
+}
+const assetIntents = localforage.createInstance({ name: "infinite-canvas-asset-write-intents" });
+async function commitLibraryWrite(method: "POST" | "PATCH", path: string, body: Record<string, unknown>, key: string) {
+    const scope = `${getBackendUrl()}\0${getCanvasDraftSessionId()}\0${key}`;
+    return writeAssetIntent<{ ok: boolean; asset: Record<string, unknown> }>(assetIntents, scope, { method, path, body },
+        intent => request(intent.method, intent.path, intent.body), i18n.t("canvas.sharedLibrary.restoredRequest"));
+}
+export async function saveLibraryAsset(asset: Asset, command?: SharedAssetWrite) {
+    const source = command?.canvasSource;
+    const key = source ? `${source.projectId}:${source.nodeId}:${asset.kind}` : `asset:${asset.id}`;
+    const response = await commitLibraryWrite("POST", "/canvas/assets", { ...asset, operationId: command?.operationId || nanoid(), ...command }, key);
+    if (!response.asset) throw new Error("Backend 未返回资产保存结果");
+    const saved = response.asset as unknown as Asset;
+    acceptLibraryAsset(saved);
+    return saved;
+}
+if (typeof window !== "undefined") window.addEventListener("backend-event", event => {
+    const value = (event as CustomEvent).detail;
+    if (value?.type !== "asset.updated") return;
+    if (value.payload?.deleted && value.entityId) useAssetStore.setState(state => ({ assets: state.assets.filter(asset => asset.id !== value.entityId) }));
+    else if (value.payload?.id && value.payload?.kind) acceptLibraryAsset(value.payload as Asset);
+    else void hydrateAssetsFromBackend();
+});

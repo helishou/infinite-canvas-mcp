@@ -5,15 +5,26 @@ import path from "node:path";
 import { BackendClient } from "./backend-client.js";
 import type { ComfyModelCatalog, ComfyPreset } from "./comfyui-types.js";
 import type { RuntimeTask, RuntimeTaskEvent } from "./types.js";
+import type { ModelCatalogRead } from "./model-catalog.js";
 
 export { BackendClientError } from "./backend-client.js";
+
+function configuredDataDirectory(env: Record<string, string | undefined>) {
+    const explicit = env.INFINITE_CANVAS_DATA_DIR?.trim();
+    if (explicit) return path.resolve(explicit);
+    try {
+        const root = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".infinite-canvas-root.json"), "utf8")) as { dataDir?: unknown };
+        if (typeof root.dataDir === "string" && root.dataDir.trim()) return path.resolve(root.dataDir);
+    } catch { /* use the default data directory */ }
+    return path.join(os.homedir(), ".infinite-canvas");
+}
 
 /** 构造 BackendClient（读 backend.json 或环境变量）。 */
 export function createBackendClient(backendUrl: string, env: Record<string, string | undefined> = process.env): BackendClient {
     const token = env.INFINITE_CANVAS_BACKEND_TOKEN
         || (() => {
             try {
-                const file = path.join(os.homedir(), ".infinite-canvas", "backend.json");
+                const file = path.join(configuredDataDirectory(env), "backend.json");
                 return String(JSON.parse(fs.readFileSync(file, "utf8")).token || "");
             } catch { return ""; }
         })();
@@ -24,6 +35,7 @@ export function createBackendClient(backendUrl: string, env: Record<string, stri
 export type ComfyUiClient = {
     status(): Promise<Record<string, unknown>>;
     models(signal?: AbortSignal): Promise<ComfyModelCatalog>;
+    modelCatalog?(input: ModelCatalogRead): Promise<unknown>;
     presets(): ComfyPreset[];
     run(preset: string, input: Record<string, unknown>, params: Record<string, unknown>, baseUrl?: string, clientTaskId?: string): Promise<RuntimeTask>;
     cancel(id: string): Promise<RuntimeTask>;
@@ -36,6 +48,12 @@ export function backendComfyUi(client: BackendClient, presets: () => ComfyPreset
     return {
         status: () => client.comfyStatus(),
         models: (signal) => client.comfyModels(signal),
+        modelCatalog: (input) => {
+            const params = new URLSearchParams();
+            for (const [key, value] of Object.entries(input)) if (value !== undefined) params.set(key, Array.isArray(value) ? value.join(",") : String(value));
+            if (!params.has("view")) params.set("view", "summary");
+            return client.get<{ data: unknown }>(`/comfy/models?${params}`).then(result => result.data);
+        },
         presets,
         run: (preset, input, params, baseUrl, clientTaskId) => client.comfyRun(preset, input, params, baseUrl, clientTaskId),
         cancel: (id) => client.comfyCancel(id),

@@ -22,7 +22,6 @@ export function stableH3Fingerprint(value: unknown): string {
 
 export function h3ClipDependsOnPrevious(segment: Record<string, unknown>, params: Record<string, unknown> = {}) {
     return segment.motionContextEnabled === true || params.motionContextEnabled === true
-        || segment.previousVideoAsReference === true || params.previousVideoAsReference === true
         || segment.tailFrameContinuation === true || params.tailFrameContinuation === true
         || segment.previousTailFrameContinuation === true;
 }
@@ -37,10 +36,10 @@ export function h3ClipCacheFingerprint(input: {
     const { segment, params, references, compiledPrompt, previousFingerprint } = input;
     const dependency = h3ClipDependsOnPrevious(segment, params) ? String(previousFingerprint || "missing") : "independent";
     const segmentInputs = Object.fromEntries([
-        "confirmationMode", "latentUpscaleConfirmationMode", "motionContextEnabled", "previousVideoAsReference", "tailFrameContinuation",
+        "confirmationMode", "latentUpscaleConfirmationMode", "motionContextEnabled", "tailFrameContinuation",
         "previousTailFrameContinuation", "storyboardCompositeEnabled", "storyboardDurations", "storyboardShots", "styleTemplateId",
     ].filter((key) => segment[key] !== undefined).map((key) => [key, segment[key]]));
-    const fingerprintParams = Object.fromEntries(Object.entries(params).filter(([key]) => !["confirmSecondPass", "postGenerationOnly"].includes(key)));
+    const fingerprintParams = Object.fromEntries(Object.entries(params).filter(([key]) => !["confirmSecondPass", "postGenerationOnly", "previousVideoAsReference"].includes(key)));
     // 同一模板 ID 的正文修订也会改变生成输入，不能复用旧风格的成片。
     const styleTemplateId = segment.styleTemplateId === undefined
         ? styleTemplateFromPrompt(compiledPrompt, String(params.mode || params.taskMode || "ref2va"))
@@ -61,7 +60,7 @@ export function h3ClipCacheFingerprintV1(input: {
         "result", "resultStorageKey", "results", "status", "progress", "runtimeTaskId", "errorDetails",
         "cacheFingerprint", "firstPassFingerprint", "firstPassReady", "firstPassResult", "firstPassStorageKey",
     ].includes(key)));
-    const fingerprintParams = Object.fromEntries(Object.entries(params).filter(([key]) => !["confirmSecondPass", "postGenerationOnly"].includes(key)));
+    const fingerprintParams = Object.fromEntries(Object.entries(params).filter(([key]) => !["confirmSecondPass", "postGenerationOnly", "previousVideoAsReference"].includes(key)));
     return stableH3Fingerprint({ version: 1, segment: segmentInputs, params: fingerprintParams, references, compiledPrompt, dependency });
 }
 

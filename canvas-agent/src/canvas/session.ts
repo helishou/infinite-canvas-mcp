@@ -5,7 +5,7 @@ import type { AgentAttachment } from "../agent/types.js";
 import { logger } from "../utils/logger.js";
 import { buildCanvasToolRequest, fitAttachmentNodeSize } from "./operations.js";
 import type { ToolName } from "./schemas.js";
-import { compactCanvasState, compactNode, isToolName, nextCanvasX, parseToolInput } from "./tools.js";
+import { compactNode, isToolName, nextCanvasX, parseToolInput } from "./tools.js";
 import { summarizeCanvasState } from "./state-summary.js";
 import type { CanvasSnapshot } from "./types.js";
 
@@ -25,6 +25,7 @@ export type ConversationState = {
 };
 type McpInventoryItem = { name: string; authStatus?: string };
 export const AGENT_PROTOCOL_VERSION = 6;
+const RUNTIME_HEARTBEAT_INTERVAL_MS = 15000;
 
 const SITE_TOOLS = new Set<ToolName>([
     "site_navigate",
@@ -54,11 +55,14 @@ export class CanvasSession {
     private boundClientId = "";
     private focusSequence = 0;
     private codexState: CodexState = { busy: false, threadId: "", turnId: "" };
+    private readonly runtimeInstanceId = crypto.randomUUID();
+    private runtimeRevision = 1;
+    private terminalTurnScope?: { threadId: string; turnId: string };
     private conversationState: ConversationState;
     private conversationInventoryComplete = false;
     private preparedConversationThreadId = "";
 
-    constructor(activeThreadId = "") {
+    constructor(activeThreadId = "", private readonly exportSnapshot?: (projectId: string) => Promise<unknown>) {
         this.conversationState = {
             revision: 1,
             conversationId: activeThreadId || crypto.randomUUID(),
@@ -95,6 +99,18 @@ export class CanvasSession {
     /** Return a copy that callers can restore after a temporary Codex operation. */
     get codexStateSnapshot(): CodexState {
         return { ...this.codexState };
+    }
+
+    /** One authoritative snapshot for live events, reconnect, heartbeat and HTTP reconciliation. */
+    get runtimeStateSnapshot() {
+        const codex = this.codexStateSnapshot;
+        if (!codex.busy && !codex.turnId && this.terminalTurnScope?.threadId === codex.threadId) codex.turnId = this.terminalTurnScope.turnId;
+        return { instanceId: this.runtimeInstanceId, revision: this.runtimeRevision, heartbeatIntervalMs: RUNTIME_HEARTBEAT_INTERVAL_MS, conversation: this.conversationStateSnapshot, codex, pendingApprovals: this.codexPendingApprovals };
+    }
+
+    private publishRuntimeState() {
+        this.runtimeRevision++;
+        this.emitAll("runtime_state", this.runtimeStateSnapshot);
     }
 
     /** 返回站点级对话的权威快照。 */
@@ -231,11 +247,13 @@ export class CanvasSession {
         if (type === "codex_approval" && requestId) this.pendingApprovals.set(requestId, payload);
         if (type === "codex_approval_resolved" && requestId) this.pendingApprovals.delete(requestId);
         if (type === "agent_error") this.pendingApprovals.clear();
+        if (["codex_approval", "codex_approval_resolved", "agent_error"].includes(type)) this.publishRuntimeState();
     }
 
     /** 更新并广播 Codex 运行状态；静默后台活动可保留上一 turn 的断线重放。 */
     setCodexState(patch: Partial<CodexState>, options: { preserveReplay?: boolean } = {}) {
         const next = { ...this.codexState, ...patch };
+        if (this.codexState.busy && this.codexState.turnId && !next.busy) this.terminalTurnScope = { threadId: this.codexState.threadId, turnId: this.codexState.turnId };
         const threadChanged = next.threadId !== this.codexState.threadId;
         const turnChanged = Boolean(this.codexState.turnId && next.turnId && next.turnId !== this.codexState.turnId);
         const nextTurnStarted = !this.codexState.busy && next.busy;
@@ -250,6 +268,7 @@ export class CanvasSession {
         this.codexState = next;
         logger.debug("Codex state changed", this.codexState);
         this.emitAll("codex_state", this.codexState);
+        this.publishRuntimeState();
     }
 
     /** 权威历史已覆盖指定 turn 后，清理其断线重放事件。 */
@@ -280,9 +299,9 @@ export class CanvasSession {
                 this.clientFocusOrder.set(clientId, ++this.focusSequence);
             }
         }
-        sendEvent(res, "hello", { ok: true, protocolVersion: AGENT_PROTOCOL_VERSION, clientId, workspace: { activeThreadId }, conversation: this.conversationStateSnapshot, codex: this.codexState, pendingApprovals: this.codexPendingApprovals });
+        sendEvent(res, "hello", { ok: true, protocolVersion: AGENT_PROTOCOL_VERSION, clientId, workspace: { activeThreadId }, conversation: this.conversationStateSnapshot, codex: this.codexState, pendingApprovals: this.codexPendingApprovals, runtime: this.runtimeStateSnapshot });
         if (!statusOnly && activeThreadId && this.codexState.threadId === activeThreadId) this.codexReplayEvents.forEach((event) => sendEvent(res, event.type, event.payload));
-        const timer = setInterval(() => sendEvent(res, "ping", { time: Date.now() }), 15000);
+        const timer = setInterval(() => sendEvent(res, "ping", { time: Date.now(), runtime: this.runtimeStateSnapshot }), RUNTIME_HEARTBEAT_INTERVAL_MS);
         res.on("close", () => {
             clearInterval(timer);
             logger.info("SSE client disconnected", { clientId, statusOnly });
@@ -303,6 +322,7 @@ export class CanvasSession {
         this.conversationState = { ...this.conversationState, ...patch, revision: this.conversationState.revision + 1 };
         const snapshot = this.conversationStateSnapshot;
         this.emitAll("conversation_changed", snapshot);
+        this.publishRuntimeState();
         return snapshot;
     }
 
@@ -446,7 +466,12 @@ export class CanvasSession {
             if (!this.clients.size) throw new Error("当前没有已连接网页");
             return await this.requestCanvasTool(name, input);
         }
-        const readTool = ["canvas_get_state", "canvas_get_selection", "canvas_export_snapshot"].includes(name);
+        if (name === "canvas_export_snapshot") {
+            const projectId = String(input.projectId || this.canvasState?.projectId || "");
+            if (!projectId || !this.exportSnapshot) throw new Error("无法取得 Backend 权威画布导出能力");
+            return this.exportSnapshot(projectId);
+        }
+        const readTool = ["canvas_get_state", "canvas_get_selection"].includes(name);
         if (readTool && (!this.clients.size || !this.canvasState)) throw new Error("当前没有已连接画布");
         if (name === "canvas_get_state") {
             const canvas = this.canvasState!;
@@ -454,7 +479,6 @@ export class CanvasSession {
             // 网页内存快照没有可信持久 revision；条件读取在此入口总返回新鲜目录。
             return summarizeCanvasState(canvas as unknown as Record<string, unknown>, input, 512 * 1024);
         }
-        if (name === "canvas_export_snapshot") return compactCanvasState(this.canvasState);
         if (name === "canvas_get_selection") {
             const ids = new Set(this.canvasState?.selectedNodeIds || []);
             return { nodes: (this.canvasState?.nodes || []).filter((node) => ids.has(node.id)).map(compactNode) };

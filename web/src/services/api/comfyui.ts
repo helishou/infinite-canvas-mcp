@@ -182,14 +182,6 @@ export async function runVideoConcatTask(endpoint: string, token: string, videos
     }
 }
 
-export async function getRunningHubH3Task(endpoint: string, token: string, taskId: string) {
-    const task = (await fetchAgentJson<{ task: ComfyTask }>(endpoint, token, `/agent/runtime/tasks/${encodeURIComponent(taskId)}`)).task;
-    if (!task.result) return { ...task, result: null };
-    const media = task.result.media || [];
-    const output = media.find((item) => String(item.mimeType || "video/mp4").startsWith("video/")) || media[0];
-    return { ...task, result: output ? { url: output.url, storageKey: output.storageKey, mimeType: output.mimeType || "video/mp4", taskId: task.id } : null };
-}
-
 async function fetchAsBlob(url: string, signal?: AbortSignal) {
     if (!url) throw new Error("本地媒体缺少可读取地址");
     let response: Response;

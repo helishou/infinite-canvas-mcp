@@ -330,3 +330,27 @@ test("智能生成节点切换到音频、视频或文本时仍复用自身，�
         assert.equal((prepared.createOperations[1] as any).metadata.generationMode, mode);
     }
 });
+
+// 复制智能节点会把它元数据里指向自身的旧结果 id 克隆进副本（指向被复制的原节点）。
+// 运行副本时若把这些 id 当旧结果清理，就会把原节点删掉——线上复现：
+// 复制智能节点 → 点运行 → 被复制的原节点从画布消失。
+test("复制智能节点后运行副本，旧结果清理不得删除被复制的原节点", (t) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "p", nodes: [
+        { id: "original", type: "config", width: 420, height: 540, metadata: { smart: true, generationMode: "text", generatedTextResultIds: ["original"], primaryTextNodeId: "original" } },
+        { id: "copy", type: "config", width: 420, height: 540, metadata: { smart: true, generationMode: "text", generatedResultIds: ["original"], generatedTextResultIds: ["original"], primaryTextNodeId: "original", primaryImageId: "original" } },
+        { id: "legacy-text", type: "text", width: 340, height: 240, metadata: { content: "旧结果" } },
+    ], connections: [] });
+    const stores = createStores(db);
+    for (const mode of ["text", "image", "video", "audio"] as const) {
+        const prepared = prepareCanvasGenerationTarget(stores, {
+            mode, projectId: "p", nodeId: "copy", model: `m-${mode}`, prompt: "测试", count: 1,
+        }, `copy-${mode}-task`);
+        const deletedIds = prepared.createOperations.filter((operation) => operation.type === "delete_node").map((operation: any) => operation.id);
+        assert.ok(!deletedIds.includes("original"), `${mode} 模式不得删除被复制的原节点`);
+        for (const id of deletedIds) {
+            assert.notEqual(id, "original");
+        }
+    }
+});

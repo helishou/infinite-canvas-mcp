@@ -1,4 +1,7 @@
+import type { ProductionEntityBinding } from "@basketikun/canvas-agent/drama/production-contract";
+import type { SharedAssetReference } from "@basketikun/canvas-agent/shared-asset-reference";
 import type { CanvasGenerationMode } from "@basketikun/canvas-agent/generation-contract";
+import type { ProductionImageInput } from "@basketikun/canvas-agent/reference-contract";
 
 export type { CanvasGenerationMode } from "@basketikun/canvas-agent/generation-contract";
 
@@ -25,6 +28,8 @@ export enum CanvasNodeType {
     Character = "character",
     /** 场景节点：承载场景图、描述和可选色卡。 */
     Scene = "scene",
+    /** 道具节点：承载单张道具图与道具说明，可作为生成参考。 */
+    Prop = "prop",
 }
 
 // Node types are open strings: built-ins use CanvasNodeType and plugins use "<pluginId>:<name>".
@@ -88,12 +93,24 @@ export type CanvasNodeModeResult = {
 };
 
 export type CanvasNodeMetadata = {
+    sharedAssetReference?: SharedAssetReference;
+    sharedLibraryAssetId?: string;
+    productionImageInput?: ProductionImageInput;
+    productionEntity?: ProductionEntityBinding;
+    productionLayoutUnitId?: string;
+    productionSceneId?: string;
+    /** Formal screenplay block and scene identities projected by Backend. */
+    productionScriptId?: string;
+    productionScriptSceneId?: string;
+    sharedAssetOrigin?: { dramaId: string; assetId: string; approvedId: string; sourceProjectId: string; sourceNodeId: string };
     content?: string;
     url?: string;
     composerContent?: string;
     /** 新建的智能生成节点把提示词、参数和结果收在同一个 Config 节点里。 */
     smart?: boolean;
     prompt?: string;
+    /** H3 节点保存的 Clip 投影；V2 正式提示词只由 Backend 从 Shot 源稿编译。 */
+    segments?: Array<Record<string, unknown>>;
     status?: CanvasNodeStatus;
     /** 后端回写的运行进度（0–1），仅生成中有效；前端只读，不得回写。 */
     runProgress?: number;
@@ -137,6 +154,8 @@ export type CanvasNodeMetadata = {
     freeResize?: boolean;
     images?: CanvasNodeImage[];
     primaryImageId?: string;
+    /** Reference selection is independent of browsing and generation settings. */
+    smartImageReferenceSelection?: { mode: "latest_success" } | { mode: "selected_result"; resultId: string };
     /** 当前显示的智能图片历史版本。 */
     activeImageHistoryId?: string | null;
     /** 只有用户主动选中历史版本时，才用该版本的参考图快照覆盖实时连线。 */
@@ -183,6 +202,10 @@ export type CanvasNodeMetadata = {
     sceneColorCard?: { url: string; storageKey?: string; name: string; width: number; height: number; bytes: number; mimeType: string };
     sceneColorPalette?: string[];
     sceneColorCardPrompt?: string;
+    propAssetId?: string;
+    propName?: string;
+    propDescription?: string;
+    propImage?: { url: string; storageKey?: string; name: string; width: number; height: number; bytes: number; mimeType: string };
     loopCount?: number;
     loopCountMode?: "auto" | "manual";
     loopMode?: "serial" | "parallel";

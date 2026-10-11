@@ -202,6 +202,18 @@ try {
     assert.equal(edited.isError, undefined);
     await a.getByText("MCP增量：Agent统一协议回写", { exact: true }).first().waitFor();
     console.log("PASS: 常驻 MCP HTTP 工具清单与增量编辑，画布实时显示");
+    const h3BeforeUpdate = (await api("GET", "/canvas/projects/" + projectId)).project;
+    const h3Update = await mcp.callTool({ name: "h3_update_clips", arguments: { projectId, nodeId: "h3", operationId: randomUUID(), expectedRevision: h3BeforeUpdate.revision, updates: [{ segmentId: "S03", patch: { title: "MCP v2 实时回执片段" } }] } });
+    assert.equal(h3Update.isError, undefined, JSON.stringify(h3Update));
+    const h3UpdateReceipt = JSON.parse(h3Update.content.find((item) => item.type === "text").text);
+    assert.equal(h3UpdateReceipt.committed, true);
+    await a.waitForFunction(async ({ projectId }) => {
+        const { useCanvasStore } = await import("/src/stores/canvas/use-canvas-store.ts");
+        const project = useCanvasStore.getState().projects.find(item => item.id === projectId);
+        const node = project?.nodes.find(item => item.id === "h3");
+        return node?.metadata.segments?.find(segment => segment.id === "S03")?.title === "MCP v2 实时回执片段";
+    }, { projectId });
+    console.log("PASS: MCP v2 稳定回执写入 H3 Clip，真实画布 Store 经 Backend 广播实时更新");
     for (const name of ["canvas_save_text_suggestion", "canvas_list_text_suggestions", "canvas_resolve_text_suggestion"]) assert.ok(inventory.tools.some((tool) => tool.name === name));
     const candidateTarget = { nodeId: "h3", segmentId: "S03", field: "prompt" };
     const candidateDoc = await api("GET", "/canvas/projects/" + projectId + "/text?" + new URLSearchParams(candidateTarget));

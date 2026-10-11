@@ -1,5 +1,5 @@
 import type { AiTextMessage } from "@/services/api/image";
-import { resolveCharacterImageKeys } from "@basketikun/canvas-agent/reference-contract";
+import { productionImageInput, resolveCharacterImageKeys } from "@basketikun/canvas-agent/reference-contract";
 import i18n from "@/i18n";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import type { ReferenceImage } from "@/types/image";
@@ -52,6 +52,11 @@ type NodeGenerationGroupInput = {
 export type NodeGenerationInput = NodeGenerationResourceInput | NodeGenerationGroupInput;
 
 export function buildNodeGenerationContext(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], prompt: string, index?: CanvasGraphIndex, loopContext?: CanvasLoopRuntimeContext): NodeGenerationContext {
+    const formal = productionImageInput(nodes.find(node => node.id === nodeId));
+    if (formal) {
+        const referenceImages = formal.references.map(ref => ({ id: `${ref.nodeId}:${ref.label}`, name: `${ref.label} · ${ref.assetId} · ${ref.role}`, type: "image/png", dataUrl: "", storageKey: ref.storageKey }));
+        return { prompt, referenceImages, loopInputImages: [], referenceVideos: [], referenceAudios: [], textCount: 0, imageCount: referenceImages.length, videoCount: 0, audioCount: 0 };
+    }
     const inputs = buildNodeGenerationInputs(nodeId, nodes, connections, index, loopContext);
     const sourceNode = nodes.find((node) => node.id === nodeId);
     const separateLoopImages = Boolean(loopContext?.nodeId && (
@@ -266,6 +271,7 @@ function readNodeGenerationResource(node: CanvasNodeData, characterSelection?: C
     if (node.type === CanvasNodeType.Loop && nodes && connections) return readLoopGenerationResources(node, nodes, connections, index, loopContext, visited);
     if (node.type === CanvasNodeType.Character) return readCharacterGenerationResources(node, characterSelection);
     if (node.type === CanvasNodeType.Scene) return readSceneGenerationResources(node);
+    if (node.type === CanvasNodeType.Prop) return readPropGenerationResources(node);
     const image = readReferenceImage(node);
     if (image) return [{ nodeId: node.id, type: "image", title: node.title, image }];
     const video = readReferenceVideo(node);
@@ -318,6 +324,17 @@ function readSceneGenerationResources(node: CanvasNodeData): NodeGenerationResou
         type: "image",
         title: `${node.title} · 场景图`,
         image: { id: `${node.id}-场景图`, name: image.name || `${node.title || node.id}.png`, type: image.mimeType || "image/png", dataUrl: image.url || "", storageKey: image.storageKey },
+    }];
+}
+
+function readPropGenerationResources(node: CanvasNodeData): NodeGenerationResourceInput[] {
+    const image = node.metadata?.propImage;
+    if (!image?.url && !image?.storageKey) return [];
+    return [{
+        nodeId: node.id,
+        type: "image",
+        title: `${node.metadata?.propName || node.title} · 道具图`,
+        image: { id: `${node.id}-道具图`, name: image.name || `${node.title || node.id}.png`, type: image.mimeType || "image/png", dataUrl: image.url || "", storageKey: image.storageKey },
     }];
 }
 

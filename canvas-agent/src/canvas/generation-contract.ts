@@ -1,5 +1,51 @@
 import { z } from "zod";
 
+export type H3ExecutionPreview = {
+    ready: boolean; readyTargets?: Array<{ nodeId: string; segmentId: string }>; blockedTargets?: Array<{ nodeId: string; segmentId: string; code: string; message: string }>; warnings?: Array<{ code: string; message: string }>; revision: number; planHash: string;
+    clips: Array<{ nodeId: string; segmentId: string; savedRuntime: Record<string, unknown>; effectiveRuntime: Record<string, unknown>; parameterSources: Record<string, string>; policy: string;
+        expectedDimensions: { firstPass: { width: number; height: number } | null; final: { width: number; height: number } | null }; promptHash: string; referenceMap: Array<Record<string, unknown>> }>;
+    diagnostics: Array<{ code: string; nodeId: string; segmentId: string; message: string }>;
+};
+
+export const h3ExecutionModeSchema = z.enum(["auto", "local", "runninghub"]);
+/**
+ * 值来源：constant=固定值（表单填），prompt=本轮提示词，image/video/audio=按序注入参考素材。
+ * 没有 H3 参数这一类——H3 专用 RunningHub 路径已移除（commit be2388ad），
+ * task.params 再也不会带 H3 参数，param 映射运行必失败，所以不再作为可写入值。
+ * paramKey 同理：保留 zod 读取兼容，老档案里已存的 param 映射能解析出来并降级成
+ * constant（见 runninghub.ts 的 normalizeRunningHubFieldSources），不会整个档案读不出来。
+ */
+export const runningHubFieldSchema = z.object({
+  id: z.string().optional(), nodeId: z.string().min(1), fieldName: z.string().min(1),
+  fieldValue: z.unknown().optional(), fieldType: z.string().optional(), label: z.string().optional(),
+  enabled: z.boolean().optional(), required: z.boolean().optional(),
+  source: z.enum(["constant", "prompt", "image", "video", "audio", "param"]).optional(),
+  paramKey: z.string().optional(), index: z.number().int().positive().optional(),
+});
+export type RunningHubField = z.infer<typeof runningHubFieldSchema>;
+export const runningHubConfigPatchSchema = z.object({
+  baseUrl: z.string().optional(), apiKey: z.string().optional(), walletApiKey: z.string().optional(),
+  mode: z.enum(["workflow", "app"]).optional(), workflowId: z.string().optional(), appId: z.string().optional(),
+  fields: z.array(runningHubFieldSchema).optional(), workflowJson: z.unknown().optional(),
+  useWallet: z.boolean().optional(), instanceType: z.enum(["default", "plus", "ultra"]).optional(),
+  concurrency: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+});
+export type RunningHubConfig = z.infer<typeof runningHubConfigPatchSchema> & {
+  baseUrl: string; apiKey: string; mode: "workflow" | "app"; concurrency: number;
+  workflowId: string; appId: string; fields: RunningHubField[]; useWallet: boolean; instanceType: "default" | "plus" | "ultra";
+};
+/** RunningHub API 格式工作流：节点 ID → 节点定义，与本地 ComfyUI 工作流 JSON 同形。 */
+export const runningHubWorkflowGraphSchema = z.record(z.string(), z.unknown());
+export type RunningHubWorkflowGraph = z.infer<typeof runningHubWorkflowGraphSchema>;
+export const runningHubWorkflowProfileSchema = z.object({
+  id: z.string().min(1), name: z.string().min(1).max(120), workflowId: z.string().min(1),
+  instanceType: z.enum(["default", "plus", "ultra"]).optional(), fields: z.array(runningHubFieldSchema),
+  /** 读取节点图时的原始图快照；只读展示，运行以平台当前工作流为准。 */
+  workflowJson: runningHubWorkflowGraphSchema.optional(),
+  createdAt: z.string().optional(), updatedAt: z.string().optional(),
+});
+export type RunningHubWorkflowProfile = z.infer<typeof runningHubWorkflowProfileSchema>;
+
 /**
  * 画布生成的跨进程协议。
  *
@@ -16,10 +62,14 @@ export const canvasGenerationCommandSchema = z
     sourceNodeId: z.string().optional(),
     nodeIds: z.array(z.string()).optional(),
     segmentId: z.string().optional(),
+    endSegmentId: z.string().optional(),
     segmentIndex: z.number().optional(),
     runFromCurrent: z.boolean().optional(),
     skipCompleted: z.boolean().optional(),
     forceRegenerate: z.boolean().optional(),
+    inputBasis: z.enum(["canvas", "published"]).optional(),
+    expectedCanvasRevision: z.number().int().nonnegative().optional(),
+    expectedPlanHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
     model: z.string().optional(),
     prompt: z.string().optional(),
     references: z.array(z.record(z.string(), z.unknown())).optional(),

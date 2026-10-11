@@ -1,3 +1,4 @@
+import { withH3ParameterEdits } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { useEffect, useRef, useState, useCallback, useMemo } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContentProps } from "@infinite-canvas/plugin-sdk";
 import { message } from "antd";
@@ -26,19 +27,23 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     const ctx = useH3LocalView(sharedContext);
     const metadata = ctx.node.metadata || {};
     const sharedMetadata = sharedContext.node.metadata || {};
-    const segmentFallbacks = JSON.stringify([
-        sharedMetadata.prompt, sharedMetadata.duration, sharedMetadata.seed, sharedMetadata.noiseSeed,
-        sharedMetadata.mode, sharedMetadata.taskMode, sharedMetadata.modelName, sharedMetadata.loraName,
-        sharedMetadata.aspectRatio, sharedMetadata.megapixels, sharedMetadata.videoSteps, sharedMetadata.denoise,
-        sharedMetadata.teAccel, sharedMetadata.noDub, sharedMetadata.noCaption, sharedMetadata.audioMode,
-    ]);
-    const segments = useMemo(() => segmentsFor(sharedMetadata), [sharedMetadata.segments, segmentFallbacks]);
+    const segments = useMemo(() => segmentsFor(sharedMetadata), [sharedMetadata]);
     const ctxRef = useRef(ctx);
     ctxRef.current = ctx;
     const storedSelectedId = String(metadata.selectedSegmentId || "");
     const selected = segments.find((item) => item.id === storedSelectedId) || segments[0];
     const selectedIndex = Math.max(0, segments.findIndex((item) => item.id === selected?.id));
     const appliedDeepLinkRef = useRef("");
+    const emittedFocusRef = useRef(0);
+    const focusRequest = Number(metadata.h3FocusRequest || 0);
+    useEffect(() => {
+        if (!focusRequest || emittedFocusRef.current === focusRequest) return;
+        const frame = requestAnimationFrame(() => {
+            emittedFocusRef.current = focusRequest;
+            window.dispatchEvent(new CustomEvent("minimax-h3-focus-preview", { detail: { projectId: sharedContext.projectId, nodeId: sharedContext.node.id, requestId: focusRequest } }));
+        });
+        return () => cancelAnimationFrame(frame);
+    }, [focusRequest, sharedContext.projectId, sharedContext.node.id]);
     useEffect(() => {
         const query = new URLSearchParams(window.location.search);
         const segmentId = query.get("segmentId") || "";
@@ -56,8 +61,41 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     }, [ctx, segments, selected?.id, storedSelectedId]);
     const upstream = readH3Refs(ctx);
     const selectedRefs = selected ? refsForSegment(selected) : [];
-    const outputSegmentId = (url: string) => segments.find((segment) => resultUrl(segment.result) === url || (segment.results || []).some((item) => item.url === url))?.id;
-    const outputs = segments.flatMap((item, index) => [...(item.results || []), ...(resultUrl(item.result) ? [{ url: resultUrl(item.result), type: "video", name: `Clip ${index + 1}`, storageKey: item.resultStorageKey, segmentId: item.id }] : [])]).map((item, index) => { const value = item && typeof item === "object" ? item as Record<string, unknown> : { url: String(item) } as Record<string, unknown>; const url = String(value.url || value.video_url || value.content || ""); const type = String(value.type || value.kind || "video").startsWith("image") ? "image" : String(value.type || value.kind || "video").startsWith("audio") ? "audio" : "video"; const segmentId = typeof value.segmentId === "string" ? value.segmentId : outputSegmentId(url); return url ? { url, type, name: String(value.name || `Clip ${index + 1}`), storageKey: typeof value.storageKey === "string" ? value.storageKey : undefined, segmentId, params: value.params && typeof value.params === "object" ? value.params as Record<string, unknown> : undefined } as H3Ref : null; }).filter((item): item is H3Ref => Boolean(item)).filter((item, index, all) => all.findIndex((other) => other.url === item.url) === index).reverse();
+    const outputs = useMemo(() => {
+        const segmentByUrl = new Map<string, string>();
+        const rawOutputs: Array<unknown> = [];
+        for (const [segmentIndex, segment] of segments.entries()) {
+            for (const item of segment.results || []) {
+                rawOutputs.push(item);
+                if (item.url && !segmentByUrl.has(item.url)) segmentByUrl.set(item.url, segment.id);
+            }
+            const url = resultUrl(segment.result);
+            if (url) {
+                rawOutputs.push({ url, type: "video", name: `Clip ${segmentIndex + 1}`, storageKey: segment.resultStorageKey, segmentId: segment.id });
+                if (!segmentByUrl.has(url)) segmentByUrl.set(url, segment.id);
+            }
+        }
+        const seenUrls = new Set<string>();
+        const result: H3Ref[] = [];
+        for (const [index, item] of rawOutputs.entries()) {
+            const value = item && typeof item === "object" ? item as Record<string, unknown> : { url: String(item) };
+            const url = String(value.url || value.video_url || value.content || "");
+            if (!url || seenUrls.has(url)) continue;
+            seenUrls.add(url);
+            const rawType = String(value.type || value.kind || "video");
+            const type = rawType.startsWith("image") ? "image" : rawType.startsWith("audio") ? "audio" : "video";
+            result.push({
+                url, type,
+                name: String(value.name || `Clip ${index + 1}`),
+                storageKey: typeof value.storageKey === "string" ? value.storageKey : undefined,
+                segmentId: typeof value.segmentId === "string" ? value.segmentId : segmentByUrl.get(url),
+                generationLogId: typeof value.generationLogId === "string" ? value.generationLogId : undefined,
+                taskId: typeof value.taskId === "string" ? value.taskId : undefined,
+                params: value.params && typeof value.params === "object" ? value.params as Record<string, unknown> : undefined,
+            } as H3Ref);
+        }
+        return result.reverse();
+    }, [segments]);
     const total = Math.max(1, segments.reduce((sum, item) => sum + Math.max(0.5, Number(item.duration || 1)), 0));
     const playhead = Math.max(0, Math.min(total, Number(metadata.playhead || 0)));
     const fmt = (value: number) => `${Number(value || 0).toFixed(Number(value || 0) % 1 ? 1 : 0)}s`;
@@ -129,6 +167,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     const [playToken, setPlayToken] = useState(0);
     const [smartStoryboardOpen, setSmartStoryboardOpen] = useState(false);
     const [smartStoryboardUploads, setSmartStoryboardUploads] = useState<H3Ref[]>([]);
+    const [submittingSegments, setSubmittingSegments] = useState<Set<string>>(() => new Set());
     const [canvasReferenceDragOver, setCanvasReferenceDragOver] = useState(false);
     const workbenchRef = useRef<HTMLDivElement | null>(null);
     // 播放期间由 rAF 调用：直接改写 ruler 上所有 .minimax-playhead 指针的 left（= 绝对时间秒 ×100px），
@@ -160,12 +199,27 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     // 空 ref 槽添加或在职责弹窗内替换引用时，复用画布既有的「选节点作参考」模式；选中节点通过 canvas-reference-pick 回抛。
     const [pickingRef, setPickingRef] = useState<{ segmentId: string; slotIndex: number; types: H3Ref["type"][]; replaceRef?: H3Ref; shotId?: string } | null>(null);
     useEffect(() => {
+        const onSubmitPending = (event: Event) => {
+            const detail = (event as CustomEvent<{ nodeId?: string; segmentId?: string; pending?: boolean }>).detail || {};
+            if (detail.nodeId !== ctx.node.id || !detail.segmentId) return;
+            setSubmittingSegments((current) => {
+                const next = new Set(current);
+                if (detail.pending) next.add(detail.segmentId!);
+                else next.delete(detail.segmentId!);
+                return next;
+            });
+        };
+        window.addEventListener("minimax-h3:submit-pending", onSubmitPending);
+        return () => window.removeEventListener("minimax-h3:submit-pending", onSubmitPending);
+    }, [ctx.node.id]);
+    useEffect(() => {
         const syncReferences = (changedNodeIds?: Set<string>) => {
             const ctx = ctxRef.current;
             const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
             const currentSegments = segmentsFor(liveMetadata);
             let changed = false;
             const nextSegments = currentSegments.map((segment) => {
+                if (segment.productionClipProjection) return segment;
                 let nextSegment = segment;
                 const sourceIds = new Set(refsForSegment(segment).filter((ref) => !ref.groupId && ref.nodeId && (!changedNodeIds || changedNodeIds.has(ref.nodeId))).map((ref) => ref.nodeId!));
                 for (const sourceId of sourceIds) {
@@ -207,6 +261,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         const ctx = ctxRef.current;
         let changed = false;
         const next = segments.map((segment) => {
+            if (segment.productionClipProjection) return segment;
             // 先清掉指向已不存在引用的分镜绑定（旧版本遗留的孤儿卡），再做常规归一化。
             const healed = dropUnboundStoryboardReferences(segment);
             const hasStoryboards = storyboardRefsForSegment(healed).length > 0;
@@ -238,10 +293,19 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             message.warning("末张分镜时长不足 1 秒，无法再平分新增分镜。");
             return false;
         }
+        const isFormalClip = Boolean((previous.productionClipProjection as Record<string, unknown> | undefined)?.targetId);
+        const storyboardState = (segment: H3Segment) => JSON.stringify({ shots: segment.storyboardShots || [], refs: storyboardRefsForSegment(segment) });
+        if (isFormalClip && storyboardState(previous) !== storyboardState(updated)) {
+            if (!ctx.production) { message.error("正式制作 Clip 的分镜需要制作台编辑器接收；当前工作台未连接"); return false; }
+            void ctx.production.replaceStoryboardTrack({ nodeId: ctx.node.id, segmentId: updated.id, segment: updated as unknown as Record<string, unknown> })
+                .then(result => { if (!result.sourceSaved) message.error("制作台未保存分镜更改"); })
+                .catch(error => message.error(error instanceof Error ? error.message : String(error)));
+            return true;
+        }
         ctx.updateMetadata({ ...(select ? { selectedSegmentId: updated.id } : {}), segments: current.map((item) => item.id === updated.id ? updated : item) });
         void syncStoryboardPrompt(ctx, updated, previous);
         return true;
-    }, [ctx, metadata]);
+    }, [ctx, metadata, message]);
     const patchSelected = useCallback((patch: Partial<H3Segment>) => {
         if (!selected) return;
         if ((patch.duration !== undefined || patch.mode !== undefined || patch.taskMode !== undefined) && storyboardTrackItems(selected).length) {
@@ -255,9 +319,9 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     }, [commitSegmentChange, ctx, metadata, selected]);
     const patchAllSettings = useCallback((patch: Partial<H3Segment>) => {
         const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata;
-        const current = segmentsFor(liveMetadata);
+        const current = Array.isArray(liveMetadata.segments) && liveMetadata.segments.length ? liveMetadata.segments as H3Segment[] : segmentsFor(liveMetadata);
         const next = current.map((segment) => {
-            const updated = { ...segment, ...patch };
+            const updated = { ...segment, ...withH3ParameterEdits(segment as unknown as Record<string, unknown>, patch) } as H3Segment;
             if ((patch.duration !== undefined || patch.mode !== undefined || patch.taskMode !== undefined) && storyboardTrackItems(segment).length) {
                 const withRefs = withSegmentRefs(updated, refsForSegment(segment));
                 void syncStoryboardPrompt(ctx, withRefs, segment);
@@ -594,7 +658,8 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         }
     };
     const nextSegment = segments.slice(selectedIndex + 1).find((item) => Boolean(resultUrl(item.result)));
-    const nextUrl = nextSegment ? (nextSegment.resultStorageKey ? ctx.mediaUrl(nextSegment.resultStorageKey) : resultUrl(nextSegment.result)) : undefined;
+    const preloadNext = metadata.h3PlaybackAll === true;
+    const nextUrl = preloadNext && nextSegment ? (nextSegment.resultStorageKey ? ctx.mediaUrl(nextSegment.resultStorageKey) : resultUrl(nextSegment.result)) : undefined;
     const themeStyle = {
         ...h3ThemeVars(ctx.theme),
         "--minimax-prompt-w": `${promptW}px`,
@@ -603,20 +668,33 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         "--minimax-timeline-h": `${effTimelineH}px`,
         "--minimax-ref-h": `${effRefLaneH}px`,
     };
+    if (metadata.productionSceneId && segments.length === 0) return <div className="minimax-canvas-workbench" data-canvas-no-zoom style={themeStyle} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
+        <div className="minimax-wb-status">本场暂无 Clip。请先在制作台添加镜头并分配 Clip。</div>
+    </div>;
     return <div ref={workbenchRef} className={`minimax-canvas-workbench${canvasReferenceDragOver ? " is-canvas-ref-drag-over" : ""}`} data-canvas-no-zoom data-canvas-ref-drop-target={ctx.node.id} style={themeStyle} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()} onDragOver={(event) => { event.preventDefault(); event.stopPropagation(); }} onDrop={addDroppedReference}>
         <H3Runner key="runner" ctx={ctx} />
         <H3PaneHandles key="pane-handles" ctx={ctx} />
         <H3RulerScrubber key="ruler-scrubber" ctx={ctx} segments={segments} total={total} previewH={effPreviewH} />
-        <H3WorkbenchToolbar key="workbench-toolbar" ctx={ctx} metadata={metadata} segments={segments} selected={selected} selectedIndex={selectedIndex} outputs={outputs} playhead={playhead} total={total} fmt={fmt} onPlayAll={playAll} />
+        <H3WorkbenchToolbar key="workbench-toolbar" ctx={ctx} metadata={metadata} segments={segments} selected={selected} selectedIndex={selectedIndex} playhead={playhead} total={total} fmt={fmt} onPlayAll={playAll} />
         <SmartStoryboardModal key="storyboard-modal" ctx={ctx} metadata={metadata} upstream={upstream} open={smartStoryboardOpen} uploads={smartStoryboardUploads} setUploads={setSmartStoryboardUploads} onClose={() => setSmartStoryboardOpen(false)} />
         {editingRef && currentEditingRef ? <H3ReferenceModal key="reference-modal" ctx={ctx} refItem={currentEditingRef} characters={referencedCharacters} group={editingRefGroup} onApply={applyReferenceEdit} onReplaceFromCanvas={requestCanvasRefReplace} onRemoveRef={removeEditingReference} onRemoveStoryboardImage={removeEditingStoryboardImage} onDeleteGroup={editingRefGroup ? deleteReferenceGroup : undefined} onClose={() => setEditingRef(null)} /> : null}
         <div key="workbench-body" ref={bodyRef} className="minimax-wb-body">
-            <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer key={`${showLivePreview ? "live" : "result"}-${previewKind}`} ctx={ctx} url={previewStorageKey ? ctx.mediaUrl(previewStorageKey) : preview} kind={previewKind} aspectRatio={String(selected?.aspectRatio || metadata.aspectRatio || "16:9 (Widescreen)")} storageKey={previewStorageKey} name={previewName} livePreview={showLivePreview} playhead={playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playToken={playToken} playRequest={playRequest} nextUrl={nextUrl} onEnded={advancePlayback} onPlayheadTick={livePlayheadTick} /></div>
-            <div key="prompt-side" className="minimax-prompt-side"><H3ClipSettingsPanel ctx={ctx} metadata={metadata} selected={selected} patchSelected={patchSelected} patchAllSettings={patchAllSettings} /></div>
+            <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer key={`${showLivePreview ? "live" : "result"}-${previewKind}`} ctx={ctx} url={previewStorageKey ? ctx.mediaUrl(previewStorageKey) : preview} kind={previewKind} aspectRatio={String(selected?.aspectRatio || metadata.aspectRatio || "16:9 (Widescreen)")} storageKey={previewStorageKey} name={previewName} livePreview={showLivePreview} playhead={playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playToken={playToken} playRequest={playRequest} nextUrl={nextUrl} preloadNext={preloadNext} onEnded={advancePlayback} onPlayheadTick={livePlayheadTick} /></div>
+            <div key="prompt-side" className="minimax-prompt-side"><H3ClipSettingsPanel ctx={ctx} metadata={metadata} selected={selected} submitting={submittingSegments.has(String(selected?.id || ""))} patchSelected={patchSelected} patchAllSettings={patchAllSettings} /></div>
         <H3Timeline key="timeline" ctx={ctx} segments={segments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onEditRef={(segmentId, ref) => setEditingRef({ segmentId, ref })} onRequestReplaceRef={beginCanvasRefReplace} onRequestPickRef={requestCanvasRefPick} onRequestPickStoryboardShot={requestStoryboardShotPick} pickingShotKey={pickingRef?.shotId ? `${pickingRef.segmentId}:${pickingRef.shotId}` : undefined} onSegmentChange={commitSegmentChange} pickingKey={pickingRef ? `${pickingRef.segmentId}:${pickingRef.slotIndex}` : undefined} onPlayAll={playAll} fmt={fmt} />
             <H3MaterialLibrary key="material-library" ctx={ctx} outputs={outputs} segments={segments} selected={selected} patchSelected={patchSelected} />
+            <div key="input-source" className="minimax-wb-input-source" style={{ padding: "8px 0", fontSize: 14 }}>
+                使用当前已保存内容
+                {selected?.productionClipProjection && <span> · 已关联导演基线</span>}
+                {selected?.inputOutdated === true && <span> · 输入已修改</span>}
+                {typeof (selected?.productionClipProjection?.nextValues as any)?.prompt === "string" && selected?.prompt !== (selected.productionClipProjection?.nextValues as any).prompt && <details>
+                    <summary>已手动修改 · 查看导演提示词差异</summary>
+                    <pre style={{ maxHeight: 240, overflow: "auto", whiteSpace: "pre-wrap" }}>{String((selected.productionClipProjection?.nextValues as any).prompt)}</pre>
+                    <button type="button" onClick={() => patchSelected({ prompt: String((selected.productionClipProjection?.nextValues as any).prompt) })}>采用导演提示词</button>
+                </details>}
+            </div>
             <H3CurrentClipPanel key="current-clip-panel" ctx={ctx} selected={selected} selectedIndex={selectedIndex} imageRefs={imageRefs} videoRefs={videoRefs} audioRefs={audioRefs} patchSelected={patchSelected} fmt={fmt} onOpenStoryboard={() => setSmartStoryboardOpen(true)} />
         </div>
-        <div key="status" className="minimax-wb-status"><H3StatusBadge status={currentRuntime.status} error={String(selected?.errorDetails || metadata.errorDetails || metadata.error || "")} onRetry={() => requestH3Run(ctx, false, true)} />{String(metadata.smartStoryboardStatus || "") === "loading" ? <span style={{ marginLeft: 8, color: "#f59e0b", fontSize: 24 }}>智能分镜正在分析参考图并生成提示词，请稍候…</span> : null}{String(metadata.smartStoryboardStatus || "") === "success" ? <span style={{ marginLeft: 8, color: "#22c55e", fontSize: 24 }}>智能分镜已完成</span> : null}{String(metadata.smartStoryboardStatus || "") === "error" ? <span style={{ marginLeft: 8, color: "#ef4444", fontSize: 24 }}>智能分镜生成失败</span> : null}</div>
+        <div key="status" className="minimax-wb-status"><H3StatusBadge status={submittingSegments.has(String(selected?.id || "")) && !["queued", "loading", "awaiting_confirmation"].includes(currentRuntime.status) ? "preparing" : currentRuntime.status} error={String(selected?.errorDetails || metadata.errorDetails || metadata.error || "")} onRetry={() => requestH3Run(ctx, false, true)} />{String(metadata.smartStoryboardStatus || "") === "loading" ? <span style={{ marginLeft: 8, color: "#f59e0b", fontSize: 24 }}>智能分镜正在分析参考图并生成提示词，请稍候…</span> : null}{String(metadata.smartStoryboardStatus || "") === "success" ? <span style={{ marginLeft: 8, color: "#22c55e", fontSize: 24 }}>智能分镜已完成</span> : null}{String(metadata.smartStoryboardStatus || "") === "error" ? <span style={{ marginLeft: 8, color: "#ef4444", fontSize: 24 }}>智能分镜生成失败</span> : null}</div>
     </div>;
 }

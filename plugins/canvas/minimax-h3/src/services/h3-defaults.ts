@@ -3,11 +3,15 @@
 // 「设为默认参数」的布局快照（节点宽高 + 各模块区域宽高）随默认参数一起保存：Host 注入的
 // settings.layout 是主来源（跨浏览器/客户端一致），localStorage LAYOUT_KEY 只作兜底副本；
 // 读取生成参数时仍剥掉 layout，避免混进 segment。
-import { readH3Layout } from "../../../../../canvas-agent/src/plugins/minimax-h3/node-factory";
+import { readH3Layout } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
+import { useSyncExternalStore } from "@infinite-canvas/plugin-sdk";
 
 const LAYOUT_KEY = "minimax-h3-default-layout";
 let cachedPayload: StoredPayload | null = null;
 let cachedLayoutPanes: Record<string, number> | null = null;
+let cachedParams: Record<string, unknown> = {};
+const listeners = new Set<() => void>();
+const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 export interface StoredH3Defaults {
     type: "minimax-h3-settings";
@@ -22,6 +26,9 @@ type StoredPayload = { type?: string; version?: number; settings?: Record<string
 export function setDefaultParamsCache(settings: Record<string, unknown>): void {
     cachedPayload = { type: "minimax-h3-settings", version: 2, settings };
     cachedLayoutPanes = null;
+    const { layout: _layout, ...params } = settings;
+    cachedParams = params;
+    for (const listener of listeners) listener();
 }
 
 if (typeof window !== "undefined") {
@@ -32,11 +39,11 @@ if (typeof window !== "undefined") {
 }
 
 export function readDefaultParams(): Record<string, unknown> {
-    const payload = cachedPayload;
-    if (!payload) return {};
-    // layout 是布局子对象，不是生成参数，剥掉再返回，避免混进 segment。
-    const { layout: _layout, ...rest } = payload.settings as Record<string, unknown>;
-    return rest;
+    return cachedParams;
+}
+
+export function useDefaultParams() {
+    return useSyncExternalStore(subscribe, readDefaultParams, readDefaultParams);
 }
 
 export function readDefaultLayout(): H3DefaultLayout {
@@ -79,6 +86,8 @@ export function writeDefaultParams(settings: Record<string, unknown>): void {
 export function clearDefaultParams(): void {
     cachedPayload = null;
     cachedLayoutPanes = null;
+    cachedParams = {};
+    for (const listener of listeners) listener();
     try {
         if (typeof localStorage === "undefined") return;
         localStorage.removeItem(LAYOUT_KEY);

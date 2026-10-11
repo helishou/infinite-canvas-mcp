@@ -1,3 +1,4 @@
+import { AgentSubagents } from "./agent-subagents";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, useSpring, useTransform } from "motion/react";
 import { useTranslation } from "react-i18next";
@@ -35,6 +36,7 @@ export function AgentChatTimeline({
     const messages = useAgentStore((state) => state.messages);
     const bootstrapStatus = useAgentStore((state) => state.bootstrapStatus);
     const mcpStartupStatuses = useAgentStore((state) => state.mcpStartupStatuses);
+    const connectError = useAgentStore((state) => state.connectError);
     const timeline = useMemo(() => groupTimelineMessages(messages), [messages]);
     const listRef = useRef<HTMLDivElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
@@ -42,7 +44,7 @@ export function AgentChatTimeline({
     const [showScrollToBottom, setShowScrollToBottom] = useState(false);
     const streaming = messages.some((message) => message.streamId);
     const showBootstrap = Boolean(bootstrapStatus && !messages.some((message) => message.role === "user" || message.role === "assistant"));
-    const working = showBootstrap ? bootstrapStatus! : workingActivity(messages.at(-1));
+    const working = waiting && connectError ? { key: "runtime-sync-error", text: connectError, status: "failed" as const } : showBootstrap ? bootstrapStatus! : workingActivity(messages.at(-1));
     const updateScrollState = useCallback(() => {
         const list = listRef.current;
         if (!list) return;
@@ -82,6 +84,7 @@ export function AgentChatTimeline({
                     {timeline.map((entry) => entry.type === "commands"
                         ? <AgentCommandGroupRow key={entry.id} items={entry.items} theme={theme} />
                         : <AgentChatMessageRow key={entry.item.id} item={entry.item} theme={theme} />)}
+                    <AgentSubagents theme={theme} />
                     {pendingTool ? (
                         <AgentPendingToolCard
                             summary={summarizeCanvasAgentOps(pendingTool.input?.ops || []) || toolName(pendingTool.name)}

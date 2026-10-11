@@ -131,6 +131,57 @@ test("MCP 按逐镜绑定顺序排列分镜图，并让 Picture 标签仍指向�
     ]);
 });
 
+test("分镜写入包含角色组派生引用，并按稳定来源 Shot ID 创建分镜轨", () => {
+    const scene = { id: "scene-binding", assetId: "scene-asset", label: "雨夜天台", role: "scene", tags: [], enabled: true, usage: "reference", mediaType: "image", storageKey: "image:scene" };
+    const frame = { id: "frame-binding", assetId: "frame-asset", label: "S01-01 分镜图", role: "storyboard", tags: [], enabled: true, usage: "reference", mediaType: "image", storageKey: "image:frame" };
+    const group = {
+        id: "group-lixi", characterName: "黎希｜第1集·用户指定身份", characterAssetId: "character-lixi",
+        characterNodeId: "character-lixi", subjectId: "lixi",
+        outfits: [{ id: "outfit-lixi", name: "黑红服装", role: "character_turnaround", enabled: true, storageKey: "image:lixi", mimeType: "image/png" }],
+        voiceEnabled: false, outfitEnabled: true,
+    };
+    const segment = {
+        id: "clip-storyboard-character", mode: "ref2va", duration: 5,
+        referenceBindings: [scene, frame],
+        h3CharacterGroups: { [group.id]: group },
+    };
+    const generated = writeStoryboardPrompt({
+        nodes: [{ id: "character-lixi", type: "character", metadata: { characterName: "黎希" } }],
+    }, segment, {
+        openingDescription: "雨夜天台。",
+        shots: [{ id: "S01-01-source-id", description: "黎希从画面左侧走入。", pictureBindingId: frame.id }],
+        referenceBindings: [frame],
+        overallSoundscape: "雨声。",
+        nonDiegeticMusic: "N/A",
+    });
+
+    assert.match(generated.prompt, /<Subject 1> is 黎希｜第1集·用户指定身份/u);
+    assert.match(generated.prompt, /<Subject 1> \(appears in \[Shot 1\]\): fully_preserved/u);
+    assert.match(generated.prompt, /<Picture 1> is the approved storyboard keyframe at the entry of \[Shot 1\]/u);
+    assert.deepEqual(generated.storyboardShots, [{ id: "S01-01-source-id", referenceBindingId: frame.id }]);
+    assert.deepEqual(generated.referenceBindings?.map((binding) => binding.id), [frame.id]);
+    assert.equal(generated.referenceBindings?.some((binding) => binding.groupId === group.id), false, "派生角色组引用不能被写回手工绑定数组");
+});
+
+test("两个 Shot 复用同一张分镜图时，轨道仍保留各自稳定 ID 和时长", () => {
+    const frame = { id: "frame-shared", assetId: "asset-frame", label: "复用分镜图", role: "storyboard", tags: [], enabled: true, usage: "reference", mediaType: "image", storageKey: "image:shared" };
+    const generated = writeStoryboardPrompt({}, { id: "clip-reuse", mode: "ref2va", duration: 5, referenceBindings: [frame] }, {
+        openingDescription: "同一场景内连续动作。",
+        shots: [
+            { id: "source-shot-a", duration: 2, description: "人物进入。", pictureBindingId: frame.id },
+            { id: "source-shot-b", duration: 3, description: "人物转身。", switchTime: "2", transitionType: "cut", pictureBindingId: frame.id },
+        ],
+        overallSoundscape: "环境声。",
+        nonDiegeticMusic: "N/A",
+    });
+
+    assert.deepEqual(generated.storyboardShots, [
+        { id: "source-shot-a", referenceBindingId: frame.id, duration: 2 },
+        { id: "source-shot-b", referenceBindingId: frame.id, duration: 3 },
+    ]);
+    assert.deepEqual(generated.storyboardDurations, { [frame.id]: 3 });
+});
+
 test("h3_write_storyboard_prompt 只写入服装描述而不写服装名称", () => {
     const binding = {
         id: "character-outfit-binding",

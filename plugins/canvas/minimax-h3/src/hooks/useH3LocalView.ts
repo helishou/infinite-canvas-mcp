@@ -7,6 +7,7 @@ export const H3_LOCAL_VIEW_DEFAULTS = {
     playhead: 0,
     h3PlaybackAll: false,
     h3PlayRequest: 0,
+    h3FocusRequest: 0,
     h3Scrubbing: false,
     timelineScrollLeft: 0,
     minimaxOutputFilter: "all",

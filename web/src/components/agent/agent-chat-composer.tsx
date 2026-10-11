@@ -1,6 +1,6 @@
 import { useRef, useState, type ReactNode } from "react";
 import { Button, Dropdown, Tooltip } from "antd";
-import { ArrowUp, Check, ChevronUp, Cpu, Gauge, Hand, ImagePlus, LoaderCircle, RefreshCw, ShieldAlert, ShieldCheck, ShieldOff, Square, X } from "lucide-react";
+import { ArrowUp, Check, ChevronUp, Cpu, Gauge, Hand, ImagePlus, ListPlus, LoaderCircle, RefreshCw, ShieldAlert, ShieldCheck, ShieldOff, Square, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
@@ -14,10 +14,13 @@ export function AgentChatComposer({
     attachments = [],
     disabled,
     sending,
+    waiting,
+    queueBusy,
     placeholder,
     theme,
     onPromptChange,
     onSubmit,
+    onQueue,
     onStop,
     onAddFiles,
     onRemoveAttachment,
@@ -36,10 +39,13 @@ export function AgentChatComposer({
     attachments?: AgentChatAttachment[];
     disabled?: boolean;
     sending?: boolean;
+    waiting?: boolean;
+    queueBusy?: boolean;
     placeholder: string;
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     onPromptChange: (value: string) => void;
     onSubmit: () => void;
+    onQueue?: () => void;
     onStop?: () => void;
     onAddFiles?: (files: FileList | File[] | null) => void | Promise<void>;
     onRemoveAttachment?: (id: string) => void;
@@ -57,7 +63,17 @@ export function AgentChatComposer({
     const { t } = useTranslation();
     const fileInputRef = useRef<HTMLInputElement>(null);
     const canvasReferences = useAgentStore((state) => state.canvasReferences);
-    const canSubmit = !disabled && !sending && Boolean(prompt.trim() || attachments.length || canvasReferences.length);
+    const hasDraft = Boolean(prompt.trim() || attachments.length || canvasReferences.length);
+    const queueActive = Boolean(queueBusy ?? waiting);
+    const canSubmit = !disabled && !sending && !queueActive && hasDraft;
+    const canQueue = !disabled && !sending && queueActive && hasDraft && Boolean(onQueue);
+    const submit = () => {
+        if (queueActive) {
+            if (canQueue) onQueue?.();
+        } else if (canSubmit) {
+            void onSubmit();
+        }
+    };
     return (
         <div className="px-2 pb-2 pt-2" onWheelCapture={(event) => event.stopPropagation()}>
             <div className="rounded-[24px] border px-3 pb-3 pt-3 shadow-lg" style={{ background: theme.toolbar.panel, borderColor: theme.node.stroke }}>
@@ -75,7 +91,7 @@ export function AgentChatComposer({
                         ))}
                     </div>
                 ) : null}
-                <AgentChatPromptInput value={prompt} disabled={disabled || sending} placeholder={placeholder} theme={theme} onChange={onPromptChange} onSubmit={() => { if (canSubmit) void onSubmit(); }} onAddFiles={onAddFiles} />
+                <AgentChatPromptInput value={prompt} disabled={disabled || sending} placeholder={placeholder} theme={theme} onChange={onPromptChange} onSubmit={submit} onAddFiles={onAddFiles} />
                 <div className="@container mt-2 flex items-center justify-between gap-2">
                     <div className="flex min-w-0 items-center gap-1">
                         {onAddFiles ? (
@@ -91,13 +107,16 @@ export function AgentChatComposer({
                         ) : null}
                         {onConfirmToolsChange ? <ToolConfirmationMenu confirmTools={Boolean(confirmTools)} theme={theme} onChange={onConfirmToolsChange} /> : null}
                         {permissionMode && onPermissionModeChange ? <PermissionModeMenu permissionMode={permissionMode} theme={theme} onChange={onPermissionModeChange} /> : null}
-                        {models?.length && model && reasoningEffort && onModelChange && onReasoningEffortChange ? <AgentModelControls models={models} model={model} reasoningEffort={reasoningEffort} onModelChange={onModelChange} onReasoningEffortChange={onReasoningEffortChange} /> : null}
+                        {models?.length && model && onModelChange && onReasoningEffortChange ? <AgentModelControls models={models} model={model} reasoningEffort={reasoningEffort || ""} onModelChange={onModelChange} onReasoningEffortChange={onReasoningEffortChange} /> : null}
                         {left}
                     </div>
                     <div className="flex shrink-0 items-center gap-1.5">
-                        {sending && onStop ? (
+                        {queueActive && !sending && onQueue ? (
+                            <Tooltip title={t("agent.composer.queueSubmit")} placement="top"><Button type="primary" shape="circle" className="!h-10 !w-10 !min-w-10" disabled={!canQueue} icon={<ListPlus className="size-4" />} onClick={submit} aria-label={t("agent.composer.queueSubmit")} /></Tooltip>
+                        ) : null}
+                        {(sending || waiting) && onStop ? (
                             <Tooltip title={t("agent.composer.stop")} placement="top"><Button danger shape="circle" className="!h-10 !w-10 !min-w-10" icon={<Square className="size-4" />} onClick={() => void onStop()} aria-label={t("agent.composer.stop")} /></Tooltip>
-                        ) : (
+                        ) : queueActive ? null : (
                             <Tooltip title={t("agent.composer.send")} placement="top"><Button type="primary" shape="circle" className="!h-10 !w-10 !min-w-10" disabled={!canSubmit} icon={sending ? <LoaderCircle className="size-4 animate-spin" /> : <ArrowUp className="size-4" />} onClick={() => void onSubmit()} aria-label={t("agent.composer.send")} /></Tooltip>
                         )}
                     </div>
@@ -107,7 +126,7 @@ export function AgentChatComposer({
     );
 }
 
-function AgentModelControls({ models, model, reasoningEffort, onModelChange, onReasoningEffortChange }: { models: AgentModel[]; model: string; reasoningEffort: AgentReasoningEffort; onModelChange: (model: string) => void; onReasoningEffortChange: (effort: AgentReasoningEffort) => void }) {
+function AgentModelControls({ models, model, reasoningEffort, onModelChange, onReasoningEffortChange }: { models: AgentModel[]; model: string; reasoningEffort: AgentReasoningEffort | ""; onModelChange: (model: string) => void; onReasoningEffortChange: (effort: AgentReasoningEffort) => void }) {
     const { t } = useTranslation();
     const current = models.find((item) => item.model === model) || models[0];
     const effortLabel = (effort: AgentReasoningEffort) => t(`agent.composer.effort.${effort}`);
@@ -129,7 +148,7 @@ function AgentModelControls({ models, model, reasoningEffort, onModelChange, onR
                     </Select>
                 </span>
             </Tooltip>
-            <Tooltip title={t("agent.composer.reasoning", { effort: effortLabel(reasoningEffort) })} placement="top" open={reasoningOpen ? false : undefined}>
+            {reasoningEffort && current.supportedReasoningEfforts.length > 0 && <Tooltip title={t("agent.composer.reasoning", { effort: effortLabel(reasoningEffort) })} placement="top" open={reasoningOpen ? false : undefined}>
                 <span className="inline-flex shrink-0">
                     <Select value={reasoningEffort} open={reasoningOpen} onOpenChange={setReasoningOpen} onValueChange={(value: string) => onReasoningEffortChange(value as AgentReasoningEffort)}>
                         <SelectTrigger hideChevron className="h-9 w-9 min-w-9 justify-center gap-0 rounded-full border-0 bg-transparent px-0 text-xs font-medium shadow-none hover:bg-black/5 focus:ring-0 @min-[660px]:w-auto @min-[660px]:min-w-[4.5rem] @min-[660px]:justify-start @min-[660px]:gap-1.5 @min-[660px]:px-2.5 dark:bg-transparent dark:hover:bg-white/10" aria-label={t("agent.composer.selectReasoning", { effort: effortLabel(reasoningEffort) })}>
@@ -142,7 +161,7 @@ function AgentModelControls({ models, model, reasoningEffort, onModelChange, onR
                         </SelectContent>
                     </Select>
                 </span>
-            </Tooltip>
+            </Tooltip>}
         </div>
     );
 }

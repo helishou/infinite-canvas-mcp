@@ -1,7 +1,7 @@
 {
   "framework": "vite",
-  "installCommand": "cd web && bun install",
-  "buildCommand": "cd web && bun run build",
+  "installCommand": "npm ci",
+  "buildCommand": "npm run build --workspace canvas-agent && npm run build:plugins && npm run build --workspace web",
   "outputDirectory": "web/dist",
   "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
 }

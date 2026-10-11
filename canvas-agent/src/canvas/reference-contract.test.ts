@@ -1,7 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { characterGroupBindings, compileReferenceSubmission } from "./reference-contract.js";
+import { characterGroupBindings, compileReferenceSubmission, normalizeReferenceRole } from "./reference-contract.js";
+
+test("legacy director identity references normalize to H3 character_identity, not other", () => {
+    assert.equal(normalizeReferenceRole("identity"), "character_identity");
+    const result = compileReferenceSubmission({}, { taskMode: "ref2va", prompt: "<Picture 1>", referenceBindings: [
+        { id: "cui", assetId: "cui", label: "Cuizi", role: "identity", subjectId: "C_CUI", tags: [], enabled: true, usage: "reference", mediaType: "image", url: "https://example.test/cui.png" },
+    ] });
+    assert.equal(result.references[0].role, "character_identity");
+    assert.equal(result.references[0].subjectId, "C_CUI");
+});
 
 test("分镜图片固定占用最前 Picture 槽，旧提示词按绑定身份改写", () => {
     const binding = (id: string, role: "storyboard" | "character_identity") => ({

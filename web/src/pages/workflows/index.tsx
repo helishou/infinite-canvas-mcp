@@ -1,12 +1,23 @@
-import { useEffect, useState, useCallback, useRef } from "react";
-import { Button, Empty, Input, Spin, Tabs, Tag, message, Select, Switch } from "antd";
-import { Upload as UploadIcon, Upload, Download, Play, Trash2, Settings2, Workflow, Code, History } from "lucide-react";
-import { request, fetchBackendGenerationLogs, deleteBackendGenerationLogs, uploadBackendMedia, backendMediaUrl } from "@/services/backend-api";
-import { exportWorkflowPackage, importWorkflowPackage, renameWorkflowTitle, runWorkflow, pollWorkflowTask, type WorkflowPackage, type WorkflowRunResult } from "@/services/api/workflows";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Alert, Button, Checkbox, Input, InputNumber, Segmented, Spin, Table, Tabs, message, Select } from "antd";
+import { Upload as UploadIcon, Cloud, Download, Play, Trash2, Workflow } from "lucide-react";
+import { request, fetchBackendGenerationLogs, deleteBackendGenerationLogs } from "@/services/backend-api";
+import { exportWorkflowPackage, importWorkflowPackage, renameWorkflowTitle, runWorkflow, pollWorkflowTask, type WorkflowConfig, type WorkflowField, type WorkflowPackage, type WorkflowRunResult } from "@/services/api/workflows";
 import { WorkflowGraphPanel } from "./workflow-graph-panel";
+import { WorkflowLibraryList, type WorkflowLibraryItem } from "./workflow-library-list";
+import { RunTab } from "./run-panel";
+import { WorkflowWorkbench, type WorkbenchTab } from "./workflow-workbench";
+import { RunHistoryList } from "./run-history-list";
+import { normalizeOutputNodeSelection, OutputNodePicker } from "./output-node-picker";
+import { RunningHubWorkflowImport } from "./runninghub-workflow-import";
+import { RunningHubProfileActions } from "./runninghub-profile-actions";
+import { RunningHubGraphPanel } from "./runninghub-graph-panel";
+import { runningHubProfileToConfig, runningHubValuesFromForm } from "./runninghub-run-adapter";
+import { runRunningHubWorkflow, cancelRunningHubTask } from "@/services/api/runninghub";
+import { fetchRunningHubWorkflows, fetchRunningHubStatus, saveRunningHubWorkflow, type RunningHubWorkflowProfile } from "@/services/api/runninghub";
+import { useConfigStore } from "@/stores/use-config-store";
 import { ComfyChannelsPanel, ComfyRuntimePanel } from "./comfy-management-panels";
 import "../../styles/workflow-graph.css";
-import type { WorkflowConfig, WorkflowField } from "@/types/workflow";
 
 type WorkflowItem = {
     name: string;
@@ -28,14 +39,28 @@ export default function WorkflowsPage() {
     const [workflows, setWorkflows] = useState<WorkflowItem[]>([]);
     const [loading, setLoading] = useState(false);
     const [selected, setSelected] = useState<WorkflowDetail | null>(null);
+    const [selectedProfile, setSelectedProfile] = useState<RunningHubWorkflowProfile | null>(null);
     const [running, setRunning] = useState(false);
     const [taskResult, setTaskResult] = useState<TaskResult | null>(null);
     const [section, setSection] = useState("workflows");
-    const [activeTab, setActiveTab] = useState("structure");
+    // 本地库与 RunningHub 库共用同一页面壳，数据源与选中项各自独立。
+    const [library, setLibrary] = useState<"local" | "runninghub">("local");
+    const aiConfig = useConfigStore((state) => state.config);
+    const [profiles, setProfiles] = useState<RunningHubWorkflowProfile[]>([]);
+    const [profilesLoading, setProfilesLoading] = useState(false);
+    const [rhConfigured, setRhConfigured] = useState<{ hasApiKey: boolean; url?: string } | null>(null);
+    const [rhRunning, setRhRunning] = useState(false);
+    const [rhTaskId, setRhTaskId] = useState<string | null>(null);
+    const [rhResult, setRhResult] = useState<WorkflowRunResult | null>(null);
+    const [rhTab, setRhTab] = useState<WorkbenchTab>("graph");
+    const [rhBaseUrl, setRhBaseUrl] = useState("https://www.runninghub.ai");
+    const [activeTab, setActiveTab] = useState<WorkbenchTab>("graph");
     const [historyLogs, setHistoryLogs] = useState<Array<{ id: string; workflow: string; prompt: string; status: string; createdAt: string; outputs: Array<{ url: string; mimeType: string }>; error?: string }>>([]);
     const [loadingHistory, setLoadingHistory] = useState(false);
     const [editingName, setEditingName] = useState<string | null>(null);
     const [editValue, setEditValue] = useState("");
+    // 指定输出节点属于当前工作流的配置，跟着 config 一起存；不选=不过滤。
+    const [outputNodes, setOutputNodes] = useState<string[]>([]);
 
     const fetchWorkflows = useCallback(async () => {
         try {
@@ -47,6 +72,64 @@ export default function WorkflowsPage() {
     }, []);
 
     useEffect(() => { fetchWorkflows(); }, [fetchWorkflows]);
+
+    /** RunningHub 档案列表；未配置 API Key 时仍可浏览，只是不能运行。 */
+    const fetchProfiles = useCallback(async () => {
+        setProfilesLoading(true);
+        try {
+            const { workflows } = await fetchRunningHubWorkflows();
+            setProfiles(workflows || []);
+        } catch (err) {
+            message.error(err instanceof Error ? err.message : "加载 RunningHub 工作流失败");
+        } finally {
+            setProfilesLoading(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        void fetchProfiles();
+        void fetchRunningHubStatus()
+            .then((status) => {
+                setRhConfigured(status);
+                if (status?.url) setRhBaseUrl(status.url);
+            })
+            .catch(() => setRhConfigured(null));
+    }, [fetchProfiles]);
+
+    /**
+     * 档案 id → 引用它的模型名。删除档案前用它提示影响面；模型绑定用的是档案
+     * 稳定 id，所以展示名变化不影响这里的判断。
+     */
+    const usedByModels = useMemo(() => {
+        const usage = new Map<string, string[]>();
+        const channels = (aiConfig?.channels || []) as Array<{ models?: Array<Record<string, any>> }>;
+        for (const channel of channels) {
+            for (const model of channel.models || []) {
+                for (const binding of Object.values((model.workflowBindings || {}) as Record<string, any>)) {
+                    if (binding?.provider !== "runninghub" || !binding.profileId) continue;
+                    const list = usage.get(binding.profileId) || [];
+                    list.push(String(model.name || "未命名模型"));
+                    usage.set(binding.profileId, list);
+                }
+            }
+        }
+        return usage;
+    }, [aiConfig]);
+
+    /** 档案列表项：副标题是 workflowId，徽标显示已启用映射数 / 总字段数。 */
+    const profileItems = useMemo<WorkflowLibraryItem[]>(
+        () =>
+            profiles.map((profile) => {
+                const enabled = (profile.fields || []).filter((field) => field.enabled !== false).length;
+                return {
+                    id: profile.id,
+                    title: profile.name,
+                    meta: profile.workflowId,
+                    badge: `${enabled}/${(profile.fields || []).length} 字段`,
+                };
+            }),
+        [profiles],
+    );
 
     const handleUpload = async (file: File) => {
         setLoading(true);
@@ -98,8 +181,9 @@ export default function WorkflowsPage() {
         }
     };
 
-    const handleRename = async (name: string) => {
-        const trimmed = editValue.trim();
+    // title 由列表壳传入：重命名输入态是壳内部状态，页面不再持有 editValue。
+    const handleRename = async (name: string, title: string) => {
+        const trimmed = title.trim();
         setEditingName(null);
         if (!trimmed) return;
         const item = workflows.find((w) => w.name === name);
@@ -118,9 +202,11 @@ export default function WorkflowsPage() {
     const handleLoadDetail = async (name: string) => {
         try {
             const detail = await request<WorkflowDetail>("GET", `/api/workflows/${encodeURIComponent(name)}`);
-            setSelected(detail);
+            const outputNodes = normalizeOutputNodeSelection(detail.config.outputNodes || [], detail.workflow);
+            setSelected({ ...detail, config: { ...detail.config, outputNodes } });
             setTaskResult(null);
-            setActiveTab("structure");
+            setOutputNodes(outputNodes);
+            setActiveTab("graph");
         } catch (err) {
             message.error(err instanceof Error ? err.message : "加载详情失败");
         }
@@ -142,7 +228,11 @@ export default function WorkflowsPage() {
         setRunning(true);
         setTaskResult(null);
         try {
-            const { taskId } = await runWorkflow(selected.name, fields, selected.config);
+            // 输出节点跟着本轮一起提交；config 里同时落盘，保证下次运行保持一致。
+            const baseConfig = selected.config;
+            const config = { ...baseConfig, outputNodes };
+            await handleSaveConfig(config);
+            const { taskId } = await runWorkflow(selected.name, fields, config);
             const result = await pollWorkflowTask(taskId);
             setTaskResult(result);
             if (result.status.status_str === "success") {
@@ -155,6 +245,11 @@ export default function WorkflowsPage() {
         } finally {
             setRunning(false);
         }
+    };
+
+    const handleOutputNodesChange = (next: string[]) => {
+        setOutputNodes(next);
+        if (selected) void handleSaveConfig({ ...selected.config, outputNodes: next });
     };
 
     const loadHistory = useCallback(async () => {
@@ -181,6 +276,65 @@ export default function WorkflowsPage() {
 
     useEffect(() => { if (activeTab === "history") loadHistory(); }, [activeTab, loadHistory]);
 
+    /**
+     * 提交档案到 RunningHub 云端执行。表单值走 values（本次运行的参数覆盖），
+     * 提示词与媒体走 input；输出节点选择沿用本地同款选择器。
+     */
+    const handleRunProfile = async (form: Record<string, string>) => {
+        if (!selectedProfile) return;
+        if (!rhConfigured?.hasApiKey) {
+            message.warning("请先在「运行环境」配置 RunningHub API Key");
+            return;
+        }
+        setRhRunning(true);
+        setRhResult(null);
+        try {
+            const { task } = await runRunningHubWorkflow(
+                selectedProfile.id,
+                { prompt: form.prompt || "" },
+                runningHubValuesFromForm(form),
+                outputNodes.length ? { runninghubOutputNodes: outputNodes } : {},
+            );
+            setRhTaskId(task.id);
+            message.success("已提交 RunningHub，云端计费按平台规则");
+        } catch (err) {
+            message.error(err instanceof Error ? err.message : "提交 RunningHub 失败");
+            setRhRunning(false);
+        }
+    };
+
+    /** 轮询云端任务到终态；结果媒体由 Backend 归档，这里只展示。 */
+    useEffect(() => {
+        if (!rhTaskId || !rhRunning) return;
+        let stopped = false;
+        const timer = window.setInterval(() => {
+            void (async () => {
+                try {
+                    const { task } = await request<{ task: { status: string; error?: string; result?: { media?: WorkflowRunResult["media"] } } }>(
+                        "GET",
+                        `/agent/runninghub/tasks/${encodeURIComponent(rhTaskId)}`,
+                    );
+                    if (stopped) return;
+                    if (task.status === "succeeded") {
+                        setRhResult({ media: task.result?.media || [], status: { status_str: "success", completed: true } });
+                        setRhRunning(false);
+                        window.clearInterval(timer);
+                    } else if (task.status === "failed" || task.status === "cancelled") {
+                        message.error(task.error || `RunningHub 任务${task.status}`);
+                        setRhRunning(false);
+                        window.clearInterval(timer);
+                    }
+                } catch {
+                    /* 单次轮询失败不终止，等待下一次 */
+                }
+            })();
+        }, 2000);
+        return () => {
+            stopped = true;
+            window.clearInterval(timer);
+        };
+    }, [rhTaskId, rhRunning]);
+
     const handleDeleteHistory = async (id: string) => {
         try {
             await deleteBackendGenerationLogs({ id });
@@ -197,6 +351,117 @@ export default function WorkflowsPage() {
         setSelected({ ...selected, config: updatedConfig });
         handleSaveConfig(updatedConfig);
     };
+
+    /**
+     * 节点图里改的档案映射立刻落盘，行为与本地字段编辑一致。
+     * 先更新本地选中项让浮窗马上反映新状态，再 PUT 回档案；
+     * 保存失败要回滚，否则界面显示的映射和平台档案会长期不一致。
+     */
+    const handleProfileFieldsChange = async (nextFields: RunningHubWorkflowProfile["fields"]) => {
+        if (!selectedProfile) return;
+        const previous = selectedProfile;
+        const next = { ...selectedProfile, fields: nextFields };
+        setSelectedProfile(next);
+        try {
+            const { workflow } = await saveRunningHubWorkflow(next);
+            setSelectedProfile(workflow);
+            setProfiles((current) => current.map((item) => (item.id === next.id ? workflow : item)));
+        } catch (err) {
+            setSelectedProfile(previous);
+            message.error(err instanceof Error ? err.message : "保存 RunningHub 映射失败");
+        }
+    };
+
+    /** 本地工作流库列表项：标题取配置标题，副标题是文件名，徽标是字段数。 */
+    const libraryItems = useMemo<WorkflowLibraryItem[]>(
+        () =>
+            workflows.map((wf) => ({
+                id: wf.name,
+                title: wf.title,
+                meta: wf.name.replace(/^custom\//, ""),
+                badge: `${wf.fieldCount} 字段`,
+                builtin: wf.builtin,
+            })),
+        [workflows],
+    );
+
+    // 两个库共用同一个右栏：切换器在顶部，下面按 library 换列表内容。
+    const libraryColumn = (
+        <div className="col-span-4 flex min-h-0 flex-col gap-3">
+            <Segmented
+                block
+                value={library}
+                onChange={(value) => setLibrary(value as "local" | "runninghub")}
+                options={[
+                    { label: `本地 ComfyUI (${workflows.length})`, value: "local" },
+                    { label: `RunningHub (${profiles.length})`, value: "runninghub" },
+                ]}
+            />
+            {library === "runninghub" ? (
+                <div className="flex shrink-0 items-center gap-2 rounded-lg border border-stone-200 bg-white px-3 py-2 text-xs dark:border-stone-700 dark:bg-stone-900">
+                    {profilesLoading ? <Spin size="small" /> : null}
+                    <span className="flex-1 text-stone-600 dark:text-stone-300">
+                        {rhConfigured?.hasApiKey
+                            ? "云端工作流库：档案与平台节点图保持一致。"
+                            : "未配置 RunningHub API Key，可浏览档案但无法运行。"}
+                    </span>
+                </div>
+            ) : (
+                <div className="relative flex shrink-0 items-center gap-2 rounded-lg border border-stone-200 bg-white px-3 py-2 dark:border-stone-700 dark:bg-stone-900">
+                    {loading ? <Spin size="small" /> : <UploadIcon className="size-4 shrink-0 text-stone-400" />}
+                    <span className="text-sm text-stone-600 dark:text-stone-300">{loading ? "正在导入…" : "导入本地 ComfyUI JSON / 工作流包"}</span>
+                    <input
+                        type="file"
+                        accept=".json"
+                        disabled={loading}
+                        onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            if (file) { await handleUpload(file); e.target.value = ""; }
+                        }}
+                        className="absolute inset-0 cursor-pointer opacity-0"
+                    />
+                </div>
+            )}
+
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-stone-200 bg-white dark:border-stone-700 dark:bg-stone-900">
+                <div className="shrink-0 border-b border-stone-200 px-3 py-2.5 dark:border-stone-700">
+                    <h2 className="text-sm font-medium">{library === "local" ? "本地工作流列表" : "RunningHub 工作流列表"}</h2>
+                </div>
+                {library === "local" ? (
+                    <>
+                        <div className="shrink-0 px-3 pt-2.5">
+                            <RunningHubWorkflowImport workflows={workflows} onImported={(name) => { void fetchWorkflows().then(() => handleLoadDetail(name)); }} />
+                        </div>
+                        <WorkflowLibraryList
+                            items={libraryItems}
+                            selectedId={selected?.name}
+                            onSelect={(item) => void handleLoadDetail(item.id)}
+                            onRename={(item, title) => void handleRename(item.id, title)}
+                            emptyText="暂无本地工作流"
+                        />
+                    </>
+                ) : (
+                    <>
+                        <div className="shrink-0 px-3 pt-2.5">
+                            <RunningHubProfileActions
+                                profiles={profiles}
+                                selected={selectedProfile}
+                                onChanged={fetchProfiles}
+                                onSelected={setSelectedProfile}
+                                usedByModels={usedByModels}
+                            />
+                        </div>
+                        <WorkflowLibraryList
+                            items={profileItems}
+                            selectedId={selectedProfile?.id}
+                            onSelect={(item) => setSelectedProfile(profiles.find((profile) => profile.id === item.id) || null)}
+                            emptyText={rhConfigured?.hasApiKey === false ? "未配置 API Key" : "暂无 RunningHub 工作流档案"}
+                        />
+                    </>
+                )}
+            </div>
+        </div>
+    );
 
     return (
         <div className="mx-auto flex h-full max-w-7xl flex-col overflow-hidden px-6 py-4">
@@ -217,7 +482,67 @@ export default function WorkflowsPage() {
             />
 
             <div className={`min-h-0 flex-1 ${section === "workflows" ? "overflow-hidden" : "overflow-y-auto"}`}>
-            {section === "workflows" ? <div className="grid h-full min-h-0 grid-cols-12 gap-4">
+            {section === "workflows" && library === "runninghub" ? (
+                <div className="grid h-full min-h-0 grid-cols-12 gap-4">
+                    <div className="col-span-8 flex min-h-0 flex-col gap-3">
+                        {!selectedProfile ? (
+                            <div className="flex flex-1 items-center justify-center rounded-lg border border-dashed border-stone-300 dark:border-stone-700">
+                                <div className="text-center">
+                                    <Cloud className="mx-auto size-10 text-stone-300" />
+                                    <p className="mt-2 text-sm text-stone-500">从右侧选择一个 RunningHub 工作流档案</p>
+                                    <p className="mt-1 text-xs text-stone-400">档案保存节点输入映射，运行由 RunningHub 云端执行并按平台计费</p>
+                                </div>
+                            </div>
+                        ) : (
+                            <WorkflowWorkbench
+                                activeTab={rhTab}
+                                onTabChange={setRhTab}
+                                historyCount={0}
+                                title={selectedProfile.name}
+                                subtitle={`${selectedProfile.workflowId} · RunningHub 云端执行`}
+                                graph={
+                                    <RunningHubGraphPanel
+                                        workflowId={selectedProfile.workflowId}
+                                        workflow={selectedProfile.workflowJson}
+                                        fields={selectedProfile.fields || []}
+                                        baseUrl={rhBaseUrl}
+                                        onFieldsChange={(next) => void handleProfileFieldsChange(next)}
+                                    />
+                                }
+                                run={
+                                    <RunTab
+                                        config={runningHubProfileToConfig(selectedProfile)}
+                                        onRun={(form) => void handleRunProfile(form)}
+                                        running={rhRunning}
+                                        result={rhResult}
+                                        runLabel="提交到 RunningHub"
+                                        emptyText="该档案没有启用任何输入映射，点档案的「重新同步」读取字段后在运行环境配置映射"
+                                        hint="表单里的参数只影响本次运行，不会写回档案；媒体按档案里 image/video/audio 字段的顺序注入"
+                                        statusText="已提交 RunningHub，等待云端完成…"
+                                        onCancel={rhTaskId ? () => { void cancelRunningHubTask(rhTaskId); setRhRunning(false); } : undefined}
+                                        outputPicker={
+                                            <OutputNodePicker
+                                                graph={(selectedProfile.workflowJson || {}) as never}
+                                                value={outputNodes}
+                                                onChange={handleOutputNodesChange}
+                                            />
+                                        }
+                                    />
+                                }
+                                history={
+                                    <RunHistoryList
+                                        entries={[]}
+                                        loading={false}
+                                        onRefresh={() => undefined}
+                                        hint="RunningHub 档案的运行历史在 Backend 任务记录里，可通过任务查询查看"
+                                    />
+                                }
+                            />
+                        )}
+                    </div>
+                    {libraryColumn}
+                </div>
+            ) : section === "workflows" ? <div className="grid h-full min-h-0 grid-cols-12 gap-4">
                 <div className="col-span-8 min-h-0">
                     {!selected ? (
                         <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-stone-300 dark:border-stone-700">
@@ -227,358 +552,92 @@ export default function WorkflowsPage() {
                             </div>
                         </div>
                     ) : (
-                        <div className="flex h-full min-h-0 flex-col gap-3">
-                            <div className="flex shrink-0 items-center justify-between rounded-lg border border-stone-200 bg-white px-4 py-3 dark:border-stone-700 dark:bg-stone-900">
-                                <div className="min-w-0">
-                                    {editingName === selected.name ? (
-                                        <Input
-                                            autoFocus
-                                            size="small"
-                                            value={editValue}
-                                            onChange={(e) => setEditValue(e.target.value)}
-                                            onPressEnter={() => handleRename(selected.name)}
-                                            onBlur={() => handleRename(selected.name)}
-                                            className="w-full"
-                                        />
-                                    ) : (
-                                        <h2
-                                            className={`truncate text-base font-semibold ${selected.builtin ? "" : "cursor-pointer hover:text-blue-600"}`}
-                                            title={selected.builtin ? "" : "双击重命名"}
-                                            onDoubleClick={() => {
-                                                if (selected.builtin) return;
-                                                setEditingName(selected.name);
-                                                setEditValue(selected.config.title || selected.name);
-                                            }}
-                                        >
-                                            {selected.config.title || selected.name}
-                                        </h2>
-                                    )}
-                                    <p className="mt-0.5 truncate text-xs text-stone-500">{selected.name.replace(/^custom\//, "")} · {Object.keys(selected.workflow).length} 个节点 · {selected.config.fields.length} 字段</p>
-                                </div>
-                                <div className="ml-3 flex shrink-0 gap-2">
-                                    <Button size="small" icon={<Download className="size-3.5" />} onClick={handleExport}>
-                                        导出
-                                    </Button>
+                        <WorkflowWorkbench
+                            activeTab={activeTab}
+                            onTabChange={setActiveTab}
+                            historyCount={historyLogs.length}
+                            title={
+                                editingName === selected.name ? (
+                                    <Input
+                                        autoFocus
+                                        size="small"
+                                        value={editValue}
+                                        onChange={(e) => setEditValue(e.target.value)}
+                                        onPressEnter={() => handleRename(selected.name, editValue)}
+                                        onBlur={() => handleRename(selected.name, editValue)}
+                                        className="w-full"
+                                    />
+                                ) : (
+                                    <h2
+                                        className={`truncate ${selected.builtin ? "cursor-default" : "cursor-pointer hover:text-blue-600"}`}
+                                        title={selected.builtin ? "" : "双击重命名"}
+                                        onDoubleClick={() => {
+                                            if (selected.builtin) return;
+                                            setEditingName(selected.name);
+                                            setEditValue(selected.config.title || selected.name);
+                                        }}
+                                    >
+                                        {selected.config.title || selected.name}
+                                    </h2>
+                                )
+                            }
+                            subtitle={`${selected.name.replace(/^custom\//, "")} · ${Object.keys(selected.workflow).length} 个节点 · ${selected.config.fields.length} 字段`}
+                            actions={
+                                <>
+                                    <Button size="small" icon={<Download className="size-3.5" />} onClick={handleExport}>导出</Button>
                                     {!selected.builtin && (
-                                        <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={() => handleDelete(selected.name)}>
-                                            删除
-                                        </Button>
+                                        <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={() => handleDelete(selected.name)}>删除</Button>
                                     )}
-                                </div>
-                            </div>
-
-                            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-stone-200 bg-white dark:border-stone-700 dark:bg-stone-900">
-                                <div className="flex shrink-0 border-b border-stone-200 dark:border-stone-700">
-                                    <button
-                                        className={`flex items-center gap-1.5 px-3 py-2 text-xs transition ${activeTab === "structure" ? "border-b-2 border-blue-500 text-blue-600" : "text-stone-500 hover:text-stone-700"}`}
-                                        onClick={() => setActiveTab("structure")}
-                                    >
-                                        <Code className="size-3.5" /> 节点图
-                                    </button>
-                                    <button
-                                        className={`flex items-center gap-1.5 px-3 py-2 text-xs transition ${activeTab === "run" ? "border-b-2 border-blue-500 text-blue-600" : "text-stone-500 hover:text-stone-700"}`}
-                                        onClick={() => setActiveTab("run")}
-                                    >
-                                        <Play className="size-3.5" /> 运行
-                                    </button>
-                                    <button
-                                        className={`flex items-center gap-1.5 px-3 py-2 text-xs transition ${activeTab === "history" ? "border-b-2 border-blue-500 text-blue-600" : "text-stone-500 hover:text-stone-700"}`}
-                                        onClick={() => setActiveTab("history")}
-                                    >
-                                        <History className="size-3.5" /> 历史 ({historyLogs.length})
-                                    </button>
-                                </div>
-
-                                <div className="min-h-0 flex-1 overflow-y-auto p-3">
-                                    {activeTab === "structure" && (
-                                        <div className="h-full min-h-[280px]">
-                                            <WorkflowGraphPanel
-                                                name={selected.name}
-                                                workflow={selected.workflow}
-                                                fields={selected.config.fields}
-                                                onFieldsChange={handleFieldsChange}
-                                                onWorkflowChange={(workflow) => {
-                                                    if (!selected) return;
-                                                    const next = { ...selected, workflow };
-                                                    setSelected(next);
-                                                    void request("PUT", `/api/workflows/${encodeURIComponent(selected.name)}/workflow`, workflow).catch((error) => message.error(error instanceof Error ? error.message : "保存节点图失败"));
-                                                }}
-                                            />
-                                        </div>
-                                    )}
-
-                                    {activeTab === "run" && (
-                                        <RunPanel config={selected.config} onRun={handleRun} running={running} result={taskResult} />
-                                    )}
-
-                                    {activeTab === "history" && (
-                                        <div>
-                                            <div className="mb-3 flex items-center justify-between">
-                                                <p className="text-xs text-stone-500">工作流运行历史（与生图/画布日志共享存储）</p>
-                                                <Button size="small" onClick={loadHistory} disabled={loadingHistory}>刷新</Button>
-                                            </div>
-                                            {loadingHistory ? (
-                                                <Spin />
-                                            ) : historyLogs.length === 0 ? (
-                                                <Empty description="暂无运行历史" />
-                                            ) : (
-                                                <div className="space-y-2">
-                                                    {historyLogs.map((log) => (
-                                                        <div key={log.id} className="flex items-center gap-3 rounded border border-stone-200 bg-white p-3 text-sm dark:border-stone-700 dark:bg-stone-800">
-                                                            <div className="flex-1 min-w-0">
-                                                                <div className="flex items-center gap-2 mb-1">
-                                                                    <Tag color={log.status === "success" ? "green" : log.status === "failed" ? "red" : "blue"}>{log.status}</Tag>
-                                                                    <span className="font-medium truncate">{log.workflow}</span>
-                                                                    <span className="text-xs text-stone-400 shrink-0">{new Date(log.createdAt).toLocaleString()}</span>
-                                                                </div>
-                                                                {log.prompt && <p className="text-xs text-stone-500 truncate" title={log.prompt}>{log.prompt}</p>}
-                                                                {log.error && <p className="text-xs text-red-500 truncate" title={log.error}>{log.error}</p>}
-                                                                {log.outputs.length > 0 && (
-                                                                    <div className="mt-1 flex gap-1">
-                                                                        {log.outputs.slice(0, 4).map((o, i) => (
-                                                                            o.mimeType?.startsWith("audio/")
-                                                                                ? <audio key={i} src={o.url} controls className="h-10 w-56" />
-                                                                                : o.mimeType?.startsWith("video/")
-                                                                                    ? <video key={i} src={o.url} className="h-10 w-16 rounded object-cover" />
-                                                                                    : <img key={i} src={o.url} alt="" className="h-10 w-10 rounded object-cover" />
-                                                                        ))}
-                                                                        {log.outputs.length > 4 && (
-                                                                            <span className="flex h-10 w-10 items-center justify-center rounded bg-stone-100 text-xs text-stone-500">+{log.outputs.length - 4}</span>
-                                                                        )}
-                                                                    </div>
-                                                                )}
-                                                            </div>
-                                                            <Button size="small" danger icon={<Trash2 className="size-3" />} onClick={() => handleDeleteHistory(log.id)} />
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            )}
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-                        </div>
-                    )}
-                </div>
-
-                <div className="col-span-4 flex min-h-0 flex-col gap-3">
-                    <div className="relative flex shrink-0 items-center gap-2 rounded-lg border border-stone-200 bg-white px-3 py-2 dark:border-stone-700 dark:bg-stone-900">
-                        {loading ? <Spin size="small" /> : <UploadIcon className="size-4 shrink-0 text-stone-400" />}
-                        <span className="text-sm text-stone-600 dark:text-stone-300">{loading ? "正在导入…" : "导入 ComfyUI JSON / 工作流包"}</span>
-                        <input
-                            type="file"
-                            accept=".json"
-                            disabled={loading}
-                            onChange={async (e) => {
-                                const file = e.target.files?.[0];
-                                if (file) { await handleUpload(file); e.target.value = ""; }
-                            }}
-                            className="absolute inset-0 cursor-pointer opacity-0"
+                                </>
+                            }
+                            graph={
+                                <WorkflowGraphPanel
+                                    name={selected.name}
+                                    workflow={selected.workflow}
+                                    fields={selected.config.fields}
+                                    onFieldsChange={handleFieldsChange}
+                                    onWorkflowChange={(workflow) => {
+                                        if (!selected) return;
+                                        const nextOutputNodes = normalizeOutputNodeSelection(outputNodes, workflow);
+                                        setOutputNodes(nextOutputNodes);
+                                        const next = { ...selected, workflow, config: { ...selected.config, outputNodes: nextOutputNodes } };
+                                        setSelected(next);
+                                        void request("PUT", `/api/workflows/${encodeURIComponent(selected.name)}/workflow`, workflow).catch((error) => message.error(error instanceof Error ? error.message : "保存节点图失败"));
+                                    }}
+                                />
+                            }
+                            run={
+                                <RunTab
+                                    config={selected.config}
+                                    onRun={handleRun}
+                                    running={running}
+                                    result={taskResult}
+                                    outputPicker={<OutputNodePicker graph={selected.workflow} value={outputNodes} onChange={handleOutputNodesChange} />}
+                                />
+                            }
+                            history={
+                                <RunHistoryList
+                                    entries={historyLogs.map((log) => ({
+                                        id: log.id,
+                                        status: log.status,
+                                        title: log.workflow,
+                                        time: new Date(log.createdAt).toLocaleString(),
+                                        prompt: log.prompt,
+                                        error: log.error,
+                                        outputs: log.outputs,
+                                        onDelete: () => void handleDeleteHistory(log.id),
+                                    }))}
+                                    loading={loadingHistory}
+                                    onRefresh={loadHistory}
+                                    hint="工作流运行历史（与生图/画布日志共享存储）"
+                                />
+                            }
                         />
+                    )}
                     </div>
-
-                    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-stone-200 bg-white dark:border-stone-700 dark:bg-stone-900">
-                        <div className="shrink-0 border-b border-stone-200 px-3 py-2.5 dark:border-stone-700">
-                            <h2 className="text-sm font-medium">工作流列表</h2>
-                        </div>
-                        {workflows.length === 0 ? (
-                            <div className="flex flex-1 items-center justify-center p-6"><Empty description="暂无工作流" /></div>
-                        ) : (
-                            <div className="min-h-0 flex-1 divide-y divide-stone-200 overflow-y-auto dark:divide-stone-700">
-                                {workflows.map((wf) => (
-                                    <div
-                                        key={wf.name}
-                                        className={`cursor-pointer px-3 py-2.5 transition hover:bg-stone-50 dark:hover:bg-stone-800 ${selected?.name === wf.name ? "bg-stone-100 dark:bg-stone-800" : ""}`}
-                                        onClick={() => { if (editingName !== wf.name) handleLoadDetail(wf.name); }}
-                                    >
-                                        <div className="flex items-center justify-between">
-                                            <div className="min-w-0 flex-1">
-                                                {editingName === wf.name ? (
-                                                    <Input
-                                                        autoFocus
-                                                        size="small"
-                                                        value={editValue}
-                                                        onChange={(e) => setEditValue(e.target.value)}
-                                                        onClick={(e) => e.stopPropagation()}
-                                                        onPressEnter={() => handleRename(wf.name)}
-                                                        onBlur={() => handleRename(wf.name)}
-                                                        className="w-full"
-                                                    />
-                                                ) : (
-                                                    <p
-                                                        className="truncate text-sm font-medium"
-                                                        title={wf.builtin ? "" : "双击重命名"}
-                                                        onDoubleClick={(e) => {
-                                                            e.stopPropagation();
-                                                            if (wf.builtin) return;
-                                                            setEditingName(wf.name);
-                                                            setEditValue(wf.title);
-                                                        }}
-                                                    >
-                                                        {wf.title}
-                                                    </p>
-                                                )}
-                                                <p className="mt-0.5 truncate text-xs text-stone-500">{wf.name.replace(/^custom\//, "")}</p>
-                                            </div>
-                                            <Tag color="blue">{wf.fieldCount} 字段</Tag>
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-                </div>
-            </div> : section === "models" ? <ComfyChannelsPanel /> : <ComfyRuntimePanel />}
+                    {libraryColumn}
+                </div> : section === "models" ? <ComfyChannelsPanel /> : <ComfyRuntimePanel />}
             </div>
-        </div>
-    );
-}
-
-// ─── RunPanel ───
-type RunPanelProps = {
-    config: WorkflowConfig;
-    onRun: (fields: Record<string, string>) => void;
-    onFieldChange?: (fieldId: string, value: string) => void;
-    running: boolean;
-    result: TaskResult | null;
-};
-
-type MediaFieldUploadProps = {
-    fieldId: string;
-    value: string;
-    kind: "image" | "audio" | "video";
-    onChange: (value: string) => void;
-};
-
-function MediaFieldUpload({ fieldId, value, kind, onChange }: MediaFieldUploadProps) {
-    const inputRef = useRef<HTMLInputElement>(null);
-    const [previewUrl, setPreviewUrl] = useState(value);
-    const [filename, setFilename] = useState("");
-    const [uploading, setUploading] = useState(false);
-
-    const previewValue = (source: string) => {
-        if (!source.startsWith("/media/")) return source;
-        const storageKey = decodeURIComponent(source.slice("/media/".length).split("?", 1)[0]);
-        return backendMediaUrl(storageKey);
-    };
-
-    useEffect(() => {
-        setPreviewUrl(previewValue(value));
-        if (!value) setFilename("");
-        if (kind === "image") localStorage.removeItem(`wf_image_${fieldId}`);
-    }, [fieldId, kind, value]);
-
-    const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        e.target.value = "";
-        if (!file) return;
-        setUploading(true);
-        try {
-            const media = await uploadBackendMedia({ name: file.name, blob: file, mimeType: file.type || undefined, category: "input" });
-            setPreviewUrl(backendMediaUrl(media.storageKey));
-            setFilename(file.name);
-            onChange(media.url);
-        } catch (error) {
-            message.error(error instanceof Error ? error.message : "媒体上传失败");
-        } finally {
-            setUploading(false);
-        }
-    };
-
-    return (
-        <div className="space-y-2">
-            <div className="flex items-center gap-2">
-                <input ref={inputRef} type="file" accept={`${kind}/*`} className="hidden" onChange={handleFileChange} />
-                <Button size="small" loading={uploading} icon={<Upload className="size-3" />} onClick={() => inputRef.current?.click()}>
-                    {previewUrl ? `更换${kind === "audio" ? "音频" : kind === "video" ? "视频" : "图片"}` : `选择${kind === "audio" ? "音频" : kind === "video" ? "视频" : "图片"}`}
-                </Button>
-                {previewUrl && (
-                    <>
-                        <Tag color="blue" className="text-xs truncate max-w-48">{filename || `已选择${kind === "audio" ? "音频" : kind === "video" ? "视频" : "图片"}`}</Tag>
-                        <Button size="small" danger type="text" onClick={() => { setPreviewUrl(""); setFilename(""); onChange(""); }}>
-                            <Trash2 className="size-3" />
-                        </Button>
-                    </>
-                )}
-            </div>
-            {previewUrl && (
-                kind === "audio"
-                    ? <audio src={previewUrl} controls className="w-full" />
-                    : kind === "video"
-                        ? <video src={previewUrl} controls className="max-h-64 w-full rounded border border-stone-200 dark:border-stone-700" />
-                        : <div className="relative inline-block"><img src={previewUrl} alt="" className="h-24 w-24 rounded object-cover border border-stone-200 dark:border-stone-700" /></div>
-            )}
-        </div>
-    );
-}
-
-function RunPanel({ config, onRun, running, result }: RunPanelProps) {
-    const [fields, setFields] = useState<Record<string, string>>({});
-
-    useEffect(() => {
-        const defaults: Record<string, string> = {};
-        for (const f of config.fields) {
-            if (f.default !== undefined && f.default !== null) defaults[f.id] = String(f.default);
-        }
-        setFields(defaults);
-    }, [config.fields]);
-
-    return (
-        <div className="space-y-4">
-            {config.fields.length === 0 ? (
-                <div className="text-center text-sm text-stone-500">
-                    <Settings2 className="mx-auto mb-2 size-8 text-stone-300" />
-                    <p>请先点击节点配置字段后再运行</p>
-                </div>
-            ) : (
-                <div className="space-y-3">
-                    {config.fields.map((field) => (
-                        <div key={field.id}>
-                            <label className="mb-1 flex items-center gap-2 text-xs text-stone-500">
-                                {field.name || field.id}
-                                <Tag color="default" className="text-xs">{field.node.includes(",") ? `多节点 · ${field.input}` : `${field.node}.${field.input}`}</Tag>
-                            </label>
-                            {field.type === "text" ? (
-                                <Input.TextArea value={fields[field.id] || ""} onChange={(e) => setFields((p) => ({ ...p, [field.id]: e.target.value }))} rows={2} placeholder={field.name} />
-                            ) : field.type === "image" ? (
-                                <MediaFieldUpload fieldId={field.id} kind="image" value={fields[field.id] || ""} onChange={(v) => setFields((p) => ({ ...p, [field.id]: v }))} />
-                            ) : field.type === "audio" ? (
-                                <MediaFieldUpload fieldId={field.id} kind="audio" value={fields[field.id] || ""} onChange={(v) => setFields((p) => ({ ...p, [field.id]: v }))} />
-                            ) : field.type === "video" ? (
-                                <MediaFieldUpload fieldId={field.id} kind="video" value={fields[field.id] || ""} onChange={(v) => setFields((p) => ({ ...p, [field.id]: v }))} />
-                            ) : field.type === "dropdown" ? (
-                                <Select value={fields[field.id] || undefined} onChange={(v) => setFields((p) => ({ ...p, [field.id]: v }))} options={(field.options ?? []).map((o) => ({ label: o, value: o }))} placeholder={field.name} className="w-full" />
-                            ) : field.type === "boolean" ? (
-                                <Switch checked={fields[field.id] === "true"} onChange={(v) => setFields((p) => ({ ...p, [field.id]: String(v) }))} />
-                            ) : (
-                                <Input value={fields[field.id] || ""} onChange={(e) => setFields((p) => ({ ...p, [field.id]: e.target.value }))} placeholder={String(field.default || "")} />
-                            )}
-                        </div>
-                    ))}
-                </div>
-            )}
-
-            <Button type="primary" icon={<Play className="size-4" />} onClick={() => onRun(fields)} loading={running} disabled={config.fields.length === 0}>
-                {running ? "执行中..." : "运行工作流"}
-            </Button>
-
-            {running && <Spin size="small" />}
-
-            {result && result.media.length > 0 && (
-                <div>
-                    <h4 className="mb-2 text-sm font-medium">执行结果</h4>
-                    <div className="grid grid-cols-2 gap-3">
-                        {result.media.map((item, i) => (
-                            <div key={i} className="overflow-hidden rounded border border-stone-200 dark:border-stone-700">
-                                {item.mimeType?.startsWith("video/") ? <video src={item.url} controls className="w-full" /> : item.mimeType?.startsWith("audio/") ? <audio src={item.url} controls className="w-full p-2" /> : <img src={item.url} alt={item.filename} className="w-full" />}
-                                <p className="truncate px-2 py-1 text-xs text-stone-500">{item.filename}</p>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            )}
-
-            {result && result.error && <div className="rounded bg-red-50 p-3 text-sm text-red-600 dark:bg-red-900/20">错误: {result.error}</div>}
         </div>
     );
 }

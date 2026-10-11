@@ -17,9 +17,13 @@ export type ResolvedCanvasImageReference = {
 export function effectiveCanvasNodeType(node: Record<string, unknown>) {
     const type = String(node.type || "");
     const metadata = recordOf(node.metadata);
-    if (type === "config" && metadata.smart === true) {
+    if (type === "config") {
         const mode = String(metadata.generationMode || "").trim();
-        if (["text", "image", "video", "audio"].includes(mode)) return mode;
+        if (metadata.smart === true && ["text", "image", "video", "audio"].includes(mode)) return mode;
+        // A regular image-generation config becomes a usable image source once
+        // Backend has archived a successful result. Smart-only handling made
+        // production keyframes require a second metadata edit after generation.
+        if (mode === "image" && metadata.status === "success" && typeof metadata.storageKey === "string" && metadata.storageKey) return "image";
     }
     return type;
 }
@@ -37,7 +41,7 @@ export function resolveCanvasImageReferenceNode(
         else addImageReference(node, references, added);
     } else if (effectiveType === "character") {
         addCharacterImageReferences(node, referenceTarget, references, added);
-    } else if (effectiveType === "scene") {
+    } else if (effectiveType === "scene" || effectiveType === "prop") {
         addSceneImageReferences(node, references, added);
     }
     return references;
@@ -224,7 +228,7 @@ function addSceneImageReferences(node: Record<string, unknown>, references: Reso
     // 色卡是 SVG 元数据，供画布展示/提示词使用，不作为图片模型的二进制参考图。
     // 直连 GPT Image 的 multipart image[] 只接受可解码的栅格图片；把 SVG 色卡混入会让整个请求失败。
     const images = [
-        { key: "sceneImage", label: "scene" },
+        { key: effectiveCanvasNodeType(node) === "prop" ? "propImage" : "sceneImage", label: effectiveCanvasNodeType(node) === "prop" ? "prop" : "scene" },
     ] as const;
     let addedImage = false;
     for (const { key, label } of images) {

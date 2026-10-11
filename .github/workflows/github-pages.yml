@@ -20,17 +20,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
 
       - name: Install dependencies
-        working-directory: web
-        run: bun install
+        run: npm ci
+
+      - run: npm run build --workspace canvas-agent
+      - run: npm run build:plugins
 
       - name: Build
         working-directory: web
         env:
           VITE_BASE: /${{ github.event.repository.name }}/
-        run: bun run build
+          VITE_PLUGIN_REGISTRY_URL: /${{ github.event.repository.name }}/plugins/official-plugins.json
+        run: npm run build
 
       - name: Add SPA fallback
         run: cp web/dist/index.html web/dist/404.html

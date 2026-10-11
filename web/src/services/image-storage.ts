@@ -4,7 +4,6 @@ import i18n from "@/i18n";
 import { createImageThumbnail } from "@/lib/image-thumbnail";
 import { uploadBackendMedia, deleteBackendMedia, backendMediaUrl, resolveComfyMediaUrl } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
-import { withLocalProxy } from "@/stores/use-config-store";
 
 export type UploadedImage = {
     url: string;
@@ -34,7 +33,11 @@ type ImageReadOptions = { signal?: AbortSignal; category?: "input" | "output" | 
 type StoredImagePreview = { version: number; blob?: Blob };
 
 export function isImageFile(file: File): boolean {
-    return file.type.startsWith("image/") || /\.svg$/i.test(file.name);
+    return file.type.startsWith("image/") || isSvgFile(file);
+}
+
+export function isSvgFile(file: File): boolean {
+    return file.type === "image/svg+xml" || /\.svg$/i.test(file.name);
 }
 
 // 预览是浏览器本地的可丢弃缓存；同一个 storageKey 在不同 Backend 中不能共用。
@@ -89,7 +92,7 @@ async function fetchImageBlob(url: string, options?: ImageReadOptions) {
         controller.abort();
     }, IMAGE_DOWNLOAD_TIMEOUT_MS);
     try {
-        const response = await fetch(withLocalProxy(url), { signal: controller.signal });
+        const response = await fetch(url, { signal: controller.signal });
         if (!response.ok) throw namedError(IMAGE_RESPONSE_ERROR);
         return await response.blob();
     } catch (error) {

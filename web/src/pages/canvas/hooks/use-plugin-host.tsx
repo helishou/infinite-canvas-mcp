@@ -1,24 +1,30 @@
-import { useCallback, useEffect, useMemo, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
+import { previewH3Generation, fetchBackendH3Defaults, saveBackendH3Defaults, resetBackendH3Defaults } from '@/services/backend-api';
 import { useTranslation } from "react-i18next";
 
 import { storeGeneratedVideo } from "@/services/api/video";
-import { getLocalH3Task, getRunningHubH3Task, resolveBackendAgentEndpoint, runVideoConcatTask } from "@/services/api/comfyui";
+import { fetchWorkflowDetail } from "@/services/api/workflows";
+import { getLocalH3Task, resolveBackendAgentEndpoint, runVideoConcatTask } from "@/services/api/comfyui";
 import { fetchComfyModels } from "@/services/api/canvas-agent";
 import { applyBackendCanvasOperations, backendMediaUrl, createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, getBackendUrl, resolveBackendH3Confirmation, startCanvasGeneration, updateBackendGenerationLog } from "@/services/backend-api";
 import { observeCanvasGenerationTask } from "@/services/api/canvas-generation-task";
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { canvasTaskActionPath, canvasTaskPath } from "@basketikun/canvas-agent/generation-api";
-import { decodeChannelModel, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
+import { decodeChannelModel, resolveModelWorkflow, resolveModelWorkflowParams, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 import { buildGenerationConfig } from "@/lib/canvas/canvas-generation-helpers";
 import { createCanvasReferenceService } from "@/lib/canvas/reference-service";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { ensurePluginsLoaded } from "@/lib/canvas/plugin-loader";
 import { canvasThemes } from "@/lib/canvas-theme";
-import type { CanvasAssetPickerImage, CanvasGenerationCommand, CanvasGenerationLogs, CanvasMediaPreview, CanvasNodeToolbarItem, CanvasPluginAi, CanvasPluginHost, CanvasReferenceService } from "@/types/canvas-plugin";
+import type { CanvasAssetPickerImage, CanvasGenerationCommand, CanvasGenerationLogs, CanvasMediaPreview, CanvasNodeToolbarItem, CanvasPluginAi, CanvasPluginHost, CanvasReferenceService, CanvasVideoModelSchema } from "@/types/canvas-plugin";
 import type { CanvasAgentOp } from "@/lib/canvas/canvas-agent-ops";
 import type { CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
 import { flushCanvasProjectBeforeGeneration, useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import type { CanvasGraphIndex } from "@/lib/canvas/canvas-graph-index";
+import { createPluginGraphAccess } from "./plugin-graph-access";
+import { requestFormalH3OutputSelection } from "@/lib/canvas/h3-output-restore";
+import { createProductionEditing } from "@/lib/canvas/production-editing";
 
 type CanvasTheme = (typeof canvasThemes)[keyof typeof canvasThemes];
 
@@ -30,6 +36,7 @@ type PluginHostParams = {
     theme: CanvasTheme;
     nodesRef: MutableRefObject<CanvasNodeData[]>;
     connectionsRef: MutableRefObject<CanvasConnection[]>;
+    selectGraphIndex: (nodes: CanvasNodeData[], connections: CanvasConnection[]) => CanvasGraphIndex;
     viewportRef: MutableRefObject<ViewportTransform>;
     setNodes: Dispatch<SetStateAction<CanvasNodeData[]>>;
     setDialogNodeId: Dispatch<SetStateAction<string | null>>;
@@ -62,6 +69,7 @@ export function usePluginHost(params: PluginHostParams) {
     const { t } = useTranslation();
     const { projectId, effectiveConfig, isAiConfigReady, openConfigDialog, theme, nodesRef, connectionsRef, viewportRef, setNodes, setDialogNodeId, openAssetPicker, openMediaPreview, applyAgentOps } = params;
     const getProject = useCallback(() => useCanvasStore.getState().projects.find((item) => item.id === projectId), [projectId]);
+    const graphAccess = useMemo(() => createPluginGraphAccess(getProject, () => ({ nodes: nodesRef.current, connections: connectionsRef.current }), params.selectGraphIndex), [getProject, nodesRef, connectionsRef, params.selectGraphIndex]);
     const generationLogs = useMemo<CanvasGenerationLogs>(() => {
         return {
             list: async (options: Parameters<CanvasGenerationLogs["list"]>[0] = {}) => { const result = await fetchBackendGenerationLogs({ ...options, projectId: options.projectId || projectId }); return result.logs || []; },
@@ -70,21 +78,20 @@ export function usePluginHost(params: PluginHostParams) {
             remove: async (options: any) => { const result = await deleteBackendGenerationLogs(options); return Number(result.deleted || 0); },
         };
     }, [projectId]);
+    const defaultLoadVersion = useRef(0);
     const h3Defaults = useMemo(() => ({
-        get: async () => {
-            const response = await fetch(`${getBackendUrl()}/plugins/minimax-h3/defaults?token=${encodeURIComponent(getBackendTokenShared())}`);
-            if (!response.ok) throw new Error(`读取 H3 默认参数失败（HTTP ${response.status}）`);
-            const data = await response.json() as { defaults?: Record<string, unknown> | null };
-            return data.defaults || {};
-        },
+        get: fetchBackendH3Defaults,
         set: async (settings: Record<string, unknown>) => {
-            const response = await fetch(`${getBackendUrl()}/plugins/minimax-h3/defaults?token=${encodeURIComponent(getBackendTokenShared())}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(settings) });
-            if (!response.ok) throw new Error(`保存 H3 默认参数失败（HTTP ${response.status}）`);
-            return ((await response.json()) as { defaults?: Record<string, unknown> }).defaults || settings;
+            defaultLoadVersion.current++;
+            const committed = await saveBackendH3Defaults(settings);
+            defaultLoadVersion.current++;
+            window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: committed }));
+            return committed;
         },
         reset: async () => {
-            const response = await fetch(`${getBackendUrl()}/plugins/minimax-h3/defaults?token=${encodeURIComponent(getBackendTokenShared())}`, { method: "DELETE" });
-            if (!response.ok) throw new Error(`重置 H3 默认参数失败（HTTP ${response.status}）`);
+            defaultLoadVersion.current++;
+            await resetBackendH3Defaults();
+            defaultLoadVersion.current++;
             window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: {} }));
         },
     }), []);
@@ -142,7 +149,12 @@ export function usePluginHost(params: PluginHostParams) {
                     const text = String(task.result?.texts?.[0]?.content || "");
                     if (!text) throw new Error("插件文本任务成功但没有返回文本");
                     options?.onDelta?.(text);
-                    if (log) void generationLogs.update(log.id, { status: "success", finishedAt: new Date().toISOString(), durationMs: Date.now() - startedAtMs, runtimeTaskId: task.id, outputs: [{ type: "text", text }] }).catch(() => { });
+                    // 翻译任务（H3 提示词翻译）的模型原始响应是分段 JSON（{"translations":[...]}），
+                    // 真正的格式化中文由插件在画布只读框回填。生成日志里若原样展示该 JSON，
+                    // 用户会误以为是翻译输出，因此只记录一条友好说明而不暴露原始响应。
+                    const isTranslation = logMeta?.taskMode === "翻译";
+                    const loggedText = isTranslation ? "翻译已格式化为中文并回填到提示词只读框" : text;
+                    if (log) void generationLogs.update(log.id, { status: "success", finishedAt: new Date().toISOString(), durationMs: Date.now() - startedAtMs, runtimeTaskId: task.id, outputs: [{ type: "text", text: loggedText }] }).catch(() => { });
                     return { text, taskId: task.id };
                 } catch (error) {
                     if (log) void generationLogs.update(log.id, {
@@ -153,7 +165,13 @@ export function usePluginHost(params: PluginHostParams) {
                     throw error;
                 }
             },
+            previewH3Generation,
             runCanvasGeneration: async (command: CanvasGenerationCommand) => {
+                if (command.operation === 'h3-run') {
+                    await flushCanvasProjectBeforeGeneration(projectId);
+                }
+                // Backend freezes and validates H3 inputs in the submission request. A separate
+                // preview here re-reads and hashes every reference before the same check runs again.
                 const data = await startCanvasGeneration(command);
                 if (!data.task) throw new Error("画布生成失败：Backend 未返回任务");
                 return data.task;
@@ -172,15 +190,24 @@ export function usePluginHost(params: PluginHostParams) {
                 if (!response.ok || !data.task) throw new Error(data.error || `读取 H3 运行失败（HTTP ${response.status}）`);
                 return data.task;
             },
+            getCanvasH3TaskStatus: async (taskId) => {
+                const response = await fetch(`${getBackendUrl()}${canvasTaskPath(taskId)}/status?token=${encodeURIComponent(getBackendTokenShared())}`);
+                const data = await response.json() as { task?: { status?: string }; error?: string };
+                if (!response.ok || !data.task) throw new Error(data.error || `读取 H3 运行状态失败（HTTP ${response.status}）`);
+                return { status: String(data.task.status || "") };
+            },
             cancelCanvasH3Task: async (taskId) => {
                 const response = await fetch(`${getBackendUrl()}${canvasTaskActionPath(taskId, "cancel")}?token=${encodeURIComponent(getBackendTokenShared())}`, { method: "POST" });
-                const data = await response.json() as { task?: import("@/types/canvas-plugin").LocalH3Task; error?: string };
+                const data = await response.json() as { task?: Pick<import("@/types/canvas-plugin").LocalH3Task, "id" | "status">; error?: string };
                 if (!response.ok || !data.task) throw new Error(data.error || `取消 H3 运行失败（HTTP ${response.status}）`);
                 return data.task;
             },
             restoreH3Output: async (input) => {
                 const project = getProject();
                 if (!project) throw new Error("画布已关闭，无法还原历史输出");
+                const node = project.nodes.find(node => node.id === input.nodeId);
+                if (!node) throw new Error("目标 H3 节点已不存在，请刷新后重新选择");
+                if (requestFormalH3OutputSelection(projectId, node, input)) return;
                 await applyBackendCanvasOperations(projectId, [{ type: "restore_h3_output", ...input }], Number(project.revision || 0));
             },
             runVideoConcat: async (videos, options) => {
@@ -191,16 +218,33 @@ export function usePluginHost(params: PluginHostParams) {
                 const result = await fetchComfyModels(getBackendUrl(), getBackendTokenShared());
                 return { models: result.data?.models || [], loras: result.data?.loras || [], textEncoders: result.data?.textEncoders || [], videoVaes: result.data?.videoVaes || [], audioVaes: result.data?.audioVaes || [], latentUpscaleModels: result.data?.latentUpscaleModels || [], nanfeng: result.data?.nanfeng || {} };
             },
-            getRunningHubH3Task: async (taskId) => {
-                const task = await getRunningHubH3Task(getBackendUrl(), getBackendTokenShared(), taskId) as Awaited<ReturnType<typeof getRunningHubH3Task>>;
-                if (task.status === "succeeded" && task.result?.url && !task.result.storageKey) {
-                    return { ...task, result: await persistH3Result(task.result) };
-                }
-                return task;
-            },
             // List configured models for a capability; labels use the model name without the channel prefix.
             listModels: (capability) => selectableModelsByCapability(effectiveConfig, capability as ModelCapability | undefined).map((value) => ({ value, label: decodeChannelModel(value)?.model || value })),
             defaultModel: (capability) => buildGenerationConfig(effectiveConfig, undefined, capability).model,
+            describeVideoModel: async (model: string, referenceCount: number): Promise<CanvasVideoModelSchema> => {
+                const resolved = resolveModelWorkflow(effectiveConfig, model, referenceCount);
+                const decoded = decodeChannelModel(model);
+                const modelName = decoded?.model || model;
+                const channel = effectiveConfig.channels.find((item) => decoded?.channelId ? item.id === decoded.channelId : item.models.some((candidate) => candidate.name === modelName));
+                const declaration = channel?.models.find((candidate) => candidate.name === modelName);
+                if (resolved) {
+                    const detail = await fetchWorkflowDetail(resolved);
+                    return { model, kind: "workflow", workflow: resolved, supported: true, fields: detail.config?.fields || [], defaultValues: resolveModelWorkflowParams(effectiveConfig, model, referenceCount) };
+                }
+                const fallback = declaration?.workflows?.[0];
+                if (fallback) {
+                    const detail = await fetchWorkflowDetail(fallback);
+                    return { model, kind: "workflow", workflow: fallback, supported: false, fields: detail.config?.fields || [], error: `该视频模型不支持当前输入数量（${referenceCount} 个参考）` };
+                }
+                if (channel?.kind !== "comfyui" && declaration?.capability === "video") return {
+                    model, kind: "direct", supported: true, fields: [
+                        { id: "seconds", name: "时长（秒）", type: "number", default: 6, min: 1, max: 20, step: 1 },
+                        { id: "size", name: "视频尺寸", type: "text", default: "1280x720" },
+                        { id: "resolution", name: "清晰度", type: "text", default: "720p" },
+                    ],
+                };
+                return { model, kind: "unsupported", supported: false, fields: [], error: `当前输入模式没有可用的视频模型工作流（${referenceCount} 个参考）` };
+            },
         };
     }, [effectiveConfig, generationLogs, isAiConfigReady, openConfigDialog, projectId, t]);
 
@@ -208,19 +252,7 @@ export function usePluginHost(params: PluginHostParams) {
         () => ({
             projectId,
             mediaUrl: backendMediaUrl,
-            getNode: (id) => getProject()?.nodes.find((node) => node.id === id) || null,
-            getNodes: () => getProject()?.nodes || [],
-            getConnections: () => getProject()?.connections || [],
-            getUpstream: (nodeId) =>
-                connectionsRef.current
-                    .filter((conn) => conn.toNodeId === nodeId)
-                    .map((conn) => nodesRef.current.find((node) => node.id === conn.fromNodeId))
-                    .filter((node): node is CanvasNodeData => Boolean(node)),
-            getDownstream: (nodeId) =>
-                connectionsRef.current
-                    .filter((conn) => conn.fromNodeId === nodeId)
-                    .map((conn) => nodesRef.current.find((node) => node.id === conn.toNodeId))
-                    .filter((node): node is CanvasNodeData => Boolean(node)),
+            ...graphAccess,
             updateNode: (nodeId, patch) => {
                 setNodes((nodes) => {
                     const next = nodes.map((node) => (node.id === nodeId ? { ...node, ...patch } : node));
@@ -245,8 +277,9 @@ export function usePluginHost(params: PluginHostParams) {
             openAssetPicker,
             openMediaPreview,
             generationLogs,
+            production: createProductionEditing(projectId, graphAccess.getNode, () => flushCanvasProjectBeforeGeneration(projectId)),
         }),
-        [applyAgentOps, generationLogs, getProject, h3Defaults, openAssetPicker, openMediaPreview, pluginAi, projectId, references, setNodes],
+        [applyAgentOps, generationLogs, graphAccess, h3Defaults, openAssetPicker, openMediaPreview, pluginAi, projectId, references, setNodes],
     );
 
     const renderPluginPanel = useCallback(
@@ -290,29 +323,42 @@ export function usePluginHost(params: PluginHostParams) {
         return rest;
     };
     useEffect(() => {
+        let active = true;
         void (async () => {
+            const version = ++defaultLoadVersion.current;
             const raw = localStorage.getItem("minimax-h3-default-params");
             const local = raw ? (() => { try { const parsed = JSON.parse(raw) as { settings?: Record<string, unknown> }; return parsed.settings || {}; } catch { return {}; } })() : {};
-            const remote = await h3Defaults.get().catch(() => ({}));
+            const remote = await h3Defaults.get();
+            if (!active || version !== defaultLoadVersion.current) return;
             if (Object.keys(remote).length) {
                 window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: remote }));
                 if (raw) localStorage.removeItem("minimax-h3-default-params");
             } else if (Object.keys(stripLayout(local)).length) {
                 const migrated = await h3Defaults.set(stripLayout(local));
+                if (!active) return;
                 window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: migrated }));
                 localStorage.removeItem("minimax-h3-default-params");
+            } else {
+                window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: {} }));
             }
-        })();
+        })().catch(error => console.error("H3 默认参数尚未读取，保留原设置与迁移数据", error));
         void ensurePluginsLoaded();
-        const reloadPlugins = () => void ensurePluginsLoaded();
+        const readDefaults = async () => {
+            const version = ++defaultLoadVersion.current;
+            try {
+                const settings = await h3Defaults.get();
+                if (active && version === defaultLoadVersion.current) window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: settings }));
+            } catch (error) { console.error("H3 默认参数更新尚未确认，保留上次读取值", error); }
+        };
+        const reloadPlugins = () => { void ensurePluginsLoaded(); void readDefaults(); };
         const refreshH3Defaults = (event: Event) => {
             const detail = (event as CustomEvent<{ type?: string; entityId?: string }>).detail;
             if (detail?.type !== "settings.updated" || detail.entityId !== "plugin:minimax-h3:defaults:v1") return;
-            void h3Defaults.get().then((settings) => window.dispatchEvent(new CustomEvent("minimax-h3-defaults-updated", { detail: settings })));
+            void readDefaults();
         };
         window.addEventListener("backend-connected", reloadPlugins);
         window.addEventListener("backend-event", refreshH3Defaults);
-        return () => { window.removeEventListener("backend-connected", reloadPlugins); window.removeEventListener("backend-event", refreshH3Defaults); };
+        return () => { active = false; window.removeEventListener("backend-connected", reloadPlugins); window.removeEventListener("backend-event", refreshH3Defaults); };
     }, [h3Defaults]);
 
     return { pluginHost, renderPluginPanel, buildNodeToolbarItems };

@@ -1,0 +1,242 @@
+import hashlib
+import importlib.util
+import os
+import base64
+import json
+import sys
+import tempfile
+import unittest
+from copy import deepcopy
+from pathlib import Path
+
+from canvas_subject_prompt_v2 import adapt_production, build_source_map, compile_prompt_v2, project_continuity_source, write_prompt_text
+
+source_contract_spec = importlib.util.spec_from_file_location("canvas_source_contract", Path(__file__).with_name("source-contract.py"))
+source_contract = importlib.util.module_from_spec(source_contract_spec)
+source_contract_spec.loader.exec_module(source_contract)
+
+
+class SubjectPromptV2ProjectionTest(unittest.TestCase):
+    def test_continuity_projection_uses_subject_entity_refs_without_mutating_source(self):
+        source = {
+            "prompt_assembly": {"version": 2},
+            "character_registry": [{"id": "CHAR_A", "name": "A"}],
+            "scene_registry": [{"id": "SCENE_A", "name": "Scene A"}],
+            "asset_plan": [{"id": "PROP_A", "kind": "prop"}],
+            "subject_registry": [
+                {"id": "SUB_A", "entityRef": {"kind": "character", "id": "CHAR_A"}},
+                {"id": "SUB_SCENE", "entityRef": {"kind": "scene", "id": "SCENE_A"}},
+                {"id": "SUB_PROP", "entityRef": {"kind": "asset", "id": "PROP_A"}},
+            ],
+            "shots": [{"id": "SHOT_A", "duration_frames": 24, "timeline_id": "TL_A", "story_order": 0,
+                       "subject_usages": [
+                           {"subjectId": "SUB_A", "continuityFactIds": ["FACT_A"], "stateRequirements": []},
+                           {"subjectId": "SUB_SCENE", "continuityFactIds": [], "stateRequirements": [{"factId": "FACT_SCENE"}]},
+                           {"subjectId": "SUB_PROP", "continuityFactIds": [], "stateRequirements": []},
+                       ]}],
+            "segments": [{"id": "SEG_A", "shot_ids": ["SHOT_A"]}],
+            "ledger": {"timelines": [{"id": "TL_A", "start_frame": 0}]},
+        }
+        snapshot = deepcopy(source)
+        projected = project_continuity_source(source)
+        self.assertEqual(source, snapshot)
+        shot = projected["shots"][0]
+        self.assertEqual([item["id"] for item in shot["characters"]], ["CHAR_A"])
+        self.assertEqual(shot["scene_id"], "SCENE_A")
+        self.assertEqual(shot["required_assets"], ["PROP_A"])
+        self.assertEqual(shot["continuity_facts"], ["FACT_A", "FACT_SCENE"])
+
+    def test_source_map_hashes_match_archived_prompt_bytes_on_windows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prompt = "detailed_description:\r\nA registered visual action.\r\n\r\noverall_soundscape:\r\nIndustrial rain.\r\n"
+            path = Path(directory) / "clip.h3.txt"
+            normalized = write_prompt_text(path, prompt)
+            source_map = build_source_map(normalized, {"segmentId": "CLIP_1", "sourceHash": "a" * 64, "entries": []})
+            prompt_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+            self.assertEqual(path.read_bytes(), normalized.encode("utf-8"))
+            self.assertEqual(source_map["promptHash"], prompt_hash)
+            artifact = {"kind": "h3", "status": "ready", "targetId": "CLIP_1", "prompt": path.read_text(encoding="utf-8"),
+                        "sha256": prompt_hash, "sourceHash": source_map["sourceHash"], "receipt": {"sourceMap": source_map}}
+            contract_path = Path(__file__).with_name("source-contract.py")
+            spec = importlib.util.spec_from_file_location("source_contract_newlines", contract_path)
+            contract = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(contract)
+            self.assertFalse(contract.validate_prompt_source_maps([artifact]))
+
+    def test_mixed_compilation_scope_accepts_registered_asset_outputs(self):
+        source = {
+            "prompt_assembly": {"version": 2},
+            "_canvas_compilation_scope": {"targetIds": ["ASSET_STYLE", "KF_SHOT_06", "UNKNOWN"]},
+            "asset_plan": [{"id": "ASSET_STYLE"}, {"id": "KF_SHOT_06"}],
+            "asset_cards": [{"id": "ASSET_STYLE"}],
+            "shots": [], "segments": [], "subject_registry": [], "utterances": [],
+            "ledger": {"contract_version": 2, "facts": [], "timelines": [], "initial": [], "events": [], "requirements": [], "coverage": []},
+        }
+        issues = source_contract.validate_subject_prompt_v2(source, "compile")
+        selected_target_issues = [item for item in issues if "Selected compilation target" in item["message"]]
+        self.assertEqual([item["targetId"] for item in selected_target_issues], ["UNKNOWN"])
+
+    def test_clip_compiles_subjects_shots_and_source_map_without_mutating_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "picture.png"
+            image_bytes = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l1sAAAAASUVORK5CYII=")
+            image.write_bytes(image_bytes)
+            digest = hashlib.sha256(image_bytes).hexdigest()
+            source = {
+                "prompt_assembly": {"version": 2},
+                "_canvas_subject_source_hash": "a" * 64,
+                "_canvas_subject_picture_sources": {
+                    "CHAR_IMG": {"assetId": "CHAR_ASSET", "subjectId": "CHAR", "kind": "subject", "role": "identity",
+                                 "file": str(image), "sha256": digest, "storageKey": "image:char", "nodeId": "CHAR_NODE",
+                                 "retain": ["face and hair"], "exclude": ["pose and background"], "defaultFor": ["identity"]},
+                    "SCENE_IMG": {"assetId": "SCENE_ASSET", "subjectId": "SCENE", "kind": "subject", "role": "scene",
+                                  "file": str(image), "sha256": digest, "storageKey": "image:scene", "nodeId": "SCENE_NODE",
+                                  "retain": ["coop layout"], "exclude": ["people and original blocking"], "defaultFor": ["identity"]},
+                },
+                "fps_num": 24, "fps_den": 1, "brief": "A child investigates a real egg.",
+                "character_registry": [{"id": "CHILD", "name": "Child", "prompt_description": "A small child in a blue cotton shirt."}],
+                "scene_registry": [{"id": "COOP", "name": "Chicken coop", "prompt_description": "A mud-brick coop with a straw nest behind a small opening."}],
+                "subject_registry": [
+                    {"id": "CHAR", "kind": "character", "entityRef": {"kind": "character", "id": "CHILD", "ownerKind": "episode", "ownerId": "EP"}, "pictureBindings": [
+                        {"id": "CHAR_IMG", "assetId": "CHAR_ASSET", "provides": ["identity"], "retain": ["face and hair"], "exclude": ["pose and background"], "defaultFor": ["identity"]}]},
+                    {"id": "SCENE", "kind": "scene", "entityRef": {"kind": "scene", "id": "COOP", "ownerKind": "episode", "ownerId": "EP"}, "pictureBindings": [
+                        {"id": "SCENE_IMG", "assetId": "SCENE_ASSET", "provides": ["scene"], "retain": ["coop layout"], "exclude": ["people and original blocking"], "defaultFor": ["identity"]}]},
+                ],
+                "asset_plan": [], "asset_cards": [], "shots": [
+                    {"id": "SHOT_1", "timeline_id": "main", "story_order": 0, "duration_frames": 96,
+                     "visual": "The child stays outside the coop window and watches the hen in the nest.",
+                     "camera": {"framing": "MCU", "attention_subject_ids": ["CHAR"], "editorial_reason": "Read the child's cautious reaction."},
+                     "subject_usages": [
+                         {"subjectId": "CHAR", "presentation": "visible", "pictureBindingIds": [], "referencePurpose": ["identity"], "continuityFactIds": [], "stateRequirements": []},
+                         {"subjectId": "SCENE", "presentation": "state_context", "pictureBindingIds": ["SCENE_IMG"], "referencePurpose": ["identity"], "continuityFactIds": [], "stateRequirements": []},
+                     ],
+                     "keyframes": [], "utterance_refs": [{"utteranceId": "U1", "role": "speaker", "localStartFrame": 20, "localEndFrame": 60, "textStart": 0, "textEnd": 20}]},
+                ],
+                "segments": [{"id": "CLIP_1", "shot_ids": ["SHOT_1"], "mode": "Ref2VA", "mode_lock": "Ref2VA", "mode_selection_reason": "Use the registered identity and coop references."}],
+                "utterances": [{"id": "U1", "speakerSubjectId": "CHAR", "text": "Look at the real egg", "language": "English", "delivery": "quietly", "voiceover": False,
+                                "start": {"shotId": "SHOT_1", "localFrame": 20}, "end": {"shotId": "SHOT_1", "localFrame": 60}}],
+                "ledger": {"contract_version": 2, "facts": [], "timelines": [{"id": "main", "start_frame": 0}], "initial": [], "events": [], "requirements": [], "coverage": []},
+            }
+            authored_snapshot = repr(source)
+            projected = adapt_production(source)
+            self.assertEqual(repr(source), authored_snapshot)
+            segment = projected["segments"][0]
+            self.assertEqual(segment["generation_clip_duration"], 4.0)
+            self.assertEqual([item["label"] for item in segment["references"]], ["<Picture 1>"])
+            self.assertEqual(len(segment["subjects"]), 2)
+            prompt = compile_prompt_v2(projected, segment)
+            self.assertLess(prompt.index("subject_definitions:"), prompt.index("summary:"))
+            self.assertIn("[Shot 1]", prompt)
+            source_map = build_source_map(prompt, projected["_canvas_subject_v2_source_maps"]["CLIP_1"])
+            self.assertEqual(source_map["sourceHash"], "a" * 64)
+            self.assertTrue(any(item["sourceId"] == "SHOT_1" and item["field"] == "visual" for item in source_map["entries"]))
+            self.assertTrue(any(item["sourceId"] == "U1" and item["field"] == "text" for item in source_map["entries"]))
+
+            # Missing lock prose is not an approval gate. A valid mode is inferred
+            # from authored visible Subject references and frozen image inputs.
+            inferred_source = deepcopy(source)
+            for field in ("mode", "mode_lock", "mode_selection_reason"):
+                inferred_source["segments"][0].pop(field, None)
+            inferred_diagnostics = source_contract.validate(inferred_source, "compile")
+            self.assertFalse([item for item in inferred_diagnostics if item["severity"] == "error"], inferred_diagnostics)
+            inferred = adapt_production(inferred_source)["segments"][0]
+            self.assertEqual(inferred["mode"], "Ref2VA")
+            self.assertEqual(inferred["mode_lock"], "Ref2VA")
+            self.assertTrue(inferred["mode_selection_reason"])
+
+            text_source = deepcopy(inferred_source)
+            for usage in text_source["shots"][0]["subject_usages"]:
+                usage["presentation"] = "state_context"
+                usage["pictureBindingIds"] = []
+            text_projected = adapt_production(text_source, draft=True)["segments"][0]
+            self.assertEqual(text_projected["mode"], "T2VA")
+
+            contract_path = Path(__file__).with_name("source-contract.py")
+            spec = importlib.util.spec_from_file_location("subject_prompt_source_contract", contract_path)
+            contract = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(contract)
+            self.assertEqual(contract.contract()["promptAssemblyVersions"], [2])
+            self.assertFalse([item for item in contract.validate(source, "edit") if item["severity"] == "error"])
+            artifact = {"kind": "h3", "status": "ready", "targetId": "CLIP_1", "prompt": prompt,
+                        "sha256": source_map["promptHash"], "sourceHash": source_map["sourceHash"],
+                        "receipt": {"sourceMap": source_map}}
+            self.assertFalse(contract.validate_prompt_source_maps([artifact]))
+            artifact["prompt"] += " changed"
+            self.assertTrue(contract.validate_prompt_source_maps([artifact]))
+
+            # A missing visible identity image keeps the source editable and its text
+            # prompt compilable as a draft. The same input remains blocked for media use.
+            draft_source = deepcopy(source)
+            draft_source["subject_registry"][0]["pictureBindings"] = []
+            draft_source["shots"][0]["subject_usages"][0]["pictureBindingIds"] = []
+            draft_source["shots"][0]["subject_usages"][1]["pictureBindingIds"] = []
+            draft_source["_canvas_subject_picture_sources"] = {}
+            compile_diagnostics = contract.validate(draft_source, "compile")
+            self.assertFalse([item for item in compile_diagnostics if item["severity"] == "error"], compile_diagnostics)
+            missing_binding = [item for item in compile_diagnostics if "Missing or ambiguous default binding" in item["message"]]
+            self.assertTrue(missing_binding)
+            self.assertEqual(missing_binding[0]["severity"], "warning")
+            generate_diagnostics = contract.validate(draft_source, "generate")
+            self.assertTrue(any(item["severity"] == "error" and "Missing or ambiguous default binding" in item["message"] for item in generate_diagnostics))
+            projected_draft = adapt_production(draft_source, draft=True)
+            draft_segment = projected_draft["segments"][0]
+            self.assertEqual(draft_segment["references"], [])
+            draft_prompt = compile_prompt_v2(projected_draft, draft_segment, draft=True)
+            self.assertIn("The child stays outside", draft_prompt)
+
+            runtime = os.environ.get("ACHENG_TEST_RUNTIME")
+            if runtime:
+                import subprocess
+                python = os.environ.get("ACHENG_PYTHON") or sys.executable
+                runtime_scripts = Path(runtime) / "scripts"
+                env = os.environ.copy()
+                env["PYTHONPATH"] = str(runtime_scripts) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+                compile_script = "from compile_h3 import compile_package; import json,sys; print(json.dumps(compile_package(sys.argv[1], sys.argv[2], draft=True)))"
+
+                def compile_runtime(candidate, output_path):
+                    input_path = Path(directory) / (output_path.name + ".json")
+                    input_path.write_text(json.dumps(candidate, ensure_ascii=False), encoding="utf-8")
+                    result = subprocess.run([python, "-B", "-X", "utf8", "-c", compile_script, str(input_path), str(output_path)],
+                                            cwd=runtime, env=env, check=True, capture_output=True, text=True, encoding="utf-8")
+                    return json.loads(result.stdout)
+
+                output_path = Path(directory) / "compiled"
+                index = compile_runtime(source, output_path)
+                self.assertEqual(len(index), 1)
+                self.assertEqual(index[0]["format_pass"], "PASSED", index[0].get("blockers"))
+                self.assertEqual(index[0]["source_map"]["segmentId"], "CLIP_1")
+                self.assertTrue(index[0]["source_map"]["entries"])
+                draft_output = Path(directory) / "compiled-missing-image"
+                draft_index = compile_runtime(draft_source, draft_output)
+                self.assertEqual(len(draft_index), 1)
+                self.assertEqual(draft_index[0]["format_pass"], "NOT_ACCEPTED")
+                self.assertTrue(any("reference mode has no media bindings" in item for item in draft_index[0].get("blockers", [])))
+                draft_prompt_file = draft_index[0].get("prompt_file") or draft_index[0].get("file")
+                self.assertTrue(draft_prompt_file)
+                self.assertTrue((draft_output / draft_prompt_file).is_file())
+
+
+class ContinuityProjectionTest(unittest.TestCase):
+    def test_local_events_and_flat_screenplay_are_projected_without_rewriting_source(self):
+        from copy import deepcopy
+        from canvas_subject_prompt_v2 import project_continuity_source, audit_subject_continuity
+        scene = {"id": "SC1", "scene_id": "ENV", "text": "铆钉护甲受损，仍守在门前。"}
+        source = {"prompt_assembly": {"version": 2}, "shots": [
+            {"id": "S1", "timeline_id": "T", "story_order": 0, "duration_frames": 48},
+            {"id": "S2", "timeline_id": "T", "story_order": 1, "duration_frames": 72}],
+            "segments": [{"id": "C", "shot_ids": ["S1", "S2"]}], "script_scenes": [scene],
+            "ledger": {"contract_version": 2, "timelines": [{"id": "T", "start_frame": 100}], "facts": [], "initial": [], "requirements": [], "coverage": [],
+                "events": [{"id": "E1", "shot_id": "S2", "local_frame": 0}, {"id": "E2", "shot_id": "S2", "local_frame": 1}]}}
+        before = deepcopy(source)
+        projected = project_continuity_source(source)
+        self.assertEqual([(s["start_frame"], s["end_frame"]) for s in projected["shots"]], [(100, 148), (148, 220)])
+        self.assertEqual([e["frame"] for e in projected["ledger"]["events"]], [148, 149])
+        self.assertEqual(projected["script_scenes"][0]["blocks"][0], scene)
+        self.assertEqual(source, before)
+        self.assertEqual(project_continuity_source(projected), projected)
+        from continuity_v2 import digest
+        self.assertEqual(audit_subject_continuity(source)["sourceDigest"], digest(source))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,28 @@
+name: Deployment smoke
+on:
+  pull_request:
+    paths: ['Dockerfile', '.dockerignore', 'docker-compose*.yml', 'deploy/**', 'backend/**', 'canvas-agent/**', 'web/**', 'plugins/canvas/**', 'scripts/build-official-plugins.mjs', 'scripts/acheng*', 'scripts/acheng/**', 'scripts/test-deployment.mjs', 'package*.json', '.github/workflows/deployment-smoke.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    env:
+      INFINITE_CANVAS_BACKEND_TOKEN: isolated-ci-deployment-token
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: docker compose --project-name canvas-deployment-ci up -d --build
+      - run: node scripts/test-deployment.mjs seed http://localhost:3000/api artifacts/deployment-fixture.json --browser
+      - run: docker compose --project-name canvas-deployment-ci up -d --force-recreate backend
+      - run: node scripts/test-deployment.mjs verify http://localhost:3000/api artifacts/deployment-fixture.json --browser
+      - if: failure()
+        run: docker compose --project-name canvas-deployment-ci logs --no-color
+      - if: always()
+        run: docker compose --project-name canvas-deployment-ci down --volumes

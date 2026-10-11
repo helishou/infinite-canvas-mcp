@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test, { type TestContext } from "node:test";
 import express from "express";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -42,6 +45,20 @@ async function fixture(t: TestContext) {
     api.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [{ id: "minimax-h3", enabled: true, version: KNOWN_FIRST_PARTY["minimax-h3"].version, tools: [] }] }));
     api.post("/mcp/observability/events", (req, res) => { events.push(req.body); res.json({ ok: true }); });
     api.get("/canvas/projects/:id", (req, res) => res.json({ ok: true, project: db.getCanvasProject(req.params.id) }));
+    api.get("/canvas/projects/:id/h3-context", (req, res) => {
+        const parseIds = (value: unknown) => {
+            try { const parsed = JSON.parse(typeof value === "string" ? value : "[]"); return Array.isArray(parsed) && parsed.every(item => typeof item === "string") ? parsed as string[] : []; }
+            catch { return []; }
+        };
+        const project = db.getCanvasProjectH3Context(req.params.id, String(req.query.nodeId || ""), typeof req.query.segmentId === "string" ? req.query.segmentId : undefined, { sourceNodeIds: parseIds(req.query.sourceNodeIds), assetIds: parseIds(req.query.assetIds) });
+        if (!project) return void res.status(404).json({ ok: false, code: "NODE_NOT_FOUND", error: "H3 节点不存在" });
+        res.json({ ok: true, project });
+    });
+    api.get("/canvas/projects/:id/h3-node-summary", (req, res) => {
+        const project = db.getCanvasH3NodeSummary(req.params.id, String(req.query.nodeId || ""));
+        if (!project) return void res.status(404).json({ ok: false, code: "NODE_NOT_FOUND", error: "H3 节点不存在" });
+        res.json({ ok: true, project });
+    });
     api.get("/tasks/:id", (req, res) => {
         const task = db.getTask(req.params.id);
         if (!task) { res.status(404).json({ ok: false, code: "TASK_NOT_FOUND", error: "task not found" }); return; }
@@ -52,7 +69,10 @@ async function fixture(t: TestContext) {
         writes.push(req.body);
         if (race) { race = false; db.applyCanvasProjectOperations("hardening", undefined, [{ type: "update_h3_segment", nodeId: "h3", segmentId: "A", patch: { prompt: "Peer edit" } }]); }
         try { res.json({ ok: true, ...db.applyCanvasProjectOperations(req.params.id, req.body.expectedRevision, req.body.operations, { baseRevision: req.body.baseRevision, operationId: req.body.operationId }) }); }
-        catch (error) { res.status(409).json({ ok: false, code: "REVISION_CONFLICT", error: error instanceof Error ? error.message : String(error) }); }
+        catch (error) {
+            const detail = error as Error & { code?: string; revision?: number; expectedRevision?: number; conflictTargets?: string[] };
+            res.status(detail.code === "REVISION_CONFLICT" ? 409 : 400).json({ ok: false, code: detail.code || "REVISION_CONFLICT", error: detail.message || String(error), ...(detail.revision === undefined ? {} : { revision: detail.revision }), ...(detail.expectedRevision === undefined ? {} : { expectedRevision: detail.expectedRevision }), ...(detail.conflictTargets ? { conflictTargets: detail.conflictTargets } : {}) });
+        }
     });
     const apiServer = api.listen(0, "127.0.0.1"); await once(apiServer, "listening");
     const address = apiServer.address(); if (!address || typeof address === "string") throw new Error("API address missing");
@@ -78,7 +98,7 @@ test("real HTTP declares joint prepare and applies final prompt/character/refere
     const tool = catalog.tools.find((entry) => entry.name === "h3_prepare_clip");
     assert.ok(tool, "a source handler must be exposed through actual MCP registration");
     assert.equal(tool.annotations?.readOnlyHint, false);
-    const result = await f.prepare({ expectedRevision: 0 }); assert.notEqual(result.isError, true);
+    const result = await f.prepare({ expectedRevision: 0 }); assert.notEqual(result.isError, true, JSON.stringify(payload(result)));
     assert.equal(payload(result).revision, 1); assert.equal(f.writes.length, 1);
     assert.equal(f.segments()[0].prompt, "New <Subject 1>");
     assert.equal(Object.keys(f.segments()[0].h3CharacterGroups).length, 1);
@@ -120,6 +140,34 @@ test("real HTTP Clip result lookup rejects the other Clip's exact task or storag
     assert.deepEqual(payload(correct).result.identity, { projectId: "hardening", nodeId: "h3", segmentId: "A", taskId: "task-A", storageKey: "video:A" });
     assert.equal(payload(correct).result.media.url, "/media/video%3AA");
     assert.equal(f.writes.length, 0);
+});
+
+test("restored scene Clips read an archived video through its exact source task and keep history visible", async (t) => {
+    const f = await fixture(t), sourceNodeId = "archive-h3", storageKey = "video:archived-scene-result";
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "h3-archive-result-")), filePath = path.join(directory, "archived.mp4");
+    fs.writeFileSync(filePath, "verified archived video");
+    f.db.upsertMediaFile({ storageKey, filePath, mimeType: "video/mp4", bytes: fs.statSync(filePath).size, width: 16, height: 9, durationMs: 4000, createdAt: new Date().toISOString() });
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const task = f.db.createTask("task-archived-scene", "comfyui:minimax-h3", { projectId: "hardening", nodeId: sourceNodeId, segmentId: "A" }, { canvasBinding: { projectId: "hardening", nodeId: sourceNodeId, segmentId: "A" } });
+    f.db.updateTask(task.id, { status: "succeeded", progress: 1, result: { media: [{ storageKey, mimeType: "video/mp4" }] } });
+    const log = f.db.createGenerationLog({ projectId: "hardening", nodeId: sourceNodeId, segmentId: "A", status: "success", platform: "h3", model: "fixture", runtimeTaskId: task.id, references: [], inputCounts: {}, startedAt: new Date().toISOString(), durationMs: 0, outputs: [{ storageKey, mimeType: "video/mp4" }], params: {} });
+    const project = f.db.getCanvasProject("hardening")!;
+    f.db.applyCanvasProjectOperations("hardening", Number(project.revision), [
+        { type: "add_node", id: sourceNodeId, nodeType: "minimax-h3:video", position: { x: 800, y: 0 }, width: 400, height: 300,
+            metadata: { productionArchiveLabel: "旧版 H3 Clips；保留原视频", segments: [{ id: "A", status: "success", result: `/media/${encodeURIComponent(storageKey)}`, resultStorageKey: storageKey }] } },
+        { type: "update_h3_segment", nodeId: "h3", segmentId: "A", patch: {
+            status: "success", progress: 1, runtimeTaskId: "", result: `/media/${encodeURIComponent(storageKey)}`, resultStorageKey: storageKey,
+            results: [{ taskId: task.id, storageKey, mimeType: "video/mp4" }], archivedResultOrigin: { sourceNodeId, sourceSegmentId: "A", generationLogId: log.id, taskId: task.id, storageKey },
+        } },
+    ], { runtimeWrite: true });
+    const read = await f.client.callTool({ name: "h3_get_clip", arguments: { projectId: "hardening", nodeId: "h3", segmentId: "A", include: ["result"] } });
+    assert.notEqual(read.isError, true);
+    assert.deepEqual(payload(read).result.identity, { projectId: "hardening", nodeId: "h3", segmentId: "A", taskId: task.id, storageKey, sourceNodeId, sourceSegmentId: "A", generationLogId: log.id });
+    assert.equal(payload(read).result.media.url, `/media/${encodeURIComponent(storageKey)}`);
+    assert.equal(payload(read).result.currentOutput, true);
+    assert.deepEqual(f.db.getH3NodeMaterials("hardening", "h3").map(item => ({ storageKey: item.storageKey, segmentId: item.segmentId })), [{ storageKey, segmentId: "A" }]);
+    const wrongTask = await f.client.callTool({ name: "h3_get_clip", arguments: { projectId: "hardening", nodeId: "h3", segmentId: "A", include: ["result"], taskId: "wrong-task", storageKey } });
+    assert.equal(wrongTask.isError, true); assert.equal(payload(wrongTask).error.code, "MEDIA_IDENTITY_MISMATCH");
 });
 
 test("real HTTP a shared parent requires a matching Clip event, not a flat/latest output", async (t) => {

@@ -19,6 +19,42 @@ type TestClient = {
 
 const emptyEventHistory = { record: () => Promise.resolve(), recordTurn: () => Promise.resolve() };
 
+test("production review forwards local image paths to the Codex adapter without inline encoding", async () => {
+    const client = Reflect.construct(CodexAppClient, [{}, () => undefined, emptyEventHistory]);
+    let captured: unknown;
+    client.startTurn = async (_thread: string, _prompt: string, images: string[]) => { captured = images; return { output: '{"verdict":"needs_human"}' }; };
+    await client.generateProductionOutput("worker", "inspect", {}, ["C:/media/image.png"]);
+    assert.deepEqual(captured, ["C:/media/image.png"]);
+});
+
+test("分块输出保留跨块 UTF-8、多行、CRLF 和未完成消息", () => {
+    const client = Reflect.construct(CodexAppClient, [{}, () => undefined, emptyEventHistory]);
+    const parsed: unknown[] = [];
+    client.handle = (message: unknown) => parsed.push(message);
+    const first = { text: "中文🌟" };
+    const second = { text: "next" };
+    const bytes = Buffer.from(`${JSON.stringify(first)}\r\n\n${JSON.stringify(second)}\n`);
+    for (let index = 0; index < bytes.length - 1; index++) client.read(bytes.subarray(index, index + 1));
+    assert.deepEqual(parsed, [first], "没有换行的第二条消息必须等待完整到达");
+    client.read(bytes.subarray(bytes.length - 1));
+    assert.deepEqual(parsed, [first, second]);
+});
+
+test("大消息只在换行到达时合并一次，后续消息仍按顺序分派", () => {
+    const client = Reflect.construct(CodexAppClient, [{}, () => undefined, emptyEventHistory]);
+    const parsed: unknown[] = [];
+    client.handle = (message: unknown) => parsed.push(message);
+    const message = { text: "历史输出".repeat(500_000) };
+    const line = JSON.stringify(message);
+    for (let offset = 0; offset < line.length; offset += 4096) client.read(line.slice(offset, offset + 4096));
+    assert.equal(parsed.length, 0);
+    // 每个未完成片段独立保存，防止退回反复复制/扫描完整前缀的二次方路径。
+    assert.equal(client.buffer.length, Math.ceil(line.length / 4096));
+    client.read('\n{"ok":true}\n');
+    assert.deepEqual(parsed, [message, { ok: true }]);
+    assert.equal(client.buffer.length, 0);
+});
+
 test("审批只在 app-server 确认 resolved 后清除", () => {
     const writes: Array<Record<string, unknown>> = [];
     const events: Array<{ type: string; payload: unknown }> = [];
@@ -116,10 +152,11 @@ test("显式 Skill 同时使用文本标记和结构化输入传给 turn/start",
 
     const running = client.startTurn("thread-1", "执行任务", [], "request", undefined, undefined, undefined, skill);
     const request = writes.find((item) => item.method === "turn/start");
-    assert.deepEqual((request?.params as { input?: unknown[] })?.input, [
+    assert.deepEqual((request?.params as { input?: unknown[] })?.input?.slice(0, 2), [
         { type: "text", text: "$demo-skill 执行任务", text_elements: [] },
         { type: "skill", ...skill },
     ]);
+    assert.match(String(((request?.params as { input?: Array<{ text?: string }> }).input?.at(-1))?.text), /parentThreadId=thread-1/);
     testClient.handle({ id: request?.id, result: { turn: { id: "turn-1" } } });
     await new Promise((resolve) => setImmediate(resolve));
     testClient.handleNotification("turn/completed", { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } });

@@ -2,12 +2,13 @@ import axios from "axios";
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
+import { corsBlockedHint } from "@/lib/api-error";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { readImageMeta } from "@/lib/image-utils";
 import { resolveH3VideoSettings } from "@/lib/h3-video-settings";
-import { boolConfig, buildApiUrl, modelOptionName, modelWorkflowMissingMessage, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, resolveModelWorkflow, withLocalProxy, type AiConfig } from "@/stores/use-config-store";
+import { boolConfig, buildApiUrl, modelOptionName, modelWorkflowMissingMessage, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, resolveModelWorkflow, type AiConfig } from "@/stores/use-config-store";
 import { runModelPlugin } from "./model-plugin";
 import { runComfyTask, resolveComfyEndpoint, type LocalReference } from "./comfyui";
 import { fetchWorkflowDetail, isWorkflowImageField, runWorkflow, pollWorkflowTask } from "./workflows";
@@ -28,6 +29,10 @@ const pluginVideoResults = new Map<string, VideoGenerationResult>();
 
 function aiApiUrl(config: AiConfig, path: string) {
     return buildApiUrl(config.baseUrl, path);
+}
+
+function recordOf(value: unknown): Record<string, unknown> {
+    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
 function aiHeaders(config: AiConfig, contentType?: string) {
@@ -109,6 +114,14 @@ async function createComfyVideoWorkflowTask(config: AiConfig, selectedModel: str
         if (!reference) continue;
         const dataUrl = await imageToDataUrl(reference);
         if (dataUrl) workflowFields[imageFields[index].id] = dataUrl;
+    }
+    // 面板上填的内部实现字段值：与媒体、提示词一起提交。只接受工作流里真实声明的
+    // 字段 id，避免把面板残留的陈旧参数塞进图。
+    const configured = detail.config?.fields || [];
+    const supplied = (config as { selectedVideoModelFieldValues?: Record<string, unknown> }).selectedVideoModelFieldValues;
+    for (const [id, value] of Object.entries(recordOf(supplied))) {
+        if (!configured.some((field) => field.id === id) || value === undefined || value === null || value === "") continue;
+        workflowFields[id] = value;
     }
     const { taskId } = await runWorkflow(workflowName, workflowFields, detail.config);
     return { id: taskId, provider: "comfyui", model: selectedModel, ...(parameters ? { parameters } : {}) };
@@ -243,7 +256,7 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
 
 async function videoResultFromUrl(url: string, options?: RequestOptions): Promise<VideoGenerationResult> {
     try {
-        const response = await axios.get<Blob>(withLocalProxy(url), { responseType: "blob", signal: options?.signal });
+        const response = await axios.get<Blob>(url, { responseType: "blob", signal: options?.signal });
         await assertVideoBlob(response.data);
         return { blob: response.data };
     } catch (error) {
@@ -328,7 +341,7 @@ function readApiErrorMessage(value: unknown): string {
 function readAxiosError(error: unknown, fallback: string) {
     if (axios.isCancel(error)) return apiText("requestCanceled");
     if (axios.isAxiosError<{ error?: { message?: string }; msg?: string; message?: string; code?: number | string }>(error)) {
-        if (!error.response && error.code === "ERR_NETWORK") return apiText("requestFailed");
+        if (!error.response && error.code === "ERR_NETWORK") return corsBlockedHint();
         const responseData = error.response?.data;
         return readApiErrorMessage(responseData) || statusMessage(error.response?.status, fallback);
     }

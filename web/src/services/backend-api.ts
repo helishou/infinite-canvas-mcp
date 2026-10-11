@@ -1,12 +1,14 @@
+import type { DirectorSubagentInput, DirectorSubagentSummary, DirectorSubagentResult } from "@basketikun/canvas-agent/agent/delegation";
 /** 总后台 API client（Web 端）。 */
 
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { backendConnection } from "@/lib/backend-connection";
+import { coalesceInFlightRequest } from "@/lib/in-flight-request";
 import { nanoid } from "nanoid";
 import type { CanvasGenerationCommand, CanvasGenerationStartResult, CanvasLoopPrepare } from "@basketikun/canvas-agent/generation-contract";
 import { CANVAS_GENERATION_PATH, CANVAS_LOOP_PREPARE_PATH, CANVAS_TASKS_PATH, canvasTaskActionPath, canvasTaskPath, h3ConfirmationPath } from "@basketikun/canvas-agent/generation-api";
 import { ensureCanvasDraftLease } from "@/lib/canvas/canvas-draft-session";
-import type { EpisodeProductionData, ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
+import type { EpisodeProductionData, ProductionOperation, DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 
 export type BackendMediaResult = {
     storageKey: string;
@@ -59,6 +61,7 @@ export async function request<T = unknown>(method: string, path: string, body?: 
         throw new BackendApiError(`无法连接 Backend：${method} ${path} → ${backendUrl}（${reason}）。请确认 Backend 已启动且端口可访问。`, 0, { method, path, backendUrl, cause: reason });
     }
     const data = (await res.json().catch(() => ({}))) as T & { ok?: boolean; error?: string };
+    if (res.status === 401 && typeof window !== "undefined") window.dispatchEvent(new Event("backend-auth-failed"));
     if (!res.ok) {
         // 把后端返回的 error 字符串完整透传（之前 30 字符截断导致 500 错看不到）
         const errText = (data && typeof data === "object" && "error" in data && typeof data.error === "string") ? data.error : "";
@@ -66,6 +69,11 @@ export async function request<T = unknown>(method: string, path: string, body?: 
         throw new BackendApiError(`Backend ${method} ${path} failed: HTTP ${res.status} ${extra}`.trim(), res.status, data && typeof data === "object" ? data as Record<string, unknown> : {});
     }
     return data;
+}
+
+function sharedGet<T>(path: string): Promise<T> {
+    const key = `${getBackendUrl()}\u0000${getBackendTokenShared()}\u0000GET\u0000${path}`;
+    return coalesceInFlightRequest(key, () => request<T>("GET", path));
 }
 
 export type BackendRuntimeTask = {
@@ -89,8 +97,26 @@ export type BackendRuntimeTask = {
 };
 
 /** 所有画布生成来源共用的任务提交客户端。 */
-export function startCanvasGeneration(input: CanvasGenerationCommand, signal?: AbortSignal) {
-    return request<{ ok: boolean } & CanvasGenerationStartResult>("POST", CANVAS_GENERATION_PATH, input, { signal });
+export async function startCanvasGeneration(input: CanvasGenerationCommand, signal?: AbortSignal) {
+    const result = await request<{ ok: boolean } & CanvasGenerationStartResult>("POST", CANVAS_GENERATION_PATH, input, { signal });
+    try {
+        const [{ useProductionWorkspaceStore }, { useProductionFollowStore }] = await Promise.all([import("@/stores/use-production-workspace-store"), import("@/stores/use-production-follow-store")]);
+        const context = useProductionWorkspaceStore.getState().context;
+        if (context && context.canvasId === input.projectId && context.owner) {
+            const owner = context.owner;
+            const { readiness } = await fetchProductionReadiness(owner.kind === "canvas" ? { projectId: owner.id } : owner.id);
+            if (readiness.presentation?.taskId === result.taskId) {
+                useProductionFollowStore.getState().setTarget({ ...owner, workId: readiness.presentation.workId });
+                useProductionFollowStore.getState().setPresentation(readiness.presentation);
+                useProductionFollowStore.getState().resume();
+            }
+        }
+    } catch { /* A presentation read cannot invalidate an already accepted task receipt. */ }
+    return result;
+}
+
+export function previewH3Generation(input: CanvasGenerationCommand) {
+    return request<import('@basketikun/canvas-agent/generation-contract').H3ExecutionPreview>('POST', '/canvas/generation/h3-preview', input);
 }
 
 export type CanvasLoopPrepareResult = { runId: string; outputGroupId: string; slotNodeIds: string[]; totalRounds: number };
@@ -217,18 +243,101 @@ export function deleteBackendDramaEpisode(episodeId: string) {
     return request<{ ok: boolean; deleted?: number }>("DELETE", `/drama/episodes/${encodeURIComponent(episodeId)}`);
 }
 
-export type EpisodeProduction = { episodeId: string; revision: number; draft: EpisodeProductionData; published: EpisodeProductionData | null; publishedVersion: number; updatedAt: string; impact?: { changedSceneIds: string[]; affectedShotIds: string[]; imageShotIds: string[]; clipGroupIds: string[]; missingAssetNodeIds: string[] }; replayed?: boolean };
-const productionPath = (episodeId: string) => `/drama/episodes/${encodeURIComponent(episodeId)}/production`;
-export function fetchEpisodeProduction(episodeId: string) { return request<{ ok: boolean; production: EpisodeProduction }>("GET", productionPath(episodeId)); }
-export function fetchEpisodeProductionLegacy(episodeId: string) { return request<{ ok: boolean; sources: Array<{ source: "fullPlot" | "script.md" | "storyboard.md"; sha256: string; text: string }> }>("GET", `${productionPath(episodeId)}/legacy`); }
-export function editEpisodeProduction(episodeId: string, expectedRevision: number, ops: ProductionOperation[], operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/ops`, { operationId, expectedRevision, ops }); }
-export function previewEpisodeProductionImpact(episodeId: string, stage: "script" | "shots") { return request<{ ok: boolean; impact: NonNullable<EpisodeProduction["impact"]> }>("GET", `${productionPath(episodeId)}/impact?stage=${stage}`); }
-export function publishEpisodeProduction(episodeId: string, expectedRevision: number, stage: "script" | "shots", operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/publish`, { operationId, expectedRevision, stage }); }
-export function fetchEpisodeProductionVersions(episodeId: string) { return request<{ ok: boolean; versions: Array<{ version: number; stage: "script" | "shots"; impact: NonNullable<EpisodeProduction["impact"]>; createdAt: string }> }>("GET", `${productionPath(episodeId)}/versions`); }
-export function restoreEpisodeProduction(episodeId: string, expectedRevision: number, version: number, operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/restore`, { operationId, expectedRevision, version }); }
-export function syncEpisodeProductionClips(episodeId: string) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/sync-clips`); }
-export function fetchEpisodeProductionRun(episodeId: string, version: number) { return request<{ ok: boolean; run: { status: string; submitted: Array<{ kind: "image" | "h3"; id: string; taskId: string }>; error: string | null } | null }>("GET", `${productionPath(episodeId)}/runs/${version}`); }
-export function exportEpisodeProductionMarkdown(episodeId: string, stage: "script" | "shots", version?: number) { return request<{ ok: boolean; fileName: string; markdown: string }>("GET", `${productionPath(episodeId)}/export?stage=${stage}${version ? `&version=${version}` : ""}`); }
+export type ProductionClipRefreshReceipt = {
+    sourceHash?: string;
+    sourceSaved: true; operationId: string; status: "queued" | "checking" | "compiling" | "applying" | "succeeded" | "blocked" | "failed" | "superseded" | "interrupted";
+    segmentId: string; savedRevision: number; compilationOperationId: string; selectedTargets: string[]; affectedTargets: string[];
+    blockingDiagnostic?: { code: string; message: string; targetId?: string; path?: string };
+    application?: { revision?: number; referenceSync?: Array<{ targetId: string; status: string; referenceCount?: number; diagnostics?: Array<{ code: string; message: string }> }> };
+    mediaSubmitted: false;
+};
+export type EpisodeProduction = { episodeId: string; revision: number; draft: EpisodeProductionData; published: EpisodeProductionData | null; publishedVersion: number; updatedAt: string; impact?: { changedSceneIds: string[]; affectedShotIds: string[]; imageShotIds: string[]; clipGroupIds: string[]; missingAssetNodeIds: string[]; assetIds?: string[] }; clipRefreshes?: ProductionClipRefreshReceipt[]; replayed?: boolean };
+export type ProductionTarget = string | { projectId: string } | { sceneId: string };
+export type ProductionCanvasContext = { role: "ordinary" | "episode" | "scene" | "shared-assets" | "standalone"; canvasId: string; dramaId?: string; episodeId?: string; sceneId?: string; owner?: { kind: "episode" | "canvas" | "scene"; id: string }; sharedAssetCanvasId?: string | null };
+export function fetchProductionCanvasContext(id: string) { return request<{ ok: boolean; context: ProductionCanvasContext }>("GET", `/canvas/projects/${encodeURIComponent(id)}/production-context`); }
+export function ensureEpisodeCanvas(id: string) { return request<{ ok: boolean; project: Record<string, unknown>; context: ProductionCanvasContext }>("POST", `/drama/episodes/${encodeURIComponent(id)}/canvas/ensure`, {}); }
+export function ensureSharedAssetCanvas(id: string) { return request<{ ok: boolean; project: Record<string, unknown>; context: ProductionCanvasContext }>("POST", `/drama/projects/${encodeURIComponent(id)}/asset-canvas/ensure`, {}); }
+export function prepareProductionTargets(owner: ProductionTarget, expectedRevision: number, targets: string[], operationId: string) { return request<{ ok: boolean; production: EpisodeProduction; mediaSubmitted: false }>("POST", `${productionPath(owner)}/prepare-targets`, { expectedRevision, targets, operationId }); }
+export function arrangeProductionScene(owner: ProductionTarget, expectedRevision: number, sceneId: string, operationId: string) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(owner)}/arrange-scene`, { expectedRevision, sceneId, operationId }); }
+export type ApprovedSharedAsset = { id: string; assetId: string; dramaId: string; sourceProjectId: string; sourceNodeId: string; sourceVersion: number; storageKey: string; sha256: string; snapshot: { title: string }; evidence: string; reviewStatus: "unreviewed" | "approved"; createdAt: string };
+export type SharedAssetUpdate = { id: string; assetId: string; approvedId: string; status: string; error?: string };
+export function fetchProductionSharedAssets(owner: ProductionTarget) { return request<{ ok: boolean; assets: ApprovedSharedAsset[]; versions: ApprovedSharedAsset[]; updates: SharedAssetUpdate[] }>("GET", `${productionPath(owner)}/shared-assets`); }
+export function adoptProductionSharedAsset(owner: ProductionTarget, input: { assetId: string; approvedId: string; expectedRevision: number; operationId: string }) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(owner)}/shared-assets/adopt`, input); }
+export type SharedAssetPromotionPreview = { episodeId: string; episodeRevision: number; publishedVersion: number; sourceHash: string; sourceCanvasId: string; sourceCanvasRevision: number; sourceNodeId: string; assetId: string; assetName: string; storageKey: string; sha256: string; evidence: string; reviewStatus: "unreviewed" | "approved"; sourceGenerationTaskId: string; dramaId: string; sharedCanvasId: string | null; sharedCanvasRevision: number | null; targetNodeId: string; approvedId: string | null; eligible: true };
+export function previewProductionSharedAssetPromotion(owner: ProductionTarget, assetId: string, expectedRevision: number) { return request<{ ok: boolean; preview: SharedAssetPromotionPreview; mediaSubmitted: false }>("POST", `${productionPath(owner)}/shared-assets/promotions/preview`, { assetId, expectedRevision }); }
+export function promoteExistingProductionSharedAsset(owner: ProductionTarget, input: { assetId: string; expectedRevision: number; expectedSourceCanvasRevision: number; expectedSharedCanvasRevision: number | null; operationId: string }) { return request<{ ok: boolean; promotion: { approvedId: string; canvasId: string; nodeId: string; replayed: boolean }; mediaSubmitted: false }>("POST", `${productionPath(owner)}/shared-assets/promotions`, input); }
+export function retryProductionSharedUpdate(owner: ProductionTarget, id: string, expectedRevision: number) { return request("POST", `${productionPath(owner)}/shared-assets/updates/${encodeURIComponent(id)}/retry`, { expectedRevision }); }
+const productionPath = (target: ProductionTarget) => typeof target === "string"
+    ? `/drama/episodes/${encodeURIComponent(target)}/production`
+    : "sceneId" in target
+        ? `/drama/scenes/${encodeURIComponent(target.sceneId)}/production`
+        : `/canvas/projects/${encodeURIComponent(target.projectId)}/production`;
+export function fetchEpisodeProduction(episodeId: ProductionTarget) { return request<{ ok: boolean; production: EpisodeProduction }>("GET", productionPath(episodeId)); }
+export function fetchProductionWorkbench(owner: ProductionTarget, view: "subject_workbench" | "shot_workbench" | "clip_workbench", targetId: string, snapshot: "draft" | "published" = "draft") {
+    const query = new URLSearchParams({ view, targetIds: targetId, snapshot });
+    return request<{ ok: boolean; production: Record<string, any> }>("GET", productionPath(owner) + "?" + query.toString());
+}
+export function fetchEpisodeProductionLegacy(episodeId: ProductionTarget) { return request<{ ok: boolean; sources: Array<{ source: "fullPlot" | "script.md" | "storyboard.md"; sha256: string; text: string }> }>("GET", `${productionPath(episodeId)}/legacy`); }
+export function editEpisodeProduction(episodeId: ProductionTarget, expectedRevision: number, ops: ProductionOperation[], operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/ops`, { operationId, expectedRevision, ops }); }
+export function previewEpisodeProductionImpact(episodeId: ProductionTarget, stage: "script" | "shots" | "director") { return request<{ ok: boolean; impact: NonNullable<EpisodeProduction["impact"]> }>("GET", `${productionPath(episodeId)}/impact?stage=${stage}`); }
+export function publishEpisodeProduction(episodeId: ProductionTarget, expectedRevision: number, stage: "script" | "shots" | "director", operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/publish`, { operationId, expectedRevision, stage }); }
+export function fetchEpisodeProductionVersions(episodeId: ProductionTarget) { return request<{ ok: boolean; versions: Array<{ version: number; stage: "script" | "shots" | "director"; impact: NonNullable<EpisodeProduction["impact"]>; createdAt: string }> }>("GET", `${productionPath(episodeId)}/versions`); }
+export type ProductionSceneArchive = { archiveId: string; sceneId: string; sceneTitle: string; deletedAt: string; expiresAt: string; shotCount: number; clipCount: number };
+export function fetchProductionSceneArchives(target: ProductionTarget) { return request<{ ok: boolean; archives: ProductionSceneArchive[] }>("GET", `${productionPath(target)}/scene-archives`); }
+export function restoreEpisodeProduction(episodeId: ProductionTarget, expectedRevision: number, version: number, operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/restore`, { operationId, expectedRevision, version }); }
+export function syncEpisodeProductionClips(episodeId: ProductionTarget) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/sync-clips`); }
+// 编译：提交后返回 operationId，沿同一 operationId 轮询状态；成功后用 preparedId 应用回执写回正式源稿。
+export type ProductionCompilationStatus = {
+    operationId: string; status: "queued" | "running" | "succeeded" | "blocked" | "interrupted" | "failed"; verdict: "passed" | "passed_with_warnings" | "blocked";
+    expectedRevision: number; sourceHash: string; preparedId?: string; diagnosticCount?: number; targetCount?: number; reused?: boolean;
+    blockingDiagnostic?: { code: string; path?: string; targetId?: string; shotId?: string; message: string };
+    application?: { revision?: number; sourceHash?: string; operationId?: string; replayed?: boolean; referenceSync?: Array<{ targetId: string; status: string; referenceCount?: number }> };
+    mediaSubmitted: false;
+};
+export type ProductionCompilationDiagnostic = { code?: string; severity?: string; path?: string; targetId?: string; shotId?: string; message?: string; blockingActions?: string[]; blocksCompilation?: boolean; nextAction?: unknown };
+export function compileProduction(target: ProductionTarget, expectedRevision: number, operationId: string) {
+    return request<{ ok: boolean; compilation: ProductionCompilationStatus }>("POST", `${productionPath(target)}/compile`, { expectedRevision, operationId });
+}
+export function fetchProductionCompilation(target: ProductionTarget, operationId: string, view: "status" | "targets" | "diagnostics" = "status", extra?: { offset?: number; pageSize?: number }) {
+    const query = new URLSearchParams({ view, ...(extra?.offset === undefined ? {} : { offset: String(extra.offset) }), ...(extra?.pageSize === undefined ? {} : { pageSize: String(extra.pageSize) }) });
+    return request<{ ok: boolean; compilation: ProductionCompilationStatus & { items?: ProductionCompilationDiagnostic[]; total?: number; nextOffset?: number | null } }>("GET", `${productionPath(target)}/compilations/${encodeURIComponent(operationId)}?${query.toString()}`);
+}
+export function applyProductionCompilation(target: ProductionTarget, preparedId: string) {
+    return request<{ ok: boolean; receipt: { revision: number; sourceHash?: string; operationId: string; replayed?: boolean; publishedVersion?: number; referenceSync?: Array<{ targetId: string; status: string; referenceCount?: number }>; mediaSubmitted: false } }>("POST", `${productionPath(target)}/apply-compilation`, { preparedId });
+}
+export function fetchEpisodeProductionRun(episodeId: ProductionTarget, version: number) { return request<{ ok: boolean; run: { status: string; submitted: Array<{ kind: "image" | "h3"; id: string; taskId: string }>; error: string | null } | null }>("GET", `${productionPath(episodeId)}/runs/${version}`); }
+export type ProductionReadinessTarget = { id: string; targetId: string; kind: "asset" | "keyframe" | "segment"; title: string; status: "ready" | "blocked" | "needs_review" | "complete"; blockers: string[]; warnings?: string[]; artifactId?: string; executionTargets?: string[]; notice?: string };
+export type ProductionPresentation = { key: string; workId: string; owner: { kind: "canvas" | "episode" | "scene"; id: string }; aliases?: string[]; workspace: "overview" | "story" | "assets" | "shots" | "continuity" | "production" | "advanced"; action: "author" | "compile" | "produce" | "review" | "deliver" | "blocked"; targetKind?: string; targetId?: string; canvasId?: string; nodeId?: string; segmentId?: string; runId?: string; taskId?: string; status: "ready" | "working" | "needs_review" | "blocked" | "complete"; reason?: string };
+export type ProductionReadiness = { revision: number; publishedVersion: number; source: "draft" | "published"; canvasId?: string; canvasRevision?: number; targets: ProductionReadinessTarget[]; modules: Record<string, unknown>; unresolved: string[]; nextAction: string; presentation?: ProductionPresentation; sceneWorks?: DirectorProduction["workflow"]["sceneWorks"] };
+export type SceneWorkInspection = { revision: number; works: Array<NonNullable<DirectorProduction["workflow"]["sceneWorks"]>[string] & { reviewInputHash?: string; inputChanged?: boolean; reviewAssetIds?: string[]; source?: Record<string, unknown>; media?: Array<{ targetId: string; storageKey: string; sha256: string }> }>; shared: { continuation?: DirectorProduction["workflow"]["sharedReviewContinuation"]; inputHash?: string; reviewCurrent?: boolean; reviewAssetIds?: string[]; reviewWorks?: Array<NonNullable<DirectorProduction["workflow"]["sharedReviewWorks"]>[string]>; reviews?: NonNullable<DirectorProduction["workflow"]["sharedAssetReviews"]>; error?: string; review?: DirectorProduction["workflow"]["sharedReview"]; source?: Record<string, unknown>; media?: Array<{ targetId: string; storageKey: string; sha256: string }> } | null };
+export function fetchProductionSceneWork(target: ProductionTarget) { return request<{ ok: boolean; state: SceneWorkInspection }>("GET", `${productionPath(target)}/scene-work`); }
+export type ProductionSceneAction = { action: "shared-review"; model?: string; effort?: string } | { action: "start"; sceneIds: string[]; generateMedia: boolean; model?: string; effort?: string } | { action: "pause" | "resume"; workId: string } | { action: "review"; workId?: string; assetIds?: string[]; inputHash: string; verdict: "approved" | "rejected"; evidence: string };
+export function submitProductionSceneAction(target: ProductionTarget, command: ProductionSceneAction, expectedRevision: number, operationId: string) {
+    const { action, ...input } = command;
+    return request<{ ok: boolean; production: EpisodeProduction; replayed?: boolean }>("POST", `${productionPath(target)}/scene-work/${action}`, { ...input, expectedRevision, operationId });
+}
+export function startProductionSceneWork(target: ProductionTarget, input: { expectedRevision: number; sceneIds: string[]; generateMedia: boolean; model?: string; effort?: string }, operationId = nanoid()) { const { expectedRevision, ...fields } = input; return submitProductionSceneAction(target, { action: "start", ...fields }, expectedRevision, operationId); }
+export function actProductionSceneWork(target: ProductionTarget, action: "pause" | "resume", workId: string, expectedRevision: number, operationId = nanoid()) { return submitProductionSceneAction(target, { action, workId }, expectedRevision, operationId); }
+export function reviewProductionSceneWork(target: ProductionTarget, input: { expectedRevision: number; workId?: string; assetIds?: string[]; inputHash: string; verdict: "approved" | "rejected"; evidence: string }, operationId = nanoid()) { const { expectedRevision, ...fields } = input; return submitProductionSceneAction(target, { action: "review", ...fields }, expectedRevision, operationId); }
+export type ProductionBatch = { executionSnapshot?: { inputBasis: "canvas" | "published"; canvasRevision: number; planHash: string } | null; runId: string; episodeId: string; version: number; sourceRevision: number; idempotencyKey: string; status: string; targets: string[]; plan: NonNullable<EpisodeProduction["impact"]>; engine: Record<string, unknown> | null; settings: Record<string, unknown>; submitted: Array<{ kind: "image" | "h3"; id: string; taskId: string; projectId?: string; nodeId?: string; segmentId?: string; status?: "running" | "succeeded" | "failed" }>; error: string | null; pauseRequested: boolean; createdAt: string; updatedAt: string };
+export function fetchProductionReadiness(target: ProductionTarget, options?: { runId?: string }) { return sharedGet<{ ok: boolean; readiness: ProductionReadiness }>(`${productionPath(target)}/readiness${options?.runId ? `?runId=${encodeURIComponent(options.runId)}` : ""}`); }
+export type ProductionContinuity = { owner: { kind: "canvas" | "episode" | "scene"; id: string }; snapshot: "draft" | "published"; revision: number; publishedVersion: number; sourceHash?: string | null; runtime?: Record<string, unknown> | null; status: "missing" | "unchecked" | "diagnosticOnly" | "stale" | "blocked" | "unresolved" | "passed" | "partial"; coverageStatus: string; semanticDiscovery: "not_performed"; checkedAt: string | null; diagnostics: { total: number; blocked: number; unresolved: number }; items: unknown[]; total: number; nextCursor: string | null; report?: Record<string, any> };
+export function fetchProductionContinuity(target: ProductionTarget, options?: { snapshot?: "draft" | "published"; view?: "summary" | "issues" | "timeline" | "shot"; targetId?: string; objectId?: string; pageSize?: number; cursor?: string }) {
+    const query = new URLSearchParams(Object.fromEntries(Object.entries(options || {}).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)])));
+    return request<{ ok: boolean; continuity: ProductionContinuity }>("GET", `${productionPath(target)}/continuity?${query}`);
+}
+export function checkProductionContinuity(target: ProductionTarget, input: { expectedRevision: number; operationId: string; snapshot?: "draft" | "published"; targetIds?: string[] }) {
+    return request<{ ok: boolean; check: { status: "succeeded"; verdict: string; report: Record<string, any>; revision: number; replayed?: boolean; mediaSubmitted: false } }>("POST", `${productionPath(target)}/continuity/check`, input);
+}
+export function previewProductionContinuityUpgrade(target: ProductionTarget, input: { expectedRevision: number; operationId: string; fromSourceHash: string; ledger: Record<string, unknown> }) {
+    return request<{ ok: boolean; preview: { owner: { kind: string; id: string }; revision: number; fromSourceHash: string; targetRuntime: Record<string, string>; previewHash: string; candidateSourceHash: string; migrationClass: string; changeClassification: { equivalentConversions: string[]; historicalProjection: string[]; semanticGaps: Array<Record<string, any>>; speculativeSuggestions: string[] }; report: Record<string, any>; affectedTargets: string[]; activeRuns: Array<{ runId: string; status: string; targets: unknown[] }> } }>("POST", `${productionPath(target)}/continuity/upgrade-preview`, input);
+}
+export function fetchProductionBatches(target: ProductionTarget) { return sharedGet<{ ok: boolean; runs: ProductionBatch[] }>(`${productionPath(target)}/batches`); }
+export function startProductionRun(target: ProductionTarget, input: { inputBasis?: "canvas" | "published"; expectedCanvasRevision?: number; expectedPlanHash?: string; runId: string; idempotencyKey: string; workId?: string; expectedRevision: number; version: number; targets: string[]; scope?: "selected" | "all_ready" }) { return request<{ ok: boolean; run: ProductionBatch }>("POST", `${productionPath(target)}/runs`, input); }
+export function fetchProductionBatch(target: ProductionTarget, runId: string) { return request<{ ok: boolean; run: ProductionBatch | null }>("GET", `${productionPath(target)}/batches/${encodeURIComponent(runId)}`); }
+export function pauseProductionBatch(target: ProductionTarget, runId: string) { return request<{ ok: boolean; run: ProductionBatch }>("POST", `${productionPath(target)}/batches/${encodeURIComponent(runId)}/pause`, {}); }
+export function resumeProductionBatch(target: ProductionTarget, runId: string) { return request<{ ok: boolean; run: ProductionBatch }>("POST", `${productionPath(target)}/batches/${encodeURIComponent(runId)}/resume`, {}); }
+export function exportEpisodeProductionMarkdown(episodeId: ProductionTarget, stage: "script" | "shots" | "director", version?: number) { return request<{ ok: boolean; fileName: string; markdown: string }>("GET", `${productionPath(episodeId)}/export?stage=${stage}${version ? `&version=${version}` : ""}`); }
 
 export type DramaCustomAsset = {
     id: string;
@@ -339,8 +448,14 @@ export function upsertBackendAsset(asset: Record<string, unknown>) {
     return request<{ ok: boolean; asset?: Record<string, unknown> }>("POST", "/canvas/assets", asset);
 }
 
-export function deleteBackendAsset(id: string) {
-    return request<{ ok: boolean; deleted?: number }>("DELETE", `/canvas/assets/${encodeURIComponent(id)}`);
+export type SharedAssetWrite = { operationId: string; canvasSource?: { projectId: string; nodeId: string }; discardLocal?: boolean; resolveConflicts?: "local" };
+export function updateBackendAsset(id: string, patch: Record<string, unknown>, command?: SharedAssetWrite) {
+    return request<{ ok: boolean; asset: Record<string, unknown>; replayed?: boolean }>("PATCH", `/canvas/assets/${encodeURIComponent(id)}`, { ...patch, ...command });
+}
+
+export function deleteBackendAsset(id: string, source?: { sourceProjectId: string; sourceNodeId: string }) {
+    const query = source ? `?${new URLSearchParams({ sourceProjectId: source.sourceProjectId, sourceNodeId: source.sourceNodeId })}` : "";
+    return request<{ ok: boolean; deleted?: number }>("DELETE", `/canvas/assets/${encodeURIComponent(id)}${query}`);
 }
 
 export function upsertBackendAssetFolder(folder: Record<string, unknown>) {
@@ -567,7 +682,8 @@ export function fetchBackendTasks(options: { projectId?: string; nodeIds?: strin
     if (options.limit) params.set("limit", String(options.limit));
     if (options.offset) params.set("offset", String(options.offset));
     const qs = params.toString();
-    return request<{ ok: boolean; tasks?: BackendRuntimeTask[] }>("GET", `${CANVAS_TASKS_PATH}${qs ? `?${qs}` : ""}`);
+    const path = `${CANVAS_TASKS_PATH}${qs ? `?${qs}` : ""}`;
+    return sharedGet<{ ok: boolean; tasks?: BackendRuntimeTask[] }>(path);
 }
 
 export function createBackendTask(kind: string, input: Record<string, unknown> = {}, params: Record<string, unknown> = {}, clientTaskId?: string) {
@@ -604,4 +720,26 @@ export function releaseBackendBrowserTask(id: string, workerId: string) {
 
 export function diagnoseBackendCanvasProject(projectId: string) {
     return request<{ ok: boolean; projectId: string; revision: number; issues: Array<Record<string, unknown>> }>("GET", `/canvas/projects/${encodeURIComponent(projectId)}/diagnostics`);
+}
+
+export function directorSubagentRequest(input: Omit<DirectorSubagentInput, "view"> & { view?: DirectorSubagentInput["view"] }) {
+    return request<{ ok: boolean; task?: DirectorSubagentSummary; tasks?: DirectorSubagentSummary[]; result?: DirectorSubagentResult; chunk?: { text: string; resultHash: string; nextCursor: string | null }; nextOffset?: number | null }>("POST", "/director/subagents", input);
+}
+
+/** Defaults are acknowledged Backend values, never the submitted fallback. */
+export async function fetchBackendH3Defaults() {
+    const result = await request<{ defaults?: Record<string, unknown> | null }>("GET", "/plugins/minimax-h3/defaults");
+    if (!Object.hasOwn(result, "defaults") || result.defaults !== null && (typeof result.defaults !== "object" || Array.isArray(result.defaults))) throw new Error("Backend 未返回有效的 H3 默认参数");
+    return result.defaults || {};
+}
+
+export async function saveBackendH3Defaults(settings: Record<string, unknown>) {
+    const result = await request<{ defaults?: Record<string, unknown> }>("PUT", "/plugins/minimax-h3/defaults", settings);
+    if (!result.defaults || typeof result.defaults !== "object" || Array.isArray(result.defaults)) throw new Error("Backend 未确认 H3 默认参数保存值");
+    return result.defaults;
+}
+
+export async function resetBackendH3Defaults() {
+    const result = await request<{ defaults?: null }>("DELETE", "/plugins/minimax-h3/defaults");
+    if (result.defaults !== null) throw new Error("Backend 未确认 H3 默认参数重置");
 }

@@ -1,12 +1,49 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { ImageOff, Music, Play, Workflow } from "lucide-react";
 import { backendMediaUrl } from "@/services/backend-api";
+import { ensureImagePreview, previewUrlFor, subscribeImagePreview } from "@/services/image-storage";
 import type { WorkbenchMedia } from "./workbench-data";
 
-/** Media stays paused until a deliberate pointer/focus interaction; no thumbnail downloads. */
+/** Cards reuse the canvas preview cache; the explicit preview always opens original media. */
 export function WorkbenchMediaPreview({ media, label, controls = false }: { media: WorkbenchMedia | null; label: string; controls?: boolean }) {
     const src = media?.storageKey ? backendMediaUrl(media.storageKey) : media?.url || "";
+    const container = useRef<HTMLDivElement>(null);
+    const [visible, setVisible] = useState(false);
+    const active = controls || visible;
+    const previewKey = !controls && media?.kind === "image" ? media.storageKey : undefined;
+    const subscribe = useCallback((listener: () => void) => subscribeImagePreview(previewKey, listener), [previewKey, src]);
+    const getPreview = useCallback(() => previewUrlFor(previewKey), [previewKey, src]);
+    const preview = useSyncExternalStore(subscribe, getPreview, () => undefined);
+    const [checkedSource, setCheckedSource] = useState("");
     const [failedSource, setFailedSource] = useState("");
+
+    useEffect(() => {
+        if (active) return;
+        if (typeof IntersectionObserver === "undefined") {
+            setVisible(true);
+            return;
+        }
+        const observer = new IntersectionObserver(([entry]) => {
+            if (entry.isIntersecting) {
+                setVisible(true);
+                observer.disconnect();
+            }
+        });
+        if (container.current) observer.observe(container.current);
+        return () => observer.disconnect();
+    }, [active]);
+
+    useEffect(() => {
+        if (!active || !previewKey) return;
+        let disposed = false;
+        void ensureImagePreview(previewKey).catch(() => undefined).then(() => {
+            if (!disposed) setCheckedSource(src);
+        });
+        return () => { disposed = true; };
+    }, [active, previewKey, src]);
+
+    if (!active || (previewKey && !preview && checkedSource !== src))
+        return <div ref={container} className="h-full min-h-24 w-full bg-muted/50" />;
     if (!media || !src || failedSource === src)
         return (
             <div className="flex h-full min-h-24 w-full flex-col items-center justify-center gap-2 bg-muted/50 text-muted-foreground">
@@ -47,5 +84,5 @@ export function WorkbenchMediaPreview({ media, label, controls = false }: { medi
                 )}
             </div>
         );
-    return <img src={src} alt={label} loading="lazy" className={`h-full w-full ${controls ? "object-contain" : "object-cover"}`} onError={() => setFailedSource(src)} />;
+    return <img src={preview || src} alt={label} loading={controls ? "eager" : "lazy"} decoding="async" className={`h-full w-full ${controls ? "object-contain" : "object-cover"}`} onError={() => setFailedSource(src)} />;
 }

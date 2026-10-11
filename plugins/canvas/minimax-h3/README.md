@@ -38,14 +38,13 @@ npm run dev
 | `h3_run_clip` | 运行单个片段(解析参考图/视频/音频并提交 ComfyUI) |
 | `h3_get_task` | 查询生成任务状态/进度/结果 |
 | `h3_cancel_task` | 取消运行中的任务 |
-| `h3_update_clip` | 更新某片段字段并写回节点 metadata |
+| `h3_update_clips` | 以稳定 operationId 和 expectedRevision 更新单个或多个 Clip 保存稿，支持回执恢复 |
 | `h3_run_all_clips` | 运行全部/指定 H3 节点的未完成片段 |
 
 ### 生命周期与安全边界
 
 - 浏览器启用/禁用插件时,通过 `POST /api/plugins/mcp` 把声明同步给 Agent,持久化到 SQLite;Agent 的 MCP 进程冷启动加载、并轮询该声明,从而动态注册/注销工具,重启后仍生效。
 - **MCP 不运行在浏览器插件代码里**,它由 Node.js stdio 服务(Agent)执行。
-- **安全边界**:官方/本地插件(minimax-h3)自动加载其 MCP 模块;第三方远程插件仅加载前端节点,MCP 执行需经用户显式安装 + Agent 授权,未授权时只记录、不注册工具。MCP 模块只来自本地已安装包或受信插件目录,绝不执行任意网页脚本。
+- **安全边界**:宿主内置 H3 节点自动加载 Agent 随包提供的 MCP 模块;第三方 URL 插件仅加载前端节点,MCP 执行需经用户显式安装 + Agent 授权,未授权时只记录、不注册工具。MCP 模块只来自随包组件或受信插件目录,绝不执行任意网页脚本。
 
 详见 `plugin.manifest.json` 与 `canvas-agent/src/server/plugin-mcp.ts`。
-

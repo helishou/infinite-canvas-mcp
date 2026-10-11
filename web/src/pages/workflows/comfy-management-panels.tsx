@@ -9,6 +9,7 @@ import { createModelPackage, parseModelPackage, restoreModelPackage } from "@/se
 import { importWorkflowPackage, type WorkflowPackage } from "@/services/api/workflows";
 import { createModelChannel, hydrateConfigFromBackend, modelOptionName, normalizeChannelModels, useConfigStore, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
 import { InstancesModal } from "./instances-modal";
+import { RunningHubPanel } from "./runninghub-panel";
 
 const CAPABILITY_LABELS = { image: "图片", video: "视频", text: "文本", audio: "音频" } as const;
 const CAPABILITY_ICON = { image: ImageIcon, video: Video, text: Type, audio: Music } as const;
@@ -332,6 +333,7 @@ export function ComfyRuntimePanel() {
 
     return (
         <div className="mt-5 space-y-4">
+            <RunningHubPanel />
             <section className="rounded-lg border border-stone-200 bg-white px-4 pb-1 pt-2 dark:border-stone-800 dark:bg-stone-900">
                 <Form layout="vertical" requiredMark={false}>
                     <ConfigComfyui active />

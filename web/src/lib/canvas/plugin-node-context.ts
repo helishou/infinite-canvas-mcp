@@ -43,5 +43,6 @@ export function buildNodeContext(host: CanvasPluginHost, node: CanvasNodeData, t
         openMediaPreview: (item) => host.openMediaPreview(item),
         storage,
         generationLogs: host.generationLogs,
+        production: host.production,
     };
 }

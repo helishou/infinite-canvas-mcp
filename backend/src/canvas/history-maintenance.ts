@@ -9,6 +9,8 @@ import { applyCanvasProjectOperations } from "./project-ops.js";
 
 /** Caller owns the migration transaction. Missing legacy hashes are reserved, never guessed. */
 export function migrateCanvasReceipts(db: DatabaseSync) {
+    const foreignKeyViolations = () => new Set((db.prepare("PRAGMA foreign_key_check").all() as Array<{ table: string; rowid: number | null; parent: string; fkid: number }>).map((row) => JSON.stringify([row.table, row.rowid, row.parent, row.fkid])));
+    const existingViolations = foreignKeyViolations();
     const orphan = db.prepare("SELECT r.operation_id FROM canvas_command_receipts r LEFT JOIN canvas_operation_batches b ON b.operation_id = r.operation_id WHERE b.operation_id IS NULL LIMIT 1").get();
     if (orphan) throw new Error("Cannot migrate an unowned canvas receipt; original data preserved");
     db.exec(`CREATE TABLE canvas_command_receipts_next (
@@ -23,7 +25,7 @@ export function migrateCanvasReceipts(db: DatabaseSync) {
     DROP TABLE canvas_command_receipts;
     ALTER TABLE canvas_command_receipts_next RENAME TO canvas_command_receipts;
     CREATE INDEX canvas_command_receipts_project ON canvas_command_receipts(project_id);`);
-    if (db.prepare("PRAGMA foreign_key_check").all().length) throw new Error("Canvas receipt migration failed foreign-key validation");
+    if ([...foreignKeyViolations()].some((violation) => !existingViolations.has(violation))) throw new Error("Canvas receipt migration introduced a foreign-key violation");
 }
 
 export function reconstructCanvasHistory(db: DatabaseSync, id: string, revision: number) {

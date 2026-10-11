@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { DirectorSubagents, registerDirectorSubagentRoutes } from "./drama/director-subagents.js";
+import { productionCompilationBusy } from "./drama/compilation.js";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -13,9 +15,12 @@ import { registerComfyRoutes } from "./server/comfy-routes.js";
 import { BackendEventBus } from "./events.js";
 import { createBackendRuntimeContext } from "./runtime/context.js";
 import { RunningHubBackend } from "./runtime/runninghub.js";
+import { H3ExecutionQueue, h3CanResumeQueued } from "./runtime/h3-queue.js";
 import { VideoConcatBackend } from "./runtime/video-concat.js";
 import { registerAgentRuntimeRoutes } from "./server/agent-runtime-routes.js";
 import { createAgentRuntime } from "@basketikun/canvas-agent/runtime/agent-runtime";
+import { LlmAgent, isLlmThread } from "@basketikun/canvas-agent/agent/llm";
+import { ProductionAgentPool } from "@basketikun/canvas-agent/agent/production";
 import { WorkflowStore } from "./workflows/store.js";
 import { WorkflowExecutor } from "./workflows/executor.js";
 import { WorkflowModelCatalog } from "./workflows/model-catalog.js";
@@ -36,8 +41,11 @@ import { CANVAS_BROWSER_TASK_KIND, CanvasBrowserScriptDispatcher } from "./canva
 import { registerCanvasBrowserScriptRoutes } from "./server/browser-script-routes.js";
 import { acquireBackendInstanceLock } from "./instance-lock.js";
 import { CanvasReferenceService } from "./canvas/reference-service.js";
+import { createDevReloadGate } from "./runtime/dev-reload.js";
 import { registerCanvasReferenceRoutes } from "./server/canvas-reference-routes.js";
 import { EpisodeProductionService } from "./drama/production.js";
+import { SharedAssetCoordinator } from "./drama/shared-assets.js";
+import { NativeProductionGeneration } from "./drama/native-generation.js";
 import { EpisodeProductionRunner } from "./drama/production-runner.js";
 import { registerDramaProductionRoutes } from "./server/drama-production-routes.js";
 import { CanvasRealtimeHub } from "./canvas/realtime-hub.js";
@@ -55,14 +63,23 @@ if (process.argv[2] === "mcp") {
 }
 
 async function startBackendHttpServer() {
+  const startupTimingsMs: Record<string, number> = { imports: Math.round(performance.now()) };
+  let startupStageStarted = performance.now();
+  const markStartupStage = (stage: string) => {
+    const now = performance.now();
+    startupTimingsMs[stage] = Math.round(now - startupStageStarted);
+    startupStageStarted = now;
+  };
   const config = loadConfig(true);
   saveConfig(config);
   ensureDataDirs();
   const releaseInstanceLock = await acquireBackendInstanceLock(DATA_DIR);
+  markStartupStage("configAndLock");
 
   const db = new BackendDatabase();
   const stores = createStores(db);
   applyNetworkSettings(config, stores.settings.get(NETWORK_SETTINGS_KEY));
+  markStartupStage("databaseAndStores");
   const events = new BackendEventBus();
   const writeBackStandaloneH3Task = async (
     task: import("./db.js").RuntimeTask,
@@ -70,27 +87,17 @@ async function startBackendHttpServer() {
     if (task.params?.parentTaskId) return;
     await writeBackH3Task(stores, events, task);
   };
+  const h3Queue = new H3ExecutionQueue(stores.tasks, stores.settings, true);
   const comfy = new ComfyUiBackend({
     tasks: stores.tasks,
     settings: stores.settings,
     media: stores.media,
     events,
     onTaskTerminal: writeBackStandaloneH3Task,
+    h3Queue,
   });
   const runtime = createBackendRuntimeContext({ db, stores, comfy, events });
-  const runningHub = new RunningHubBackend(
-    runtime.tasks,
-    runtime.stores.settings,
-    runtime.events,
-    runtime.media,
-    writeBackStandaloneH3Task,
-  );
-  const canvasH3Runner = new CanvasH3Runner(
-    runtime.stores,
-    runtime.events,
-    runtime.comfy,
-    runningHub,
-  );
+  const runningHub = new RunningHubBackend(runtime.tasks, runtime.stores.settings, runtime.events, runtime.media, h3Queue);
   const videoConcat = new VideoConcatBackend(
     runtime.tasks,
     undefined,
@@ -105,6 +112,7 @@ async function startBackendHttpServer() {
     stores.settings,
   );
   await workflowModels.syncStoredConfig();
+  markStartupStage("executorsAndWorkflowCatalog");
   const workflowExecutor = new WorkflowExecutor(
     runtime.comfy,
     runtime.stores.tasks,
@@ -124,10 +132,18 @@ async function startBackendHttpServer() {
     workflowStore,
     workflowExecutor,
     runtime.events,
+    runningHub,
   );
   const canvasTextDispatcher = new CanvasTextDispatcher(config, runtime.stores);
   const directVideo = new DirectVideoBackend(config, runtime.stores.settings, runtime.stores.tasks, runtime.stores.media);
-  const canvasVideoDispatcher = new CanvasVideoDispatcher(runtime.stores, runtime.comfy, workflowStore, workflowExecutor, videoConcat, directVideo);
+  const canvasVideoDispatcher = new CanvasVideoDispatcher(runtime.stores, runtime.comfy, workflowStore, workflowExecutor, videoConcat, directVideo, runningHub);
+  const canvasH3Runner = new CanvasH3Runner(
+    runtime.stores,
+    runtime.events,
+    runtime.comfy,
+    runningHub,
+    canvasVideoDispatcher,
+  );
   const directAudio = new DirectAudioBackend(config, runtime.stores.settings, runtime.stores.tasks, runtime.stores.media);
   const canvasAudioDispatcher = new CanvasAudioDispatcher(runtime.stores, directAudio, runtime.comfy);
   const canvasBrowserScriptDispatcher = new CanvasBrowserScriptDispatcher(runtime.stores, runtime.events, canvasTextDispatcher);
@@ -144,7 +160,10 @@ async function startBackendHttpServer() {
     canvasBrowserScriptDispatcher,
   );
   const canvasReferences = new CanvasReferenceService(runtime.stores, (alert) => logger.warn("疑似参考资产循环写入", alert));
+  const devReload = process.env.INFINITE_CANVAS_DEV_WATCH === "1" && process.send ? createDevReloadGate() : null;
+  const devActiveTask = devReload ? db.db.prepare("SELECT 1 FROM tasks WHERE status IN ('queued','running','awaiting_confirmation') LIMIT 1") : null;
   const { app } = startServer(runtime.db, config, {
+    devReloadMiddleware: devReload?.middleware,
     comfy: runtime.comfy,
     events: runtime.events,
     stores: runtime.stores,
@@ -163,7 +182,7 @@ async function startBackendHttpServer() {
       if (task.kind === "canvas-h3-run") return canvasH3Runner.cancel(task.id);
       if (task.kind.startsWith("comfyui:"))
         return runtime.comfy.cancel(task.id);
-      if (task.kind === "runninghub:minimax-h3")
+      if (task.kind.startsWith("runninghub:"))
         return runningHub.cancel(task.id);
       if (task.kind === "video-concat" || task.kind === "video-trim") return videoConcat.cancel(task.id);
       if (task.kind === "direct-video") return directVideo.cancel(task.id);
@@ -189,8 +208,8 @@ async function startBackendHttpServer() {
           undefined,
           clientTaskId,
         );
-      if (task.kind === "runninghub:minimax-h3")
-        return runningHub.run(task.input, params, clientTaskId);
+      if (task.kind === "runninghub:workflow")
+        return runningHub.runWorkflow(String(task.params.runninghubProfileId || ""), task.input, task.params.runninghubParams && typeof task.params.runninghubParams === "object" ? task.params.runninghubParams as Record<string, unknown> : {}, params, clientTaskId);
       if (task.kind === "direct-video") return directVideo.retry(task);
       if (task.kind === "direct-audio") return directAudio.retry(task);
       throw new Error(`任务类型 ${task.kind} 没有注册重试执行器`);
@@ -227,8 +246,25 @@ async function startBackendHttpServer() {
   );
   registerCanvasGenerationRoutes(app, canvasGeneration);
   const episodeProduction = new EpisodeProductionService(runtime.db, runtime.events);
+  const productionLlm = new LlmAgent(runtime.stores.settings, config.url, config.token);
+  const productionAgents = new ProductionAgentPool(undefined, {
+    canRun: request => request.threadId ? isLlmThread(request.threadId) : Boolean(request.model?.includes("::")),
+    run: request => productionLlm.structured(request),
+  }, (model, threadId) => productionLlm.nativeWorkerModel(model, threadId));
+  process.once("exit", () => productionAgents.stop());
+  app.get("/production/worker-status", (_req, res) => res.json({ ok: true, busy: productionAgents.busy }));
   const episodeProductionRunner = new EpisodeProductionRunner(episodeProduction, runtime.stores, canvasGeneration);
-  registerDramaProductionRoutes(app, episodeProduction, episodeProductionRunner);
+  registerDramaProductionRoutes(app, episodeProduction, episodeProductionRunner, undefined, runtime.events, productionAgents);
+  const canvasProduction = new EpisodeProductionService(runtime.db, runtime.events, undefined, true);
+  const directorSubagents = new DirectorSubagents(runtime.stores, productionAgents, runtime.events, process.cwd(), (threadId, model) => productionLlm.delegationModel(threadId, model), kind => kind === "episode" ? episodeProduction : canvasProduction);
+  directorSubagents.reconcileStartup();
+  registerDirectorSubagentRoutes(app, directorSubagents);
+  const canvasProductionRunner = new EpisodeProductionRunner(canvasProduction, runtime.stores, canvasGeneration);
+  registerDramaProductionRoutes(app, canvasProduction, canvasProductionRunner, "/canvas/projects/:episodeId/production", runtime.events, productionAgents);
+  const nativeProductionGeneration = new NativeProductionGeneration(runtime.db, runtime.stores, episodeProduction, canvasProduction, runtime.events);
+  nativeProductionGeneration.start();
+  canvasGeneration.observeProduction(nativeProductionGeneration);
+  new SharedAssetCoordinator(runtime.db, episodeProduction, runtime.events, (id, runId) => { void episodeProductionRunner.runBatch(id, runId); }, undefined, id => episodeProductionRunner.syncUnsubmittedInputs(id)).start();
   registerCanvasBrowserScriptRoutes(app, canvasBrowserScriptDispatcher);
   registerCanvasReferenceRoutes(app, canvasReferences);
   registerAgentRuntimeRoutes(
@@ -251,6 +287,7 @@ async function startBackendHttpServer() {
   const agent = createAgentRuntime({
     backendUrl: config.url,
     backendToken: config.token,
+    settings: runtime.stores.settings,
   });
   runtime.agent = agent;
   app.use("/agent", agent.app);
@@ -261,9 +298,11 @@ async function startBackendHttpServer() {
     stores.mcpObservability,
     () => canvasRealtime.focusedProjectId(),
   );
+  markStartupStage("routesAndAgent");
   // 启动时只读取最新 10 条需要恢复的生成任务；超出范围的记录保持原状，
   // 不因未入选而标记失败。终态只考虑仍绑定的 H3 父任务和未收口的生成日志。
   const recoveryTasks = db.listStartupRecoveryTasks([...boundH3ParentTaskIds(stores.projects.list())], 10);
+  markStartupStage("recoverySelection");
   for (const task of recoveryTasks) {
     if (task.kind === "canvas-h3-run" && ["succeeded", "failed", "cancelled"].includes(task.status)) {
       void canvasH3Runner.reconcileTerminal(task).catch((error) =>
@@ -276,7 +315,7 @@ async function startBackendHttpServer() {
     }
     const binding = task.params?.canvasBinding as { generationLogId?: string } | undefined;
     const pendingLog = binding?.generationLogId ? stores.logs.get(binding.generationLogId) : null;
-    if (["comfyui:minimax-h3", "runninghub:minimax-h3"].includes(task.kind)
+    if (task.kind === "comfyui:minimax-h3"
       && ["succeeded", "failed", "cancelled"].includes(task.status)
       && pendingLog && ["queued", "running"].includes(pendingLog.status)) {
       void writeBackH3Task(stores, runtime.events, task).catch((error) =>
@@ -326,7 +365,7 @@ async function startBackendHttpServer() {
       task.kind.startsWith("comfyui:")
     )
       runtime.comfy.resume(task.id);
-    if (["queued", "running"].includes(task.status) && task.kind === "runninghub:minimax-h3")
+    if (["queued", "running"].includes(task.status) && task.kind.startsWith("runninghub:"))
       runningHub.resume(task.id);
   }
   // ── 孤儿任务回收（防僵尸堆积）───────────────────────────────────
@@ -350,7 +389,7 @@ async function startBackendHttpServer() {
       task.kind === "direct-audio" ||
       task.kind === "canvas-h3-run" ||
       task.kind.startsWith("comfyui:") ||
-      task.kind === "runninghub:minimax-h3";
+      task.kind.startsWith("runninghub:");
     if (!hasHandler) {
       // 无恢复处理器（例如 workflow 类型，启动循环未为其调用 resume）→ 必然僵尸
       stores.tasks.update(task.id, {
@@ -361,30 +400,37 @@ async function startBackendHttpServer() {
       stores.tasks.addEvent(task.id, "status", { status: "failed" });
       continue;
     }
-    // comfyui / runninghub 类型必须依赖 ComfyUI promptId 才能恢复；没有则说明从未提交，
-    // 重启后无法恢复 → 置失败。有 promptId 的已由上面的 resume 循环挂上观察循环，跳过。
-    if (task.kind.startsWith("comfyui:") || task.kind === "runninghub:minimax-h3") {
-      const promptId = stores.tasks
+    // 已提交的 ComfyUI/RunningHub 子任务按各自远端 ID 恢复观察；只把未提交且没有
+    // 可安全重放的本地队列意图标记失败，避免猜测任务是否已计费。
+    if (task.kind.startsWith("comfyui:") || task.kind.startsWith("runninghub:")) {
+      const submitted = stores.tasks
         .events(task.id)
-        .find((e) => e.type === "submitted")?.payload?.promptId;
+        .find((e) => e.type === "submitted")?.payload;
+      const promptId = task.kind.startsWith("runninghub:") ? submitted?.taskId : submitted?.promptId;
+      if (h3CanResumeQueued(stores.tasks, task.id)) continue;
       const createdTs = task.createdAt ? new Date(task.createdAt).getTime() : 0;
       // 超过 24 小时的 ComfyUI 任务，其 history 早被 ComfyUI 清理，resume 观察必然超时失败，
       // 与其让其挂在 running 里最多 1 小时，不如直接置失败（孤儿任务回收）。
-      const tooOld = createdTs > 0 && Date.now() - createdTs > 24 * 60 * 60 * 1000;
+      const tooOld = task.kind.startsWith("comfyui:") && createdTs > 0 && Date.now() - createdTs > 24 * 60 * 60 * 1000;
       if (typeof promptId !== "string" || !promptId || tooOld) {
         stores.tasks.update(task.id, {
           status: "failed",
           error:
             tooOld && promptId
               ? "backend 重启后该 ComfyUI 任务已超过 24 小时，history 已不可恢复，已自动置为失败（孤儿任务回收）"
-              : "backend 重启后该 ComfyUI 任务从未提交到 ComfyUI（无 promptId），已自动置为失败（孤儿任务回收）",
+              : task.kind.startsWith("runninghub:")
+                ? "backend 重启后该 RunningHub 任务没有远端 taskId，无法安全恢复，已自动置为失败（孤儿任务回收）"
+                : "backend 重启后该 ComfyUI 任务没有 promptId，无法安全恢复，已自动置为失败（孤儿任务回收）",
         });
         stores.tasks.addEvent(task.id, "status", { status: "failed" });
       }
     }
     // canvas-*/direct-* 类型：上面的 resume 循环已尝试恢复，此处不再处理
   }
+  h3Queue.activate();
   void episodeProductionRunner.resumePending();
+  void canvasProductionRunner.resumePending();
+  markStartupStage("recoveryDispatch");
   app.get("/canvas/projects/:id/collaboration", (req, res) => {
     const project = db.getCanvasProject(req.params.id);
     if (!project)
@@ -401,10 +447,13 @@ async function startBackendHttpServer() {
     config.port,
     config.listenHost || "127.0.0.1",
     () => {
+      markStartupStage("listen");
       logger.info(`总后台已启动 ${config.url}`, {
         listenHost: config.listenHost || "127.0.0.1",
         pid: process.pid,
         version: readVersion(),
+        startupTimingsMs,
+        startupTotalMs: Math.round(performance.now()),
       });
     },
   );
@@ -450,6 +499,15 @@ async function startBackendHttpServer() {
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
+  if (devReload && process.send) {
+    process.on("message", (message: unknown) => {
+      if (!message || typeof message !== "object" || (message as { type?: string }).type !== "dev:reload") return;
+      const accepted = devReload.tryReload(() => agent.session.codexBusy || agent.session.runtimeStateSnapshot.conversation.status === "running" || productionAgents.busy
+        || productionCompilationBusy() || Boolean(devActiveTask?.get()));
+      process.send?.({ type: "dev:reload-status", accepted }, undefined, undefined, () => { if (accepted) shutdown("DEV_RELOAD"); });
+    });
+    process.send({ type: "dev:ready", pid: process.pid });
+  }
   // tsx --watch 默认用 SIGINT 重启：Express 5 异步关闭、可能不触发 SIGINT 监听器，
   // 补一个 beforeExit 走同样收尾，避免每次热重载都卡到 10s 兜底才退。
   process.on("beforeExit", () => {

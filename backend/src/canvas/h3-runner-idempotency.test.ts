@@ -8,6 +8,7 @@ import { BackendDatabase, type RuntimeTask } from "../db.js";
 import { BackendEventBus } from "../events.js";
 import { createStores } from "../stores/index.js";
 import { CanvasH3Runner } from "./h3-runner.js";
+const localProvider = () => ({ ready: () => false, queue: { select: () => "local", unreserve() {} } });
 
 type RunInput = Parameters<CanvasH3Runner["start"]>[0];
 const request: RunInput = { projectId: "p", nodeId: "n", segmentId: "clip-a" };
@@ -46,7 +47,7 @@ function fixture(t: TestContext) {
         resume() { assert.fail("an idempotent start must not resume external execution"); },
         cancel() { assert.fail("an idempotent start must not cancel external execution"); },
     };
-    const runner = () => new CanvasH3Runner(stores, events, comfy as never, {} as never);
+    const runner = () => new CanvasH3Runner(stores, events, comfy as never, localProvider() as never);
     const settle = async () => {
         releases.splice(0).forEach((release) => release());
         for (const id of runningParents) await waitFor(() => stores.tasks.get(id)?.status === "failed", `parent ${id} did not settle`);

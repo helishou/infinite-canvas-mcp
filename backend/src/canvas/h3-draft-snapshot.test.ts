@@ -27,7 +27,7 @@ test("native batch draft edit preserves active bindings and frozen inputs for cu
         },
         cancel() { assert.fail("draft edits must not cancel tasks"); },
     };
-    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, {} as never);
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, { ready: () => false, queue: { select: () => "local", unreserve: () => {} } } as never);
     const parent = runner.start({ projectId: "p", nodeId: "n", runFromCurrent: true, skipCompleted: false }, "snapshot-parent");
     const waitFor = async (predicate: () => boolean) => {
         for (let i = 0; i < 200 && !predicate(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
@@ -40,7 +40,11 @@ test("native batch draft edit preserves active bindings and frozen inputs for cu
     assert.ok(before[0].runtimeTaskId);
     const context: any = {
         getCanvasProject: async () => stores.projects.get("p"),
-        backend: { applyCanvasOperations: async (id: string, operations: any[], revision: number, _operationId?: string, strictRevision?: boolean) => {
+        backend: {
+            checkMcpCommandReceipt: async () => ({ command: null }),
+            prepareMcpCommand: async (input: any) => ({ status: "prepared", payload: input.payload, receipt: input.receipt }),
+            getMcpCommandReceipt: async () => ({ command: null }),
+            applyCanvasOperations: async (id: string, operations: any[], revision: number, _operationId?: string, strictRevision?: boolean) => {
             assert.equal(strictRevision, true);
             return stores.projects.applyOperations(id, revision, operations, { source: { clientId: "test", kind: "mcp", label: "draft edit" } });
         } },
@@ -48,7 +52,7 @@ test("native batch draft edit preserves active bindings and frozen inputs for cu
     const pluginMcp = await KNOWN_FIRST_PARTY["minimax-h3"].load();
     const handler = pluginMcp.createHandler(context).h3_update_clips!;
     try {
-        await handler({ projectId: "p", nodeId: "n", updates: ["a", "b"].map((segmentId) => ({ segmentId, patch: { prompt: "A sword and jade pendant.", timeline: [{ description: "New draft" }] } })) }, context);
+        await handler({ projectId: "p", nodeId: "n", operationId: "snapshot-draft-edit", expectedRevision: Number(project.revision), updates: ["a", "b"].map((segmentId) => ({ segmentId, patch: { prompt: "A sword and jade pendant.", timeline: [{ description: "New draft" }] } })) }, context);
         const after = (stores.projects.get("p")!.nodes as any[])[0].metadata.segments;
         for (let i = 0; i < 2; i++) {
             assert.equal(after[i].prompt, "A sword and jade pendant.");

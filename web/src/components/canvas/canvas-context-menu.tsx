@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import type { ReactNode } from "react";
-import { BetweenHorizontalStart, ClipboardCopy, GalleryHorizontalEnd, GalleryHorizontal, Group, Images, Plus, Trash2 } from "lucide-react";
+import { BetweenHorizontalStart, ClipboardCopy, GalleryHorizontalEnd, GalleryHorizontal, Group, Images, Languages, Plus, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -13,12 +13,14 @@ export function CanvasNodeContextMenu({
     canCaptureVideoFrame,
     canGroup,
     canCopyContent,
+    canTranslate,
     isExtractingKeyframes,
     onClose,
     onCaptureVideoFrame,
     onExtractVideoKeyframes,
     onGroup,
     onCopyContent,
+    onTranslate,
 
     onDuplicate,
     onDelete,
@@ -27,6 +29,7 @@ export function CanvasNodeContextMenu({
     canCaptureVideoFrame: boolean;
     canGroup: boolean;
     canCopyContent: boolean;
+    canTranslate: boolean;
     isExtractingKeyframes?: boolean;
 
     onClose: () => void;
@@ -34,6 +37,7 @@ export function CanvasNodeContextMenu({
     onExtractVideoKeyframes?: () => void;
     onGroup: () => void;
     onCopyContent: () => void;
+    onTranslate: (target: "zh-CN" | "en") => void;
 
     onDuplicate: () => void;
     onDelete: () => void;
@@ -81,6 +85,14 @@ export function CanvasNodeContextMenu({
             {canCopyContent ? (
                 <>
                     <MenuButton icon={<ClipboardCopy className="size-4" />} label={t("canvas.controls.copyContent")} onClick={onCopyContent} />
+                    <div className="my-1 border-t" style={{ borderColor: theme.toolbar.border }} />
+                </>
+            ) : null}
+
+            {canTranslate ? (
+                <>
+                    <MenuButton icon={<Languages className="size-4" />} label="翻译为中文" onClick={() => onTranslate("zh-CN")} />
+                    <MenuButton icon={<Languages className="size-4" />} label="翻译为英文" onClick={() => onTranslate("en")} />
                     <div className="my-1 border-t" style={{ borderColor: theme.toolbar.border }} />
                 </>
             ) : null}

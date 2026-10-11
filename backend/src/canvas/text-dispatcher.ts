@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { requestCodexText } from "@basketikun/canvas-agent/agent/codex-text";
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 
 import type { ResolvedConfig } from "../config.js";
@@ -32,7 +33,8 @@ export type CanvasTextGenerationInput = {
     resultPolicy?: "replace-active" | "append";
 };
 
-type TextProvider = {
+export type TextProvider = {
+    kind?: "codex-cli";
     model: string;
     baseUrl: string;
     apiKey: string;
@@ -42,6 +44,45 @@ type TextProvider = {
 };
 
 type TextRequest = (provider: TextProvider, prompt: string, imageDataUrls: string[], signal?: AbortSignal) => Promise<string>;
+
+/**
+ * 从 ai.config 解析一次文本调用的渠道与凭据。
+ * 画布文本任务与其它后端文本调用（如右键翻译）共用，避免各自解析一份渠道规则。
+ */
+export function resolveTextProvider(
+    aiConfig: unknown,
+    modelValue: string,
+    params?: { systemPrompt?: unknown; reasoningEffort?: unknown },
+): TextProvider {
+    const config = recordOf(aiConfig);
+    const decoded = decodeChannelModel(modelValue);
+    const model = modelOptionName(modelValue).trim();
+    const channels = arrayRecords(config.channels);
+    const channel = decoded
+        ? channels.find((item) => String(item.id || "") === decoded.channelId)
+        : channels.find((item) => arrayRecords(item.models).some((entry) => String(entry.name || "") === model)) || channels[0];
+    if (!channel) throw new Error(`文本模型「${model}」没有可用渠道配置`);
+    const declaration = arrayRecords(channel.models).find((entry) => String(entry.name || "") === model);
+    if (String(declaration?.script || "").trim()) throw new Error(`文本模型「${model}」使用浏览器自定义脚本，Backend 无头执行暂不支持该脚本`);
+    if (channel.kind === "codex-cli") {
+        if (!declaration || declaration.capability !== "text") throw new Error("Codex CLI 渠道只能使用已登记的文本模型");
+        return { kind: "codex-cli", model, baseUrl: "", apiKey: "", apiFormat: "openai", systemPrompt: String(params?.systemPrompt ?? config.systemPrompt ?? "").trim(), reasoningEffort: String(params?.reasoningEffort || config.reasoningEffort || "auto") };
+    }
+    const apiFormat = String(channel.apiFormat || config.apiFormat || "openai");
+    if (apiFormat !== "openai" && apiFormat !== "openai-chat") throw new Error(`Backend 文本执行器暂不支持渠道协议：${apiFormat}`);
+    const baseUrl = String(channel.baseUrl || config.baseUrl || "").trim();
+    const apiKey = String(channel.apiKey || config.apiKey || "").trim();
+    if (!baseUrl) throw new Error(`文本模型「${model}」缺少 Base URL`);
+    if (!apiKey) throw new Error(`文本模型「${model}」缺少 API Key`);
+    return {
+        model,
+        baseUrl,
+        apiKey,
+        apiFormat,
+        systemPrompt: String(params?.systemPrompt ?? config.systemPrompt ?? "").trim(),
+        reasoningEffort: String(params?.reasoningEffort || config.reasoningEffort || "auto"),
+    };
+}
 
 /** Backend 原生文本执行器：无浏览器时也能运行画布识图/文本生成并回写结果节点。 */
 export class CanvasTextDispatcher {
@@ -60,6 +101,7 @@ export class CanvasTextDispatcher {
         const taskId = input.clientTaskId || `canvas-text-${crypto.randomUUID()}`;
         const existing = this.stores.tasks.get(taskId);
         if (existing) return { taskId: existing.id, executor };
+        if (this.stores.tasks.getTombstone?.(taskId)) throw Object.assign(new Error(`TASK_HISTORY_PRUNED: ${taskId}`), { code: "TASK_HISTORY_PRUNED", retryable: false });
         const active = this.findActiveTask(input);
         if (active) return { taskId: active.id, executor: active.executor || executor };
         let project = this.canvasTarget(input);
@@ -128,6 +170,7 @@ export class CanvasTextDispatcher {
             const node = project && arrayRecords(project.nodes).find((node) => node.id === input.nodeId);
             if (project && recordOf(node?.metadata).runtimeTaskId !== task.id) throw new Error("文本任务已失去节点绑定，保留当前画布，不恢复旧任务");
             provider = this.resolveProvider(input);
+            if (provider.kind === "codex-cli" && task.status === "running") throw new Error("Codex CLI 文本请求已中断，原输入与任务已保留；未自动重跑，请确认后重试");
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             this.stores.tasks.update(task.id, { status: "failed", error: message });
@@ -162,7 +205,7 @@ export class CanvasTextDispatcher {
         const contents: string[] = [];
         for (let index = 0; index < count; index++) {
             if (controller.signal.aborted) return;
-            const content = (await this.requestText(provider, input.prompt, imageDataUrls, controller.signal)).trim();
+            const content = (await this.requestTextWithRetry(provider, input.prompt, imageDataUrls, controller.signal)).trim();
             if (controller.signal.aborted) return; // 提供方可能忽略 AbortSignal；迟到结果不能把 cancelled 改回 succeeded。
             if (!content) throw new Error("文本模型返回了空内容");
             contents.push(content);
@@ -172,6 +215,30 @@ export class CanvasTextDispatcher {
         const result = { texts: contents.map((content, index) => ({ index, content })) };
         this.stores.tasks.update(task.id, { status: "succeeded", progress: 1, result });
         this.stores.tasks.addEvent(task.id, "result", result);
+    }
+
+    /**
+     * 在任务自身的 controller 未取消的前提下，对文本提供方请求做有限重试。
+     * 用于吸收运行环境（如 WorkBuddy 运行时对后台请求的强制中断）抛出的
+     * “signal is aborted without reason” 类中止错误，而不是一次失败就判定任务失败。
+     * 一旦检测到用户主动取消（signal 已 abort）则立即抛出，不重试。
+     */
+    private async requestTextWithRetry(provider: TextProvider, prompt: string, imageDataUrls: string[], signal: AbortSignal, maxAttempts = 3): Promise<string> {
+        let lastError: unknown;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            if (signal.aborted) throw new Error("Aborted");
+            try {
+                return await this.requestText(provider, prompt, imageDataUrls, signal);
+            } catch (error) {
+                lastError = error;
+                const err = error instanceof Error ? error : new Error(String(error));
+                const aborted = err.name === "AbortError" || /abort|without reason|this operation was aborted/i.test(err.message);
+                // 非中止类错误、用户主动取消、或已到最大重试次数：直接抛出。
+                if (!aborted || signal.aborted || attempt >= maxAttempts) throw error;
+                await new Promise((resolve) => setTimeout(resolve, 300 * attempt));
+            }
+        }
+        throw lastError instanceof Error ? lastError : new Error(String(lastError));
     }
 
     private canvasTarget(input: CanvasTextGenerationInput) {
@@ -213,30 +280,7 @@ export class CanvasTextDispatcher {
     }
 
     private resolveProvider(input: CanvasTextGenerationInput): TextProvider {
-        const config = recordOf(this.stores.settings.get("ai.config"));
-        const decoded = decodeChannelModel(input.model);
-        const model = modelOptionName(input.model).trim();
-        const channels = arrayRecords(config.channels);
-        const channel = decoded
-            ? channels.find((item) => String(item.id || "") === decoded.channelId)
-            : channels.find((item) => arrayRecords(item.models).some((entry) => String(entry.name || "") === model)) || channels[0];
-        if (!channel) throw new Error(`文本模型「${model}」没有可用渠道配置`);
-        const declaration = arrayRecords(channel.models).find((entry) => String(entry.name || "") === model);
-        if (String(declaration?.script || "").trim()) throw new Error(`文本模型「${model}」使用浏览器自定义脚本，Backend 无头执行暂不支持该脚本`);
-        const apiFormat = String(channel.apiFormat || config.apiFormat || "openai");
-        if (apiFormat !== "openai" && apiFormat !== "openai-chat") throw new Error(`Backend 文本执行器暂不支持渠道协议：${apiFormat}`);
-        const baseUrl = String(channel.baseUrl || config.baseUrl || "").trim();
-        const apiKey = String(channel.apiKey || config.apiKey || "").trim();
-        if (!baseUrl) throw new Error(`文本模型「${model}」缺少 Base URL`);
-        if (!apiKey) throw new Error(`文本模型「${model}」缺少 API Key`);
-        return {
-            model,
-            baseUrl,
-            apiKey,
-            apiFormat,
-            systemPrompt: String(input.params?.systemPrompt ?? config.systemPrompt ?? "").trim(),
-            reasoningEffort: String(input.params?.reasoningEffort || config.reasoningEffort || "auto"),
-        };
+        return resolveTextProvider(this.stores.settings.get("ai.config"), input.model, input.params);
     }
 
     private findActiveTask(input: CanvasTextGenerationInput) {
@@ -289,7 +333,15 @@ export class CanvasTextDispatcher {
             source.type === "text" && sourceMetadata.generationEngine === "backend" ? input.nodeId : ""
         ));
         if (!input.loopOutput && (input.resultPolicy || "replace-active") === "replace-active") {
-            for (const id of previousIds) if (id !== targetTextNodeId && nodes.some((node) => String(node.id || "") === id)) operations.push({ type: "delete_node", id });
+            for (const id of previousIds) {
+                if (id === targetTextNodeId) continue;
+                const previous = nodes.find((node) => String(node.id || "") === id);
+                // 只清理独立文本结果节点。智能节点回写会把自身 id 记入 generatedTextResultIds，
+                // 复制粘贴会把这个 id 克隆进副本元数据；不拦住 config 类型的话，
+                // 运行副本会把被复制的原智能节点当「旧结果」删掉。
+                if (!previous || String(previous.type || "") === "config") continue;
+                operations.push({ type: "delete_node", id });
+            }
         }
         const textItems = contents.map((content) => ({ id: `text-value-${crypto.randomUUID()}`, status: "success", content }));
         if (targetTextNodeId) {
@@ -362,6 +414,7 @@ export class CanvasTextDispatcher {
 }
 
 export async function requestOpenAiText(provider: TextProvider, prompt: string, imageDataUrls: string[], signal?: AbortSignal): Promise<string> {
+    if (provider.kind === "codex-cli") return requestCodexText({ model: provider.model, prompt, images: imageDataUrls, systemPrompt: provider.systemPrompt, effort: provider.reasoningEffort, signal });
     const userContent: string | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }> = imageDataUrls.length
         ? [{ type: "text", text: prompt }, ...imageDataUrls.map((url) => ({ type: "image_url" as const, image_url: { url } }))]
         : prompt;
@@ -389,7 +442,16 @@ export async function requestOpenAiText(provider: TextProvider, prompt: string, 
     } catch (error) {
         if (error instanceof HttpError && (error.status === 401 || error.status === 403)) throw error;
         if (signal?.aborted) throw error;
-        return requestChatCompletions(provider, messages, signal);
+        try {
+            return await requestChatCompletions(provider, messages, signal);
+        } catch (second) {
+            const wrapped = error instanceof Error ? error : new Error(String(error));
+            const aborted = wrapped.name === "AbortError" || /abort|without reason|this operation was aborted/i.test(wrapped.message);
+            // 运行环境（如 WorkBuddy 运行时）对后台请求强制中断时，把 cryptic 的
+            // “signal is aborted without reason” 映射为可读提示，便于排查渠道/代理/超时。
+            if (aborted) throw new Error(`文本模型请求被运行环境中断（${wrapped.message}），请检查渠道 Base URL / 代理 / 超时设置`);
+            throw second;
+        }
     }
 }
 
@@ -398,13 +460,34 @@ async function requestChatCompletions(provider: TextProvider, messages: Array<Re
     return readTextPayload(payload);
 }
 
+/**
+ * 连不上渠道时 fetch 抛出的是 libcurl / TLS / DNS 之类的底层字串（例如中转网关上游抖动时
+ * 透传的 “Failed to perform, curl: (35) TLS connect error …”），直接抛给界面无法排查。
+ * 这里统一转成可读提示，并把原始信息附在末尾保留诊断价值。
+ */
+function describeTransportError(error: unknown, baseUrl: string) {
+    const message = error instanceof Error ? error.message : String(error);
+    const target = baseUrl || "渠道地址";
+    if (/TLS connect error|invalid library|ssl|tls|handshake/i.test(message)) return `无法连接文本模型渠道（${target}）：TLS 握手失败，通常是渠道上游或代理异常。原始错误：${message}`;
+    if (/ECONNREFUSED/i.test(message)) return `无法连接文本模型渠道（${target}）：连接被拒绝，渠道服务可能未启动。原始错误：${message}`;
+    if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(message)) return `无法连接文本模型渠道（${target}）：域名解析失败，请检查 Base URL 与网络。原始错误：${message}`;
+    if (/fetch failed|socket hang up|ECONNRESET|UND_ERR|aborted/i.test(message)) return `无法连接文本模型渠道（${target}）：网络请求失败，请检查渠道地址、代理与超时。原始错误：${message}`;
+    return message;
+}
+
 async function postJson(provider: TextProvider, path: string, body: Record<string, unknown>, signal?: AbortSignal) {
-    const response = await fetch(apiUrl(provider.baseUrl, path), {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${provider.apiKey}` },
-        body: JSON.stringify(body),
-        signal,
-    });
+    let response: Awaited<ReturnType<typeof fetch>>;
+    try {
+        response = await fetch(apiUrl(provider.baseUrl, path), {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${provider.apiKey}` },
+            body: JSON.stringify(body),
+            signal,
+        });
+    } catch (error) {
+        if (signal?.aborted) throw error;
+        throw new Error(describeTransportError(error, provider.baseUrl));
+    }
     const raw = await response.text();
     let payload: unknown;
     try { payload = raw ? JSON.parse(raw) : {}; } catch { payload = { error: { message: raw.slice(0, 500) } }; }

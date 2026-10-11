@@ -5,6 +5,8 @@ import i18n from "@/i18n";
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { type AiConfig } from "@/stores/use-config-store";
+import { WorkflowCustomFields } from "@/components/workflow-custom-fields";
+import { type WorkflowField } from "@/services/api/workflows";
 import { h3VideoSettingChanges, isLocalH3VideoModel, resolveH3VideoSettings } from "@/lib/h3-video-settings";
 import { normalizeVideoSizeValue } from "@/lib/video-size";
 export { normalizeVideoSizeValue } from "@/lib/video-size";
@@ -35,10 +37,22 @@ type VideoSettingsPanelProps = {
     theme: CanvasTheme;
     showTitle?: boolean;
     className?: string;
+    /**
+     * 选中内部实现模型时传入：本次可填写的工作流自定义字段与它们的值。
+     * 有字段就渲染这些字段并隐藏通用项，语义与生图工作台一致。
+     */
+    customFields?: WorkflowField[];
+    customFieldValues?: Record<string, unknown>;
+    onCustomFieldChange?: (id: string, value: unknown) => void;
+    /** 选中了内部实现但没解析出字段时的说明；null 表示无需提示。 */
+    implementationMissing?: string | null;
 };
 
-export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5" }: VideoSettingsPanelProps) {
+export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", customFields, customFieldValues, onCustomFieldChange, implementationMissing }: VideoSettingsPanelProps) {
     const { t } = useTranslation();
+    // 隐藏通用项的唯一依据是「本次真的要渲染内部实现字段」；取不到字段时仍显示通用项，
+    // 否则面板会只剩一个空壳。与生图工作台的判定口径一致。
+    const showsImplementationFields = Boolean(customFields && customFields.length);
     const seconds = config.videoSeconds ?? "6";
     const size = normalizeVideoSizeValue(config.size);
     const dimensions = readSizeDimensions(size);
@@ -61,6 +75,20 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
         <ImageSettingsTheme theme={theme}>
             <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
                 {showTitle ? <div className="text-lg font-semibold">{t("settingsPanels.video.title")}</div> : null}
+                {showsImplementationFields ? (
+                    <SettingGroup title={t("settingsPanels.video.workflowFields")} color={theme.node.muted}>
+                        <WorkflowCustomFields
+                            fields={customFields || []}
+                            values={customFieldValues || {}}
+                            onChange={(id, value) => onCustomFieldChange?.(id, value)}
+                        />
+                    </SettingGroup>
+                ) : null}
+                {implementationMissing ? (
+                    <div className="text-xs leading-relaxed" style={{ color: theme.node.muted }}>{implementationMissing}</div>
+                ) : null}
+                {!showsImplementationFields ? (
+                <>
                 <SettingGroup title={t("settingsPanels.video.quality")} color={theme.node.muted}>
                     <div className="grid grid-cols-3 gap-2.5">
                         {resolutionOptions.map((item) => (
@@ -109,6 +137,8 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                     </div>
                 </SettingGroup>
                 {h3 ? <div className="text-xs leading-relaxed" style={{ color: theme.node.muted }}>{h3Preview ? t("h3Video.preview", { size: h3Preview.parameters.size, seconds: h3Preview.parameters.seconds, megapixels: h3Preview.fields.megapixels }) : t(size === "auto" ? "h3Video.autoPreview" : "h3Video.durationError")}</div> : null}
+                </>
+                ) : null}
             </div>
         </ImageSettingsTheme>
     );

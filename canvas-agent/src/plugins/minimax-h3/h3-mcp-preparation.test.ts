@@ -114,11 +114,12 @@ test("h3_prepare_clip 一次原子写入继承参数、角色组和已有节点�
     assert.equal(group.characterNodeId, "character-1");
     assert.equal(group.outfits.length, 3);
     assert.deepEqual(group.outfits.filter((outfit: any) => outfit.enabled).map((outfit: any) => outfit.storageKey), ["image:1"]);
-    assert.equal(result.snapshot.sourceSegmentId, "s1");
-    assert.equal(result.snapshot.runtime.megapixels, 0.2);
-    assert.equal(result.snapshot.characterGroups[0].catalogCount, 3);
-    assert.equal(result.snapshot.characterGroups[0].enabledCount, 1);
-    assert.equal(result.snapshot.references[0].subjectId, "shen-zhao");
+    assert.equal(result.committed, true);
+    assert.equal(result.revision, project.revision);
+    assert.equal(result.values.sourceShotId, "S01-04~S01-06");
+    assert.equal(result.values.megapixels, 0.2);
+    assert.ok(/^[a-f0-9]{64}$/.test(result.fieldSummaries.h3CharacterGroups.sha256));
+    assert.ok(/^[a-f0-9]{64}$/.test(result.fieldSummaries.referenceBindings.sha256));
 });
 
 test("h3_prepare_clip 预检失败时不写入部分状态", async () => {

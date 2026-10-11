@@ -13,7 +13,7 @@ npm run dev      # watch 构建,产物同步到 web/public/plugins/my-plugin.js
 npm run typecheck
 ```
 
-然后启动画布 `web`,在「节点插件」管理器里启用(自动发现)即可看到你的节点。发布时把 `dist/<name>.js` 托管到任意静态地址,用户填 URL 安装。
+启动画布 `web`,在「节点插件」的 URL 安装区填写 `http://localhost:3001/plugins/my-plugin.js` 即可预览节点。发布时把 `dist/<name>.js` 托管到任意静态地址,用户填公开 URL 安装。
 
 > 产物名取**目录名**(`my-plugin/` → `my-plugin.js`),所以复制后记得把目录改成你的插件名。
 

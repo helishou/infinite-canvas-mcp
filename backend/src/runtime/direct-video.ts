@@ -1,4 +1,5 @@
 import type { ResolvedConfig } from "../config.js";
+import { Readable } from "node:stream";
 import type { RuntimeTask } from "../db.js";
 import type { MediaStore, SettingStore, TaskStore } from "../stores/types.js";
 import type { CanvasImageReference } from "../canvas/image-dispatcher.js";
@@ -150,8 +151,9 @@ export class DirectVideoBackend {
     private async downloadResult(url: string, authKey: string, signal: AbortSignal, taskId: string) {
         const response = await fetch(url, { headers: { Authorization: `Bearer ${authKey}` }, signal });
         if (!response.ok) throw new Error(`读取视频成品失败（HTTP ${response.status}）`);
+        if (!response.body) throw new Error("读取视频成品失败：响应没有媒体数据");
         const mimeType = response.headers.get("content-type")?.split(";", 1)[0] || "video/mp4";
-        const stored = this.media.store(Buffer.from(await response.arrayBuffer()), { name: `video-${taskId}.mp4`, mimeType, category: "output" });
+        const stored = await this.media.storeStream(Readable.fromWeb(response.body as unknown as import("node:stream/web").ReadableStream), { name: `video-${taskId}.mp4`, mimeType, category: "output" });
         return { url: this.media.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType, bytes: stored.bytes };
     }
 

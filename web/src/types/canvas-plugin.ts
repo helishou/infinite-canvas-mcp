@@ -29,6 +29,11 @@ export type LocalH3Task = { id: string; status: "queued" | "running" | "awaiting
 export type LocalVideoConcatResult = { url: string; storageKey?: string; mimeType: string; taskId?: string };
 export type PluginModelCapability = "image" | "video" | "text" | "audio";
 export type ModelOption = { value: string; label: string };
+export type CanvasVideoModelField = {
+    id: string; name: string; type: "text" | "number" | "slider" | "boolean" | "dropdown" | "image" | "audio" | "video";
+    required?: boolean; default?: unknown; min?: number; max?: number; step?: number; options?: string[]; randomEnabled?: boolean; isPrompt?: boolean;
+};
+export type CanvasVideoModelSchema = { model: string; kind: "workflow" | "direct" | "unsupported"; workflow?: string; supported: boolean; fields: CanvasVideoModelField[]; defaultValues?: Record<string, unknown>; error?: string };
 export type CanvasGenerationLogStatus = "queued" | "running" | "success" | "failed" | "cancelled";
 export type CanvasGenerationLog = {
     id: string; projectId: string; nodeId?: string; segmentId?: string; status: CanvasGenerationLogStatus;
@@ -39,7 +44,7 @@ export type CanvasGenerationLog = {
 };
 export type CanvasGenerationLogInput = Omit<CanvasGenerationLog, "id" | "createdAt" | "updatedAt">;
 export type CanvasGenerationLogs = {
-    list: (options?: { projectId?: string; nodeId?: string; status?: CanvasGenerationLogStatus; limit?: number }) => Promise<CanvasGenerationLog[]>;
+    list: (options?: { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; status?: CanvasGenerationLogStatus; limit?: number; offset?: number }) => Promise<CanvasGenerationLog[]>;
     create: (input: CanvasGenerationLogInput) => Promise<CanvasGenerationLog>;
     update: (id: string, patch: Partial<CanvasGenerationLogInput>) => Promise<CanvasGenerationLog>;
     remove: (options: { id?: string; projectId?: string; nodeId?: string }) => Promise<number>;
@@ -50,16 +55,18 @@ export type CanvasPluginAi = {
     generateVideo: (prompt: string, options?: GenerateVideoOptions) => Promise<GenerateVideoResult>;
     generateText: (prompt: string, options?: GenerateTextOptions) => Promise<GenerateTextResult>;
     runCanvasGeneration: (command: CanvasGenerationCommand) => Promise<CanvasGenerationTask>;
+    previewH3Generation: (command: CanvasGenerationCommand) => Promise<import('@basketikun/canvas-agent/generation-contract').H3ExecutionPreview>;
     resolveH3Confirmation: (input: { taskId: string; action: "confirm" | "keep_first_pass" | "discard"; segmentId: string; expectedRevision: number; postpassParams?: Record<string, unknown> }) => Promise<LocalH3Task>;
     getLocalH3Task: (taskId: string) => Promise<LocalH3Task>;
+    getCanvasH3TaskStatus: (taskId: string) => Promise<{ status: string }>;
     getCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;
-    cancelCanvasH3Task: (taskId: string) => Promise<LocalH3Task>;
+    cancelCanvasH3Task: (taskId: string) => Promise<Pick<LocalH3Task, "id" | "status">>;
     restoreH3Output: (input: { nodeId: string; segmentId: string; generationLogId: string; storageKey?: string; settings: Record<string, unknown> }) => Promise<void>;
     runVideoConcat: (videos: Array<{ name: string; url?: string; storageKey?: string }>, options?: LocalH3Options) => Promise<LocalVideoConcatResult>;
     listLocalH3Models: () => Promise<{ models: string[]; loras: string[]; textEncoders?: string[]; videoVaes?: string[]; audioVaes?: string[]; latentUpscaleModels?: string[] }>;
-    getRunningHubH3Task: (taskId: string) => Promise<LocalH3Task>;
-    listModels: (capability?: PluginModelCapability) => ModelOption[];
+      listModels: (capability?: PluginModelCapability) => ModelOption[];
     defaultModel: (capability: PluginModelCapability) => string;
+    describeVideoModel: (model: string, referenceCount: number) => Promise<CanvasVideoModelSchema>;
 };
 export type CanvasH3Defaults = {
     get: () => Promise<Record<string, unknown>>;
@@ -76,6 +83,7 @@ export type CanvasNodeToolbarItem = {
     onClick: () => void;
     active?: boolean;
     danger?: boolean;
+    disabled?: boolean;
 };
 
 export type CanvasAssetPickerImage = { kind: "image"; dataUrl: string; title: string; storageKey?: string };
@@ -136,6 +144,11 @@ export type CanvasTextEditorProps = {
     lineMap?: boolean;
 };
 
+export type CanvasProductionStoryboardEditor = { nodeId: string; segmentId: string; segment: Record<string, unknown> };
+export type CanvasProductionEditing = {
+    reverseSyncPrompt: (input: { nodeId: string; segmentId: string; prompt: string; artifactId: string; sourceHash: string; basePromptHash: string }) => Promise<{ sourceSaved: boolean }>;
+    replaceStoryboardTrack: (input: CanvasProductionStoryboardEditor) => Promise<{ sourceSaved: boolean }>;
+};
 export type CanvasNodeContext = {
     mediaUrl: (storageKey: string) => string;
     TextEditor: ComponentType<CanvasTextEditorProps>;
@@ -184,6 +197,7 @@ export type CanvasNodeContext = {
     // Plugin-private persistence isolated by namespace.
     storage: PluginStorage;
     generationLogs: CanvasGenerationLogs;
+    production?: CanvasProductionEditing;
 };
 
 export type PluginStorage = {
@@ -215,14 +229,19 @@ export type CanvasPluginHost = {
     openAssetPicker: (options?: { kind?: "image" }) => Promise<CanvasAssetPickerImage | null>;
     openMediaPreview: (item: CanvasMediaPreview) => void;
     generationLogs: CanvasGenerationLogs;
+    production?: CanvasProductionEditing;
 };
 
 /** 宿主统一媒体预览的入参：给 `beforeUrl` 时进入 Before / After 对比模式。 */
-export type CanvasMediaPreview = {
+export type CanvasMediaPreviewSource = {
     url: string;
     name?: string;
     type?: "image" | "video" | "audio";
     beforeUrl?: string;
+};
+export type CanvasMediaPreview = CanvasMediaPreviewSource & {
+    gallery?: CanvasMediaPreviewSource[];
+    galleryIndex?: number;
 };
 
 // Configuration for reusing the host's built-in generation panel; see SDK CanvasBuiltinPanelConfig.
@@ -290,7 +309,7 @@ export type CanvasPlugin = {
 // 插件 MCP 能力:让插件在 Agent(canvas-agent)侧动态暴露 MCP 工具
 //
 // 安全边界:MCP 不能运行在浏览器插件代码里,它由 Node.js stdio 服务(Agent)执行。
-// 第三方远程插件的 MCP 执行需经用户显式安装 + Agent 授权;官方/本地插件自动加载。
+// 第三方插件的 MCP 执行需经用户显式安装 + Agent 授权;宿主内置 MCP 模块自动加载。
 // Agent 侧从本地已安装包或受信插件目录加载 MCP 模块,绝不执行任意网页脚本。
 // ---------------------------------------------------------------------------
 
@@ -333,6 +352,6 @@ export type CanvasPluginMcp = {
     version: string;
     tools: readonly McpToolDefinition[];
     // 返回「工具 id -> 处理函数」映射,Agent 据此为每个工具调用 registerTool。
-    // 官方/本地插件由 Agent 侧打包的 MCP 模块提供,浏览器声明可省略。
+    // 宿主内置插件由 Agent 侧打包的 MCP 模块提供,浏览器声明可省略。
     createHandler?: (context: PluginMcpContext) => Record<string, McpToolHandler>;
 };

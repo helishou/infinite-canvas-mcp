@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { useParams } from "react-router-dom";
+import { useCanvasRoute } from "@/lib/canvas/canvas-host";
 import { getCanvasTextSession } from "@/services/api/canvas-text";
 import type { CanvasTextEditorHandle, CanvasTextTarget } from "@/types/canvas-plugin";
 import { ArrowUp, Image as ImageIcon, LoaderCircle, Maximize2, MessageSquare, Music2, Square, Video } from "lucide-react";
@@ -15,6 +15,7 @@ import { getNodeImageReferenceCount } from "./canvas-node-image-reference-count"
 import { CanvasPromptLibrary } from "./canvas-prompt-library";
 import { CanvasCollaborativeText } from "./canvas-collaborative-text";
 import { CanvasNodeType, type CanvasGenerationMode, type CanvasNodeData } from "@/types/canvas";
+import { resolveCanvasNodePromptField } from "./canvas-node-prompt-field";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 
 import { CanvasNodeReferenceBar } from "./canvas-node-reference-bar";
@@ -49,8 +50,8 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
     const hasTextContent = (node.type === CanvasNodeType.Text || (isSmartGenerationNode && mode === "text")) && Boolean(node.metadata?.content?.trim());
     const hasImageContent = mode === "image" && Boolean(canvasNodeImage(node) || (node.type === CanvasNodeType.Loop && node.metadata?.content));
     const isEditingExistingContent = hasTextContent || hasImageContent;
-    const { id: projectId = "" } = useParams();
-    const field = node.type === CanvasNodeType.Config || isEditingExistingContent ? "composerContent" : "prompt";
+    const { projectId } = useCanvasRoute();
+    const field = resolveCanvasNodePromptField(node.type, isEditingExistingContent);
     const target = useMemo<CanvasTextTarget>(() => ({ nodeId: node.id, field }), [node.id, field]);
     const session = useMemo(() => getCanvasTextSession(projectId, target), [projectId, target]);
     const textStatus = useSyncExternalStore(session.subscribe, session.getSnapshot);

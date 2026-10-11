@@ -10,7 +10,7 @@ Infinite Canvas 画布节点插件的 **TypeScript SDK**。插件作者只写节
 | `definePlugin(...)` | 给插件对象(或工厂)补全类型;对象形式无需再 `const { React } = runtime` |
 | automatic JSX | `jsxImportSource` 指向本包,TSX 自动转发到宿主 React,**不打包第二份 React** |
 | 类型化 hooks | `import { useState, useEffect, useMemo, useRef, ... }`,运行时转发宿主 React |
-| `buildPlugin(...)` | 统一 esbuild 构建,插件 `build.mjs` 只需一行 |
+| `buildPlugin(...)` | 统一 esbuild 构建,产物写入插件 `dist/`,插件 `build.mjs` 只需一行 |
 
 ## 最小插件
 
@@ -50,7 +50,7 @@ import { buildPlugin } from "@infinite-canvas/plugin-sdk/build";
 await buildPlugin(import.meta.url);
 ```
 
-`npm run build` 产出 `dist/<目录名>.js` 并同步到 `web/public/plugins/`。
+`npm run build` 产出 `dist/<目录名>.js`，并在本地开发时同步到 `web/public/plugins/`，供手动 URL 安装或 `VITE_DEV_PLUGINS` 热刷新。
 
 ## 依赖接入
 

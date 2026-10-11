@@ -7,6 +7,8 @@ import express, {
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { assetConsumers, sourceOf, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
+import { ensureProductionCanvas, productionCanvasContext } from "./drama/production-canvas.js";
 
 import {
   type ResolvedConfig,
@@ -38,6 +40,7 @@ import type {
 import { BackendEventBus, type CanvasEventSource } from "./events.js";
 import type { CanvasOperation } from "./canvas/project-ops.js";
 import { diagnoseCanvasProject } from "./canvas/project-diagnostics.js";
+import { diagnoseH3Clips } from "./canvas/h3-diagnose.js";
 import { syncCharacterAssetsForProject } from "./canvas/character-asset-on-open.js";
 import {
   detectLineInset,
@@ -53,14 +56,20 @@ import {
   isLocalConnection,
   registerConnectionRoutes,
 } from "./server/connection-routes.js";
+import { registerLocalModelProxyRoutes } from "./server/local-model-proxy.js";
 import { CanvasDraftSessionLeases } from "./canvas/draft-session-leases.js";
 import { registerMcpObservabilityRoutes } from "./server/mcp-observability-routes.js";
+import { registerMcpExportRoutes, type McpSnapshotExports } from "./server/mcp-export-routes.js";
 import { CHARACTER_VOICE_COMPRESSION_THRESHOLD_BYTES, prepareCharacterVoiceUpload } from "./server/character-voice-compression.js";
+import { redactInlineMedia } from "./runtime/redact-inline-media.js";
+import { CANVAS_TRANSLATION_TARGETS, translateCanvasText, type CanvasTranslationTarget } from "./canvas/translation.js";
 
 const logger = createLogger("backend");
 
 /** startServer 的可选依赖（comfy 路由由 index.ts 单独挂载）。 */
 export type ServerDeps = {
+  devReloadMiddleware?: import("express").RequestHandler;
+  snapshotExports?: McpSnapshotExports;
   comfy?: ComfyUiBackend;
   events?: BackendEventBus;
   stores?: Stores;
@@ -78,7 +87,7 @@ export function startServer(
 ) {
   const stores: Stores = deps.stores ?? createStores(db);
   const events = deps.events ?? new BackendEventBus();
-  db.onCanvasCommit((commit) =>
+  db.onCanvasCommit((commit) => {
     events.publishCanvasDelta({
       entityId: commit.projectId,
       revision: commit.revision,
@@ -87,9 +96,16 @@ export function startServer(
       updatedAt: commit.updatedAt,
       operationId: commit.operationId,
       source: commit.source as CanvasEventSource,
-    }),
-  );
+    });
+    for (const asset of db.listSharedAssetRecordsForProject(commit.projectId)) {
+      const source = sourceOf(asset);
+      if (source?.sourceProjectId === commit.projectId) events.publish({ type: "asset.updated", entityId: asset.id, payload: db.getAsset(asset.id) });
+    }
+    for (const assetId of commit.deletedAssetIds || []) events.publish({ type: "asset.updated", entityId: assetId, payload: { deleted: 1 } });
+    for (const update of commit.productionUpdates || []) events.publish({ type: "drama-production.updated", entityId: update.entityId, payload: { revision: update.revision } });
+  });
   const app = express();
+  if (deps.devReloadMiddleware) app.use(deps.devReloadMiddleware);
   const draftSessionLeases = new CanvasDraftSessionLeases();
   const FRONTEND_SETTINGS_KEY = "frontend.settings";
   const STRUCTURED_SETTING_KEYS = new Map([
@@ -217,6 +233,7 @@ export function startServer(
     });
   });
   registerConnectionRoutes(app, config, stores.settings);
+  registerLocalModelProxyRoutes(app);
   app.post("/canvas/draft-sessions/:owner/acquire", (req, res) => {
     const owner = String(req.params.owner || "").trim();
     const holderId =
@@ -357,6 +374,20 @@ export function startServer(
     res.json({ ok: true });
   });
 
+  // 画布右键翻译：走设置里选定的文本模型（ai.config.translationModel），不再依赖第三方翻译 API。
+  app.post("/translation/text", async (req, res) => {
+    const text = typeof req.body?.text === "string" ? req.body.text : "";
+    const target = typeof req.body?.target === "string" ? req.body.target.trim() : "";
+    if (!text.trim()) return void res.status(400).json({ ok: false, error: "text 必填" });
+    if (!CANVAS_TRANSLATION_TARGETS.includes(target as CanvasTranslationTarget)) return void res.status(400).json({ ok: false, error: "target 仅支持 zh-CN 或 en" });
+    try {
+      const translatedText = await translateCanvasText(stores, { text, target: target as CanvasTranslationTarget });
+      res.json({ ok: true, translatedText });
+    } catch (error) {
+      res.status(502).json({ ok: false, error: error instanceof Error ? error.message : "翻译失败" });
+    }
+  });
+
   // H3 默认参数是 Backend 权威设置；浏览器 localStorage 只用于一次性迁移。
   const H3_DEFAULTS_KEY = "plugin:minimax-h3:defaults:v1";
   app.get("/plugins/minimax-h3/defaults", (_req, res) => {
@@ -480,6 +511,22 @@ export function startServer(
     res.json({ ok: true, projects });
   });
   app.get("/canvas/projects/:id", (req, res) => {
+    if (req.query.view === "nodes") {
+      let nodeIds: string[] = [];
+      try {
+        const parsed = JSON.parse(String(req.query.nodeIds || "[]"));
+        if (!Array.isArray(parsed) || parsed.some(value => typeof value !== "string")) return void res.status(400).json({ ok: false, error: "nodeIds 必须是字符串数组" });
+        nodeIds = parsed;
+      } catch { return void res.status(400).json({ ok: false, error: "nodeIds JSON 无效" }); }
+      const project = db.getCanvasProjectNodeSnapshot(req.params.id, nodeIds);
+      if (!project) return void res.status(404).json({ ok: false, error: "画布不存在" });
+      return void res.json({ ok: true, project });
+    }
+    if (req.query.view === "selection") {
+      const project = db.getCanvasProjectNodeSnapshot(req.params.id, undefined, true);
+      if (!project) return void res.status(404).json({ ok: false, error: "画布不存在" });
+      return void res.json({ ok: true, project });
+    }
     if (req.query.view === "index") {
       const rawRevision = req.query.ifRevision;
       const ifRevision = typeof rawRevision === "string" && /^\d+$/.test(rawRevision) ? Number(rawRevision) : undefined;
@@ -497,6 +544,53 @@ export function startServer(
       return void res.status(404).json({ ok: false, error: "画布不存在" });
     res.json({ ok: true, project });
   });
+  app.get("/canvas/projects/:id/h3-context", (req, res) => {
+    const nodeId = String(req.query.nodeId || "");
+    if (!nodeId) return void res.status(400).json({ ok: false, error: "nodeId 必填" });
+    let sourceNodeIds: string[] = [], assetIds: string[] = [];
+    try {
+      const parseIds = (value: unknown) => {
+        const parsed = JSON.parse(typeof value === "string" ? value : "[]");
+        if (!Array.isArray(parsed) || parsed.some(item => typeof item !== "string")) throw new Error("must be string array");
+        return parsed as string[];
+      };
+      sourceNodeIds = parseIds(req.query.sourceNodeIds);
+      assetIds = parseIds(req.query.assetIds);
+    } catch { return void res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "sourceNodeIds 和 assetIds 必须是字符串数组 JSON" }); }
+    const project = db.getCanvasProjectH3Context(req.params.id, nodeId, typeof req.query.segmentId === "string" ? req.query.segmentId : undefined, { sourceNodeIds, assetIds });
+    if (!project || !Array.isArray(project.nodes) || !project.nodes.length) return void res.status(404).json({ ok: false, error: "H3 节点不存在" });
+    res.json({ ok: true, project });
+  });
+  app.get("/canvas/projects/:id/h3-diagnose", (req, res) => {
+    const nodeId = typeof req.query.nodeId === "string" && req.query.nodeId ? req.query.nodeId : undefined;
+    let nodeIds: string[] | undefined;
+    if (typeof req.query.nodeIds === "string" && req.query.nodeIds) {
+      try {
+        const parsed = JSON.parse(req.query.nodeIds);
+        if (!Array.isArray(parsed) || parsed.some(item => typeof item !== "string")) throw new Error("must be string array");
+        nodeIds = parsed as string[];
+      } catch { return void res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "nodeIds 必须是字符串数组 JSON" }); }
+    }
+    const offset = Number.parseInt(String(req.query.offset ?? "0"), 10);
+    const pageSize = Number.parseInt(String(req.query.pageSize ?? "200"), 10);
+    try {
+      const result = diagnoseH3Clips(stores, {
+        projectId: req.params.id, nodeId, nodeIds,
+        offset: Number.isFinite(offset) && offset >= 0 ? offset : 0,
+        pageSize: Number.isFinite(pageSize) && pageSize > 0 ? pageSize : 200,
+      });
+      res.json({ ok: true, ...result });
+    } catch (error) {
+      res.status(404).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+  app.get("/canvas/projects/:id/h3-node-summary", (req, res) => {
+    const nodeId = String(req.query.nodeId || "");
+    if (!nodeId) return void res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "nodeId 必填" });
+    const project = db.getCanvasH3NodeSummary(req.params.id, nodeId);
+    if (!project) return void res.status(404).json({ ok: false, error: "画布不存在" });
+    res.json({ ok: true, project });
+  });
   app.post("/canvas/projects/:id/sync-character-assets", (req, res) => {
     try {
       res.json({ ok: true, ...syncCharacterAssetsForProject(stores, req.params.id) });
@@ -509,10 +603,20 @@ export function startServer(
     if (!db.getCanvasProject(req.params.id))
       return void res.status(404).json({ ok: false, error: "画布不存在" });
     const episode = db.getDramaEpisodeByCanvasId(req.params.id);
-    const drama = episode
-      ? stores.canvasFolders.list().find((item) => item.id === episode.dramaId) || null
-      : null;
+    const drama = stores.canvasFolders.list().find(item => episode ? item.id === episode.dramaId : item.sharedAssetCanvasId === req.params.id) || null;
     res.json({ ok: true, projectId: req.params.id, episode, drama });
+  });
+  app.get("/canvas/projects/:id/production-context", (req, res) => {
+    try { res.json({ ok: true, context: productionCanvasContext(db, req.params.id) }); }
+    catch (error) { res.status(404).json({ ok: false, error: String(error) }); }
+  });
+  app.post("/drama/episodes/:episodeId/canvas/ensure", (req, res) => {
+    try { res.json({ ok: true, ...ensureProductionCanvas(db, "episode", req.params.episodeId, events) }); }
+    catch (error) { res.status(409).json({ ok: false, error: String(error) }); }
+  });
+  app.post("/drama/projects/:dramaId/asset-canvas/ensure", (req, res) => {
+    try { res.json({ ok: true, ...ensureProductionCanvas(db, "shared-assets", req.params.dramaId, events) }); }
+    catch (error) { res.status(409).json({ ok: false, error: String(error) }); }
   });
   app.get("/canvas/projects/:id/changes", (req, res) => {
     try {
@@ -612,6 +716,33 @@ export function startServer(
         });
     }
   });
+  app.post("/mcp/commands/:operationId/prepare", (req, res) => {
+    const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body as Record<string, unknown> : {};
+    const tool = String(body.tool || ""), targetId = String(body.targetId || "");
+    if (!["canvas_apply_ops", "h3_update_clips", "assets_add", "assets_upsert_batch"].includes(tool) || !targetId || !body.request || typeof body.request !== "object" || !body.payload || typeof body.payload !== "object")
+      return void res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "冻结命令参数不完整或工具不支持" });
+    try {
+      const command = db.prepareMcpCommand({ operationId: String(req.params.operationId), tool, targetId, projectId: typeof body.projectId === "string" ? body.projectId : undefined, request: body.request, payload: body.payload as Record<string, unknown>, receipt: body.receipt && typeof body.receipt === "object" ? body.receipt as Record<string, unknown> : {} });
+      res.json({ ok: true, command });
+    } catch (error) {
+      const value = error as Error & { code?: string };
+      res.status(value.code === "OPERATION_ID_REUSED" || value.code === "ASSET_SOURCE_CHANGED" ? 409 : 400).json({ ok: false, code: value.code || "INVALID_INPUT", error: value.message });
+    }
+  });
+  app.get("/mcp/commands/:operationId", (req, res) => {
+    res.json({ ok: true, command: db.getMcpCommandReceipt(String(req.params.operationId)) });
+  });
+  app.post("/mcp/commands/:operationId/check", (req, res) => {
+    const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body as Record<string, unknown> : {};
+    if (typeof body.tool !== "string" || typeof body.targetId !== "string" || !body.request || typeof body.request !== "object") return void res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "命令身份参数不完整" });
+    try {
+      const command = db.getMcpCommandReceipt(String(req.params.operationId), { tool: body.tool, targetId: body.targetId, projectId: typeof body.projectId === "string" ? body.projectId : undefined, request: body.request });
+      res.json({ ok: true, command });
+    } catch (error) {
+      const value = error as Error & { code?: string };
+      res.status(value.code === "OPERATION_ID_REUSED" ? 409 : 400).json({ ok: false, code: value.code || "INVALID_INPUT", error: value.message });
+    }
+  });
   app.get("/canvas/projects/:id/ops/:operationId/receipt", (req, res) => {
     if (db.getCanvasProjectRevision(req.params.id) === null)
       return void res.status(404).json({ ok: false, error: "画布不存在" });
@@ -642,6 +773,9 @@ export function startServer(
           ...(req.body?.baseRevision !== undefined
             ? { baseRevision: Number(req.body.baseRevision) }
             : {}),
+          ...(req.body?.mcpCommand && typeof req.body.mcpCommand === "object"
+            ? { mcpCommand: req.body.mcpCommand as { tool: string; targetId: string; request: unknown } }
+            : {}),
         },
       );
       res.json({
@@ -665,11 +799,13 @@ export function startServer(
         committed?: boolean;
         snapshotAvailable?: boolean;
       };
+      if (req.body?.mcpCommand && typeof req.body.mcpCommand === "object") db.rejectMcpCommand(operationId, value.code || "MCP_COMMAND_REJECTED", value.message);
       if (
         [
           "REVISION_CONFLICT",
           "FIELD_CONFLICT",
           "OPERATION_ID_REUSED",
+          "MCP_COMMAND_MISMATCH",
           "RECEIPT_UNAVAILABLE",
           "TEXT_DOCUMENT_REPLACED",
           "TEXT_CONFLICT",
@@ -684,6 +820,8 @@ export function startServer(
             error: value.message,
             projectId: req.params.id,
             revision: value.revision,
+            expectedRevision,
+            actualRevision: value.revision,
             project: value.project,
             conflictTargets: value.conflictTargets,
             committed: value.committed,
@@ -720,12 +858,14 @@ export function startServer(
     }
   });
   app.delete("/canvas/projects/:id", (req, res) => {
+    try {
     const deleted = stores.projects.delete(req.params.id);
     events.publishCanvasSnapshot({
       entityId: req.params.id,
       payload: { deleted },
     });
     res.json({ ok: true, deleted });
+    } catch (error) { res.status(409).json({ ok: false, error: String(error) }); }
   });
   // ── H3 节点历史运行产物（按需取，替代 metadata.materials 字段）──
   app.get("/canvas/projects/:id/nodes/:nodeId/materials", (req, res) => {
@@ -782,6 +922,11 @@ export function startServer(
     res.json({ ok: true, deleted });
   });
   // ── Drama episodes：剧目 → 分集 → 画布 ───────────────────────────────
+  app.get("/drama/projects/:dramaId", (req, res) => {
+    const drama = db.listCanvasFolders(String(req.params.dramaId))[0];
+    if (!drama?.isDrama) return void res.status(404).json({ ok: false, code: "DRAMA_NOT_FOUND", error: "剧目不存在" });
+    res.json({ ok: true, drama });
+  });
   app.get("/drama/projects/:dramaId/episodes", (req, res) => {
     const dramaId = String(req.params.dramaId || "");
     const drama = stores.canvasFolders
@@ -1069,6 +1214,9 @@ export function startServer(
 
   // ── Assets ───────────────────────────────────────────────────────────
   app.get("/canvas/assets", (req, res) => {
+    if (req.query.view === "summary") {
+      return void res.json({ ok: true, ...db.listAssetsPage({ kind: req.query.kind as string | undefined, keyword: req.query.keyword as string | undefined, page: Number(req.query.page) || 1, pageSize: Number(req.query.pageSize) || 20 }) });
+    }
     const kind = req.query.kind as string | undefined;
     const folderId = req.query.folderId as string | undefined;
     const dramaId = req.query.dramaId as string | undefined;
@@ -1077,6 +1225,28 @@ export function startServer(
       assets: stores.assets.list({ kind, folderId, dramaId }),
       folders: stores.assets.folders(),
     });
+  });
+  app.get("/canvas/assets/:id", (req, res) => {
+    const asset = db.getAsset(String(req.params.id));
+    if (!asset) return void res.status(404).json({ ok: false, code: "ASSET_NOT_FOUND", error: "素材不存在" });
+    res.json({ ok: true, asset });
+  });
+  app.post("/canvas/assets/mcp-upsert-batch", (req, res) => {
+    const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body as Record<string, unknown> : {};
+    if (!Array.isArray(body.assets) || !body.request || typeof body.request !== "object" || typeof body.operationId !== "string" || typeof body.tool !== "string")
+      return void res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "素材命令参数不完整" });
+    try {
+      const receipt = db.commitMcpAssetCommand({ operationId: body.operationId, tool: body.tool, request: body.request, assets: body.assets as Asset[] });
+      const assetIds = Array.isArray(receipt.assetIds) ? receipt.assetIds.map(String) : [];
+      if (receipt.replayed === false) for (const id of assetIds) {
+        const asset = db.getAsset(id);
+        if (asset) events.publish({ type: "asset.updated", entityId: id, payload: redactInlineMedia(asset) });
+      }
+      res.json(receipt);
+    } catch (error) {
+      const value = error as Error & { code?: string };
+      res.status(value.code === "OPERATION_ID_REUSED" ? 409 : 400).json({ ok: false, code: value.code || "MCP_COMMAND_REJECTED", error: value.message });
+    }
   });
   app.put("/canvas/assets", (req, res) => {
     const body = req.body as { assets?: Asset[]; folders?: AssetFolder[] };
@@ -1100,44 +1270,48 @@ export function startServer(
     events.publish({ type: "asset.updated", payload: result });
     res.json({ ok: true, ...result });
   });
+  const assetError = (res: express.Response, error: unknown) => {
+    const value = error as Error & { code?: string; consumers?: unknown; conflictTargets?: unknown };
+    res.status(value.code === "FIELD_CONFLICT" || value.code === "ASSET_IN_USE" || value.code === "OPERATION_ID_REUSED" ? 409 : 400)
+      .json({ ok: false, code: value.code || "INVALID_ASSET", error: value.message, consumers: value.consumers, conflictTargets: value.conflictTargets });
+  };
   app.post("/canvas/assets", (req, res) => {
-    const asset = req.body as Asset;
-    if (!asset?.id)
-      return void res.status(400).json({ ok: false, error: "asset.id 必填" });
-    const result = stores.assets.upsert(asset);
-    events.publish({
-      type: "asset.updated",
-      entityId: result.id,
-      payload: result,
-    });
-    res.status(201).json({ ok: true, asset: result });
+    const { operationId, canvasSource, discardLocal, resolveConflicts, assetBase, ...asset } = req.body;
+    if (!asset?.id) return void res.status(400).json({ ok: false, error: "asset.id 必填" });
+    try {
+      const current = db.getAssetRecord(asset.id);
+      if (sourceOf(current) && asset.dramaId !== undefined && asset.dramaId !== current?.dramaId)
+        throw new Error("共享资产剧目归属请使用单项编辑入口；拒绝旧资产列表覆盖共享来源");
+      const replayed = Boolean(operationId && db.db.prepare("SELECT 1 FROM shared_library_receipts WHERE operation_id=?").get(operationId));
+      const result = db.upsertAsset(asset as Asset, { operationId, canvasSource, discardLocal, resolveConflicts, assetBase, request: req.body } as AssetWriteCommand);
+      events.publish({ type: "asset.updated", entityId: result.id, payload: result });
+      const source = sourceOf(result);
+      res.status(201).json({ ok: true, asset: result, operationId, replayed,
+        ...(source ? { source, sourceRevision: db.getCanvasProjectRevision(source.sourceProjectId) } : {}) });
+    } catch (error) { assetError(res, error); }
   });
   app.patch("/canvas/assets/:id", (req, res) => {
     const current = stores.assets.get(req.params.id);
-    if (!current)
-      return void res.status(404).json({ ok: false, error: "asset not found" });
-    const next = {
-      ...current,
-      ...(req.body as Partial<Asset>),
-      id: current.id,
-      updatedAt: new Date().toISOString(),
-    };
-    const result = stores.assets.upsert(next);
-    events.publish({
-      type: "asset.updated",
-      entityId: result.id,
-      payload: result,
-    });
-    res.json({ ok: true, asset: result });
+    if (!current) return void res.status(404).json({ ok: false, error: "asset not found" });
+    const { operationId, canvasSource, discardLocal, resolveConflicts, assetBase, ...patch } = req.body;
+    try {
+      const replayed = Boolean(operationId && db.db.prepare("SELECT 1 FROM shared_library_receipts WHERE operation_id=?").get(operationId));
+      const result = db.upsertAsset({ ...current, ...patch, id: current.id }, { operationId, canvasSource, discardLocal, resolveConflicts, assetBase, request: { id: current.id, ...req.body } });
+      events.publish({ type: "asset.updated", entityId: result.id, payload: result });
+      const source = sourceOf(result);
+      res.json({ ok: true, asset: result, operationId, replayed,
+        ...(source ? { source, sourceRevision: db.getCanvasProjectRevision(source.sourceProjectId) } : {}) });
+    } catch (error) { assetError(res, error); }
   });
   app.delete("/canvas/assets/:id", (req, res) => {
-    const deleted = stores.assets.delete(req.params.id);
-    events.publish({
-      type: "asset.updated",
-      entityId: req.params.id,
-      payload: { deleted },
-    });
-    res.json({ ok: true, deleted });
+    try {
+      const source = sourceOf(db.getAssetRecord(req.params.id));
+      if (source && !assetConsumers(db, source).length && (req.query.sourceProjectId !== source.sourceProjectId || req.query.sourceNodeId !== source.sourceNodeId))
+        throw Object.assign(new Error("资产已成为共享来源，请刷新资产库后再删除"), { code: "ASSET_SOURCE_CHANGED" });
+      const deleted = stores.assets.delete(req.params.id);
+      events.publish({ type: "asset.updated", entityId: req.params.id, payload: { deleted } });
+      res.json({ ok: true, deleted });
+    } catch (error) { assetError(res, error); }
   });
 
   // ── Asset folders ────────────────────────────────────────────────────
@@ -1662,6 +1836,12 @@ export function startServer(
         });
     res.json({ ok: true, tasks });
   });
+  app.get(`${CANVAS_TASK_ROUTE}/status`, (req, res) => {
+    const task = stores.tasks.get(req.params.id);
+    if (!task)
+      return void res.status(404).json({ ok: false, error: "task not found", code: "TASK_NOT_FOUND" });
+    res.json({ ok: true, task: { id: task.id, status: task.status } });
+  });
   app.get(CANVAS_TASK_ROUTE, (req, res) => {
     const task = stores.tasks.get(req.params.id);
     if (!task)
@@ -1742,12 +1922,21 @@ export function startServer(
       const task = deps.cancelTask
         ? deps.cancelTask(current)
         : stores.tasks.cancel(taskId);
+      const h3TaskSummary = current.kind === "canvas-h3-run" ? {
+        id: task.id,
+        kind: task.kind,
+        status: task.status,
+        projectId: String((task.input as Record<string, unknown> | undefined)?.projectId || ""),
+        nodeId: String((task.input as Record<string, unknown> | undefined)?.nodeId || ""),
+        segmentId: String((task.input as Record<string, unknown> | undefined)?.segmentId || ""),
+        updatedAt: task.updatedAt,
+      } : null;
       events.publish({
         type: "task.updated",
         entityId: task.id,
-        payload: task,
+        payload: h3TaskSummary || task,
       });
-      res.json({ ok: true, task });
+      res.json({ ok: true, task: h3TaskSummary || task });
     } catch (error) {
       res.status(409).json({ ok: false, error: (error as Error).message });
     }
@@ -1784,6 +1973,7 @@ export function startServer(
   });
 
   registerMcpObservabilityRoutes(app, stores.mcpObservability);
+  registerMcpExportRoutes(app, stores.projects, deps.snapshotExports);
   registerBackendErrorHandler(app);
 
   return { app: app as Express, stores, events };

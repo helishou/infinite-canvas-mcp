@@ -6,10 +6,12 @@ import { createStores } from "../stores/index.js";
 import { CanvasGenerationService } from "./generation-service.js";
 
 function serviceWith(overrides: { image?: Record<string, unknown>; h3?: Record<string, unknown>; comfy?: Record<string, unknown>; stores?: Record<string, unknown>; video?: Record<string, unknown>; audio?: Record<string, unknown>; browser?: Record<string, unknown> } = {}) {
+    const supplied = overrides.stores || {};
+    const stores = { ...supplied, tasks: { get: () => null, list: () => [], ...(supplied.tasks as Record<string, unknown> || {}) } };
     return new CanvasGenerationService(
         (overrides.image || {}) as never,
         (overrides.h3 || {}) as never,
-        (overrides.stores || {}) as never,
+        stores as never,
         {} as never,
         (overrides.comfy || {}) as never,
         {} as never,

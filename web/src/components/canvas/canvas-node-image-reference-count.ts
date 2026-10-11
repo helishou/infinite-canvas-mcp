@@ -1,4 +1,5 @@
 import { buildNodeGenerationContext } from "./canvas-node-generation";
+import { productionImageInput } from "@basketikun/canvas-agent/reference-contract";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 
 /** Settings must describe the inputs used by the next generation, not the @ candidate list. */
@@ -15,6 +16,6 @@ export function getNodeImageReferenceCount(
     const connections = connectedNodes.map((source) => ({ id: source.id, fromNodeId: source.id, toNodeId: node.id }));
     const context = buildNodeGenerationContext(node.id, nodes, connections, prompt);
     // The ordinary image editor sends its own image; smart generators never do so implicitly.
-    const ownImageCount = node.type === CanvasNodeType.Image && node.metadata?.content ? 1 : 0;
+    const ownImageCount = !productionImageInput(node) && node.type === CanvasNodeType.Image && node.metadata?.content ? 1 : 0;
     return context.referenceImages.length + ownImageCount + loopInputCount;
 }

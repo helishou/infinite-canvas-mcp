@@ -1,16 +1,26 @@
 import { createHash } from "node:crypto";
 import type { CanvasOperation, CanvasOperationResult } from "./project-ops.js";
+import type { AssetNode } from "@basketikun/canvas-agent/shared-asset-reference";
 
 export type CanvasCommandContext = {
     /** 仅限进程内任务执行器传入；HTTP/MCP 入参不得透传此权限。 */
     runtimeWrite?: boolean;
+    /** Trusted production commands may include canvas ops in their outer transaction. Never accept from HTTP/MCP. */
+    withinTransaction?: boolean;
+    deferredCommits?: CanvasCommit[];
+    /** Trusted propagation baseline, so derived character references see the actual before/after. */
+    referenceSourceBefore?: { sourceProjectId: string; sourceNodeId: string; node: AssetNode };
     operationId?: string;
     source?: Record<string, unknown>;
     /** 与旧 expectedRevision 的整图 CAS 分离：新协议按写入字段检查并发。 */
     baseRevision?: number;
+    /** Backend-frozen external MCP intent bound to this ops transaction. */
+    mcpCommand?: { tool: string; targetId: string; request: unknown };
 };
 
 export type CanvasCommit = {
+    deletedAssetIds?: string[];
+    productionUpdates?: Array<{ entityId: string; revision: number }>;
     projectId: string;
     operationId: string;
     baseRevision: number;
@@ -27,7 +37,11 @@ export function commandFingerprint(value: unknown): string {
         if (!item || typeof item !== "object") return item;
         return Object.fromEntries(Object.entries(item).filter(([, value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => [key, canonical(value)]));
     };
-    return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
+    const serialized = JSON.stringify(canonical(value));
+    // JSON.stringify(undefined) returns undefined rather than a string. H3
+    // settings commonly add fields that were absent in the prior Clip, so
+    // fingerprinting that before value must remain valid and distinct from null.
+    return createHash("sha256").update(serialized === undefined ? "undefined" : serialized).digest("hex");
 }
 
 export function collaborationError(code: string, message: string) {

@@ -28,7 +28,7 @@ const skillDraftSchema = z.object({
     if (draft.defaultPrompt && !mentionsSkill(draft.defaultPrompt, draft.name)) context.addIssue({ code: "custom", path: ["defaultPrompt"], message: `默认提示词必须包含 $${draft.name}` });
 });
 
-const SKILL_DRAFT_OUTPUT_SCHEMA: JsonRecord = {
+export const SKILL_DRAFT_OUTPUT_SCHEMA: JsonRecord = {
     type: "object",
     additionalProperties: false,
     required: ["name", "displayName", "description", "instructions", "shortDescription", "defaultPrompt"],
@@ -43,6 +43,12 @@ const SKILL_DRAFT_OUTPUT_SCHEMA: JsonRecord = {
 };
 
 export type AgentSkillDraft = z.infer<typeof skillDraftSchema>;
+
+export function validateAgentSkillDraft(value: unknown): AgentSkillDraft {
+    const draft = skillDraftSchema.parse(value);
+    assertDraftHasNoSensitiveValues(draft, []);
+    return draft;
+}
 
 export class CodexSkillLookupError extends Error {
     override name = "CodexSkillLookupError";
@@ -85,9 +91,9 @@ export async function resolveCodexApproval(requestId: string, decision: string) 
 }
 
 /** 创建新的 Codex 线程并记录当前线程 ID。 */
-export async function startCodexThread(emit: AgentEmit, cwd?: string, permissionMode: AgentPermissionMode = "request", preheat = false) {
+export async function startCodexThread(emit: AgentEmit, cwd?: string, permissionMode: AgentPermissionMode = "request", preheat = false, model?: string) {
     const app = await getCodexApp(emit);
-    const thread = await app.startThread(cwd, permissionMode, preheat);
+    const thread = await app.startThread(cwd, permissionMode, preheat, model);
     loadedThreadId = String(field(thread, "id") || "");
     return thread;
 }

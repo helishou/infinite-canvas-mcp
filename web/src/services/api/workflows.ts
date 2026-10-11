@@ -9,33 +9,10 @@ export type WorkflowItem = {
     hasConfig?: boolean;
 };
 
-// 跟 backend/src/db.ts 的 WorkflowField / WorkflowConfig 对齐。
-// 配置面板加完后这个类型可以删，本地前端 types 由 workflows 页面那侧维护。
-export type WorkflowFieldType = "text" | "number" | "slider" | "boolean" | "dropdown" | "image" | "audio" | "video";
-export type WorkflowField = {
-    id: string;
-    node: string;
-    input: string;
-    name: string;
-    type: WorkflowFieldType;
-    required?: boolean;
-    default?: unknown;
-    min?: number;
-    max?: number;
-    step?: number;
-    options?: string[];
-    randomEnabled?: boolean;
-    isPrompt?: boolean;
-};
-export type WorkflowConfig = {
-    title: string;
-    backend: string;
-    operation: string;
-    description: string;
-    fields: WorkflowField[];
-    mediaInputs?: Record<string, unknown>;
-    miniCards?: Record<string, unknown>;
-};
+// 字段与配置类型只有一份定义在 @/types/workflow；这里只做转发，
+// 避免两个同名类型各自漂移。跟 backend/src/db.ts 的 WorkflowField / WorkflowConfig 对齐。
+import type { WorkflowConfig, WorkflowField } from "@/types/workflow";
+export type { WorkflowField, WorkflowFieldType, WorkflowConfig } from "@/types/workflow";
 
 export type WorkflowDetail = {
     name: string;
@@ -78,8 +55,11 @@ export type WorkflowRunResult = {
     promptId?: string;
     outputs?: Record<string, unknown>;
     media: Array<{ url: string; storageKey?: string; mimeType: string; filename?: string }>;
+    texts?: Array<{ nodeId?: string; content: string }>;
     status: { status_str?: string; completed?: boolean };
     error?: string;
+    /** 整体失败但指定输出节点有产物时的说明；有值表示结果来自抢救，仍算成功。 */
+    warning?: string;
 };
 
 // fields 字典：key = WorkflowField.id，value：
@@ -162,7 +142,7 @@ export async function pollWorkflowTask(
                 mimeType: m.mimeType,
                 filename: m.filename,
             }));
-            return { taskId, media: media as WorkflowRunResult["media"], status: { status_str: "success", completed: true } };
+            return { taskId, media: media as WorkflowRunResult["media"], texts: task.result?.texts, status: { status_str: "success", completed: true } };
         }
         if (task.status === "failed") throw new Error(task.error || "工作流执行失败");
         if (task.status === "cancelled") throw new Error("任务已取消");

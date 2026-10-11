@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { inputHash } from '../drama/canvas-inputs.js';
 
 import type { CanvasGenerationCommand, CanvasLoopPrepare } from "@basketikun/canvas-agent/generation-contract";
 import type { CanvasProject, RuntimeTask } from "../db.js";
@@ -22,6 +23,7 @@ import { CanvasAudioDispatcher } from "./audio-dispatcher.js";
 import { CanvasBrowserScriptDispatcher } from "./browser-script-dispatcher.js";
 import { decodeChannelModel, modelOptionName, resolveModelScript } from "./model-workflow.js";
 import type { Stores } from "../stores/types.js";
+import { productionImageInput } from "@basketikun/canvas-agent/reference-contract";
 
 /**
  * 画布生成唯一编排入口。
@@ -31,6 +33,11 @@ import type { Stores } from "../stores/types.js";
  * 适配，不再给每个入口各写一套分支。
  */
 export class CanvasGenerationService {
+    private productionObserver?: {
+        prepare(command: CanvasGenerationCommand): { command: CanvasGenerationCommand; context?: unknown; executionProject?: CanvasProject; executionDefaults?: Record<string, unknown> };
+        submitted(taskId: string, context: unknown): void;
+    };
+    observeProduction(observer: NonNullable<CanvasGenerationService["productionObserver"]>) { this.productionObserver = observer; }
     constructor(
         private readonly image: CanvasImageDispatcher,
         private readonly h3: CanvasH3Runner,
@@ -44,8 +51,51 @@ export class CanvasGenerationService {
         private readonly browserScript?: CanvasBrowserScriptDispatcher,
     ) {}
 
-    async start(command: CanvasGenerationCommand) {
+    async start(command: CanvasGenerationCommand, options?: { productionManaged: boolean; executionProject?: CanvasProject; executionDefaults?: Record<string, unknown> }) {
+        const key = command.idempotencyKey || command.clientTaskId;
+        const callerHash = inputHash(command);
+        const existing = key ? this.stores.tasks.get(key) : null;
+        if (existing?.input.params && (existing.input.params as Record<string, unknown>).canvasCallerHash) {
+            if ((existing.input.params as Record<string, unknown>).canvasCallerHash !== callerHash) throw new Error("幂等键已用于不同生成请求");
+            const context = (existing.input.params as Record<string, unknown>).canvasProductionTarget;
+            if (context) this.productionObserver?.submitted(existing.id, context);
+            return { task: existing, taskId: existing.id, executor: 'canvas' };
+        }
+        const prepared = options?.productionManaged ? { command } : this.productionObserver?.prepare(command) || { command };
+        if (prepared.context || prepared.command.params?.canvasInputHash || options?.executionProject) prepared.command = { ...prepared.command, params: { ...prepared.command.params, canvasCallerHash: callerHash, canvasProductionTarget: prepared.context || null } };
+        if (prepared.command.mode === "image" && prepared.command.projectId && prepared.command.nodeId && !prepared.command.loopOutput) {
+            const active = this.stores.tasks.list({ projectId: prepared.command.projectId, nodeIds: [prepared.command.nodeId] }).find(task => ["queued", "running", "awaiting_confirmation"].includes(task.status) && (task.kind === "canvas-image" || task.input.mode === "image") && (!prepared.command.imageIds?.length || !(task.input.imageIds as string[] | undefined)?.length || prepared.command.imageIds.some(id => (task.input.imageIds as string[]).includes(id))));
+            if (active) throw Object.assign(new Error(`图片目标正在由任务 ${active.id} 生成，请使用原任务入口`), { code: "TARGET_OCCUPIED", taskId: active.id });
+        }
+        const executionProject = options?.executionProject || (prepared as any).executionProject;
+        const result = executionProject && prepared.command.operation === "h3-run"
+            ? { task: this.h3.startFrozen(prepared.command as any, command.idempotencyKey || command.clientTaskId, executionProject, options?.executionDefaults || (prepared as any).executionDefaults || {}), executor: "h3" }
+            : await this.dispatch(prepared.command);
+        const taskId = "taskId" in result ? result.taskId : result.task.id;
+        if (prepared.context) this.productionObserver?.submitted(taskId, prepared.context);
+        return { ...result, taskId };
+    }
+
+    private async dispatch(command: CanvasGenerationCommand) {
+        const project = command.projectId ? this.stores.projects?.get?.(command.projectId) : undefined;
+        const node = (project?.nodes as Array<Record<string, any>> || []).find(item => item.id === command.nodeId);
+        if (node?.metadata?.sharedAssetOrigin && command.params?.writeBackToTarget) throw new Error("共享引用不能原位生成，请到源资产画布编辑");
         const operation = command.operation || "generate";
+        if (command.inputBasis === "published" && operation === "h3-run" && command.projectId) {
+            const requirements = this.stores.projects?.getH3ProductionRequirements?.(command.projectId);
+            const ids = command.nodeIds || (command.nodeId ? [command.nodeId] : []);
+            const clips = (requirements?.clips || []).filter(clip => ids.includes(clip.nodeId));
+            const start = command.segmentId ? clips.findIndex(clip => clip.segmentId === command.segmentId) : 0;
+            const end = command.endSegmentId ? clips.findIndex(clip => clip.segmentId === command.endSegmentId) : command.runFromCurrent || command.nodeIds?.length ? clips.length - 1 : start;
+            if (clips.slice(Math.max(0, start), Math.max(start, end) + 1).some(clip => clip.sharedAssetsCurrent === false)) throw Object.assign(new Error("共享资产已更新，等待提示词重新校验"), { code: "SHARED_ASSET_UPDATE" });
+        }
+        const referenceIds = new Set((command.references || []).map(ref => ref.sourceNodeId).filter(Boolean));
+        for (const reference of project?.nodes as Record<string, any>[] || []) {
+            const origin = reference.metadata?.sharedAssetOrigin;
+            if (command.inputBasis !== "published" || !origin || !referenceIds.has(reference.id)) continue;
+            const latest = this.stores.assets.list({ dramaId: origin.dramaId }).find(asset => asset.source === "production-shared" && asset.metadata.assetId === origin.assetId);
+            if (!latest || latest.metadata.approvedId !== origin.approvedId) throw Object.assign(new Error("共享引用正在等待批准版本更新"), { code: "SHARED_ASSET_UPDATE" });
+        }
         // H3 uses its own runner validation and does not participate in generic loop slots.
         if (operation === "h3-run") return this.startH3(command);
         validateLoopGenerationCommand(command, command.projectId ? this.stores.projects.get(command.projectId) : null);
@@ -73,17 +123,27 @@ export class CanvasGenerationService {
         return prepareCanvasLoopRun(this.stores, input);
     }
 
+    previewH3(command: CanvasGenerationCommand) {
+        if (command.inputBasis === "published") {
+            const prepared = this.productionObserver?.prepare(command);
+            if (prepared?.executionProject) return this.h3.previewFrozen(prepared.command as any, prepared.executionProject, prepared.executionDefaults || {});
+        }
+        return this.h3.preview(command as Parameters<CanvasH3Runner['preview']>[0]);
+    }
+
     private startH3(command: CanvasGenerationCommand) {
         if (!command.projectId || (!command.nodeId && !command.nodeIds?.length)) throw new Error("H3 生成缺少 projectId 或节点 ID");
         const task = this.h3.start({
             projectId: command.projectId,
             ...(command.nodeId ? { nodeId: command.nodeId } : {}),
             ...(command.nodeIds?.length ? { nodeIds: command.nodeIds } : {}),
+            ...(command.endSegmentId ? { endSegmentId: command.endSegmentId } : {}),
             ...(command.segmentId ? { segmentId: command.segmentId } : {}),
             ...(command.segmentIndex !== undefined ? { segmentIndex: command.segmentIndex } : {}),
             ...(command.runFromCurrent !== undefined ? { runFromCurrent: command.runFromCurrent } : {}),
             ...(command.skipCompleted !== undefined ? { skipCompleted: command.skipCompleted } : {}),
             ...(command.forceRegenerate !== undefined ? { forceRegenerate: command.forceRegenerate } : {}),
+            ...(command.expectedPlanHash ? { expectedPlanHash: command.expectedPlanHash } : {}),
             ...(command.params ? { params: command.params } : {}),
         }, command.idempotencyKey || command.clientTaskId);
         return { task, taskId: task.id, executor: "h3" };
@@ -119,6 +179,7 @@ export class CanvasGenerationService {
     }
 
     private resolveImageReferences(command: CanvasGenerationCommand): CanvasGenerationCommand {
+        if (command.params?.canvasFrozenInput === true) return command;
         const resolved = this.resolveImageReferencesOnly(command);
         if (command.mode !== "image" && command.mode !== "video") return resolved;
         if (!command.projectId) return resolved;
@@ -150,6 +211,15 @@ export class CanvasGenerationService {
         const sourceNodeId = command.sourceNodeId || command.nodeId;
         if (!sourceNodeId) return command;
         const sourceNode = nodes.find((node) => String(node.id || "") === sourceNodeId);
+        if (command.params?.canvasFrozenInput === true) return command;
+        const formal = command.mode === "image" && productionImageInput(sourceNode);
+        if (formal && command.inputBasis === "published") {
+            const frozen = command.params?.productionImageInput;
+            if (formal.stale || !frozen || JSON.stringify(frozen) !== JSON.stringify(formal)) throw new Error("正式图像参考清单未验证或已变化，请重新编译并准备节点");
+            const expected = formal.references.map(ref => ref.storageKey);
+            if (JSON.stringify(command.references?.map(ref => ref.storageKey)) !== JSON.stringify(expected)) throw new Error("正式参考图上传数量或顺序与编译清单不一致");
+            return command;
+        }
         const sourceMetadata = recordOf(sourceNode?.metadata);
         const commandMetadata = recordOf(command);
         const explicitReferenceNodeIds = Array.isArray(commandMetadata.referenceNodeIds)
@@ -220,9 +290,7 @@ export class CanvasGenerationService {
         const onCreated = binding && binding.bindOnStart !== false
             ? (created: RuntimeTask) => bindCanvasTask(this.stores, binding, created.id)
             : undefined;
-        const task = engine === "runninghub"
-            ? await this.runningHub.run(command.input || {}, params, clientTaskId, onCreated)
-            : await this.comfy.run(command.preset || "minimax-h3", command.input || {}, params, command.comfyUrl, clientTaskId, onCreated);
+        const task = await this.comfy.run(command.preset || "minimax-h3", command.input || {}, params, command.comfyUrl, clientTaskId, onCreated);
         return { ok: true, task, taskId: task.id, executor };
     }
 

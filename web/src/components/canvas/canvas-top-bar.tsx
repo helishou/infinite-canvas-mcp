@@ -1,18 +1,18 @@
+import { useCanvasRoute } from "@/lib/canvas/canvas-host";
 import { useEffect, useRef, useState } from "react";
-import { BookOpen, Bot, Download, FileText, Home, Images, LoaderCircle, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Sparkles, Trash2, Undo2, Upload, UsersRound } from "lucide-react";
+import { Download, FileText, Home, Images, LoaderCircle, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Trash2, Undo2, Upload, UsersRound } from "lucide-react";
 import { Button, Dropdown, Modal, Popover, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
+import { Link, useSearchParams } from "react-router-dom";
 
 import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { DOCS_URL } from "@/constant/env";
+import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
 import type { CanvasCollaborator } from "@/stores/canvas/use-canvas-store";
-import { CanvasCollaborativeText } from "./canvas-collaborative-text";
-import { CanvasDraftsButton } from "./canvas-drafts-button";
 import { CanvasTaskCenterButton } from "./canvas-task-center";
-import { CanvasTextSuggestionsButton } from "./canvas-text-suggestions-button";
+import { CanvasProductionToolbar } from "@/components/production/canvas-production-workspace";
 
 export function CanvasTopBar({
     projectId,
@@ -36,10 +36,6 @@ export function CanvasTopBar({
     onOpenPlugins,
     onUndo,
     onRedo,
-    agentOpen,
-    compactAgentStatus,
-    onToggleAgent,
-    globalPrompt,
     onOpenGenerationLogs,
     collaborators,
 }: {
@@ -64,21 +60,20 @@ export function CanvasTopBar({
     onOpenPlugins: () => void;
     onUndo: () => void;
     onRedo: () => void;
-    agentOpen: boolean;
-    compactAgentStatus: { connected: boolean; enabled: boolean; activity: string };
-    onToggleAgent: () => void;
-    globalPrompt: string;
     onOpenGenerationLogs: () => void;
     collaborators: CanvasCollaborator[];
 }) {
     const colorTheme = useThemeStore((state) => state.theme);
     const { t } = useTranslation();
+    const { search: searchParams } = useCanvasRoute();
+    const productionOrigin = searchParams.get("from") === "dramas" ? "?from=dramas" : "";
     const theme = canvasThemes[colorTheme];
     const titleRef = useRef<HTMLDivElement>(null);
     const [shortcutsOpen, setShortcutsOpen] = useState(false);
     const sidePanelOpen = useCanvasSidePanelStore((state) => state.panelOpen);
     const toggleSidePanel = useCanvasSidePanelStore((state) => state.togglePanel);
-
+    const productionOwner = useProductionWorkspaceStore(state => state.context?.owner);
+    const productionDramaId = useProductionWorkspaceStore(state => state.context?.dramaId);
     useEffect(() => {
         if (!isTitleEditing) return;
         const close = (event: PointerEvent) => {
@@ -91,7 +86,7 @@ export function CanvasTopBar({
     return (
         <>
             <div className="pointer-events-none absolute left-0 right-0 top-0 z-50 flex h-16 items-center justify-between pl-1 pr-4">
-                <div className="pointer-events-auto flex min-w-0 items-center gap-2">
+                <div className={`pointer-events-auto flex min-w-0 flex-1 items-center whitespace-nowrap ${productionOwner ? "gap-1 sm:gap-2" : "gap-2"}`}>
                     <Tooltip title={sidePanelOpen ? t("canvas.collapsePanel") : t("canvas.expandPanel")}>
                         <button
                             type="button"
@@ -107,8 +102,8 @@ export function CanvasTopBar({
                         trigger={["click"]}
                         menu={{
                             items: [
-                                { key: "home", icon: <Home className="size-4" />, label: t("canvas.home"), onClick: onHome },
-                                { key: "docs", icon: <BookOpen className="size-4" />, label: t("canvas.docs"), onClick: () => window.open(DOCS_URL, "_blank", "noopener,noreferrer") },
+                                ...(productionDramaId ? [{ key: "drama", icon: <Images className="size-4" />, label: <Link to={`/production?dramaId=${encodeURIComponent(productionDramaId)}&workspace=series`}>{t("productionCanvas.backDrama")}</Link> }] : []),
+                                { key: "home", icon: <Home className="size-4" />, label: t("productionCanvas.backHome"), onClick: onHome },
                                 { key: "projects", icon: <Images className="size-4" />, label: t("canvas.projects"), onClick: onProjects },
                                 { type: "divider" },
                                 { key: "new", icon: <Plus className="size-4" />, label: t("canvas.create"), onClick: onCreateProject },
@@ -127,7 +122,7 @@ export function CanvasTopBar({
                         </button>
                     </Dropdown>
 
-                    <div ref={titleRef} className="flex min-w-0 items-center gap-2">
+                    <div ref={titleRef} className={`${productionDramaId ? "hidden" : "flex"} min-w-0 items-center gap-2`}>
                         {isTitleEditing ? (
                             <input
                                 autoFocus
@@ -144,7 +139,7 @@ export function CanvasTopBar({
                         ) : (
                             <button
                                 type="button"
-                                className="max-w-[280px] truncate border-b border-dashed border-transparent text-left text-lg font-semibold tracking-normal transition hover:border-current"
+                                className={`${productionOwner ? "max-w-[100px] sm:max-w-[180px] lg:max-w-[280px]" : "max-w-[280px]"} truncate border-b border-dashed border-transparent text-left text-lg font-semibold tracking-normal transition hover:border-current`}
                                 onDoubleClick={onStartTitleEditing}
                                 title={t("canvas.renameHint")}
                             >
@@ -152,42 +147,22 @@ export function CanvasTopBar({
                             </button>
                         )}
                     </div>
-                    <CompactAgentStatus status={compactAgentStatus} onClick={onToggleAgent} />
+                    {productionOwner && <CanvasProductionToolbar />}
                     <CanvasCollaborators collaborators={collaborators} />
-                    <CanvasDraftsButton />
-                    <CanvasTextSuggestionsButton projectId={projectId} />
-                    <Popover
-                        trigger="click"
-                        placement="bottomLeft"
-                        content={<div className="w-80"><CanvasCollaborativeText projectId={projectId} target={{ field: "globalPrompt" }} placeholder={t("canvas.globalPromptPlaceholder")} /></div>}
-                    >
-                        <Tooltip title={t("canvas.globalPromptHint")}>
-                                <button type="button" aria-label={t("canvas.globalPrompt")} className="flex h-8 items-center gap-1 rounded-lg px-2 text-xs transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: globalPrompt.trim() ? theme.node.text : theme.node.muted }}>
-                                <Sparkles className="size-3.5" />
-                                <span>{t("canvas.globalPrompt")}</span>
-                            </button>
-                        </Tooltip>
-                    </Popover>
                 </div>
 
-                <div className="pointer-events-auto flex items-center gap-1.5">
-                    <UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} />
-                    <Tooltip title="生成日志"><button type="button" aria-label="生成日志" className="grid size-8 place-items-center rounded-lg transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={onOpenGenerationLogs}><FileText className="size-4" /></button></Tooltip>
+                <div className="pointer-events-auto flex shrink-0 items-center gap-1.5">
+                    {productionOwner ? <Popover trigger="click" content={<div className="flex max-w-80 flex-col gap-3"><UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} /></div>}><button type="button" className="grid size-8 place-items-center" aria-label={t("productionCanvas.tools")}><Menu className="size-4" /></button></Popover>
+                        : <UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} />}
+                    <Tooltip title={t("productionCanvas.generationLogs")}><button type="button" aria-label={t("productionCanvas.generationLogs")} className="grid size-8 place-items-center rounded-lg transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={onOpenGenerationLogs}><FileText className="size-4" /></button></Tooltip>
                     <CanvasTaskCenterButton projectId={projectId} />
-                    <span className="h-6 w-px" style={{ background: theme.toolbar.border }} />
-                    <Button
-                        type="text"
-                        className="!h-10 !rounded-xl !px-3 !font-medium"
-                        style={{ background: agentOpen ? theme.toolbar.activeBg : theme.toolbar.panel, color: theme.node.text, boxShadow: "0 10px 30px rgba(28,25,23,.10)" }}
-                        icon={<Bot className="size-4" />}
-                        onClick={onToggleAgent}
-                    >
-                        Agent
-                    </Button>
                 </div>
             </div>
             <Modal title={t("canvas.shortcuts")} open={shortcutsOpen} onCancel={() => setShortcutsOpen(false)} footer={null} centered>
                 <div className="space-y-2 border-t pt-4 text-sm" style={{ borderColor: theme.node.stroke }}>
+                    <Shortcut keys={["Ctrl / Cmd", "K"]} value={t("canvas.navigation.searchLabel")} />
+                    <Shortcut keys={["F"]} value={t("canvas.navigation.focusSelection")} />
+                    <Shortcut keys={["Shift", "F"]} value={t("canvas.navigation.fitAll")} />
                     <Shortcut keys={["Ctrl / Space", t("canvas.shortcut.drag")]} value={t("canvas.shortcut.toggleTool")} />
                     <Shortcut keys={[t("canvas.shortcut.wheel")]} value={t("canvas.shortcut.zoom")} />
                     <Shortcut keys={[t("canvas.shortcut.zoomSlider")]} value={t("canvas.shortcut.preciseZoom")} />
@@ -241,20 +216,6 @@ function MenuLabel({ text, shortcut }: { text: string; shortcut: string }) {
             <span>{text}</span>
             <span className="text-xs opacity-45">{shortcut}</span>
         </span>
-    );
-}
-
-function CompactAgentStatus({ status, onClick }: { status: { connected: boolean; enabled: boolean; activity: string }; onClick: () => void }) {
-    const colorTheme = useThemeStore((state) => state.theme);
-    const theme = canvasThemes[colorTheme];
-    const { t } = useTranslation();
-    const label = status.connected ? t("canvas.agentConnected") : status.enabled ? t("canvas.agentConnecting", { activity: status.activity || t("canvas.connecting") }) : t("canvas.agentDisconnected");
-    const dotColor = status.connected ? "#22c55e" : status.enabled ? "#f59e0b" : theme.node.muted;
-    return (
-        <button type="button" className="flex h-8 items-center gap-1.5 text-xs transition hover:opacity-75" style={{ color: status.connected ? "#16a34a" : status.enabled ? "#d97706" : theme.node.muted }} onClick={onClick} title={t("canvas.openAgent")}>
-            <span className="size-2 rounded-full" style={{ background: dotColor }} />
-            <span className="max-w-[140px] truncate">{label}</span>
-        </button>
     );
 }
 

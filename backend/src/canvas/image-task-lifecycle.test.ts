@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
+import crypto from "node:crypto";
 import { BackendDatabase } from "../db.js";
 import { createStores } from "../stores/index.js";
 import { adaptFlux2KleinWorkflow, CanvasImageDispatcher } from "./image-dispatcher.js";
@@ -52,12 +53,13 @@ test("图片执行器自绑定与重试，先回写结果再发布成功，不�
         assert.equal(db.getTask(task.id)!.status, "running", "尚未回写不能先发布 succeeded");
         return writeBack(task, binding, media);
     };
-    dispatcher.start(input);
+    dispatcher.start({ ...input, size: "2048x1152", width: 2048, height: 1152, quality: "high", count: 2, params: { transparent: true, seed: 42 } });
     assert.equal(metadata().runtimeTaskId, "first");
     const revision = Number(db.getCanvasProject("p")!.revision);
     dispatcher.start(input);
     assert.equal(db.getCanvasProject("p")!.revision, revision);
     await settle(db, "first");
+    assert.deepEqual(stores.logs.list({ runtimeTaskId: "first" })[0]?.params.generationSettings, { size: "2048x1152", width: 2048, height: 1152, quality: "high", count: 2, transparent: true, seed: 42, executor: "direct-image" });
     assert.equal(metadata().status, "success");
     assert.equal(metadata().runtimeTaskId, undefined);
     const retried = await dispatcher.retry(db.getTask("first")!);
@@ -301,6 +303,21 @@ test("插件内置图片面板通过统一任务原位回写，不创建额外�
     assert.equal(source.metadata.runtimeTaskId, undefined);
 });
 
+test("冻结的正式生图回写会恢复被清空但仍匹配编译投影的提示词", async t => {
+    const { db, dispatcher, input, metadata } = fixture(t);
+    const prompt = "Compiled production prompt for the registered asset.";
+    db.applyCanvasProjectOperations("p", undefined, [{ type: "update_node", id: "source", metadata: {
+        smart: true, generationMode: "image", prompt: "", composerContent: "", model: "gpt-image-2",
+        productionImageInput: { promptHash: crypto.createHash("sha256").update(prompt).digest("hex"), stale: false },
+        productionImageProjection: { nextValues: { prompt }, conflicts: [] },
+    } }], { runtimeWrite: true });
+    dispatcher.start({ ...input, prompt, params: { writeBackToTarget: true, canvasFrozenInput: true } });
+    await settle(db, "first");
+    assert.equal(metadata().prompt, prompt);
+    assert.equal(metadata().composerContent, prompt);
+    assert.equal(metadata().status, "success");
+});
+
 test("内置 Comfy 批量子任务归属同一父任务，部分失败自动从历史清出失败槽", async (t) => {
     const { db, stores, input } = fixture(t);
     const output = slots(db);
@@ -331,8 +348,9 @@ test("自定义工作流批量取消覆盖全部子任务，所有槽位自动�
     const cancelled: string[] = [];
     const executor = { run: (...args: any[]) => new Promise((_resolve, reject) => pending.set(args[6], reject)),
         cancel: (id: string) => { cancelled.push(id); pending.get(id)!(new Error("已取消")); } };
+    const config = { fields: [{ id: "prompt", node: "1", input: "text", type: "text", isPrompt: true }] };
     const dispatcher = new CanvasImageDispatcher({} as never, stores, {} as never, { supports: () => false } as never,
-        { get: async () => ({ workflow: {}, config: { fields: [] } }) } as never, executor as never);
+        { get: async () => ({ workflow: { "1": { class_type: "CLIPTextEncode", inputs: { text: "" } } }, config }), getConfig: () => config } as never, executor as never);
     dispatcher.start({ ...input, model: "local::custom", nodeId: "output", count: 2, imageIds: ["a", "b"] });
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(pending.size, 2);
@@ -349,9 +367,10 @@ test("双图工作流拒绝循环图加两张固定参考，不能静默丢第�
     const { db, stores, input } = fixture(t);
     stores.settings.set("ai.config", { channels: [{ id: "local", kind: "comfyui", models: [{ name: "custom", workflows: ["two-images.json"], workflowRouting: { multi: "two-images.json" } }] }] });
     let executions = 0;
+    const config = { fields: [{ id: "prompt", node: "1", input: "text", type: "text", isPrompt: true }, { id: "first", node: "3", input: "image", type: "image" }, { id: "second", node: "4", input: "image", type: "image" }] };
     const dispatcher = new CanvasImageDispatcher({} as never, stores, {} as never, { supports: () => false } as never,
-        { get: async () => ({ workflow: { "3": { class_type: "LoadImage", inputs: {} }, "4": { class_type: "LoadImage", inputs: {} } },
-            config: { fields: [{ id: "first", node: "3", input: "image", type: "image" }, { id: "second", node: "4", input: "image", type: "image" }] } }) } as never,
+        { get: async () => ({ workflow: { "1": { class_type: "CLIPTextEncode", inputs: { text: "" } }, "3": { class_type: "LoadImage", inputs: {} }, "4": { class_type: "LoadImage", inputs: {} } },
+            config }), getConfig: () => config } as never,
         { run: () => { executions++; throw new Error("不应执行工作流"); } } as never);
     dispatcher.start({ ...input, model: "local::custom", references: [{ url: "http://unused.local/fixed-1.png" }, { url: "http://unused.local/fixed-2.png" }],
         loopInputImages: [{ url: "http://unused.local/round.png" }] });

@@ -52,6 +52,41 @@ function summarizeChildren(children: BackendRuntimeTask[]): string {
 
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
 
+// 可读名称映射：节点 ID → 节点标题；Clip ID → 所属节点内序号（Clip N）。
+// 数据来自项目节点 metadata.segments 的排列顺序，与 H3 工作台 Clip 卡顺序一致。
+type TaskLabelMaps = {
+    nodeTitles: Map<string, string>;
+    clipIndexes: Map<string, number>;
+};
+
+function buildLabelMaps(nodes: Array<Record<string, unknown>>): TaskLabelMaps {
+    const nodeTitles = new Map<string, string>();
+    const clipIndexes = new Map<string, number>();
+    for (const node of nodes) {
+        if (typeof node.id !== "string") continue;
+        const title = typeof node.title === "string" && node.title.trim() ? node.title.trim() : null;
+        if (title) nodeTitles.set(node.id, title);
+        const metadata = (node.metadata || {}) as { segments?: Array<{ id?: unknown }> };
+        const segments = Array.isArray(metadata.segments) ? metadata.segments : [];
+        segments.forEach((segment, index) => {
+            if (segment && typeof segment.id === "string") clipIndexes.set(segment.id, index + 1);
+        });
+    }
+    return { nodeTitles, clipIndexes };
+}
+
+function nodeLabel(task: { nodeId?: string | null }, labels: TaskLabelMaps): string {
+    if (!task.nodeId) return "-";
+    return labels.nodeTitles.get(task.nodeId) || task.nodeId;
+}
+
+function clipLabel(task: { nodeId?: string | null; segmentId?: string | null }, labels: TaskLabelMaps): string {
+    if (!task.segmentId) return "-";
+    const index = labels.clipIndexes.get(task.segmentId);
+    if (index) return `Clip ${index}`;
+    return task.segmentId;
+}
+
 function statusColor(status: BackendRuntimeTask["status"]) {
     if (status === "succeeded") return "green" as const;
     if (status === "failed") return "red" as const;
@@ -67,11 +102,19 @@ function progressStatus(status: BackendRuntimeTask["status"]) {
     return "active" as const;
 }
 
+// 模型标签只保留文件名，去掉 "H3\dir\..." 这类路径前缀
+function modelShortName(model?: string | null): string | undefined {
+    if (!model) return undefined;
+    const parts = model.split(/[\\/]/);
+    return parts[parts.length - 1] || model;
+}
+
 export function CanvasTaskCenter({ open, projectId, onClose }: { open: boolean; projectId: string; onClose: () => void }) {
     const [tasks, setTasks] = useState<BackendRuntimeTask[]>([]);
     const [status, setStatus] = useState<string>("");
     const [loading, setLoading] = useState(false);
     const [progressHistory, setProgressHistory] = useState<Record<string, number>>({});
+    const [labels, setLabels] = useState<TaskLabelMaps>({ nodeTitles: new Map(), clipIndexes: new Map() });
     // expanded 记录当前展开的父任务 id；userCollapsed 记录用户主动折叠的父任务 id，
     // 自动展开规则会跳过它们，避免用户折叠后被自动逻辑重新撑开
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -83,6 +126,10 @@ export function CanvasTaskCenter({ open, projectId, onClose }: { open: boolean; 
         try {
             const result = await fetchBackendTasks({ projectId, status: status || undefined, limit: 100, offset: 0 });
             setTasks(result.tasks || []);
+            try {
+                const project = await fetchBackendProject(projectId);
+                setLabels(buildLabelMaps(Array.isArray(project.project?.nodes) ? project.project.nodes as Array<Record<string, unknown>> : []));
+            } catch { /* 名称映射失败时回退显示原始 ID */ }
         } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
         finally { setLoading(false); }
     }, [open, projectId, status]);
@@ -192,7 +239,7 @@ export function CanvasTaskCenter({ open, projectId, onClose }: { open: boolean; 
                                     : <span className="inline-block w-5" />}
                                 <Tag color={statusColor(parent.status)}>{parent.status}</Tag>
                                 <Tag>{parent.kind || parent.executor || "task"}</Tag>
-                                {parent.model ? <Tag>{parent.model}</Tag> : null}
+                                {modelShortName(parent.model) ? <Tag title={parent.model}>{modelShortName(parent.model)}</Tag> : null}
                                 <span className="truncate text-xs text-stone-500">{parent.id}</span>
                             </div>
                             <div className="flex shrink-0 gap-1">
@@ -203,8 +250,8 @@ export function CanvasTaskCenter({ open, projectId, onClose }: { open: boolean; 
                         </div>
                         <Progress percent={Math.round(progress * 100)} size="small" status={progressStatus(parent.status)} />
                         <div className="flex flex-wrap gap-3 text-xs text-stone-500">
-                            <span>节点：{parent.nodeId || "-"}</span>
-                            <span>Clip：{parent.segmentId || "-"}</span>
+                            <span>节点：<span title={parent.nodeId || ""}>{nodeLabel(parent, labels)}</span></span>
+                            <span>Clip：<span title={parent.segmentId || ""}>{clipLabel(parent, labels)}</span></span>
                             <span>执行器：{parent.executor || "-"}</span>
                             {hasChildren ? <span className="font-medium text-stone-600 dark:text-stone-300">{summarizeChildren(children)}</span> : null}
                         </div>
@@ -224,7 +271,7 @@ export function CanvasTaskCenter({ open, projectId, onClose }: { open: boolean; 
                                     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                                         <Tag color={statusColor(child.status)}>{child.status}</Tag>
                                         <Tag>{child.kind || child.executor || "task"}</Tag>
-                                        {child.model ? <Tag>{child.model}</Tag> : null}
+                                        {modelShortName(child.model) ? <Tag title={child.model}>{modelShortName(child.model)}</Tag> : null}
                                         <span className="truncate text-xs text-stone-500">{child.id}</span>
                                     </div>
                                     <div className="flex shrink-0 gap-1">
@@ -234,8 +281,8 @@ export function CanvasTaskCenter({ open, projectId, onClose }: { open: boolean; 
                                 </div>
                                 <Progress percent={Math.round((child.progress || 0) * 100)} size="small" status={progressStatus(child.status)} />
                                 <div className="flex flex-wrap gap-3 text-xs text-stone-500">
-                                    <span>节点：{child.nodeId || "-"}</span>
-                                    <span>Clip：{child.segmentId || "-"}</span>
+                                    <span>节点：<span title={child.nodeId || ""}>{nodeLabel(child, labels)}</span></span>
+                                    <span>Clip：<span title={child.segmentId || ""}>{clipLabel(child, labels)}</span></span>
                                     <span>执行器：{child.executor || "-"}</span>
                                 </div>
                                 {child.error ? <div className="mt-1 break-words text-xs text-red-500">{child.error}</div> : null}

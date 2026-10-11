@@ -13,6 +13,7 @@ import { ClientRootInit } from "@/components/layout/client-root-init";
 import type { AppLocale } from "@/i18n";
 import { getAntThemeConfig } from "@/lib/app-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
+import { setApplicationTitle } from "@/lib/app-title";
 
 const queryClient = new QueryClient({
     defaultOptions: {
@@ -37,7 +38,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
 
     useEffect(() => {
         document.documentElement.lang = locale;
-        document.title = t("meta.title");
+        setApplicationTitle(t("meta.title"));
         document.querySelector('meta[name="description"]')?.setAttribute("content", t("meta.description"));
         dayjs.locale(locale === "zh-CN" ? "zh-cn" : "en");
     }, [locale, t]);

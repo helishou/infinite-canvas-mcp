@@ -14,7 +14,8 @@ export function CanvasProjectCard({ project }: { project: CanvasProject }) {
     const navigate = useNavigate();
     const [searchParams] = useSearchParams();
     const renameProject = useCanvasStore((state) => state.renameProject);
-    const folders = useCanvasStore((state) => state.folders);
+    const allFolders = useCanvasStore((state) => state.folders);
+    const folders = allFolders.filter((folder) => !folder.isDrama);
     const moveProjectsToFolder = useCanvasStore((state) => state.moveProjectsToFolder);
     const selectedIds = useCanvasUiStore((state) => state.selectedProjectIds);
     const editingId = useCanvasUiStore((state) => state.editingProjectId);

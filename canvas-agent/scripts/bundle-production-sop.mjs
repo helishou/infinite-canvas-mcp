@@ -16,3 +16,5 @@ const existingParent = fs.existsSync(path.dirname(target)) ? path.dirname(target
 if (!insidePackage(existingParent) || (fs.existsSync(target) && !insidePackage(target))) throw new Error("Bundled skill target escaped the package workspace");
 fs.rmSync(target, { recursive: true, force: true });
 fs.cpSync(source, target, { recursive: true, dereference: false });
+fs.mkdirSync(path.join(packageRoot, "dist", "skills"), { recursive: true });
+fs.copyFileSync(path.join(packageRoot, "src", "skills", "compile-preflight.py"), path.join(packageRoot, "dist", "skills", "compile-preflight.py"));

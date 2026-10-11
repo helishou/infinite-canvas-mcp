@@ -1,10 +1,11 @@
 import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Select, Tag, Tooltip, Typography } from "antd";
+import { App, Button, Checkbox, Drawer, Empty, Input, Modal, Select, Tag, Tooltip, Typography } from "antd";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
 import { ImageSettingsPanel } from "@/components/image-settings-panel";
+import { MediaImage } from "@/components/media/media-image";
 import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
@@ -139,6 +140,20 @@ export default function ImagePage() {
         if (!referencesHydrated) return;
         saveWorkbenchReferences(references);
     }, [references, referencesHydrated]);
+
+    // 支持在页面任意位置直接 Ctrl+V 粘贴截图为参考图；仅当剪切板带图片文件时接管事件，文本粘贴不受影响。
+    useEffect(() => {
+        const onPaste = (event: ClipboardEvent) => {
+            const files = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith("image/"));
+            if (!files.length) return;
+            event.preventDefault();
+            void addReferences(files);
+        };
+        window.addEventListener("paste", onPaste);
+        return () => window.removeEventListener("paste", onPaste);
+        // addReferences 只依赖 setReferences 等稳定引用，空依赖数组安全
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
     const [results, setResults] = useState<GenerationResult[]>([]);
     const [logs, setLogs] = useState<GenerationLog[]>([]);
     const [running, setRunning] = useState(false);
@@ -233,7 +248,7 @@ export default function ImagePage() {
         };
     }, [activeWorkflowName, config, model, references.length]);
 
-    const addReferences = async (files?: FileList | null) => {
+    const addReferences = async (files?: FileList | readonly File[] | null) => {
         const imageFiles = Array.from(files || []).filter((file) => file.type.startsWith("image/"));
         const nextReferences = await Promise.all(
             imageFiles.map(async (file) => {
@@ -803,7 +818,7 @@ function ResultImageCard({
     const { t } = useTranslation();
     return (
         <div className="overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800">
-            <Image src={image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl} alt={t("imageWorkbench.resultAlt", { count: index + 1 })} className="aspect-square object-cover" />
+            <MediaImage src={image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl} alt={t("imageWorkbench.resultAlt", { count: index + 1 })} className="aspect-square object-cover" />
             <div className="space-y-2 border-t border-stone-200 px-3 py-2.5 dark:border-stone-800">
                 <div className="flex min-w-0 gap-x-2 gap-y-1 text-xs text-stone-500 dark:text-stone-400">
                     <span>

@@ -2,7 +2,7 @@ import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { characterImageKey, type CharacterImageSelection } from "@basketikun/canvas-agent/reference-contract";
 import { shallow } from "zustand/vanilla/shallow";
 import i18n from "@/i18n";
-import { getNodeDefinition } from "@/lib/canvas/node-registry";
+import { getNodeDefinition, useNodeRegistryVersion } from "@/lib/canvas/node-registry";
 import { canvasNodeImage } from "@/lib/canvas/canvas-image-renderability";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { imageToDataUrl } from "@/services/image-storage";
@@ -100,15 +100,45 @@ export function getMentionResourceNodes(nodeId: string, nodes: CanvasNodeData[],
 
 /** 相同资源内容保留数组引用，让未受影响节点的 React.memo 生效。 */
 export function createMentionReferenceSelector() {
-    let previous = new Map<string, CanvasResourceReference[]>();
+    type MapName = "nodeById" | "incomingByNodeId" | "outgoingByNodeId" | "groupChildrenById";
+    type Dependency = { map: MapName; id: string; value: unknown };
+    type Entry = { references: CanvasResourceReference[]; dependencies: Dependency[]; language: string; registry: number };
+    let previous = new Map<string, Entry>();
     return (visibleNodes: CanvasNodeData[], nodes: CanvasNodeData[], connections: CanvasConnection[], index: CanvasGraphIndex) => {
         const next = new Map<string, CanvasResourceReference[]>();
+        const entries = new Map<string, Entry>();
+        const language = i18n.resolvedLanguage || i18n.language;
+        const registry = useNodeRegistryVersion.getState().version;
         for (const node of visibleNodes) {
-            const references = buildNodeMentionReferences(node, nodes, connections, index);
             const cached = previous.get(node.id);
-            next.set(node.id, cached && cached.length === references.length && cached.every((item, i) => shallow(item, references[i])) ? cached : references);
+            if (cached && cached.language === language && cached.registry === registry && cached.dependencies.every((dep) => index[dep.map].get(dep.id) === dep.value)) {
+                next.set(node.id, cached.references);
+                entries.set(node.id, cached);
+                continue;
+            }
+            const dependencies: Dependency[] = [];
+            // Record the resolver's real reads, including absent slots and nested loop/group inputs.
+            // Unrelated geometry or nodes cannot invalidate these dependencies.
+            const track = <K extends MapName>(name: K): CanvasGraphIndex[K] => {
+                const source = index[name];
+                const get = (id: string) => {
+                    const value = source.get(id);
+                    dependencies.push({ map: name, id, value });
+                    return value;
+                };
+                return new Proxy(source, { get: (target, key) => {
+                    if (key === "get") return get;
+                    const value = Reflect.get(target, key, target);
+                    return typeof value === "function" ? value.bind(target) : value;
+                } });
+            };
+            const tracked = { ...index, nodeById: track("nodeById"), incomingByNodeId: track("incomingByNodeId"), outgoingByNodeId: track("outgoingByNodeId"), groupChildrenById: track("groupChildrenById") };
+            const computed = buildNodeMentionReferences(node, nodes, connections, tracked);
+            const references = cached && cached.references.length === computed.length && cached.references.every((item, i) => shallow(item, computed[i])) ? cached.references : computed;
+            next.set(node.id, references);
+            entries.set(node.id, { references, dependencies, language, registry });
         }
-        previous = next;
+        previous = entries;
         return next;
     };
 }
@@ -186,18 +216,19 @@ function expandGroupResourceNodes(inputNodes: CanvasNodeData[], nodes: CanvasNod
 }
 
 export function getGroupResourceNodes(groupId: string, nodes: CanvasNodeData[], index?: CanvasGraphIndex) {
-    const group = index?.nodeById.get(groupId) || nodes.find((node) => node.id === groupId);
+    const group = index ? index.nodeById.get(groupId) : nodes.find((node) => node.id === groupId);
     if (group?.metadata?.orderedGroup) {
         const byId = index?.nodeById || new Map(nodes.map((node) => [node.id, node]));
-        return orderedGroupSlots(group, nodes).map((id) => byId.get(id)).filter((node): node is CanvasNodeData => Boolean(node && isResourceNode(node)));
+        return orderedGroupSlots(group, nodes, index).map((id) => byId.get(id)).filter((node): node is CanvasNodeData => Boolean(node && isResourceNode(node)));
     }
-    return (index?.groupChildrenById.get(groupId) || nodes.filter((node) => node.metadata?.groupId === groupId)).filter(isResourceNode);
+    return (index ? index.groupChildrenById.get(groupId) || [] : nodes.filter((node) => node.metadata?.groupId === groupId)).filter(isResourceNode);
 }
 
 function labelResourceNodes(nodes: CanvasNodeData[], active: boolean) {
     const counts: Record<CanvasResourceKind, number> = { image: 0, video: 0, audio: 0, text: 0 };
     return nodes.flatMap((node): CanvasResourceReference[] => {
-        return nodeResourceItems(node).map((resource, resourceIndex) => {
+        const resources = nodeResourceItems(node);
+        return resources.map((resource, resourceIndex) => {
             const index = counts[resource.kind]++;
             const label = labelForKind(resource.kind, index);
             return {
@@ -205,7 +236,7 @@ function labelResourceNodes(nodes: CanvasNodeData[], active: boolean) {
                 nodeId: node.id,
                 kind: resource.kind,
                 label,
-                title: nodeResourceTitle(node, resource, resourceIndex, label),
+                title: nodeResourceTitle(node, resource, resourceIndex, label, resources.length),
                 previewUrl: resource.url,
                 storageKey: resource.storageKey,
                 text: resource.text,
@@ -268,9 +299,9 @@ export function nodeResourceItems(node: CanvasNodeData): CanvasNodeResource[] {
     return Array.isArray(resource) ? resource : resource ? [resource] : [];
 }
 
-function nodeResourceTitle(node: CanvasNodeData, resource: CanvasNodeResource, index: number, fallback: string) {
+function nodeResourceTitle(node: CanvasNodeData, resource: CanvasNodeResource, index: number, fallback: string, resourceCount: number) {
     if (resource.text && node.type === CanvasNodeType.Text) return node.title || fallback;
-    return nodeResourceItems(node).length > 1 ? `${node.title || "输出"} · Clip ${index + 1}` : node.title || fallback;
+    return resourceCount > 1 ? `${node.title || "输出"} · Clip ${index + 1}` : node.title || fallback;
 }
 
 function labelForKind(kind: CanvasResourceKind, index: number) {

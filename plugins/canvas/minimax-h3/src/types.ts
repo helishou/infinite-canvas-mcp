@@ -44,7 +44,7 @@ export type H3CharacterGroupEditPatch = {
     voiceEnabled?: boolean;
 };
 
-export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; generationLogId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; storyboardSubjectIds?: string[]; order?: number; groupId?: string; outfitId?: string; bindingId?: string; assetId?: string; tags?: string[]; description?: string; enabled?: boolean; usage?: H3ReferenceUsage; retentionLevel?: H3ReferenceRetention; analysis?: Record<string, unknown>; runtime?: boolean };
+export type H3Ref = { url: string; type: "image" | "video" | "audio"; name: string; storageKey?: string; mimeType?: string; slot?: number; segmentId?: string; generationLogId?: string; taskId?: string; params?: Record<string, unknown>; nodeId?: string; role?: H3ReferenceRole; subjectId?: string; storyboardSubjectIds?: string[]; order?: number; groupId?: string; outfitId?: string; bindingId?: string; assetId?: string; tags?: string[]; description?: string; enabled?: boolean; usage?: H3ReferenceUsage; retentionLevel?: H3ReferenceRetention; analysis?: Record<string, unknown>; runtime?: boolean };
 export type H3StoryboardShot = { id: string; duration?: number; referenceBindingId?: string };
 
 /**
@@ -59,7 +59,16 @@ export type H3TaskState = { id?: string; status: H3TaskStatus; progress: number;
 export type H3Pane = "library" | "preview" | "video" | "refs";
 
 export type H3Segment = {
+    /** Backend 的正式编译基线；自动修复不能改写它投影的正文和参考。 */
+    productionClipProjection?: Record<string, unknown>;
+    h3ParameterPolicy?: "defaults" | "overrides";
+    h3ParameterOverrides?: string[];
+    inputOutdated?: boolean;
+    selectedVideoModelEnabled?: boolean;
+    selectedVideoModel?: string;
+    selectedVideoModelFieldValues?: Record<string, Record<string, unknown>>;
     id: string;
+    minimaxEngine?: "auto" | "local" | "runninghub";
     start?: number;
     prompt?: string;
     duration?: number;
@@ -287,9 +296,9 @@ export type H3Segment = {
     motionContextEnabled?: boolean;
     // 上一段成品视频作为「参考视频」喂进本段：必须显式开启，默认关闭。
     // 只有链式续跑（runFromCurrent）时生效；标在本段上（index > 0 才有意义）。
-    // 注意：唯一有效键名是 previousVideoAsReference，不要再引入别名。
+    // 仅保留历史记录兼容；新配置和执行器不再消费该字段。
     previousVideoAsReference?: boolean;
-    // 尾帧参考：下一段运行时追加本段尾帧，参考动作、场景与连续性；独立于潜空间续写。
+    // 尾帧参考：下一段运行时追加本段尾帧，参考动作、场景与连续性；设置开关时与潜空间续写互斥。
     // （仅运行时拼接，不写回 prompt 编辑区）。该开关标在本段上，表示「把我的尾帧传给下一段」。
     // 注意：唯一有效键名是 tailFrameContinuation；不要再引入 tailFrameEnabled 之类的别名。
     tailFrameContinuation?: boolean;

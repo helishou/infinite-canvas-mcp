@@ -1,0 +1,46 @@
+type Row = Record<string, any>;
+type Workspace = "story" | "assets" | "shots" | "continuity" | "production" | "advanced";
+type Target = { kind: "asset" | "keyframe" | "segment"; targetId: string; status: string; blockers: string[] };
+const rows = (value: unknown): Row[] => Array.isArray(value) ? value : [];
+
+/** Source module notes describe past director work; only current target checks are blockers. */
+export function manualWorkspaceProgress(workspace: Workspace, source: Row, targets: Target[], continuityStatus?: string) {
+    const scoped = targets.filter(target => workspace === "assets" ? target.kind === "asset" : workspace === "production" ? target.kind === "segment" : workspace === "shots" ? target.kind === "keyframe" : false);
+    const blocked = scoped.filter(target => target.status === "blocked" && target.blockers.length);
+    if (workspace === "story") {
+        const scripts = rows(source.script_scenes).filter(scene => String(scene.text || "").trim());
+        return { status: scripts.length ? "saved" : "waiting", summaryKey: scripts.length ? "storySaved" : "storyEmpty", values: { count: scripts.length }, actionKey: "editScript" };
+    }
+    if (workspace === "assets") {
+        const count = rows(source.subject_registry).length || rows(source.character_registry).length + rows(source.scene_registry).length + rows(source.asset_plan).filter(asset => String(asset.kind) === "prop").length;
+        return { status: blocked.length ? "blocked" : count ? "saved" : "waiting", summaryKey: blocked.length ? "targetsBlocked" : count ? "assetsSaved" : "assetsEmpty", values: { count: blocked.length || count }, actionKey: "editAssets" };
+    }
+    if (workspace === "shots") {
+        const count = rows(source.shots).length;
+        return { status: blocked.length ? "blocked" : count ? "saved" : "waiting", summaryKey: blocked.length ? "targetsBlocked" : count ? "shotsSaved" : "shotsEmpty", values: { count: blocked.length || count, clips: rows(source.segments).length }, actionKey: "editShots" };
+    }
+    if (workspace === "continuity") {
+        const blocking = targets.some(target => target.blockers.some(reason => /CONTINUITY_|连续性/.test(reason)));
+        return { status: blocking ? "blocked" : continuityStatus === "passed" ? "done" : "optional", summaryKey: blocking ? "continuityBlocked" : continuityStatus === "passed" ? "continuityPassed" : "continuityOptional", values: {}, actionKey: "checkContinuity" };
+    }
+    const count = scoped.length, complete = scoped.filter(target => target.status === "complete").length;
+    return { status: blocked.length ? "blocked" : count && complete === count ? "done" : count ? "working" : "waiting", summaryKey: blocked.length ? "productionBlocked" : count ? "productionProgress" : "productionEmpty", values: { count, blocked: blocked.length, complete }, actionKey: "editProduction" };
+}
+
+export function manualTargetRecovery(target: Target, source: Row) {
+    const workspace: Workspace = target.kind === "asset" ? "assets" : target.kind === "keyframe" ? "shots" : "production";
+    const kind = target.kind === "keyframe" ? "shot" : target.kind;
+    const reason = target.blockers[0] || "";
+    const segment = rows(source.segments).find(segment => String(segment.id) === target.targetId);
+    const shotId = Array.isArray(segment?.shot_ids) ? segment.shot_ids[0] : undefined;
+    if (/提示词为空|prompt.*empty/i.test(reason) && target.kind === "segment" && shotId) return { workspace: "shots" as Workspace, kind: "shot", id: String(shotId), messageKey: "promptMissing", actionKey: "completeShot" };
+    if (/模型|渠道|model|provider/i.test(reason)) return { workspace: "advanced" as Workspace, kind, id: target.targetId, messageKey: "modelMissing", actionKey: "chooseModel" };
+    if (reason && /图片|参考|素材|归档|文件|REFERENCE_|SUBJECT_IMAGE/.test(reason)) return { workspace: target.kind === "asset" ? "assets" as Workspace : "shots" as Workspace, kind: shotId ? "shot" : kind, id: shotId ? String(shotId) : target.targetId, messageKey: "referenceMissing", actionKey: "chooseReference" };
+    if (reason && /帧窗|秒数|时长|相邻|跨越|连续边界/.test(reason)) return { workspace: "shots" as Workspace, kind: shotId ? "shot" : kind, id: shotId ? String(shotId) : target.targetId, messageKey: "timingInvalid", actionKey: "editShots" };
+    return { workspace, kind, id: target.targetId, messageKey: target.status === "blocked" ? "targetBlocked" : target.status === "needs_review" ? "reviewTarget" : "openTarget", actionKey: target.status === "needs_review" ? "reviewMedia" : "openTargetEditor" };
+}
+
+export function canBindSubjectImage(choice: { projectId: string; nodeId: string } | undefined, canvasId: string, nodes: Row[], bindings: Row[]) {
+    return Boolean(choice && (choice.projectId !== canvasId || nodes.some(node => node.id === choice.nodeId && (["image", "character", "scene", "prop"].includes(String(node.type)) || node.type === "config" && node.metadata?.smart === true && (node.metadata.generationMode || "image") === "image")))
+        && !bindings.some(binding => binding.sourceNode?.projectId === choice.projectId && binding.sourceNode?.nodeId === choice.nodeId));
+}

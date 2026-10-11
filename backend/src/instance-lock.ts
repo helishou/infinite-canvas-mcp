@@ -14,6 +14,51 @@ function processExists(pid: number) {
     }
 }
 
+/**
+ * 校验「活着的」锁持有者 PID 是否真的是本项目的 backend 进程。
+ *
+ * 仅用 process.kill(pid, 0) 判活有 Windows PID 复用漏洞：旧 backend 退出后，
+ * 系统可能把同一个 PID 分配给一个毫不相干的进程（chrome / vite / 别的 node），
+ * 于是死锁被误判成「另一个实例在跑」→ 热重启直接抛「Backend 已在运行」。
+ *
+ * 修法：活 PID 再额外比对它的命令行，确认确实是 backend 入口（node/tsx 跑
+ * backend 的 src|dist/index.ts|js）。不是的话一律当作死进程，让新实例安全接管锁。
+ */
+const backendProcCache = new Map<number, boolean>();
+const BACKEND_CMD = /(?:^|[\s"'])(?:node(?:\.exe)?|tsx(?:\.exe|\.cmd)?)(?:[\s"']|$)/i;
+const BACKEND_ENTRY = /(?:backend[\\/](?:src|dist)[\\/]index\.(?:ts|js))|(?:\bsrc[\\/]index\.(?:ts|js))|(?:\bdist[\\/]index\.(?:ts|js))/i;
+
+function readProcessCommandLine(pid: number): string | null {
+    if (process.platform === "win32") {
+        try {
+            const out = execFileSync("powershell.exe", [
+                "-NoProfile", "-NonInteractive", "-Command",
+                `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
+            ], { encoding: "utf8", timeout: 1500, windowsHide: true });
+            return out.trim() || null;
+        } catch { return null; }
+    }
+    try {
+        const raw = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+        return raw.replace(/\0/g, " ").trim() || null;
+    } catch { return null; }
+}
+
+function isBackendProcess(pid: number) {
+    const cached = backendProcCache.get(pid);
+    if (cached !== undefined) return cached;
+    const cmd = readProcessCommandLine(pid);
+    // 查不到命令行就保守当成「不是 backend」，让既有多实例保护继续生效（不自动接管）。
+    const verdict = cmd ? (BACKEND_CMD.test(cmd) && BACKEND_ENTRY.test(cmd)) : false;
+    backendProcCache.set(pid, verdict);
+    return verdict;
+}
+
+/** 锁持有者「确实活着且确为 backend」时才算占用 —— 否则视为死锁可接管。 */
+function lockHolderAlive(pid: number) {
+    return processExists(pid) && isBackendProcess(pid);
+}
+
 function sleepMs(ms: number) {
     // 异步睡眠：拿锁等待期间事件循环必须保持可响应，
     // 用同步的 Atomics.wait 会把整个后端冻住 8 秒（tsx watch 重启时的竞态窗口）。
@@ -69,7 +114,7 @@ async function waitForLockRelease(lockPath: string, timeoutMs: number) {
     while (Date.now() < deadline) {
         let current: Partial<LockRecord> = {};
         try { current = JSON.parse(fs.readFileSync(lockPath, "utf8")) as Partial<LockRecord>; } catch { return true; /* 锁没了，可以拿 */ }
-        if (!processExists(Number(current.pid))) return true;
+        if (!lockHolderAlive(Number(current.pid))) return true;
         await sleepMs(150);
     }
     return false;
@@ -92,7 +137,7 @@ export async function acquireBackendInstanceLock(dataDir: string) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         let existing: Partial<LockRecord> = {};
         try { existing = JSON.parse(fs.readFileSync(lockPath, "utf8")) as Partial<LockRecord>; } catch { /* stale or partial lock */ }
-        if (processExists(Number(existing.pid))) {
+        if (lockHolderAlive(Number(existing.pid))) {
             // tsx watch 重启：父进程 tsx 一直活着，真正的占位者是那个正在退出的旧子进程。
             // 这时要等它交锁，而不是当成「另一个实例在跑」直接退出 —— 否则 watch 的新进程
             // 一启动就崩，表现为「改代码没反应」。

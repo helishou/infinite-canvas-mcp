@@ -14,12 +14,24 @@ function fixture() {
         })) },
     }] };
     const calls: any[] = [];
+    const commands = new Map<string, any>();
     let reads = 0;
     let beforeCommit: (() => void) | undefined;
     const context: any = {
         getCanvasProject: async () => { reads++; return structuredClone(project); },
         backend: {
-            applyCanvasOperations: async (id: string, operations: any[], revision: number, _operationId?: string, strictRevision?: boolean) => {
+            checkMcpCommandReceipt: async (operationId: string, identity: any) => {
+                const command = commands.get(operationId);
+                if (command && JSON.stringify(command.request) !== JSON.stringify(identity.request)) throw Object.assign(new Error("operationId 已用于不同请求"), { code: "OPERATION_ID_REUSED" });
+                return { ok: true, command: command ? structuredClone(command) : null };
+            },
+            prepareMcpCommand: async (input: any) => {
+                const command = { operationId: input.operationId, tool: input.tool, targetId: input.targetId, status: "prepared", payload: structuredClone(input.payload), receipt: structuredClone(input.receipt), request: structuredClone(input.request) };
+                commands.set(input.operationId, command);
+                return structuredClone(command);
+            },
+            getMcpCommandReceipt: async (operationId: string) => ({ ok: true, command: structuredClone(commands.get(operationId) || null) }),
+            applyCanvasOperations: async (id: string, operations: any[], revision: number, _operationId?: string, strictRevision?: boolean, mcpCommand?: any) => {
                 calls.push({ id, operations: structuredClone(operations), revision, strictRevision });
                 beforeCommit?.();
                 assert.equal(strictRevision, true, "batch must demand strict revision at the real writer");
@@ -35,6 +47,12 @@ function fixture() {
                 }
                 next.revision++;
                 Object.assign(project, next);
+                if (mcpCommand) {
+                    const command = commands.get(_operationId);
+                    command.status = "committed";
+                    command.committedRevision = project.revision;
+                    command.receipt = { ...command.receipt, ok: true, committed: true, operationId: _operationId, revision: project.revision, changesHash: "fixture-hash", replayed: false };
+                }
                 return { project: structuredClone(project), revision: project.revision, operationResults: [] };
             },
         },
@@ -42,7 +60,7 @@ function fixture() {
     const handler: any = pluginMcp.createHandler(context).h3_update_clips;
     assert.equal(typeof handler, "function", "native h3_update_clips handler must exist");
     const run = async (updates: unknown, extra: Record<string, unknown> = {}) => {
-        return handler({ projectId: project.id, nodeId: "h3-batch", updates, ...extra }, context);
+        return handler({ projectId: project.id, nodeId: "h3-batch", updates, expectedRevision: project.revision, operationId: "batch-operation", ...extra }, context);
     };
     return { project, calls, run, reads: () => reads, race: (fn: () => void) => { beforeCommit = fn; } };
 }
@@ -57,24 +75,27 @@ test("native batch declaration is shared by server and manifest", () => {
     assert.deepEqual(server.inputJsonSchema, client.inputJsonSchema);
 });
 
-test("six updates use one read, one atomic writer and ordered compact actual values", async () => {
+test("six updates use one read, one atomic writer and a compact replayable receipt", async () => {
     const f = fixture();
     const untouched = structuredClone(f.project.nodes[0].metadata.segments[6]);
-    const result = await f.run(updates(), { expectedRevision: 9 });
+    const result = await f.run(updates(), { expectedRevision: 9, operationId: "replayable-batch" });
     assert.equal(f.reads(), 1);
     assert.equal(f.calls.length, 1);
     assert.equal(f.calls[0].operations.filter((op: any) => op.type === "update_h3_segment").length, 6);
     assert.equal(f.project.revision, 10);
     assert.equal(result.count, 6);
     assert.equal(result.atomic, true);
-    assert.deepEqual(result.items.map((item: any) => item.segmentId), ["s1", "s2", "s3", "s4", "s5", "s6"]);
-    for (const item of result.items) {
-        assert.equal(item.values.duration, 7);
-        assert.match(item.values.title, /^new-/);
-    }
+    assert.deepEqual(result.segmentIds, ["s1", "s2", "s3", "s4", "s5", "s6"]);
+    assert.deepEqual(result.updatedFields, ["title", "duration"]);
+    for (const item of result.items) { assert.equal(item.values.duration, 7); assert.match(item.values.title, /^new-/); }
+    assert.match(result.changesHash, /^fixture-hash$/);
     assert.deepEqual(f.project.nodes[0].metadata.segments[6], untouched);
     assert.equal("project" in result, false);
     assert.equal("metadata" in result, false);
+    const replay = await f.run(updates(), { expectedRevision: 9, operationId: "replayable-batch" });
+    assert.equal(replay.replayed, true);
+    assert.equal(f.reads(), 1);
+    assert.equal(f.calls.length, 1);
 });
 
 test("late invalid prompt rejects every update before the writer", async () => {

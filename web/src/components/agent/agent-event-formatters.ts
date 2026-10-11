@@ -1,3 +1,4 @@
+import { parseToolResult, toolResultFailure, generationTaskCounts, compilationToolView, describeCompilation, compilationDetailRows } from "@basketikun/canvas-agent/agent/tool-result";
 import { isSiteTool, SITE_TOOL_LABELS } from "@/lib/agent/agent-site-tools";
 import i18n from "@/i18n";
 import { summarizeCanvasAgentOps, type CanvasAgentOp } from "@/lib/canvas/canvas-agent-ops";
@@ -27,6 +28,7 @@ export type AgentEventPayload = {
     duration_ms?: number;
 };
 export type AgentEventItem = {
+    model?: string;
     id?: string;
     type?: string;
     text?: unknown;
@@ -53,7 +55,7 @@ export type AgentEventItem = {
     savedPath?: unknown;
     revisedPrompt?: unknown;
 };
-export type AgentUserDetail = { kind: string; status: string; rows?: Array<{ label: string; value: string }>; output?: string; files?: Array<{ path: string; action?: string }>; tasks?: Array<{ step: string; status: string }>; explanation?: string };
+export type AgentUserDetail = { kind: string; status: string; compilationStatus?: string; rows?: Array<{ label: string; value: string }>; output?: string; files?: Array<{ path: string; action?: string }>; tasks?: Array<{ step: string; status: string }>; explanation?: string };
 
 export type AgentLogContext = { endpoint: string; connected: boolean; enabled: boolean; activity: string; waiting: boolean; sending: boolean; messages: number; pendingTool?: string };
 
@@ -107,7 +109,8 @@ export function formatAgentActivity(event: AgentEventPayload): Omit<AgentChatIte
     if (item.type === "context_compaction") return { role: "tool", title: tr("compactContext"), text: item.error?.message || tr(completed ? "contextCompacted" : "compactingContext"), detail: { kind: "context", status: itemStatus, ...(item.error?.message ? { output: item.error.message } : {}) } };
     if (isMcpToolItem(item)) {
         const name = String(item.tool || "");
-        return { role: "tool", title: toolName(name), text: completed ? item.error?.message || toolSummary(item) : tr("toolRunning", { action: toolAction(name) }), detail: toolDetail(item, itemStatus) };
+        const failure = toolResultFailure(item);
+        return { role: "tool", title: compilationToolView(item) ? tr(compilationToolView(item)!.titleKey) : toolName(name), text: completed ? toolSummary(item) : tr("toolRunning", { action: toolAction(name) }), detail: toolDetail(item, failure.failed ? "failed" : itemStatus) };
     }
     if (item.type === "dynamic_tool_call") {
         const name = String(item.tool || "");
@@ -328,6 +331,8 @@ export function toolName(name: string) {
 }
 
 const toolTranslationKeys: Record<string, string> = {
+    director_subagent: "subagentTasks",
+    production_preflight: "productionPreflight", production_get: "productionRead", production_get_source: "productionRead", production_get_version_source: "productionVersion", production_get_artifact_index: "productionRead", production_get_version_artifact_index: "productionVersion", production_get_artifact: "productionRead", production_get_version_artifact: "productionVersion", production_get_workbench: "productionRead", production_get_readiness: "productionReadiness", production_start_run: "productionStart", production_get_batch: "productionBatch", production_pause_run: "productionPause", production_resume_run: "productionResume", production_list_versions: "productionVersions", production_get_version: "productionVersion", production_list_legacy: "productionLegacy", production_preview_impact: "productionImpact", production_edit: "productionEdit", production_publish: "productionPublish", production_restore: "productionRestore", production_sync_clips: "productionSync", production_get_run: "productionRun", production_export_markdown: "productionExport",
     canvas_apply_ops: "canvasOps", canvas_get_state: "readCanvas", canvas_get_selection: "readSelection", canvas_export_snapshot: "exportSnapshot", canvas_create_node: "createNode", canvas_create_attachment_nodes: "addAttachments", canvas_create_text_node: "createText", canvas_create_text_nodes: "createTexts", canvas_create_config_node: "createConfig", canvas_create_image_prompt_flow: "createImageFlow", canvas_create_generation_flow: "createGenerationFlow", canvas_generate_text: "generateText", canvas_generate_image: "generateImage", canvas_generate_video: "generateVideo", canvas_generate_audio: "generateAudio", canvas_update_node: "updateNode", canvas_update_node_text: "updateText", canvas_move_nodes: "moveNodes", canvas_resize_node: "resizeNode", canvas_delete_nodes: "deleteNodes", canvas_connect_nodes: "connectNodes", canvas_set_generation_references: "setGenerationReferences", canvas_select_nodes: "selectNodes", canvas_run_generation: "runGeneration", site_navigate: "openPage",
 };
 
@@ -339,8 +344,8 @@ function siteToolSummary(name: string, result: unknown, input: unknown) {
     if (name === "assets_list") return tr("assetCount", { count: numberField(data, "total") });
     if (name === "assets_add") return tr("assetAdded");
     if (name === "generation_get_status") {
-        const summary = data.summary && typeof data.summary === "object" ? (data.summary as Record<string, unknown>) : {};
-        return tr("generationStatus", { total: numberField(data, "total"), queued: numberField(summary, "queued"), running: numberField(summary, "running"), succeeded: numberField(summary, "succeeded"), failed: numberField(summary, "failed") });
+        const counts = generationTaskCounts(data);
+        return counts ? tr("generationStatus", counts) : tr("generationStatusUnavailable");
     }
     if (name === "workbench_image_generate" || name === "workbench_video_generate") return typeof data.note === "string" ? data.note : tr("workbenchExecuted");
     if (name === "workbench_image_get_config" || name === "workbench_video_get_config") return tr("workbenchConfigRead");
@@ -353,7 +358,10 @@ function isMcpToolItem(item?: AgentEventItem): item is AgentEventItem & { type: 
 
 export function toolDetail(item: AgentEventItem | undefined, status: string): AgentUserDetail {
     const name = String(item?.tool || "");
-    return { kind: "tool", status, rows: toolInputRows(name, item?.arguments), ...(item?.error?.message ? { output: item.error.message } : {}) };
+    const failure = toolResultFailure(item);
+    const compilation = compilationToolView(item);
+    if (compilation) return { kind: "tool", status, compilationStatus: compilation.status, rows: compilationDetailRows(compilation).map(row => ({ label: tr(row.key), value: row.value })), output: describeCompilation(compilation, tr) };
+    return { kind: "tool", status, rows: toolInputRows(name, item?.arguments), ...(failure.failed ? { output: toolFailureText(item) } : {}) };
 }
 
 export function toolCallDetail(name: string, input: unknown, status: string, error = ""): AgentUserDetail {
@@ -370,7 +378,15 @@ function toolInputRows(name: string, input: unknown) {
     return [];
 }
 
+function toolFailureText(item?: AgentEventItem) {
+    const failure = toolResultFailure(item);
+    return [failure.message || tr("toolResultFailed"), failure.connection ? tr("toolConnectionRecovery") : ""].filter(Boolean).join("\n");
+}
+
 export function toolSummary(item?: AgentEventItem) {
+    if (toolResultFailure(item).failed) return toolFailureText(item);
+    const compilation = compilationToolView(item);
+    if (compilation) return describeCompilation(compilation, tr);
     const result = parseToolResult(item?.result);
     const name = String(item?.tool || "");
     if (name === "site_navigate" || isSiteTool(name)) return siteToolSummary(name, result, parseToolArguments(item?.arguments));
@@ -457,21 +473,6 @@ export function latestPlanMessage(messages: AgentChatItem[]) {
 
 export function isPlanMessage(message: AgentChatItem) {
     return message.role === "tool" && objectField(message.detail, "kind") === "todo";
-}
-
-function parseToolResult(result: unknown) {
-    const content = objectField(result, "content");
-    const text = Array.isArray(content)
-        ? content
-              .map((item) => objectField(item, "text"))
-              .filter((item): item is string => typeof item === "string")
-              .join("\n")
-        : "";
-    try {
-        return text ? JSON.parse(text) : result;
-    } catch {
-        return text || result;
-    }
 }
 
 export function normalizeText(value: unknown) {

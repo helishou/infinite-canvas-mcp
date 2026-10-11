@@ -16,6 +16,23 @@ function fixture(t: TestContext) {
     return db;
 }
 
+test("versioned text and title replacement commits together and rolls back on concurrent text changes", t => {
+    const db = fixture(t), target = { nodeId: "text", field: "content" as const };
+    const before = db.getCanvasText("canvas", target);
+    const operations = [{ type: "update_node", id: "text", patch: { title: "新标题" } },
+        { type: "text_replace", target, documentId: before.documentId, expectedText: before.text, text: "中文正文\n第二行😀" }];
+    db.applyCanvasProjectOperations("canvas", undefined, operations, { operationId: "text-title-original" });
+    assert.equal(db.getCanvasText("canvas", target).text, "中文正文\n第二行😀");
+    assert.equal((db.getCanvasProject("canvas")!.nodes as any[]).find(node => node.id === "text").title, "新标题");
+    assert.equal(db.applyCanvasProjectOperations("canvas", undefined, operations, { operationId: "text-title-original" }).duplicated, true);
+    const current = db.getCanvasText("canvas", target);
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "text_replace", target, documentId: current.documentId, expectedText: current.text, text: "协作者新内容" }]);
+    const changed = db.getCanvasProject("canvas");
+    assert.throws(() => db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "text", patch: { title: "不得留下" } },
+        { type: "text_replace", target, documentId: current.documentId, expectedText: current.text, text: "旧基线覆盖" }], { operationId: "text-title-conflict" }), { code: "TEXT_CONFLICT" });
+    assert.deepEqual(db.getCanvasProject("canvas"), changed);
+});
+
 test("角色主图变更原子更新下游引用，回执/广播/历史重放一致，失败不留下半次更新", (t) => {
     const db = fixture(t);
     db.applyCanvasProjectOperations("canvas", undefined, [
@@ -234,6 +251,8 @@ test("两名编辑者从相同基线插入中文，两个 Yjs 增量都保留", 
 
 test("指纹与属性枚举顺序无关；字段路径以稳定实体 ID 隔离", () => {
     assert.equal(commandFingerprint({ b: 2, a: 1 }), commandFingerprint({ a: 1, b: 2 }));
+    assert.equal(commandFingerprint(undefined), commandFingerprint(undefined));
+    assert.notEqual(commandFingerprint(undefined), commandFingerprint(null));
     assert.deepEqual(concurrentCommandConflicts(
         [{ type: "update_h3_segment", nodeId: "h3", segmentId: "s1", patch: { prompt: "甲" } }],
         [{ type: "update_h3_segment", nodeId: "h3", segmentId: "s2", patch: { prompt: "乙" } }],
@@ -312,4 +331,19 @@ test("智能文字配置节点可编辑生成结果，且不改输入提示词",
 
     db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "image-config", nodeType: "config", metadata: { smart: true, generationMode: "image", content: "非文字结果" } }]);
     assert.throws(() => db.getCanvasText("canvas", { nodeId: "image-config", field: "content" }), /不是可协作文本/);
+});
+
+test("SVG 扩展节点源码使用协作文本，图片节点仍拒绝正文编辑", (t) => {
+    const db = fixture(t);
+    const source = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"/>';
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "vector", nodeType: "svg:vector", metadata: { content: source } }]);
+    const target = { nodeId: "vector", field: "content" as const };
+    const initial = db.getCanvasText("canvas", target);
+    assert.equal(initial.text, source);
+    const updated = source.replace("10 10", "20 20");
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "text_replace", target, documentId: initial.documentId, expectedText: source, text: updated }]);
+    assert.equal(db.getCanvasText("canvas", target).text, updated);
+    assert.equal((db.getCanvasProject("canvas")!.nodes as Array<{ id: string; metadata: { content: string } }>).find((node) => node.id === "vector")?.metadata.content, updated);
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "bitmap", nodeType: "image", metadata: { content: "/media/image" } }]);
+    assert.throws(() => db.getCanvasText("canvas", { nodeId: "bitmap", field: "content" }), /不是可协作文本/);
 });

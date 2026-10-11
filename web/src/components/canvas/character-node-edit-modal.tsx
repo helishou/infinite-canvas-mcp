@@ -141,7 +141,7 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
 
     const handleSave = () => {
         if (uploadingVoice) return;
-        if (!images.length && !hasCharacterVoiceSource({ url: voiceUrl, storageKey: voiceStorageKey, assetId: voiceAssetId })) {
+        if (!node?.metadata?.productionEntity && !images.length && !hasCharacterVoiceSource({ url: voiceUrl, storageKey: voiceStorageKey, assetId: voiceAssetId })) {
             message.error(t("assets.characterRequireReference"));
             return;
         }

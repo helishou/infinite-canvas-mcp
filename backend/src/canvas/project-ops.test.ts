@@ -3,6 +3,17 @@ import test from "node:test";
 
 import { applyCanvasProjectOperations } from "./project-ops.js";
 
+test("smart image reference selection preserves generation settings and rejects unarchived results", () => {
+    const project = { nodes: [{ id: "IMG", type: "config", metadata: { smart: true, generationMode: "image", prompt: "Current prompt", model: "Current model", primaryImageId: "displayed",
+        images: [{ id: "old", status: "success", storageKey: "image:old" }, { id: "pending", status: "loading", storageKey: "" }] } }], connections: [] };
+    applyCanvasProjectOperations(project, [{ type: "update_node", id: "IMG", metadata: { smartImageReferenceSelection: { mode: "selected_result", resultId: "old" } } }]);
+    assert.equal(project.nodes[0].metadata.prompt, "Current prompt");
+    assert.equal(project.nodes[0].metadata.model, "Current model");
+    assert.equal(project.nodes[0].metadata.primaryImageId, "displayed");
+    assert.throws(() => applyCanvasProjectOperations(project, [{ type: "update_node", id: "IMG", metadata: { smartImageReferenceSelection: { mode: "selected_result", resultId: "pending" } } }]), /SMART_IMAGE_REFERENCE_SELECTION_INVALID/);
+    assert.throws(() => applyCanvasProjectOperations(project, [{ type: "update_node", id: "IMG", metadata: { smartImageReferenceSelection: { mode: "latest_success", resultId: "old" } } }]), /SMART_IMAGE_REFERENCE_SELECTION_INVALID/);
+});
+
 type Project = { revision?: number; nodes: Array<Record<string, unknown>>; connections: Array<Record<string, unknown>>; selectedNodeIds?: string[]; viewport?: Record<string, unknown> };
 
 function makeH3Node(overrides: Partial<{ id: string; segments: Array<Record<string, unknown>> }> = {}): Record<string, unknown> {
@@ -25,6 +36,32 @@ function makeH3Node(overrides: Partial<{ id: string; segments: Array<Record<stri
 function makeProject(nodes: Array<Record<string, unknown>>): Project {
     return { revision: 1, nodes, connections: [] };
 }
+
+test("inserting an unrelated Clip does not inherit the legacy node's Motion Context switch", () => {
+    const node = makeH3Node();
+    (node.metadata as any).motionContextEnabled = true;
+    const project = makeProject([node]);
+    applyCanvasProjectOperations(project, [{ type: "add_h3_segment", nodeId: "h3-1", segment: { id: "fresh" } }]);
+    const clips = (node.metadata as any).segments;
+    assert.equal(clips.at(-1).motionContextEnabled, false);
+    assert.equal(clips.at(-1).tailFrameContinuation, false);
+    applyCanvasProjectOperations(project, [{ type: "add_h3_segment", nodeId: "h3-1", segment: { id: "explicit", motionContextEnabled: true } }]);
+    assert.equal((node.metadata as any).segments.at(-1).motionContextEnabled, true);
+    assert.equal((node.metadata as any).motionContextEnabled, true);
+});
+
+test("Clip 编辑、插入、移动和删除均在后端重算起点", () => {
+    const project = makeProject([makeH3Node({ segments: [{ id: "a", duration: 5, start: 99 }, { id: "b", duration: 5 }] })]);
+    const segments = () => (project.nodes[0].metadata as any).segments;
+    applyCanvasProjectOperations(project, [{ type: "update_h3_segment", nodeId: "h3-1", segmentId: "a", patch: { duration: 8 } }]);
+    assert.deepEqual(segments().map((s: any) => s.start), [0, 8]);
+    applyCanvasProjectOperations(project, [{ type: "add_h3_segment", nodeId: "h3-1", segment: { id: "c", duration: 3, start: 999 }, beforeSegmentId: "b" }]);
+    assert.deepEqual(segments().map((s: any) => [s.id, s.start]), [["a", 0], ["c", 8], ["b", 11]]);
+    applyCanvasProjectOperations(project, [{ type: "move_h3_segment", nodeId: "h3-1", segmentId: "b", beforeSegmentId: "a" }]);
+    assert.deepEqual(segments().map((s: any) => [s.id, s.start]), [["b", 0], ["a", 5], ["c", 13]]);
+    applyCanvasProjectOperations(project, [{ type: "delete_h3_segment", nodeId: "h3-1", segmentId: "a" }]);
+    assert.deepEqual(segments().map((s: any) => [s.id, s.start]), [["b", 0], ["c", 5]]);
+});
 
 test("update_h3_segment：按 segmentId 原子更新单段字段，不动其它段", () => {
     const project = makeProject([makeH3Node()]);

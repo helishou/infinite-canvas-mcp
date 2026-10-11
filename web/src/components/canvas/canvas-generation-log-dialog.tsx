@@ -4,6 +4,7 @@ import { ChevronDown, ChevronUp, Copy, Maximize2, Trash2 } from "lucide-react";
 
 import { deleteBackendGenerationLogs, fetchBackendGenerationLogs, backendMediaUrl, type BackendGenerationLog as GenerationLog } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
+import { useTranslation } from "react-i18next";
 
 const PAGE_SIZE = 30;
 const ESTIMATED_ROW_HEIGHT = 220;
@@ -49,32 +50,43 @@ function outputMediaKind(outputs: Array<Record<string, unknown>> | undefined): "
     return "";
 }
 
-export function CanvasGenerationLogDialog({ open, projectId, onClose }: { open: boolean; projectId: string; onClose: () => void }) {
+type SelectHistoryResult = (log: GenerationLog, output: Record<string, unknown>) => void;
+export function CanvasGenerationLogDialog({ open, projectId, nodeId, segmentId, objectTitle, currentStorageKey, onSelectResult, onClose }: { open: boolean; projectId: string; nodeId?: string; segmentId?: string; objectTitle?: string; currentStorageKey?: string; onSelectResult?: SelectHistoryResult; onClose: () => void }) {
+    const { t } = useTranslation();
+    const scoped = Boolean(nodeId);
     const connected = useBackendStore((state) => state.connected);
     const [logs, setLogs] = useState<GenerationLog[]>([]);
     const [loading, setLoading] = useState(false);
     const [loadingMore, setLoadingMore] = useState(false);
     const [hasMore, setHasMore] = useState(false);
     const [kind, setKind] = useState<LogFilterKind>("all");
+    const loadSequence = useRef(0);
     const load = useCallback(async () => {
         if (!connected || !projectId) return;
+        const sequence = ++loadSequence.current;
+        setLogs([]); setHasMore(false); setLoadingMore(false);
         setLoading(true);
         try {
-            const page = (await fetchBackendGenerationLogs({ projectId, limit: PAGE_SIZE, offset: 0 })).logs || [];
+            const page = (await fetchBackendGenerationLogs({ projectId, nodeId, segmentId, limit: PAGE_SIZE, offset: 0 })).logs || [];
+            if (sequence !== loadSequence.current) return;
             setLogs(page);
             setHasMore(page.length === PAGE_SIZE);
-        } finally { setLoading(false); }
-    }, [connected, projectId]);
+        } catch (error) { if (sequence === loadSequence.current) message.error(String(error)); }
+        finally { if (sequence === loadSequence.current) setLoading(false); }
+    }, [connected, projectId, nodeId, segmentId]);
     const loadMore = useCallback(async () => {
         if (!connected || !projectId || loading || loadingMore || !hasMore) return;
+        const sequence = loadSequence.current;
         setLoadingMore(true);
         try {
-            const page = (await fetchBackendGenerationLogs({ projectId, limit: PAGE_SIZE, offset: logs.length })).logs || [];
+            const page = (await fetchBackendGenerationLogs({ projectId, nodeId, segmentId, limit: PAGE_SIZE, offset: logs.length })).logs || [];
+            if (sequence !== loadSequence.current) return;
             setLogs((current) => [...current, ...page.filter((item) => !current.some((existing) => existing.id === item.id))]);
             setHasMore(page.length === PAGE_SIZE);
-        } finally { setLoadingMore(false); }
-    }, [connected, hasMore, loading, loadingMore, logs.length, projectId]);
-    useEffect(() => { if (open) void load(); }, [load, open]);
+        } catch (error) { if (sequence === loadSequence.current) message.error(String(error)); }
+        finally { if (sequence === loadSequence.current) setLoadingMore(false); }
+    }, [connected, hasMore, loading, loadingMore, logs.length, projectId, nodeId, segmentId]);
+    useEffect(() => { if (open) void load(); return () => { loadSequence.current++; }; }, [load, open]);
     const remove = async (id?: string) => {
         if (!connected) return;
         await deleteBackendGenerationLogs(id ? { id } : { projectId });
@@ -87,16 +99,16 @@ export function CanvasGenerationLogDialog({ open, projectId, onClose }: { open: 
         for (const log of logs) counts[logKind(log)] += 1;
         return KIND_TABS.map((tab) => ({ value: tab.value, label: `${tab.label} ${counts[tab.value]}` }));
     }, [logs]);
-    return <Modal title={`生成日志${logs.length ? ` (${logs.length}${hasMore ? "+" : ""})` : ""}`} open={open} onCancel={onClose} footer={null} width={860} destroyOnHidden>
+    return <Modal title={scoped ? `${objectTitle || ""} · ${t("productionCanvas.objectHistory")}` : `生成日志${logs.length ? ` (${logs.length}${hasMore ? "+" : ""})` : ""}`} open={open} onCancel={onClose} footer={null} width={860} destroyOnHidden>
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-            <Segmented size="small" value={kind} options={kindOptions} onChange={(value) => setKind(value as LogFilterKind)} />
-            <Button danger size="small" icon={<Trash2 className="size-3.5" />} disabled={!logs.length} onClick={() => void remove()}>清空日志</Button>
+            {!scoped && <><Segmented size="small" value={kind} options={kindOptions} onChange={(value) => setKind(value as LogFilterKind)} /><Button danger size="small" icon={<Trash2 className="size-3.5" />} disabled={!logs.length} onClick={() => void remove()}>清空日志</Button></>}
+            {scoped && <p className="text-sm text-muted-foreground">{t("productionCanvas.objectHistoryHint")}</p>}
         </div>
-        {!connected ? <Empty description="Canvas Agent 未连接" /> : !logs.length ? <Empty description={loading ? "加载中…" : "暂无生成日志"} /> : visible.length ? <LogList logs={visible} hasMore={hasMore} loadingMore={loadingMore} onLoadMore={() => void loadMore()} onDelete={(id) => void remove(id)} /> : <Empty description="当前筛选下暂无日志">{hasMore ? <Button size="small" loading={loadingMore} onClick={() => void loadMore()}>继续加载更多</Button> : null}</Empty>}
+        {!connected ? <Empty description="Canvas Agent 未连接" /> : !logs.length ? <Empty description={loading ? t("productionCanvas.historyLoading") : scoped ? t("productionCanvas.noObjectHistory") : "暂无生成日志"} /> : visible.length ? <LogList logs={visible} compact={scoped} currentStorageKey={currentStorageKey} onSelectResult={onSelectResult} hasMore={hasMore} loadingMore={loadingMore} onLoadMore={() => void loadMore()} onDelete={scoped ? undefined : (id) => void remove(id)} /> : <Empty description="当前筛选下暂无日志">{hasMore ? <Button size="small" loading={loadingMore} onClick={() => void loadMore()}>继续加载更多</Button> : null}</Empty>}
     </Modal>;
 }
 
-function LogList({ logs, hasMore, loadingMore, onLoadMore, onDelete }: { logs: GenerationLog[]; hasMore: boolean; loadingMore: boolean; onLoadMore: () => void; onDelete: (id: string) => void }) {
+function LogList({ logs, compact, currentStorageKey, onSelectResult, hasMore, loadingMore, onLoadMore, onDelete }: { logs: GenerationLog[]; compact?: boolean; currentStorageKey?: string; onSelectResult?: SelectHistoryResult; hasMore: boolean; loadingMore: boolean; onLoadMore: () => void; onDelete?: (id: string) => void }) {
     // 普通文档流渲染（每页 30 条，无需虚拟化）。之前的手写虚拟列表用 absolute+top 定位，
     // 行高靠 getBoundingClientRect 测量——antd Modal 打开动画（transform 缩放）期间测得
     // 偏小的行高且 ResizeObserver 事后不重报，导致条目相互重叠错位；删除/刷新后按索引
@@ -107,7 +119,7 @@ function LogList({ logs, hasMore, loadingMore, onLoadMore, onDelete }: { logs: G
     };
     return <div onScroll={onScroll} className="max-h-[65vh] overflow-y-auto pr-1">
         <div className="flex flex-col gap-3">
-            {logs.map((log) => <LogCard key={log.id} log={log} onDelete={() => onDelete(log.id)} />)}
+            {logs.map((log) => <LogCard key={log.id} log={log} compact={compact} currentStorageKey={currentStorageKey} onSelectResult={onSelectResult} onDelete={onDelete ? () => onDelete(log.id) : undefined} />)}
         </div>
         {loadingMore ? <div className="py-2 text-center text-xs text-stone-500">加载更多…</div> : null}
     </div>;
@@ -135,6 +147,24 @@ function collectReferences(log: GenerationLog): Array<Record<string, unknown>> {
     return visible.length ? refs.filter((ref) => hasUrl(ref) || (ref.runtime === true && String(ref.id || "").startsWith("runtime-tail-"))) : refs;
 }
 
+function generationSettingsText(params: unknown) {
+    const root = params && typeof params === "object" ? params as Record<string, unknown> : {};
+    const settings = root.generationSettings;
+    if (!settings || typeof settings !== "object" || Array.isArray(settings)) return "";
+    const rows: string[] = [];
+    const visit = (value: unknown, path: string) => {
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+            for (const [key, child] of Object.entries(value as Record<string, unknown>)) visit(child, path ? `${path}.${key}` : key);
+        } else if (Array.isArray(value)) {
+            rows.push(`${path}：${value.map((item) => typeof item === "string" ? item : JSON.stringify(item)).join("，")}`);
+        } else if (value !== undefined) {
+            rows.push(`${path}：${value === null ? "null" : String(value)}`);
+        }
+    };
+    visit(settings, "");
+    return rows.join("\n");
+}
+
 function actualSubmissionText(params: unknown) {
     const submission = params && typeof params === "object" ? (params as Record<string, unknown>).actualSubmission : undefined;
     if (!submission || typeof submission !== "object") return "";
@@ -160,7 +190,8 @@ function actualSubmissionText(params: unknown) {
     ].join("\n");
 }
 
-function LogCard({ log, onDelete }: { log: GenerationLog; onDelete: () => void }) {
+function LogCard({ log, compact, currentStorageKey, onSelectResult, onDelete }: { log: GenerationLog; compact?: boolean; currentStorageKey?: string; onSelectResult?: SelectHistoryResult; onDelete?: () => void }) {
+    const { t } = useTranslation();
     const [expanded, setExpanded] = useState(false);
     const [preview, setPreview] = useState<{ url: string; video: boolean; name?: string } | null>(null);
     const copy = async (value: string) => { await navigator.clipboard?.writeText(value); message.success("已复制"); };
@@ -169,6 +200,7 @@ function LogCard({ log, onDelete }: { log: GenerationLog; onDelete: () => void }
     const logParams = log.params && typeof log.params === "object" ? log.params as Record<string, unknown> : {};
     const loopInputs = Array.isArray(logParams.loopInputImages) ? logParams.loopInputImages.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item))) : [];
     const actualSubmission = actualSubmissionText(log.params);
+    const generationSettings = generationSettingsText(log.params);
     const kind = logKind(log);
     // 生文类日志（插件翻译/增强提示词等）把模型输出存进 outputs，这里渲染成可展开的文本段
     const textOutputs = log.outputs.filter((output) => String(output.type || "") === "text" && String(output.text || "").trim());
@@ -178,16 +210,20 @@ function LogCard({ log, onDelete }: { log: GenerationLog; onDelete: () => void }
         setPreview({ url, video, name });
     }, []);
     return <div className="rounded-lg border border-stone-200 p-3 dark:border-stone-700">
-        <div className="flex items-start justify-between gap-3"><div className="flex flex-wrap items-center gap-1.5"><Tag color={KIND_COLOR[kind]}>{typeLabel}</Tag><Tag color={statusColor}>{log.status}</Tag><Tag>{log.platform}</Tag>{log.taskMode ? <Tag>{log.taskMode}</Tag> : null}{log.model ? <Tag>{log.model}</Tag> : null}<span className="text-xs text-stone-500">{new Date(log.createdAt).toLocaleString()} · {Math.round(log.durationMs / 1000)}s</span></div><Button type="text" danger size="small" icon={<Trash2 className="size-3.5" />} onClick={onDelete} /></div>
+        <div className="flex items-start justify-between gap-3"><div className="flex flex-wrap items-center gap-1.5">{!compact && <Tag color={KIND_COLOR[kind]}>{typeLabel}</Tag>}<Tag color={statusColor}>{compact ? t(`productionCanvas.historyStatus.${log.status}`) : log.status}</Tag>{!compact && <><Tag>{log.platform}</Tag>{log.taskMode ? <Tag>{log.taskMode}</Tag> : null}{log.model ? <Tag>{log.model}</Tag> : null}</>}<span className="text-xs text-muted-foreground">{new Date(log.createdAt).toLocaleString()} · {Math.round(log.durationMs / 1000)}s</span></div>{onDelete && <Button type="text" danger size="small" icon={<Trash2 className="size-3.5" />} onClick={onDelete} />}</div>
+        <details open={!compact || undefined}><summary className={compact ? "mt-3 cursor-pointer text-xs text-muted-foreground" : "hidden"}>{t("productionCanvas.historyInputs")}</summary>
         <div className="mt-2 flex flex-wrap gap-3 text-xs text-stone-500"><span>节点：{log.nodeId || "-"}</span><span>Clip：{log.segmentId || "-"}</span><span>任务：{log.runtimeTaskId || log.promptId || "等待任务 ID"}</span></div>
         {references.length ? <div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><span className="self-start pt-1 text-stone-500">输入 refs：</span>{references.map((reference, index) => <ReferencePreview key={`${log.id}-ref-${index}`} reference={reference} index={index} onPreview={openPreview} />)}</div> : null}
         {loopInputs.length ? <div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><span className="self-start pt-1 text-stone-500">本轮组图：</span>{loopInputs.map((image, index) => <ReferencePreview key={`${log.id}-loop-${index}`} reference={image} index={index} onPreview={openPreview} />)}</div> : null}
         {!loopInputs.length && Number(log.inputCounts?.loopInputs || 0) > 0 ? <div className="mt-2 text-xs text-stone-500">本轮组图：{log.inputCounts.loopInputs} 张（此历史日志未保存缩略图）</div> : null}
         {log.prompt ? <ExpandableText label="提示词" value={log.prompt} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(log.prompt || "")} /> : null}
         {textOutputs.map((output, index) => <ExpandableText key={`${log.id}-text-${index}`} label="输出文本" value={String(output.text || "")} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(String(output.text || ""))} />)}
+        {generationSettings ? <ExpandableText label="生成参数" value={generationSettings} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(generationSettings)} /> : null}
         {actualSubmission ? <ExpandableText label="实际提交配置" value={actualSubmission} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(actualSubmission)} /> : null}
+        </details>
         {log.error ? <ExpandableText label="错误" value={log.error} expanded={expanded} error onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(log.error || "")} /> : null}
         {log.outputs.length ? <div className="mt-3 grid grid-cols-4 gap-2">{log.outputs.map((output, index) => <Output key={`${log.id}-${index}`} output={output} onPreview={openPreview} />)}</div> : null}
+        {onSelectResult && log.outputs.filter(output => typeof output.storageKey === "string" && /^(image|video)\//.test(String(output.mimeType || ""))).map((output, index) => <Button key={`${log.id}:select:${index}`} className="mt-3 mr-2" size="small" disabled={log.status !== "success" || !log.runtimeTaskId || output.storageKey === currentStorageKey} onClick={() => onSelectResult(log, output)}>{t(output.storageKey === currentStorageKey ? "productionCanvas.currentResult" : "productionCanvas.selectResult")}{log.outputs.length > 1 ? ` ${index + 1}` : ""}</Button>)}
         <Modal open={!!preview} onCancel={() => setPreview(null)} footer={null} width="80%" destroyOnHidden title={preview?.name} centered>
             {preview?.video
                 ? <video src={preview.url} controls autoPlay playsInline style={{ width: "100%", maxHeight: "70vh", display: "block", background: "#000" }} />

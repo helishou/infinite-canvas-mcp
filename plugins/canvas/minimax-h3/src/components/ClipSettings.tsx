@@ -1,13 +1,16 @@
+import { resolveH3Runtime } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
+import { useDefaultParams } from "../services/h3-defaults";
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
+import type { CanvasNodeContext, CanvasVideoModelField, CanvasVideoModelSchema } from "@infinite-canvas/plugin-sdk";
 import { AutoComplete, Input, InputNumber, Switch, Select, Tooltip } from "antd";
 import { Search } from "lucide-react";
 import { h3LoraOptions, h3ModelOptions, H3_LORA_STRENGTH_MIN, H3_LORA_STRENGTH_MAX } from "../constants";
 import { discoverH3Models, mergeH3Options } from "../services/model-discovery";
 import { useH3DropdownOpen } from "../hooks/useH3DropdownOpen";
-import { H3_STYLE_TEMPLATES, styleTemplateFromPrompt } from "../../../../../canvas-agent/src/plugins/minimax-h3/style-templates";
-import { H3_VIDEO_MEGAPIXELS as megapixels } from "../../../../../canvas-agent/src/plugins/minimax-h3/video-settings";
+import { H3_STYLE_TEMPLATES, styleTemplateFromPrompt } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
+import { H3_VIDEO_MEGAPIXELS as megapixels } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import type { H3Segment } from "../types";
+import { h3Label, useH3Locale } from "../h3-locale";
 
 type Props = { ctx: CanvasNodeContext; metadata: Record<string, unknown>; segment?: H3Segment; patch: (value: Partial<H3Segment>) => void };
 type SectionKey = "mode" | "model" | "sampling" | "lora" | "sla" | "runtime" | "latentUpscale" | "preview" | "rtx" | "faceRefine" | "audio" | "continuation";
@@ -57,7 +60,17 @@ function H3LoraPicker({ values, value, onChange }: { values: string[]; value: st
     return <span ref={dropdown.rootRef} style={{ display: "block", width: "100%", minWidth: 0 }}><AutoComplete className="nfh3-select" size="middle" value={draft} options={values.filter(Boolean).map((item) => ({ value: item, label: item }))} filterOption open={dropdown.open} onOpenChange={dropdown.onOpenChange} onChange={changeDraft} onSelect={(next) => { changeDraft(next); committedRef.current = next; onChange(next); }} onBlur={commit} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commit(); event.currentTarget.blur(); } }} allowClear placeholder="选择或输入 LoRA 文件名" onMouseDown={(event) => event.stopPropagation()} style={{ width: "100%" }} /></span>;
 }
 
-export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
+export function ClipSettings({ ctx, metadata, segment: inputSegment, patch: savePatch }: Props) {
+    const raw = (Array.isArray(metadata.segments) ? metadata.segments as Array<Record<string, unknown>> : []).find(item => item.id === inputSegment?.id) || inputSegment || {};
+    const defaults = useDefaultParams();
+    const resolved = resolveH3Runtime(raw as Record<string, unknown>, {}, metadata, defaults);
+    const segment = inputSegment ? { ...inputSegment, ...resolved.params, videoSteps: resolved.params.steps } as H3Segment : undefined;
+    const selectedVideoReferenceCount = selectedVideoWorkflowReferenceCount(segment);
+    const patch = savePatch;
+    const [selectedVideoModelSchema, setSelectedVideoModelSchema] = useState<CanvasVideoModelSchema | null>(null);
+    const [selectedVideoModelLoading, setSelectedVideoModelLoading] = useState(false);
+    const [selectedVideoModelError, setSelectedVideoModelError] = useState('');
+    const locale = useH3Locale();
     const [catalog, setCatalog] = useState<{ models: string[]; loras: string[]; textEncoders: string[]; videoVaes: string[]; audioVaes: string[]; latentUpscaleModels: string[]; nanfeng: Record<string, unknown[]> }>({ models: [], loras: [], textEncoders: [], videoVaes: [], audioVaes: [], latentUpscaleModels: [], nanfeng: {} });
     const [refreshingLoras, setRefreshingLoras] = useState(false);
     const [loraSearch, setLoraSearch] = useState("");
@@ -71,18 +84,24 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
         return () => { active = false; };
     }, [ctx.ai, segment?.id]);
     useEffect(() => { setLoraSearch(""); }, [segment?.id]);
-    // 潜空间放大模型兜底：启用后若未选择且列表已加载，自动写入第一个可用模型。
-    // 之前 discover 回调里写 segment 的时机不可靠（catalog 异步更新后组件已渲染），
-    // 导致 UI 看着像是选了第一项，但 segment.latentUpscaleModel 实际为空，后端报无模型。
-    // 注意：这里只能用 catalog.latentUpscaleModels（useState），不能用下方声明的
-    // latentUpscaleModelChoices（const 在 TDZ 中会在依赖数组求值时抛错）。
     useEffect(() => {
-        if (segment?.latentUpscaleEnabled !== true) return;
-        const current = String(segment.latentUpscaleModel || "").trim();
-        if (current) return;
-        const first = catalog.latentUpscaleModels[0];
-        if (first) patch({ latentUpscaleModel: String(first) });
-    }, [segment?.latentUpscaleEnabled, segment?.latentUpscaleModel, catalog.latentUpscaleModels, patch]);
+        const model = String(segment?.selectedVideoModel || "").trim();
+        if (segment?.selectedVideoModelEnabled !== true || !model) {
+            setSelectedVideoModelSchema(null);
+            setSelectedVideoModelError("");
+            setSelectedVideoModelLoading(false);
+            return;
+        }
+        let active = true;
+        setSelectedVideoModelSchema(null);
+        setSelectedVideoModelError("");
+        setSelectedVideoModelLoading(true);
+        void ctx.ai.describeVideoModel(model, selectedVideoReferenceCount)
+            .then((schema) => { if (active) setSelectedVideoModelSchema(schema); })
+            .catch((error) => { if (active) setSelectedVideoModelError(error instanceof Error ? error.message : String(error)); })
+            .finally(() => { if (active) setSelectedVideoModelLoading(false); });
+        return () => { active = false; };
+    }, [ctx.ai, segment?.id, segment?.selectedVideoModelEnabled, segment?.selectedVideoModel, selectedVideoReferenceCount]);
     useEffect(() => {
         let active = true;
         const legacy = metadata.h3SigmaPresets && typeof metadata.h3SigmaPresets === "object" ? metadata.h3SigmaPresets as Record<string, unknown> : {};
@@ -135,6 +154,51 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
     const samplerChoices = nfChoices("采样器", samplers);
     const schedulerChoices = nfChoices("调度器", schedulers);
     const seedMode = segment.noiseSeedMode === "fixed" ? "fixed" : "random";
+    const field = { width: "100%" } as const;
+    const hintMark = (hint: string) => <Tooltip title={hint}><span className="nfh3-hint-mark" aria-label={hint} role="img">?</span></Tooltip>;
+    const control = (label: string, value: ReactNode, wide = false, hint?: string) => <label key={`nfh3-ctl-${label}`} className={`nfh3-control${wide ? " wide" : ""}`} data-control={label}><span>{label}{hint ? hintMark(hint) : null}</span>{value}</label>;
+    const selectedModelSchemaKey = selectedVideoModelSchema?.kind === "direct"
+        ? `direct:${String(segment.selectedVideoModel || "")}`
+        : selectedVideoModelSchema?.workflow ? `${String(segment.selectedVideoModel || "")}::${selectedVideoModelSchema.workflow}` : "";
+    const allSelectedModelValues = segment.selectedVideoModelFieldValues || {};
+    const selectedModelValues = selectedModelSchemaKey ? allSelectedModelValues[selectedModelSchemaKey] || {} : {};
+    const selectedModelFields = (selectedVideoModelSchema?.fields || []).filter((item) =>
+        !item.isPrompt && item.id.toLowerCase() !== "prompt" && !["image", "video", "audio"].includes(item.type));
+    const defaultSelectedModelFieldValue = (item: CanvasVideoModelField) => {
+        if (Object.prototype.hasOwnProperty.call(selectedModelValues, item.id)) return selectedModelValues[item.id];
+        if (["duration", "seconds"].includes(item.id)) return segment.duration ?? selectedVideoModelSchema?.defaultValues?.[item.id] ?? item.default;
+        if (["mode", "taskMode"].includes(item.id)) return segment.mode || segment.taskMode || item.default;
+        return selectedVideoModelSchema?.defaultValues?.[item.id] ?? item.default;
+    };
+    const patchSelectedModelField = (item: CanvasVideoModelField, value: unknown) => {
+        const next = { ...selectedModelValues, [item.id]: value };
+        patch({
+            selectedVideoModelFieldValues: { ...allSelectedModelValues, [selectedModelSchemaKey]: next },
+            ...(["duration", "seconds"].includes(item.id) && Number.isFinite(Number(value)) ? { duration: Number(value) } : {}),
+        });
+    };
+    const renderSelectedModelField = (item: CanvasVideoModelField) => {
+        const value = defaultSelectedModelFieldValue(item);
+        const label = `${item.name || item.id}${item.required ? " *" : ""}`;
+        if (item.type === "boolean") return control(label, <Switch checked={value === true || String(value).toLowerCase() === "true"} onChange={(next) => patchSelectedModelField(item, next)} />);
+        if (item.type === "number" || item.type === "slider") return control(label, <InputNumber style={field} min={item.min} max={item.max} step={item.step || (item.type === "slider" ? 0.01 : 1)} value={value !== undefined && value !== null && value !== "" && Number.isFinite(Number(value)) ? Number(value) : undefined} onChange={(next) => patchSelectedModelField(item, next ?? "")} />);
+        if (item.type === "dropdown" && item.options?.length) return control(label, <H3Dropdown values={item.options} value={value === undefined || value === null ? undefined : String(value)} onChange={(next) => patchSelectedModelField(item, String(next))} allowClear placeholder={label} searchable />);
+        return control(label, <Input value={value === undefined || value === null ? "" : String(value)} placeholder={item.default === undefined ? label : String(item.default)} onChange={(event) => patchSelectedModelField(item, event.target.value)} />);
+    };
+    const selectedVideoModelPanel = <section className="nfh3-section nfh3-selected-model-parameters" data-section="selected-model-parameters">
+        <div className="nfh3-section-head"><b>{h3Label(locale, "selectedVideoModelParameters")}</b><small>{String(segment.selectedVideoModel || "")}</small></div>
+        <div className="nfh3-section-body">
+            {selectedVideoModelLoading ? <div className="nfh3-hint">{h3Label(locale, "selectedVideoModelLoading")}</div> : null}
+            {selectedVideoModelError ? <div className="nfh3-hint" role="alert">{selectedVideoModelError}</div> : null}
+            {selectedVideoModelSchema?.error ? <div className="nfh3-hint" role="alert">{h3Label(locale, "selectedVideoModelModeWarning")} {selectedVideoModelSchema.error}</div> : null}
+            <div className="nfh3-control-grid">
+                {control("视觉风格模板", <H3Dropdown values={H3_STYLE_TEMPLATES.map((template) => template.id)} value={styleTemplateId || undefined} onChange={(value) => patch({ styleTemplateId: value ? String(value) : null })} format={(value) => H3_STYLE_TEMPLATES.find((template) => template.id === value)?.label || String(value)} placeholder="不加模板" searchable allowClear />, true)}
+                {control("尾帧参考（传给下一段）", <Switch checked={segment.tailFrameContinuation === true} onChange={(checked) => patch({ tailFrameContinuation: checked, ...(checked ? { motionContextEnabled: false } : {}) })} />, false, "下一段运行时截取本段尾帧，追加到已有图片参考最后，作为下一段的首帧状态基准。" )}
+            </div>
+            {!selectedVideoModelLoading && !selectedVideoModelError && selectedVideoModelSchema && !selectedModelFields.length ? <div className="nfh3-hint">{h3Label(locale, "selectedVideoModelNoFields")}</div> : null}
+            {selectedModelFields.length ? <div className="nfh3-control-grid">{selectedModelFields.map((item) => <div key={item.id} className="nfh3-dynamic-model-field">{renderSelectedModelField(item)}</div>)}</div> : null}
+        </div>
+    </section>;
     const sageChoices = nfChoices("SageAttention", attentionModes);
     const slaBackendChoices = nfChoices("SLA稠密后端", ["comfy_kitchen", "pytorch", "auto"]);
     const rtxQualityChoices = nfChoices("RTX质量", rtxQualities);
@@ -151,12 +215,8 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
     // 画布节点会在父层监听 pointer/mousedown 做拖拽；Select 的文字区域通常能
     // 先触发打开，但右侧箭头区域会被父层抢走。阻止事件继续冒泡，保证整个
     // selector（包括箭头）都是同一个下拉触发热区。
-    const field = { width: "100%" } as const;
     const section = (key: SectionKey, title: string, summary: ReactNode, content: ReactNode, className = "") => <section key={`nfh3-sec-${key}`} className={`nfh3-section ${className}`} data-section={key}><button type="button" className="nfh3-section-head" onClick={() => setOpen(key)}><span className={`nfh3-chevron${expanded[key] === true ? " is-open" : ""}`} aria-hidden="true" /><b>{title}</b><small>{summary}</small></button>{expanded[key] === true ? <div className="nfh3-section-body">{content}</div> : null}</section>;
     const enabledSummary = (text: string) => <span className="nfh3-enabled-summary">{text}</span>;
-    // hint 走 Tooltip：说明文字只在悬停时出现，不常驻占版面。需要 import { Tooltip } from "antd"。
-    const hintMark = (hint: string) => <Tooltip title={hint}><span className="nfh3-hint-mark" aria-label={hint} role="img">?</span></Tooltip>;
-    const control = (label: string, value: ReactNode, wide = false, hint?: string) => <label key={`nfh3-ctl-${label}`} className={`nfh3-control${wide ? " wide" : ""}`} data-control={label}><span>{label}{hint ? hintMark(hint) : null}</span>{value}</label>;
     const choice = (label: string, values: Array<string | number>, value: unknown, onChange: (value: string | number) => void, format?: (value: string | number) => string, wide = false, searchable = false, placeholder?: string, allowClear = false) => control(label, <H3Dropdown values={values} value={value as string | number} onChange={onChange} format={format} searchable={searchable} placeholder={placeholder} allowClear={allowClear} listId={`nfh3-${label}-options`} />, wide);
     const loraSlots = (segment.loraSlots?.length ? segment.loraSlots : [{ name: segment.loraName || "", strength: Number(segment.loraStrength ?? 1), enabled: !!segment.loraName }]).slice(0, 8);
     while (loraSlots.length < 3) loraSlots.push({ name: "", strength: 1, enabled: false });
@@ -178,7 +238,7 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
     // 开启「一采使用手动 Sigma」后实际步数 = Sigma 序列长度 - 1（与后端 validateNanFengSingleSigma 语义一致）；
     // 解析不出有效序列时回退到采样步数字段。
     const manualSigmaValues = segment.v81ManualSigma === true ? String(segment.h3FullSigma || "").match(/[-+]?(?:\d*\.)?\d+(?:[eE][-+]?\d+)?/g)?.map(Number).filter(Number.isFinite) || [] : [];
-    const samplingStepsSummary = manualSigmaValues.length >= 2 ? manualSigmaValues.length - 1 : (segment.steps || 20);
+    const samplingStepsSummary = manualSigmaValues.length >= 2 ? manualSigmaValues.length - 1 : (segment.steps ?? 20);
     // 续段衔接折叠头摘要：两个开关任一开启都要能一眼看出状态。
     // 接缝加噪/denoise 属于「接缝软硬」而非开关状态，但数值偏离默认时必须能被看见，
     // 否则用户只看到「潜空间续写至下一段」却不知道缝是硬接还是加了噪。
@@ -199,13 +259,15 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
         patch(next);
     };
     return <div className="nfh3-settings">
+        {resolved.parameterIssues.length ? <div className="nfh3-hint" role="alert">{resolved.parameterIssues.join("；")}</div> : null}
         <div className="nfh3-mode-grid">{(Object.keys(modeLabels) as Array<keyof typeof modeLabels>).map((key) => <button key={key} type="button" data-mode={key} className={mode === key ? "active" : ""} onClick={() => patch({ mode: key, taskMode: key })}><b>{modeLabels[key]}</b></button>)}</div>
+        {segment.selectedVideoModelEnabled === true ? selectedVideoModelPanel : <>
         {section("model", "模型与基础参数", String(segment.modelName || "未选择模型").replace(/^.*[\\/]/, ""), <div className="nfh3-control-grid">
             {control("模型", <H3Dropdown values={modelOptions.map((item) => item.value)} value={segment.modelName || modelOptions[0]?.value} onChange={(value) => patch({ modelName: String(value) })} placeholder="选择模型" />, true)}
             {choice("视觉风格模板", H3_STYLE_TEMPLATES.map((template) => template.id), styleTemplateId, (value) => patch({ styleTemplateId: value ? String(value) : null }), (value) => H3_STYLE_TEMPLATES.find((template) => template.id === value)?.label || String(value), true, true, "不加模板", true)}
-            {control("文本编码器", <H3Dropdown values={catalog.textEncoders.filter((value) => /minimax/i.test(value))} value={segment.textEncoder || catalog.textEncoders.find((value) => /minimax/i.test(value))} onChange={(value) => patch({ textEncoder: String(value) })} placeholder="选择文本编码器" />, true)}
-            {control("视频 VAE", <H3Dropdown values={catalog.videoVaes} value={segment.videoVae || catalog.videoVaes[0]} onChange={(value) => patch({ videoVae: String(value) })} placeholder="选择视频 VAE" />, true)}
-            {control("音频 VAE", <H3Dropdown values={catalog.audioVaes} value={segment.audioVae || catalog.audioVaes[0]} onChange={(value) => patch({ audioVae: String(value) })} placeholder="选择音频 VAE" />, true)}
+            {control("文本编码器", <H3Dropdown values={catalog.textEncoders.filter((value) => /minimax/i.test(value))} value={segment.textEncoder} onChange={(value) => patch({ textEncoder: String(value) })} placeholder="选择文本编码器" />, true)}
+            {control("视频 VAE", <H3Dropdown values={catalog.videoVaes} value={segment.videoVae} onChange={(value) => patch({ videoVae: String(value) })} placeholder="选择视频 VAE" />, true)}
+            {control("音频 VAE", <H3Dropdown values={catalog.audioVaes} value={segment.audioVae} onChange={(value) => patch({ audioVae: String(value) })} placeholder="选择音频 VAE" />, true)}
             {control("启用 TRT 视频 VAE", <Switch checked={segment.trtVideoVaeEnabled === true} onChange={(checked) => patch({ trtVideoVaeEnabled: checked })} />)}
             {segment.trtVideoVaeEnabled ? <>{choice("TRT 视频解码引擎", trtDecoderChoices, segment.trtDecoderEngine || "None", (value) => patch({ trtDecoderEngine: String(value) }), undefined, true)}{choice("TRT 视频编码引擎", trtEncoderChoices, segment.trtEncoderEngine || "None", (value) => patch({ trtEncoderEngine: String(value) }), undefined, true)}</> : null}
             {choice("编码器类型", encoderTypeChoices, segment.textEncoderType || "minimax", (value) => patch({ textEncoderType: String(value) }))}
@@ -217,14 +279,14 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
                 <div style={{ flex: "0 0 auto", minWidth: 120 }}><H3Dropdown values={["random", "fixed"]} value={seedMode} onChange={(value) => setSeedMode(String(value))} format={(value) => value === "fixed" ? "固定" : "随机"} listId="nfh3-seed-mode-options" /></div>
                 <div style={{ flex: 1, display: "flex", gap: 6, alignItems: "center", minWidth: 0 }}>{seedMode === "random" ? <button type="button" className="nfh3-seed-reroll" title="重新生成随机种子" onMouseDown={(event) => event.stopPropagation()} onClick={() => { const seed = Math.max(1, Math.floor(Math.random() * Number.MAX_SAFE_INTEGER)); patch({ seed, noiseSeed: seed }); }}>🎲</button> : null}<InputNumber style={field} min={0} precision={0} value={String(segment.seed ?? segment.noiseSeed ?? "").trim() !== "" ? Number(segment.seed ?? segment.noiseSeed) : undefined} placeholder={seedMode === "fixed" ? "输入固定种子" : "随机种子"} onChange={(value) => patch({ seed: value ?? undefined, noiseSeed: value ?? undefined })} /></div>
             </div>, true)}
-            {choice("百万像素", megapixelChoices, segment.megapixels || 0.4, (value) => patch({ megapixels: Number(value) }), (value) => `${value} MP`)}
-            {choice("尺寸倍数", [32], segment.sizeMultiple || 32, (value) => patch({ sizeMultiple: Number(value) }))}
+            {choice("百万像素", megapixelChoices, segment.megapixels ?? 0.4, (value) => patch({ megapixels: Number(value) }), (value) => `${value} MP`)}
+            {choice("尺寸倍数", [32], segment.sizeMultiple ?? 32, (value) => patch({ sizeMultiple: Number(value) }))}
             {mode === "ref2va" ? choice("参考图尺寸", refImageSizeChoices, segment.refImageSize || "match", (value) => patch({ refImageSize: String(value) })) : null}
-            {mode !== "t2v" ? choice("参考图最长边", refLongEdgeChoices, segment.referenceLongEdge || 1920, (value) => patch({ referenceLongEdge: Number(value) })) : null}
+            {mode !== "t2v" ? choice("参考图最长边", refLongEdgeChoices, segment.referenceLongEdge ?? 1920, (value) => patch({ referenceLongEdge: Number(value) })) : null}
         </div>)}
         {section("continuation", "续段衔接", continuationSummary, <div className="nfh3-control-grid">
-            {control("尾帧参考（传给下一段）", <Switch checked={segment.tailFrameContinuation === true} onChange={(checked) => patch({ tailFrameContinuation: checked })} />, false, "下一段运行时截取本段尾帧，自动追加到已有图片参考的最后一张，作为下一段首帧状态基准，继承姿态、持物、动作进度和场景状态；机位、景别可改变，不能把动作重置。保留素材和引用编号；运行时使用多参考模式接收尾帧，保存的模式不改写。") }
-            {control("潜空间续写到下一段 Motion Context（V15）", <Switch checked={segment.motionContextEnabled === true} onChange={(checked) => patch({ motionContextEnabled: checked })} />, false, "尾帧参考传递图片，决定下一段首帧的物理状态。潜空间续写：开启本段开关后，本段的 AV latent 与所设上下文参数传给紧邻的下一段；关闭处断链。请从连续组首段使用「运行当前及后续分镜」，不能跳过组内已完成片段。单独运行本段不会建立跨任务续写。")}
+            {control("尾帧参考（传给下一段）", <Switch checked={segment.tailFrameContinuation === true} onChange={(checked) => patch({ tailFrameContinuation: checked, ...(checked ? { motionContextEnabled: false } : {}) })} />, false, "下一段运行时截取本段尾帧，自动追加到已有图片参考的最后一张，作为下一段首帧状态基准，继承姿态、持物、动作进度和场景状态；机位、景别可改变，不能把动作重置。保留素材和引用编号；运行时使用多参考模式接收尾帧，保存的模式不改写。") }
+            {control("潜空间续写到下一段 Motion Context（V15）", <Switch checked={segment.motionContextEnabled === true} onChange={(checked) => patch({ motionContextEnabled: checked, ...(checked ? { tailFrameContinuation: false } : {}) })} />, false, "默认关闭。只有两段必须保持同一个不能切镜的摄影镜头时开启；同人物、同场景、对白或声音承接不自动开启。本段开关登记到下一段的衔接，实际由下一段消费本段的 AV latent 与上下文，本段自身输入不受影响。从组首生成会依次重跑全组，到第一个关闭的边界停止。")}
             {segment.motionContextEnabled ? <>
                 {choice("传给下一段的视频上下文帧数", ["22", "5", "39", "56"], segment.contextLength || "22", (value) => patch({ contextLength: String(value) }))}
                 {control("传给下一段的音频上下文帧数", <InputNumber style={field} min={0} max={240} value={segment.audioContextLength ?? 24} onChange={(value) => patch({ audioContextLength: value ?? undefined })} />)}
@@ -266,7 +328,7 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
             {control("指定稠密步", <input value={String(segment.slaDenseSteps || "0")} onChange={(event) => patch({ slaDenseSteps: event.target.value })} placeholder="0" />)}
             {choice("稠密后端", slaBackendChoices, segment.slaBackend || "comfy_kitchen", (value) => patch({ slaBackend: String(value) }), undefined, true)}
         </div>)}
-        {section("latentUpscale", "H3 潜空间放大二采", segment.latentUpscaleEnabled ? enabledSummary(segment.latentUpscaleConfirmationMode ? "一采待确认后继续" : "已启用") : "关闭", <div className="nfh3-control-grid">{choice("一采/二采采样器", samplerChoices, segment.sampler || "res_multistep", (value) => patch({ sampler: String(value) }), undefined, true, true)}{choice("一采/二采调度器", schedulerChoices, segment.scheduler || "simple", (value) => patch({ scheduler: String(value) }), undefined, true, true)}{control("启用潜空间二采", <Switch checked={segment.latentUpscaleEnabled === true} disabled={!latentUpscaleModelChoices.length} onChange={(checked) => patch({ latentUpscaleEnabled: checked, ...(!checked ? { latentUpscaleConfirmationMode: false } : {}) })} />)}{control("一采确认模式", <Switch checked={segment.latentUpscaleEnabled === true && segment.latentUpscaleConfirmationMode === true} disabled={segment.latentUpscaleEnabled !== true} onChange={(checked) => patch({ latentUpscaleConfirmationMode: checked })} />, false, "需先启用潜空间二采。开启后先预览一采，只有确认后才执行潜空间放大二采；可保留一采或放弃任务。一采/二采步数与 Sigma 在启动时固定。")}{control("一采步数", <InputNumber style={field} min={1} max={20} value={segment.h3FirstSteps != null ? Number(segment.h3FirstSteps) : undefined} placeholder="6" onChange={(value) => patch({ h3FirstSteps: value ?? undefined })} />)}{control("二采步数", <InputNumber style={field} min={1} max={12} value={segment.h3SecondSteps != null ? Number(segment.h3SecondSteps) : undefined} placeholder="4" onChange={(value) => patch({ h3SecondSteps: value ?? undefined })} />)}{choice("放大模型", latentUpscaleModelChoices, segment.latentUpscaleModel, (value) => patch({ latentUpscaleModel: String(value) }), undefined, true, false, "请选择放大模型")}{segment.latentUpscaleEnabled === true && !latentUpscaleModelChoices.length ? <div className="nfh3-latent-warning" style={{ color: "#faad14", fontSize: 22, padding: "4px 0" }}>未在 ComfyUI 发现 H3 潜空间放大模型，请确认已安装 NanFengH3LowPeakLatentUpscalerV15 节点并重刷模型列表。</div> : null}{choice("目标百万像素", megapixelChoices, segment.latentUpscaleMegapixels || 1, (value) => patch({ latentUpscaleMegapixels: Number(value) }), (value) => `${value} MP`)}{choice("潜空间对齐", [2, 4, 8, 16, 32], segment.latentUpscaleAlign || 2, (value) => patch({ latentUpscaleAlign: Number(value) }))}{choice("潜空间精度", ["fp16", "bf16", "fp32"], segment.latentUpscalePrecision || "bf16", (value) => patch({ latentUpscalePrecision: String(value) }))}</div>)}
+        {section("latentUpscale", "H3 潜空间放大二采", segment.latentUpscaleEnabled ? enabledSummary(segment.latentUpscaleConfirmationMode ? "一采待确认后继续" : "已启用") : "关闭", <div className="nfh3-control-grid">{choice("一采/二采采样器", samplerChoices, segment.sampler || "res_multistep", (value) => patch({ sampler: String(value) }), undefined, true, true)}{choice("一采/二采调度器", schedulerChoices, segment.scheduler || "simple", (value) => patch({ scheduler: String(value) }), undefined, true, true)}{control("启用潜空间二采", <Switch checked={segment.latentUpscaleEnabled === true} disabled={segment.latentUpscaleEnabled !== true && !latentUpscaleModelChoices.length} onChange={(checked) => patch({ latentUpscaleEnabled: checked, ...(!checked ? { latentUpscaleConfirmationMode: false } : {}) })} />)}{control("一采确认模式", <Switch checked={segment.latentUpscaleEnabled === true && segment.latentUpscaleConfirmationMode === true} disabled={segment.latentUpscaleEnabled !== true} onChange={(checked) => patch({ latentUpscaleConfirmationMode: checked })} />, false, "需先启用潜空间二采。开启后先预览一采，只有确认后才执行潜空间放大二采；可保留一采或放弃任务。一采/二采步数与 Sigma 在启动时固定。")}{control("一采步数", <InputNumber style={field} min={1} max={20} value={segment.h3FirstSteps != null ? Number(segment.h3FirstSteps) : undefined} placeholder="6" onChange={(value) => patch({ h3FirstSteps: value ?? undefined })} />)}{control("二采步数", <InputNumber style={field} min={1} max={12} value={segment.h3SecondSteps != null ? Number(segment.h3SecondSteps) : undefined} placeholder="4" onChange={(value) => patch({ h3SecondSteps: value ?? undefined })} />)}{choice("放大模型", latentUpscaleModelChoices, segment.latentUpscaleModel, (value) => patch({ latentUpscaleModel: String(value) }), undefined, true, false, "请选择放大模型")}{segment.latentUpscaleEnabled === true && !latentUpscaleModelChoices.length ? <div className="nfh3-latent-warning" style={{ color: "#faad14", fontSize: 22, padding: "4px 0" }}>未在 ComfyUI 发现 H3 潜空间放大模型，请确认已安装 NanFengH3LowPeakLatentUpscalerV15 节点并重刷模型列表。</div> : null}{choice("目标百万像素", megapixelChoices, segment.latentUpscaleMegapixels ?? 1, (value) => patch({ latentUpscaleMegapixels: Number(value) }), (value) => `${value} MP`)}{choice("潜空间对齐", [2, 4, 8, 16, 32], segment.latentUpscaleAlign ?? 2, (value) => patch({ latentUpscaleAlign: Number(value) }))}{choice("潜空间精度", ["fp16", "bf16", "fp32"], segment.latentUpscalePrecision || "bf16", (value) => patch({ latentUpscalePrecision: String(value) }))}</div>)}
         {section("runtime", "显存与卸载", segment.keepModelCache !== false ? enabledSummary("连续生成") : segment.uniBlockSwapEnabled ? enabledSummary("UniBlockSwap") : "默认", <div className="nfh3-control-grid">
             {control("运行时预留显存", <Switch checked={segment.runtimeReserveEnabled === true} onChange={(checked) => patch({ runtimeReserveEnabled: checked })} />)}
             {control("预留显存 GB", <InputNumber style={field} min={0} max={24} step={0.1} value={segment.reservedVramGb != null ? Number(segment.reservedVramGb) : undefined} placeholder="0.6" onChange={(value) => patch({ reservedVramGb: value ?? undefined })} />)}
@@ -305,5 +367,16 @@ export function ClipSettings({ ctx, metadata, segment, patch }: Props) {
             <div className="nfh3-hint">也可输入 ComfyUI `models/loras` 下的相对文件名，按回车应用。</div>
         </div>)}
         {mode === "ref2va" ? section("audio", "数字人 · MV · 锁音频", segment.audioDrive ? enabledSummary("智能音频驱动") : segment.lockAudio ? enabledSummary("锁定音频") : "未启用", <div className="nfh3-audio-workspace">{control("开启锁音频", <Switch checked={segment.lockAudio === true} onChange={(checked) => patch({ lockAudio: checked })} />)}{control("开启音频驱动模式", <Switch checked={segment.audioDrive === true} onChange={(checked) => patch({ audioDrive: checked, lockAudio: checked ? true : segment.lockAudio })} />)}{segment.audioDrive ? <>{control("驱动文件", <input value={String(segment.audioDriveFile || "")} onChange={(event) => patch({ audioDriveFile: event.target.value })} placeholder="音频文件名或拖入" />, true)}{control("当前起点", <InputNumber style={field} min={0} step={0.001} value={segment.audioDriveStart != null ? Number(segment.audioDriveStart) : undefined} placeholder="0" onChange={(value) => patch({ audioDriveStart: value ?? undefined })} />)}{control("当前终点", <InputNumber style={field} min={0} step={0.001} value={segment.audioDriveEnd != null ? Number(segment.audioDriveEnd) : undefined} placeholder="0" onChange={(value) => patch({ audioDriveEnd: value ?? undefined })} />)}{control("打点数据", <textarea value={String(segment.audioDriveMarkers || "")} onChange={(event) => patch({ audioDriveMarkers: event.target.value })} placeholder="JSON" />, true)}{control("分段图片", <textarea value={String(segment.audioDriveSegmentImages || "")} onChange={(event) => patch({ audioDriveSegmentImages: event.target.value })} placeholder="JSON" />, true)}{control("分段分镜", <textarea value={String(segment.audioDriveSegmentStoryboards || "")} onChange={(event) => patch({ audioDriveSegmentStoryboards: event.target.value })} placeholder="JSON" />, true)}{control("创意描述", <textarea value={String(segment.audioDriveCreative || "")} onChange={(event) => patch({ audioDriveCreative: event.target.value })} />, true)}{control("排除范围", <textarea value={String(segment.audioDriveExclude || "")} onChange={(event) => patch({ audioDriveExclude: event.target.value })} />, true)}</> : null}</div>) : null}
+        </>}
     </div>;
+}
+
+function selectedVideoWorkflowReferenceCount(segment?: H3Segment) {
+    const mode = String(segment?.mode || segment?.taskMode || "ref2va").toLowerCase();
+    if (mode === "t2v" || mode === "t2va") return 0;
+    if (mode === "i2v" || mode === "i2va") return 1;
+    if (mode === "fl2v" || mode === "fl2va") return 2;
+    const bindings = Array.isArray(segment?.referenceBindings) ? segment.referenceBindings.filter((item) => item.enabled !== false).length : 0;
+    const items = Array.isArray(segment?.refItems) ? segment.refItems.filter((item) => item.enabled !== false).length : 0;
+    return Math.max(1, bindings, items);
 }

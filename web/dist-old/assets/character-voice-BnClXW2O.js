@@ -1,0 +1,1 @@
+const e="已归档角色声线";function o(t,r){return t.find(a=>r.assetId&&a.id===r.assetId||r.storageKey&&a.data.storageKey===r.storageKey||r.url&&a.data.url&&a.data.url===r.url)}function n(t,r){const a=t?.trim()||"";return a&&a!==e?a:r?.title||""}function u(t){return!!(t.url||t.storageKey||t.assetId)}export{o as f,u as h,n as r};

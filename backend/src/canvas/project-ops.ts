@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { compactH3SegmentStarts } from "@basketikun/canvas-agent/runtime-fields";
 import { characterReferenceUpdates, h3CharacterSourceFromNode, referenceBindingsOf, syncH3CharacterGroupSource } from "@basketikun/canvas-agent/reference-contract";
 
 export type CanvasOperation = Record<string, unknown> & { type: string };
@@ -123,6 +124,17 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             if (operation.metadata && typeof operation.metadata === "object" && !Array.isArray(operation.metadata)) {
                 const metadata = recordOf(node.metadata);
                 let metadataPatch = operation.metadata as Record<string, unknown>;
+                if (Object.hasOwn(metadataPatch, "smartImageReferenceSelection")) {
+                    const policy = recordOf(metadataPatch.smartImageReferenceSelection);
+                    const images = Array.isArray(metadata.images) ? metadata.images as Array<Record<string, unknown>> : [];
+                    if (node.type !== "config" || metadata.smart !== true || (metadata.generationMode || "image") !== "image"
+                        || !["latest_success", "selected_result"].includes(String(policy.mode))
+                        || Object.keys(policy).some(key => !["mode", "resultId"].includes(key))
+                        || policy.mode === "latest_success" && Object.hasOwn(policy, "resultId")
+                        || policy.mode === "selected_result" && !images.some(image => image.id === policy.resultId && image.status === "success" && image.storageKey)) {
+                        throw new Error("SMART_IMAGE_REFERENCE_SELECTION_INVALID: 引用选择必须来自智能图片节点的成功归档结果");
+                    }
+                }
                 // metadata.segments 在 update_node 中必须是「完整替换」（同长同 id 集合）。
                 // 部分替换会冲突 MCP / 任务回写等并发写路径，强制改用 update_h3_segment 等细粒度 op。
                 if (Object.prototype.hasOwnProperty.call(metadataPatch, "segments")) {
@@ -234,7 +246,9 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
                 if (afterIndex < 0) throw new Error(`afterSegmentId 不存在：${afterSegmentId}`);
                 insertIndex = afterIndex + 1;
             }
-            segments.splice(insertIndex, 0, incoming);
+            // A newly inserted Clip has no authored outgoing continuity decision yet.
+            // Preserve explicit choices; do not inherit a legacy node-wide chain switch.
+            segments.splice(insertIndex, 0, { motionContextEnabled: false, tailFrameContinuation: false, ...incoming });
             const metadata = recordOf(node.metadata);
             metadata.segments = segments;
             node.metadata = metadata;
@@ -389,6 +403,12 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             for (const key of allowed) if (key in patch) project[key] = patch[key];
         } else {
             throw new Error(`未知画布操作：${operation.type}`);
+        }
+        const timelineNode = nodes.find((node) => String(node.id) === String(operation.nodeId || operation.id || ""));
+        if (isH3CanvasNode(timelineNode) && Array.isArray(recordOf(timelineNode!.metadata).segments)) {
+            const metadata = recordOf(timelineNode!.metadata);
+            metadata.segments = compactH3SegmentStarts(segmentsOf(timelineNode!), metadata.duration);
+            timelineNode!.metadata = metadata;
         }
         results.push(result);
         results.push(...derived.map((operation) => ({ type: operation.type, ok: true })));

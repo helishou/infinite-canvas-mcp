@@ -80,9 +80,9 @@ test("v7 迁移：把 v6 的 folder_id 搬到 drama_episodes，并给所有 dram
         assert.equal(items[0].episode.id, eps1[0].id);
         assert.equal(items[0].canvas?.id, "project-1");
 
-        // 画布删除只解除绑定，不删除分集
-        assert.equal(db.deleteCanvasProject("project-1"), 1);
-        assert.equal(db.getDramaEpisode(eps1[0].id)?.canvasId, null);
+        // 固定制作画布不能从画布库删除
+        assert.throws(() => db.deleteCanvasProject("project-1"), /仍绑定制作对象/);
+        assert.equal(db.getDramaEpisode(eps1[0].id)?.canvasId, "project-1");
 
         // 6. drama_episodes CRUD
         const newEp = db.upsertDramaEpisode({ dramaId: "folder-1", episodeNumber: 2, title: "第二集", synopsis: "她离开", fullPlot: "她离开王府后查明旧案。", canvasId: null });
@@ -94,7 +94,7 @@ test("v7 迁移：把 v6 的 folder_id 搬到 drama_episodes，并给所有 dram
 
         // 7. 后续迁移同样完整执行
         const versions = db["db"].prepare("SELECT version FROM schema_migrations ORDER BY version").all() as Array<{ version: number }>;
-        assert.deepEqual(versions.map((v) => v.version), Array.from({ length: DATABASE_SCHEMA_VERSION - 5 }, (_, index) => index + 6));
+        assert.deepEqual(versions.map((v) => v.version), Array.from({ length: DATABASE_SCHEMA_VERSION - 5 }, (_, index) => index + 6).filter(version => version !== 18 && version !== 19));
     } finally {
         db.close();
     }

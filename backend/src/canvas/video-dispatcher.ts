@@ -3,14 +3,16 @@ import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generatio
 
 import type { CanvasProject, RuntimeTask, WorkflowConfig, WorkflowField } from "../db.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
+import type { RunningHubBackend } from "../runtime/runninghub.js";
 import { validateVideoTrimRange, type VideoConcatBackend } from "../runtime/video-concat.js";
 import type { Stores, TaskStore } from "../stores/types.js";
 import type { WorkflowExecutor } from "../workflows/executor.js";
 import type { WorkflowStore } from "../workflows/store.js";
-import { builtinWorkflowName, decodeChannelModel, findChannelModel, modelOptionName, resolveWorkflowForModel, usesWorkflowExecutor, workflowResolutionMessage } from "./model-workflow.js";
+import { builtinWorkflowName, decodeChannelModel, findChannelModel, modelOptionName, resolveWorkflowBindingForModel, usesWorkflowExecutor, workflowResolutionMessage } from "./model-workflow.js";
 import type { CanvasImageReference } from "./image-dispatcher.js";
 import { DirectVideoBackend } from "../runtime/direct-video.js";
 import { prepareCanvasGenerationTarget, prepareCanvasVideoTrimTarget } from "./generation-target.js";
+import { generationSettingsSnapshot } from "./generation-settings.js";
 
 export const CANVAS_VIDEO_CONCAT_MODEL = "__local_video_concat__";
 export const CANVAS_VIDEO_TRIM_MODEL = "__local_video_trim__";
@@ -24,6 +26,9 @@ export type CanvasVideoGenerationInput = {
     prompt: string;
     references?: CanvasImageReference[];
     videoReferences?: CanvasVideoReference[];
+    audioReferences?: CanvasVideoReference[];
+    /** H3 can bind videos/audio as workflow refs; ordinary video calls route by image refs only. */
+    workflowReferenceCount?: number;
     size?: string;
     seconds?: string;
     resolution?: string;
@@ -37,15 +42,17 @@ export type CanvasVideoGenerationInput = {
     loopOutput?: CanvasGenerationCommand["loopOutput"];
 };
 
-type Plan = { input: CanvasVideoGenerationInput; kind: "concat" | "trim" | "workflow" | "preset" | "direct"; workflow?: string; preset?: string };
+type Plan = { input: CanvasVideoGenerationInput; kind: "concat" | "trim" | "workflow" | "preset" | "direct" | "runninghub-workflow"; workflow?: string; preset?: string; runninghubProfileId?: string };
 
 /** Backend 权威的普通视频任务；H3 连续 Clip 仍由专用 runner 管理。 */
 export class CanvasVideoDispatcher {
     private readonly children = new Map<string, Set<string>>();
     constructor(private readonly stores: Stores, private readonly comfy: ComfyUiBackend, private readonly workflows: WorkflowStore,
-        private readonly workflowExecutor: WorkflowExecutor, private readonly concat: VideoConcatBackend, private readonly directVideo?: DirectVideoBackend) {}
+        private readonly workflowExecutor: WorkflowExecutor, private readonly concat: VideoConcatBackend, private readonly directVideo?: DirectVideoBackend,
+        /** 可选注入：未配置 RunningHub 时该能力整体不可用，不影响本地执行器。 */
+        private readonly runningHub?: RunningHubBackend) {}
 
-    start(raw: CanvasVideoGenerationInput) {
+    start(raw: CanvasVideoGenerationInput, onCreated?: (task: RuntimeTask) => void) {
         let input = this.prepare(raw);
         let plan = this.plan(input);
         const taskId = input.clientTaskId || `canvas-video-${crypto.randomUUID()}`;
@@ -55,6 +62,7 @@ export class CanvasVideoDispatcher {
             throw new Error("视频裁剪任务 ID 已用于不同输入");
         }
         if (existing) return { taskId: existing.id, executor: plan.kind };
+        if (this.stores.tasks.getTombstone?.(taskId)) throw Object.assign(new Error(`TASK_HISTORY_PRUNED: ${taskId}`), { code: "TASK_HISTORY_PRUNED", retryable: false });
         const active = this.findActive(input);
         if (active) return { taskId: active.id, executor: String(active.executor || plan.kind) };
         const prepared = (plan.kind === "trim" ? prepareCanvasVideoTrimTarget : prepareCanvasGenerationTarget)(this.stores, { ...input, mode: "video" }, taskId);
@@ -66,8 +74,11 @@ export class CanvasVideoDispatcher {
         const task = this.stores.tasks.create(taskId, "canvas-video", input, {
             projectId: input.projectId, nodeId: input.nodeId, executor: plan.kind, model: input.model,
             videoTargetSize: project ? { width: targetSize.width, height: targetSize.height } : undefined,
+            ...(input.params?.parentTaskId ? { parentTaskId: input.params.parentTaskId } : {}),
+            ...(input.params?.canvasBinding ? { canvasBinding: input.params.canvasBinding } : {}),
         });
         try {
+            onCreated?.(task);
             if (project) this.stores.projects.applyOperations(input.projectId!, Number(project.revision || 0), [
                 ...prepared.createOperations,
                 { type: "update_node", id: input.nodeId!, metadata: { runtimeTaskId: task.id, status: "loading", runProgress: 0 }, metadataDelete: ["errorDetails"] },
@@ -77,7 +88,23 @@ export class CanvasVideoDispatcher {
             this.stores.tasks.update(task.id, { status: "failed", error: messageOf(error) });
             throw error;
         }
-        void this.execute(plan, task).catch((error) => this.fail(task, input, error));
+        const startedAt = Date.now();
+        const references = [
+            ...(input.references || []).map((reference) => ({ ...reference, type: "image" })),
+            ...(input.videoReferences || []).map((reference) => ({ ...reference, type: "video" })),
+            ...(input.audioReferences || []).map((reference) => ({ ...reference, type: "audio" })),
+        ].map(({ id, name, mimeType, storageKey, type }) => ({ id, name, mimeType, storageKey, type }));
+        const logId = input.projectId && !input.params?.parentTaskId ? this.stores.logs.create({
+            projectId: input.projectId, nodeId: input.nodeId, status: "running", platform: "canvas-video", workflow: plan.workflow || "",
+            model: input.model, taskMode: input.references?.length ? "i2v" : "t2v", prompt: input.prompt, references,
+            inputCounts: { image: input.references?.length || 0, video: input.videoReferences?.length || 0, audio: input.audioReferences?.length || 0 },
+            runtimeTaskId: task.id, startedAt: new Date(startedAt).toISOString(), durationMs: 0, outputs: [],
+            params: { generationSettings: generationSettingsSnapshot(input.params, {
+                size: input.size, seconds: input.seconds, resolution: input.resolution, width: input.width, height: input.height,
+                executor: plan.kind, ...(input.workflowReferenceCount !== undefined ? { workflowReferenceCount: input.workflowReferenceCount } : {}),
+            }, plan.workflow ? this.workflows.getConfig(plan.workflow)?.fields || [] : []) },
+        }).id : null;
+        void this.execute(plan, task, logId, startedAt).catch((error) => this.fail(task, input, error, logId, startedAt));
         return { taskId: task.id, executor: plan.kind };
     }
 
@@ -98,7 +125,15 @@ export class CanvasVideoDispatcher {
             const node = project && (project.nodes as Array<Record<string, any>>).find((node) => node.id === input.nodeId);
             if (project && node?.metadata?.runtimeTaskId !== task.id) throw new Error("视频任务已失去节点绑定，不恢复旧任务");
             const plan = this.plan(input);
-            void this.execute(plan, task).catch((error) => this.fail(task, input, error));
+            // 重启后子任务集合是内存态、必然为空；RunningHub 子任务要按 parentTaskId
+            // 从存储里找回来并按远端 taskId 恢复观察，否则云端任务失去跟踪。
+            for (const child of this.stores.tasks.list({ kind: "runninghub:workflow", limit: 200 })) {
+                if (String(child.params?.parentTaskId || "") !== task.id || !["queued", "running"].includes(child.status)) continue;
+                try { this.runningHub?.resume(child.id); } catch {}
+            }
+            const log = this.stores.logs.list({ runtimeTaskId: task.id, limit: 1 })[0];
+            const startedAt = log ? Date.parse(log.startedAt) : Date.now();
+            void this.execute(plan, task, log?.id || null, startedAt).catch((error) => this.fail(task, input, error, log?.id || null, startedAt));
         } catch (error) { this.fail(task, input, error); }
     }
 
@@ -110,14 +145,17 @@ export class CanvasVideoDispatcher {
             try { this.comfy.cancel(child); } catch {}
             try { this.concat.cancel(child); } catch {}
             try { this.directVideo?.cancel(child); } catch {}
+            try { this.runningHub?.cancel(child); } catch {}
         }
         const cancelled = this.stores.tasks.cancel(id);
         const input = task.input as CanvasVideoGenerationInput;
+        const log = this.stores.logs.list({ runtimeTaskId: id, limit: 1 })[0];
+        if (log) this.stores.logs.update(log.id, { status: "cancelled", finishedAt: new Date().toISOString(), durationMs: Math.max(0, Date.now() - Date.parse(log.startedAt)) });
         if (input.projectId && input.nodeId) this.stores.projects.markCanvasVideoTaskFailed(cancelled, input as Required<Pick<CanvasVideoGenerationInput, "projectId" | "nodeId">>, "");
         return cancelled;
     }
 
-    private async execute(plan: Plan, task: RuntimeTask) {
+    private async execute(plan: Plan, task: RuntimeTask, logId: string | null, startedAt: number) {
         this.stores.tasks.update(task.id, { status: "running", progress: 0.02 });
         const media = await this.dispatch(plan, task.id);
         if (this.stores.tasks.get(task.id)?.status === "cancelled") return;
@@ -129,6 +167,7 @@ export class CanvasVideoDispatcher {
         if (this.stores.tasks.get(task.id)?.status === "cancelled") return;
         this.stores.tasks.update(task.id, { status: "succeeded", progress: 1, result: { media: [media] } });
         this.stores.tasks.addEvent(task.id, "result", { media: [media] });
+        if (logId) this.stores.logs.update(logId, { status: "success", outputs: [media], finishedAt: new Date().toISOString(), durationMs: Math.max(0, Date.now() - startedAt) });
     }
 
     private async dispatch(plan: Plan, taskId: string): Promise<Record<string, unknown>> {
@@ -158,8 +197,40 @@ export class CanvasVideoDispatcher {
             this.assertActive(taskId);
             this.track(taskId, childId);
             try {
-                await this.directVideo.run(plan.input, childId, { parentTaskId: taskId, channelId: decodeChannelModel(plan.input.model)?.channelId, seconds: plan.input.seconds, resolution: plan.input.resolution });
+                const modelValues = recordOf(recordOf(plan.input.params?.selectedVideoModelFieldValues)[`direct:${plan.input.model}`]);
+                const directInput = {
+                    ...plan.input,
+                    seconds: String(modelValues.seconds ?? plan.input.seconds ?? "6"),
+                    size: String(modelValues.size ?? plan.input.size ?? "1280x720"),
+                    resolution: String(modelValues.resolution ?? plan.input.resolution ?? "720p"),
+                };
+                await this.directVideo.run(directInput, childId, { parentTaskId: taskId, channelId: decodeChannelModel(plan.input.model)?.channelId, seconds: directInput.seconds, size: directInput.size, resolution: directInput.resolution });
                 return firstMedia(await waitForTask(this.stores.tasks, childId));
+            } finally { this.untrack(taskId, childId); }
+        }
+        if (plan.kind === "runninghub-workflow") {
+            const runningHub = this.runningHub;
+            if (!runningHub) throw new Error("Backend 未初始化 RunningHub 执行器，无法运行绑定的 RunningHub 工作流");
+            const childId = `video-runninghub-child-${taskId}`;
+            this.assertActive(taskId);
+            this.track(taskId, childId);
+            try {
+                // 平台提交、任务状态与媒体归档都交给 RunningHubBackend；视频档自身校验出视频结果。
+                const task = await runningHub.runWorkflow(plan.runninghubProfileId!, {
+                    prompt: plan.input.prompt,
+                    references: plan.input.references || [],
+                    videoReferences: plan.input.videoReferences || [],
+                    audioReferences: plan.input.audioReferences || [],
+                }, { ...(plan.input.params || {}) }, {
+                    parentTaskId: taskId,
+                    projectId: plan.input.projectId,
+                    nodeId: plan.input.nodeId,
+                    model: plan.input.model,
+                    ...(plan.input.seconds ? { seconds: plan.input.seconds } : {}),
+                    ...(plan.input.size ? { size: plan.input.size } : {}),
+                    ...(plan.input.width && plan.input.height ? { width: plan.input.width, height: plan.input.height } : {}),
+                }, childId);
+                return firstMedia(await waitForTask(this.stores.tasks, task.id));
             } finally { this.untrack(taskId, childId); }
         }
         if (plan.kind === "preset") {
@@ -175,9 +246,24 @@ export class CanvasVideoDispatcher {
         const detail = await this.workflows.get(plan.workflow!);
         const fields = detail.config?.fields || [];
         const values: Record<string, unknown> = { ...(plan.input.params || {}) };
+        if (values.seconds === undefined && plan.input.seconds !== undefined) values.seconds = plan.input.seconds;
+        const configuredVideoFields = recordOf(plan.input.params?.selectedVideoModelFieldValues);
+        const selectedVideoFields = recordOf(configuredVideoFields[`${plan.input.model}::${plan.workflow!}`] ?? configuredVideoFields[plan.workflow!]);
+        Object.assign(values, selectedVideoFields);
         for (const field of fields) if (field.type === "text" && (field.isPrompt || field.id.toLowerCase() === "prompt")) values[field.id] = plan.input.prompt;
-        await this.fillMediaFields(values, fields.filter((field) => isImageField(field, detail.workflow)), plan.input.references || []);
-        await this.fillMediaFields(values, fields.filter((field) => isVideoField(field, detail.workflow)), plan.input.videoReferences || []);
+        const imageFields = fields.filter((field) => isImageField(field, detail.workflow));
+        const videoFields = fields.filter((field) => isVideoField(field, detail.workflow));
+        const audioFields = fields.filter((field) => isAudioField(field, detail.workflow));
+        await this.fillMediaFields(values, imageFields, plan.input.references || []);
+        await this.fillMediaFields(values, videoFields, plan.input.videoReferences || []);
+        await this.fillMediaFields(values, audioFields, plan.input.audioReferences || []);
+        for (const [kind, supplied, mapped] of [
+            ["图片", plan.input.references || [], imageFields],
+            ["视频", plan.input.videoReferences || [], videoFields],
+            ["音频", plan.input.audioReferences || [], audioFields],
+        ] as const) {
+            if (supplied.length > mapped.length) throw new Error(`所选视频模型的工作流没有映射全部${kind}参考（收到 ${supplied.length} 个，映射 ${mapped.length} 个）`);
+        }
         const childId = `video-workflow-child-${taskId}`;
         this.assertActive(taskId);
         this.track(taskId, childId);
@@ -202,15 +288,23 @@ export class CanvasVideoDispatcher {
         if (input.model === CANVAS_VIDEO_CONCAT_MODEL) return { input, kind: "concat" };
         const config = this.stores.settings.get("ai.config");
         if (usesWorkflowExecutor(config, input.model)) {
-            const resolved = resolveWorkflowForModel(config, input.model, (input.references || []).length);
+            const resolved = resolveWorkflowBindingForModel(config, input.model, Number.isSafeInteger(input.workflowReferenceCount) ? Number(input.workflowReferenceCount) : (input.references || []).length);
             if (!resolved.ok) throw new Error(`${workflowResolutionMessage(resolved)}（模型=${input.model}）`);
-            return { input: { ...input, params: { ...resolved.params, ...(input.params || {}) } }, kind: "workflow", workflow: resolved.workflow };
+            const withParams = { ...input, params: { ...resolved.params, ...(input.params || {}) } };
+            if (resolved.binding.provider === "runninghub") {
+                if (!this.runningHub) throw new Error(`模型「${input.model}」绑定了 RunningHub 工作流，但当前 Backend 未初始化 RunningHub 执行器`);
+                return { input: withParams, kind: "runninghub-workflow", runninghubProfileId: resolved.binding.profileId };
+            }
+            return { input: withParams, kind: "workflow", workflow: resolved.binding.workflow };
         }
         const workflow = builtinWorkflowName(input.model);
         if (workflow) return { input, kind: "workflow", workflow };
         if (input.preset) return { input, kind: "preset", preset: input.preset };
         const selected = findChannelModel(this.stores.settings.get("ai.config"), input.model);
-        if (this.directVideo && selected && String(selected.channel.kind || "") !== "comfyui" && String((selected.model as Record<string, unknown>).capability || "") === "video") return { input, kind: "direct" };
+        if (this.directVideo && selected && String(selected.channel.kind || "") !== "comfyui" && String((selected.model as Record<string, unknown>).capability || "") === "video") {
+            if (input.videoReferences?.length || input.audioReferences?.length) throw new Error("所选直连视频模型目前只接受图片参考；请移除视频/音频参考或选择 ComfyUI 视频工作流模型");
+            return { input, kind: "direct" };
+        }
         throw new Error(`当前 Backend 没有视频模型执行器：${modelOptionName(input.model)}`);
     }
 
@@ -240,7 +334,7 @@ export class CanvasVideoDispatcher {
 
     private prepare(input: CanvasVideoGenerationInput): CanvasVideoGenerationInput {
         const keep = (reference: CanvasVideoReference) => reference.dataUrl ? this.storeInline(reference) : reference;
-        return { ...input, prompt: String(input.prompt || ""), references: input.references?.map(keep), videoReferences: input.videoReferences?.map(keep) };
+        return { ...input, prompt: String(input.prompt || ""), references: input.references?.map(keep), videoReferences: input.videoReferences?.map(keep), audioReferences: input.audioReferences?.map(keep) };
     }
     private storeInline(reference: CanvasVideoReference) {
         const match = /^data:([^;,]+);base64,(.+)$/s.exec(reference.dataUrl || "");
@@ -264,11 +358,13 @@ export class CanvasVideoDispatcher {
     private assertActive(taskId: string) { if (this.stores.tasks.get(taskId)?.status === "cancelled") throw new Error("视频任务已取消，未启动子执行器"); }
     private track(parent: string, child: string) { const set = this.children.get(parent) || new Set<string>(); set.add(child); this.children.set(parent, set); }
     private untrack(parent: string, child: string) { const set = this.children.get(parent); set?.delete(child); if (!set?.size) this.children.delete(parent); }
-    private fail(task: RuntimeTask, input: CanvasVideoGenerationInput, error: unknown) {
+    private fail(task: RuntimeTask, input: CanvasVideoGenerationInput, error: unknown, logId?: string | null, startedAt?: number) {
         const current = this.stores.tasks.get(task.id);
         if (!current || current.status === "cancelled") return;
         const message = messageOf(error);
         const failed = this.stores.tasks.update(task.id, { status: "failed", error: message });
+        const log = logId ? this.stores.logs.get(logId) : this.stores.logs.list({ runtimeTaskId: task.id, limit: 1 })[0];
+        if (log) this.stores.logs.update(log.id, { status: "failed", error: message, finishedAt: new Date().toISOString(), durationMs: Math.max(0, Date.now() - (startedAt || Date.parse(log.startedAt))) });
         if (input.projectId && input.nodeId) this.stores.projects.markCanvasVideoTaskFailed(failed, input as Required<Pick<CanvasVideoGenerationInput, "projectId" | "nodeId">>, message);
     }
 }
@@ -281,7 +377,9 @@ function bindSource(project: CanvasProject, input: CanvasVideoGenerationInput, t
 }
 function isImageField(field: WorkflowField, workflow: Record<string, unknown>) { return field.type === "image" || field.node.split(",").some((id) => (workflow[id] as any)?.class_type === "LoadImage"); }
 function isVideoField(field: WorkflowField, workflow: Record<string, unknown>) { return field.type === "video" || field.node.split(",").some((id) => /(?:^|_)LoadVideo/.test((workflow[id] as any)?.class_type || "")); }
+function isAudioField(field: WorkflowField, workflow: Record<string, unknown>) { return field.type === "audio" || field.node.split(",").some((id) => /(?:^|_)LoadAudio/.test((workflow[id] as any)?.class_type || "")); }
 function emptyWorkflowConfig(name: string): WorkflowConfig { return { title: name, backend: "", operation: "", description: "", fields: [] }; }
+function recordOf(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 function messageOf(error: unknown) { return error instanceof Error ? error.message : String(error); }
 async function waitForTask(tasks: TaskStore, id: string) { for (;;) { const task = tasks.get(id); if (!task) throw new Error(`生成任务不存在：${id}`); if (task.status === "succeeded") return task; if (["failed", "cancelled"].includes(task.status)) throw new Error(task.error || `生成任务${task.status}`); await new Promise((resolve) => setTimeout(resolve, 500)); } }
 function firstMedia(task: RuntimeTask) { const media = task.result?.media; const values = Array.isArray(media) ? media : media && typeof media === "object" ? [media] : []; const output = values.find((item: any) => String(item?.mimeType || "").startsWith("video/")) || values[0]; if (!output || typeof output !== "object") throw new Error("视频任务完成但没有返回媒体"); return output as Record<string, unknown>; }

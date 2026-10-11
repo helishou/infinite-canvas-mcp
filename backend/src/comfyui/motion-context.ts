@@ -60,7 +60,7 @@ export async function buildMotionContextClip(
 
     try {
         // ── Step 1: ffprobe 取帧数 ──────────────────────────────────
-        const probe = await run("ffprobe", [
+        const probe = await run(process.env.FFPROBE_PATH || "ffprobe", [
             "-v", "error", "-count_frames",
             "-show_streams", "-of", "json", source,
         ]);
@@ -75,7 +75,7 @@ export async function buildMotionContextClip(
 
         // ── Step 2: ffmpeg 截取尾部帧（24fps, rgb24） ──────────────
         const framePattern = path.join(tmpDir, "frame_%05d.png");
-        await run("ffmpeg", [
+        await run(process.env.FFMPEG_PATH || "ffmpeg", [
             "-hide_banner", "-loglevel", "error", "-y",
             "-i", source,
             "-vf", `select='gte(n,${start})',setpts=PTS-STARTPTS,fps=24`,
@@ -141,7 +141,7 @@ export async function buildMotionContextClip(
 
         // ── Step 4: ffmpeg 编码输出 ────────────────────────────────
         await fs.mkdir(path.dirname(target) || ".", { recursive: true });
-        await run("ffmpeg", [
+        await run(process.env.FFMPEG_PATH || "ffmpeg", [
             "-hide_banner", "-loglevel", "error", "-y",
             "-framerate", "24",
             "-i", framePattern,

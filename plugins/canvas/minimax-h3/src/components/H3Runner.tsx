@@ -23,8 +23,8 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 const result = (parent.result || {}) as Record<string, unknown>;
                 const childId = String(result.currentChildTaskId || "");
                 const childKind = String(result.currentChildKind || "");
-                if (childId) {
-                    const child = childKind === "runninghub:minimax-h3" ? await ctx.ai.getRunningHubH3Task(childId) : await ctx.ai.getLocalH3Task(childId);
+                if (childId && childKind !== "canvas-video") {
+                    const child = await ctx.ai.getLocalH3Task(childId);
                     if (!stopped && child.preview?.dataUrl && typeof window !== "undefined") {
                         window.dispatchEvent(new CustomEvent("minimax-h3-preview", { detail: { parentTaskId: taskId, sourceTaskId: childId, url: child.preview.dataUrl, mime: child.preview.mime, promptId: child.preview.promptId, step: child.preview.step, total: child.preview.total } }));
                     }
@@ -52,7 +52,8 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
             if (!segments.length) throw new Error("当前节点没有可生成的 Clip");
             const selectedId = String(selected?.id || metadata.selectedSegmentId || "");
             if (!selectedId) throw new Error("当前节点没有可定位的 Clip");
-            await ctx.flush();
+            // The host's runCanvasGeneration path flushes the canvas before submitting this H3 command.
+            if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("minimax-h3:submit-pending", { detail: { nodeId: ctx.node.id, segmentId: selectedId, pending: true } }));
             await ctx.ai.runCanvasGeneration({ mode: "video", operation: "h3-run", projectId: ctx.projectId, nodeId: ctx.node.id, segmentId: selectedId, runFromCurrent, forceRegenerate });
         } catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
@@ -61,6 +62,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 : detail;
             message.error(!runFromCurrent && clipNumber > 0 && !/\bClip\s+\d+\b/iu.test(readable) ? `Clip ${clipNumber}：${readable}` : readable);
         } finally {
+            if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("minimax-h3:submit-pending", { detail: { nodeId: ctx.node.id, segmentId, pending: false } }));
             runInFlight.current.delete(segmentId);
         }
     };

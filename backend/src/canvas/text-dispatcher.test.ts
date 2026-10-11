@@ -5,6 +5,29 @@ import { CanvasTextDispatcher, requestOpenAiText } from "./text-dispatcher.js";
 import { BackendDatabase } from "../db.js";
 import { createStores } from "../stores/index.js";
 
+test("Codex text tasks resolve the selected channel without requiring an HTTP key", async () => {
+    const db = new BackendDatabase(":memory:");
+    try {
+        const stores = createStores(db);
+        stores.settings.set("ai.config", { channels: [{ id: "cli", kind: "codex-cli", models: [{ name: "native", capability: "text" }] }] });
+        let kind = "", model = "";
+        const dispatcher = new CanvasTextDispatcher({ url: "http://unused" } as any, stores, async provider => { kind = provider.kind || ""; model = provider.model; assert.equal(provider.apiKey, ""); assert.equal(provider.baseUrl, ""); return "native result"; });
+        const started = dispatcher.start({ model: "cli::native", prompt: "fixture" });
+        const deadline = Date.now() + 1000;
+        while (!['succeeded', 'failed'].includes(stores.tasks.get(started.taskId)?.status || "") && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+        assert.equal(kind, "codex-cli"); assert.equal(model, "native");
+        assert.equal(stores.tasks.get(started.taskId)?.status, "succeeded");
+        assert.equal((stores.tasks.get(started.taskId)?.result?.texts as any[])[0].content, "native result");
+        let retried = 0;
+        const resumed = new CanvasTextDispatcher({ url: "http://unused" } as any, stores, async () => { retried++; return "duplicate"; });
+        const interrupted = stores.tasks.create("cli-interrupted", "canvas-text", { model: "cli::native", prompt: "fixture" }, {});
+        stores.tasks.update(interrupted.id, { status: "running" });
+        resumed.resume(stores.tasks.get(interrupted.id)!);
+        assert.equal(retried, 0); assert.equal(stores.tasks.get(interrupted.id)?.status, "failed");
+        assert.match(stores.tasks.get(interrupted.id)?.error || "", /未自动重跑/);
+    } finally { db.close(); }
+});
+
 test("OpenAI Responses 请求携带参考图并解析 output_text", async () => {
     const originalFetch = globalThis.fetch;
     let seenUrl = "";
@@ -192,8 +215,7 @@ test("插件文本任务通过统一执行器保留本次系统提示词", async
     assert.equal(db.getTask("plugin-text")!.status, "succeeded");
 });
 
-test("文本结果重试通过 Backend 原位更新目标节点，不重复创建结果", async (t) => {
-    const { db, dispatcher, input } = liveFixture(t, async () => "原位重试结果");
+test("文本结果重试通过 Backend 原位更新目标节点，不重复创建结果", async (t) => {    const { db, dispatcher, input } = liveFixture(t, async () => "原位重试结果");
     db.applyCanvasProjectOperations("p", undefined, [{
         type: "add_node", nodeType: "text", id: "text-result", title: "旧结果",
         position: { x: 420, y: 0 }, width: 340, height: 240,
@@ -208,4 +230,31 @@ test("文本结果重试通过 Backend 原位更新目标节点，不重复创�
     assert.deepEqual(nodes.find((node) => node.id === "source")!.metadata.generatedTextResultIds, ["text-result"]);
     assert.throws(() => dispatcher.start({ ...input, clientTaskId: "missing-target", params: { targetTextNodeId: "missing" } }), /结果节点不存在/);
     assert.equal(db.getTask("missing-target"), null);
+});
+
+// 复制智能节点会把它元数据里指向自身的 generatedTextResultIds/primaryTextNodeId
+// 原样克隆进副本（指向的是被复制的原节点）。运行副本时若把这份 id 当「旧结果」
+// 清理，就会把原节点删掉——曾在线上复现：复制 → 运行副本 → 原节点消失。
+test("复制智能节点后运行副本，不把被复制的原节点当旧结果删除", async (t) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "p", nodes: [
+        { id: "original", type: "config", metadata: { smart: true, generatedTextResultIds: ["original"], primaryTextNodeId: "original" } },
+        { id: "copy", type: "config", metadata: { smart: true, generatedTextResultIds: ["original"], primaryTextNodeId: "original" } },
+    ], connections: [] });
+    const stores = createStores(db);
+    stores.settings.set("ai.config", { channels: [{ id: "c", baseUrl: "http://unused.local/v1", apiKey: "test", models: [{ name: "gpt-5-5" }] }] });
+    const dispatcher = new CanvasTextDispatcher({ url: "http://unused.local" } as any, stores, async () => "副本结果");
+    dispatcher.start({ projectId: "p", nodeId: "copy", model: "c::gpt-5-5", prompt: "测试", clientTaskId: "copy-run" });
+    await settle(db, "copy-run");
+    assert.equal(db.getTask("copy-run")!.status, "succeeded");
+    const nodes = db.getCanvasProject("p")!.nodes as Array<{ id: string; type: string; metadata: Record<string, unknown> }>;
+    const original = nodes.find((node) => node.id === "original");
+    assert.ok(original, "被复制的原节点必须保留");
+    assert.deepEqual(original.metadata.generatedTextResultIds, ["original"]);
+    // 智能节点文本结果原位写回副本自身，不得波及原节点。
+    const copy = nodes.find((node) => node.id === "copy")!;
+    assert.equal(copy.metadata.content, "副本结果");
+    assert.deepEqual(copy.metadata.generatedTextResultIds, ["copy"]);
+    assert.equal(nodes.length, 2);
 });

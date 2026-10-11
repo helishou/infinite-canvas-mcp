@@ -4,9 +4,20 @@ import { collectOutputMedia } from "../comfyui/bridge.js";
 import type { MediaStore, TaskStore } from "../stores/types.js";
 import type { BackendEventBus } from "../events.js";
 import { redactInlineMedia } from "../runtime/redact-inline-media.js";
+import { workflowGenerationSettingsSnapshot } from "../canvas/generation-settings.js";
 
 type RunParams = Record<string, unknown>;
 type FieldValues = Record<string, unknown>;
+
+/**
+ * 按用户指定的输出节点裁剪 ComfyUI 的 outputs（结构是 节点ID → 该节点产物）。
+ * 未指定时原样返回；指定了但一个都没命中时返回空对象，由调用方给出可读报错。
+ */
+export function selectOutputNodes(outputs: Record<string, unknown>, outputNodes?: string[]): Record<string, unknown> {
+    if (!Array.isArray(outputNodes) || !outputNodes.length) return outputs;
+    const wanted = new Set(outputNodes.map((id) => String(id)));
+    return Object.fromEntries(Object.entries(outputs || {}).filter(([nodeId]) => wanted.has(nodeId)));
+}
 
 type RunResult = {
     taskId: string;
@@ -14,7 +25,24 @@ type RunResult = {
     outputs: Record<string, unknown>;
     media: Array<{ url: string; storageKey?: string; mimeType: string; filename: string }>;
     status: { status_str: string; completed: boolean };
+    /**
+     * 整体工作流失败、但指定的输出节点已有产物时的说明。
+     * 有值表示结果来自抢救，仍然算成功。
+     */
+    warning?: string;
 };
+
+/**
+ * 整体工作流失败时，尝试从指定的输出节点抢救已有产物。
+ * 指定了输出节点且它们确实产出了媒体时，按成功返回并附带整体失败原因；
+ * 没指定输出节点、或指定节点没有产物时返回 null，调用方照常报错。
+ */
+async function rescueOutputsFromFailure(outputs: unknown, outputNodes: string[], comfyUrl: string, mediaStore: MediaStore, controller: AbortController) {
+    const picked = selectOutputNodes((outputs && typeof outputs === "object" ? outputs : {}) as Record<string, unknown>, outputNodes);
+    if (!Object.keys(picked).length) return null;
+    const list = await collectOutputMedia(picked, comfyUrl, mediaStore, controller.signal);
+    return list.length ? { outputs: picked, media: list } : null;
+}
 
 function workflowRequestError(action: string, url: string, error: unknown) {
     const reason = error instanceof Error ? `${error.name ? `${error.name}: ` : ""}${error.message}` : String(error);
@@ -543,6 +571,23 @@ export class WorkflowExecutor {
         private readonly db?: BackendDatabase,
     ) {}
 
+    private updateCanvasImageWorkflowSettingsLog(parentTaskId: string | undefined, workflowName: string | undefined, fields: WorkflowField[], values: FieldValues) {
+        if (!parentTaskId || !workflowName || !this.db) return;
+        const log = this.db.listGenerationLogs({ runtimeTaskId: parentTaskId, platform: "canvas-image", limit: 1 })[0];
+        if (!log || log.workflow !== workflowName) return;
+        const currentFieldIds = new Set(fields.map((field) => field.id));
+        const staleFieldIds = Object.keys(values).filter((key) => key.startsWith("f_") && !currentFieldIds.has(key));
+        const historicalFields = this.db.getWorkflowFieldDefinitionsByIds(staleFieldIds)
+            .map(({ workflowName: sourceWorkflow, field }) => ({ ...field, sourceWorkflow }));
+        const params = log.params && typeof log.params === "object" ? log.params : {};
+        this.db.updateGenerationLog(log.id, {
+            params: {
+                ...params,
+                generationSettings: workflowGenerationSettingsSnapshot(values, [...fields, ...historicalFields]),
+            },
+        });
+    }
+
     /**
      * 准备一次工作流运行：应用默认值、上传媒体、注入参数、裁剪、校验、创建任务。
      * 同步部分（媒体上传 + 校验）可能抛错，由调用方捕获。
@@ -571,6 +616,8 @@ export class WorkflowExecutor {
         nodeId: string | undefined;
         name: string | undefined;
         configTitle: string;
+        /** 用户指定的输出节点；空数组表示不过滤。 */
+        outputNodes: string[];
         parentTaskId: string | undefined;
     }> {
         const controller = new AbortController();
@@ -596,6 +643,7 @@ export class WorkflowExecutor {
                 processedValues[field.id] = Math.floor(Math.random() * 1125899906842624);
             }
         }
+        this.updateCanvasImageWorkflowSettingsLog(parentTaskId, name, config.fields || [], processedValues);
 
         // 处理多节点字段（node 含逗号，如 Flux2-Klein 的 width/height 需同时注入到 152 和 156）
         const multiNodeParams: RunParams = {};
@@ -676,7 +724,7 @@ export class WorkflowExecutor {
             : this.tasks.create("workflow", { workflow: "custom", fields: persistedFieldValues, prompt: promptText }, { ...params, ...(parentTaskId ? { parentTaskId } : {}) });
         this.controllers.set(task.id, controller);
         this.events?.publish({ type: "task.updated", entityId: task.id, payload: task });
-        return { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle: config.title, parentTaskId };
+        return { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle: config.title, outputNodes: Array.isArray(config.outputNodes) ? config.outputNodes : [], parentTaskId };
     }
 
     /**
@@ -696,10 +744,12 @@ export class WorkflowExecutor {
         nodeId: string | undefined;
         name: string | undefined;
         configTitle: string;
+        /** 用户指定的输出节点；空数组表示不过滤。 */
+        outputNodes: string[];
         /** 画布父任务已自行写过生成日志时，内层不再重复写。 */
         parentTaskId: string | undefined;
     }): Promise<RunResult> {
-        const { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle, parentTaskId } = ctx;
+        const { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle, outputNodes, parentTaskId } = ctx;
         // 画布任务（image/video/audio）已经写过一条更完整的生成日志时，这里不再重复写。
         // 否则同一次生图会在日志面板出现「生图」+「工作流」两条几乎一致的记录：
         // 同一 nodeId、同一 prompt、同一产物 storageKey，只有耗时和任务 ID 不同。
@@ -707,7 +757,7 @@ export class WorkflowExecutor {
         const skipLog = Boolean(parentTaskId);
         try {
             this.tasks.update(task.id, { status: "running", progress: 0.05 });
-            const finalResult = await this.executeWorkflow(task, prepared, url, controller, clientId);
+            const finalResult = await this.executeWorkflow(task, prepared, url, controller, clientId, outputNodes);
             this.tasks.update(task.id, { status: "succeeded", progress: 1, result: finalResult });
             this.events?.publish({ type: "task.completed", entityId: task.id, payload: finalResult });
             if (!skipLog) this.db?.createGenerationLog({
@@ -832,6 +882,8 @@ export class WorkflowExecutor {
         comfyUrl: string,
         controller: AbortController,
         clientId: string,
+        /** 用户指定的输出节点；空数组表示不过滤。 */
+        outputNodes: string[] = [],
     ) {
         const activeExecution = { url: comfyUrl, cancelRequested: false } as { url: string; promptId?: string; cancelRequested: boolean; cancellation?: Promise<void> };
         this.comfyExecutions.set(task.id, activeExecution);
@@ -913,13 +965,24 @@ export class WorkflowExecutor {
                     throw new Error("任务已取消");
                 }
                 if (Date.now() - startedAt > maxExecutionMs) throw new Error("ComfyUI 任务执行超时（30 分钟）");
-                if (wsError) throw wsError;
+                if (wsError) {
+                    // wsError 只在 socket 回调里赋值，TS 控制流看不到，先取成 Error。
+                    const wsFailure = wsError as Error;
+                    // 整体失败但指定输出节点已有产物时，按成功抢救。
+                    const rescued = outputNodes.length ? await rescueOutputsFromFailure(wsOutputs ?? wsExecutionSuccessOutputs, outputNodes, comfyUrl, this.media, controller) : null;
+                    if (rescued) return { promptId, outputs: rescued.outputs, media: rescued.media, status: { status_str: "success", completed: true }, warning: `工作流整体失败（${wsFailure.message}），已采用指定输出节点的产物` };
+                    throw wsFailure;
+                }
 
                 if (wsExecuted) {
                     const useOutputs = wsOutputs ?? wsExecutionSuccessOutputs;
                     if (useOutputs && Object.keys(useOutputs).length > 0) {
-                        const media = await collectOutputMedia(useOutputs, comfyUrl, this.media, controller.signal);
-                        if (media.length) return { promptId, outputs: useOutputs, media, status: { status_str: "success", completed: true } };
+                        // 指定输出节点时只保留选中节点的产物。
+                        const outputs = selectOutputNodes(useOutputs, outputNodes);
+                        if (Object.keys(outputs).length) {
+                            const media = await collectOutputMedia(outputs, comfyUrl, this.media, controller.signal);
+                            if (media.length) return { promptId, outputs, media, status: { status_str: "success", completed: true } };
+                        }
                     }
                     if (Date.now() - startedAt > 60000) throw new Error("ComfyUI 已在 WebSocket 报告完成但取回结果");
                 }
@@ -937,12 +1000,20 @@ export class WorkflowExecutor {
                     const history = await historyRes.json() as Record<string, any>;
                     const item = history[promptId];
                     const statusStr = item?.status?.status_str;
-                    if (statusStr === "error" || statusStr === "failed") throw new Error(`ComfyUI 执行失败：${statusStr}`);
                     const hasOutputs = !!(item?.outputs && typeof item.outputs === "object" && Object.keys(item.outputs).length > 0);
+                    // 整体失败时先看指定输出节点有没有产物：有就按成功算，没有才报错。
+                    if (statusStr === "error" || statusStr === "failed") {
+                        const rescued = outputNodes.length ? await rescueOutputsFromFailure(item?.outputs, outputNodes, comfyUrl, this.media, controller) : null;
+                        if (rescued) return { promptId, outputs: rescued.outputs, media: rescued.media, status: { status_str: "success", completed: true }, warning: `工作流整体失败（${statusStr}），已采用指定输出节点的产物` };
+                        throw new Error(`ComfyUI 执行失败：${statusStr}`);
+                    }
                     if (statusStr === "success" || item?.status?.completed || hasOutputs) {
                         if (!hasOutputs) throw new Error("ComfyUI 执行结束但无输出");
-                        const media = await collectOutputMedia(item.outputs, comfyUrl, this.media, controller.signal);
-                        if (media.length) return { promptId, outputs: item.outputs, media, status: item.status || {} };
+                        // 用户可指定输出节点：只保留选中的节点产物，未指定时保持原样。
+                        const outputs = selectOutputNodes(item.outputs, outputNodes);
+                        if (!Object.keys(outputs).length) throw new Error(`指定的输出节点没有产物：${outputNodes.join("、")}`);
+                        const media = await collectOutputMedia(outputs, comfyUrl, this.media, controller.signal);
+                        if (media.length) return { promptId, outputs, media, status: item.status || {} };
                         if (Date.now() - startedAt > 60000) throw new Error("ComfyUI 执行结束但输出中没有可用媒体");
                     }
                 }

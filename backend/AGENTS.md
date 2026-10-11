@@ -21,9 +21,11 @@
 
 ## MCP 与运行现场
 
+- 新增或修改 MCP 工具遵循[MCP 工具契约](../.agents/rules/mcp-contracts.md)；方法与验证见[工具开发指引](../.agents/skills/canvas-h3-implementation/references/mcp-tool-development.md)。
+
 - 外部客户端连接常驻 Backend `/mcp` Streamable HTTP。session 上下文隔离，插件声明轮询由 Backend 统一维护；stdio 仅兼容。
 - HTTP session 在进程内存中，服务重载后须让客户端重新初始化；不要误判成项目数据丢失，也不要为每个会话新建业务 Backend。
-- `npm run dev --workspace backend` 当前为 `tsx src/index.ts`，不会自动重启；需要热重启时显式运行 `npm run dev:watch --workspace backend`。只有实际消费 dist 时才必须重建 Backend。共享包 dist 变更也要确认已被当前进程加载。
+- `dev` 与 `dev:watch` 使用带空闲保护的开发重载器，监听 Backend 源码和共享包 dist；媒体任务、待确认任务、Agent／生产代理回合或写请求未结束时延后重载。`dev:once` 为单次启动，`start` 消费 Backend dist。只有实际消费 dist 时才必须重建 Backend；共享包源码仍须先构建 dist，再确认消费进程重载。
 - 端口、lock 文件和进程名都不是唯一证据；核对命令行、端点响应和相关日志，不批量清理服务。
 
 ## 改动验收
@@ -33,3 +35,8 @@
 - 生成链验证 taskId → 子任务/promptId → 归档媒体 → 活动节点绑定；ComfyUI success、目录里有文件或旧结果存在都不代表验收。
 - 模型或工作流新增优先扩展已有执行器注册和输入契约；不要为每个模型再开专用 MCP/API。
 - H3/ComfyUI 排障方法按需读[工程 Skill](../.agents/skills/canvas-h3-implementation/SKILL.md)。
+
+## Production 编译素材池
+
+- 编译素材（asset/references 的冻结字节）一律物化到 compilation root 下内容寻址全局池 `inputs/<sha256><ext>`（`writePool`），复用前按 digest 校验完整性、损坏即 tmp+rename 重写；禁止把 per-preparedId 物化路径写进 source——resolver 返回的路径会进 `approved_file`/`asset_plan.file`/`segments[].references[].file` 并参与 sourceHash，路径随目录漂移会让连续性回执（严格 hash+runtimeId 匹配）永远 stale，结构性死循环。
+- prepare 与 enqueue 两个入口必须共用同一素材池（`collectMaterial` + `writePool`），否则两边产物 hash 互相打回对方。

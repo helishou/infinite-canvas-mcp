@@ -1,3 +1,4 @@
+import type { SharedAssetSource } from "@basketikun/canvas-agent/shared-asset-reference";
 import { useEffect, useMemo, useState } from "react";
 import { Empty, Input, Modal, Pagination, Tag } from "antd";
 import { Search } from "lucide-react";
@@ -7,13 +8,13 @@ import { cn } from "@/lib/utils";
 import { findCharacterVoiceAsset, resolveCharacterVoiceName } from "@/lib/character-voice";
 import { useAssetStore, type Asset, type AudioAsset, type CharacterImage, type ImageAsset, type SceneImage } from "@/stores/use-asset-store";
 
-export type InsertAssetPayload =
+export type InsertAssetPayload = { sharedAssetSource?: SharedAssetSource } & (
     | { kind: "text"; content: string; title: string }
     | { kind: "image"; dataUrl: string; title: string; storageKey?: string }
     | { kind: "video"; url: string; title: string; storageKey?: string; width?: number; height?: number }
     | { kind: "audio"; url: string; title: string; storageKey?: string; bytes: number; mimeType: string; durationMs?: number }
     | { kind: "character"; assetId: string; title: string; description: string; images: CharacterImage[]; primaryIndex: number; voice: string; voiceName: string; voiceDescription: string; voiceStorageKey?: string; voiceAssetId: string }
-    | { kind: "scene"; assetId: string; title: string; description: string; image: SceneImage; colorCard?: SceneImage; colorPalette?: string[]; colorCardPrompt: string };
+    | { kind: "scene"; assetId: string; title: string; description: string; image: SceneImage; colorCard?: SceneImage; colorPalette?: string[]; colorCardPrompt: string });
 
 type Props = {
     open: boolean;
@@ -90,12 +91,13 @@ function MyAssetsTab({ allowedKinds, onInsert }: { allowedKinds?: string[]; onIn
     }, [allowedKinds, kindFilter]);
 
     const handleInsert = (asset: Asset) => {
+        const insert = (payload: InsertAssetPayload) => onInsert({ ...payload, sharedAssetSource: asset.metadata?.sharedAssetSource as SharedAssetSource | undefined });
         if (asset.kind === "text") {
-            onInsert({ kind: "text", content: asset.data.content, title: asset.title });
+            insert({ kind: "text", content: asset.data.content, title: asset.title });
         } else if (asset.kind === "video") {
-            onInsert({ kind: "video", url: asset.data.url, storageKey: asset.data.storageKey, title: asset.title, width: asset.data.width, height: asset.data.height });
+            insert({ kind: "video", url: asset.data.url, storageKey: asset.data.storageKey, title: asset.title, width: asset.data.width, height: asset.data.height });
         } else if (asset.kind === "audio") {
-            onInsert({ kind: "audio", url: asset.data.url, storageKey: asset.data.storageKey, title: asset.title, bytes: asset.data.bytes, mimeType: asset.data.mimeType, durationMs: asset.data.durationMs });
+            insert({ kind: "audio", url: asset.data.url, storageKey: asset.data.storageKey, title: asset.title, bytes: asset.data.bytes, mimeType: asset.data.mimeType, durationMs: asset.data.durationMs });
         } else if (asset.kind === "character") {
             const voiceAsset = findCharacterVoiceAsset(assets.filter((candidate): candidate is AudioAsset => candidate.kind === "audio"), {
                 assetId: asset.data.voiceAssetId,
@@ -103,7 +105,7 @@ function MyAssetsTab({ allowedKinds, onInsert }: { allowedKinds?: string[]; onIn
                 url: asset.data.voice,
             });
             const coverIndex = asset.data.images.findIndex((image) => image.url === asset.coverUrl);
-            onInsert({
+            insert({
                 kind: "character",
                 assetId: asset.id,
                 title: asset.title,
@@ -117,9 +119,9 @@ function MyAssetsTab({ allowedKinds, onInsert }: { allowedKinds?: string[]; onIn
                 voiceAssetId: asset.data.voiceAssetId || voiceAsset?.id || "",
             });
         } else if (asset.kind === "scene") {
-            onInsert({ kind: "scene", assetId: asset.id, title: asset.title, description: asset.data.description, image: asset.data.image, colorCard: asset.data.colorCard, colorPalette: asset.data.colorPalette, colorCardPrompt: asset.data.colorCardPrompt });
+            insert({ kind: "scene", assetId: asset.id, title: asset.title, description: asset.data.description, image: asset.data.image, colorCard: asset.data.colorCard, colorPalette: asset.data.colorPalette, colorCardPrompt: asset.data.colorCardPrompt });
         } else {
-            onInsert({ kind: "image", dataUrl: (asset as ImageAsset).data.dataUrl, storageKey: (asset as ImageAsset).data.storageKey, title: asset.title });
+            insert({ kind: "image", dataUrl: (asset as ImageAsset).data.dataUrl, storageKey: (asset as ImageAsset).data.storageKey, title: asset.title });
         }
     };
 

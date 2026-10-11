@@ -1,0 +1,64 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import i18n from "@/i18n";
+import { registerNodeDefinitions, unregisterPluginNodes } from "./node-registry";
+import { createCanvasGraphIndexSelector } from "./canvas-graph-index";
+import { createMentionReferenceSelector, buildNodeMentionReferences } from "./canvas-resource-references";
+import type { CanvasConnection, CanvasNodeData } from "@/types/canvas";
+
+const node = (id: string, type: string = "text", metadata = {}): CanvasNodeData => ({ id, type, title: id, position: { x: 0, y: 0 }, width: 100, height: 100, metadata });
+test("unrelated edits reuse references without invoking resource providers; providers and language invalidate the cache", async (t) => {
+    let reads = 0;
+    const definition = { type: "cache-test:resource", title: "test", icon: null, defaultSize: { width: 100, height: 100 }, resource: () => { reads++; return { kind: "video" as const, url: "video-one" }; } };
+    registerNodeDefinitions([definition], "cache-test");
+    const language = i18n.language;
+    t.after(async () => { unregisterPluginNodes("cache-test"); await i18n.changeLanguage(language); });
+    const source = node("source", definition.type), target = node("target", "config"), unrelated = node("other");
+    let nodes = [source, target, unrelated];
+    const connections = [{ id: "edge", fromNodeId: source.id, toNodeId: target.id }];
+    const index = createCanvasGraphIndexSelector(), select = createMentionReferenceSelector();
+    const first = select([target], nodes, connections, index(nodes, connections)).get(target.id)!;
+    assert.ok(reads > 0); reads = 0;
+    nodes = [source, target, { ...unrelated, title: "changed" }];
+    assert.equal(select([target], nodes, connections, index(nodes, connections)).get(target.id), first);
+    assert.equal(reads, 0);
+    registerNodeDefinitions([{ ...definition, resource: () => ({ kind: "video", url: "video-two" }) }], "cache-test");
+    assert.equal(select([target], nodes, connections, index(nodes, connections)).get(target.id)![0].previewUrl, "video-two");
+    await i18n.changeLanguage("zh-CN");
+    const chinese = select([target], nodes, connections, index(nodes, connections)).get(target.id)![0].label;
+    await i18n.changeLanguage("en-US");
+    assert.notEqual(select([target], nodes, connections, index(nodes, connections)).get(target.id)![0].label, chinese);
+    unregisterPluginNodes("cache-test");
+    assert.deepEqual(select([target], nodes, connections, index(nodes, connections)).get(target.id), []);
+});
+
+test("ordered slots, legacy membership, missing-slot restoration and nested loop inputs stay current", () => {
+    const target = node("target", "config"), a = node("a", "image", { content: "a.png" }), b = node("b", "image", { content: "b.png" });
+    const group = node("group", "group", { orderedGroup: true, groupSlots: ["b", "a", "missing"] });
+    let nodes = [target, a, b, group];
+    let links: CanvasConnection[] = [{ id: "gt", fromNodeId: "group", toNodeId: "target" }];
+    const index = createCanvasGraphIndexSelector(), select = createMentionReferenceSelector();
+    const verify = () => {
+        const graph = index(nodes, links);
+        const cached = select([target], nodes, links, graph).get(target.id)!;
+        assert.deepEqual(cached, buildNodeMentionReferences(target, nodes, links, graph));
+        return cached.map((reference) => reference.nodeId);
+    };
+    assert.deepEqual(verify(), ["b", "a"]);
+    nodes = [...nodes, node("missing", "image", { content: "restored.png" })];
+    assert.deepEqual(verify(), ["b", "a", "missing"]);
+    nodes = nodes.map((n) => n.id === "group" ? { ...n, metadata: { orderedGroup: true, groupSlots: ["a", "b"] } } : n);
+    assert.deepEqual(verify(), ["a", "b"]);
+    nodes = nodes.map((n) => n.id === "group" ? { ...n, metadata: { orderedGroup: true, groupSlots: [] } } : n.id === "a" ? { ...n, metadata: { content: "a.png", groupId: "group" } } : n);
+    assert.deepEqual(verify(), ["a"]);
+    nodes = nodes.map((n) => n.id === "b" ? { ...n, metadata: { content: "b.png", groupId: "group" } } : n);
+    assert.deepEqual(verify(), ["a", "b"]);
+    const loop = node("loop", "loop", { loopPromptEnabled: true, loopPrompts: ["old"] });
+    nodes = [...nodes, loop];
+    links = [{ id: "lt", fromNodeId: "loop", toNodeId: "target" }, { id: "gl", fromNodeId: "group", toNodeId: "loop" }];
+    verify();
+    nodes = nodes.map((n) => n.id === "loop" ? { ...n, metadata: { loopPromptEnabled: true, loopPrompts: ["new"] } } : n);
+    verify();
+    nodes = nodes.filter((n) => n.id !== "b"); verify();
+    links = []; verify();
+});

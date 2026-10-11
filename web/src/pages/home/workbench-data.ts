@@ -58,6 +58,7 @@ export function projectCover(project: CanvasProject, outputs: WorkbenchOutput[],
         const metadata = node.metadata;
         if (!metadata) continue;
         if (metadata.sceneImage) return { kind: "image", ...metadata.sceneImage };
+        if (metadata.propImage) return { kind: "image", ...metadata.propImage };
         const characterImages = metadata.characterImages || [];
         const character = characterImages[Math.min(Math.max(metadata.characterPrimaryIndex || 0, 0), Math.max(characterImages.length - 1, 0))];
         if (character) return { kind: "image", ...character };

@@ -1,0 +1,115 @@
+// 视频工作台内部实现解析的测试。
+//
+// 视频侧原先只有通用参数；这里锁定「按场景命中内部实现 → 取出可填写字段 →
+// 参数默认值取自渠道配置」这条链路，避免又退回成只显示通用项。
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { initialVideoParamValues, resolveVideoImplementation, videoParamKey } from "./video-implementation";
+import { resolveModelWorkflow } from "@/stores/use-config-store";
+import { resolveWorkflowBindingForModel } from "@basketikun/canvas-agent/model-workflow";
+import type { RunningHubWorkflowProfile } from "@/services/api/runninghub";
+import type { WorkflowField } from "@/services/api/workflows";
+
+const CHANNEL_ID = "local-comfyui";
+const PROFILE_ID = "rh-1";
+
+function config(models: unknown[]) {
+    return { channels: [{ id: CHANNEL_ID, name: "本地 ComfyUI", kind: "comfyui", models }] } as never;
+}
+
+function field(id: string, extra: Partial<WorkflowField> = {}): WorkflowField {
+    return { id, node: "1", input: id, name: id, type: "text", ...extra } as WorkflowField;
+}
+
+test("渠道按场景配的参数覆盖字段默认值", () => {
+    const fields = [field("duration", { type: "number", default: 5 }), field("cfg", { type: "number", default: 0.5 })];
+    const values = initialVideoParamValues(
+        config([{ name: "云端生视频", capability: "video", workflowBindings: { text: { provider: "runninghub", profileId: PROFILE_ID } }, workflowParams: { text: { duration: 8 } } }]),
+        `${CHANNEL_ID}::云端生视频`,
+        0,
+        fields,
+    );
+    assert.equal(values.duration, 8, "渠道配置应覆盖默认值");
+    assert.equal(values.cfg, 0.5, "未覆盖的字段保留默认值");
+});
+
+test("渠道未配该场景时全部取字段默认值", () => {
+    const fields = [field("duration", { type: "number", default: 5 })];
+    const values = initialVideoParamValues(
+        config([{ name: "云端生视频", capability: "video", workflowParams: { single: { duration: 3 } } }]),
+        `${CHANNEL_ID}::云端生视频`,
+        0,
+        fields,
+    );
+    assert.equal(values.duration, 5, "文生场景不该拿到单图场景的参数");
+});
+
+test("字段没有默认值时不出现在初始值里，交给用户填", () => {
+    const values = initialVideoParamValues(config([]), "任意模型", 0, [field("seed")]);
+    assert.equal("seed" in values, false);
+});
+
+test("只挂 RunningHub 绑定时解析为云端实现，不因没有本地工作流名而落空", () => {
+    // 复现 bug：先调只认本地工作流名的解析器时，这个模型会被判成「没有实现」，
+    // 于是面板退回通用项，RunningHub 档案的自定义字段永远不显示。
+    const config = {
+        channels: [
+            {
+                id: CHANNEL_ID,
+                name: "本地 ComfyUI",
+                kind: "comfyui",
+                models: [
+                    {
+                        name: "云端生视频",
+                        capability: "video",
+                        workflows: null,
+                        workflowRouting: null,
+                        workflowBindings: {
+                            text: { provider: "runninghub", profileId: PROFILE_ID },
+                            single: { provider: "runninghub", profileId: PROFILE_ID },
+                            multi: { provider: "runninghub", profileId: PROFILE_ID },
+                        },
+                    },
+                ],
+            },
+        ],
+    } as never;
+    // 只有绑定、没有任何本地工作流名时，旧解析器返回空字符串。
+    assert.equal(resolveModelWorkflow(config, `${CHANNEL_ID}::云端生视频`, 0), "");
+    // 绑定版解析必须认出这是云端实现。
+    const binding = resolveWorkflowBindingForModel(config, `${CHANNEL_ID}::云端生视频`, 0);
+    assert.equal(binding.ok, true);
+    assert.deepEqual(binding.ok && binding.binding, { provider: "runninghub", profileId: PROFILE_ID });
+});
+
+test("RunningHub 的提示词字段由上方提示词输入框提供，不应显示为工作流参数", async () => {
+    const profile: RunningHubWorkflowProfile = {
+        id: PROFILE_ID,
+        name: "云端生视频",
+        workflowId: "workflow-1",
+        fields: [
+            { nodeId: "263", fieldName: "text", source: "prompt", fieldType: "text", enabled: true },
+            { nodeId: "263", fieldName: "steps", source: "constant", fieldValue: 20, fieldType: "number", enabled: true },
+            { nodeId: "12", fieldName: "image", source: "image", fieldType: "image", enabled: true },
+        ],
+    };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => Response.json({ workflows: [profile] });
+    try {
+        const implementation = await resolveVideoImplementation(
+            config([{ name: "云端生视频", capability: "video", workflowBindings: { text: { provider: "runninghub", profileId: PROFILE_ID } } }]),
+            `${CHANNEL_ID}::云端生视频`,
+            0,
+        );
+        assert.equal(implementation?.provider, "runninghub");
+        assert.deepEqual(implementation?.fields.map((item) => item.id), ["263::steps"]);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test("参数键按模型与实现隔离", () => {
+    assert.equal(videoParamKey("ch::模型", "custom/a.json"), "ch::模型::custom/a.json");
+    assert.notEqual(videoParamKey("ch::模型", "rh-1"), videoParamKey("ch::模型", "custom/a.json"));
+});

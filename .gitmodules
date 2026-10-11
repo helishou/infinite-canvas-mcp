@@ -1,0 +1,4 @@
+[submodule ".agents/skills/acheng-director"]
+	path = .agents/skills/acheng-director
+	url = https://github.com/helishou/acheng-director-skill.git
+	branch = main

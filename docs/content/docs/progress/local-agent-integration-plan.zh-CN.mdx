@@ -129,7 +129,7 @@ Codex CLI <-> canvas-agent MCP <-> 当前网页画布
 - `canvas_get_selection`：读取当前选中的节点。
 - `canvas_export_snapshot`：导出当前画布快照，用于让 Agent 理解布局。
 - `canvas_create_text_node`：快捷创建文本节点。
-- `canvas_create_image_prompt_flow`：快捷创建提示词文本节点和图片生成配置节点。
+- `canvas_create_generation_flow(mode=image)`：创建当前图片智能配置流程，支持显式参考与 autoRun。
 
 用户本机 Codex 配置示例：
 

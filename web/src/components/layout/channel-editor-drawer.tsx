@@ -1,4 +1,4 @@
-import { Button, Drawer, Input, Segmented, Select, Space } from "antd";
+import { App, Button, Drawer, Input, Segmented, Select, Space } from "antd";
 import { ListPlus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -13,6 +13,7 @@ type ScriptTarget = { name: string; capability: ModelCapability; value: string }
 
 export function ChannelEditorDrawer({ open, channel, onSave, onClose, lockKind = false }: { open: boolean; channel: ModelChannel | null; onSave: (channel: ModelChannel) => void; onClose: () => void; lockKind?: boolean }) {
     const { t } = useTranslation();
+    const { message } = App.useApp();
     const [draft, setDraft] = useState<ModelChannel | null>(channel);
     const [selectOpen, setSelectOpen] = useState(false);
     const [scriptTarget, setScriptTarget] = useState<ScriptTarget | null>(null);
@@ -39,11 +40,12 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose, lockKind =
         patch({ apiFormat, baseUrl });
     };
     const isComfy = draft.kind === "comfyui";
+    const isCodex = draft.kind === "codex-cli";
 
     const applySelection = (names: string[]) => {
         const map = new Map(draft.models.map((model) => [model.name, model]));
         // ComfyUI 渠道里工作流名多是中文，按关键词猜能力不可靠，默认按图片处理，需要时手动切。
-        setModels(names.map((name) => map.get(name) || { name, capability: isComfy ? "image" : guessCapability(name) }));
+        setModels(names.map((name) => map.get(name) || { name, capability: isComfy ? "image" : isCodex ? "text" : guessCapability(name) }));
     };
 
     const setCapability = (name: string, capability: ModelCapability) => setModels(draft.models.map((model) => (model.name === name ? { ...model, capability } : model)));
@@ -67,6 +69,7 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose, lockKind =
     };
 
     const save = () => {
+        if (isCodex && draft.models.some(model => model.capability !== "text" || model.script?.trim())) { message.error(t("config.channelEditor.codexModelsOnly")); return; }
         onSave({ ...draft, name: draft.name.trim() || t("config.channels.unnamed"), models: normalizeChannelModels(draft.models) });
         onClose();
     };
@@ -92,23 +95,24 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose, lockKind =
                     <span className="mb-1 block text-sm font-medium">{t("config.channelEditor.name")}</span>
                     <Input value={draft.name} onChange={(event) => patch({ name: event.target.value })} />
                 </label>
-                <label className="block">
+                {!isCodex && <label className="block">
                     <span className="mb-1 block text-sm font-medium">{t("config.channelEditor.protocol")}</span>
                     <Select disabled={isComfy} className="w-full" value={draft.apiFormat} options={apiFormatOptions} onChange={changeApiFormat} />
                     {isComfy ? <div className="mt-1 text-xs text-stone-500">ComfyUI 渠道不走协议，下方「渠道类型」已选 ComfyUI。</div> : null}
-                </label>
+                </label>}
                 <label className="block">
-                    <span className="mb-1 block text-sm font-medium">渠道类型</span>
-                    <Select disabled={lockKind} className="w-full" value={draft.kind || "api"} options={[{ label: "云端 API", value: "api" }, { label: "本地 ComfyUI", value: "comfyui" }]} onChange={(kind) => patch({ kind })} />
+                    <span className="mb-1 block text-sm font-medium">{t("config.channelEditor.kind")}</span>
+                    <Select aria-label={t("config.channelEditor.kind")} disabled={lockKind} className="w-full" value={draft.kind || "api"} options={[{ label: t("config.channelEditor.apiKind"), value: "api" }, { label: t("config.channelEditor.comfyKind"), value: "comfyui" }, { label: "Codex CLI", value: "codex-cli" }]} onChange={(kind) => patch({ kind })} />
                 </label>
-                <label className="block md:col-span-2">
+                {isCodex && <p className="text-sm text-stone-500 md:col-span-2">{t("config.channelEditor.codexHint")}</p>}
+                {!isCodex && <label className="block md:col-span-2">
                     <span className="mb-1 block text-sm font-medium">{t("config.channelEditor.baseUrl")}</span>
                     <Input value={draft.baseUrl} onChange={(event) => patch({ baseUrl: event.target.value })} placeholder={isComfy ? "http://127.0.0.1:8188" : "https://api.example.com"} />
-                </label>
-                <label className="block md:col-span-2">
+                </label>}
+                {!isCodex && <label className="block md:col-span-2">
                     <span className="mb-1 block text-sm font-medium">API Key</span>
                     <Input.Password disabled={isComfy} value={draft.apiKey} onChange={(event) => patch({ apiKey: event.target.value })} placeholder={isComfy ? "无需 API Key" : "sk-..."} />
-                </label>
+                </label>}
             </div>
 
             <div className="mt-6 mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -149,10 +153,10 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose, lockKind =
                                             工作流{model.workflows?.length ? ` ${model.workflows.length}` : ""}
                                         </Button>
                                     ) : null}
-                                    <Segmented size="small" value={model.capability} options={capabilityOptions} onChange={(value) => setCapability(model.name, value as ModelCapability)} />
-                                    <Button size="small" type={model.script ? "primary" : "default"} ghost={Boolean(model.script)} onClick={() => setScriptTarget({ name: model.name, capability: model.capability, value: model.script || "" })}>
+                                    <Segmented size="small" value={model.capability} options={isCodex ? capabilityOptions.filter(option => option.value === "text") : capabilityOptions} onChange={(value) => setCapability(model.name, value as ModelCapability)} />
+                                    {!isCodex && <Button size="small" type={model.script ? "primary" : "default"} ghost={Boolean(model.script)} onClick={() => setScriptTarget({ name: model.name, capability: model.capability, value: model.script || "" })}>
                                         {t(model.script ? "config.channelEditor.scriptReady" : "config.channelEditor.script")}
-                                    </Button>
+                                    </Button>}
                                     <Button size="small" danger type="text" icon={<Trash2 className="size-3.5" />} onClick={() => removeModel(model.name)} />
                                 </div>
                             </div>

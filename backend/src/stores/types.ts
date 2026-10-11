@@ -1,4 +1,5 @@
 import path from "node:path";
+import type { Readable } from "node:stream";
 import type {
     Asset, AssetFolder, CanvasFolder, CanvasProject,
     GenerationLog, GenerationLogStatus, MediaFile,
@@ -37,7 +38,9 @@ export type H3NodeMaterial = {
     createdAt: string;
 };
 export type CanvasProjectFilter = { episodeId?: string; id?: string };
+export type H3ProductionRequirements = { ownerId: string; revision: number; version: number; videoAspectRatio?: string; clips: Array<{ nodeId: string; segmentId: string; storyboardRequired: boolean; sharedAssetsCurrent?: boolean; promptContentHash?: string; sourceHash?: string; literalDialogues?: Array<{ blockId: string; speaker: string; text: string }>; shots: Array<{ id: string; duration: number }> }> };
 export type CanvasProjectStore = {
+    getH3ProductionRequirements?(projectId: string): H3ProductionRequirements | null;
     list(): CanvasProject[];
     listSummaries(filter?: CanvasProjectFilter): CanvasProject[];
     get(id: string): CanvasProject | null;
@@ -49,6 +52,7 @@ export type CanvasProjectStore = {
         task: RuntimeTask,
         binding: { projectId: string; nodeId: string; segmentId: string; generationLogId?: string },
         output: Record<string, unknown> | null,
+        completion?: { cacheFingerprint?: string; firstPassReady?: boolean },
     ): { project: CanvasProject; log: GenerationLog | null; operations: CanvasOperation[] } | null;
     writeBackCanvasImageTask(
         task: RuntimeTask,
@@ -90,6 +94,8 @@ export type NamedMedia = RuntimeMedia & { id: string; mimeType: string; url: str
 export type MediaStore = {
     /** 入库媒体（web 双写 / 生成结果落地），storageKey 由后台生成。 */
     store(data: Buffer, options: { name?: string; mimeType?: string; storageKey?: string; category?: MediaCategory } & MediaStats): MediaFile;
+    /** 流式归档媒体，避免视频下载与落盘期间同时保留整文件 Buffer。 */
+    storeStream(source: Readable, options: { name?: string; mimeType?: string; storageKey?: string; category?: MediaCategory; resolveMimeType?: (prefix: Buffer, bytes: number) => string } & MediaStats): Promise<MediaFile & { sha256: string; prefix: Buffer }>;
     /** 按 base64 dataUrl 落地（兼容旧 Agent /runtime/media 与 H3 ref），返回带本地路径的完整记录。 */
     storeDataUrl(dataUrl: string, name: string, extra?: MediaStats & { storageKey?: string; category?: MediaCategory }): MediaFile & { path: string; url: string };
     /** 按 name 幂等读写 runtime 媒体（H3 ref 落地），对应旧 Agent 的 storeRuntimeMedia。 */
@@ -113,7 +119,9 @@ export type TaskStore = {
      */
     create(kindOrId: string, inputOrKind: string | Record<string, unknown>, paramsOrInput: Record<string, unknown>, maybeParams?: Record<string, unknown>): RuntimeTask;
     get(id: string): RuntimeTask | null;
-    list(filter?: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number }): RuntimeTask[];
+    /** 查询已清理任务 ID 的凭据；不存在返回 null。入口在副作用前调用。 */
+    getTombstone(id: string): { taskId: string; terminalStatus: string; prunedAt: string } | null;
+    list(filter?: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; parentThreadId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number }): RuntimeTask[];
     update(id: string, patch: TaskPatch): RuntimeTask;
     transitionH3(id: string, expectedStatus: RuntimeTaskStatus, expectedRevision: number, patch: TaskPatch & { status: RuntimeTaskStatus; result: Record<string, unknown> }, event: { type: string; payload: Record<string, unknown> }): RuntimeTask | null;
     cancel(id: string): RuntimeTask;
@@ -136,6 +144,8 @@ export type McpObservabilityReportOptions = {
     /** `from`/`to` 是本地日历日（YYYY-MM-DD），包含边界当天。 */
     from?: string;
     to?: string;
+    tool?: string;
+    view?: "summary" | "full";
 };
 
 export type McpObservabilityStore = {

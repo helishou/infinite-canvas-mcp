@@ -1,4 +1,7 @@
 import path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { assertH3WorkflowContract, inspectH3Result } from '../canvas/h3-execution-contract.js';
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
@@ -23,6 +26,7 @@ export type ComfyUiDeps = {
     media: MediaStore;
     events?: BackendEventBus;
     onTaskTerminal?: (task: RuntimeTask) => void | Promise<void>;
+    h3Queue?: import("../runtime/h3-queue.js").H3ExecutionQueue;
 };
 
 export type ComfyPreset = { id: string; name: string; kind: "image" | "video" | "audio"; inputs: string[]; params: string[] };
@@ -166,6 +170,7 @@ export class ComfyUiBackend {
     private url: string;
     private readonly deps: ComfyUiDeps;
     private readonly controllers = new Map<string, AbortController>();
+    private readonly cancellations = new Map<string, Promise<void>>();
     private readonly comfyExecutions = new Map<string, { url: string; promptId?: string }>();
     private readonly livePreviews = new Map<string, H3LivePreview>();
     private readonly pendingPreviews = new Map<string, Omit<H3LivePreview, "promptId">>();
@@ -311,14 +316,17 @@ export class ComfyUiBackend {
             ? this.deps.tasks.create(clientTaskId, `comfyui:${preset}`, input, params)
             : this.deps.tasks.create(`comfyui:${preset}`, input, params);
         await onCreated?.(task);
-        void this.execute(task, definition, taskUrl).catch((error) => this.fail(task.id, error));
+        const work = () => this.execute(task, definition, taskUrl).catch((error) => this.fail(task.id, error));
+        if (preset === "minimax-h3" && this.deps.h3Queue) this.deps.h3Queue.enqueue(task, "local", work, { comfyUrl: taskUrl });
+        else void work();
         return task;
     }
 
     cancel(id: string) {
         this.controllers.get(id)?.abort();
-        void this.cancelComfyExecution(id);
+        this.cancellations.set(id, this.cancelComfyExecution(id));
         const task = this.deps.tasks.cancel(id);
+        this.deps.h3Queue?.cancel(id);
         this.deps.events?.publish({ type: "task.updated", entityId: id, payload: task });
         void this.deps.onTaskTerminal?.(task);
         return task;
@@ -335,15 +343,26 @@ export class ComfyUiBackend {
     resume(id: string) {
         const task = this.deps.tasks.get(id);
         if (!task || !["queued", "running"].includes(task.status) || this.comfyExecutions.has(id) || this.resuming.has(id)) return;
-        const promptId = this.deps.tasks.events(id).find((event) => event.type === "submitted")?.payload?.promptId;
-        if (typeof promptId !== "string" || !promptId) return; // 从未提交到 ComfyUI，无法恢复
+        const taskEvents = this.deps.tasks.events(id);
+        const promptId = taskEvents.find((event) => event.type === "submitted")?.payload?.promptId;
+        const queued = taskEvents.find((event) => event.type === "h3_queued");
+        if (typeof promptId !== "string" || !promptId) {
+            if (task.kind === "comfyui:minimax-h3" && task.status === "queued" && queued && !taskEvents.some((event) => event.type === "h3_dispatching")) {
+                const definition = PRESETS.find((item) => item.id === "minimax-h3")!;
+                this.deps.h3Queue?.enqueue(task, "local", () => this.execute(task, definition, String(queued.payload.comfyUrl || this.url)).catch((error) => this.fail(id, error)));
+            }
+            return;
+        }
         this.resuming.add(id);
-        this.comfyExecutions.set(id, { url: this.url, promptId });
+        const comfyUrl = String(queued?.payload.comfyUrl || this.url);
+        this.comfyExecutions.set(id, { url: comfyUrl, promptId });
         const controller = new AbortController();
         this.controllers.set(id, controller);
-        void this.watchRecovered(id, this.url, promptId, controller)
+        const work = () => this.watchRecovered(id, comfyUrl, promptId, controller)
             .catch((error) => this.fail(id, error))
-            .finally(() => { this.controllers.delete(id); this.comfyExecutions.delete(id); this.resuming.delete(id); });
+            .finally(async () => { await this.cancellations.get(id); this.cancellations.delete(id); this.controllers.delete(id); this.comfyExecutions.delete(id); this.resuming.delete(id); });
+        if (task.kind === "comfyui:minimax-h3" && this.deps.h3Queue) this.deps.h3Queue.recover(task, "local", work);
+        else void work();
     }
 
     /** 重启恢复专用的观察循环：只依赖 /history（无 WS 通道），ComfyUI 自身没重启就能等到结果。 */
@@ -363,8 +382,8 @@ export class ComfyUiBackend {
                     const hasOutputs = !!(item?.outputs && typeof item.outputs === "object" && Object.keys(item.outputs).length > 0);
                     if (statusStr === "success" || item?.status?.completed || hasOutputs) {
                         if (!hasOutputs) throw new Error(`ComfyUI 执行结束但未产出任何输出，节点可能执行失败：${extractComfyErrorMessage(item?.status)}`);
-                        const result = attachH3ActualSubmission({ promptId, outputs: item!.outputs, media: await collectOutputMedia(item!.outputs, comfyUrl, this.deps.media, controller.signal), status: item!.status || {} }, submitted?.actualSubmission, promptId);
-                        this.updateTask(taskId, { status: "succeeded", progress: 1, result });
+                        const result = await inspectH3Result(attachH3ActualSubmission({ promptId, outputs: item!.outputs, media: await collectOutputMedia(item!.outputs, comfyUrl, this.deps.media, controller.signal), status: item!.status || {} }, submitted?.actualSubmission, promptId), this.deps.tasks.get(taskId)!.params, this.deps.media);
+                        this.updateTask(taskId, { status: result.specification?.status === 'mismatch' ? 'failed' : 'succeeded', progress: 1, result, ...(result.specification?.status === 'mismatch' ? { error: result.specification.issues.join('；') } : {}) });
                         this.deps.tasks.addEvent(taskId, "result", result);
                         return;
                     }
@@ -396,13 +415,16 @@ export class ComfyUiBackend {
                 await this.clearComfyExecutionCache(comfyUrl);
                 executionCacheCleared = true;
             }
-            this.updateTask(task.id, { status: "succeeded", progress: 1, result });
-            this.deps.tasks.addEvent(task.id, "result", result);
+            const checked = await inspectH3Result(result, task.params, this.deps.media);
+            this.updateTask(task.id, { status: checked.specification?.status === 'mismatch' ? 'failed' : 'succeeded', progress: 1, result: checked, ...(checked.specification?.status === 'mismatch' ? { error: checked.specification.issues.join('；') } : {}) });
+            this.deps.tasks.addEvent(task.id, "result", checked);
             executionCompleted = true;
         } finally {
             if (preset.id === "minimax-h3" && !executionCacheCleared && (!keepModelCache || !executionCompleted)) {
                 try { await this.clearComfyExecutionCache(comfyUrl); } catch (error) { console.warn("[comfyui] H3 执行缓存清理失败:", error instanceof Error ? error.message : String(error)); }
             }
+            await this.cancellations.get(task.id);
+            this.cancellations.delete(task.id);
             this.controllers.delete(task.id); this.comfyExecutions.delete(task.id);
         }
     }
@@ -438,7 +460,7 @@ export class ComfyUiBackend {
             const actualSubmission = segments.length ? segments[segments.length - 1].actualSubmission : undefined;
             const combined = localResults.length > 1 ? await concatLocalVideos(localResults) : undefined;
             if (!combined) return actualSubmission ? { segments, media: segmentMedia, actualSubmission } : { segments, media: segmentMedia };
-            const stored = this.deps.media.store(await readFile(combined), { name: path.basename(combined), mimeType: "video/mp4", category: "output" });
+            const stored = await this.deps.media.storeStream(fs.createReadStream(combined), { name: path.basename(combined), mimeType: "video/mp4", category: "output" });
             await rm(combined, { force: true });
             const result = { segments, media: [{ url: this.deps.media.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType, filename: path.basename(combined) }, ...segmentMedia] };
             return actualSubmission ? { ...result, actualSubmission } : result;
@@ -473,6 +495,7 @@ export class ComfyUiBackend {
             const workflow = preset === "minimax-h3"
                 ? await buildNativeNanFengV15Workflow(prepared.input, params, uploadFn, comfyUrl, controller.signal)
                 : await buildWorkflow(preset, prepared.input, params, uploadFn);
+            if (preset === 'minimax-h3' && params.h3ExecutionContract) assertH3WorkflowContract(workflow, (params.h3ExecutionContract as any).expectedRuntime);
             const actualSubmission = preset === "minimax-h3" ? summarizeH3Workflow(workflow, "") : undefined;
             const withActualSubmission = (result: Record<string, any>, promptId: string) => attachH3ActualSubmission(result, actualSubmission, promptId);
 
@@ -580,7 +603,7 @@ export class ComfyUiBackend {
             if (execution) execution.promptId = body.prompt_id;
             this.deps.tasks.addEvent(task.id, "submitted", actualSubmission ? { promptId: body.prompt_id, actualSubmission: { ...actualSubmission, promptId: body.prompt_id } } : { promptId: body.prompt_id });
             const startedAt = Date.now();
-            const maxExecutionMs = Math.max(5 * 60 * 1000, Math.min(60 * 60 * 1000, Number(params.maxExecutionMs) || 30 * 60 * 1000));
+            const maxExecutionMs = Math.max(5 * 60 * 1000, Math.min(120 * 60 * 1000, Number(params.maxExecutionMs) || 120 * 60 * 1000));
             const stallTimeoutMs = params.stallTimeoutMs === undefined
                 ? 9000 * 1000
                 : Math.max(0, Number(params.stallTimeoutMs) || 0);
@@ -832,8 +855,8 @@ async function materializeComfyMedia(url: string, comfyUrl: string, target: stri
     const source = new URL(url);
     const response = await fetch(`${comfyUrl}/view${source.search}`);
     if (!response.ok) throw new Error(`读取 H3 分段结果失败：HTTP ${response.status}`);
-    const buffer = Buffer.from(await response.arrayBuffer());
-    await import("node:fs/promises").then(({ writeFile }) => writeFile(target, buffer));
+    if (!response.body) throw new Error("读取 H3 分段结果失败：响应没有媒体数据");
+    await pipeline(Readable.fromWeb(response.body as unknown as import("node:stream/web").ReadableStream), fs.createWriteStream(target, { flags: "wx", mode: 0o600 }));
     return target;
 }
 
@@ -1039,19 +1062,8 @@ async function buildWorkflow(preset: string, input: Record<string, unknown>, par
                 source[loadId] = { class_type: "LoadAudio", inputs: { audio: audioName }, _meta: { title: `MiniMax H3 audio ${index + 1}` } };
                 if (source["136"]?.inputs) source["136"].inputs[source["136"]?.class_type === "JZL_MiniMaxH3ReferenceToVideo2" ? `ref_audio_${index}` : `ref_audios.ref_audio_${index}`] = [loadId, 0];
             }
-            const previousVideo = String(input.previousVideo || "");
-            // 只有显式开启「上一段作为参考视频」才注入 motion context；旧条件 params.motionContext !== false
-            // 会让任何带了 previousVideo 的调用（含链式续跑）静默改图，故收紧为显式白名单。
-            if (previousVideo && params.previousVideoAsReference === true) {
-                const previousName = await upload(previousVideo);
-                source["9106"] = { class_type: "LoadVideo", inputs: { file: previousName }, _meta: { title: "MiniMax Motion Context previous clip" } };
-                source["9107"] = { class_type: "GetVideoComponents", inputs: { video: ["9106", 0] }, _meta: { title: "MiniMax Motion Context frames" } };
-                source["9108"] = { class_type: "MiniMaxH3MotionContext", inputs: { conditioning: ["136", 0], vae: ["119", 0], latent: ["136", 1], context_frames: ["9107", 0], context_audio: ["9107", 1], audio_vae: ["120", 0], context_length: String(params.motionContextLength || "22"), audio_context_length: Number(params.motionContextAudioLength || 24) }, _meta: { title: "MiniMax H3 Motion Context" } };
-                source["9109"] = { class_type: "MiniMaxH3MotionContextTrim", inputs: { images: ["122", 0], trim_frames: ["9108", 1], audio: ["121", 0], fps: 24, match_tail: true }, _meta: { title: "MiniMax H3 Motion Context Trim" } };
-                source["126"].inputs.conditioning = ["9108", 0];
-                source["130"].inputs.images = ["9109", 0];
-                source["130"].inputs.audio = ["9109", 1];
-            }
+            // Previous finished clips are never injected. Motion Context uses AV latent.
+
         }
     }
     return source;
@@ -1653,11 +1665,12 @@ async function refreshNanFengCatalog(comfyUrl: string, signal: AbortSignal) {
     return false;
 }
 
-async function resolveNanFengWorkflowParams(comfyUrl: string, params: Record<string, unknown>, signal: AbortSignal) {
+export async function resolveNanFengWorkflowParams(comfyUrl: string, params: Record<string, unknown>, signal: AbortSignal) {
+    const strict = !!params.h3ExecutionContract;
     let resolved = await resolveH3ModelParams(comfyUrl, params, signal);
     try {
         const response = await fetch(`${comfyUrl}/object_info/${encodeURIComponent(NANFENG_H3_CLASS)}`, { signal });
-        if (!response.ok) return resolved;
+        if (!response.ok) { if (strict) throw new Error(`无法读取 H3 节点能力：HTTP ${response.status}`); return resolved; }
         const body = await response.json() as Record<string, any>;
         const required = body[NANFENG_H3_CLASS]?.input?.required || {};
         const choices = (name: string) => Array.isArray(required[name]?.[0]) ? required[name][0].map(String) : [];
@@ -1668,21 +1681,27 @@ async function resolveNanFengWorkflowParams(comfyUrl: string, params: Record<str
         const next: Record<string, unknown> = { ...resolved, nativeLoaderCacheSupported: Object.hasOwn(required, "复用加载器缓存") || Object.hasOwn(body[NANFENG_H3_CLASS]?.input?.optional || {}, "复用加载器缓存") };
         for (const [paramName, inputName] of pathFields) {
             const available = choices(inputName);
-            if (!available.length) continue;
+            if (paramName === 'latentUpscaleModel' && next.latentUpscaleEnabled !== true) continue;
+            if (!available.length) { if (strict) throw new Error(`H3 节点没有 ${inputName} 可用选项`); continue; }
             const configuredDefault = String(required[inputName]?.[1]?.default || available[0]);
             const current = String(next[paramName] || "").trim();
-            next[paramName] = current ? resolveComfyChoice(current, available, inputName !== "模型") : configuredDefault;
+            const selected = current ? resolveComfyChoice(current, available, !strict && inputName !== "模型") : configuredDefault;
+            if (strict && (!current || !available.includes(selected))) throw new Error(`H3 所选 ${inputName} 不可用：${current || '未选择'}`);
+            next[paramName] = selected;
         }
         if (Array.isArray(next.loraSlots)) {
             next.loraSlots = next.loraSlots.map((slot: any, index: number) => {
                 const available = choices(`LoRA${index + 1}`);
-                if (!available.length || !slot || String(slot.name || "").trim() === "") return slot;
+                if (!slot || String(slot.name || "").trim() === "") return slot;
+                if (!available.length) { if (strict && slot.enabled !== false) throw new Error(`H3 所选 LoRA 不可用：${slot.name}`); return slot; }
                 const name = resolveComfyChoice(slot.name, available, false);
-                return { ...slot, name: available.includes(name) ? name : "未选择", enabled: available.includes(name) && slot.enabled !== false };
+                if (strict && slot.enabled !== false && !available.includes(name)) throw new Error(`H3 所选 LoRA 不可用：${slot.name}`);
+                return strict ? { ...slot, name } : { ...slot, name: available.includes(name) ? name : "未选择", enabled: available.includes(name) && slot.enabled !== false };
             });
         }
         resolved = next;
-    } catch {
+    } catch (error) {
+        if (strict) throw error;
         // object_info 不可达时保留旧兼容值；/prompt 会继续返回 ComfyUI 的具体校验错误。
     }
     return resolved;
@@ -1713,7 +1732,7 @@ async function resolveH3ModelParams(comfyUrl: string, params: Record<string, unk
             const score = tokens.reduce((sum, token) => sum + (candidate.includes(token) ? 1 : 0), 0);
             return { name, score };
         }).sort((a, b) => b.score - a.score);
-        if (ranked[0] && ranked[0].score >= Math.max(3, Math.ceil(tokens.length * 0.55))) return { ...params, modelName: ranked[0].name };
+        if (!params.h3ExecutionContract && ranked[0] && ranked[0].score >= Math.max(3, Math.ceil(tokens.length * 0.55))) return { ...params, modelName: ranked[0].name };
         throw new Error(`ComfyUI 未找到 H3 模型 “${requested}”。可用模型：${available.filter((name) => /h3|minimax/i.test(name)).slice(0, 20).join("、") || available.slice(0, 20).join("、")}`);
     } catch (error) {
         if (error instanceof Error && /未找到 H3 模型/.test(error.message)) throw error;
@@ -1789,7 +1808,8 @@ export async function collectOutputMedia(outputs: Record<string, any>, baseUrl: 
         const sourceUrl = `${baseUrl}/view?${query.toString()}`;
         const response = await fetchWithRetry(sourceUrl, signal);
         if (!response.ok) return [{ url: sourceUrl, mimeType: mimeForOutput(item), filename: String(item.filename) }];
-        const stored = mediaStore.store(Buffer.from(await response.arrayBuffer()), { name: String(item.filename), mimeType: mimeForOutput(item), category: "output" });
+        if (!response.body) throw new Error(`ComfyUI 输出没有媒体数据：${String(item.filename)}`);
+        const stored = await mediaStore.storeStream(Readable.fromWeb(response.body as unknown as import("node:stream/web").ReadableStream), { name: String(item.filename), mimeType: mimeForOutput(item), category: "output" });
         return [{ url: mediaStore.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType, filename: String(item.filename), sourceUrl }];
     }))).flat();
 }
