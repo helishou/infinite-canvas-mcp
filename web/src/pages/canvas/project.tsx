@@ -7,8 +7,10 @@ import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { useMediaPreviewStore } from "@/stores/use-media-preview-store";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
 import { viewportForCanvasNodes } from "@/lib/canvas/canvas-navigation";
+import { abortCanvasGenerationRequestsByRunningId, finishCanvasGenerationRequest as finishCanvasGenerationRequestInRegistry, startCanvasGenerationRequest as startCanvasGenerationRequestInRegistry, type ActiveCanvasGenerationRequest } from "@/lib/canvas/canvas-generation-lifecycle";
+import { CANVAS_CLIPBOARD_FORMAT, findClipboardMediaType, isLegacyCanvasClipboardText, parseCanvasClipboard, serializeCanvasClipboard, type CanvasClipboard } from "@/lib/canvas/canvas-clipboard";
 import { createCanvasGraphIndexSelector } from "@/lib/canvas/canvas-graph-index";
-import { lazy, Suspense, startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { Suspense, startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useParams } from "react-router-dom";
 import { ExternalLink, Group, History, MessageSquare, Pencil, Video } from "lucide-react";
@@ -115,19 +117,22 @@ import { CanvasRefreshShell } from "@/components/canvas/canvas-refresh-shell";
 import { CanvasTopBar } from "@/components/canvas/canvas-top-bar";
 import { useCanvasHost, useCanvasRoute } from "@/lib/canvas/canvas-host";
 
-const CanvasNodeAngleDialog = lazy(() => import("@/components/canvas/canvas-node-angle-dialog").then((module) => ({ default: module.CanvasNodeAngleDialog })));
-const CanvasNodeCropDialog = lazy(() => import("@/components/canvas/canvas-node-crop-dialog").then((module) => ({ default: module.CanvasNodeCropDialog })));
-const CanvasNodeMaskEditDialog = lazy(() => import("@/components/canvas/canvas-node-mask-edit-dialog").then((module) => ({ default: module.CanvasNodeMaskEditDialog })));
-const CanvasNodeSplitDialog = lazy(() => import("@/components/canvas/canvas-node-split-dialog").then((module) => ({ default: module.CanvasNodeSplitDialog })));
-const CanvasNodeUpscaleDialog = lazy(() => import("@/components/canvas/canvas-node-upscale-dialog").then((module) => ({ default: module.CanvasNodeUpscaleDialog })));
-const CanvasPluginManagerModal = lazy(() => import("@/components/canvas/canvas-plugin-manager-modal").then((module) => ({ default: module.CanvasPluginManagerModal })));
-const CanvasGenerationLogDialog = lazy(() => import("@/components/canvas/canvas-generation-log-dialog").then((module) => ({ default: module.CanvasGenerationLogDialog })));
-const CharacterNodeEditModal = lazy(() => import("@/components/canvas/character-node-edit-modal").then((module) => ({ default: module.CharacterNodeEditModal })));
-const SceneNodeEditModal = lazy(() => import("@/components/canvas/scene-node-edit-modal").then((module) => ({ default: module.SceneNodeEditModal })));
-const PropNodeEditModal = lazy(() => import("@/components/canvas/prop-node-edit-modal").then((module) => ({ default: module.PropNodeEditModal })));
-const CanvasVideoCompareModal = lazy(() => import("@/components/canvas/canvas-video-compare-modal").then((module) => ({ default: module.CanvasVideoCompareModal })));
-const AssetPickerModal = lazy(() => import("@/components/canvas/asset-picker-modal").then((module) => ({ default: module.AssetPickerModal })));
-const CanvasNodePromptPanel = lazy(() => import("@/components/canvas/canvas-node-prompt-panel").then((module) => ({ default: module.CanvasNodePromptPanel })));
+import {
+    AssetPickerModal,
+    CanvasDialogHost,
+    CanvasGenerationLogDialog,
+    CanvasNodeAngleDialog,
+    CanvasNodeCropDialog,
+    CanvasNodeMaskEditDialog,
+    CanvasNodePromptPanel,
+    CanvasNodeSplitDialog,
+    CanvasNodeUpscaleDialog,
+    CanvasPluginManagerModal,
+    CanvasVideoCompareModal,
+    CharacterNodeEditModal,
+    PropNodeEditModal,
+    SceneNodeEditModal,
+} from "@/components/canvas/canvas-dialog-host";
 import { CanvasRealtimePresenceLayer, useCanvasRealtimePresence, writeCanvasPresenceViewport } from "@/components/canvas/canvas-realtime-presence";
 import { ConnectionCreateMenu, NodeCreateMenu, type PendingConnectionCreate } from "@/components/canvas/canvas-create-menus";
 import {
@@ -149,43 +154,10 @@ import type { ReferenceAudio } from "@/types/media";
 // Register built-in nodes in the shared registry once when the module loads.
 registerBuiltinNodes();
 
-type CanvasClipboard = {
-    nodes: CanvasNodeData[];
-    connections: CanvasConnection[];
-};
-
 type CanvasClipboardContent = {
     kind: "image" | "video" | "audio" | "text";
     value: string;
 };
-
-const CANVAS_CLIPBOARD_FORMAT = "application/x-infinite-canvas-nodes";
-
-function serializeCanvasClipboard(clipboard: CanvasClipboard) {
-    return JSON.stringify({ format: CANVAS_CLIPBOARD_FORMAT, version: 1, ...clipboard });
-}
-
-function parseCanvasClipboard(text: string): CanvasClipboard | null {
-    try {
-        const value = JSON.parse(text) as { format?: unknown; version?: unknown; nodes?: unknown; connections?: unknown };
-        if (value.format !== CANVAS_CLIPBOARD_FORMAT || value.version !== 1 || !Array.isArray(value.nodes) || !Array.isArray(value.connections)) return null;
-        const nodes = value.nodes.filter((node): node is CanvasNodeData => {
-            if (!node || typeof node !== "object") return false;
-            const item = node as Partial<CanvasNodeData>;
-            return typeof item.id === "string" && typeof item.type === "string" && typeof item.title === "string" && typeof item.width === "number" && typeof item.height === "number" && Boolean(item.position) && typeof item.position?.x === "number" && typeof item.position?.y === "number";
-        });
-        if (!nodes.length) return null;
-        const nodeIds = new Set(nodes.map((node) => node.id));
-        const connections = value.connections.filter((connection): connection is CanvasConnection => {
-            if (!connection || typeof connection !== "object") return false;
-            const item = connection as Partial<CanvasConnection>;
-            return typeof item.id === "string" && typeof item.fromNodeId === "string" && typeof item.toNodeId === "string" && (nodeIds.has(item.fromNodeId) || nodeIds.has(item.toNodeId));
-        });
-        return { nodes, connections };
-    } catch {
-        return null;
-    }
-}
 
 function getCanvasClipboardContent(node: CanvasNodeData): CanvasClipboardContent | null {
     const metadata = node.metadata;
@@ -232,20 +204,6 @@ async function writeCanvasClipboardBlob(blob: Promise<Blob | null>, kind: Canvas
         }),
     ]);
     return true;
-}
-
-function isLegacyCanvasClipboardText(text: string) {
-    try {
-        const value = JSON.parse(text) as { format?: unknown };
-        // 兼容历史格式名与当前 CANVAS_CLIPBOARD_FORMAT（复制兜底时 JSON 会以纯文本进入系统剪贴板）
-        return value.format === "infinite-canvas-nodes" || value.format === CANVAS_CLIPBOARD_FORMAT;
-    } catch {
-        return false;
-    }
-}
-
-function findClipboardMediaType(item: ClipboardItem, kind: "image" | "video" | "audio") {
-    return item.types.find((type) => type.startsWith(`${kind}/`) || type.startsWith(`web ${kind}/`));
 }
 
 async function readCanvasClipboardItem(items: ClipboardItems) {
@@ -298,13 +256,6 @@ function loopImageInputCount(nodeId: string, nodes: CanvasNodeData[], connection
     const plan = resolveLoopInputPlan(loop.metadata || {}, countSlots("image"), countSlots("video"), countSlots("audio"), countSlots("text"));
     return plan.mediaKind === "image" ? Math.min(plan.batchSize, Math.max(0, plan.sourceCount - plan.start + 1)) : 0;
 }
-
-type ActiveGenerationRequest = {
-    targetNodeId: string;
-    originNodeId: string;
-    runningNodeId: string;
-    controller: AbortController;
-};
 
 const VIDEO_NODE_MAX_WIDTH = 420;
 const VIDEO_NODE_MAX_HEIGHT = 420;
@@ -482,12 +433,10 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const renameProject = useCanvasStore((state) => state.renameProject);
     const deleteProjects = useCanvasStore((state) => state.deleteProjects);
     const getCurrentCanvasDramaId = useCallback(async () => {
-        try {
-            const result = await fetchBackendCanvasDrama(projectId);
-            return result.episode?.dramaId || result.drama?.id || null;
-        } catch {
-            return null;
-        }
+        const context = useProductionWorkspaceStore.getState().context;
+        if (context?.canvasId === projectId && context.dramaId) return context.dramaId;
+        const result = await fetchBackendCanvasDrama(projectId);
+        return result.episode?.dramaId || result.drama?.id || null;
     }, [projectId]);
     const collaborators = useCanvasStore((state) => state.collaborators[projectId] || EMPTY_CANVAS_COLLABORATORS);
     const canvasConflict = useCanvasStore((state) => state.canvasConflicts[projectId]);
@@ -687,7 +636,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const connectionPreviewRafRef = useRef<number | null>(null);
     const connectionPreviewPointerRef = useRef<{ clientX: number; clientY: number } | null>(null);
     const pendingConnectionCreateRef = useRef(pendingConnectionCreate);
-    const generationRequestsRef = useRef(new Map<string, ActiveGenerationRequest>());
+    const generationRequestsRef = useRef(new Map<string, ActiveCanvasGenerationRequest>());
     const loopAbortRef = useRef<AbortController | null>(null);
     const loopPreparingRef = useRef(false);
     const dragPreviewPositionsRef = useRef<Map<string, Position>>(EMPTY_DRAG_PREVIEW);
@@ -720,27 +669,16 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     );
 
     const startGenerationRequest = useCallback((targetNodeId: string, originNodeId: string, runningId = originNodeId, controller = new AbortController()) => {
-        const previous = generationRequestsRef.current.get(targetNodeId);
-        if (previous?.controller !== controller) previous?.controller.abort();
-        generationRequestsRef.current.set(targetNodeId, { targetNodeId, originNodeId, runningNodeId: runningId, controller });
-        return controller;
+        return startCanvasGenerationRequestInRegistry(generationRequestsRef.current, targetNodeId, originNodeId, runningId, controller);
     }, []);
 
     const finishGenerationRequest = useCallback((targetNodeId: string, controller: AbortController) => {
-        const request = generationRequestsRef.current.get(targetNodeId);
-        if (request?.controller === controller) generationRequestsRef.current.delete(targetNodeId);
+        finishCanvasGenerationRequestInRegistry(generationRequestsRef.current, targetNodeId, controller);
     }, []);
 
     const stopGenerationByRunningId = useCallback(
         (runningId: string) => {
-            const affectedNodeIds = new Set<string>();
-            generationRequestsRef.current.forEach((request) => {
-                if (request.runningNodeId !== runningId) return;
-                request.controller.abort();
-                generationRequestsRef.current.delete(request.targetNodeId);
-                affectedNodeIds.add(request.targetNodeId);
-                affectedNodeIds.add(request.originNodeId);
-            });
+            const affectedNodeIds = abortCanvasGenerationRequestsByRunningId(generationRequestsRef.current, runningId);
             setRunningNodeId((current) => (current === runningId ? null : current));
             if (!affectedNodeIds.size) return;
             setNodes((prev) =>
@@ -3741,26 +3679,41 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         [extractingKeyframeNodeId, message, projectId, t],
     );
 
+    const assetSaveRequests = useRef(new Map<string, Promise<string>>());
+    const [savingAssetNodes, setSavingAssetNodes] = useState<Set<string>>(() => new Set());
     const saveCanvasAsset = useCallback(async (node: CanvasNodeData, input: Parameters<typeof addAsset>[0]) => {
-        if (!input.dramaId) { if (input.id) { await useAssetStore.getState().updateAsset(input.id, input); return input.id; } return addAsset(input); }
-        await flushCanvasProjectBeforeGeneration(projectId!);
-        const ref = node.metadata?.sharedAssetReference as SharedAssetReference | undefined;
-        const previous = useAssetStore.getState().assets.find(asset => asset.id === ref?.assetId || asset.id === node.metadata?.sharedLibraryAssetId || (asset.dramaId === input.dramaId && asset.metadata?.projectId === projectId && asset.metadata?.nodeId === node.id && (node.type !== CanvasNodeType.Config || (asset.data as Record<string, unknown>).storageKey === (input.data as Record<string, unknown>).storageKey)));
-        const now = new Date().toISOString();
-        const asset = { ...previous, ...input, tags: previous?.tags || input.tags, folderId: previous?.folderId ?? input.folderId, note: previous?.note ?? input.note,
-            title: node.type === CanvasNodeType.Config ? input.title : node.title || input.title, id: previous?.id || nanoid(), createdAt: previous?.createdAt || now, updatedAt: now,
-            metadata: { ...previous?.metadata, ...input.metadata, projectId, nodeId: node.id } } as Asset;
-        const command = { operationId: nanoid(), canvasSource: { projectId: projectId!, nodeId: node.id } };
-        try { return (await saveLibraryAsset(asset, command)).id; }
-        catch (error) {
-            if (!(error instanceof BackendApiError) || error.details.code !== "FIELD_CONFLICT") throw error;
-            return await new Promise<string>((resolve, reject) => {
-                modal.confirm({ title: t("canvas.sharedLibrary.conflictTitle"), content: t("canvas.sharedLibrary.conflictDescription"), okText: t("canvas.sharedLibrary.useLocal"), cancelText: t("canvas.sharedLibrary.keepDraft"),
-                    onOk: async () => { try { resolve((await saveLibraryAsset(asset, { ...command, operationId: nanoid(), resolveConflicts: "local" })).id); } catch (failure) { reject(failure); } },
-                    onCancel: () => reject(error) });
-            });
-        }
-    }, [addAsset, modal, projectId, t]);
+        const key = `${projectId}:${node.id}`;
+        const pending = assetSaveRequests.current.get(key);
+        if (pending) return pending;
+        setSavingAssetNodes(current => new Set(current).add(key));
+        const hideLoading = message.loading(t("canvas.sharedLibrary.saving"), 0);
+        const job = (async () => {
+            if (!input.dramaId) { if (input.id) { await useAssetStore.getState().updateAsset(input.id, input); return input.id; } return addAsset(input); }
+            await flushCanvasProjectBeforeGeneration(projectId!);
+            const ref = node.metadata?.sharedAssetReference as SharedAssetReference | undefined;
+            const previous = useAssetStore.getState().assets.find(asset => asset.id === ref?.assetId || asset.id === node.metadata?.sharedLibraryAssetId || (asset.id === input.id && asset.dramaId === input.dramaId) || (asset.dramaId === input.dramaId && asset.metadata?.projectId === projectId && asset.metadata?.nodeId === node.id && (node.type !== CanvasNodeType.Config || (asset.data as Record<string, unknown>).storageKey === (input.data as Record<string, unknown>).storageKey)));
+            const now = new Date().toISOString();
+            const asset = { ...previous, ...input, tags: previous?.tags || input.tags, folderId: previous?.folderId ?? input.folderId, note: previous?.note ?? input.note,
+                title: node.type === CanvasNodeType.Config ? input.title : node.title || input.title, id: previous?.id || nanoid(), createdAt: previous?.createdAt || now, updatedAt: now,
+                metadata: { ...previous?.metadata, ...input.metadata, projectId, nodeId: node.id } } as Asset;
+            const command = { operationId: nanoid(), canvasSource: { projectId: projectId!, nodeId: node.id } };
+            try { return (await saveLibraryAsset(asset, command)).id; }
+            catch (error) {
+                if (!(error instanceof BackendApiError) || error.details.code !== "FIELD_CONFLICT") throw error;
+                return await new Promise<string>((resolve, reject) => {
+                    modal.confirm({ title: t("canvas.sharedLibrary.conflictTitle"), content: t("canvas.sharedLibrary.conflictDescription"), okText: t("canvas.sharedLibrary.useLocal"), cancelText: t("canvas.sharedLibrary.keepDraft"),
+                        onOk: async () => { try { resolve((await saveLibraryAsset(asset, { ...command, operationId: nanoid(), resolveConflicts: "local" })).id); } catch (failure) { reject(failure); } },
+                        onCancel: () => reject(error) });
+                });
+            }
+        })().finally(() => {
+            assetSaveRequests.current.delete(key);
+            setSavingAssetNodes(current => { const next = new Set(current); next.delete(key); return next; });
+            hideLoading();
+        });
+        assetSaveRequests.current.set(key, job);
+        return job;
+    }, [addAsset, message, modal, projectId, t]);
 
     const discardSharedAssetEdits = useCallback(async (node: CanvasNodeData) => {
         const ref = node.metadata?.sharedAssetReference as SharedAssetReference | undefined;
@@ -4312,7 +4265,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         setDialogNodeId(null);
     }, [sceneEditNodeId]);
 
-    const saveSceneEdit = useCallback((patch: { title: string; sceneName: string; sceneDescription: string; sceneImage: NonNullable<CanvasNodeMetadata["sceneImage"]>; sceneColorCard?: NonNullable<CanvasNodeMetadata["sceneColorCard"]>; sceneColorPalette?: string[]; sceneColorCardPrompt: string }) => {
+    const saveSceneEdit = useCallback((patch: { title: string; sceneName: string; sceneDescription: string; sceneImage?: NonNullable<CanvasNodeMetadata["sceneImage"]>; sceneColorCard?: NonNullable<CanvasNodeMetadata["sceneColorCard"]>; sceneColorPalette?: string[]; sceneColorCardPrompt: string }) => {
         if (!sceneEditNodeId) return;
         setNodes((prev) => prev.map((item) => item.id === sceneEditNodeId ? {
             ...item,
@@ -6155,7 +6108,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                             description={
                                 <div className="space-y-2">
                                     <div>{t(canvasConflict.reason === "rejected" ? "canvasSave.rejected" : "canvasSave.conflict", { revision: canvasConflict.revision, count: canvasConflict.pendingOperations, conflicts: canvasConflict.conflictTargets.length })}</div>
-                                    {canvasConflict.reason === "rejected" ? <div>{t(canvasConflict.canRecoverTimeline ? "canvasSave.timelineRecovery" : canvasConflict.canRetryFormalClip ? "canvasSave.formalRecovery" : canvasConflict.canRetryBackendFailure ? "canvasSave.backendRecovery" : "canvasSave.rejectedHelp")}</div> : null}
+                                    {canvasConflict.reason === "rejected" ? <div>{t(canvasConflict.canRecoverTimeline ? "canvasSave.timelineRecovery" : canvasConflict.canRetryStoryboardDurations ? "canvasSave.storyboardDurationRecovery" : canvasConflict.canRetryFormalClip ? "canvasSave.formalRecovery" : canvasConflict.canRetryBackendFailure ? "canvasSave.backendRecovery" : "canvasSave.rejectedHelp")}</div> : null}
                                     {canvasConflict.conflictTargets.length ? (
                                         <ul className="m-0 list-disc pl-5 text-xs opacity-80">
                                             {canvasConflict.conflictTargets.slice(0, 5).map((target) => (
@@ -6165,7 +6118,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                                         </ul>
                                     ) : null}
                                     <div className="flex gap-2 pt-1">
-                                        <Button size="small" disabled={canvasConflict.reason === "rejected" && !canvasConflict.canRecoverTimeline && !canvasConflict.canRetryFormalClip && !canvasConflict.canRetryBackendFailure} onClick={() => keepPendingOpsOnCanvasConflict(projectId)}>{t(canvasConflict.canRecoverTimeline ? "canvasSave.recover" : canvasConflict.canRetryFormalClip ? "canvasSave.retryFormal" : canvasConflict.canRetryBackendFailure ? "canvasSave.retrySaved" : "canvasSave.keep", { count: canvasConflict.pendingOperations })}</Button>
+                                        <Button size="small" disabled={canvasConflict.reason === "rejected" && !canvasConflict.canRecoverTimeline && !canvasConflict.canRetryStoryboardDurations && !canvasConflict.canRetryFormalClip && !canvasConflict.canRetryBackendFailure} onClick={() => keepPendingOpsOnCanvasConflict(projectId)}>{t(canvasConflict.canRecoverTimeline ? "canvasSave.recover" : canvasConflict.canRetryStoryboardDurations ? "canvasSave.retryStoryboardDuration" : canvasConflict.canRetryFormalClip ? "canvasSave.retryFormal" : canvasConflict.canRetryBackendFailure ? "canvasSave.retrySaved" : "canvasSave.keep", { count: canvasConflict.pendingOperations })}</Button>
                                         <Button size="small" danger onClick={() => adoptRemoteOnCanvasConflict(projectId)}>{`采用远端（丢弃我的 ${canvasConflict.pendingOperations} 个操作）`}</Button>
                                     </div>
                                 </div>
@@ -6402,6 +6355,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 <CanvasRealtimePresenceLayer projectId={projectId} nodeById={nodeById} viewport={viewport} />
 
                 <CanvasNodeHoverToolbar
+                    savingAsset={Boolean(toolbarNode && savingAssetNodes.has(`${projectId}:${toolbarNode.id}`))}
                     node={isNodeDragging || isNodeResizing || nodeImageSettingsOpen || Boolean(referencePickerNodeId) || expandedBatchNodeIds.has(toolbarNode?.id || "") ? null : toolbarNode}
                     viewport={viewport}
                     extraTools={[...productionMoreActions, ...(pluginToolbarItems || [])]}
@@ -6545,28 +6499,30 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
 
                 <input ref={imageInputRef} type="file" multiple accept="image/*,.svg,video/*,audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav" className="hidden" onChange={handleImageInputChange} />
 
-                <CanvasNodeInfoModal node={infoNode} open={Boolean(infoNode)} onClose={() => setInfoNodeId(null)} onRename={handleNodeTitleChange} />
-                <Suspense fallback={null}>{pluginManagerOpen ? <CanvasPluginManagerModal open onClose={() => setPluginManagerOpen(false)} /> : null}</Suspense>
+                <CanvasDialogHost>
+                    <CanvasNodeInfoModal key="node-info" node={infoNode} open={Boolean(infoNode)} onClose={() => setInfoNodeId(null)} onRename={handleNodeTitleChange} />
+                    {pluginManagerOpen ? <CanvasPluginManagerModal key="plugin-manager" open onClose={() => setPluginManagerOpen(false)} /> : null}
 
-                <Suspense fallback={null}>{cropNode && imageToolUrl?.nodeId === cropNode.id ? <CanvasNodeCropDialog dataUrl={imageToolUrl.url} open onClose={() => setCropNodeId(null)} onConfirm={(crop) => void cropImageNode(cropNode, crop)} /> : null}</Suspense>
+                    {cropNode && imageToolUrl?.nodeId === cropNode.id ? <CanvasNodeCropDialog key="crop" dataUrl={imageToolUrl.url} open onClose={() => setCropNodeId(null)} onConfirm={(crop) => void cropImageNode(cropNode, crop)} /> : null}
 
-                <Suspense fallback={null}>{maskEditNode && imageToolUrl?.nodeId === maskEditNode.id ? (
-                    <CanvasNodeMaskEditDialog dataUrl={imageToolUrl.url} open onClose={() => setMaskEditNodeId(null)} onConfirm={(payload) => void maskEditImageNode(maskEditNode, payload)} />
-                ) : null}</Suspense>
+                    {maskEditNode && imageToolUrl?.nodeId === maskEditNode.id ? (
+                    <CanvasNodeMaskEditDialog key="mask-edit" dataUrl={imageToolUrl.url} open onClose={() => setMaskEditNodeId(null)} onConfirm={(payload) => void maskEditImageNode(maskEditNode, payload)} />
+                ) : null}
 
-                <Suspense fallback={null}>{splitNode && imageToolUrl?.nodeId === splitNode.id ? <CanvasNodeSplitDialog dataUrl={imageToolUrl.url} open onClose={() => setSplitNodeId(null)} onConfirm={(params) => void splitImageNode(splitNode, params)} /> : null}</Suspense>
+                    {splitNode && imageToolUrl?.nodeId === splitNode.id ? <CanvasNodeSplitDialog key="split" dataUrl={imageToolUrl.url} open onClose={() => setSplitNodeId(null)} onConfirm={(params) => void splitImageNode(splitNode, params)} /> : null}
 
-                <Suspense fallback={null}>{upscaleNode && imageToolUrl?.nodeId === upscaleNode.id ? (
-                    <CanvasNodeUpscaleDialog dataUrl={imageToolUrl.url} open onClose={() => setUpscaleNodeId(null)} onConfirm={(params) => void upscaleImageNode(upscaleNode, params)} />
-                ) : null}</Suspense>
+                    {upscaleNode && imageToolUrl?.nodeId === upscaleNode.id ? (
+                    <CanvasNodeUpscaleDialog key="upscale" dataUrl={imageToolUrl.url} open onClose={() => setUpscaleNodeId(null)} onConfirm={(params) => void upscaleImageNode(upscaleNode, params)} />
+                ) : null}
 
-                <Modal title={t("canvas.projectPage.superResolve")} open={Boolean(superResolveNode && canvasNodeImage(superResolveNode))} centered footer={null} onCancel={() => setSuperResolveNodeId(null)}>
+                <Modal key="super-resolve" title={t("canvas.projectPage.superResolve")} open={Boolean(superResolveNode && canvasNodeImage(superResolveNode))} centered footer={null} onCancel={() => setSuperResolveNodeId(null)}>
                     <div className="py-8 text-center text-base font-medium">{t("canvas.projectPage.notImplemented")}</div>
                 </Modal>
 
-                <Suspense fallback={null}>{angleNode && imageToolUrl?.nodeId === angleNode.id ? <CanvasNodeAngleDialog dataUrl={imageToolUrl.url} open onClose={() => setAngleNodeId(null)} onConfirm={(params) => void generateAngleNode(angleNode, params)} /> : null}</Suspense>
+                    {angleNode && imageToolUrl?.nodeId === angleNode.id ? <CanvasNodeAngleDialog key="angle" dataUrl={imageToolUrl.url} open onClose={() => setAngleNodeId(null)} onConfirm={(params) => void generateAngleNode(angleNode, params)} /> : null}
 
-                <Suspense fallback={null}>{characterEditNodeId ? <CharacterNodeEditModal
+                    {characterEditNodeId ? <CharacterNodeEditModal
+                    key="character-edit"
                     open={Boolean(characterEditNodeId)}
                     selectingCanvasImage={characterImagePickerActive}
                     canvasImagePick={characterCanvasImagePick}
@@ -6574,9 +6530,10 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onClose={closeCharacterEditor}
                     onPickCanvasImage={startCharacterImageSelection}
                     onSave={saveCharacterEdit}
-                /> : null}</Suspense>
+                /> : null}
 
-                <Suspense fallback={null}>{sceneEditNodeId ? <SceneNodeEditModal
+                    {sceneEditNodeId ? <SceneNodeEditModal
+                    key="scene-edit"
                     open={Boolean(sceneEditNodeId)}
                     selectingCanvasImage={Boolean(sceneImagePickerActive)}
                     canvasImagePick={sceneCanvasImagePick}
@@ -6584,8 +6541,9 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onClose={closeSceneEditor}
                     onPickCanvasImage={startSceneImageSelection}
                     onSave={saveSceneEdit}
-                /> : null}</Suspense>
-                <Suspense fallback={null}>{propEditNodeId ? <PropNodeEditModal
+                /> : null}
+                    {propEditNodeId ? <PropNodeEditModal
+                    key="prop-edit"
                     open={Boolean(propEditNodeId)}
                     selectingCanvasImage={propImagePickerActive}
                     canvasImagePick={propCanvasImagePick}
@@ -6593,9 +6551,9 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onClose={closePropEditor}
                     onPickCanvasImage={startPropImageSelection}
                     onSave={savePropEdit}
-                /> : null}</Suspense>
+                /> : null}
 
-                <Suspense fallback={null}>{videoComparison ? <CanvasVideoCompareModal comparison={videoComparison} onClose={() => setVideoComparison(null)} /> : null}</Suspense>
+                    {videoComparison ? <CanvasVideoCompareModal key="video-comparison" comparison={videoComparison} onClose={() => setVideoComparison(null)} /> : null}
 
                 <Modal
                     title={t("canvas.projectPage.clearTitle")}
@@ -6615,6 +6573,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 </Modal>
 
                 <Suspense fallback={null}>{assetPickerOpen ? <AssetPickerModal open allowedKinds={assetPickerAllowedKinds} onInsert={handleAssetInsert} onClose={closeAssetPicker} /> : null}</Suspense>
+                </CanvasDialogHost>
             </section>
         </main>
     );

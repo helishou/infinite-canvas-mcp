@@ -6,11 +6,19 @@
 
 ### Infinite Canvas 集成：Subject Prompt v2 源稿与编译
 
-新建制作稿采用 `prompt_assembly.version=2`。先登记稳定 Subject，并让 Subject 图片绑定指向智能图片节点；Shot 通过 Subject 使用对象和绑定，不自编 `<Picture N>` 编号。连续性事实只写入唯一权威 `ledger`，事实所属对象由 Subject 的实体引用解析；Shot 初态、事件和尾态由局部帧与连续性重放派生。Shot 是摄影原子，时长使用整数帧；Clip 只重组相邻 Shot，不重复保存 Prompt、Subject 列表或 Picture 编号。
+新建制作稿采用 `prompt_assembly.version=2`。先登记稳定 Subject，并通过 `entityRef` 绑定角色、场景或道具的正式实体；Subject 图片绑定可指向对应素材节点或智能图片节点，始终使用真实 `sourceNode.projectId/nodeId` 与选择策略；Shot 通过 Subject 使用对象和绑定，不自编 `<Picture N>` 编号。连续性事实只写入唯一权威 `ledger`，事实所属对象由 Subject 的实体引用解析；Shot 初态、事件和尾态由局部帧与连续性重放派生。Shot 是摄影原子，时长使用整数帧；Clip 只重组相邻 Shot，不重复保存 Prompt、Subject 列表或 Picture 编号。
 
 正式 Prompt、参考顺序与上传映射只由当前激活编译器从结构化源稿组装。Agent 只写结构字段，不在 `segments[].prompt` 或画布 Clip 中手工组装正式 Prompt。用户在画布明确编辑 Prompt 后，可要求反向同步；仅当本次编译回执提供的 SourceMap 能把全部修改唯一映射到单个 Shot 文本或对白字段时才写回，其他文本留在画布并报告歧义，不猜测修改摄影、身份、绑定或连续性。缺少 SourceMap 时保留手工 Prompt，不宣称同步完成。
 
 Subject 图片与关键帧引用固定到 Backend 核验过的成功归档结果。`latest_success` 按持久任务顺序与批内输出顺序解析；历史浏览不能改变选择，恢复旧生成设置是独立的显式动作。编译和同步不授权图片、视频生成或发布。旧制作稿保持原合同，只有显式迁移才进入 Subject Prompt v2。
+
+### Infinite Canvas 集成：素材节点与共享资产
+
+角色、场景、道具登记使用正式 `production_edit`：已有实体沿 `patch_director_source` 更新，新增素材沿 `create_manual_director_asset` 一次登记资产卡、实体与 Subject。Backend 在同一事务内创建对应的角色／场景／道具节点；稳定关联为 owner + kind + entity ID，不按名称匹配，不另造可独立维护的描述副本。旧稿缺节点时用 `production_prepare_targets` 的 `entity:character:<实体ID>`、`entity:scene:<实体ID>` 或 `entity:prop:<资产ID>` 补齐，读取短回执中的 revision；需要定位时用 `production_get_workbench` 的 `subject_workbench` 定向回读 `entityNodeSource` 中的真实 projectId/nodeId，保留原布局与连线。风格不随此节点接入自动创建。
+
+图片生成节点保留参数、任务与结果历史；它与素材身份节点职责分开。图片绑定沿 Subject/Shot 正式操作维护；素材节点消费当前有效图片，智能节点遵循 `node_selection/latest_success/selected_result`。使用已归档媒体，编译与生成冻结本轮输入；不因节点接入自动批准、发布或生成。
+
+剧目资产库是该剧目共享资产画布的目录视图。通用加入／更新复用 `assets_add/assets_upsert_batch` 的稳定 operationId、`canvasSource:{projectId,nodeId}` 与明确资产 ID，Backend 建立唯一源并原位转引用；智能生成只共享选定产物，原任务保持。引用编辑保留为本地字段修改，明确更新原资产才同步共享源，不另建同名资产。删除引用走画布 ops；删除库中源资产先用 `assets_get` 读取稳定来源，再用 `canvas_apply_commands` 删除该 sourceProjectId/sourceNodeId，有引用时按 Backend 返回的使用画布处理，不能绕过保护或删归档媒体。普通资产库沿原行为。正式制作的批准版本采用仍走 `production_get_shared_assets/production_adopt_shared_asset`，不把通用加入资产库当作批准或改写历史输入。具体工具参数以当轮 schema 为准。
 
 ### Infinite Canvas 集成：制作内容语言
 

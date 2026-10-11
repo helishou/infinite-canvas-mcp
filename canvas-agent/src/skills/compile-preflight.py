@@ -11,6 +11,8 @@ def diagnose(runtime, source):
     import asset_plan
     import style_anchor
     import post_hooks
+    from fractions import Fraction
+    from canvas_subject_prompt_v2 import project_continuity_source
     from audit_storyboard_quality import audit, ContractError
     from prompt_delivery import render_asset_prompt
 
@@ -27,30 +29,52 @@ def diagnose(runtime, source):
                        "severity": severity, **({"example": example} if example is not None else {}),
                        "nextAction": {"action": "correct_source", "message": "补齐此字段或绑定后重新预检；不要原样重试编译。"}})
 
-    def check(callback, path, target=None, example_for_error=None):
+    def check(callback, path, target=None, example_for_error=None, severity="error", code="COMPILE_SOURCE_INVALID"):
         try:
             callback()
         except (ContractError, ValueError, TypeError, KeyError, IndexError, AttributeError, OSError, ZeroDivisionError) as error:
-            add(error, path, target, example=example_for_error(str(error)) if example_for_error else None)
+            add(error, path, target, code=code, severity=severity, example=example_for_error(str(error)) if example_for_error else None)
 
     if source.get("segments"):
         if not isinstance(source["segments"], list):
             add("视频段落必须为数组", "segments")
             return issues
+        # Subject Prompt v2 derives Clip windows and durations from authored
+        # Shot durations. Validate those projected fields, while continuing to
+        # require all actually authored clip selectors on the source segment.
+        projected = project_continuity_source(source)
+        if projected is not source:
+            fps_num = int(projected.get("fps_num", 24))
+            fps_den = int(projected.get("fps_den", 1))
+            for segment in projected.get("segments", []):
+                if not isinstance(segment, dict):
+                    continue
+                start, end = segment.get("start_frame"), segment.get("end_frame")
+                if isinstance(start, int) and isinstance(end, int) and end > start:
+                    segment["generation_clip_duration"] = str(Fraction((end - start) * fps_den, fps_num))
+        check_segments = projected.get("segments", []) if projected is not source else source["segments"]
         # The existing --draft compiler preserves incomplete references and audit blockers.
         # Surface those as draft diagnostics; do not turn them into a new compilation gate.
         for index, segment in enumerate(source["segments"]):
             if not isinstance(segment, dict):
                 add("视频段落必须为对象", f"segments.{index}")
                 continue
-            for field in ("id", "mode", "generation_clip_duration", "start_frame", "end_frame"):
+            projected_segment = check_segments[index] if index < len(check_segments) else segment
+            required_fields = ("id", "mode") if projected is not source else ("id", "mode", "generation_clip_duration", "start_frame", "end_frame")
+            for field in required_fields:
                 if field not in segment:
                     add("视频段落编译字段缺失", f"segments.{index}.{field}", str(segment.get("id") or ""))
+            if projected is not source:
+                for field in ("generation_clip_duration", "start_frame", "end_frame"):
+                    if field not in projected_segment:
+                        add("视频段落编译字段无法由镜头范围推导", f"segments.{index}.{field}", str(segment.get("id") or ""))
         if source.get("asset_cards"):
             policy = style_anchor.style_policy_report(source, base, strict=False)
             if policy.get("status") == "BLOCKED":
                 add(policy.get("reason", "风格策略尚未准备"), "style_lock", code="STYLE_POLICY", severity="warning")
-        report = audit(source, base)
+        # Do not resolve or fabricate media here, and never write derived
+        # fields back to authored source.
+        report = audit(projected, base)
         for gate in report.get("gates", []):
             for error in gate.get("errors", []):
                 add(error, "segments", code="COMPILE_VIDEO_DRAFT", severity="warning")
@@ -77,8 +101,8 @@ def diagnose(runtime, source):
                 add("资产用途缺失或不完整", f"asset_plan.{index}.purpose", target,
                     example={"purpose": "锁定此资产的身份、形态与材质，为后续镜头提供一致参考。"})
         if plans:
-            check(lambda: asset_plan.check_asset_plan(source, base), "asset_plan")
-    check(lambda: style_anchor.check_style_lock(source, base), "style_lock")
+            check(lambda: asset_plan.check_asset_plan(source, base), "asset_plan", severity="warning", code="ASSET_PLAN_QUALITY")
+    check(lambda: style_anchor.check_style_lock(source, base), "style_lock", severity="warning", code="STYLE_LOCK_QUALITY")
     policy = style_anchor.style_policy_report(source, base, strict=False)
     if policy.get("status") == "BLOCKED":
         add(policy.get("reason", "风格策略尚未准备"), "style_policy", code="STYLE_POLICY", severity="warning")
@@ -94,14 +118,14 @@ def diagnose(runtime, source):
             target = str(node.get("id") or "")
             dependencies = node.get("depends_on") or []
             if not isinstance(dependencies, list) or anchor_id not in dependencies:
-                add("缺少风格母图依赖", f"asset_plan.{index}.depends_on", target, "STYLE_DEPENDENCY_MISSING")
+                add("缺少风格母图依赖", f"asset_plan.{index}.depends_on", target, "STYLE_DEPENDENCY_MISSING", severity="warning")
             card_index = next((i for i, item in enumerate(cards) if isinstance(item, dict) and item.get("id") == target), None)
             if card_index is not None:
                 refs = cards[card_index].get("references")
                 refs = refs if isinstance(refs, list) else []
                 style_refs = [ref for ref in refs if isinstance(ref, dict) and ref.get("asset_id") == anchor_id and ref.get("role") == "style"]
                 if len(style_refs) != 1 or style_refs[0].get("asset_version") != lock.get("anchor_version"):
-                    add("风格参考或版本缺失", f"asset_cards.{card_index}.references", target, "STYLE_REFERENCE_MISSING")
+                    add("风格参考或版本缺失", f"asset_cards.{card_index}.references", target, "STYLE_REFERENCE_MISSING", severity="warning")
     for index, card in enumerate(cards):
         if not isinstance(card, dict):
             add("资产提示词卡必须为对象", f"asset_cards.{index}")
@@ -132,9 +156,9 @@ def diagnose(runtime, source):
             scoped = copy.deepcopy(source)
             scoped["asset_plan"] = [node for node in plans if isinstance(node, dict) and node.get("id") in (anchor_id, target)]
             scoped["asset_cards"] = [item for item in cards if isinstance(item, dict) and item.get("id") in (anchor_id, target)]
-            check(lambda: style_anchor.check_style_lock(scoped, base), f"asset_cards.{index}.references", target)
+            check(lambda: style_anchor.check_style_lock(scoped, base), f"asset_cards.{index}.references", target, severity="warning", code="STYLE_LOCK_QUALITY")
     # Keep the original full validator authoritative for cross-asset and transaction checks.
-    check(lambda: post_hooks.check_assets(source, base, True), "asset_cards")
+    check(lambda: post_hooks.check_assets(source, base, True), "asset_cards", severity="warning", code="ASSET_PROMPT_QUALITY")
     return issues
 
 

@@ -12,3 +12,13 @@ test("plain result slots, non-image smart nodes and missing adopted nodes are ex
     const result = smartImageChoices("episode", [{ id: "slot", type: "image" }, { ...node("video", "视频"), metadata: { smart: true, generationMode: "video" } }], { broken: { sharedSource: { sourceProjectId: "shared", sourceNodeId: "missing" } } }, [{ id: "shared", nodes: [] }]);
     assert.deepEqual(result, []);
 });
+
+test("typed character, scene and prop nodes can supply workbench image bindings", () => {
+    const result = smartImageChoices("episode", ["character", "scene", "prop"].map(type => ({ id: type, type, title: type })), {}, []);
+    assert.deepEqual(result.map(choice => choice.nodeId), ["character", "scene", "prop"]);
+});
+
+test("an imported archived image is available for manual Subject binding", () => {
+    const choices = smartImageChoices("episode", [{ id: "upload", type: "image", metadata: { storageKey: "image:upload" } }], {}, []);
+    assert.equal(choices[0].nodeId, "upload");
+});

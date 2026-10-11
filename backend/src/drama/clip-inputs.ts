@@ -1,4 +1,5 @@
 import { mergeDirectorInput } from "./input-merge.js";
+import { hasExecutableH3Prompt, inputHash } from "./canvas-inputs.js";
 import { outgoingDirectorBoundary } from "@basketikun/canvas-agent/drama/production-validation";
 import { isH3StyleTemplateId } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
 import { BASE_H3_NODE_METADATA, createH3NodeMetadata } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
@@ -15,6 +16,20 @@ const object = (value: any): Record<string, any> => value && typeof value === "o
 export type ReferenceSync = { targetId: string; status: "ready" | "blocked"; referenceCount: number; inputHash?: string; diagnostics: Array<{ code: string; message: string }> };
 export const CLIP_PROJECTION_FIELDS = ["sourceShotId", "title", "duration", "taskMode", "prompt", "referenceBindings", "tailFrameContinuation", "motionContextEnabled", "directorEngine", "directorSourceHash", "styleTemplateId", "h3CharacterGroups", "storyboardShots", "aspectRatio", "modelName"];
 function clipFieldHash(value: unknown) { return crypto.createHash("sha256").update(canonicalProduction(value ?? null)).digest("hex"); }
+function initialProjectionBaseline(existing: Record<string, any>, next: Record<string, any>) {
+    const baseline: Record<string, string> = {};
+    for (const key of CLIP_PROJECTION_FIELDS) {
+        const value = existing[key];
+        const empty = value === undefined || value === null || value === ""
+            || Array.isArray(value) && value.length === 0
+            || value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0;
+        const blankPrompt = key === "prompt" && !hasExecutableH3Prompt(value);
+        // A blank legacy Prompt/reference slot has no manual value to protect. Establish
+        // that empty baseline once so the first successful compile can fill it in place.
+        if (empty || blankPrompt || inputHash(value) === inputHash(next[key])) baseline[key] = inputHash(value);
+    }
+    return baseline;
+}
 export function clipInputHash(segment: Record<string, any>) {
     const fields: Array<[string, unknown]> = CLIP_PROJECTION_FIELDS.map(key => [key, segment[key] ?? null]);
     if (segment.productionClipProjection?.styleTemplateDeclared === true) fields.push(["styleTemplateDeclared", true]);
@@ -32,16 +47,36 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
     const planned = (d.source.segments as Array<Record<string, any>>).find(s => s.id === group.id)!;
     const styleTemplateId = planned.styleTemplateId ?? null;
     if (styleTemplateId !== null && !isH3StyleTemplateId(styleTemplateId)) throw new Error(`未知 H3 风格模板：${styleTemplateId}`);
-    const bindings: Array<Record<string, unknown>> = authored.references.map((ref, index) => ({
-        id: stableId("binding", group.id, ref.label), assetId: stableId("asset", ref.nodeId, ref.storageKey),
-        label: ref.label, role: ref.role, tags: [], enabled: true, usage: "reference",
-        mediaType: ref.label.startsWith("<Video") ? "video" : ref.label.startsWith("<Audio") ? "audio" : "image",
-        storageKey: ref.storageKey, sourceNodeId: ref.nodeId, order: index, ...(ref.subjectId ? { subjectId: ref.subjectId } : {}),
-    }));
+    const subjectIdsByAsset = new Map<string, Set<string>>();
+    for (const subject of Array.isArray(d.source.subject_registry) ? d.source.subject_registry as Array<Record<string, any>> : []) {
+        for (const binding of Array.isArray(subject.pictureBindings) ? subject.pictureBindings as Array<Record<string, any>> : []) {
+            const assetId = String(binding.assetId || "");
+            if (!assetId) continue;
+            const ids = subjectIdsByAsset.get(assetId) || new Set<string>();
+            ids.add(String(subject.id)); subjectIdsByAsset.set(assetId, ids);
+        }
+    }
+    const bindings: Array<Record<string, unknown>> = authored.references.map((ref, index) => {
+        const subjectIds = subjectIdsByAsset.get(String(ref.assetId || ""));
+        const subjectId = ref.role === "keyframe" || ref.role === "storyboard" || subjectIds?.size !== 1 ? undefined : [...subjectIds][0];
+        return {
+            id: stableId("binding", group.id, ref.label), assetId: stableId("asset", ref.nodeId, ref.storageKey),
+            label: ref.label, role: ref.role, tags: [], enabled: true, usage: "reference",
+            mediaType: ref.label.startsWith("<Video") ? "video" : ref.label.startsWith("<Audio") ? "audio" : "image",
+            storageKey: ref.storageKey, sourceNodeId: ref.nodeId, order: index,
+            ...(ref.subjectId || subjectId ? { subjectId: ref.subjectId || subjectId } : {}),
+        };
+    });
     const characterGroups: Record<string, unknown> = {};
     for (const characterNodeId of new Set(authored.references.filter(ref => nodes.some(n => n.id === ref.nodeId && n.type === "character")).map(ref => ref.nodeId))) {
         const refs = authored.references.filter(ref => ref.nodeId === characterNodeId);
-        const built = buildCharacterGroupFromExistingNode(nodes.find(n => n.id === characterNodeId)!, {
+        const characterNode = nodes.find(n => n.id === characterNodeId)!;
+        // Some formal Subject bindings reference an archived image directly. A
+        // projected `character` node can exist without a characterImages outfit
+        // catalog; keep that verified binding instead of blocking Clip sync or
+        // manufacturing a second catalog entry for the same image.
+        if (!Array.isArray(object(characterNode.metadata).characterImages) || !object(characterNode.metadata).characterImages.length) continue;
+        const built = buildCharacterGroupFromExistingNode(characterNode, {
             selectedOutfitStorageKeys: refs.filter(r => r.label.startsWith("<Picture")).map(r => r.storageKey),
             voiceEnabled: refs.some(r => r.label.startsWith("<Audio")), subjectId: String(refs.find(r => r.subjectId)?.subjectId || characterNodeId),
         });
@@ -78,7 +113,10 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
         modelName: /* h3Model || */ object(nodes.find((node: any) => node.id === group.nodeId)?.metadata).modelName || BASE_H3_NODE_METADATA.modelName };
     const preflight = compileReferenceSubmission(project, segment);
     assertReferenceCompilation(preflight);
-    if (preflight.compiledPrompt !== prompt) throw new Error(`Segment ${group.id} 的参考顺序需要重新绑定并编译；不能自动改写正式正文`);
+    if (preflight.compiledPrompt !== prompt) {
+        const tokens = (value: string) => [...value.matchAll(/<(?:Picture|Subject|Video|Audio)\s+\d+>/g)].map(match => match[0]).join(" → ") || "无引用标记";
+        throw new Error(`Segment ${group.id} 的提示词引用映射与画布绑定不一致；源稿顺序：${tokens(prompt)}；画布编译顺序：${tokens(preflight.compiledPrompt)}。请按该映射重绑后重新编译，Backend 未改写提示词。`);
+    }
     const promptSourceMap = promptSourceMapSchema.safeParse((authored.receipt as Record<string, any>).sourceMap);
     segment.productionClipProjection = { targetId: group.id, sourceHash: authored.sourceHash, artifactId: authored.id, promptHash: authored.sha256,
         promptAssemblyVersion: isSubjectPromptAssembly(d.source) ? 2 : 1, promptSourceMapAvailable: authored.status === "ready" && isSubjectPromptAssembly(d.source) && promptSourceMap.success && promptSourceMap.data.entries.length > 0,
@@ -105,6 +143,29 @@ export function buildPublishedProductionClip(project: Record<string, any>, publi
     return segment;
 }
 
+/** Shot membership and timing remain projectable even while the prompt artifact is stale. */
+export function formalStoryboardTrack(data: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], existing: Record<string, any>) {
+    const director = data.director;
+    if (!director) return undefined;
+    const sourceShots = (Array.isArray(director.source.shots) ? director.source.shots : []).map(object);
+    const shots = group.shotIds.map(id => sourceShots.find(shot => String(shot.id) === id));
+    if (!shots.length || shots.some(shot => !shot)) return undefined;
+    const fps = Number(director.source.fps_num || 24) / Number(director.source.fps_den || 1);
+    if (!Number.isFinite(fps) || fps <= 0) return undefined;
+    const refs = Array.isArray(existing.referenceBindings) ? existing.referenceBindings as Array<Record<string, any>> : [];
+    const storyboardShots = (shots as Record<string, any>[]).map(shot => {
+        const frames = Number(shot.duration_frames), start = Number(shot.start_frame), end = Number(shot.end_frame);
+        const duration = Number.isFinite(frames) && frames > 0 ? frames / fps
+            : Number.isFinite(start) && Number.isFinite(end) && end > start ? (end - start) / fps
+                : Number(data.shots.find(item => item.id === shot.id)?.duration || 0);
+        const input = director.shotInputs[shot.id], asset = input?.keyframePolicy !== "none" && input?.keyframeAssetId ? director.assets[input.keyframeAssetId] : undefined;
+        const binding = asset && refs.find(ref => ref.role === "storyboard" && ref.mediaType === "image" && ref.storageKey === asset.storageKey
+            && (!asset.nodeId || ref.sourceNodeId === asset.nodeId));
+        return { id: String(shot.id), duration, ...(binding?.id ? { referenceBindingId: String(binding.id) } : {}) };
+    });
+    return { storyboardModeEnabled: true, storyboardShots, duration: storyboardShots.reduce((sum, shot) => sum + shot.duration, 0) };
+}
+
 export function productionClipProjection(project: Record<string, any>, data: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], segmentId: string, existing?: Record<string, any>) {
     const result: ReferenceSync = { targetId: group.id, status: "blocked", referenceCount: 0, diagnostics: [] };
     try {
@@ -112,11 +173,20 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
         if (existing) {
             const groups = [["referenceBindings", "h3CharacterGroups", "storyboardShots", "duration"], ...CLIP_PROJECTION_FIELDS.filter(key => !["referenceBindings", "h3CharacterGroups", "storyboardShots", "duration"].includes(key)).map(key => [key])];
             const nextValues = Object.fromEntries(CLIP_PROJECTION_FIELDS.filter(key => Object.hasOwn(segment, key)).map(key => [key, segment[key]]));
-            const merged = mergeDirectorInput(existing, segment, existing.productionClipProjection?.fieldHashes, groups);
+            const baseline = { ...(existing.productionClipProjection?.fieldHashes || initialProjectionBaseline(existing, segment)) };
+            // Older projection receipts may omit a Prompt baseline because the
+            // legacy `DRAFT` scaffold was mistaken for authored text. Treat that
+            // non-executable scaffold as empty once; preserve substantive manual
+            // Prompts through the normal three-way merge.
+            if (!hasExecutableH3Prompt(existing.prompt)) baseline.prompt = inputHash(existing.prompt);
+            const merged = mergeDirectorInput(existing, segment, baseline, groups);
             segment = { ...merged.merged, productionClipProjection: { ...segment.productionClipProjection, nextValues, fieldGroups: groups, conflicts: merged.conflicts, manualFields: merged.manualFields } };
-            if (merged.conflicts.length) result.diagnostics.push({ code: "MANUAL_INPUT_PRESERVED", message: `已保留人工修改：${merged.conflicts.join(",")}` });
+            if (merged.conflicts.length) result.diagnostics.push({ code: "MANUAL_INPUT_CONFLICT", message: `存在人工修改与正式源稿冲突，已保留画布输入：${merged.conflicts.join(",")}` });
         }
-        result.status = "ready"; result.referenceCount = segment.referenceBindings.length; result.inputHash = segment.productionClipProjection.inputHash;
+        // A same-field manual edit stays on the canvas while independent compiler fields
+        // still synchronize. The conflict is diagnostic; it does not freeze the whole Clip.
+        result.status = "ready";
+        result.referenceCount = segment.referenceBindings.length; result.inputHash = segment.productionClipProjection.inputHash;
         return { segment, result };
     } catch (error) { result.diagnostics.push({ code: "CLIP_INPUT_BLOCKED", message: error instanceof Error ? error.message : String(error) }); return { result }; }
 }
@@ -175,6 +245,13 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
         const projected = productionClipProjection(project, data, group, segmentId, existing);
         referenceSync.push(projected.result);
         if (existing) {
+            if (!projected.segment) {
+                const storyboard = formalStoryboardTrack(data, group, existing);
+                if (storyboard && (canonicalProduction(existing.storyboardShots || []) !== canonicalProduction(storyboard.storyboardShots)
+                    || Number(existing.duration || 0) !== storyboard.duration || existing.storyboardModeEnabled !== true)) {
+                    operations.push({ type: "update_h3_segment", nodeId, segmentId: existing.id, patch: storyboard });
+                }
+            }
             if (projected.segment && (clipInputHash(existing) !== clipInputHash(projected.segment) || canonicalProduction(existing.productionClipProjection) !== canonicalProduction(projected.segment.productionClipProjection))) {
                 if (pendingNode) nodeMetadata.segments = existingSegments.map(segment => segment.id === existing.id ? projected.segment! : segment);
                 else operations.push({ type: "update_h3_segment", nodeId, segmentId: existing.id, patch: projected.segment });

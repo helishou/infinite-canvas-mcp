@@ -19,7 +19,7 @@ type Props = {
     node: CanvasNodeData | null;
     onClose: () => void;
     onPickCanvasImage: (slot: "image" | "colorCard") => void;
-    onSave: (patch: { title: string; sceneName: string; sceneDescription: string; sceneImage: SceneImage; sceneColorCard?: SceneImage; sceneColorPalette?: string[]; sceneColorCardPrompt: string }) => void;
+    onSave: (patch: { title: string; sceneName: string; sceneDescription: string; sceneImage?: SceneImage; sceneColorCard?: SceneImage; sceneColorPalette?: string[]; sceneColorCardPrompt: string }) => void;
 };
 
 export function SceneNodeEditModal({ open, selectingCanvasImage, canvasImagePick, node, onClose, onPickCanvasImage, onSave }: Props) {
@@ -89,13 +89,13 @@ export function SceneNodeEditModal({ open, selectingCanvasImage, canvasImagePick
     }, [extractPalette]);
 
     const handleSave = () => {
-        if (!image) {
+        if (!image && !node?.metadata?.productionEntity) {
             message.error(t("assets.sceneRequireImage"));
             return;
         }
         setSaving(true);
         const palette = normalizeSceneColorPalette(colorPalette);
-        onSave({ title: title.trim() || t("canvas.nodeTypes.scene"), sceneName: title.trim(), sceneDescription: description.trim(), sceneImage: image, sceneColorCard: colorCard || undefined, sceneColorPalette: palette.length ? palette : undefined, sceneColorCardPrompt: colorCardPrompt.trim() });
+        onSave({ title: title.trim() || t("canvas.nodeTypes.scene"), sceneName: title.trim(), sceneDescription: description.trim(), sceneImage: image || undefined, sceneColorCard: colorCard || undefined, sceneColorPalette: palette.length ? palette : undefined, sceneColorCardPrompt: colorCardPrompt.trim() });
         setSaving(false);
         onClose();
     };

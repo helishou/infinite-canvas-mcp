@@ -113,6 +113,8 @@ def apply_prompt_policy(root):
     # libraries and their hashes remain unchanged and are superseded explicitly.
     entry = root / "SKILL.md"
     text = entry.read_text(encoding="utf-8")
+    text = text.replace("每个 Segment 必须显式写 `mode`、`mode_lock` 和 `mode_selection_reason`。已有模式未经用户授权不得在续写、重编或版本升级时切换；没有真实参考图不能伪造 Ref2VA 标签。",
+                        "Clip mode 若已填写必须是有效 H3 模式；mode_lock 和 mode_selection_reason 是可选记录，不作为编译门槛。缺省模式按真实 Subject/关键帧引用推导；缺少真实媒体仍不能生成对应引用。已明确的 mode 在续写、重编或版本升级时不静默切换。")
     text = text.replace("### H3 详细度、当前激活运行版本与模式锁", "### H3 精简正文、当前激活运行版本与模式锁")
     text = re.sub(r"1\. \*\*按当前激活运行版本计算详细度\*\*[^\n]*",
                   "1. **按本镜事实量写正文**：遵守[H3 精简生产正文](references/115-h3-concise-prompts.md)；取消自动词数下限和按秒扩写，短镜头正文通常为 350–500 英文词建议范围。", text)
@@ -128,7 +130,7 @@ def apply_prompt_policy(root):
         if paragraph.startswith("图片使用72号独立交付合同；H3必须读"):
             paragraphs[index] = "图片使用72号独立交付合同；H3 按[精简生产正文](../../references/115-h3-concise-prompts.md)编写，并执行[最终格式门](../../references/111-h3-final-format-pass-v4.md)。每段独立带入本镜事实，段内身份与场景只定义一次；不输出写作指令，不为字数扩写。保留真实编号参考、逐字台词、局部时间窗、摄影/动作因果和连续尾态。"
         elif paragraph.startswith("每个 Segment 必须显式写"):
-            paragraphs[index] = "每个 Segment 必须显式写 `mode`、`mode_lock` 和 `mode_selection_reason`；续写时未经用户授权不得切换模式。按精简正文合同保留可执行事实，H3-only 请求不自动启动 STYLE_MOTHER 或资产节点；确有未完成内容时按字段保存 partial 和游标。"
+            paragraphs[index] = "Clip mode 若已填写必须是有效 H3 模式；mode_lock 和 mode_selection_reason 是可选记录，不作为编译门槛。缺省模式按真实 Subject/关键帧引用推导；缺少真实媒体仍不能生成对应引用。已明确的 mode 在续写时不静默切换。按精简正文合同保留可执行事实，H3-only 请求不自动启动 STYLE_MOTHER 或资产节点；确有未完成内容时按字段保存 partial 和游标。"
     model.write_text("\n\n".join(paragraphs), encoding="utf-8")
 
     compiler = root / "references/70-minimax-h3-compiler.md"
@@ -138,9 +140,11 @@ def apply_prompt_policy(root):
     if count != 1:
         raise RuntimeError("Upstream H3 compiler guidance changed")
     text = text.replace("不得把详细正文按 350–500 词的短模板压缩。", "短镜头通常按 350–500 英文词的建议组织完整事实，长度本身不作验收门槛。")
+    text = text.replace("每个 Segment 必须显式锁定 `mode`、`mode_lock` 与 `mode_selection_reason`。", "Clip mode 若已填写必须有效；mode_lock 与 mode_selection_reason 可选，不作为编译门槛。缺省模式按真实引用推导，已明确的 mode 不静默切换。")
     compiler.write_text(text, encoding="utf-8")
 
     for relative in ("references/72-standalone-prompt-delivery.md", "references/90-production-contract.md",
+                     "references/104-capability-map-and-master-prompt-v4.md",
                      "references/110-goal-multi-turn-delivery-v4.md", "references/111-h3-final-format-pass-v4.md",
                      "templates/h3-prompt-package.md"):
         path = root / relative
@@ -148,6 +152,12 @@ def apply_prompt_policy(root):
         link = "../references/115-h3-concise-prompts.md" if relative.startswith("templates/") else "115-h3-concise-prompts.md"
         concise = f"`detailed_description` 遵守[精简生产正文]({link})，取消自动词数下限和按秒扩写"
         text = re.sub(r"`detailed_description` 按(?:本段)?时长与复杂度动态计算最低词数[^。；\n]*", concise, text)
+        text = re.sub(r"每个 Segment 必须显式(?:写|锁定) `mode`、`mode_lock` (?:和|与) `mode_selection_reason`。",
+                      "mode 若已填写必须是有效 H3 模式；mode_lock 与 mode_selection_reason 可选，不作为编译门槛。缺省时按真实引用推导，已明确的 mode 不静默切换。", text)
+        text = text.replace("Segment 必须登记 `mode`、`mode_lock` 和 `mode_selection_reason`；续写或升级不得静默更换模式。",
+                            "Segment 的 mode 可显式记录；lock/reason 可选。缺省时按真实引用推导，已明确的 mode 在续写或升级时不静默更换。")
+        text = text.replace("mode: 有真实参考资产时默认 Ref2VA，并锁定 mode、mode_lock、mode_selection_reason；没有真实参考文件时不得伪造 Picture/Video 标签。",
+                            "mode: 有真实参考资产时默认 Ref2VA；缺省时由编译器按真实 Subject/关键帧引用推导，lock/reason 可选；没有真实参考文件时不得伪造 Picture/Video 标签。")
         text = text.replace("按本段时长与复杂度动态计算的 Ref2VA 密度门（默认 10 秒段最低 2,000、目标约 2,400 个英文词）", f"[Ref2VA 精简正文合同]({link})")
         text = text.replace("长度不足时返回失败或 partial，不能以 `PASS` 掩盖不足。", "字数短不构成失败，缺少可执行事实时返回阻塞或 partial。")
         text = re.sub(r"新任务按时长与复杂度动态计算最低词数[^\n]*?不足只能 partial，不能 accepted。", "取消自动字数门槛，逐项检查当前请求的可执行事实；缺事实只能 partial，不能 accepted。", text)

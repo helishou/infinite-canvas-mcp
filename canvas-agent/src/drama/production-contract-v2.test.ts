@@ -50,15 +50,24 @@ test("visible Subject usages resolve one declared purpose default when no bindin
     assert.deepEqual(directorSourceV2Diagnostics(value), []);
 });
 
-test("visible Subject usages reject missing or ambiguous purpose defaults", () => {
+test("missing or ambiguous default images do not block saving a visible Subject usage", () => {
     const missing = source();
     missing.shots[0].subject_usages[0].pictureBindingIds = [];
     missing.subject_registry[0].pictureBindings[0].defaultFor = [];
-    assert.ok(directorSourceV2Diagnostics(missing).some(issue => issue.message.includes("缺少适用于 identity 的默认图片绑定")));
+    assert.deepEqual(directorSourceV2Diagnostics(missing), []);
+    const director = {
+        schemaVersion: 1,
+        engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "test" },
+        source: missing, sourceHash: "b".repeat(64),
+        modules: Object.fromEntries(directorModules.map(module => [module, { status: "planned", evidence: [], unresolved: [] }])),
+        artifacts: [], assets: Object.fromEntries(["AST_SHUANZI", "AST_EGG", "KF_S1"].map(id => [id, { assetId: id, version: "v1", status: "planned" }])),
+        shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {},
+    };
+    assert.equal(directorProductionSchema.safeParse(director).success, true);
     const ambiguous = source();
     ambiguous.shots[0].subject_usages[0].pictureBindingIds = [];
     ambiguous.subject_registry[0].pictureBindings.push({ ...ambiguous.subject_registry[0].pictureBindings[0], id: "SHUANZI_ID_2", assetId: "AST_SHUANZI_2" });
-    assert.ok(directorSourceV2Diagnostics(ambiguous).some(issue => issue.message.includes("默认图片绑定有歧义")));
+    assert.deepEqual(directorSourceV2Diagnostics(ambiguous), []);
 });
 
 test("Clip compilation scope includes only selected Subject bindings and submitted keyframes", () => {

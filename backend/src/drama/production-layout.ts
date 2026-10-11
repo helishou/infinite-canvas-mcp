@@ -1,3 +1,5 @@
+import { productionEntities } from "@basketikun/canvas-agent/drama/production-contract";
+import { entityNodeId } from "./entity-nodes.js";
 import crypto from "node:crypto";
 import { readH3Layout } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { canonicalProduction, productionLayoutPlanSchema, productionSceneEntries, type EpisodeProductionData, type ProductionLayoutPlan, type ProductionLayoutUnit } from "@basketikun/canvas-agent/drama/production-contract";
@@ -198,6 +200,14 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
         createUnit(`video:${nodeId}`, "video", targets, sceneId, position, { width, height }, [{ role: "video", nodeId, nodeType: "minimax-h3:video", position, size: { width, height } }]);
     }
 
+    for (const [index, entity] of productionEntities(director?.source || {}, owner).entries()) {
+        const explicit = nodes.filter(node => node.type === entity.kind && node.metadata?.productionEntity?.ownerId === owner.id && node.metadata.productionEntity.kind === entity.kind && node.metadata.productionEntity.entityId === entity.entityId);
+        if (explicit.length > 1) throw new Error("制作实体重复绑定到多个节点");
+        const nodeId = explicit[0]?.id || entityNodeId(owner, entity.kind, entity.entityId);
+        const position = { x: -1260, y: 280 + index * 580 };
+        createUnit(`entity:${entity.kind}:${entity.entityId}`, "asset", [`entity:${entity.kind}:${entity.entityId}`], undefined, position, { width: 460, height: 480 }, [{ role: "asset", nodeId, nodeType: entity.kind, position, size: { width: 460, height: 480 } }]);
+    }
+
     // Old materialized nodes remain layout anchors even if their source object was later removed.
     for (const old of oldUnits.values()) if (!activeIds.has(old.id) && old.status === "materialized" && old.members.some(member => nodeById.has(member.nodeId))) {
         units.set(old.id, old); diagnostics.push({ code: "LAYOUT_ORPHAN_ANCHOR", target: old.targets[0], message: "既有节点已不在当前源稿，仍保留其布局锚点" });
@@ -241,7 +251,7 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
         const right = Math.max(...selected.map(unit => unit.bounds.position.x + unit.bounds.size.width)), bottom = Math.max(...selected.map(unit => unit.bounds.position.y + unit.bounds.size.height));
         return { id: area, area, bounds: { position: { x, y }, size: { width: right - x, height: bottom - y } } };
     });
-    const structureHash = hash({ assets: explicitAssets.map(item => [item.id, item.item.kind || item.item.role || "other", item.item.canvas_scope || "", item.item.depends_on || []]), scripts: scripts.map(script => [script.sceneId, script.scriptId]), scenes: scenes.map(scene => [scene.id, scene.shotIds]), frames: Object.entries(inputAssetByShot).map(([id, input]) => [id, input.keyframeAssetId || "", input.keyframePolicy]), clips: production.clipGroups.map(group => [group.id, group.shotIds, group.nodeId || ""]) });
+    const structureHash = hash({ entities: productionEntities(director?.source || {}, owner).map(entity => [entity.kind, entity.entityId]), assets: explicitAssets.map(item => [item.id, item.item.kind || item.item.role || "other", item.item.canvas_scope || "", item.item.depends_on || []]), scripts: scripts.map(script => [script.sceneId, script.scriptId]), scenes: scenes.map(scene => [scene.id, scene.shotIds]), frames: Object.entries(inputAssetByShot).map(([id, input]) => [id, input.keyframeAssetId || "", input.keyframePolicy]), clips: production.clipGroups.map(group => [group.id, group.shotIds, group.nodeId || ""]) });
     const geometryHash = hash(fixed.map(node => [node.id, node.position, node.width, node.height]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
     const body = { schemaVersion: 1, algorithmVersion: "production-layout-v1", canvasId, owner, structureHash, geometryHash, regions, units: planUnits, diagnostics };
     return productionLayoutPlanSchema.parse({ ...body, planHash: hash(body) });

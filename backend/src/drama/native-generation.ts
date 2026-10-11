@@ -10,7 +10,6 @@ import type { EpisodeProductionService } from "./production.js";
 import { productionCanvasContext } from "./production-canvas.js";
 import { compiledImageInput, verifyImageInput } from "./image-inputs.js";
 import { productionImageInput } from "@basketikun/canvas-agent/reference-contract";
-import { continuityTargetBlockers } from "./continuity-reports.js";
 
 export type NativeProductionTarget = {
     owner: { kind: "canvas" | "episode"; id: string }; version: number; sourceHash: string;
@@ -59,11 +58,6 @@ export class NativeProductionGeneration {
         } else return { command };
         if (!current.published?.director) throw new Error("缺少已发布导演版本");
         if (kind === "segment" && targets.some(target => !current.published!.clipGroups.some(group => group.id === target.targetId && group.nodeId === command.nodeId && group.segmentId === target.segmentId))) throw new Error("当前 Clip 映射尚未发布");
-        if (kind === "segment" && (current.published!.director!.source.ledger as any)?.contract_version === 2) {
-            const continuity = service.getContinuity(owner.id, { snapshot: "published", view: "summary" });
-            const blockers = continuityTargetBlockers(continuity, targets.map(target => target.targetId));
-            if (blockers.length) throw new Error(`${blockers[0].code}: ${blockers.map(item => item.message).join("；")}`);
-        }
         const artifactIds = kind === "keyframe" ? [director.shotInputs[targetId].keyframeAssetId!] : targets.map(target => target.targetId);
         service.validateExecution(owner.id, current.publishedVersion, artifactIds);
         const executionProject = structuredClone(this.db.getCanvasProject(command.projectId!)!);
@@ -119,9 +113,15 @@ export class NativeProductionGeneration {
                 targetId: ids[0].slice(ids[0].indexOf(":") + 1), targets: [{ targetId: ids[0].slice(ids[0].indexOf(":") + 1), inputHash: inputHash(frozen), controlHash }] };
             return { command: { ...frozen, params: { ...frozen.params, canvasInputHash: inputHash(frozen), canvasControlHash: controlHash, canvasInputDefaults: defaults, canvasFrozenInput: true } }, context };
         }
-        const snapshot = captureCanvasInputs(project, data, ids, this.stores.settings.get("plugin:minimax-h3:defaults:v1") as Record<string, unknown> || {}, key => this.stores.media.meta(key));
+        const targetId = ids[0].slice(ids[0].indexOf(":") + 1);
+        const executionData = kind !== "segment" && command.model ? { ...data, settings: { ...data.settings, imageModels: { ...data.settings.imageModels, [targetId]: command.model } } } : data;
+        const snapshot = captureCanvasInputs(project, executionData, ids, this.stores.settings.get("plugin:minimax-h3:defaults:v1") as Record<string, unknown> || {}, key => this.stores.media.meta(key));
         if (!snapshot.targets.length || snapshot.targets.some(target => target.dependencies.length)) throw new Error(snapshot.blockedTargets.map(item => item.message).join("；") || "参考素材尚未生成");
         const target = snapshot.targets[0];
+        if (command.params?.canvasFrozenInput === true && (command.prompt !== target.command.prompt ||
+            command.params.canvasInputHash && command.params.canvasInputHash !== target.inputHash)) {
+            throw new Error("正式图像产物与当前保存输入不一致，请回读后重新准备生成");
+        }
         const saved = command.operation === "h3-run" ? command : { ...command, ...target.command };
         return { command: { ...saved, inputBasis: "canvas", params: { ...saved.params, canvasInputHash: target.inputHash, canvasInputDefaults: snapshot.defaults, canvasFrozenInput: command.mode === "image" } },
             context: { owner, inputBasis: "canvas", version: current.publishedVersion, sourceHash: data.director.sourceHash, projectId: project.id, nodeId: command.nodeId!, kind,

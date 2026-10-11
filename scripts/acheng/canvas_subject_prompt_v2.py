@@ -27,6 +27,13 @@ def utf16_length(value):
     return len(value.encode("utf-16-le")) // 2
 
 
+def write_prompt_text(path, text):
+    """Write the exact LF bytes used by SourceMap offsets and prompt hashes."""
+    normalized = str(text).replace("\r\n", "\n")
+    Path(path).write_bytes(normalized.encode("utf-8"))
+    return normalized
+
+
 def entity_text(source, subject):
     ref = subject.get("entityRef", {})
     entity_id = str(ref.get("id", ""))
@@ -37,7 +44,7 @@ def entity_text(source, subject):
     return name, description
 
 
-def binding_ids(subject, usage):
+def binding_ids(subject, usage, *, allow_missing=False):
     bindings = rows(subject.get("pictureBindings"))
     explicit = [str(value) for value in usage.get("pictureBindingIds", [])]
     if explicit:
@@ -52,6 +59,8 @@ def binding_ids(subject, usage):
                       if purpose in [str(value) for value in item.get("defaultFor", [])]
                       and all(requirements.get(str(key)) == str(value) for key, value in (item.get("applicableState") or {}).items())]
         if len(candidates) != 1:
+            if allow_missing:
+                continue
             raise ValueError("Subject " + str(subject.get("id")) + " lacks one unambiguous " + purpose + " default picture binding")
         selected.append(str(candidates[0]["id"]))
     return selected
@@ -110,6 +119,40 @@ def project_continuity_source(production):
     if (production.get("prompt_assembly") or {}).get("version") != 2:
         return production
     source = deepcopy(production)
+    subjects = {str(row.get("id")): row for row in rows(source.get("subject_registry")) if row.get("id")}
+    # The ledger validator consumes the older participant fields. Derive those
+    # fields from the authoritative Subject usages in memory so character and
+    # prop facts are checked without adding duplicate ownership to the source.
+    text_ids = lambda value: [str(item) for item in value if isinstance(item, str) and item] if isinstance(value, list) else []
+    for shot in rows(source.get("shots")):
+        character_rows = list(shot.get("characters")) if isinstance(shot.get("characters"), list) else []
+        asset_ids = text_ids(shot.get("required_assets"))
+        continuity_ids = text_ids(shot.get("continuity_facts"))
+        for usage in rows(shot.get("subject_usages")):
+            subject = subjects.get(str(usage.get("subjectId") or ""), {})
+            entity_ref = subject.get("entityRef") if isinstance(subject.get("entityRef"), dict) else {}
+            entity_kind = str(entity_ref.get("kind") or "")
+            entity_id = str(entity_ref.get("id") or "")
+            if not entity_id:
+                continue
+            if entity_kind == "character":
+                character_rows.append({"id": entity_id})
+            elif entity_kind == "asset":
+                asset_ids.append(entity_id)
+            elif entity_kind == "scene" and not shot.get("scene_id"):
+                shot["scene_id"] = entity_id
+            continuity_ids.extend(text_ids(usage.get("continuityFactIds")))
+            continuity_ids.extend(str(value.get("factId")) for value in rows(usage.get("stateRequirements"))
+                                  if isinstance(value, dict) and value.get("factId"))
+        unique_characters = {}
+        for item in character_rows:
+            if isinstance(item, dict) and item.get("id"):
+                unique_characters[str(item["id"])] = item
+            elif isinstance(item, str) and item:
+                unique_characters[item] = {"id": item}
+        shot["characters"] = list(unique_characters.values())
+        shot["required_assets"] = list(dict.fromkeys(str(value) for value in asset_ids if value))
+        shot["continuity_facts"] = list(dict.fromkeys(str(value) for value in continuity_ids if value))
     origins = {str(row.get("id")): row.get("start_frame", 0) for row in rows((source.get("ledger") or {}).get("timelines"))}
     streams = defaultdict(list)
     for shot in rows(source.get("shots")):
@@ -149,7 +192,26 @@ def audit_subject_continuity(production, target_ids=None):
     return report
 
 
-def adapt_production(production):
+def _infer_segment_mode(source, segment):
+    explicit = str(segment.get("mode") or "").strip()
+    modes = {"T2VA", "I2VA", "FL2VA", "L2VA", "Ref2VA"}
+    if explicit:
+        if explicit not in modes:
+            raise ValueError("Clip " + str(segment.get("id")) + " has an invalid generation mode " + explicit)
+        return explicit
+    shot_by_id = {str(item.get("id")): item for item in rows(source.get("shots"))}
+    subjects = {str(item.get("id")): item for item in rows(source.get("subject_registry"))}
+    for shot_id in segment.get("shot_ids", []):
+        shot = shot_by_id.get(str(shot_id), {})
+        if any(frame.get("requiredForSubmission") for frame in rows(shot.get("keyframes"))):
+            return "Ref2VA"
+        for usage in rows(shot.get("subject_usages")):
+            if str(usage.get("subjectId")) in subjects and (usage.get("presentation") == "visible" or usage.get("pictureBindingIds")):
+                return "Ref2VA"
+    return "T2VA"
+
+
+def adapt_production(production, *, draft=False):
     """Project authored v2 data to the mature H3 packaging schema without writing it back."""
     if (production.get("prompt_assembly") or {}).get("version") != 2:
         return production
@@ -183,6 +245,7 @@ def adapt_production(production):
     for segment in segments:
         segment_id = str(segment.get("id"))
         shot_ids = [str(value) for value in segment.get("shot_ids", [])]
+        mode = _infer_segment_mode(source, segment)
         selected_pictures = []
         picture_by_digest = {}
         subject_uses = defaultdict(list)
@@ -191,12 +254,12 @@ def adapt_production(production):
             shot = next((item for item in shots if str(item.get("id")) == shot_id), None)
             if not shot:
                 raise ValueError("Clip " + segment_id + " refers to an unknown Shot " + shot_id)
-            for usage in (rows(shot.get("subject_usages")) if str(segment.get("mode")) == "Ref2VA" else []):
+            for usage in (rows(shot.get("subject_usages")) if mode == "Ref2VA" else []):
                 subject_id = str(usage.get("subjectId") or "")
                 subject = subject_by_id.get(subject_id)
                 if not subject:
                     raise ValueError("Shot " + shot_id + " refers to an unknown Subject " + subject_id)
-                for binding_id in binding_ids(subject, usage):
+                for binding_id in binding_ids(subject, usage, allow_missing=draft):
                     snapshot = snapshots.get(binding_id)
                     if not snapshot:
                         raise ValueError("Subject image " + binding_id + " is not in the frozen compiler inputs")
@@ -241,6 +304,13 @@ def adapt_production(production):
                     picture_by_digest[digest] = picture
                     selected_pictures.append(picture)
                 picture["is_keyframe"] = True
+                # Preserve the formal keyframe asset identity on the compiled
+                # reference so Backend can resolve its frozen archive path.
+                # Without this id, readCompilationReference only knows the
+                # segment label while the trusted snapshot is indexed by keyframe.
+                asset_id = str(snapshot.get("assetId") or frame.get("assetId") or frame.get("id") or "")
+                if asset_id:
+                    picture["asset_ids"].append(asset_id)
                 picture["anchor_shot_ids"].append(shot_id)
                 picture["shot_ids"].append(shot_id)
                 picture["roles"].append("keyframe")
@@ -253,16 +323,28 @@ def adapt_production(production):
                     picture["subject_ids"].append(str(ref_subject.get("id")))
                     reference_requirements[shot_id].append({"entity_id": entity_id, "asset_version": picture["asset_version"], "purpose": "keyframe"})
 
-        if not selected_pictures and str(segment.get("mode")) != "T2VA":
+        # H3 consumes storyboard/keyframe references before general reference
+        # images. Keep the authored Picture numbering in that same order so
+        # compilation does not have to silently rewrite an approved prompt.
+        storyboard_first = sorted(selected_pictures, key=lambda picture: (not picture["is_keyframe"], picture["number"]))
+        label_map = {}
+        for number, picture in enumerate(storyboard_first, 1):
+            previous = picture["label"]
+            current = "<Picture " + str(number) + ">"
+            label_map[previous] = current
+            picture["number"] = number
+            picture["label"] = current
+        for subject_id, uses in subject_uses.items():
+            subject_uses[subject_id] = [(shot_id, label_map.get(label, label), binding) for shot_id, label, binding in uses]
+        selected_pictures = storyboard_first
+
+        if not selected_pictures and mode != "T2VA" and not draft:
             raise ValueError("Clip " + segment_id + " needs at least one image binding for its selected generation mode")
         start_frame = windows[shot_ids[0]][0]
         end_frame = windows[shot_ids[-1]][1]
         duration = float(Fraction((end_frame - start_frame) * int(source.get("fps_den", 1)), int(source.get("fps_num", 24))))
         if duration < 4 or duration > 15:
             raise ValueError("Clip " + segment_id + " duration is outside the 4–15 second H3 range")
-        mode = str(segment.get("mode") or "")
-        if not mode or segment.get("mode_lock", mode) != mode or not str(segment.get("mode_selection_reason") or "").strip():
-            raise ValueError("Clip " + segment_id + " must declare its locked generation mode and reason")
         refs = []
         for picture in selected_pictures:
             asset_ids = list(dict.fromkeys(value for value in picture["asset_ids"] if value))
@@ -271,12 +353,18 @@ def adapt_production(production):
             if asset_id:
                 plan = assets.get(asset_id)
                 if not plan:
+                    card = next((item for item in rows(source.get("asset_cards"))
+                                 if str(item.get("asset_id") or item.get("id") or "") == asset_id), {})
                     plan = {"id": asset_id, "asset_id": asset_id, "kind": "keyframe" if picture["is_keyframe"] else "prop",
-                            "name": asset_id, "version": picture["asset_version"], "entity_id": entity_ids[0] if entity_ids else "",
+                            "name": asset_id, "version": card.get("asset_version") or picture["asset_version"],
+                            "entity_id": entity_ids[0] if entity_ids else "",
                             "entity_ids": entity_ids, "status": "selected_result"}
                     source.setdefault("asset_plan", []).append(plan)
                     assets[asset_id] = plan
-                plan.update({"file": picture["file"], "sha256": picture["sha256"], "version": picture["asset_version"], "status": "selected_result",
+                # Keep the authored asset version stable. The SHA-256 below pins this
+                # exact archived image; replacing the semantic version with that hash
+                # makes every other card referencing this asset look version-stale.
+                plan.update({"file": picture["file"], "sha256": picture["sha256"], "status": "selected_result",
                              "entity_id": entity_ids[0] if entity_ids else plan.get("entity_id"), "entity_ids": entity_ids})
             picture_shots = list(dict.fromkeys(picture["shot_ids"]))
             picture_scope = ", ".join("[Shot " + str(shot_ids.index(str(value)) + 1) + "]" for value in picture_shots if str(value) in shot_ids)
@@ -362,7 +450,8 @@ def adapt_production(production):
             summary = "A continuous scene of " + str(len(shot_ids)) + " authored camera Shot(s)."
         if not summary.startswith("["):
             summary = "[reference generation] " + summary
-        transformed_segments.append({**segment, "mode": mode, "mode_lock": mode, "mode_selection_reason": str(segment.get("mode_selection_reason") or ""),
+        mode_reason = str(segment.get("mode_selection_reason") or ("Inferred from visible Subject and keyframe references." if mode == "Ref2VA" else "No image reference intent is present; using text-to-video."))
+        transformed_segments.append({**segment, "mode": mode, "mode_lock": mode, "mode_selection_reason": mode_reason,
                                      "shot_ids": shot_ids, "start_frame": start_frame, "end_frame": end_frame,
                                      "generation_clip_duration": duration, "style": str(segment.get("style") or ""),
                                      "summary": summary, "references": refs, "subjects": subject_entries,
@@ -539,7 +628,12 @@ def _shot_prompt_v2(production, segment, shot, shot_number, speakers):
     local_start = int(shot["start_frame"]) - clip_start
     local_end = int(shot["end_frame"]) - clip_start
     duration = float(Fraction((local_end - local_start) * fps_den, fps_num))
-    parts = ["[Shot " + str(shot_number) + "] " + _time(local_start, production) + "–" + _time(local_end, production) + " within this Clip."]
+    start_time, end_time = _time(local_start, production), _time(local_end, production)
+    if shot_number == 1:
+        header = "[Shot 1] " + start_time + "–" + end_time + " within this Clip."
+    else:
+        header = "[Shot " + str(shot_number) + "] At " + start_time + ", covering " + start_time + "–" + end_time + " within this Clip."
+    parts = [header]
     state = str(shot.get("state_description") or "").strip()
     if state:
         parts.append("At shot start, preserve these registered Subject states: " + state)
@@ -635,7 +729,9 @@ def _shot_prompt_v2(production, segment, shot, shot_number, speakers):
 def _load_runtime_helper(name):
     if name in sys.modules:
         return sys.modules[name]
-    candidate = Path(__file__).resolve().parents[2] / ".agents" / "skills" / "acheng-director" / "scripts" / f"{name}.py"
+    candidate = Path(__file__).resolve().parent / f"{name}.py"
+    if not candidate.is_file():
+        candidate = Path(__file__).resolve().parents[2] / ".agents" / "skills" / "acheng-director" / "scripts" / f"{name}.py"
     spec = importlib.util.spec_from_file_location(name, candidate)
     module = importlib.util.module_from_spec(spec); sys.modules[name] = module; spec.loader.exec_module(module); return module
 

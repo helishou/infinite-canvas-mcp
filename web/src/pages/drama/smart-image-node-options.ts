@@ -2,7 +2,7 @@ type Row = Record<string, any>;
 export type ImageNodeChoice = { projectId: string; nodeId: string; assetId?: string; title?: string; shared?: boolean };
 export function imageChoiceKey(value?: { projectId?: string; nodeId?: string }) { return value?.projectId && value.nodeId ? JSON.stringify([value.projectId, value.nodeId]) : undefined; }
 export function smartImageChoices(canvasId: string, nodes: Row[], assets: Record<string, Row>, sharedProjects: Row[], assetPlan: Row[] = []) {
-    const valid = (node: Row) => node.type === "config" && node.metadata?.smart === true && (node.metadata.generationMode || "image") === "image";
+    const valid = (node: Row) => ["character", "scene", "prop"].includes(String(node.type)) || node.type === "image" && Boolean(node.metadata?.storageKey) || node.type === "config" && node.metadata?.smart === true && (node.metadata.generationMode || "image") === "image";
     const result: ImageNodeChoice[] = nodes.filter(valid).map(node => ({ projectId: canvasId, nodeId: node.id, title: node.title, assetId: Object.entries(assets).find(([, asset]) => asset.nodeId === node.id && !asset.sharedSource)?.[0] }));
     for (const [assetId, asset] of Object.entries(assets)) {
         const source = asset.sharedSource;

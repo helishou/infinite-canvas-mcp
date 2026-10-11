@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Input, Tag } from "antd";
+import { Button, Input, Modal, Tag } from "antd";
 import { ArrowUpRight, Clapperboard, Plus, Search } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -25,6 +25,8 @@ export default function DramaPage() {
     const dramaFolders = useMemo(() => folders.filter((folder) => folder.isDrama), [folders]);
     const shownDramaFolders = dramaFolders.filter(folder => folder.name.toLocaleLowerCase().includes(libraryQuery.trim().toLocaleLowerCase()));
     const [episodesByDrama, setEpisodesByDrama] = useState<Record<string, DramaEpisode[]>>({});
+    const [createOpen, setCreateOpen] = useState(false);
+    const [newDramaName, setNewDramaName] = useState("");
     useEffect(() => {
         if (!hydrated || !dramaFolders.length) {
             setEpisodesByDrama({});
@@ -45,16 +47,22 @@ export default function DramaPage() {
         return () => { disposed = true; };
     }, [dramaFolders, hydrated]);
 
+    const openCreateDrama = () => {
+        setNewDramaName(t("drama.defaultProjectName"));
+        setCreateOpen(true);
+    };
     const createDrama = () => {
-        const name = window.prompt(t("drama.createProjectPrompt"), t("drama.defaultProjectName"));
-        if (name?.trim()) setActiveView(createFolder(name.trim(), true));
+        const name = newDramaName.trim();
+        if (!name) return;
+        setActiveView(createFolder(name, true));
+        setCreateOpen(false);
     };
 
     return (
         <main>
             <div className="flex flex-wrap items-center justify-between gap-3">
                 <Input className="!w-56" allowClear prefix={<Search className="size-4 text-muted-foreground" />} aria-label={t("landing.searchSeries")} placeholder={t("landing.searchSeries")} value={libraryQuery} onChange={event => setLibraryQuery(event.target.value)} />
-                <Button type="primary" onClick={createDrama} icon={<Plus className="size-4" />}>{t("drama.createProject")}</Button>
+                <Button type="primary" onClick={openCreateDrama} icon={<Plus className="size-4" />}>{t("drama.createProject")}</Button>
             </div>
             <section className="mt-6">
                 {!hydrated ? (
@@ -69,10 +77,28 @@ export default function DramaPage() {
                         <div className="grid size-12 place-items-center rounded-full bg-orange-100 text-orange-600 dark:bg-orange-950/40 dark:text-orange-300"><Clapperboard className="size-5" /></div>
                         <h3 className="mt-5 text-lg font-medium">{t("drama.emptyProjectsTitle")}</h3>
                         <p className="mt-2 max-w-md text-sm leading-6 text-stone-500 dark:text-stone-400">{t("drama.emptyProjectsDescription")}</p>
-                        <Button type="primary" className="mt-5" icon={<Plus className="size-4" />} onClick={createDrama}>{t("drama.createProject")}</Button>
+                        <Button type="primary" className="mt-5" icon={<Plus className="size-4" />} onClick={openCreateDrama}>{t("drama.createProject")}</Button>
                     </div>
                 )}
             </section>
+            <Modal
+                open={createOpen}
+                title={t("drama.createProject")}
+                okText={t("drama.createProject")}
+                cancelText={t("common.cancel")}
+                okButtonProps={{ disabled: !newDramaName.trim() }}
+                onOk={createDrama}
+                onCancel={() => setCreateOpen(false)}
+            >
+                <Input
+                    autoFocus
+                    aria-label={t("drama.createProjectPrompt")}
+                    placeholder={t("drama.createProjectPrompt")}
+                    value={newDramaName}
+                    onChange={event => setNewDramaName(event.target.value)}
+                    onPressEnter={createDrama}
+                />
+            </Modal>
         </main>
     );
 }

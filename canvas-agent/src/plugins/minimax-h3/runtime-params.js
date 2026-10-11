@@ -9,7 +9,12 @@ export function resolveH3Runtime(segment, override, metadata, defaults) {
     const values = {};
     const layers = [['request', override], ['clip', segment], ['node', metadata], ['nodeParams', nodeParams], ['defaults', defaults], ['builtIn', BASE_H3_NODE_METADATA]];
     for (const key of H3_PARAM_KEYS) {
-        const selected = layers.find(([source, layer]) => !(useDefaults && !plannedKeys.has(key) && ['clip', 'node', 'nodeParams'].includes(source)) && layer[key] !== undefined && (key === 'styleTemplateId' || layer[key] !== null));
+        const selected = layers.find(([source, layer]) => {
+            const projection = record(segment.productionClipProjection);
+            if (key === 'styleTemplateId' && source === 'clip' && Boolean(segment.productionClipProjection) && projection.styleTemplateDeclared === false && layer[key] === null)
+                return false;
+            return !(useDefaults && !plannedKeys.has(key) && ['clip', 'node', 'nodeParams'].includes(source)) && layer[key] !== undefined && (key === 'styleTemplateId' || layer[key] !== null);
+        });
         if (selected) {
             values[key] = selected[1][key];
             sources[key] = selected[0];

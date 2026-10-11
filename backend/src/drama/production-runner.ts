@@ -4,7 +4,7 @@ import { inputHash, type CanvasExecutionTarget } from "./canvas-inputs.js";
 import { createH3NodeMetadata } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { H3_DEFAULTS_KEY } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
-import { canonicalProduction, isSubjectPromptAssembly, productionSceneEntries, productionImageModel, resolveDirectorReviewPolicy, type ProductionLayoutPlan, type ProductionLayoutUnit, type ProductionLayoutReceipt } from "@basketikun/canvas-agent/drama/production-contract";
+import { canonicalProduction, productionEntities, isSubjectPromptAssembly, productionSceneEntries, productionImageModel, resolveDirectorReviewPolicy, type ProductionLayoutPlan, type ProductionLayoutUnit, type ProductionLayoutReceipt } from "@basketikun/canvas-agent/drama/production-contract";
 
 import type { CanvasGenerationService } from "../canvas/generation-service.js";
 import { resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
@@ -16,6 +16,7 @@ import { EpisodeProductionService, type ProductionRecord, type ProductionRun } f
 import { verifyImageInput } from "./image-inputs.js";
 import { productionClipProjection, clipInputHash, CLIP_PROJECTION_FIELDS, type ReferenceSync } from "./clip-inputs.js";
 import { productionSceneIdsForShots, productionSceneLayout } from "./production-layout.js";
+import { productionSceneCreationOperations } from "./production-scene-nodes.js";
 
 const stableId = (kind: string, ...parts: string[]) => `${kind}-${crypto.createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24)}`;
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -41,8 +42,16 @@ const mediaKey = (node: Record<string, unknown>) => {
 
 /** Version-scoped, recoverable task submissions; all media still flows through CanvasGenerationService. */
 export class EpisodeProductionRunner {
+    private static productionH3Lane: Promise<void> = Promise.resolve();
     private readonly running = new Set<string>();
     constructor(private readonly service: EpisodeProductionService, private readonly stores: Stores, private readonly generation: CanvasGenerationService) {}
+
+    private withProductionH3Lane<T>(operation: () => Promise<T>): Promise<T> {
+        const previous = EpisodeProductionRunner.productionH3Lane;
+        let release!: () => void;
+        EpisodeProductionRunner.productionH3Lane = new Promise<void>(resolve => { release = resolve; });
+        return previous.then(operation).finally(release);
+    }
 
     /** Materialize formal targets from the frozen whole-production layout without publishing or generating. */
     prepareTargets(id: string, expectedRevision: number, targetIds: string[], operationId: string): ProductionRecord & { replayed?: boolean; layoutReceipt?: ProductionLayoutReceipt; referenceSync?: ReferenceSync[] } {
@@ -60,23 +69,26 @@ export class EpisodeProductionRunner {
             const keyframeAssetIds = new Set(Object.values(director.shotInputs).map(input => input.keyframeAssetId).filter(Boolean));
             for (const target of [...new Set(targetIds)]) {
                 const [kind, ...parts] = target.split(":"), targetId = parts.join(":");
-                if (!targetId || !["scene", "asset", "frame", "segment"].includes(kind)) throw new Error("准备目标必须为 scene、asset、frame 或 segment，并包含稳定目标 ID");
+                if (!targetId || !["scene", "asset", "frame", "segment", "entity"].includes(kind)) throw new Error("准备目标必须为 entity、scene、asset、frame 或 segment，并包含稳定目标 ID");
                 const plannedAsset = plans.find(item => String(item.asset_id || item.id || "") === targetId);
                 const planKind = String(plannedAsset?.kind || plannedAsset?.asset_type || "").toLowerCase();
                 if (skipStoryboardImages && (kind === "frame" || kind === "asset" && (keyframeAssetIds.has(targetId) || ["keyframe", "storyboard", "frame"].includes(planKind)))) throw new Error("当前已选择跳过分镜图，不能准备关键帧图片目标");
-                if (kind === "asset") {
+                if (kind === "entity") {
+                    const owner = this.service.ownerIdentity(id);
+                    if (!productionEntities(director.source, owner).some(entity => `${entity.kind}:${entity.entityId}` === targetId)) throw new Error("制作实体不存在或不属于当前制作对象");
+                } else if (kind === "asset") {
                     const plan = plannedAsset;
                     if (!plan) throw new Error(`正式源稿中不存在资产 ${targetId}`);
                     const scope = String(plan.canvas_scope || (director.assets[targetId]?.sharedSource || sharedOwner ? "shared" : "episode"));
-                    if (scope !== (sharedOwner ? "shared" : "episode")) throw new Error(sharedOwner ? `资产 ${targetId} 属于本集专用，不能在共享资产画布准备` : `资产 ${targetId} 属于剧目共享；请在共享资产画布准备源资产，再由本集采用批准版本`);
+                    if (scope !== (sharedOwner ? "shared" : "episode")) throw new Error(sharedOwner ? `资产 ${targetId} 属于本集专用，不能在共享素材画布准备` : `共享资产 ${targetId} 尚未采用；请从剧目共享素材库选择版本`);
                 } else if (kind === "segment") {
                     if (sharedOwner) throw new Error("剧目共享资产画布只准备可复用资产；关键帧和视频 Clip 应在分集画布准备");
                     const group = fresh.draft.clipGroups.find(item => item.id === targetId);
                     const planned = (Array.isArray(director.source.segments) ? director.source.segments : []).map(object).find(item => item.id === targetId);
                     if (!group || !planned) throw new Error("Segment 未登记到正式源稿");
                     const scenes = productionSceneEntries(director.source);
-                    const sceneIds = productionSceneIdsForShots(scenes, group.shotIds);
-                    if (!group.nodeId && sceneIds.length !== 1) throw new Error(sceneIds.length ? `Segment ${targetId} 跨越多个场次；请先按场次拆分` : `Segment ${targetId} 未映射到唯一正式场次，无法准备场次 H3 节点`);
+                    const sceneIds = productionSceneIdsForShots(scenes, Array.isArray(planned.shot_ids) ? planned.shot_ids.map(String) : group.shotIds);
+                    if (sceneIds.length !== 1) throw new Error(sceneIds.length ? `Segment ${targetId} 跨越多个场次；请先按场次拆分` : `Segment ${targetId} 未映射到唯一正式场次，无法准备场次 H3 节点`);
                 } else if (sharedOwner && kind === "frame") {
                     throw new Error("剧目共享资产画布只准备可复用资产；关键帧和视频 Clip 应在分集画布准备");
                 } else if (kind === "frame") {
@@ -111,6 +123,13 @@ export class EpisodeProductionRunner {
             if (kind === "scene") {
                 if (!productionSceneEntries(director.source).some(scene => scene.id === targetId)) throw new Error("正式剧本场次不存在");
                 sceneIds.add(targetId);
+                const unit = locate(target, "scene");
+                if (!unit) throw new Error(`正式布局中缺少场次目标 ${target}`);
+                add(unit);
+            } else if (kind === "entity") {
+                const unit = locate(target, "asset");
+                if (!unit) throw new Error("制作实体不存在");
+                add(unit);
             } else if (kind === "asset") {
                 const planned = (Array.isArray(director.source.asset_plan) ? director.source.asset_plan : []).map(object).find(item => String(item.asset_id || item.id) === targetId);
                 if (!planned) throw new Error("资产未登记到正式源稿");
@@ -134,7 +153,7 @@ export class EpisodeProductionRunner {
                 if (!unit) throw new Error(`正式布局中缺少视频目标 ${target}`);
                 add(unit);
                 if (unit.sceneId) { sceneIds.add(unit.sceneId); add(locate(`scene:${unit.sceneId}`, "scene")); }
-            } else throw new Error("准备目标必须为 scene、asset、frame 或 segment");
+            } else throw new Error("准备目标必须为 entity、scene、asset、frame 或 segment");
         }
         for (const sceneId of sceneIds) for (const unit of compiled.units) if (unit.area === "script" && unit.sceneId === sceneId) add(unit);
         const units = frozen?.plan.units || compiled.units;
@@ -160,10 +179,24 @@ export class EpisodeProductionRunner {
                 plannedNodeIds.add(member.nodeId);
             }
         }
+        const plannedSceneProject = {
+            ...project,
+            nodes: [
+                ...nodesOf(project),
+                ...canvasOps.flatMap(operation => operation.type === "add_node" ? [{
+                    id: operation.id, type: operation.nodeType, position: operation.position,
+                    width: operation.width, height: operation.height, metadata: operation.metadata,
+                }] : []),
+            ],
+        };
+        canvasOps.push(...productionSceneCreationOperations(
+            plannedSceneProject, current.draft, plan, this.service.ownerIdentity(id), [...sceneIds],
+            object(this.stores.settings.get(H3_DEFAULTS_KEY)),
+        ));
         const assetTitleFor = (assetId: string) => assetTitle(director.source, assetId);
         for (const target of [...new Set(targetIds)]) {
             const [kind, ...parts] = target.split(":"), targetId = parts.join(":");
-            if (kind === "scene") continue;
+            if (kind === "scene" || kind === "entity") continue;
             if (kind === "asset" || kind === "frame") {
                 const assetId = kind === "frame" ? director.shotInputs[targetId]?.keyframeAssetId : targetId;
                 if (!assetId) throw new Error(`布局目标 ${target} 缺少正式资产映射`);
@@ -208,7 +241,11 @@ export class EpisodeProductionRunner {
                 const existingNode = nodesOf(project).find(node => node.id === member.nodeId);
                 const existingSegments = object(existingNode?.metadata).segments as Array<Record<string, unknown>> || [];
                 const existing = existingSegments.find(item => item.id === segmentId);
-                let projected = productionClipProjection(project, current.draft, group, segmentId, existing);
+                const activeClip = existing && (["queued", "loading", "running", "generating", "awaiting_confirmation"].includes(String(existing.status)) || Boolean(existing.runtimeTaskId));
+                let projected = activeClip
+                    ? { result: { targetId: group.id, status: "blocked" as const, referenceCount: Array.isArray(existing.referenceBindings) ? existing.referenceBindings.length : 0,
+                        diagnostics: [{ code: "TARGET_OCCUPIED", message: `Clip ${group.id} 有在途任务，任务结束前保留当前输入` }] } }
+                    : productionClipProjection(project, current.draft, group, segmentId, existing);
                 if (projected.segment) {
                     try { this.service.validateClipMedia(id, current.draft.director!, group.id); }
                     catch (error) { projected = { result: { targetId: group.id, status: "blocked", referenceCount: 0, diagnostics: [{ code: "REFERENCE_NOT_APPROVED", message: String(error) }] } }; }
@@ -699,14 +736,14 @@ export class EpisodeProductionRunner {
                 const dependency = predecessor ? videoByGroup.get(predecessor.from) : undefined;
                 const completion = (async () => {
                     if (dependency) { const failure = await dependency; if (failure) throw new Error("H3 前段失败，本段保持未提交状态"); }
-                    await executeChain();
+                    await this.withProductionH3Lane(executeChain);
                 })().then(() => undefined, error => {
                     if (submittedTaskId) run = this.markTaskStatus(run!, submittedTaskId, "failed");
                     return error instanceof Error ? error : new Error(String(error));
                 });
                 videoCompletions.push(completion);
                 for (const group of chain) videoByGroup.set(group.id, completion);
-            } else await executeChain();
+            } else await this.withProductionH3Lane(executeChain);
         }
         await this.finishIndependent(videoCompletions);
         this.service.updateRun({ ...run, status: "succeeded", error: null });
@@ -718,7 +755,8 @@ export class EpisodeProductionRunner {
         const snapshot = run.executionSnapshot!;
         const byId = new Map(snapshot.targets.map(target => [target.id, target]));
         const failures = new Map<string, string>(), done = new Set<string>();
-        const work = async (target: CanvasExecutionTarget): Promise<void> => {
+        const inFlight = new Map<string, Promise<void>>();
+        const workTarget = async (target: CanvasExecutionTarget): Promise<void> => {
             if (done.has(target.id)) return;
             this.checkPause(run);
             const chain = [target];
@@ -757,33 +795,60 @@ export class EpisodeProductionRunner {
             const taskId = stableId("canvas-production-task", run.runId!, ...chain.map(member => member.id));
             const command = { ...target.command, ...(chain.length > 1 ? { endSegmentId: chain[chain.length - 1].segmentId, runFromCurrent: true } : {}), inputBasis: "canvas" as const, idempotencyKey: taskId,
                 params: { ...(target.segmentId ? {} : target.command.params), canvasInputHash: target.inputHash, canvasInputDefaults: snapshot.defaults, canvasFrozenInput: !target.segmentId } };
-            let task = this.stores.tasks.get(taskId);
-            if (!task) {
-                const started = await this.generation.start(command, { productionManaged: true, executionProject: snapshot.project, executionDefaults: snapshot.defaults });
-                task = this.stores.tasks.get(started.taskId);
-            }
-            if (!task) throw new Error("生成任务未持久化");
-            for (const member of chain) run = this.recordTask(run, member.segmentId ? "h3" : "image", member.id, task.id,
-                { projectId: snapshot.canvasId, nodeId: member.nodeId, segmentId: member.segmentId });
-            try {
-                await this.waitTask(task.id);
-                run = this.markTaskStatus(run, task.id, "succeeded");
-                this.service.bindCanvasTaskResult(run.episodeId, task.id, { projectId: snapshot.canvasId, nodeId: target.nodeId,
-                    kind: target.segmentId ? "segment" : target.id.startsWith("frame:") ? "keyframe" : "asset",
-                    targets: chain.map(member => ({ targetId: member.id.slice(member.id.indexOf(":") + 1), segmentId: member.segmentId, inputHash: member.inputHash })) });
-                for (const member of chain) done.add(member.id);
-            } catch (error) { run = this.markTaskStatus(run, task.id, "failed"); throw error; }
+            const executeTask = async () => {
+                let task = this.stores.tasks.get(taskId);
+                if (!task) {
+                    const started = await this.generation.start(command, { productionManaged: true, executionProject: snapshot.project, executionDefaults: snapshot.defaults });
+                    task = this.stores.tasks.get(started.taskId);
+                }
+                if (!task) throw new Error("生成任务未持久化");
+                for (const member of chain) run = this.recordTask(run, member.segmentId ? "h3" : "image", member.id, task.id,
+                    { projectId: snapshot.canvasId, nodeId: member.nodeId, segmentId: member.segmentId });
+                try {
+                    await this.waitTask(task.id);
+                    run = this.markTaskStatus(run, task.id, "succeeded");
+                    this.service.bindCanvasTaskResult(run.episodeId, task.id, { projectId: snapshot.canvasId, nodeId: target.nodeId,
+                        kind: target.segmentId ? "segment" : target.id.startsWith("frame:") ? "keyframe" : "asset",
+                        targets: chain.map(member => ({ targetId: member.id.slice(member.id.indexOf(":") + 1), segmentId: member.segmentId, inputHash: member.inputHash })) });
+                    for (const member of chain) done.add(member.id);
+                } catch (error) { run = this.markTaskStatus(run, task.id, "failed"); throw error; }
+            };
+            if (target.segmentId) await this.withProductionH3Lane(executeTask);
+            else await executeTask();
+        };
+        // Targets in one frozen run form a dependency graph. Memoize each in-flight
+        // target so independent leaves can start together without submitting a shared
+        // prerequisite twice. Motion-context chains are still submitted as one task.
+        const work = (target: CanvasExecutionTarget): Promise<void> => {
+            if (done.has(target.id)) return Promise.resolve();
+            const existing = inFlight.get(target.id);
+            if (existing) return existing;
+            const execution = Promise.resolve().then(() => workTarget(target));
+            inFlight.set(target.id, execution);
+            return execution.finally(() => {
+                if (inFlight.get(target.id) === execution) inFlight.delete(target.id);
+            });
         };
         let awaitingReview = false;
-        for (const target of snapshot.targets) {
+        let pauseError: unknown;
+        const settleTarget = async (target: CanvasExecutionTarget) => {
             try { await work(target); }
             catch (error) {
-                if (this.service.batchPauseRequested(run.episodeId, run.runId!)) throw error;
+                if (this.service.batchPauseRequested(run.episodeId, run.runId!)) { pauseError ||= error; return; }
                 awaitingReview ||= (error as any).code === "AWAITING_REVIEW";
                 failures.set(target.id, (error as Error).message);
                 done.add(target.id);
             }
-        }
+        };
+        // Run independent image targets together under the image provider's own
+        // queue/capacity control. H3 targets keep snapshot order and share one
+        // process-wide production lane across all run IDs.
+        const imageWork = Promise.all(snapshot.targets.filter(target => !target.segmentId).map(settleTarget));
+        const videoWork = (async () => {
+            for (const target of snapshot.targets.filter(target => target.segmentId)) await settleTarget(target);
+        })();
+        await Promise.all([imageWork, videoWork]);
+        if (pauseError) throw pauseError;
         if (resolveDirectorReviewPolicy(run.settings?.reviewPolicy as any).mode !== "none") {
             const current = this.service.get(run.episodeId).draft;
             for (const target of snapshot.targets.filter(target => !target.segmentId)) {

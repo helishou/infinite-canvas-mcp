@@ -5,7 +5,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
-import { directorModules, directorProductionSchema, canonicalProduction, isSubjectPromptAssembly, resolveSubjectPictureBindingIds, productionContractVersion, productionPreflightRequestSchema, type DirectorProduction, type ProductionDiagnostic, type ProductionPreflight } from "../drama/production-contract.js";
+import { directorModules, directorProductionSchema, canonicalProduction, isSubjectPromptAssembly, resolveSubjectPictureBindingIds, productionContractVersion, productionPreflightRequestSchema, diagnosticBlocksAction, type DirectorProduction, type ProductionDiagnostic, type ProductionPreflight } from "../drama/production-contract.js";
 import { productionOperationContract, schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch, ref2vaPromptDiagnostics, continuityBoundaryDiagnostics } from "../drama/production-validation.js";
 
 let discoveredPython: string | undefined;
@@ -362,6 +362,13 @@ export function validateAchengSource(director: DirectorProduction, stage: "edit"
         cwd: runtime.path, windowsHide: true, encoding: "utf8", input: JSON.stringify({ source: director.source, artifacts: director.artifacts || [], stage }),
     });
     const sourceDiagnostics: ProductionDiagnostic[] = JSON.parse(response).diagnostics;
+    for (const item of sourceDiagnostics) {
+        if (item.code === "INVALID_SUBJECT_SOURCE" && item.path.includes("subject_usages.pictureBindingIds")
+            && item.message.startsWith("Missing or ambiguous default binding for ")) {
+            item.blockingActions = ["generate"];
+            item.blocksCompilation = false;
+        }
+    }
     // Continuity readiness is target-scoped and comes from the persisted Backend
     // report. Source validation keeps a partial authored draft editable/publishable.
     for (const item of sourceDiagnostics) if (String(item.code).startsWith("CONTINUITY_")) item.severity = "warning";
@@ -369,7 +376,7 @@ export function validateAchengSource(director: DirectorProduction, stage: "edit"
 }
 
 export function assertAchengSource(director: DirectorProduction, stage: "edit" | "publish" | "generate") {
-    const diagnostics = validateAchengSource(director, stage).filter(item => item.severity === "error");
+    const diagnostics = validateAchengSource(director, stage).filter(item => diagnosticBlocksAction(item, stage));
     if (diagnostics.length) throw new ProductionValidationError(diagnostics);
 }
 
@@ -386,10 +393,11 @@ export function preflightCompilationDirector(raw: unknown, resolveReferenceFile?
     if (parsed.success) {
         const decisions = continuityBoundaryDiagnostics(parsed.data, "compile");
         result.diagnostics = result.diagnostics.filter(item => !decisions.some(issue => issue.code === item.code && issue.targetId === item.targetId));
-        result.diagnostics.push(...decisions);
+        result.diagnostics.push(...decisions.map(issue => ({ ...issue, severity: "warning" as const, blocksCompilation: false, blockingActions: [] })));
     }
-    if (result.diagnostics.some(item => item.severity === "error" && /CONTINUITY/.test(item.code))) { result.valid = false; result.nextActions = [{ action: "correct_source", message: "先逐项登记连续性边界，再重新编译源稿。" }]; return result; }
-    if (result.diagnostics.some(item => ["INVALID_SCHEMA", "ENGINE_UNAVAILABLE", "ENGINE_MISMATCH"].includes(item.code))) return result;
+    result.diagnostics = result.diagnostics.map(item => String(item.code).startsWith("CONTINUITY_")
+        ? { ...item, severity: "warning", blocksCompilation: false, blockingActions: [] } : item);
+    if (result.diagnostics.some(item => diagnosticBlocksAction(item, "compile") && ["INVALID_SCHEMA", "ENGINE_UNAVAILABLE", "ENGINE_MISMATCH"].includes(item.code))) return result;
     const director = directorProductionSchema.parse(structuredClone(raw));
     hydrateScopedApprovedInputs(director, resolveReferenceFile);
     if (JSON.stringify(director.source).includes('"legacy_fixture"')) {
@@ -423,7 +431,7 @@ export function preflightCompilationDirector(raw: unknown, resolveReferenceFile?
     } catch (error) {
         result.diagnostics.push({ code: "COMPILE_PREFLIGHT_UNAVAILABLE", path: "director.engine", message: error instanceof Error ? error.message : String(error), severity: "error" });
     }
-    result.valid = !result.diagnostics.some(item => item.severity === "error");
+    result.valid = !result.diagnostics.some(item => diagnosticBlocksAction(item, "compile"));
     result.compileReady = result.valid;
     result.nextActions = result.diagnostics.filter(item => item.severity === "error").map(item => item.nextAction || { action: "correct_source", message: item.message });
     return result;

@@ -5,6 +5,16 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- First registration of an owned character, scene or prop Subject automatically binds its canonical material node and follows the selected image. Empty nodes retain the binding for later images. Verify refresh and replay do not duplicate bindings, and existing bindings or explicit unbinding are preserved.
+
+- Subject details are the main entry for production materials. Linked canvas nodes no longer appear again as cards; other canvas materials are collapsed by default. Distinct identities with the same name remain separate. Verify node navigation, picture binding and material deletion remain accessible.
+
+- Character, scene and prop details in Production now expose Delete material for manually created entries. Verify unused entries and Subject registrations disappear after deletion and stay removed after refresh; names do not determine identity, and referenced, bound, published or generated entries are rejected without data loss. Canvas nodes and archived media are retained.
+
+- The canvas picker now switches directly between shared-asset and episode canvases, preparing an episode canvas only when no binding exists. Converted character, scene and image media can join the drama library without being rejected by production-purpose markers or automatically approved. Save actions show a pending state, and drama-context read failures are surfaced. Verify canonical nodes appear in the shared canvas, original nodes become references, and repeated saves reuse the existing asset.
+
+- Production defaults to optional review: source saves do not wait for compilation, quality and continuity findings remain visible warnings, and verified media can feed downstream work without recording a false approval. Verify explicit review policies still work, legacy policy migration and resume preserve original task/media identities, independent targets continue when one fails, and missing files, hash mismatches, binding errors and conflicting continuation modes still block their dependent targets.
+
 - Drama asset libraries now use one canonical node per asset in the drama shared canvas. Adding an ordinary asset preserves its layout and links while turning it into a reference; smart generators share only the selected output. Verify insertion, local edits, explicit updates, discarding edits, cross-episode refresh, field conflicts, lost-response receipt recovery, referenced-asset deletion protection, and migration of existing assets without losing local differences or approval history. Ordinary libraries keep their existing behavior.
 
 - Production MCP reads now use separate summary, source-section, artifact-index, single-prompt and single-target workbench tools; summary tools reject detail selectors, collections page by cursor, and prompt reads return UTF-8 chunks with a hash. Verify tool discovery in HTTP MCP and Agent compatibility clients, current and historical owners, boundary-size outputs, cursor expiry, and Agent recovery from the former whole-record call.
@@ -2801,3 +2811,24 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 
 - From an episode canvas, confirm the switcher identifies the current episode and lists episode canvases by episode number and title. Selecting another episode opens that episode's canvas; shared assets remain available.
 - Confirm the switcher no longer offers Drama overview or All dramas entries. Check the selected episode marker, narrow screens, and Chinese/English labels.
+
+### Production material canvas nodes
+
+- Saving production source creates character, scene and prop nodes by stable entity identity. Style is excluded; entities with the same name retain separate nodes.
+- Workbench and node name/description edits update the same current source, preserving other structured fields, geometry and connections. Published versions and task history remain intact.
+- Empty production character/scene nodes can save names and descriptions before adding images. Opening an empty character no longer triggers repeated thumbnail rendering.
+- Existing source can use “Connect canvas nodes” to materialize missing nodes. Embedded canvas workspaces reuse preparation for missing nodes; Subject cards link to their material node.
+- Image bindings can select character, scene and prop nodes. Prop images use the shared reference resolver; archived bytes are verified and frozen for tasks without automatic approval or generation.
+- Pending: creation, bidirectional editing, reload recovery, same-name identity, preparation replay, image selection and historical input protection.
+
+- MCP uses the same service for entity preparation, node edits, library promotion/update and deletion protection. A draft Subject workbench exposes the exact `entityNodeSource`; the director Skill and bundled canvas adapter use these identities. Verified through an isolated HTTP MCP session without media generation.
+
+### Manual production recovery
+
+- Overview progress follows saved scripts, Subjects, Shots and live target blockers. Earlier director notes about receipts, style or approval remain in source/advanced details and do not become manual workflow gates.
+- Each target provides an existing manual editor action for prompts, references, models or timing, plus optional director discussion. Blocked targets appear first; physical Clips also link to their canvas Prompt editor.
+- Native character, scene, prop and archived image nodes can be selected and bound manually. Subject previews resolve archived bindings even before a Shot uses them, without writing media projections back to source.
+- Draft readiness guidance follows current canvas checks instead of stale publication guidance. Existing completion and frozen history remain intact.
+- Test the direct actions, typed-node binding, unused Subject preview, missing Prompt recovery and saved content with stale module notes.
+
+- A confirmed canvas input edit refreshes readiness using its canvas revision; manual Prompt edits clear stale missing-input notices without re-reading all production history. Isolated UI verification covered direct Shot navigation, manual Clip Prompt persistence/readiness refresh and typed character image binding/preview.

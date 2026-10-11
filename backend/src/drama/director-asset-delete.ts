@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { canonicalProduction, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
+import { canonicalProduction, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 
 type Row = Record<string, any>;
 const rows = (value: unknown): Row[] => Array.isArray(value) ? value.filter((item): item is Row => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
@@ -45,6 +45,52 @@ function collectReferences(value: unknown, path: string, assetIds: Set<string>, 
         }
         collectReferences(child, `${path}.${key}`, assetIds, subjectIds, entityIds, found);
     }
+}
+
+export function createManualDirectorAsset(director: DirectorProduction, operation: Extract<ProductionOperation, { type: "create_manual_director_asset" }>, owner: { kind: "episode" | "canvas"; id: string }): void {
+    const source = director.source as Record<string, any>;
+    const plan = { ...operation.assetPlan, created_by: "manual" } as Row;
+    const card = operation.assetCard as Row;
+    const id = String(plan.id || "").trim();
+    const kind = String(plan.kind || "");
+    if (!id || !["character", "scene", "prop"].includes(kind) || plan.status !== "planned") throw new Error("MANUAL_ASSET_INVALID: assetPlan must be a planned character, scene or prop with a stable ID");
+    if (String(card.id || "") !== id || String(card.asset_id || "") !== id || card.asset_kind !== kind) throw new Error(`MANUAL_ASSET_CARD_MISMATCH: ${id}`);
+    if (rows(plan.depends_on).length || (Array.isArray(plan.depends_on) && plan.depends_on.length)) throw new Error(`MANUAL_ASSET_DEPENDENCIES_NOT_EMPTY: ${id}`);
+    if (Array.isArray(card.references) && card.references.length) throw new Error(`MANUAL_ASSET_REFERENCES_NOT_EMPTY: ${id}`);
+    if (rows(source.asset_plan).some(row => valueOf(row) === id) || rows(source.asset_cards).some(row => valueOf(row) === id)) throw new Error(`ASSET_ALREADY_EXISTS: ${id}`);
+
+    const registryKind = kind === "character" || kind === "scene" ? kind : undefined;
+    const entityId = registryKind ? String(plan.entity_id || "") : id;
+    const registryEntity = operation.registryEntity as Row | undefined;
+    if (registryKind) {
+        if (operation.registryKind !== registryKind || !registryEntity || String(registryEntity.id || "") !== entityId || !String(registryEntity.name || "").trim()) throw new Error(`MANUAL_ASSET_REGISTRY_MISMATCH: ${id}`);
+        const registry = registryKind === "character" ? "character_registry" : "scene_registry";
+        if (rows(source[registry]).some(row => String(row.id || "") === entityId)) throw new Error(`ASSET_ENTITY_ALREADY_EXISTS: ${entityId}`);
+    } else if (operation.registryKind || operation.registryEntity) throw new Error(`MANUAL_ASSET_REGISTRY_UNEXPECTED: ${id}`);
+
+    const subject = operation.subject as Row | undefined;
+    if (subject) {
+        const expectedSubjectKind = registryKind || "asset";
+        if (String(subject.entityRef?.ownerKind || "") !== owner.kind || String(subject.entityRef?.ownerId || "") !== owner.id) throw new Error(`MANUAL_ASSET_SUBJECT_OWNER_MISMATCH: ${id}`);
+        if (String(subject.entityRef?.kind || "") !== expectedSubjectKind || String(subject.entityRef?.id || "") !== entityId || rows(subject.pictureBindings).length) throw new Error(`MANUAL_ASSET_SUBJECT_MISMATCH: ${id}`);
+        if (rows(source.subject_registry).some(row => String(row.id || "") === String(subject.id || ""))) throw new Error(`SUBJECT_ALREADY_EXISTS: ${String(subject.id || "")}`);
+    }
+
+    const nextSource: Row = {
+        ...source,
+        asset_plan: [...rows(source.asset_plan), plan],
+        asset_cards: [...rows(source.asset_cards), card],
+    };
+    if (registryKind) {
+        const registry = registryKind === "character" ? "character_registry" : "scene_registry";
+        nextSource[registry] = [...rows(source[registry]), registryEntity];
+    }
+    if (subject) nextSource.subject_registry = [...rows(source.subject_registry), subject];
+    director.source = nextSource as DirectorProduction["source"];
+    director.sourceHash = crypto.createHash("sha256").update(canonicalProduction(director.source)).digest("hex");
+    director.artifacts = director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));
+    director.executionAuthorized = false;
+    if (director.workflow.currentWork) director.workflow.currentWork = { ...director.workflow.currentWork, sourceHash: director.sourceHash };
 }
 
 export function directorHasAssetHistory(director: DirectorProduction | undefined, assetId: string): boolean {

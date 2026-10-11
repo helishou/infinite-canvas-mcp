@@ -37,6 +37,21 @@ test("客户端不能伪装 task/system 来源篡改运行字段，整批失败�
     }
 });
 
+test("H3 Clip 参数可以补全原先缺失的模式与分辨率字段", (t) => {
+    const db = fixture(t);
+    const result = db.applyCanvasProjectOperations("p", undefined, [{
+        type: "update_h3_segment",
+        nodeId: "h3",
+        segmentId: "s1",
+        patch: { mode: "t2v", taskMode: "t2v", aspectRatio: "9:16", megapixels: 0.4 },
+    }], { operationId: "set-h3-clip-runtime" });
+    const segment = (result.project.nodes as Array<{ metadata: { segments: Array<Record<string, unknown>> } }>)[0].metadata.segments[0];
+    assert.equal(segment.mode, "t2v");
+    assert.equal(segment.taskMode, "t2v");
+    assert.equal(segment.aspectRatio, "9:16");
+    assert.equal(segment.megapixels, 0.4);
+});
+
 test("重排和完整替换按 Clip ID 继承省略的任务字段，不丢结果、不按数组下标串片段", (t) => {
     const db = fixture(t);
     const op = { type: "replace_h3_segments", nodeId: "h3", segments: [{ id: "s2", prompt: "二修改" }, { id: "s1", prompt: "一修改" }] };

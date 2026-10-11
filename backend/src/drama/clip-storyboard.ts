@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { canonicalProduction, directorProductionSchema, type DirectorProduction, type ProductionEdit } from "@basketikun/canvas-agent/drama/production-contract";
+import { canonicalProduction, directorProductionSchema, productionSceneEntries, type DirectorProduction, type ProductionEdit } from "@basketikun/canvas-agent/drama/production-contract";
 import { currentCompilationArtifact, compilationHash } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
 
@@ -16,22 +16,46 @@ export function clipShots(d: DirectorProduction, id: string) {
 }
 export function replaceDirectorClipStoryboard(d: DirectorProduction, op: { segmentId: string; segment: Record<string, unknown>; shots: Record<string, any>[]; shotInputs: Record<string, unknown> }) {
     const { segment, shots: old } = clipShots(d, op.segmentId), oldIds = new Set(old.map(s => s.id));
-    if (op.segment.id !== segment.id || op.segment.start_frame !== segment.start_frame || op.segment.end_frame !== segment.end_frame)
-        reject("CLIP_DURATION_CHANGED", `segments.${segment.id}`, "局部替换须保留 Segment 身份及起止帧");
+    const v2 = (d.source.prompt_assembly as Record<string, unknown> | undefined)?.version === 2;
+    if (op.segment.id !== segment.id || !v2 && (op.segment.start_frame !== segment.start_frame || op.segment.end_frame !== segment.end_frame))
+        reject("CLIP_DURATION_CHANGED", `segments.${segment.id}`, "局部替换须保留 Segment 身份及起止范围");
     if (rows(d.source.segments).some(s => s.id !== segment.id && (s.shot_ids || []).some((id: string) => oldIds.has(id))))
         reject("CLIP_SHARED_SHOT", `segments.${segment.id}.shot_ids`, "镜头被其他 Clip 引用，请使用场次返修");
     const all = rows(d.source.shots), first = all.findIndex(s => s.id === old[0].id);
     if (all.slice(first, first + old.length).map(s => s.id).join() !== old.map(s => s.id).join()) reject("CLIP_SHOT_ORDER", "shots", "原镜头须连续且有序");
-    const ids = new Set(op.shots.map(s => s.id)), scene = old[0].source_scene_id, timeline = old[0].timeline_id;
-    if (ids.size !== op.shots.length || op.shots.some(s => !s.id || s.source_scene_id !== scene || s.timeline_id !== timeline || all.some(other => other.id === s.id && !oldIds.has(s.id))))
-        reject("CLIP_SHOT_IDENTITY", "shots", "镜头 ID、场次或时间线无效");
-    if (old.some(s => s.source_scene_id !== scene || s.timeline_id !== timeline)) reject("CLIP_CROSS_TIMELINE", "shots", "跨场次或时间线须使用场次返修");
-    let cursor = segment.start_frame;
-    for (const s of op.shots) {
-        if (!Number.isInteger(s.start_frame) || !Number.isInteger(s.end_frame) || s.start_frame !== cursor || s.end_frame <= cursor) reject("CLIP_FRAME_WINDOW", `shots.${s.id}`, "镜头时间窗缺口或重叠");
-        cursor = s.end_frame;
+    const ids = new Set(op.shots.map(s => s.id)), timeline = old[0].timeline_id;
+    if (ids.size !== op.shots.length || op.shots.some(s => !s.id || s.timeline_id !== timeline || all.some(other => other.id === s.id && !oldIds.has(s.id))))
+        reject("CLIP_SHOT_IDENTITY", "shots", "镜头 ID、时间线或身份无效");
+    if (old.some(s => s.timeline_id !== timeline)) reject("CLIP_CROSS_TIMELINE", "shots", "跨时间线须使用场次返修");
+    const sourceScene = old[0].source_scene_id;
+    const mappedScenes = [...new Set(productionSceneEntries(d.source).filter(scene => old.some(shot => scene.shotIds.includes(String(shot.id)))).map(scene => scene.id))];
+    if (mappedScenes.length > 1 || sourceScene && mappedScenes.some(sceneId => sceneId !== sourceScene)) reject("CLIP_CROSS_SCENE", "shots", "Clip 镜头映射到多个场次，拒绝猜测归属");
+    const mappedScene = sourceScene || mappedScenes[0];
+    if (old.some(s => sourceScene && s.source_scene_id !== sourceScene)) reject("CLIP_CROSS_SCENE", "shots", "跨场次须使用场次返修");
+    if (v2) {
+        const firstOrder = Number(old[0].story_order), totalFrames = old.reduce((sum, shot) => sum + Number(shot.duration_frames || 0), 0);
+        if (!Number.isInteger(firstOrder) || old.some((shot, index) => shot.story_order !== firstOrder + index) || totalFrames <= 0) reject("CLIP_SHOT_ORDER", "shots", "Prompt v2 Clip 镜头须在同一时间线连续排序");
+        const hasScenes = rows(d.source.script_scenes).length > 0;
+        if (hasScenes && !mappedScene) reject("CLIP_SCENE_AMBIGUOUS", "shots", "无法唯一确认该 Clip 的场次，拒绝写回新镜头");
+        let frames = 0;
+        for (const [index, shot] of op.shots.entries()) {
+            const prior = old.find(item => item.id === shot.id);
+            if (!Number.isInteger(shot.duration_frames) || shot.duration_frames <= 0 || Object.hasOwn(shot, "start_frame") || Object.hasOwn(shot, "end_frame")
+                || shot.story_order !== firstOrder + index || prior?.source_scene_id && shot.source_scene_id !== prior.source_scene_id
+                || !prior && mappedScene && shot.source_scene_id !== mappedScene) reject("CLIP_FRAME_WINDOW", `shots.${shot.id}`, "Prompt v2 镜头须使用正整数时长帧，并保持场次与连续顺序");
+            frames += shot.duration_frames;
+        }
+        if (frames !== totalFrames) reject("CLIP_COVERAGE", `segments.${segment.id}.shot_ids`, "Prompt v2 分镜时长须完整覆盖当前 Clip");
+    } else {
+        let cursor = Number(segment.start_frame);
+        for (const s of op.shots) {
+            if (!Number.isInteger(s.start_frame) || !Number.isInteger(s.end_frame) || s.start_frame !== cursor || s.end_frame <= cursor) reject("CLIP_FRAME_WINDOW", `shots.${s.id}`, "镜头时间窗缺口或重叠");
+            if (sourceScene && s.source_scene_id !== sourceScene) reject("CLIP_CROSS_SCENE", `shots.${s.id}`, "镜头场次身份不能改变");
+            cursor = s.end_frame;
+        }
+        if (cursor !== segment.end_frame) reject("CLIP_COVERAGE", `segments.${segment.id}.shot_ids`, "新镜头须完整覆盖当前 Clip 一次");
     }
-    if (cursor !== segment.end_frame || (op.segment.shot_ids as string[] || []).join() !== op.shots.map(s => s.id).join()) reject("CLIP_COVERAGE", `segments.${segment.id}.shot_ids`, "新镜头须完整覆盖当前 Clip 一次");
+    if ((op.segment.shot_ids as string[] || []).join() !== op.shots.map(s => s.id).join()) reject("CLIP_COVERAGE", `segments.${segment.id}.shot_ids`, "新镜头须完整覆盖当前 Clip 一次");
     if (Object.keys(op.shotInputs).length !== ids.size || Object.keys(op.shotInputs).some(id => !ids.has(id))) reject("CLIP_INPUTS", "shotInputs", "输入须精确覆盖替换镜头");
     const next = structuredClone(d), startOrder = old[0].story_order, lastOrder = old.at(-1)!.story_order;
     const replacements = op.shots.map((s, i) => Number.isFinite(startOrder) ? { ...s, story_order: startOrder + i } : s);

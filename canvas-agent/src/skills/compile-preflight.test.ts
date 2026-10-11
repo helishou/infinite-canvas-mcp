@@ -104,3 +104,36 @@ test("compilation can rebuild stale receipts and retain an unfinished video draf
     assert.equal(draft.compileReady, true, JSON.stringify(draft.diagnostics));
     assert.ok(draft.diagnostics.some(item => item.code === "COMPILE_VIDEO_DRAFT" && item.severity === "warning"));
 });
+
+test("continuity boundary diagnostics remain visible but do not block prompt compilation", () => {
+    const source = styleSource();
+    source.fps_num = 24; source.fps_den = 1;
+    source.segments = [
+        { id: "SEG_A", mode: "T2VA", generation_clip_duration: 4, start_frame: 0, end_frame: 96, shot_ids: [], summary: "Opening beat." },
+        { id: "SEG_B", mode: "T2VA", generation_clip_duration: 4, start_frame: 96, end_frame: 192, shot_ids: [], summary: "Following beat." },
+    ];
+    const input = director(source);
+    input.boundaries = [];
+    const result = preflightCompilationDirector(input);
+    const continuity = result.diagnostics.filter(item => item.code.includes("CONTINUITY"));
+    assert.ok(continuity.length > 0, JSON.stringify(result.diagnostics));
+    assert.ok(continuity.every(item => item.severity === "warning" && item.blockingActions?.length === 0), JSON.stringify(continuity));
+    assert.equal(result.compileReady, true, JSON.stringify(result.diagnostics));
+});
+
+test("a missing incoming continuity boundary remains a warning at compile preflight", () => {
+    const source = styleSource();
+    source.fps_num = 24; source.fps_den = 1;
+    source.segments = [
+        { id: "SEG_A", mode: "T2VA", generation_clip_duration: 4, start_frame: 0, end_frame: 96, shot_ids: [], summary: "Opening beat." },
+        { id: "SEG_B", mode: "T2VA", generation_clip_duration: 4, start_frame: 96, end_frame: 192, shot_ids: [], summary: "Following beat." },
+    ];
+    const input = director(source);
+    input.boundaries = [];
+    const result = preflightCompilationDirector(input);
+    const missing = result.diagnostics.filter(item => item.code === "MISSING_CONTINUITY_BOUNDARY");
+    assert.equal(missing.length, 1, JSON.stringify(result.diagnostics));
+    assert.equal(missing[0].severity, "warning");
+    assert.deepEqual(missing[0].blockingActions, []);
+    assert.equal(result.compileReady, true, JSON.stringify(result.diagnostics));
+});

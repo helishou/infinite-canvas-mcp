@@ -76,6 +76,25 @@ test("fingerprint changes for input, scope, engine and reference bytes; workflow
     assert.equal(calls, 5);
 });
 
+test("Subject picture binding asset IDs never replace stable Segment compilation targets", async t => {
+    const { service, director, compilations } = fixture(t);
+    const candidate = structuredClone(director);
+    candidate.source = {
+        prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
+        script_scenes: [{ id: "SCENE", scene_id: "ROOM", scene_name: "厨房", text: "", beat_ids: ["BEAT"] }],
+        scene_registry: [{ id: "ROOM", name: "厨房" }], subject_registry: [], asset_plan: [], asset_cards: [],
+        shots: [{ id: "SHOT", scene_id: "ROOM", timeline_id: "main", story_order: 0, duration_frames: 96,
+            visual: "固定镜头拍厨房门口。", story_beat_ids: ["BEAT"], subject_usages: [], keyframes: [], camera: { framing: "MS", attention_subject_ids: [], editorial_reason: "Hold the doorway." } }],
+        segments: [{ id: "CLIP", asset_id: "picture:SUBJECT:canvas:image-node", shot_ids: ["SHOT"], mode: "T2VA" }],
+        ledger: { contract_version: 2, facts: [], timelines: [{ id: "main" }], initial: [], events: [], requirements: [], coverage: [] },
+    };
+    candidate.sourceHash = directorHash(candidate.source);
+    const started = compilations.enqueue("episode", "episode", "stable-segment-scope", service.get("episode").revision, candidate);
+    assert.ok(["queued", "running"].includes(started.status));
+    const completed = await done(compilations, "stable-segment-scope");
+    assert.equal(completed.status, "succeeded");
+});
+
 test("unknown and compiler-origin failures, running jobs and legacy records never reuse", async t => {
     const { root, service } = fixture(t);
     let calls = 0;
@@ -329,10 +348,10 @@ test("repeated media bindings read bytes once per verification and still reject 
     finally { fs.readFileSync = read; }
     assert.equal(reads, 1);
     director.assets.B.sha256 = "0".repeat(64);
-    assert.throws(() => service.verifyCompilationBindings("episode", director), /reference bytes changed/);
+    assert.throws(() => service.verifyCompilationBindings("episode", director), /reference bytes changed|内容已发生变化/);
     director.assets.B.sha256 = promptHash(bytes);
     director.assets.B.nodeId = "missing-node";
-    assert.throws(() => service.verifyCompilationBindings("episode", director), /not bound/);
+    assert.throws(() => service.verifyCompilationBindings("episode", director), /not bound|不在制作画布/);
 });
 
 test("scoped asset-only compilation applies with ledger v2 before video continuity is authored", async t => {
@@ -362,6 +381,7 @@ test("three scoped compiler jobs overlap and merge disjoint results without over
         shots: ["A", "B", "C"].map(id => ({ id: `S${id}`, source_scene_id: id, scene_id: id, visual: id, required_assets: [] })), segments: [],
         asset_plan: ["A", "B", "C"].map(id => ({ id: `K${id}`, kind: "keyframe", canvas_scope: "episode", shot_ids: [`S${id}`] })),
         asset_cards: ["A", "B", "C"].map(id => ({ id: `K${id}`, prompt: "authored image" })) };
+    director.shotInputs = Object.fromEntries(["A", "B", "C"].map(id => [`S${id}`, { assetIds: [], keyframePolicy: "new", keyframeAssetId: `K${id}` }]));
     director.sourceHash = directorHash(director.source);
     service.edit("episode", { operationId: "scenes", expectedRevision: 1, ops: [{ type: "set_director_production", director }] });
     const releases: Array<() => void> = []; let concurrent = 0, peak = 0;
@@ -512,4 +532,43 @@ test("story-only compile is blocked before a compiler packet or task is created"
     assert.equal(fs.existsSync(packets), false);
     assert.deepEqual(service.get("episode"), before);
     assert.equal(db.db.prepare("SELECT count(*) n FROM sqlite_master WHERE name='runtime_tasks'").get()?.n, 0);
+});
+
+test("missing identity media applies a compiled text draft while keeping generation unavailable", async t => {
+    const { root, service, director } = fixture(t);
+    director.source = {
+        prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
+        character_registry: [{ id: "P", name: "Person" }], scene_registry: [{ id: "SCENE", name: "Room" }],
+        script_scenes: [{ id: "SCENE", scene_id: "SCENE", scene_name: "Room", text: "", beat_ids: [] }],
+        subject_registry: [{ id: "P", kind: "character", entityRef: { ownerKind: "episode", ownerId: "episode", kind: "character", id: "P" }, pictureBindings: [] }],
+        asset_plan: [{ id: "A1", kind: "character", shot_ids: ["S1"] }], asset_cards: [],
+        shots: [{ id: "S1", scene_id: "SCENE", timeline_id: "main", story_order: 0, duration_frames: 96, visual: "The illustrator hears the feeder and turns toward the kitchen.",
+            camera: { framing: "MS", attention_subject_ids: ["P"], editorial_reason: "Keep the reaction to the feeder audible and readable." },
+            subject_usages: [{ subjectId: "P", presentation: "visible", pictureBindingIds: [], referencePurpose: ["identity"], continuityFactIds: [], stateRequirements: [] }],
+            keyframes: [], utterance_refs: [] }],
+        segments: [{ id: "C1", shot_ids: ["S1"], mode: "Ref2VA", mode_lock: "Ref2VA", mode_selection_reason: "Preserve the visible Subject identity when its image is available." }],
+        utterances: [], ledger: { contract_version: 2, facts: [], timelines: [{ id: "main" }], initial: [], events: [], requirements: [], coverage: [] },
+    };
+    director.sourceHash = directorHash(director.source);
+    service.edit("episode", { operationId: "missing-image-source", expectedRevision: 1, ops: [{ type: "set_director_production", director }] });
+    const revision = service.get("episode").revision;
+    const prompt = "<Subject 1> The character hears the cat feeder.";
+    const compiler = (input: DirectorProduction) => ({
+        director: { ...input, artifacts: [{ id: "h3-C1", kind: "h3" as const, targetId: "C1", prompt, sha256: promptHash(prompt), sourceHash: input.sourceHash,
+            status: "draft" as const, references: [], receipt: { sourceHash: input.sourceHash, promptHash: promptHash(prompt), engineRuntimeId: input.engine.runtimeId, validator: "fixture",
+                diagnostics: { formatPass: "NOT_ACCEPTED", blockers: ["reference mode has no media bindings"] } } }] },
+        exitCode: 0, diagnostics: [], audit: {}, sourceAdjustments: [], acceptance: {},
+    });
+    const compilations = new ProductionCompilationService(service, path.join(root, "draft-packets"), compiler);
+    const started = compilations.enqueue("episode", "episode", "missing-image-draft", revision);
+    await new Promise(resolve => setImmediate(resolve));
+    const job = compilations.getCompilation("episode", "episode", started.operationId);
+    assert.equal(job.status, "succeeded");
+    const targetPage = compilations.getCompilation("episode", "episode", started.operationId, "targets", 0, 10);
+    assert.equal(targetPage.items[0]?.status, "draft");
+    const applied = compilations.apply("episode", "episode", job.preparedId!);
+    assert.equal(applied.mediaSubmitted, false);
+    const stored = service.get("episode").draft.director!;
+    assert.equal(stored.artifacts.find(item => item.targetId === "C1")?.status, "draft");
+    assert.deepEqual(stored.artifacts.find(item => item.targetId === "C1")?.references, []);
 });

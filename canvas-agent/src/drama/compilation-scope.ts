@@ -4,6 +4,7 @@ import { canonicalProduction, isSubjectPromptAssembly, productionSceneEntries, r
 export type CompilationScope = { sceneId?: string; targetIds?: string[]; output?: "selected" };
 const rows = (value: unknown): Record<string, any>[] => Array.isArray(value) ? value : [];
 const key = (item: Record<string, any>) => String(item.asset_id || item.id || "");
+const stableId = (item: Record<string, any>) => String(item.id || "");
 export const compilationHash = (value: unknown) => crypto.createHash("sha256").update(canonicalProduction(value)).digest("hex");
 
 /** A compiler input projection, never a second authored source or an authorization. */
@@ -11,19 +12,22 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     const source = director.source;
     const scene = scope.sceneId ? productionSceneEntries(source).find(item => item.id === scope.sceneId) : undefined;
     if (scope.sceneId && !scene) throw new Error("COMPILATION_SCOPE_UNKNOWN_SCENE: 编译场次不存在");
-    const allShots = rows(source.shots), allSegments = rows(source.segments), plans = rows(source.asset_plan);
+    const allShots = rows(source.shots), allSegments = rows(source.segments), plans = rows(source.asset_plan), cards = rows(source.asset_cards);
     const wanted = new Set(scope.targetIds || []);
+    const segmentIds = new Set(allSegments.map(stableId));
+    const assetTargetIds = new Set([...plans, ...cards].map(key).filter(Boolean));
+    const compilerTargetIds = new Set([...segmentIds, ...assetTargetIds]);
     const shots = new Set(wanted.size ? [] : scene?.shotIds || []);
     for (const id of wanted) {
-        if (![...allShots, ...allSegments, ...plans].some(item => key(item) === id)) throw new Error(`COMPILATION_SCOPE_UNKNOWN_TARGET: 编译目标不存在：${id}`);
-        if (allShots.some(item => key(item) === id)) shots.add(id);
+        if (![...allShots.map(stableId), ...allSegments.map(stableId), ...plans.map(key)].includes(id)) throw new Error(`COMPILATION_SCOPE_UNKNOWN_TARGET: 编译目标不存在：${id}`);
+        if (allShots.some(item => stableId(item) === id)) shots.add(id);
         for (const shotId of plans.find(item => key(item) === id)?.shot_ids || []) shots.add(String(shotId));
-        const segment = allSegments.find(item => key(item) === id);
+        const segment = allSegments.find(item => stableId(item) === id);
         for (const shotId of segment?.shot_ids || []) shots.add(String(shotId));
     }
     if (scene && [...shots].some(id => !scene.shotIds.includes(id))) throw new Error("COMPILATION_SCOPE_CROSS_SCENE: 目标不属于指定编译场次");
-    const includeShotSegments = Boolean(scene && !wanted.size) || [...wanted].some(id => allShots.some(item => key(item) === id));
-    const segments = allSegments.filter(item => wanted.has(key(item)) || includeShotSegments && (item.shot_ids || []).some((id: string) => shots.has(id)));
+    const includeShotSegments = Boolean(scene && !wanted.size) || [...wanted].some(id => allShots.some(item => stableId(item) === id));
+    const segments = allSegments.filter(item => wanted.has(stableId(item)) || includeShotSegments && (item.shot_ids || []).some((id: string) => shots.has(id)));
     for (const segment of segments) if ((segment.shot_ids || []).some((id: string) => !shots.has(id))) throw new Error("COMPILATION_SCOPE_CROSS_SCENE: Segment 跨越编译范围");
     const subjectAssembly = isSubjectPromptAssembly(source);
     const outputShotIds = new Set(shots);
@@ -33,8 +37,8 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     const bindingAssets = new Map<string, string>();
     if (subjectAssembly) for (const subject of subjectRegistry) for (const binding of rows(subject.pictureBindings)) bindingAssets.set(String(binding.id), String(binding.assetId || binding.id));
     const shotAssets = new Set<string>();
-    if (subjectAssembly) for (const shot of allShots.filter(item => shots.has(key(item)))) {
-        if (!subjectReferenceShotIds.has(key(shot))) continue;
+    if (subjectAssembly) for (const shot of allShots.filter(item => shots.has(stableId(item)))) {
+        if (!subjectReferenceShotIds.has(stableId(shot))) continue;
         for (const usage of rows(shot.subject_usages)) for (const bindingId of resolveSubjectPictureBindingIds(subjectById.get(String(usage.subjectId)), usage).bindingIds) {
             const assetId = bindingAssets.get(String(bindingId)); if (assetId) shotAssets.add(assetId);
         }
@@ -44,15 +48,15 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     const assets = new Set(plans.filter(item => wanted.has(key(item)) || activeFrame(item) && (item.shot_ids || []).some((id: string) => shots.has(id))).map(key));
     shotAssets.forEach(id => assets.add(id));
     if (scene && !wanted.size && !shots.size) for (const plan of plans) if (plan.canvas_scope === "shared") assets.add(key(plan));
-    for (const shot of allShots.filter(item => shots.has(key(item)))) {
+    for (const shot of allShots.filter(item => shots.has(stableId(item)))) {
         if (subjectAssembly) {
-            for (const usage of (subjectReferenceShotIds.has(key(shot)) ? rows(shot.subject_usages) : [])) for (const bindingId of resolveSubjectPictureBindingIds(subjectById.get(String(usage.subjectId)), usage).bindingIds) {
+            for (const usage of (subjectReferenceShotIds.has(stableId(shot)) ? rows(shot.subject_usages) : [])) for (const bindingId of resolveSubjectPictureBindingIds(subjectById.get(String(usage.subjectId)), usage).bindingIds) {
                 const assetId = bindingAssets.get(String(bindingId)); if (assetId) assets.add(assetId);
             }
             for (const frame of rows(shot.keyframes).filter(item => item.requiredForSubmission)) assets.add(String(frame.assetId || frame.id));
         } else {
             for (const id of shot.required_assets || []) assets.add(String(id));
-            const input = director.shotInputs[key(shot)];
+            const input = director.shotInputs[stableId(shot)];
             for (const id of input?.assetIds || []) assets.add(id);
             if (input?.keyframePolicy !== "none" && input?.keyframeAssetId) assets.add(input.keyframeAssetId);
         }
@@ -64,13 +68,49 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
         for (const dep of [...(plans.find(item => key(item) === id)?.depends_on || []), ...rows(card?.references).map(item => item.asset_id)].filter(Boolean)) { assets.add(String(dep)); visit(String(dep), seen); }
     };
     for (const id of assets) visit(id);
-    const targetIds = [...new Set(scope.output === "selected" ? [...wanted] : [...assets, ...segments.map(key)])].sort();
+    // `assets` also contains media-only dependencies such as Subject picture
+    // bindings. They must be materialized as compiler inputs, but are not
+    // compilation outputs and must never be sent to the artifact/apply scope.
+    const targetIds = [...new Set(scope.output === "selected"
+        ? [...wanted].filter(id => compilerTargetIds.has(id))
+        : [...assetTargetIds].filter(id => assets.has(id)).concat(segments.map(stableId)))].sort();
     if (!targetIds.length && !shots.size && !scene) throw new Error("COMPILATION_SCOPE_EMPTY: 编译范围没有正式目标");
     const projected = structuredClone(director);
-    projected.source.shots = allShots.filter(item => shots.has(key(item)));
+    projected.source.shots = allShots.filter(item => shots.has(stableId(item)));
     projected.source.segments = segments;
     projected.source.asset_plan = plans.filter(item => assets.has(key(item)));
     projected.source.asset_cards = rows(source.asset_cards).filter(item => assets.has(key(item)));
+    if (subjectAssembly) {
+        // The pinned storyboard validator predates Subject Prompt v2 and checks
+        // attention IDs against character/scene/asset registries. Keep the
+        // authored Subject IDs for prompt assembly, while exposing ephemeral
+        // registry aliases in this isolated compiler projection only.
+        const subjectsById = new Map(rows(source.subject_registry).map(subject => [String(subject.id), subject]));
+        const aliases = new Map<string, Map<string, Record<string, any>>>();
+        for (const shot of allShots.filter(item => outputShotIds.has(stableId(item)))) {
+            const attentionIds: string[] = Array.isArray(shot.camera?.attention_subject_ids) ? shot.camera.attention_subject_ids.map(String) : [];
+            for (const subjectId of attentionIds) {
+                const subject = subjectsById.get(subjectId);
+                const entityKind = String(subject?.entityRef?.kind || "");
+                const registry = entityKind === "character" ? "character_registry" : entityKind === "scene" ? "scene_registry" : entityKind === "asset" ? "asset_plan" : "";
+                if (!registry) continue;
+                const entityId = String(subject?.entityRef?.id || "");
+                const entity = rows(source[registry]).find(item => key(item) === entityId);
+                if (!entity) continue;
+                const alias = structuredClone(entity);
+                alias.id = subjectId;
+                delete alias.entity_id;
+                delete alias.asset_id;
+                const entries = aliases.get(registry) || new Map<string, Record<string, any>>();
+                entries.set(subjectId, alias); aliases.set(registry, entries);
+            }
+        }
+        for (const [registry, entries] of aliases) {
+            const rowsForRegistry = rows(projected.source[registry]);
+            const existing = new Set(rowsForRegistry.map(item => key(item)));
+            projected.source[registry] = [...rowsForRegistry, ...[...entries].filter(([id]) => !existing.has(id)).map(([, alias]) => alias)];
+        }
+    }
     const sceneIds = new Set(productionSceneEntries(source).filter(item => scene ? item.id === scene.id : item.shotIds.some(id => shots.has(id))).map(item => item.id));
     projected.source.script_scenes = rows(source.script_scenes).filter(item => sceneIds.has(String(item.id || item.scene_id)));
     const ledger = source.ledger as Record<string, any> | undefined;
@@ -90,16 +130,16 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
             const coverage = rows(ledger.coverage).filter(item => blockIds.has(String(item.source_anchor?.block_id || item.block_id)));
             const eventIds = new Set(coverage.flatMap(item => (item.event_ids || []).map(String)));
             for (const requirement of rows(ledger.requirements).filter(item => contextShots.has(String(item.shot_id)))) for (const eventId of requirement.event_ids || []) eventIds.add(String(eventId));
-            for (const item of coverage) for (const shotId of item.shot_ids || []) if (allShots.some(shot => key(shot) === String(shotId))) contextShots.add(String(shotId));
-            for (const event of rows(ledger.events)) if (eventIds.has(key(event)) && allShots.some(shot => key(shot) === String(event.shot_id))) contextShots.add(String(event.shot_id));
+            for (const item of coverage) for (const shotId of item.shot_ids || []) if (allShots.some(shot => stableId(shot) === String(shotId))) contextShots.add(String(shotId));
+            for (const event of rows(ledger.events)) if (eventIds.has(stableId(event)) && allShots.some(shot => stableId(shot) === String(event.shot_id))) contextShots.add(String(event.shot_id));
             // Replaying only the selected shot would lose earlier changes on its timeline.
             const lastOrders = new Map<string, number>();
-            for (const shot of allShots.filter(item => contextShots.has(key(item)))) if (shot.timeline_id && Number.isFinite(Number(shot.story_order))) lastOrders.set(String(shot.timeline_id), Math.max(lastOrders.get(String(shot.timeline_id)) ?? -Infinity, Number(shot.story_order)));
-            for (const shot of allShots) if (shot.timeline_id && Number(shot.story_order) <= (lastOrders.get(String(shot.timeline_id)) ?? -Infinity)) contextShots.add(key(shot));
+            for (const shot of allShots.filter(item => contextShots.has(stableId(item)))) if (shot.timeline_id && Number.isFinite(Number(shot.story_order))) lastOrders.set(String(shot.timeline_id), Math.max(lastOrders.get(String(shot.timeline_id)) ?? -Infinity, Number(shot.story_order)));
+            for (const shot of allShots) if (shot.timeline_id && Number(shot.story_order) <= (lastOrders.get(String(shot.timeline_id)) ?? -Infinity)) contextShots.add(stableId(shot));
             for (const entry of entries) if (entry.shotIds.some(id => contextShots.has(id))) sceneIds.add(entry.id);
             changed = before !== contextShots.size + sceneIds.size;
         }
-        projected.source.shots = allShots.filter(item => contextShots.has(key(item)));
+        projected.source.shots = allShots.filter(item => contextShots.has(stableId(item)));
         projected.source.script_scenes = rows(source.script_scenes).filter(item => sceneIds.has(String(item.id || item.scene_id)));
         const blocks = new Set(rows(projected.source.script_scenes).flatMap(item => rows(Array.isArray(item.blocks) ? item.blocks : typeof item.text === "string" ? [item] : []).map(block => String(block.id))));
         projected.source.ledger = { ...structuredClone(ledger),
@@ -113,20 +153,26 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
             const usedSubjects = new Set<string>();
             const usedFacts = new Set<string>();
             const outputUtteranceIds = new Set<string>();
-            for (const shot of allShots.filter(item => contextShots.has(key(item)))) {
+            for (const shot of allShots.filter(item => contextShots.has(stableId(item)))) {
                 for (const usage of rows(shot.subject_usages)) {
                     usedSubjects.add(String(usage.subjectId));
                     for (const factId of usage.continuityFactIds || []) usedFacts.add(String(factId));
                 }
                 for (const frame of rows(shot.keyframes).filter(item => item.requiredForSubmission)) for (const subjectId of frame.subjectIds || []) usedSubjects.add(String(subjectId));
                 for (const factId of shot.continuity_facts || []) usedFacts.add(String(factId));
-                if (clipShots.has(key(shot))) for (const ref of rows(shot.utterance_refs)) outputUtteranceIds.add(String(ref.utteranceId));
+                if (clipShots.has(stableId(shot))) for (const ref of rows(shot.utterance_refs)) outputUtteranceIds.add(String(ref.utteranceId));
             }
+            for (const shot of allShots.filter(item => outputShotIds.has(stableId(item)))) for (const ref of rows(shot.utterance_refs)) outputUtteranceIds.add(String(ref.utteranceId));
+            const outputUtterances = rows(source.utterances).filter(item => outputUtteranceIds.has(String(item.id)));
+            // A clipped utterance depends on its registered speaker even when
+            // that Subject has no visible picture usage in this Clip (text-only
+            // T2VA and dialogue-focused shots are valid examples).
+            for (const utterance of outputUtterances) usedSubjects.add(String(utterance.speakerSubjectId || ""));
             const scopedLedger = projected.source.ledger as Record<string, any>;
             for (const req of rows(scopedLedger.requirements)) usedFacts.add(String(req.fact_id || ""));
             for (const event of rows(scopedLedger.events)) usedFacts.add(String(event.fact_id || ""));
             const coverageEvents = new Set(rows(scopedLedger.coverage).flatMap(item => (item.event_ids || []).map(String)));
-            for (const event of rows(ledger.events).filter(item => coverageEvents.has(key(item)))) usedFacts.add(String(event.fact_id || ""));
+            for (const event of rows(ledger.events).filter(item => coverageEvents.has(stableId(item)))) usedFacts.add(String(event.fact_id || ""));
             const facts = rows(ledger.facts);
             for (const fact of facts) {
                 const subjectId = entitySubjects.get(`${fact.object_kind}:${fact.object_id}`);
@@ -139,22 +185,21 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
             projected.source.subject_registry = allSubjectRows.filter(subject => usedSubjects.has(String(subject.id))).map(subject => {
                 // Replay context keeps valid identity declarations; its media is
                 // materialized separately only when an output Shot consumes it.
-                const selectedBindings = new Set(rows(source.shots).filter(shot => contextShots.has(key(shot))).flatMap(shot => rows(shot.subject_usages).filter(usage => usage.subjectId === subject.id).flatMap(usage => resolveSubjectPictureBindingIds(subject, usage).bindingIds)));
+                const selectedBindings = new Set(rows(source.shots).filter(shot => contextShots.has(stableId(shot))).flatMap(shot => rows(shot.subject_usages).filter(usage => usage.subjectId === subject.id).flatMap(usage => resolveSubjectPictureBindingIds(subject, usage).bindingIds)));
                 return { ...subject, pictureBindings: rows(subject.pictureBindings).filter(binding => selectedBindings.has(String(binding.id))) };
             });
             scopedLedger.facts = facts.filter(fact => usedFacts.has(String(fact.id)));
-            scopedLedger.timelines = rows(ledger.timelines).filter(item => [...contextShots].some((shotId: string) => String(allShots.find(shot => key(shot) === shotId)?.timeline_id) === String(item.id)));
+            scopedLedger.timelines = rows(ledger.timelines).filter(item => [...contextShots].some((shotId: string) => String(allShots.find(shot => stableId(shot) === shotId)?.timeline_id) === String(item.id)));
             scopedLedger.initial = rows(ledger.initial).filter(item => usedFacts.has(String(item.fact_id)) && scopedLedger.timelines.some((timeline: Record<string, any>) => timeline.id === item.timeline_id));
             scopedLedger.events = rows(ledger.events).filter(item => contextShots.has(String(item.shot_id)) && usedFacts.has(String(item.fact_id)));
             scopedLedger.requirements = rows(ledger.requirements).filter(item => contextShots.has(String(item.shot_id)) && usedFacts.has(String(item.fact_id)));
             scopedLedger.coverage = rows(ledger.coverage).filter(item => blocks.has(String(item.source_anchor?.block_id || item.block_id)));
-            for (const shot of allShots.filter(item => outputShotIds.has(key(item)))) for (const ref of rows(shot.utterance_refs)) outputUtteranceIds.add(String(ref.utteranceId));
-            projected.source.utterances = rows(source.utterances).filter(item => outputUtteranceIds.has(String(item.id)));
+            projected.source.utterances = outputUtterances;
         }
     }
     projected.assets = Object.fromEntries(Object.entries(director.assets).filter(([id]) => assets.has(id)));
     projected.shotInputs = Object.fromEntries(Object.entries(director.shotInputs).filter(([id]) => shots.has(id)));
-    projected.boundaries = director.boundaries.filter(item => segments.some(s => key(s) === item.from) && segments.some(s => key(s) === item.to));
+    projected.boundaries = director.boundaries.filter(item => segments.some(s => stableId(s) === item.from) && segments.some(s => stableId(s) === item.to));
     projected.artifacts = director.artifacts.filter(item => targetIds.includes(item.targetId));
     projected.sourceHash = compilationHash(projected.source);
     // Authored global facts remain inputs. Run cursors and unrelated artifacts do not.
@@ -162,15 +207,18 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
         ...rows(projected.source.asset_cards).flatMap(item => rows(item.references).map(ref => String(ref.asset_id || ""))),
         ...(subjectAssembly ? [] : segments.flatMap(item => rows(item.references).map(ref => String(ref.asset_id || "")))),
         ...rows(projected.source.shots).flatMap(item => (item.required_assets || []).map(String)),
-        ...(subjectAssembly ? rows(projected.source.shots).filter(item => subjectReferenceShotIds.has(key(item))).flatMap(item => rows(item.subject_usages).flatMap(usage => resolveSubjectPictureBindingIds(subjectById.get(String(usage.subjectId)), usage).bindingIds.map(bindingId => bindingAssets.get(String(bindingId)) || ""))) : []),
+        ...(subjectAssembly ? rows(projected.source.shots).filter(item => subjectReferenceShotIds.has(stableId(item))).flatMap(item => rows(item.subject_usages).flatMap(usage => resolveSubjectPictureBindingIds(subjectById.get(String(usage.subjectId)), usage).bindingIds.map(bindingId => bindingAssets.get(String(bindingId)) || ""))) : []),
         ...(subjectAssembly ? rows(projected.source.shots).flatMap(item => rows(item.keyframes).filter(frame => frame.requiredForSubmission).map(frame => String(frame.assetId || frame.id))) : []),
         ...rows(projected.source.asset_plan).flatMap(item => (item.depends_on || []).map(String)),
     ]);
     const inputAssets = Object.fromEntries(Object.entries(projected.assets).filter(([id]) => referenced.has(id) || Boolean(scene && !shots.size)).map(([id, asset]) => [id, { nodeId: asset.nodeId, assetId: asset.assetId, version: asset.version, storageKey: asset.storageKey, sha256: asset.sha256, sharedSource: asset.sharedSource }]));
     const bindings = Object.fromEntries(Object.entries(projected.assets).map(([id, asset]) => [id, { nodeId: asset.nodeId ?? null, assetId: asset.assetId ?? null }]));
     const hashSource = { ...projected.source };
-    // This derived identity lookup is checked by the fresh continuity report;
-    // it is not a model input and must preserve historical scoped receipt hashes.
+    // Backend compiler isolation markers and the derived continuity asset lookup
+    // are validation context, not authored model inputs. Exclude them so packet
+    // hashes remain valid when the scoped prompt is applied to the unmarked source.
+    if (hashSource._canvas_compilation_scope) delete hashSource.delivery_scope;
+    delete hashSource._canvas_compilation_scope;
     delete hashSource._canvas_continuity_asset_registry;
     const inputs = { source: hashSource, assets: inputAssets, bindings, shotInputs: projected.shotInputs, boundaries: projected.boundaries };
     const inputHash = compilationHash(inputs);
@@ -179,6 +227,13 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
 }
 
 export function currentCompilationArtifact(director: DirectorProduction, artifact: DirectorProduction["artifacts"][number]) {
+    // A matching full-source SHA256 proves the artifact was compiled from exactly this
+    // director. The engine runtime id may drift after an engine upgrade (the receipt
+    // records the compile-time engine while the live draft engine advances), so accept
+    // on a provenance match instead of rejecting a legitimate receipt on an identity
+    // mismatch. This must run before the engine-identity guard below, which would
+    // otherwise short-circuit and reject a valid artifact.
+    if (artifact.receipt.sourceHash && artifact.receipt.sourceHash === director.sourceHash) return true;
     const identity = artifact.receipt.engine as DirectorProduction["engine"] | undefined;
     if (identity && identity.runtimeId !== artifact.receipt.engineRuntimeId) return false;
     const scoped = artifact.receipt.compilationScope as { scope: CompilationScope; inputHash: string; engine?: DirectorProduction["engine"] } | undefined;
@@ -212,12 +267,12 @@ export function scopedCompilerInput(input: DirectorProduction, scope: Compilatio
     for (const shot of shots) {
         const start = Number(shot.start_frame), end = Number(shot.end_frame);
         if (!Number.isInteger(start) || !Number.isInteger(end) || end <= start) continue;
-        shifts.set(key(shot), cursor - start); shot.start_frame = cursor; cursor += end - start; shot.end_frame = cursor;
+        shifts.set(stableId(shot), cursor - start); shot.start_frame = cursor; cursor += end - start; shot.end_frame = cursor;
     }
     for (const segment of rows(next.source.segments)) {
-        const covered = shots.filter(shot => (segment.shot_ids || []).includes(key(shot)));
+        const covered = shots.filter(shot => (segment.shot_ids || []).includes(stableId(shot)));
         if (covered.length) {
-            const shift = shifts.get(key(covered[0])) || 0;
+            const shift = shifts.get(stableId(covered[0])) || 0;
             for (const ref of [...rows(segment.references), ...rows(segment.subjects)]) {
                 if (typeof ref.start_frame === "number") ref.start_frame += shift;
                 if (typeof ref.end_frame === "number") ref.end_frame += shift;
@@ -229,7 +284,14 @@ export function scopedCompilerInput(input: DirectorProduction, scope: Compilatio
     if (ledger) for (const event of rows(ledger.events)) if (typeof event.frame === "number" && shifts.has(String(event.shot_id))) event.frame += shifts.get(String(event.shot_id))!;
     if (cursor > 0) next.source.production_total_duration = `${cursor * Number(next.source.fps_den || 1)}/${Number(next.source.fps_num || 24)}`;
     next.source.delivery_scope = "prompt_only";
-    next.source._canvas_compilation_scope = { scope, authoredInputHash: compilationHash(input.source), frameShifts: Object.fromEntries(shifts) };
+    next.source._canvas_compilation_scope = {
+        scope,
+        // Active runtime source validation reads targetIds at this marker's
+        // top level to distinguish selected output from retained ledger context.
+        targetIds: scope.targetIds || [],
+        authoredInputHash: compilationHash(input.source),
+        frameShifts: Object.fromEntries(shifts),
+    };
     next.sourceHash = compilationHash(next.source);
     return next;
 }

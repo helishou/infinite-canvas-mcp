@@ -1,3 +1,4 @@
+import { productionEntities, productionEntityBinding } from "@basketikun/canvas-agent/drama/production-contract";
 import { ensureCanvasProjectLoaded, flushCanvasProjectBeforeGeneration } from "@/stores/canvas/use-canvas-store";
 import { withH3ParameterEdits } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -31,6 +32,7 @@ import {
   checkProductionContinuity, fetchProductionContinuity, previewProductionContinuityUpgrade, type ProductionContinuity,
   resumeProductionBatch, startProductionRun, type DramaEpisode, type EpisodeProduction,
   type ProductionBatch, type ProductionReadiness, type ProductionTarget, type ProductionCanvasContext,
+  compileProduction, fetchProductionCompilation, applyProductionCompilation, type ProductionCompilationStatus, type ProductionCompilationDiagnostic,
   prepareProductionTargets, arrangeProductionScene, adoptProductionSharedAsset, ensureSharedAssetCanvas, fetchProductionCanvasContext,
   previewProductionSharedAssetPromotion, promoteExistingProductionSharedAsset,
   backendMediaUrl, startCanvasGeneration, fetchBackendTasks, type BackendRuntimeTask,
@@ -38,7 +40,7 @@ import {
 import { DirectorPanel, type DirectorWorkspace, type AssetReview } from "./director-panel";
 import { DramaManagePanel } from "./manage-panel";
 import "./production.css";
-import { registerProductionPromptEditor, sourceSegmentForCanvasClip } from "@/lib/canvas/production-editing";
+import { registerProductionPromptEditor, registerProductionStoryboardEditor, sourceSegmentForCanvasClip, buildDirectorClipStoryboardOperation } from "@/lib/canvas/production-editing";
 import { dramaWorkbenchEpisode, dramaWorkbenchPath } from "./workbench-entry";
 import { commandNeedsRecovery } from "./production-command-recovery";
 
@@ -47,10 +49,12 @@ type PendingCommand = { operationId: string; expectedRevision: number; status: "
   | { kind: "prepare"; targets: string[] } | { kind: "arrange"; sceneId: string } | { kind: "adopt"; assetId: string; approvedId: string }
 );
 type PendingRunStart = { inputBasis?: "canvas" | "published"; expectedCanvasRevision?: number; expectedPlanHash?: string; runId: string; idempotencyKey: string; workId?: string; expectedRevision: number; version: number; targets: string[]; scope: "selected" | "all_ready" };
+type PendingCompilation = { operationId: string; expectedRevision: number };
 type LocalDraft = { brief?: string; sourceDrafts?: Record<string, string>; remoteRevision: number | null; pendingCommand?: PendingCommand | null; pendingRunStart?: PendingRunStart | null };
 type LegacySource = { source: "fullPlot" | "script.md" | "storyboard.md"; sha256: string; text: string };
 type VersionItem = { version: number; stage: string; createdAt: string };
 const localDrafts = localforage.createInstance({ name: "episode-production-drafts", storeName: "unfinished" });
+const pendingCompilationStorageKey = (draftKey: string) => `${draftKey}:pending-compilation`;
 let draftWrites: Promise<unknown> = Promise.resolve();
 function writeLocalDraft(key: string, value: LocalDraft | null) {
   const write = draftWrites.catch(() => undefined).then(async () => { if (value) await localDrafts.setItem(key, value); else await localDrafts.removeItem(key); });
@@ -180,6 +184,11 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   const pendingCommandRef = useRef<PendingCommand | null>(null);
   const [pendingRunStart, setPendingRunStart] = useState<PendingRunStart | null>(null);
   const pendingRunStartRef = useRef<PendingRunStart | null>(null);
+  const [pendingCompilation, setPendingCompilation] = useState<PendingCompilation | null>(null);
+  const pendingCompilationRef = useRef<PendingCompilation | null>(null);
+  const [compiling, setCompiling] = useState(false);
+  const [compileError, setCompileError] = useState("");
+  const [compileNotice, setCompileNotice] = useState("");
   const startingRunRef = useRef(false);
   const handledAgentResultRef = useRef("");
   const setAgentState = useAgentStore(state => state.setAgentState);
@@ -266,6 +275,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       const key = `${backendConnection().url}:${owner}:${getCanvasDraftSessionId()}`;
       await draftWrites.catch(() => undefined);
       const saved = await localDrafts.getItem<LocalDraft>(key);
+      const savedCompilation = await localDrafts.getItem<PendingCompilation>(pendingCompilationStorageKey(key));
       if (!active) return;
       if (saved) {
         const currentBrief = production?.draft.director?.source.brief;
@@ -275,6 +285,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         pending(saved.pendingCommand || null);
         setPendingRun(saved.pendingRunStart || null);
       }
+      pendingCompilationRef.current = savedCompilation || null;
+      setPendingCompilation(savedCompilation || null);
       setDraftKey(key);
     })().catch(error => { if (active) { setLoadError(String(error)); message.error(String(error)); } });
     return () => { active = false; };
@@ -349,7 +361,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         fetchProductionContinuity(target, { snapshot: continuitySnapshot }),
       ]);
       if (sequence !== remoteSequence.current) return prod.production;
-      setProduction(previous => !previous || previous.episodeId !== prod.production.episodeId || prod.production.revision > previous.revision ? prod.production : previous); setReadiness(ready.readiness); setContinuityReport(continuity.continuity); setVersions(history.versions); setBatches(runHistory.runs);
+      setProduction(previous => !previous || previous.episodeId !== prod.production.episodeId || prod.production.revision > previous.revision ? prod.production : previous); setReadiness(previous => previous && previous.revision === ready.readiness.revision && previous.canvasRevision !== undefined && ready.readiness.canvasRevision !== undefined && previous.canvasRevision > ready.readiness.canvasRevision ? previous : ready.readiness); setContinuityReport(continuity.continuity); setVersions(history.versions); setBatches(runHistory.runs);
       setRuntimeTasks(tasks);
       if (canvas) setCanvasRead({ id: canvasId, revision: Number(canvas.revision || 0), nodes: (canvas.nodes || []) as ProductionCanvasSnapshot["nodes"] });
       return prod.production;
@@ -362,15 +374,104 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     }
   }, [target, canvasId, continuitySnapshot, production?.draft.clipGroups, production?.draft.director?.assets]);
 
+  const persistPendingCompilation = async (value: PendingCompilation | null) => {
+    pendingCompilationRef.current = value;
+    setPendingCompilation(value);
+    if (!draftKey) return;
+    if (value) await localDrafts.setItem(pendingCompilationStorageKey(draftKey), value);
+    else await localDrafts.removeItem(pendingCompilationStorageKey(draftKey));
+  };
+
+  const runProductionCompile = async () => {
+    if (compiling || !production?.draft.director) return;
+    if (!draftKey) {
+      setCompileError(t("drama.production.draftNotReady"));
+      return;
+    }
+    setCompiling(true);
+    setCompileError("");
+    setCompileNotice("");
+    try {
+      let compileSource = production;
+      let pending = pendingCompilationRef.current;
+      if (!pending) {
+        // Compile the canvas state the user just saved through this page, not a stale
+        // Backend projection. Recovery keeps the original frozen operation unchanged.
+        if (canvasId) await flushCanvasProjectBeforeGeneration(canvasId);
+        compileSource = (await fetchEpisodeProduction(target)).production;
+        setProduction(previous => !previous || previous.episodeId !== compileSource.episodeId || compileSource.revision > previous.revision ? compileSource : previous);
+        pending = { operationId: `compile-${nanoid(14)}`, expectedRevision: compileSource.revision };
+        await persistPendingCompilation(pending);
+      }
+      const started = await compileProduction(target, pending.expectedRevision, pending.operationId);
+      let status: ProductionCompilationStatus = started.compilation;
+      for (let attempt = 0; attempt < 600 && ["queued", "running"].includes(status.status); attempt++) {
+        await new Promise(resolve => window.setTimeout(resolve, 1200));
+        status = (await fetchProductionCompilation(target, pending.operationId)).compilation;
+      }
+      const diagnostics: ProductionCompilationDiagnostic[] = status.diagnosticCount
+        ? (await fetchProductionCompilation(target, pending.operationId, "diagnostics", { pageSize: 100 })).compilation.items || [] : [];
+      const describe = (item: ProductionCompilationDiagnostic) => [item.targetId, item.path, item.code, item.message].filter(Boolean).join(" · ");
+      const warningDetails = diagnostics.filter(item => item.severity === "warning").map(describe).filter(Boolean).slice(0, 10);
+      const completionNotice = () => {
+        const warningNotice = status.verdict === "passed_with_warnings" && status.diagnosticCount
+          ? ` · ${t("director.atomic.compileWarnings", { count: status.diagnosticCount })}` : "";
+        return t("director.atomic.compileDone", { count: status.targetCount || compileSource.draft.clipGroups.length })
+          + warningNotice + (warningDetails.length ? `\n${warningDetails.join("\n")}` : "");
+      };
+      if (status.application?.revision !== undefined) {
+        await persistPendingCompilation(null);
+        setCompileNotice(completionNotice());
+        void refreshRemote().catch(() => undefined);
+        return;
+      }
+      if (status.status === "succeeded" && status.verdict !== "blocked" && status.preparedId) {
+        await applyProductionCompilation(target, status.preparedId);
+        await persistPendingCompilation(null);
+        setCompileNotice(completionNotice());
+        void refreshRemote().catch(() => undefined);
+        return;
+      }
+      if (["succeeded", "blocked", "interrupted", "failed"].includes(status.status)) await persistPendingCompilation(null);
+      const blocker = status.blockingDiagnostic;
+      const blockingDetails = diagnostics.filter(item => item.blockingActions?.includes("compile") || item.severity === "error" || item.blocksCompilation).map(describe).filter(Boolean).slice(0, 10);
+      setCompileError(blockingDetails.length ? blockingDetails.join("\n") : blocker
+        ? [blocker.targetId, blocker.path, blocker.code, blocker.message].filter(Boolean).join(" · ")
+        : t("director.atomic.compileBlocked", { status: status.status === "succeeded" ? status.verdict : status.status }));
+    } catch (error) {
+      if (error instanceof BackendApiError && error.status >= 400 && error.status < 500 && error.status !== 408) await persistPendingCompilation(null);
+      setCompileError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCompiling(false);
+    }
+  };
+
   useEffect(() => {
     const onProductionEvent = (event: Event) => {
-      const value = (event as CustomEvent<{ type?: string; entityId?: string }>).detail;
+      const value = (event as CustomEvent<{ type?: string; entityId?: string; payload?: { runId?: string } }>).detail;
       const aliases = new Set([projectId, episodeId, canvasId, episode?.id, episode?.canvasId, ...(readiness?.presentation?.aliases || [])].filter(Boolean));
-      if (value?.type === "drama-production.updated" && value.entityId && aliases.has(value.entityId)) void refreshRemote();
+      // Run receipts are covered by the active single-flight poller and task events.
+      // A full refresh here fans each progress write into seven reads.
+      if (value?.type === "drama-production.updated" && value.entityId && aliases.has(value.entityId) && !value.payload?.runId) void refreshRemote();
     };
     window.addEventListener("backend-event", onProductionEvent);
     return () => window.removeEventListener("backend-event", onProductionEvent);
   }, [projectId, episodeId, canvasId, episode, readiness?.presentation?.aliases, refreshRemote]);
+
+  // A manually edited canvas Prompt does not change the director source revision.
+  // Refresh only readiness after its confirmed canvas revision changes, not all source/history.
+  useEffect(() => {
+    const revision = liveCanvas?.revision;
+    if (!production?.draft.director || !canvasId || revision === undefined || (readiness?.canvasRevision !== undefined && readiness.canvasRevision >= Number(revision))) return;
+    let active = true;
+    void fetchProductionReadiness(target).then(result => {
+      if (!active) return;
+      const currentRevision = useCanvasStore.getState().projects.find(project => project.id === canvasId)?.revision;
+      if (result.readiness.canvasRevision !== undefined && currentRevision !== undefined && result.readiness.canvasRevision < Number(currentRevision)) return;
+      setReadiness(previous => previous && previous.revision > result.readiness.revision ? previous : result.readiness);
+    }).catch(fail);
+    return () => { active = false; };
+  }, [canvasId, liveCanvas?.revision, target, production?.revision]);
 
   const pollingTaskNodes = useMemo(() => [...new Set([...(production?.draft.clipGroups || []).map(group => group.nodeId), ...Object.values(production?.draft.director?.assets || {}).map(asset => asset.nodeId)].filter((id): id is string => Boolean(id)))], [production?.draft.clipGroups, production?.draft.director?.assets]);
   const pollingTaskNodesKey = JSON.stringify(pollingTaskNodes);
@@ -381,14 +482,18 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     if (!hasActiveProductionWork) return;
     let active = true;
     let lastReadinessPollAt = Date.now();
+    let readinessRefreshQueued = false;
     const knownTaskStatuses = new Map(runtimeTasks.map(task => [task.id, task.status]));
     const refreshReadiness = async () => {
+      if (readinessRefreshQueued || Date.now() - lastReadinessPollAt < 1_000) return;
+      readinessRefreshQueued = true;
       try {
         const ready = await fetchProductionReadiness(target);
         if (!active) return;
         setReadiness(ready.readiness);
         lastReadinessPollAt = Date.now();
       } catch { /* Status events are advisory; the bounded poll remains the fallback. */ }
+      finally { readinessRefreshQueued = false; }
     };
     const poller = startSingleFlightPoller({
       intervalMs: 5000,
@@ -558,7 +663,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   useEffect(() => {
     if (!embedded || !owner || !production || !draftKey) return;
     const receive = (event: Event) => {
-      const detail = (event as CustomEvent<{ owner: NonNullable<ProductionCanvasContext["owner"]>; command: { kind: "prepare"; targets: string[] } | { kind: "arrange"; sceneId: string } | { kind: "adopt"; assetId: string; approvedId: string } }>).detail;
+      const detail = (event as CustomEvent<{ owner: NonNullable<ProductionCanvasContext["owner"]>; command: { kind: "prepare"; targets: string[] } | { kind: "arrange"; sceneId: string } | { kind: "adopt"; assetId: string; approvedId: string } | { kind: "edit"; ops: ProductionOperation[] } }>).detail;
       if (!detail || detail.owner.kind !== owner.kind || detail.owner.id !== owner.id) return;
       if (pendingCommandRef.current) { warnPendingCommand(); return; }
       if (busy || workspaceCommandInFlight.current) { message.warning(t("drama.production.commandInProgress")); return; }
@@ -578,6 +683,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     const key = `${owner.kind}:${owner.id}:${production.draft.director.sourceHash}`;
     if (preparedScriptSource.current === key) return;
     const targets = productionSceneEntries(production.draft.director.source).filter(scene => !canvasNodes.some(node => node.type === "text" && node.metadata?.productionScriptSceneId === scene.id)).map(scene => `scene:${scene.id}`);
+    targets.push(...productionEntities(production.draft.director.source, owner).filter(entity => !canvasNodes.some(node => productionEntityBinding(node.metadata?.productionEntity)?.entityId === entity.entityId && productionEntityBinding(node.metadata?.productionEntity)?.kind === entity.kind && productionEntityBinding(node.metadata?.productionEntity)?.ownerId === owner.id)).map(entity => `entity:${entity.kind}:${entity.entityId}`));
     preparedScriptSource.current = key;
     if (targets.length) window.dispatchEvent(new CustomEvent("production-workspace-command", { detail: { owner, command: { kind: "prepare", targets } } }));
   }, [embedded, owner?.kind, owner?.id, production, draftKey, busy, canvasNodes]);
@@ -742,9 +848,15 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     follow.setTarget({ ...owner, workId: follow.target?.workId || run.runId, runId: run.runId, threadId: follow.target?.threadId });
     follow.resume();
     if (embedded) useAgentStore.getState().closePanel();
-    await refreshRemote();
-    void fetchProductionBatches(target).then(value => setBatches(value.runs)).catch(() => undefined);
-    void fetchProductionReadiness(target, { runId: run.runId }).then(value => setReadiness(value.readiness)).catch(() => undefined);
+    // Starting a run only needs the refreshed production revision and this run's
+    // readiness. A full workspace refresh also downloads versions, canvas, tasks,
+    // and continuity, then used to repeat the batch/readiness reads below.
+    const [current, ready] = await Promise.all([
+      fetchEpisodeProduction(target),
+      fetchProductionReadiness(target, { runId: run.runId }),
+    ]);
+    setProduction(previous => !previous || previous.episodeId !== current.production.episodeId || current.production.revision > previous.revision ? current.production : previous);
+    setReadiness(previous => previous && previous.revision > ready.readiness.revision ? previous : ready.readiness);
   };
 
   const startRun = async (targets: string[], scope: "selected" | "all_ready" = "selected") => {
@@ -1127,6 +1239,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     return true;
   };
   const replaceDirector = async (director: NonNullable<EpisodeProduction["draft"]["director"]>) => edit([{ type: "set_director_production", director }]);
+  const createManualAsset = async (operation: Extract<ProductionOperation, { type: "create_manual_director_asset" }>) => edit([operation]);
   const deleteScene = async (sceneId: string) => {
     if (!production || busy || !sceneId || !canvasId) return false;
     const { project } = await fetchBackendProject(canvasId);
@@ -1184,6 +1297,16 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   }, [production, canvasId, edit, message, t]);
 
   useEffect(() => {
+    if (!production?.draft.director || !canvasId) return;
+    return registerProductionStoryboardEditor(canvasId, async input => {
+      const groupId = sourceSegmentForCanvasClip(production.draft.clipGroups, input.nodeId, input.segmentId);
+      const operation = buildDirectorClipStoryboardOperation(production.draft.director!, groupId, input);
+      const sourceSaved = await edit([operation]);
+      return { sourceSaved };
+    });
+  }, [production, canvasId, edit]);
+
+  useEffect(() => {
     if (agentTaskResult?.status === "failed") setAgentError(agentTaskResult.error || t("director.workspace.agentTaskFailed"));
   }, [agentTaskResult, t]);
 
@@ -1237,10 +1360,21 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
               sourceDrafts={sourceDrafts} onSourceDraftChange={setSourceDraft}
               briefDraft={briefDraft} onBriefDraftChange={setBriefDraft}
               onBrief={saveBrief} onEditCanvasClip={editCanvasClip} onAdoptDirectorFields={adoptDirectorFields} onPatch={patchSource} onAdoptClipStyle={adoptClipStyle} onRegroup={regroupSegment} onWorkflow={setWorkflow} onSettings={patch => void edit([{ type: 'set_settings', patch }])} onBindAsset={(assetId, nodeId) => void bindAsset(assetId, nodeId)}
-              onUpsertSubject={upsertSubject} onDeleteSubject={deleteSubject} onDeleteScene={deleteScene} onDeleteManualAsset={deleteManualAsset} onSaveV2Shot={saveV2Shot} onRepartitionClips={repartitionV2} onEditShot={editV2Shot}
+              onPrepareEntities={async () => {
+                if (!production.draft.director || busy || pendingCommandRef.current) return;
+                setBusy(true);
+                try {
+                  const entityOwner = owner || { kind: projectId ? "canvas" as const : "episode" as const, id: projectId || episodeId! };
+                  const targets = productionEntities(production.draft.director.source, entityOwner).map(entity => `entity:${entity.kind}:${entity.entityId}`);
+                  if (targets.length) await sendCommand({ kind: "prepare", targets, operationId: nanoid(), expectedRevision: production.revision, status: "unknown" });
+                  await refreshRemote();
+                } catch (cause) { fail(cause); } finally { setBusy(false); }
+              }}
+              onUpsertSubject={upsertSubject} onDeleteSubject={deleteSubject} onDeleteScene={deleteScene} onDeleteManualAsset={deleteManualAsset} onCreateManualAsset={createManualAsset} onSaveV2Shot={saveV2Shot} onRepartitionClips={repartitionV2} onEditShot={editV2Shot}
               onOpenSharedAsset={(assetId, title) => void openSharedAsset(assetId, title).catch(fail)} onPromoteExistingSharedAsset={(assetId, title) => void promoteExistingSharedAsset(assetId, title).catch(fail)}
               onBoundary={setBoundary} onReview={reviewAsset} onPublish={() => void publish()} onSaveContinuity={saveContinuity} onPreviewContinuityUpgrade={previewContinuityUpgrade} onCheckContinuity={checkContinuity} onContinuitySnapshot={changeContinuitySnapshot}
               onReplace={value => void replaceDirector(value)} onAskDirector={scope => void askDirector(scope)} onRequestContinuityUpgrade={requestContinuityUpgradeFromAgent} onNavigate={navigateWorkspace}
+              onCompile={() => void runProductionCompile()} compileBusy={compiling} compilePending={Boolean(pendingCompilation)} compileError={compileError} compileNotice={compileNotice}
               onLocateTarget={(kind, id) => {
                 if (kind === "shot") { navigateWorkspace("shots", { kind, id }); return; }
                 const group = production.draft.clipGroups.find(group => group.id === id);

@@ -217,7 +217,9 @@ export function restoreDirectorScene(input: { db: BackendDatabase; owner: Owner;
         director.artifacts.push({ ...structuredClone(entry.value), status: "stale" });
     }
     for (const field of ["events", "requirements", "coverage"]) for (const entry of snapshot.ledgerRows[field] || []) restoreArrayRow(ledgerArray(source, field), entry, `连续性 ${field}`);
-    for (const entry of snapshot.utterances) restoreArrayRow(rows(source.utterances), entry, "对白事件");
+    const utterances = rows(source.utterances);
+    for (const entry of snapshot.utterances) restoreArrayRow(utterances, entry, "对白事件");
+    source.utterances = utterances;
     for (const item of snapshot.externalShotUtteranceRefs) {
         const shot = rows(source.shots).find(value => String(value.id) === item.shotId);
         if (!shot) throw new Error(`SCENE_RESTORE_SOURCE_CONFLICT: 外部镜头 ${item.shotId} 已删除`);

@@ -1,3 +1,4 @@
+import { syncEntityNodeEdits, normalizeEntityNodeOperation } from "./drama/entity-nodes.js";
 import { resolveSharedAssetNode, type AssetNode } from "@basketikun/canvas-agent/shared-asset-reference";
 import { effectiveTargetInput, inputHash } from "./drama/canvas-inputs.js";
 import crypto from "node:crypto";
@@ -999,6 +1000,17 @@ export class BackendDatabase {
                     const draft = JSON.parse(row.draft_json) as Record<string, any>;
                     if (!draft.settings || typeof draft.settings !== "object") continue;
                     draft.settings.reviewPolicy = none;
+                    const workflow = draft.director?.workflow;
+                    if (workflow?.sceneWorks && typeof workflow.sceneWorks === "object") for (const work of Object.values(workflow.sceneWorks) as Array<Record<string, any>>) {
+                        if (work.status !== "running" && work.policy) work.policy = none;
+                    }
+                    if (workflow?.sharedReviewWorks && typeof workflow.sharedReviewWorks === "object") for (const work of Object.values(workflow.sharedReviewWorks) as Array<Record<string, any>>) {
+                        if (work.status === "pending") { work.status = "paused"; work.error = "审核默认已关闭；保留本次记录，如需审核请手动恢复"; }
+                    }
+                    if (workflow?.sharedReviewContinuation?.status === "active") {
+                        workflow.sharedReviewContinuation.status = "paused";
+                        workflow.sharedReviewContinuation.error = "审核默认已关闭；共享审核续行已暂停";
+                    }
                     this.db.prepare("UPDATE episode_productions SET draft_json=? WHERE episode_id=?").run(JSON.stringify(draft), row.episode_id);
                 }
                 for (const row of this.db.prepare("SELECT folder_id, production_plan_json FROM drama_projects WHERE production_plan_json IS NOT NULL").all() as Array<{ folder_id: string; production_plan_json: string }>) {
@@ -1007,6 +1019,62 @@ export class BackendDatabase {
                     this.db.prepare("UPDATE drama_projects SET production_plan_json=? WHERE folder_id=?").run(JSON.stringify(plan), row.folder_id);
                 }
                 this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (39, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
+        if (currentVersion < 40) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                const none = { mode: "none", shared: "none", scene: "none" };
+                const migrateDraft = (json: string) => {
+                    const draft = JSON.parse(json) as Record<string, any>;
+                    if (draft.settings && typeof draft.settings === "object") draft.settings.reviewPolicy = none;
+                    const workflow = draft.director?.workflow;
+                    if (workflow?.sceneWorks && typeof workflow.sceneWorks === "object") for (const work of Object.values(workflow.sceneWorks) as Array<Record<string, any>>) {
+                        if (work.status !== "running" && work.policy) work.policy = none;
+                    }
+                    if (workflow?.sharedReviewWorks && typeof workflow.sharedReviewWorks === "object") for (const work of Object.values(workflow.sharedReviewWorks) as Array<Record<string, any>>) {
+                        if (work.status === "pending") { work.status = "paused"; work.error = "审核默认已关闭；保留本次记录，如需审核请手动恢复"; }
+                    }
+                    if (workflow?.sharedReviewContinuation?.status === "active") {
+                        workflow.sharedReviewContinuation.status = "paused";
+                        workflow.sharedReviewContinuation.error = "审核默认已关闭；共享审核续行已暂停";
+                    }
+                    return JSON.stringify(draft);
+                };
+                for (const [table, key] of [["episode_productions", "episode_id"], ["canvas_productions", "project_id"]] as const) {
+                    for (const row of this.db.prepare(`SELECT ${key}, draft_json FROM ${table}`).all() as Array<Record<string, string>>) {
+                        this.db.prepare(`UPDATE ${table} SET draft_json=? WHERE ${key}=?`).run(migrateDraft(row.draft_json), row[key]);
+                    }
+                }
+                for (const row of this.db.prepare("SELECT folder_id, production_plan_json FROM drama_projects WHERE production_plan_json IS NOT NULL").all() as Array<{ folder_id: string; production_plan_json: string }>) {
+                    const plan = JSON.parse(row.production_plan_json) as Record<string, unknown>;
+                    plan.reviewPolicy = none;
+                    this.db.prepare("UPDATE drama_projects SET production_plan_json=? WHERE folder_id=?").run(JSON.stringify(plan), row.folder_id);
+                }
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (40, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
+        if (currentVersion < 41) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                this.db.exec(`CREATE TABLE IF NOT EXISTS production_scene_archives (
+                    archive_id TEXT PRIMARY KEY,
+                    owner_kind TEXT NOT NULL CHECK(owner_kind IN ('episode','canvas')),
+                    owner_id TEXT NOT NULL,
+                    scene_id TEXT NOT NULL,
+                    scene_title TEXT NOT NULL,
+                    delete_operation_id TEXT NOT NULL UNIQUE,
+                    deleted_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL,
+                    restored_at TEXT,
+                    restore_operation_id TEXT
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS production_scene_archives_active ON production_scene_archives(owner_kind, owner_id, scene_id) WHERE restored_at IS NULL;
+                CREATE INDEX IF NOT EXISTS production_scene_archives_expiry ON production_scene_archives(owner_kind, owner_id, expires_at, restored_at);`);
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (41, ?)").run(new Date().toISOString());
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }
@@ -2043,18 +2111,20 @@ export class BackendDatabase {
                 connections: (project.connections as Record<string, any>[] || []).filter(edge => formalSourceIds.has(edge.toNodeId)),
             }) : undefined;
             const scriptBaseline = !context?.runtimeWrite && context?.source?.clientId !== "production:scripts" ? { nodes: structuredClone((Array.isArray(project.nodes) ? project.nodes as Record<string, any>[] : []).filter(node => node.metadata?.productionScriptId)) } : undefined;
+            const entityBaseline = !["production:scripts", "production:layout"].includes(String(context?.source?.clientId || "")) ? { nodes: structuredClone((Array.isArray(project.nodes) ? project.nodes as Record<string, any>[] : []).filter(node => node.metadata?.productionEntity)) } : undefined;
             if (!this.db.prepare("SELECT 1 FROM canvas_collaboration_checkpoints WHERE project_id = ?").get(id)) {
                 this.db.prepare("INSERT INTO canvas_collaboration_checkpoints (project_id, revision, data_json) VALUES (?, ?, ?)").run(id, currentRevision, JSON.stringify(current));
             }
             const committedOperations: CanvasOperation[] = [];
             const operationResults = operations.flatMap((operation, index) => {
+                if (!context?.runtimeWrite) operations[index] = operation = normalizeEntityNodeOperation(project, operation);
                 validateAssetOperation(this, id, project, operation, context);
                 normalizeAssetInsertion(this, operation);
                 if (!context?.runtimeWrite) {
                     const node = (Array.isArray(project.nodes) ? project.nodes as Record<string, any>[] : []).find(item => item.id === (operation.id || operation.nodeId));
                     const metadata = operation.metadata as Record<string, unknown> | undefined;
                     const patched = (operation.patch as Record<string, any> | undefined)?.metadata;
-                    const layoutKeys = ["productionLayoutUnitId", "productionLayoutBounds"];
+                    const layoutKeys = ["productionLayoutUnitId", "productionLayoutBounds", "productionEntity"];
                     for (const change of [metadata, patched].filter(Boolean)) for (const key of layoutKeys) {
                         if (Object.hasOwn(change, key) && commandFingerprint(change[key]) !== commandFingerprint(node?.metadata?.[key] ?? null)) throw new Error("制作布局标识由 Backend 管理");
                     }
@@ -2128,7 +2198,7 @@ export class BackendDatabase {
                 }
                 for (const operation of stale) { const result = applyCanvasProjectOperations(project, [operation]); committedOperations.push(operation); operationResults.push(...result); }
             }
-            const productionUpdates = scriptBaseline ? syncScriptNodeEdits(this, id, scriptBaseline, project) : [];
+            const productionUpdates = [...(scriptBaseline ? syncScriptNodeEdits(this, id, scriptBaseline, project) : []), ...(entityBaseline ? syncEntityNodeEdits(this, id, entityBaseline, project) : [])];
             if (imageInputBaseline) {
                 const synced = syncImageReferenceEdits(this, id, imageInputBaseline, project);
                 productionUpdates.push(...synced.updates);
@@ -2307,10 +2377,23 @@ export class BackendDatabase {
             if (recordOf(recordOf(task.input).params).writeBackToTarget === true) {
                 const output = media[0];
                 if (!output) throw new Error("生成完成但没有返回图片");
+                const taskParams = recordOf(recordOf(task.input).params);
+                const productionInput = recordOf(sourceMetadata.productionImageInput);
+                const projection = recordOf(sourceMetadata.productionImageProjection);
+                const projectedPrompt = String(recordOf(projection.nextValues).prompt || "");
+                const restoreFrozenProductionPrompt = taskParams.canvasFrozenInput === true
+                    && !String(sourceMetadata.prompt || "").trim()
+                    && Boolean(input.prompt)
+                    && projectedPrompt === input.prompt
+                    && productionInput.promptHash === crypto.createHash("sha256").update(input.prompt).digest("hex")
+                    && productionInput.stale !== true
+                    && !(Array.isArray(projection.conflicts) && projection.conflicts.includes("prompt"));
                 const metadata = {
                     content: output.url, url: output.url, storageKey: output.storageKey || "", mimeType: output.mimeType || "image/png",
                     bytes: output.bytes, naturalWidth: output.width, naturalHeight: output.height,
-                    ...(!recordOf(recordOf(task.input).params).canvasFrozenInput ? { prompt: input.prompt, model: input.model } : {}), generationType: input.references?.length ? "edit" : "generation",
+                    ...(!taskParams.canvasFrozenInput ? { prompt: input.prompt, model: input.model }
+                        : restoreFrozenProductionPrompt ? { prompt: input.prompt, composerContent: input.prompt } : {}),
+                    generationType: input.references?.length ? "edit" : "generation",
                     status: "success", runProgress: 1, generationTaskId: task.id, inputOutdated: false, generatedImageHistory: [...(Array.isArray(sourceMetadata.generatedImageHistory) ? sourceMetadata.generatedImageHistory : []), ...media.map(output => ({ ...output, taskId: task.id, inputHash: frozenHash }))],
                 };
                 const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId, metadata,

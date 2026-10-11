@@ -2,11 +2,10 @@ import { Fragment, useEffect, useMemo, useRef, useState, type PointerEvent as Re
 import { createPortal } from "react-dom";
 import { Alert, App, Button, Dropdown, Input, Modal, Radio, Tag } from "antd";
 import { ArrowRight, Clapperboard, Image as ImageIcon, Layers3, Search, WandSparkles } from "lucide-react";
-import { nanoid } from "nanoid";
 import { useTranslation } from "react-i18next";
 import { isSubjectPromptAssembly, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import { subjectShotWindows, subjectStateProjection } from "@basketikun/canvas-agent/drama/subject-assembly";
-import { backendMediaUrl, applyProductionCompilation, compileProduction, fetchProductionCompilation, fetchProductionWorkbench, type EpisodeProduction, type ProductionTarget } from "@/services/backend-api";
+import { backendMediaUrl, fetchProductionWorkbench, type EpisodeProduction, type ProductionTarget } from "@/services/backend-api";
 import { records, formatSeconds } from "./director-display";
 import { productionWorkbenchValue, subjectDisplayName } from "./subject-shot-draft";
 import { continuityPresentation } from "./continuity-presentation";
@@ -37,8 +36,8 @@ type Props = {
     onEditShot?: (operation: ShotOperation) => Promise<boolean>;
 
     shotDrafts?: Record<string, string>;
-    /** Clip 组合视图的「一键编译」：本组件直接提交/轮询/应用编译回执，完成后回调 refresh 重读正式源稿。 */
-    busy?: boolean; onRefresh?: () => void;
+    /** Clip 组合使用与交付页相同的 Backend 编译提交与恢复流程。 */
+    busy?: boolean; compileBusy?: boolean; compilePending?: boolean; compileError?: string; compileNotice?: string; onCompile?: () => void;
     onClip: (id: string) => void;
     onDiscuss: (shotId?: string) => void;
     /** 跳转到指定工作区（参考素材点开进素材库）。 */
@@ -46,7 +45,7 @@ type Props = {
 };
 
 /** The v2 authoring surface: stable Shots, derived Clip packaging, and compiler evidence. */
-export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, canvasNodes, renderEditor, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onEditShot, shotDrafts = {}, busy, onRefresh, onClip, onDiscuss, onNavigate }: Props) {
+export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, canvasNodes, renderEditor, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onEditShot, shotDrafts = {}, busy, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", onCompile, onClip, onDiscuss, onNavigate }: Props) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const source = director.source as Record<string, any>;
@@ -121,9 +120,11 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const keyframes = records(workbench?.keyframes), referenceDiagnostics = records(workbench?.resolutionDiagnostics);
     const totalSeconds = shots.reduce((sum, shot) => sum + duration(shot), 0);
     // 左栏「连续性状态」里的动作块（与下一段的边界开关），由 DirectorPanel 注入。
-    const continuityActions = renderContinuity?.(selected);
+    // Empty sources still pass through this setup before the empty-state branch below.
+    // Do not call shot renderers until selection has resolved to an actual shot.
+    const continuityActions = selected ? renderContinuity?.(selected) : undefined;
     // 起止状态（镜头开始时 / 镜头结束时）：从「画面与摄影」挪进来，与台账状态、边界开关同区展示。
-    const shotStateFields = renderShotState?.(selected);
+    const shotStateFields = selected ? renderShotState?.(selected) : undefined;
     const statusLabel = refresh ? t("director.workspace.clipRefreshStatus." + refresh.status, { segment: t("director.studio.clipNumber", { number: clipIndex + 1 }) })
         : t(compiled ? "director.atomic.compiled" : "director.atomic.pendingCompile");
     // Clip 组合视图的编译状态：优先显示正在进行的自动刷新作业，其次读导演产物的真实编译状态（ready / 过期 / 未编译）。
@@ -138,35 +139,6 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     };
     const clipStates = clips.map(clip => ({ id: String(clip.id), ...clipCompileState(String(clip.id)) }));
     const compileCounts = { ready: clipStates.filter(item => item.tone === "ready").length, pending: clipStates.filter(item => item.tone === "pending").length, stale: clipStates.filter(item => item.tone === "stale").length, running: clipStates.filter(item => item.tone === "live").length };
-    // 一键编译：提交一次全量编译作业 → 沿同一 operationId 轮询 → 用 preparedId 应用回执写回正式源稿。
-    // 编译失败/被阻塞时保留后端的诊断原文，不自行改写；不做媒体生成。
-    const [compiling, setCompiling] = useState(false);
-    const [compileError, setCompileError] = useState("");
-    const [compileNotice, setCompileNotice] = useState("");
-    const runCompile = async () => {
-        if (compiling || busy || !clips.length) return;
-        setCompiling(true); setCompileError(""); setCompileNotice("");
-        try {
-            const operationId = `compile-clips-${nanoid(10)}`;
-            const started = await compileProduction(owner, production.revision, operationId);
-            let status = started.compilation;
-            for (let attempt = 0; attempt < 600 && ["queued", "running"].includes(String(status.status)); attempt++) {
-                await new Promise(resolve => setTimeout(resolve, 1200));
-                status = (await fetchProductionCompilation(owner, operationId)).compilation;
-            }
-            if (status.status !== "succeeded" || !status.preparedId) {
-                setCompileError(status.blockingDiagnostic?.message || t("director.atomic.compileBlocked", { status: status.status }));
-                return;
-            }
-            await applyProductionCompilation(owner, status.preparedId);
-            setCompileNotice(t("director.atomic.compileDone", { count: status.targetCount || clips.length }));
-        } catch (error) {
-            setCompileError(error instanceof Error ? error.message : String(error));
-        } finally {
-            setCompiling(false);
-            onRefresh?.();
-        }
-    };
     // 分割块：拖动或右键调整相邻片段之间的分镜归属。芯片按 id 登记，拖动时按实际布局吸附到镜头边界。
     const chipRefs = useRef(new Map<string, HTMLElement>());
     const trackRef = useRef<HTMLDivElement | null>(null);
@@ -233,12 +205,12 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
             <div className="flex flex-wrap items-center justify-between gap-3">
                 <p className="text-sm text-muted-foreground">{t(subjectAssembly ? "director.atomic.packagingHint" : "director.atomic.legacyPackagingHint")}</p>
                 <div className="flex shrink-0 items-center gap-3">
-                    {clipStates.length > 0 && <span className="text-xs text-muted-foreground">{compiling ? t("director.atomic.compileInFlight") : t("director.atomic.compileSummary", compileCounts) + (compileCounts.running > 0 ? " · " + t("director.atomic.compileRunning", { running: compileCounts.running }) : "")}</span>}
-                    <Button size="small" type="primary" icon={<WandSparkles className="size-3.5" />} loading={compiling} disabled={busy || !clipStates.length} onClick={() => void runCompile()}>{t("director.atomic.compileAction")}</Button>
+                    {clipStates.length > 0 && <span className="text-xs text-muted-foreground">{compileBusy ? t("director.atomic.compileInFlight") : t("director.atomic.compileSummary", compileCounts) + (compileCounts.running > 0 ? " · " + t("director.atomic.compileRunning", { running: compileCounts.running }) : "")}</span>}
+                    <Button size="small" type="primary" icon={<WandSparkles className="size-3.5" />} loading={compileBusy} disabled={busy || compileBusy || !clipStates.length || !onCompile} onClick={() => onCompile?.()}>{compilePending ? t("drama.production.recoverReceipt") : t("director.atomic.compileAction")}</Button>
                 </div>
             </div>
-            {compileError && <Alert type="error" showIcon closable message={t("director.atomic.compileFailed")} description={compileError} onClose={() => setCompileError("")} />}
-            {compileNotice && <Alert type="success" showIcon closable message={compileNotice} onClose={() => setCompileNotice("")} />}
+            {compileError && <Alert type="error" showIcon message={t("director.atomic.compileFailed")} description={compileError} />}
+            {compileNotice && <Alert type="success" showIcon message={compileNotice} />}
             {clipStates.length > 0 && <div className="flex flex-wrap items-center gap-1.5" aria-label={t("director.atomic.compileStatus")}>
                 <span className="mr-1 text-xs text-muted-foreground">{t("director.atomic.compileStatus")}</span>
                 {clipStates.map((item, index) => <span key={item.id} className="flex items-center gap-1.5 rounded-md border border-border px-2 py-0.5 text-xs">

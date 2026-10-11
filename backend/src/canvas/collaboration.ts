@@ -37,7 +37,11 @@ export function commandFingerprint(value: unknown): string {
         if (!item || typeof item !== "object") return item;
         return Object.fromEntries(Object.entries(item).filter(([, value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => [key, canonical(value)]));
     };
-    return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
+    const serialized = JSON.stringify(canonical(value));
+    // JSON.stringify(undefined) returns undefined rather than a string. H3
+    // settings commonly add fields that were absent in the prior Clip, so
+    // fingerprinting that before value must remain valid and distinct from null.
+    return createHash("sha256").update(serialized === undefined ? "undefined" : serialized).digest("hex");
 }
 
 export function collaborationError(code: string, message: string) {

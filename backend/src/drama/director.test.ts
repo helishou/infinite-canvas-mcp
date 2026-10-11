@@ -663,18 +663,18 @@ test("production batches bind workId and runId atomically and replay without a s
 test("manual asset deletion is revision-checked, refuses dependencies atomically, and leaves canvas media untouched", t => {
     const { service, db } = fixture(t);
     const director = doc(0);
-    director.source.asset_plan = [
-        { id: "PROP_A", kind: "prop", created_by: "manual", version: "v1", status: "planned", depends_on: [] },
-        { id: "PROP_B", kind: "prop", version: "v1", status: "planned", depends_on: ["PROP_A"] },
-    ];
-    director.source.asset_cards = [
-        { id: "PROP_A", asset_id: "PROP_A", asset_kind: "prop", prompt: "A" },
-        { id: "PROP_B", asset_id: "PROP_B", asset_kind: "prop", prompt: "B" },
-    ];
-    director.assets = { PROP_A: { version: "v1", status: "planned" }, PROP_B: { version: "v1", status: "planned" } };
-    director.sourceHash = directorHash(director.source);
     const before = service.get("ep");
     service.edit("ep", { operationId: "seed-manual-assets", expectedRevision: before.revision, ops: [{ type: "set_director_production", director }] });
+    const assetOp = (id: string, name: string, subjectId?: string) => ({
+        type: "create_manual_director_asset" as const,
+        assetPlan: { id, kind: "prop" as const, asset_name: name, version: "v1", description: "", purpose: name, depends_on: [], status: "planned" as const },
+        assetCard: { id, asset_id: id, asset_kind: "prop" as const, asset_version: "v1", prompt: name, references: [] },
+        ...(subjectId ? { subject: { id: subjectId, kind: "prop" as const, entityRef: { ownerKind: "episode" as const, ownerId: "ep", kind: "asset" as const, id }, pictureBindings: [] } } : {}),
+    });
+    const base = service.get("ep");
+    service.edit("ep", { operationId: "create-manual-assets", expectedRevision: base.revision, ops: [assetOp("PROP_A", "A", "SUB_PROP_A"), assetOp("PROP_B", "B")] });
+    const created = service.get("ep");
+    service.edit("ep", { operationId: "link-manual-asset", expectedRevision: created.revision, ops: [{ type: "patch_director_source", entity: "asset", id: "PROP_B", patch: { depends_on: ["PROP_A"] } }] });
     const seeded = service.get("ep");
     const unchangedSource = JSON.stringify(seeded.draft.director?.source);
     assert.throws(() => service.edit("ep", { operationId: "blocked-asset-delete", expectedRevision: seeded.revision, ops: [{ type: "delete_director_asset", id: "PROP_A", confirmed: true }] }), /ASSET_STILL_REFERENCED/);
@@ -689,20 +689,44 @@ test("manual asset deletion is revision-checked, refuses dependencies atomically
     const deleted = service.get("ep");
     assert.deepEqual((deleted.draft.director!.source.asset_plan as any[]).map(item => item.id), ["PROP_B"]);
     assert.deepEqual((deleted.draft.director!.source.asset_cards as any[]).map(item => item.id), ["PROP_B"]);
+    assert.deepEqual(deleted.draft.director!.source.subject_registry, []);
     assert.equal(deleted.draft.director!.assets.PROP_A, undefined);
     assert.equal(deleted.draft.director!.sourceHash, directorHash(deleted.draft.director!.source));
     assert.equal(db.getCanvasProject("canvas")!.revision, canvasRevision);
+
+    const timestamp = new Date().toISOString();
+    db.db.prepare("INSERT INTO tasks (id,kind,status,input_json,params_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?)").run("asset-history-task", "image", "failed", "{}", "{}", timestamp, timestamp);
+    db.db.prepare("INSERT INTO production_task_bindings (task_id,owner_kind,owner_id,version,source_hash,target_kind,target_id,project_id,node_id,targets_json) VALUES (?,?,?,?,?,?,?,?,?,?)").run("asset-history-task", "episode", "ep", 1, deleted.draft.director!.sourceHash, "asset", "PROP_B", "canvas", "asset-node", "[]");
+    const withHistory = service.get("ep");
+    assert.throws(() => service.edit("ep", { operationId: "delete-asset-with-task-history", expectedRevision: withHistory.revision, ops: [{ type: "delete_director_asset", id: "PROP_B", confirmed: true }] }), /ASSET_HAS_MEDIA_OR_HISTORY/);
+    assert.equal(service.get("ep").revision, withHistory.revision);
+});
+
+test("manual provenance cannot be minted by wholesale source replacement", t => {
+    const { service } = fixture(t);
+    const director = doc(0);
+    director.source.asset_plan = [{ id: "FORGED_MANUAL", kind: "prop", created_by: "manual", asset_name: "Forged", version: "v1", description: "", purpose: "", depends_on: [], status: "planned" }];
+    director.source.asset_cards = [{ id: "FORGED_MANUAL", asset_id: "FORGED_MANUAL", asset_kind: "prop", asset_version: "v1", prompt: "", references: [] }];
+    director.sourceHash = directorHash(director.source);
+    const before = service.get("ep");
+    service.edit("ep", { operationId: "forged-manual-origin", expectedRevision: before.revision, ops: [{ type: "set_director_production", director }] });
+    const current = service.get("ep");
+    assert.equal((current.draft.director!.source.asset_plan as any[])[0].created_by, undefined);
+    assert.throws(() => service.edit("ep", { operationId: "delete-forged-manual-origin", expectedRevision: current.revision, ops: [{ type: "delete_director_asset", id: "FORGED_MANUAL", confirmed: true }] }), /ASSET_NOT_MANUAL/);
+    assert.equal(service.get("ep").revision, current.revision);
 });
 
 test("manual asset deletion refuses an asset recorded in an immutable published version", t => {
     const { service } = fixture(t);
-    const director = doc(1);
-    director.source.asset_plan = [{ id: "PROP_PUBLISHED", kind: "prop", created_by: "manual", version: "v1", status: "planned", depends_on: [] }];
-    director.source.asset_cards = [{ id: "PROP_PUBLISHED", asset_id: "PROP_PUBLISHED", asset_kind: "prop", prompt: "Published prop" }];
-    director.assets = { PROP_PUBLISHED: { version: "v1", status: "planned" } };
-    director.sourceHash = directorHash(director.source);
-    director.artifacts = director.artifacts.map(artifact => ({ ...artifact, sourceHash: director.sourceHash, receipt: { ...artifact.receipt, sourceHash: director.sourceHash } }));
-    publish(service, director);
+    const director = doc(0);
+    const initial = service.get("ep");
+    service.edit("ep", { operationId: "seed-published-manual-asset", expectedRevision: initial.revision, ops: [{ type: "set_director_production", director }] });
+    const base = service.get("ep");
+    const assetPlan = { id: "PROP_PUBLISHED", kind: "prop" as const, asset_name: "Published prop", version: "v1", description: "", purpose: "Published prop", depends_on: [], status: "planned" as const };
+    const assetCard = { id: "PROP_PUBLISHED", asset_id: "PROP_PUBLISHED", asset_kind: "prop" as const, asset_version: "v1", prompt: "Published prop", references: [] };
+    service.edit("ep", { operationId: "create-published-manual-asset", expectedRevision: base.revision, ops: [{ type: "create_manual_director_asset", assetPlan, assetCard }] });
+    const withAsset = service.get("ep");
+    publish(service, withAsset.draft.director!);
     const current = service.get("ep");
     assert.throws(() => service.edit("ep", { operationId: "delete-published-asset", expectedRevision: current.revision, ops: [{ type: "delete_director_asset", id: "PROP_PUBLISHED", confirmed: true }] }), /ASSET_PUBLISHED/);
     assert.equal(service.get("ep").revision, current.revision);

@@ -238,6 +238,9 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
     router.get<Record<string, string>>(`${base}/legacy`, (req, res) => {
         try { res.json({ ok: true, sources: service.legacy(req.params.episodeId) }); } catch (error) { handle(res, error); }
     });
+    router.get<Record<string, string>>(`${base}/scene-archives`, (req, res) => {
+        try { res.json({ ok: true, archives: service.listArchivedScenes(req.params.episodeId) }); } catch (error) { handle(res, error); }
+    });
     router.get<Record<string, string>>(`${base}/versions`, (req, res) => {
         try { res.json({ ok: true, versions: service.versions(req.params.episodeId) }); } catch (error) { handle(res, error); }
     });

@@ -144,8 +144,10 @@ export type CanvasTextEditorProps = {
     lineMap?: boolean;
 };
 
+export type CanvasProductionStoryboardEditor = { nodeId: string; segmentId: string; segment: Record<string, unknown> };
 export type CanvasProductionEditing = {
     reverseSyncPrompt: (input: { nodeId: string; segmentId: string; prompt: string; artifactId: string; sourceHash: string; basePromptHash: string }) => Promise<{ sourceSaved: boolean }>;
+    replaceStoryboardTrack: (input: CanvasProductionStoryboardEditor) => Promise<{ sourceSaved: boolean }>;
 };
 export type CanvasNodeContext = {
     mediaUrl: (storageKey: string) => string;

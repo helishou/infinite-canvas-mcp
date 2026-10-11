@@ -53,7 +53,7 @@ export const productionWorkspaceDescriptions = {
     production_list_scene_versions: "列出单场次历史发布版本。",
     production_get_scene_version: "默认读取场次发布版本摘要；用 view、sourceSection、targetIds、pageSize/cursor、chunkBytes 读取详情。",
     production_restore_scene_production: "将单场次历史版本恢复到草稿；不删除历史或媒体。",
-    production_prepare_targets: "在固定画布按 Backend 持久化布局计划准备正式 scene 剧本文本节点、asset/frame 节点或 segment Clip；返回布局回执，不发布或生成。",
+    production_prepare_targets: "在固定画布按 Backend 持久化布局计划准备正式 entity:<character|scene|prop>:<实体ID> 素材节点、scene 剧本文本节点、asset/frame 节点或 segment Clip；返回布局回执，不发布或生成。",
     production_get_continuity: "只读读取正式连续性检查状态、问题、对象轨迹或单镜状态；不会触发检查或修改制作稿。",
     production_check_continuity: "按正式 owner 和 revision 执行 Acheng 固定 runtime 的连续性检查并持久化回执；检查完成不表示 verdict passed，不发布或生成。",
     production_preview_continuity_upgrade: "只读预览旧连续性源稿升级到 ledger v2 的诊断与版本影响；不会改动制作稿、发布版、历史媒体或生成任务。",

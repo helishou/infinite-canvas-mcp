@@ -251,6 +251,8 @@ test("两名编辑者从相同基线插入中文，两个 Yjs 增量都保留", 
 
 test("指纹与属性枚举顺序无关；字段路径以稳定实体 ID 隔离", () => {
     assert.equal(commandFingerprint({ b: 2, a: 1 }), commandFingerprint({ a: 1, b: 2 }));
+    assert.equal(commandFingerprint(undefined), commandFingerprint(undefined));
+    assert.notEqual(commandFingerprint(undefined), commandFingerprint(null));
     assert.deepEqual(concurrentCommandConflicts(
         [{ type: "update_h3_segment", nodeId: "h3", segmentId: "s1", patch: { prompt: "甲" } }],
         [{ type: "update_h3_segment", nodeId: "h3", segmentId: "s2", patch: { prompt: "乙" } }],

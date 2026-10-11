@@ -53,6 +53,7 @@ type CanvasConflictTarget = {
 type CanvasConflictRecord = {
     reason?: "rejected" | "conflict";
     canRecoverTimeline?: boolean;
+    canRetryStoryboardDurations?: boolean;
     canRetryFormalClip?: boolean;
     canRetryBackendFailure?: boolean;
     remoteDeleted?: boolean;
@@ -404,6 +405,9 @@ function setCanvasCommandConflict(id: string, remote: CanvasProject, message: st
     const rejected = commands.some((command) => Boolean(command.rejected) && !command.rejected!.includes("HTTP 409"));
     const canRecoverTimeline = rejected && commands.some((command) => command.rejected?.includes("INVALID_CLIP_FIELD: patch.start"))
         && commands.every((command) => recoverH3StartOperations(command.operations, command.base) !== null);
+    const storyboardDurationRejection = (value: string) => /字段 storyboardDurations 必须通过制作台 Shot 数据写入/.test(value);
+    const canRetryStoryboardDurations = rejected && commands.some(command => command.rejected && storyboardDurationRejection(command.rejected))
+        && commands.every(command => !command.rejected || storyboardDurationRejection(command.rejected));
     const legacyFormalRejection = (message: string) => /字段 (prompt|referenceBindings|h3CharacterGroups|storyboardShots|tailFrameContinuation|motionContextEnabled) 属于正式编译产物/.test(message)
         || /INVALID_CLIP_FIELD: patch\.(h3CharacterGroups|storyboardDurations|storyboardModeEnabled|storyboardCompositeEnabled|storyboardPromptCache|subjectDefinitions) 不属于可编辑 Clip 配置/.test(message);
     const canRetryFormalClip = rejected && commands.some(command => command.rejected && legacyFormalRejection(command.rejected))
@@ -414,11 +418,26 @@ function setCanvasCommandConflict(id: string, remote: CanvasProject, message: st
     const canRetryBackendFailure = rejected && commands.some(command => command.rejected && legacyHashFailure(command.rejected))
         && commands.every(command => !command.rejected || legacyHashFailure(command.rejected));
     useCanvasStore.setState((state) => ({ canvasConflicts: { ...state.canvasConflicts, [id]: {
-        message, reason: rejected ? "rejected" : "conflict", canRecoverTimeline, canRetryFormalClip, canRetryBackendFailure, revision: Number(remote.revision || 0),
+        message, reason: rejected ? "rejected" : "conflict", canRecoverTimeline, canRetryStoryboardDurations, canRetryFormalClip, canRetryBackendFailure, revision: Number(remote.revision || 0),
         pendingOperations: commands.reduce((count, command) => count + command.operations.length, 0),
         conflictTargets: targets || [],
         remoteProject: remote,
     } } }));
+}
+
+/** 旧 H3 画布草稿可能夹带正式 Shot 时长的派生投影；重提时只剔除此字段。 */
+function omitProductionStoryboardDurations(operations: Array<Record<string, unknown>>) {
+    return operations.flatMap((operation) => {
+        if (operation.type !== "update_h3_segment") return [operation];
+        const patch = { ...((operation.patch && typeof operation.patch === "object" ? operation.patch : {}) as Record<string, unknown>) };
+        delete patch.storyboardDurations;
+        const patchDelete = Array.isArray(operation.patchDelete) ? operation.patchDelete.map(String).filter(field => field !== "storyboardDurations") : [];
+        if (!Object.keys(patch).length && !patchDelete.length) return [];
+        const next: Record<string, unknown> = { ...operation, patch };
+        if (patchDelete.length) next.patchDelete = patchDelete;
+        else delete next.patchDelete;
+        return [next];
+    });
 }
 
 function replayPendingCommandEvents(projectId: string) {
@@ -544,9 +563,10 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
         const local = get().projects.find((project) => project.id === id);
         if (!local) return;
         try {
-            if (conflict.reason === "rejected" && !conflict.canRecoverTimeline && !conflict.canRetryFormalClip && !conflict.canRetryBackendFailure) return;
+            if (conflict.reason === "rejected" && !conflict.canRecoverTimeline && !conflict.canRetryStoryboardDurations && !conflict.canRetryFormalClip && !conflict.canRetryBackendFailure) return;
             const operations = pendingCommands.list(id).flatMap((command) => conflict.canRecoverTimeline
-                ? recoverH3StartOperations(command.operations, command.base)! : command.operations);
+                ? recoverH3StartOperations(command.operations, command.base)!
+                : conflict.canRetryStoryboardDurations ? omitProductionStoryboardDurations(command.operations) : command.operations);
             const remote = conflict.remoteDeleted ? local : conflict.remoteProject;
             const replacement = { operationId: nanoid(), projectId: id, backend: commandBackend, ownerId: draftSessionId, source: getCanvasCollaborationClient(), order: ++commandOrder, base: remote, operations: conflict.remoteDeleted ? [] : operations };
             await pendingCommands.replace(replacement);
@@ -879,7 +899,7 @@ export function diffCanvasProject(base: CanvasProject, next: CanvasProject): Arr
                     // 参考绑定和续接开关允许人工编辑，必须进入保存 op，不能只留下乐观显示。
                     // 编译身份与源稿专属字段仍由 Backend 维护。
                     const formalClipFields = segment.productionClipProjection || (baseSegment as Record<string, unknown>).productionClipProjection
-                        ? new Set(["prompt", "directorEngine", "directorSourceHash", "h3CharacterGroups", "storyboardShots", "productionClipProjection"])
+                        ? new Set(["prompt", "directorEngine", "directorSourceHash", "h3CharacterGroups", "storyboardShots", "storyboardDurations", "productionClipProjection"])
                         : null;
                     for (const field of new Set([...Object.keys(baseSegment), ...Object.keys(segment)])) {
                         if (field === "id" || field === "start") continue;

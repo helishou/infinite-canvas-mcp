@@ -1,15 +1,25 @@
 import { appendScenePalettePrompt, sceneNodesByIds } from "../canvas/scene-generation-context.js";
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import { canonicalProduction, productionImageModel, type EpisodeProductionData } from '@basketikun/canvas-agent/drama/production-contract';
+import { canonicalProduction, productionImageModel, productionSceneEntries, type EpisodeProductionData } from '@basketikun/canvas-agent/drama/production-contract';
 import { compileReferenceSubmission, assertReferenceCompilation, productionImageInput } from '@basketikun/canvas-agent/reference-contract';
 import { resolveH3Runtime, h3StoryboardIssues } from '@basketikun/canvas-agent/plugins/minimax-h3/runtime-params';
 import { resolveCanvasImageReferencesByIds } from '../canvas/image-references.js';
 import type { CanvasGenerationCommand } from '@basketikun/canvas-agent/generation-contract';
 import type { CanvasProject } from '../db.js';
+import { productionSceneIdsForShots } from './production-layout.js';
 
 export const inputHash = (value: unknown) => crypto.createHash('sha256').update(canonicalProduction(value ?? null)).digest('hex');
 const rows = (value: any): any[] => Array.isArray(value) ? value : [];
+export const hasExecutableH3Prompt = (value: unknown) => {
+    const prompt = String(value || "").trim();
+    if (!prompt || /^DRAFT\b/m.test(prompt)) return false;
+    const body = prompt
+        .replace(/^\s*[A-Za-z][A-Za-z0-9_ ]*\s*:\s*$/gm, "")
+        .replace(/^\s*N\/A\s*$/gim, "")
+        .replace(/^\s*[-=.,;:]\s*$/gm, "");
+    return Boolean(body.trim());
+};
 export type CanvasExecutionTarget = {
     id: string; nodeId: string; sourceNodeId: string; segmentId?: string;
     command: CanvasGenerationCommand; inputHash: string;
@@ -84,6 +94,14 @@ export function captureCanvasInputs(project: CanvasProject, data: EpisodeProduct
     for (const alias of aliases) warnings.push({ targetId: alias.targetId, code: "SHARED_TARGET_NODE", message: `与 ${alias.canonicalId} 共用图片节点，仅提交一次` });
     for (const id of targetIds) {
         try {
+            if (id.startsWith('segment:')) {
+                const segmentId = id.slice('segment:'.length);
+                const segment = rows(data.director?.source.segments).find(segment => String(segment.id) === segmentId);
+                const sceneIds = productionSceneIdsForShots(productionSceneEntries(data.director?.source || {}), rows(segment?.shot_ids).map(String));
+                if (sceneIds.length !== 1) throw new Error(sceneIds.length
+                    ? `Segment ${segmentId} 跨越多个正式场次；请先按场次拆分`
+                    : `Segment ${segmentId} 未映射到唯一正式场次，无法准备场次 H3 节点`);
+            }
             const nodeId = nodeByTarget.get(id);
             if (!nodeId) throw new Error(`生产目标未绑定画布：${id}`);
             const group = id.startsWith('segment:') ? data.clipGroups.find(group => `segment:${group.id}` === id) : undefined;
@@ -92,7 +110,7 @@ export function captureCanvasInputs(project: CanvasProject, data: EpisodeProduct
             const segmentId = group?.segmentId || undefined;
             if (group && !segmentId) throw new Error(`生产目标未绑定 Clip：${id}`);
             const effective = effectiveTargetInput(frozen, nodeId, segmentId, defaults);
-            if (!effective.prompt.trim()) throw new Error('提示词为空');
+            if (!hasExecutableH3Prompt(effective.prompt)) throw new Error('提示词为空或只有空格式段落');
             const dependencies: CanvasExecutionTarget['dependencies'] = [];
             let command: CanvasGenerationCommand;
             let compiledKeys: string[] | undefined;

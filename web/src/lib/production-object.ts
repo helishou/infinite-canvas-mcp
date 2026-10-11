@@ -1,3 +1,4 @@
+import { productionSceneEntries } from "@basketikun/canvas-agent/drama/production-contract";
 import type { EpisodeProduction, ProductionCanvasContext, ProductionPresentation } from "@/services/backend-api";
 import type { CanvasNodeData } from "@/types/canvas";
 
@@ -20,6 +21,14 @@ export function productionObjectForNode(context: ProductionCanvasContext, produc
     if (!director) return null;
     if (node.metadata?.productionScriptId) return null; // Script text uses the ordinary canvas editor.
     const base = { owner: context.owner, canvasId: context.canvasId, nodeId: node.id };
+    const sceneId = String(node.metadata?.productionSceneId || "");
+    if (sceneId) {
+        const metadataOwnerKind = node.metadata?.productionOwnerKind;
+        const metadataOwnerId = node.metadata?.productionOwnerId;
+        if (metadataOwnerKind !== undefined && metadataOwnerKind !== context.owner.kind || metadataOwnerId !== undefined && metadataOwnerId !== context.owner.id) return null;
+        const scene = productionSceneEntries(director.source).find(item => item.id === sceneId);
+        if (scene) return { ...base, workspace: "story", targetKind: "scene", targetId: scene.id, title: scene.title || scene.id };
+    }
     const group = production.draft.clipGroups.find(item => item.nodeId === node.id && Boolean(segmentId) && item.segmentId === segmentId);
     if (group) return { ...base, workspace: "production", targetKind: "segment", targetId: group.id, segmentId: group.segmentId || undefined, clipIndex: production.draft.clipGroups.indexOf(group) + 1, title: node.title || group.id };
     const frame = Object.entries(production.draft.keyframes).find(([, item]) => item.nodeId === node.id);

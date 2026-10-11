@@ -7,7 +7,7 @@ import { setImmediate as immediate } from "node:timers/promises";
 import { ProductionCompilationService, productionCompilationBusy } from "./compilation.js";
 const director: any = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "1" }, source: { brief: "source" }, sourceHash: "b".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
 
-test("active Python audit preserves standalone-error provenance through the shared compiler adapter", async t => {
+test("active Python audit preserves standalone quality-warning provenance through the shared compiler adapter", async t => {
     const { resolveAchengEngine, compileAchengDirector, achengEngineIdentity } = await import("@basketikun/canvas-agent/skills/acheng");
     const { canonicalProduction } = await import("@basketikun/canvas-agent/drama/production-contract");
     const crypto = await import("node:crypto");
@@ -28,12 +28,18 @@ test("active Python audit preserves standalone-error provenance through the shar
     const error = compiled.diagnostics.find(item => item.code === "PROMPT_EXTERNAL_CONTEXT" && item.shotId === shot.id);
     assert.ok(error, JSON.stringify(compiled.diagnostics));
     assert.equal(error.path, `director.source.shots.${shot.id}.visual`);
-    assert.equal(error.targetId, segment.id); assert.equal(error.origin, "source"); assert.equal(error.blocksCompilation, true);
+    assert.equal(error.targetId, segment.id); assert.equal(error.origin, "source");
+    assert.equal(error.severity, "warning"); assert.equal(error.blocksCompilation, false);
+    assert.deepEqual(error.blockingActions, []);
 });
 function setup(t: any, compiler: any) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "compilation-jobs-")); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
     let current: any = { revision: 1, draft: { director: structuredClone(director) } };
-    const service: any = { get: () => structuredClone(current), verifyCompilationBindings: () => {}, compilationReferenceFiles: () => ({}), edit: (_id: string, input: any) => {
+    const service: any = { get: () => structuredClone(current), verifyCompilationBindings: () => {}, compilationReferenceFiles: () => ({}),
+        resolveSubjectPictureInputs: (_id: string, input: any) => structuredClone(input), preflight: (_id: string, request: any) => request.action === "compile" &&
+            !request.request?.director?.source?.asset_cards?.length && !request.request?.director?.source?.segments?.length
+            ? { valid: false, diagnostics: [{ code: "COMPILE_STAGE_NOT_READY", path: "director.source", message: "incomplete", severity: "error" }] }
+            : { valid: true, diagnostics: [] }, edit: (_id: string, input: any) => {
         if (current.revision !== input.expectedRevision) throw new Error("conflict"); current = { ...current, revision: 2, draft: { director: input.ops[0].director } }; return structuredClone(current);
     } };
     return { root, service, compilations: new ProductionCompilationService(service, root, compiler), change: () => { current.revision++; } };
@@ -60,7 +66,23 @@ test("lost response and identical submissions retain one compiler invocation and
     assert.equal(JSON.stringify(completed).includes('"prompt"'), false);
     f.compilations.apply("e", "owner", completed.preparedId);
     assert.equal(f.compilations.getCompilation("e", "owner", "op").application.revision, 2);
+    assert.equal((f.compilations.enqueue("e", "owner", "op", 1) as any).replayed, true, "a lost response can recover the applied result with the original request revision");
     assert.throws(() => f.compilations.getCompilation("e", "other", "op"), /不属于/);
+});
+test("a required image that is not archived stays generation-blocking but does not block draft compilation", async t => {
+    const f = setup(t, result);
+    f.service.resolveSubjectPictureInputs = (_id: string, input: any, _targets: string[] | undefined, _forCompilation: boolean, _previewSubjects: string[] | undefined, diagnostics?: any[]) => {
+        diagnostics?.push({ code: "SUBJECT_IMAGE_RESULT_MISSING", path: "shots.S1.keyframes.KF1.selection", targetId: "SEG1",
+            message: "图片尚未归档", severity: "warning", blocksCompilation: false, blockingActions: ["generate"] });
+        return structuredClone(input);
+    };
+    f.compilations.enqueue("e", "owner", "draft-with-missing-keyframe", 1);
+    const completed: any = await done(f.compilations, "draft-with-missing-keyframe");
+    assert.equal(completed.status, "succeeded");
+    const report: any = f.compilations.getCompilation("e", "owner", "draft-with-missing-keyframe", "diagnostics", 0, 10);
+    assert.ok(report.items.some((item: any) => item.code === "SUBJECT_IMAGE_RESULT_MISSING" && item.targetId === "SEG1" && item.blockingActions?.includes("generate")));
+    f.compilations.apply("e", "owner", completed.preparedId);
+    assert.equal(f.compilations.getCompilation("e", "owner", "draft-with-missing-keyframe").application.revision, 2);
 });
 test("failed compilation is persistent and is not rerun by queries", async t => {
     let calls = 0; const f = setup(t, () => { calls++; throw new Error("Python exited"); });

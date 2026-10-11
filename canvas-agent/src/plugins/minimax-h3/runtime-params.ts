@@ -18,6 +18,7 @@ export function resolveH3Runtime(segment: Record<string, unknown>, override: Rec
             if (source === 'defaults' && ['motionContextEnabled', 'tailFrameContinuation'].includes(key)) return false;
             const projection = record(segment.productionClipProjection);
             const explicitStyle = key === 'styleTemplateId' && source === 'clip' && (!segment.productionClipProjection || projection.styleTemplateDeclared === true);
+            if (key === 'styleTemplateId' && source === 'clip' && Boolean(segment.productionClipProjection) && projection.styleTemplateDeclared === false && layer[key] === null) return false;
             return !(useDefaults && !plannedKeys.has(key) && !explicitStyle && !manualKeys.has(key) && ['clip', 'node', 'nodeParams'].includes(source)) && layer[key] !== undefined && (key === 'styleTemplateId' || layer[key] !== null);
         });
         if (selected) { values[key] = selected[1][key]; sources[key] = selected[0]; }

@@ -215,7 +215,8 @@ export function writeDramaAsset(db: BackendDatabase, asset: Asset, command: Asse
             if (!local) throw new Error("来源节点不存在");
             const episode = db.getDramaEpisodeByCanvasId(command.canvasSource.projectId);
             if (command.canvasSource.projectId !== source.sourceProjectId && episode?.dramaId !== source.dramaId) throw new Error("来源节点不属于目标剧目");
-            if (local.metadata?.sharedAssetOrigin || local.metadata?.productionAssetId || local.metadata?.productionShotId || local.metadata?.productionScriptId) throw new Error("正式制作节点请沿共享接入和采用入口操作");
+            if (local.metadata?.sharedAssetOrigin) throw new Error("已批准共享引用请沿正式采用入口更新版本");
+            if (local.metadata?.productionScriptId) throw new Error("正式剧本节点请沿剧本编辑入口保存；可将独立文本素材加入资产库");
             if (local.metadata?.sharedAssetReference?.assetId && local.metadata.sharedAssetReference.assetId !== asset.id) throw new Error("引用不能更新其他共享资产");
         }
         const sharedProject = db.getCanvasProject(source.sourceProjectId)!;

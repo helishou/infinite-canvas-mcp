@@ -1,3 +1,4 @@
+import type { ProductionEntityBinding } from "@basketikun/canvas-agent/drama/production-contract";
 import type { SharedAssetReference } from "@basketikun/canvas-agent/shared-asset-reference";
 import type { CanvasGenerationMode } from "@basketikun/canvas-agent/generation-contract";
 import type { ProductionImageInput } from "@basketikun/canvas-agent/reference-contract";
@@ -95,6 +96,7 @@ export type CanvasNodeMetadata = {
     sharedAssetReference?: SharedAssetReference;
     sharedLibraryAssetId?: string;
     productionImageInput?: ProductionImageInput;
+    productionEntity?: ProductionEntityBinding;
     productionLayoutUnitId?: string;
     productionSceneId?: string;
     /** Formal screenplay block and scene identities projected by Backend. */

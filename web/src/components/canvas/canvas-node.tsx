@@ -1534,7 +1534,7 @@ function PropNodeContent({ node, theme, scale }: NodeContentRendererProps) {
 function CharacterNodeContent(props: NodeContentRendererProps) {
     const { node, theme, scale, batchExpanded, onToggleBatch, onSetBatchPrimary, onDeleteBatchImage, onViewBatchImage } = props;
     const { t } = useTranslation();
-    const images = node.metadata?.characterImages || [];
+    const images = useMemo(() => node.metadata?.characterImages || [], [node.metadata?.characterImages]);
     const primaryIndex = Math.min(Math.max(node.metadata?.characterPrimaryIndex || 0, 0), Math.max(images.length - 1, 0));
     const primary = images[primaryIndex];
     const voiceUrl = node.metadata?.characterVoiceUrl || "";

@@ -67,7 +67,8 @@ test("environment and asset-card patches update compiler source without changing
     assert.deepEqual(director.source.asset_plan, [{ asset_id: "YARD", version: "v1" }]);
     assert.notEqual(director.sourceHash, beforeHash);
     assert.throws(() => applyDirectorSourcePatch(director, "environment", "missing", { description: "Missing" }), /不存在/);
-    assert.throws(() => applyDirectorSourcePatch(director, "asset_card", "YARD", { references: [] }), /不允许/);
+    applyDirectorSourcePatch(director, "asset_card", "YARD", { references: [] });
+    assert.deepEqual((director.source.asset_cards as any[])[0].references, []);
 });
 
 test("video aspect kickoff distinguishes an explicit canvas-inherit choice from an unanswered setting", () => {

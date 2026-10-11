@@ -130,7 +130,62 @@ test('batch executes saved inputs, continues an independent target after failure
     await new EpisodeProductionRunner(f.service, f.stores, generation).runBatch('ep', 'run');
     assert.equal(calls.length, 2); assert.equal(calls[0].prompt, 'My image prompt');
     const batch = f.service.getBatch('ep', 'run')!;
-    assert.equal(batch.status, 'failed'); assert.equal(batch.submitted[1].status, 'succeeded', batch.error || ''); assert.deepEqual(batch.submitted.map(item => item.status), ['failed', 'succeeded']);
+    assert.equal(batch.status, 'failed');
+    assert.equal(batch.submitted.find(item => item.id === 'asset:A')?.status, 'failed', batch.error || '');
+    assert.equal(batch.submitted.find(item => item.id === 'segment:G')?.status, 'succeeded', batch.error || '');
+});
+
+test('automatic batch overlaps independent images and preserves a successful target when its peer fails', async t => {
+    const f = fixture(t);
+    const production = f.service.get('ep');
+    production.draft.director!.assets.B = { nodeId: 'image-b', version: 'v1', status: 'planned' };
+    f.db.db.prepare("UPDATE episode_productions SET draft_json=? WHERE episode_id='ep'").run(JSON.stringify(production.draft));
+    f.stores.projects.applyOperations('canvas', undefined, [{ type: 'add_node', id: 'image-b', nodeType: 'image', title: 'Image B', position: { x: 500, y: 0 }, width: 300, height: 220, metadata: { prompt: 'Independent image B', model: 'test-image' } }]);
+
+    let activeStarts = 0, maxActiveStarts = 0;
+    const generation = { start: async (command: any) => {
+        activeStarts++; maxActiveStarts = Math.max(maxActiveStarts, activeStarts);
+        await new Promise(resolve => setTimeout(resolve, 20));
+        const task = f.stores.tasks.create(command.idempotencyKey, 'canvas-image', command, {});
+        if (command.nodeId === 'image-b') {
+            f.stores.tasks.update(task.id, { status: 'failed', error: 'mock failure' });
+            activeStarts--;
+            return { taskId: task.id };
+        }
+        const storageKey = `generated-${command.nodeId}`;
+        const filePath = path.join(f.directory, `${command.nodeId}.png`);
+        fs.writeFileSync(filePath, 'generated-image');
+        f.db.upsertMediaFile({ storageKey, filePath, mimeType: 'image/png', bytes: 15, width: 8, height: 8, durationMs: null, createdAt: new Date().toISOString() });
+        f.stores.tasks.update(task.id, { status: 'succeeded', outputs: [{ storageKey }], result: { media: [{ storageKey }] } });
+        activeStarts--;
+        return { taskId: task.id };
+    } } as unknown as CanvasGenerationService;
+
+    const batch = f.service.startBatch('ep', { runId: 'parallel-images', idempotencyKey: 'parallel-images', expectedRevision: 0, targets: ['asset:A', 'asset:B'] });
+    await new EpisodeProductionRunner(f.service, f.stores, generation).runBatch('ep', batch.runId);
+    const completed = f.service.getBatch('ep', batch.runId)!;
+    assert.equal(maxActiveStarts, 2, 'independent ready images should be submitted without waiting for one another');
+    assert.equal(completed.status, 'failed');
+    assert.deepEqual(new Set(completed.submitted.map(item => item.id)), new Set(['asset:A', 'asset:B']));
+    assert.equal(completed.submitted.find(item => item.id === 'asset:A')?.status, 'succeeded');
+    assert.equal(completed.submitted.find(item => item.id === 'asset:B')?.status, 'failed');
+    assert.equal(f.service.get('ep').draft.director!.assets.A.status, 'generated');
+    assert.equal(f.service.get('ep').draft.director!.assets.B.status, 'planned');
+});
+
+test('production H3 work shares one process-wide lane across run owners', async t => {
+    const f = fixture(t);
+    const firstRunner: any = new EpisodeProductionRunner(f.service, f.stores, {} as CanvasGenerationService);
+    const secondRunner: any = new EpisodeProductionRunner(f.service, f.stores, {} as CanvasGenerationService);
+    let active = 0, maxActive = 0;
+    const execute = (runner: any) => runner.withProductionH3Lane(async () => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await new Promise(resolve => setTimeout(resolve, 10));
+        active--;
+    });
+    await Promise.all([execute(firstRunner), execute(secondRunner)]);
+    assert.equal(maxActive, 1);
 });
 
 test('migration adds nullable frozen snapshots, backs up persisted databases, and preserves old batches', t => {

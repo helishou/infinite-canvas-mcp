@@ -116,6 +116,38 @@ test("invalid source rolls back first shared canvas creation and publishes no co
     } finally { db.close(); }
 });
 
+test("converted production character and scene media can join the library without approving or rewriting production ownership", () => {
+    for (const kind of ["character", "scene"]) {
+        const { db, asset } = fixture();
+        try {
+            db.applyCanvasProjectOperations("a", undefined, [{ type: "update_node", id: "character", patch: { type: kind }, metadata: { productionAssetId: "ASSET_EXISTING", productionShotId: "shot-purpose", generatedImageHistory: [{ taskId: "original-task", storageKey: "a" }], ...(kind === "scene" ? { sceneImage: { url: "/media/a", storageKey: "a" }, sceneName: "场景", sceneDescription: "环境" } : {}) } }], { runtimeWrite: true });
+            const input = { ...asset, kind, data: kind === "scene" ? { name: "场景", description: "环境", image: { url: "/media/a", storageKey: "a" } } : asset.data };
+            const saved = db.upsertAsset(input, { operationId: `join-${kind}`, canvasSource: { projectId: "a", nodeId: "character" } });
+            const source = sourceOf(saved)!;
+            const reference = (db.getCanvasProject("a")!.nodes as any[])[0];
+            assert.equal(reference.metadata.productionAssetId, "ASSET_EXISTING");
+            assert.equal(reference.metadata.generatedImageHistory[0].taskId, "original-task");
+            assert.equal(reference.metadata.sharedAssetReference.assetId, saved.id);
+            const canonical = (db.getCanvasProject(source.sourceProjectId)!.nodes as any[]).find(n => n.id === source.sourceNodeId);
+            assert.equal(canonical.type, kind);
+            assert.equal(canonical.metadata.productionAssetId, undefined);
+            assert.equal(db.db.prepare("SELECT COUNT(*) AS count FROM drama_asset_versions").get()!.count, 0);
+        } finally { db.close(); }
+    }
+});
+
+test("formal scripts and pinned approved references remain protected from generic asset promotion", () => {
+    const { db, asset } = fixture();
+    try {
+        for (const metadata of [{ productionScriptId: "script-owner" }, { sharedAssetOrigin: { approvedId: "approved-version" } }]) {
+            db.applyCanvasProjectOperations("a", undefined, [{ type: "update_node", id: "character", metadata, metadataDelete: ["productionScriptId", "sharedAssetOrigin"].filter(key => !(key in metadata)) }], { runtimeWrite: true });
+            assert.throws(() => db.upsertAsset(asset, { canvasSource: { projectId: "a", nodeId: "character" } }), /正式剧本|已批准共享引用/);
+            assert.equal(db.getAsset(asset.id), null);
+            assert.equal(db.listCanvasProjects().length, 2);
+        }
+    } finally { db.close(); }
+});
+
 test("source changes refresh character selections and ordinary H3 consumers without modifying snapshots", () => {
     const { db, asset } = fixture();
     try {

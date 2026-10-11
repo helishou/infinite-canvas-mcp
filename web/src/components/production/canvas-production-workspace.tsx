@@ -4,12 +4,11 @@ import { App, Button, Dropdown, Input, Modal, Select, Tag } from "antd";
 import { ArrowLeft, Check, ChevronDown, Clapperboard, Pencil, Search, Settings2 } from "lucide-react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { productionSceneEntries } from "@basketikun/canvas-agent/drama/production-contract";
-import { fetchProductionCanvasContext, fetchBackendDramaEpisodes, ensureSharedAssetCanvas, fetchProductionSharedAssets, retryProductionSharedUpdate,
+import { productionSceneEntries, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
+import { fetchProductionCanvasContext, fetchBackendDramaEpisodes, ensureEpisodeCanvas, ensureSharedAssetCanvas, fetchProductionSharedAssets, retryProductionSharedUpdate,
     fetchBackendCanvasFolders, type ApprovedSharedAsset, type SharedAssetUpdate, type DramaEpisode } from "@/services/backend-api";
 import { productionTarget } from "@/lib/production-navigation";
 import { MediaImage } from "@/components/media/media-image";
-import { dramaWorkbenchPath } from "@/pages/drama/workbench-entry";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { useAgentStore } from "@/stores/use-agent-store";
@@ -17,7 +16,7 @@ import { useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { backendMediaUrl } from "@/services/backend-api";
+import { backendMediaUrl, fetchProductionSceneArchives, type ProductionSceneArchive } from "@/services/backend-api";
 
 export function useCanvasProductionContext(projectId: string) {
     const { search: query } = useCanvasRoute();
@@ -81,9 +80,14 @@ export function CanvasProductionToolbar() {
         useAgentStore.getState().closePanel();
         try {
             if (id === "shared") {
-                const { project } = await ensureSharedAssetCanvas(context.dramaId!);
-                navigate(`/canvas/${encodeURIComponent(String(project.id))}`);
-            } else navigate(dramaWorkbenchPath(context.dramaId!, id));
+                const canvasId = context.sharedAssetCanvasId || String((await ensureSharedAssetCanvas(context.dramaId!)).project.id);
+                navigate(`/canvas/${encodeURIComponent(canvasId)}`);
+            } else {
+                const episode = episodes.find(episode => episode.id === id);
+                const canvasId = episode?.canvasId || String((await ensureEpisodeCanvas(id)).project.id);
+                if (!episode?.canvasId) setEpisodes(current => current.map(episode => episode.id === id ? { ...episode, canvasId } : episode));
+                navigate(`/canvas/${encodeURIComponent(canvasId)}`);
+            }
         } catch (error) { message.error(String(error)); }
         finally { setSwitching(false); }
     };
@@ -122,7 +126,16 @@ export function ProductionDirectory({ filter = "", onLocate }: { filter?: string
     const { navigate } = useCanvasRoute();
     const { search: query } = useCanvasRoute();
     const busy = useProductionWorkspaceStore(state => state.commandBusy);
-    const canvasNodes = useCanvasStore(state => state.projects.find(project => project.id === context?.canvasId)?.nodes);
+    const { modal } = App.useApp();
+    const canvasProject = useCanvasStore(state => state.projects.find(project => project.id === context?.canvasId));
+    const canvasNodes = canvasProject?.nodes;
+    const [archives, setArchives] = useState<ProductionSceneArchive[]>([]);
+    useEffect(() => {
+        let active = true;
+        if (!context?.owner || !production?.draft.director) { setArchives([]); return () => { active = false; }; }
+        void fetchProductionSceneArchives(productionTarget(context.owner)).then(result => { if (active) setArchives(result.archives); }).catch(() => { if (active) setArchives([]); });
+        return () => { active = false; };
+    }, [context?.owner?.kind, context?.owner?.id, production?.revision]);
     if (!context?.owner || !production?.draft.director) return <div className="p-3 text-xs">{t("productionCanvas.ready")}</div>;
     const director = production.draft.director;
     const scenes = productionSceneEntries(director.source);
@@ -142,6 +155,14 @@ export function ProductionDirectory({ filter = "", onLocate }: { filter?: string
         else if (edit || !nodeId || kind === "story") { useProductionWorkspaceStore.getState().setPanelTab("object"); useAgentStore.getState().openPanel(); }
     };
     const prepare = (id: string) => { onLocate?.(); window.dispatchEvent(new CustomEvent("production-workspace-command", { detail: { owner: context.owner, command: { kind: "prepare", targets: [id] } } })); };
+    const submitEdit = (op: ProductionOperation) => {
+        if (!canvasProject) return;
+        onLocate?.();
+        window.dispatchEvent(new CustomEvent("production-workspace-command", { detail: { owner: context.owner, command: { kind: "edit", ops: [op] } } }));
+    };
+    const confirmArchive = (sceneId: string, title: string) => modal.confirm({ title: t("productionCanvas.archiveSceneConfirm", { scene: title }), okText: t("productionCanvas.archiveScene"), okType: "danger", cancelText: t("common.cancel"), onOk: () => submitEdit({ type: "archive_director_scene", sceneId, expectedCanvasRevision: Number(canvasProject?.revision || 0), confirmed: true }) });
+    const confirmRestore = (archive: ProductionSceneArchive) => modal.confirm({ title: t("productionCanvas.restoreSceneConfirm", { scene: archive.sceneTitle }), okText: t("productionCanvas.restoreScene"), cancelText: t("common.cancel"), onOk: () => submitEdit({ type: "restore_director_scene", archiveId: archive.archiveId, expectedCanvasRevision: Number(canvasProject?.revision || 0) }) });
+    const confirmClipDelete = (segmentId: string, title: string) => modal.confirm({ title: t("productionCanvas.deleteClipConfirm", { clip: title }), okText: t("productionCanvas.deleteClip"), okType: "danger", cancelText: t("common.cancel"), onOk: () => submitEdit({ type: "delete_director_clip", segmentId, expectedCanvasRevision: Number(canvasProject?.revision || 0), confirmed: true }) });
     const row = (kind: string, id: string, title: string, workspace: string, prepareId?: string) => {
         if (filter.trim() && !`${id} ${title}`.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase())) return null;
         const status = readiness?.targets.find(item => item.id === `${kind === "shot" ? "frame" : kind}:${id}`)?.status;
@@ -149,6 +170,7 @@ export function ProductionDirectory({ filter = "", onLocate }: { filter?: string
             <button type="button" className="min-w-0 flex-1 truncate rounded px-2 py-1 text-left text-xs hover:bg-black/5 dark:hover:bg-white/10" aria-current={query.get("target") === `${kind}:${id}` ? "true" : undefined} onClick={() => select(workspace, kind, id)}>{title}</button>
             {status && <span className="text-[10px] opacity-60">{t(`director.workspace.targetStatus.${status}`, { defaultValue: status })}</span>}
             {prepareId && <Button size="small" type="text" disabled={busy} onClick={() => void prepare(prepareId)}>{t("productionCanvas.prepare")}</Button>}
+            {kind === "segment" && <Button size="small" type="text" danger disabled={busy || !canvasProject} onClick={() => confirmClipDelete(id, title)}>{t("productionCanvas.deleteClip")}</Button>}
             {!prepareId && kind !== "scene" && <Button size="small" type="text" icon={<Pencil className="size-3" />} aria-label={t("productionCanvas.editNamed", { name: title })} onClick={() => select(workspace, kind, id, true)} />}
         </div>;
     };
@@ -159,11 +181,20 @@ export function ProductionDirectory({ filter = "", onLocate }: { filter?: string
             {plan.filter(asset => !Object.values(director.shotInputs).some(input => input.keyframeAssetId === String(asset.asset_id || asset.id))).map(asset => { const id = String(asset.asset_id || asset.id); return row("asset", id, String(asset.asset_name || asset.name || asset.title || id), "assets", director.assets[id]?.nodeId ? undefined : `asset:${id}`); })}
         </details>
         {scenes.map((scene, index) => <details key={scene.id} open><summary className="px-2 py-2 text-xs font-medium">{index + 1}. {scene.title}
-            <Button type="text" size="small" disabled={busy} onClick={event => { event.preventDefault(); event.stopPropagation(); window.dispatchEvent(new CustomEvent("production-workspace-command", { detail: { owner: context.owner, command: { kind: "arrange", sceneId: scene.id } } })); }}>{t("productionCanvas.arrange")}</Button></summary>
+            <Button type="text" size="small" disabled={busy} onClick={event => { event.preventDefault(); event.stopPropagation(); window.dispatchEvent(new CustomEvent("production-workspace-command", { detail: { owner: context.owner, command: { kind: "arrange", sceneId: scene.id } } })); }}>{t("productionCanvas.arrange")}</Button>
+            <Button type="text" size="small" danger disabled={busy || !canvasProject} onClick={event => { event.preventDefault(); event.stopPropagation(); confirmArchive(scene.id, scene.title); }}>{t("productionCanvas.archiveScene")}</Button></summary>
             {row("scene", scene.id, t("productionCanvas.script"), "story", canvasNodes?.some(node => node.type === "text" && node.metadata?.productionScriptSceneId === scene.id) ? undefined : `scene:${scene.id}`)}
             {scene.shotIds.map(id => row("shot", id, production.draft.shots.find(shot => shot.id === id)?.title || id, "shots", director.shotInputs[id]?.keyframeAssetId && !director.assets[director.shotInputs[id].keyframeAssetId!]?.nodeId ? `frame:${id}` : undefined))}
             {production.draft.clipGroups.filter(group => group.shotIds.some(id => scene.shotIds.includes(id))).map(group => row("segment", group.id, t("productionCanvas.clip", { number: production.draft.clipGroups.indexOf(group) + 1 }), "production", `segment:${group.id}`))}
         </details>)}
+        {archives.some(archive => !filter.trim() || `${archive.sceneId} ${archive.sceneTitle}`.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase())) && <details className="mt-2" data-production-archived-scenes>
+            <summary className="px-2 py-2 text-xs font-medium">{t("productionCanvas.archivedScenes")}</summary>
+            {archives.filter(archive => !filter.trim() || `${archive.sceneId} ${archive.sceneTitle}`.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase())).map(archive => <div key={archive.archiveId} className="flex min-w-0 items-center gap-1 py-1 text-xs">
+                <span className="min-w-0 flex-1 truncate px-2" title={archive.sceneId}>{archive.sceneTitle}</span>
+                <span className="text-[10px] opacity-60">{t("productionCanvas.archiveCounts", { shots: archive.shotCount, clips: archive.clipCount, expires: new Date(archive.expiresAt).toLocaleString() })}</span>
+                <Button size="small" type="text" disabled={busy || !canvasProject} onClick={() => confirmRestore(archive)}>{t("productionCanvas.restoreScene")}</Button>
+            </div>)}
+        </details>}
         {!scenes.length && production.draft.clipGroups.map((group, index) => row("segment", group.id, t("productionCanvas.clip", { number: index + 1 }), "production", `segment:${group.id}`))}
         {row("story", "advanced", t("productionCanvas.advanced"), "advanced")}
     </div>;

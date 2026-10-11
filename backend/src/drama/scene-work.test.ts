@@ -201,7 +201,7 @@ test("incomplete kickoff settings persist as a draft and only confirmed settings
     const draft = dramaProductionPlanSchema.parse({ parallelScenes: true, requirements: "unfinished planning" });
     db.upsertCanvasFolder({ ...folder, outline: "confirmed story", productionPlan: draft, expectedPlanningUpdatedAt: folder.updatedAt || folder.createdAt });
     const saved = db.listCanvasFolders().find(item => item.id === "drama")!;
-    assert.equal(saved.productionPlan?.parallelScenes, true); assert.equal(saved.productionPlan?.reviewPolicy, undefined); assert.equal(saved.productionPlan?.confirmedAt, undefined);
+    assert.equal(saved.productionPlan?.parallelScenes, true); assert.equal(saved.productionPlan?.reviewPolicy?.mode, "none"); assert.equal(saved.productionPlan?.confirmedAt, undefined);
     db.upsertDramaEpisode({ id: "unconfirmed", dramaId: "drama", episodeNumber: 2, title: "Unconfirmed", synopsis: "" });
     assert.equal(Boolean(service.get("unconfirmed").draft.settings.parallelScenes), false, "unfinished plans must not enable a new production");
     const confirmed = { ...draft, storyboardImageMode: "skip" as const, reviewPolicy: { mode: "automatic" as const, shared: "automatic" as const, scene: "automatic" as const }, confirmedOutline: saved.outline!, confirmedAt: new Date().toISOString() };
@@ -229,6 +229,26 @@ test("scene HTTP start returns a formal receipt and replays a lost response with
     assert.equal(Object.keys(service.get("ep").draft.director!.workflow.sceneWorks!).length, 2); assert.equal(service.get("ep").revision, revision);
     const collision = await submit({ ...body, generateMedia: true }); assert.equal(collision.status, 400);
     assert.match((await collision.json()).error, /IDEMPOTENCY_CONFLICT/);
+});
+
+test("none review policy starts scene work without shared media or a review-agent call", async t => {
+    const { service, director, root } = fixture(t);
+    director.source.asset_plan = [{ id: "COMMON", kind: "prop", canvas_scope: "shared", version: "v1" }];
+    director.sourceHash = compilationHash(director.source);
+    service.edit("ep", { operationId: "seed-no-review", expectedRevision: service.get("ep").revision,
+        ops: [{ type: "set_director_production", director }, { type: "set_settings", patch: { reviewPolicy: { mode: "none", shared: "none", scene: "none" } } }] });
+    let calls = 0;
+    const coordinator = new SceneWorkCoordinator(service, new ProductionCompilationService(service, path.join(root, "scene-none")), undefined, "ep", { run: async request => {
+        calls++;
+        assert.notEqual(request.review, true);
+        throw new Error("stop after confirming source work started");
+    } });
+    const response = coordinator.start("ep", { operationId: "start-no-review", expectedRevision: service.get("ep").revision, sceneIds: ["A"], generateMedia: false });
+    assert.equal(response.production.draft.settings.reviewPolicy.mode, "none");
+    assert.equal(response.sharedReview.media.length, 0);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls, 1);
+    assert.equal(service.get("ep").draft.director!.workflow.sceneWorks![Object.keys(service.get("ep").draft.director!.workflow.sceneWorks!)[0]].stage, "create");
 });
 
 test("scene HTTP review survives unrelated global revisions while retaining its frozen media identity", async t => {

@@ -55,6 +55,29 @@ test("V2 frame-only scope retains replay binding declarations and flat-block cov
     assert.equal(checked.success, true, checked.success ? "" : JSON.stringify(checked.error.issues));
     assert.deepEqual(d, before);
 });
+
+test("V2 Clip scope retains a registered dialogue speaker even without a visual Subject usage", () => {
+    const d = scopedDirector();
+    d.source.prompt_assembly = { version: 2 };
+    d.source.character_registry = [{ id: "LIN", name: "林澄" }];
+    d.source.scene_registry = [{ id: "ROOM", name: "厨房" }];
+    d.source.script_scenes = [{ id: "A", scene_id: "ROOM", blocks: [{ id: "B1", kind: "action", text: "林澄走进厨房。" }] }];
+    d.source.subject_registry = [{ id: "SUB_LIN", kind: "character", entityRef: { ownerKind: "episode", ownerId: "EP", kind: "character", id: "LIN" }, pictureBindings: [] }];
+    d.source.shots = [{ id: "SA", source_scene_id: "A", scene_id: "ROOM", timeline_id: "T", story_order: 0, duration_frames: 96,
+        visual: "林澄走进厨房，低声呼唤阿团。", camera: { framing: "MS", attention_subject_ids: ["SUB_LIN"], editorial_reason: "交代林澄发现空碗。" },
+        subject_usages: [], keyframes: [], utterance_refs: [{ utteranceId: "U1", role: "speaker", localStartFrame: 12, localEndFrame: 60, textStart: 0, textEnd: 3 }] }];
+    d.source.segments = [{ id: "GA", shot_ids: ["SA"], mode: "T2VA", mode_lock: "T2VA", mode_selection_reason: "No media references are selected for this text-to-video Clip." }];
+    d.source.utterances = [{ id: "U1", speakerSubjectId: "SUB_LIN", text: "阿团？", start: { shotId: "SA", localFrame: 12 }, end: { shotId: "SA", localFrame: 60 } }];
+    d.source.ledger = { contract_version: 2, facts: [], timelines: [{ id: "T" }], initial: [], events: [], requirements: [], coverage: [] };
+    d.shotInputs = { SA: { keyframePolicy: "none" } };
+    d.sourceHash = compilationHash(d.source);
+
+    const scoped = compilationScopeInput(d, { targetIds: ["GA"] });
+    assert.deepEqual((scoped.director.source.subject_registry as any[]).map(subject => subject.id), ["SUB_LIN"]);
+    const checked = directorProductionSchema.safeParse(scopedCompilerInput(scoped.director, { targetIds: ["GA"], output: "selected" }));
+    assert.equal(checked.success, true, checked.success ? "" : JSON.stringify(checked.error.issues));
+});
+
 test("scoped ledger retains coverage using the authored source anchor", () => {
     const d = scopedDirector();
     (d.source.script_scenes as any[])[0].blocks = [{ id: "A1", kind: "action", text: "Enter" }];
@@ -142,5 +165,6 @@ test("engine changes retain legacy scoped receipt validity without accepting cha
     assert.equal(currentCompilationArtifact(director, artifact), true);
     assert.deepEqual(artifact.receipt, originalReceipt);
     (director.source.shots as any[])[0].visual = "changed relevant action";
+    director.sourceHash = compilationHash(director.source);
     assert.equal(currentCompilationArtifact(director, artifact), false);
 });

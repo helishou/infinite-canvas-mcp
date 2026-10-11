@@ -155,6 +155,22 @@ test("H3：仅编辑 segment A 的 prompt，只产出一条 update_h3_segment，
     assert.deepEqual(ops[0].patch, { prompt: "新 A" });
 });
 
+test("正式制作 Clip 的分镜时长是 Shot 源稿投影，不进入通用画布操作", () => {
+    const base = makeProject([makeH3Node("h3-1", [
+        { id: "formal", title: "A", storyboardDurations: { shot: 4 }, productionClipProjection: { targetId: "clip-1" } },
+        { id: "ordinary", title: "B", storyboardDurations: { board: 4 } },
+    ])]);
+    const next = makeProject([makeH3Node("h3-1", [
+        { id: "formal", title: "A changed", storyboardDurations: { shot: 5 }, productionClipProjection: { targetId: "clip-1" } },
+        { id: "ordinary", title: "B", storyboardDurations: { board: 5 } },
+    ])]);
+
+    const operations = diffCanvasProject(base, next).filter(operation => operation.type === "update_h3_segment");
+    const byId = new Map(operations.map(operation => [operation.segmentId, operation.patch as Record<string, unknown>]));
+    assert.deepEqual(byId.get("formal"), { title: "A changed" });
+    assert.deepEqual(byId.get("ordinary"), { storyboardDurations: { board: 5 } });
+});
+
 test("H3：编辑两个不同段，拆成两条 update_h3_segment；节点级 metadata 走 update_node", () => {
     const base = makeProject([makeH3Node("h3-1", [
         { id: "s1", prompt: "A", status: "idle" },

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { directorModules, directorProductionSchema } from "@basketikun/canvas-agent/drama/production-contract";
-import { repartitionDirectorClips } from "./clip-storyboard.js";
+import { replaceDirectorClipStoryboard, repartitionDirectorClips } from "./clip-storyboard.js";
 
 function shot(id: string, storyOrder: number, timelineId = "main") {
     return { id, timeline_id: timelineId, story_order: storyOrder, duration_frames: 48, visual: id, subject_usages: [], keyframes: [], utterance_refs: [] };
@@ -42,6 +42,22 @@ test("different mode-selection prose does not create an execution-profile confli
     repartitionDirectorClips(value, { shotIds: ["S1", "S2", "S3", "S4"], segments: [{ shot_ids: ["S1", "S2", "S3", "S4"] }] });
     assert.equal((value.source.segments as any[]).length, 1);
     assert.equal((value.source.segments as any[])[0].mode, "Ref2VA");
+});
+
+test("Clip storyboard replacement supports Prompt v2 frame durations, reordering, and new Shot IDs", () => {
+    const value = director([
+        { id: "C1", shot_ids: ["S1", "S2"], mode: "Ref2VA", mode_lock: "Ref2VA", styleTemplateId: null },
+        { id: "C2", shot_ids: ["S3", "S4"], mode: "Ref2VA", mode_lock: "Ref2VA", styleTemplateId: null },
+    ]);
+    const original = (value.source as Record<string, any>).shots[1];
+    const priorSegment = (value.source as Record<string, any>).segments[0];
+    replaceDirectorClipStoryboard(value, { segmentId: "C1", segment: { ...priorSegment, shot_ids: ["S2", "S5"] }, shots: [
+        { ...original, id: "S2", duration_frames: 24, story_order: 0 },
+        { ...original, id: "S5", duration_frames: 72, story_order: 1, subject_usages: [], keyframes: [], utterance_refs: [] },
+    ], shotInputs: { S2: { keyframePolicy: "none", assetIds: [] }, S5: { keyframePolicy: "none", assetIds: [] } } });
+    const source = value.source as Record<string, any>;
+    assert.deepEqual(source.segments[0].shot_ids, ["S2", "S5"]);
+    assert.deepEqual(source.shots.map((shot: any) => [shot.id, shot.duration_frames, shot.story_order]), [["S2", 24, 0], ["S5", 72, 1], ["S3", 48, 2], ["S4", 48, 3]]);
 });
 
 test("repartition rejects gaps and requires an explicit existing profile when old Clip settings differ", () => {

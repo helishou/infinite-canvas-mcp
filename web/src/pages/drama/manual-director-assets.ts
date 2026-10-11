@@ -34,7 +34,6 @@ export function createManualDirectorAsset(source: Source, draft: ManualAssetDraf
         purpose: draft.purpose.trim() || draft.description.trim() || name,
         depends_on: [],
         status: "planned",
-        created_by: "manual",
         ...(draft.canvasScope ? { canvas_scope: draft.canvasScope } : {}),
     };
     const assetCard = {
@@ -51,11 +50,17 @@ export function createManualDirectorAsset(source: Source, draft: ManualAssetDraf
         asset_cards: [...records(source.asset_cards), assetCard],
     };
 
+    let registryKind: "character" | "scene" | undefined;
+    let registryEntity: Source | undefined;
     if (draft.kind === "character") {
         const entity = { id: draft.entityId, name, description: draft.description.trim(), appearance: draft.description.trim() };
+        registryKind = "character";
+        registryEntity = entity;
         nextSource.character_registry = [...records(source.character_registry), entity];
     } else if (draft.kind === "scene") {
         const entity = { id: draft.entityId, name, description: draft.description.trim() };
+        registryKind = "scene";
+        registryEntity = entity;
         nextSource.scene_registry = [...records(source.scene_registry), entity];
     }
 
@@ -72,5 +77,18 @@ export function createManualDirectorAsset(source: Source, draft: ManualAssetDraf
     } : undefined;
     if (subject) nextSource.subject_registry = [...records(source.subject_registry), subject];
 
-    return { source: nextSource, assetPlan, assetCard, subject };
+    return { source: nextSource, assetPlan, assetCard, subject, registryKind, registryEntity };
+}
+
+/** Resolve deletion targets by entity identity, never by the display name. */
+export function manualAssetsForSubject(source: Source, subject: Source, owner: { kind: "episode" | "canvas"; id: string }): Source[] {
+    const ref = subject.entityRef;
+    if (!ref || ref.ownerKind !== owner.kind || ref.ownerId !== owner.id) return [];
+    return records(source.asset_plan).filter(plan => {
+        if (plan.created_by !== "manual") return false;
+        const id = String(plan.id || plan.asset_id || "");
+        if (ref.kind === "asset") return plan.kind === "prop" && id === ref.id;
+        return (ref.kind === "character" || ref.kind === "scene") && plan.kind === ref.kind
+            && String(plan.entity_id || plan.entityId || id) === ref.id;
+    });
 }

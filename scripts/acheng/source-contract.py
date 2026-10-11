@@ -42,13 +42,13 @@ def contract():
             "subject_registry": {"type": "array", "items": {"type": "object", "required": ["id", "entityRef", "pictureBindings"]}},
             "utterances": {"type": "array", "items": {"type": "object", "required": ["id", "speakerSubjectId", "text", "start", "end"]}},
             "segments": {"type": "array", "items": {"type": "object", "properties": {
-                "mode": {"type": "string", "enum": list(MODES)}, "mode_lock": {"type": "string", "enum": list(MODES)}, "mode_selection_reason": prose,
+                "mode": {"type": "string", "enum": list(MODES)}, "mode_lock": {"type": "string"}, "mode_selection_reason": {"type": "string"},
                 "subjects": {"type": "array", "items": {"type": "object", "properties": {
                     "label": {"type": "string", "pattern": "^<Subject [1-9][0-9]*>$"},
                     "entity_id": prose, "definition": prose, "retention": prose,
                     "shot_ids": {"type": "array", "minItems": 1, "items": prose}},
                     "required": ["label", "entity_id", "definition", "retention", "shot_ids"]}}
-                }, "required": ["mode", "mode_lock", "mode_selection_reason"]}},
+                }}},
             "shots": {"type": "array", "items": {"type": "object", "properties": {
                 "prompt_contract_version": {"type": "integer", "enum": [2]},
                 "identity_context": {"type": "object", "additionalProperties": prose},
@@ -70,7 +70,7 @@ def contract():
                 }},
             }, "required": ["recipe"]}},
             "style_lock": {"type": "object", "properties": {field: {"type": "array", "minItems": 1, "items": prose} for field in ("preserve_scope", "exclude_scope")}, "required": ["preserve_scope", "exclude_scope"]}}},
-        "relationships": ["segments[].mode_lock must equal mode", "Full creative and file contracts remain owned by Acheng audit/compiler; this schema covers Canvas source fields."],
+        "relationships": ["segments[].mode is an execution mode; missing modes are inferred from selected references, and lock/reason fields are optional metadata.", "Full creative and file contracts remain owned by Acheng audit/compiler; this schema covers Canvas source fields."],
         "templates": {"manual_storyboard_override": {"storyboard_policy": {"version": 1}, "camera": {"framing": "MCU", "attention_subject_ids": ["<registered subject id>"], "editorial_reason": "Read the speaker's strategy or listener's changing response."}}, "segment": {"mode": "Ref2VA", "mode_lock": "Ref2VA", "mode_selection_reason": "Use approved identity and scene references."}, "asset_card": {"recipe": "portrait"}, "style_scope": {"preserve_scope": ["Preserve the approved lighting and palette."], "exclude_scope": ["Do not copy the anchor subject identity."]}},
         "continuityLedger": continuity_v2_contract(),
         "storyboardPolicy": {"version": 1, "defaultForNewProductions": False, "dialogueCoverage": "H3 compilation inserts speaker close-up/reverse coverage from authored dialogue timing and character visibility for legacy and new sources, without changing source Shot/Segment frames or dialogue text.", "manualOverrideCameraFields": ["framing", "attention_subject_ids", "editorial_reason"], "framingValues": list(FRAMINGS), "explicitManualOverride": "When version 1 is declared, enforce manual framing/attention/reason fields and validate only selected Shot/Segment structure in scoped compilation."},
@@ -84,9 +84,9 @@ def contract():
 
 def validate_subject_prompt_v2(source, stage="edit"):
     issues = []
-    def issue(path, message, target=None):
+    def issue(path, message, target=None, severity=None):
         issues.append({"code": "INVALID_SUBJECT_SOURCE", "path": "director.source." + path, "targetId": target,
-                       "message": message, "severity": "warning" if stage == "edit" else "error"})
+                       "message": message, "severity": severity or ("warning" if stage == "edit" else "error")})
     if not isinstance(source, dict) or source.get("prompt_assembly", {}).get("version") != 2:
         issue("prompt_assembly.version", "Subject Prompt v2 must explicitly declare version 2")
         return issues
@@ -152,13 +152,24 @@ def validate_subject_prompt_v2(source, stage="edit"):
                                    if str(purpose) in [str(value) for value in binding.get("defaultFor", [])]
                                    and all(requirements.get(str(key)) == str(value) for key, value in (binding.get("applicableState") or {}).items())]
                         if len(matches) != 1:
-                            issue("shots." + shot_id + ".subject_usages.pictureBindingIds", "Missing or ambiguous default binding for " + str(purpose), shot_id)
+                            # Text prompts remain compilable as drafts while the image is
+                            # unavailable. A real media submission still requires one
+                            # unambiguous binding for each requested reference purpose.
+                            issue("shots." + shot_id + ".subject_usages.pictureBindingIds", "Missing or ambiguous default binding for " + str(purpose), shot_id,
+                                  severity="warning" if stage == "compile" else None)
         for frame in shot.get("keyframes", []) if isinstance(shot.get("keyframes"), list) else []:
             if frame.get("requiredForSubmission") and str(frame.get("id")) not in binding_owner and not frame.get("sourceNode"):
                 issue("shots." + shot_id + ".keyframes", "Required keyframe lacks a smart node binding", shot_id)
     by_segment = {}
     selected_scope = source.get("_canvas_compilation_scope") if isinstance(source.get("_canvas_compilation_scope"), dict) else {}
     wanted = set(map(str, selected_scope.get("targetIds", [])))
+    asset_targets = {
+        str(item.get("asset_id") or item.get("id") or "")
+        for item in source.get("asset_plan", []) if isinstance(item, dict)
+    } | {
+        str(item.get("id") or "")
+        for item in source.get("asset_cards", []) if isinstance(item, dict)
+    }
     partitioned = set()
     for index, segment in enumerate(segments):
         segment_id = str(segment.get("id") or "")
@@ -174,16 +185,23 @@ def validate_subject_prompt_v2(source, stage="edit"):
         partitioned.update(ids)
         by_segment[segment_id] = ids
         mode = str(segment.get("mode") or "")
-        if mode not in MODES or segment.get("mode_lock") != mode or not str(segment.get("mode_selection_reason") or "").strip():
-            issue("segments." + segment_id, "Clip mode must be explicit, locked, and justified", segment_id)
+        if mode and mode not in MODES:
+            issue("segments." + segment_id + ".mode", "Clip generation mode is invalid", segment_id)
+        elif not mode:
+            issue("segments." + segment_id + ".mode", "Clip generation mode will be inferred from selected references", segment_id, severity="warning")
+        if mode and segment.get("mode_lock") and segment.get("mode_lock") != mode:
+            issue("segments." + segment_id + ".mode_lock", "Stored mode lock differs from the selected generation mode", segment_id, severity="warning")
     if not wanted:
         for shot_id in shot_by_id:
             if shot_id not in partitioned:
                 issue("shots." + shot_id, "Shot is not assigned to a Clip", shot_id)
     else:
         for target in wanted:
-            if target not in by_segment:
-                issue("segments", "Selected compilation target is not a Clip: " + target, target)
+            # A mixed compilation scope may contain image-asset outputs as well as
+            # video Clips. Asset targets are valid compile outputs; only Clip IDs
+            # participate in the Shot partition check above.
+            if target not in by_segment and target not in asset_targets:
+                issue("segments", "Selected compilation target is neither a Clip nor a registered asset: " + target, target)
     if ledger.get("contract_version") != 2:
         issue("ledger", "Subject Prompt v2 requires the registered ledger v2")
     else:
@@ -221,6 +239,8 @@ def validate(source, stage="edit"):
     issues = []
     def issue(path, message, target=None, missing=False):
         issues.append({"code": "SOURCE_INCOMPLETE" if missing else "INVALID_SOURCE", "path": "director.source." + path, "message": message, "severity": "warning" if missing and stage == "edit" else "error", **({"targetId": target} if target else {})})
+    def warning(path, message, target=None):
+        issues.append({"code": "INVALID_SOURCE", "path": "director.source." + path, "message": message, "severity": "warning", **({"targetId": target} if target else {})})
     def check(value, schema, path, target=None):
         kind = schema.get("type")
         valid_type = {"object": isinstance(value, dict), "array": isinstance(value, list), "string": isinstance(value, str)}.get(kind, True)
@@ -260,8 +280,15 @@ def validate(source, stage="edit"):
             continuity_issues.append(item)
     if isinstance(source, dict):
         for i, seg in enumerate(source.get("segments", []) if isinstance(source.get("segments", []), list) else []):
-            if isinstance(seg, dict) and "mode_lock" in seg and "mode" in seg and seg["mode_lock"] != seg["mode"]:
-                issue(f"segments.{i}.mode_lock", "mode_lock must equal mode", seg.get("id"))
+            if not isinstance(seg, dict):
+                continue
+            mode = str(seg.get("mode") or "")
+            if mode and mode not in MODES:
+                issue(f"segments.{i}.mode", "Clip generation mode is invalid", seg.get("id"))
+            elif not mode:
+                warning(f"segments.{i}.mode", "Clip generation mode will be inferred from selected references", seg.get("id"))
+            if mode and seg.get("mode_lock") and seg["mode_lock"] != mode:
+                warning(f"segments.{i}.mode_lock", "Stored mode lock differs from the selected generation mode", seg.get("id"))
     return issues + continuity_issues
 
 

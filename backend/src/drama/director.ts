@@ -24,6 +24,13 @@ const prose = (value: unknown) => typeof value === "string" ? value : JSON.strin
 export function projectDirector(data: EpisodeProductionData) {
     const d = data.director; if (!d) return;
     if (directorHash(d.source) !== d.sourceHash) throw new Error("Acheng sourceHash 与完整制作稿不一致");
+    // Any canonical source or compiler-runtime change invalidates a ready receipt.
+    // Retire that derived artifact before projection validates current bindings;
+    // otherwise a normal edit is rejected for an artifact that is stale by definition.
+    d.artifacts = d.artifacts.map(artifact => artifact.status === "ready" &&
+        (!currentCompilationArtifact(d, artifact) || artifact.receipt.promptHash !== artifact.sha256)
+        ? { ...artifact, status: "stale" as const }
+        : artifact);
     const source = d.source;
     if (JSON.stringify(source).includes('"legacy_fixture"')) throw new Error("新制作不能使用 legacy_fixture");
     const fps = Number(source.fps_num || 24) / Number(source.fps_den || 1);

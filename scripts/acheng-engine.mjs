@@ -4,7 +4,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { resolveAchengPython } from '@basketikun/canvas-agent/skills/acheng';
+import { runAchengPython } from '@basketikun/canvas-agent/skills/acheng';
 
 export const UPSTREAM = 'https://github.com/helishou/acheng-director-skill.git';
 const scripts = path.dirname(fileURLToPath(import.meta.url));
@@ -13,6 +13,7 @@ const sha = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
 const read = (p) => JSON.parse(fs.readFileSync(p, 'utf8'));
 const projectOverlayPath = path.join(scripts, 'acheng', 'canvas-kickoff.md');
 const run = (cmd, args, cwd, env) => execFileSync(cmd, args, { cwd, ...(env ? { env: { ...process.env, ...env } } : {}), encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
+const runPython = (args, cwd) => runAchengPython(args, { cwd, encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
 const ignored = new Set(['.git', '__pycache__', '.pytest_cache', 'output']);
 export function applyRuntimeSkillOverlay(directory) {
   const entry = path.join(directory, 'SKILL.md');
@@ -162,11 +163,10 @@ export class AchengEngine {
       const candidate = fs.mkdtempSync(path.join(this.base, 'candidate-'));
       const archive = path.join(candidate, 'upstream.tar');
       const directory = path.join(candidate, 'skill'); fs.mkdirSync(directory);
-      const python = resolveAchengPython();
       if (workingTree) copySourceSnapshot(this.source, directory);
       else {
         run('git', ['archive', '--format=tar', `--output=${archive}`, commit], this.source);
-        run(python, ['-B', '-X', 'utf8', '-c', 'import tarfile,sys; tarfile.open(sys.argv[1]).extractall(sys.argv[2], filter="data")', archive, directory]);
+        runPython(['-B', '-X', 'utf8', '-c', 'import tarfile,sys; tarfile.open(sys.argv[1]).extractall(sys.argv[2], filter="data")', archive, directory], this.source);
       }
       const contracts = read(path.join(scripts, 'acheng', 'contracts.json'));
       const changedContracts = [];
@@ -177,21 +177,21 @@ export class AchengEngine {
       let upstreamFixed = false;
       const changedCodeContracts = changedContracts.filter(file => file !== 'SKILL.md');
       if (changedCodeContracts.length) {
-        const fixes = ['SKILL.md', 'scripts/h3_contract.py', 'scripts/h3_final_format.py', 'scripts/style_anchor.py'];
+        const fixes = ['SKILL.md', 'scripts/h3_contract.py', 'scripts/h3_final_format.py', 'scripts/style_anchor.py', 'scripts/asset_plan.py', 'scripts/compile_h3.py', 'scripts/compile_assets.py', 'scripts/post_hooks.py'];
         if (changedCodeContracts.some(file => !fixes.includes(file))) throw new Error(`Upstream contract changed: ${changedContracts.join(', ')}. Review compatibility before activation. Candidate retained: ${candidate}`);
         // The Canvas contract probe imports the compatibility source schema, so
         // it cannot run against the raw archive. Apply the reviewed overlay and
         // validate the composed candidate below; never infer overlay retirement
         // from a raw upstream-only verification attempt.
       }
-      run(python, ['-B', '-X', 'utf8', path.join(scripts, 'acheng', 'restore-source-bytes.py'), directory]);
+      runPython(['-B', '-X', 'utf8', path.join(scripts, 'acheng', 'restore-source-bytes.py'), directory], directory);
       // Verify the unchanged upstream suite first; its historical fixtures have
       // intentionally different density expectations from new Canvas production.
-      run(python, ['-B', '-X', 'utf8', '-m', 'unittest', 'discover', '-s', 'scripts', '-p', 'test_*.py'], directory);
-      if (!upstreamFixed) run(python, ['-B', '-X', 'utf8', path.join(scripts, 'acheng', 'compat.py'), directory]);
-      run(python, ['-B', '-X', 'utf8', path.join(scripts, 'acheng', 'verify.py'), directory]);
-      run(python, ['-B', '-X', 'utf8', path.join(scripts, 'acheng', 'model-contract.test.py'), directory]);
-      run(python, ['-B', '-X', 'utf8', 'scripts/validate_director_contract.py'], directory);
+      runPython(['-B', '-X', 'utf8', '-m', 'unittest', 'discover', '-s', 'scripts', '-p', 'test_*.py'], directory);
+      if (!upstreamFixed) runPython(['-B', '-X', 'utf8', path.join(scripts, 'acheng', 'compat.py'), directory], directory);
+      runPython(['-B', '-X', 'utf8', path.join(scripts, 'acheng', 'verify.py'), directory], directory);
+      runPython(['-B', '-X', 'utf8', path.join(scripts, 'acheng', 'model-contract.test.py'), directory], directory);
+      runPython(['-B', '-X', 'utf8', 'scripts/validate_director_contract.py'], directory);
       applyRuntimeSkillOverlay(directory);
       const version = fs.readFileSync(path.join(directory, 'SKILL.md'), 'utf8').match(/version:\s*"([^"]+)"/)?.[1] || 'unknown';
       const manifest = { upstream: this.upstream, branch: 'main', commit, version, patchVersion, runtimeId, ...(treeHash ? { sourceTreeHash: treeHash } : {}), overlayApplied: !upstreamFixed, files: inventory(directory), verifiedAt: new Date().toISOString() };

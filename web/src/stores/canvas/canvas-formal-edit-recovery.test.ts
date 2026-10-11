@@ -12,10 +12,10 @@ localforage.createInstance = (({ name }: { name: string }) => {
         iterate: async (visit: (value: any, key: string) => void) => bucket.forEach(visit) };
 }) as any;
 const { getBackendUrl, getCanvasDraftSessionId } = await import("../../services/backend-api");
-const base: any = { id: "formal-recover", revision: 5, title: "fixture", createdAt: "", updatedAt: "", nodes: [{ id: "h3", type: "minimax-h3:video", metadata: { segments: [{ id: "clip", duration: 5, prompt: "Compiled prompt", result: "historical.mp4", productionClipProjection: { inputHash: "compiled" } }] } }], connections: [], chatSessions: [], activeChatId: null, backgroundMode: "lines", showImageInfo: false, globalPrompt: "", viewport: { x: 0, y: 0, k: 1 } };
+const base: any = { id: "formal-recover", revision: 5, title: "fixture", createdAt: "", updatedAt: "", nodes: [{ id: "h3", type: "minimax-h3:video", metadata: { segments: [{ id: "clip", duration: 5, prompt: "Compiled prompt", storyboardDurations: { shot: 5 }, result: "historical.mp4", productionClipProjection: { inputHash: "compiled" } }] } }], connections: [], chatSessions: [], activeChatId: null, backgroundMode: "lines", showImageInfo: false, globalPrompt: "", viewport: { x: 0, y: 0, k: 1 } };
 const original = { operationId: "old-formal-edit", projectId: base.id, ownerId: getCanvasDraftSessionId(), backend: getBackendUrl(), order: 1, base, baseRevision: 5,
-    rejected: "Backend POST /canvas/projects/formal-recover/ops failed: HTTP 400 字段 prompt 属于正式编译产物，请修改编译前源稿后重新编译",
-    operations: [{ type: "update_h3_segment", nodeId: "h3", segmentId: "clip", patch: { prompt: "Manual prompt", storyboardShots: [{ id: "shot", duration: 5 }] } }] };
+    rejected: "Backend POST /canvas/projects/formal-recover/ops failed: HTTP 400 字段 storyboardDurations 必须通过制作台 Shot 数据写入",
+    operations: [{ type: "update_h3_segment", nodeId: "h3", segmentId: "clip", patch: { prompt: "Manual prompt", storyboardDurations: { shot: 7 } } }] };
 const unrelated = { ...structuredClone(original), operationId: "unrelated-rejection", projectId: "unrelated", base: { ...structuredClone(base), id: "unrelated" }, rejected: "HTTP 400 INVALID_CLIP_FIELD: patch.promt 不属于可编辑 Clip 配置" };
 buckets.set("infinite-canvas-command-outbox", new Map([[original.operationId, structuredClone(original)], [unrelated.operationId, unrelated]]));
 const submissions: any[] = [];
@@ -36,14 +36,14 @@ globalThis.fetch = (async (input: any, init: any) => {
 const { useCanvasStore, hydrateCanvasProjects, flushCanvasSyncNow, applyBackendCanvasDelta } = await import("./use-canvas-store");
 const { useBackendStore } = await import("../use-backend-store");
 
-test("旧正式 Clip 拒绝草稿刷新不自动重提，明确恢复保存原编辑、编译基线及历史输出", async () => {
+test("旧 Clip 时长投影被拒绝后，可保留其它编辑重提且不改写 Shot 源稿", async () => {
     try {
         useBackendStore.setState({ connected: true });
         await hydrateCanvasProjects(); await flushCanvasSyncNow();
         const conflict = useCanvasStore.getState().canvasConflicts[base.id];
         assert.equal(conflict.reason, "rejected");
-        assert.equal(conflict.canRetryFormalClip, true);
-        assert.equal(useCanvasStore.getState().canvasConflicts.unrelated.canRetryFormalClip, false);
+        assert.equal(conflict.canRetryStoryboardDurations, true);
+        assert.equal(useCanvasStore.getState().canvasConflicts.unrelated.canRetryStoryboardDurations, false);
         await useCanvasStore.getState().keepPendingOpsOnCanvasConflict("unrelated");
         assert.deepEqual(buckets.get("infinite-canvas-command-outbox")!.get(unrelated.operationId), unrelated);
         await flushCanvasSyncNow(); assert.equal(submissions.length, 0);
@@ -51,7 +51,7 @@ test("旧正式 Clip 拒绝草稿刷新不自动重提，明确恢复保存原�
         const outbox = buckets.get("infinite-canvas-command-outbox")!;
         const replacement = [...outbox.values()].find(command => command.projectId === base.id);
         assert.notEqual(replacement.operationId, original.operationId);
-        assert.deepEqual(replacement.operations, original.operations);
+        assert.deepEqual(replacement.operations, [{ type: "update_h3_segment", nodeId: "h3", segmentId: "clip", patch: { prompt: "Manual prompt" } }]);
         assert.deepEqual(replacement.supersedes, [original.operationId]);
         assert.ok(writes.indexOf(`save:${replacement.operationId}`) < writes.indexOf(`remove:${original.operationId}`));
         await flushCanvasSyncNow();
@@ -60,7 +60,7 @@ test("旧正式 Clip 拒绝草稿刷新不自动重提，明确恢复保存原�
         assert.equal(submissions[0].operationId, replacement.operationId);
         const clip = remote.nodes[0].metadata.segments[0];
         assert.equal(clip.prompt, "Manual prompt");
-        assert.deepEqual(clip.storyboardShots, original.operations[0].patch.storyboardShots);
+        assert.deepEqual(clip.storyboardDurations, { shot: 5 });
         assert.equal(clip.result, "historical.mp4");
         assert.equal(clip.productionClipProjection.inputHash, "compiled");
     } finally { useBackendStore.setState({ connected: false }); }

@@ -131,7 +131,7 @@ skill = (root / "SKILL.md").read_text(encoding="utf-8")
 assert "固定角色四格模板（用户指定）" not in skill
 assert "动态密度与硬性上限（2200-2900 词）" not in skill
 from asset_plan import DEFAULT_CHARACTER_VIEW_LAYOUT
-assert DEFAULT_CHARACTER_VIEW_LAYOUT["views"] == ["front_face_above_clavicle", "front_full_body", "side_full_body", "back_full_body"]
+assert DEFAULT_CHARACTER_VIEW_LAYOUT["views"] == ["front_face_above_clavicle", "right_profile_above_clavicle", "headless_front_costume_full_body", "back_full_body"]
 assert "@图片1" not in skill
 assert "Infinite Canvas 集成：视频制作启动确认" in skill
 assert "videoAspectRatioConfirmed=true" in skill
@@ -141,7 +141,7 @@ asset_skill = (root / "modules/assets/SKILL.md").read_text(encoding="utf-8")
 assert "固定角色四格模板（用户指定）" not in asset_skill
 assert "selection=user_explicit" in asset_skill
 import copy
-from asset_plan import prepare_asset_card, check_character_view_layout, _canvas_legacy_character_layout
+from asset_plan import prepare_asset_card, check_character_view_layout
 layout_payload = {"asset_plan": [{"id": "CHAR_PROBE", "kind": "character", "status": "planned", "version": "v1"}]}
 layout_card = {"id": "CHAR_PROBE", "asset_kind": "character", "character_name": "A documented character",
                "state_label": "neutral_identity", "prompt": "Preserve the documented subject facts.", "seven_steps": [{"step": 1, "content": "The documented subject."}]}
@@ -149,8 +149,8 @@ default_card = prepare_asset_card(layout_card, layout_payload)
 check_character_view_layout(default_card, layout_payload)
 assert prepare_asset_card(default_card, layout_payload) == default_card
 headless_card = copy.deepcopy(layout_card)
-headless_card["view_layout"] = {**copy.deepcopy(_canvas_legacy_character_layout), "selection": "user_explicit",
-                               "selection_reason": "The user explicitly selected the original headless costume board."}
+headless_card["view_layout"] = {**copy.deepcopy(DEFAULT_CHARACTER_VIEW_LAYOUT), "selection": "user_explicit",
+                               "selection_reason": "The user explicitly selected the current headless costume board."}
 creature_card = copy.deepcopy(layout_card)
 creature_card["view_layout"] = {"type": "four_view_creature_turnaround", "views": ["front_head", "side_head", "coiled_full_body", "mid_body_scale_detail"],
                               "order": "grid_2x2", "row_height_ratio": [1, 1], "same_subject": True,
@@ -165,7 +165,6 @@ for authored in (headless_card, creature_card):
     if authored is creature_card:
         assert "headless" not in prepared["prompt"] and "costume full body" not in prepared["prompt"]
 for invalid in (
-    {**layout_card, "prompt": "Create a headless costume board."},
     {**headless_card, "view_layout": {**headless_card["view_layout"], "selection_reason": ""}},
     {**headless_card, "view_layout": {**headless_card["view_layout"], "row_height_ratio": [1, 1]}},
     {**headless_card, "view_layout": {**headless_card["view_layout"], "views": ["invented"]}},

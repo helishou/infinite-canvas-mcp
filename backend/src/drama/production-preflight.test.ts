@@ -68,7 +68,12 @@ test("stage-specific checks do not prohibit unfinished planning drafts", t => {
 
 test("target edits report the original occupying run and tasks before changing source, while unrelated Clips remain editable", t => {
     const { db, service } = fixture(t);
-    const source = { shots: [{ id: "s1" }, { id: "s2" }], segments: [{ id: "seg1", shot_ids: ["s1"], mode: "T2VA" }, { id: "seg2", shot_ids: ["s2"], mode: "T2VA" }] };
+    const source = { fps_num: 24, fps_den: 1, scene_registry: [{ id: "room", name: "Room" }],
+        script_scenes: [{ id: "scene", scene_id: "room", beat_ids: ["b1", "b2"] }],
+        shots: [{ id: "s1", source_scene_id: "scene", scene_id: "room", story_beat_ids: ["b1"], start_frame: 0, end_frame: 120, visual: "first" },
+            { id: "s2", source_scene_id: "scene", scene_id: "room", story_beat_ids: ["b2"], start_frame: 120, end_frame: 240, visual: "second" }],
+        segments: [{ id: "seg1", shot_ids: ["s1"], start_frame: 0, end_frame: 120, generation_clip_duration: 5, mode: "T2VA" },
+            { id: "seg2", shot_ids: ["s2"], start_frame: 120, end_frame: 240, generation_clip_duration: 5, mode: "T2VA" }] };
     const director: DirectorProduction = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "fixture", runtimeId: "fixture", version: "fixture" }, source, sourceHash: directorHash(source), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
     service.edit("episode", { operationId: "seed-occupied", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
     db.db.prepare("INSERT INTO episode_production_batches (run_id,episode_id,idempotency_key,request_hash,version,source_revision,status,targets_json,plan_json,engine_json,settings_json,submitted_json,pause_requested,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")

@@ -243,3 +243,14 @@ test('Canvas instructions remain a single block with Windows line endings', t =>
     assert.ok(!output.includes('\r\r\n'));
   }
 });
+
+test('director runtime entry routes typed entities and shared assets through real MCP tools', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acheng-entity-overlay-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, 'SKILL.md'), entry);
+  applyRuntimeSkillOverlay(root);
+  const text = fs.readFileSync(path.join(root, 'SKILL.md'), 'utf8');
+  for (const identity of ['entity:character:', 'entity:scene:', 'entity:prop:', 'entityNodeSource', 'create_manual_director_asset', 'assets_upsert_batch', 'canvas_apply_commands']) assert.ok(text.includes(identity), identity);
+  assert.doesNotMatch(text, /assets_remove/);
+  assert.ok(text.includes('不按名称匹配'));
+});

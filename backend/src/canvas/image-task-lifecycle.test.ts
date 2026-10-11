@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
+import crypto from "node:crypto";
 import { BackendDatabase } from "../db.js";
 import { createStores } from "../stores/index.js";
 import { adaptFlux2KleinWorkflow, CanvasImageDispatcher } from "./image-dispatcher.js";
@@ -300,6 +301,21 @@ test("插件内置图片面板通过统一任务原位回写，不创建额外�
     assert.equal(source.metadata.content, "http://unused.local/test-0.png");
     assert.equal(source.metadata.status, "success");
     assert.equal(source.metadata.runtimeTaskId, undefined);
+});
+
+test("冻结的正式生图回写会恢复被清空但仍匹配编译投影的提示词", async t => {
+    const { db, dispatcher, input, metadata } = fixture(t);
+    const prompt = "Compiled production prompt for the registered asset.";
+    db.applyCanvasProjectOperations("p", undefined, [{ type: "update_node", id: "source", metadata: {
+        smart: true, generationMode: "image", prompt: "", composerContent: "", model: "gpt-image-2",
+        productionImageInput: { promptHash: crypto.createHash("sha256").update(prompt).digest("hex"), stale: false },
+        productionImageProjection: { nextValues: { prompt }, conflicts: [] },
+    } }], { runtimeWrite: true });
+    dispatcher.start({ ...input, prompt, params: { writeBackToTarget: true, canvasFrozenInput: true } });
+    await settle(db, "first");
+    assert.equal(metadata().prompt, prompt);
+    assert.equal(metadata().composerContent, prompt);
+    assert.equal(metadata().status, "success");
 });
 
 test("内置 Comfy 批量子任务归属同一父任务，部分失败自动从历史清出失败槽", async (t) => {

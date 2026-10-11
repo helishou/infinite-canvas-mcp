@@ -56,14 +56,15 @@ test("H3 migration retries after rollback without overwriting old or failed-atte
     }
 });
 
-test("v37 scene archive migration is idempotent and preserves existing project data", t => {
+test("v41 scene archive migration is idempotent and preserves existing project data", t => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "scene-archive-v37-"));
     const file = path.join(directory, "runtime.sqlite");
     let db: BackendDatabase | undefined;
     t.after(() => { db?.close(); fs.rmSync(directory, { recursive: true, force: true }); });
     db = new BackendDatabase(file);
     db.createCanvasProject({ id: "keep", title: "Keep me", nodes: [], connections: [] });
-    db.db.prepare("DELETE FROM schema_migrations WHERE version >= 37").run();
+    db.db.prepare("DROP TABLE production_scene_archives").run();
+    db.db.prepare("DELETE FROM schema_migrations WHERE version >= 41").run();
     db.close(); db = undefined;
 
     db = new BackendDatabase(file);

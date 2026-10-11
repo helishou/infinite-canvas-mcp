@@ -92,7 +92,7 @@ export class ClipRefreshCoordinator {
             const director = record.draft.director as DirectorProduction | undefined;
             if (!director || !clipRefreshScope(consumer.segment_id).targetIds.every(target => (director.source.segments as any[] || []).some(segment => segment.id === target))) continue;
             let resolved: DirectorProduction;
-            try { resolved = this.service.resolveSubjectPictureInputs(consumer.owner_id, director, [consumer.segment_id], true); }
+            try { resolved = this.service.resolveSubjectPictureInputs(consumer.owner_id, director, [consumer.segment_id], true, undefined, []); }
             catch (error) {
                 const store = this.service.clipRefreshStore(consumer.owner_id);
                 const parent = `smart-result:${projectId}:${revision}:${eventId}`;
@@ -134,7 +134,7 @@ export class ClipRefreshCoordinator {
             }
             const current = this.service.get(id), stored = current.draft.director;
             if (!stored) { step("superseded"); return; }
-            const d = this.service.resolveSubjectPictureInputs(id, stored, [job.segmentId], true);
+            const d = this.service.resolveSubjectPictureInputs(id, stored, [job.segmentId], true, undefined, []);
             if (compilationScopeInput(d, clipRefreshScope(job.segmentId)).inputHash !== job.inputHash) { step("superseded"); return; }
             const occupied = this.service.targetOccupancy(id, [job.segmentId]);
             if (occupied.length) { job.diagnostics = occupied.map(o => ({ code: "TARGET_OCCUPIED", targetId: job.segmentId, message: o.nextAction.message, nextAction: o.nextAction })); step("blocked"); return; }

@@ -293,10 +293,19 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             message.warning("末张分镜时长不足 1 秒，无法再平分新增分镜。");
             return false;
         }
+        const isFormalClip = Boolean((previous.productionClipProjection as Record<string, unknown> | undefined)?.targetId);
+        const storyboardState = (segment: H3Segment) => JSON.stringify({ shots: segment.storyboardShots || [], refs: storyboardRefsForSegment(segment) });
+        if (isFormalClip && storyboardState(previous) !== storyboardState(updated)) {
+            if (!ctx.production) { message.error("正式制作 Clip 的分镜需要制作台编辑器接收；当前工作台未连接"); return false; }
+            void ctx.production.replaceStoryboardTrack({ nodeId: ctx.node.id, segmentId: updated.id, segment: updated as unknown as Record<string, unknown> })
+                .then(result => { if (!result.sourceSaved) message.error("制作台未保存分镜更改"); })
+                .catch(error => message.error(error instanceof Error ? error.message : String(error)));
+            return true;
+        }
         ctx.updateMetadata({ ...(select ? { selectedSegmentId: updated.id } : {}), segments: current.map((item) => item.id === updated.id ? updated : item) });
         void syncStoryboardPrompt(ctx, updated, previous);
         return true;
-    }, [ctx, metadata]);
+    }, [ctx, metadata, message]);
     const patchSelected = useCallback((patch: Partial<H3Segment>) => {
         if (!selected) return;
         if ((patch.duration !== undefined || patch.mode !== undefined || patch.taskMode !== undefined) && storyboardTrackItems(selected).length) {

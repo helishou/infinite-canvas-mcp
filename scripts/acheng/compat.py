@@ -47,6 +47,14 @@ def apply(root):
         replace(style, f'isinstance(lock.get("{field}"), list) and lock["{field}"] and all(substantive(x) for x in lock["{field}"])', f'__import__("canvas_source_contract").is_scope(lock.get("{field}"))')
     bindings = root / "scripts/reference_bindings.py"
     replace(bindings, '    issues, labels, rows = [], [], []', '    issues, labels, rows = [], [], []\n    from canvas_source_contract import validate\n    if not legacy:\n        issues.extend(item["message"] for item in validate({"segments": [segment]}, "publish") if item["severity"] == "error")')
+    replace(bindings,
+            '''    if not legacy and (segment.get("mode_lock") != segment["mode"] or not segment.get("mode_selection_reason")):
+        issues.append("explicit mode_lock and mode_selection_reason required; no silent mode fallback")''',
+            "")
+    hooks = root / "scripts/post_hooks.py"
+    replace(hooks,
+            'require(reference["role"] in ("identity", "scene", "style", "pose", "composition", "lighting"), "image reference role invalid")',
+            'require(reference["role"] in ("identity", "scene", "style", "pose", "composition", "lighting", "layout"), "image reference role invalid")')
     # Update the actual entry instructions, not a contradictory appendix alone.
     for path in [root / "SKILL.md", root / "modules/model/SKILL.md", root / "references/62-style-anchor.md"]:
         text = path.read_text(encoding="utf-8")
@@ -200,6 +208,17 @@ def compile_segment(p, seg, *, draft=False):
 
     references = root / "scripts/reference_bindings.py"
     replace(references,
+            '''        if node and ref.get("asset_version") != node.get("version"):
+            errors.append("asset version conflict")''',
+            '''        if node and ref.get("asset_version") != node.get("version"):
+            # Subject Prompt v2 references may bind an exact archived result by
+            # content hash while retaining the asset's authored semantic version.
+            content_bound = (node.get("status") == "selected_result"
+                             and ref.get("asset_version") == "sha256:" + str(ref.get("sha256") or "")
+                             and ref.get("sha256") == node.get("sha256"))
+            if not content_bound:
+                errors.append("asset version conflict")''')
+    replace(references,
             '''        elif node:
             errors.append("asset planned; real approved media pending")
         expected = node.get("sha256") if node.get("status") == "approved" else ref.get("sha256")''',
@@ -226,19 +245,19 @@ def compile_segment(p, seg, *, draft=False):
         source_errors = [item for item in source_issues if item.get("severity") == "error"]
         if source_errors:
             raise ContractError(json.dumps(source_errors, ensure_ascii=False))
-        production = adapt_production(production)
+        production = adapt_production(production, draft=True)
         v2_source_maps = production.pop("_canvas_subject_v2_source_maps", {})
 ''')
     replace(compiler,
             '''        try:
-            text = compile_segment(production, resolved_seg, draft=bool(blockers))
+            text = compile_segment(production, resolved_seg, draft=True)
         except ValueError as exc:''',
             '''        try:
             if production.get("_canvas_prompt_assembly_version") == 2:
                 from canvas_subject_prompt_v2 import compile_prompt_v2
-                text = compile_prompt_v2(production, resolved_seg, draft=bool(blockers))
+                text = compile_prompt_v2(production, resolved_seg, draft=True)
             else:
-                text = compile_segment(production, resolved_seg, draft=bool(blockers))
+                text = compile_segment(production, resolved_seg, draft=True)
         except ValueError as exc:''')
     replace(compiler,
             '''            text = compile_segment(production, resolved_seg, draft=True)''',
@@ -258,6 +277,13 @@ def compile_segment(p, seg, *, draft=False):
                 entry["source_map"] = source_map
         if not blockers:
             contract = file_contract(production, resolved_seg, snapshot["references"])''')
+    replace(compiler,
+            '        (output / name).write_text(text, encoding="utf-8")',
+            '''        if production.get("_canvas_prompt_assembly_version") == 2:
+            from canvas_subject_prompt_v2 import write_prompt_text
+            text = write_prompt_text(output / name, text)
+        else:
+            (output / name).write_text(text, encoding="utf-8")''')
 
 
 if __name__ == "__main__":

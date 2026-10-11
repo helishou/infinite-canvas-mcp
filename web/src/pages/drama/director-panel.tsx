@@ -1,3 +1,5 @@
+import { canBindSubjectImage, manualWorkspaceProgress, manualTargetRecovery } from "./manual-production-guide";
+import { productionEntities, productionEntityBinding } from "@basketikun/canvas-agent/drama/production-contract";
 import { ProductionInputDiff } from "./production-input-diff";
 import { currentClipRefreshes, groupedRefreshIssues } from "./production-refresh-display";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -23,7 +25,7 @@ import { ReferenceNodeLink } from "./reference-node-link";
 import { PictureBindingEditor } from "./picture-binding-editor";
 import { SmartImageNodePicker } from "./smart-image-node-picker";
 import type { ImageNodeChoice } from "./smart-image-node-options";
-import { createManualDirectorAsset, type ManualAssetKind } from "./manual-director-assets";
+import { createManualDirectorAsset, manualAssetsForSubject, type ManualAssetKind } from "./manual-director-assets";
 import { createManualScriptScene } from "./manual-director-scenes";
 import { readClipPartitionDraft } from "./subject-clip-draft";
 import { useReferenceResultVersion } from "./use-reference-result-version";
@@ -63,8 +65,8 @@ function SubjectPictureBindings({ subject, canvasNodes, canvasId, owner, assets,
   const bindings = records(subject.pictureBindings);
   const referenceVersion = useReferenceResultVersion(bindings.map(binding => binding.sourceNode || {}));
   const ownerKey = JSON.stringify(owner);
-  const sources = canvasNodes.filter(node => node.type === "config" && node.metadata?.smart === true && (node.metadata?.generationMode || "image") === "image");
-  const nodeChoiceValid = Boolean(nodeChoice && (nodeChoice.projectId !== canvasId || sources.some(node => node.id === nodeChoice.nodeId)) && !bindings.some(binding => binding.sourceNode?.projectId === nodeChoice.projectId && binding.sourceNode?.nodeId === nodeChoice.nodeId));
+  const sources = canvasNodes.filter(node => ["image", "character", "scene", "prop"].includes(String(node.type)) || node.type === "config" && node.metadata?.smart === true && (node.metadata?.generationMode || "image") === "image");
+  const nodeChoiceValid = canBindSubjectImage(nodeChoice, canvasId, canvasNodes, bindings);
   useEffect(() => { if (nodeChoice && !nodeChoiceValid) setNodeChoice(undefined); }, [nodeChoice, nodeChoiceValid]);
   const bindingStamp = JSON.stringify(bindings);
   const mediaStamp = JSON.stringify(sources.filter(node => bindings.some(binding => binding.sourceNode?.nodeId === node.id)).map(node => [node.id, node.metadata?.images, node.metadata?.storageKey, node.metadata?.smartImageReferenceSelection]));
@@ -436,9 +438,10 @@ function SubjectClipPartitionEditor({ shots, segments, fps, busy, shotTitle, onS
 export function DirectorPanel({
   workspace, director, production, readiness, run, batches, runtimeTasks = [], canvasNodes, legacy, versions, busy, canvasId, canvasRole, focusTarget, embedded = false, continuityReport,
   briefDraft, onBriefDraftChange, onOpenSharedAsset, onPromoteExistingSharedAsset,
-  onUpsertSubject, onDeleteSubject, onDeleteScene, onDeleteManualAsset, onSaveV2Shot, onRepartitionClips, onEditShot,
+  onPrepareEntities, onUpsertSubject, onDeleteSubject, onDeleteScene, onDeleteManualAsset, onCreateManualAsset, onSaveV2Shot, onRepartitionClips, onEditShot,
   compact = false, onSaveScript, generationSupported = true,
   onBrief, onPatch, onEditCanvasClip, onAdoptDirectorFields, onAdoptClipStyle, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onReview, onPublish, onReplace, onAskDirector, onRequestContinuityUpgrade, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRestore, onRefresh, onSceneCommand, sceneCommandPending, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onPreviewContinuityUpgrade, onCheckContinuity, onContinuitySnapshot,
+  onCompile, compileBusy = false, compilePending = false, compileError = "", compileNotice = "",
 }: {
   workspace: DirectorWorkspace; director?: DirectorProduction; production: EpisodeProduction; readiness?: ProductionReadiness; run?: ProductionBatch | null;
   continuityReport?: import("@/services/backend-api").ProductionContinuity;
@@ -456,10 +459,12 @@ export function DirectorPanel({
   runtimeTasks?: BackendRuntimeTask[];
   onBrief: (brief: string) => Promise<void> | void;
   onPatch: (entity: "style" | "scene" | "environment" | "character" | "asset" | "asset_card" | "shot" | "segment", id: string | undefined, patch: Record<string, unknown>) => Promise<boolean> | void;
+  onPrepareEntities?: () => Promise<void>;
   onUpsertSubject?: (subject: Extract<ProductionOperation, { type: "upsert_director_subject" }>["subject"]) => Promise<boolean>;
   onDeleteSubject?: (id: string) => Promise<boolean>;
   onDeleteScene?: (sceneId: string) => Promise<boolean>;
   onDeleteManualAsset?: (assetId: string) => Promise<boolean>;
+  onCreateManualAsset: (operation: Extract<ProductionOperation, { type: "create_manual_director_asset" }>) => Promise<boolean>;
   onSaveV2Shot?: (shotId: string, patch: Record<string, unknown>, keyframes?: Extract<ProductionOperation, { type: "set_director_shot_keyframes" }>["keyframes"], utterances?: Extract<ProductionOperation, { type: "set_director_shot_utterances" }>["utterances"]) => Promise<boolean>;
   onRepartitionClips?: (shotIds: string[], segments: Array<Record<string, unknown>>) => Promise<boolean>;
   onEditShot?: (operation: Extract<ProductionOperation, { type: "edit_director_shot" }>) => Promise<boolean>;
@@ -495,6 +500,11 @@ export function DirectorPanel({
   onSceneCommand: (action: ProductionSceneAction, revision: number) => Promise<unknown>;
   onExport: (includeGeneratedMedia: boolean) => Promise<void>;
   exporting: boolean;
+  onCompile?: () => void;
+  compileBusy?: boolean;
+  compilePending?: boolean;
+  compileError?: string;
+  compileNotice?: string;
   runStartPending: boolean;
   activeTargetIds: string[];
 }) {
@@ -592,11 +602,14 @@ export function DirectorPanel({
         ownerKind,
         ownerId,
       });
-      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonicalProduction(created.source)));
-      const sourceHash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
-      const workflow = d.workflow.currentWork ? { ...d.workflow, currentWork: { ...d.workflow.currentWork, sourceHash } } : d.workflow;
-      const nextDirector = { ...d, source: created.source, sourceHash, artifacts: d.artifacts.map(item => ({ ...item, status: "stale" as const })), executionAuthorized: false, workflow };
-      const saved = await onReplace(nextDirector);
+      const operation = {
+        type: "create_manual_director_asset" as const,
+        assetPlan: created.assetPlan,
+        assetCard: created.assetCard,
+        ...(created.registryKind && created.registryEntity ? { registryKind: created.registryKind, registryEntity: created.registryEntity } : {}),
+        ...(created.subject ? { subject: created.subject } : {}),
+      } as Extract<ProductionOperation, { type: "create_manual_director_asset" }>;
+      const saved = await onCreateManualAsset(operation);
       if (saved === false) return;
       setNewAssetOpen(false);
       setNewAssetName(""); setNewAssetDescription(""); setNewAssetPrompt(""); setNewAssetPurpose("");
@@ -644,7 +657,9 @@ export function DirectorPanel({
     okText: t("director.workspace.deleteManualAssetAction"),
     okButtonProps: { danger: true, disabled: busy },
     cancelText: t("director.workspace.cancel"),
-    onOk: async () => { await onDeleteManualAsset?.(assetId); },
+    onOk: async () => {
+      if (!await onDeleteManualAsset?.(assetId)) throw new Error(t("director.workspace.deleteManualAssetFailed"));
+    },
   });
   const frameForShot = (id: string) => {
     const key = d?.shotInputs[id]?.keyframeAssetId;
@@ -693,22 +708,19 @@ export function DirectorPanel({
     return "unchecked";
   };
   const objectRows = objectWorkspaces.map(item => {
-    const states = item.modules.map(module => d?.modules[module] ? { ...d.modules[module], status: moduleViewStatus(module) } : undefined).filter(Boolean);
-    const targets = readiness?.targets.filter(target => item.targetKinds.includes(target.kind)) || [];
-    const unresolved = states.flatMap(state => state?.unresolved || []);
+    const guide = manualWorkspaceProgress(item.key, source, readiness?.targets || [], continuityReport?.status);
     const current = presentationWorkspace === item.key;
-    const done = states.length > 0 && states.every(state => state?.status === "committed");
-    const blocked = states.some(state => state?.status === "blocked") || unresolved.length > 0;
-    const status = current ? "current" : !d ? "waiting" : done ? "done" : blocked ? "blocked" : "working";
-    const summary = !d ? t("director.workspace.overview.waitingBrief")
-      : unresolved[0] || (targets.length ? t("director.workspace.overview.targetSummary", {
-        done: targets.filter(target => target.status === "complete").length,
-        total: targets.length,
-        review: targets.filter(target => target.status === "needs_review").length,
-        blocked: targets.filter(target => target.status === "blocked").length,
-      }) : item.modules.map(module => `${t(`director.workspace.moduleName.${module}`)} · ${t(`director.workspace.moduleStatus.${moduleViewStatus(module)}`)}`).join(" / "));
-    return { ...item, current, status, summary };
+    return { ...item, current, status: current ? "current" : guide.status, summary: t(`director.workspace.manual.${guide.summaryKey}`, guide.values), actionLabel: t(`director.workspace.manual.${guide.actionKey}`) };
   });
+  const openManualTarget = (item: NonNullable<typeof readiness>["targets"][number]) => {
+    const recovery = manualTargetRecovery(item, source);
+    const subject = records(source.subject_registry).find(subject => records(subject.pictureBindings).some(binding => binding.assetId === item.targetId));
+    if (subject) setSelectedSubjectId(String(subject.id));
+    onNavigate(recovery.workspace, { kind: recovery.kind, id: recovery.id });
+  };
+  const manualBlockers = [...new Set((readiness?.targets || []).flatMap(target => target.blockers))];
+  const nextManualTarget = readiness?.targets.find(target => target.status === "blocked") || readiness?.targets.find(target => target.kind === "segment" && target.status === "ready");
+  const nextManualAction = nextManualTarget ? manualTargetRecovery(nextManualTarget, source) : undefined;
 
   const imageNodes = canvasNodes.filter(node => ["image", "character", "scene", "prop"].includes(String(node.type)) || (node.type === "config" && (node.metadata?.generationMode || "image") === "image"));
   const mediaForAsset = (assetId: string, shotId?: string) => {
@@ -941,20 +953,19 @@ export function DirectorPanel({
     {production.draft.settings.parallelScenes && canvasRole !== "scene" && <SceneProductionPanel key={JSON.stringify({ canvasId, episodeId: production.episodeId })} disabled={busy} commandPending={sceneCommandPending} onCommand={onSceneCommand} onAskDirector={scope => onAskDirector({ workspace: "overview", ...scope })} production={production} owner={canvasRole === "episode" ? production.episodeId : { projectId: canvasId }} onRefresh={onRefresh} />}
     <section className="rounded-2xl border border-border bg-muted/40 p-4 sm:p-5" aria-label={t("director.workspace.overview.currentTask")}>
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0"><p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{t("director.workspace.overview.currentTask")}</p><h2 className="mt-1 text-lg font-semibold sm:text-xl">{humanMessage(taskTitle)}</h2>
-          <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground"><span>{t(`director.workspace.tab.${presentationWorkspace}`)}{presentationTargetName ? ` · ${humanMessage(presentationTargetName)}` : ""}</span>{presentationModule && <span>{t("director.studio.collaborate")}</span>}</div>
-          {presentation?.reason && <p className="mt-2 text-sm text-muted-foreground">{presentation.reason}</p>}
+        <div className="min-w-0"><p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{t("director.workspace.overview.currentTask")}</p><h2 className="mt-1 text-lg font-semibold sm:text-xl">{humanMessage(d && presentation?.action === "author" ? t("director.workspace.manual.currentWorkspace", { workspace: t(`director.workspace.tab.${presentationWorkspace}`) }) : taskTitle)}</h2>
+          <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground"><span>{t(`director.workspace.tab.${presentationWorkspace}`)}{presentationTargetName && (presentationWorkspace !== "story" || presentation?.targetKind === "scene") ? ` · ${humanMessage(presentationTargetName)}` : ""}</span>{presentationModule && <span>{t("director.studio.collaborate")}</span>}</div>
+          {d && objectRows.find(row => row.key === presentationWorkspace)?.summary && <p className="mt-2 text-sm text-muted-foreground">{objectRows.find(row => row.key === presentationWorkspace)?.summary}</p>}
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-1">{presentation?.status && <Tag color={presentation.status === "needs_review" ? "orange" : presentation.status === "blocked" ? "red" : presentation.status === "complete" ? "green" : undefined}>{t(`director.workspace.presentationStatus.${presentation.status}`)}</Tag>}</div>
       </div>
       <div className="mt-4 flex flex-wrap gap-2">
-        <Button type="primary" disabled={busy || (!d && !briefDraft.trim())} onClick={() => {
+        <Button type="primary" disabled={busy} onClick={() => {
           if (!d) { document.getElementById("director-current-brief")?.scrollIntoView({ block: "center", behavior: "smooth" }); return; }
-          if (!presentation) { onAskDirector({ workspace: "overview", instruction: t("director.workspace.continueInstruction") }); return; }
-          if (presentation?.status === "needs_review" || !["author", "compile"].includes(presentation?.action || "")) { onNavigate(presentationWorkspace, presentationFocus); return; }
-          onAskDirector({ workspace: presentationWorkspace, targetId: presentation?.targetId, instruction: t("director.workspace.continueInstruction") });
-        }}>{!d ? t("director.workspace.overview.startFromBriefAction") : !presentation ? t("director.workspace.askDirector") : presentation.status === "needs_review" ? t("director.workspace.overview.viewAndReview") : ["author", "compile"].includes(presentation.action || "") ? t("director.workspace.askDirector") : t("director.workspace.overview.openWorkspace")}</Button>
-        {d && presentation && (presentation.status === "needs_review" || presentation.status === "blocked" || ["author", "compile"].includes(presentation.action)) && <Button onClick={() => presentation.action === "author" || presentation.action === "compile" ? onNavigate(presentationWorkspace, presentationFocus) : onAskDirector({ workspace: presentationWorkspace, targetId: presentation.targetId, instruction: t("director.workspace.overview.reviseCurrentTask") })}>{presentation.action === "author" || presentation.action === "compile" ? t("director.workspace.overview.openWorkspace") : t("director.workspace.overview.askDirectorToRevise")}</Button>}
+          onNavigate(presentationWorkspace === "overview" ? "story" : presentationWorkspace, presentationFocus);
+        }}>{!d ? t("director.workspace.overview.startFromBriefAction") : presentation?.status === "needs_review" ? t("director.workspace.overview.viewAndReview") : t("director.workspace.manual.openEditor")}</Button>
+        {d && <Button type="text" disabled={busy} onClick={() => onAskDirector({ workspace: presentationWorkspace, targetId: presentation?.targetId, instruction: t("director.workspace.continueInstruction") })}>{t("director.workspace.askDirector")}</Button>}
+
       </div>
     </section>
     {(d?.workflow.pendingDecisions || []).filter(decision => decision.status === "pending" || decision.workId === d?.workflow.currentWork?.workId).map((decision: DirectorDecision) => <article key={decision.id} className="rounded-xl border border-orange-300/60 bg-orange-50/50 p-4 dark:border-orange-800 dark:bg-orange-950/20">
@@ -971,7 +982,7 @@ export function DirectorPanel({
         <div className="mt-3 flex flex-wrap gap-2"><Button disabled={busy || briefDraft === String(source.brief || "")} onClick={() => void onBrief(briefDraft)}>{t("director.workspace.saveBrief")}</Button></div>
       </details>
       <section className="rounded-2xl border border-border bg-card p-5">
-        <p className="text-xs uppercase tracking-wide text-muted-foreground">{t("director.workspace.readiness")}</p><h2 className="mt-1 text-xl font-semibold">{humanMessage(readiness?.nextAction || t("director.workspace.noNextAction"))}</h2>
+        <p className="text-xs uppercase tracking-wide text-muted-foreground">{t("director.workspace.readiness")}</p><h2 className="mt-1 text-xl font-semibold">{nextManualAction ? t("director.workspace.manual.nextStep", { action: t(`director.workspace.manual.${nextManualAction.actionKey}`) }) : humanMessage(readiness?.nextAction || t("director.workspace.noNextAction"))}</h2>
         <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
           {([["ready", readinessCounts.ready], ["blocked", readinessCounts.blocked], ["review", readinessCounts.review], ["done", readinessCounts.done]] as const).map(([key, count]) => <div key={key} className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">{t(`director.workspace.readinessCount.${key}`)}</p><p className="mt-1 text-2xl font-semibold">{count}</p></div>)}
         </div>
@@ -979,15 +990,26 @@ export function DirectorPanel({
     </div>
     <section className="overflow-hidden rounded-2xl border border-border bg-card" aria-label={t("director.workspace.overview.objectStatus")}>
       {objectRows.map(row => <button key={row.key} type="button" aria-current={row.current ? "page" : undefined} onClick={() => onNavigate(row.key)} className={`grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b border-border px-4 py-3 text-left transition-colors last:border-b-0 sm:grid-cols-[minmax(150px,.8fr)_minmax(0,1.5fr)_auto] sm:gap-4 sm:px-5 ${row.current ? "bg-muted/40" : "hover:bg-muted/30"}`}>
-        <span className="min-w-0"><strong className="block truncate font-medium">{t(`director.workspace.tab.${row.key}`)}</strong></span>
+        <span className="min-w-0"><strong className="block truncate font-medium">{t(`director.workspace.tab.${row.key}`)}</strong><span className="mt-1 inline-flex items-center gap-1 text-xs text-primary">{row.actionLabel}<ArrowRight className="size-3" /></span></span>
         <span className="col-span-2 row-start-2 min-w-0 truncate text-xs text-muted-foreground sm:col-span-1 sm:row-auto">{humanMessage(row.summary)}</span>
         <Tag className="col-start-2 row-start-1 sm:col-start-auto sm:row-auto" color={row.status === "current" ? "blue" : row.status === "blocked" ? "red" : row.status === "done" ? "green" : undefined}>{t(`director.workspace.overview.rowStatus.${row.status}`)}</Tag>
       </button>)}
     </section>
     {readiness?.targets.some(item => item.status !== "complete") && <section className="space-y-2"><div className="flex items-center justify-between"><h2 className="font-semibold">{t("director.workspace.targetsNeedingWork")}</h2><Tag>{readiness.targets.length}</Tag></div>
-      {readiness.targets.filter(item => item.status !== "complete").slice(0, 8).map(item => <article key={item.id} data-production-target={item.kind === "keyframe" ? `frame:${item.targetId}` : `${item.kind}:${item.targetId}`} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card p-3"><div className="min-w-0"><p className="font-medium">{targetName(item.kind, item.targetId, item.title)}<Tag className="ml-2">{t(`director.workspace.targetKind.${item.kind}`)}</Tag></p><p className="mt-1 text-sm text-muted-foreground">{humanMessage(item.blockers[0] || item.notice || t(`director.workspace.targetStatus.${item.status}`))}</p></div><Button size="small" onClick={() => item.status === "needs_review" ? onNavigate(item.kind === "segment" ? "production" : item.kind === "keyframe" ? "shots" : "assets", { kind: item.kind === "keyframe" ? "shot" : item.kind, id: item.targetId }) : onAskDirector({ workspace: item.kind === "segment" ? "production" : item.kind === "keyframe" ? "shots" : "assets", targetId: item.targetId })}>{item.status === "needs_review" ? t(item.kind === "segment" ? "director.workspace.reviewInProduction" : item.kind === "keyframe" ? "director.workspace.reviewInShots" : "director.workspace.reviewInAssets") : t("director.workspace.askDirector")}</Button></article>)}
+      {readiness.targets.filter(item => item.status !== "complete" || Boolean(item.warnings?.length)).sort((a, b) => Number(b.status === "blocked") - Number(a.status === "blocked")).slice(0, 8).map(item => {
+        const recovery = manualTargetRecovery(item, source);
+        return <article key={item.id} data-production-target={item.kind === "keyframe" ? `frame:${item.targetId}` : `${item.kind}:${item.targetId}`} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card p-3">
+          <div className="min-w-0 flex-1"><p className="font-medium">{targetName(item.kind, item.targetId, item.title)}<Tag className="ml-2">{t(`director.workspace.targetKind.${item.kind}`)}</Tag></p><p className="mt-1 text-sm text-muted-foreground">{t(`director.workspace.manual.${recovery.messageKey}`)}</p>
+            {item.blockers.length > 0 && <details className="mt-2 text-xs text-muted-foreground"><summary className="cursor-pointer">{t("director.workspace.manual.issueDetails")}</summary><p className="mt-1 whitespace-pre-wrap break-words">{humanMessage(item.blockers.join("；"))}</p></details>}
+          </div>
+          <div className="flex flex-wrap gap-2"><Button size="small" disabled={busy} onClick={() => openManualTarget(item)}>{t(`director.workspace.manual.${recovery.actionKey}`)}</Button>
+            {item.kind === "segment" && onLocateTarget && production.draft.clipGroups.some(group => group.id === item.targetId && group.nodeId && group.segmentId) && <Button size="small" disabled={busy} onClick={() => onLocateTarget("segment", item.targetId)}>{t("director.workspace.manual.editCanvasPrompt")}</Button>}
+            <Button size="small" type="text" disabled={busy} onClick={() => onAskDirector({ workspace: item.kind === "segment" ? "production" : item.kind === "keyframe" ? "shots" : "assets", targetId: item.targetId })}>{t("director.workspace.askDirector")}</Button>
+          </div>
+        </article>;
+      })}
     </section>}
-    {readiness?.unresolved.length ? <Alert type="warning" showIcon message={t("director.workspace.openIssues")} description={humanMessage(readiness.unresolved.join("；"))} /> : null}
+    {manualBlockers.length ? <Alert type="warning" showIcon message={t("director.workspace.manual.actualIssues", { count: manualBlockers.length })} description={t("director.workspace.manual.actualIssuesHint")} /> : null}
 
     <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4"><span className="text-xs text-muted-foreground">{t("director.workspace.overview.footerHint")}</span><Button type="primary" icon={<WandSparkles className="size-4" />} disabled={busy || !briefDraft.trim()} onClick={async () => { if (briefDraft !== String(source.brief || "")) await onBrief(briefDraft); onAskDirector({ workspace: presentationWorkspace, targetId: presentation?.targetId, brief: briefDraft, instruction: t("director.workspace.continueInstruction") }); }}>{t("director.workspace.progressCurrent")}</Button></footer>
   </div>;
@@ -1039,6 +1061,7 @@ export function DirectorPanel({
       </div>
     </Modal>
     {error && <Alert type="error" showIcon message={error} />}
+    {d && onPrepareEntities && productionEntities(source, { kind: typeof subjectOwner === "string" ? "episode" : "canvas", id: typeof subjectOwner === "string" ? subjectOwner : canvasId }).some(entity => !canvasNodes.some(node => productionEntityBinding(node.metadata?.productionEntity)?.entityId === entity.entityId && productionEntityBinding(node.metadata?.productionEntity)?.kind === entity.kind)) && <Button size="small" disabled={busy} onClick={() => void onPrepareEntities()}>{t("director.crud.prepareEntityNodes")}</Button>}
     {d && <details className="border-b border-border pb-4"><summary className="cursor-pointer text-sm text-muted-foreground">{t("director.studio.styleSettings")}</summary><section className="mt-3 grid gap-3 md:grid-cols-2">
       <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.styleMother")}</span><Select allowClear value={String((source.style_lock as Record<string, unknown> | undefined)?.anchor_asset_id || "") || undefined} disabled={busy} placeholder={t("director.workspace.chooseStyleMother")} options={assetPlan.filter(item => String(item.role || item.asset_type || "").toUpperCase() === "STYLE_MOTHER" || String(item.kind || "").toLowerCase() === "style").map(item => ({ value: assetIdOf(item), label: assetTitle(item) }))} onChange={value => void onPatch("style", undefined, { anchor_asset_id: value || "" })} /></label>
       <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.stylePolicy")}</span><Select value={String(source.style_policy || "required")} disabled={busy} options={[{ value: "required", label: t("director.workspace.styleRequired") }, { value: "waived", label: t("director.workspace.styleWaived") }]} onChange={value => void onPatch("style", undefined, { style_policy: value })} /></label>
@@ -1047,9 +1070,20 @@ export function DirectorPanel({
     </section></details>}
     <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex flex-wrap gap-1">{["all", "characters", "locations", "props"].map(filter => <button type="button" key={filter} aria-pressed={assetFilter === filter} className={`rounded-lg px-3 py-2 text-sm ${assetFilter === filter ? "bg-muted font-medium" : "text-muted-foreground hover:bg-muted/50"}`} onClick={() => setAssetFilter(filter)}>{t(`director.studio.filter.${filter}`)}</button>)}</div><Input className="max-w-60" prefix={<Search className="size-4 text-muted-foreground" />} placeholder={t("director.studio.searchAssets")} aria-label={t("director.studio.searchAssets")} value={assetSearch} onChange={event => setAssetSearch(event.target.value)} /></div>
     {(() => {
-      const visibleCanvasAssets = canvasAssetRows.filter(item => (assetFilter === "all" || assetFilter === item.kind) && item.name.toLocaleLowerCase().includes(assetSearch.toLocaleLowerCase()));
-      return visibleCanvasAssets.length ? <section className="space-y-3 rounded-xl border border-border bg-card p-4" data-canvas-asset-nodes>
-        <header className="flex items-center justify-between gap-2"><h3 className="text-sm font-semibold">{t("director.crud.canvasAssetNodes")}</h3><Tag>{visibleCanvasAssets.length}</Tag></header>
+      const visibleCanvasAssets = canvasAssetRows.filter(item => {
+        if (subjectAssembly) {
+          const binding = productionEntityBinding(item.node.metadata?.productionEntity);
+          if (records(source.subject_registry).some(subject => {
+            const ref = subject.entityRef;
+            return binding && ref && ref.ownerKind === binding.ownerKind && ref.ownerId === binding.ownerId
+              && ref.id === binding.entityId && (ref.kind === "asset" ? "prop" : ref.kind) === binding.kind
+              || records(subject.pictureBindings).some(picture => picture.sourceNode?.projectId === canvasId && picture.sourceNode?.nodeId === item.node.id);
+          })) return false;
+        }
+        return (assetFilter === "all" || assetFilter === item.kind) && item.name.toLocaleLowerCase().includes(assetSearch.toLocaleLowerCase());
+      });
+      return visibleCanvasAssets.length ? <details open={!subjectAssembly} className="space-y-3 rounded-xl border border-border bg-card p-4" data-canvas-asset-nodes>
+        <summary className="cursor-pointer text-sm font-semibold">{t(subjectAssembly ? "director.crud.otherCanvasAssetNodes" : "director.crud.canvasAssetNodes")} <Tag>{visibleCanvasAssets.length}</Tag></summary>
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{visibleCanvasAssets.map(item => {
           const imageSource = item.storageKey ? backendMediaUrl(item.storageKey) : item.url;
           return <article key={item.node.id} className="overflow-hidden rounded-lg border border-border" data-canvas-asset-node={item.node.id}>
@@ -1057,7 +1091,7 @@ export function DirectorPanel({
             <div className="space-y-2 p-3"><div className="flex items-center justify-between gap-2"><strong className="min-w-0 truncate text-sm" title={item.name}>{item.name}</strong><Tag className="shrink-0">{t(`director.studio.filter.${item.kind}`)}</Tag></div>{item.description && <p className="line-clamp-2 text-xs text-muted-foreground">{item.description}</p>}<ReferenceNodeLink sourceNode={{ projectId: canvasId, nodeId: item.node.id }} /></div>
           </article>;
         })}</div>
-      </section> : null;
+      </details> : null;
     })()}
     {!d ? <Alert type="info" message={t("director.workspace.assetsNeedDirector")} /> : isSubjectPromptAssembly(source) ? <section className="space-y-3" data-subject-registry-editor>
       <div className="flex items-center justify-end gap-3"><Button disabled={busy} onClick={() => setNewSubjectOpen(true)}>{t("director.crud.addSubject")}</Button></div>
@@ -1071,8 +1105,13 @@ export function DirectorPanel({
         const entity = subject.entityRef || {}, entityId = String(entity.id || ""), character = records(source.character_registry).find(row => row.id === entityId), scene = records(source.scene_registry).find(row => row.id === entityId), asset = assetPlan.find(row => assetIdOf(row) === entityId);
         const title = String(character?.name || scene?.name || asset?.asset_name || asset?.name || entityId || subject.id);
         const usageCount = records(source.shots).filter(shot => records(shot.subject_usages).some(usage => usage.subjectId === subject.id)).length;
+        const manualAssets = manualAssetsForSubject(source, subject, { kind: typeof subjectOwner === "string" ? "episode" : "canvas", id: typeof subjectOwner === "string" ? subjectOwner : canvasId });
         return <article key={String(subject.id)} className="grid min-w-0 gap-4 rounded-xl border border-border bg-card p-4 xl:grid-cols-[minmax(0,1fr)_320px]">
-          <div className="flex flex-wrap items-center justify-between gap-2 xl:col-span-2"><div><h3 className="font-semibold">{title}</h3><p className="text-xs text-muted-foreground">{t("director.workspace.subjectConsumers", { count: usageCount })}</p></div><Tag>{t(`director.workspace.subjectKind.${String(subject.kind || "other")}`)}</Tag></div>
+          <div className="flex flex-wrap items-center justify-between gap-2 xl:col-span-2"><div><h3 className="font-semibold">{title}</h3><p className="text-xs text-muted-foreground">{t("director.workspace.subjectConsumers", { count: usageCount })}</p></div><div className="flex flex-wrap items-center gap-2"><Tag>{t(`director.workspace.subjectKind.${String(subject.kind || "other")}`)}</Tag>{onDeleteManualAsset && manualAssets.map(plan => <Button key={assetIdOf(plan)} size="small" danger disabled={busy} onClick={() => deleteManualAsset(assetIdOf(plan))}>{t("director.workspace.deleteManualAssetAction")}{manualAssets.length > 1 ? ` · ${assetName(assetIdOf(plan))}` : ""}</Button>)}</div></div>
+          <div className="xl:col-span-2">{(() => {
+            const entityNode = canvasNodes.find(node => productionEntityBinding(node.metadata?.productionEntity)?.entityId === entityId && productionEntityBinding(node.metadata?.productionEntity)?.kind === (entity.kind === "asset" ? "prop" : entity.kind) && productionEntityBinding(node.metadata?.productionEntity)?.ownerId === entity.ownerId);
+            return entityNode ? <ReferenceNodeLink sourceNode={{ projectId: canvasId, nodeId: entityNode.id }} label={t("director.crud.openEntityNode")} /> : onPrepareEntities && <Button size="small" disabled={busy} onClick={() => void onPrepareEntities()}>{t("director.crud.prepareEntityNodes")}</Button>;
+          })()}</div>
           <details open className="min-w-0 border-t border-border pt-3 xl:col-start-2 xl:row-start-2 xl:max-h-[65dvh] xl:overflow-y-auto"><summary className="cursor-pointer text-sm">{t("director.crud.editSubject")}</summary><div className="mt-3 space-y-3">{(() => {
             const entityType = entity.kind === "character" ? "character" : entity.kind === "scene" ? "environment" : "asset";
             const row = entity.kind === "character" ? character : entity.kind === "scene" ? scene : asset;
@@ -1188,13 +1227,16 @@ export function DirectorPanel({
   };
 
   // 起止状态（镜头开始时 / 镜头结束时）：从「画面与摄影」挪进左栏「连续性状态」模块，与边界开关同区展示。
-  const renderShotState = (shot: Record<string, any>) => {
+  const renderShotState = (shot?: Record<string, any>) => {
+    if (!shot || typeof shot !== "object" || !shot.id) return null;
     const id = String(shot.id || "");
     return <ShotStateFields key={id} shot={shot} busy={busy} onSave={async patch => { const saved = await onPatch("shot", id, patch); return saved !== false; }} />;
   };
 
   // 连续性动作（与下一段的边界开关）：归左栏编辑区下方的「连续性状态」模块。
-  const renderShotContinuity = (shot: Record<string, any>) => {
+  const renderShotContinuity = (shot?: Record<string, any>) => {
+    // 聚焦镜头可能在路由目标已变更、源稿同步期间暂时不存在；连续性 UI 仅适用于有效镜头。
+    if (!shot || typeof shot !== "object" || !shot.id) return null;
     const id = String(shot.id || "");
     const segment = segments.find(item => (item.shot_ids || []).includes(id));
     const boundary = segment && d?.boundaries.find(item => item.from === segment.id);
@@ -1223,7 +1265,7 @@ export function DirectorPanel({
       renderShotActions={subjectAssembly ? undefined : shot => renderShotActions(shot)}
       clipEditor={subjectAssembly ? <SubjectClipPartitionEditor shots={sourceShots} segments={segments} fps={fps} busy={busy} shotTitle={shotTitle} draftValue={sourceDrafts.v2clips} onDraftChange={value => onSourceDraftChange("v2clips", value)} onSave={onRepartitionClips || (async () => false)} /> : <div className="space-y-4">{segments.map(segment => <section key={segment.id} className="border-b border-border pb-4"><h3 className="text-sm font-medium">{segmentTitle(String(segment.id))}</h3><SegmentGroupEditor segment={segment} shots={sourceShots} segments={segments} fps={fps} draftValue={sourceDrafts[`segment:${segment.id}:shot_ids`]} onDraftChange={value => onSourceDraftChange(`segment:${segment.id}:shot_ids`, value)} disabled={busy} onSave={onRegroup} /></section>)}</div>}
       onClip={id => onNavigate("production", { kind: "segment", id })}
-      busy={busy} onRefresh={onRefresh}
+      busy={busy} compileBusy={compileBusy} compilePending={compilePending} compileError={compileError} compileNotice={compileNotice} onCompile={onCompile}
       onDiscuss={targetId => onAskDirector({ workspace: "shots", targetId })} onNavigate={onNavigate} />;
     return <div className="space-y-3"><Alert type="info" message={t("director.workspace.noShots")} /><Button type="text" disabled={busy} icon={<WandSparkles className="size-3.5" />} onClick={() => onAskDirector({ workspace: "shots" })}>{t("director.studio.collaborate")}</Button></div>;
   };
@@ -1242,7 +1284,9 @@ export function DirectorPanel({
     onSave={onSaveContinuity || (async () => false)} onPreviewUpgrade={onPreviewContinuityUpgrade || (async () => ({}))} onCheck={onCheckContinuity || (async () => undefined)} onBoundary={value => onBoundary(value as DirectorProduction["boundaries"][number])} onLocate={(kind, id) => onLocateTarget?.(kind, id)} onAskDirector={onAskDirector} onRequestAgentUpgrade={onRequestContinuityUpgrade} agentThreadId={d?.workflow.agentThreadId} onSnapshot={onContinuitySnapshot} />;
 
   const renderProduction = () => <div className="space-y-5">
-    <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">{t("director.workspace.tab.production")}</h2><p className="mt-1 text-sm text-muted-foreground">{t("director.studio.productionSummary")}</p></div><div className="flex flex-wrap items-center gap-2"><label className="flex items-center gap-2 text-xs text-muted-foreground"><Switch checked={includeGeneratedMedia} disabled={exporting} onChange={setIncludeGeneratedMedia} />{t("director.workspace.includeGeneratedMedia")}</label><Button size="small" loading={exporting} disabled={!d || exporting} onClick={() => void onExport(includeGeneratedMedia)}>{t("director.workspace.exportBundle")}</Button><Button size="small" disabled={busy || !d} onClick={() => onAskDirector({ workspace: "production", targetId: readiness?.targets.find(item => item.status === "blocked")?.targetId, instruction: t("director.workspace.validateCompileCurrent") })}>{t("director.workspace.validateCompile")}</Button><Button size="small" onClick={onRefresh}>{t("director.workspace.refresh")}</Button><Button type="primary" disabled={busy || !d} onClick={onPublish}>{t("drama.production.directorPublish")}</Button></div></div>
+    <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">{t("director.workspace.tab.production")}</h2><p className="mt-1 text-sm text-muted-foreground">{t("director.studio.productionSummary")}</p></div><div className="flex flex-wrap items-center gap-2"><label className="flex items-center gap-2 text-xs text-muted-foreground"><Switch checked={includeGeneratedMedia} disabled={exporting} onChange={setIncludeGeneratedMedia} />{t("director.workspace.includeGeneratedMedia")}</label><Button size="small" loading={exporting} disabled={!d || exporting} onClick={() => void onExport(includeGeneratedMedia)}>{t("director.workspace.exportBundle")}</Button><Button size="small" loading={compileBusy} disabled={busy || compileBusy || !d || !onCompile} onClick={() => onCompile?.()}>{compilePending ? t("drama.production.recoverReceipt") : t("director.workspace.validateCompile")}</Button><Button size="small" onClick={onRefresh}>{t("director.workspace.refresh")}</Button><Button type="primary" disabled={busy || !d} onClick={onPublish}>{t("drama.production.directorPublish")}</Button></div></div>
+    {compileError && <Alert type="error" showIcon message={t("director.atomic.compileFailed")} description={compileError} />}
+    {compileNotice && <Alert type="success" showIcon message={compileNotice} />}
     <details className="border-b border-border pb-4"><summary className="cursor-pointer text-sm text-muted-foreground">{t("director.studio.settings")}</summary><div className="mt-3 space-y-3">    <section className="rounded-xl border border-border bg-card p-4">
       <label className="mb-2 block text-sm font-medium">{t('director.workspace.videoAspectRatio')}</label>
       <Select className="min-w-48" disabled={busy} value={production.draft.settings.videoAspectRatio || ''} onChange={value => onSettings({ videoAspectRatio: value || null, videoAspectRatioConfirmed: true })} options={['', '9:16', '16:9', '1:1', '4:3', '3:4', '2:3', '3:2', '21:9'].map(value => ({ value, label: value || t('director.workspace.inheritVideoAspectRatio') }))} />
@@ -1283,7 +1327,12 @@ export function DirectorPanel({
       })}</div></div> : null;
     })}</section> : <p className="text-sm text-muted-foreground">{readiness?.nextAction || t("director.workspace.noReadiness")}</p>}
 
-    {d && <section className="space-y-2"><h3 className="font-semibold">{t("director.workspace.completePrompts")}</h3>{d.artifacts.map(artifact => <details key={artifact.id} className="rounded-xl border border-border bg-card p-4"><summary className="cursor-pointer font-medium">{targetName(artifact.kind === "h3" ? "segment" : "asset", artifact.targetId)}</summary><div className="mt-3 space-y-3"><pre className="max-h-[32rem] overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted/40 p-3 text-sm">{artifact.prompt}</pre>{artifact.references.length > 0 && <div className="space-y-2"><p className="text-sm font-medium">{t("director.workspace.actualReferences")}</p>{artifact.references.map(ref => <div key={`${artifact.id}:${ref.label}:${ref.storageKey}`} className="flex flex-wrap items-center gap-2 rounded-lg border border-border p-2 text-xs"><Image className="max-h-16 max-w-20 rounded object-contain" src={backendMediaUrl(ref.storageKey)} alt={ref.label} /><span>{ref.label}</span><Tag>{ref.role}</Tag></div>)}</div>}</div></details>)}</section>}
+    {d && <section className="space-y-2"><h3 className="font-semibold">{t("director.workspace.completePrompts")}</h3>{d.artifacts.map(artifact => {
+      const receipt = artifact.receipt as Record<string, any>;
+      const compilerDiagnostics = receipt.diagnostics && typeof receipt.diagnostics === "object" ? receipt.diagnostics as Record<string, any> : {};
+      const blockers = Array.isArray(compilerDiagnostics.blockers) ? compilerDiagnostics.blockers.map(String) : [];
+      return <details key={artifact.id} className="rounded-xl border border-border bg-card p-4"><summary className="cursor-pointer font-medium">{targetName(artifact.kind === "h3" ? "segment" : "asset", artifact.targetId)} · {artifact.status}</summary><div className="mt-3 space-y-3">{blockers.length > 0 && <Alert type="warning" showIcon message={t("director.atomic.compileFailed")} description={<ul className="list-disc space-y-1 pl-5">{blockers.map((blocker, index) => <li key={`${index}:${blocker}`}>{blocker}</li>)}</ul>} />}<pre className="max-h-[32rem] overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted/40 p-3 text-sm">{artifact.prompt}</pre>{artifact.references.length > 0 && <div className="space-y-2"><p className="text-sm font-medium">{t("director.workspace.actualReferences")}</p>{artifact.references.map(ref => <div key={`${artifact.id}:${ref.label}:${ref.storageKey}`} className="flex flex-wrap items-center gap-2 rounded-lg border border-border p-2 text-xs"><Image className="max-h-16 max-w-20 rounded object-contain" src={backendMediaUrl(ref.storageKey)} alt={ref.label} /><span>{ref.label}</span><Tag>{ref.role}</Tag></div>)}</div>}</div></details>;
+    })}</section>}
   </div>;
 
   const renderAdvanced = () => <div className="space-y-5">
@@ -1422,7 +1471,7 @@ export function DirectorPanel({
     {batches.length > 0 && <div className="space-y-3">{batches.map(batch => <article key={batch.runId} className="rounded-lg border border-border p-4"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{t(`director.studio.runStatus.${batch.status}`, { defaultValue: batch.status })}</span><div className="flex gap-2">{["pending", "running"].includes(batch.status) && <Button size="small" onClick={() => onPause(batch.runId)}>{t("director.workspace.pause")}</Button>}{["paused", "awaiting_review"].includes(batch.status) && <Button size="small" onClick={() => onResume(batch.runId)}>{t("director.workspace.resume")}</Button>}</div></div><p className="mt-2 text-xs text-muted-foreground">{t("productionCanvas.taskCount", { count: batch.targets.length, submitted: batch.submitted.length })}</p>{batch.error && <p className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">{humanMessage(batch.error)}</p>}<div className="mt-3 flex flex-wrap gap-2">{batch.targets.map(key => { const [kind, ...ids] = key.split(":"); const id = ids.join(":"); return <Button key={key} size="small" type="text" onClick={() => onLocateTarget?.(kind, id)}>{targetName(kind === "frame" ? "keyframe" : kind, id)}</Button>; })}</div></article>)}</div>}
     {currentTasks.map(task => { const nodeId = String(task.nodeId || task.input?.nodeId || ""), segmentId = String(task.segmentId || task.input?.segmentId || ""); const group = production.draft.clipGroups.find(group => group.nodeId === nodeId && group.segmentId === segmentId); const frame = Object.entries(production.draft.keyframes).find(([, frame]) => frame.nodeId === nodeId); const asset = Object.entries(d?.assets || {}).find(([, asset]) => asset.nodeId === nodeId); const kind = group ? "segment" : frame ? "keyframe" : "asset", id = group?.id || frame?.[0] || asset?.[0]; return <article key={task.id} className="rounded-lg border border-border p-4"><div className="flex flex-wrap items-center justify-between gap-2"><span>{id ? targetName(kind, id) : t("productionCanvas.videoTarget")}</span><Tag>{t(`productionCanvas.historyStatus.${task.status === "succeeded" ? "success" : task.status === "awaiting_confirmation" ? "confirmation" : task.status}`)}</Tag></div>{task.status === "running" && <p className="mt-2 text-xs text-muted-foreground">{Math.round((task.progress || 0) * 100)}%</p>}{task.error && <p className="mt-2 whitespace-pre-wrap text-sm text-muted-foreground">{humanMessage(task.error)}</p>}{id && <Button className="mt-2" type="text" size="small" onClick={() => onLocateTarget?.(kind, id)}>{t("productionCanvas.locateResult")}</Button>}</article>; })}
     {!batches.length && !currentTasks.length && <p className="text-sm text-muted-foreground">{t("productionCanvas.noTasks")}</p>}
-    {readiness?.targets.some(target => ["blocked", "needs_review"].includes(target.status)) && <details className="border-t border-border pt-4"><summary className="cursor-pointer text-sm">{t("productionCanvas.needsAttention")}</summary><div className="mt-3 space-y-3">{readiness.targets.filter(target => ["blocked", "needs_review"].includes(target.status)).map(target => <div key={target.id}><Button size="small" type="text" onClick={() => onLocateTarget?.(target.kind, target.targetId)}>{targetName(target.kind, target.targetId, target.title)}</Button><p className="mt-1 text-sm text-muted-foreground">{humanMessage(target.blockers[0] || target.notice || t(`director.workspace.targetStatus.${target.status}`))}</p></div>)}</div></details>}
+    {readiness?.targets.some(target => ["blocked", "needs_review"].includes(target.status) || Boolean(target.warnings?.length)) && <details className="border-t border-border pt-4"><summary className="cursor-pointer text-sm">{t("productionCanvas.needsAttention")}</summary><div className="mt-3 space-y-3">{readiness.targets.filter(target => ["blocked", "needs_review"].includes(target.status) || Boolean(target.warnings?.length)).map(target => <div key={target.id}><Button size="small" type="text" onClick={() => onLocateTarget?.(target.kind, target.targetId)}>{targetName(target.kind, target.targetId, target.title)}</Button><p className="mt-1 text-sm text-muted-foreground">{humanMessage(target.blockers[0] || target.warnings?.[0] || target.notice || t(`director.workspace.targetStatus.${target.status}`))}</p></div>)}</div></details>}
     <section className="space-y-3 border-t border-border pt-4"><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-medium">{t("productionCanvas.deliveries")}</h3><div className="flex gap-2"><Button size="small" icon={<ArrowDownToLine className="size-3" />} loading={downloadingAllClips} disabled={!deliveredClips.length} onClick={() => void downloadAllDeliveredClips()}>{t("director.workspace.downloadAllClips")}</Button><Button size="small" loading={exporting} disabled={!d || exporting} onClick={() => void onExport(true)}>{t("productionCanvas.downloadPackage")}</Button></div></div>{deliveredClips.length ? deliveredClips.map(({ group, storageKey }) => <article key={`${group.id}:${storageKey}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border p-3"><span>{segmentTitle(group.id)}</span><div className="flex gap-2"><Button size="small" type="text" onClick={() => onLocateTarget?.("segment", group.id)}>{t("productionCanvas.locateResult")}</Button><Button size="small" aria-label={t("common.download")} onClick={() => { void fetch(backendMediaUrl(storageKey)).then(async response => { if (!response.ok) throw new Error(t("director.workspace.mediaReadFailed")); saveAs(await response.blob(), `${segmentTitle(group.id).replace(/[\\/:*?"<>|]/g, "_")}.${response.headers.get("content-type")?.includes("webm") ? "webm" : "mp4"}`); }).catch(error => message.error(String(error))); }}>{t("common.download")}</Button></div></article>) : <p className="text-sm text-muted-foreground">{t("productionCanvas.noDeliveries")}</p>}</section>
   </section>;
   const refreshIssues = groupedRefreshIssues(currentClipRefreshes(production.clipRefreshes || [], records(d?.source.segments).map(segment => String(segment.id)), d?.sourceHash));

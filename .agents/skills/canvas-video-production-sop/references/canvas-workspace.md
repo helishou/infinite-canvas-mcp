@@ -8,7 +8,11 @@
 
 进入剧目直接打开全页制作工作台并选择分集；剧目管理、共享资产和画布是明确入口，不自动把工作台跳转成画布弹窗。画布用于节点原位迭代、历史查看和授权媒体生产。普通画布不自动进入制作 SOP，旧稿不自动迁移；布局变化不重排已有节点或生成媒体。
 
-创意对话确认对象后，先保存 brief 与 `workflow.currentWork`，回读 Backend `workflow/readiness`，再通过 `site_navigate({ production: { kind, id, workId, runId? } })` 呈现正式画布目标；无节点时打开对象编辑面板。需要节点时用 `production_prepare_targets` 幂等准备 asset/frame/segment，不把准备或跟随视为生成授权。推进同一制作沿用 workId；待决定项绑定源哈希，用户答复先保存再继续，不凭聊天文字或同名节点推断导航位置。
+创意对话确认对象后，先保存 brief 与 `workflow.currentWork`，回读 Backend `workflow/readiness`，再通过 `site_navigate({ production: { kind, id, workId, runId? } })` 呈现正式画布目标；无节点时打开对象编辑面板。需要节点时用 `production_prepare_targets` 幂等准备 entity/asset/frame/segment，不把准备或跟随视为生成授权。推进同一制作沿用 workId；待决定项绑定源哈希，用户答复先保存再继续，不凭聊天文字或同名节点推断导航位置。
+
+角色、场景、道具通过正式源稿保存与 `create_manual_director_asset` 登记后，Backend 在同一事务创建对应类型的素材节点；名称与说明在制作台和节点间双向写回当前源稿。用稳定实体 ID 与 owner 定位，不按名称合并，不由 Skill 手工构造 `metadata.productionEntity`。旧稿缺节点时调用 `production_prepare_targets`，targets 使用 `entity:character:<角色ID>`、`entity:scene:<场景ID>`、`entity:prop:<道具资产ID>`，复用回执 revision；需要定位时用 `production_get_workbench` 的 `subject_workbench` 读取 `entityNodeSource` 中的真实 projectId/nodeId。风格不随此接入自动创建；图像生成器保留任务、参数与历史，不用替换生成器来建立素材身份。
+
+通用剧目资产库与正式批准素材是两条不同操作：通用加入／更新用 `assets_add/assets_upsert_batch` 的 operationId、明确资产 ID 与 `canvasSource` 接入唯一共享源，引用局部编辑不自动提交共享；删除源资产先用 `assets_get` 读取稳定来源，再用 `canvas_apply_commands` 删除共享源节点，有引用时保留数据并处理 Backend 返回的使用画布。加入不自动批准。下面的批准版本采用流程仅约束正式制作采用，不阻止未审核媒体加入通用资产库；普通资产库保持原行为。
 
 为每项资产在源稿中保存 `canvas_scope`：全剧可复用的风格母图、主要角色、常驻场景和道具设为 `shared`；单集造型、镜头关键帧和临时构图设为 `episode`。新制作按实际复用范围决定，不按资产名称猜测。缺少此字段的旧稿沿原分集生产路径兼容。共享资产必须在共享画布自己的正式制作记录中准备、编译、生成和审核；不可在分集画布生成后直接把它当成共享资产。已有分集素材只有处于本集发布版、真实媒体哈希匹配且已批准时，才可从资产卡“接入已有审核素材”；先读取来源与共享目标版本，在确认窗口后沿 Backend 事务接入同一归档媒体，保存来源分集、原节点、原任务及审核证据，不重新生成。接入后分集调用 `production_get_shared_assets`、`production_adopt_shared_asset` 采用当前批准版本，再重新编译受影响提示词。Backend 按当前 production owner 校验归属；共享画布拒绝本集资产、关键帧和视频 Clip，分集拒绝未采用的共享资产。新批准版本持久传播到采用方；相同媒体与参考语义只更新归属时保留旧媒体有效状态，实际输入变化则保留历史并标记下游过期。在冲突时回读草稿及更新原因，再按原 adoption ID 恢复。画布权威和版本边界见画布数据契约，跟随与手动接管见画布交互约束。
 
@@ -20,6 +24,6 @@
 
 ### 制作画布布局
 
-布局位置由 Backend 持久化的整批布局计划决定，Skill 不自行计算坐标、不在节点创建后批量补排。正式目标登记后调用 `production_prepare_targets`，并读取响应顶层 `layoutReceipt` 中的 planHash、算法版本、创建/复用节点和冲突诊断。资产按用途进入资产区；剧本、该场次的镜头图片与提示词及 H3 Clips 节点位于各自场次区域。新 Segment 按正式剧本场次归属分配 H3，同场次的 Segment 共用一个物理 H3 节点，不能按环境/场景资产 ID 合并多个叙事场次；跨场次 Segment 在准备前拆分。旧稿已有明确 H3 绑定时保留原映射，并通过布局诊断显示跨场或多节点情况，不静默重绑。缺少参考、待审核或尚未生成的目标也预留位置，依赖状态和生成完成顺序不改变坐标。
+布局位置由 Backend 持久化的整批布局计划决定，Skill 不自行计算坐标、不在节点创建后批量补排。正式目标登记后调用 `production_prepare_targets`，并读取布局回执中的 planHash、算法版本和创建／复用／冲突计数。网页 API 保留完整 `layoutReceipt`，MCP 使用短回执；需要节点身份时只读当前目标工作包（Subject 使用 `entityNodeSource`）或定向画布内容，不能把短回执中的计数当作节点 ID。资产按用途进入资产区；剧本、该场次的镜头图片与提示词及 H3 Clips 节点位于各自场次区域。新 Segment 按正式剧本场次归属分配 H3，同场次的 Segment 共用一个物理 H3 节点，不能按环境/场景资产 ID 合并多个叙事场次；跨场次 Segment 在准备前拆分。旧稿已有明确 H3 绑定时保留原映射，并通过布局诊断显示跨场或多节点情况，不静默重绑。缺少参考、待审核或尚未生成的目标也预留位置，依赖状态和生成完成顺序不改变坐标。
 
 Backend 将已有节点的真实位置与尺寸作为固定锚点，新目标只在所属区域分配空位；用户移动/调整的节点不被挪动。保存文案、审核状态或任务进度不触发布局变化；新增目标只扩展其预留位置。只有布局回执报告身份或占位冲突时，按正式目标 ID 和诊断继续处理，不按名称猜关联，也不以普通画布 ops 覆写编译位置。用户明确要求整理当前画布时，才另行按指定范围执行整理。

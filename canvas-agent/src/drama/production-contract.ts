@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { isH3StyleTemplateId } from "../plugins/minimax-h3/style-templates.js";
 export { productionSceneEntries, productionScriptGroups } from "./production-directory.js";
+export { productionEntities, productionEntityBinding, productionEntityDescriptionField, productionEntityText, type ProductionEntityBinding } from "./production-entities.js";
 export { productionWorkspaceSchemas, productionWorkspaceDescriptions, productionWorkspaceToolNames, productionWorkspaceRequest } from "./production-workspace-contract.js";
 export { productionToolPreflightRequest, productionToolPreflight } from "./production-tool-preflight.js";
 
@@ -307,7 +308,13 @@ export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
        }
         if (usages.success) for (const [usageIndex, usage] of usages.data.entries()) {
             const subject = subjectById.get(usage.subjectId);
-            if (subject) for (const issue of resolveSubjectPictureBindingIds(subject, usage).issues) add([...path, "subject_usages", usageIndex, "pictureBindingIds"], issue);
+            if (subject) for (const issue of resolveSubjectPictureBindingIds(subject, usage).issues) {
+                // A missing or ambiguous default image is an input-readiness problem, not a
+                // reason to reject the authored Shot. The action-specific validator blocks
+                // generation while allowing the source and text prompt to be saved/compiled.
+                if (issue.startsWith("缺少适用于 ") || issue.includes(" 默认图片绑定有歧义：")) continue;
+                add([...path, "subject_usages", usageIndex, "pictureBindingIds"], issue);
+            }
         }
         if (keyframes.success) for (const [keyframeIndex, keyframe] of keyframes.data.entries()) {
             if (keyframe.localFrame !== undefined && keyframe.localFrame >= Number(shot.duration_frames)) add([...path, "keyframes", keyframeIndex, "localFrame"], "关键帧时刻超出 Shot 时长");
@@ -505,6 +512,7 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("upsert_director_subject"), subject: subjectEntrySchema }).strict(),
     z.object({ type: z.literal("repair_director_subject_bindings") }).strict(),
     z.object({ type: z.literal("delete_director_subject"), id }).strict(),
+    z.object({ type: z.literal("create_manual_director_asset"), assetPlan: z.object({ id, kind: z.enum(["character", "scene", "prop"]), asset_name: z.string().min(1), entity_id: id.optional(), version: id, description: z.string(), purpose: z.string(), depends_on: z.array(id), status: z.literal("planned"), canvas_scope: z.enum(["episode", "shared"]).optional() }).strict(), assetCard: z.object({ id, asset_id: id, asset_kind: z.enum(["character", "scene", "prop"]), asset_version: id, prompt: z.string(), references: z.array(z.unknown()) }).strict(), registryKind: z.enum(["character", "scene"]).optional(), registryEntity: z.record(z.unknown()).optional(), subject: subjectEntrySchema.optional() }).strict(),
     z.object({ type: z.literal("delete_director_asset"), id, confirmed: z.literal(true) }).strict(),
     z.object({ type: z.literal("set_director_shot_keyframes"), shotId: id, keyframes: z.array(shotKeyframeSchema) }).strict(),
     z.object({
@@ -533,7 +541,7 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("set_director_boundary"), boundary: directorBoundarySchema }).strict(),
     z.object({ type: z.literal("set_director_segment_group"), segmentId: id, shotIds: z.array(id).min(1), removeSegmentIds: z.array(id).default([]) }).strict(),
     z.object({ type: z.literal("review_director_asset"), assetId: id, version: z.number().int().min(0), sourceHash: hash, nodeId: id, storageKey: id, sha256: hash, verdict: z.enum(["approved", "rejected"]), evidence: z.string().trim().min(1) }).strict(),
-    z.object({ type: z.literal("select_director_result"), targetKind: z.enum(["asset", "keyframe", "segment"]), targetId: id, nodeId: id, generationLogId: id, storageKey: id, canvasRevision: z.number().int().nonnegative() }).strict(),
+    z.object({ type: z.literal("select_director_result"), targetKind: z.enum(["asset", "keyframe", "segment"]), targetId: id, nodeId: id, generationLogId: id.optional(), taskId: id.optional(), storageKey: id, canvasRevision: z.number().int().nonnegative() }).strict(),
     z.object({ type: z.literal("restore_archived_scene_results"), sourceNodeId: id, expectedCanvasRevision: z.number().int().nonnegative() }).strict(),
     z.object({ type: z.literal("upsert_scene"), scene: productionSceneSchema }).strict(),
     z.object({ type: z.literal("delete_scene"), id }).strict(),
