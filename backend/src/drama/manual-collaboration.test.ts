@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { BackendDatabase } from '../db.js';
+import { DATABASE_SCHEMA_VERSION } from '../database-upgrade.js';
 import { createStores } from '../stores/index.js';
 import { BackendEventBus } from '../events.js';
 import { EpisodeProductionService } from './production.js';
@@ -33,7 +34,11 @@ function fixture(t: test.TestContext, persisted = false) {
     const data = emptyEpisodeProduction();
     data.settings.imageModel = 'test-image';
     data.director = { schemaVersion: 1, engine: { commit: 'a'.repeat(40), patchVersion: 'test', runtimeId: 'test', version: 'test' },
-        source: {}, executionAuthorized: false, sourceHash: 'b'.repeat(64), artifacts: [], modules: {}, unresolved: [], workflow: {}, boundaries: [],
+        source: {
+            script_scenes: [{ id: 'scene', scene_id: 'room', scene_name: 'Room', text: 'A scene', beat_ids: ['beat'] }],
+            shots: [{ id: 'S', source_scene_id: 'scene', scene_id: 'room', story_beat_ids: ['beat'] }],
+            segments: [{ id: 'G', shot_ids: ['S'] }],
+        }, executionAuthorized: false, sourceHash: 'b'.repeat(64), artifacts: [], modules: {}, unresolved: [], workflow: {}, boundaries: [],
         assets: { A: { nodeId: 'image', version: 'v1', status: 'planned' }, R: { nodeId: 'reference', storageKey: 'ref', version: 'v1', status: 'generated' } }, shotInputs: {} };
     data.clipGroups = [{ id: 'G', nodeId: 'h3', segmentId: 'clip', shotIds: ['S'], sourceVersion: 0 }];
     db.db.prepare("INSERT INTO episode_productions (episode_id,revision,draft_json,published_json,published_version,updated_at) VALUES ('ep',0,?,NULL,0,?)").run(JSON.stringify(data), new Date().toISOString());
@@ -190,15 +195,18 @@ test('production H3 work shares one process-wide lane across run owners', async 
 
 test('migration adds nullable frozen snapshots, backs up persisted databases, and preserves old batches', t => {
     const f = fixture(t, true);
-    assert.equal(f.db.db.prepare('SELECT MAX(version) as version FROM schema_migrations').get()!.version, 36);
+    assert.equal(f.db.db.prepare('SELECT MAX(version) as version FROM schema_migrations').get()!.version, DATABASE_SCHEMA_VERSION);
     for (const table of ['episode_production_batches', 'canvas_production_batches', 'scene_production_batches']) {
         assert.ok(f.db.db.prepare(`PRAGMA table_info(${table})`).all().some(row => row.name === 'execution_snapshot_json'));
     }
     const legacy = f.db.db.prepare("INSERT INTO episode_production_batches (run_id,episode_id,idempotency_key,request_hash,version,source_revision,status,targets_json,plan_json,settings_json,submitted_json,created_at,updated_at) VALUES ('old','ep','old','old',1,0,'paused','[]','{}','{}','[]','now','now')"); legacy.run();
     assert.equal(f.service.getBatch('ep', 'old')?.executionSnapshot, null);
-    f.db.db.exec('DELETE FROM schema_migrations WHERE version=36');
+    for (const table of ['episode_production_batches', 'canvas_production_batches', 'scene_production_batches']) {
+        f.db.db.exec(`ALTER TABLE ${table} DROP COLUMN execution_snapshot_json`);
+    }
+    f.db.db.exec('DELETE FROM schema_migrations WHERE version>=33');
     const reopened = new BackendDatabase(f.file); reopened.close();
-    assert.ok(fs.readdirSync(f.directory).some(name => name.includes('pre-schema-v35-to-v36')));
+    assert.ok(fs.readdirSync(f.directory).some(name => name.includes(`pre-schema-v32-to-v${DATABASE_SCHEMA_VERSION}`)));
 });
 
 test('field adoption is read-only in preflight and applies only selected director fields', t => {

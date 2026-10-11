@@ -94,6 +94,7 @@ import { useExportCanvas } from "@/hooks/use-export-canvas";
 import { applyNodeConfigPatch, audioMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, keepNodesInLockedGroups, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
 import { arrangeOrderedGroupMembers, inheritOrderedGroupOutputs, insertOrderedGroupSlot, moveOrderedGroupSlot, orderedGroupColumnCount, orderedGroupDisplaySlots, orderedGroupDraggedCenter, orderedGroupDropTarget, orderedGroupLayout, orderedGroupMemberPosition, orderedGroupMemberSize, orderedGroupResizeLayout, orderedGroupSlots, replaceOrderedGroupSlot, swapOrderedGroupSlot, transferOrderedGroupH3References } from "@/lib/canvas/ordered-group";
+import { collectCanvasSelectionIds } from "@/lib/canvas/canvas-selection";
 import { clearCanvasDragPreview, clearCanvasResizePreview, writeCanvasDragPreview, writeCanvasResizePreview, type CanvasResizePreviewBounds } from "@/lib/canvas/canvas-drag-preview";
 import {
     audioExtension,
@@ -2600,16 +2601,17 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             const rectY = Math.min(currentSelection.startWorldY, world.y);
             const rectW = Math.abs(world.x - currentSelection.startWorldX);
             const rectH = Math.abs(world.y - currentSelection.startWorldY);
-            const nextSelected = new Set<string>(currentSelection.additive ? currentSelection.initialSelectedNodeIds : []);
-
-            queryCanvasSpatialIndex(graphIndex.nodeSpatialIndex, {
-                left: rectX,
-                top: rectY,
-                right: rectX + rectW,
-                bottom: rectY + rectH,
-            }).forEach((node) => {
-                if (!currentSelection.excludeNodeIds?.includes(node.id)) nextSelected.add(node.id);
-            });
+            const nextSelected = collectCanvasSelectionIds(
+                queryCanvasSpatialIndex(graphIndex.nodeSpatialIndex, {
+                    left: rectX,
+                    top: rectY,
+                    right: rectX + rectW,
+                    bottom: rectY + rectH,
+                }).map((node) => node.id),
+                currentSelection.initialSelectedNodeIds,
+                currentSelection.additive,
+                currentSelection.excludeNodeIds,
+            );
 
             const nextSelectionBox = { ...currentSelection, currentWorldX: world.x, currentWorldY: world.y, currentLocalX: localX, currentLocalY: localY };
             selectionBoxRef.current = nextSelectionBox;

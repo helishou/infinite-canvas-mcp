@@ -154,7 +154,8 @@ export function normalizeImportSources(input: unknown): ImportSource[] {
         ? { filePath: entry }
         : { filePath: String((entry as Record<string, unknown>)?.filePath || ""), title: String((entry as Record<string, unknown>)?.title || "") || undefined };
     if (!source.filePath) throw new Error(`items[${index}] 缺少 filePath`);
-    const key = path.resolve(source.filePath).toLowerCase();
+    const resolvedPath = path.resolve(source.filePath);
+    const key = process.platform === "win32" ? resolvedPath.toLowerCase() : resolvedPath;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(source);

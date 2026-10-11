@@ -637,6 +637,9 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 - Unrelated node edits should not invoke reference resource providers again. Replacing reference images, restoring missing ordered slots, changing ordering or membership, and editing loop inputs must update references. Language changes and plugin updates/removal must also invalidate the relevant cache.
 - H3 and other plugins should query the shared canvas index while preserving original connection-array order, repeated sources and self-loops. Local references changed before the next render must remain immediately readable.
 - From `web`, run `node --import ../backend/node_modules/tsx/dist/loader.mjs ../scripts/benchmark-canvas-editing.mjs <pre-optimization-commit>` for the CPU comparison. Results are saved to `artifacts/canvas-editing-performance.json`; React, network and persistence costs are excluded, so these measurements do not establish a page frame-rate improvement.
+## Cross-platform local image import
+
+- On Linux, import two image files whose names differ only by case; both should remain in the result. Repeating the same normalized path should import it once. On Windows, case differences and forward/backslash variants should still deduplicate.
 
 ## H3 reference compatibility and migration recovery
 
