@@ -241,11 +241,14 @@ def audit(source, target_ids=None):
 _canvas_source_contract_audit = True
 def audit(p, base_dir=ROOT, *, h3_segment_ids=None):
     if isinstance(p, dict) and p.get("_canvas_prompt_assembly_version") == 2:
-        return {"status": "PASS", "gates": [], "diagnostics": []}
+        return {"status": "PASS", "score": 100, "applicable_gates": 0,
+                "scope": "canvas-prompt-assembly-v2", "production_sha256": digest(p),
+                "gates": [], "diagnostics": [], "visual_status": "UNVERIFIED"}
     from canvas_source_contract import validate
     diagnostics = validate(p, "compile")
     errors = [item for item in diagnostics if item.get("severity") == "error"]
-    return {"status": "FAIL" if errors else "PASS", "score": 0 if errors else 10,
+    return {"status": "FAIL" if errors else "PASS", "score": 0 if errors else 100,
+            "applicable_gates": 1, "production_sha256": digest(p),
             "scope": "canvas-source-contract",
             "gates": [{"gate": "source-contract", "status": "FAIL" if errors else "PASS",
                        "errors": [item["message"] for item in errors]}],
@@ -259,6 +262,13 @@ def compile_segment(p, seg, *, draft=False):
     return _canvas_subject_prompt_v2_compile_segment(p, seg, draft=draft)
 '''
         audit.write_text(text, encoding="utf-8")
+
+    # This validator checks authored upstream examples and their exported
+    # hashes; keep it on the upstream audit while Canvas inputs use our wrapper.
+    validator = root / "scripts/validate_director_contract.py"
+    replace(validator,
+            "from audit_storyboard_quality import ROOT, audit, compile_segment, read_data, require",
+            "from audit_storyboard_quality import ROOT, _canvas_audit_impl as audit, compile_segment, read_data, require")
 
     references = root / "scripts/reference_bindings.py"
     replace(references,
