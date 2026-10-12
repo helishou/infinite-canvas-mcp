@@ -4,6 +4,11 @@ export type DirectorRecord = Record<string, any>;
 export type ScriptSceneGroup = { key: string; sceneId: string; title: string; blocks: DirectorRecord[] };
 export const records = (value: unknown): DirectorRecord[] => Array.isArray(value) ? value.filter(item => item && typeof item === 'object' && !Array.isArray(item)) : [];
 
+/** Search labels consistently across registered subjects and canvas/legacy assets. */
+export function matchesAssetSearch(name: string, query: string): boolean {
+    return name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase());
+}
+
 export function groupScriptScenes(blocks: DirectorRecord[]): ScriptSceneGroup[] {
     return productionScriptGroups(blocks);
 }

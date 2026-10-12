@@ -1,6 +1,6 @@
 import type { SharedAssetSource } from "@basketikun/canvas-agent/shared-asset-reference";
 import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { App, Empty, Input, Popconfirm, Select, Spin, Tag, type InputRef } from "antd";
+import { App, Drawer, Empty, Input, Popconfirm, Select, Spin, Tag, type InputRef } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { BookOpen, Check, ChevronRight, Clapperboard, Download, Eye, FileText, Image as ImageIcon, LayoutGrid, Rows3, ListChecks, ListRestart, MapPinned, Music2, Package, Plus, Search, Settings2, Sparkles, Square, Trash2, Type, User, Video, type LucideIcon } from "lucide-react";
@@ -30,6 +30,12 @@ import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 
 import type { InsertAssetPayload } from "./asset-picker-modal";
 
+const subscribeCompactCanvas = (notify: () => void) => {
+    const query = window.matchMedia("(max-width: 767px)");
+    query.addEventListener("change", notify);
+    return () => query.removeEventListener("change", notify);
+};
+const compactCanvasSnapshot = () => window.matchMedia("(max-width: 767px)").matches;
 const PANEL_MOTION_SECONDS = CANVAS_SIDE_PANEL_MOTION_MS / 1000;
 const PANEL_EASE = [0.22, 1, 0.36, 1] as const;
 
@@ -76,6 +82,10 @@ export const CanvasSidePanel = memo(function CanvasSidePanel({ projectId, nodes,
     const nodeSearchFocusRequest = useCanvasSidePanelStore((state) => state.nodeSearchFocusRequest);
     const setWidth = useCanvasSidePanelStore((state) => state.setWidth);
     const [resizing, setResizing] = useState(false);
+    const compact = useSyncExternalStore(subscribeCompactCanvas, compactCanvasSnapshot, () => false);
+    const closePanel = useCanvasSidePanelStore(state => state.closePanel);
+    const focusFromDirectory = (id: string) => { onFocusNode(id); if (compact) closePanel(); };
+    const insertFromDirectory = (payload: InsertAssetPayload) => { onInsertAsset(payload); if (compact) closePanel(); };
 
     useEffect(() => {
         if (nodeSearchFocusRequest > 0) setTab("canvas");
@@ -102,20 +112,13 @@ export const CanvasSidePanel = memo(function CanvasSidePanel({ projectId, nodes,
 
     if (!panelMounted) return null;
 
-    return (
-        <motion.div
-            className="relative z-[60] flex h-full shrink-0"
-            initial={{ width: 0, opacity: 0 }}
-            animate={{ width: panelOpen ? width + 1 : 0, opacity: panelOpen ? 1 : 0 }}
-            transition={{ duration: resizing ? 0 : PANEL_MOTION_SECONDS, ease: PANEL_EASE }}
-            style={{ overflow: "clip", pointerEvents: panelClosing ? "none" : undefined }}
-        >
-            <motion.aside
+    const content = (<motion.aside
                 className="relative flex h-full shrink-0 flex-col overflow-hidden border-r"
                 initial={{ x: -48 }}
                 animate={{ x: panelClosing ? -28 : 0 }}
                 transition={{ duration: resizing ? 0 : PANEL_MOTION_SECONDS, ease: PANEL_EASE }}
-                style={{ width, background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+                style={{ width: compact ? "100%" : width, background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+                data-canvas-transient-tool={compact && panelOpen || undefined}
                 data-canvas-no-zoom
             >
                 <div className="flex items-center gap-5 px-4 pt-3.5">
@@ -125,17 +128,21 @@ export const CanvasSidePanel = memo(function CanvasSidePanel({ projectId, nodes,
                 </div>
                 <div className="mt-2 min-h-0 flex-1 overflow-hidden">
                     {tab === "canvas" ? (
-                        <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onSelectionChange={onSelectionChange} onFocusNode={onFocusNode} onPreviewNode={onPreviewNode} theme={theme} focusSearchRequest={nodeSearchFocusRequest} />
+                        <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onSelectionChange={onSelectionChange} onFocusNode={focusFromDirectory} onPreviewNode={onPreviewNode} theme={theme} focusSearchRequest={nodeSearchFocusRequest} />
                     ) : tab === "assets" ? (
-                        <CanvasAssetsTab projectId={projectId} onInsert={onInsertAsset} theme={theme} />
+                        <CanvasAssetsTab projectId={projectId} onInsert={insertFromDirectory} theme={theme} />
                     ) : (
-                        <CanvasPromptsTab onInsert={onInsertAsset} nodes={nodes} theme={theme} />
+                        <CanvasPromptsTab onInsert={insertFromDirectory} nodes={nodes} theme={theme} />
                     )}
                 </div>
-                <button type="button" className="absolute inset-y-0 right-0 z-40 w-4 translate-x-1/2 cursor-col-resize" onPointerDown={startResize} aria-label={t("canvas.sidePanel.resize")} />
-            </motion.aside>
-        </motion.div>
-    );
+                {!compact && <button type="button" className="absolute inset-y-0 right-0 z-40 w-4 translate-x-1/2 cursor-col-resize" onPointerDown={startResize} aria-label={t("canvas.sidePanel.resize")} />}
+            </motion.aside>);
+    return compact ? <Drawer title={t("canvasChrome.directory")} open={panelOpen} onClose={closePanel} placement="left" getContainer={false} rootStyle={{ position: "absolute" }} width="min(360px, calc(100% - 24px))" styles={{ body: { padding: 0 } }}>{content}</Drawer> : <motion.div
+        className="relative z-[60] flex h-full shrink-0"
+        initial={{ width: 0, opacity: 0 }} animate={{ width: panelOpen ? width + 1 : 0, opacity: panelOpen ? 1 : 0 }}
+        transition={{ duration: resizing ? 0 : PANEL_MOTION_SECONDS, ease: PANEL_EASE }}
+        style={{ overflow: "clip", pointerEvents: panelClosing ? "none" : undefined }}
+    >{content}</motion.div>;
 });
 
 function TabButton({ label, active, theme, onClick }: { label: string; active: boolean; theme: CanvasTheme; onClick: () => void }) {
@@ -699,7 +706,7 @@ function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: 
                 >
                     <Plus className="size-4" />
                 </button>
-                <Popconfirm title={t("canvas.sidePanel.removeAssetTitle")} okText={t("canvas.sidePanel.remove")} cancelText={t("common.cancel")} okButtonProps={{ danger: true }} onConfirm={onRemove}>
+                <Popconfirm title={t("canvas.sidePanel.removeAssetTitle", { name: asset.title })} description={t("canvas.sidePanel.removeAssetDescription")} okText={t("common.delete")} cancelText={t("common.cancel")} okButtonProps={{ danger: true }} onConfirm={onRemove}>
                     <button
                         type="button"
                         className="grid size-8 place-items-center rounded-full bg-white/90 text-stone-700 shadow-sm backdrop-blur transition hover:bg-white hover:text-red-500 dark:bg-black/60 dark:text-stone-100 dark:hover:bg-black/80 dark:hover:text-red-400"

@@ -1,3 +1,4 @@
+import { continuityPriorState } from "./continuity-timeline-model";
 type Row = Record<string, any>;
 
 export function continuityEventFrame(event: Row, shots: Row[]) {
@@ -15,9 +16,6 @@ export function continuityEventAnchor(ledger: Row, shots: Row[], shotId: string,
     const globalFrame = Number(shot.start_frame) + offset;
     const events: Row[] = (ledger.events || []).filter((item: Row) => item.timeline_id === shot.timeline_id && item.fact_id === factId);
     if (events.some(event => continuityEventFrame(event, shots) === globalFrame)) throw new Error("EVENT_ANCHOR_OCCUPIED");
-    const previous = events.filter(event => continuityEventFrame(event, shots) < globalFrame)
-        .sort((a, b) => continuityEventFrame(a, shots) - continuityEventFrame(b, shots)).at(-1);
-    const before = previous?.after ?? (ledger.initial || []).find((item: Row) => item.timeline_id === shot.timeline_id && item.fact_id === factId)?.value;
-    if (typeof before !== "string" || before === "unknown") throw new Error("EVENT_INITIAL_STATE_MISSING");
+    const before = continuityPriorState(ledger, shots, shotId, factId, offset);
     return { before, globalFrame, anchor: local ? { local_frame: offset } : { frame: globalFrame } };
 }

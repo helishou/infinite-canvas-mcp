@@ -1,31 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-
 import { registerCanvasBrowserScriptRoutes } from "./browser-script-routes.js";
 
-type Route = { path: string; handler: (req: any, res: any) => void };
-
-test("浏览器脚本路由要求 workerId，并把认领与结果交给同一调度器", () => {
-    const routes: Route[] = [];
-    const calls: unknown[] = [];
-    const dispatcher = {
-        claim: (...args: unknown[]) => { calls.push(["claim", ...args]); return { id: "t", status: "running" }; },
-        complete: (...args: unknown[]) => { calls.push(["complete", ...args]); return { id: "t", status: "succeeded" }; },
-        fail: () => ({}), release: () => ({}),
+test("browser route contract returns nonce only on claim and forwards it for every mutation", () => {
+    const routes = new Map<string, (req: any, res: any) => void>();
+    const calls: { name: string; args: unknown[] }[] = [];
+    const dispatcher = Object.fromEntries(["claim", "checkpoint", "complete", "fail", "release"].map(name => [name, (...args: unknown[]) => {
+        calls.push({ name, args }); return name === "claim" ? { task: { id: "task" }, claimToken: "nonce" } : { id: "task" };
+    }]));
+    registerCanvasBrowserScriptRoutes({ post: (path: string, handler: any) => routes.set(path, handler) } as never, dispatcher as never);
+    const request = (action: string, body: any) => {
+        let status = 200, result: any;
+        const response = { status(value: number) { status = value; return response; }, json(value: unknown) { result = value; return response; } };
+        routes.get(`/canvas/browser-tasks/:id/${action}`)!({ params: { id: "task" }, body }, response);
+        return { status, result };
     };
-    registerCanvasBrowserScriptRoutes({ post: (path: string, handler: Route["handler"]) => routes.push({ path, handler }) } as never, dispatcher as never);
-    assert.deepEqual(routes.map((route) => route.path), [
-        "/canvas/browser-tasks/:id/claim", "/canvas/browser-tasks/:id/complete",
-        "/canvas/browser-tasks/:id/fail", "/canvas/browser-tasks/:id/release",
-    ]);
-
-    let response: any;
-    const res = { statusCode: 200, status(code: number) { this.statusCode = code; return this; }, json(body: unknown) { response = body; } };
-    routes[0].handler({ params: { id: "t" }, body: {} }, res);
-    assert.equal(res.statusCode, 409);
-    assert.deepEqual(response, { ok: false, error: "workerId 必填" });
-
-    routes[0].handler({ params: { id: "t" }, body: { workerId: "tab-a" } }, res);
-    routes[1].handler({ params: { id: "t" }, body: { workerId: "tab-a", result: { texts: ["ok"] } } }, res);
-    assert.deepEqual(calls, [["claim", "t", "tab-a"], ["complete", "t", "tab-a", { texts: ["ok"] }]]);
+    assert.deepEqual(request("claim", { workerId: "worker" }), { status: 200, result: { ok: true, task: { id: "task" }, claimToken: "nonce" } });
+    for (const action of ["checkpoint", "complete", "fail", "release"]) {
+        assert.equal(request(action, { workerId: "worker" }).status, 409);
+        const count = calls.length;
+        const response = request(action, { workerId: "worker", claimToken: "nonce", recovery: { version: 1 }, result: { texts: ["mock"] }, terminalConfirmed: true });
+        assert.equal(response.status, 200); assert.equal(response.result.claimToken, undefined);
+        assert.equal(calls.length, count + 1); assert.ok(calls.at(-1)!.args.includes("nonce"));
+    }
+    assert.equal(calls.find(call => call.name === "fail")!.args.at(-2), true);
+    assert.deepEqual(request("claim", {}), { status: 409, result: { ok: false, error: "workerId 必填" } });
+    assert.deepEqual([...routes.keys()], ["claim", "checkpoint", "complete", "fail", "release"].map(action => `/canvas/browser-tasks/:id/${action}`));
 });

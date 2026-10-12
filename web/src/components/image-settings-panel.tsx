@@ -34,7 +34,12 @@ const aspectOptions = [
     { value: "auto", label: "auto", width: 0, height: 0, icon: "auto" },
 ];
 
-export const imageQualityOptions = qualityOptions.map((item) => ({ value: item.value, get label() { return i18n.t(`settingsPanels.common.${item.labelKey}`); } }));
+export const imageQualityOptions = qualityOptions.map((item) => ({
+    value: item.value,
+    get label() {
+        return i18n.t(`settingsPanels.common.${item.labelKey}`);
+    },
+}));
 export const imageAspectOptions = aspectOptions.map((item) => ({ value: item.size || item.value, label: item.label }));
 
 type ImageSettingsPanelProps = {
@@ -57,7 +62,22 @@ type ImageSettingsPanelProps = {
     debugScenario?: string;
 };
 
-export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", maxCount = 15, quickCount = 10, customFields, customFieldValues, onCustomFieldChange, hideStandardImageOptions = false, workflowParamsMissing = false, workflowParamsBlockedByScenario = false, debugScenario }: ImageSettingsPanelProps) {
+export function ImageSettingsPanel({
+    config,
+    onConfigChange,
+    theme,
+    showTitle = true,
+    className = "w-[320px] max-w-full space-y-4 rounded-2xl px-1 py-0.5",
+    maxCount = 15,
+    quickCount = 10,
+    customFields,
+    customFieldValues,
+    onCustomFieldChange,
+    hideStandardImageOptions = false,
+    workflowParamsMissing = false,
+    workflowParamsBlockedByScenario = false,
+    debugScenario,
+}: ImageSettingsPanelProps) {
     const { t } = useTranslation();
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const snapDimensionToStep = config.imageAlign16 !== false;
@@ -91,7 +111,7 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
             >
                 {showTitle ? <div className="text-lg font-semibold">{t("settingsPanels.image.title")}</div> : null}
                 {customFields && customFields.length > 0 && onCustomFieldChange ? (
-                    <div className="space-y-2.5">
+                    <div className="space-y-2.5" role="group" aria-label={t("settingsPanels.image.workflowFields")}>
                         <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.workflowFields")}</SettingTitle>
                         <WorkflowCustomFields fields={customFields} values={customFieldValues || {}} onChange={onCustomFieldChange} />
                     </div>
@@ -109,74 +129,118 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         {debugScenario}
                     </div>
                 ) : null}
-                {!hideStandardImageOptions && <div className="space-y-2.5">
-                    <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.quality")}</SettingTitle>
-                    <div className="grid grid-cols-3 gap-2.5">
-                        {qualityOptions.map((item) => (
-                            <OptionPill key={item.value} selected={quality === item.value} theme={theme} onClick={() => onConfigChange("quality", item.value)}>
-                                {t(`settingsPanels.common.${item.labelKey}`)}
-                            </OptionPill>
-                        ))}
+                <SettingsSection title={t("settingsPanels.groups.common")} theme={theme}>
+                    {!hideStandardImageOptions ? (
+                        <>
+                            <div className="space-y-2.5">
+                                <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.quality")}</SettingTitle>
+                                <div className="grid grid-cols-3 gap-2.5">
+                                    {qualityOptions.map((item) => (
+                                        <OptionPill key={item.value} selected={quality === item.value} theme={theme} onClick={() => onConfigChange("quality", item.value)}>
+                                            {t(`settingsPanels.common.${item.labelKey}`)}
+                                        </OptionPill>
+                                    ))}
+                                </div>
+                            </div>
+                        </>
+                    ) : null}
+                    <div className="space-y-2.5">
+                        <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.count")}</SettingTitle>
+                        <div className="grid grid-cols-3 gap-2">
+                            {Array.from({ length: quickCount }, (_, index) => index + 1).map((value) => (
+                                <OptionPill key={value} selected={count === value} theme={theme} onClick={() => onConfigChange("count", String(value))}>
+                                    {t("settingsPanels.image.images", { count: value })}
+                                </OptionPill>
+                            ))}
+                            <CountInput value={count} max={maxCount} theme={theme} onChange={(value) => onConfigChange("count", String(value || 1))} />
+                        </div>
                     </div>
-                </div>}
-                {!hideStandardImageOptions && <div className="space-y-2.5">
+                    {!hideStandardImageOptions ? (
+                        <>
+                            <div className="space-y-2.5">
+                                <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.aspectRatio")}</SettingTitle>
+                                <div className="grid grid-cols-3 gap-2">
+                                    {aspectOptions
+                                        .filter((item) => !item.size)
+                                        .map((item) => (
+                                            <button
+                                                key={item.value}
+                                                type="button"
+                                                aria-pressed={selectedAspect?.value === item.value}
+                                                className="flex h-[64px] min-w-0 cursor-pointer flex-col items-center justify-center gap-1.5 rounded-xl border bg-transparent text-sm transition hover:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                                                style={{ borderColor: selectedAspect?.value === item.value ? theme.node.text : theme.node.stroke, background: "transparent", color: theme.node.text }}
+                                                onMouseDown={(event) => event.stopPropagation()}
+                                                onClick={() => selectAspect(item.value)}
+                                            >
+                                                <AspectIcon type={item.icon} width={item.width} height={item.height} color={theme.node.text} />
+                                                <span>{item.label}</span>
+                                            </button>
+                                        ))}
+                                </div>
+                            </div>
+                        </>
+                    ) : null}
+                </SettingsSection>
+                <SettingsDisclosure
+                    title={t("settingsPanels.groups.imageAdvanced")}
+                    summary={`${hideStandardImageOptions ? "" : `${imageSizeLabel(activeSize)} · `}${t(transparentBackground ? "settingsPanels.image.transparent" : "settingsPanels.groups.defaultBackground")}`}
+                    theme={theme}
+                >
+                    {!hideStandardImageOptions ? (
+                        <>
+                            <div className="space-y-2.5">
+                                <div className="flex items-center justify-between gap-3">
+                                    <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.size")}</SettingTitle>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-xs font-medium" style={{ color: theme.node.muted }}>
+                                            {t("settingsPanels.image.align16")} · {t("settingsPanels.groups.globalPreference")}
+                                        </span>
+                                        <span title={t("settingsPanels.image.align16Hint")} onMouseDown={(event) => event.stopPropagation()}>
+                                            <Switch aria-label={t("settingsPanels.image.align16")} size="small" checked={snapDimensionToStep} onChange={(checked) => updateConfig("imageAlign16", checked)} />
+                                        </span>
+                                    </div>
+                                </div>
+                                <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2.5">
+                                    <DimensionInput prefix="W" value={dimensions.width} disabled={activeSize === "auto"} theme={theme} alignToStep={snapDimensionToStep} onChange={(value) => updateDimension("width", value)} />
+                                    <span className="text-lg opacity-45">↔</span>
+                                    <DimensionInput prefix="H" value={dimensions.height} disabled={activeSize === "auto"} theme={theme} alignToStep={snapDimensionToStep} onChange={(value) => updateDimension("height", value)} />
+                                </div>
+                            </div>
+                            <div className="space-y-2.5">
+                                <SettingTitle color={theme.node.muted}>{t("settingsPanels.groups.highResolution")}</SettingTitle>
+                                <div className="grid grid-cols-3 gap-2">
+                                    {aspectOptions
+                                        .filter((item) => item.size)
+                                        .map((item) => (
+                                            <button
+                                                key={item.value}
+                                                type="button"
+                                                aria-pressed={selectedAspect?.value === item.value}
+                                                className="flex h-[64px] min-w-0 cursor-pointer flex-col items-center justify-center gap-1.5 rounded-xl border bg-transparent text-sm transition hover:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                                                style={{ borderColor: selectedAspect?.value === item.value ? theme.node.text : theme.node.stroke, background: "transparent", color: theme.node.text }}
+                                                onMouseDown={(event) => event.stopPropagation()}
+                                                onClick={() => selectAspect(item.value)}
+                                            >
+                                                <AspectIcon type={item.icon} width={item.width} height={item.height} color={theme.node.text} />
+                                                <span>{item.label}</span>
+                                            </button>
+                                        ))}
+                                </div>
+                            </div>
+                        </>
+                    ) : null}
                     <div className="flex items-center justify-between gap-3">
-                        <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.size")}</SettingTitle>
-                        <div className="flex items-center gap-2">
-                            <span className="text-xs font-medium" style={{ color: theme.node.muted }}>
-                                {t("settingsPanels.image.align16")}
-                            </span>
-                            <span title={t("settingsPanels.image.align16Hint")} onMouseDown={(event) => event.stopPropagation()}>
-                                <Switch size="small" checked={snapDimensionToStep} onChange={(checked) => updateConfig("imageAlign16", checked)} />
-                            </span>
+                        <div className="space-y-0.5">
+                            <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.transparent")}</SettingTitle>
+                            <div className="text-xs" style={{ color: theme.node.muted, opacity: 0.75 }}>
+                                {t("settingsPanels.image.transparentHint")}
+                            </div>
                         </div>
+                        <span onMouseDown={(event) => event.stopPropagation()}>
+                            <Switch aria-label={t("settingsPanels.image.transparent")} size="small" checked={transparentBackground} onChange={(checked) => onConfigChange("background", checked ? "transparent" : "")} />
+                        </span>
                     </div>
-                    <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2.5">
-                        <DimensionInput prefix="W" value={dimensions.width} disabled={activeSize === "auto"} theme={theme} alignToStep={snapDimensionToStep} onChange={(value) => updateDimension("width", value)} />
-                        <span className="text-lg opacity-45">↔</span>
-                        <DimensionInput prefix="H" value={dimensions.height} disabled={activeSize === "auto"} theme={theme} alignToStep={snapDimensionToStep} onChange={(value) => updateDimension("height", value)} />
-                    </div>
-                </div>}
-                {!hideStandardImageOptions && <div className="space-y-2.5">
-                    <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.aspectRatio")}</SettingTitle>
-                    <div className="grid grid-cols-4 gap-2.5">
-                        {aspectOptions.map((item) => (
-                            <button
-                                key={item.value}
-                                type="button"
-                                className="flex h-[72px] cursor-pointer flex-col items-center justify-center gap-1.5 rounded-xl border bg-transparent text-sm transition hover:opacity-80"
-                                style={{ borderColor: selectedAspect?.value === item.value ? theme.node.text : theme.node.stroke, background: "transparent", color: theme.node.text }}
-                                onMouseDown={(event) => event.stopPropagation()}
-                                onClick={() => selectAspect(item.value)}
-                            >
-                                <AspectIcon type={item.icon} width={item.width} height={item.height} color={theme.node.text} />
-                                <span>{item.label}</span>
-                            </button>
-                        ))}
-                    </div>
-                </div>}
-                <div className="flex items-center justify-between gap-3">
-                    <div className="space-y-0.5">
-                        <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.transparent")}</SettingTitle>
-                        <div className="text-xs" style={{ color: theme.node.muted, opacity: 0.75 }}>
-                            {t("settingsPanels.image.transparentHint")}
-                        </div>
-                    </div>
-                    <span onMouseDown={(event) => event.stopPropagation()}>
-                        <Switch size="small" checked={transparentBackground} onChange={(checked) => onConfigChange("background", checked ? "transparent" : "")} />
-                    </span>
-                </div>
-                <div className="space-y-2.5">
-                    <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.count")}</SettingTitle>
-                    <div className="grid grid-cols-4 gap-2.5">
-                        {Array.from({ length: quickCount }, (_, index) => index + 1).map((value) => (
-                            <OptionPill key={value} selected={count === value} theme={theme} onClick={() => onConfigChange("count", String(value))}>
-                                {t("settingsPanels.image.images", { count: value })}
-                            </OptionPill>
-                        ))}
-                        <CountInput value={count} max={maxCount} theme={theme} onChange={(value) => onConfigChange("count", String(value || 1))} />
-                    </div>
-                </div>
+                </SettingsDisclosure>
             </div>
         </ImageSettingsTheme>
     );
@@ -207,7 +271,8 @@ function OptionPill({ selected, theme, onClick, children }: { selected: boolean;
     return (
         <button
             type="button"
-            className="h-9 cursor-pointer rounded-full border px-2 text-sm transition hover:opacity-80"
+            aria-pressed={selected}
+            className="min-h-9 min-w-0 cursor-pointer rounded-full border px-2 text-sm transition hover:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
             style={{ background: "transparent", borderColor: selected ? theme.node.text : theme.node.stroke, color: theme.node.text }}
             onMouseDown={(event) => event.stopPropagation()}
             onClick={onClick}
@@ -225,7 +290,7 @@ function DimensionInput({ prefix, value, disabled, theme, alignToStep, onChange 
     };
 
     return (
-        <label className="flex h-9 overflow-hidden rounded-xl text-sm" style={{ background: theme.node.fill, color: theme.node.text, opacity: disabled ? 0.55 : 1 }}>
+        <label className="flex h-9 overflow-hidden rounded-xl text-sm focus-within:ring-2 focus-within:ring-ring" style={{ background: theme.node.fill, color: theme.node.text, opacity: disabled ? 0.55 : 1 }}>
             <span className="grid w-9 place-items-center" style={{ color: theme.node.muted }}>
                 {prefix}
             </span>
@@ -247,12 +312,14 @@ function DimensionInput({ prefix, value, disabled, theme, alignToStep, onChange 
 }
 
 function CountInput({ value, max, theme, onChange }: { value: number; max: number; theme: CanvasTheme; onChange: (value: number | null) => void }) {
+    const { t } = useTranslation();
     return (
-        <label className="col-span-2 flex h-9 overflow-hidden rounded-full border text-sm" style={{ borderColor: theme.node.stroke, color: theme.node.text }}>
+        <label className="col-span-2 flex h-9 overflow-hidden rounded-full border text-sm focus-within:ring-2 focus-within:ring-ring" style={{ borderColor: theme.node.stroke, color: theme.node.text }}>
             <input
                 type="number"
                 min={1}
                 max={max}
+                aria-label={t("settingsPanels.image.count")}
                 className="min-w-0 flex-1 bg-transparent px-3 text-center outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                 style={{ color: theme.node.text, WebkitTextFillColor: theme.node.text }}
                 value={value || ""}
@@ -293,4 +360,32 @@ function readSizeDimensions(size: string, fallback: { width: number; height: num
 
 function alignDimension(value: number, enabled: boolean) {
     return enabled ? Math.ceil(value / DIMENSION_STEP) * DIMENSION_STEP : value;
+}
+
+/** Shared semantic groups: parent workspaces own the configuration scope. */
+export function SettingsSection({ title, theme, children }: { title: string; theme: CanvasTheme; children: ReactNode }) {
+    return (
+        <fieldset className="min-w-0 space-y-3 border-0 p-0">
+            <legend className="mb-2 w-full text-sm font-semibold" style={{ color: theme.node.text }}>
+                {title}
+            </legend>
+            {children}
+        </fieldset>
+    );
+}
+
+export function SettingsDisclosure({ title, summary, theme, children }: { title: string; summary?: string; theme: CanvasTheme; children: ReactNode }) {
+    return (
+        <details className="min-w-0 border-t pt-3" style={{ borderColor: theme.node.stroke }}>
+            <summary className="cursor-pointer rounded-sm text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
+                {title}
+                {summary ? (
+                    <span className="mt-1 block break-words pl-4 text-xs font-normal" style={{ color: theme.node.muted }}>
+                        {summary}
+                    </span>
+                ) : null}
+            </summary>
+            <div className="mt-4 space-y-4">{children}</div>
+        </details>
+    );
 }

@@ -10,11 +10,11 @@ export default function ConfigPage() {
 
     return (
         <main className="h-full overflow-y-auto bg-background">
-            <div className="mx-auto max-w-6xl px-6 py-6">
+            <div className="mx-auto max-w-6xl px-4 py-8 sm:px-8 sm:py-10">
                 <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
                     <div>
-                        <h1 className="text-xl font-semibold text-stone-950 dark:text-stone-100">{t("config.title")}</h1>
-                        <p className="mt-1 text-sm text-stone-500">{t("config.description")}</p>
+                        <h1 className="text-3xl font-medium tracking-tight text-foreground">{t("config.title")}</h1>
+                        <p className="mt-1 text-sm text-muted-foreground">{t("config.description")}</p>
                     </div>
                     <Link to="/diagnostics/mcp">
                         <Button type="text" icon={<Activity className="size-4" />}>

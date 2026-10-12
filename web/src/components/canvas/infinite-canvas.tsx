@@ -295,6 +295,7 @@ export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWrit
     return (
         <div
             ref={containerRef}
+            data-canvas-interaction-surface
             className="relative h-full w-full select-none overflow-hidden"
             style={{ background: theme.canvas.background, cursor }}
             onPointerDown={handlePointerDown}

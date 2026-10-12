@@ -1,13 +1,19 @@
-import type { ReactNode } from "react";
-import { Compass, Focus, HelpCircle, Scan } from "lucide-react";
+import { Compass, Focus, HelpCircle, Scan, Palette } from "lucide-react";
 import { useState } from "react";
-import { Button, Modal, Tooltip } from "antd";
+import { Button, Popover, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
-import { canvasThemes } from "@/lib/canvas-theme";
+import { CanvasAppearancePanel } from "./canvas-appearance-panel";
+import { CanvasShortcutsDialog } from "./canvas-shortcuts-dialog";
+import { useCanvasTransientEscape } from "@/lib/canvas/canvas-host";
+import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 
 type CanvasZoomControlsProps = {
+    backgroundMode: CanvasBackgroundMode;
+    showImageInfo: boolean;
+    onBackgroundModeChange: (mode: CanvasBackgroundMode) => void;
+    onShowImageInfoChange: (show: boolean) => void;
     onFitAll: () => void;
     scale: number;
     onScaleChange: (scale: number) => void;
@@ -16,17 +22,19 @@ type CanvasZoomControlsProps = {
     onToggleMiniMap: () => void;
 };
 
-export function CanvasZoomControls({ scale, onScaleChange, onReset, onFitAll, isMiniMapOpen, onToggleMiniMap }: CanvasZoomControlsProps) {
+export function CanvasZoomControls({ scale, onScaleChange, onReset, onFitAll, isMiniMapOpen, onToggleMiniMap, backgroundMode, showImageInfo, onBackgroundModeChange, onShowImageInfoChange }: CanvasZoomControlsProps) {
     const [shortcutsOpen, setShortcutsOpen] = useState(false);
+    const [appearanceOpen, setAppearanceOpen] = useState(false);
+    useCanvasTransientEscape(appearanceOpen, () => setAppearanceOpen(false));
     const { t } = useTranslation();
     const colorTheme = useThemeStore((state) => state.theme);
     const theme = canvasThemes[colorTheme];
-    const dockStyle = { background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.item, boxShadow: colorTheme === "dark" ? "0 18px 45px rgba(0,0,0,.32)" : "0 16px 40px rgba(28,25,23,.12)" };
+    const dockStyle = { background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.item };
     const activeStyle = { background: theme.toolbar.activeBg, color: theme.toolbar.activeText };
 
     return (
-        <div data-canvas-zoom-controls className="absolute bottom-36 left-5 z-50 md:bottom-5" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
-            <div className="flex h-14 items-center gap-1 rounded-xl border px-2 shadow-lg backdrop-blur" style={dockStyle}>
+        <div data-canvas-zoom-controls className="canvas-zoom-dock" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+            <div className="flex h-14 items-center gap-1 rounded-lg border px-2" style={dockStyle}>
                 <Tooltip title={isMiniMapOpen ? t("canvas.miniMapClose") : t("canvas.miniMapOpen")}>
                     <Button
                         type="text"
@@ -57,32 +65,12 @@ export function CanvasZoomControls({ scale, onScaleChange, onReset, onFitAll, is
                 <span className="w-10 text-right text-xs tabular-nums" style={{ color: theme.node.muted }}>
                     {Math.round(scale * 100)}%
                 </span>
+                <Popover destroyOnHidden open={appearanceOpen} onOpenChange={setAppearanceOpen} trigger="click" placement="topLeft" content={<CanvasAppearancePanel {...{backgroundMode, showImageInfo, onBackgroundModeChange, onShowImageInfoChange}} />}><Button type="text" aria-label={t("canvas.toolbar.appearance")} icon={<Palette className="size-4" />} /></Popover>
                 <Tooltip title={t("canvas.shortcuts")}>
                     <Button type="text" className="!h-8 !w-8 !min-w-8 !p-0" style={shortcutsOpen ? activeStyle : { color: theme.toolbar.item }} icon={<HelpCircle className="size-4" />} onClick={() => setShortcutsOpen(true)} aria-label={t("canvas.shortcuts")} />
                 </Tooltip>
             </div>
-            <Modal title={t("canvas.shortcuts")} open={shortcutsOpen} onCancel={() => setShortcutsOpen(false)} footer={null} centered>
-                <div className="space-y-3 border-t pt-4 text-sm" style={{ borderColor: theme.node.stroke }}>
-                    <Shortcut label="Ctrl / Cmd + K" value={t("canvas.navigation.searchLabel")} />
-                    <Shortcut label="F" value={t("canvas.navigation.focusSelection")} />
-                    <Shortcut label="Shift + F" value={t("canvas.navigation.fitAll")} />
-                    <Shortcut label={`Ctrl / Space + ${t("canvas.shortcut.drag")}`} value={t("canvas.shortcut.toggleTool")} />
-                    <Shortcut label={t("canvas.shortcut.wheel")} value={t("canvas.shortcut.zoom")} />
-                    <Shortcut label={t("canvas.shortcut.drag")} value={t("canvas.shortcut.boxSelect")} />
-                    <Shortcut label={`Shift / Cmd + ${t("canvas.shortcut.click")}`} value={t("canvas.shortcut.addSelection")} />
-                    <Shortcut label="Ctrl / Cmd + C / V" value={t("canvas.shortcut.copyPasteNodes")} />
-                    <Shortcut label="Delete / Backspace" value={t("canvas.shortcut.delete")} />
-                </div>
-            </Modal>
-        </div>
-    );
-}
-
-function Shortcut({ label, value }: { label: ReactNode; value: string }) {
-    return (
-        <div className="flex items-center justify-between gap-4">
-            <span className="text-base font-medium">{label}</span>
-            <span className="opacity-60">{value}</span>
+            <CanvasShortcutsDialog open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
         </div>
     );
 }

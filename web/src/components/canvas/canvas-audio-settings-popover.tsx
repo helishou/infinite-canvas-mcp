@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { CanvasPortal, useCanvasTransientEscape } from "@/lib/canvas/canvas-host";
+import { CanvasSettingsContext } from "./canvas-settings-context";
+import { canvasSettingsPosition } from "./canvas-settings-position";
 import { Settings2 } from "lucide-react";
 import { Button } from "antd";
 
@@ -15,6 +17,7 @@ export type CanvasAudioSettingKey = "audioVoice" | "audioFormat" | "audioSpeed" 
 
 type CanvasAudioSettingsPopoverProps = {
     config: AiConfig;
+    targetLabel?: string;
     onConfigChange: (key: CanvasAudioSettingKey, value: string) => void;
     buttonClassName?: string;
     placement?: "topLeft" | "top" | "topRight" | "bottomLeft" | "bottom" | "bottomRight";
@@ -29,6 +32,7 @@ type CanvasAudioSettingsPopoverProps = {
 
 export function CanvasAudioSettingsPopover({
     config,
+    targetLabel,
     onConfigChange,
     buttonClassName,
     placement = "topLeft",
@@ -135,6 +139,7 @@ export function CanvasAudioSettingsPopover({
                 placement={placement}
                 theme={theme}
                 config={config}
+                targetLabel={targetLabel}
                 onConfigChange={onConfigChange}
                 customFields={customFields}
                 customFieldValues={comfyParams}
@@ -154,7 +159,7 @@ export function CanvasAudioSettingsPopover({
     return (
         <>
             <span ref={buttonRef} className="inline-flex min-w-0">
-                <Button size="small" type="text" className={buttonClassName || "!h-8 !max-w-[170px] !justify-start !rounded-full !px-2.5"} style={{ background: theme.node.fill, color: theme.node.text }} icon={<Settings2 className="size-3.5" />} onClick={() => setOpen((current) => !current)}>
+                <Button size="small" type="text" className={buttonClassName || "!h-8 !max-w-[170px] !justify-start !rounded-full !px-2.5"} style={{ background: theme.node.fill, color: theme.node.text }} icon={<Settings2 className="size-3.5" />} aria-expanded={open} onClick={() => setOpen((current) => !current)}>
                     <span className="truncate">
                         {audioVoiceLabel(config.audioVoice)} · {audioFormatLabel(config.audioFormat)} · {audioSpeedLabel(config.audioSpeed)}
                     </span>
@@ -170,6 +175,7 @@ function AudioSettingsPortal({
     panelRef,
     placement,
     theme,
+    targetLabel,
     config,
     onConfigChange,
     customFields,
@@ -182,25 +188,18 @@ function AudioSettingsPortal({
     placement: CanvasAudioSettingsPopoverProps["placement"];
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     config: AiConfig;
+    targetLabel?: string;
     onConfigChange: (key: CanvasAudioSettingKey, value: string) => void;
     customFields: Parameters<typeof AudioSettingsPanel>[0]["customFields"];
     customFieldValues: Parameters<typeof AudioSettingsPanel>[0]["customFieldValues"];
     onCustomFieldChange: Parameters<typeof AudioSettingsPanel>[0]["onCustomFieldChange"];
     hideStandardAudioOptions: boolean;
 }) {
-    const width = 356;
-    const gap = 8;
-    const margin = 12;
-    const alignRight = placement?.endsWith("Right");
-    const alignCenter = placement === "top" || placement === "bottom";
-    const left = alignCenter ? buttonRect.left + buttonRect.width / 2 - width / 2 : alignRight ? buttonRect.right - width : buttonRect.left;
-    const topPlacement = placement?.startsWith("top");
     const style = {
         position: "fixed",
         zIndex: 1200,
-        width,
-        left: Math.max(margin, Math.min(window.innerWidth - width - margin, left)),
-        ...(topPlacement ? { bottom: window.innerHeight - buttonRect.top + gap, maxHeight: Math.max(260, buttonRect.top - margin * 2) } : { top: buttonRect.bottom + gap, maxHeight: Math.max(260, window.innerHeight - buttonRect.bottom - margin * 2) }),
+        ...canvasSettingsPosition(buttonRect, { width: window.innerWidth, height: window.innerHeight }, placement),
+        boxSizing: "border-box",
         background: theme.toolbar.panel,
         borderRadius: 18,
         boxShadow: "0 18px 54px rgba(28, 25, 23, 0.16)",
@@ -212,12 +211,15 @@ function AudioSettingsPortal({
     return <CanvasPortal>
         <div
             ref={panelRef}
+            data-canvas-shortcuts-ignore
+            data-canvas-no-zoom
             className="canvas-image-settings-popover"
             style={style}
             onPointerDown={(event) => event.stopPropagation()}
             onMouseDown={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
         >
+            <CanvasSettingsContext targetLabel={targetLabel} />
             <AudioSettingsPanel
                 config={config}
                 onConfigChange={(key, value) => onConfigChange(key, value)}

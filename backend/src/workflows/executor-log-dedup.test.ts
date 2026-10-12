@@ -42,6 +42,16 @@ function harness(logs: LogRow[], parentLog?: LogRow, historicalFields: Array<{ w
             return parentLog;
         },
     };
+    const media = {
+        get: () => null,
+        store: (bytes: Buffer, options: { mimeType?: string }) => ({ storageKey: "image:log-test", mimeType: options.mimeType || "image/png", bytes: bytes.length }),
+        async storeStream(stream: AsyncIterable<Uint8Array>, options: { mimeType?: string }) {
+            const chunks: Buffer[] = [];
+            for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+            return this.store(Buffer.concat(chunks), options);
+        },
+        url: (item: { storageKey: string }) => `/media/${encodeURIComponent(item.storageKey)}`,
+    };
     const executor = new WorkflowExecutor(
         { getUrl: () => "http://127.0.0.1:8188", uploadImage: async () => "x.png", cancelPromptExecution: async () => undefined } as never,
         {
@@ -54,7 +64,7 @@ function harness(logs: LogRow[], parentLog?: LogRow, historicalFields: Array<{ w
             update: (id: string, patch: Record<string, unknown>) => Object.assign(tasks.get(id)!, patch),
             list: () => [], addEvent: () => ({}),
         } as never,
-        { get: () => null, store: () => ({}), url: (key: string) => `/media/${encodeURIComponent(key)}` } as never,
+        media as never,
         { publish: () => undefined } as never,
         db as never,
     );

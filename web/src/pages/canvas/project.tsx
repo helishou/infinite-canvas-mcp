@@ -1,3 +1,4 @@
+import "@/components/canvas/canvas-workspace-chrome.css";
 import { libraryAssetNode } from "@/lib/canvas/library-asset-node";
 import type { SharedAssetSource, SharedAssetReference } from "@basketikun/canvas-agent/shared-asset-reference";
 import { CanvasBatchRename } from "@/components/canvas/canvas-batch-rename";
@@ -1016,7 +1017,12 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         };
     }, [size.height, size.width, viewport.k, viewport.x, viewport.y]);
 
-    const visibleNodes = useMemo(() => queryCanvasSpatialIndex(graphIndex.nodeSpatialIndex, visibleWorldBounds), [graphIndex.nodeSpatialIndex, visibleWorldBounds]);
+    const visibleNodes = useMemo(() => {
+        const visible = queryCanvasSpatialIndex(graphIndex.nodeSpatialIndex, visibleWorldBounds);
+        // The screen editor has one owner; keep that node mounted while panning outside the cull bounds.
+        const editing = dialogNodeId ? nodeById.get(dialogNodeId) : undefined;
+        return editing && !getNodeDefinition(editing.type)?.Panel && !visible.some(node => node.id === editing.id) ? [...visible, editing] : visible;
+    }, [graphIndex.nodeSpatialIndex, visibleWorldBounds, dialogNodeId, nodeById]);
     // 节点过密时只降级详情控件；概览仍保留真实缩略图或信息卡，不能退化成透明空壳。
     const denseOverviewMode = visibleNodes.length >= DENSE_OVERVIEW_MIN_VISIBLE_NODES && viewport.k < DENSE_OVERVIEW_MIN_SCALE;
 
@@ -1918,7 +1924,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         const current = liveViewportRef.current;
         const rect = containerRef.current?.getBoundingClientRect();
         const available = rect ? { width: canvasFocusWidth(rect), height: rect.height } : size;
-        const topInset = 64;
+        const topInset = 16;
         const screen = { left: node.position.x * current.k + current.x, top: node.position.y * current.k + current.y, right: (node.position.x + node.width) * current.k + current.x, bottom: (node.position.y + node.height) * current.k + current.y };
         const target = viewportForCanvasNodes([node], { width: available.width, height: Math.max(1, available.height - topInset) });
         if (!target) return;
@@ -1989,7 +1995,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             const nodeRect = el.getBoundingClientRect(), k = liveViewportRef.current.k;
             if (nodeRect.width <= 0 || nodeRect.height <= 0 || k <= 0) return;
             h3FocusTicketRef.current = null;
-            const topInset = 64;
+            const topInset = 16;
             const availableWidth = canvasFocusWidth(viewportRect);
             if (nodeRect.left >= viewportRect.left + 24 && nodeRect.top >= viewportRect.top + topInset && nodeRect.right <= viewportRect.left + availableWidth - 24 && nodeRect.bottom <= viewportRect.bottom - 24) return;
             // Clip readiness may change the mounted layout; fit that whole node, not only the player.
@@ -2852,6 +2858,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         const handlePaste = (event: ClipboardEvent) => {
             if (!activeRef.current) return;
             const target = event.target instanceof Element ? event.target : null;
+            if (target?.closest(".canvas-blocking-overlay")) return;
             if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || target?.closest("[contenteditable='true'],[data-canvas-no-zoom],[data-canvas-shortcuts-ignore]")) return;
             const data = event.clipboardData;
             if (!data) return;
@@ -2889,6 +2896,10 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         const handleKeyDown = (event: KeyboardEvent) => {
             if (!activeRef.current) return;
             const target = event.target instanceof Element ? event.target : null;
+            // Portal tools own their keyboard input, including buttons in drawer headers.
+            // Do not let undo/delete/copy mutate the canvas behind the open tool.
+            if (target?.closest(".canvas-blocking-overlay")) return;
+            if (event.defaultPrevented || target?.closest(".ant-dropdown,.ant-popover,.ant-modal,.ant-drawer")) return;
             const key = event.key.toLowerCase();
             const isModifierShortcut = event.metaKey || event.ctrlKey;
             // 焦点在富文本编辑器（contenteditable / 标记 shortcuts-ignore 的容器，如 H3 主提示词）
@@ -2961,6 +2972,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             }
 
             if (event.key === "Escape") {
+                if (connectingParamsRef.current || pendingConnectionCreateRef.current) event.preventDefault();
                 setSelectedNodeIds(new Set());
                 setSelectedConnectionId(null);
                 setContextMenu(null);
@@ -5649,7 +5661,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
 
     const renderNodePanel = useCallback(
         (panelNode: CanvasNodeData) => {
-            // 循环节点的面板是它自己的配置表单，和智能生成节点一样挂在节点下方。
+            // 循环节点的面板是它自己的配置表单，和智能生成节点一样使用当前对象的编辑面板。
             // 不要再把循环的浮层转发给下游生成节点——那会让循环自己的参数无处可改。
             if (panelNode.type === CanvasNodeType.Loop) return renderLoopPanel(panelNode);
             const target = panelNode;
@@ -5796,11 +5808,13 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         );
     const missingTarget = active && projectLoaded && (searchParams.get("nodeId") ? !nodes.some(node => node.id === searchParams.get("nodeId")) : searchParams.get("segmentId") ? !nodes.some(node => Array.isArray(node.metadata?.segments) && (node.metadata.segments as Array<{ id: string }>).some(segment => segment.id === searchParams.get("segmentId"))) : false);
     if (!projectLoaded) return <CanvasRefreshShell />;
+    const screenEditorOpen = Boolean(dialogNodeId && !getNodeDefinition(nodeById.get(dialogNodeId)?.type || "")?.Panel);
+    const pickerTargetName = nodeById.get(pendingVideoComparison?.source.id || (characterImagePickerActive ? characterEditNodeId : sceneImagePickerActive ? sceneEditNodeId : propImagePickerActive ? propEditNodeId : pluginReferencePickNodeId || referencePickerNodeId) || "")?.title;
 
     return (
-        <main className="flex h-full min-h-0 overflow-hidden" style={{ background: theme.canvas.background, color: theme.node.text }}>
+        <main className="relative flex h-full min-h-0 overflow-hidden" style={{ background: theme.canvas.background, color: theme.node.text }}>
             <CanvasSidePanel onSelectionChange={selectCanvasNodes} projectId={projectId} nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNode} onPreviewNode={setPreviewNodeId} onInsertAsset={handleAssetInsert} />
-            <section className="relative min-w-0 flex-1 overflow-hidden">
+            <section className="canvas-workspace-column relative min-w-0 flex-1 overflow-hidden">
                 {missingTarget && <p role="status" className="absolute left-4 top-14 z-20 rounded bg-background px-3 py-2 text-xs text-muted-foreground">{t("director.canvasOverlay.targetMissing")}</p>}
                 <CanvasTopBar
                     title={currentProject?.title || t("canvas.projectPage.untitledCanvas")}
@@ -5827,6 +5841,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onOpenGenerationLogs={() => setGenerationLogsOpen(true)}
                     collaborators={collaborators}
                 />
+                <div className="canvas-stage" data-canvas-stage>
                 {canvasConflict ? (
                     <div className="pointer-events-auto absolute left-1/2 top-16 z-40 w-[min(680px,calc(100%-32px))] -translate-x-1/2">
                         <Alert
@@ -5972,6 +5987,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                                 registryVersion={nodeRegistryVersion}
                                 // 图片/视频/音频/文本节点不会消费这些渲染器；不传无用函数，
                                 // 避免生成状态或面板回调变化时让所有媒体节点失去 React.memo 命中。
+                                panelContainer={showPanel && !nodeDefinition?.Panel ? containerRef.current : undefined}
+                                onClosePanel={() => setDialogNodeId(null)}
                                 renderPanel={showPanel ? renderNodePanel : undefined}
                                 renderNodeContent={node.type === CanvasNodeType.Config || node.type === CanvasNodeType.Loop ? renderNodeContentPanel : undefined}
                                 onMouseDown={handleNodeMouseDown}
@@ -6050,41 +6067,42 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     ) : null}
                 </InfiniteCanvas>
                     {pendingVideoComparison ? (
-                        <button type="button" className="absolute left-1/2 top-4 z-[90] -translate-x-1/2 rounded-full border px-4 py-2 text-sm font-medium shadow-lg backdrop-blur" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} onClick={exitReferencePick}>
-                            {t("canvas.videoCompare.selectingHint")}
+                        <button type="button" data-canvas-transient-tool className="canvas-mode-notice" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} onClick={exitReferencePick}>
+                            {t("canvas.videoCompare.selectingHint")}<span className="max-w-40 truncate">{pickerTargetName}</span><span className="shrink-0 underline">{t("canvasChrome.exitMode")}</span>
                         </button>
                     ) : characterImagePickerActive ? (
                         <button
                             type="button"
-                            className="absolute left-1/2 top-4 z-[90] -translate-x-1/2 border px-4 py-2 text-sm font-medium backdrop-blur"
+                            data-canvas-transient-tool className="canvas-mode-notice"
                             style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }}
                             onClick={exitCharacterImageSelection}
                         >
-                            {t("canvas.character.selectingImageHint")}
+                            {t("canvas.character.selectingImageHint")}<span className="max-w-40 truncate">{pickerTargetName}</span><span className="shrink-0 underline">{t("canvasChrome.exitMode")}</span>
                         </button>
                     ) : sceneImagePickerActive ? (
-                        <button type="button" className="absolute left-1/2 top-4 z-[90] -translate-x-1/2 border px-4 py-2 text-sm font-medium backdrop-blur" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} onClick={exitSceneImageSelection}>
-                            {t("canvas.scene.selectingImageHint")}
+                        <button type="button" data-canvas-transient-tool className="canvas-mode-notice" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} onClick={exitSceneImageSelection}>
+                            {t("canvas.scene.selectingImageHint")}<span className="max-w-40 truncate">{pickerTargetName}</span><span className="shrink-0 underline">{t("canvasChrome.exitMode")}</span>
                         </button>
                     ) : propImagePickerActive ? (
-                        <button type="button" className="absolute left-1/2 top-4 z-[90] -translate-x-1/2 border px-4 py-2 text-sm font-medium backdrop-blur" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} onClick={exitPropImageSelection}>
-                            {t("canvas.prop.selectingImageHint")}
+                        <button type="button" data-canvas-transient-tool className="canvas-mode-notice" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} onClick={exitPropImageSelection}>
+                            {t("canvas.prop.selectingImageHint")}<span className="max-w-40 truncate">{pickerTargetName}</span><span className="shrink-0 underline">{t("canvasChrome.exitMode")}</span>
                         </button>
                     ) : refPickActive ? (
                         <button
                             type="button"
-                            className="absolute left-1/2 top-4 z-[90] -translate-x-1/2 rounded-full border px-4 py-2 text-sm font-medium shadow-lg backdrop-blur"
+                            data-canvas-transient-tool className="canvas-mode-notice"
                             style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }}
                             onClick={exitReferencePick}
                         >
-                            {t("canvas.references.selectingHint")}
+                            {t("canvas.references.selectingHint")}<span className="max-w-40 truncate">{pickerTargetName}</span><span className="shrink-0 underline">{t("canvasChrome.exitMode")}</span>
                         </button>
                     ) : null}
+                {connectingParams && <button type="button" data-canvas-transient-tool className="canvas-mode-notice" onClick={cancelPendingConnectionCreate}>{t("canvasChrome.connecting", { name: nodeById.get(connectingParams.nodeId)?.title || connectingParams.nodeId })}<span className="shrink-0 underline">{t("canvasChrome.exitMode")}</span></button>}
                 <CanvasRealtimePresenceLayer projectId={projectId} nodeById={nodeById} viewport={viewport} />
 
                 <CanvasNodeHoverToolbar
                     savingAsset={Boolean(toolbarNode && savingAssetNodes.has(`${projectId}:${toolbarNode.id}`))}
-                    node={isNodeDragging || isNodeResizing || nodeImageSettingsOpen || Boolean(referencePickerNodeId) || expandedBatchNodeIds.has(toolbarNode?.id || "") ? null : toolbarNode}
+                    node={screenEditorOpen || selectedNodeIds.size > 1 || isNodeDragging || isNodeResizing || nodeImageSettingsOpen || Boolean(referencePickerNodeId) || expandedBatchNodeIds.has(toolbarNode?.id || "") ? null : toolbarNode}
                     viewport={viewport}
                     extraTools={[...productionMoreActions, ...(pluginToolbarItems || [])]}
                     onDiscardSharedEdits={(node) => void discardSharedAssetEdits(node)}
@@ -6132,11 +6150,10 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onFocusSelection={focusSelection}
                     onBatchRename={openBatchRename}
                     selectedCount={selectedNodeIds.size}
+                    showSelectionActions={!screenEditorOpen}
                     canvasTool={canvasTool}
                     canUndo={historyState.canUndo}
                     canRedo={historyState.canRedo}
-                    backgroundMode={backgroundMode}
-                    showImageInfo={showImageInfo}
                     onAddImage={() => createNode(CanvasNodeType.Image)}
                     onAddVideo={() => createNode(CanvasNodeType.Video)}
                     onAddH3={() => createNode("minimax-h3:video")}
@@ -6157,13 +6174,11 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onArrange={arrangeSelectedNodes}
                     onClear={() => setClearConfirmOpen(true)}
                     onCanvasToolChange={setCanvasTool}
-                    onBackgroundModeChange={setBackgroundMode}
-                    onShowImageInfoChange={setShowImageInfo}
                 />
 
-                {isMiniMapOpen ? <Minimap nodes={nodes} viewport={viewport} viewportSize={size} onViewportChange={commitViewport} /> : null}
+                {isMiniMapOpen ? <Minimap onClose={() => setIsMiniMapOpen(false)} nodes={nodes} viewport={viewport} viewportSize={size} onViewportChange={commitViewport} /> : null}
 
-                <CanvasZoomControls onFitAll={fitAllNodes} scale={viewport.k} onScaleChange={setZoomScale} onReset={resetViewport} isMiniMapOpen={isMiniMapOpen} onToggleMiniMap={() => setIsMiniMapOpen((value) => !value)} />
+                <CanvasZoomControls backgroundMode={backgroundMode} showImageInfo={showImageInfo} onBackgroundModeChange={setBackgroundMode} onShowImageInfoChange={setShowImageInfo} onFitAll={fitAllNodes} scale={viewport.k} onScaleChange={setZoomScale} onReset={resetViewport} isMiniMapOpen={isMiniMapOpen} onToggleMiniMap={() => setIsMiniMapOpen((value) => !value)} />
 
                 {contextMenu ? (
                     <CanvasNodeContextMenu
@@ -6303,6 +6318,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
 
                     {assetPickerOpen ? <AssetPickerModal key="asset-picker" open allowedKinds={assetPickerAllowedKinds} onInsert={handleAssetInsert} onClose={closeAssetPicker} /> : null}
                 </CanvasDialogHost>
+                </div>
             </section>
         </main>
     );

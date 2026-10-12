@@ -30,27 +30,27 @@ test("浏览器脚本任务由 Backend 绑定、单实例认领并原子回写�
     assert.equal(db.getTask("browser-1")!.status, "running");
     assert.throws(() => dispatcher.claim("browser-1", "tab-b"), /另一个浏览器/);
 
-    dispatcher.complete("browser-1", "tab-a", { texts: ["浏览器结果"] });
+    dispatcher.complete("browser-1", "tab-a", { texts: ["浏览器结果"] }, dispatcher.claim("browser-1", "tab-a").claimToken);
     assert.equal(db.getTask("browser-1")!.status, "succeeded");
     assert.equal(metadata().runtimeTaskId, undefined);
     assert.equal(metadata().status, "success");
     const result = (db.getCanvasProject("p")!.nodes as Array<{ type: string; metadata: Record<string, unknown> }>).find((node) => node.type === "text");
     assert.equal(result?.metadata.content, "浏览器结果");
-    assert.throws(() => dispatcher.complete("browser-1", "tab-a", { texts: ["迟到结果"] }), /状态 succeeded/);
+    assert.throws(() => dispatcher.complete("browser-1", "tab-a", { texts: ["迟到结果"] }, "old-token"), /状态 succeeded/);
 });
 
 test("显式释放可由另一标签页继续；Backend 重启不自动重跑已认领脚本", (t) => {
     const { db, dispatcher, input, metadata } = fixture(t);
     dispatcher.start(input, "return '结果'");
     dispatcher.claim("browser-1", "tab-a");
-    dispatcher.release("browser-1", "tab-a");
+    dispatcher.release("browser-1", "tab-a", dispatcher.claim("browser-1", "tab-a").claimToken);
     assert.equal(db.getTask("browser-1")!.status, "queued");
     dispatcher.claim("browser-1", "tab-b");
     dispatcher.resume(db.getTask("browser-1")!);
-    assert.equal(db.getTask("browser-1")!.status, "failed");
-    assert.match(String(db.getTask("browser-1")!.error), /手动重试/);
-    assert.equal(metadata().status, "error");
-    assert.equal(metadata().runtimeTaskId, undefined);
+    assert.equal(db.getTask("browser-1")!.status, "running");
+    assert.match(String(db.getTask("browser-1")!.error), /不能重新提交/);
+    assert.equal(metadata().status, "loading");
+    assert.equal(metadata().runtimeTaskId, "browser-1");
 });
 
 test("无自定义脚本的遗留浏览器 provider 也使用同一认领与回写协议", (t) => {
@@ -59,7 +59,7 @@ test("无自定义脚本的遗留浏览器 provider 也使用同一认领与回�
     assert.equal(started.executor, "browser-provider");
     assert.equal(db.getTask(started.taskId)!.executor, "browser-provider");
     dispatcher.claim(started.taskId, "tab-a");
-    dispatcher.complete(started.taskId, "tab-a", { texts: ["浏览器渠道结果"] });
+    dispatcher.complete(started.taskId, "tab-a", { texts: ["浏览器渠道结果"] }, dispatcher.claim(started.taskId, "tab-a").claimToken);
     const result = (db.getCanvasProject("p")!.nodes as Array<{ type: string; metadata: Record<string, unknown> }>).find((node) => node.type === "text");
     assert.equal(result?.metadata.content, "浏览器渠道结果");
 });
@@ -73,7 +73,7 @@ test("浏览器图片渠道也由 Backend 创建并绑定统一结果节点", (t
     assert.deepEqual(target.position, { x: 416, y: 0 });
     const media = stores.media.store(Buffer.from("image"), { name: "result.png", mimeType: "image/png", category: "output" });
     dispatcher.claim(started.taskId, "tab-a");
-    dispatcher.complete(started.taskId, "tab-a", { media: [media.storageKey] });
+    dispatcher.complete(started.taskId, "tab-a", { media: [media.storageKey] }, dispatcher.claim(started.taskId, "tab-a").claimToken);
     const output = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).find((node) => node.id === target.id)!;
     assert.equal(output.metadata.storageKey, media.storageKey);
     assert.equal(output.metadata.status, "success");
@@ -94,9 +94,9 @@ test("智能循环的浏览器图片轮次可分别认领并反向完成", (t) =
     const media1 = stores.media.store(Buffer.from("first"), { name: "first.png", mimeType: "image/png", category: "output" });
     const media2 = stores.media.store(Buffer.from("second"), { name: "second.png", mimeType: "image/png", category: "output" });
     dispatcher.claim(second.taskId, "tab-b");
-    dispatcher.complete(second.taskId, "tab-b", { media: [media2.storageKey] });
+    dispatcher.complete(second.taskId, "tab-b", { media: [media2.storageKey] }, dispatcher.claim(second.taskId, "tab-b").claimToken);
     dispatcher.claim(first.taskId, "tab-a");
-    dispatcher.complete(first.taskId, "tab-a", { media: [media1.storageKey] });
+    dispatcher.complete(first.taskId, "tab-a", { media: [media1.storageKey] }, dispatcher.claim(first.taskId, "tab-a").claimToken);
     const slots = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).filter((node) => node.metadata?.loopOutputSlot);
     assert.equal(slots.find((node) => node.metadata.loopRoundIndex === 1)?.metadata.storageKey, media1.storageKey);
     assert.equal(slots.find((node) => node.metadata.loopRoundIndex === 2)?.metadata.storageKey, media2.storageKey);
@@ -116,9 +116,9 @@ test("智能循环的浏览器视频轮次写入各自结果节点", (t) => {
     const firstMedia = stores.media.store(Buffer.from("first"), { name: "first.mp4", mimeType: "video/mp4", category: "output" });
     const secondMedia = stores.media.store(Buffer.from("second"), { name: "second.mp4", mimeType: "video/mp4", category: "output" });
     dispatcher.claim(second.taskId, "tab-b");
-    dispatcher.complete(second.taskId, "tab-b", { media: [secondMedia.storageKey] });
+    dispatcher.complete(second.taskId, "tab-b", { media: [secondMedia.storageKey] }, dispatcher.claim(second.taskId, "tab-b").claimToken);
     dispatcher.claim(first.taskId, "tab-a");
-    dispatcher.complete(first.taskId, "tab-a", { media: [firstMedia.storageKey] });
+    dispatcher.complete(first.taskId, "tab-a", { media: [firstMedia.storageKey] }, dispatcher.claim(first.taskId, "tab-a").claimToken);
     const slots = (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).filter((node) => node.metadata?.loopOutputSlot);
     assert.equal(slots.find((node) => node.metadata.loopRoundIndex === 1)?.metadata.storageKey, firstMedia.storageKey);
     assert.equal(slots.find((node) => node.metadata.loopRoundIndex === 2)?.metadata.storageKey, secondMedia.storageKey);

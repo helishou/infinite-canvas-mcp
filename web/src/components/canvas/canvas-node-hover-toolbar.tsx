@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { App, Dropdown, Input, Modal, Segmented, Tooltip } from "antd";
+import { App, Dropdown, Input, Modal, Segmented, Tooltip, type MenuProps } from "antd";
 import { Columns2, Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, LayoutGrid, ListOrdered, LoaderCircle, Lock, MapPinned, MessageSquare, Minus, Music2, Package, Plus, RefreshCw, Scissors, Settings2, Trash2, Unlock, Upload, User, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -13,7 +13,8 @@ import { CanvasNodeType, type CanvasNodeData, type ViewportTransform } from "@/t
 import { canvasNodeImage } from "@/lib/canvas/canvas-image-renderability";
 import type { CanvasNodeToolbarItem } from "@/types/canvas-plugin";
 import { ImageToolSettingsModal, type ImageToolbarSettingsTool } from "./canvas-image-toolbar-settings-modal";
-import { buildImageToolbarTools, defaultImageQuickToolIds, type ImageQuickToolId } from "./canvas-image-toolbar-tools";
+import { groupCanvasNodeActions, nearbyCanvasNodeActions } from "./canvas-node-action-groups";
+import { buildImageToolbarTools, type ImageQuickToolId } from "./canvas-image-toolbar-tools";
 
 type CanvasNodeHoverToolbarProps = {
     node: CanvasNodeData | null;
@@ -119,6 +120,10 @@ export function CanvasNodeHoverToolbar({
     const [draftImageToolIds, setDraftImageToolIds] = useState<ImageQuickToolId[]>(quickImageToolIds);
     const [draftShowImageToolLabels, setDraftShowImageToolLabels] = useState(showImageToolLabels);
     const [imageToolSettingsOpen, setImageToolSettingsOpen] = useState(false);
+    const toolbarRef = useRef<HTMLDivElement>(null);
+    const [toolbarWidth, setToolbarWidth] = useState(0);
+    const [actionsOpen, setActionsOpen] = useState(false);
+    const actionsTriggerRef = useRef<HTMLButtonElement>(null);
     const productionToolbarRef = useRef<HTMLDivElement>(null);
     const [productionToolbarHeight, setProductionToolbarHeight] = useState(0);
     const hasProductionActions = Boolean(productionActions);
@@ -129,6 +134,7 @@ export function CanvasNodeHoverToolbar({
 
     useEffect(() => {
         setImageToolSettingsOpen(false);
+        setActionsOpen(false);
     }, [node?.id]);
 
     useLayoutEffect(() => {
@@ -140,6 +146,16 @@ export function CanvasNodeHoverToolbar({
         observer.observe(element);
         return () => observer.disconnect();
     }, [node?.id, hasProductionActions, productionSelected]);
+
+    useLayoutEffect(() => {
+        const element = toolbarRef.current;
+        if (!element) return;
+        const measure = () => setToolbarWidth(element.getBoundingClientRect().width);
+        measure();
+        const observer = new ResizeObserver(measure);
+        observer.observe(element);
+        return () => observer.disconnect();
+    }, [node?.id, hasProductionActions]);
 
     if (!node || productionActions && !productionSelected) return null;
 
@@ -184,9 +200,9 @@ export function CanvasNodeHoverToolbar({
     const baseToolbarTools: ToolbarTool[] = [
         { id: "info", title: t("canvas.nodeToolbar.infoTitle"), label: t("canvas.nodeToolbar.info"), icon: <Info className="size-4" />, onClick: () => onInfo(node) },
         ...(isGroup ? [{ id: "arrangeGroup", title: t("canvas.nodeToolbar.arrangeGroupTitle"), label: t("canvas.nodeToolbar.arrangeGroup"), icon: <LayoutGrid className="size-4" />, onClick: () => onArrangeGroup(node) }] : []),
-        ...(isGroup ? [{ id: "toggleOrderedGroup", title: node.metadata?.orderedGroup ? "转成无序组" : "转成有序组", label: node.metadata?.orderedGroup ? "转成无序组" : "转成有序组", icon: <ListOrdered className="size-4" />, onClick: () => onToggleOrderedGroup(node), active: Boolean(node.metadata?.orderedGroup) }] : []),
+        ...(isGroup ? [{ id: "toggleOrderedGroup", title: t(node.metadata?.orderedGroup ? "canvas.nodeActions.unorderedGroup" : "canvas.nodeActions.orderedGroup"), label: t(node.metadata?.orderedGroup ? "canvas.nodeActions.unorderedGroup" : "canvas.nodeActions.orderedGroup"), icon: <ListOrdered className="size-4" />, onClick: () => onToggleOrderedGroup(node), active: Boolean(node.metadata?.orderedGroup) }] : []),
         { id: "delete", title: t("canvas.nodeToolbar.removeTitle"), label: t("common.delete"), icon: <Trash2 className="size-4" />, onClick: () => onDelete(node), danger: true },
-        ...(isGroup ? [{ id: "groupLock", title: node.metadata?.groupLocked ? "解锁组" : "锁定组", label: node.metadata?.groupLocked ? "解锁组" : "锁定组", icon: node.metadata?.groupLocked ? <Unlock className="size-4" /> : <Lock className="size-4" />, onClick: () => onToggleGroupLock(node), active: Boolean(node.metadata?.groupLocked) }] : []),
+        ...(isGroup ? [{ id: "groupLock", title: t(node.metadata?.groupLocked ? "canvas.nodeActions.unlockGroup" : "canvas.nodeActions.lockGroup"), label: t(node.metadata?.groupLocked ? "canvas.nodeActions.unlockGroup" : "canvas.nodeActions.lockGroup"), icon: node.metadata?.groupLocked ? <Unlock className="size-4" /> : <Lock className="size-4" />, onClick: () => onToggleGroupLock(node), active: Boolean(node.metadata?.groupLocked) }] : []),
     ];
     const nodeToolbarTools: ToolbarTool[] = [
         ...(canRetry ? [{ id: "retry", title: t("canvas.nodeToolbar.retryTitle"), label: t("canvas.node.retry"), icon: <RefreshCw className="size-4" />, onClick: () => onRetry(node) }] : []),
@@ -213,6 +229,17 @@ export function CanvasNodeHoverToolbar({
         { id: "discardShared", title: t("canvas.sharedLibrary.discard"), label: t("canvas.sharedLibrary.discard"), icon: <RefreshCw className="size-4" />, onClick: () => onDiscardSharedEdits?.(node) },
     ] : [];
     const toolbarTools = hasImage ? [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => quickImageToolIdSet.has(tool.id as ImageQuickToolId)).concat(sharedTools) : [...baseToolbarTools, ...nodeToolbarTools, ...extraTools, ...sharedTools];
+    const allToolbarTools: ToolbarTool[] = [...new Map([...baseToolbarTools, ...nodeToolbarTools, ...extraTools, ...sharedTools].map((tool) => [tool.id, tool])).values()];
+    const nearbyTools = nearbyCanvasNodeActions(allToolbarTools, hasImage ? quickImageToolIdSet : undefined);
+    const actionMenuItems: MenuProps["items"] = groupCanvasNodeActions(allToolbarTools).map((group) => ({
+        type: "group",
+        key: group.id,
+        label: t(`canvas.nodeActions.groups.${group.id}`),
+        children: group.actions.map((tool) => ({ key: tool.id, label: tool.label || tool.title, icon: tool.loading ? <LoaderCircle className="size-4 animate-spin" /> : tool.icon, danger: tool.danger || group.id === "danger", disabled: tool.disabled, onClick: tool.onClick })),
+    }));
+    if (hasImage) actionMenuItems.push({ type: "divider" }, { key: "customize", label: t("canvas.imageTools.customize"), icon: <Settings2 className="size-4" />, onClick: openImageToolSettings });
+    const availableWidth = canvasSize?.width || window.innerWidth;
+    const toolbarLeft = Math.min(Math.max(8 + toolbarWidth / 2, left), Math.max(8 + toolbarWidth / 2, availableWidth - toolbarWidth / 2 - 8));
     const selectableImageToolbarTools = [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => tool.id !== "retry") as ImageToolbarSettingsTool[];
 
     const closeImageToolSettings = () => {
@@ -236,6 +263,7 @@ export function CanvasNodeHoverToolbar({
     };
 
     if (productionActions) return <div ref={productionToolbarRef} data-production-node-actions className="absolute z-[70] flex flex-wrap items-center gap-1 rounded-lg border p-2 text-sm shadow-lg" style={{ left: Math.min(Math.max(16, left - 160), Math.max(16, (canvasSize?.width || window.innerWidth) - 336)), top: Math.min(Math.max(72, top - productionToolbarHeight - 24), Math.max(72, (canvasSize?.height || window.innerHeight) - productionToolbarHeight - 16)), width: Math.min(320, (canvasSize?.width || window.innerWidth) - 32), background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }} onMouseDown={event => event.stopPropagation()} onPointerDown={event => event.stopPropagation()}>
+        <span className="w-full truncate px-2 text-sm font-medium" title={node.title}>{node.title || node.type}</span>
         {productionStatus && <span data-production-node-status className="w-full px-2 pb-1 text-xs" style={{ color: theme.node.muted }}>{productionStatus}</span>}
         {productionActions.map(action => <button key={action.id} type="button" disabled={action.disabled} className="rounded px-2 py-1.5 hover:bg-black/5 disabled:cursor-default disabled:opacity-40 dark:hover:bg-white/10" aria-label={action.title} onClick={action.onClick}>{action.label}</button>)}
         <Dropdown trigger={["click"]} menu={{ items: [...new Map([...extraTools, ...toolbarTools].map(tool => [tool.id, tool])).values()].map(tool => ({ key: tool.id, label: tool.label || tool.title, icon: tool.icon, danger: tool.danger, disabled: "disabled" in tool && tool.disabled === true, onClick: tool.onClick })) }}><button type="button" aria-label={t("productionCanvas.moreNodeActions")} className="inline-flex items-center gap-1 rounded px-2 py-1.5 hover:bg-black/5 dark:hover:bg-white/10">{t("productionCanvas.more")}<Ellipsis className="size-4" /></button></Dropdown>
@@ -244,19 +272,39 @@ export function CanvasNodeHoverToolbar({
     return (
         <>
             <div
-                className="absolute z-[70] flex h-12 -translate-x-1/2 -translate-y-full items-center overflow-visible rounded-[18px] border border-black/10 bg-white text-[15px] text-[#242529] shadow-[0_8px_28px_rgba(15,23,42,.12)]"
-                style={{ left, top }}
+                ref={toolbarRef}
+                data-canvas-node-toolbar
+                className="absolute z-[70] flex h-12 -translate-x-1/2 -translate-y-full items-center rounded-lg border border-border bg-popover text-[13px] text-popover-foreground shadow-sm"
+                style={{ left: toolbarLeft, top: Math.max(64, top), maxWidth: Math.max(0, availableWidth - 16) }}
                 onMouseEnter={() => onKeep(node.id)}
                 onMouseLeave={() => {
-                    if (!imageToolSettingsOpen) onLeave();
+                    if (!imageToolSettingsOpen && !actionsOpen) onLeave();
                 }}
                 onMouseDown={(event) => event.stopPropagation()}
                 onPointerDown={(event) => event.stopPropagation()}
             >
-                {toolbarTools.map((tool) => (
-                    <ToolbarAction key={tool.id} {...tool} showLabel={isImage ? showImageToolLabels : true} />
-                ))}
-                {hasImage ? <ToolbarAction id="more" title={t("canvas.imageTools.configure")} label={t("canvas.imageTools.more")} icon={<Ellipsis className="size-4" />} active={imageToolSettingsOpen} onClick={openImageToolSettings} showLabel={showImageToolLabels} /> : null}
+                <span className="canvas-node-context" title={node.title}>{node.title || getNodeDefinition(node.type)?.title || node.type}</span>
+                <div className="flex min-w-0 items-center overflow-x-auto" data-canvas-no-zoom onWheel={(event) => event.stopPropagation()}>
+                    {nearbyTools.map((tool) => (
+                        <ToolbarAction key={tool.id} {...tool} showLabel={isImage ? showImageToolLabels : true} />
+                    ))}
+                </div>
+                <Dropdown
+                    trigger={["click"]}
+                    open={actionsOpen}
+                    autoFocus
+                    popupRender={(menu) => <div className="canvas-blocking-overlay" data-canvas-shortcuts-ignore data-canvas-no-zoom onKeyDown={(event) => {
+                        event.stopPropagation();
+                        if (event.key === "Escape") { event.preventDefault(); setActionsOpen(false); actionsTriggerRef.current?.focus(); }
+                        if (event.key === "Tab") setActionsOpen(false);
+                    }}>{menu}</div>}
+                    onOpenChange={(open) => { setActionsOpen(open); if (open) onKeep(node.id); }}
+                    menu={{ items: actionMenuItems, selectable: true, selectedKeys: allToolbarTools.filter((tool) => tool.active).map((tool) => tool.id), onClick: () => setActionsOpen(false), style: { maxHeight: "min(560px, calc(100dvh - 32px))", overflowY: "auto", maxWidth: "calc(100vw - 24px)" } }}
+                >
+                    <button ref={actionsTriggerRef} type="button" data-canvas-shortcuts-ignore aria-label={t("canvas.nodeActions.all")} aria-expanded={actionsOpen} className="canvas-blocking-overlay flex h-12 shrink-0 items-center gap-1 border-l border-border px-3 hover:bg-muted">
+                        <Ellipsis className="size-4" /><span>{t("canvas.imageTools.more")}</span>
+                    </button>
+                </Dropdown>
             </div>
             {hasImage ? (
                 <ImageToolSettingsModal
@@ -365,9 +413,9 @@ export function CanvasNodeInfoModal({ node, open, onClose, onRename }: { node: C
 function ToolbarAction({ title, label, icon, onClick, showLabel, active = false, danger = false, disabled = false, loading = false }: ToolbarTool & { showLabel: boolean }) {
     const hasText = showLabel && Boolean(label);
     return (
-        <Tooltip title={title} placement="top" mouseEnterDelay={0.2} color="#ffffff" styles={{ root: { color: "#242529", boxShadow: "0 8px 24px rgba(15,23,42,.16)", fontSize: 13, fontWeight: 500 } }}>
-            <button type="button" className={`group relative flex h-12 items-center whitespace-nowrap px-1.5 ${danger ? "text-[#ef4444]" : ""}`} onClick={onClick} disabled={disabled} aria-busy={loading || undefined} aria-label={title}>
-                <span className={`flex h-9 items-center ${hasText ? "gap-2 px-2.5" : "justify-center px-2"} rounded-lg transition group-hover:bg-[#f0f0f1] ${active ? "bg-[#eeeeef]" : ""}`}>
+        <Tooltip title={title} placement="top" mouseEnterDelay={0.2}>
+            <button type="button" className={`group relative flex h-12 shrink-0 items-center whitespace-nowrap px-1.5 ${danger ? "text-destructive" : ""}`} onClick={onClick} disabled={disabled} aria-busy={loading || undefined} aria-label={title}>
+                <span className={`flex h-9 items-center ${hasText ? "gap-2 px-2.5" : "justify-center px-2"} rounded-lg transition group-hover:bg-muted ${active ? "bg-accent" : ""}`}>
                     {loading ? <LoaderCircle className="size-4 animate-spin" /> : icon}
                     {hasText ? <span>{label}</span> : null}
                 </span>

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { BetweenHorizontalStart, ClipboardCopy, GalleryHorizontalEnd, GalleryHorizontal, Group, Images, Languages, Plus, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -44,6 +44,20 @@ export function CanvasNodeContextMenu({
 }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const menuRef = useRef<HTMLDivElement>(null);
+    const [position, setPosition] = useState({ left: menu.x, top: menu.y });
+
+    useLayoutEffect(() => {
+        const place = () => {
+            const rect = menuRef.current?.getBoundingClientRect();
+            if (!rect) return;
+            setPosition({ left: Math.max(8, Math.min(menu.x, window.innerWidth - rect.width - 8)), top: Math.max(8, Math.min(menu.y, window.innerHeight - rect.height - 8)) });
+        };
+        place();
+        menuRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+        window.addEventListener("resize", place);
+        return () => window.removeEventListener("resize", place);
+    }, [menu.x, menu.y, menu.type, canCaptureVideoFrame, canCopyContent, canTranslate, canGroup, isExtractingKeyframes, t]);
 
     useEffect(() => {
         const close = (event: PointerEvent) => {
@@ -57,50 +71,55 @@ export function CanvasNodeContextMenu({
 
     return (
         <div
-            className="fixed z-[80] min-w-44 overflow-hidden rounded-xl border py-1 shadow-2xl"
-            style={{ left: menu.x, top: menu.y, background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+            ref={menuRef}
+            role="menu"
+            aria-label={t("canvas.nodeActions.all")}
+            data-canvas-shortcuts-ignore
+            className="fixed z-[80] min-w-44 max-w-[calc(100vw-16px)] overflow-y-auto rounded-xl border py-1 shadow-2xl"
+            style={{ ...position, maxHeight: "calc(100dvh - 16px)", background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
             onPointerDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+                event.stopPropagation();
+                if (event.key === "Escape") { event.preventDefault(); onClose(); return; }
+                if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+                event.preventDefault();
+                const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
+                const current = items.indexOf(document.activeElement as HTMLButtonElement);
+                const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : (current + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+                items[next]?.focus();
+            }}
         >
-            {canCaptureVideoFrame ? (
-                <>
+            {canCopyContent ? <MenuSection label={t("canvas.nodeActions.groups.inspect")}>
+                <MenuButton icon={<ClipboardCopy className="size-4" />} label={t("canvas.controls.copyContent")} onClick={onCopyContent} />
+            </MenuSection> : null}
+            {canCaptureVideoFrame || canTranslate ? <MenuSection label={t("canvas.nodeActions.groups.generate")}>
+                {canCaptureVideoFrame ? <>
                     <MenuButton icon={<BetweenHorizontalStart className="size-4" />} label={t("canvas.videoFrames.first")} onClick={() => onCaptureVideoFrame("first")} />
                     <MenuButton icon={<GalleryHorizontalEnd className="size-4" />} label={t("canvas.videoFrames.last")} onClick={() => onCaptureVideoFrame("last")} />
                     <MenuButton icon={<GalleryHorizontal className="size-4" />} label={t("canvas.videoFrames.current")} onClick={() => onCaptureVideoFrame("current")} />
-                    <MenuButton
-                        icon={<Images className="size-4" />}
-                        label={isExtractingKeyframes ? t("canvas.videoFrames.extracting") : t("canvas.videoFrames.allShots")}
-                        onClick={onExtractVideoKeyframes}
-                        disabled={isExtractingKeyframes}
-                    />
-                    <div className="my-1 border-t" style={{ borderColor: theme.toolbar.border }} />
-                </>
-            ) : null}
-            {canGroup ? (
-                <>
-                    <MenuButton icon={<Group className="size-4" />} label={t("canvas.controls.group")} onClick={onGroup} />
-                    <div className="my-1 border-t" style={{ borderColor: theme.toolbar.border }} />
-                </>
-            ) : null}
-
-            {canCopyContent ? (
-                <>
-                    <MenuButton icon={<ClipboardCopy className="size-4" />} label={t("canvas.controls.copyContent")} onClick={onCopyContent} />
-                    <div className="my-1 border-t" style={{ borderColor: theme.toolbar.border }} />
-                </>
-            ) : null}
-
-            {canTranslate ? (
-                <>
-                    <MenuButton icon={<Languages className="size-4" />} label="翻译为中文" onClick={() => onTranslate("zh-CN")} />
-                    <MenuButton icon={<Languages className="size-4" />} label="翻译为英文" onClick={() => onTranslate("en")} />
-                    <div className="my-1 border-t" style={{ borderColor: theme.toolbar.border }} />
-                </>
-            ) : null}
-
-            {menu.type === "node" ? <MenuButton icon={<Plus className="size-4" />} label={t("canvas.controls.duplicate")} onClick={onDuplicate} /> : null}
-            <MenuButton icon={<Trash2 className="size-4" />} label={t("canvas.controls.delete")} onClick={onDelete} danger />
+                    <MenuButton icon={<Images className="size-4" />} label={isExtractingKeyframes ? t("canvas.videoFrames.extracting") : t("canvas.videoFrames.allShots")} onClick={onExtractVideoKeyframes} disabled={isExtractingKeyframes} />
+                </> : null}
+                {canTranslate ? <>
+                    <MenuButton icon={<Languages className="size-4" />} label={t("canvas.nodeActions.translateChinese")} onClick={() => onTranslate("zh-CN")} />
+                    <MenuButton icon={<Languages className="size-4" />} label={t("canvas.nodeActions.translateEnglish")} onClick={() => onTranslate("en")} />
+                </> : null}
+            </MenuSection> : null}
+            {canGroup || menu.type === "node" ? <MenuSection label={t("canvas.nodeActions.groups.organize")}>
+                {canGroup ? <MenuButton icon={<Group className="size-4" />} label={t("canvas.controls.group")} onClick={onGroup} /> : null}
+                {menu.type === "node" ? <MenuButton icon={<Plus className="size-4" />} label={t("canvas.controls.duplicate")} onClick={onDuplicate} /> : null}
+            </MenuSection> : null}
+            <MenuSection label={t("canvas.nodeActions.groups.danger")}>
+                <MenuButton icon={<Trash2 className="size-4" />} label={t("canvas.controls.delete")} onClick={onDelete} danger />
+            </MenuSection>
         </div>
     );
+}
+
+function MenuSection({ label, children }: { label: string; children: ReactNode }) {
+    return <div role="group" aria-label={label} className="py-1">
+        <div className="px-3 pb-1 text-[11px] font-medium opacity-55">{label}</div>
+        {children}
+    </div>;
 }
 
 function MenuButton({ icon, label, onClick, danger = false, disabled = false }: { icon: ReactNode; label: string; onClick?: () => void; danger?: boolean; disabled?: boolean }) {
@@ -109,8 +128,9 @@ function MenuButton({ icon, label, onClick, danger = false, disabled = false }: 
     return (
         <button
             type="button"
-            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors enabled:hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-40"
-            style={{ color: danger ? "#f87171" : theme.node.text }}
+            role="menuitem"
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors enabled:hover:bg-black/5 dark:enabled:hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 disabled:cursor-not-allowed disabled:opacity-40"
+            style={{ color: danger ? "var(--destructive)" : theme.node.text }}
             onClick={onClick}
             disabled={disabled}
         >

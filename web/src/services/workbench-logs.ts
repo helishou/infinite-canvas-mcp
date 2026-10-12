@@ -14,10 +14,13 @@ export async function readWorkbenchLogs(kind: WorkbenchLogKind): Promise<Workben
     return Promise.all(logs.map((log) => fromBackendLog(log, kind)));
 }
 
-export async function saveWorkbenchLog(kind: WorkbenchLogKind, log: WorkbenchLog): Promise<void> {
+export async function saveWorkbenchLog(kind: WorkbenchLogKind, log: WorkbenchLog, options?: { assertOwner?: () => void }): Promise<void> {
+    options?.assertOwner?.();
     const existing = await fetchBackendGenerationLogs({ projectId: PROJECTS[kind], limit: 500 });
+    options?.assertOwner?.();
     const current = (existing.logs || []).find((item) => legacyId(item) === log.id);
     const input = toBackendInput(kind, log);
+    options?.assertOwner?.();
     if (current) {
         await updateBackendGenerationLog(current.id, input);
     } else {

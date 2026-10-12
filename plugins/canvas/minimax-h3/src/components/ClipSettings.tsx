@@ -30,14 +30,14 @@ const dlssModes = ["关闭", "图像批次超分", "视频超分"];
 const dlssUpscaleModes = ["1× (DLAA / native)", "1.5× (Quality)", "1.724× (Balanced)", "2× (Performance)", "3× (Ultra Performance)"];
 const dlssEngines = ["Auto", "Native DLSSG", "Cascade"];
 const dlssCodecs = ["H.264", "H.264 (NVIDIA NVENC)", "H.265", "H.265 (NVIDIA NVENC)", "AV1", "AV1 (NVIDIA NVENC)", "ProRes Proxy"];
-const h3SelectValueStyle: CSSProperties = { display: "block", minWidth: 0, overflow: "hidden", color: "#f3f7fb", fontSize: 28, fontWeight: 700, lineHeight: "46px", textOverflow: "ellipsis", whiteSpace: "nowrap" };
+const h3SelectValueStyle: CSSProperties = { display: "block", minWidth: 0, overflow: "hidden", color: "var(--h3-control-text, var(--h3-text))", fontSize: 22, fontWeight: 400, lineHeight: "46px", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const h3SelectStyles = {
     item: h3SelectValueStyle,
     itemContent: h3SelectValueStyle,
-    input: { fontSize: 28, lineHeight: "46px" },
-    placeholder: { color: "var(--h3-muted)", fontSize: 28, lineHeight: "46px" },
+    input: { fontSize: 22, lineHeight: "46px" },
+    placeholder: { color: "var(--h3-muted)", fontSize: 22, lineHeight: "46px" },
 };
-const renderH3SelectLabel = ({ label, value }: { label?: ReactNode; value?: string | number }) => <span style={h3SelectValueStyle}>{label ?? value}</span>;
+const renderH3SelectLabel = ({ label, value }: { label?: ReactNode; value?: string | number }) => <span style={h3SelectValueStyle} title={typeof label === "string" ? label : String(value ?? "")}>{label ?? value}</span>;
 
 function H3Dropdown({ values, value, onChange, placeholder, allowClear = false, format, searchable = false, listId = "nfh3-options" }: { values: Array<string | number>; value?: string | number; onChange: (value: string | number) => void; placeholder?: string; allowClear?: boolean; format?: (value: string | number) => string; searchable?: boolean; listId?: string }) {
     const selected = value === undefined || value === null ? undefined : String(value);

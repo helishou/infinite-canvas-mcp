@@ -10,6 +10,7 @@ export function CanvasDeleteProjectsDialog() {
     const ids = useCanvasUiStore((state) => state.deleteProjectIds);
     const setDeleteIds = useCanvasUiStore((state) => state.setDeleteProjectIds);
     const removeSelectedIds = useCanvasUiStore((state) => state.removeSelectedProjectIds);
+    const projects = useCanvasStore((state) => state.projects);
     const deleteProjects = useCanvasStore((state) => state.deleteProjects);
     const cleanupImages = useAssetStore((state) => state.cleanupImages);
     const confirm = () => {
@@ -35,6 +36,9 @@ export function CanvasDeleteProjectsDialog() {
             }
         >
             <p className="text-sm text-stone-500">{t("canvas.project.deleteDescription", { count: ids.length })}</p>
+            <ul aria-label={t("projects.deleteTargets")} className="mt-3 max-h-48 list-disc space-y-1 overflow-y-auto pl-5 text-sm">
+                {ids.map((id) => <li key={id} className="break-words">{projects.find((project) => project.id === id)?.title || id}</li>)}
+            </ul>
         </Modal>
     );
 }

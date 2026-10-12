@@ -40,7 +40,8 @@ export default defineConfig({
         },
     },
     resolve: {
-        dedupe: ["react", "react-dom"],
+        // Built-in plugin sources must share the host's ConfigProvider context for theme and portals.
+        dedupe: ["react", "react-dom", "antd"],
         alias: {
             "@": resolve(webDir, "src"),
         },

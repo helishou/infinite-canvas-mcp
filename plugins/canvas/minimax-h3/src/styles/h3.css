@@ -417,7 +417,7 @@
 .minimax-aux-storyboard.is-error:hover { border-color:#ef4444; background:#4a1518; color:#fecaca; }
 
 /* 精修工作台视觉层级：更清晰的编辑器式密度、统一圆角和交互反馈。 */
-[data-canvas-no-zoom] { font-family:"Segoe UI","Microsoft YaHei",sans-serif; }
+[data-canvas-no-zoom].minimax-canvas-workbench { font-family:var(--font-sans, system-ui, sans-serif); }
 .minimax-canvas-workbench { background:#17191d; color:#e8edf5; }
 .minimax-wb-toolbar { height:96px; flex-basis:96px; padding:0 14px; gap:28px; background:linear-gradient(180deg,#20242a 0%,#191c21 100%); border-bottom-color:#303640; }
 .minimax-brand { font-size:30px; letter-spacing:.01em; }
@@ -644,7 +644,7 @@
 .minimax-settings .ant-select-arrow,.nfh3-control .ant-select-arrow { color:var(--h3-muted); }
 .minimax-settings option,.nfh3-control select option { background:var(--h3-panel); color:var(--h3-text); }
 .minimax-settings .minimax-run,.minimax-settings .minimax-run-all,.nfh3-panel-actions .minimax-run { border-color:var(--h3-active); background:var(--h3-active-bg); color:var(--h3-active-text); box-shadow:0 3px 10px color-mix(in srgb,var(--h3-active) 14%,transparent); }
-.nfh3-panel-actions .minimax-run:hover:not(:disabled) { background:var(--h3-active); color:var(--h3-active-text); box-shadow:0 5px 14px color-mix(in srgb,var(--h3-active) 22%,transparent); }
+.nfh3-panel-actions .minimax-run:hover:not(:disabled) { background:var(--h3-active-bg); color:var(--h3-active-text); box-shadow:0 5px 14px color-mix(in srgb,var(--h3-active) 22%,transparent); }
 .nfh3-panel-actions .minimax-run-all { border-color:var(--h3-border); background:transparent; color:var(--h3-text); }
 .nfh3-panel-actions .minimax-run-all:hover:not(:disabled) { border-color:var(--h3-active); background:var(--h3-hover); color:var(--h3-active-text); }
 .minimax-settings .minimax-reset,.nfh3-panel-actions .minimax-reset { border-color:var(--h3-border); background:var(--h3-fill); color:var(--h3-text); }
@@ -736,8 +736,8 @@
 /* 运行操作固定在节点右下角，避免随 Setting 内容滚动。 */
 .minimax-prompt-side > .minimax-clip-parameters { padding-bottom:72px; overflow:visible; }
 .minimax-prompt-side .nfh3-panel-actions { position:absolute; z-index:50; right:12px; bottom:12px; left:12px; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:18px; padding:0; }
-.minimax-prompt-side .nfh3-panel-actions button { height:84px; border-radius:10px; font-size:26px; font-weight:900; letter-spacing:.02em; box-shadow:0 6px 18px rgba(0,0,0,.2); }
-.minimax-prompt-side .nfh3-panel-actions .minimax-run { border:1px solid color-mix(in srgb,var(--h3-active) 72%,white); background:linear-gradient(135deg,var(--h3-active),color-mix(in srgb,var(--h3-active) 66%,#111)); color:var(--h3-active-text); box-shadow:0 7px 20px color-mix(in srgb,var(--h3-active) 30%,transparent); }
+.minimax-prompt-side .nfh3-panel-actions button { height:84px; border-radius:10px; font-size:26px; font-weight:500; letter-spacing:0; box-shadow:0 6px 18px rgba(0,0,0,.2); }
+.minimax-prompt-side .nfh3-panel-actions .minimax-run { border:1px solid color-mix(in srgb,var(--h3-active) 72%,white); background:var(--h3-active-bg); color:var(--h3-active-text); box-shadow:0 7px 20px color-mix(in srgb,var(--h3-active) 30%,transparent); }
 .minimax-prompt-side .nfh3-panel-actions .minimax-run-all { border:1px solid color-mix(in srgb,var(--h3-active) 62%,var(--h3-border)); background:color-mix(in srgb,var(--h3-active-bg) 76%,var(--h3-panel)); color:var(--h3-active-text); }
 .minimax-prompt-side .nfh3-panel-actions button:hover:not(:disabled) { transform:translateY(-2px); filter:brightness(1.14); box-shadow:0 10px 24px color-mix(in srgb,var(--h3-active) 26%,transparent); }
 
@@ -820,3 +820,23 @@
 .nfh3-storyboard-modal .minimax-collaborative-prompt .cm-content,
 .nfh3-storyboard-modal .minimax-collaborative-prompt .cm-line { font-size:13px !important; line-height:1.45 !important; }
 .nfh3-storyboard-modal .nfh3-storyboard-hint { font-size:11px; line-height:1.45; }
+
+/* UI-only weight hierarchy; retain node-scale sizes and authored text styling. */
+.minimax-brand,.minimax-library-head,.minimax-current-head,.nfh3-section-head b { font-weight:600; letter-spacing:0; }
+.nfh3-section-head small,.nfh3-control,.nfh3-prompt-options label,.nfh3-choice-control,.nfh3-settings-scope.is-global p { font-weight:400; }
+.nfh3-mode-grid button,.nfh3-choice-grid button,.nfh3-panel-actions button,.nfh3-settings-scope-control button,.minimax-settings .minimax-run,.minimax-settings .minimax-reset,.minimax-settings .minimax-run-all { font-weight:500; letter-spacing:0; }
+.minimax-settings label,.minimax-settings input,.minimax-settings select,.minimax-settings .ant-input-number-input,.minimax-settings .ant-select-selection-item,.minimax-settings .ant-select-selection-placeholder,.minimax-settings .ant-select-selection-search-input { font-weight:400; }
+
+/* Authored H3 prompts keep the previous host face independently of UI typography. */
+.minimax-collaborative-prompt,.minimax-canvas-workbench textarea.nfh3-authored-prompt { font-family:"SF Pro Display","SF Pro Text","PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif; }
+
+/* Selected values share node theme; placeholders and disabled controls stay distinct. */
+.minimax-canvas-workbench .ant-select-disabled { --h3-control-text:var(--h3-muted); }
+.minimax-settings .ant-select-selection-placeholder,.nfh3-control .ant-select-selection-placeholder,.nfh3-lora-row .ant-select-selection-placeholder { color:var(--h3-muted) !important; }
+.minimax-settings .ant-select-selection-search-input,.nfh3-control .ant-select-selection-search-input,.nfh3-lora-row .ant-select-selection-search-input { color:var(--h3-text) !important; }
+.minimax-settings input:disabled,.nfh3-control input:disabled,.nfh3-lora-row input:disabled,.minimax-canvas-workbench .ant-select-disabled .ant-select-selection-item { color:var(--h3-muted) !important; }
+.nfh3-control:has(.nfh3-select) { grid-template-columns:minmax(0,.7fr) minmax(0,1fr); }
+
+/* Give selected values their own full-width line inside the existing two-column parameter grid. */
+.nfh3-control:has(.nfh3-select) { height:auto; min-height:76px; grid-template-columns:minmax(0,1fr); align-content:start; gap:4px; }
+.nfh3-control:has(.nfh3-select) > span:first-child { font-size:18px; line-height:24px; }

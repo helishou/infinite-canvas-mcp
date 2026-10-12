@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Button, Checkbox, Input, InputNumber, Segmented, Spin, Table, Tabs, message, Select } from "antd";
+import { useTranslation } from "react-i18next";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { App, Alert, Button, Checkbox, Input, InputNumber, Segmented, Spin, Table, Tabs, message, Select, Tooltip } from "antd";
 import { Upload as UploadIcon, Cloud, Download, Play, Trash2, Workflow } from "lucide-react";
-import { request, fetchBackendGenerationLogs, deleteBackendGenerationLogs } from "@/services/backend-api";
-import { exportWorkflowPackage, importWorkflowPackage, renameWorkflowTitle, runWorkflow, pollWorkflowTask, type WorkflowConfig, type WorkflowField, type WorkflowPackage, type WorkflowRunResult } from "@/services/api/workflows";
+import { request, BackendApiError, fetchBackendGenerationLogs, deleteBackendGenerationLogs, fetchBackendTask, type BackendRuntimeTask } from "@/services/backend-api";
+import { exportWorkflowPackage, importWorkflowPackage, renameWorkflowTitle, runWorkflow, type WorkflowConfig, type WorkflowField, type WorkflowPackage, type WorkflowRunResult } from "@/services/api/workflows";
 import { WorkflowGraphPanel } from "./workflow-graph-panel";
 import { WorkflowLibraryList, type WorkflowLibraryItem } from "./workflow-library-list";
 import { RunTab } from "./run-panel";
@@ -12,12 +13,35 @@ import { normalizeOutputNodeSelection, OutputNodePicker } from "./output-node-pi
 import { RunningHubWorkflowImport } from "./runninghub-workflow-import";
 import { RunningHubProfileActions } from "./runninghub-profile-actions";
 import { RunningHubGraphPanel } from "./runninghub-graph-panel";
-import { runningHubProfileToConfig, runningHubValuesFromForm } from "./runninghub-run-adapter";
+import { runningHubProfileToConfig, runningHubRequestFromForm, RunningHubMediaConflict } from "./runninghub-run-adapter";
 import { runRunningHubWorkflow, cancelRunningHubTask } from "@/services/api/runninghub";
-import { fetchRunningHubWorkflows, fetchRunningHubStatus, saveRunningHubWorkflow, type RunningHubWorkflowProfile } from "@/services/api/runninghub";
+import { fetchRunningHubWorkflows, fetchRunningHubWorkflowTasks, fetchRunningHubStatus, saveRunningHubWorkflow, type RunningHubWorkflowProfile } from "@/services/api/runninghub";
+import { useBackendStore } from "@/stores/use-backend-store";
 import { useConfigStore } from "@/stores/use-config-store";
 import { ComfyChannelsPanel, ComfyRuntimePanel } from "./comfy-management-panels";
+import { WorkflowTaskController, WorkflowSubmissionRejected, workflowTaskResult } from "./workflow-task-controller";
 import "../../styles/workflow-graph.css";
+
+const localRuns = new WorkflowTaskController();
+const cloudRuns = new WorkflowTaskController();
+
+async function submitAndRead(submit: () => Promise<unknown>, read: () => Promise<import("./workflow-task-controller").TaskReceipt>, clientIdHonored: boolean) {
+    try {
+        const receipt = await submit();
+        if (receipt && typeof receipt === "object" && (("taskId" in receipt && typeof receipt.taskId === "string") || ("task" in receipt && receipt.task && typeof receipt.task === "object" && "id" in receipt.task))) return receipt as import("./workflow-task-controller").TaskReceipt;
+    }
+    catch (error) {
+        // Only a completed HTTP rejection plus authoritative absence permits a fresh edited submission.
+        if (clientIdHonored && error instanceof BackendApiError && error.status > 0) {
+            try { return await read(); }
+            catch (readError) {
+                if (readError instanceof BackendApiError && readError.status === 404) throw new WorkflowSubmissionRejected(error.message);
+            }
+        }
+        throw error;
+    }
+    return read();
+}
 
 type WorkflowItem = {
     name: string;
@@ -33,25 +57,35 @@ type WorkflowDetail = {
     builtin: boolean;
 };
 
-type TaskResult = WorkflowRunResult;
-
+let backendSession: { url: string; token: string; scope: string } | undefined;
 export default function WorkflowsPage() {
+    const url = useBackendStore((state) => state.url);
+    const token = useBackendStore((state) => state.token);
+    if (!backendSession || backendSession.url !== url || backendSession.token !== token) backendSession = { url, token, scope: crypto.randomUUID() };
+    // An opaque in-memory scope prevents receipts from another Backend/account being adopted.
+    return <WorkflowWorkspace key={backendSession.scope} connectionScope={backendSession.scope} />;
+}
+
+function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
+    const { t } = useTranslation();
+    const { modal } = App.useApp();
     const [workflows, setWorkflows] = useState<WorkflowItem[]>([]);
     const [loading, setLoading] = useState(false);
+    const [libraryLoading, setLibraryLoading] = useState(false);
+    const [libraryError, setLibraryError] = useState("");
+    const [profilesError, setProfilesError] = useState("");
+    const [rhStatusError, setRhStatusError] = useState("");
     const [selected, setSelected] = useState<WorkflowDetail | null>(null);
     const [selectedProfile, setSelectedProfile] = useState<RunningHubWorkflowProfile | null>(null);
-    const [running, setRunning] = useState(false);
-    const [taskResult, setTaskResult] = useState<TaskResult | null>(null);
+
     const [section, setSection] = useState("workflows");
     // 本地库与 RunningHub 库共用同一页面壳，数据源与选中项各自独立。
     const [library, setLibrary] = useState<"local" | "runninghub">("local");
     const aiConfig = useConfigStore((state) => state.config);
     const [profiles, setProfiles] = useState<RunningHubWorkflowProfile[]>([]);
     const [profilesLoading, setProfilesLoading] = useState(false);
-    const [rhConfigured, setRhConfigured] = useState<{ hasApiKey: boolean; url?: string } | null>(null);
-    const [rhRunning, setRhRunning] = useState(false);
-    const [rhTaskId, setRhTaskId] = useState<string | null>(null);
-    const [rhResult, setRhResult] = useState<WorkflowRunResult | null>(null);
+    const [rhConfigured, setRhConfigured] = useState<{ hasApiKey: boolean; url?: string; workflowTaskReplaySafe?: boolean } | null>(null);
+
     const [rhTab, setRhTab] = useState<WorkbenchTab>("graph");
     const [rhBaseUrl, setRhBaseUrl] = useState("https://www.runninghub.ai");
     const [activeTab, setActiveTab] = useState<WorkbenchTab>("graph");
@@ -60,15 +94,99 @@ export default function WorkflowsPage() {
     const [editingName, setEditingName] = useState<string | null>(null);
     const [editValue, setEditValue] = useState("");
     // 指定输出节点属于当前工作流的配置，跟着 config 一起存；不选=不过滤。
-    const [outputNodes, setOutputNodes] = useState<string[]>([]);
+    const outputNodes = selected?.config.outputNodes || [];
+    const [rhOutputSelections, setRhOutputSelections] = useState<Record<string, string[]>>({});
+    const rhOutputNodes = selectedProfile ? rhOutputSelections[selectedProfile.id] || [] : [];
+    const detailRequest = useRef(0);
+    const historyRequest = useRef(0);
+    const profileHistoryRequest = useRef(0);
+    const [detailLoading, setDetailLoading] = useState(false);
+    const [detailError, setDetailError] = useState("");
+    const [historyError, setHistoryError] = useState("");
+    const [profileHistory, setProfileHistory] = useState<BackendRuntimeTask[]>([]);
+    const [profileHistoryLoading, setProfileHistoryLoading] = useState(false);
+    const [profileHistoryError, setProfileHistoryError] = useState("");
+    const savingRef = useRef(new Set<string>());
+    const [savingOwners, setSavingOwners] = useState<Set<string>>(new Set());
+    const localOwner = selected ? `${connectionScope}:local:${selected.name}` : "";
+    const cloudOwner = selectedProfile ? `${connectionScope}:cloud:${selectedProfile.id}` : "";
+    const localRun = useSyncExternalStore(localRuns.subscribe, () => localRuns.get(localOwner));
+    const cloudRun = useSyncExternalStore(cloudRuns.subscribe, () => cloudRuns.get(cloudOwner));
+    const readCloudTask = useCallback((id: string) => request<{ task: BackendRuntimeTask; events?: unknown[] }>("GET", `/agent/runninghub/tasks/${encodeURIComponent(id)}`), []);
+    useEffect(() => {
+        if (!localOwner || !localRun?.running) return;
+        void localRuns.poll(localOwner, fetchBackendTask);
+        const timer = window.setInterval(() => void localRuns.poll(localOwner, fetchBackendTask), 1500);
+        return () => window.clearInterval(timer);
+    }, [localOwner, localRun?.running]);
+    useEffect(() => {
+        if (!cloudOwner || !(cloudRun?.running || cloudRun?.cancellation === "pending")) return;
+        void cloudRuns.poll(cloudOwner, readCloudTask);
+        const timer = window.setInterval(() => void cloudRuns.poll(cloudOwner, readCloudTask), 2000);
+        return () => window.clearInterval(timer);
+    }, [cloudOwner, cloudRun?.running, cloudRun?.cancellation, readCloudTask]);
+    const markSaving = (owner: string, saving: boolean) => {
+        if (saving) savingRef.current.add(owner); else savingRef.current.delete(owner);
+        setSavingOwners(new Set(savingRef.current));
+    };
+
+    const deleteDialog = useRef<{ destroy: () => void } | null>(null);
+    const deleteContext = `${library}:${section}:${activeTab}:${selected?.name || ""}`;
+    const currentDeleteContext = useRef(deleteContext);
+    currentDeleteContext.current = deleteContext;
+    const deleteMounted = useRef(true);
+    useEffect(() => {
+        deleteDialog.current?.destroy();
+        deleteDialog.current = null;
+    }, [deleteContext]);
+    useEffect(() => {
+        deleteMounted.current = true;
+        return () => {
+            deleteMounted.current = false;
+            deleteDialog.current?.destroy();
+            deleteDialog.current = null;
+        };
+    }, []);
+
+    const confirmLocalDelete = (key: string, title: string, content: string, remove: () => Promise<void>) => {
+        if (library !== "local" || section !== "workflows" || !selected || deleteDialog.current || savingRef.current.has(key)) return;
+        const ownerContext = deleteContext;
+        const selectionVersion = detailRequest.current;
+        const current = () => deleteMounted.current && currentDeleteContext.current === ownerContext && detailRequest.current === selectionVersion;
+        let confirmed = false;
+        const dialog = modal.confirm({
+            title,
+            content,
+            okText: t("workflowDelete.confirm"),
+            cancelText: t("workflowDelete.cancel"),
+            okButtonProps: { danger: true },
+            focusable: { autoFocusButton: "cancel" },
+            afterClose: () => { confirmed = true; if (deleteDialog.current === dialog) deleteDialog.current = null; },
+            onCancel: () => { confirmed = true; },
+            onOk: async () => {
+                if (confirmed || !current() || savingRef.current.has(key)) return;
+                confirmed = true;
+                markSaving(key, true);
+                try { await remove(); }
+                catch (err) {
+                    confirmed = false;
+                    if (current()) message.error(err instanceof Error ? err.message : t("workflowDelete.failed"));
+                    throw err;
+                } finally { markSaving(key, false); }
+            },
+        });
+        deleteDialog.current = dialog;
+    };
 
     const fetchWorkflows = useCallback(async () => {
+        setLibraryLoading(true);
+        setLibraryError("");
         try {
             const data = await request<{ workflows: WorkflowItem[] }>("GET", "/api/workflows");
             setWorkflows(data.workflows);
         } catch (err) {
-            message.error(err instanceof Error ? err.message : "加载工作流失败");
-        }
+            setLibraryError(err instanceof Error ? err.message : "加载工作流失败");
+        } finally { setLibraryLoading(false); }
     }, []);
 
     useEffect(() => { fetchWorkflows(); }, [fetchWorkflows]);
@@ -76,11 +194,12 @@ export default function WorkflowsPage() {
     /** RunningHub 档案列表；未配置 API Key 时仍可浏览，只是不能运行。 */
     const fetchProfiles = useCallback(async () => {
         setProfilesLoading(true);
+        setProfilesError("");
         try {
             const { workflows } = await fetchRunningHubWorkflows();
             setProfiles(workflows || []);
         } catch (err) {
-            message.error(err instanceof Error ? err.message : "加载 RunningHub 工作流失败");
+            setProfilesError(err instanceof Error ? err.message : "加载 RunningHub 工作流失败");
         } finally {
             setProfilesLoading(false);
         }
@@ -93,7 +212,7 @@ export default function WorkflowsPage() {
                 setRhConfigured(status);
                 if (status?.url) setRhBaseUrl(status.url);
             })
-            .catch(() => setRhConfigured(null));
+            .catch((error) => setRhStatusError(error instanceof Error ? error.message : String(error)));
     }, [fetchProfiles]);
 
     /**
@@ -135,6 +254,7 @@ export default function WorkflowsPage() {
         setLoading(true);
         try {
             const text = await file.text();
+            if (backendSession?.scope !== connectionScope) return false;
             const value = JSON.parse(text) as Record<string, unknown>;
             if (value.format === "infinite-canvas-workflow") {
                 await importWorkflowPackage(file.name, value as WorkflowPackage);
@@ -170,15 +290,14 @@ export default function WorkflowsPage() {
         }
     };
 
-    const handleDelete = async (name: string) => {
-        try {
+    const handleDelete = (name: string) => {
+        if (!selected || selected.name !== name || selected.builtin) return;
+        confirmLocalDelete(name, t("workflowDelete.workflowTitle", { name: selected.config.title || name }), t("workflowDelete.workflowDescription", { name }), async () => {
             await request("DELETE", `/api/workflows/${encodeURIComponent(name)}`);
             message.success("工作流已删除");
-            fetchWorkflows();
-            if (selected?.name === name) setSelected(null);
-        } catch (err) {
-            message.error(err instanceof Error ? err.message : "删除失败");
-        }
+            void fetchWorkflows();
+            setSelected((current) => current?.name === name ? null : current);
+        });
     };
 
     // title 由列表壳传入：重命名输入态是壳内部状态，页面不再持有 editValue。
@@ -188,74 +307,71 @@ export default function WorkflowsPage() {
         if (!trimmed) return;
         const item = workflows.find((w) => w.name === name);
         if (!item || item.builtin) return;
-        if (item.title === trimmed) return;
+        if (item.title === trimmed || savingRef.current.has(name)) return;
+        markSaving(name, true);
         try {
             await renameWorkflowTitle(name, trimmed);
             setWorkflows((prev) => prev.map((w) => (w.name === name ? { ...w, title: trimmed } : w)));
-            if (selected?.name === name) setSelected({ ...selected, config: { ...selected.config, title: trimmed } });
+            setSelected((current) => current?.name === name ? { ...current, config: { ...current.config, title: trimmed } } : current);
             message.success("已重命名");
         } catch (err) {
             message.error(err instanceof Error ? err.message : "重命名失败");
-        }
+        } finally { markSaving(name, false); }
     };
 
     const handleLoadDetail = async (name: string) => {
+        const version = ++detailRequest.current;
+        setDetailLoading(true);
+        setDetailError("");
         try {
             const detail = await request<WorkflowDetail>("GET", `/api/workflows/${encodeURIComponent(name)}`);
+            if (version !== detailRequest.current) return;
             const outputNodes = normalizeOutputNodeSelection(detail.config.outputNodes || [], detail.workflow);
             setSelected({ ...detail, config: { ...detail.config, outputNodes } });
-            setTaskResult(null);
-            setOutputNodes(outputNodes);
+            setHistoryLogs([]);
             setActiveTab("graph");
         } catch (err) {
-            message.error(err instanceof Error ? err.message : "加载详情失败");
+            if (version === detailRequest.current) setDetailError(err instanceof Error ? err.message : String(err));
+        } finally {
+            if (version === detailRequest.current) setDetailLoading(false);
         }
     };
 
-    const handleSaveConfig = async (config: WorkflowConfig) => {
-        if (!selected) return;
+    const handleSaveConfig = async (owner: WorkflowDetail, config: WorkflowConfig) => {
+        if (savingRef.current.has(owner.name)) return false;
+        markSaving(owner.name, true);
         try {
-            await request("PUT", `/api/workflows/${encodeURIComponent(selected.name)}/config`, config);
-            setSelected({ ...selected, config });
-            fetchWorkflows();
+            await request("PUT", `/api/workflows/${encodeURIComponent(owner.name)}/config`, config);
+            setSelected((current) => current?.name === owner.name ? { ...current, config } : current);
+            void fetchWorkflows();
+            return true;
         } catch (err) {
-            message.error(err instanceof Error ? err.message : "保存配置失败");
-        }
+            message.error(err instanceof Error ? err.message : t("workflowRecovery.saveFailed"));
+            return false;
+        } finally { markSaving(owner.name, false); }
     };
 
     const handleRun = async (fields: Record<string, string>) => {
-        if (!selected) return;
-        setRunning(true);
-        setTaskResult(null);
-        try {
-            // 输出节点跟着本轮一起提交；config 里同时落盘，保证下次运行保持一致。
-            const baseConfig = selected.config;
-            const config = { ...baseConfig, outputNodes };
-            await handleSaveConfig(config);
-            const { taskId } = await runWorkflow(selected.name, fields, config);
-            const result = await pollWorkflowTask(taskId);
-            setTaskResult(result);
-            if (result.status.status_str === "success") {
-                message.success("工作流执行完成");
-            } else {
-                message.error(result.error || "执行失败");
-            }
-        } catch (err) {
-            message.error(err instanceof Error ? err.message : "运行失败");
-        } finally {
-            setRunning(false);
-        }
+        if (!selected || savingRef.current.has(selected.name)) return;
+        const owner = selected;
+        const config = { ...owner.config, outputNodes: normalizeOutputNodeSelection(outputNodes, owner.workflow) };
+        const taskId = crypto.randomUUID();
+        await localRuns.start(`${connectionScope}:local:${owner.name}`, taskId, async () => {
+            return submitAndRead(() => runWorkflow(owner.name, fields, config, taskId), () => fetchBackendTask(taskId), rhConfigured?.workflowTaskReplaySafe === true);
+        }, rhConfigured?.workflowTaskReplaySafe === true);
     };
 
     const handleOutputNodesChange = (next: string[]) => {
-        setOutputNodes(next);
-        if (selected) void handleSaveConfig({ ...selected.config, outputNodes: next });
+        if (selected) void handleSaveConfig(selected, { ...selected.config, outputNodes: next });
     };
 
     const loadHistory = useCallback(async () => {
+        const version = ++historyRequest.current;
         setLoadingHistory(true);
+        setHistoryError("");
         try {
             const data = await fetchBackendGenerationLogs({ projectId: "workflow", limit: 50 });
+            if (version !== historyRequest.current) return;
             setHistoryLogs((data.logs || [])
                 .filter((log) => !selected?.name || log.workflow === selected.name)
                 .map((log) => ({
@@ -268,88 +384,74 @@ export default function WorkflowsPage() {
                     error: log.error,
                 })));
         } catch (err) {
-            message.error(err instanceof Error ? err.message : "加载历史失败");
+            if (version === historyRequest.current) setHistoryError(err instanceof Error ? err.message : t("workflowRecovery.historyFailed"));
         } finally {
-            setLoadingHistory(false);
+            if (version === historyRequest.current) setLoadingHistory(false);
         }
     }, [selected?.name]);
 
-    useEffect(() => { if (activeTab === "history") loadHistory(); }, [activeTab, loadHistory]);
+    useEffect(() => { if (activeTab === "history") void loadHistory(); return () => { historyRequest.current += 1; }; }, [activeTab, loadHistory]);
 
     /**
      * 提交档案到 RunningHub 云端执行。表单值走 values（本次运行的参数覆盖），
      * 提示词与媒体走 input；输出节点选择沿用本地同款选择器。
      */
     const handleRunProfile = async (form: Record<string, string>) => {
-        if (!selectedProfile) return;
+        if (!selectedProfile || savingRef.current.has(selectedProfile.id)) return;
         if (!rhConfigured?.hasApiKey) {
-            message.warning("请先在「运行环境」配置 RunningHub API Key");
+            message.warning(t("workflowRecovery.configureCloud"));
             return;
         }
-        setRhRunning(true);
-        setRhResult(null);
-        try {
-            const { task } = await runRunningHubWorkflow(
-                selectedProfile.id,
-                { prompt: form.prompt || "" },
-                runningHubValuesFromForm(form),
-                outputNodes.length ? { runninghubOutputNodes: outputNodes } : {},
-            );
-            setRhTaskId(task.id);
-            message.success("已提交 RunningHub，云端计费按平台规则");
-        } catch (err) {
-            message.error(err instanceof Error ? err.message : "提交 RunningHub 失败");
-            setRhRunning(false);
-        }
+        const owner = selectedProfile;
+        const taskId = crypto.randomUUID();
+        const outputs = normalizeOutputNodeSelection(rhOutputNodes, (owner.workflowJson || {}) as Parameters<typeof normalizeOutputNodeSelection>[1]);
+        let submission: ReturnType<typeof runningHubRequestFromForm>;
+        try { submission = runningHubRequestFromForm(owner, form); }
+        catch (error) { message.error(error instanceof RunningHubMediaConflict ? t("workflowRecovery.mediaConflict", { kind: error.kind, index: error.index }) : String(error)); return; }
+        const { input, values } = submission;
+        await cloudRuns.start(`${connectionScope}:cloud:${owner.id}`, taskId, async () => {
+            return submitAndRead(() => runRunningHubWorkflow(owner.id, input, values, outputs.length ? { runninghubOutputNodes: outputs } : {}, taskId), () => readCloudTask(taskId), rhConfigured?.workflowTaskReplaySafe === true);
+        }, rhConfigured?.workflowTaskReplaySafe === true);
     };
 
-    /** 轮询云端任务到终态；结果媒体由 Backend 归档，这里只展示。 */
-    useEffect(() => {
-        if (!rhTaskId || !rhRunning) return;
-        let stopped = false;
-        const timer = window.setInterval(() => {
-            void (async () => {
-                try {
-                    const { task } = await request<{ task: { status: string; error?: string; result?: { media?: WorkflowRunResult["media"] } } }>(
-                        "GET",
-                        `/agent/runninghub/tasks/${encodeURIComponent(rhTaskId)}`,
-                    );
-                    if (stopped) return;
-                    if (task.status === "succeeded") {
-                        setRhResult({ media: task.result?.media || [], status: { status_str: "success", completed: true } });
-                        setRhRunning(false);
-                        window.clearInterval(timer);
-                    } else if (task.status === "failed" || task.status === "cancelled") {
-                        message.error(task.error || `RunningHub 任务${task.status}`);
-                        setRhRunning(false);
-                        window.clearInterval(timer);
-                    }
-                } catch {
-                    /* 单次轮询失败不终止，等待下一次 */
-                }
-            })();
-        }, 2000);
-        return () => {
-            stopped = true;
-            window.clearInterval(timer);
-        };
-    }, [rhTaskId, rhRunning]);
-
-    const handleDeleteHistory = async (id: string) => {
+    const loadProfileHistory = useCallback(async () => {
+        const id = selectedProfile?.id;
+        const version = ++profileHistoryRequest.current;
+        if (!id) { setProfileHistory([]); setProfileHistoryLoading(false); return; }
+        setProfileHistoryLoading(true);
+        setProfileHistoryError("");
         try {
+            const { tasks } = await fetchRunningHubWorkflowTasks(id);
+            if (version !== profileHistoryRequest.current) return;
+            setProfileHistory(tasks || []);
+            const active = tasks.find((task) => !["succeeded", "failed", "cancelled"].includes(task.status));
+            if (active) cloudRuns.adopt(`${connectionScope}:cloud:${id}`, active);
+        } catch (error) {
+            if (version === profileHistoryRequest.current) setProfileHistoryError(error instanceof Error ? error.message : String(error));
+        } finally { if (version === profileHistoryRequest.current) setProfileHistoryLoading(false); }
+    }, [selectedProfile?.id, connectionScope]);
+    useEffect(() => {
+        setProfileHistory([]);
+        void loadProfileHistory();
+        return () => { profileHistoryRequest.current += 1; };
+    }, [loadProfileHistory]);
+
+    useEffect(() => { if (rhTab === "history") void loadProfileHistory(); }, [rhTab, loadProfileHistory, cloudRun?.result]);
+
+    const handleDeleteHistory = (id: string) => {
+        const entry = historyLogs.find((log) => log.id === id);
+        if (!selected || !entry) return;
+        confirmLocalDelete(`history:${id}`, t("workflowDelete.historyTitle"), t("workflowDelete.historyDescription", { name: entry.workflow, time: new Date(entry.createdAt).toLocaleString(), id }), async () => {
             await deleteBackendGenerationLogs({ id });
-            loadHistory();
+            setHistoryLogs((current) => current.filter((entry) => entry.id !== id));
             message.success("已删除");
-        } catch (err) {
-            message.error(err instanceof Error ? err.message : "删除失败");
-        }
+        });
     };
 
     const handleFieldsChange = (newFields: WorkflowField[]) => {
         if (!selected) return;
         const updatedConfig = { ...selected.config, fields: newFields };
-        setSelected({ ...selected, config: updatedConfig });
-        handleSaveConfig(updatedConfig);
+        void handleSaveConfig(selected, updatedConfig);
     };
 
     /**
@@ -360,16 +462,16 @@ export default function WorkflowsPage() {
     const handleProfileFieldsChange = async (nextFields: RunningHubWorkflowProfile["fields"]) => {
         if (!selectedProfile) return;
         const previous = selectedProfile;
-        const next = { ...selectedProfile, fields: nextFields };
-        setSelectedProfile(next);
+        if (savingRef.current.has(previous.id)) return;
+        markSaving(previous.id, true);
+        const next = { ...previous, fields: nextFields };
         try {
             const { workflow } = await saveRunningHubWorkflow(next);
-            setSelectedProfile(workflow);
+            setSelectedProfile((current) => current?.id === previous.id ? workflow : current);
             setProfiles((current) => current.map((item) => (item.id === next.id ? workflow : item)));
         } catch (err) {
-            setSelectedProfile(previous);
             message.error(err instanceof Error ? err.message : "保存 RunningHub 映射失败");
-        }
+        } finally { markSaving(previous.id, false); }
     };
 
     /** 本地工作流库列表项：标题取配置标题，副标题是文件名，徽标是字段数。 */
@@ -385,9 +487,27 @@ export default function WorkflowsPage() {
         [workflows],
     );
 
+    const retryOriginalSubmission = async (owner: string, controller: WorkflowTaskController) => {
+        try {
+            const status = await fetchRunningHubStatus();
+            if (backendSession?.scope !== connectionScope) return;
+            setRhConfigured(status);
+            if (status.workflowTaskReplaySafe === true) await controller.retrySubmission(owner);
+        } catch (error) {
+            setRhConfigured((current) => current ? { ...current, workflowTaskReplaySafe: false } : current);
+            setRhStatusError(error instanceof Error ? error.message : String(error));
+        }
+    };
+
+    const runNotice = (owner: string, state: import("./workflow-task-controller").WorkflowRunState | undefined, controller: WorkflowTaskController, read: (id: string) => Promise<import("./workflow-task-controller").TaskReceipt>) => state && (state.error || state.unknown || state.cancellation) ? (
+        <Alert type={state.cancellation === "confirmed" ? "info" : "warning"}
+            description={<div className="space-y-2"><p>{t(state.cancellation === "confirmed" ? "workflowRecovery.cancelConfirmed" : state.cancellation === "unconfirmed" ? "workflowRecovery.cancelUnconfirmed" : state.cancellation === "local" ? "workflowRecovery.cancelLocalOnly" : state.cancellation === "pending" ? "workflowRecovery.cancelWaiting" : state.unknown ? "workflowRecovery.submissionUnknown" : "workflowRecovery.queryFailed")}</p><p className="break-all text-xs">{state.remoteTaskId || state.taskId}</p>{state.error ? <p className="break-all text-xs">{state.error}</p> : null}<Button size="small" onClick={() => void controller.poll(owner, read)}>{t("workflowRecovery.refreshStatus")}</Button>{controller === cloudRuns && state.cancellation && state.cancellation !== "confirmed" ? <><a className="ml-2 underline" href={rhBaseUrl} target="_blank" rel="noreferrer">{t("workflowRecovery.viewCloud")}</a>{!state.cancellationAcknowledged ? <Button size="small" onClick={() => controller.acknowledgeCancellation(owner)}>{t("workflowRecovery.acknowledgeCancellation")}</Button> : null}</> : null}{state.unknown && state.retryable && rhConfigured?.workflowTaskReplaySafe === true ? <Button size="small" loading={state.submitting} onClick={() => void retryOriginalSubmission(owner, controller)}>{t("workflowRecovery.retrySameSubmission")}</Button> : null}</div>}
+        />
+    ) : null;
+
     // 两个库共用同一个右栏：切换器在顶部，下面按 library 换列表内容。
     const libraryColumn = (
-        <div className="col-span-4 flex min-h-0 flex-col gap-3">
+        <div className="order-first flex max-h-80 min-h-48 min-w-0 flex-col gap-3 lg:order-last lg:col-span-4 lg:max-h-none lg:min-h-0">
             <Segmented
                 block
                 value={library}
@@ -397,66 +517,72 @@ export default function WorkflowsPage() {
                     { label: `RunningHub (${profiles.length})`, value: "runninghub" },
                 ]}
             />
+            {libraryError && library === "local" ? <Alert type="error" description={libraryError} action={<Button size="small" onClick={() => void fetchWorkflows()}>{t("workflowRecovery.refreshStatus")}</Button>} /> : null}
+            {profilesError && library === "runninghub" ? <Alert type="error" description={profilesError} action={<Button size="small" onClick={() => void fetchProfiles()}>{t("workflowRecovery.refreshStatus")}</Button>} /> : null}
+            {rhStatusError && library === "runninghub" ? <Alert type="error" description={rhStatusError} action={<Button size="small" onClick={() => { void fetchRunningHubStatus().then((status) => { setRhConfigured(status); setRhStatusError(""); }).catch((error) => { setRhConfigured((current) => current ? { ...current, workflowTaskReplaySafe: false } : current); setRhStatusError(String(error)); }); }}>{t("workflowRecovery.refreshStatus")}</Button>} /> : null}
+            {libraryLoading && library === "local" ? <Spin size="small" /> : null}
             {library === "runninghub" ? (
                 <div className="flex shrink-0 items-center gap-2 rounded-lg border border-stone-200 bg-white px-3 py-2 text-xs dark:border-stone-700 dark:bg-stone-900">
                     {profilesLoading ? <Spin size="small" /> : null}
                     <span className="flex-1 text-stone-600 dark:text-stone-300">
-                        {rhConfigured?.hasApiKey
+                        {rhConfigured === null ? t("workflowRecovery.cloudStatusUnknown") : rhConfigured.hasApiKey
                             ? "云端工作流库：档案与平台节点图保持一致。"
                             : "未配置 RunningHub API Key，可浏览档案但无法运行。"}
                     </span>
                 </div>
-            ) : (
-                <div className="relative flex shrink-0 items-center gap-2 rounded-lg border border-stone-200 bg-white px-3 py-2 dark:border-stone-700 dark:bg-stone-900">
-                    {loading ? <Spin size="small" /> : <UploadIcon className="size-4 shrink-0 text-stone-400" />}
-                    <span className="text-sm text-stone-600 dark:text-stone-300">{loading ? "正在导入…" : "导入本地 ComfyUI JSON / 工作流包"}</span>
-                    <input
-                        type="file"
-                        accept=".json"
-                        disabled={loading}
-                        onChange={async (e) => {
-                            const file = e.target.files?.[0];
-                            if (file) { await handleUpload(file); e.target.value = ""; }
-                        }}
-                        className="absolute inset-0 cursor-pointer opacity-0"
-                    />
-                </div>
-            )}
+            ) : null}
 
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-stone-200 bg-white dark:border-stone-700 dark:bg-stone-900">
-                <div className="shrink-0 border-b border-stone-200 px-3 py-2.5 dark:border-stone-700">
-                    <h2 className="text-sm font-medium">{library === "local" ? "本地工作流列表" : "RunningHub 工作流列表"}</h2>
+                <div className="flex shrink-0 items-center justify-between gap-2 border-b border-stone-200 px-3 py-2.5 dark:border-stone-700">
+                    <h2 className="min-w-0 text-sm font-medium">{library === "local" ? "本地工作流列表" : "RunningHub 工作流列表"}</h2>
+                    <div role="group" aria-label={t("workflowLibraryActions.libraryActions")} className="flex shrink-0 items-center gap-1">
+                        {library === "local" ? <>
+                            <Tooltip title={t(loading ? "workflowLibraryActions.importingFile" : "workflowLibraryActions.importFile")}>
+                                <label className={`relative inline-flex size-6 items-center justify-center rounded text-stone-600 focus-within:ring-2 focus-within:ring-blue-500 dark:text-stone-300 ${loading ? "cursor-not-allowed opacity-50" : "cursor-pointer hover:bg-stone-100 dark:hover:bg-stone-800"}`}>
+                                    {loading ? <Spin size="small" /> : <UploadIcon aria-hidden="true" className="size-3.5" />}
+                                    <span className="sr-only">{t("workflowLibraryActions.importFile")}</span>
+                                    <input
+                                        type="file"
+                                        accept=".json"
+                                        disabled={loading}
+                                        aria-label={t("workflowLibraryActions.importFile")}
+                                        aria-busy={loading}
+                                        onChange={async (e) => {
+                                            const input = e.currentTarget;
+                                            const file = input.files?.[0];
+                                            if (file) { await handleUpload(file); input.value = ""; }
+                                        }}
+                                        className="absolute inset-0 size-full cursor-pointer opacity-0 disabled:cursor-not-allowed"
+                                    />
+                                </label>
+                            </Tooltip>
+                            <RunningHubWorkflowImport workflows={workflows} onImported={(name) => { void fetchWorkflows().then(() => handleLoadDetail(name)); }} />
+                        </> : <RunningHubProfileActions
+                            scope="library"
+                            profiles={profiles}
+                            selected={null}
+                            onChanged={fetchProfiles}
+                        />}
+                    </div>
                 </div>
                 {library === "local" ? (
                     <>
-                        <div className="shrink-0 px-3 pt-2.5">
-                            <RunningHubWorkflowImport workflows={workflows} onImported={(name) => { void fetchWorkflows().then(() => handleLoadDetail(name)); }} />
-                        </div>
-                        <WorkflowLibraryList
+                        {!libraryLoading && !libraryError ? <WorkflowLibraryList
                             items={libraryItems}
                             selectedId={selected?.name}
                             onSelect={(item) => void handleLoadDetail(item.id)}
                             onRename={(item, title) => void handleRename(item.id, title)}
                             emptyText="暂无本地工作流"
-                        />
+                        /> : null}
                     </>
                 ) : (
                     <>
-                        <div className="shrink-0 px-3 pt-2.5">
-                            <RunningHubProfileActions
-                                profiles={profiles}
-                                selected={selectedProfile}
-                                onChanged={fetchProfiles}
-                                onSelected={setSelectedProfile}
-                                usedByModels={usedByModels}
-                            />
-                        </div>
-                        <WorkflowLibraryList
+                        {!profilesLoading && !profilesError ? <WorkflowLibraryList
                             items={profileItems}
                             selectedId={selectedProfile?.id}
                             onSelect={(item) => setSelectedProfile(profiles.find((profile) => profile.id === item.id) || null)}
-                            emptyText={rhConfigured?.hasApiKey === false ? "未配置 API Key" : "暂无 RunningHub 工作流档案"}
-                        />
+                            emptyText="暂无 RunningHub 工作流档案"
+                        /> : null}
                     </>
                 )}
             </div>
@@ -464,32 +590,34 @@ export default function WorkflowsPage() {
     );
 
     return (
-        <div className="mx-auto flex h-full max-w-7xl flex-col overflow-hidden px-6 py-4">
+        <div className="mx-auto flex h-full max-w-7xl flex-col overflow-hidden px-3 py-4 sm:px-6">
             <div className="shrink-0">
-                <h1 className="flex items-center gap-2 text-xl font-semibold"><Workflow className="size-5" /> ComfyUI</h1>
-                <p className="mt-0.5 text-xs text-stone-500">集中管理工作流、本地模型和运行环境。</p>
+                <h1 className="flex items-center gap-2 text-xl font-semibold"><Workflow className="size-5" /> {t("microTools.workflow.workspaceTitle")}</h1>
+                <p className="mt-0.5 text-xs text-stone-500">{t("microTools.workflow.workspaceDescription")}</p>
             </div>
 
+            {detailLoading ? <Spin size="small" /> : null}
+            {detailError ? <Alert type="error" description={detailError} /> : null}
             <Tabs
                 className="mt-2 shrink-0 [&_.ant-tabs-nav]:!mb-3"
                 activeKey={section}
                 onChange={setSection}
                 items={[
                     { key: "workflows", label: "工作流库" },
-                    { key: "models", label: "模型" },
+                    { key: "models", label: t("microTools.workflow.localModels") },
                     { key: "runtime", label: "运行环境" },
                 ]}
             />
 
-            <div className={`min-h-0 flex-1 ${section === "workflows" ? "overflow-hidden" : "overflow-y-auto"}`}>
+            <div className={`min-h-0 flex-1 ${section === "workflows" ? "overflow-y-auto lg:overflow-hidden" : "overflow-y-auto"}`}>
             {section === "workflows" && library === "runninghub" ? (
-                <div className="grid h-full min-h-0 grid-cols-12 gap-4">
-                    <div className="col-span-8 flex min-h-0 flex-col gap-3">
+                <div className="grid min-h-0 grid-cols-1 gap-4 lg:h-full lg:grid-cols-12">
+                    <div className="flex h-[70vh] min-h-[480px] min-w-0 flex-col gap-3 lg:col-span-8 lg:h-auto lg:min-h-0">
                         {!selectedProfile ? (
                             <div className="flex flex-1 items-center justify-center rounded-lg border border-dashed border-stone-300 dark:border-stone-700">
                                 <div className="text-center">
                                     <Cloud className="mx-auto size-10 text-stone-300" />
-                                    <p className="mt-2 text-sm text-stone-500">从右侧选择一个 RunningHub 工作流档案</p>
+                                    <p className="mt-2 text-sm text-stone-500">{t("microTools.workflow.selectCloudProfile")}</p>
                                     <p className="mt-1 text-xs text-stone-400">档案保存节点输入映射，运行由 RunningHub 云端执行并按平台计费</p>
                                 </div>
                             </div>
@@ -497,44 +625,57 @@ export default function WorkflowsPage() {
                             <WorkflowWorkbench
                                 activeTab={rhTab}
                                 onTabChange={setRhTab}
-                                historyCount={0}
+                                historyCount={profileHistory.length}
                                 title={selectedProfile.name}
                                 subtitle={`${selectedProfile.workflowId} · RunningHub 云端执行`}
+                                actions={<RunningHubProfileActions
+                                    scope="selected"
+                                    profiles={profiles}
+                                    selected={selectedProfile}
+                                    onChanged={fetchProfiles}
+                                    onSelected={(profile, ownerId) => setSelectedProfile((current) => current?.id === ownerId ? profile : current)}
+                                    usedByModels={usedByModels}
+                                />}
                                 graph={
-                                    <RunningHubGraphPanel
+                                    <fieldset className="h-full min-h-0" disabled={savingOwners.has(selectedProfile?.id || "")} aria-busy={savingOwners.has(selectedProfile?.id || "")}><RunningHubGraphPanel
                                         workflowId={selectedProfile.workflowId}
                                         workflow={selectedProfile.workflowJson}
                                         fields={selectedProfile.fields || []}
                                         baseUrl={rhBaseUrl}
                                         onFieldsChange={(next) => void handleProfileFieldsChange(next)}
-                                    />
+                                    /></fieldset>
                                 }
                                 run={
                                     <RunTab
+                                        key={`runninghub:${selectedProfile.id}`}
                                         config={runningHubProfileToConfig(selectedProfile)}
                                         onRun={(form) => void handleRunProfile(form)}
-                                        running={rhRunning}
-                                        result={rhResult}
+                                        running={Boolean(cloudRun?.running)}
+                                        disabled={savingOwners.has(selectedProfile?.id || "") || Boolean(cloudRun?.unknown || cloudRun?.cancellation && cloudRun.cancellation !== "confirmed" && !cloudRun.cancellationAcknowledged)}
+                                        cancelPending={cloudRun?.cancelling}
+                                        result={cloudRun?.result || null}
                                         runLabel="提交到 RunningHub"
-                                        emptyText="该档案没有启用任何输入映射，点档案的「重新同步」读取字段后在运行环境配置映射"
+                                        emptyText={t("microTools.workflow.noCloudMappings")}
                                         hint="表单里的参数只影响本次运行，不会写回档案；媒体按档案里 image/video/audio 字段的顺序注入"
-                                        statusText="已提交 RunningHub，等待云端完成…"
-                                        onCancel={rhTaskId ? () => { void cancelRunningHubTask(rhTaskId); setRhRunning(false); } : undefined}
+                                        statusText={t(cloudRun?.submitting ? "workflowRecovery.submitting" : cloudRun?.cancellation === "pending" ? "workflowRecovery.cancelWaiting" : cloudRun?.unknown ? "workflowRecovery.submissionUnknown" : cloudRun?.error ? "workflowRecovery.queryFailed" : "workflowRecovery.running")}
+                                        onCancel={cloudRun?.taskId && !cloudRun.unknown && !cloudRun.submitting && !cloudRun.cancellation ? () => void cloudRuns.cancel(cloudOwner, cancelRunningHubTask, readCloudTask) : undefined}
+                                        extra={runNotice(cloudOwner, cloudRun, cloudRuns, readCloudTask)}
                                         outputPicker={
                                             <OutputNodePicker
                                                 graph={(selectedProfile.workflowJson || {}) as never}
-                                                value={outputNodes}
-                                                onChange={handleOutputNodesChange}
+                                                value={rhOutputNodes}
+                                                onChange={(next) => setRhOutputSelections((current) => ({ ...current, [selectedProfile.id]: next }))}
                                             />
                                         }
                                     />
                                 }
                                 history={
                                     <RunHistoryList
-                                        entries={[]}
-                                        loading={false}
-                                        onRefresh={() => undefined}
-                                        hint="RunningHub 档案的运行历史在 Backend 任务记录里，可通过任务查询查看"
+                                        entries={profileHistory.map((task) => ({ id: task.id, status: task.status, title: selectedProfile.name, time: task.createdAt ? new Date(task.createdAt).toLocaleString() : undefined, prompt: String(task.input?.prompt || ""), error: task.error || undefined, outputs: workflowTaskResult(task).media, texts: task.result?.texts?.map((item) => item.content) }))}
+                                        loading={profileHistoryLoading}
+                                        onRefresh={loadProfileHistory}
+                                        error={profileHistoryError}
+                                        hint={t("workflowRecovery.cloudHistory")}
                                     />
                                 }
                             />
@@ -542,8 +683,8 @@ export default function WorkflowsPage() {
                     </div>
                     {libraryColumn}
                 </div>
-            ) : section === "workflows" ? <div className="grid h-full min-h-0 grid-cols-12 gap-4">
-                <div className="col-span-8 min-h-0">
+            ) : section === "workflows" ? <div className="grid min-h-0 grid-cols-1 gap-4 lg:h-full lg:grid-cols-12">
+                <div className="h-[70vh] min-h-[480px] min-w-0 lg:col-span-8 lg:h-auto lg:min-h-0">
                     {!selected ? (
                         <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-stone-300 dark:border-stone-700">
                             <div className="text-center">
@@ -586,12 +727,12 @@ export default function WorkflowsPage() {
                                 <>
                                     <Button size="small" icon={<Download className="size-3.5" />} onClick={handleExport}>导出</Button>
                                     {!selected.builtin && (
-                                        <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={() => handleDelete(selected.name)}>删除</Button>
+                                        <Button size="small" danger loading={savingOwners.has(selected.name)} icon={<Trash2 className="size-3.5" />} onClick={() => handleDelete(selected.name)}>删除</Button>
                                     )}
                                 </>
                             }
                             graph={
-                                <WorkflowGraphPanel
+                                <fieldset className="h-full min-h-0" disabled={savingOwners.has(selected?.name || "")} aria-busy={savingOwners.has(selected?.name || "")}><WorkflowGraphPanel
                                     name={selected.name}
                                     workflow={selected.workflow}
                                     fields={selected.config.fields}
@@ -599,20 +740,26 @@ export default function WorkflowsPage() {
                                     onWorkflowChange={(workflow) => {
                                         if (!selected) return;
                                         const nextOutputNodes = normalizeOutputNodeSelection(outputNodes, workflow);
-                                        setOutputNodes(nextOutputNodes);
-                                        const next = { ...selected, workflow, config: { ...selected.config, outputNodes: nextOutputNodes } };
-                                        setSelected(next);
-                                        void request("PUT", `/api/workflows/${encodeURIComponent(selected.name)}/workflow`, workflow).catch((error) => message.error(error instanceof Error ? error.message : "保存节点图失败"));
+                                        const owner = selected;
+                                        if (savingRef.current.has(owner.name)) return;
+                                        markSaving(owner.name, true);
+                                        void request("PUT", `/api/workflows/${encodeURIComponent(owner.name)}/workflow`, workflow).then(() => {
+                                            setSelected((current) => current?.name === owner.name ? { ...current, workflow, config: { ...current.config, outputNodes: nextOutputNodes } } : current);
+                                        }).catch((error) => message.error(error instanceof Error ? error.message : "保存节点图失败")).finally(() => markSaving(owner.name, false));
                                     }}
-                                />
+                                /></fieldset>
                             }
                             run={
                                 <RunTab
+                                    key={`local:${selected.name}`}
                                     config={selected.config}
                                     onRun={handleRun}
-                                    running={running}
-                                    result={taskResult}
-                                    outputPicker={<OutputNodePicker graph={selected.workflow} value={outputNodes} onChange={handleOutputNodesChange} />}
+                                    running={Boolean(localRun?.running)}
+                                    disabled={savingOwners.has(selected?.name || "") || Boolean(localRun?.unknown)}
+                                    statusText={t(localRun?.submitting ? "workflowRecovery.submitting" : localRun?.unknown ? "workflowRecovery.submissionUnknown" : localRun?.error ? "workflowRecovery.queryFailed" : "workflowRecovery.running")}
+                                    result={localRun?.result || null}
+                                    extra={runNotice(localOwner, localRun, localRuns, fetchBackendTask)}
+                                    outputPicker={<OutputNodePicker disabled={savingOwners.has(selected?.name || "")} graph={selected.workflow} value={outputNodes} onChange={handleOutputNodesChange} />}
                                 />
                             }
                             history={
@@ -626,10 +773,12 @@ export default function WorkflowsPage() {
                                         error: log.error,
                                         outputs: log.outputs,
                                         onDelete: () => void handleDeleteHistory(log.id),
+                                        deletePending: savingOwners.has(`history:${log.id}`),
                                     }))}
                                     loading={loadingHistory}
+                                    error={historyError}
                                     onRefresh={loadHistory}
-                                    hint="工作流运行历史（与生图/画布日志共享存储）"
+                                    hint={t("workflowRecovery.localHistory")}
                                 />
                             }
                         />
