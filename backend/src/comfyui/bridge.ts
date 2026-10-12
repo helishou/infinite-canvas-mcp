@@ -15,6 +15,7 @@ import { splitVideo } from "./video-segment.js";
 import { buildMotionContextClip } from "./motion-context.js";
 import { assertIndependentMediaRoot, comfyInputName, copyComfyInput, resolveComfyRoot } from "./local-root.js";
 import { normalizeH3Params, resolveH3Seed, clampH3LoraStrength } from "../canvas/h3-params.js";
+import { H3_VIDEO_RATIOS } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { assertH3LatentUpscalerReady } from "./h3-latent-upscaler-preflight.js";
 import { stageH3ContinuationSeed, type H3ContinuationIdentity } from "./continuation-seed.js";
 import { listLocalLoras } from "./local-lora-catalog.js";
@@ -1747,17 +1748,8 @@ async function resolveH3ModelParams(comfyUrl: string, params: Record<string, unk
 }
 
 function normalizeH3AspectRatio(value: string) {
-    const aliases: Record<string, string> = {
-        // 短形式
-        "16:9": "16:9 (Widescreen)", "9:16": "9:16 (Portrait Widescreen)", "1:1": "1:1 (Square)",
-        "4:3": "4:3 (Standard)", "3:4": "3:4 (Portrait Standard)", "2:3": "2:3 (Portrait Photo)", "3:2": "3:2 (Photo)",
-        // H3 端 ClipSettings 选项里曾经使用的简称（已落库 segment.aspectRatio 可能是这些值）
-        "9:16 (Portrait)": "9:16 (Portrait Widescreen)",
-        "4:3 (Standard)": "4:3 (Standard)", "3:4 (Portrait)": "3:4 (Portrait Standard)",
-        "3:2 (Photo)": "3:2 (Photo)", "2:3 (Portrait)": "2:3 (Portrait Photo)",
-    };
-    const normalized = aliases[value] || value;
-    console.warn("[H3 normalizeAspectRatio]", { input: value, output: normalized, hit: value in aliases });
+    const normalized = Object.keys(H3_VIDEO_RATIOS).find((option) => option === value || option.startsWith(`${value} `)) || value;
+    console.warn("[H3 normalizeAspectRatio]", { input: value, output: normalized, hit: normalized !== value });
     return normalized;
 }
 

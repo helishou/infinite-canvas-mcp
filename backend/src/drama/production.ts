@@ -61,7 +61,7 @@ import { convertDirectorSourceToSubjectV2 } from "./subject-v2-upgrade.js";
 
 import { directorHash, projectDirector, validateDirectorMedia, assertDirectorEngine } from "./director.js";
 import { DATA_DIR } from "../config.js";
-import { resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
+import { resolveCanvasCharacterImageReferences, resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
 import type { BackendDatabase } from "../db.js";
 import type { BackendEventBus } from "../events.js";
 import type { CanvasCommit } from "../canvas/collaboration.js";
@@ -186,9 +186,9 @@ export class EpisodeProductionService {
         this.validateSubjectEntityOwnership(id, director);
         if (!productionCanvasId) throw new Error("SUBJECT_IMAGE_PRODUCTION_CANVAS_MISSING: 制作对象尚未绑定画布");
         const assetPlans = clipRows(director.source.asset_plan), subjects = clipRows(director.source.subject_registry);
+        const shotsById = new Map(clipRows(director.source.shots).map(shot => [String(shot.id), shot]));
         let sourceModeChanged = false;
         if (forCompilation) {
-            const shotsById = new Map(clipRows(director.source.shots).map(shot => [String(shot.id), shot]));
             for (const segment of clipRows(director.source.segments)) {
                 const segmentId = String(segment.id || "");
                 if (!segmentId || targetIds && !targetIds.includes(segmentId)) continue;
@@ -200,13 +200,12 @@ export class EpisodeProductionService {
                 const shotIds = clipRows(segment.shot_ids).map(String);
                 const selectedShots = shotIds.map(shotId => shotsById.get(shotId)).filter(Boolean) as Array<Record<string, any>>;
                 const frames = selectedShots.flatMap(shot => clipRows(shot.keyframes).filter(frame => frame.requiredForSubmission));
-                const hasVisibleSubjectReference = selectedShots.some(shot => clipRows(shot.subject_usages).some(usage =>
-                    resolveSubjectPictureBindingIds(subjects.find(subject => String(subject.id) === String(usage.subjectId)), usage).bindingIds.length > 0));
+                const hasVisibleSubject = selectedShots.some(shot => clipRows(shot.subject_usages).some(usage => usage.presentation === "visible"));
                 const anchors = new Set(frames.map(frame => String(frame.anchor || "")));
                 const sourceMode = anchors.has("opening") && anchors.has("closing") ? "FL2VA"
                     : anchors.has("opening") ? "I2VA"
                         : anchors.has("closing") ? "L2VA"
-                            : hasVisibleSubjectReference || frames.length ? "Ref2VA" : "T2VA";
+                            : hasVisibleSubject || frames.length ? "Ref2VA" : "T2VA";
                 if (!sourceMode || segment.mode === sourceMode) continue;
                 segment.mode = sourceMode;
                 delete segment.mode_lock;
@@ -224,6 +223,17 @@ export class EpisodeProductionService {
         const subjectReferenceShotIds = forCompilation ? new Set(clipRows(director.source.segments).filter(segment => String(segment.mode) === "Ref2VA"
             && (!targetIds || targetIds.includes(String(segment.id)))).flatMap(segment => (segment.shot_ids || []).map(String))) : undefined;
         const shots = clipRows(director.source.shots).filter(shot => !selectedShotIds || selectedShotIds.has(String(shot.id))), usedBindings = new Set<string>();
+        if (forCompilation) for (const segment of clipRows(director.source.segments).filter(item =>
+            String(item.mode) === "Ref2VA" && (!targetIds || targetIds.includes(String(item.id))))) {
+            const segmentShots = clipRows(segment.shot_ids).map(shotId => shotsById.get(String(shotId))).filter(Boolean) as Array<Record<string, any>>;
+            const hasPictureBinding = segmentShots.some(shot => clipRows(shot.subject_usages).some(usage =>
+                resolveSubjectPictureBindingIds(subjectById.get(String(usage.subjectId)), usage).bindingIds.length > 0));
+            const hasRequiredKeyframe = segmentShots.some(shot => clipRows(shot.keyframes).some(frame => frame.requiredForSubmission));
+            if (!hasPictureBinding && !hasRequiredKeyframe) throw new ProductionValidationError([{
+                code: "REF2VA_IMAGE_REQUIRED", path: `source.segments.${String(segment.id)}.mode`, targetId: String(segment.id),
+                message: "Ref2VA 编译至少需要一张已选择的图片参考或必需关键帧；请补选图片或将模式改为适用的无图模式", severity: "error",
+            }]);
+        }
         const segmentTargetsByShot = new Map<string, string[]>(), bindingTargets = new Map<string, Set<string>>();
         for (const segment of clipRows(director.source.segments).filter(item => !targetIds || targetIds.includes(String(item.id)))) for (const shotId of segment.shot_ids || []) {
             const key = String(shotId); segmentTargetsByShot.set(key, [...(segmentTargetsByShot.get(key) || []), String(segment.id)]);
@@ -310,14 +320,26 @@ export class EpisodeProductionService {
                 if (resolved.error || !resolved.image) throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_RESULT_MISSING", path: `subject_registry.${subjectId}.pictureBindings.${bindingId}.selection`, targetId: bindingId, message: resolved.error || "智能节点没有有效结果", severity: "error" }]);
                 slot = resolved.image as Record<string, any>;
             } else {
-                const reference = resolveCanvasImageReferenceNode(node)[0];
+                const selectedResultId = String(binding.selection?.mode === "selected_result" ? binding.selection.resultId || "" : "");
+                const characterImages = node.type === "character" && Array.isArray(metadata.characterImages)
+                    ? metadata.characterImages.filter((image: unknown) => image && typeof image === "object" && !Array.isArray(image)) as Array<Record<string, any>> : [];
+                const characterImageKey = (image: Record<string, any>, index: number) => String(image.storageKey || image.url || image.name || `image-${index}`);
+                const references = selectedResultId && node.type === "character"
+                    ? resolveCanvasCharacterImageReferences(node) : resolveCanvasImageReferenceNode(node);
+                const selectedCharacterImage = selectedResultId && node.type === "character"
+                    ? characterImages.find((image, index) => [String(image.id || ""), characterImageKey(image, index), String(image.storageKey || ""), `${nodeId}:character-image:${characterImageKey(image, index)}`].includes(selectedResultId))
+                    : undefined;
+                const reference = selectedResultId
+                    ? references.find(item => item.id === selectedResultId || item.storageKey === selectedResultId || selectedCharacterImage && item.storageKey === selectedCharacterImage.storageKey)
+                    : references[0];
                 if (!reference?.storageKey) {
+                    if (selectedResultId && references.some(item => item.storageKey)) throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_RESULT_MISSING", path: `subject_registry.${subjectId}.pictureBindings.${bindingId}.selection`, targetId: bindingId, message: `所选图片结果 ${selectedResultId} 不属于当前来源节点`, severity: "error" }]);
                     unresolvedBinding({ code: "SUBJECT_IMAGE_RESULT_MISSING", path: `${bindingPath}.selection`, targetId: bindingId, message: "来源节点没有可读取的归档图片", severity: "error" }, bindingId, !old?.storageKey);
                     continue;
                 }
-                const selectedResultId = String(binding.selection?.mode === "selected_result" ? binding.selection.resultId || "" : "");
-                if (selectedResultId && selectedResultId !== reference.id && selectedResultId !== reference.storageKey) throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_RESULT_MISSING", path: `subject_registry.${subjectId}.pictureBindings.${bindingId}.selection`, targetId: bindingId, message: `所选图片结果 ${selectedResultId} 不属于当前来源节点`, severity: "error" }]);
-                slot = { id: reference.id, storageKey: reference.storageKey, mimeType: reference.mimeType, generationTaskId: metadata.generationTaskId || "" };
+                slot = { id: reference.id, storageKey: reference.storageKey, mimeType: reference.mimeType,
+                    ...(selectedCharacterImage?.sha256 ? { sha256: selectedCharacterImage.sha256 } : {}),
+                    generationTaskId: selectedCharacterImage?.generationTaskId || metadata.generationTaskId || "" };
             }
             const storageKey = String(slot.storageKey || ""), generationTaskId = String(slot.generationTaskId || "");
             const media = storageKey && this.db.getMediaFile(storageKey);
@@ -1046,7 +1068,7 @@ export class EpisodeProductionService {
             if (!binding.storageKey) continue;
             const node = nodes.find(n => n.id === binding.nodeId);
             const meta = node?.metadata as Record<string, unknown> | undefined;
-            const keys = node ? [...resolveCanvasImageReferenceNode(node).map(r => r.storageKey), (node as any).storageKey, meta?.storageKey, meta?.resultStorageKey] : [];
+            const keys = node ? [...resolveCanvasCharacterImageReferences(node).map(r => r.storageKey), (node as any).storageKey, meta?.storageKey, meta?.resultStorageKey] : [];
             if (!node || !keys.includes(binding.storageKey)) throw new Error(`编译引用「${binding.label || binding.nodeId}」的图片已不在制作画布的对应节点上（节点 ${binding.nodeId} 缺失或已被替换），请在画布中恢复或重新生成该图片后重新编译`);
             const media = this.db.getMediaFile(binding.storageKey);
             if (!media || !fs.existsSync(media.filePath)) throw new Error(`编译引用「${binding.label || binding.nodeId}」的图片文件已从本机归档中丢失（${binding.storageKey}），无法编译`);
@@ -1395,12 +1417,17 @@ export class EpisodeProductionService {
             const targets = ids.map(id => {
                 const previous = baseline.targets.find(target => target.id === id);
                 const mediaBlockers = productionMediaDependencyBlockers(previous);
+                // Canvas execution snapshots do not know the authored H3 mode's media
+                // contract. Keep the formal Ref2VA image requirement visible when the
+                // workbench overlays its current-canvas readiness snapshot.
+                const referenceModeBlockers = previous?.blockers.filter(message => message.startsWith("Ref2VA")) || [];
                 const blockers = [...new Set([
+                    ...referenceModeBlockers,
                     ...checked.blockedTargets.filter(target => target.targetId === id).map(target => target.message),
                     ...mediaBlockers,
                     ...(dependencyBlocked.has(id) ? [`请先生成前置目标：${dependencyBlocked.get(id)!.join(", ")}`] : []),
                 ])];
-                const targetReady = ready.has(id) && !dependencyBlocked.has(id) && mediaBlockers.length === 0;
+                const targetReady = ready.has(id) && !dependencyBlocked.has(id) && mediaBlockers.length === 0 && referenceModeBlockers.length === 0;
                 return { ...(previous || { id, targetId: id.slice(id.indexOf(":") + 1), kind: id.startsWith("segment:") ? "segment" as const : id.startsWith("frame:") ? "keyframe" as const : "asset" as const, title: id }),
                     status: targetReady ? previous?.status === "complete" ? "complete" as const : "ready" as const : "blocked" as const, blockers, notice: "使用当前已保存内容" };
             });
@@ -1448,6 +1475,55 @@ export class EpisodeProductionService {
         const invalidBoundaryIssues = director.boundaries.filter(boundary => !knownSegmentIds.has(boundary.from) || !knownSegmentIds.has(boundary.to)).map(boundary => `连续性边界 ${boundary.from} → ${boundary.to} 引用了尚未登记的 Segment`);
         const planById = new Map(plan.map(item => [String(item.asset_id || item.id || ""), item]));
         const keyframeAssetIds = new Set(Object.values(director.shotInputs).map(input => input.keyframeAssetId).filter((id): id is string => Boolean(id)));
+        let publicationWide = source === "draft" && !current.published?.director;
+        const unpublishedTargets = new Set<string>();
+        const publishedDirector = current.published?.director;
+        const shotById = new Map(shots.map(shot => [String(shot.id || ""), shot]));
+        const markAssetTargets = (assetId: string) => {
+            const keyframeShots = Object.entries(director.shotInputs).filter(([, input]) => input.keyframeAssetId === assetId).map(([shotId]) => shotId);
+            if (keyframeShots.length) keyframeShots.forEach(shotId => unpublishedTargets.add(`frame:${shotId}`));
+            else unpublishedTargets.add(`asset:${assetId}`);
+            for (const segment of segments) {
+                const shotIds = Array.isArray(segment.shot_ids) ? segment.shot_ids.map(String) : [];
+                if (shotIds.some(shotId => {
+                    const shot = shotById.get(shotId);
+                    return director.shotInputs[shotId]?.assetIds.includes(assetId) || idList(shot?.required_assets).includes(assetId);
+                })) unpublishedTargets.add(`segment:${String(segment.id || "")}`);
+            }
+        };
+        if (source === "draft" && publishedDirector) {
+            if (director.sourceHash !== publishedDirector.sourceHash || fingerprint(director.engine) !== fingerprint(publishedDirector.engine)) publicationWide = true;
+            const signature = (artifact: NonNullable<DirectorProduction["artifacts"][number]> | undefined) => artifact ? {
+                prompt: artifact.sha256, status: artifact.status, sourceHash: artifact.sourceHash, receipt: artifact.receipt,
+                references: artifact.references.map(ref => [ref.label, ref.nodeId, ref.storageKey, ref.sha256, ref.role]),
+            } : null;
+            const artifactKeys = [...new Set([...director.artifacts, ...publishedDirector.artifacts].map(item => `${item.kind}:${item.targetId}`))];
+            for (const key of artifactKeys) {
+                const [kind, targetId] = key.split(":", 2) as ["image" | "h3", string];
+                const before = publishedDirector.artifacts.find(item => item.kind === kind && item.targetId === targetId);
+                const after = director.artifacts.find(item => item.kind === kind && item.targetId === targetId);
+                if (fingerprint(signature(before)) === fingerprint(signature(after))) continue;
+                if (kind === "h3") unpublishedTargets.add(`segment:${targetId}`);
+                else markAssetTargets(targetId);
+            }
+            for (const id of new Set([...Object.keys(director.assets), ...Object.keys(publishedDirector.assets)])) {
+                const before = publishedDirector.assets[id], after = director.assets[id];
+                if (fingerprint(before) !== fingerprint(after)) markAssetTargets(id);
+            }
+            for (const shotId of new Set([...Object.keys(director.shotInputs), ...Object.keys(publishedDirector.shotInputs)])) {
+                if (fingerprint(director.shotInputs[shotId]) === fingerprint(publishedDirector.shotInputs[shotId])) continue;
+                unpublishedTargets.add(`frame:${shotId}`);
+                for (const segment of segments) if (Array.isArray(segment.shot_ids) && segment.shot_ids.map(String).includes(shotId)) unpublishedTargets.add(`segment:${String(segment.id || "")}`);
+            }
+            const boundaries = new Map(director.boundaries.map(item => [item.from, item]));
+            const publishedBoundaries = new Map(publishedDirector.boundaries.map(item => [item.from, item]));
+            for (const from of new Set([...boundaries.keys(), ...publishedBoundaries.keys()])) {
+                if (fingerprint(boundaries.get(from)) === fingerprint(publishedBoundaries.get(from))) continue;
+                unpublishedTargets.add(`segment:${from}`);
+                const to = boundaries.get(from)?.to || publishedBoundaries.get(from)?.to;
+                if (to) unpublishedTargets.add(`segment:${to}`);
+            }
+        }
         const canvasId = this.episodeInfo(episodeId).canvasId || "";
         const project = canvasId ? this.db.getCanvasProject(canvasId) : null;
         const canvasRole = canvasId ? productionCanvasContext(this.db, canvasId).role : "ordinary";
@@ -1505,7 +1581,7 @@ export class EpisodeProductionService {
             const node = nodes?.find(item => item.id === asset.nodeId);
             if (!media || !node || !fs.existsSync(media.filePath) || crypto.createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex") !== asset.sha256) return false;
             const metadata = record(node.metadata);
-            return [...resolveCanvasImageReferenceNode(node).map(item => item.storageKey), node.storageKey, metadata.storageKey, metadata.resultStorageKey].includes(asset.storageKey);
+            return [...resolveCanvasCharacterImageReferences(node).map(item => item.storageKey), node.storageKey, metadata.storageKey, metadata.resultStorageKey].includes(asset.storageKey);
         };
         const pushAsset = (id: string, title: string, blockers: string[]) => {
             const artifact = artifactFor("image", id);
@@ -1607,6 +1683,13 @@ export class EpisodeProductionService {
                 }
             }
             requiredAssets.push(...subjectAssetIds);
+            const requiredKeyframeAssets = shotIds.flatMap(shotId => {
+                const shot = sourceShots.get(shotId);
+                if (isSubjectPromptAssembly(director.source)) return objectList(shot?.keyframes).filter(frame => frame.requiredForSubmission).map(frame => String(frame.assetId || frame.id || "")).filter(Boolean);
+                const input = director.shotInputs[shotId];
+                return input?.keyframePolicy !== "none" && input?.keyframeAssetId ? [input.keyframeAssetId] : [];
+            });
+            if (String(segment.mode) === "Ref2VA" && ![...requiredAssets, ...requiredKeyframeAssets].some(Boolean)) blockers.push("Ref2VA 模式至少需要一张已选择的图片参考或必需关键帧；请补选图片或切换到适用的无图模式");
             blockers.push(...dependencyBlockers(requiredAssets));
             for (const shotId of shotIds) {
                 const input = director.shotInputs[shotId];

@@ -47,6 +47,7 @@ export class CanvasSession {
     private pending = new Map<string, PendingRequest>();
     private pendingApprovals = new Map<string, Record<string, unknown>>();
     private canvasStates = new Map<string, CanvasSnapshot>();
+    private activeDramaIds = new Map<string, string>();
     private turnAttachments = new Map<string, TurnAttachment>();
     private codexReplayEvents = new Map<string, ReplayEvent>();
     private codexReplayActiveItems = new Set<string>();
@@ -80,6 +81,22 @@ export class CanvasSession {
     /** 获取当前 turn 绑定或最近激活的网页客户端。 */
     private get targetClientId() {
         return this.boundClientId || this.activeClientId;
+    }
+
+    /** 当前目标网页的画布，用于解析活动剧目。 */
+    focusedCanvasProjectId() {
+        return this.canvasState?.projectId || null;
+    }
+
+    /** 显式固定或解除当前目标网页对应的活动剧目。 */
+    setActiveDramaId(dramaId: string | null) {
+        const clientId = this.targetClientId || "default";
+        if (dramaId) this.activeDramaIds.set(clientId, dramaId);
+        else this.activeDramaIds.delete(clientId);
+    }
+
+    activeDramaId() {
+        return this.activeDramaIds.get(this.targetClientId || "default") || null;
     }
 
     /** 返回 Canvas Agent 当前连接状态。 */
@@ -309,6 +326,7 @@ export class CanvasSession {
             this.clients.delete(clientId);
             this.clientFocusOrder.delete(clientId);
             this.canvasStates.delete(clientId);
+            this.activeDramaIds.delete(clientId);
             this.pending.forEach((item, requestId) => {
                 if (item.clientId !== clientId) return;
                 this.pending.delete(requestId);

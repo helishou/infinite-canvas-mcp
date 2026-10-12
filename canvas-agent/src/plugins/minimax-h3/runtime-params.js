@@ -182,6 +182,8 @@ export function normalizeH3LoraSlots(params) {
  */
 export function normalizeH3Params(params, generateRandomSeed = false) {
     const next = { ...params };
+    if (next.audioDrive === true)
+        next.lockAudio = true;
     const seed = parseH3Seed(next.seed) ?? parseH3Seed(next.noiseSeed);
     const rawMode = String(next.noiseSeedMode || "").toLowerCase();
     const mode = rawMode === "fixed" ? "fixed" : rawMode === "random" ? "random" : seed === undefined || seed === 0 ? "random" : "fixed";

@@ -116,11 +116,12 @@ export function AgentSubagents({ theme }: { theme: (typeof canvasThemes)[keyof t
             setNextOffset(response.nextOffset ?? null);
         } catch (reason) { if (generation.current === epoch) setError(String(reason)); }
     };
-    // A failed discovery request is not evidence that a child exists. Empty
-    // conversations reserve no chrome, divider, spacing, or disclosure control.
-    if (!projectId || !parentThreadId || ownedScope.current !== scope || !tasks.length) return null;
-    const active = tasks.filter(task => ["queued", "running"].includes(task.status)).length;
-    const detail = tasks.find(task => task.taskId === selected);
+    const visibleTasks = tasks.filter(task => ["queued", "running"].includes(task.status) || task.taskId === selected);
+    // A failed discovery request is not evidence that a child exists. Settled
+    // tasks leave the current-task strip; an explicitly opened result stays until closed.
+    if (!projectId || !parentThreadId || ownedScope.current !== scope || !visibleTasks.length) return null;
+    const active = visibleTasks.filter(task => ["queued", "running"].includes(task.status)).length;
+    const detail = visibleTasks.find(task => task.taskId === selected);
     const result = detail && results[`${detail.taskId}:${detail.artifactHash || ""}`];
     const status = (task: DirectorSubagentSummary) => task.adoption ? "adopted" : ["queued", "running", "failed", "cancelled"].includes(task.status) ? task.status : task.validity === "stale" ? "stale" : task.outcome === "partial" ? "partial" : task.outcome === "needs_human" ? "needs_human" : "pending_review";
     const statusIcon = (task: DirectorSubagentSummary) => {
@@ -147,12 +148,12 @@ export function AgentSubagents({ theme }: { theme: (typeof canvasThemes)[keyof t
         <button type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)} className="rounded px-1 py-1.5 text-xs hover:bg-black/5 dark:hover:bg-white/10" style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left", color: theme.node.muted }}>
             <ChevronRight aria-hidden className={`size-3 shrink-0 transition-transform motion-reduce:transition-none ${expanded ? "rotate-90" : ""}`} />
             <Users aria-hidden className="size-3.5 shrink-0" />
-            <span className="min-w-0 truncate">{t("agent.subagents.title", { count: tasks.length })}</span>
+            <span className="min-w-0 truncate">{t("agent.subagents.title", { count: visibleTasks.length })}</span>
             <span className="ml-auto shrink-0 text-[11px]">{error ? t("agent.subagents.syncShort") : active > 0 ? t("agent.subagents.active", { count: active }) : t("agent.subagents.settled")}</span>
         </button>
         {expanded && <div className="mt-1 space-y-2 pl-4" data-testid="agent-subagents-body">
             {error && <div role="alert" className="text-xs" style={{ color: theme.node.muted }}><p>{t("agent.subagents.syncError")}</p><details><summary className="cursor-pointer">{t("agent.subagents.errorDetails")}</summary><p className="break-words">{error}</p></details><Button type="text" size="small" icon={<RefreshCw className="size-3" />} onClick={() => refresh(value => value + 1)}>{t("agent.subagents.refresh")}</Button></div>}
-            <div className="max-h-[25dvh] space-y-0.5 overflow-y-auto overscroll-contain">{tasks.map(task => <button key={task.taskId} type="button" aria-haspopup="dialog" aria-expanded={selected === task.taskId} onClick={() => activate(task)} className="rounded px-2 py-2 text-xs hover:bg-black/5 dark:hover:bg-white/10" style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left", background: selected === task.taskId ? theme.toolbar.activeBg : undefined }} data-testid="agent-subagent">
+            <div className="max-h-[25dvh] space-y-0.5 overflow-y-auto overscroll-contain">{visibleTasks.map(task => <button key={task.taskId} type="button" aria-haspopup="dialog" aria-expanded={selected === task.taskId} onClick={() => activate(task)} className="rounded px-2 py-2 text-xs hover:bg-black/5 dark:hover:bg-white/10" style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left", background: selected === task.taskId ? theme.toolbar.activeBg : undefined }} data-testid="agent-subagent">
                 {statusIcon(task)}
                 <span className="min-w-0 flex-1"><span className="block truncate font-medium" style={{ color: theme.node.text }} title={task.title}>{task.title}</span><span className="mt-0.5 block truncate text-[11px]" style={{ color: theme.node.muted }}>{t(`agent.subagents.role.${task.role}`)}</span></span>
                 <span className="shrink-0 text-[11px]" style={{ color: theme.node.muted }}>{t(`agent.subagents.status.${status(task)}`)}</span>

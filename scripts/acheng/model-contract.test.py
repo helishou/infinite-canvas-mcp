@@ -37,6 +37,30 @@ def add_subject(segment, entity):
 
 
 class ModelContractTests(unittest.TestCase):
+    def test_migrated_numeric_version_is_accepted_without_rewriting_source(self):
+        from audit_storyboard_quality import shape
+        value, _, _ = production()
+        value["version"] = 2
+        shape(value)
+        self.assertEqual(value["version"], 2)
+
+    def test_legacy_scene_block_matches_script_projection_and_preserves_digest(self):
+        from continuity_v2 import audit, digest
+        block = {"id": "SC01", "kind": "action", "text": "女子隔帘辩解。"}
+        value = {"script_scenes": [{"id": "SC01", "scene_id": "S01", "thread": "A", "text": block["text"]}],
+                 "shots": [], "segments": [], "ledger": {"contract_version": 2, "facts": [], "timelines": [],
+                 "initial": [], "events": [], "requirements": [], "coverage": [{"id": "C1",
+                 "source_anchor": {"block_id": "SC01"}, "source_digest": digest({"scene_id": "S01", "block": block}),
+                 "evidence_kind": "unresolved_review", "fact_ids": [], "event_ids": []}]}}
+        original = copy.deepcopy(value)
+        report = audit(value)
+        codes = {item["code"] for item in report["diagnostics"]}
+        self.assertNotIn("CONTINUITY_COVERAGE_SOURCE", codes)
+        self.assertNotIn("CONTINUITY_COVERAGE_STALE", codes)
+        self.assertIn("CONTINUITY_COVERAGE_UNRESOLVED", codes)
+        self.assertEqual(value, original)
+        self.assertEqual(report["sourceDigest"], digest(original))
+
     def test_storyboard_structure_warnings_and_compiled_receipt(self):
         from canvas_source_contract import contract
         contract_value = contract()
@@ -60,7 +84,7 @@ class ModelContractTests(unittest.TestCase):
         self.assertTrue(any(d['code'] == 'STORYBOARD_EDITORIAL_REASON_REQUIRED' and d['severity'] == 'error' for d in validate(value, 'publish')))
         self.assertTrue(any(d['code'] == 'STORYBOARD_EDITORIAL_REASON_REQUIRED' and d['severity'] == 'warning' for d in validate(value, 'edit')))
 
-    def test_new_compiler_adds_dialogue_camera_coverage_without_source_policy(self):
+    def test_new_compiler_preserves_authored_camera_without_synthetic_dialogue_cuts(self):
         value = json.loads((root / "examples/02-drama.production.json").read_text(encoding="utf-8"))
         value.pop("storyboard_policy", None)
         value.pop("prompt_detail_policy", None)
@@ -68,8 +92,8 @@ class ModelContractTests(unittest.TestCase):
             segment.pop("prompt_detail_policy", None)
             compiled = compile_segment(value, segment)
             if any(not line.get("voiceover", False) for sid in segment["shot_ids"] for shot in value["shots"] if shot["id"] == sid for line in shot["dialogues"]):
-                self.assertIn("Dialogue-led editorial coverage derived from the immutable speaker and frame schedule", compiled)
-                self.assertIn("face and shoulders as the active speaker", compiled)
+                self.assertNotIn("Dialogue-led editorial coverage derived from the immutable speaker and frame schedule", compiled)
+                self.assertNotIn("face and shoulders as the active speaker", compiled)
 
     def test_scoped_storyboard_does_not_upgrade_context_shots(self):
         value = json.loads((root / "examples/02-drama.production.json").read_text(encoding="utf-8"))
@@ -149,6 +173,8 @@ class ModelContractTests(unittest.TestCase):
         value, _, _ = production()
         value['_canvas_compilation_scope'] = {'scope': {}}
         value['ledger'] = {'contract_version': 2, 'facts': [], 'timelines': [], 'initial': [], 'events': [], 'requirements': [], 'coverage': []}
+        value['script_scenes'] = [{'id': 'SC', 'scene_id': value['shots'][0]['scene_id'],
+                                  'blocks': [{'id': 'B1', 'kind': 'action', 'text': '角色抵达现场。'}]}]
         value['_canvas_validation_continuity'] = {'status': 'passed', 'final': {}, 'diagnostics': []}
         local = validation_input(value)
         self.assertEqual(local.continuity_report['status'], 'blocked')

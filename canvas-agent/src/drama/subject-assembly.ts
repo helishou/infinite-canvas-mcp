@@ -40,9 +40,21 @@ export function subjectShotWindows(source: Record<string, unknown>): Map<string,
         return result;
     }
     const origins = new Map(rows((source.ledger as Row | undefined)?.timelines).map(timeline => [String(timeline.id), Number.isInteger(timeline.start_frame) ? Number(timeline.start_frame) : 0]));
+    const timelineIds = [...origins.keys()];
+    const defaultTimelineId = timelineIds.includes("main") ? "main" : timelineIds[0] || "main";
     const byTimeline = new Map<string, Row[]>();
-    for (const shot of rows(source.shots)) {
-        const timelineId = String(shot.timeline_id || "");
+    const nextOrder = new Map<string, number>();
+    const occupied = new Map<string, Set<number>>();
+    for (const original of rows(source.shots)) {
+        const shot = { ...original };
+        const timelineId = String(shot.timeline_id || defaultTimelineId);
+        shot.timeline_id = timelineId;
+        const used = occupied.get(timelineId) || new Set<number>();
+        let order = Number.isInteger(shot.story_order) && shot.story_order >= 0 ? Number(shot.story_order) : (nextOrder.get(timelineId) || 0);
+        if (!Number.isInteger(original.story_order) || original.story_order < 0) while (used.has(order)) order += 1;
+        shot.story_order = order;
+        used.add(order); occupied.set(timelineId, used);
+        nextOrder.set(timelineId, Math.max(nextOrder.get(timelineId) || 0, order + 1));
         const list = byTimeline.get(timelineId) || []; list.push(shot); byTimeline.set(timelineId, list);
     }
     for (const [timelineId, shots] of byTimeline) {
@@ -67,7 +79,7 @@ export function subjectStateProjection(source: Record<string, unknown>): Record<
     const ownerByFact = new Map(facts.map(fact => [String(fact.id), subjectByEntity.get(entityKey(fact.object_kind, fact.object_id))]));
     const windows = subjectShotWindows(source), shots = rows(source.shots), byTimeline = new Map<string, Row[]>(), output: Record<string, SubjectShotState> = {};
     for (const shot of shots) {
-        const timelineId = String(shot.timeline_id || ""), list = byTimeline.get(timelineId) || [];
+        const timelineId = windows.get(String(shot.id))?.timelineId || String(shot.timeline_id || "main"), list = byTimeline.get(timelineId) || [];
         list.push(shot); byTimeline.set(timelineId, list);
     }
     for (const [timelineId, stream] of byTimeline) {
@@ -79,7 +91,7 @@ export function subjectStateProjection(source: Record<string, unknown>): Record<
         });
         const eventsByShot = new Map<string, Row[]>();
         for (const event of orderedEvents) { const list = eventsByShot.get(String(event.shot_id)) || []; list.push(event); eventsByShot.set(String(event.shot_id), list); }
-        for (const shot of stream.sort((a, b) => Number(a.story_order) - Number(b.story_order))) {
+        for (const shot of stream.sort((a, b) => Number(windows.get(String(a.id))?.startFrame || 0) - Number(windows.get(String(b.id))?.startFrame || 0))) {
             const shotId = String(shot.id), usedSubjectIds = new Set<string>(), usedFactIds = new Set<string>((shot.continuity_facts || []).map(String));
             for (const usage of rows(shot.subject_usages)) {
                 usedSubjectIds.add(String(usage.subjectId));

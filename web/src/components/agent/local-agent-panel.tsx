@@ -706,10 +706,9 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                 pendingApprovals: [],
             });
             useAgentSkillStore.getState().reset();
-            if (!wasConnected) {
-                source.close();
-                setAgentState({ enabled: false });
-            }
+            // Keep EventSource open after the first failed handshake too. The browser
+            // retries the SSE connection; closing it here turned transient startup or
+            // reconnect failures into a permanent disconnect that needed user action.
         };
         return () => {
             disposed = true;
@@ -1166,6 +1165,12 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                     const path = productionPresentationPath(presentation);
                     if (follow.guardReason) follow.setPendingPresentation(presentation);
                     else {
+                        if (presentation.canvasId) {
+                            const workspace = useProductionWorkspaceStore.getState();
+                            workspace.setSelectedObject(productionObjectForPresentation(presentation, production));
+                            workspace.setPanelTab("object");
+                            useAgentStore.getState().openPanel();
+                        }
                         follow.expectPath(path);
                         navigate(path, { replace: true });
                     }

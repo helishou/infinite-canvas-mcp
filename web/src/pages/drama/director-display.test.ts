@@ -23,6 +23,15 @@ test("asset history browsing keeps current production identity and ignores faile
  assert.deepEqual(rows, original);
 });
 
+test("character image previews include the full storage-keyed catalog without changing production selection", () => {
+ const images = [{ storageKey: "character:cover", outfit: "cover" }, { storageKey: "character:outfit", outfit: "outfit" }];
+ const preview = assetImagePreview("character:cover", images, "character:outfit", true);
+ assert.deepEqual(preview.images, ["character:cover", "character:outfit"]);
+ assert.equal(preview.previewKey, "character:outfit");
+ assert.equal(preview.browsingHistory, true);
+ assert.equal(assetImagePreview("character:cover", images, "character:outfit").previewKey, "character:cover");
+});
+
 test("dialogue speaker resolves the v2 speaker_id/speaker_name instead of showing the placeholder", () => {
  const nameMap = { CHAR_LIXI: "Lixi", CHAR_ZHANGWEI: "Zhang Wei" };
  const labels = { narration: "旁白", speaker: "说话人" };

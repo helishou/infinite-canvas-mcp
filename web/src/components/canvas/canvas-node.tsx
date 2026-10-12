@@ -25,6 +25,8 @@ import { getPluginNodeView } from "@/stores/canvas/plugin-node-view";
 import { orderedGroupColumnCount, orderedGroupDisplaySlots, orderedGroupLayout } from "@/lib/canvas/ordered-group";
 import { canvasNodeImage, hasRenderableCanvasImage } from "@/lib/canvas/canvas-image-renderability";
 import { SmartImageHistoryActions } from "./smart-image-history-actions";
+import { shouldStartCanvasNodeDrag } from "./canvas-node-drag";
+import { CanvasNodePanelFrame } from "./canvas-node-panel-frame";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 const selectionBlue = "#2f80ff";
@@ -330,7 +332,7 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
     return (
         <div
             data-node-id={data.id}
-            className={`node-element group/node absolute flex select-none overflow-hidden rounded-3xl ${isH3 ? "border" : "border-2"} ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"} ${generating && !active ? "canvas-node-generating" : ""}`}
+            className={`node-element group/node absolute flex select-none overflow-hidden rounded-3xl cursor-grab active:cursor-grabbing ${isH3 ? "border" : "border-2"} ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"} ${generating && !active ? "canvas-node-generating" : ""}`}
             style={{
                 transform: `translate(${position.x}px, ${position.y}px)`,
                 width,
@@ -789,7 +791,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     return (
         <div
             data-node-id={data.id}
-            className={`node-element group/node absolute flex select-none flex-col transition-shadow duration-200 ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"} ${referenceSelectionState === "available" ? "cursor-pointer" : referenceSelectionState ? "cursor-not-allowed" : ""}`}
+            className={`node-element group/node absolute flex select-none flex-col transition-shadow duration-200 ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"} ${referenceSelectionState === "available" ? "cursor-pointer" : referenceSelectionState ? "cursor-not-allowed" : "cursor-grab active:cursor-grabbing"}`}
             style={{
                 transform: `translate(${(previewBounds?.position || previewPosition || data.position).x}px, ${(previewBounds?.position || previewPosition || data.position).y}px)`,
                 width: previewBounds?.width || data.width,
@@ -819,29 +821,22 @@ export const CanvasNode = React.memo(function CanvasNode({
                 }
                 onSelectCapture?.(event, data.id);
                 if (event.defaultPrevented) return;
-                // H3 节点内容几乎全是交互控件，且其根 div 在冒泡阶段 stopPropagation 挡掉了普通的
-                // body 拖拽路径，只能走这里。若沿用全量黑名单（button/input/textarea/select/video），
-                // 节点上几乎任何可见区域都命中被排除，导致“拖不动”。故对 H3 仅屏蔽纯文本编辑控件，
-                // H3 只允许从自己的标题栏拖动，其他区域全部保留给控件和内容交互。
+                // H3 根节点会在冒泡阶段 stopPropagation，拖动只能从这里启动。
+                // 只允许显式拖动区，拖动区中的按钮/输入仍由控件处理；外标题单独标记为可交互拖动句柄。
                 // contenteditable（CodeMirror 文本编辑器）与 data-canvas-shortcuts-ignore（编辑器容器）
                 // 必须排除：capture 先于编辑器自身的 stopPropagation 执行，命中拖拽会掐断 mousedown，
                 // 导致文本节点双击进入编辑后光标放不进去、拖动变成移动节点。
                 const target = event.target as HTMLElement;
                 const isH3 = data.type === "minimax-h3:video";
-                const interactive = target.closest("button, input, textarea, select, video, .ant-select-dropdown, [contenteditable='true'], [data-canvas-shortcuts-ignore]");
-                const isExplicitDragHandle = target.closest("[data-canvas-node-drag-handle]");
                 // 四角缩放手柄是纯 div，会命中上面的拖拽分支；但若在此处触发拖拽，
                 // handleNodeMouseDown 的 event.stopPropagation() 会掐断事件，使 ResizeHandle 自己的
                 // onMouseDown（冒泡阶段）无法执行，缩放被拖拽彻底劫持。故需显式排除缩放手柄。
-                const onResizeHandle = target.closest("[data-resize-handle]");
                 // 连线手柄（ConnectionHandleDot）与缩放手柄同理：纯 div 会命中拖拽分支，
                 // capture 阶段触发 handleNodeMouseDown 的 stopPropagation 会掐断其自身
                 // onMouseDown（onConnectStart，冒泡阶段），导致无法连线、反而变成拖拽。需显式排除。
-                const onConnectionHandle = target.closest("[data-connection-handle]");
                 // 节点下方的面板（提示词/参考内容等）是纯交互区：面板已在冒泡阶段 stopPropagation，
                 // 但 capture 先于冒泡执行，会先在这里触发拖拽。命中面板时跳过拖拽，把交互留给面板自身。
-                const onNodePanel = target.closest("[data-canvas-node-panel]");
-                if ((!interactive || isExplicitDragHandle) && !onResizeHandle && !onConnectionHandle && !onNodePanel && (!isH3 || isExplicitDragHandle)) onMouseDown(event, data.id);
+                if (shouldStartCanvasNodeDrag(target, isH3)) onMouseDown(event, data.id);
             }}
             onClickCapture={(event) => {
                 if (!referenceSelectionState && !pickedReferenceOnMouseDown.current) return;
@@ -858,7 +853,13 @@ export const CanvasNode = React.memo(function CanvasNode({
             }}
         >
             {!referenceSelectionState && (isSelected || hovered || isEditingTitle) && (
-                <div className="absolute left-3 top-[-28px] z-[65] max-w-[calc(100%-24px)]" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+                <div
+                    data-canvas-node-drag-handle={!isEditingTitle ? "true" : undefined}
+                    data-canvas-node-drag-interactive-handle={!isEditingTitle ? "true" : undefined}
+                    className="absolute left-3 right-3 top-[-28px] z-[65] flex h-7 items-center"
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                >
                     {isEditingTitle ? (
                         <input
                             ref={titleInputRef}
@@ -879,8 +880,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                     ) : (
                         <button
                             type="button"
-                            data-canvas-node-drag-handle={hasVideoContent ? "true" : undefined}
-                            className="block max-w-full truncate border-b border-dashed border-transparent px-0 py-0.5 text-left text-xs font-medium opacity-75 transition hover:border-current hover:opacity-100"
+                            className="block max-w-full truncate cursor-grab border-b border-dashed border-transparent px-0 py-0.5 text-left text-xs font-medium opacity-75 transition hover:border-current hover:opacity-100 active:cursor-grabbing"
                             style={{ color: theme.node.text }}
                             title={t("canvas.node.renameHint")}
                             onDoubleClick={(event) => {
@@ -916,7 +916,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 onMouseDown={(event) => {
                     const target = event.target as HTMLElement;
                     const isH3 = data.type === "minimax-h3:video";
-                    if (!referenceSelectionState && (!isH3 || target.closest("[data-canvas-node-drag-handle]"))) onMouseDown(event, data.id);
+                    if (!referenceSelectionState && shouldStartCanvasNodeDrag(target, isH3)) onMouseDown(event, data.id);
                 }}
                 onDoubleClick={(event) => {
                     if (referenceSelectionState) {
@@ -1064,9 +1064,9 @@ export const CanvasNode = React.memo(function CanvasNode({
                 <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border bg-popover px-3 py-2"><span className="truncate text-sm font-medium" title={data.title}>{data.title}</span><button type="button" className="grid size-9 shrink-0 place-items-center rounded hover:bg-muted" aria-label={t("canvasChrome.closeEditor")} onClick={onClosePanel}><X className="size-4" /></button></header>
                 <div className="min-h-0 overflow-y-auto overscroll-contain">{panelContent}</div>
             </section>, panelContainer) : (
-                <div data-canvas-node-panel className="absolute left-1/2 top-full z-[70] w-[600px] -translate-x-1/2 pt-4">
+                <CanvasNodePanelFrame isSmartGenerationNode={isSmartGenerationNode}>
                     {panelContent}
-                </div>
+                </CanvasNodePanelFrame>
             ) : null}
         </div>
     );

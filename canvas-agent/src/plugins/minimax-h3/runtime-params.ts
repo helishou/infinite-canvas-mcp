@@ -57,6 +57,7 @@ export function withH3ParameterEdits(segment: Record<string, unknown>, patch: Re
     // Save the companion field too, so inherited defaults cannot re-enable it.
     if (patch.tailFrameContinuation === true) patch = { ...patch, motionContextEnabled: false };
     else if (patch.motionContextEnabled === true) patch = { ...patch, tailFrameContinuation: false };
+    if (patch.audioDrive === true || (patch.audioDrive !== false && segment.audioDrive === true)) patch = { ...patch, lockAudio: true };
     if (patch.steps !== undefined && patch.videoSteps === undefined) patch = { ...patch, videoSteps: patch.steps };
     const keys = new Set(Array.isArray(segment.h3ParameterOverrides) ? segment.h3ParameterOverrides.map(String) : []);
     if (patch.h3ParameterPolicy === 'defaults' && !Object.hasOwn(patch, 'h3ParameterOverrides')) keys.clear();
@@ -202,6 +203,7 @@ export function normalizeH3LoraSlots(params: Record<string, unknown>) {
  */
 export function normalizeH3Params(params: Record<string, unknown>, generateRandomSeed = false) {
     const next: Record<string, unknown> = { ...params };
+    if (next.audioDrive === true) next.lockAudio = true;
     const seed = parseH3Seed(next.seed) ?? parseH3Seed(next.noiseSeed);
     const rawMode = String(next.noiseSeedMode || "").toLowerCase();
     const mode = rawMode === "fixed" ? "fixed" : rawMode === "random" ? "random" : seed === undefined || seed === 0 ? "random" : "fixed";

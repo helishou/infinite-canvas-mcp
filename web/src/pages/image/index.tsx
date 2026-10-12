@@ -603,12 +603,13 @@ export default function ImagePage() {
     };
 
     const unknownResult = results.some(result => result.status === "unknown");
+    const fitResultsToViewport = results.length > 0 && results.every(result => result.status === "success" && result.image);
     const deliveryIndex = results.findIndex((result,index) => result.status === "failed" && deliveryResultsRef.current.has(index));
     const confirmNewGeneration = () => Modal.confirm({ title:t("videoRecovery.newGeneration"), content:t("videoRecovery.confirmNew"), okText:t("videoRecovery.newGeneration"), onOk:()=>{ void generate(); } });
 
     return (
         <div className="ui-controls flex h-full min-w-0 flex-col overflow-hidden bg-background text-foreground">
-            <main className="grid min-h-0 flex-1 grid-cols-1 gap-5 overflow-y-auto p-3 sm:p-5 lg:overflow-hidden lg:p-6 xl:grid-cols-[260px_minmax(0,1fr)]">
+            <main className="grid min-h-0 flex-1 grid-cols-1 gap-5 overflow-y-auto p-3 sm:p-5 lg:grid-rows-[minmax(0,1fr)] lg:overflow-hidden lg:p-6 xl:grid-cols-[260px_minmax(0,1fr)]">
                 <aside className="thin-scrollbar hidden min-h-0 min-w-0 overflow-y-auto border-r border-border pr-5 xl:block">
                     <LogPanel
                         logs={logs}
@@ -621,7 +622,7 @@ export default function ImagePage() {
                     />
                 </aside>
 
-                <section className="grid min-w-0 gap-5 lg:min-h-0 lg:grid-cols-[minmax(320px,380px)_minmax(0,1fr)] lg:overflow-hidden">
+                <section className="grid min-w-0 gap-5 lg:h-full lg:min-h-0 lg:grid-cols-[minmax(320px,380px)_minmax(0,1fr)] lg:overflow-hidden">
                     <div className="thin-scrollbar flex min-w-0 flex-col ui-card border border-border bg-card p-4 sm:p-5 lg:min-h-0 lg:overflow-y-auto">
                         <div>
                             <div className="flex flex-wrap items-start justify-between gap-3">
@@ -770,8 +771,8 @@ export default function ImagePage() {
                         </section>
                     </div>
 
-                    <div className="thin-scrollbar flex min-w-0 flex-col ui-card border border-border bg-card p-4 sm:p-5 lg:min-h-0 lg:overflow-y-auto">
-                        <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+                    <div className={`flex min-w-0 flex-col ui-card border border-border bg-card p-4 sm:p-5 lg:h-full lg:min-h-0 ${fitResultsToViewport ? "lg:overflow-hidden" : "lg:overflow-y-auto"}`}>
+                        <div className="mb-5 flex shrink-0 flex-wrap items-center justify-between gap-3">
                             <div>
                                 <h2 className="ui-panel-title">{t("workbench.results")}</h2>
                             </div>
@@ -782,7 +783,7 @@ export default function ImagePage() {
                             ) : null}
                         </div>
                         {results.length ? (
-                            <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,220px),1fr))] items-start gap-4">
+                            <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,220px),1fr))] items-stretch gap-4 lg:min-h-0 lg:flex-1 lg:auto-rows-fr">
                                 {results.map((result, index) =>
                                     result.status === "success" && result.image ? (
                                         <ResultImageCard key={result.id} image={result.image} index={index} onEdit={addResultToReferences} onDownload={downloadImage} onSaveAsset={saveResultToAssets} />
@@ -791,12 +792,12 @@ export default function ImagePage() {
                                     ) : result.status === "failed" ? (
                                         <FailedImageCard deliveryOnly={deliveryResultsRef.current.has(index)} key={result.id} error={result.error || t("workbench.generationFailed")} onRetry={() => retryResult(index)} />
                                     ) : (
-                                        <PendingImageCard key={result.id} />
+                                        <PendingImageCard key={result.id} className="lg:h-full lg:aspect-auto" />
                                     ),
                                 )}
                             </div>
                         ) : (
-                            <div className="flex min-h-[280px] flex-1 flex-col items-center justify-center rounded-lg bg-muted/45 px-6 py-12 text-center lg:min-h-[360px]">
+                            <div className="flex min-h-[280px] flex-1 flex-col items-center justify-center rounded-lg bg-muted/45 px-6 py-12 text-center lg:min-h-0">
                                 <ImagePlus className="mb-4 size-8 text-muted-foreground/65" />
                                 <Empty image={false} description={t("imageWorkbench.empty")} />
                             </div>
@@ -910,9 +911,9 @@ function ResultImageCard({
 }) {
     const { t } = useTranslation();
     return (
-        <div className="overflow-hidden rounded-lg border border-border bg-card">
-            <MediaImage src={image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl} alt={t("imageWorkbench.resultAlt", { count: index + 1 })} className="aspect-square w-full bg-muted/40 object-contain" />
-            <div className="space-y-2 border-t border-border px-3 py-3">
+        <div className="overflow-hidden rounded-lg border border-border bg-card lg:flex lg:h-full lg:min-h-0 lg:flex-col">
+            <MediaImage src={image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl} alt={t("imageWorkbench.resultAlt", { count: index + 1 })} className="aspect-square w-full bg-muted/40 object-contain lg:aspect-auto lg:h-full lg:min-h-0 lg:flex-1" />
+            <div className="space-y-2 border-t border-border px-3 py-3 lg:shrink-0">
                 <div className="flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs tabular-nums text-muted-foreground">
                     <span>
                         {image.width}x{image.height}
@@ -942,10 +943,10 @@ function ResultImageCard({
     );
 }
 
-function PendingImageCard() {
+function PendingImageCard({ className = "" }: { className?: string } = {}) {
     const { t } = useTranslation();
     return (
-        <div className="relative aspect-square overflow-hidden rounded-lg border border-dashed border-border bg-muted/40">
+        <div className={`relative aspect-square overflow-hidden rounded-lg border border-dashed border-border bg-muted/40 ${className}`}>
             <div
                 className="absolute inset-0 opacity-60"
                 style={{

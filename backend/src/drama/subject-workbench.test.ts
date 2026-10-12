@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { directorModules, directorProductionSchema, productionWriteReceipt, projectProductionRead, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
+import { directorModules, directorProductionSchema, productionWriteReceipt, projectProductionRead, resolveSubjectPictureBindingIds, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import { BackendDatabase } from "../db.js";
 import { BackendEventBus } from "../events.js";
 import { EpisodeProductionService } from "./production.js";
@@ -156,12 +156,48 @@ test("Clip compilation infers text mode for offscreen voices instead of stale re
     assert.equal(resolved.sourceHash, directorHash(resolved.source));
 });
 
-test("Clip compilation keeps reference mode when a visible Subject is explicitly presented", t => {
+test("explicitly clearing pictures is saveable but still blocks a Ref2VA compile and readiness", t => {
     const service = fixture(t, true), director = directorV2();
-    const subject = (director.source.subject_registry as any[])[0];
-    subject.pictureBindings = [];
     const usage = (director.source.shots as any[])[0].subject_usages[0];
+    usage.pictureBindingMode = "explicit";
     usage.pictureBindingIds = [];
+    director.sourceHash = directorHash(director.source);
+    const seeded = service.edit("ep", { operationId: "seed-explicit-empty-reference", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
+    const savedUsage = (seeded.draft.director!.source.shots as any[])[0].subject_usages[0];
+    assert.equal(savedUsage.pictureBindingMode, "explicit");
+    assert.deepEqual(savedUsage.pictureBindingIds, []);
+    assert.deepEqual(resolveSubjectPictureBindingIds((seeded.draft.director!.source.subject_registry as any[])[0], savedUsage).bindingIds, []);
+    const shotRead = service.shotWorkbench("ep", "S1").shotWorkbench;
+    assert.equal(shotRead.subjectUsages[0].pictureBindings.length, 0);
+    assert.deepEqual(shotRead.resolutionDiagnostics, []);
+    assert.throws(() => service.resolveSubjectPictureInputs("ep", seeded.draft.director!, ["C1"], true), (error: any) =>
+        error.diagnostics?.some((item: any) => item.code === "REF2VA_IMAGE_REQUIRED" && item.targetId === "C1"));
+    const ready = service.workflowReadiness("ep").targets.find(item => item.id === "segment:C1");
+    assert.equal(ready?.status, "blocked");
+    assert.ok(ready?.blockers.some(item => item.includes("Ref2VA") && item.includes("图片")));
+
+    const textMode = structuredClone(service.get("ep").draft.director!);
+    const segment = (textMode.source.segments as any[])[0];
+    segment.mode = segment.mode_lock = "T2VA";
+    segment.mode_selection_reason = "Use a text-only generation mode.";
+    textMode.sourceHash = directorHash(textMode.source);
+    const textSaved = service.edit("ep", { operationId: "seed-explicit-empty-text-mode", expectedRevision: service.get("ep").revision, ops: [{ type: "set_director_production", director: textMode }] });
+    const textCompiled = service.resolveSubjectPictureInputs("ep", textSaved.draft.director!, ["C1"], true);
+    assert.equal((textCompiled.source.segments as any[])[0].mode, "T2VA");
+    assert.equal(textCompiled.assets.A1.storageKey, undefined);
+});
+
+test("Clip mode inference retains Ref2VA when a visible Subject has a verified image", t => {
+    const storageKey = "image:visible-subject", bytes = Buffer.from("visible-image");
+    const service = fixture(t, true, (db, directory) => {
+        const filePath = path.join(directory, "visible-subject.png");
+        fs.writeFileSync(filePath, bytes);
+        db.upsertMediaFile({ storageKey, filePath, mimeType: "image/png", bytes: bytes.length, width: 8, height: 8, durationMs: null, createdAt: new Date().toISOString() });
+        db.applyCanvasProjectOperations("CANVAS_EP", undefined, [{ type: "add_node", id: "IMAGE_P", nodeType: "character", position: { x: 0, y: 0 }, metadata: {
+            characterImages: [{ storageKey, url: "/media/visible-subject.png" }], characterPrimaryIndex: 0,
+        } }], { runtimeWrite: true });
+    });
+    const director = directorV2();
     (director.source.segments as any[])[0].mode = "T2VA";
     delete (director.source.segments as any[])[0].mode_lock;
     director.sourceHash = directorHash(director.source);
@@ -170,6 +206,7 @@ test("Clip compilation keeps reference mode when a visible Subject is explicitly
 
     const resolved = service.resolveSubjectPictureInputs("ep", service.get("ep").draft.director!, ["C1"], true);
     assert.equal((resolved.source.segments as any[])[0].mode, "Ref2VA");
+    assert.equal(resolved.assets.A1.storageKey, storageKey);
 });
 
 test("node-managed reference selection freezes the selected image and registers only its actual Clip consumer", t => {
@@ -420,6 +457,7 @@ test("optional Shot frame preview resolves node media without changing submissio
     source.subject_registry[0].pictureBindings = [];
     source.shots[0].subject_usages[0].pictureBindingIds = [];
     source.shots[0].subject_usages[0].presentation = "state_context";
+    source.segments[0].mode = source.segments[0].mode_lock = "T2VA";
     source.shots[0].keyframes = [{ id: "KF1", assetId: "KF1", sourceNode: { projectId: "CANVAS_EP", nodeId: "FRAME_NODE" }, selection: { mode: "node_selection" }, anchor: "at_frame", localFrame: 0, subjectIds: ["P"], retain: ["构图"], exclude: [], requiredForSubmission: false }];
     director.sourceHash = directorHash(source);
     const saved = service.edit("ep", { operationId: "optional-frame", expectedRevision: service.get("ep").revision, ops: [{ type: "set_director_production", director }] });
@@ -500,4 +538,152 @@ test("auto-bound character consumes the canonical node image without copying med
     assert.equal(workbench.pictureBindings.length, 1);
     assert.equal(workbench.pictureBindings[0].resolved?.storageKey, storageKey);
     assert.equal((saved.draft.director!.source.subject_registry as any[]).find(row => row.id === "P_AUTO").pictureBindings[0].storageKey, undefined);
+});
+
+test("character picture bindings resolve distinct stable keys and keep them across cover changes", t => {
+    let database!: BackendDatabase;
+    const keys = ["character-cover", "character-outfit", "character-scene-state"];
+    const service = fixture(t, true, (db, directory) => {
+        database = db;
+        const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aO7sAAAAASUVORK5CYII=", "base64");
+        for (const storageKey of keys) {
+            const filePath = path.join(directory, `${storageKey}.png`);
+            fs.writeFileSync(filePath, bytes);
+            db.upsertMediaFile({ storageKey, filePath, mimeType: "image/png", bytes: bytes.length, width: 1, height: 1, durationMs: null, createdAt: new Date().toISOString() });
+        }
+        db.createCanvasProject({ id: "FOREIGN_CANVAS", title: "Unrelated canvas", nodes: [], connections: [] });
+        db.applyCanvasProjectOperations("FOREIGN_CANVAS", undefined, [{ type: "add_node", id: "IMAGE_P", nodeType: "character", position: { x: 0, y: 0 }, metadata: {
+            characterImages: keys.map((storageKey, index) => ({ id: `image-${index}`, storageKey, url: `/media/${storageKey}.png`, outfit: `look-${index}` })), characterPrimaryIndex: 0,
+        } }], { runtimeWrite: true });
+        db.applyCanvasProjectOperations("CANVAS_EP", undefined, [{ type: "add_node", id: "IMAGE_P", nodeType: "character", position: { x: 0, y: 0 }, metadata: {
+            characterImages: keys.map((storageKey, index) => ({ id: `image-${index}`, storageKey, url: `/media/${storageKey}.png`, outfit: `look-${index}` })), characterPrimaryIndex: 0,
+        } }], { runtimeWrite: true });
+    });
+    const director = directorV2();
+    const subject = (director.source.subject_registry as any[])[0];
+    subject.pictureBindings.push({ id: "P_OUTFIT", assetId: "A2", sourceNode: { projectId: "CANVAS_EP", nodeId: "IMAGE_P" },
+        selection: { mode: "selected_result", resultId: "IMAGE_P:character-image:character-outfit" }, provides: ["clothing"], retain: ["clothing"], exclude: ["pose"], applicableState: {}, defaultFor: [] });
+    subject.pictureBindings.push({ id: "P_COVER", assetId: "A3", sourceNode: { projectId: "CANVAS_EP", nodeId: "IMAGE_P" },
+        selection: { mode: "selected_result", resultId: "IMAGE_P:character-image:character-cover" }, provides: ["appearance"], retain: ["appearance"], exclude: [], applicableState: {}, defaultFor: [] });
+    director.sourceHash = directorHash(director.source);
+    service.edit("ep", { operationId: "character-multi-image-source", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
+
+    const firstRead = service.subjectWorkbench("ep", "P").subjectWorkbench;
+    assert.deepEqual(Object.fromEntries(firstRead.pictureBindings.map((binding: any) => [binding.id, binding.resolved?.storageKey])), {
+        P_ID: keys[0], P_OUTFIT: keys[1], P_COVER: keys[0],
+    });
+
+    const project = database.getCanvasProject("CANVAS_EP")!;
+    database.applyCanvasProjectOperations("CANVAS_EP", Number(project.revision), [{ type: "update_node", id: "IMAGE_P", metadata: { characterPrimaryIndex: 2 } }], { runtimeWrite: true });
+    const afterCoverChange = service.subjectWorkbench("ep", "P").subjectWorkbench;
+    assert.deepEqual(Object.fromEntries(afterCoverChange.pictureBindings.map((binding: any) => [binding.id, binding.resolved?.storageKey])), {
+        P_ID: keys[2], P_OUTFIT: keys[1], P_COVER: keys[0],
+    });
+
+    const badHashProject = database.getCanvasProject("CANVAS_EP")!;
+    database.applyCanvasProjectOperations("CANVAS_EP", Number(badHashProject.revision), [{ type: "update_node", id: "IMAGE_P", metadata: {
+        characterImages: keys.map((storageKey, index) => ({ id: `image-${index}`, storageKey, url: `/media/${storageKey}.png`, outfit: `look-${index}`, ...(index === 1 ? { sha256: "0".repeat(64) } : {}) })),
+    } }], { runtimeWrite: true });
+    const hashInput = structuredClone(director);
+    (hashInput.source.shots as any[])[0].subject_usages[0].pictureBindingIds = ["P_ID", "P_OUTFIT", "P_COVER"];
+    hashInput.sourceHash = directorHash(hashInput.source);
+
+    const outfitMedia = database.getMediaFile(keys[1])!;
+    database.upsertMediaFile({ ...outfitMedia, bytes: Number(outfitMedia.bytes) + 1 });
+    assert.throws(() => service.resolveSubjectPictureInputs("ep", hashInput, undefined, false, ["P"]), (error: any) => error.diagnostics?.[0]?.code === "SUBJECT_IMAGE_BYTES_MISMATCH");
+    database.upsertMediaFile(outfitMedia);
+
+    assert.throws(() => service.resolveSubjectPictureInputs("ep", hashInput, undefined, false, ["P"]), (error: any) => error.diagnostics?.[0]?.code === "SUBJECT_IMAGE_HASH_MISMATCH");
+
+    const invalid = structuredClone(director);
+    (invalid.source.subject_registry as any[])[0].pictureBindings[1].selection.resultId = "foreign-image-key";
+    invalid.sourceHash = directorHash(invalid.source);
+    assert.throws(() => service.resolveSubjectPictureInputs("ep", invalid, undefined, false, ["P"]));
+
+    const foreign = structuredClone(director);
+    (foreign.source.subject_registry as any[])[0].pictureBindings[1].sourceNode.projectId = "FOREIGN_CANVAS";
+    (foreign.source.shots as any[])[0].subject_usages[0].pictureBindingIds = ["P_OUTFIT"];
+    foreign.sourceHash = directorHash(foreign.source);
+    assert.throws(() => service.resolveSubjectPictureInputs("ep", foreign, undefined, false, ["P"]), (error: any) => error.diagnostics?.[0]?.code === "SUBJECT_IMAGE_NODE_OWNER");
+});
+
+test("legacy shot image and keyframe references save independently, read back, and leave shared media intact", t => {
+    let database!: BackendDatabase;
+    const sharedPath = path.join(os.tmpdir(), `shared-reference-${Date.now()}.png`);
+    const service = fixture(t, false, db => {
+        database = db;
+        fs.writeFileSync(sharedPath, Buffer.from("shared"));
+        db.upsertMediaFile({ storageKey: "shared:original", filePath: sharedPath, mimeType: "image/png", bytes: 6, width: 1, height: 1, durationMs: null, createdAt: new Date().toISOString() });
+    });
+    t.after(() => fs.rmSync(sharedPath, { force: true }));
+    const director = directorV2();
+    const source = director.source as Record<string, any>;
+    delete source.prompt_assembly;
+    source.subject_registry = [];
+    source.shots = [{ id: "S1", scene_id: "SCENE", timeline_id: "main", story_order: 0, start_frame: 0, end_frame: 48,
+        visual: "A shot", state_in: {}, state_out: {}, required_assets: ["REF_A"] }];
+    source.segments = [{ id: "C1", shot_ids: ["S1"], start_frame: 0, end_frame: 48, generation_clip_duration: 2, mode: "T2VA" }];
+    source.asset_plan = ["REF_A", "REF_B", "FRAME_A", "FRAME_B"].map(id => ({ id, asset_id: id, asset_name: id, kind: id.startsWith("FRAME") ? "keyframe" : "character" }));
+    director.assets = { SHARED: { assetId: "SHARED", version: "v1", status: "approved", storageKey: "shared:original" } };
+    director.shotInputs = { S1: { assetIds: ["REF_A"], keyframePolicy: "reuse", keyframeAssetId: "FRAME_A" } };
+    director.sourceHash = directorHash(director.source);
+    const saved = service.edit("ep", { operationId: "legacy-shot-reference-seed", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
+
+    const replaced = structuredClone(saved.draft.director!);
+    (replaced.source.shots as any[])[0].required_assets = ["REF_B"];
+    replaced.shotInputs.S1 = { assetIds: ["REF_B"], keyframePolicy: "reuse", keyframeAssetId: "FRAME_B" };
+    service.edit("ep", { operationId: "legacy-shot-reference-replace", expectedRevision: saved.revision, ops: [{ type: "set_director_production", director: replaced }] });
+    const afterReplace = service.get("ep").draft.director!;
+    assert.deepEqual((afterReplace.source.shots as any[])[0].required_assets, ["REF_B"]);
+    assert.deepEqual(afterReplace.shotInputs.S1, { assetIds: ["REF_B"], keyframePolicy: "reuse", keyframeAssetId: "FRAME_B" });
+
+    const cleared = structuredClone(afterReplace);
+    (cleared.source.shots as any[])[0].required_assets = [];
+    cleared.shotInputs.S1 = { assetIds: [], keyframePolicy: "none" };
+    service.edit("ep", { operationId: "legacy-shot-reference-clear", expectedRevision: service.get("ep").revision, ops: [{ type: "set_director_production", director: cleared }] });
+    const afterClear = service.get("ep").draft.director!;
+    assert.deepEqual((afterClear.source.shots as any[])[0].required_assets, []);
+    assert.deepEqual(afterClear.shotInputs.S1, { assetIds: [], keyframePolicy: "none" });
+    assert.equal(database.getMediaFile("shared:original")?.storageKey, "shared:original");
+});
+
+test("v2 Shot saves existing picture bindings and keyframes through separate source operations", t => {
+    const service = fixture(t, true), director = directorV2();
+    const subject = (director.source.subject_registry as any[])[0];
+    subject.pictureBindings.push({ id: "P_ALT", assetId: "A2", sourceNode: { projectId: "CANVAS_EP", nodeId: "IMAGE_P" },
+        selection: { mode: "latest_success" }, provides: ["appearance"], retain: ["appearance"], exclude: [], applicableState: {}, defaultFor: [] });
+    director.sourceHash = directorHash(director.source);
+    const saved = service.edit("ep", { operationId: "v2-shot-reference-seed", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
+    const shot = (director.source.shots as any[])[0];
+    const keyframes = [{ id: "KF_S1", assetId: "KF_S1", sourceNode: { projectId: "CANVAS_EP", nodeId: "FRAME_NODE" }, selection: { mode: "latest_success" },
+        anchor: "opening", subjectIds: ["P"], retain: ["composition"], exclude: [], requiredForSubmission: false }];
+    service.edit("ep", { operationId: "v2-shot-reference-edit", expectedRevision: saved.revision, ops: [
+        { type: "patch_director_source", entity: "shot", id: "S1", patch: { subject_usages: shot.subject_usages.map((usage: any) => ({ ...usage, pictureBindingIds: ["P_ALT"] })) } },
+        { type: "set_director_shot_keyframes", shotId: "S1", keyframes },
+    ] });
+    const afterSave = service.get("ep").draft.director!;
+    const savedUsage = (afterSave.source.shots as any[])[0].subject_usages[0];
+    assert.deepEqual(savedUsage.pictureBindingIds, ["P_ALT"]);
+    assert.deepEqual((afterSave.source.shots as any[])[0].keyframes, keyframes);
+
+    service.edit("ep", { operationId: "v2-shot-keyframe-clear", expectedRevision: service.get("ep").revision, ops: [
+        { type: "patch_director_source", entity: "shot", id: "S1", patch: { subject_usages: [{ ...savedUsage, pictureBindingIds: [] }] } },
+        { type: "set_director_shot_keyframes", shotId: "S1", keyframes: [] },
+    ] });
+    const afterClear = service.get("ep").draft.director!;
+    const clearedUsage = (afterClear.source.shots as any[])[0].subject_usages[0];
+    assert.deepEqual(clearedUsage.pictureBindingIds, []);
+    assert.deepEqual(resolveSubjectPictureBindingIds((afterClear.source.subject_registry as any[])[0], clearedUsage).bindingIds, ["P_ID"]);
+    assert.deepEqual((afterClear.source.shots as any[])[0].keyframes, []);
+
+    service.edit("ep", { operationId: "v2-shot-reference-zero", expectedRevision: service.get("ep").revision, ops: [
+        { type: "patch_director_source", entity: "shot", id: "S1", patch: { subject_usages: [{ ...clearedUsage, pictureBindingMode: "explicit", pictureBindingIds: [] }] } },
+    ] });
+    const explicitClear = service.shotWorkbench("ep", "S1").shotWorkbench;
+    const explicitUsage = explicitClear.subjectUsages[0];
+    assert.equal(explicitUsage.pictureBindingMode, "explicit");
+    assert.deepEqual(explicitUsage.pictureBindingIds, []);
+    assert.deepEqual(explicitUsage.pictureBindings, []);
+    assert.deepEqual(resolveSubjectPictureBindingIds(explicitUsage.subject, explicitUsage).bindingIds, []);
+    assert.deepEqual((service.get("ep").draft.director!.source.subject_registry as any[])[0].pictureBindings.map((binding: any) => binding.id).sort(), ["P_ALT", "P_ID"]);
 });

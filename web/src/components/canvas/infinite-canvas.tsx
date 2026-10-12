@@ -5,6 +5,7 @@ import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { ViewportTransform } from "@/types/canvas";
 import { shouldStartCanvasPan } from "@/lib/canvas/canvas-gesture";
+import { syncCanvasZoom } from "./canvas-node-panel-frame";
 
 /** 平移/缩放时是否只做命令式 DOM 写入（跳过 React 渲染）。 */
 export type ViewportChangeOptions = { live?: boolean };
@@ -46,7 +47,10 @@ export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWrit
         const grid = gridRef.current;
         const previous = lastWrittenViewportRef.current;
         if (previous && previous.frame === frame && previous.grid === grid && previous.x === next.x && previous.y === next.y && previous.k === next.k) return;
-        if (frame) frame.style.transform = `translate(${next.x}px, ${next.y}px) scale(${next.k})`;
+        if (frame) {
+            frame.style.transform = `translate(${next.x}px, ${next.y}px) scale(${next.k})`;
+            syncCanvasZoom(frame, next.k);
+        }
         if (grid) {
             const gridSize = 48 * next.k;
             grid.style.backgroundSize = `${gridSize}px ${gridSize}px`;
@@ -308,10 +312,12 @@ export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWrit
             <CanvasGrid viewport={viewportRef.current} mode={backgroundMode} gridRef={gridRef} />
             <div
                 ref={transformRef}
+                data-canvas-viewport-transform
                 className="absolute origin-top-left"
                 style={{
                     transform: `translate(${viewportRef.current.x}px, ${viewportRef.current.y}px) scale(${viewportRef.current.k})`,
-                }}
+                    "--canvas-zoom": viewportRef.current.k,
+                } as React.CSSProperties & { "--canvas-zoom": number }}
             >
                 {children}
             </div>

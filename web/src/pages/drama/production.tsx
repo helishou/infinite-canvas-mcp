@@ -1,7 +1,7 @@
 import { productionEntities, productionEntityBinding } from "@basketikun/canvas-agent/drama/production-contract";
-import { ensureCanvasProjectLoaded, flushCanvasProjectBeforeGeneration } from "@/stores/canvas/use-canvas-store";
 import { withH3ParameterEdits } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Alert, App, Button, Input, Select, Tag } from "antd";
 import { ArrowLeft, ExternalLink } from "lucide-react";
 import localforage from "localforage";
@@ -14,15 +14,17 @@ import { ensureCanvasDraftLease, getCanvasDraftSessionId } from "@/lib/canvas/ca
 import { exportAchengDeliveryBundle } from "@/lib/acheng-delivery-export";
 import { ACHENG_CANVAS_LANGUAGE_RULE } from "@/lib/agent/creative-launch";
 import { useAgentStore } from "@/stores/use-agent-store";
+import { useBackendStore } from "@/stores/use-backend-store";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
 import { useWorkbenchCanvas, useCanvasHost } from "@/lib/canvas/canvas-host";
 import { WorkbenchCanvas } from "./workbench-canvas";
 import { productionCanvasNodes, type ProductionCanvasSnapshot } from "./production-canvas-nodes";
 import { readShotFormDraft, shotFormChanges, shotDraftSourceChanged } from "./subject-shot-draft";
+import { updateLegacyShotReferences as updateLegacyShotReferenceSource } from "./legacy-shot-references";
 import { startSingleFlightPoller } from "@/lib/single-flight-poll";
 import { productionObjectPath, type ProductionObject } from "@/lib/production-object";
-import { applyBackendCanvasEvent, useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import { applyBackendCanvasEvent, ensureCanvasProjectLoaded, flushCanvasProjectBeforeGeneration, useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { SharedAssetsPicker } from "@/components/production/canvas-production-workspace";
 import {
   submitProductionSceneAction, type ProductionSceneAction, BackendApiError, editEpisodeProduction, previewEpisodeProductionImpact,
@@ -51,7 +53,7 @@ type PendingCommand = { operationId: string; expectedRevision: number; status: "
   | { kind: "prepare"; targets: string[] } | { kind: "arrange"; sceneId: string } | { kind: "adopt"; assetId: string; approvedId: string }
 );
 type PendingRunStart = { inputBasis?: "canvas" | "published"; expectedCanvasRevision?: number; expectedPlanHash?: string; runId: string; idempotencyKey: string; workId?: string; expectedRevision: number; version: number; targets: string[]; scope: "selected" | "all_ready" };
-type PendingCompilation = { operationId: string; expectedRevision: number };
+type PendingCompilation = { operationId: string; expectedRevision: number; scope?: { sceneId: string } };
 type LocalDraft = { brief?: string; sourceDrafts?: Record<string, string>; remoteRevision: number | null; pendingCommand?: PendingCommand | null; pendingRunStart?: PendingRunStart | null };
 type LegacySource = { source: "fullPlot" | "script.md" | "storyboard.md"; sha256: string; text: string };
 type VersionItem = { version: number; stage: string; createdAt: string };
@@ -96,41 +98,61 @@ function writeLocalDraft(key: string, value: LocalDraft | null) {
 }
 
 export default function ProductionRoute({ dramaId }: { dramaId?: string } = {}) {
-  const [query, setQuery] = useSearchParams(), navigate = useNavigate(), { t } = useTranslation();
-  const [episodeRead, setEpisodeRead] = useState<{ dramaId: string; episodes?: DramaEpisode[]; error?: string }>();
+  const [query, setQuery] = useSearchParams(), { t } = useTranslation();
+  const backendUrl = useBackendStore(state => state.url);
+  const currentDramaId = dramaId || "";
+  const episodeQuery = useQuery({
+    queryKey: ["project-directory-episodes", backendUrl, currentDramaId],
+    queryFn: async () => (await fetchBackendDramaEpisodes(currentDramaId)).episodes || [],
+    enabled: Boolean(dramaId),
+  });
+  const episodes = episodeQuery.data;
   const refreshEpisodes = useCallback(() => {
     if (!dramaId) return;
-    void fetchBackendDramaEpisodes(dramaId).then(result => { setEpisodeRead({ dramaId, episodes: result.episodes || [] }); })
-      .catch(error => { setEpisodeRead({ dramaId, error: error instanceof Error ? error.message : String(error) }); });
-  }, [dramaId]);
-  useEffect(() => { refreshEpisodes(); }, [refreshEpisodes]);
-  const episodes = dramaId && episodeRead?.dramaId === dramaId ? episodeRead.episodes : undefined;
+    void episodeQuery.refetch();
+  }, [dramaId, episodeQuery.refetch]);
   const requestedEpisodeId = query.get("episodeId");
+  const episodeReadError = episodeQuery.error instanceof Error ? episodeQuery.error.message : String(episodeQuery.error || "");
+  const episodesNotice = episodeQuery.isError ? <Alert
+    className="mb-5"
+    type="warning"
+    showIcon
+    message={t("director.loadFailed")}
+    description={<div className="flex flex-wrap items-center gap-x-3 gap-y-1"><span>{episodeReadError}</span><Button type="link" size="small" className="p-0" onClick={refreshEpisodes}>{t("director.refresh")}</Button></div>}
+  /> : undefined;
   // URL 指向的分集已不存在（如在「剧目」页签中被删除）时清理地址，避免刷新后一直带回退逻辑。
   useEffect(() => {
-    if (!dramaId || !episodes || !requestedEpisodeId) return;
+    if (!dramaId || !episodes || episodeQuery.isFetching || episodeQuery.isError || !requestedEpisodeId) return;
     if (episodes.some(item => item.id === requestedEpisodeId)) return;
     const next = new URLSearchParams(query);
     next.delete("episodeId");
     setQuery(next, { replace: true });
-  }, [dramaId, episodes, requestedEpisodeId, query, setQuery]);
+  }, [dramaId, episodes, episodeQuery.isFetching, episodeQuery.isError, requestedEpisodeId, query, setQuery]);
   if (!dramaId) return <ProductionEditor />;
-  const error = episodeRead?.dramaId === dramaId ? episodeRead.error : undefined;
-  if (error) return <Alert className="m-6" type="error" message={t("director.loadFailed")} description={error} />;
-  if (!episodes) return <div className="p-6">{t("drama.production.loading")}</div>;
+  const seriesContext = { id: dramaId, episodes: episodes || [] };
+  if (!episodes && !episodeQuery.isError) return <div className="p-6">{t("drama.production.loading")}</div>;
+  if (!episodes && episodeQuery.isError) {
+    if (requestedEpisodeId) return <ProductionEditor key={requestedEpisodeId} owner={{ kind: "episode", id: requestedEpisodeId }} series={seriesContext} notice={episodesNotice} />;
+    return <WorkbenchCanvas key={dramaId}><SeriesSetupWorkbench dramaId={dramaId} onEpisodesChanged={refreshEpisodes} notice={episodesNotice} /></WorkbenchCanvas>;
+  }
+  if (episodes && episodeQuery.isError && requestedEpisodeId && !episodes.some(item => item.id === requestedEpisodeId)) {
+    // A cached list cannot prove the selected episode was deleted while its refresh is failing.
+    return <ProductionEditor key={requestedEpisodeId} owner={{ kind: "episode", id: requestedEpisodeId }} series={seriesContext} notice={episodesNotice} />;
+  }
+  const availableEpisodes = episodes ?? [];
   let selected;
-  try { selected = dramaWorkbenchEpisode(episodes, requestedEpisodeId); }
+  try { selected = dramaWorkbenchEpisode(availableEpisodes, requestedEpisodeId); }
   catch {
     // 请求的分集已不存在：回退到第一集，不再报「分集不属于当前剧目」。
-    if (!episodes.length) return <WorkbenchCanvas key={dramaId}><SeriesSetupWorkbench dramaId={dramaId} onEpisodesChanged={refreshEpisodes} /></WorkbenchCanvas>;
-    selected = dramaWorkbenchEpisode(episodes, null);
+    if (!availableEpisodes.length) return <WorkbenchCanvas key={dramaId}><SeriesSetupWorkbench dramaId={dramaId} onEpisodesChanged={refreshEpisodes} /></WorkbenchCanvas>;
+    selected = dramaWorkbenchEpisode(availableEpisodes, null);
   }
-  if (!selected) return <WorkbenchCanvas key={dramaId}><SeriesSetupWorkbench dramaId={dramaId} onEpisodesChanged={refreshEpisodes} /></WorkbenchCanvas>;
-  return <ProductionEditor key={selected.id} owner={{ kind: "episode", id: selected.id }} series={{ id: dramaId, episodes }} onSeriesEpisodesChanged={refreshEpisodes} />;
+  if (!selected) return <WorkbenchCanvas key={dramaId}><SeriesSetupWorkbench dramaId={dramaId} onEpisodesChanged={refreshEpisodes} notice={episodesNotice} /></WorkbenchCanvas>;
+  return <ProductionEditor key={selected.id} owner={{ kind: "episode", id: selected.id }} series={seriesContext} onSeriesEpisodesChanged={refreshEpisodes} notice={episodesNotice} />;
 }
 
 /** 无分集剧目仍提供全剧规划、分集与真实共享画布入口。 */
-function SeriesSetupWorkbench({ dramaId, onEpisodesChanged }: { dramaId: string; onEpisodesChanged: () => void }) {
+function SeriesSetupWorkbench({ dramaId, onEpisodesChanged, notice }: { dramaId: string; onEpisodesChanged: () => void; notice?: ReactNode }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { t } = useTranslation();
@@ -142,6 +164,7 @@ function SeriesSetupWorkbench({ dramaId, onEpisodesChanged }: { dramaId: string;
       <div className="mb-7 flex flex-wrap items-center justify-between gap-x-6 gap-y-4">
         <div className="flex flex-wrap items-center gap-3"><Button type="text" icon={<ArrowLeft className="size-4" />} onClick={() => navigate("/projects?type=drama")}>{t("director.back")}</Button><div><h1 className="text-xl font-medium tracking-tight sm:text-[26px]">{seriesName || t("director.atomic.seriesWorkbench")}</h1><p className="mt-2 text-xs text-muted-foreground">{t("director.atomic.emptyDrama")}</p></div></div>
       </div>
+      {notice}
       <div className="grid min-w-0 items-start gap-5 lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-8">
         <ProductionWorkspaceNavigation groups={productionNavigationGroups({ hasSeries: true, scope: "episode", setup: true })} selectedId={`series:${view || "planning"}`} onSelect={item => {
           useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"));
@@ -155,13 +178,13 @@ function SeriesSetupWorkbench({ dramaId, onEpisodesChanged }: { dramaId: string;
   </main>;
 }
 
-type ProductionEditorProps = { owner?: ProductionCanvasContext["owner"]; embedded?: boolean; dialog?: boolean; series?: { id: string; episodes: DramaEpisode[] }; onSeriesEpisodesChanged?: () => void };
+type ProductionEditorProps = { owner?: ProductionCanvasContext["owner"]; embedded?: boolean; dialog?: boolean; series?: { id: string; episodes: DramaEpisode[] }; onSeriesEpisodesChanged?: () => void; notice?: ReactNode };
 export function ProductionEditor(props: ProductionEditorProps) {
   const params = useParams();
   if (props.embedded) return <ProductionEditorContent {...props} />;
   return <WorkbenchCanvas key={`${props.owner?.kind || ""}:${props.owner?.id || params.episodeId || params.projectId || ""}`}><ProductionEditorContent {...props} /></WorkbenchCanvas>;
 }
-function ProductionEditorContent({ owner, embedded = false, dialog = false, series, onSeriesEpisodesChanged }: ProductionEditorProps) {
+function ProductionEditorContent({ owner, embedded = false, dialog = false, series, onSeriesEpisodesChanged, notice }: ProductionEditorProps) {
   const canvasHost = useWorkbenchCanvas();
   const surfaceHost = useCanvasHost();
   const params = useParams();
@@ -457,7 +480,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     else await localDrafts.removeItem(pendingCompilationStorageKey(draftKey));
   };
 
-  const runProductionCompile = async () => {
+  const runProductionCompile = async (sceneId?: string) => {
     if (compiling || !production?.draft.director) return;
     if (!draftKey) {
       setCompileError(t("drama.production.draftNotReady"));
@@ -475,10 +498,10 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         if (canvasId) await flushCanvasProjectBeforeGeneration(canvasId);
         compileSource = (await fetchEpisodeProduction(target)).production;
         setProduction(previous => !previous || previous.episodeId !== compileSource.episodeId || compileSource.revision > previous.revision ? compileSource : previous);
-        pending = { operationId: `compile-${nanoid(14)}`, expectedRevision: compileSource.revision };
+        pending = { operationId: `compile-${nanoid(14)}`, expectedRevision: compileSource.revision, ...(sceneId ? { scope: { sceneId } } : {}) };
         await persistPendingCompilation(pending);
       }
-      const started = await compileProduction(target, pending.expectedRevision, pending.operationId);
+      const started = await compileProduction(target, pending.expectedRevision, pending.operationId, pending.scope);
       let status: ProductionCompilationStatus = started.compilation;
       let waitedMs = 0;
       let pollDelayMs = 1200;
@@ -1359,15 +1382,49 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     return true;
   };
   const replaceDirector = async (director: NonNullable<EpisodeProduction["draft"]["director"]>) => edit([{ type: "set_director_production", director }]);
+  const updateLegacyShotReferences = async (shotId: string, assetIds: string[], keyframeAssetId: string | null) => {
+    const current = production?.draft.director;
+    if (!current || isSubjectPromptAssembly(current.source) || busy) return false;
+    const updated = updateLegacyShotReferenceSource(current, shotId, assetIds, keyframeAssetId);
+    if (!updated) return false;
+    return edit([{ type: "set_director_production", director: updated }]);
+  };
   const createManualAsset = async (operation: Extract<ProductionOperation, { type: "create_manual_director_asset" }>) => edit([operation]);
   const deleteScene = async (sceneId: string) => {
     if (!production || busy || !sceneId || !canvasId) return false;
     const { project } = await fetchBackendProject(canvasId);
     return edit([{ type: "archive_director_scene", sceneId, expectedCanvasRevision: Number(project.revision), confirmed: true }]);
   };
-  const deleteManualAsset = async (assetId: string) => {
+  const deleteAsset = async (assetId: string) => {
     if (!production || busy || !assetId) return false;
     return edit([{ type: "delete_director_asset", id: assetId, confirmed: true }]);
+  };
+  const removeCanvasAsset = async (nodeId: string) => {
+    if (!production || busy || !canvasId || productionOwner.kind !== "episode" || !nodeId) return false;
+    setBusy(true);
+    try {
+      // 资产列表可以显示 load() 读到的 Backend 快照；先保存已有画布编辑并
+      // 用权威快照校准 Store，不能把 Store 中缺节点误报成 Backend 已删除。
+      await flushCanvasProjectBeforeGeneration(canvasId);
+      const latest = (await fetchBackendProject(canvasId)).project as unknown as CanvasProject;
+      applyBackendCanvasEvent({ type: "canvas.updated", entityId: canvasId, revision: Number(latest.revision || 0), payload: latest }, true);
+      if (!latest.nodes.some(item => item.id === nodeId)) { await refreshRemote(); return true; }
+      const project = await ensureCanvasProjectLoaded(canvasId);
+      const node = project.nodes.find(item => item.id === nodeId);
+      if (!node) throw new Error("画布正在同步最新版本，请刷新后重试移除");
+      if (!["character", "scene", "prop"].includes(node.type)) return false;
+      useCanvasStore.getState().updateProject(canvasId, {
+        nodes: project.nodes.filter(item => item.id !== nodeId),
+        connections: project.connections.filter(connection => connection.fromNodeId !== nodeId && connection.toNodeId !== nodeId),
+      });
+      await flushCanvasProjectBeforeGeneration(canvasId);
+      const saved = (await fetchBackendProject(canvasId)).project as unknown as CanvasProject;
+      if (saved.nodes.some(item => item.id === nodeId)) throw new Error("Backend 尚未确认移除该素材，请刷新后重试");
+      applyBackendCanvasEvent({ type: "canvas.updated", entityId: canvasId, revision: Number(saved.revision || 0), payload: saved }, true);
+      await refreshRemote();
+      return true;
+    } catch (error) { fail(error); return false; }
+    finally { setBusy(false); }
   };
   const exportBundle = async (includeGeneratedMedia: boolean) => {
     if (!production || !readiness) return;
@@ -1462,6 +1519,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   ];
 
   return <main ref={editorRootRef} data-production-inspector={embedded && !dialog || undefined} data-production-dialog={dialog || undefined} data-director-workspace data-production-workspace-shell={!embedded || undefined} data-shot-workspace-shell={!embedded && workspace === "shots" || undefined} className={embedded ? "min-h-full bg-background p-3 text-foreground" : "min-h-full bg-background px-4 py-5 text-foreground sm:px-6 lg:px-10 lg:py-7"}>
+      {notice && <div className="mx-auto w-full max-w-[1440px]">{notice}</div>}
     <div className="mx-auto max-w-[1440px]">
       <ProductionWorkspaceBreadcrumb items={breadcrumbs} />
       {!embedded && <div data-production-workspace-heading className="mb-7 flex flex-wrap items-center justify-between gap-x-6 gap-y-4">
@@ -1512,11 +1570,11 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
                   await refreshRemote();
                 } catch (cause) { fail(cause); } finally { setBusy(false); }
               }}
-              onUpsertSubject={upsertSubject} onDeleteSubject={deleteSubject} onDeleteScene={deleteScene} onDeleteManualAsset={deleteManualAsset} onCreateManualAsset={createManualAsset} onSaveV2Shot={saveV2Shot} onRepartitionClips={repartitionV2} onEditShot={editV2Shot}
+              onUpsertSubject={upsertSubject} onDeleteSubject={deleteSubject} onDeleteScene={deleteScene} onDeleteAsset={deleteAsset} onRemoveCanvasAsset={removeCanvasAsset} onCreateManualAsset={createManualAsset} onSaveV2Shot={saveV2Shot} onUpdateLegacyShotReferences={updateLegacyShotReferences} onRepartitionClips={repartitionV2} onEditShot={editV2Shot}
               onOpenSharedAsset={(assetId, title) => void openSharedAsset(assetId, title).catch(fail)} onPromoteExistingSharedAsset={(assetId, title) => void promoteExistingSharedAsset(assetId, title).catch(fail)}
               onBoundary={setBoundary} onPublish={() => void publish()} onSaveContinuity={saveContinuity} onPreviewContinuityUpgrade={previewContinuityUpgrade} onCheckContinuity={checkContinuity} onContinuitySnapshot={changeContinuitySnapshot}
               onReplace={value => void replaceDirector(value)} onAskDirector={scope => void askDirector(scope)} onRequestContinuityUpgrade={requestContinuityUpgradeFromAgent} onNavigate={navigateWorkspace}
-              onCompile={() => void runProductionCompile()} compileBusy={compiling} compilePending={Boolean(pendingCompilation)} compileError={compileError} compileNotice={compileNotice}
+              onCompile={sceneId => void runProductionCompile(sceneId)} compileBusy={compiling} compilePending={Boolean(pendingCompilation)} compileError={compileError} compileNotice={compileNotice}
               onLocateTarget={(kind, id) => {
                 if (kind === "shot") { navigateWorkspace("shots", { kind, id }); return; }
                 const group = production.draft.clipGroups.find(group => group.id === id);

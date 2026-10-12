@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveCanvasImageReferences } from "./image-references.js";
+import { resolveCanvasCharacterImageReferences, resolveCanvasImageReferences } from "./image-references.js";
 
 const image = (id: string, title: string) => ({ id, type: "image", title, metadata: { storageKey: `image:${id}`, mimeType: "image/png" } });
 
@@ -13,6 +13,16 @@ test("失效的角色选图恢复当前主图，Backend 不再静默漏传人物
         ] } },
     ], connections: [{ id: "ref", fromNodeId: "char", toNodeId: "config" }] };
     assert.deepEqual(resolveCanvasImageReferences(project, "config")?.map((ref) => ref.storageKey), ["image:primary"]);
+});
+
+test("full character catalog resolution uses stable media keys independent of its cover", () => {
+    const node = { id: "character", type: "character", metadata: { characterPrimaryIndex: 1, characterImages: [
+        { storageKey: "media:outfit-a", url: "a.png" }, { storageKey: "media:outfit-b", url: "b.png" },
+    ] } };
+    assert.deepEqual(resolveCanvasCharacterImageReferences(node).map(reference => [reference.id, reference.storageKey]), [
+        ["character:character-image:media:outfit-a", "media:outfit-a"],
+        ["character:character-image:media:outfit-b", "media:outfit-b"],
+    ]);
 });
 
 test("图片生成从结果节点沿配置节点回溯全部参考图并保留顺序", () => {

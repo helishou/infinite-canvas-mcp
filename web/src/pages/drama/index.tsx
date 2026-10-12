@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Button, Input, Modal, Tag } from "antd";
+import { App, Button, Input, Modal, Tag } from "antd";
 import { ArrowUpRight, Clapperboard, Plus, Search } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -20,8 +20,15 @@ export default function DramaPage({ searchQuery, compactEmpty = false }: { searc
     const libraryQuery = searchQuery ?? localQuery;
     const [query] = useSearchParams();
     const navigate = useNavigate();
-    const setActiveView = (id: string) => navigate(dramaProjectDestination(id, query.toString()));
+    const { message } = App.useApp();
     const { dramaFolders, episodesByDrama } = useDramaDirectory();
+    const setActiveView = (id: string) => {
+        if (episodesByDrama[id] === undefined) {
+            message.info(t("projects.episodesUnavailable"));
+            return;
+        }
+        navigate(dramaProjectDestination(id, query.toString()));
+    };
     const shownDramaFolders = dramaFolders.filter(folder => matchesProjectQuery(folder.name, libraryQuery));
     const [createOpen, setCreateOpen] = useState(false);
     const [newDramaName, setNewDramaName] = useState("");

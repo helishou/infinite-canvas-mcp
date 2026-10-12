@@ -4,7 +4,7 @@ import { Button, ConfigProvider } from "antd";
 import { PanelBottomClose } from "lucide-react";
 import { useNavigate, type NavigateFunction, type NavigateOptions, type To } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { CanvasHostContext, WorkbenchCanvasContext, type CanvasTarget } from "@/lib/canvas/canvas-host";
+import { CanvasHostContext, WorkbenchCanvasContext, setWorkbenchCanvasOverlayTarget, type CanvasTarget } from "@/lib/canvas/canvas-host";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { useMediaPreviewStore } from "@/stores/use-media-preview-store";
 import { canvasHostLocation } from "@/lib/canvas/canvas-host-navigation";
@@ -16,7 +16,7 @@ export function WorkbenchCanvas({ children }: { children: ReactNode }) {
     const [target, setTarget] = useState<CanvasTarget>();
     const [search, setCanvasSearch] = useState(() => new URLSearchParams());
     const [visible, setVisible] = useState(false), [requestId, setRequestId] = useState(0);
-    const returnFocus = useRef<HTMLElement | null>(null), panel = useRef<HTMLDivElement>(null), workbench = useRef<HTMLDivElement>(null);
+    const returnFocus = useRef<HTMLElement | null>(null), panel = useRef<HTMLDivElement>(null), overlay = useRef<HTMLDivElement>(null), workbench = useRef<HTMLDivElement>(null);
     const popupContainer = useCallback(() => panel.current || document.body, []);
     const collapse = useCallback(() => { panel.current?.querySelectorAll<HTMLMediaElement>("video, audio").forEach(media => media.pause()); useMediaPreviewStore.getState().close(); setVisible(false); requestAnimationFrame(() => returnFocus.current?.focus({ preventScroll: true })); }, []);
     const openCanvas = useCallback((next: CanvasTarget) => {
@@ -41,12 +41,14 @@ export function WorkbenchCanvas({ children }: { children: ReactNode }) {
         const keydown = (event: KeyboardEvent) => {
             if (event.key === "Tab" && panel.current && !document.querySelector(".ant-modal-wrap:not([style*='display: none'])")) {
                 const items = Array.from(panel.current.querySelectorAll<HTMLElement>("button:not([disabled]), a[href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex='0']")).filter(item => item.getClientRects().length > 0);
+                items.push(...Array.from(overlay.current?.querySelectorAll<HTMLElement>("[data-agent-launcher] button:not([disabled])") || []).filter(item => item.getClientRects().length > 0));
                 const first = items[0], last = items.at(-1);
                 if (event.shiftKey && (document.activeElement === first || document.activeElement === panel.current)) { event.preventDefault(); last?.focus(); }
                 else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
                 return;
             }
             if (event.key !== "Escape" || event.defaultPrevented) return;
+            if (document.querySelector("#canvas-director-dialog[aria-hidden='false']")) return;
             if (document.querySelector(".ant-modal-wrap:not([style*='display: none']), .ant-dropdown:not(.ant-dropdown-hidden), .ant-drawer-open, [data-canvas-transient-tool]")) return;
             queueMicrotask(() => { if (!event.defaultPrevented) collapse(); });
         };
@@ -54,11 +56,15 @@ export function WorkbenchCanvas({ children }: { children: ReactNode }) {
         return () => { document.body.style.overflow = previousOverflow; window.removeEventListener("keydown", keydown); };
     }, [visible, collapse]);
     useEffect(() => { if (workbench.current) workbench.current.inert = visible; }, [visible]);
+    useEffect(() => {
+        setWorkbenchCanvasOverlayTarget(visible ? overlay.current : null);
+        return () => { if (visible) setWorkbenchCanvasOverlayTarget(null); };
+    }, [target, visible]);
     const host = useMemo(() => target ? { projectId: target.projectId, active: visible, search, requestId, navigate: canvasNavigate, collapse, popupContainer } : null, [target, visible, search, requestId, canvasNavigate, collapse, popupContainer]);
     return <WorkbenchCanvasContext.Provider value={{ openCanvas, restoreCanvas, visible, hasCanvas: Boolean(target) }}>
         <div ref={workbench} className="h-full" data-workbench-underlay>{children}</div>
         {host && createPortal(<CanvasHostContext.Provider value={host}>
-            <div hidden={!visible} className="fixed inset-0 z-[900] bg-background/60 p-0 sm:p-3" data-workbench-canvas>
+            <div ref={overlay} hidden={!visible} className="fixed inset-0 z-[900] bg-background/60 p-0 sm:p-3" data-workbench-canvas>
                 <div ref={panel} role="dialog" aria-modal="true" aria-label={t("director.canvasOverlay.title")} tabIndex={-1} onClickCapture={event => {
                     const link = (event.target as Element).closest?.("a[href]");
                     if (!link || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;

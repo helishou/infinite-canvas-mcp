@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Bot, Menu } from "lucide-react";
+import { Menu } from "lucide-react";
 import { Button, Modal, Tooltip } from "antd";
 import { Link, useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -14,7 +14,6 @@ import { resolveWorkspaceNavigation } from "@/lib/workspace-navigation";
 import { cn } from "@/lib/utils";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { useConfigStore } from "@/stores/use-config-store";
-import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
 
 export function AppTopNav() {
     const { t } = useTranslation();
@@ -26,12 +25,9 @@ export function AppTopNav() {
     const agentEnabled = useAgentStore((state) => state.enabled);
     const agentConnected = useAgentStore((state) => state.connected);
     const connectAgent = useAgentStore((state) => state.connectAgent);
-    const panelOpen = useAgentStore((state) => state.panelOpen);
-    const panelTab = useProductionWorkspaceStore((state) => state.panelTab);
     const localComfyuiEnabled = useConfigStore((state) => state.config.localComfyuiEnabled);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const navigation = resolveWorkspaceNavigation(pathname, search);
-    const chatOpen = panelOpen && (!navigation.compact || panelTab !== "object");
 
     useEffect(() => {
         if (autoConnectRef.current || agentEnabled || agentConnected || !agentToken.trim()) return;
@@ -44,11 +40,6 @@ export function AppTopNav() {
         setWorkflowNoticeOpen(false);
     }, [pathname, search]);
 
-    const toggleAgent = () => {
-        useProductionWorkspaceStore.getState().setPanelTab("director");
-        if (chatOpen) useAgentStore.getState().closePanel();
-        else useAgentStore.getState().openPanel();
-    };
     const showWorkflowNotice = () => {
         setMobileNavOpen(false);
         setWorkflowNoticeOpen(true);
@@ -106,20 +97,8 @@ export function AppTopNav() {
                         </nav>
                     </div>
 
-                    <div className="flex shrink-0 items-center gap-1 whitespace-nowrap sm:gap-2">
+                    <div className="flex shrink-0 items-center gap-1 whitespace-nowrap">
                         <GlobalTaskButton className="ui-icon-button" />
-                        <Tooltip title={t(chatOpen ? "topNav.closeAgent" : "topNav.openAgent")}>
-                            <Button
-                                type="text"
-                                shape="circle"
-                                className="ui-icon-button"
-                                icon={<Bot className="size-4" />}
-                                onClick={toggleAgent}
-                                aria-label={t(chatOpen ? "topNav.closeAgent" : "topNav.openAgent")}
-                                aria-expanded={chatOpen}
-                                aria-controls="canvas-director-dialog"
-                            />
-                        </Tooltip>
                         <UserStatusActions />
                     </div>
                 </div>

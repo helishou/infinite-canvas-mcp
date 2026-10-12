@@ -33,7 +33,7 @@ test("versioned text and title replacement commits together and rolls back on co
     assert.deepEqual(db.getCanvasProject("canvas"), changed);
 });
 
-test("角色主图变更原子更新下游引用，回执/广播/历史重放一致，失败不留下半次更新", (t) => {
+test("Character cover changes preserve explicit image keys across commits, broadcasts and history replay", (t) => {
     const db = fixture(t);
     db.applyCanvasProjectOperations("canvas", undefined, [
         { type: "add_node", id: "char", nodeType: "character", metadata: { characterPrimaryIndex: 0, characterImages: [{ storageKey: "image:a" }, { storageKey: "image:b" }] } },
@@ -47,9 +47,9 @@ test("角色主图变更原子更新下游引用，回执/广播/历史重放一
     let broadcast: CanvasCommit | undefined;
     db.onCanvasCommit((commit) => { broadcast = commit; });
     const changed = db.applyCanvasProjectOperations("canvas", undefined, operations, { operationId: "primary-change" });
-    assert.deepEqual(changed.operations.map((op: { type: string; id?: unknown }) => [op.type, op.id]), [["update_node", "char"], ["update_node", "target"]]);
+    assert.deepEqual(changed.operations.map((op: { type: string; id?: unknown }) => [op.type, op.id]), [["update_node", "char"]]);
     const target = (changed.project.nodes as Array<Record<string, any>>).find((node) => node.id === "target")!;
-    assert.deepEqual(target.metadata.characterReferences.char, { imageKeys: ["image:b"], voiceEnabled: false });
+    assert.deepEqual(target.metadata.characterReferences.char, { imageKeys: ["image:a"], voiceEnabled: false });
     assert.equal(target.metadata.images[0].generationSnapshot.references[0].storageKey, "image:a");
     assert.deepEqual(broadcast?.operations, changed.operations);
     const repeated = db.applyCanvasProjectOperations("canvas", undefined, operations, { operationId: "primary-change" });

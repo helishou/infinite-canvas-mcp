@@ -4,47 +4,85 @@ import { canonicalProduction, type DirectorProduction, type ProductionOperation 
 type Row = Record<string, any>;
 const rows = (value: unknown): Row[] => Array.isArray(value) ? value.filter((item): item is Row => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
 const valueOf = (row: Row) => String(row.asset_id || row.id || "");
-const referenceFields = new Set([
+const assetReferenceFields = new Set([
     "asset_id", "assetId", "asset_ids", "assetIds", "depends_on", "required_assets", "requiredAssets",
     "keyframeAssetId", "keyframe_asset_id", "anchor_asset_id", "sourceAssetId", "source_asset_id",
-    "subjectId", "subject_id", "subjectIds", "subject_ids", "speakerSubjectId", "speaker_subject_id",
-    "pictureBindingIds", "picture_binding_ids", "scene_id", "sceneId", "source_scene_id",
-    "character_id", "characterId", "character_ids", "characterIds",
 ]);
+const entityReferenceFields = new Set([
+    "scene_id", "sceneId", "source_scene_id", "character_id", "characterId", "character_ids", "characterIds",
+]);
+const subjectReferenceFields = new Set([
+    "subjectId", "subject_id", "subjectIds", "subject_ids", "speakerSubjectId", "speaker_subject_id",
+    "pictureBindingIds", "picture_binding_ids", "attention_subject_ids",
+]);
+const factReferenceFields = new Set(["fact_id", "factId", "fact_ids", "factIds", "continuityFactIds", "continuity_facts"]);
+const OMIT = Symbol("omit");
 
-function matchedValues(value: unknown, wanted: Set<string>): string[] {
-    if (typeof value === "string") return wanted.has(value) ? [value] : [];
-    if (Array.isArray(value)) return value.flatMap(item => matchedValues(item, wanted));
-    if (value && typeof value === "object") return Object.values(value as Row).flatMap(item => matchedValues(item, wanted));
-    return [];
+function hasDirectMatch(value: unknown, wanted: Set<string>): boolean {
+    return typeof value === "string" && wanted.has(value);
 }
 
-function collectReferences(value: unknown, path: string, assetIds: Set<string>, subjectIds: Set<string>, entityIds: Set<string>, found: string[]) {
+function stripDirectMatches(value: unknown, wanted: Set<string>): unknown {
+    return Array.isArray(value) ? value.filter(item => !hasDirectMatch(item, wanted)) : value;
+}
+
+/** Clear only structured links to the removed draft asset; prose and unrelated records remain intact. */
+function detachReferences(value: unknown, assetIds: Set<string>, subjectIds: Set<string>, entityIds: Set<string>, factIds: Set<string>, parentKey = ""): any {
     if (Array.isArray(value)) {
-        value.forEach((item, index) => collectReferences(item, `${path}[${index}]`, assetIds, subjectIds, entityIds, found));
-        return;
+        const result: unknown[] = [];
+        for (const item of value) {
+            if (item && typeof item === "object" && !Array.isArray(item)) {
+                const row = item as Row;
+                if (parentKey === "subject_usages" && hasDirectMatch(row.subjectId ?? row.subject_id, subjectIds)) continue;
+                if (parentKey === "stateRequirements" && hasDirectMatch(row.factId ?? row.fact_id, factIds)) continue;
+                if (parentKey === "pictureBindings" && hasDirectMatch(row.assetId ?? row.asset_id, assetIds)) continue;
+                if ((parentKey === "keyframes" || parentKey === "references") && hasDirectMatch(row.assetId ?? row.asset_id, assetIds)) continue;
+            }
+            const next = detachReferences(item, assetIds, subjectIds, entityIds, factIds);
+            if (next !== OMIT) result.push(next);
+        }
+        return result;
     }
-    if (!value || typeof value !== "object") return;
+    if (!value || typeof value !== "object") return value;
     const row = value as Row;
+    if (typeof row.object_kind === "string" && (hasDirectMatch(row.object_id, assetIds) || hasDirectMatch(row.object_id, entityIds))) return OMIT;
     if (row.entityRef && typeof row.entityRef === "object") {
         const ref = row.entityRef as Row;
-        const matches = ref.kind === "asset" ? assetIds.has(String(ref.id || ""))
-            : ref.kind === "scene" || ref.kind === "character" ? entityIds.has(String(ref.id || "")) : false;
-        if (matches) found.push(`${path}.entityRef`);
+        if ((ref.kind === "asset" && hasDirectMatch(ref.id, assetIds)) || ((ref.kind === "scene" || ref.kind === "character") && hasDirectMatch(ref.id, entityIds))) return OMIT;
     }
-    if (typeof row.object_kind === "string" && (assetIds.has(String(row.object_id || "")) || entityIds.has(String(row.object_id || "")))) found.push(`${path}.object_id`);
+    const result: Row = {};
     for (const [key, child] of Object.entries(row)) {
-        if (key === "entityRef") continue;
-        const wanted = key === "scene_id" || key === "sceneId" || key === "source_scene_id" || key === "character_id" || key === "characterId" || key === "character_ids" || key === "characterIds"
-            ? entityIds : key === "subjectId" || key === "subject_id" || key === "subjectIds" || key === "subject_ids" || key === "speakerSubjectId" || key === "speaker_subject_id" || key === "pictureBindingIds" || key === "picture_binding_ids"
-                ? subjectIds : referenceFields.has(key) ? assetIds : undefined;
-        const matched = wanted ? matchedValues(child, wanted) : [];
-        if (matched.length) {
-            const label = row.id || row.asset_id || row.shot_id || row.scene_id || row.subjectId || row.subject_id;
-            found.push(`${path}${label ? `#${label}` : ""}.${key} → ${[...new Set(matched)].join("/")}`);
+        if (key === "sharedSource" && child && typeof child === "object" && hasDirectMatch((child as Row).assetId, assetIds)) continue;
+        if (key === "source_anchor" && child && typeof child === "object" && hasDirectMatch((child as Row).scene_id, entityIds)) {
+            const anchor = detachReferences(child, assetIds, subjectIds, entityIds, factIds) as Row;
+            if (hasDirectMatch((child as Row).id, entityIds)) delete anchor.id;
+            if (Object.keys(anchor).length) result[key] = anchor;
+            continue;
         }
-        collectReferences(child, `${path}.${key}`, assetIds, subjectIds, entityIds, found);
+        if (assetReferenceFields.has(key)) {
+            if (Array.isArray(child)) result[key] = stripDirectMatches(child, assetIds);
+            else if (!hasDirectMatch(child, assetIds)) result[key] = detachReferences(child, assetIds, subjectIds, entityIds, factIds, key);
+            continue;
+        }
+        if (entityReferenceFields.has(key)) {
+            if (Array.isArray(child)) result[key] = stripDirectMatches(child, entityIds);
+            else if (!hasDirectMatch(child, entityIds)) result[key] = detachReferences(child, assetIds, subjectIds, entityIds, factIds, key);
+            continue;
+        }
+        if (subjectReferenceFields.has(key)) {
+            if (Array.isArray(child)) result[key] = stripDirectMatches(child, subjectIds);
+            else if (!hasDirectMatch(child, subjectIds)) result[key] = detachReferences(child, assetIds, subjectIds, entityIds, factIds, key);
+            continue;
+        }
+        if (factReferenceFields.has(key)) {
+            if (Array.isArray(child)) result[key] = stripDirectMatches(child, factIds);
+            else if (!hasDirectMatch(child, factIds)) result[key] = detachReferences(child, assetIds, subjectIds, entityIds, factIds, key);
+            continue;
+        }
+        const next = detachReferences(child, assetIds, subjectIds, entityIds, factIds, key);
+        if (next !== OMIT) result[key] = next;
     }
+    return result;
 }
 
 export function createManualDirectorAsset(director: DirectorProduction, operation: Extract<ProductionOperation, { type: "create_manual_director_asset" }>, owner: { kind: "episode" | "canvas"; id: string }): void {
@@ -93,75 +131,64 @@ export function createManualDirectorAsset(director: DirectorProduction, operatio
     if (director.workflow.currentWork) director.workflow.currentWork = { ...director.workflow.currentWork, sourceHash: director.sourceHash };
 }
 
-export function directorHasAssetHistory(director: DirectorProduction | undefined, assetId: string): boolean {
-    if (!director) return false;
-    const id = assetId.trim();
-    const source = director.source as Record<string, any>;
-    if (rows(source.asset_plan).some(row => valueOf(row) === id) || rows(source.asset_cards).some(row => valueOf(row) === id)
-        || Object.prototype.hasOwnProperty.call(director.assets || {}, id)
-        || (director.artifacts || []).some(artifact => artifact.targetId === id)) return true;
-    const references: string[] = [];
-    collectReferences(source, "source", new Set([id]), new Set(), new Set(), references);
-    collectReferences(director.shotInputs || {}, "shotInputs", new Set([id]), new Set(), new Set(), references);
-    return references.length > 0;
-}
-
-/** Removes an unreferenced, never-materialized asset definition. Canvas media is retained. */
-export function deleteManualDirectorAsset(director: DirectorProduction, assetId: string): void {
+/** Removes an asset definition and its asset-ID links while preserving its registered scene/character entity. */
+export function deleteDirectorAsset(director: DirectorProduction, assetId: string): void {
     const id = assetId.trim();
     if (!id) throw new Error("ASSET_ID_REQUIRED: 资产 ID 不能为空");
     const source = director.source as Record<string, any>;
     const plans = rows(source.asset_plan), plan = plans.find(row => valueOf(row) === id);
     if (!plan) throw new Error(`ASSET_NOT_FOUND: ${id}`);
-    if (plan.created_by !== "manual") throw new Error(`ASSET_NOT_MANUAL: ${id}`);
-    if (["approved", "generated", "rejected"].includes(String(plan.status || ""))) throw new Error(`ASSET_HAS_MEDIA_OR_HISTORY: ${id}`);
-
-    const state = director.assets[id] as Row | undefined;
-    if (state && (String(state.status || "planned") !== "planned" || state.nodeId || state.storageKey || state.generationTaskId || state.sha256 || state.sharedSource)) {
-        throw new Error(`ASSET_HAS_MEDIA_OR_HISTORY: ${id}`);
-    }
-    if ((director.artifacts || []).some(artifact => artifact.targetId === id || rows(artifact.references).some(ref => String(ref.assetId || ref.asset_id || "") === id))) {
-        throw new Error(`ASSET_HAS_MEDIA_OR_HISTORY: ${id}`);
-    }
 
     const kind = String(plan.kind || plan.asset_type || plan.role || "").toLowerCase();
     const entityKind = kind === "character" || kind === "person" || kind === "role" ? "character"
         : kind === "scene" || kind === "environment" || kind === "location" ? "scene" : "asset";
-    const entityId = String(plan.entity_id || plan.entityId || id);
     const allSubjects = rows(source.subject_registry);
-    const relatedSubjects = allSubjects.filter(subject => subject.entityRef?.kind === entityKind && String(subject.entityRef?.id || "") === entityId);
+    const relatedSubjects = entityKind === "asset"
+        ? allSubjects.filter(subject => subject.entityRef?.kind === "asset" && String(subject.entityRef?.id || "") === id)
+        : [];
     const subjectIds = new Set(relatedSubjects.map(subject => String(subject.id || "")));
     const bindingIds = new Set(relatedSubjects.flatMap(subject => rows(subject.pictureBindings).map(binding => String(binding.id || ""))));
-    const assetIds = new Set([id]);
-    const entityIds = new Set(entityKind === "asset" ? [] : [entityId]);
-    const cards = rows(source.asset_cards);
-    const scanSource = {
-        ...source,
-        asset_plan: plans.filter(row => valueOf(row) !== id),
-        asset_cards: cards.filter(row => valueOf(row) !== id),
-        subject_registry: allSubjects.filter(subject => !relatedSubjects.includes(subject)),
-    };
     const subjectAndBindingIds = new Set([...subjectIds, ...bindingIds]);
-    if (relatedSubjects.some(subject => rows(subject.pictureBindings).length > 0)) throw new Error(`ASSET_IS_BOUND: ${id} · subject_registry`);
-    const usages: string[] = [];
-    collectReferences(scanSource, "source", assetIds, subjectAndBindingIds, entityIds, usages);
-    collectReferences(director.shotInputs || {}, "shotInputs", assetIds, subjectAndBindingIds, entityIds, usages);
-    const otherAssets = Object.fromEntries(Object.entries(director.assets || {}).filter(([key]) => key !== id));
-    collectReferences(otherAssets, "assets", assetIds, subjectAndBindingIds, entityIds, usages);
-    if (usages.length) throw new Error(`ASSET_STILL_REFERENCED: ${id} · ${[...new Set(usages)].join(", ")}`);
+    const assetIds = new Set([id]);
+    const noEntityIds = new Set<string>();
+    const cards = rows(source.asset_cards);
+    const ledger = source.ledger && typeof source.ledger === "object" ? source.ledger as Row : undefined;
+    const facts = rows(ledger?.facts);
+    const removedFacts = new Set(facts.filter(fact => typeof fact.object_kind === "string" && assetIds.has(String(fact.object_id || "")))
+        .map(fact => String(fact.id || "")).filter(Boolean));
+    const removedEvents = new Set(rows(ledger?.events).filter(event => removedFacts.has(String(event.fact_id || ""))).map(event => String(event.id || "")).filter(Boolean));
 
-    const registry = entityKind === "character" ? "character_registry" : entityKind === "scene" ? "scene_registry" : undefined;
-    const nextSource: Record<string, any> = {
+    const sourceWithoutAsset: Record<string, any> = {
         ...source,
         asset_plan: plans.filter(row => valueOf(row) !== id),
         asset_cards: cards.filter(row => valueOf(row) !== id),
-        subject_registry: allSubjects.filter(subject => !relatedSubjects.includes(subject)),
     };
-    if (registry) nextSource[registry] = rows(source[registry]).filter(row => String(row.id || "") !== entityId);
+    if (relatedSubjects.length) sourceWithoutAsset.subject_registry = allSubjects.filter(subject => !relatedSubjects.includes(subject));
+    if (ledger) {
+        const nextLedger = { ...ledger };
+        if (Array.isArray(ledger.facts)) nextLedger.facts = ledger.facts.filter((fact: Row) => !removedFacts.has(String(fact?.id || "")));
+        if (Array.isArray(ledger.initial)) nextLedger.initial = ledger.initial.filter((item: Row) => !removedFacts.has(String(item?.fact_id || "")));
+        if (Array.isArray(ledger.events)) nextLedger.events = ledger.events.filter((item: Row) => !removedFacts.has(String(item?.fact_id || "")));
+        if (Array.isArray(ledger.requirements)) nextLedger.requirements = ledger.requirements
+            .filter((item: Row) => !removedFacts.has(String(item?.fact_id || "")))
+            .map((item: Row) => ({
+                ...item,
+                event_ids: Array.isArray(item.event_ids) ? item.event_ids.filter((eventId: unknown) => !removedEvents.has(String(eventId))) : item.event_ids,
+            }));
+        if (Array.isArray(ledger.coverage)) nextLedger.coverage = ledger.coverage.map((item: Row) => ({
+            ...item,
+            fact_ids: Array.isArray(item.fact_ids) ? item.fact_ids.filter((factId: unknown) => !removedFacts.has(String(factId))) : item.fact_ids,
+            event_ids: Array.isArray(item.event_ids) ? item.event_ids.filter((eventId: unknown) => !removedEvents.has(String(eventId))) : item.event_ids,
+        }));
+        sourceWithoutAsset.ledger = nextLedger;
+    }
+    const nextSource = detachReferences(sourceWithoutAsset, assetIds, subjectAndBindingIds, noEntityIds, removedFacts) as Record<string, any>;
     director.source = nextSource as DirectorProduction["source"];
-    const nextAssets = { ...director.assets };
-    delete nextAssets[id];
+    const nextAssets = Object.fromEntries(Object.entries(director.assets || {})
+        .filter(([key]) => key !== id)
+        .map(([key, value]) => [key, detachReferences(value, assetIds, subjectAndBindingIds, noEntityIds, removedFacts)])) as DirectorProduction["assets"];
     director.assets = nextAssets;
+    director.shotInputs = detachReferences(director.shotInputs || {}, assetIds, subjectAndBindingIds, noEntityIds, removedFacts) as DirectorProduction["shotInputs"];
     director.sourceHash = crypto.createHash("sha256").update(canonicalProduction(director.source)).digest("hex");
     director.artifacts = director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));
     director.executionAuthorized = false;

@@ -1,9 +1,10 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Alert, App, Button, Dropdown, Input, Modal, Radio, Tag } from "antd";
-import { ArrowLeft, ArrowRight, ArrowUpRight, Clapperboard, Image as ImageIcon, Layers3, Search, WandSparkles } from "lucide-react";
+import { Alert, App, Button, Dropdown, Input, Modal, Radio, Select, Tag } from "antd";
+import { ArrowLeft, ArrowRight, ArrowUpRight, ChevronLeft, ChevronRight, Clapperboard, GripHorizontal, Image as ImageIcon, Layers3, Search, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { isSubjectPromptAssembly, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
+import { isSubjectPromptAssembly, resolveSubjectPictureBindingIds, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
+import { setShotPictureBindingIds, setShotPictureBindingMode, shotPictureBindingMode } from "./subject-picture-selection";
 import { subjectShotWindows, subjectStateProjection } from "@basketikun/canvas-agent/drama/subject-assembly";
 import { backendMediaUrl, fetchProductionWorkbench, type EpisodeProduction, type ProductionTarget } from "@/services/backend-api";
 import { records, formatSeconds } from "./director-display";
@@ -16,7 +17,7 @@ import { ShotOperations, type ShotOperation } from "./shot-operations";
 import { readShotFormDraft, shotDraftChanged } from "./subject-shot-draft";
 import type { DirectorWorkspace } from "./director-panel";
 import { storyboardArtifactState, storyboardDurationFrames, storyboardPeople, storyboardReportedState, storyboardScenes, storyboardSceneShotIds } from "./storyboard-display";
-import { boundaryCounts, clipBoundaryPositions, clipDurationSeconds, clipProfileKey, clipShotIds, materializeClipPartition, nearestBoundaryCount, outsideClipWindow, partitionAt } from "./clip-boundary";
+import { boundaryCounts, clipBoundaryAutoScrollDelta, clipBoundaryPositions, clipDurationSeconds, clipProfileKey, clipShotIds, createClipBoundaryPointerHandlers, materializeClipPartition, nearestBoundaryCount, outsideClipWindow, partitionAt } from "./clip-boundary";
 
 /** 工作包读取缓存（LRU）：同一镜头、同一源稿版本、同一参考结果版本直接命中，避免反复「正在读取镜头工作包」。 */
 const workbenchCache = new Map<string, Record<string, any>>();
@@ -27,8 +28,8 @@ type Props = {
     director: DirectorProduction; production: EpisodeProduction; owner: ProductionTarget; initialShotId?: string;
     viewMemory?: StoryboardViewMemory;
     canvasId: string; onLocateClip?: (id: string) => void;
-    canvasNodes: Array<{ id: string; metadata?: Record<string, unknown> }>;
-    renderEditor: (shot: Record<string, any>, workbench?: Record<string, any>) => ReactNode; clipEditor: ReactNode;
+    canvasNodes: Array<{ id: string; title?: string; type?: string; metadata?: Record<string, unknown> }>;
+    renderEditor: (shot: Record<string, any>, workbench?: Record<string, any>) => ReactNode; clipEditor: (scope: { sceneId?: string; shotIds: string[]; editable: boolean }) => ReactNode;
     /** 该镜头的起止状态（镜头开始时 / 镜头结束时），由 DirectorPanel 注入到左栏「连续性状态」，原在「画面与摄影」里。 */
     renderShotState?: (shot: Record<string, any>) => ReactNode;
     /** 该镜头的连续性动作（与下一段的边界开关），由 DirectorPanel 注入到左栏编辑区下方的「连续性状态」。 */
@@ -38,10 +39,12 @@ type Props = {
     /** v2 源稿的 Clip 重新装箱入口：时间线上的分割块拖动/右键都落到这个 op。 */
     onRepartitionClips?: (shotIds: string[], segments: Array<Record<string, unknown>>) => Promise<boolean>;
     onEditShot?: (operation: ShotOperation) => Promise<boolean>;
+    onSaveShotPatch?: (shotId: string, patch: Record<string, unknown>) => Promise<boolean>;
+    onUpdateLegacyShotReferences?: (shotId: string, assetIds: string[], keyframeAssetId: string | null) => Promise<boolean>;
 
     shotDrafts?: Record<string, string>;
     /** Clip 组合使用与交付页相同的 Backend 编译提交与恢复流程。 */
-    busy?: boolean; compileBusy?: boolean; compilePending?: boolean; compileError?: string; compileNotice?: string; onCompile?: () => void;
+    busy?: boolean; compileBusy?: boolean; compilePending?: boolean; compileError?: string; compileNotice?: string; onCompile?: (sceneId?: string) => void;
     onClip: (id: string) => void;
     onDiscuss: (shotId?: string) => void;
     /** 跳转到指定工作区（参考素材点开进素材库）。 */
@@ -49,7 +52,7 @@ type Props = {
 };
 
 /** The v2 authoring surface: stable Shots, derived Clip packaging, and compiler evidence. */
-export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, viewMemory, canvasNodes, canvasId, onLocateClip, renderEditor, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onEditShot, shotDrafts = {}, busy, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", onCompile, onClip, onDiscuss, onNavigate }: Props) {
+export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, viewMemory, canvasNodes, canvasId, onLocateClip, renderEditor, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onEditShot, onSaveShotPatch, onUpdateLegacyShotReferences, shotDrafts = {}, busy, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", onCompile, onClip, onDiscuss, onNavigate }: Props) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const source = director.source as Record<string, any>;
@@ -64,10 +67,11 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const [draggingShotId, setDraggingShotId] = useState("");
     const [search, setSearch] = useState(viewMemory?.current?.search || "");
     const [sceneFilter, setSceneFilter] = useState(viewMemory?.current?.sceneFilter || "");
+    const [sceneDirectoryCollapsed, setSceneDirectoryCollapsed] = useState(false);
     const [mobileEditing, setMobileEditing] = useState(Boolean(initialShotId) || Boolean(viewMemory?.current?.mobileEditing));
     const [detailView, setDetailView] = useState<"editing" | "context">(viewMemory?.current?.detailView || "editing");
     const selectShot = (id: string) => { setSelectedId(id); setMobileEditing(true); setDetailView("editing"); };
-    const sceneDirectory = storyboardScenes(source);
+    const sceneDirectory = useMemo(() => storyboardScenes(source), [source, director.sourceHash]);
     const sceneIds = storyboardSceneShotIds(source, sceneFilter);
     const [view, setView] = useState<"shots" | "clips">(viewMemory?.current?.view || "shots");
     const [workbench, setWorkbench] = useState<Record<string, any>>();
@@ -79,6 +83,9 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const windows = useMemo(() => subjectShotWindows(source), [source]);
     const states = useMemo(() => subjectStateProjection(source), [source]);
     const ownerKey = JSON.stringify(owner);
+    useEffect(() => {
+        if (sceneFilter && sceneFilter !== "__unassigned__" && !sceneDirectory.scenes.some(scene => scene.id === sceneFilter)) setSceneFilter("");
+    }, [sceneFilter, sceneDirectory]);
     useEffect(() => { if (initialShotId) { setSelectedId(initialShotId); setView("shots"); setSceneFilter(""); setMobileEditing(true); } }, [initialShotId, ownerKey]);
     const selected = shots.find(shot => String(shot.id) === selectedId) || shots[0];
     const activeId = String(selected?.id || "");
@@ -90,8 +97,18 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const duration = (shot: Record<string, any>) => storyboardDurationFrames(shot) / fps;
     const people = (shot: Record<string, any>) => storyboardPeople(source, shot, subjectAssembly).join(" · ");
     const directSceneIds = sceneFilter === "__unassigned__" ? sceneDirectory.unassigned : sceneDirectory.scenes.find(scene => scene.id === sceneFilter)?.shotIds;
+    const directSceneShotIds = new Set(sceneFilter ? directSceneIds || [] : shots.map(shot => String(shot.id)));
     const crossSceneCount = directSceneIds ? [...sceneIds].filter(id => !directSceneIds.includes(id)).length : 0;
-    const scopeShots = view === "clips" ? shots : shots.filter(shot => sceneIds.has(String(shot.id)));
+    const scopeShots = shots.filter(shot => directSceneShotIds.has(String(shot.id)));
+    const clipEditorShotIds = shots.filter(shot => sceneIds.has(String(shot.id))).map(shot => String(shot.id));
+    const clipEditorSegments = clips.filter(item => (item.shot_ids || []).some((id: string) => sceneIds.has(String(id))));
+    const clipEditorRange = shots.reduce((range, shot, index) => sceneIds.has(String(shot.id))
+        ? { first: range.first < 0 ? index : range.first, last: index }
+        : range, { first: -1, last: -1 });
+    const clipEditorContiguous = !sceneFilter || clipEditorRange.first >= 0 && clipEditorRange.last - clipEditorRange.first + 1 === clipEditorShotIds.length;
+    const clipEditorSceneLocal = !sceneFilter || clipEditorShotIds.every(id => directSceneShotIds.has(id));
+    const clipEditorGroupsLocal = clipEditorSegments.every(item => (item.shot_ids || []).every((id: string) => sceneIds.has(String(id))));
+    const clipEditorScope = { sceneId: sceneFilter || undefined, shotIds: clipEditorShotIds, editable: clipEditorContiguous && clipEditorSceneLocal && clipEditorGroupsLocal };
     const visible = shots.filter(shot => sceneIds.has(String(shot.id)) && `${title(shot)} ${shot.visual || ""} ${people(shot)}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()));
     const referencedNodes = new Set(records(selected?.subject_usages).flatMap(usage => records(subjects.find(subject => subject.id === usage.subjectId)?.pictureBindings).map(binding => String(binding.sourceNode?.nodeId || "")))
         .concat(records(selected?.keyframes).map(frame => String(frame.sourceNode?.nodeId || ""))));
@@ -132,8 +149,30 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const refresh = compiled && ["blocked", "failed"].includes(refreshCandidate?.status || "") ? undefined : refreshCandidate;
     const state = subjectAssembly ? workbench?.continuity || states[activeId] : storyboardReportedState(workbench?.continuity, activeId);
     const assetIds = [...new Set([...(selected?.required_assets || []), ...(director.shotInputs[activeId]?.assetIds || [])].map(String))];
+    const keyframeAssetIds = new Set(Object.values(director.shotInputs).map(input => String(input.keyframeAssetId || "")).filter(Boolean));
+    const assetOptionsById = new Map<string, string>();
+    for (const asset of records(source.asset_plan)) {
+        const id = String(asset.asset_id || asset.id || "");
+        if (id) assetOptionsById.set(id, String(asset.asset_name || asset.title || asset.name || id));
+    }
+    for (const [id, asset] of Object.entries(director.assets || {})) assetOptionsById.set(id, String(asset?.title || asset?.label || assetOptionsById.get(id) || id));
+    for (const id of [...assetIds, ...keyframeAssetIds]) if (id && !assetOptionsById.has(id)) assetOptionsById.set(id, id);
+    const assetOptions = [...assetOptionsById].map(([value, label]) => ({ value, label }));
+    const ordinaryAssetOptions = assetOptions;
+    const selectedKeyframeAssetId = String(director.shotInputs[activeId]?.keyframeAssetId || "");
     const references: Array<Record<string, any> & { subjectId: string }> = subjectAssembly ? records(workbench?.subjectUsages).flatMap(usage => records(usage.pictureBindings).map(binding => ({ ...binding, subjectId: String(usage.subjectId), presentation: usage.presentation })))
         : assetIds.map(assetId => ({ id: assetId, subjectId: assetId, displayName: records(source.asset_plan).find(asset => String(asset.asset_id || asset.id) === assetId)?.asset_name || assetId, resolved: workbench?.assets?.[assetId] || director.assets[assetId] }));
+    const pictureBindingLabel = (binding: Record<string, any>) => {
+        const node = canvasNodes.find(item => item.id === binding.sourceNode?.nodeId);
+        const resultId = String(binding.selection?.resultId || "");
+        const selectedImage = records(node?.metadata?.characterImages).find(image => {
+            const key = String(image.storageKey || image.url || image.name || "");
+            return [key, String(image.storageKey || ""), `${node?.id}:character-image:${key}`].includes(resultId);
+        });
+        const sourceLabel = node?.title || node?.metadata?.name || t("director.crud.boundImage");
+        const mediaLabel = selectedImage?.outfit || selectedImage?.outfitDescription || selectedImage?.name || binding.displayName || binding.id;
+        return [sourceLabel, mediaLabel].map(value => String(value || "").trim()).filter(Boolean).join(" · ");
+    };
     const keyframes = records(workbench?.keyframes), referenceDiagnostics = records(workbench?.resolutionDiagnostics);
     // 左栏「连续性状态」里的动作块（与下一段的边界开关），由 DirectorPanel 注入。
     // Empty sources still pass through this setup before the empty-state branch below.
@@ -157,7 +196,9 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
             : { label: t("director.atomic.compileStale"), color: "orange", tone: "stale" as const };
     };
     const clipStates = clips.map(clip => ({ id: String(clip.id), ...clipCompileState(String(clip.id)) }));
-    const compileCounts = { ready: clipStates.filter(item => item.tone === "ready").length, pending: clipStates.filter(item => item.tone === "pending").length, stale: clipStates.filter(item => item.tone === "stale").length, running: clipStates.filter(item => item.tone === "live").length, recorded: clipStates.filter(item => item.tone === "recorded").length, blocked: clipStates.filter(item => item.tone === "blocked").length };
+    const visibleClipStates = !sceneFilter ? clipStates : clipStates.filter(item => clips.find(clip => String(clip.id) === item.id)?.shot_ids?.some((id: string) => directSceneShotIds.has(String(id))));
+    const sceneCompileAvailable = !sceneFilter || sceneDirectory.scenes.some(scene => scene.id === sceneFilter);
+    const compileCounts = { ready: visibleClipStates.filter(item => item.tone === "ready").length, pending: visibleClipStates.filter(item => item.tone === "pending").length, stale: visibleClipStates.filter(item => item.tone === "stale").length, running: visibleClipStates.filter(item => item.tone === "live").length, recorded: visibleClipStates.filter(item => item.tone === "recorded").length, blocked: visibleClipStates.filter(item => item.tone === "blocked").length };
     // 分割块：拖动或右键调整相邻片段之间的分镜归属。芯片按 id 登记，拖动时按实际布局吸附到镜头边界。
     const chipRefs = useRef(new Map<string, HTMLElement>());
     const trackRef = useRef<HTMLDivElement | null>(null);
@@ -219,8 +260,8 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
         {/* 紧凑头部：标题 + 统计 + 视图页签合一行；「主体与图片 / 连续性台账」与顶部工作区页签重复，已去掉（连续性入口就是顶部工作区页签）。 */}
         <header className="storyboard-toolbar flex flex-wrap items-center gap-x-4 gap-y-3 border-b border-border pb-4">
             <div className="storyboard-scene-context flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
-                <h2 className="m-0 text-lg font-semibold">{view === "clips" ? t("director.atomic.view.clips") : sceneFilter === "__unassigned__" ? t("director.atomic.unassignedScene") : sceneDirectory.scenes.find(scene => scene.id === sceneFilter)?.title || t("director.atomic.allScenes")}</h2>
-                <p className="m-0 text-xs text-muted-foreground">{t("director.atomic.counts", { shots: scopeShots.length, clips: view === "clips" ? clips.length : clips.filter(clip => clipShotIds(clip).some(id => sceneIds.has(id))).length, seconds: formatSeconds(scopeShots.reduce((sum, shot) => sum + duration(shot), 0)) })}{view === "shots" && crossSceneCount > 0 && <span className="block mt-1">{t("director.atomic.crossSceneIncluded", { count: crossSceneCount })}</span>}</p>
+                <h2 className="m-0 text-lg font-semibold">{sceneFilter === "__unassigned__" ? t("director.atomic.unassignedScene") : sceneDirectory.scenes.find(scene => scene.id === sceneFilter)?.title || (view === "clips" ? t("director.atomic.view.clips") : t("director.atomic.allScenes"))}</h2>
+                <p className="m-0 text-xs text-muted-foreground">{t("director.atomic.counts", { shots: scopeShots.length, clips: visibleClipStates.length, seconds: formatSeconds(scopeShots.reduce((sum, shot) => sum + duration(shot), 0)) })}{view === "shots" && crossSceneCount > 0 && <span className="block mt-1">{t("director.atomic.crossSceneIncluded", { count: crossSceneCount })}</span>}</p>
             </div>
             <div className="ml-auto flex flex-wrap items-center gap-3">
                 <div className="flex items-center gap-1" role="tablist" aria-label={t("director.atomic.views")}>{(["shots", "clips"] as const).map(key => <button key={key} type="button" role="tab" aria-selected={view === key} onClick={() => setView(key)} className={`flex items-center gap-1.5 border-b-2 px-1 py-1 text-sm ${view === key ? "border-primary font-medium text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}`}>{key === "shots" ? <Clapperboard className="size-4" /> : <Layers3 className="size-4" />}{t("director.atomic.view." + key)}</button>)}</div>
@@ -228,31 +269,38 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                 <Button type="text" size="small" icon={<WandSparkles className="size-3.5" />} onClick={() => onDiscuss(activeId || undefined)}>{t("director.studio.collaborate")}</Button>
             </div>
         </header>
+        {(shots.length > 0 || sceneDirectory.scenes.length > 0) && <nav className={`storyboard-scenes${sceneDirectoryCollapsed ? " is-collapsed" : ""}`} data-scene-directory-collapsed={sceneDirectoryCollapsed} aria-label={t("director.atomic.sceneNavigation")}>
+            <button type="button" className="storyboard-scene-toggle" aria-label={t("director.atomic.sceneNavigation")} aria-expanded={!sceneDirectoryCollapsed} title={t("director.atomic.sceneNavigation")} onClick={() => setSceneDirectoryCollapsed(value => !value)}>
+                {sceneDirectoryCollapsed ? <ChevronRight className="size-4" aria-hidden="true" /> : <><ChevronLeft className="size-4" aria-hidden="true" /><span>{t("director.atomic.sceneNavigation")}</span></>}
+            </button>
+            {!sceneDirectoryCollapsed && <>
+            <h2 className="storyboard-scene-label">{t("director.atomic.sceneNavigation")}</h2>
+            <button type="button" aria-pressed={!sceneFilter} onClick={() => setSceneFilter("")}>{t("director.atomic.allScenes")}<span>{shots.length}</span></button>
+            {sceneDirectory.scenes.map(scene => <button type="button" key={scene.id} aria-pressed={sceneFilter === scene.id} onClick={() => { setSceneFilter(scene.id); if (!scene.shotIds.includes(activeId) && scene.shotIds[0]) setSelectedId(scene.shotIds[0]); }}>{scene.title}<span>{scene.shotIds.length}</span></button>)}
+            {sceneDirectory.unassigned.length > 0 && <button type="button" aria-pressed={sceneFilter === "__unassigned__"} onClick={() => { setSceneFilter("__unassigned__"); if (!sceneDirectory.unassigned.includes(activeId)) setSelectedId(sceneDirectory.unassigned[0]); }}>{t("director.atomic.unassignedScene")}<span>{sceneDirectory.unassigned.length}</span></button>}
+            </>}
+        </nav>}
         {view === "clips" ? <div className="storyboard-clip-editor space-y-3">
             {/* 编译状态与编译入口：Clip 组合是「保存 → 校验 → 编译 → 同步」的落点，状态与按钮放同一行，逐 Clip 显示。 */}
             <div className="flex flex-wrap items-center justify-between gap-3">
                 <p className="text-sm text-muted-foreground">{t(subjectAssembly ? "director.atomic.packagingHint" : "director.atomic.legacyPackagingHint")}</p>
                 <div className="flex shrink-0 items-center gap-3">
-                    {clipStates.length > 0 && <span className="text-xs text-muted-foreground">{compileBusy ? t("director.atomic.compileInFlight") : t("director.atomic.compileSummary", compileCounts) + (compileCounts.blocked ? " · " + t("director.atomic.blockedCompileCount", { count: compileCounts.blocked }) : "") + (compileCounts.recorded ? " · " + t("director.atomic.recordedCompileCount", { count: compileCounts.recorded }) : "") + (compileCounts.running > 0 ? " · " + t("director.atomic.compileRunning", { running: compileCounts.running }) : "")}</span>}
-                    <Button size="small" type="primary" icon={<WandSparkles className="size-3.5" />} loading={compileBusy} disabled={busy || compileBusy || !clipStates.length || !onCompile} onClick={() => onCompile?.()}>{compilePending ? t("drama.production.recoverReceipt") : t("director.atomic.compileAction")}</Button>
+                    {visibleClipStates.length > 0 && <span className="text-xs text-muted-foreground">{compileBusy ? t("director.atomic.compileInFlight") : t("director.atomic.compileSummary", compileCounts) + (compileCounts.blocked ? " · " + t("director.atomic.blockedCompileCount", { count: compileCounts.blocked }) : "") + (compileCounts.recorded ? " · " + t("director.atomic.recordedCompileCount", { count: compileCounts.recorded }) : "") + (compileCounts.running > 0 ? " · " + t("director.atomic.compileRunning", { running: compileCounts.running }) : "")}</span>}
+                    <Button size="small" type="primary" icon={<WandSparkles className="size-3.5" />} loading={compileBusy} disabled={busy || compileBusy || !visibleClipStates.length || !onCompile || sceneFilter === "__unassigned__" || !sceneCompileAvailable} title={sceneFilter === "__unassigned__" ? t("director.atomic.compileUnassignedHint") : undefined} onClick={() => onCompile?.(sceneFilter && sceneFilter !== "__unassigned__" ? sceneFilter : undefined)}>{compilePending ? t("drama.production.recoverReceipt") : sceneFilter ? sceneFilter === "__unassigned__" ? t("director.atomic.compileAction") : t("director.atomic.compileSceneAction") : t("director.atomic.compileAction")}</Button>
                 </div>
             </div>
             {compileError && <Alert type="error" showIcon message={t("director.atomic.compileFailed")} description={compileError} style={{ whiteSpace: "pre-line" }} />}
             {compileNotice && <Alert type="success" showIcon message={compileNotice} style={{ whiteSpace: "pre-line" }} />}
-            {clipStates.length > 0 && <div className="flex flex-wrap items-center gap-1.5" aria-label={t("director.atomic.compileStatus")}>
+            {visibleClipStates.length > 0 && <div className="flex flex-wrap items-center gap-1.5" aria-label={t("director.atomic.compileStatus")}>
                 <span className="mr-1 text-xs text-muted-foreground">{t("director.atomic.compileStatus")}</span>
-                {clipStates.map((item, index) => <span key={item.id} className="flex items-center gap-1.5 rounded-md border border-border px-2 py-0.5 text-xs">
-                    <button type="button" onClick={() => onClip(item.id)} className="text-muted-foreground hover:text-foreground">{t("director.studio.clipNumber", { number: index + 1 })}</button>
+                {visibleClipStates.map(item => <span key={item.id} className="flex items-center gap-1.5 rounded-md border border-border px-2 py-0.5 text-xs">
+                    <button type="button" onClick={() => onClip(item.id)} className="text-muted-foreground hover:text-foreground">{t("director.studio.clipNumber", { number: clips.findIndex(clip => String(clip.id) === item.id) + 1 })}</button>
                     <Tag className="!mr-0 !text-[11px] !leading-4" color={item.color}>{item.label}</Tag>
                 </span>)}
             </div>}
-            {clipEditor}
+            {sceneFilter && !clipEditorScope.editable && <Alert type="info" showIcon message={t("director.atomic.clipPartitionScopeHint")} />}
+            {clipEditor(clipEditorScope)}
         </div> : !shots.length ? <div className="space-y-3"><p className="text-sm text-muted-foreground">{t("director.workspace.noShots")}</p>{subjectAssembly && onEditShot && <ShotOperations source={source} busy={busy} onEdit={onEditShot} onSelect={selectShot} />}</div> : <>
-            <nav className="storyboard-scenes" aria-label={t("director.atomic.sceneNavigation")}><h2 className="storyboard-scene-label">{t("director.atomic.sceneNavigation")}</h2>
-                <button type="button" aria-pressed={!sceneFilter} onClick={() => setSceneFilter("")}>{t("director.atomic.allScenes")}<span>{shots.length}</span></button>
-                {sceneDirectory.scenes.map(scene => <button type="button" key={scene.id} aria-pressed={sceneFilter === scene.id} onClick={() => { setSceneFilter(scene.id); if (!storyboardSceneShotIds(source, scene.id).has(activeId) && scene.shotIds[0]) setSelectedId(scene.shotIds[0]); }}>{scene.title}<span>{scene.shotIds.length}</span></button>)}
-                {sceneDirectory.unassigned.length > 0 && <button type="button" aria-pressed={sceneFilter === "__unassigned__"} onClick={() => { setSceneFilter("__unassigned__"); if (!sceneDirectory.unassigned.includes(activeId)) setSelectedId(sceneDirectory.unassigned[0]); }}>{t("director.atomic.unassignedScene")}<span>{sceneDirectory.unassigned.length}</span></button>}
-            </nav>
             <div className="storyboard-columns">
             <div className="storyboard-list-panel">
             {/* 镜头检索并到时间线上方：原先左侧那份「镜头列表」与这条时间线是同一批镜头的两套入口，已合并（只保留时间线）。 */}
@@ -313,7 +361,46 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                     <section className="border-t border-border pt-4" data-production-section="shot-state" tabIndex={-1}><h3 className="text-sm font-medium">{t("director.atomic.state")}</h3><p className="mt-1 text-xs text-muted-foreground">{t(subjectAssembly ? "director.atomic.derivedState" : "director.atomic.legacyStateHint")}</p>{!subjectAssembly && shotStateFields && <div className="mt-3" data-shot-state>{shotStateFields}</div>}{continuityActions && <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-border pb-3 text-xs text-muted-foreground" data-shot-continuity-actions>{continuityActions}</div>}
                         {records(state?.start).length + records(state?.end).length > 0 ? <div className="mt-3 grid gap-4 ">{(["start", "end"] as const).map(phase => <div key={phase}><p className="text-[11px] font-medium text-muted-foreground">{t("director.atomic.statePhase." + phase)}</p>{records(state?.[phase]).map(item => <div key={item.factId} className="mt-2"><p className="text-[10px] text-muted-foreground">{item.subjectId ? subjectDisplayName(source, String(item.subjectId)) : item.property}</p><p className="text-xs leading-5">{humanState.value(String(item.factId), item.value)}</p></div>)}{!records(state?.[phase]).length && <p className="mt-1 text-xs text-muted-foreground">{t("director.atomic.noState")}</p>}</div>)}</div> : <p className="mt-3 text-xs text-muted-foreground">{t("director.atomic.noState")}</p>}{records(state?.unresolved).length > 0 && <p className="mt-3 text-xs text-amber-600">{t("director.atomic.stateIssue")} · {records(state?.unresolved).map(item => humanState.fact(String(item.factId))).join(" · ")}</p>}</section>
 
-                    <section data-production-section="shot-references" tabIndex={-1}><h3 className="flex items-center gap-2 text-sm font-medium"><ImageIcon className="size-4" />{t("director.atomic.references")}</h3><p className="mt-1 text-xs text-muted-foreground">{t(subjectAssembly ? "director.atomic.referencesHint" : "director.atomic.legacyReferencesHint")}</p>{reading ? <p className="mt-3 text-xs text-muted-foreground">{t("director.atomic.loading")}</p> : workbenchError ? <div className="mt-3 text-xs"><p className="text-muted-foreground">{workbenchError}</p><Button size="small" type="text" onClick={() => setRetry(value => value + 1)}>{t("director.atomic.retry")}</Button></div> : <div className="mt-3 space-y-3">{references.map(reference => <div key={`${reference.subjectId}:${reference.id}`} className="flex gap-3">{reference.resolved?.storageKey ? <img src={backendMediaUrl(reference.resolved.storageKey)} alt={reference.displayName || subjectDisplayName(source, reference.subjectId)} className="h-16 w-16 shrink-0 rounded object-contain" loading="lazy" /> : <span className="flex h-16 w-16 shrink-0 items-center justify-center text-muted-foreground"><ImageIcon className="size-5" /></span>}<div className="min-w-0"><p className="text-xs font-medium">{reference.displayName || subjectDisplayName(source, reference.subjectId)}</p><p className="mt-1 text-[11px] text-muted-foreground">{(reference.provides || []).map((purpose: string) => t(`director.crud.purpose.${purpose}`, { defaultValue: /[\u4e00-\u9fff]/.test(purpose) ? purpose : t("director.crud.otherPurpose") })).join(" · ")}</p><p className="mt-1 text-[11px] text-muted-foreground">{t(!subjectAssembly ? "director.atomic.legacyReferenceBinding" : reference.selection?.mode === "node_selection" ? "director.atomic.followNodeReference" : reference.selection?.mode === "selected_result" ? "director.workspace.selectedHistory" : "director.workspace.followLatest")}</p><ReferenceNodeLink sourceNode={reference.sourceNode} /><button type="button" onClick={() => onNavigate("assets", { kind: "asset", id: subjectAssembly ? reference.subjectId : reference.id })} className="mt-1 inline-flex items-center gap-0.5 text-[11px] text-primary hover:underline">{t("director.atomic.viewReference")}<ArrowRight className="size-3" /></button></div></div>)}{!references.length && <p className="text-xs text-muted-foreground">{t("director.atomic.noResolvedReferences")}</p>}</div>}</section>
+                    {subjectAssembly && selected && <section className="border-t border-border pt-4" data-shot-picture-binding-editor>
+                        <h3 className="text-sm font-medium">{t("director.atomic.references")}</h3>
+                        <p className="mt-1 text-xs text-muted-foreground">{t("director.atomic.referencesHint")}</p>
+                        <div className="mt-3 space-y-3">{records(selected.subject_usages).map((usage, index) => {
+                            const subject = subjects.find(item => String(item.id) === String(usage.subjectId));
+                            const resolved = resolveSubjectPictureBindingIds(subject, usage);
+                            const pictureMode = shotPictureBindingMode(usage);
+                            return <div key={`${usage.subjectId}:${index}`} className="grid gap-2 text-xs">
+                                <span>{subjectDisplayName(source, String(usage.subjectId))}</span>
+                                <Select value={pictureMode} disabled={busy || reading || !subject || !onSaveShotPatch}
+                                    options={["default", "explicit"].map(mode => ({ value: mode, label: t(`director.workspace.pictureBindingMode${mode === "default" ? "Default" : "Explicit"}`) }))}
+                                    onChange={mode => {
+                                        const nextUsage = setShotPictureBindingMode(subject, usage, mode as "default" | "explicit");
+                                        const subject_usages = records(selected.subject_usages).map((item, itemIndex) => itemIndex === index ? nextUsage : item);
+                                        void onSaveShotPatch?.(activeId, { subject_usages });
+                                    }} />
+                                <Select mode="multiple" value={resolved.bindingIds} disabled={busy || reading || !subject || !onSaveShotPatch || pictureMode === "default"}
+                                    options={records(subject?.pictureBindings).map(binding => ({ value: String(binding.id), label: pictureBindingLabel(binding) }))}
+                                    onChange={pictureBindingIds => {
+                                        const subject_usages = records(selected.subject_usages).map((item, itemIndex) => itemIndex === index ? setShotPictureBindingIds(item, pictureBindingIds) : item);
+                                        void onSaveShotPatch?.(activeId, { subject_usages });
+                                    }} />
+                                {pictureMode === "default" ? <p className="text-[11px] text-muted-foreground">{t("director.workspace.pictureBindingDefaultHint")}</p> : !resolved.bindingIds.length && <p className="text-[11px] text-muted-foreground">{t("director.workspace.pictureBindingExplicitEmptyHint")}</p>}
+                            </div>;
+                        })}</div>
+                        <p className="mt-2 text-[11px] text-muted-foreground">{t("director.atomic.emptyBindingUsesDefault")}</p>
+                    </section>}
+                    {!subjectAssembly && selected && <section className="border-t border-border pt-4" data-legacy-shot-reference-editor>
+                        <h3 className="text-sm font-medium">{t("director.atomic.editShotReferences")}</h3>
+                        <div className="mt-3 space-y-3">
+                            <label className="grid gap-1 text-xs"><span>{t("director.atomic.ordinaryImageReferences")}</span>
+                                <Select mode="multiple" value={assetIds} disabled={busy || reading || !onUpdateLegacyShotReferences} options={ordinaryAssetOptions}
+                                    onChange={nextAssetIds => void onUpdateLegacyShotReferences?.(activeId, nextAssetIds, selectedKeyframeAssetId || null)} />
+                            </label>
+                            <label className="grid gap-1 text-xs"><span>{t("director.atomic.keyframeReferences")}</span>
+                                <Select allowClear value={selectedKeyframeAssetId || undefined} disabled={busy || reading || !onUpdateLegacyShotReferences} options={assetOptions}
+                                    onChange={nextAssetId => void onUpdateLegacyShotReferences?.(activeId, assetIds, nextAssetId || null)} />
+                            </label>
+                        </div>
+                    </section>}                    <section data-production-section="shot-references" tabIndex={-1}><h3 className="flex items-center gap-2 text-sm font-medium"><ImageIcon className="size-4" />{t("director.atomic.references")}</h3><p className="mt-1 text-xs text-muted-foreground">{t(subjectAssembly ? "director.atomic.referencesHint" : "director.atomic.legacyReferencesHint")}</p>{reading ? <p className="mt-3 text-xs text-muted-foreground">{t("director.atomic.loading")}</p> : workbenchError ? <div className="mt-3 text-xs"><p className="text-muted-foreground">{workbenchError}</p><Button size="small" type="text" onClick={() => setRetry(value => value + 1)}>{t("director.atomic.retry")}</Button></div> : <div className="mt-3 space-y-3">{references.map(reference => <div key={`${reference.subjectId}:${reference.id}`} className="flex gap-3">{reference.resolved?.storageKey ? <img src={backendMediaUrl(reference.resolved.storageKey)} alt={reference.displayName || subjectDisplayName(source, reference.subjectId)} className="h-16 w-16 shrink-0 rounded object-contain" loading="lazy" /> : <span className="flex h-16 w-16 shrink-0 items-center justify-center text-muted-foreground"><ImageIcon className="size-5" /></span>}<div className="min-w-0"><p className="text-xs font-medium">{reference.displayName || subjectDisplayName(source, reference.subjectId)}</p><p className="mt-1 text-[11px] text-muted-foreground">{(reference.provides || []).map((purpose: string) => t(`director.crud.purpose.${purpose}`, { defaultValue: /[\u4e00-\u9fff]/.test(purpose) ? purpose : t("director.crud.otherPurpose") })).join(" · ")}</p><p className="mt-1 text-[11px] text-muted-foreground">{t(!subjectAssembly ? "director.atomic.legacyReferenceBinding" : reference.selection?.mode === "node_selection" ? "director.atomic.followNodeReference" : reference.selection?.mode === "selected_result" ? "director.workspace.selectedHistory" : "director.workspace.followLatest")}</p><ReferenceNodeLink sourceNode={reference.sourceNode} /><button type="button" onClick={() => onNavigate("assets", { kind: "asset", id: subjectAssembly ? reference.subjectId : reference.id })} className="mt-1 inline-flex items-center gap-0.5 text-[11px] text-primary hover:underline">{t("director.atomic.viewReference")}<ArrowRight className="size-3" /></button></div></div>)}{!references.length && <p className="text-xs text-muted-foreground">{t("director.atomic.noResolvedReferences")}</p>}</div>}</section>
                     {keyframes.length > 0 && <section className="border-t border-border pt-4"><h3 className="text-sm font-medium">{t("director.atomic.keyframeReferences")}</h3><div className="mt-3 space-y-3">{keyframes.map(frame => <div key={frame.id} className="flex gap-3">{frame.resolved?.storageKey ? <img src={backendMediaUrl(frame.resolved.storageKey)} alt={t("director.atomic.anchor." + frame.anchor)} className="h-16 w-16 shrink-0 rounded object-contain" loading="lazy" /> : <span className="flex h-16 w-16 shrink-0 items-center justify-center text-muted-foreground"><ImageIcon className="size-5" /></span>}<div className="min-w-0"><p className="text-xs font-medium">{t("director.atomic.anchor." + frame.anchor)}</p><p className="mt-1 text-[11px] text-muted-foreground">{frame.requiredForSubmission ? t("director.atomic.requiredAnchor") : t("director.atomic.designAnchor")}</p>{frame.anchor === "at_frame" && <p className="mt-1 text-[11px] text-muted-foreground">{frame.localFrame}f</p>}<ReferenceNodeLink sourceNode={frame.sourceNode} /></div></div>)}</div></section>}
                     <details className="border-t border-border pt-4"><summary className="cursor-pointer text-sm font-medium">{t("director.atomic.compiledOutput")}</summary><p className="mt-2 text-xs text-muted-foreground">{t(compiled ? "director.atomic.outputHint" : "director.atomic.previousOutput")}</p>{artifact ? <pre className="mt-3 max-h-80 overflow-auto whitespace-pre-wrap break-words text-xs leading-5">{artifact.prompt}</pre> : <p className="mt-3 text-xs text-muted-foreground">{t("director.atomic.pendingCompile")}</p>}<Button className="mt-2" size="small" type="text" disabled={!clip} onClick={() => clip && onClip(String(clip.id))}>{t("director.atomic.openClip")}<ArrowRight className="size-3" /></Button></details>
                 </aside>
@@ -343,9 +430,13 @@ function ClipBoundaryHandle({ pairIndex, leftClipId, rightClipId, leftIds, right
 }) {
     const { t } = useTranslation();
     // 拖动状态全部留在本组件：move 期间不触发父级重渲染（被移动镜头的高亮直接操作芯片 DOM）。
-    const [drag, setDrag] = useState<{ count: number; edges: Array<{ count: number; viewport: number; content: number }>; guide: number } | null>(null);
+    type DragState = { count: number; edges: Array<{ count: number; viewport: number; content: number }>; guide: number };
+    const [drag, setDrag] = useState<DragState | null>(null);
     const [merge, setMerge] = useState<{ profileSourceId: string } | null>(null);
-    const dragMoved = useRef(false);
+    const activeDrag = useRef<DragState | null>(null);
+    const activePointerId = useRef<number | null>(null);
+    const dragPointerY = useRef<number | null>(null);
+    const autoScrollFrame = useRef<number | null>(null);
     const leftCount = leftIds.length, rightCount = rightIds.length, allIds = [...leftIds, ...rightIds];
     const movingIds = (count: number) => count < leftCount ? leftIds.slice(count) : allIds.slice(leftCount, count);
     const leftNow = drag ? drag.count : leftCount;
@@ -358,37 +449,91 @@ function ClipBoundaryHandle({ pairIndex, leftClipId, rightClipId, leftIds, right
             element.classList.toggle("ring-primary/40", on);
         }
     };
-    const begin = (event: ReactPointerEvent<HTMLDivElement>) => {
-        if (disabled || event.button !== 0 || allIds.length < 2) return;
+    const updateDragAt = (position: number) => {
+        const current = activeDrag.current;
+        if (!current) return;
         const elements = allIds.map(id => chips.current.get(id));
-        if (elements.some(element => !element)) return; // 搜索过滤掉边界上的镜头时不做几何吸附，右键仍可用
+        const trackElement = track.current;
+        const edges = trackElement && elements.every(Boolean)
+            ? clipBoundaryPositions(elements.map(item => item!.getBoundingClientRect()), boundaryCounts(leftCount, rightCount), trackElement.getBoundingClientRect(), vertical ? trackElement.scrollTop : trackElement.scrollLeft, vertical)
+            : current.edges;
+        const count = nearestBoundaryCount(position, edges.map(item => ({ count: item.count, edge: item.viewport }))) ?? current.count;
+        const target = edges.find(item => item.count === count);
+        if (!target) return;
+        const next = { count, edges, guide: target.content };
+        const edgesChanged = edges.length !== current.edges.length || edges.some((edge, index) => edge.viewport !== current.edges[index]?.viewport || edge.content !== current.edges[index]?.content);
+        if (count !== current.count) highlight(movingIds(count));
+        activeDrag.current = next;
+        if (count !== current.count || next.guide !== current.guide || edgesChanged) setDrag(next);
+    };
+    const stopAutoScroll = () => {
+        if (autoScrollFrame.current !== null) {
+            window.cancelAnimationFrame(autoScrollFrame.current);
+            autoScrollFrame.current = null;
+        }
+    };
+    const scheduleAutoScroll = () => {
+        if (!vertical || autoScrollFrame.current !== null) return;
+        autoScrollFrame.current = window.requestAnimationFrame(() => {
+            autoScrollFrame.current = null;
+            const trackElement = track.current;
+            const pointerY = dragPointerY.current;
+            if (!activeDrag.current || !trackElement || pointerY === null) return;
+            const rect = trackElement.getBoundingClientRect();
+            const delta = clipBoundaryAutoScrollDelta(pointerY, rect, trackElement.scrollTop, trackElement.scrollHeight, trackElement.clientHeight);
+            if (!delta) return;
+            const before = trackElement.scrollTop;
+            const maxScrollTop = Math.max(0, trackElement.scrollHeight - trackElement.clientHeight);
+            trackElement.scrollTop = Math.min(Math.max(0, before + delta), maxScrollTop);
+            if (trackElement.scrollTop === before) return;
+            updateDragAt(pointerY);
+            scheduleAutoScroll();
+        });
+    };
+    useEffect(() => () => {
+        if (autoScrollFrame.current !== null) window.cancelAnimationFrame(autoScrollFrame.current);
+    }, []);
+    const begin = (event: ReactPointerEvent<HTMLDivElement>) => {
+        if (disabled || allIds.length < 2) return false;
+        const elements = allIds.map(id => chips.current.get(id));
+        if (elements.some(element => !element)) return false; // 搜索过滤掉边界上的镜头时不做几何吸附，右键仍可用
         const trackElement = track?.current ?? event.currentTarget.closest("[data-clip-track]");
-        if (!trackElement) return;
+        if (!trackElement) return false;
         const rects = elements.map(element => element!.getBoundingClientRect());
         const trackRect = trackElement.getBoundingClientRect();
         // 引导线吸附到「未来边界」的真实位置：相邻两枚芯片间隙的中点（含跨组的那条缝）。
         const edges = clipBoundaryPositions(rects, boundaryCounts(leftCount, rightCount), trackRect, vertical ? trackElement.scrollTop : trackElement.scrollLeft, vertical);
-        dragMoved.current = false;
-        event.currentTarget.setPointerCapture(event.pointerId);
+        stopAutoScroll();
         highlight(movingIds(leftCount));
-        setDrag({ count: leftCount, edges, guide: edges.find(item => item.count === leftCount)!.content });
+        const initial = { count: leftCount, edges, guide: edges.find(item => item.count === leftCount)!.content };
+        activeDrag.current = initial;
+        dragPointerY.current = vertical ? event.clientY : null;
+        setDrag(initial);
+        return true;
     };
     const move = (event: ReactPointerEvent<HTMLDivElement>) => {
-        if (!drag) return;
-        const elements = allIds.map(id => chips.current.get(id));
-        const element = track.current;
-        const edges = element && elements.every(Boolean) ? clipBoundaryPositions(elements.map(item => item!.getBoundingClientRect()), boundaryCounts(leftCount, rightCount), element.getBoundingClientRect(), vertical ? element.scrollTop : element.scrollLeft, vertical) : drag.edges;
-        const count = nearestBoundaryCount(vertical ? event.clientY : event.clientX, edges.map(item => ({ count: item.count, edge: item.viewport }))) ?? drag.count;
-        const guide = edges.find(item => item.count === count)!.content;
-        if (count !== drag.count) { dragMoved.current = true; highlight(movingIds(count)); setDrag({ ...drag, edges, count, guide }); }
-        else if (guide !== drag.guide) setDrag({ ...drag, edges, guide });
+        if (!activeDrag.current) return;
+        const position = vertical ? event.clientY : event.clientX;
+        if (vertical) dragPointerY.current = event.clientY;
+        updateDragAt(position);
+        scheduleAutoScroll();
     };
-    const finish = () => {
-        if (!drag) return;
-        const count = drag.count;
+    const finish = (event: ReactPointerEvent<HTMLDivElement>) => {
+        stopAutoScroll();
+        if (activeDrag.current) updateDragAt(vertical ? event.clientY : event.clientX);
+        dragPointerY.current = null;
+        const current = activeDrag.current;
+        activeDrag.current = null;
         setDrag(null); highlight([]);
-        if (count !== leftCount) void onCommit(count);
+        if (current && current.count !== leftCount) void onCommit(current.count);
     };
+    const cancel = () => {
+        stopAutoScroll();
+        dragPointerY.current = null;
+        activeDrag.current = null;
+        setDrag(null); highlight([]);
+    };
+    const pointerHandlers = createClipBoundaryPointerHandlers<ReactPointerEvent<HTMLDivElement>>(activePointerId, { begin, move, finish, cancel });
     const items = [
         { key: "to-left", label: t("director.atomic.clipBoundaryToLeft", { clip: pairIndex + 1 }), disabled: rightCount <= 1 },
         { key: "to-right", label: t("director.atomic.clipBoundaryToRight", { clip: pairIndex + 2 }), disabled: leftCount <= 1 },
@@ -396,29 +541,41 @@ function ClipBoundaryHandle({ pairIndex, leftClipId, rightClipId, leftIds, right
         { key: "merge", label: t("director.atomic.clipBoundaryMerge") },
     ];
     const mergedDuration = clipDurationSeconds(allIds, shots, fps);
-    const guide = drag && track.current ? createPortal(
-        <div className={`pointer-events-none absolute z-20 ${vertical ? "inset-x-0 border-t-2 border-primary" : "inset-y-0"}`} style={vertical ? { top: drag.guide } : { left: drag.guide }} data-clip-boundary-guide>
-            <span className="absolute inset-y-0 -ml-px w-0.5 bg-primary/80" />
-            <span data-clip-boundary-badge className={`absolute top-0 ${vertical ? "left-2" : "left-0 -translate-x-1/2"} whitespace-nowrap rounded bg-primary px-1.5 py-0.5 text-xs text-primary-foreground`}>{t("director.atomic.clipBoundaryBadge", { left: leftNow, leftSeconds: secondsOf(allIds.slice(0, leftNow)), right: allIds.length - leftNow, rightSeconds: secondsOf(allIds.slice(leftNow)) })}</span>
-        </div>, track.current) : null;
-    return <>{guide}<Dropdown trigger={vertical ? ["contextMenu", "click"] : ["contextMenu"]} disabled={disabled} menu={{ items, onClick: ({ key }) => {
+    const handleMenuClick = ({ key }: { key: string }) => {
         if (key === "to-left" && rightCount > 1) void onCommit(leftCount + 1);
         else if (key === "to-right" && leftCount > 1) void onCommit(leftCount - 1);
         else if (key === "merge") {
             if (!profileConflict && !outsideClipWindow(mergedDuration)) void onMerge(leftClipId);
             else setMerge({ profileSourceId: leftClipId });
         }
-    } }}>
-        <div role="separator" tabIndex={disabled ? -1 : 0} aria-orientation={vertical ? "horizontal" : "vertical"} aria-label={t("director.atomic.clipBoundary")} title={disabled ? undefined : t("director.atomic.clipBoundaryHint")}
+    };
+    const guide = drag && track.current ? createPortal(
+        <div className={`pointer-events-none absolute z-20 ${vertical ? "inset-x-0 border-t-2 border-primary" : "inset-y-0"}`} style={vertical ? { top: drag.guide } : { left: drag.guide }} data-clip-boundary-guide>
+            <span className="absolute inset-y-0 -ml-px w-0.5 bg-primary/80" />
+            <span data-clip-boundary-badge className={`absolute top-0 ${vertical ? "left-2" : "left-0 -translate-x-1/2"} inline-flex items-center gap-2 whitespace-nowrap rounded bg-primary px-1.5 py-0.5 text-xs text-primary-foreground`}>
+                <span data-clip-owner="left">{t("director.atomic.clipHeading", { number: pairIndex + 1 })} · {t("director.atomic.clipSummary", { count: leftNow, seconds: secondsOf(allIds.slice(0, leftNow)) })}</span>
+                <span aria-hidden="true">|</span>
+                <span data-clip-owner="right">{t("director.atomic.clipHeading", { number: pairIndex + 2 })} · {t("director.atomic.clipSummary", { count: allIds.length - leftNow, seconds: secondsOf(allIds.slice(leftNow)) })}</span>
+            </span>
+        </div>, track.current) : null;
+    return <>{guide}
+    {vertical ? <div className="storyboard-boundary group" data-clip-boundary={`${pairIndex + 1}-${pairIndex + 2}`}>
+        <div aria-hidden="true" data-clip-boundary-grip className={`storyboard-boundary-grip ${drag ? "is-dragging" : ""} ${disabled ? "is-disabled" : ""}`} {...pointerHandlers}>
+            <span className="storyboard-boundary-grip-icon"><GripHorizontal className="size-4" /></span>
+        </div>
+        <Dropdown trigger={["contextMenu", "click"]} disabled={disabled} menu={{ items, onClick: handleMenuClick }}>
+            <button type="button" disabled={disabled} aria-label={t("director.atomic.clipBoundary")} title={disabled ? undefined : t("director.atomic.clipBoundaryHint")} aria-haspopup="menu" className="storyboard-boundary-menu">
+                {t("director.atomic.adjustBoundary")} <span aria-hidden="true">⌄</span>
+            </button>
+        </Dropdown>
+    </div> : <Dropdown trigger={["contextMenu"]} disabled={disabled} menu={{ items, onClick: handleMenuClick }}>
+        <div role="separator" tabIndex={disabled ? -1 : 0} aria-orientation="vertical" aria-label={t("director.atomic.clipBoundary")} title={disabled ? undefined : t("director.atomic.clipBoundaryHint")}
             data-clip-boundary={`${pairIndex + 1}-${pairIndex + 2}`}
-            onPointerDown={begin} onPointerMove={move} onPointerUp={finish} onPointerCancel={() => { setDrag(null); highlight([]); dragMoved.current = false; }}
-            onClickCapture={event => { if (dragMoved.current) { event.preventDefault(); event.stopPropagation(); dragMoved.current = false; } }}
-            onKeyDown={event => { if (vertical && !disabled && ["Enter", " "].includes(event.key)) { event.preventDefault(); event.currentTarget.click(); } }}
-            className={vertical ? `storyboard-boundary group ${disabled ? "" : "cursor-row-resize"}` : `group relative flex w-3 shrink-0 touch-none items-stretch justify-center ${disabled ? "cursor-default" : "cursor-col-resize"}`}>
-            {vertical && <span className="text-xs text-muted-foreground">⋮ {t("director.atomic.adjustBoundary")} <span aria-hidden="true">⌄</span></span>}
+            {...pointerHandlers}
+            className={`group relative flex w-3 shrink-0 touch-none items-stretch justify-center ${disabled ? "cursor-default" : "cursor-col-resize"}`}>
             <span className={`my-1 w-[3px] rounded-full transition-colors ${drag ? "bg-primary" : disabled ? "bg-border" : "bg-border group-hover:bg-primary/60"}`} />
         </div>
-    </Dropdown>
+    </Dropdown>}
         <Modal open={Boolean(merge)} title={t("director.atomic.clipBoundaryMergeTitle", { left: pairIndex + 1, right: pairIndex + 2 })} okText={t("director.atomic.clipBoundaryMergeOk")} cancelText={t("common.cancel")}
             onCancel={() => setMerge(null)} onOk={async () => { const chosen = merge?.profileSourceId; setMerge(null); await onMerge(chosen); }}>
             <p>{t("director.atomic.clipBoundaryMergeBody", { shots: allIds.length, duration: formatSeconds(mergedDuration) })}</p>

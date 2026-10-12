@@ -20,6 +20,7 @@ import { SceneProductionPanel } from "./scene-production-panel";
 import { H3_STYLE_TEMPLATES } from "../../../../canvas-agent/src/plugins/minimax-h3/style-templates";
 import { subjectShotWindows } from "@basketikun/canvas-agent/drama/subject-assembly";
 import { SubjectShotEditor } from "./subject-shot-editor";
+import { keyframeBindingState } from "./keyframe-binding-state";
 import { SubjectStoryboardWorkbench, type StoryboardViewMemory } from "./subject-storyboard-workbench";
 import { productionWorkbenchValue, subjectDisplayName, subjectDescriptionField } from "./subject-shot-draft";
 import { ReferenceNodeLink } from "./reference-node-link";
@@ -72,9 +73,14 @@ function SubjectPictureBindings({ subject, canvasNodes, canvasId, owner, assets,
   const ownerKey = JSON.stringify(owner);
   const sources = canvasNodes.filter(node => ["image", "character", "scene", "prop"].includes(String(node.type)) || node.type === "config" && node.metadata?.smart === true && (node.metadata?.generationMode || "image") === "image");
   const nodeChoiceValid = canBindSubjectImage(nodeChoice, canvasId, canvasNodes, bindings);
+  const selectedSourceNode = nodeChoice?.projectId === canvasId ? sources.find(node => node.id === nodeChoice.nodeId) : undefined;
+  const characterSourceImages = selectedSourceNode?.type === "character" ? records(selectedSourceNode.metadata?.characterImages).flatMap((image, index) => {
+    const storageKey = String(image.storageKey || "").trim();
+    return storageKey ? [{ image, index, storageKey, referenceId: `${selectedSourceNode.id}:character-image:${storageKey}` }] : [];
+  }) : [];
   useEffect(() => { if (nodeChoice && !nodeChoiceValid) setNodeChoice(undefined); }, [nodeChoice, nodeChoiceValid]);
   const bindingStamp = JSON.stringify(bindings);
-  const mediaStamp = JSON.stringify(sources.filter(node => bindings.some(binding => binding.sourceNode?.nodeId === node.id)).map(node => [node.id, node.metadata?.images, node.metadata?.storageKey, node.metadata?.smartImageReferenceSelection]));
+  const mediaStamp = JSON.stringify(sources.filter(node => bindings.some(binding => binding.sourceNode?.nodeId === node.id)).map(node => [node.id, node.metadata?.images, node.metadata?.characterImages, node.metadata?.storageKey, node.metadata?.smartImageReferenceSelection]));
   useEffect(() => {
     if (!expanded) return;
     let current = true;
@@ -88,11 +94,19 @@ function SubjectPictureBindings({ subject, canvasNodes, canvasId, owner, assets,
     return () => { current = false; };
   }, [expanded, ownerKey, subject.id, bindingStamp, mediaStamp, referenceVersion, retry]);
   const add = async () => {
-    if (!nodeChoice || !nodeChoiceValid) return;
+    if (!nodeChoice || !nodeChoiceValid || selectedSourceNode?.type === "character") return;
     const bindingId = `picture:${subject.id}:${encodeURIComponent(nodeChoice.projectId)}:${encodeURIComponent(nodeChoice.nodeId)}`;
     const binding = { id: bindingId, assetId: nodeChoice.assetId || bindingId,
       sourceNode: { projectId: nodeChoice.projectId, nodeId: nodeChoice.nodeId }, selection: { mode: "node_selection" },
       provides: ["identity"], retain: ["主体身份与已登记外观"], exclude: ["原图姿势", "无关背景"], applicableState: {}, defaultFor: bindings.some(item => (item.defaultFor || []).includes("identity")) ? [] : ["identity"] };
+    if (await onSave({ ...subject, pictureBindings: [...bindings, binding] })) setNodeChoice(undefined);
+  };
+  const addCharacterImage = async (storageKey: string, referenceId: string) => {
+    if (!nodeChoice || !canBindSubjectImage(nodeChoice, canvasId, canvasNodes, bindings, storageKey)) return;
+    const bindingId = `picture:${subject.id}:${encodeURIComponent(nodeChoice.projectId)}:${encodeURIComponent(nodeChoice.nodeId)}:${encodeURIComponent(storageKey)}`;
+    const binding = { id: bindingId, assetId: nodeChoice.assetId || bindingId,
+      sourceNode: { projectId: nodeChoice.projectId, nodeId: nodeChoice.nodeId }, selection: { mode: "selected_result", resultId: referenceId },
+      provides: ["identity"], retain: ["角色身份"], exclude: ["原图构图", "无关背景"], applicableState: {}, defaultFor: bindings.some(item => (item.defaultFor || []).includes("identity")) ? [] : ["identity"] };
     if (await onSave({ ...subject, pictureBindings: [...bindings, binding] })) setNodeChoice(undefined);
   };
   const remove = async (binding: Record<string, any>) => {
@@ -110,6 +124,12 @@ function SubjectPictureBindings({ subject, canvasNodes, canvasId, owner, assets,
       const sourceAction = navigation.pictures[index];
       const inUse = usages.some(usage => resolveSubjectPictureBindingIds(subject, usage).bindingIds.includes(String(binding.id)));
       const resolved = records(workbench?.pictureBindings).find(item => item.id === binding.id)?.resolved;
+      const characterImages = node?.type === "character" ? records(node.metadata?.characterImages).flatMap((image, imageIndex) => {
+        const storageKey = String(image.storageKey || "").trim();
+        return storageKey ? [{ image, imageIndex, storageKey, referenceId: `${node.id}:character-image:${storageKey}` }] : [];
+      }) : [];
+      const selectedCharacterImage = characterImages.find(item => [item.storageKey, item.referenceId].includes(String(selection.resultId || "")))
+        || characterImages.find(item => item.storageKey === String(resolved?.storageKey || ""));
       return <article key={binding.id} data-subject-picture={String(binding.id)} className="grid gap-3 border-b border-border py-4 last:border-b-0">
         <h4 className="text-xs font-medium text-muted-foreground">{t("director.subjectImages.referenceNumber", { number: index + 1 })}</h4>
         {resolved?.storageKey ? <MediaImage className="max-h-64 w-full rounded object-contain" src={backendMediaUrl(String(resolved.storageKey))} alt={String(subject.id)} /> : <div className="flex h-32 w-full items-center justify-center rounded border border-border text-xs text-muted-foreground">{readError ? "—" : t(reading ? "director.atomic.loading" : "director.workspace.noActivePicture")}</div>}
@@ -117,6 +137,7 @@ function SubjectPictureBindings({ subject, canvasNodes, canvasId, owner, assets,
           <div className="flex flex-wrap items-center gap-2"><strong className="text-sm">{node?.title || t("director.crud.boundImage")}</strong><Tag>{selection.mode === "node_selection" ? t("director.atomic.followNodeReference") : selection.mode === "selected_result" ? t("director.workspace.selectedHistory") : t("director.workspace.followLatest")}</Tag></div>
           <div className="flex flex-wrap items-center gap-2" data-picture-source-actions><span className="mr-auto">{sourceAction && <ReferenceNodeLink sourceNode={sourceAction.sourceNode} label={t(sourceAction.isEntity ? "director.subjectImages.openPictureAndSubject" : "director.subjectImages.openPictureSource")} />}</span><Button size="small" type="text" disabled={busy || inUse} title={inUse ? t("director.subjectImages.unbindInUse") : undefined} onClick={() => void remove(binding)}>{t("director.workspace.removePictureBinding")}</Button>{selection.mode !== "node_selection" && <Button size="small" type="text" disabled={busy} onClick={() => void onSave({ ...subject, pictureBindings: bindings.map(item => item.id === binding.id ? { ...item, selection: { mode: "node_selection" } } : item) })}>{t("director.atomic.followNodeReference")}</Button>}</div>
           <label className="grid gap-1 text-xs"><span>{t("director.subjectImages.replaceReference")}</span><SmartImageNodePicker canvasId={canvasId} canvasNodes={canvasNodes} assets={assets} assetPlan={assetPlan} value={binding.sourceNode} disabled={busy} onChange={choice => void onSave({ ...subject, pictureBindings: bindings.map(item => item.id === binding.id ? { ...item, assetId: choice.assetId || binding.id, sourceNode: { projectId: choice.projectId, nodeId: choice.nodeId }, selection: { mode: "node_selection" } } : item) })} /></label>
+          {characterImages.length > 0 && <label className="grid gap-1 text-xs"><span>{t("director.subjectImages.pinCharacterImage")}</span><Select className="w-full" value={selectedCharacterImage?.storageKey} disabled={busy} options={characterImages.map(item => ({ value: item.storageKey, label: String(item.image.outfit || item.image.name || t("director.crud.frameNumber", { number: item.imageIndex + 1 })) }))} onChange={storageKey => { const chosen = characterImages.find(item => item.storageKey === storageKey); if (chosen) void onSave({ ...subject, pictureBindings: bindings.map(item => item.id === binding.id ? { ...item, selection: { mode: "selected_result", resultId: chosen.referenceId } } : item) }); }} /></label>}
           <PictureBindingEditor binding={binding} busy={busy} draftValue={sourceDrafts[`picture:${subject.id}:${binding.id}`]} onDraftChange={value => onSourceDraftChange(`picture:${subject.id}:${binding.id}`, value)} onSave={patch => onSave({ ...subject, pictureBindings: bindings.map(item => item.id === binding.id ? { ...item, ...patch } : item) })} />
           <p className="text-xs text-muted-foreground">{t("director.workspace.pictureUsage", { retain: (binding.retain || []).join(", "), exclude: (binding.exclude || []).join(", ") })}</p>
           <label className="flex items-center justify-between gap-3 text-xs text-muted-foreground"><span>{t("director.atomic.defaultIdentity")}</span><Switch size="small" checked={(binding.defaultFor || []).includes("identity")} disabled={busy} onChange={checked => void onSave({ ...subject, pictureBindings: bindings.map(item => ({ ...item, defaultFor: item.id === binding.id ? [...(item.defaultFor || []).filter((purpose: string) => purpose !== "identity"), ...(checked ? ["identity"] : [])] : checked ? (item.defaultFor || []).filter((purpose: string) => purpose !== "identity") : item.defaultFor || [] })) })} /></label>
@@ -128,8 +149,18 @@ function SubjectPictureBindings({ subject, canvasNodes, canvasId, owner, assets,
       <h4 className="text-sm font-medium">{t(bindings.length ? "director.subjectImages.addAnotherReference" : "director.subjectImages.addFirstReference")}</h4>
       <p className="text-xs text-muted-foreground">{t("director.subjectImages.addReferenceHint")}</p>
     <div className="flex flex-wrap gap-2">
-      <SmartImageNodePicker canvasId={canvasId} canvasNodes={canvasNodes} assets={assets} assetPlan={assetPlan} value={nodeChoice} disabled={busy} placeholder={t("director.workspace.chooseSmartImageNode")} exclude={bindings.map(binding => binding.sourceNode || {})} onUnavailable={() => setNodeChoice(undefined)} onChange={setNodeChoice} />
-      <Button size="small" disabled={busy || !nodeChoiceValid} onClick={() => void add()}>{t("director.subjectImages.addReference")}</Button>
+      <SmartImageNodePicker canvasId={canvasId} canvasNodes={canvasNodes} assets={assets} assetPlan={assetPlan} value={nodeChoice} disabled={busy} placeholder={t("director.workspace.chooseSmartImageNode")} exclude={bindings.filter(binding => {
+        const node = binding.sourceNode?.projectId === canvasId ? canvasNodes.find(item => item.id === binding.sourceNode?.nodeId) : undefined;
+        return node?.type !== "character" || !canBindSubjectImage({ projectId: String(binding.sourceNode?.projectId || ""), nodeId: String(binding.sourceNode?.nodeId || "") }, canvasId, canvasNodes, bindings);
+      }).map(binding => binding.sourceNode || {})} onUnavailable={() => setNodeChoice(undefined)} onChange={setNodeChoice} />
+      {selectedSourceNode?.type === "character" ? <div className="w-full space-y-2">
+        {characterSourceImages.map(({ image, index, storageKey, referenceId }) => <div key={storageKey} className="flex items-center gap-2 rounded border border-border p-2">
+          <MediaImage className="h-12 w-12 shrink-0 rounded object-contain" src={image.url || backendMediaUrl(storageKey)} alt={String(image.outfit || image.name || subject.id)} />
+          <span className="min-w-0 flex-1 truncate text-xs">{String(image.outfit || image.name || t("director.crud.frameNumber", { number: index + 1 }))}</span>
+          <Button size="small" disabled={busy || !canBindSubjectImage(nodeChoice, canvasId, canvasNodes, bindings, storageKey)} onClick={() => void addCharacterImage(storageKey, referenceId)}>{t("director.subjectImages.addReference")}</Button>
+        </div>)}
+        {!characterSourceImages.length && <p className="text-xs text-muted-foreground">{t("director.subjectImages.stableMediaKeyRequired")}</p>}
+      </div> : <Button size="small" disabled={busy || !nodeChoiceValid} onClick={() => void add()}>{t("director.subjectImages.addReference")}</Button>}
     </div>
     <ReferenceNodeLink sourceNode={{ projectId: canvasId }} label={t("director.subjectImages.prepareNewPicture")} />
     </section>
@@ -452,7 +483,7 @@ function SubjectClipPartitionEditor({ shots, segments, fps, busy, shotTitle, onS
 export function DirectorPanel({
   workspace, director, production, readiness, run, batches, runtimeTasks = [], canvasNodes, legacy, versions, busy, canvasId, canvasRole, focusTarget, embedded = false, continuityReport, continuitySnapshotLoading = false,
   briefDraft, onBriefDraftChange, onOpenSharedAsset, onPromoteExistingSharedAsset,
-  onPrepareEntities, onUpsertSubject, onDeleteSubject, onDeleteScene, onDeleteManualAsset, onCreateManualAsset, onSaveV2Shot, onRepartitionClips, onEditShot,
+  onPrepareEntities, onUpsertSubject, onDeleteSubject, onDeleteScene, onDeleteAsset, onRemoveCanvasAsset, onCreateManualAsset, onSaveV2Shot, onRepartitionClips, onEditShot, onUpdateLegacyShotReferences,
   compact = false, navigationTitleVisible = false, onSaveScript, generationSupported = true, assetScopeHint,
   onBrief, onPatch, onEditCanvasClip, onAdoptDirectorFields, onAdoptClipStyle, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onPublish, onReplace, onAskDirector, onRequestContinuityUpgrade, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRestore, onRefresh, onSceneCommand, sceneCommandPending, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onPreviewContinuityUpgrade, onCheckContinuity, onContinuitySnapshot,
   onCompile, compileBusy = false, compilePending = false, compileError = "", compileNotice = "",
@@ -480,9 +511,11 @@ export function DirectorPanel({
   onUpsertSubject?: (subject: Extract<ProductionOperation, { type: "upsert_director_subject" }>["subject"]) => Promise<boolean>;
   onDeleteSubject?: (id: string) => Promise<boolean>;
   onDeleteScene?: (sceneId: string) => Promise<boolean>;
-  onDeleteManualAsset?: (assetId: string) => Promise<boolean>;
+  onDeleteAsset?: (assetId: string) => Promise<boolean>;
+  onRemoveCanvasAsset?: (nodeId: string) => Promise<boolean>;
   onCreateManualAsset: (operation: Extract<ProductionOperation, { type: "create_manual_director_asset" }>) => Promise<boolean>;
   onSaveV2Shot?: (shotId: string, patch: Record<string, unknown>, keyframes?: Extract<ProductionOperation, { type: "set_director_shot_keyframes" }>["keyframes"], utterances?: Extract<ProductionOperation, { type: "set_director_shot_utterances" }>["utterances"]) => Promise<boolean>;
+  onUpdateLegacyShotReferences?: (shotId: string, assetIds: string[], keyframeAssetId: string | null) => Promise<boolean>;
   onRepartitionClips?: (shotIds: string[], segments: Array<Record<string, unknown>>) => Promise<boolean>;
   onEditShot?: (operation: Extract<ProductionOperation, { type: "edit_director_shot" }>) => Promise<boolean>;
 
@@ -516,7 +549,7 @@ export function DirectorPanel({
   onSceneCommand: (action: ProductionSceneAction, revision: number) => Promise<unknown>;
   onExport: (includeGeneratedMedia: boolean) => Promise<void>;
   exporting: boolean;
-  onCompile?: () => void;
+  onCompile?: (sceneId?: string) => void;
   compileBusy?: boolean;
   compilePending?: boolean;
   compileError?: string;
@@ -679,14 +712,24 @@ export function DirectorPanel({
       },
     });
   };
-  const deleteManualAsset = (assetId: string) => Modal.confirm({
-    title: t("director.workspace.deleteManualAssetTitle"),
-    content: t("director.workspace.deleteManualAssetConfirm", { asset: assetName(assetId) }),
-    okText: t("director.workspace.deleteManualAssetAction"),
+  const deleteAsset = (assetId: string) => Modal.confirm({
+    title: t("director.workspace.deleteAssetTitle", { asset: assetName(assetId) }),
+    content: t("director.workspace.deleteAssetConfirm", { asset: assetName(assetId) }),
+    okText: t("director.workspace.deleteAssetAction"),
     okButtonProps: { danger: true, disabled: busy },
     cancelText: t("director.workspace.cancel"),
     onOk: async () => {
-      if (!await onDeleteManualAsset?.(assetId)) throw new Error(t("director.workspace.deleteManualAssetFailed"));
+      if (!await onDeleteAsset?.(assetId)) throw new Error(t("director.workspace.deleteAssetFailed"));
+    },
+  });
+  const removeCanvasAsset = (nodeId: string, name: string) => Modal.confirm({
+    title: t("director.crud.removeEpisodeAssetTitle", { asset: name }),
+    content: t("director.crud.removeEpisodeAssetConfirm"),
+    okText: t("director.crud.removeEpisodeAsset"),
+    okButtonProps: { danger: true, disabled: busy },
+    cancelText: t("director.workspace.cancel"),
+    onOk: async () => {
+      if (!await onRemoveCanvasAsset?.(nodeId)) throw new Error(t("director.crud.removeEpisodeAssetFailed"));
     },
   });
   const frameForShot = (id: string) => {
@@ -833,14 +876,18 @@ export function DirectorPanel({
     const metadata = node.metadata || {};
     const kind = node.type === "character" ? "characters" : node.type === "scene" ? "locations" : "props";
     const images = Array.isArray(metadata.characterImages) ? metadata.characterImages as Array<Record<string, any>> : [];
-    const primary = images[Math.min(Math.max(Number(metadata.characterPrimaryIndex) || 0, 0), Math.max(images.length - 1, 0))];
+    const primaryIndex = Math.min(Math.max(Number(metadata.characterPrimaryIndex) || 0, 0), Math.max(images.length - 1, 0));
+    const primary = images[primaryIndex];
     const image = node.type === "character" ? primary : node.type === "scene" ? metadata.sceneImage as Record<string, any> | undefined : metadata.propImage as Record<string, any> | undefined;
+    const imageGallery = node.type === "character" ? images.flatMap((item, index) => item.storageKey || item.url ? [{ storageKey: String(item.storageKey || ""), url: String(item.url || ""), label: String(item.outfit || item.name || `${index + 1}`), primary: index === primaryIndex }] : [])
+      : image && (image.storageKey || image.url) ? [{ storageKey: String(image.storageKey || ""), url: String(image.url || ""), label: String(image.name || node.title || node.id), primary: true }] : [];
     return [{
       node, kind,
       name: String(metadata.characterName || metadata.sceneName || metadata.propName || node.title || node.id),
       description: String(metadata.characterDescription || metadata.sceneDescription || metadata.propDescription || ""),
       storageKey: String(image?.storageKey || (node.type === "image" ? metadata.storageKey : "") || ""),
       url: String(image?.url || metadata.content || ""),
+      images: imageGallery,
     }];
   });
 
@@ -908,7 +955,7 @@ export function DirectorPanel({
     return saved;
   }} /></label> : null;
   // 资产合同字段（描述/职责、版本、前置依赖、关联画布图）：素材大卡与分镜图详情共用这一份，避免两处维护。
-  const renderAssetContractFields = (assetId: string, item: Record<string, any> | undefined, media: ReturnType<typeof mediaForAsset>, options: { description?: boolean } = {}) => {
+  const renderAssetContractFields = (assetId: string, item: Record<string, any> | undefined, media: ReturnType<typeof mediaForAsset>, options: { description?: boolean; binding?: boolean } = {}) => {
     const field = item?.description !== undefined || item?.prompt === undefined ? "description" : "prompt";
     const dependencies = Array.isArray(item?.depends_on) ? item!.depends_on.map((value: unknown) => typeof value === "string" ? value : String((value as Record<string, unknown>)?.asset_id || (value as Record<string, unknown>)?.id || "")).filter(Boolean) : [];
     return <>
@@ -916,14 +963,15 @@ export function DirectorPanel({
       {options.description && item && <label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.description")}<SourceField value={proseOf(item[field] ?? item.visual ?? item.purpose)} draftValue={sourceDrafts[`asset:${assetId}:${field}`] ?? sourceDrafts[`asset:${assetId}:visual`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:${field}`, value)} multiline rows={3} disabled={busy} onCommit={async value => { const saved = await onPatch("asset", assetId, { [field]: patchProse(item[field], value) }); if (saved !== false) onSourceDraftChange(`asset:${assetId}:visual`, undefined); return saved; }} /></label>}
       {item && <label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.assetVersion")}<SourceField value={item.version || item.asset_version || "v1"} draftValue={sourceDrafts[`asset:${assetId}:version`]} onDraftChange={value => onSourceDraftChange(`asset:${assetId}:version`, value)} disabled={busy} onCommit={value => onPatch("asset", assetId, { version: String(value) })} /></label>}
       {item && <label className="grid gap-1 text-xs text-muted-foreground">{t("director.workspace.assetDependencies")}<Select mode="multiple" value={dependencies} disabled={busy} options={assetPlan.filter(value => assetIdOf(value) !== assetId).map(value => ({ value: assetIdOf(value), label: assetName(assetIdOf(value)) }))} onChange={value => void onPatch("asset", assetId, { depends_on: value })} /></label>}
-      <label className="grid gap-1 text-xs text-muted-foreground">{t("director.studio.linkImage")}<Select value={media.nodeId || undefined} disabled={busy || !imageNodes.length} placeholder={t("director.workspace.bindCanvasImage")} options={imageNodes.map((node, index) => ({ value: node.id, label: humanName(node.title, node.id, t("director.studio.imageNumber", { number: index + 1 })) }))} onChange={nodeId => nodeId && onBindAsset(assetId, nodeId)} /></label>
+      {options.binding !== false && <label className="grid gap-1 text-xs text-muted-foreground">{t("director.studio.linkImage")}<Select value={media.nodeId || undefined} disabled={busy || !imageNodes.length} placeholder={t("director.workspace.bindCanvasImage")} options={imageNodes.map((node, index) => ({ value: node.id, label: humanName(node.title, node.id, t("director.studio.imageNumber", { number: index + 1 })) }))} onChange={nodeId => nodeId && onBindAsset(assetId, nodeId)} /></label>}
     </>;
   };
   const renderAssetCard = (assetId: string, item?: Record<string, any>, keyframeShot?: string, options: { gallery?: boolean } = {}) => {
     const { gallery = false } = options;
     const media = mediaForAsset(assetId, keyframeShot);
     const imageNode = canvasNodes.find(node => node.id === media.nodeId);
-    const { images: previewImages, previewKey, browsingHistory } = assetImagePreview(media.storageKey, imageNode?.metadata?.images, gallery ? assetPreviewKeys[assetId] : undefined);
+    const nodeImages = imageNode?.type === "character" ? imageNode.metadata?.characterImages : imageNode?.metadata?.images;
+    const { images: previewImages, previewKey, browsingHistory } = assetImagePreview(media.storageKey, nodeImages, gallery ? assetPreviewKeys[assetId] : undefined, imageNode?.type === "character");
     const title = keyframeShot ? `${shotTitle(keyframeShot)} · ${t("director.studio.keyframe")}` : assetName(assetId);
     const card = records(source.asset_cards).find(value => assetIdOf(value) === assetId);
     const field = item?.description !== undefined || item?.prompt === undefined ? "description" : "prompt";
@@ -1181,13 +1229,20 @@ export function DirectorPanel({
         }
         return (assetFilter === "all" || assetFilter === item.kind) && matchesAssetSearch(item.name, assetSearch);
       });
-      return visibleCanvasAssets.length ? <details open={!subjectAssembly} className="space-y-3 rounded-lg border border-border bg-card p-4" data-canvas-asset-nodes>
+      return visibleCanvasAssets.length ? <details open={!subjectAssembly} className="space-y-2 rounded-lg border border-border bg-card p-3" data-canvas-asset-nodes>
         <summary className="cursor-pointer text-sm font-semibold">{t(subjectAssembly ? "director.crud.otherCanvasAssetNodes" : "director.crud.canvasAssetNodes")} <Tag>{visibleCanvasAssets.length}</Tag></summary>
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{visibleCanvasAssets.map(item => {
-          const imageSource = item.storageKey ? backendMediaUrl(item.storageKey) : item.url;
-          return <article key={item.node.id} className="overflow-hidden rounded-lg border border-border" data-canvas-asset-node={item.node.id}>
-            <div className="flex h-32 items-center justify-center bg-muted/30">{imageSource ? <MediaImage className="h-full w-full object-contain" src={imageSource} alt={item.name} /> : <ImageIcon className="size-8 text-muted-foreground/50" />}</div>
-            <div className="space-y-2 p-3"><div className="flex items-center justify-between gap-2"><strong className="min-w-0 truncate text-sm" title={item.name}>{item.name}</strong><Tag className="shrink-0">{t(`director.studio.filter.${item.kind}`)}</Tag></div>{item.description && <p className="line-clamp-2 text-xs text-muted-foreground">{item.description}</p>}<ReferenceNodeLink sourceNode={{ projectId: canvasId, nodeId: item.node.id }} /></div>
+        <div className="grid gap-2 sm:grid-cols-2 2xl:grid-cols-4">{visibleCanvasAssets.map(item => {
+          const images = Array.isArray(item.images) ? item.images : [];
+          const previews: Array<{ storageKey?: string; url?: string; label: string; primary?: boolean }> = images.length ? images : item.storageKey || item.url ? [{ storageKey: item.storageKey, url: item.url, label: item.name }] : [];
+          return <article key={item.node.id} className="flex min-w-0 gap-3 rounded-lg border border-border p-2.5" data-canvas-asset-node={item.node.id}>
+            <div className="grid h-24 w-28 shrink-0 grid-cols-2 gap-1 overflow-y-auto rounded bg-muted/30 p-1">{previews.length ? previews.map((image, index) => {
+              const imageSource = image.storageKey ? backendMediaUrl(image.storageKey) : image.url || "";
+              return <div key={`${image.storageKey || image.url}:${index}`} className={`relative min-h-0 overflow-hidden rounded bg-background/40 ${previews.length === 1 ? "col-span-2 row-span-2" : ""}`} title={image.label} aria-label={`${item.name}: ${image.label}`}>
+                <MediaImage className="h-full w-full object-contain" src={imageSource} alt={`${item.name} ${image.label}`} />
+                {image.primary && <span className="absolute bottom-0.5 left-0.5 rounded bg-background/80 px-1 text-[9px] leading-4 text-foreground">{t("director.workspace.currentImage")}</span>}
+              </div>;
+            }) : <div className="col-span-2 row-span-2 flex items-center justify-center"><ImageIcon className="size-7 text-muted-foreground/50" /></div>}</div>
+            <div className="flex min-w-0 flex-1 flex-col justify-center gap-1.5"><div className="flex min-w-0 items-center justify-between gap-2"><strong className="min-w-0 truncate text-sm" title={item.name}>{item.name}</strong><Tag className="m-0 shrink-0">{t(`director.studio.filter.${item.kind}`)}</Tag></div>{item.description && <p className="line-clamp-2 text-xs text-muted-foreground">{item.description}</p>}<div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1"><ReferenceNodeLink sourceNode={{ projectId: canvasId, nodeId: item.node.id }} />{canvasRole === "episode" && onRemoveCanvasAsset && <Button size="small" type="text" danger icon={<Trash2 className="size-3.5" />} disabled={busy} onClick={() => removeCanvasAsset(item.node.id, item.name)}>{t("director.crud.removeEpisodeAsset")}</Button>}</div></div>
           </article>;
         })}</div>
       </details> : null;
@@ -1219,7 +1274,7 @@ export function DirectorPanel({
             return row ? <><label className="grid gap-1 text-xs"><span>{t("director.crud.subjectName")}</span><SourceField value={row.name || row.asset_name || ""} draftValue={sourceDrafts[`subject:${subject.id}:name`]} onDraftChange={value => onSourceDraftChange(`subject:${subject.id}:name`, value)} disabled={busy || !own} onCommit={name => onPatch(entityType, entityId, { [entityType === "asset" ? "asset_name" : "name"]: name })} /></label><label className="grid gap-1 text-xs"><span>{t("director.crud.subjectDescription")}</span><SourceField value={proseOf(row[descriptionField])} draftValue={sourceDrafts[`subject:${subject.id}:description`]} onDraftChange={value => onSourceDraftChange(`subject:${subject.id}:description`, value)} multiline rows={3} disabled={busy || !own} onCommit={value => onPatch(entityType, entityId, { [descriptionField]: patchProse(row[descriptionField], value) })} /></label>{card && <label className="grid gap-1 text-xs"><span>{t("director.crud.manualAssetPrompt")}</span><SourceField value={String(card.prompt || "")} draftValue={sourceDrafts[`asset_card:${entityId}:prompt`]} onDraftChange={value => onSourceDraftChange(`asset_card:${entityId}:prompt`, value)} multiline rows={4} disabled={busy || !own} onCommit={value => onPatch("asset_card", entityId, { prompt: String(value) })} /></label>}{!own && <p className="text-xs text-muted-foreground">{t("director.crud.sharedEntityReadOnly")}</p>}</> : null;
           })()}<div className="space-y-1 border-t border-border pt-3">{records(source.shots).filter(shot => records(shot.subject_usages).some(usage => usage.subjectId === subject.id)).map(shot => <button key={shot.id} type="button" className="block w-full truncate text-left text-xs text-primary" onClick={() => onNavigate("shots", { kind: "shot", id: String(shot.id) })}>{shotTitle(String(shot.id))}</button>)}</div></div></details>
          <div className="min-w-0 xl:col-start-1 xl:row-start-2 xl:max-h-[65dvh] xl:overflow-y-auto"><SubjectPictureBindings subject={subject} assets={d.assets} assetPlan={assetPlan} canvasNodes={canvasNodes} canvasId={canvasId} owner={subjectOwner} busy={busy} entitySource={entitySource} usages={records(source.shots).flatMap(shot => records(shot.subject_usages).filter(usage => usage.subjectId === subject.id))} sourceDrafts={sourceDrafts} onSourceDraftChange={onSourceDraftChange} onSave={next => onUpsertSubject ? onUpsertSubject(next as Extract<ProductionOperation, { type: "upsert_director_subject" }>["subject"]) : Promise.resolve(false)} /></div>
-          <details className="border-t border-border pt-3 xl:col-span-2" data-production-danger="subject"><summary className="cursor-pointer text-xs text-muted-foreground">{t("director.micro.objectManagement")}</summary><div className="mt-3 space-y-3"><div className="flex flex-wrap gap-2">{onDeleteManualAsset && manualAssets.map(plan => <Button key={assetIdOf(plan)} size="small" danger disabled={busy} onClick={() => deleteManualAsset(assetIdOf(plan))}>{t("director.workspace.deleteManualAssetAction")}{manualAssets.length > 1 ? ` · ${assetName(assetIdOf(plan))}` : ""}</Button>)}</div><Button size="small" danger type="text" disabled={busy || usageCount > 0} onClick={() => void onDeleteSubject?.(String(subject.id))}>{t("director.crud.removeSubject")}</Button><p className="text-xs text-muted-foreground">{t("director.crud.removeSubjectHint")}</p></div></details>
+          <details className="border-t border-border pt-3 xl:col-span-2" data-production-danger="subject"><summary className="cursor-pointer text-xs text-muted-foreground">{t("director.micro.objectManagement")}</summary><div className="mt-3 space-y-3"><div className="flex flex-wrap gap-2">{onDeleteAsset && manualAssets.map(plan => <Button key={assetIdOf(plan)} size="small" danger disabled={busy} onClick={() => deleteAsset(assetIdOf(plan))}>{t("director.workspace.deleteAssetAction")}{manualAssets.length > 1 ? ` · ${assetName(assetIdOf(plan))}` : ""}</Button>)}</div><Button size="small" danger type="text" disabled={busy || usageCount > 0} onClick={() => void onDeleteSubject?.(String(subject.id))}>{t("director.crud.removeSubject")}</Button><p className="text-xs text-muted-foreground">{t("director.crud.removeSubjectHint")}</p></div></details>
         </article>;
       })}</div></div>
       {!records(source.subject_registry).length && <Alert type="info" message={t("director.workspace.subjectsEmpty")} />}
@@ -1240,10 +1295,14 @@ export function DirectorPanel({
               const shotId = shotForAsset(assetId);
               const media = mediaForAsset(assetId, shotId);
               const active = assetId === activeAssetId;
-              return <button key={assetId} type="button" aria-current={active ? "true" : undefined} onClick={() => setSelectedAssetId(assetId)} className={`flex w-full items-center gap-2 border-b border-border px-3 py-3 text-left last:border-b-0 ${active ? "bg-muted/60" : "hover:bg-muted/30"}`}>
-                <span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded border border-border">{media.storageKey ? <img className="h-full w-full object-contain" src={backendMediaUrl(media.storageKey)} alt="" loading="lazy" /> : <ImageIcon className="size-4 text-muted-foreground" />}</span><span className="min-w-0 flex-1"><strong className="block truncate text-sm font-medium" title={assetName(assetId)}>{shotId ? `${shotTitle(shotId)} · ${t("director.studio.keyframe")}` : assetName(assetId)}</strong><span className="mt-1 block truncate text-xs text-muted-foreground">{t(`director.studio.filter.${assetCategory(assetId)}`)}</span></span>
-                <Tag className="shrink-0" color={media.status === "generated" ? "blue" : media.status === "approved" ? "green" : media.status === "rejected" ? "red" : undefined}>{t(`director.workspace.assetStatus.${media.status}`)}</Tag>
-              </button>;
+              const deletablePlan = !shotId && !keyframeAssetIds.has(assetId) && assetPlan.some(item => assetIdOf(item) === assetId);
+              return <div key={assetId} className={`flex items-center gap-1 border-b border-border px-2 last:border-b-0 ${active ? "bg-muted/60" : "hover:bg-muted/30"}`}>
+                <button type="button" aria-current={active ? "true" : undefined} onClick={() => setSelectedAssetId(assetId)} className="flex min-w-0 flex-1 items-center gap-2 py-2.5 text-left">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded border border-border">{media.storageKey ? <img className="h-full w-full object-contain" src={backendMediaUrl(media.storageKey)} alt="" loading="lazy" /> : <ImageIcon className="size-4 text-muted-foreground" />}</span><span className="min-w-0 flex-1"><strong className="block truncate text-sm font-medium" title={assetName(assetId)}>{shotId ? `${shotTitle(shotId)} · ${t("director.studio.keyframe")}` : assetName(assetId)}</strong><span className="mt-1 block truncate text-xs text-muted-foreground">{t(`director.studio.filter.${assetCategory(assetId)}`)}</span></span>
+                  <Tag className="shrink-0" color={media.status === "generated" ? "blue" : media.status === "approved" ? "green" : media.status === "rejected" ? "red" : undefined}>{t(`director.workspace.assetStatus.${media.status}`)}</Tag>
+                </button>
+                {deletablePlan && onDeleteAsset && <Button size="small" type="text" danger icon={<Trash2 className="size-3.5" />} disabled={busy} aria-label={t("director.workspace.deleteAssetTitle", { asset: assetName(assetId) })} title={t("director.workspace.deleteAssetTitle", { asset: assetName(assetId) })} onClick={() => deleteAsset(assetId)} />}
+              </div>;
             })}
           </div>
         </nav>
@@ -1257,14 +1316,15 @@ export function DirectorPanel({
     const assetId = d?.shotInputs[shotId]?.keyframeAssetId;
     const media = assetId ? mediaForAsset(assetId, shotId) : undefined;
     const storageKey = media?.storageKey || frameForShot(shotId) || "";
-    if (!storageKey) return null;
+    const binding = keyframeBindingState(assetId, media?.nodeId, storageKey, imageNodes.map(node => node.id));
+    if (!storageKey && !binding.registered) return null;
     const title = `${shotTitle(shotId)} · ${t("director.studio.keyframe")}`;
     const openPreview = () => setMediaPreview({ assetId: assetId || "", title, storageKey });
     return <section data-production-target={`frame:${shotId}`} className="rounded-lg border border-border bg-card">
       <div className="flex flex-wrap items-center gap-3 px-3 py-2">
-        <button type="button" onClick={openPreview} title={title} aria-label={t("director.studio.previewAsset", { title })} className="h-[54px] w-[96px] shrink-0 overflow-hidden rounded border border-border bg-muted/30">
+        {storageKey ? <button type="button" onClick={openPreview} title={title} aria-label={t("director.studio.previewAsset", { title })} className="h-[54px] w-[96px] shrink-0 overflow-hidden rounded border border-border bg-muted/30">
           <img className="h-full w-full object-cover" src={backendMediaUrl(storageKey)} alt={title} loading="lazy" />
-        </button>
+        </button> : <div aria-hidden="true" className="flex h-[54px] w-[96px] shrink-0 items-center justify-center rounded border border-border bg-muted/30"><ImageIcon className="size-5 text-muted-foreground" /></div>}
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
           <span className="min-w-0 truncate text-xs font-medium">{assetId ? assetName(assetId) : t("director.studio.canvasKeyframe")}</span>
           {media && <Tag className="m-0" color={media.status === "approved" ? "green" : media.status === "generated" ? "blue" : media.status === "rejected" ? "red" : "default"}>{t(`director.workspace.assetStatus.${media.status}`)}</Tag>}
@@ -1272,7 +1332,11 @@ export function DirectorPanel({
         {/* 跳画布：直接定位到这张分镜图所在的画布节点（缩略图仍可点开大图预览）。 */}
         {media?.nodeId && <ReferenceNodeLink sourceNode={{ projectId: media.asset?.sharedSource?.sourceProjectId || canvasId, nodeId: media.nodeId }} />}
       </div>
-      {assetId && media && <details className="border-t border-border px-3 py-2"><summary className="cursor-pointer text-[11px] text-muted-foreground">{t("director.studio.keyframeDetails")}</summary><div className="mt-3 space-y-3">{renderAssetContractFields(assetId, assetPlan.find(item => assetIdOf(item) === assetId), media, { description: true })}</div></details>}
+      {assetId && media && <div className="space-y-2 border-t border-border px-3 py-2" data-keyframe-binding>
+        <label className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.studio.linkImage")}</span><Select value={binding.selectedNodeId} disabled={busy || !imageNodes.length} placeholder={t("director.workspace.bindCanvasImage")} options={imageNodes.map((node, index) => ({ value: node.id, label: humanName(node.title, node.id, t("director.studio.imageNumber", { number: index + 1 })) }))} onChange={nodeId => nodeId && onBindAsset(assetId, nodeId)} /></label>
+        {binding.unavailableNode && <Alert type="warning" showIcon message={t("director.studio.keyframeNodeUnavailable")} />}
+        <details><summary className="cursor-pointer text-[11px] text-muted-foreground">{t("director.studio.keyframeDetails")}</summary><div className="mt-3 space-y-3">{renderAssetContractFields(assetId, assetPlan.find(item => assetIdOf(item) === assetId), media, { description: true, binding: false })}</div></details>
+      </div>}
     </section>;
   };
 
@@ -1349,11 +1413,20 @@ export function DirectorPanel({
 
   const renderShots = () => {
     if (d) return <SubjectStoryboardWorkbench key={JSON.stringify(subjectOwner)} viewMemory={storyboardViews.current[JSON.stringify(subjectOwner)] ||= {}} director={d} production={production} owner={subjectOwner} canvasNodes={canvasNodes} canvasId={canvasId} onLocateClip={id => onLocateTarget?.("segment", id)}
-      initialShotId={focusTarget?.startsWith("shot:") ? focusedId : undefined} renderEditor={(shot, workbench) => renderShotDetails(shot, false, workbench)} onRepartitionClips={subjectAssembly ? onRepartitionClips : undefined} onEditShot={onEditShot} shotDrafts={sourceDrafts}
+      initialShotId={focusTarget?.startsWith("shot:") ? focusedId : undefined} renderEditor={(shot, workbench) => renderShotDetails(shot, false, workbench)} onRepartitionClips={subjectAssembly ? onRepartitionClips : undefined} onEditShot={onEditShot} onSaveShotPatch={onSaveV2Shot ? (shotId, patch) => onSaveV2Shot(shotId, patch) : undefined} onUpdateLegacyShotReferences={onUpdateLegacyShotReferences} shotDrafts={sourceDrafts}
       renderContinuity={isSubjectPromptAssembly(d.source) ? undefined : shot => renderShotContinuity(shot)}
       renderShotState={shot => renderShotState(shot)}
       renderShotActions={subjectAssembly ? undefined : shot => renderShotActions(shot)}
-      clipEditor={subjectAssembly ? <SubjectClipPartitionEditor shots={sourceShots} segments={segments} fps={fps} busy={busy} shotTitle={shotTitle} draftValue={sourceDrafts.v2clips} onDraftChange={value => onSourceDraftChange("v2clips", value)} onSave={onRepartitionClips || (async () => false)} /> : <div className="space-y-4">{segments.map(segment => <section key={segment.id} className="border-b border-border pb-4"><h3 className="text-sm font-medium">{segmentTitle(String(segment.id))}</h3><SegmentGroupEditor segment={segment} shots={sourceShots} segments={segments} fps={fps} draftValue={sourceDrafts[`segment:${segment.id}:shot_ids`]} onDraftChange={value => onSourceDraftChange(`segment:${segment.id}:shot_ids`, value)} disabled={busy} onSave={onRegroup} /></section>)}</div>}
+      clipEditor={scope => {
+        const included = new Set(scope.shotIds);
+        const scopedShots = sourceShots.filter(shot => included.has(String(shot.id)));
+        const scopedSegments = segments.filter(segment => (segment.shot_ids || []).some((id: string) => included.has(String(id))));
+        if (subjectAssembly) {
+          const draftKey = scope.sceneId ? `v2clips:${scope.sceneId}` : "v2clips";
+          return <SubjectClipPartitionEditor shots={scopedShots} segments={scopedSegments} fps={fps} busy={busy || !scope.editable} shotTitle={shotTitle} draftValue={sourceDrafts[draftKey]} onDraftChange={value => onSourceDraftChange(draftKey, value)} onSave={onRepartitionClips || (async () => false)} />;
+        }
+        return <div className="space-y-4">{scopedSegments.map(segment => <section key={segment.id} className="border-b border-border pb-4"><h3 className="text-sm font-medium">{segmentTitle(String(segment.id))}</h3><SegmentGroupEditor segment={segment} shots={scopedShots} segments={scopedSegments} fps={fps} draftValue={sourceDrafts[`segment:${segment.id}:shot_ids`]} onDraftChange={value => onSourceDraftChange(`segment:${segment.id}:shot_ids`, value)} disabled={busy || !scope.editable} onSave={onRegroup} /></section>)}</div>;
+      }}
       onClip={id => onNavigate("production", { kind: "segment", id })}
       busy={busy} compileBusy={compileBusy} compilePending={compilePending} compileError={compileError} compileNotice={compileNotice} onCompile={onCompile}
       onDiscuss={targetId => onAskDirector({ workspace: "shots", targetId })} onNavigate={onNavigate} />;

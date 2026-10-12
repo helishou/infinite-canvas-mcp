@@ -11,6 +11,7 @@ export function productionPresentationPath(presentation: ProductionPresentation)
     const isCanvasProduction = Boolean(canvasId);
     if (isCanvasProduction) {
         const query = new URLSearchParams();
+        query.set("edit", "1");
         if (presentation.nodeId) query.set("nodeId", presentation.nodeId);
         if (presentation.segmentId) query.set("segmentId", presentation.segmentId);
         query.set("workId", presentation.workId);

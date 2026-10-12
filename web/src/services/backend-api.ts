@@ -295,8 +295,8 @@ export type ProductionCompilationStatus = {
     mediaSubmitted: false;
 };
 export type ProductionCompilationDiagnostic = { code?: string; severity?: string; path?: string; targetId?: string; shotId?: string; message?: string; blockingActions?: string[]; blocksCompilation?: boolean; nextAction?: unknown };
-export function compileProduction(target: ProductionTarget, expectedRevision: number, operationId: string) {
-    return request<{ ok: boolean; compilation: ProductionCompilationStatus }>("POST", `${productionPath(target)}/compile`, { expectedRevision, operationId });
+export function compileProduction(target: ProductionTarget, expectedRevision: number, operationId: string, scope?: { sceneId: string }) {
+    return request<{ ok: boolean; compilation: ProductionCompilationStatus }>("POST", `${productionPath(target)}/compile`, { expectedRevision, operationId, ...(scope ? { scope } : {}) });
 }
 export function fetchProductionCompilation(target: ProductionTarget, operationId: string, view: "status" | "targets" | "diagnostics" = "status", extra?: { offset?: number; pageSize?: number }) {
     const query = new URLSearchParams({ view, ...(extra?.offset === undefined ? {} : { offset: String(extra.offset) }), ...(extra?.pageSize === undefined ? {} : { pageSize: String(extra.pageSize) }) });

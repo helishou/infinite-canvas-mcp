@@ -4,21 +4,22 @@
 .canvas-topbar { position:relative; z-index:80; display:flex; flex-shrink:0; align-items:center; justify-content:space-between; gap:12px; min-height:56px; padding:4px 12px; border-bottom:1px solid var(--border); background:var(--background); }
 .canvas-topbar[data-hosted="true"] { padding-right:132px; }
 .canvas-topbar button { min-height:36px; }
-.canvas-stage { position:relative; flex:1; min-height:0; margin-bottom:76px; }
-.canvas-create-dock { position:absolute; z-index:60; bottom:-64px; left:350px; right:112px; margin-inline:auto; width:max-content; max-width:calc(100% - 462px); display:flex; align-items:center; gap:2px; padding:4px; height:48px; border:1px solid; border-radius:10px; }
+.canvas-stage { position:relative; flex:1; min-height:0; }
+.canvas-create-dock { position:absolute; z-index:60; bottom:12px; left:350px; right:112px; margin-inline:auto; width:max-content; max-width:calc(100% - 462px); display:flex; align-items:center; gap:2px; padding:4px; height:48px; border:1px solid; border-radius:10px; pointer-events:none; }
+.canvas-create-dock .ant-btn { pointer-events:auto; }
 .canvas-create-dock .ant-btn { min-width:36px; height:36px; padding-inline:8px; }
 .canvas-create-dock [aria-pressed="true"] { background:var(--accent); color:var(--accent-foreground); }
-.canvas-zoom-dock { position:absolute; z-index:60; bottom:-64px; left:12px; }
+.canvas-zoom-dock { position:absolute; z-index:60; bottom:12px; left:12px; pointer-events:none; }
+.canvas-zoom-dock > div:first-child { pointer-events:auto; }
 .canvas-zoom-dock > div:first-child { height:48px; }
 .canvas-zoom-dock input[type="range"] { width:64px; }
 .canvas-selection-actions { position:absolute; z-index:75; right:12px; top:12px; border:1px solid; border-radius:8px; }
 .canvas-node-context { max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:0 10px; border-right:1px solid var(--border); font-size:12px; color:var(--muted-foreground); }
 [data-canvas-minimap] { bottom:12px; left:12px; }
+.canvas-stage:has([data-canvas-minimap]) .canvas-zoom-dock { bottom:184px; }
 .canvas-mode-notice { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:90; max-width:calc(100% - 24px); display:flex; align-items:center; gap:12px; border:1px solid var(--border); border-radius:8px; padding:8px 12px; background:var(--popover); color:var(--popover-foreground); font-size:13px; }
 @media(max-width:1100px) {
-  .canvas-stage { margin-bottom:132px; }
-  .canvas-create-dock { bottom:-120px; left:12px; right:104px; max-width:calc(100% - 116px); }
-  .canvas-zoom-dock { bottom:-64px; }
+  .canvas-create-dock { left:12px; right:104px; max-width:calc(100% - 116px); }
 }
 @media(max-width:600px) {
   .canvas-topbar { gap:4px; padding-inline:4px; }

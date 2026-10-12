@@ -274,7 +274,7 @@ export function CanvasNodeHoverToolbar({
             <div
                 ref={toolbarRef}
                 data-canvas-node-toolbar
-                className="absolute z-[70] flex h-12 -translate-x-1/2 -translate-y-full items-center rounded-lg border border-border bg-popover text-[13px] text-popover-foreground shadow-sm"
+                className="absolute z-[70] flex h-12 min-w-0 -translate-x-1/2 -translate-y-full items-center rounded-lg border border-border bg-popover text-[13px] text-popover-foreground shadow-sm"
                 style={{ left: toolbarLeft, top: Math.max(64, top), maxWidth: Math.max(0, availableWidth - 16) }}
                 onMouseEnter={() => onKeep(node.id)}
                 onMouseLeave={() => {
@@ -284,7 +284,7 @@ export function CanvasNodeHoverToolbar({
                 onPointerDown={(event) => event.stopPropagation()}
             >
                 <span className="canvas-node-context" title={node.title}>{node.title || getNodeDefinition(node.type)?.title || node.type}</span>
-                <div className="flex min-w-0 items-center overflow-x-auto" data-canvas-no-zoom onWheel={(event) => event.stopPropagation()}>
+                <div className="flex min-w-0 flex-1 items-center overflow-x-auto hide-scrollbar" data-canvas-no-zoom onWheel={(event) => event.stopPropagation()}>
                     {nearbyTools.map((tool) => (
                         <ToolbarAction key={tool.id} {...tool} showLabel={isImage ? showImageToolLabels : true} />
                     ))}

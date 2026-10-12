@@ -162,7 +162,10 @@ export function resolveSubjectPictureBindingIds(subjectValue: unknown, usageValu
         .map((item: Record<string, unknown>) => [String(item.factId), String(item.value)]));
     const applicable = (binding: Record<string, any>) => Object.entries(binding.applicableState || {})
         .every(([factId, value]) => requirements.get(factId) === String(value));
-    if (explicit.length) {
+    // Missing/default preserves the historical contract: an empty list inherits
+    // purpose defaults, while a non-empty list is an explicit selection. The
+    // new explicit mode lets callers represent an intentional empty selection.
+    if (usage.pictureBindingMode === "explicit" || explicit.length) {
         const selected = explicit.map(id => bindings.find(binding => String(binding.id) === id));
         const missing = explicit.filter((_id, index) => !selected[index]);
         const mismatched = selected.filter((binding): binding is Record<string, any> => binding !== undefined && !applicable(binding));
@@ -172,6 +175,7 @@ export function resolveSubjectPictureBindingIds(subjectValue: unknown, usageValu
         ] };
     }
     if (usage.presentation !== "visible") return { bindingIds: [] as string[], issues: [] as string[] };
+    if (subject.entityRef?.kind === "scene") return { bindingIds: [] as string[], issues: [] as string[] };
     const purposes = [...new Set((Array.isArray(usage.referencePurpose) && usage.referencePurpose.length ? usage.referencePurpose : ["identity"]).map(String))];
     const selected: string[] = [], issues: string[] = [];
     for (const purpose of purposes) {
@@ -222,6 +226,7 @@ const subjectEntrySchema = z.object({
 const shotSubjectUsageSchema = z.object({
     subjectId: id, presentation: z.enum(["visible", "offscreen_voice", "state_context"]),
     localStartFrame: z.number().int().nonnegative().optional(), localEndFrame: z.number().int().positive().optional(),
+    pictureBindingMode: z.enum(["default", "explicit"]).optional(),
     pictureBindingIds: z.array(id).default([]), referencePurpose: z.array(id).default([]), continuityFactIds: z.array(id).default([]),
     stateRequirements: z.array(z.object({ factId: id, value: id }).strict()).default([]),
     localNotes: z.string().optional(),
@@ -284,6 +289,10 @@ export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
     const shotById = new Map<string, Record<string, any>>();
     const shotOrder = new Map<string, number>();
     const timelineOrder = new Set<string>();
+    const ledgerSource = source.ledger && typeof source.ledger === "object" ? source.ledger as Record<string, any> : {};
+    const timelines = rowsForContract(ledgerSource.timelines).map(item => String(item.id || "")).filter(Boolean);
+    const defaultTimelineId = timelines.includes("main") ? "main" : timelines[0] || "main";
+    const nextStoryOrder = new Map<string, number>();
     for (const [index, shot] of shots.entries()) {
         const path = ["shots", index];
         if (!shot.id || shotById.has(String(shot.id))) add([...path, "id"], "Shot ID 必须全局唯一");
@@ -291,10 +300,19 @@ export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
         if (!Number.isInteger(shot.duration_frames) || shot.duration_frames <= 0) add([...path, "duration_frames"], "新合同 Shot 必须使用正整数 duration_frames");
         if (Object.hasOwn(shot, "start_frame") || Object.hasOwn(shot, "end_frame")) add(path, "prompt v2 Shot 的全局帧窗由 duration_frames、timeline 与 story_order 派生");
         for (const field of ["state_description", "state_in", "state_out", "continuity_cues", "required_assets", "reference_requirements", "dialogues"]) if (Object.hasOwn(shot, field)) add([...path, field], "prompt v2 Shot 状态、参考与对白必须使用各自的结构化来源");
-        if (!shot.timeline_id || !Number.isInteger(shot.story_order) || shot.story_order < 0) add(path, "Shot 必须登记 timeline_id 和非负 story_order");
-        const orderKey = `${shot.timeline_id}\0${shot.story_order}`;
-        if (timelineOrder.has(orderKey)) add([...path, "story_order"], "同一 timeline 的 story_order 不能重复");
-        timelineOrder.add(orderKey); shotOrder.set(String(shot.id), index);
+        const timelineId = String(shot.timeline_id || defaultTimelineId);
+        let storyOrder = Number.isInteger(shot.story_order) && shot.story_order >= 0
+            ? Number(shot.story_order)
+            : nextStoryOrder.get(timelineId) || 0;
+        let orderKey = `${timelineId}\0${storyOrder}`;
+        while (!(Number.isInteger(shot.story_order) && shot.story_order >= 0) && timelineOrder.has(orderKey)) {
+            storyOrder += 1;
+            orderKey = `${timelineId}\0${storyOrder}`;
+        }
+        if (Number.isInteger(shot.story_order) && shot.story_order >= 0 && timelineOrder.has(orderKey)) add([...path, "story_order"], "同一 timeline 的 story_order 不能重复");
+        timelineOrder.add(orderKey);
+        nextStoryOrder.set(timelineId, Math.max(nextStoryOrder.get(timelineId) || 0, storyOrder + 1));
+        shotOrder.set(String(shot.id), index);
         const usages = z.array(shotSubjectUsageSchema).safeParse(shot.subject_usages ?? []);
         const keyframes = z.array(shotKeyframeSchema).safeParse(shot.keyframes ?? []);
         const utteranceRefs = z.array(shotUtteranceRefSchema).safeParse(shot.utterance_refs ?? []);

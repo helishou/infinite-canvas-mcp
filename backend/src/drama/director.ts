@@ -5,7 +5,7 @@ import { canonicalProduction, type DirectorProduction, type EpisodeProductionDat
 import type { BackendDatabase } from "../db.js";
 import { resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
 import { resolveAchengEngine } from "@basketikun/canvas-agent/skills/acheng";
-import { isSubjectPromptAssembly } from "@basketikun/canvas-agent/drama/production-contract";
+import { isSubjectPromptAssembly, resolveSubjectPictureBindingIds } from "@basketikun/canvas-agent/drama/production-contract";
 import { subjectShotWindows, subjectStateProjection } from "@basketikun/canvas-agent/drama/subject-assembly";
 import { ref2vaPromptDiagnostics, ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
 import { assertImageReferenceCoverage } from "./image-inputs.js";
@@ -50,7 +50,7 @@ export function projectDirector(data: EpisodeProductionData) {
         const input = d.shotInputs[String(s.id)];
         const window = shotWindows.get(String(s.id));
         const usages = subjectAssembly ? list(s.subject_usages) : [];
-        const assetIds = subjectAssembly ? usages.flatMap(usage => (usage.pictureBindingIds || []).map((bindingId: string) => String(subjectBindings.get(bindingId)?.assetId || "")))
+        const assetIds = subjectAssembly ? usages.flatMap(usage => resolveSubjectPictureBindingIds(subjectsById.get(String(usage.subjectId)), usage).bindingIds.map(bindingId => String(subjectBindings.get(bindingId)?.assetId || "")))
             : [...(input?.assetIds || [])];
         const keyframeAssetIds = subjectAssembly ? list(s.keyframes).map(frame => String(frame.assetId || frame.id)) : input?.keyframeAssetId ? [input.keyframeAssetId] : [];
         const assetNodeIds = [...new Set([...assetIds, ...keyframeAssetIds].flatMap(id => d.assets[id]?.nodeId ? [d.assets[id]!.nodeId!] : []))];

@@ -27,7 +27,8 @@ export function useCanvasProductionContext(projectId: string) {
         if (useProductionWorkspaceStore.getState().context?.canvasId !== projectId) useProductionWorkspaceStore.getState().setContext(null);
         useCanvasSidePanelStore.setState({ panelOpen: false, panelMounted: false, panelClosing: false });
         const agent = useAgentStore.getState();
-        if (!agent.creativeLaunch && !agent.sending && !agent.waiting && !agent.prompt.trim() && !agent.attachments.length && !agent.canvasReferences.length) agent.closePanel();
+        // Collapsing the dialog only changes its presentation; LocalAgentPanel and its active turn stay mounted.
+        if (agent.panelOpen) agent.closePanel();
         void fetchProductionCanvasContext(projectId).then(({ context }) => {
             if (!active) return;
             if (context.role === "standalone" && !(productionKind === "canvas" && productionId === projectId)) context = { role: "ordinary", canvasId: projectId };

@@ -7,8 +7,9 @@ import { Search } from "lucide-react";
 import { h3LoraOptions, h3ModelOptions, H3_LORA_STRENGTH_MIN, H3_LORA_STRENGTH_MAX } from "../constants";
 import { discoverH3Models, mergeH3Options } from "../services/model-discovery";
 import { useH3DropdownOpen } from "../hooks/useH3DropdownOpen";
-import { resolveH3StyleTemplates, styleTemplateFromPrompt } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
-import { H3_VIDEO_MEGAPIXELS as megapixels } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
+import { H3_STYLE_TEMPLATES, styleTemplateFromPrompt } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
+import { H3_VIDEO_MEGAPIXELS as megapixels, H3_VIDEO_RATIOS as videoRatios } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
+import { resolveAvailableH3StyleTemplates } from "../services/h3-style-templates";
 import type { H3Ref, H3Segment } from "../types";
 import { h3Label, useH3Locale } from "../h3-locale";
 
@@ -16,11 +17,12 @@ type Props = { ctx: CanvasNodeContext; metadata: Record<string, unknown>; segmen
 type SectionKey = "mode" | "model" | "sampling" | "lora" | "sla" | "runtime" | "latentUpscale" | "preview" | "rtx" | "faceRefine" | "audio" | "continuation";
 const sectionKeys: SectionKey[] = ["model", "continuation", "sampling", "lora", "sla", "runtime", "latentUpscale", "preview", "rtx", "faceRefine", "audio"];
 const modeLabels = { t2v: "文生视频", i2v: "图生视频", fl2v: "首尾帧", ref2va: "多参考" } as const;
+const NO_STYLE_TEMPLATE_OPTION = "__h3_no_style_template__";
 const encoderTypes = ["minimax"];
 const encoderDevices = ["default", "cpu"];
 const precisions = ["default", "fp8_e4m3fn", "fp8_e5m2"];
 const attentionModes = ["disabled", "auto", "sageattn_qk_int8_pv_fp16_cuda", "sageattn_qk_int8_pv_fp16_triton", "sageattn_qk_int8_pv_fp8_cuda", "sageattn_qk_int8_pv_fp8_cuda++", "sageattn3", "sageattn3_per_block_mean", "H3专用Sage加速"];
-const ratios = ["16:9 (Widescreen)", "9:16 (Portrait)", "1:1 (Square)", "4:3", "3:4", "21:9"];
+const ratios = Object.keys(videoRatios);
 const samplers = ["res_multistep", "南风采样器", "er_sde", "euler", "euler_cfg1_perpneg", "ddim", "uni_pc"];
 const schedulers = ["simple", "normal", "karras", "exponential", "sgm_uniform", "ddim_uniform"];
 const resizeModes = ["倍数缩放", "目标尺寸"];
@@ -63,7 +65,7 @@ function H3LoraPicker({ values, value, onChange }: { values: string[]; value: st
 export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs = [], patch: savePatch, onManageStyleTemplates }: Props) {
     const raw = (Array.isArray(metadata.segments) ? metadata.segments as Array<Record<string, unknown>> : []).find(item => item.id === inputSegment?.id) || inputSegment || {};
     const defaults = useDefaultParams();
-    const styleTemplates = resolveH3StyleTemplates(defaults.styleTemplates);
+    const styleTemplates = resolveAvailableH3StyleTemplates(defaults);
     const resolved = resolveH3Runtime(raw as Record<string, unknown>, {}, metadata, defaults);
     const segment = inputSegment ? { ...inputSegment, ...resolved.params, videoSteps: resolved.params.steps } as H3Segment : undefined;
     const selectedVideoReferenceCount = selectedVideoWorkflowReferenceCount(segment);
@@ -118,6 +120,16 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
     const styleTemplateId = segment.styleTemplateId === undefined
         ? styleTemplateFromPrompt(String(segment.prompt || ""), mode, defaults.styleTemplates)
         : segment.styleTemplateId;
+    const styleTemplateOptions = [
+        NO_STYLE_TEMPLATE_OPTION,
+        ...styleTemplates.map((template) => template.id),
+        ...(styleTemplateId && !styleTemplates.some((template) => template.id === styleTemplateId) ? [String(styleTemplateId)] : []),
+    ];
+    const styleTemplateValue = styleTemplateId == null ? NO_STYLE_TEMPLATE_OPTION : String(styleTemplateId);
+    const styleTemplateLabel = (value: string | number) => value === NO_STYLE_TEMPLATE_OPTION
+        ? "不加模板"
+        : styleTemplates.find((template) => template.id === value)?.label || H3_STYLE_TEMPLATES.find((template) => template.id === value)?.label || String(value);
+    const selectStyleTemplate = (value: string | number) => patch({ styleTemplateId: value === NO_STYLE_TEMPLATE_OPTION ? null : String(value) });
     const expanded = (metadata.nanFengExpandedSections as Record<string, boolean> | undefined) || {};
     const setOpen = (key: SectionKey) => {
         const opening = expanded[key] !== true;
@@ -145,7 +157,7 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
     const encoderTypeChoices = nfChoices("文本编码器类型", encoderTypes);
     const encoderDeviceChoices = nfChoices("文本编码器设备", encoderDevices);
     const precisionChoices = nfChoices("模型权重精度", precisions);
-    const ratioChoices = nfChoices("画面比例", ratios);
+    const ratioChoices = nfChoices("画面比例", mode === "i2v" || mode === "fl2v" ? ["原图比例", ...ratios] : ratios);
     const rawRatio = String(segment.aspectRatio || "16:9 (Widescreen)");
     const selectedRatio = ratioChoices.find((value) => String(value) === rawRatio)
         || ratioChoices.find((value) => String(value).startsWith(`${rawRatio} `))
@@ -193,7 +205,7 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
             {selectedVideoModelError ? <div className="nfh3-hint" role="alert">{selectedVideoModelError}</div> : null}
             {selectedVideoModelSchema?.error ? <div className="nfh3-hint" role="alert">{h3Label(locale, "selectedVideoModelModeWarning")} {selectedVideoModelSchema.error}</div> : null}
             <div className="nfh3-control-grid">
-                {control("视觉风格模板", <H3Dropdown values={styleTemplates.map((template) => template.id)} value={styleTemplateId || undefined} onChange={(value) => patch({ styleTemplateId: value ? String(value) : null })} format={(value) => styleTemplates.find((template) => template.id === value)?.label || String(value)} placeholder="不加模板" searchable allowClear />, true)}
+                {control("视觉风格模板", <H3Dropdown values={styleTemplateOptions} value={styleTemplateValue} onChange={selectStyleTemplate} format={styleTemplateLabel} placeholder="选择模板" searchable />, true)}
                 {control("尾帧参考（传给下一段）", <Switch checked={segment.tailFrameContinuation === true} onChange={(checked) => patch({ tailFrameContinuation: checked, ...(checked ? { motionContextEnabled: false } : {}) })} />, false, "下一段运行时截取本段尾帧，追加到已有图片参考最后，作为下一段的首帧状态基准。" )}
             </div>
             {!selectedVideoModelLoading && !selectedVideoModelError && selectedVideoModelSchema && !selectedModelFields.length ? <div className="nfh3-hint">{h3Label(locale, "selectedVideoModelNoFields")}</div> : null}
@@ -266,7 +278,7 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
         {segment.selectedVideoModelEnabled === true ? selectedVideoModelPanel : <>
         {section("model", "模型与基础参数", String(segment.modelName || "未选择模型").replace(/^.*[\\/]/, ""), <div className="nfh3-control-grid">
             {control("模型", <H3Dropdown values={modelOptions.map((item) => item.value)} value={segment.modelName || modelOptions[0]?.value} onChange={(value) => patch({ modelName: String(value) })} placeholder="选择模型" />, true)}
-            {choice("视觉风格模板", styleTemplates.map((template) => template.id), styleTemplateId, (value) => patch({ styleTemplateId: value ? String(value) : null }), (value) => styleTemplates.find((template) => template.id === value)?.label || String(value), true, true, "不加模板", true)}
+            {choice("视觉风格模板", styleTemplateOptions, styleTemplateValue, selectStyleTemplate, styleTemplateLabel, true, true, "选择模板")}
             {control("文本编码器", <H3Dropdown values={catalog.textEncoders.filter((value) => /minimax/i.test(value))} value={segment.textEncoder} onChange={(value) => patch({ textEncoder: String(value) })} placeholder="选择文本编码器" />, true)}
             {control("视频 VAE", <H3Dropdown values={catalog.videoVaes} value={segment.videoVae} onChange={(value) => patch({ videoVae: String(value) })} placeholder="选择视频 VAE" />, true)}
             {control("音频 VAE", <H3Dropdown values={catalog.audioVaes} value={segment.audioVae} onChange={(value) => patch({ audioVae: String(value) })} placeholder="选择音频 VAE" />, true)}
@@ -368,7 +380,7 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
             <button type="button" className="nfh3-lora-add" onClick={() => void refreshLoraCatalog()} disabled={refreshingLoras}>{refreshingLoras ? "读取中…" : "刷新 LoRA 列表"}</button>
             <div className="nfh3-hint">也可输入 ComfyUI `models/loras` 下的相对文件名，按回车应用。</div>
         </div>)}
-        {mode === "ref2va" ? section("audio", "数字人 · MV · 锁音频", segment.audioDrive ? enabledSummary("智能音频驱动") : segment.lockAudio ? enabledSummary("锁定音频") : "未启用", <div className="nfh3-audio-workspace">{control("开启锁音频", <Switch checked={segment.lockAudio === true} onChange={(checked) => patch({ lockAudio: checked })} />)}{control("开启音频驱动模式", <Switch checked={segment.audioDrive === true} onChange={(checked) => patch({ audioDrive: checked, lockAudio: checked ? true : segment.lockAudio })} />)}{segment.audioDrive ? <>{control("驱动音频", <H3Dropdown values={audioRefs.filter((ref) => ref.bindingId).map((ref) => ref.bindingId!)} value={audioRefs.some((ref) => ref.bindingId === segment.audioDriveFile) ? segment.audioDriveFile : undefined} onChange={(value) => patch({ audioDriveFile: String(value || "") })} format={(value) => audioRefs.find((ref) => ref.bindingId === value)?.name || String(value)} placeholder={audioRefs.length ? "选择参考音频" : "请先添加参考音频"} searchable allowClear />, true)}{control("当前起点", <InputNumber style={field} min={0} step={0.001} value={segment.audioDriveStart != null ? Number(segment.audioDriveStart) : undefined} placeholder="0" onChange={(value) => patch({ audioDriveStart: value ?? undefined })} />)}{control("当前终点", <InputNumber style={field} min={0} step={0.001} value={segment.audioDriveEnd != null ? Number(segment.audioDriveEnd) : undefined} placeholder="0" onChange={(value) => patch({ audioDriveEnd: value ?? undefined })} />)}{control("打点数据", <textarea value={String(segment.audioDriveMarkers || "")} onChange={(event) => patch({ audioDriveMarkers: event.target.value })} placeholder="JSON" />, true)}{control("分段图片", <textarea value={String(segment.audioDriveSegmentImages || "")} onChange={(event) => patch({ audioDriveSegmentImages: event.target.value })} placeholder="JSON" />, true)}{control("分段分镜", <textarea value={String(segment.audioDriveSegmentStoryboards || "")} onChange={(event) => patch({ audioDriveSegmentStoryboards: event.target.value })} placeholder="JSON" />, true)}{control("创意描述", <textarea value={String(segment.audioDriveCreative || "")} onChange={(event) => patch({ audioDriveCreative: event.target.value })} />, true)}{control("排除范围", <textarea value={String(segment.audioDriveExclude || "")} onChange={(event) => patch({ audioDriveExclude: event.target.value })} />, true)}</> : null}</div>) : null}
+        {mode === "ref2va" ? section("audio", "数字人 · MV · 锁音频", segment.audioDrive ? enabledSummary("智能音频驱动") : segment.lockAudio ? enabledSummary("锁定音频") : "未启用", <div className="nfh3-audio-workspace">{control("开启锁音频", <Switch checked={segment.lockAudio === true || segment.audioDrive === true} disabled={segment.audioDrive === true} onChange={(checked) => patch({ lockAudio: checked })} />)}{control("开启音频驱动模式", <Switch checked={segment.audioDrive === true} onChange={(checked) => patch({ audioDrive: checked })} />)}{segment.audioDrive ? <>{control("驱动音频", <H3Dropdown values={audioRefs.filter((ref) => ref.bindingId).map((ref) => ref.bindingId!)} value={audioRefs.some((ref) => ref.bindingId === segment.audioDriveFile) ? segment.audioDriveFile : undefined} onChange={(value) => patch({ audioDriveFile: String(value || "") })} format={(value) => audioRefs.find((ref) => ref.bindingId === value)?.name || String(value)} placeholder={audioRefs.length ? "选择参考音频" : "请先添加参考音频"} searchable allowClear />, true)}{control("当前起点", <InputNumber style={field} min={0} step={0.001} value={segment.audioDriveStart != null ? Number(segment.audioDriveStart) : undefined} placeholder="0" onChange={(value) => patch({ audioDriveStart: value ?? undefined })} />)}{control("当前终点", <InputNumber style={field} min={0} step={0.001} value={segment.audioDriveEnd != null ? Number(segment.audioDriveEnd) : undefined} placeholder="0" onChange={(value) => patch({ audioDriveEnd: value ?? undefined })} />)}{control("打点数据", <textarea value={String(segment.audioDriveMarkers || "")} onChange={(event) => patch({ audioDriveMarkers: event.target.value })} placeholder="JSON" />, true)}{control("分段图片", <textarea value={String(segment.audioDriveSegmentImages || "")} onChange={(event) => patch({ audioDriveSegmentImages: event.target.value })} placeholder="JSON" />, true)}{control("分段分镜", <textarea value={String(segment.audioDriveSegmentStoryboards || "")} onChange={(event) => patch({ audioDriveSegmentStoryboards: event.target.value })} placeholder="JSON" />, true)}{control("创意描述", <textarea value={String(segment.audioDriveCreative || "")} onChange={(event) => patch({ audioDriveCreative: event.target.value })} />, true)}{control("排除范围", <textarea value={String(segment.audioDriveExclude || "")} onChange={(event) => patch({ audioDriveExclude: event.target.value })} />, true)}</> : null}</div>) : null}
         </>}
     </div>;
 }

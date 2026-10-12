@@ -270,6 +270,13 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
                 const bytes = readCompilationReference(output, ref.file, [ref.asset_id ? resolveReferenceFile?.(ref.asset_id, "asset") : undefined, resolveReferenceFile?.(targetId, label)]);
                 const digest = crypto.createHash("sha256").update(bytes).digest("hex");
                 const asset = ref.asset_id ? director.assets[ref.asset_id] : undefined;
+                // Legacy imported audio is an authored external reference rather
+                // than an image asset. Match its exact compiled bytes; Backend
+                // still verifies the node/media ownership when applying inputs.
+                const segmentSource = (director.source.segments as Array<Record<string, any>> || []).find(segment => segment.id === targetId);
+                const authoredAudio = (segmentSource?.references as Array<Record<string, any>> || []).find(source =>
+                    source.label === label && (source.mediaType === "audio" || source.role === "audio")
+                    && source.sha256 === digest && source.nodeId && source.storageKey);
                 const old = prior.find(a => a.targetId === targetId && a.kind === kind)?.references.find(r => r.label === label && r.sha256 === digest);
                 const canvasStyleAnchorId = String(director.source.style_anchor_node_id || "");
                 const canvasStyleBinding = ref.canvas_style_anchor === true && ref.role === "style"
@@ -277,7 +284,7 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
                     && typeof ref.canvas_storage_key === "string" && ref.canvas_storage_key
                     ? { nodeId: canvasStyleAnchorId, storageKey: ref.canvas_storage_key, sha256: digest }
                     : undefined;
-                const binding = asset?.nodeId && asset.storageKey && asset.sha256 === digest ? asset : canvasStyleBinding || old;
+                const binding = asset?.nodeId && asset.storageKey && asset.sha256 === digest ? asset : canvasStyleBinding || old || authoredAudio;
                 if (!binding?.nodeId || !binding.storageKey || ref.sha256 !== digest) {
                     diagnostics.push({ code: "MISSING_REFERENCE_BINDING", path: `artifacts.${kind}-${targetId}.references`, targetId,
                         message: `No matching Canvas media binding for ${label}`, severity: "warning", blocksCompilation: false, blockingActions: ["generate"] });

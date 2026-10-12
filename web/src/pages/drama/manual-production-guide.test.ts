@@ -29,3 +29,14 @@ test("typed material nodes can be bound manually while wrong types, missing node
     assert.equal(canBindSubjectImage({ projectId: "canvas", nodeId: "video" }, "canvas", [{ id: "video", type: "video" }], []), false);
     assert.equal(canBindSubjectImage({ projectId: "canvas", nodeId: "character" }, "canvas", nodes, [{ sourceNode: { projectId: "canvas", nodeId: "character" } }]), false);
 });
+
+test("one character node can provide distinct stable media keys without binding the same image twice", () => {
+    const node = { id: "character", type: "character", metadata: { characterPrimaryIndex: 0, characterImages: [
+        { storageKey: "media:cover" }, { storageKey: "media:outfit" },
+    ] } };
+    const base = { sourceNode: { projectId: "canvas", nodeId: "character" } };
+    const cover = { ...base, selection: { mode: "selected_result", resultId: "character:character-image:media:cover" } };
+    assert.equal(canBindSubjectImage({ projectId: "canvas", nodeId: "character" }, "canvas", [node], [cover]), true);
+    assert.equal(canBindSubjectImage({ projectId: "canvas", nodeId: "character" }, "canvas", [node], [cover, { ...base, selection: { mode: "selected_result", resultId: "media:outfit" } }]), false);
+    assert.equal(canBindSubjectImage({ projectId: "canvas", nodeId: "character" }, "canvas", [node], [{ ...base, selection: { mode: "node_selection" } }]), true);
+});

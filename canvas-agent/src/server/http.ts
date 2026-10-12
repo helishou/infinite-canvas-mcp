@@ -106,6 +106,15 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
       : {}),
   });
   const session = new CanvasSession(initialWorkspace.activeThreadId || "", projectId => backend.post(`/canvas/projects/${encodeURIComponent(projectId)}/mcp-export`, {}));
+  const resolveActiveDramaId = async () => {
+    const pinned = session.activeDramaId();
+    if (pinned) return { dramaId: pinned, source: "session-pinned" as const };
+    const projectId = session.focusedCanvasProjectId();
+    if (!projectId) return { dramaId: "", source: "none" as const };
+    const result = await backend.get<{ context?: { dramaId?: string | null } }>(`/canvas/projects/${encodeURIComponent(projectId)}/production-context`);
+    const dramaId = String(result.context?.dramaId || "").trim();
+    return { dramaId, source: dramaId ? "browser-focused" as const : "none" as const };
+  };
   const llm = options.settings ? new LlmAgent(options.settings, backend.backendUrl, backend.backendToken) : undefined;
   const useLlm = () => {
     const id = ensureSiteWorkspace(config).activeThreadId || "";
@@ -704,13 +713,30 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
           ok: true,
           result: await comfyUi.cancel(String(input.taskId || "")),
         });
-      if (name === "drama_get_project")
-        return void res.json({ ok: true, result: await backend.getDramaProject(String(input.dramaId || "")) });
-      if (name === "drama_list_episodes")
+      if (name === "drama_set_active_project") {
+        const dramaId = String(input.dramaId || "").trim();
+        if (dramaId) await backend.getDramaProject(dramaId);
+        session.setActiveDramaId(dramaId || null);
+        const active = await resolveActiveDramaId();
+        return void res.json({ ok: true, result: { ok: true, activeDramaId: active.dramaId || null, source: active.source } });
+      }
+      if (name === "drama_get_project") {
+        const requestedId = String(input.dramaId || "").trim();
+        const active = requestedId ? undefined : await resolveActiveDramaId();
+        const dramaId = requestedId || active?.dramaId || "";
+        if (!dramaId) throw new Error("当前网页活动画布没有所属剧目；请打开剧目画布或调用 drama_set_active_project 显式选择");
+        return void res.json({ ok: true, result: await backend.getDramaProject(dramaId) });
+      }
+      if (name === "drama_list_episodes") {
+        const requestedId = String(input.dramaId || "").trim();
+        const active = requestedId ? undefined : await resolveActiveDramaId();
+        const dramaId = requestedId || active?.dramaId || "";
+        if (!dramaId) throw new Error("当前网页活动画布没有所属剧目；请打开剧目画布或调用 drama_set_active_project 显式选择");
         return void res.json({
           ok: true,
-          result: await backend.listDramaEpisodes(String(input.dramaId || "")),
+          result: await backend.listDramaEpisodes(dramaId),
         });
+      }
       if (name === "drama_get_episode")
         return void res.json({
           ok: true,

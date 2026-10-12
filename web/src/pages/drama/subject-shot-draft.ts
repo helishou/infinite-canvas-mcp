@@ -22,7 +22,8 @@ function validFormValue(value: unknown): value is ShotFormValue {
         || !Number.isFinite(value.duration_frames) || !object(value.camera)
         || !optionalStrings(value.camera.attention_subject_ids) || !validUtterances(value.utterances)) return false;
     return Array.isArray(value.subject_usages) && value.subject_usages.every(usage => object(usage)
-        && typeof usage.subjectId === "string" && optionalStrings(usage.pictureBindingIds) && optionalStrings(usage.continuityFactIds))
+        && typeof usage.subjectId === "string" && (usage.pictureBindingMode === undefined || ["default", "explicit"].includes(usage.pictureBindingMode))
+        && optionalStrings(usage.pictureBindingIds) && optionalStrings(usage.continuityFactIds))
         && Array.isArray(value.keyframes) && value.keyframes.every(frame => object(frame) && typeof frame.id === "string");
 }
 

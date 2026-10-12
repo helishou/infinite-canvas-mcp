@@ -1,11 +1,15 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Alert, App, Button, Empty, Input, Modal, Progress, Segmented, Skeleton, Tag, Tooltip } from "antd";
 import { ArrowRight, Bookmark, BookmarkCheck, Clapperboard, ImagePlus, LayoutGrid, List, ListChecks, Plus, RefreshCw, Search, Trash2, Workflow, Sparkles, Eye } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import { fetchProductionCanvasContext } from "@/services/backend-api";
 import { useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
+import { useWorkbenchCanvas } from "@/lib/canvas/canvas-host";
+import { canvasHostLocation } from "@/lib/canvas/canvas-host-navigation";
 import { CanvasDeleteProjectsDialog } from "@/components/canvas/canvas-delete-projects-dialog";
+import { WorkbenchCanvas } from "@/pages/drama/workbench-canvas";
 import { cn } from "@/lib/utils";
 import { collectOutputs, projectCover, taskDestination, type WorkbenchOutput } from "./workbench-data";
 import { WorkbenchMediaPreview } from "./workbench-media";
@@ -15,9 +19,14 @@ type ProjectFilter = "all" | "canvas" | "drama" | "pinned";
 const surface = "rounded-[10px] border border-border bg-card";
 
 export default function IndexPage() {
+    return <WorkbenchCanvas><HomeWorkbench /></WorkbenchCanvas>;
+}
+
+function HomeWorkbench() {
     const { t, i18n } = useTranslation();
     const { message } = App.useApp();
     const navigate = useNavigate();
+    const canvasHost = useWorkbenchCanvas();
     const projects = useCanvasStore((s) => s.projects);
     const folders = useCanvasStore((s) => s.folders);
     const hydrated = useCanvasStore((s) => s.hydrated);
@@ -40,6 +49,7 @@ export default function IndexPage() {
     const [outputsOpen, setOutputsOpen] = useState(false);
     const [creating, setCreating] = useState(false);
     const [name, setName] = useState("");
+    const openDestinationRequest = useRef(0);
     const outputs = useMemo(() => collectOutputs(data.logs), [data.logs]);
     const folderFor = (p: CanvasProject) => data.canvasOwners.get(p.id);
     const isDrama = (p: CanvasProject) => data.canvasOwners.has(p.id);
@@ -57,7 +67,36 @@ export default function IndexPage() {
         nodes: project.summary?.nodeCount ?? project.nodes.length,
         connections: project.summary?.connectionCount ?? project.connections.length,
     });
-    const openProject = (id: string) => navigate(`/canvas/${encodeURIComponent(id)}`);
+    const openDestination = async (destination: string) => {
+        const requestId = ++openDestinationRequest.current;
+        const target = canvasHostLocation(destination, "");
+        if (target) {
+            const openInOverlay = () => canvasHost?.openCanvas({ projectId: target.projectId, nodeId: target.search.get("nodeId") || undefined, segmentId: target.search.get("segmentId") || undefined });
+            if (data.canvasOwners.has(target.projectId)) {
+                openInOverlay();
+                return;
+            }
+            // The latest-project card is available before the drama ownership queries finish.
+            // Resolve that one clicked project so an early click cannot escape the production layout.
+            if (!data.dramaReady && data.connected) {
+                try {
+                    const { context } = await fetchProductionCanvasContext(target.projectId);
+                    if (requestId !== openDestinationRequest.current) return;
+                    if (["episode", "scene", "shared-assets"].includes(context.role)) {
+                        openInOverlay();
+                        return;
+                    }
+                } catch (error) {
+                    if (requestId !== openDestinationRequest.current) return;
+                    message.error(error instanceof Error ? error.message : String(error));
+                    return;
+                }
+            }
+        }
+        if (requestId !== openDestinationRequest.current) return;
+        navigate(destination);
+    };
+    const openProject = (id: string) => openDestination(`/canvas/${encodeURIComponent(id)}`);
     const visibleProjects = (data.dramaReady ? filtered.slice(0, visibleCount) : []).flatMap((entry) => entry.kind === "canvas" ? [entry.project] : []);
     const coverProjects = latest && !visibleProjects.some((p) => p.id === latest.id) ? [latest, ...visibleProjects] : visibleProjects;
     const extraCover = useProjectCoverResults(coverProjects.filter((p) => !projectCover(p, outputs, folderFor(p))).map((p) => [p.id, p.updatedAt]));
@@ -440,7 +479,7 @@ export default function IndexPage() {
                                         </div>
                                         <Tag color={task.status === "failed" ? "error" : task.status === "running" ? "processing" : task.status === "succeeded" ? "success" : "default"}>{t(`home.workbench.status_${task.status}`)}</Tag>
                                         {destination && (
-                                            <Button size="small" onClick={() => navigate(destination)}>
+                                            <Button size="small" onClick={() => openDestination(destination)}>
                                                 {t("home.workbench.openSource")}
                                             </Button>
                                         )}

@@ -13,17 +13,16 @@ test("legacy dangling character selections use the current primary; explicit emp
     assert.deepEqual(resolveCharacterImageKeys(source.metadata, { imageKeys: [] }), []);
 });
 
-test("primary changes refresh downstream primary selections, preserving valid outfit choices and other characters", () => {
+test("primary changes keep explicit character media keys and other characters unchanged", () => {
     const source = character();
     const next = character(undefined, 1);
     const primary = target(["image:a"]);
     const outfit = { ...target(["image:b"]), id: "outfit" };
     const disabled = { ...target([]), id: "disabled" };
     const updates = characterReferenceUpdates(source, next, [primary, outfit, disabled]);
-    assert.equal(updates.length, 1);
-    assert.deepEqual(updates[0].metadata.characterReferences.character, { imageKeys: ["image:b"], voiceEnabled: false });
-    assert.deepEqual(updates[0].metadata.characterReferences.other, primary.metadata.characterReferences.other);
+    assert.deepEqual(updates, []);
     assert.deepEqual(primary.metadata.characterReferences.character.imageKeys, ["image:a"]);
+    assert.deepEqual(outfit.metadata.characterReferences.character.imageKeys, ["image:b"]);
 });
 
 test("same-length image replacements refresh lost media and remain stable when reapplied", () => {

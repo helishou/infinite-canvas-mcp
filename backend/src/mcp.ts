@@ -67,6 +67,8 @@ type BrowserActiveProjectResolver = () => string | null;
 type McpSessionState = {
   activeProjectId: string | null;
   activeProjectSource: McpProjectSource;
+  activeDramaId: string | null;
+  activeDramaSource: McpProjectSource;
   clientId: string;
   runtimeInfo?: () => Record<string, unknown>;
 };
@@ -99,6 +101,8 @@ async function createBackendMcpInstance(
   const state: McpSessionState = {
     activeProjectId: null,
     activeProjectSource: "browser",
+    activeDramaId: null,
+    activeDramaSource: "browser",
     clientId: `mcp:${crypto.randomUUID()}`,
   };
   // 插件 MCP（尤其 H3）只通过常驻 Backend API 访问画布、任务、媒体和设置，
@@ -420,6 +424,7 @@ const BACKEND_OWNED_TOOL_NAMES = new Set<string>([
   "canvas_create_project",
   "canvas_delete_project",
   "canvas_set_active_project",
+  "drama_set_active_project",
   "canvas_diagnose_project",
   "canvas_fix_diagnostics",
   "drama_create_project",
@@ -478,6 +483,32 @@ function resolveMcpProjectId(
   state.activeProjectId = null;
   state.activeProjectSource = "browser";
   return { projectId: "", source: "none" as const };
+}
+
+type ActiveDramaResolution = { dramaId: string; source: "session-pinned" | "browser-focused" | "active-canvas" | "none" };
+
+async function resolveMcpDramaId(
+  state: McpSessionState,
+  backendApi: ReturnType<typeof createBackendClient>,
+  getBrowserActiveProjectId?: BrowserActiveProjectResolver,
+): Promise<ActiveDramaResolution> {
+  if (state.activeDramaSource === "session" && state.activeDramaId)
+    return { dramaId: state.activeDramaId, source: "session-pinned" };
+
+  const canvas = resolveMcpProjectId(state, undefined, getBrowserActiveProjectId);
+  if (!canvas.projectId) {
+    state.activeDramaId = null;
+    return { dramaId: "", source: "none" };
+  }
+  const response = await backendApi.get<{ context?: { dramaId?: string | null } }>(
+    `/canvas/projects/${encodeURIComponent(canvas.projectId)}/production-context`,
+  );
+  const dramaId = String(response.context?.dramaId || "").trim();
+  state.activeDramaId = dramaId || null;
+  return {
+    dramaId,
+    source: dramaId ? canvas.source === "session-pinned" ? "active-canvas" : "browser-focused" : "none",
+  };
 }
 
 async function executeDirectCanvasTool(
@@ -1728,18 +1759,41 @@ function registerBackendCanvasTools(
   server.registerTool("drama_get_project", {
     description: toolDescriptions.drama_get_project,
     inputSchema: toolInputSchemas.drama_get_project,
-  }, async (input) => textResult({ drama: await backendApi.getDramaProject(input.dramaId) }));
+  }, async (rawInput) => {
+    const input = toolInputSchemas.drama_get_project.parse(rawInput);
+    const active = input.dramaId ? undefined : await resolveMcpDramaId(state, backendApi, getBrowserActiveProjectId);
+    const dramaId = String(input.dramaId || active?.dramaId || "").trim();
+    if (!dramaId) throw new Error("当前网页活动画布没有所属剧目；请打开剧目画布或调用 drama_set_active_project 显式选择");
+    return textResult({ drama: await backendApi.getDramaProject(dramaId), activeDramaId: dramaId });
+  });
+  server.registerTool("drama_set_active_project", {
+    description: toolDescriptions.drama_set_active_project,
+    inputSchema: toolInputSchemas.drama_set_active_project,
+  }, async (rawInput) => {
+    const input = toolInputSchemas.drama_set_active_project.parse(rawInput);
+    const dramaId = String(input.dramaId || "").trim();
+    if (dramaId) {
+      await backendApi.getDramaProject(dramaId);
+      state.activeDramaId = dramaId;
+      state.activeDramaSource = "session";
+      return textResult({ ok: true, activeDramaId: dramaId, source: "session-pinned" });
+    }
+    state.activeDramaId = null;
+    state.activeDramaSource = "browser";
+    const active = await resolveMcpDramaId(state, backendApi, getBrowserActiveProjectId);
+    return textResult({ ok: true, activeDramaId: active.dramaId || null, source: active.source });
+  });
   server.registerTool(
     "drama_list_episodes",
     {
-      description:
-        "列出一个剧目的全部分集，按 episodeNumber 升序返回；每项含标题、剧情和绑定画布 ID。",
-      inputSchema: z.object({
-        dramaId: z.string().trim().min(1).describe("剧目 ID"),
-      }),
+      description: toolDescriptions.drama_list_episodes,
+      inputSchema: toolInputSchemas.drama_list_episodes,
     },
     async (rawInput: Record<string, unknown>) => {
-      const dramaId = String(rawInput.dramaId).trim();
+      const input = toolInputSchemas.drama_list_episodes.parse(rawInput);
+      const active = input.dramaId ? undefined : await resolveMcpDramaId(state, backendApi, getBrowserActiveProjectId);
+      const dramaId = String(input.dramaId || active?.dramaId || "").trim();
+      if (!dramaId) throw new Error("当前网页活动画布没有所属剧目；请打开剧目画布或调用 drama_set_active_project 显式选择");
       return textResult(await backendApi.listDramaEpisodes(dramaId));
     },
   );
@@ -1869,6 +1923,10 @@ function registerBackendCanvasTools(
       const result = await backendApi.delete<{ ok: boolean; deleted?: number }>(
         `/drama/projects/${encodeURIComponent(input.id)}`,
       );
+      if (Number(result.deleted || 0) > 0 && state.activeDramaId === input.id) {
+        state.activeDramaId = null;
+        state.activeDramaSource = "browser";
+      }
       return textResult({
         ok: true,
         id: input.id,

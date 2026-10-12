@@ -90,8 +90,8 @@ export function shotDurationPatch(shot: DirectorRecord, seconds: number, fps: nu
 
 
 /** Preview selection is local UI state and never selects a production reference. */
-export function assetImagePreview(currentStorageKey: string, nodeImages: unknown, selectedKey?: string) {
-    const images = [...new Set([currentStorageKey, ...records(nodeImages).filter(image => image.status === "success" && image.storageKey).map(image => String(image.storageKey))].filter(Boolean))];
+export function assetImagePreview(currentStorageKey: string, nodeImages: unknown, selectedKey?: string, includeCatalogImages = false) {
+    const images = [...new Set([currentStorageKey, ...records(nodeImages).filter(image => (includeCatalogImages || image.status === "success") && image.storageKey).map(image => String(image.storageKey))].filter(Boolean))];
     const previewKey = selectedKey && images.includes(selectedKey) ? selectedKey : currentStorageKey;
     return { images, previewKey, browsingHistory: previewKey !== currentStorageKey };
 }

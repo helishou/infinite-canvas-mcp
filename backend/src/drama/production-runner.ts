@@ -5,10 +5,10 @@ import { inputHash, type CanvasExecutionTarget } from "./canvas-inputs.js";
 import { createH3NodeMetadata } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { H3_DEFAULTS_KEY } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
-import { canonicalProduction, productionEntities, isSubjectPromptAssembly, productionSceneEntries, productionImageModel, type ProductionLayoutPlan, type ProductionLayoutUnit, type ProductionLayoutReceipt } from "@basketikun/canvas-agent/drama/production-contract";
+import { canonicalProduction, productionEntities, isSubjectPromptAssembly, productionSceneEntries, productionImageModel, resolveDirectorReviewPolicy, type ProductionLayoutPlan, type ProductionLayoutUnit, type ProductionLayoutReceipt } from "@basketikun/canvas-agent/drama/production-contract";
 
 import type { CanvasGenerationService } from "../canvas/generation-service.js";
-import { resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
+import { resolveCanvasCharacterImageReferences, resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
 import type { RuntimeTask } from "../db.js";
 import type { Stores } from "../stores/types.js";
@@ -36,9 +36,10 @@ const assetTitle = (source: Record<string, unknown>, id: string) => {
     const item = items.find(value => String(value.asset_id || value.id || "") === id);
     return String(item?.asset_name || item?.title || item?.name || item?.kind || id);
 };
-const mediaKey = (node: Record<string, unknown>) => {
+const mediaKey = (node: Record<string, unknown>, preferredStorageKey?: string) => {
     const meta = object(node.metadata);
-    return String(resolveCanvasImageReferenceNode(node)[0]?.storageKey || meta.storageKey || "");
+    const references = String(node.type || "") === "character" ? resolveCanvasCharacterImageReferences(node) : resolveCanvasImageReferenceNode(node);
+    return String(references.find(reference => reference.storageKey === preferredStorageKey)?.storageKey || references[0]?.storageKey || meta.storageKey || "");
 };
 
 /** Version-scoped, recoverable task submissions; all media still flows through CanvasGenerationService. */
@@ -549,7 +550,7 @@ export class EpisodeProductionRunner {
                 const node = project && nodesOf(project).find(node => node.id === asset.nodeId);
                 const outputs = task ? [...task.outputs, ...(Array.isArray(task.result?.media) ? task.result.media as Record<string, unknown>[] : [])] : [];
                 return !task || task.status !== "succeeded" || (item.projectId ?? task.projectId) !== episode.canvasId || (item.nodeId ?? task.nodeId) !== asset.nodeId
-                    || !outputs.some(output => output.storageKey === asset.storageKey) || !node || mediaKey(node) !== asset.storageKey
+                    || !outputs.some(output => output.storageKey === asset.storageKey) || !node || mediaKey(node, asset.storageKey) !== asset.storageKey
                     || !media || !fs.existsSync(media.filePath) || crypto.createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex") !== asset.sha256;
             });
             if (!waiting.length) return false;

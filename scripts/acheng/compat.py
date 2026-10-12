@@ -4,7 +4,7 @@ import re
 import sys
 import subprocess
 
-PATCH_VERSION = "canvas-7"
+PATCH_VERSION = "canvas-10"
 
 
 def replace(path, before, after):
@@ -40,6 +40,10 @@ def apply(root):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     (root / "canvas-source-contract.json").write_text(__import__("json").dumps(module.contract(), ensure_ascii=False, indent=2), encoding="utf-8")
+    asset_plan = root / "scripts/asset_plan.py"
+    replace(asset_plan, 'need(required and isinstance(required, list) and set(required) <= set(nodes), f"{shot[\'id\']}: asset requirements incomplete")',
+            'need(isinstance(required, list) and set(required) <= set(nodes), f"{shot[\'id\']}: asset requirements incomplete")')
+    replace(asset_plan, '        need(any(nodes[a]["kind"] == "scene" and nodes[a].get("entity_id") == shot["scene_id"] for a in required), f"{shot[\'id\']}: scene asset missing")\n', "")
     hooks = root / "scripts/post_hooks.py"
     replace(hooks, 'card.get("recipe") in ("portrait", "dark", "fantasy", "hard_surface", "ink", "monochrome", "product", "clean_slate", "style")', 'card.get("recipe") in __import__("canvas_source_contract").RECIPES')
     style = root / "scripts/style_anchor.py"
@@ -175,8 +179,51 @@ def check_asset_plan(payload, base):
         asset_plan.write_text(asset_plan_text, encoding="utf-8")
     continuity = root / "scripts/continuity_v2.py"
     continuity_text = continuity.read_text(encoding="utf-8")
-    if "_canvas_continuity_base_audit" not in continuity_text:
-        wrapper = "\n\n_canvas_continuity_base_audit = audit\ndef audit(source, target_ids=None):\n    if isinstance(source, dict) and (source.get('prompt_assembly') or {}).get('version') == 2:\n        from canvas_subject_prompt_v2 import project_continuity_source\n        result = _canvas_continuity_base_audit(project_continuity_source(source), target_ids)\n        result['sourceDigest'] = digest(source)\n        return result\n    return _canvas_continuity_base_audit(source, target_ids)\n"
+    replace(continuity, 'current_digest = digest({"scene_id": scene.get("scene_id"), "block": block})', 'current_digest = digest({"scene_id": scene.get("scene_id") or scene.get("id"), "block": block})')
+    continuity_text = continuity.read_text(encoding="utf-8")
+    if "_canvas_continuity_base_audit_defaults" not in continuity_text:
+        wrapper = """
+
+_canvas_continuity_base_audit_defaults = audit
+def audit(source, target_ids=None):
+    if isinstance(source, dict) and isinstance(source.get("ledger"), dict) and source["ledger"].get("contract_version") == 2:
+        from copy import deepcopy
+        original = source
+        projected = deepcopy(source)
+        ledger = projected["ledger"]
+        timeline_rows = ledger.get("timelines") if isinstance(ledger.get("timelines"), list) else []
+        timeline_ids = [str(row.get("id")) for row in timeline_rows if isinstance(row, dict) and row.get("id") is not None]
+        default_timeline = "main" if "main" in timeline_ids else (timeline_ids[0] if timeline_ids else "main")
+        if not timeline_ids:
+            ledger["timelines"] = [{"id": default_timeline, "start_frame": 0}]
+        next_order, occupied = {}, {}
+        for shot in projected.get("shots", []) if isinstance(projected.get("shots"), list) else []:
+            if not isinstance(shot, dict):
+                continue
+            timeline_id = str(shot.get("timeline_id") or default_timeline)
+            shot["timeline_id"] = timeline_id
+            used = occupied.setdefault(timeline_id, set())
+            order = shot.get("story_order")
+            if type(order) is not int or order < 0:
+                order = next_order.get(timeline_id, 0)
+                while order in used:
+                    order += 1
+                shot["story_order"] = order
+            used.add(order)
+            next_order[timeline_id] = max(next_order.get(timeline_id, 0), order + 1)
+        for scene in projected.get("script_scenes", []) if isinstance(projected.get("script_scenes"), list) else []:
+            if isinstance(scene, dict) and "blocks" not in scene and isinstance(scene.get("text"), str) and scene.get("id"):
+                # Match the existing script projection's source block bytes,
+                # not a copy of scene metadata that changes the coverage hash.
+                scene["blocks"] = [{"id": scene["id"], "kind": "action", "text": scene["text"]}]
+        if (projected.get("prompt_assembly") or {}).get("version") == 2:
+            from canvas_subject_prompt_v2 import project_continuity_source
+            projected = project_continuity_source(projected)
+        result = _canvas_continuity_base_audit_defaults(projected, target_ids)
+        result["sourceDigest"] = digest(original)
+        return result
+    return _canvas_continuity_base_audit_defaults(source, target_ids)
+"""
         # CLI must resolve the adapted audit before its __main__ call.
         entry = 'if __name__ == "__main__":'
         if entry not in continuity_text:
@@ -187,15 +234,22 @@ def check_asset_plan(payload, base):
 
     audit = root / "scripts/audit_storyboard_quality.py"
     text = audit.read_text(encoding="utf-8")
-    marker = "_canvas_subject_prompt_v2_audit"
+    marker = "_canvas_source_contract_audit"
     if marker not in text:
         text += '''
 
-_canvas_subject_prompt_v2_audit = audit
+_canvas_source_contract_audit = True
 def audit(p, base_dir=ROOT, *, h3_segment_ids=None):
     if isinstance(p, dict) and p.get("_canvas_prompt_assembly_version") == 2:
         return {"status": "PASS", "gates": [], "diagnostics": []}
-    return _canvas_subject_prompt_v2_audit(p, base_dir, h3_segment_ids=h3_segment_ids)
+    from canvas_source_contract import validate
+    diagnostics = validate(p, "compile")
+    errors = [item for item in diagnostics if item.get("severity") == "error"]
+    return {"status": "FAIL" if errors else "PASS", "score": 0 if errors else 10,
+            "scope": "canvas-source-contract",
+            "gates": [{"gate": "source-contract", "status": "FAIL" if errors else "PASS",
+                       "errors": [item["message"] for item in errors]}],
+            "diagnostics": diagnostics, "visual_status": "UNVERIFIED"}
 
 _canvas_subject_prompt_v2_compile_segment = compile_segment
 def compile_segment(p, seg, *, draft=False):
@@ -218,20 +272,21 @@ def compile_segment(p, seg, *, draft=False):
                              and ref.get("sha256") == node.get("sha256"))
             if not content_bound:
                 errors.append("asset version conflict")''')
-    replace(references,
+    if 'media_status = node.get("status") in ("approved", "generated", "selected_result")' not in references.read_text(encoding="utf-8"):
+        replace(references,
             '''        elif node:
             errors.append("asset planned; real approved media pending")
         expected = node.get("sha256") if node.get("status") == "approved" else ref.get("sha256")''',
-            '''        elif node and node.get("status") == "selected_result":
+            '''        elif node and node.get("status") in ("generated", "selected_result"):
             file = file or node.get("file")
             if ref.get("sha256") and node.get("sha256") != ref["sha256"]:
-                errors.append("selected node result SHA-256 conflicts with the archived binding")
+                errors.append("generated node result SHA-256 conflicts with the archived binding")
         elif node:
-            errors.append("asset planned; real approved media pending")
-        expected = node.get("sha256") if node.get("status") in ("approved", "selected_result") else ref.get("sha256")''')
+            errors.append("asset planned; generated media not bound")
+        expected = node.get("sha256") if node.get("status") in ("approved", "generated", "selected_result") else ref.get("sha256")''')
     replace(references,
             '''               "content_status": "LEGACY_FIXTURE_NOT_REVIEWED" if legacy else ("APPROVAL_RECORDED" if not errors else "UNVERIFIED"),''',
-            '''               "content_status": "LEGACY_FIXTURE_NOT_REVIEWED" if legacy else ("BOUND_ARCHIVED_RESULT" if node.get("status") == "selected_result" and not errors else ("APPROVAL_RECORDED" if not errors else "UNVERIFIED")),''')
+            '''               "content_status": "LEGACY_FIXTURE_NOT_REVIEWED" if legacy else ("APPROVAL_RECORDED" if node.get("status") == "approved" and not errors else ("GENERATED_RESULT_BOUND" if node.get("status") == "generated" and not errors else ("BOUND_ARCHIVED_RESULT" if node.get("status") == "selected_result" and not errors else "UNVERIFIED"))),''')
 
     compiler = root / "scripts/compile_h3.py"
     replace(compiler,

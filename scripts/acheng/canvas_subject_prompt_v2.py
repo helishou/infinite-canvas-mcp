@@ -126,6 +126,26 @@ def project_continuity_source(production):
     if (production.get("prompt_assembly") or {}).get("version") != 2:
         return production
     source = deepcopy(production)
+    ledger = source.get("ledger") if isinstance(source.get("ledger"), dict) else {}
+    timeline_rows = rows(ledger.get("timelines"))
+    timeline_ids = [str(row.get("id")) for row in timeline_rows if row.get("id") is not None]
+    default_timeline_id = "main" if "main" in timeline_ids else (timeline_ids[0] if timeline_ids else "main")
+    if not timeline_rows:
+        source["ledger"] = {**ledger, "timelines": [{"id": default_timeline_id, "start_frame": 0}]}
+        ledger = source["ledger"]
+    next_order, occupied_orders = {}, {}
+    for shot in rows(source.get("shots")):
+        timeline_id = str(shot.get("timeline_id") or default_timeline_id)
+        shot["timeline_id"] = timeline_id
+        used = occupied_orders.setdefault(timeline_id, set())
+        order = shot.get("story_order")
+        if type(order) is not int or order < 0:
+            order = next_order.get(timeline_id, 0)
+            while order in used:
+                order += 1
+            shot["story_order"] = order
+        used.add(order)
+        next_order[timeline_id] = max(next_order.get(timeline_id, 0), order + 1)
     subjects = {str(row.get("id")): row for row in rows(source.get("subject_registry")) if row.get("id")}
     # The ledger validator consumes the older participant fields. Derive those
     # fields from the authoritative Subject usages in memory so character and
@@ -185,7 +205,7 @@ def project_continuity_source(production):
         if ids and all(str(key) in windows for key in ids):
             segment["start_frame"], segment["end_frame"] = windows[str(ids[0])][0], windows[str(ids[-1])][1]
     for scene in rows(source.get("script_scenes")):
-        if not isinstance(scene.get("blocks"), list) and isinstance(scene.get("text"), str) and scene.get("id"):
+        if not rows(scene.get("blocks")) and isinstance(scene.get("text"), str) and scene.get("id"):
             # Flat screenplay rows are themselves source blocks; keep their exact content for digests.
             scene["blocks"] = [deepcopy(scene)]
     return source
@@ -214,7 +234,23 @@ def _infer_segment_mode(source, segment):
             return "Ref2VA"
         for usage in rows(shot.get("subject_usages")):
             if str(usage.get("subjectId")) in subjects and (usage.get("presentation") == "visible" or usage.get("pictureBindingIds")):
-                return "Ref2VA"
+                subject = subjects[str(usage.get("subjectId"))]
+                explicit = [str(value) for value in rows(usage.get("pictureBindingIds"))]
+                bindings = rows(subject.get("pictureBindings"))
+                entity_ref = subject.get("entityRef") if isinstance(subject.get("entityRef"), dict) else {}
+                if entity_ref.get("kind") == "scene" and not explicit:
+                    continue
+                if explicit and any(str(binding.get("id")) in explicit for binding in bindings):
+                    return "Ref2VA"
+                if not explicit and usage.get("presentation") == "visible":
+                    requirements = {str(item.get("factId")): str(item.get("value")) for item in rows(usage.get("stateRequirements"))}
+                    purposes = [str(value) for value in rows(usage.get("referencePurpose"))] or ["identity"]
+                    matches = [[binding for binding in bindings
+                                if purpose in [str(value) for value in rows(binding.get("defaultFor"))]
+                                and all(requirements.get(str(key)) == str(value) for key, value in (binding.get("applicableState") or {}).items())]
+                               for purpose in purposes]
+                    if matches and all(len(items) == 1 for items in matches):
+                        return "Ref2VA"
     return "T2VA"
 
 
@@ -469,7 +505,6 @@ def adapt_production(production, *, draft=False):
     transformed_by_id = {str(item.get("id")): item for item in all_transformed_shots}
     source["shots"] = [transformed_by_id.get(str(item.get("id")), item) for item in shots]
     source["segments"] = transformed_segments
-    source["version"] = "2.0"
     source["project_id"] = str(source.get("project_id") or source.get("drama_id") or source.get("brief") or "subject-prompt-production")
     source["delivery_scope"] = "full_production"
     source["production_total_duration"] = str(max((end for _start, end in windows.values()), default=0) * int(source.get("fps_den", 1)) / int(source.get("fps_num", 24)))

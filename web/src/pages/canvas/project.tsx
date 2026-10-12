@@ -142,6 +142,7 @@ import {
 } from "@/components/canvas/canvas-dialog-host";
 import { CanvasRealtimePresenceLayer, useCanvasRealtimePresence, writeCanvasPresenceViewport } from "@/components/canvas/canvas-realtime-presence";
 import { ConnectionCreateMenu, NodeCreateMenu, type PendingConnectionCreate } from "@/components/canvas/canvas-create-menus";
+import { shouldShowCanvasNodePanel } from "@/components/canvas/canvas-node-panel-frame";
 import {
     CanvasNodeType,
     type CanvasAssistantImage,
@@ -1430,7 +1431,9 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const deleteNodes = useCallback(
         (ids: Set<string>) => {
             if (!ids.size) return;
-            const allIds = new Set(ids);
+            const protectedIds = new Set(nodesRef.current.filter((node) => ids.has(node.id) && isH3NodeType(node.type)).map((node) => node.id));
+            const allIds = new Set([...ids].filter((id) => !protectedIds.has(id)));
+            if (!allIds.size) return;
             setNodes((prev) => {
                 const next = prev.filter((node) => !allIds.has(node.id));
                 return next.map((node) => {
@@ -1440,7 +1443,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 });
             });
             setConnections((prev) => prev.filter((conn) => !allIds.has(conn.fromNodeId) && !allIds.has(conn.toNodeId)));
-            setSelectedNodeIds(new Set());
+            setSelectedNodeIds(protectedIds);
             setSelectedConnectionId(null);
             setHoveredNodeId((current) => (current && allIds.has(current) ? null : current));
             setToolbarNodeId((current) => (current && allIds.has(current) ? null : current));
@@ -5942,7 +5945,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
 
                     {visibleNodes.map((node) => {
                         const nodeDefinition = getNodeDefinition(node.type);
-                        const showPanel = !isNodeResizing && dialogNodeId === node.id && !selectionBox && !nodeDefinition?.hidePanel;
+                        const showPanel = shouldShowCanvasNodePanel({ activeNodeId: dialogNodeId, nodeId: node.id, isNodeResizing, hasSelectionBox: Boolean(selectionBox), hidden: Boolean(nodeDefinition?.hidePanel) });
                         const needsPluginHost = Boolean(nodeDefinition?.Content || nodeDefinition?.Panel || nodeDefinition?.onDoubleClick || nodeDefinition?.forceInteractive);
                         return (
                             <CanvasNodeViewportItem
@@ -6185,6 +6188,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 {contextMenu ? (
                     <CanvasNodeContextMenu
                         menu={contextMenu}
+                        canDelete={contextMenu.type === "connection" || !isH3NodeType(contextMenuNode?.type)}
                         canCaptureVideoFrame={contextMenuNode?.type === CanvasNodeType.Video && Boolean(contextMenuNode.metadata?.content)}
                         canGroup={contextMenu.type === "node" && selectedNodeIds.has(contextMenu.nodeId) && groupableSelectedCount > 1}
                         canCopyContent={Boolean(contextMenuText)}

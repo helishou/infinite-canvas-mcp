@@ -40,7 +40,28 @@ export function manualTargetRecovery(target: Target, source: Row) {
     return { workspace, kind, id: target.targetId, messageKey: target.status === "blocked" ? "targetBlocked" : target.status === "needs_review" ? "reviewTarget" : "openTarget", actionKey: target.status === "needs_review" ? "reviewMedia" : "openTargetEditor" };
 }
 
-export function canBindSubjectImage(choice: { projectId: string; nodeId: string } | undefined, canvasId: string, nodes: Row[], bindings: Row[]) {
-    return Boolean(choice && (choice.projectId !== canvasId || nodes.some(node => node.id === choice.nodeId && (["image", "character", "scene", "prop"].includes(String(node.type)) || node.type === "config" && node.metadata?.smart === true && (node.metadata.generationMode || "image") === "image")))
-        && !bindings.some(binding => binding.sourceNode?.projectId === choice.projectId && binding.sourceNode?.nodeId === choice.nodeId));
+export function canBindSubjectImage(choice: { projectId: string; nodeId: string } | undefined, canvasId: string, nodes: Row[], bindings: Row[], imageKey?: string) {
+    if (!choice) return false;
+    const node = choice.projectId === canvasId ? nodes.find(item => item.id === choice.nodeId) : undefined;
+    if (choice.projectId === canvasId && !(node && (["image", "character", "scene", "prop"].includes(String(node.type)) || node.type === "config" && node.metadata?.smart === true && (node.metadata.generationMode || "image") === "image"))) return false;
+    const sameNode = bindings.filter(binding => binding.sourceNode?.projectId === choice.projectId && binding.sourceNode?.nodeId === choice.nodeId);
+    if (node?.type === "character") {
+        const images = rows(node.metadata?.characterImages);
+        const keys = [...new Set(images.map(image => String(image.storageKey || "")).filter(Boolean))];
+        if (!keys.length) return sameNode.length === 0;
+        const primaryIndex = Math.min(Math.max(Math.trunc(Number(node.metadata?.characterPrimaryIndex) || 0), 0), Math.max(images.length - 1, 0));
+        const primaryKey = String(images[primaryIndex]?.storageKey || "");
+        const boundKeys = new Set<string>();
+        for (const binding of sameNode) {
+            const selection = binding.selection || {};
+            if (selection.mode === "selected_result") {
+                const resultId = String(selection.resultId || "");
+                for (const key of keys) if (resultId === key || resultId === `${choice.nodeId}:character-image:${key}`) boundKeys.add(key);
+            } else if (selection.mode === "node_selection" || selection.mode === "latest_success") {
+                if (primaryKey) boundKeys.add(primaryKey);
+            }
+        }
+        return imageKey ? keys.includes(imageKey) && !boundKeys.has(imageKey) : keys.some(key => !boundKeys.has(key));
+    }
+    return sameNode.length === 0;
 }

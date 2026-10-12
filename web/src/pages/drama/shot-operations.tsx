@@ -3,7 +3,7 @@ import { App, Button, Checkbox, Dropdown, Input, InputNumber, Modal, Select } fr
 import { Copy, MoreHorizontal, Plus, Scissors, Trash2, ArrowUp, ArrowDown, Combine } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { nanoid } from "nanoid";
-import { resolveSubjectPictureBindingIds, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
+import type { ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 import { readableText, records } from "./director-display";
 import { subjectDisplayName } from "./subject-shot-draft";
 
@@ -48,7 +48,7 @@ export function ShotOperations({ source, shot, busy, onEdit, onSelect, contextMe
         const id = createdId;
         const usages = subjects.filter(subject => visible.includes(subject.id)).map(subject => {
             const original = records(shot?.subject_usages).find(usage => usage.subjectId === subject.id);
-            const usage = { subjectId: subject.id, presentation: "visible", pictureBindingIds: resolveSubjectPictureBindingIds(subject, { presentation: "visible", referencePurpose: ["identity"], stateRequirements: [] }).bindingIds, referencePurpose: ["identity"], continuityFactIds: [], stateRequirements: [] };
+            const usage = { subjectId: subject.id, presentation: "visible", pictureBindingIds: [], pictureBindingMode: "default", referencePurpose: ["identity"], continuityFactIds: [], stateRequirements: [] };
             const value: Row = { ...(original || usage), presentation: "visible" }; delete value.localStartFrame; delete value.localEndFrame; return value;
         });
         const design = { title: title.trim(), visual: visual.trim(), camera: { ...(shot?.camera || {}), framing, attention_subject_ids: attention, editorial_reason: reason.trim() }, ...(mode === "insert" || visibleChanged ? { subject_usages: usages } : {}) };

@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { Badge, Button, Drawer, Tooltip } from "antd";
 import { Bell, BellOff, LoaderCircle, LocateFixed, MessageSquare, X } from "lucide-react";
 import { useConfirmationReminders } from "./use-confirmation-reminders";
@@ -11,6 +12,7 @@ import { useAgentStore } from "@/stores/use-agent-store";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
+import { useWorkbenchCanvasOverlayTarget } from "@/lib/canvas/canvas-host";
 
 const ProductionEditor = lazy(() => import("@/pages/drama/production").then(module => ({ default: module.ProductionEditor })));
 
@@ -20,6 +22,7 @@ export function AgentPanel() {
     const navigate = useNavigate();
     const panelOpen = useAgentStore(state => state.panelOpen);
     const panelMounted = useAgentStore(state => state.panelMounted);
+    const workbenchCanvasOverlay = useWorkbenchCanvasOverlayTarget();
     const busy = useAgentStore(state => state.sending || state.waiting);
     const reminders = useConfirmationReminders();
     const closePanel = useAgentStore(state => state.closePanel);
@@ -91,21 +94,22 @@ export function AgentPanel() {
         <Button type={panelTab === "object" ? "primary" : "text"} size="small" aria-pressed={panelTab === "object"} onClick={() => { useProductionWorkspaceStore.getState().setPanelTab("object"); useAgentStore.getState().openPanel(); }}>{t("productionCanvas.object")}</Button>
         <Button type={panelTab === "director" ? "primary" : "text"} size="small" aria-pressed={panelTab === "director"} onClick={() => { useProductionWorkspaceStore.getState().setPanelTab("director"); useAgentStore.getState().openPanel(); }}>Agent</Button>
     </div> : null;
+    const launcher = <div className={`fixed bottom-4 right-3 flex max-w-[calc(100vw-24px)] flex-col items-end gap-3 ${workbenchCanvasOverlay ? "z-[1000]" : "z-[80]"} sm:bottom-5 sm:right-6`} data-agent-launcher data-chat-open={chatOpen} data-canvas-shortcuts-ignore>
+        {homePage && !chatOpen && !welcomeDismissed && <div data-director-welcome-bubble className="relative flex max-w-[calc(100vw-24px)] items-center gap-1 rounded-xl border border-border bg-card px-2 py-2 text-foreground shadow-sm">
+            <span aria-hidden="true" data-director-welcome-tail className="pointer-events-none absolute -bottom-1.5 right-8 size-3 rotate-45 border-b border-r border-border bg-card" />
+            <button type="button" className="rounded-lg px-2 py-1.5 text-sm leading-relaxed transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring" onClick={() => { setWelcomeDismissed(true); setCreativeEntryOpen(true); useProductionWorkspaceStore.getState().setPanelTab("director"); useAgentStore.getState().openPanel(); }}>{t("landing.ideaTitle")}</button>
+            <button type="button" className="grid size-7 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring" aria-label={t("productionCanvas.dismissWelcome")} onClick={() => setWelcomeDismissed(true)}><X className="size-3.5" /></button>
+        </div>}
+        <Badge count={reminders.count} size="small">
+            <Button type={chatOpen ? "default" : "primary"} shape="round" className="!h-11 !rounded-xl !px-4 !text-sm !font-medium !shadow-none" aria-label={t("productionCanvas.openChat")} aria-expanded={chatOpen} aria-controls="canvas-director-dialog" icon={busy ? <LoaderCircle className="size-4 animate-spin" /> : <MessageSquare className="size-4" />} onClick={openChat}>{t("productionCanvas.director")}</Button>
+        </Badge>
+    </div>;
     return <>
-        <div className="fixed bottom-4 right-3 z-[80] flex max-w-[calc(100vw-24px)] flex-col items-end gap-3 sm:bottom-5 sm:right-6" data-agent-launcher data-chat-open={chatOpen} data-canvas-shortcuts-ignore>
-            {homePage && !chatOpen && !welcomeDismissed && <div data-director-welcome-bubble className="relative flex max-w-[calc(100vw-24px)] items-center gap-1 rounded-xl border border-border bg-card px-2 py-2 text-foreground shadow-sm">
-                <span aria-hidden="true" data-director-welcome-tail className="pointer-events-none absolute -bottom-1.5 right-8 size-3 rotate-45 border-b border-r border-border bg-card" />
-                <button type="button" className="rounded-lg px-2 py-1.5 text-sm leading-relaxed transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring" onClick={() => { setWelcomeDismissed(true); setCreativeEntryOpen(true); useProductionWorkspaceStore.getState().setPanelTab("director"); useAgentStore.getState().openPanel(); }}>{t("landing.ideaTitle")}</button>
-                <button type="button" className="grid size-7 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring" aria-label={t("productionCanvas.dismissWelcome")} onClick={() => setWelcomeDismissed(true)}><X className="size-3.5" /></button>
-            </div>}
-            <Badge count={reminders.count} size="small">
-                <Button type={chatOpen ? "default" : "primary"} shape="round" className="!h-11 !rounded-xl !px-4 !text-sm !font-medium !shadow-none" aria-label={t("productionCanvas.openChat")} aria-expanded={chatOpen} aria-controls="canvas-director-dialog" icon={busy ? <LoaderCircle className="size-4 animate-spin" /> : <MessageSquare className="size-4" />} onClick={openChat}>{t("productionCanvas.director")}</Button>
-            </Badge>
-        </div>
+        {workbenchCanvasOverlay ? createPortal(launcher, workbenchCanvasOverlay) : launcher}
         <section id="canvas-director-dialog" role="dialog" aria-label={t("productionCanvas.chatDialog")} aria-hidden={!chatOpen} inert={!chatOpen}
             data-canvas-shortcuts-ignore data-canvas-no-zoom
             className="fixed bottom-20 right-3 z-[75] flex w-[min(460px,calc(100vw-24px))] flex-col overflow-hidden rounded-xl border border-border bg-card text-foreground shadow-xl sm:bottom-[84px] sm:right-6"
-            style={{ height: "min(640px, calc(100dvh - 112px))", visibility: chatOpen ? "visible" : "hidden", pointerEvents: chatOpen ? "auto" : "none" }}>
+            style={{ height: "min(640px, calc(100dvh - 112px))", zIndex: workbenchCanvasOverlay ? 950 : undefined, visibility: chatOpen ? "visible" : "hidden", pointerEvents: chatOpen ? "auto" : "none" }}>
             {owner && <div className="shrink-0 border-b border-border px-3 py-2">{objectAgentSwitch}</div>}
             {(canvasPage && owner && (current || recoveryPending) || followTarget?.kind && followTarget.id && (!following || pending)) && <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-muted/30 px-4 py-2.5" data-director-production-controls>
                 {canvasPage && owner && (current || recoveryPending) && <button type="button" className="min-w-0 flex-1 truncate rounded-md px-1.5 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground" onClick={() => {

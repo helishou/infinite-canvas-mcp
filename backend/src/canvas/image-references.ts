@@ -1,5 +1,5 @@
 import type { CanvasProject } from "../db.js";
-import { resolveCharacterImageKeys, selectSmartImageResult } from "@basketikun/canvas-agent/reference-contract";
+import { characterImageKey, resolveCharacterImageKeys, selectSmartImageResult } from "@basketikun/canvas-agent/reference-contract";
 
 export type ResolvedCanvasImageReference = {
     id: string;
@@ -45,6 +45,19 @@ export function resolveCanvasImageReferenceNode(
         addSceneImageReferences(node, references, added);
     }
     return references;
+}
+
+/** Resolve every character image by stable key for explicit bindings and source verification. */
+export function resolveCanvasCharacterImageReferences(node: Record<string, unknown>) {
+    if (String(node.type || "") !== "character") return resolveCanvasImageReferenceNode(node);
+    const id = String(node.id || "");
+    if (!id) return [];
+    const metadata = recordOf(node.metadata);
+    const images = Array.isArray(metadata.characterImages) ? metadata.characterImages.filter((image): image is Record<string, unknown> => Boolean(image) && typeof image === "object" && !Array.isArray(image)) : [];
+    const existing = recordOf(metadata.characterReferences);
+    const selection = recordOf(existing[id]);
+    const referenceTarget = { ...node, metadata: { ...metadata, characterReferences: { ...existing, [id]: { ...selection, imageKeys: images.map((image, index) => characterImageKey(image, index)) } } } };
+    return resolveCanvasImageReferenceNode(node, referenceTarget);
 }
 
 /** 按调用方明确给出的节点 ID 展开参考图，保留用户选择顺序。 */

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { directorModules, directorProductionSchema, directorSourceV2Diagnostics, promptSourceMapSchema } from "./production-contract.js";
+import { directorModules, directorProductionSchema, directorSourceV2Diagnostics, promptSourceMapSchema, resolveSubjectPictureBindingIds } from "./production-contract.js";
 import { compilationScopeInput } from "./compilation-scope.js";
 import { subjectShotWindows, subjectStateProjection } from "./subject-assembly.js";
 
@@ -68,6 +68,32 @@ test("missing or ambiguous default images do not block saving a visible Subject 
     ambiguous.shots[0].subject_usages[0].pictureBindingIds = [];
     ambiguous.subject_registry[0].pictureBindings.push({ ...ambiguous.subject_registry[0].pictureBindings[0], id: "SHUANZI_ID_2", assetId: "AST_SHUANZI_2" });
     assert.deepEqual(directorSourceV2Diagnostics(ambiguous), []);
+});
+
+test("explicit empty picture selection is schema-compatible, excluded from compilation scope, and never falls back", () => {
+    const value = source();
+    const usage = value.shots[0].subject_usages[0] as any;
+    usage.pictureBindingMode = "explicit";
+    usage.pictureBindingIds = [];
+    assert.deepEqual(directorSourceV2Diagnostics(value), []);
+    const production = directorProductionSchema.parse({
+        schemaVersion: 1,
+        engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "test" },
+        source: value, sourceHash: "b".repeat(64),
+        modules: Object.fromEntries(directorModules.map(module => [module, { status: "planned", evidence: [], unresolved: [] }])),
+        artifacts: [], assets: Object.fromEntries(["AST_SHUANZI", "AST_EGG", "KF_S1"].map(id => [id, { assetId: id, version: "v1", status: "planned" }])),
+        shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {},
+    });
+    const savedUsage = production.source.shots[0].subject_usages[0];
+    assert.equal(savedUsage.pictureBindingMode, "explicit");
+    assert.deepEqual(resolveSubjectPictureBindingIds(production.source.subject_registry[0], savedUsage), { bindingIds: [], issues: [] });
+    const scope = compilationScopeInput(production, { targetIds: ["C1"], output: "selected" });
+    assert.deepEqual(scope.director.source.shots[0].subject_usages[0].pictureBindingIds, []);
+    assert.deepEqual(scope.director.source.subject_registry[0].pictureBindings, []);
+
+    const invalid = structuredClone(value);
+    (invalid.shots[0].subject_usages[0] as any).pictureBindingIds = ["UNKNOWN_BINDING"];
+    assert.ok(directorSourceV2Diagnostics(invalid).some(item => item.path.join(".").includes("pictureBindingIds")));
 });
 
 test("Clip compilation scope includes only selected Subject bindings and submitted keyframes", () => {

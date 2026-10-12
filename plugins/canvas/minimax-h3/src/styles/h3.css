@@ -837,6 +837,7 @@
 .minimax-settings input:disabled,.nfh3-control input:disabled,.nfh3-lora-row input:disabled,.minimax-canvas-workbench .ant-select-disabled .ant-select-selection-item { color:var(--h3-muted) !important; }
 .nfh3-control:has(.nfh3-select) { grid-template-columns:minmax(0,.7fr) minmax(0,1fr); }
 
-/* Give selected values their own full-width line inside the existing two-column parameter grid. */
-.nfh3-control:has(.nfh3-select) { height:auto; min-height:76px; grid-template-columns:minmax(0,1fr); align-content:start; gap:4px; }
+/* Keep searchable selectors aligned with their labels while preserving the existing control height. */
+.nfh3-control:has(.nfh3-select) { height:auto; min-height:76px; align-content:center; gap:8px; }
 .nfh3-control:has(.nfh3-select) > span:first-child { font-size:18px; line-height:24px; }
+.nfh3-control[data-control="视觉风格模板"]:has(.nfh3-select) { grid-template-columns:128px minmax(0,1fr); }

@@ -13,7 +13,8 @@ import { H3Icon } from "./H3Icon";
 import { requestH3Run, resolveH3PaneSizes } from "./H3WorkbenchPrimitives";
 import { h3Label, useH3Locale } from "../h3-locale";
 import { refsForSegment } from "../services/h3-data";
-import { H3_STYLE_TEMPLATES, resolveH3StyleTemplates, type H3StyleTemplate } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
+import { H3_STYLE_TEMPLATES, type H3StyleTemplate } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
+import { resolveAvailableH3StyleTemplates } from "../services/h3-style-templates";
 
 type Props = { ctx: CanvasNodeContext; metadata: Record<string, unknown>; selected?: H3Segment; submitting?: boolean; patchSelected: (patch: Partial<H3Segment>) => void; patchAllSettings: (patch: Partial<H3Segment>) => void };
 
@@ -90,7 +91,7 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, submitting = fals
     const [decisionBusy, setDecisionBusy] = useState(false);
     const [stylesOpen, setStylesOpen] = useState(false);
     const [styleDraft, setStyleDraft] = useState<H3StyleTemplate | null>(null);
-    const styleTemplates = resolveH3StyleTemplates(defaults.styleTemplates);
+    const styleTemplates = resolveAvailableH3StyleTemplates(defaults);
     const saveStyleTemplates = async (next: H3StyleTemplate[]) => {
         const current = await ctx.h3Defaults.get();
         const committed = await ctx.h3Defaults.set({ ...current, styleTemplates: next });
@@ -99,7 +100,17 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, submitting = fals
     const editStyle = (template: H3StyleTemplate) => setStyleDraft({ ...template });
     const removeStyle = async (id: string) => {
         try {
-            await saveStyleTemplates((Array.isArray(defaults.styleTemplates) ? defaults.styleTemplates as H3StyleTemplate[] : []).filter(item => item.id !== id));
+            const current = await ctx.h3Defaults.get();
+            const stored = Array.isArray(current.styleTemplates) ? current.styleTemplates as H3StyleTemplate[] : [];
+            const deleted = new Set(Array.isArray(current.deletedStyleTemplateIds) ? current.deletedStyleTemplateIds.filter((item): item is string => typeof item === "string") : []);
+            if (H3_STYLE_TEMPLATES.some(item => item.id === id)) deleted.add(id);
+            const committed = await ctx.h3Defaults.set({
+                ...current,
+                styleTemplates: stored.filter(item => item.id !== id),
+                deletedStyleTemplateIds: [...deleted],
+                ...(current.styleTemplateId === id ? { styleTemplateId: null } : {}),
+            });
+            writeDefaultParams(committed);
             setStyleDraft(null);
         } catch (error) { message.error(error instanceof Error ? error.message : "删除风格模板失败"); }
     };
@@ -178,7 +189,7 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, submitting = fals
         <ClipSettings key="clip-settings" ctx={ctx} metadata={metadata} segment={selected} audioRefs={effectiveSegment ? refsForSegment(effectiveSegment).filter((ref) => ref.type === "audio") : []} patch={patchSettings} onManageStyleTemplates={() => setStylesOpen(true)} />
         <Modal title="管理视觉风格模板" open={stylesOpen} onCancel={() => { setStylesOpen(false); setStyleDraft(null); }} footer={null} width={720}>
             <div style={{ display: "grid", gap: 10, maxHeight: "55vh", overflow: "auto", marginBottom: 16 }}>
-                {styleTemplates.map(template => <div key={template.id} style={{ display: "flex", alignItems: "center", gap: 10 }}><strong style={{ flex: 1 }}>{template.label}</strong><Button size="small" onClick={() => editStyle(template)}>编辑</Button><Button size="small" danger onClick={() => void removeStyle(template.id)}>{H3_STYLE_TEMPLATES.some(item => item.id === template.id) ? "恢复默认" : "删除"}</Button></div>)}
+                {styleTemplates.map(template => <div key={template.id} style={{ display: "flex", alignItems: "center", gap: 10 }}><strong style={{ flex: 1 }}>{template.label}</strong><Button size="small" onClick={() => editStyle(template)}>编辑</Button><Button size="small" danger onClick={() => void removeStyle(template.id)}>删除</Button></div>)}
             </div>
             <Button type="dashed" block onClick={() => setStyleDraft({ id: `custom-${crypto.randomUUID()}`, label: "", text: "" })}>添加模板</Button>
             {styleDraft ? <div style={{ display: "grid", gap: 10, marginTop: 16 }}><Input value={styleDraft.label} placeholder="模板名称" onChange={event => setStyleDraft({ ...styleDraft, label: event.target.value })} /><Input.TextArea value={styleDraft.text} placeholder="风格提示词（运行时加入视频描述段开头）" autoSize={{ minRows: 5, maxRows: 12 }} onChange={event => setStyleDraft({ ...styleDraft, text: event.target.value })} /><div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}><Button onClick={() => setStyleDraft(null)}>取消</Button><Button type="primary" onClick={() => void commitStyle()}>保存模板</Button></div></div> : null}

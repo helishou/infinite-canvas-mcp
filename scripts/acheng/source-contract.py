@@ -73,7 +73,7 @@ def contract():
         "relationships": ["segments[].mode is an execution mode; missing modes are inferred from selected references, and lock/reason fields are optional metadata.", "Full creative and file contracts remain owned by Acheng audit/compiler; this schema covers Canvas source fields."],
         "templates": {"manual_storyboard_override": {"storyboard_policy": {"version": 1}, "camera": {"framing": "MCU", "attention_subject_ids": ["<registered subject id>"], "editorial_reason": "Read the speaker's strategy or listener's changing response."}}, "segment": {"mode": "Ref2VA", "mode_lock": "Ref2VA", "mode_selection_reason": "Use approved identity and scene references."}, "asset_card": {"recipe": "portrait"}, "style_scope": {"preserve_scope": ["Preserve the approved lighting and palette."], "exclude_scope": ["Do not copy the anchor subject identity."]}},
         "continuityLedger": continuity_v2_contract(),
-        "storyboardPolicy": {"version": 1, "defaultForNewProductions": False, "dialogueCoverage": "H3 compilation inserts speaker close-up/reverse coverage from authored dialogue timing and character visibility for legacy and new sources, without changing source Shot/Segment frames or dialogue text.", "manualOverrideCameraFields": ["framing", "attention_subject_ids", "editorial_reason"], "framingValues": list(FRAMINGS), "explicitManualOverride": "When version 1 is declared, enforce manual framing/attention/reason fields and validate only selected Shot/Segment structure in scoped compilation."},
+        "storyboardPolicy": {"version": 1, "defaultForNewProductions": False, "dialogueCoverage": "Temporarily disabled: H3 compilation preserves authored camera design, dialogue text and timing without inserting speaker close-up/reverse/reaction cuts.", "manualOverrideCameraFields": ["framing", "attention_subject_ids", "editorial_reason"], "framingValues": list(FRAMINGS), "explicitManualOverride": "When version 1 is declared, enforce manual framing/attention/reason fields and validate only selected Shot/Segment structure in scoped compilation."},
         "modelPromptContract": {"version": 1,
             "subjects": "Ref2VA identity/character/scene/environment/prop references require one matching entity/source/Shot Subject. Frame and composition anchors may remain Pictures.",
             "continuity": "Replay snapshots remain report-only. Optional shots[].continuity_cues assert a registered local fact/value at start/end and provide complete model-facing description. Without cues, authored shot state/action remains the prose source.",
@@ -111,6 +111,10 @@ def validate_subject_prompt_v2(source, stage="edit"):
             binding_owner[binding_id] = subject_id
     shot_by_id, position = {}, {}
     order_keys = set()
+    ledger_timelines = rows(ledger.get("timelines"))
+    timeline_ids = [str(item.get("id")) for item in ledger_timelines if isinstance(item, dict) and item.get("id") is not None]
+    default_timeline_id = "main" if "main" in timeline_ids else (timeline_ids[0] if timeline_ids else "main")
+    timeline_by_shot, next_story_order = {}, {}
     for index, shot in enumerate(shots):
         if not isinstance(shot, dict):
             issue("shots." + str(index), "Shot must be an object")
@@ -124,10 +128,17 @@ def validate_subject_prompt_v2(source, stage="edit"):
         duration = shot.get("duration_frames")
         if type(duration) is not int or duration <= 0:
             issue("shots." + shot_id + ".duration_frames", "Shot duration must be positive integer frames", shot_id)
-        timeline_id, order = str(shot.get("timeline_id") or ""), shot.get("story_order")
-        if not timeline_id or type(order) is not int or order < 0 or (timeline_id, order) in order_keys:
-            issue("shots." + shot_id, "Shot timeline and story_order must be valid and unique", shot_id)
+        timeline_id = str(shot.get("timeline_id") or default_timeline_id)
+        order = shot.get("story_order")
+        if type(order) is not int or order < 0:
+            order = next_story_order.get(timeline_id, 0)
+            while (timeline_id, order) in order_keys:
+                order += 1
+        elif (timeline_id, order) in order_keys:
+            issue("shots." + shot_id, "Story order must be unique within its timeline", shot_id)
         order_keys.add((timeline_id, order))
+        timeline_by_shot[shot_id] = timeline_id
+        next_story_order[timeline_id] = max(next_story_order.get(timeline_id, 0), order + 1)
         camera = shot.get("camera") if isinstance(shot.get("camera"), dict) else {}
         for field in ("framing", "editorial_reason"):
             if not str(camera.get(field) or "").strip():
@@ -140,11 +151,14 @@ def validate_subject_prompt_v2(source, stage="edit"):
                 issue("shots." + shot_id + ".subject_usages", "Shot references an unknown Subject", shot_id)
                 continue
             if usage.get("presentation") == "visible":
+                entity_ref = subject.get("entityRef") if isinstance(subject.get("entityRef"), dict) else {}
                 selected = [str(value) for value in usage.get("pictureBindingIds", [])]
                 if selected:
                     if any(binding_owner.get(value) != str(subject.get("id")) for value in selected):
                         issue("shots." + shot_id + ".subject_usages.pictureBindingIds", "Selected picture binding belongs to another Subject", shot_id)
                 else:
+                    if entity_ref.get("kind") == "scene":
+                        continue
                     requirements = {str(item.get("factId")): str(item.get("value")) for item in usage.get("stateRequirements", [])}
                     purposes = usage.get("referencePurpose") or ["identity"]
                     for purpose in purposes:
@@ -180,7 +194,7 @@ def validate_subject_prompt_v2(source, stage="edit"):
         offsets = [position[value] for value in ids]
         if offsets != list(range(offsets[0], offsets[0] + len(offsets))) or any(value in partitioned for value in ids):
             issue("segments." + segment_id + ".shot_ids", "Clip Shots must be an ordered contiguous partition", segment_id)
-        if any(shot_by_id[value].get("timeline_id") != shot_by_id[ids[0]].get("timeline_id") for value in ids):
+        if any(timeline_by_shot.get(value) != timeline_by_shot.get(ids[0]) for value in ids):
             issue("segments." + segment_id + ".shot_ids", "A Clip cannot cross story timelines", segment_id)
         partitioned.update(ids)
         by_segment[segment_id] = ids
