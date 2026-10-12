@@ -18,7 +18,7 @@ export function WorkbenchCanvas({ children }: { children: ReactNode }) {
     const [visible, setVisible] = useState(false), [requestId, setRequestId] = useState(0);
     const returnFocus = useRef<HTMLElement | null>(null), panel = useRef<HTMLDivElement>(null), workbench = useRef<HTMLDivElement>(null);
     const popupContainer = useCallback(() => panel.current || document.body, []);
-    const collapse = useCallback(() => { panel.current?.querySelectorAll<HTMLMediaElement>("video, audio").forEach(media => media.pause()); useMediaPreviewStore.getState().close(); setVisible(false); requestAnimationFrame(() => returnFocus.current?.focus()); }, []);
+    const collapse = useCallback(() => { panel.current?.querySelectorAll<HTMLMediaElement>("video, audio").forEach(media => media.pause()); useMediaPreviewStore.getState().close(); setVisible(false); requestAnimationFrame(() => returnFocus.current?.focus({ preventScroll: true })); }, []);
     const openCanvas = useCallback((next: CanvasTarget) => {
         returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         if (next.nodeId || next.segmentId) useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"));
@@ -47,7 +47,7 @@ export function WorkbenchCanvas({ children }: { children: ReactNode }) {
                 return;
             }
             if (event.key !== "Escape" || event.defaultPrevented) return;
-            if (document.querySelector(".ant-modal-wrap:not([style*='display: none']), .ant-dropdown:not(.ant-dropdown-hidden), [data-canvas-transient-tool]")) return;
+            if (document.querySelector(".ant-modal-wrap:not([style*='display: none']), .ant-dropdown:not(.ant-dropdown-hidden), .ant-drawer-open, [data-canvas-transient-tool]")) return;
             queueMicrotask(() => { if (!event.defaultPrevented) collapse(); });
         };
         window.addEventListener("keydown", keydown);
@@ -56,7 +56,7 @@ export function WorkbenchCanvas({ children }: { children: ReactNode }) {
     useEffect(() => { if (workbench.current) workbench.current.inert = visible; }, [visible]);
     const host = useMemo(() => target ? { projectId: target.projectId, active: visible, search, requestId, navigate: canvasNavigate, collapse, popupContainer } : null, [target, visible, search, requestId, canvasNavigate, collapse, popupContainer]);
     return <WorkbenchCanvasContext.Provider value={{ openCanvas, restoreCanvas, visible, hasCanvas: Boolean(target) }}>
-        <div ref={workbench} data-workbench-underlay>{children}</div>
+        <div ref={workbench} className="h-full" data-workbench-underlay>{children}</div>
         {host && createPortal(<CanvasHostContext.Provider value={host}>
             <div hidden={!visible} className="fixed inset-0 z-[900] bg-background/60 p-0 sm:p-3" data-workbench-canvas>
                 <div ref={panel} role="dialog" aria-modal="true" aria-label={t("director.canvasOverlay.title")} tabIndex={-1} onClickCapture={event => {
@@ -64,8 +64,8 @@ export function WorkbenchCanvas({ children }: { children: ReactNode }) {
                     if (!link || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
                     const href = link.getAttribute("href");
                     if (href?.startsWith("/")) { event.preventDefault(); event.stopPropagation(); canvasNavigate(href); }
-                }} className="flex h-full min-h-0 flex-col overflow-hidden bg-background outline-none sm:rounded-xl sm:border sm:border-border">
-                    <header className="flex shrink-0 items-center justify-between border-b border-border px-4 py-2"><span className="text-sm font-medium">{t("director.canvasOverlay.title")}</span><Button type="text" icon={<PanelBottomClose className="size-4" />} onClick={collapse}>{t("director.canvasOverlay.collapse")}</Button></header>
+                }} className="relative flex h-full min-h-0 flex-col overflow-hidden bg-background outline-none sm:rounded-xl sm:border sm:border-border">
+                    <header className="absolute right-2 top-2 z-[100] flex h-10 items-center"><span className="sr-only">{t("director.canvasOverlay.title")}</span><Button type="text" icon={<PanelBottomClose className="size-4" />} onClick={collapse}>{t("director.canvasOverlay.collapse")}</Button></header>
                     <ConfigProvider getPopupContainer={() => panel.current || document.body}><div className="min-h-0 flex-1"><Suspense fallback={<p className="p-6 text-sm text-muted-foreground">{t("director.atomic.loading")}</p>}><CanvasSurface key={host.projectId} projectId={host.projectId} /></Suspense></div></ConfigProvider>
                 </div>
             </div>

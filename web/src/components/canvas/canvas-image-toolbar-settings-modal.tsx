@@ -3,6 +3,7 @@ import { Button, Card, Checkbox, Form, Modal, Space, Switch, Tag, Tooltip, Typog
 import { Ellipsis, Image as ImageIcon, Settings2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { groupCanvasNodeActions } from "./canvas-node-action-groups";
 import type { ImageQuickToolId } from "./canvas-image-toolbar-tools";
 
 export type ImageToolbarSettingsTool = {
@@ -130,7 +131,7 @@ export function ImageToolSettingsModal({
             onCancel={onCancel}
             destroyOnHidden
             footer={
-                <div className="flex items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="flex items-center gap-2">
                         <span>{t("canvas.imageTools.showLabels")}</span>
                         <Switch checked={showLabels} onChange={onShowLabelsChange} />
@@ -203,14 +204,18 @@ export function ImageToolSettingsModal({
                         </Space>
                     }
                 >
-                    <Checkbox.Group value={selectedIds} className="grid w-full gap-3 md:grid-cols-3" onChange={(values) => updateSelectedTools(values as ImageQuickToolId[])}>
-                        {tools.map((tool) => (
-                            <Checkbox key={tool.id} value={tool.id} className="m-0">
-                                <span className="inline-flex items-center gap-2">
-                                    {tool.icon}
-                                    {tool.label}
-                                </span>
-                            </Checkbox>
+                    <Checkbox.Group value={selectedIds} className="!block w-full space-y-4" onChange={(values) => updateSelectedTools(values as ImageQuickToolId[])}>
+                        {groupCanvasNodeActions(tools).map((group) => (
+                            <fieldset key={group.id} className="m-0 min-w-0 border-0 p-0">
+                                <legend className="mb-2 text-xs font-medium" style={{ color: token.colorTextSecondary }}>{t(`canvas.nodeActions.groups.${group.id}`)}</legend>
+                                <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
+                                    {group.actions.map((tool) => (
+                                        <Checkbox key={tool.id} value={tool.id} className="m-0">
+                                            <span className="inline-flex items-center gap-2">{tool.icon}{tool.label}</span>
+                                        </Checkbox>
+                                    ))}
+                                </div>
+                            </fieldset>
                         ))}
                     </Checkbox.Group>
                 </Form.Item>

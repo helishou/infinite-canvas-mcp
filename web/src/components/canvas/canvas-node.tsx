@@ -1,7 +1,9 @@
+import { useCanvasTransientEscape } from "@/lib/canvas/canvas-host";
+import { createPortal } from "react-dom";
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useNavigate } from "react-router-dom";
 import type { ReactNode } from "react";
-import { ChevronRight, Copy, Download, FileText, Image as ImageIcon, ListRestart, MapPinned, Music2, Package, Puzzle, RefreshCw, Settings2, Star, Trash2, User, Video } from "lucide-react";
+import { ChevronRight, X, Copy, Download, FileText, Image as ImageIcon, ListRestart, MapPinned, Music2, Package, Puzzle, RefreshCw, Settings2, Star, Trash2, User, Video } from "lucide-react";
 
 import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
@@ -54,6 +56,8 @@ export type CanvasNodeProps = {
     pluginHost?: CanvasPluginHost;
     registryVersion?: number;
     renderPanel?: (node: CanvasNodeData) => ReactNode;
+    panelContainer?: HTMLElement | null;
+    onClosePanel?: () => void;
     renderNodeContent?: (node: CanvasNodeData) => ReactNode;
     groupChildCount?: number;
     isGroupDropTarget?: boolean;
@@ -524,6 +528,8 @@ export const CanvasNode = React.memo(function CanvasNode({
     mentionReferences = [],
     pluginHost,
     renderPanel,
+    panelContainer,
+    onClosePanel,
     renderNodeContent,
     groupChildCount = 0,
     isGroupDropTarget = false,
@@ -775,6 +781,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     }, [handleResizeMove, handleResizeUp]);
 
     const panelContent = showPanel && !isGroup && renderPanel ? renderPanel(data) : null;
+    useCanvasTransientEscape(Boolean(panelContent && panelContainer), () => onClosePanel?.(), true);
     const compact = scale < 0.24 && !isSelected && !hovered && !showPanel && !referenceSelectionState;
 
     return (
@@ -1050,7 +1057,10 @@ export const CanvasNode = React.memo(function CanvasNode({
                 <ConnectionHandleDot side="right" visible={hovered || isSelected || isConnecting} onMouseDown={(event) => onConnectStart(event, data.id, "source")} />
             ) : null}
 
-            {panelContent ? (
+            {panelContent ? panelContainer ? createPortal(<section data-canvas-node-panel data-canvas-screen-panel data-canvas-transient-tool data-canvas-no-zoom data-canvas-shortcuts-ignore className="canvas-screen-panel canvas-blocking-overlay" onPointerDown={event => event.stopPropagation()} onMouseDown={event => event.stopPropagation()} onWheel={event => event.stopPropagation()}>
+                <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border bg-popover px-3 py-2"><span className="truncate text-sm font-medium" title={data.title}>{data.title}</span><button type="button" className="grid size-9 shrink-0 place-items-center rounded hover:bg-muted" aria-label={t("canvasChrome.closeEditor")} onClick={onClosePanel}><X className="size-4" /></button></header>
+                <div className="min-h-0 overflow-y-auto overscroll-contain">{panelContent}</div>
+            </section>, panelContainer) : (
                 <div data-canvas-node-panel className="absolute left-1/2 top-full z-[70] w-[600px] -translate-x-1/2 pt-4">
                     {panelContent}
                 </div>

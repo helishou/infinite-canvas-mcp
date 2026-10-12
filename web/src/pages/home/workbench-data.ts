@@ -52,7 +52,7 @@ export function collectOutputs(logs: BackendGenerationLog[]): WorkbenchOutput[] 
 export function projectCover(project: CanvasProject, outputs: WorkbenchOutput[], folder?: CanvasFolder): WorkbenchMedia | null {
     const result = outputs.find((output) => output.log.projectId === project.id && output.kind === "image") || outputs.find((output) => output.log.projectId === project.id && output.kind === "video");
     if (result) return result;
-    if (folder?.coverStorageKey) return { kind: "image", storageKey: folder.coverStorageKey };
+    if (folder?.isDrama && folder.coverStorageKey) return { kind: "image", storageKey: folder.coverStorageKey };
     // Only inspect already-loaded nodes. The home page must not hydrate every canvas for a cover.
     for (const node of project.nodes) {
         const metadata = node.metadata;

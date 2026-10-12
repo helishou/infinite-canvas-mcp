@@ -2,6 +2,7 @@ import { CanvasAudioSettingsPopover, type CanvasAudioSettingKey } from "./canvas
 import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
 import { CanvasTextSettingsPopover } from "./canvas-text-settings-popover";
 import { CanvasVideoSettingsPopover } from "./canvas-video-settings-popover";
+import { useTranslation } from "react-i18next";
 import { ModelPicker } from "@/components/model-picker";
 import { useConfigStore, type AiConfig } from "@/stores/use-config-store";
 import type { CanvasGenerationMode, CanvasNodeData } from "@/types/canvas";
@@ -36,7 +37,7 @@ export type CanvasGenerationControlsProps = {
 };
 
 const GRID_BUTTON = "canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2";
-const INLINE_BUTTON = "!h-10 !max-w-[170px] !justify-start !rounded-full !px-3";
+const INLINE_BUTTON = "!h-10 !max-w-full !justify-start !rounded-lg !px-3";
 
 export function CanvasGenerationControls({
     node,
@@ -53,6 +54,8 @@ export function CanvasGenerationControls({
     placement = "topLeft",
     className,
 }: CanvasGenerationControlsProps) {
+    const { t } = useTranslation();
+    const targetLabel = node.title || t("canvas.node.untitled");
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const grid = layout === "grid";
@@ -70,6 +73,7 @@ export function CanvasGenerationControls({
             return (
                 <CanvasImageSettingsPopover
                     config={config}
+                    targetLabel={targetLabel}
                     placement={placement}
                     autoAdjustOverflow={false}
                     buttonClassName={buttonClassName}
@@ -87,6 +91,7 @@ export function CanvasGenerationControls({
             return (
                 <CanvasVideoSettingsPopover
                     config={config}
+                    targetLabel={targetLabel}
                     placement={placement}
                     buttonClassName={buttonClassName}
                     onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))}
@@ -97,6 +102,7 @@ export function CanvasGenerationControls({
             return (
                 <CanvasAudioSettingsPopover
                     config={config}
+                    targetLabel={targetLabel}
                     placement={placement}
                     buttonClassName={buttonClassName}
                     onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))}
@@ -108,6 +114,7 @@ export function CanvasGenerationControls({
         }
         return (
             <CanvasTextSettingsPopover
+                targetLabel={targetLabel}
                 config={config}
                 count={textCount}
                 placement={placement}
@@ -120,19 +127,19 @@ export function CanvasGenerationControls({
 
     const picker = (
         <ModelPicker
-            className={grid ? "canvas-compact-control h-10" : "max-w-[190px]"}
+            className={grid ? "canvas-compact-control h-10" : "max-w-full"}
             config={config}
             value={config.model}
             onChange={changeModel}
             capability={mode}
             onMissingConfig={() => openConfigDialog(true)}
-            fullWidth={grid}
+            fullWidth
         />
     );
 
     if (grid) {
         return (
-            <div className={className ?? "mb-2 grid min-w-0 cursor-default grid-cols-[minmax(0,1fr)_148px] items-center gap-2"} onMouseDown={(event) => event.stopPropagation()}>
+            <div className={className ?? "mb-2 grid min-w-0 cursor-default grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-center gap-2"} onMouseDown={(event) => event.stopPropagation()}>
                 {picker}
                 {settings}
             </div>
@@ -140,7 +147,7 @@ export function CanvasGenerationControls({
     }
 
     return (
-        <div className={className ?? "flex min-w-0 items-center gap-2"} onMouseDown={(event) => event.stopPropagation()}>
+        <div className={className ?? "grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-center gap-2"} onMouseDown={(event) => event.stopPropagation()}>
             {picker}
             {settings}
         </div>

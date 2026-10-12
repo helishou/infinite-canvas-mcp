@@ -58,3 +58,15 @@ test("source prose remains visible without a separate Chinese display field", ()
     data.facts[0].value_descriptions.outside = "翠子站在门外。";
     assert.equal(display.value("F", "outside"), "翠子站在门外。");
 });
+
+test("asset plan asset_name resolves the fact owner from its canonical asset identity", () => {
+ const display = continuityPresentation({ ...input, assets: [{ asset_id: "NOTE", asset_name: "航海笔记" }], facts: [{ id: "OPEN", object_kind: "asset", object_id: "NOTE", name: "笔记开合" }] }, key => key);
+ assert.equal(display.fact("OPEN"), "航海笔记 · 笔记开合");
+});
+
+test("Clip headers use an actual Clip name or its stable source ordinal, never repeat member Shot labels", () => {
+ const display = continuityPresentation({ ...input, segments: [{ id: "C1", shot_ids: ["S01", "S02"] }, { id: "C2", title: "夜间交接", shot_ids: ["S03"] }] }, (key, values) => `${key}${values?.count || ""}`);
+ assert.equal(display.clip("C1"), "segmentNumber1");
+ assert.equal(display.clip("C2"), "夜间交接");
+ assert.equal(display.target("C1"), "翠子伸手");
+});

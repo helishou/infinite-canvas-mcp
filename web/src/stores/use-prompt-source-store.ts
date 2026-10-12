@@ -58,6 +58,20 @@ function persistPromptSources(state: Pick<PromptSourceStore, "sources" | "schedu
         .catch(() => undefined);
 }
 
+export function importPromptSourcesConfirmed(input: StoredPromptSources, expected: StoredPromptSources = usePromptSourceStore.getState()): Promise<void> {
+    const next = normalizeStoredPromptSources(input);
+    const before = expected;
+    const operation = promptSourceSyncQueue.then(async () => {
+        const state = usePromptSourceStore.getState();
+        if (JSON.stringify({ sources: state.sources, schedule: state.schedule }) !== JSON.stringify({ sources: before.sources, schedule: before.schedule })) throw new Error("CONFIG_CHANGED_DURING_IMPORT");
+        await saveStructuredSetting("prompt-sources", next);
+        const current = usePromptSourceStore.getState();
+        if (current.sources === before.sources && current.schedule === before.schedule) usePromptSourceStore.setState({ ...next, hydrated: true });
+    });
+    promptSourceSyncQueue = operation.catch(() => undefined);
+    return operation;
+}
+
 export async function hydratePromptSourcesFromBackend(): Promise<boolean> {
     if (typeof window === "undefined") return false;
     try {

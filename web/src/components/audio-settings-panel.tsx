@@ -1,7 +1,7 @@
 import { type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
-import { ImageSettingsTheme, SettingTitle } from "@/components/image-settings-panel";
+import { ImageSettingsTheme, SettingsSection } from "@/components/image-settings-panel";
 import { audioFormatOptions, audioSpeedLabel, audioVoiceOptions, normalizeAudioFormatValue, normalizeAudioSpeedValue, normalizeAudioVoiceValue } from "@/lib/audio-generation";
 import { WorkflowCustomFields } from "@/components/workflow-custom-fields";
 import { type CanvasTheme } from "@/lib/canvas-theme";
@@ -31,7 +31,7 @@ export function AudioSettingsPanel({
     onConfigChange,
     theme,
     showTitle = true,
-    className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5",
+    className = "w-[320px] max-w-full space-y-4 rounded-2xl px-1 py-0.5",
     customFields,
     customFieldValues,
     onCustomFieldChange,
@@ -47,57 +47,62 @@ export function AudioSettingsPanel({
             <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
                 {showTitle ? <div className="text-lg font-semibold">{t("settingsPanels.audio.title")}</div> : null}
                 {customFields && customFields.length > 0 && onCustomFieldChange ? (
-                    <div className="space-y-2.5">
-                        <SettingTitle color={theme.node.muted}>{t("settingsPanels.audio.workflowFields")}</SettingTitle>
+                    <SettingsSection title={t("settingsPanels.audio.workflowFields")} theme={theme}>
                         <WorkflowCustomFields fields={customFields} values={customFieldValues || {}} onChange={onCustomFieldChange} />
-                    </div>
+                    </SettingsSection>
                 ) : null}
                 {!hideStandardAudioOptions && (
                     <>
-                        <SettingGroup title={t("settingsPanels.audio.voice")} color={theme.node.muted}>
-                            <div className="grid grid-cols-3 gap-2.5">
-                                {audioVoiceOptions.map((item) => (
-                                    <OptionPill key={item.value} selected={voice === item.value} theme={theme} onClick={() => onConfigChange("audioVoice", item.value)}>
-                                        {item.label}
-                                    </OptionPill>
-                                ))}
-                            </div>
-                        </SettingGroup>
-                        <SettingGroup title={t("settingsPanels.audio.format")} color={theme.node.muted}>
-                            <div className="grid grid-cols-3 gap-2.5">
-                                {audioFormatOptions.map((item) => (
-                                    <OptionPill key={item.value} selected={format === item.value} theme={theme} onClick={() => onConfigChange("audioFormat", item.value)}>
-                                        {item.label}
-                                    </OptionPill>
-                                ))}
-                            </div>
-                        </SettingGroup>
-                        <SettingGroup title={t("settingsPanels.audio.speed")} color={theme.node.muted}>
-                            <div className="grid grid-cols-4 gap-2.5">
-                                {speedOptions.map((value) => (
-                                    <OptionPill key={value} selected={speed === value} theme={theme} onClick={() => onConfigChange("audioSpeed", value)}>
-                                        {audioSpeedLabel(value)}
-                                    </OptionPill>
-                                ))}
-                            </div>
-                            <input
-                                type="number"
-                                min={0.25}
-                                max={4}
-                                step={0.05}
-                                className="h-9 w-full rounded-full border bg-transparent px-3 text-center text-sm outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-                                style={{ borderColor: theme.node.stroke, color: theme.node.text, WebkitTextFillColor: theme.node.text }}
-                                value={config.audioSpeed || "1"}
-                                onChange={(event) => onConfigChange("audioSpeed", event.target.value)}
-                                onBlur={(event) => onConfigChange("audioSpeed", normalizeAudioSpeedValue(event.target.value))}
-                                onMouseDown={(event) => event.stopPropagation()}
-                            />
-                        </SettingGroup>
+                        <SettingsSection title={t("settingsPanels.groups.voicePace")} theme={theme}>
+                            <SettingGroup title={t("settingsPanels.audio.voice")} color={theme.node.muted}>
+                                <div className="grid grid-cols-3 gap-2.5">
+                                    {audioVoiceOptions.map((item) => (
+                                        <OptionPill key={item.value} selected={voice === item.value} theme={theme} onClick={() => onConfigChange("audioVoice", item.value)}>
+                                            {item.label}
+                                        </OptionPill>
+                                    ))}
+                                </div>
+                            </SettingGroup>
+                            <SettingGroup title={t("settingsPanels.audio.speed")} color={theme.node.muted}>
+                                <div className="grid grid-cols-4 gap-2.5">
+                                    {speedOptions.map((value) => (
+                                        <OptionPill key={value} selected={speed === value} theme={theme} onClick={() => onConfigChange("audioSpeed", value)}>
+                                            {audioSpeedLabel(value)}
+                                        </OptionPill>
+                                    ))}
+                                </div>
+                                <input
+                                    type="number"
+                                    aria-label={t("settingsPanels.audio.speed")}
+                                    min={0.25}
+                                    max={4}
+                                    step={0.05}
+                                    className="h-9 w-full rounded-full border bg-transparent px-3 text-center text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                                    style={{ borderColor: theme.node.stroke, color: theme.node.text, WebkitTextFillColor: theme.node.text }}
+                                    value={config.audioSpeed || "1"}
+                                    onChange={(event) => onConfigChange("audioSpeed", event.target.value)}
+                                    onBlur={(event) => onConfigChange("audioSpeed", normalizeAudioSpeedValue(event.target.value))}
+                                    onMouseDown={(event) => event.stopPropagation()}
+                                />
+                            </SettingGroup>
+                        </SettingsSection>
+                        <SettingsSection title={t("settingsPanels.groups.audioOutput")} theme={theme}>
+                            <SettingGroup title={t("settingsPanels.audio.format")} color={theme.node.muted}>
+                                <div className="grid grid-cols-3 gap-2.5">
+                                    {audioFormatOptions.map((item) => (
+                                        <OptionPill key={item.value} selected={format === item.value} theme={theme} onClick={() => onConfigChange("audioFormat", item.value)}>
+                                            {item.label}
+                                        </OptionPill>
+                                    ))}
+                                </div>
+                            </SettingGroup>
+                        </SettingsSection>
                         <SettingGroup title={t("settingsPanels.audio.instructions")} color={theme.node.muted}>
                             <textarea
+                                aria-label={t("settingsPanels.audio.instructions")}
                                 value={config.audioInstructions || ""}
                                 placeholder={t("settingsPanels.audio.instructionsPlaceholder")}
-                                className="thin-scrollbar h-20 w-full resize-none rounded-xl border bg-transparent px-3 py-2 text-sm leading-5 outline-none"
+                                className="thin-scrollbar h-20 w-full resize-none rounded-xl border bg-transparent px-3 py-2 text-sm leading-5 outline-none focus-visible:ring-2 focus-visible:ring-ring"
                                 style={{ borderColor: theme.node.stroke, color: theme.node.text }}
                                 onChange={(event) => onConfigChange("audioInstructions", event.target.value)}
                                 onMouseDown={(event) => event.stopPropagation()}
@@ -112,7 +117,14 @@ export function AudioSettingsPanel({
 
 function OptionPill({ selected, theme, onClick, children }: { selected: boolean; theme: CanvasTheme; onClick: () => void; children: ReactNode }) {
     return (
-        <button type="button" className="h-9 cursor-pointer rounded-full border px-2 text-sm transition hover:opacity-80" style={{ background: "transparent", borderColor: selected ? theme.node.text : theme.node.stroke, color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()} onClick={onClick}>
+        <button
+            type="button"
+            aria-pressed={selected}
+            className="min-h-9 min-w-0 cursor-pointer rounded-full border px-2 text-sm transition hover:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+            style={{ background: "transparent", borderColor: selected ? theme.node.text : theme.node.stroke, color: theme.node.text }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={onClick}
+        >
             {children}
         </button>
     );
@@ -120,11 +132,11 @@ function OptionPill({ selected, theme, onClick, children }: { selected: boolean;
 
 function SettingGroup({ title, color, children }: { title: string; color: string; children: ReactNode }) {
     return (
-        <div className="space-y-2.5">
-            <div className="text-xs font-medium" style={{ color }}>
+        <fieldset className="min-w-0 space-y-2.5 border-0 p-0">
+            <legend className="mb-2 text-xs font-medium" style={{ color }}>
                 {title}
-            </div>
+            </legend>
             {children}
-        </div>
+        </fieldset>
     );
 }

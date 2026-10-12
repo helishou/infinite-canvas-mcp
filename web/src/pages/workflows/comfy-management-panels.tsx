@@ -2,7 +2,7 @@ import { App, Button, Card, Checkbox, Empty, Form, Tag } from "antd";
 import { Download, FileUp, Image as ImageIcon, Music, Pencil, Plus, Server, Trash2, Type, Video } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { ConfigComfyui } from "@/components/layout/config-comfyui";
+import { useTranslation } from "react-i18next";
 import { ModelWorkflowEditorModal } from "@/components/layout/model-workflow-editor-modal";
 import { backendMediaUrl, fetchBackendGenerationLogs, request, type BackendGenerationLog } from "@/services/backend-api";
 import { createModelPackage, parseModelPackage, restoreModelPackage } from "@/services/api/model-packages";
@@ -329,16 +329,14 @@ function readModelCover(output: Record<string, unknown>): ModelCover | null {
 }
 
 export function ComfyRuntimePanel() {
+    const { t } = useTranslation();
+    const openConfigDialog = useConfigStore(state => state.openConfigDialog);
     const [instancesOpen, setInstancesOpen] = useState(false);
 
     return (
         <div className="mt-5 space-y-4">
             <RunningHubPanel />
-            <section className="rounded-lg border border-stone-200 bg-white px-4 pb-1 pt-2 dark:border-stone-800 dark:bg-stone-900">
-                <Form layout="vertical" requiredMark={false}>
-                    <ConfigComfyui active />
-                </Form>
-            </section>
+            <section className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card p-4"><div><h3 className="text-sm font-semibold">{t("config.preferences.comfyDirectory")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("config.preferences.comfyDirectoryHint")}</p></div><Button onClick={() => openConfigDialog(false, "connection")}>{t("config.preferences.manageConnections")}</Button></section>
             <section className="flex items-center justify-between gap-4 rounded-lg border border-stone-200 bg-white px-4 py-4 dark:border-stone-800 dark:bg-stone-900">
                 <div>
                     <div className="text-sm font-semibold">运行实例</div>

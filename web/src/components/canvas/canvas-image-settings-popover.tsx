@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { CanvasPortal, useCanvasTransientEscape } from "@/lib/canvas/canvas-host";
+import { CanvasSettingsContext } from "./canvas-settings-context";
+import { canvasSettingsPosition } from "./canvas-settings-position";
 import { Settings2 } from "lucide-react";
 import { Button } from "antd";
 import { useTranslation } from "react-i18next";
@@ -13,6 +15,7 @@ import { migrateWorkflowParams, reconcileWorkflowParams, workflowAspectOption } 
 
 type CanvasImageSettingsPopoverProps = {
     config: AiConfig;
+    targetLabel?: string;
     onConfigChange: (key: "quality" | "size" | "count" | "background", value: string) => void;
     onMissingConfig?: () => void;
     onOpenChange?: (open: boolean) => void;
@@ -29,14 +32,14 @@ type CanvasImageSettingsPopoverProps = {
     referenceCount?: number;
 };
 
-export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChange, buttonClassName, placement = "topLeft", comfyParams, onComfyParamsChange, onPromptRequiredChange, referenceCount = 0 }: CanvasImageSettingsPopoverProps) {
+export function CanvasImageSettingsPopover({ config, targetLabel, onConfigChange, onOpenChange, buttonClassName, placement = "topLeft", comfyParams, onComfyParamsChange, onPromptRequiredChange, referenceCount = 0 }: CanvasImageSettingsPopoverProps) {
     const { t } = useTranslation();
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const buttonRef = useRef<HTMLSpanElement>(null);
     const panelRef = useRef<HTMLDivElement>(null);
     const [open, setOpen] = useState(false);
-    useCanvasTransientEscape(open, () => setOpen(false));
+    useCanvasTransientEscape(open, () => { setOpen(false); onOpenChange?.(false); });
     const [buttonRect, setButtonRect] = useState<DOMRect | null>(null);
     const [workflowDetail, setWorkflowDetail] = useState<WorkflowDetail | null>(null);
     const workflowDetailRef = useRef<WorkflowDetail | null>(null);
@@ -165,6 +168,7 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
                 placement={placement}
                 theme={theme}
                 config={config}
+                targetLabel={targetLabel}
                 onConfigChange={(key, value) => {
                     onConfigChange(key, value);
                     updateConfig(key, value);
@@ -194,6 +198,8 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
                     className={buttonClassName || "!h-8 !max-w-[180px] !justify-start !rounded-full !px-2.5"}
                     style={{ background: theme.node.fill, color: theme.node.text }}
                     icon={<Settings2 className="size-3.5" />}
+                    aria-expanded={open}
+                    aria-label={targetLabel ? t("canvas.nodeActions.parameters") : undefined}
                     onClick={() => updateOpen(!open)}
                 >
                     <span className="truncate">
@@ -211,6 +217,7 @@ function ImageSettingsPortal({
     panelRef,
     placement,
     theme,
+    targetLabel,
     config,
     onConfigChange,
     customFields,
@@ -226,6 +233,7 @@ function ImageSettingsPortal({
     placement: CanvasImageSettingsPopoverProps["placement"];
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     config: AiConfig;
+    targetLabel?: string;
     onConfigChange: CanvasImageSettingsPopoverProps["onConfigChange"];
     customFields?: Parameters<typeof ImageSettingsPanel>[0]["customFields"];
     customFieldValues?: Parameters<typeof ImageSettingsPanel>[0]["customFieldValues"];
@@ -235,19 +243,11 @@ function ImageSettingsPortal({
     workflowParamsBlockedByScenario: boolean;
     debugScenario: string;
 }) {
-    const width = 356;
-    const gap = 8;
-    const margin = 12;
-    const alignRight = placement?.endsWith("Right");
-    const alignCenter = placement === "top" || placement === "bottom";
-    const left = alignCenter ? buttonRect.left + buttonRect.width / 2 - width / 2 : alignRight ? buttonRect.right - width : buttonRect.left;
-    const topPlacement = placement?.startsWith("top");
     const style = {
         position: "fixed",
         zIndex: 1200,
-        width,
-        left: Math.max(margin, Math.min(window.innerWidth - width - margin, left)),
-        ...(topPlacement ? { bottom: window.innerHeight - buttonRect.top + gap, maxHeight: Math.max(260, buttonRect.top - margin * 2) } : { top: buttonRect.bottom + gap, maxHeight: Math.max(260, window.innerHeight - buttonRect.bottom - margin * 2) }),
+        ...canvasSettingsPosition(buttonRect, { width: window.innerWidth, height: window.innerHeight }, placement),
+        boxSizing: "border-box",
         background: theme.toolbar.panel,
         borderRadius: 18,
         boxShadow: "0 18px 54px rgba(28, 25, 23, 0.16)",
@@ -257,7 +257,8 @@ function ImageSettingsPortal({
     } as const;
 
     return <CanvasPortal>
-        <div ref={panelRef} className="canvas-image-settings-popover" style={style} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
+        <div ref={panelRef} data-canvas-shortcuts-ignore data-canvas-no-zoom className="canvas-image-settings-popover" style={style} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
+            <CanvasSettingsContext targetLabel={targetLabel} updatesImageDefaults />
             <ImageSettingsPanel
                 config={config}
                 onConfigChange={(key, value) => onConfigChange(key, value)}

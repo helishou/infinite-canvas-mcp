@@ -92,62 +92,75 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
     return (
         <div
             data-canvas-no-zoom
-            className="rounded-2xl border p-3 shadow-2xl backdrop-blur"
+            className="max-w-full rounded-2xl border p-3 shadow-2xl backdrop-blur"
             style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
             onMouseDown={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
             onDoubleClick={(event) => event.stopPropagation()}
             onWheel={(event) => event.stopPropagation()}
         >
+            <div className="mb-2 flex min-w-0 items-center gap-2 text-xs">
+                <span className="shrink-0" style={{ color: theme.node.muted }}>{t("canvas.nodeActions.target")}</span>
+                <span className="truncate font-medium" title={node.title}>{node.title || t("canvas.node.untitled")}</span>
+            </div>
             <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} historyReferences={visibleHistoryReferences} onClearHistoryReferences={clearHistoryReferences} onDisconnect={onDisconnectReference} onReorder={onReorderReference} reorderableSourceNodeIds={reorderableSourceNodeIds} onStartSelection={onStartReferenceSelection} />
-            {isSmartGenerationNode ? (
-                <Segmented
-                    className="mb-2 w-full"
-                    size="small"
-                    block
-                    disabled={isRunning}
-                    value={mode}
-                    onChange={(value) => onConfigChange(node.id, { generationMode: value as CanvasGenerationMode })}
-                    options={[
-                        { value: "image", label: <span className="inline-flex items-center gap-1"><ImageIcon className="size-3.5" />{t("canvas.configNode.image")}</span> },
-                        { value: "video", label: <span className="inline-flex items-center gap-1"><Video className="size-3.5" />{t("canvas.configNode.video")}</span> },
-                        { value: "audio", label: <span className="inline-flex items-center gap-1"><Music2 className="size-3.5" />{t("canvas.configNode.audio")}</span> },
-                        { value: "text", label: <span className="inline-flex items-center gap-1"><MessageSquare className="size-3.5" />{t("canvas.configNode.text")}</span> },
-                    ]}
-                />
-            ) : null}
+            <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-medium" style={{ color: theme.node.muted }}>{t("canvas.nodeActions.input")}</span>
+                <div className="flex items-center gap-1">
+                    <CanvasPromptLibrary onSelect={updatePrompt} />
+                    <Tooltip title={t("canvas.promptPanel.expandEditor")}>
+                        <Button type="text" className="!h-8 !w-8 !min-w-8 shrink-0 !rounded-full !bg-transparent !p-0" style={{ color: theme.node.text }} icon={<Maximize2 className="size-3.5" />} onClick={openExpandedEditor} aria-label={t("canvas.promptPanel.expandEditor")} />
+                    </Tooltip>
+                </div>
+            </div>
             <CanvasCollaborativeText
                 projectId={projectId} target={target} chips dialogue
                 references={mentionReferences}
                 editorRef={editorRef}
                 onSubmit={submit}
-                className="thin-scrollbar h-40 w-full cursor-text resize-none rounded-xl px-3 py-2 text-sm leading-5 outline-none"
+                className="canvas-authored-prompt thin-scrollbar h-40 w-full cursor-text resize-none rounded-xl px-3 py-2 text-sm leading-5 outline-none"
                 style={{ background: "transparent", color: theme.node.text }}
                 placeholder={t(`canvas.promptPanel.${mode === "image" && hasImageContent ? "editImage" : mode === "text" && hasTextContent ? "editText" : mode}`)}
             />
 
-            <div className="mt-2 flex min-w-0 items-center justify-between gap-2">
-                <div className="flex min-w-0 items-center gap-2">
-                    <Tooltip title={t("canvas.promptPanel.expandEditor")}>
-                        <Button type="text" className="!h-8 !w-8 !min-w-8 shrink-0 !rounded-full !bg-transparent !p-0" style={{ color: theme.node.text }} icon={<Maximize2 className="size-3.5" />} onClick={openExpandedEditor} aria-label={t("canvas.promptPanel.expandEditor")} />
-                    </Tooltip>
-                    <CanvasPromptLibrary onSelect={updatePrompt} />
-                    <CanvasGenerationControls
-                        node={node}
-                        mode={mode}
-                        config={config}
-                        onConfigChange={onConfigChange}
-                        referenceCounts={{ image: referenceCount, audio: audioReferenceCount }}
-                        imageReferenceCount={referenceCount}
-                        textCount={node.metadata?.textCount || 1}
-                        onTextCountChange={(next: number) => onConfigChange(node.id, { textCount: next })}
-                        onImageSettingsOpenChange={onImageSettingsOpenChange}
-                        onImagePromptRequiredChange={setImagePromptRequired}
-                    />
+            <section className="mt-2 border-t pt-3" style={{ borderColor: theme.toolbar.border }} aria-label={t("canvas.nodeActions.modelParameters")}>
+                <div className="mb-2 flex items-center justify-between gap-2 text-[11px]" style={{ color: theme.node.muted }}>
+                    <span className="font-medium">{t("canvas.nodeActions.modelParameters")}</span>
+                    {mode === "image" ? <span title={t("canvas.nodeActions.imageModelDefault")}>{t("canvas.nodeActions.imageModelDefault")}</span> : null}
                 </div>
+                {isSmartGenerationNode ? (
+                    <Segmented
+                        className="mb-2 w-full"
+                        size="small"
+                        block
+                        disabled={isRunning}
+                        value={mode}
+                        onChange={(value) => onConfigChange(node.id, { generationMode: value as CanvasGenerationMode })}
+                        options={[
+                            { value: "image", label: <span className="inline-flex items-center gap-1"><ImageIcon className="size-3.5" />{t("canvas.configNode.image")}</span> },
+                            { value: "video", label: <span className="inline-flex items-center gap-1"><Video className="size-3.5" />{t("canvas.configNode.video")}</span> },
+                            { value: "audio", label: <span className="inline-flex items-center gap-1"><Music2 className="size-3.5" />{t("canvas.configNode.audio")}</span> },
+                            { value: "text", label: <span className="inline-flex items-center gap-1"><MessageSquare className="size-3.5" />{t("canvas.configNode.text")}</span> },
+                        ]}
+                    />
+                ) : null}
+                <CanvasGenerationControls
+                    node={node}
+                    mode={mode}
+                    config={config}
+                    onConfigChange={onConfigChange}
+                    referenceCounts={{ image: referenceCount, audio: audioReferenceCount }}
+                    imageReferenceCount={referenceCount}
+                    textCount={node.metadata?.textCount || 1}
+                    onTextCountChange={(next: number) => onConfigChange(node.id, { textCount: next })}
+                    onImageSettingsOpenChange={onImageSettingsOpenChange}
+                    onImagePromptRequiredChange={setImagePromptRequired}
+                />
+            </section>
+            <div className="mt-3 flex justify-end">
                 <Button
                     type="primary"
-                    className="!h-10 !min-w-16 shrink-0 !rounded-full !px-3"
+                    className="!h-10 !min-w-16 shrink-0 !rounded-lg !px-3"
                     danger={isRunning}
                     disabled={!isRunning && (!textStatus.ready || textStatus.blocked || (promptRequired && !prompt.trim()))}
                     onClick={() => (isRunning ? onStop(node.id) : submit())}
@@ -161,18 +174,18 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
                                 <span className="text-xs font-medium">{t("canvas.promptPanel.stop")}</span>
                             </>
                         ) : (
-                            <ArrowUp className="size-4" />
+                            <><ArrowUp className="size-4" /><span>{t("canvas.promptPanel.generate")}</span></>
                         )}
                     </span>
                 </Button>
             </div>
-            <Modal title={t("canvas.promptPanel.editorTitle")} open={expanded} centered width={760} footer={null} onCancel={() => setExpanded(false)} destroyOnHidden>
+            <Modal title={`${t("canvas.promptPanel.editorTitle")} · ${node.title || t("canvas.node.untitled")}`} open={expanded} centered width={760} footer={null} onCancel={() => setExpanded(false)} destroyOnHidden>
                 <div data-canvas-no-zoom className="pt-2" onWheelCapture={(event) => event.stopPropagation()}>
                     <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} historyReferences={visibleHistoryReferences} onClearHistoryReferences={clearHistoryReferences} onDisconnect={onDisconnectReference} onReorder={onReorderReference} reorderableSourceNodeIds={reorderableSourceNodeIds} onStartSelection={(nodeId) => { setExpanded(false); onStartReferenceSelection?.(nodeId); }} />
                     <CanvasCollaborativeText
                         projectId={projectId} target={target} chips dialogue
                         references={mentionReferences}
-                        className="thin-scrollbar h-[52dvh] min-h-80 w-full cursor-text overflow-y-auto rounded-xl border p-4 text-[15px] leading-6 outline-none"
+                        className="canvas-authored-prompt thin-scrollbar h-[52dvh] min-h-80 w-full cursor-text overflow-y-auto rounded-xl border p-4 text-[15px] leading-6 outline-none"
                         style={{ background: "transparent", borderColor: theme.toolbar.border, color: theme.node.text }}
                         placeholder={t(`canvas.promptPanel.${mode === "image" && hasImageContent ? "editImage" : mode === "text" && hasTextContent ? "editText" : mode}`)}
                     />

@@ -107,12 +107,13 @@ export function AgentLogView({
     };
     const connectionLabel = t(context.connected ? "agent.events.online" : context.enabled ? "agent.events.connecting" : "agent.events.disabled");
     return (
-        <div className="min-h-0 flex-1 overflow-hidden px-4 py-3">
-            <div className="flex h-full min-h-0 flex-col gap-3">
-                <div className="flex items-center justify-between gap-3">
-                    <div className="text-base font-semibold leading-6">{t("agent.logs.title")}</div>
+        <div className="@container min-h-0 min-w-0 flex-1 overflow-hidden px-3 py-3">
+            <div className="flex h-full min-h-0 min-w-0 flex-col gap-3">
+                <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
+                    <div className="text-sm font-semibold leading-5">{t("agent.logs.title")}</div>
                     <Segmented
                         size="small"
+                        className="max-w-full !text-xs"
                         value={mode}
                         onChange={(value) => setMode(value as "text" | "json")}
                         options={[
@@ -122,32 +123,34 @@ export function AgentLogView({
                     />
                 </div>
 
-                <div className="border-y py-2.5" style={{ borderColor: theme.node.stroke }}>
-                    <div className="flex items-start gap-2.5">
+                <div className="shrink-0 border-y py-2" style={{ borderColor: theme.node.stroke }}>
+                    <div className="flex min-w-0 items-start gap-2.5">
                         <span className={`mt-1.5 size-2 shrink-0 rounded-full ${context.connected ? "bg-emerald-500" : context.enabled ? "bg-amber-500" : "bg-current opacity-30"}`} />
                         <div className="min-w-0 flex-1">
-                            <div className="flex min-w-0 items-center gap-2 text-sm">
+                            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs leading-5">
                                 <span className="font-medium">{connectionLabel}</span>
                                 <span className="truncate" style={{ color: theme.node.muted }}>
                                     {context.activity}
                                 </span>
                             </div>
-                            <div className="mt-0.5 truncate font-mono text-[11px] leading-4" style={{ color: theme.node.faint }} title={context.endpoint}>
+                            <div className="mt-0.5 flex min-w-0 flex-wrap gap-x-3 gap-y-0.5 text-[11px] leading-4" style={{ color: theme.node.muted }}>
+                                <span>{t("agent.logs.messages", { count: context.messages })}</span>
+                                <span className="min-w-0 break-all">{context.pendingTool ? t("agent.logs.tool", { tool: context.pendingTool }) : t("agent.logs.noPendingTool")}</span>
+                            </div>
+                            <div className="mt-1 truncate font-mono text-[11px] leading-4" style={{ color: theme.node.faint }} title={context.endpoint}>
                                 {context.endpoint}
                             </div>
-                        </div>
-                        <div className="shrink-0 text-right text-[11px] leading-4" style={{ color: theme.node.muted }}>
-                            <div>{t("agent.logs.messages", { count: context.messages })}</div>
-                            <div>{context.pendingTool ? t("agent.logs.tool", { tool: context.pendingTool }) : t("agent.logs.noPendingTool")}</div>
                         </div>
                     </div>
                 </div>
 
                 {mode === "text" ? (
                     <>
-                        <div className="flex items-center justify-between gap-2">
+                        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
                             <Segmented
                                 size="small"
+                                block
+                                className="min-w-0 basis-full !text-xs @min-[400px]:flex-1 @min-[400px]:basis-auto"
                                 value={filter}
                                 onChange={(value) => setFilter(value as LogFilter)}
                                 options={[
@@ -160,12 +163,12 @@ export function AgentLogView({
                             <LogActions logs={logs} lastError={lastError} onClear={onClear} onCopy={(value, tip) => void copy(value, tip)} context={context} />
                         </div>
                         <div className="relative min-h-0 flex-1">
-                            <div ref={listRef} tabIndex={0} aria-label={t("agent.logs.list")} className="thin-scrollbar h-full overflow-y-auto border-y focus-visible:outline-none" style={{ borderColor: theme.node.stroke }} onScroll={updateScrollState}>
+                            <div ref={listRef} tabIndex={0} aria-label={t("agent.logs.list")} className="thin-scrollbar h-full overflow-y-auto border-t focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-current" style={{ borderColor: theme.node.stroke }} onScroll={updateScrollState}>
                                 {visibleLogs.map((item, index) => (
                                     <LogRow key={item.id} item={item} theme={theme} onToggle={index === visibleLogs.length - 1 ? handleLastLogToggle : undefined} />
                                 ))}
                                 {!visibleLogs.length ? (
-                                    <div className="px-3 py-10 text-center text-sm" style={{ color: theme.node.muted }}>
+                                    <div className="px-3 py-8 text-center text-xs" style={{ color: theme.node.muted }}>
                                         {t(logs.length ? "agent.logs.noFiltered" : "agent.logs.empty")}
                                     </div>
                                 ) : null}
@@ -183,7 +186,7 @@ export function AgentLogView({
                     </>
                 ) : (
                     <>
-                        <div className="flex items-center justify-between gap-2">
+                        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
                             <span className="text-xs" style={{ color: theme.node.muted }}>
                                 {t("agent.logs.fullData", { count: logs.length })}
                             </span>
@@ -207,15 +210,15 @@ export function AgentLogView({
 function LogActions({ logs, lastError, context, onClear, onCopy }: { logs: AgentEventLog[]; lastError?: AgentEventLog; context: AgentLogContext; onClear: () => void; onCopy: (value?: string, tip?: string) => void }) {
     const { t } = useTranslation();
     return (
-        <div className="flex shrink-0 items-center gap-0.5">
+        <div className="ml-auto flex shrink-0 items-center gap-1">
             <Tooltip title={t("agent.logs.copyAll")}>
-                <Button type="text" size="small" shape="circle" aria-label={t("agent.logs.copyAll")} icon={<Copy className="size-3.5" />} onClick={() => onCopy()} />
+                <Button type="text" size="small" shape="circle" className="!inline-flex !size-7 !min-w-7 !items-center !justify-center !p-0" aria-label={t("agent.logs.copyAll")} icon={<Copy className="size-3.5" />} onClick={() => onCopy()} />
             </Tooltip>
             <Tooltip title={t("agent.logs.copyLastError")}>
-                <Button type="text" size="small" shape="circle" aria-label={t("agent.logs.copyLastError")} disabled={!lastError} icon={<CircleAlert className="size-3.5" />} onClick={() => lastError && onCopy(formatLogText([lastError], context), t("agent.logs.lastErrorCopied"))} />
+                <Button type="text" size="small" shape="circle" className="!inline-flex !size-7 !min-w-7 !items-center !justify-center !p-0" aria-label={t("agent.logs.copyLastError")} disabled={!lastError} icon={<CircleAlert className="size-3.5" />} onClick={() => lastError && onCopy(formatLogText([lastError], context), t("agent.logs.lastErrorCopied"))} />
             </Tooltip>
             <Tooltip title={t("agent.logs.clear")}>
-                <Button danger type="text" size="small" shape="circle" aria-label={t("agent.logs.clear")} disabled={!logs.length} icon={<Trash2 className="size-3.5" />} onClick={onClear} />
+                <Button danger type="text" size="small" shape="circle" className="!inline-flex !size-7 !min-w-7 !items-center !justify-center !p-0" aria-label={t("agent.logs.clear")} disabled={!logs.length} icon={<Trash2 className="size-3.5" />} onClick={onClear} />
             </Tooltip>
         </div>
     );

@@ -3,7 +3,7 @@ type Labels = (key: string, values?: Record<string, unknown>) => string;
 
 /** Resolve presentation text without changing canonical ledger identities or values. */
 export function continuityPresentation(input: { facts: Row[]; timelines: Row[]; scenes: Row[]; locations: Row[]; characters: Row[]; assets: Row[]; shots: Row[]; segments: Row[]; sourceBlocks: Row[] }, label: Labels) {
-    const name = (row?: Row) => String(row?.display_name || row?.display_label || row?.name || row?.title || row?.scene_name || row?.heading || "");
+    const name = (row?: Row) => String(row?.display_name || row?.display_label || row?.name || row?.asset_name || row?.title || row?.scene_name || row?.heading || "");
     const find = (rows: Row[], id: string) => rows.find(row => String(row.id || row.asset_id || row.scene_id) === id);
     const object = (kind: string, id: string) => name(find(kind === "character" ? input.characters : kind === "scene" ? [...input.locations, ...input.scenes] : input.assets, id)) || label("missingObject");
     const fact = (id: string) => {
@@ -34,6 +34,10 @@ export function continuityPresentation(input: { facts: Row[]; timelines: Row[]; 
         const segment = find(input.segments, id);
         return name(segment) || (segment ? (segment.shot_ids || []).map((shotId: string) => name(find(input.shots, shotId))).filter(Boolean).join("、") || label("segmentNumber", { count: input.segments.indexOf(segment) + 1 }) : label("missingTarget"));
     };
+    const clip = (id: string) => {
+        const segment = find(input.segments, id);
+        return name(segment) || (segment ? label("segmentNumber", { count: input.segments.indexOf(segment) + 1 }) : label("missingTarget"));
+    };
     const source = (id: string) => {
         const block = find(input.sourceBlocks, id);
         return block ? `${scene(String(block.sceneId))} · ${String(block.sourceBlock?.text || block.text || label("sourceNumber", { count: input.sourceBlocks.indexOf(block) + 1 }))}` : label("missingSource");
@@ -56,5 +60,5 @@ export function continuityPresentation(input: { facts: Row[]; timelines: Row[]; 
         }
         return text;
     };
-    return { object, fact, value, timeline, scene, target, source, expected, message };
+    return { object, fact, value, timeline, scene, target, clip, source, expected, message };
 }

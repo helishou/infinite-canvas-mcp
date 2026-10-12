@@ -59,16 +59,7 @@ export function AgentHistoryView({
                 </div>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                     {onLegacyHistoryChange && <Checkbox checked={legacyHistory} disabled={!connected || loading || busy} onChange={event => onLegacyHistoryChange(event.target.checked)}>{t("agent.history.codexHistory")}</Checkbox>}
-                    <div className="flex items-center gap-2 text-sm" style={{ color: theme.node.muted }}>
-                        {threads.length ? <Checkbox checked={allSelected} indeterminate={Boolean(selectedThreads.length) && !allSelected} disabled={loading || busy} onChange={() => setSelectedIds(allSelected ? new Set() : new Set(threads.map((thread) => thread.id)))} /> : null}
-                        <span>{selectedThreads.length ? t("agent.history.selected", { count: selectedThreads.length }) : threads.length ? t("agent.history.count", { count: threads.length }) : connected ? t("agent.history.empty") : t("agent.status.disconnected")}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                        {selectedThreads.length ? (
-                            <Button size="small" danger type="text" icon={<Trash2 className="size-3.5" />} disabled={loading || busy} onClick={() => onDeleteThreads(selectedThreads.map((thread) => thread.id))}>
-                                {t("agent.history.deleteCount", { count: selectedThreads.length })}
-                            </Button>
-                        ) : null}
+                    <div className="flex flex-wrap items-center gap-2">
                         <Button size="small" icon={<RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />} disabled={!connected || loading} onClick={onRefresh}>
                             {t("agent.history.refresh")}
                         </Button>
@@ -76,6 +67,17 @@ export function AgentHistoryView({
                             {t("agent.history.newThread")}
                         </Button>
                     </div>
+                </div>
+                <div role="group" aria-label={t("microTools.agent.selection")} className="flex flex-wrap items-center justify-between gap-2 border-t pt-3" style={{ borderColor: theme.node.stroke }}>
+                    <div className="flex items-center gap-2 text-sm" style={{ color: theme.node.muted }}>
+                        {threads.length ? <Checkbox aria-label={t("microTools.agent.selectAll")} checked={allSelected} indeterminate={Boolean(selectedThreads.length) && !allSelected} disabled={loading || busy} onChange={() => setSelectedIds(allSelected ? new Set() : new Set(threads.map((thread) => thread.id)))} /> : null}
+                        <span>{selectedThreads.length ? t("agent.history.selected", { count: selectedThreads.length }) : threads.length ? t("agent.history.count", { count: threads.length }) : connected ? t("agent.history.empty") : t("agent.status.disconnected")}</span>
+                    </div>
+                        {selectedThreads.length ? (
+                            <Button size="small" danger type="text" icon={<Trash2 className="size-3.5" />} disabled={loading || busy} onClick={() => onDeleteThreads(selectedThreads.map((thread) => thread.id))}>
+                                {t("agent.history.deleteCount", { count: selectedThreads.length })}
+                            </Button>
+                        ) : null}
                 </div>
                 <div className="space-y-2">
                     {threads.map((thread) => {

@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 // 渠道模型的工作流配置：一个对外暴露的模型可以挂多个内部实现（本地 ComfyUI
 // 工作流或 RunningHub 云端工作流档案），并按输入场景（文生 / 单图 / 多图）
 // 分别指定走哪个实现、以及该实现的参数；只挂一个实现时三份活都用它，
@@ -76,6 +77,7 @@ function defaultFieldValue(field: WorkflowField) {
 }
 
 export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { open: boolean; model: ChannelModel | null; onSave: (model: ChannelModel) => void; onClose: () => void }) {
+    const { t } = useTranslation();
     const { message } = App.useApp();
     const [name, setName] = useState("");
     const [capability, setCapability] = useState<ModelCapability>("image");
@@ -265,7 +267,7 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
                         ))}
                     </div>
                 ) : (
-                    <div className="py-8 text-center text-sm text-stone-500">{loading ? "加载中…" : "暂无内部实现，请先在模型页导入模型或在运行环境登记 RunningHub 工作流"}</div>
+                    <div className="py-8 text-center text-sm text-stone-500">{loading ? "加载中…" : t("microTools.workflow.noImplementations")}</div>
                 )}
             </div>
 
@@ -370,7 +372,7 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
 
 /**
  * 单个输入场景的参数：按该场景实际走的实现拉字段。
- * 本地实现读 ComfyUI 工作流详情；RunningHub 实现的输入映射由运行环境档案管理，
+ * 本地实现读 ComfyUI 工作流详情；RunningHub 实现的输入映射由工作流库档案管理，
  * 这里只提示去哪里改，不在模型弹窗里复制一份映射。
  */
 function ScenarioWorkflowParamsModal({
@@ -390,6 +392,7 @@ function ScenarioWorkflowParamsModal({
     onSave: (value?: Record<string, unknown>) => void;
     onClose: () => void;
 }) {
+    const { t } = useTranslation();
     const { message } = App.useApp();
     const [detail, setDetail] = useState<WorkflowDetail | null>(null);
     const [values, setValues] = useState<Record<string, unknown>>({});
@@ -403,7 +406,7 @@ function ScenarioWorkflowParamsModal({
         let cancelled = false;
         setLoading(true);
         setValues({});
-        // RunningHub 档案没有本地工作流详情可读，字段映射在运行环境里维护。
+        // RunningHub 档案没有本地工作流详情可读，字段映射在工作流库的节点图里维护。
         if (workflow.startsWith(RUNNINGHUB_PREFIX)) {
             setDetail(null);
             setLoading(false);
@@ -479,7 +482,7 @@ function ScenarioWorkflowParamsModal({
         >
             {cloud ? (
                 <div className="py-6 text-center text-sm text-stone-500">
-                    <div>「{cloud.name}」是 RunningHub 云端工作流，其节点输入映射在「运行环境 → RunningHub 工作流」里配置。</div>
+                    <div>{t("microTools.workflow.cloudMappingLocation", { name: cloud.name })}</div>
                     <div className="mt-2 text-xs text-stone-400">勾选状态：{cloud.fields.filter((field) => field.enabled !== false).length}/{cloud.fields.length} 个字段已启用</div>
                 </div>
             ) : loading ? (

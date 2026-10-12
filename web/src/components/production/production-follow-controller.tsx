@@ -110,9 +110,11 @@ export function ProductionFollowController() {
 
     useEffect(() => {
         const observed = new WeakSet<Element>();
-        const isVisible = (element: Element) => !element.classList.contains("ant-modal-hidden") && getComputedStyle(element).display !== "none";
+        const isVisible = (element: Element) => element.classList.contains("ant-drawer")
+            ? element.classList.contains("ant-drawer-open")
+            : !element.classList.contains("ant-modal-hidden") && getComputedStyle(element).display !== "none";
         const sync = () => {
-            const modals = Array.from(document.querySelectorAll(".ant-modal-wrap"));
+            const modals = Array.from(document.querySelectorAll(".ant-modal-wrap, .canvas-blocking-overlay.ant-drawer"));
             for (const modal of modals) if (!observed.has(modal)) {
                 observed.add(modal);
                 observer.observe(modal, { attributes: true, attributeFilter: ["class", "style", "aria-hidden"] });

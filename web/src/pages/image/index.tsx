@@ -1,4 +1,5 @@
 import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload } from "lucide-react";
+import { captureVideoOwner } from "../video/task-receipts";
 import { useEffect, useRef, useState } from "react";
 import { App, Button, Checkbox, Drawer, Empty, Input, Modal, Select, Tag, Tooltip, Typography } from "antd";
 import { saveAs } from "file-saver";
@@ -40,9 +41,11 @@ type GeneratedImage = {
     mimeType?: string;
 };
 
+class ImageSubmissionUnknown extends Error {}
+
 type GenerationResult = {
     id: string;
-    status: "pending" | "success" | "failed";
+    status: "pending" | "success" | "failed" | "unknown";
     image?: GeneratedImage;
     error?: string;
 };
@@ -62,7 +65,8 @@ type GenerationLog = {
     imageCount: number;
     size: string;
     quality: string;
-    status: "success" | "failed";
+    status: "pending" | "success" | "failed";
+    uncertainCount?: number;
     images: GeneratedImage[];
     thumbnails: string[];
 };
@@ -71,7 +75,7 @@ type GenerationLogConfig = Pick<AiConfig, "model" | "imageModel" | "quality" | "
 
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
 
-const RESULT_ACTION_BUTTON_CLASS = "min-w-0 px-1.5 [&_.ant-btn-icon]:shrink-0 [&>span:last-child]:min-w-0 [&>span:last-child]:truncate";
+const RESULT_ACTION_BUTTON_CLASS = "ui-result-action min-w-0 [&_.ant-btn-icon]:shrink-0";
 const LEGACY_REFERENCES_KEY = "image_workbench_references";
 let referencesHydration: Promise<ReferenceImage[]> | null = null;
 let referencesSaveQueue = Promise.resolve();
@@ -112,6 +116,11 @@ function hydrateWorkbenchReferences() {
 export default function ImagePage() {
     const { message } = App.useApp();
     const { t } = useTranslation();
+    const selectionVersionRef = useRef(0);
+    const mountedRef = useRef(true);
+    useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; selectionVersionRef.current++; }; }, []);
+    const submissionRef = useRef(false);
+    const deliveryResultsRef = useRef(new Map<number, { url: string } | { dataUrl: string }>());
     const fileInputRef = useRef<HTMLInputElement>(null);
     const dragDepthRef = useRef(0);
     const config = useConfigStore((state) => state.config);
@@ -281,6 +290,7 @@ export default function ImagePage() {
     };
 
     const generate = async () => {
+        if (submissionRef.current) return;
         const agentTaskId = agentTaskIdRef.current;
         agentTaskIdRef.current = undefined;
         const text = prompt.trim();
@@ -302,6 +312,12 @@ export default function ImagePage() {
             return;
         }
 
+        submissionRef.current = true;
+        const selectionVersion = ++selectionVersionRef.current;
+        let owner: Awaited<ReturnType<typeof captureVideoOwner>>;
+        try { owner = await captureVideoOwner(); owner.assertCurrent(); } catch { submissionRef.current = false; setRunning(false); message.warning(t("videoRecovery.channelChanged")); return; }
+        if (!mountedRef.current || selectionVersion !== selectionVersionRef.current) { submissionRef.current = false; return; }
+        deliveryResultsRef.current.clear();
         setElapsedMs(0);
         setRunning(true);
         if (agentTaskId) updateAgentTask(agentTaskId, { status: "running", error: undefined });
@@ -310,18 +326,18 @@ export default function ImagePage() {
         const batchStartedAt = performance.now();
         setStartedAt(batchStartedAt);
 
-        const tasks = Array.from({ length: generationCount }, (_, index) => runGenerationSlot(index, snapshot));
+        const tasks = Array.from({ length: generationCount }, (_, index) => runGenerationSlot(index, snapshot, selectionVersion, owner.assertCurrent));
 
         const result = await Promise.allSettled(tasks);
         const successImages = result.filter((item): item is PromiseFulfilledResult<GeneratedImage> => item.status === "fulfilled").map((item) => item.value);
         const successCount = successImages.length;
-        const failCount = generationCount - successCount;
+        const uncertainCount = result.filter(item => item.status === "rejected" && (item.reason instanceof ImageSubmissionUnknown || item.reason?.deliveryIncomplete)).length;
+        const failCount = generationCount - successCount - uncertainCount;
         const failed = result.find((item): item is PromiseRejectedResult => item.status === "rejected");
         const error = failed?.reason instanceof Error ? failed.reason.message : failCount ? t("workbench.generationFailed") : undefined;
-        if (agentTaskId) updateAgentTask(agentTaskId, { status: successCount ? "succeeded" : "failed", successCount, failCount, error: successCount ? undefined : error });
 
         try {
-            saveLog(
+            await saveLog(
                 buildLog({
                     prompt: text,
                     model,
@@ -330,12 +346,19 @@ export default function ImagePage() {
                     durationMs: performance.now() - batchStartedAt,
                     successCount,
                     failCount,
-                    status: successCount ? "success" : "failed",
+                    status: uncertainCount ? "pending" : successCount ? "success" : "failed",
+                    uncertainCount,
                     images: successImages,
                 }),
+                owner.assertCurrent,
             );
-            successCount ? message.success(t("imageWorkbench.generated")) : message.error(failed?.reason instanceof Error ? failed.reason.message : t("workbench.generationFailed"));
+            if (agentTaskId) updateAgentTask(agentTaskId, { status: uncertainCount ? "running" : successCount ? "succeeded" : "failed", successCount, failCount, error: uncertainCount ? t("videoRecovery.unknown") : successCount ? undefined : error });
+            if (mountedRef.current && selectionVersion === selectionVersionRef.current) uncertainCount ? message.warning(t("videoRecovery.noReceipt")) : successCount ? message.success(t("imageWorkbench.generated")) : message.error(failed?.reason instanceof Error ? failed.reason.message : t("workbench.generationFailed"));
+        } catch {
+            message.warning(t("videoRecovery.historyUnavailable"));
+            if (agentTaskId) updateAgentTask(agentTaskId, { status: "running", error: t("videoRecovery.historyUnavailable") });
         } finally {
+            submissionRef.current = false;
             setRunning(false);
         }
     };
@@ -399,6 +422,8 @@ export default function ImagePage() {
     };
 
     const createSession = () => {
+        selectionVersionRef.current++;
+        deliveryResultsRef.current.clear();
         setPrompt("");
         setReferences([]);
         setResults([]);
@@ -419,13 +444,17 @@ export default function ImagePage() {
         setDeleteConfirmOpen(false);
     };
 
-    const saveLog = (log: GenerationLog) => {
-        void saveWorkbenchLog("image", log).then(refreshLogs);
+    const saveLog = async (log: GenerationLog, assertOwner?: () => void) => {
+        await saveWorkbenchLog("image", log, { assertOwner });
+        assertOwner?.();
+        await refreshLogs();
     };
 
     const refreshLogs = async () => setLogs(await readStoredLogs());
 
     const previewGenerationLog = async (log: GenerationLog) => {
+        selectionVersionRef.current++;
+        deliveryResultsRef.current.clear();
         setPreviewLog(log);
         setLogsOpen(false);
         setPrompt(log.prompt);
@@ -434,7 +463,7 @@ export default function ImagePage() {
         if (log.config.quality) updateConfig("quality", log.config.quality);
         if (log.config.size) updateConfig("size", log.config.size);
         if (log.config.count) updateConfig("count", log.config.count);
-        setResults(log.images.map((image) => ({ id: image.id, status: "success", image })));
+        setResults([...log.images.map((image): GenerationResult => ({ id: image.id, status: "success", image })), ...Array.from({length:log.uncertainCount || 0}, (_,index): GenerationResult => ({id:`${log.id}:unknown:${index}`,status:"unknown"}))]);
     };
 
     const buildRequestSnapshot = () => {
@@ -451,17 +480,19 @@ export default function ImagePage() {
         return { text, config: { ...effectiveConfig, model, count: "1" }, references: [...references] };
     };
 
-    const runGenerationSlot = async (index: number, snapshot: { text: string; config: AiConfig; references: ReferenceImage[] }) => {
+    const runGenerationSlot = async (index: number, snapshot: { text: string; config: AiConfig; references: ReferenceImage[] }, selectionVersion = selectionVersionRef.current, assertOwner: () => void = () => {}) => {
         const itemStartedAt = performance.now();
+        let submitted = false;
         try {
+            assertOwner();
             const channel = resolveModelChannel(snapshot.config, snapshot.config.model);
             const local = channel.kind === "comfyui";
             // ComfyUI 渠道统一走工作流执行器（/api/workflows/:name/run）：工作流名由渠道模型配置的
             // 输入场景路由（文生 / 单图 / 多图）解析，未配置路由时回退到模型名对应的内置工作流；
             // 该场景被标记为「不支持」时解析结果为空，直接报错不回退。
             const workflowName = local ? resolveModelWorkflow(snapshot.config, snapshot.config.model, snapshot.references.length) : "";
-            let result: { url: string } | { dataUrl: string } | undefined;
-            if (local) {
+            let result = deliveryResultsRef.current.get(index);
+            if (!result && local) {
                 if (!workflowName) throw new Error(modelWorkflowMissingMessage(snapshot.config, snapshot.config.model, snapshot.references.length));
                 // 1) 拉 workflow 详情：拿 config.fields 里 type=image 的 input 节点
                 // 2) 把生图工作台写的 prompt 注入到标记为「作为提示词」的文本字段
@@ -494,19 +525,25 @@ export default function ImagePage() {
                 for (const [id, value] of Object.entries(customFieldValues)) {
                     workflowFields[id] = value;
                 }
+                submitted = true;
                 const { taskId } = await runWorkflow(workflowName, workflowFields, detail.config);
                 const run = await pollWorkflowTask(taskId);
                 const first = run.media?.[0];
                 if (!first) throw new Error("ComfyUI 工作流完成但没有返回媒体");
                 result = { url: first.url };
-            } else if (snapshot.references.length) {
+            } else if (!result && snapshot.references.length) {
+                submitted = true;
                 result = await requestEdit(snapshot.config, snapshot.text, snapshot.references).then((items) => items[0]);
-            } else {
+            } else if (!result) {
+                submitted = true;
                 result = await requestGeneration(snapshot.config, snapshot.text).then((items) => items[0]);
             }
             if (!result) throw new Error(t("imageWorkbench.missingResult"));
-            const source = "url" in result ? await fetch((result as { url: string }).url).then((response) => response.blob()) : (result as { dataUrl: string }).dataUrl;
+            if (selectionVersion === selectionVersionRef.current) deliveryResultsRef.current.set(index, result);
+            const source = "url" in result ? await fetch((result as { url: string }).url).then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}: ${t("common.downloadFailed")}`); return response.blob(); }) : (result as { dataUrl: string }).dataUrl;
+            assertOwner();
             const stored = await uploadImage(source, { category: "output" });
+            assertOwner();
             const nextImage: GeneratedImage = {
                 id: nanoid(),
                 dataUrl: stored.url,
@@ -517,23 +554,35 @@ export default function ImagePage() {
                 bytes: stored.bytes,
                 mimeType: stored.mimeType,
             };
-            setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
+            if (selectionVersion === selectionVersionRef.current) setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
             return nextImage;
         } catch (error) {
-            setResults((value) => updateResultAt(value, index, { status: "failed", error: error instanceof Error ? error.message : t("workbench.generationFailed") }));
-            throw error;
+            const unknown = submitted && !deliveryResultsRef.current.has(index);
+            const failure = unknown ? new ImageSubmissionUnknown(error instanceof Error ? error.message : t("videoRecovery.unknown")) : error;
+            if (failure instanceof Error && deliveryResultsRef.current.has(index)) Object.assign(failure, { deliveryIncomplete: true });
+            if (selectionVersion === selectionVersionRef.current) setResults((value) => updateResultAt(value, index, { status: unknown ? "unknown" : "failed", error: failure instanceof Error ? failure.message : t("workbench.generationFailed") }));
+            throw failure;
         }
     };
 
     const retryResult = async (index: number) => {
+        if (submissionRef.current) return;
         const snapshot = buildRequestSnapshot();
         if (!snapshot) return;
         setPreviewLog(null);
         setResults((value) => updateResultAt(value, index, { status: "pending", error: undefined, image: undefined }));
+        submissionRef.current = true;
+        setRunning(true);
+        const selectionVersion = selectionVersionRef.current;
+        let owner: Awaited<ReturnType<typeof captureVideoOwner>>;
+        try { owner = await captureVideoOwner(); owner.assertCurrent(); } catch { submissionRef.current = false; setRunning(false); message.warning(t("videoRecovery.channelChanged")); return; }
+        if (!mountedRef.current || selectionVersion !== selectionVersionRef.current) { submissionRef.current = false; setRunning(false); return; }
+        let generated = false;
         const retryStartedAt = performance.now();
         try {
-            const image = await runGenerationSlot(index, snapshot);
-            saveLog(
+            const image = await runGenerationSlot(index, snapshot, selectionVersion, owner.assertCurrent);
+            generated = true;
+            await saveLog(
                 buildLog({
                     prompt: snapshot.text,
                     model,
@@ -545,17 +594,22 @@ export default function ImagePage() {
                     status: "success",
                     images: [image],
                 }),
+                owner.assertCurrent,
             );
-            message.success(t("workbench.retrySuccess"));
+            if (mountedRef.current && selectionVersion === selectionVersionRef.current) message.success(t("workbench.retrySuccess"));
         } catch {
-            // runGenerationSlot has already marked the result as failed.
-        }
+            if (generated) message.warning(t("videoRecovery.historyUnavailable"));
+        } finally { submissionRef.current = false; setRunning(false); }
     };
 
+    const unknownResult = results.some(result => result.status === "unknown");
+    const deliveryIndex = results.findIndex((result,index) => result.status === "failed" && deliveryResultsRef.current.has(index));
+    const confirmNewGeneration = () => Modal.confirm({ title:t("videoRecovery.newGeneration"), content:t("videoRecovery.confirmNew"), okText:t("videoRecovery.newGeneration"), onOk:()=>{ void generate(); } });
+
     return (
-        <div className="flex h-full flex-col overflow-hidden bg-stone-50 text-stone-900 dark:bg-stone-950 dark:text-stone-100">
-            <main className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[300px_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[320px_minmax(0,1fr)]">
-                <aside className="thin-scrollbar hidden min-h-0 overflow-y-auto rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:block">
+        <div className="ui-controls flex h-full min-w-0 flex-col overflow-hidden bg-background text-foreground">
+            <main className="grid min-h-0 flex-1 grid-cols-1 gap-5 overflow-y-auto p-3 sm:p-5 lg:overflow-hidden lg:p-6 xl:grid-cols-[260px_minmax(0,1fr)]">
+                <aside className="thin-scrollbar hidden min-h-0 min-w-0 overflow-y-auto border-r border-border pr-5 xl:block">
                     <LogPanel
                         logs={logs}
                         selectedLogIds={selectedLogIds}
@@ -567,14 +621,14 @@ export default function ImagePage() {
                     />
                 </aside>
 
-                <section className="grid gap-3 lg:min-h-0 lg:overflow-hidden xl:grid-cols-[420px_minmax(0,1fr)]">
-                    <div className="thin-scrollbar flex flex-col rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:min-h-0 lg:overflow-y-auto">
+                <section className="grid min-w-0 gap-5 lg:min-h-0 lg:grid-cols-[minmax(320px,380px)_minmax(0,1fr)] lg:overflow-hidden">
+                    <div className="thin-scrollbar flex min-w-0 flex-col ui-card border border-border bg-card p-4 sm:p-5 lg:min-h-0 lg:overflow-y-auto">
                         <div>
-                            <div className="flex items-start justify-between gap-3">
+                            <div className="flex flex-wrap items-start justify-between gap-3">
                                 <div className="min-w-0">
-                                    <h1 className="text-2xl font-semibold text-stone-950 dark:text-stone-100">{t("imageWorkbench.title")}</h1>
+                                    <h1 className="ui-page-title text-foreground">{t("imageWorkbench.title")}</h1>
                                 </div>
-                                <div className="flex shrink-0 gap-2 lg:hidden">
+                                <div className="flex shrink-0 flex-wrap gap-1.5 xl:hidden">
                                     <Button icon={<History className="size-4" />} onClick={() => setLogsOpen(true)}>
                                         {t("workbench.logs")}
                                     </Button>
@@ -585,36 +639,48 @@ export default function ImagePage() {
                             </div>
                         </div>
 
-                        <div className="mt-6 space-y-5">
-                            <div>
-                                <div className="mb-2 flex items-center justify-between gap-3">
-                                    <span className="text-base font-semibold">{t("workbench.prompt")}</span>
+                        <div className="mt-6 space-y-6">
+                            <section aria-label={t("workbench.groups.input")}>
+                                <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
+                                    <label htmlFor="image-workbench-prompt" className="ui-group-title">
+                                        {t("workbench.groups.input")}
+                                    </label>
                                     <div className="flex gap-2">
-                                        <Button size="small" icon={<BookOpen className="size-3.5" />} onClick={() => setPromptDialogOpen(true)}>
+                                        <Button size="small" icon={<BookOpen className="size-4" />} onClick={() => setPromptDialogOpen(true)}>
                                             {t("workbench.viewPrompts")}
                                         </Button>
-                                        <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => setAssetPickerOpen(true)}>
+                                        <Button size="small" icon={<FolderPlus className="size-4" />} onClick={() => setAssetPickerOpen(true)}>
                                             {t("workbench.viewAssets")}
                                         </Button>
                                     </div>
                                 </div>
-                                <Input.TextArea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={7} placeholder={t("imageWorkbench.promptPlaceholder")} />
-                            </div>
+                                <Input.TextArea
+                                    id="image-workbench-prompt"
+                                    className="!rounded-lg !px-3.5 !py-3 !text-sm !leading-relaxed"
+                                    value={prompt}
+                                    onChange={(event) => setPrompt(event.target.value)}
+                                    rows={7}
+                                    placeholder={t("imageWorkbench.promptPlaceholder")}
+                                />
+                            </section>
 
-                            <div className="min-w-0">
-                                <div className="mb-2 flex items-center justify-between gap-3">
-                                    <span className="text-base font-semibold">{t("imageWorkbench.references")}</span>
+                            <section className="min-w-0" aria-label={t("workbench.groups.references")}>
+                                <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <h2 className="ui-group-title">{t("workbench.groups.references")}</h2>
+                                        <span className="rounded bg-muted px-1.5 py-0.5 text-xs tabular-nums text-muted-foreground">{references.length}</span>
+                                    </div>
                                     <div className="flex gap-2">
-                                        <Button size="small" icon={<ClipboardPaste className="size-3.5" />} onClick={() => void addReferencesFromClipboard()}>
+                                        <Button size="small" icon={<ClipboardPaste className="size-4" />} onClick={() => void addReferencesFromClipboard()}>
                                             {t("workbench.clipboard")}
                                         </Button>
-                                        <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => fileInputRef.current?.click()}>
+                                        <Button size="small" icon={<Upload className="size-4" />} onClick={() => fileInputRef.current?.click()}>
                                             {t("workbench.upload")}
                                         </Button>
                                     </div>
                                 </div>
                                 <div
-                                    className={`hover-scrollbar hover-scrollbar-hint relative flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed p-2 pb-3 overscroll-x-contain transition-colors ${isReferenceDragActive ? "border-stone-900 bg-stone-100/80 dark:border-stone-100 dark:bg-stone-900/80" : "border-stone-300 dark:border-stone-700"}`}
+                                    className={`hover-scrollbar hover-scrollbar-hint relative flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed bg-muted/25 p-2.5 pb-3 overscroll-x-contain transition-colors ${isReferenceDragActive ? "border-primary bg-primary/5" : "border-border"}`}
                                     onDragEnter={(event) => {
                                         event.preventDefault();
                                         dragDepthRef.current += 1;
@@ -642,26 +708,31 @@ export default function ImagePage() {
                                     }}
                                 >
                                     {references.map((item, index) => (
-                                        <div key={item.id} className="group relative size-20 shrink-0 overflow-hidden rounded-md border border-stone-200 dark:border-stone-800">
-                                            <img src={item.dataUrl} alt={item.name} className="size-full object-cover" />
+                                        <div key={item.id} className="group relative h-32 w-24 shrink-0 overflow-hidden rounded-md border border-border sm:h-28 sm:w-20">
+                                            <img src={item.dataUrl} alt={item.name} className="h-20 w-full object-cover" />
                                             <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{imageReferenceLabel(index)}</span>
                                             <ReferenceOrderButtons index={index} total={references.length} onMove={(offset) => setReferences((value) => moveListItem(value, index, offset))} />
                                             <button
                                                 type="button"
-                                                className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
+                                                className="absolute right-1 top-1 flex size-11 sm:size-8 items-center justify-center rounded-md bg-background/90 text-foreground opacity-100 transition-opacity hover:bg-background focus-visible:outline-2 focus-visible:outline-ring sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
                                                 onClick={() => setReferences((value) => value.filter((ref) => ref.id !== item.id))}
                                                 aria-label={t("imageWorkbench.removeReference")}
                                             >
-                                                <Trash2 className="size-3.5" />
+                                                <Trash2 className="size-4" />
                                             </button>
                                         </div>
                                     ))}
-                                    {!references.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">{isReferenceDragActive ? t("imageWorkbench.dropReferences") : t("imageWorkbench.noReferences")}</div> : null}
+                                    {!references.length ? (
+                                        <div className="flex min-w-full items-center justify-center px-2 text-center text-xs leading-relaxed text-muted-foreground">
+                                            {isReferenceDragActive ? t("imageWorkbench.dropReferences") : t("imageWorkbench.noReferences")}
+                                        </div>
+                                    ) : null}
                                 </div>
-                            </div>
+                                <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{t(references.length ? "workbench.groups.withReferences" : "workbench.groups.withoutReferences")}</p>
+                            </section>
 
-                            <div className="flex items-center justify-between rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm dark:border-stone-800 dark:bg-stone-900 sm:hidden">
-                                <span className="truncate text-stone-500 dark:text-stone-400">
+                            <div className="flex min-w-0 items-center justify-between gap-2 rounded-lg bg-muted/60 px-3 py-2.5 text-xs sm:hidden">
+                                <span className="truncate text-muted-foreground">
                                     {modelOptionLabel(effectiveConfig, model)} · {effectiveConfig.size} · {effectiveConfig.quality}
                                 </span>
                                 <Button size="small" type="text" icon={<SlidersHorizontal className="size-4" />} onClick={() => setSettingsOpen(true)}>
@@ -669,7 +740,7 @@ export default function ImagePage() {
                                 </Button>
                             </div>
 
-                            <div className="hidden gap-4 sm:grid sm:grid-cols-2">
+                            <section aria-label={t("workbench.groups.defaults")} className="hidden gap-4 border-t border-border pt-5 sm:grid sm:grid-cols-2">
                                 <GenerationSettings
                                     config={effectiveConfig}
                                     model={model}
@@ -679,39 +750,55 @@ export default function ImagePage() {
                                     customFieldValues={customFieldValues}
                                     setCustomFieldValues={setCustomFieldValues}
                                 />
-                            </div>
+                            </section>
                         </div>
 
-                        <div className="mt-auto pt-6">
-                            <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running} disabled={!canGenerate || running} onClick={() => void generate()}>
-                                {t("workbench.generate")}
+                        <section aria-label={t("workbench.groups.submit")} className="mt-auto border-t border-border pt-4">
+                            <div className="mb-3 space-y-1">
+                                <h2 className="ui-group-title">{t("workbench.groups.submit")}</h2>
+                                <p className="break-words text-xs leading-relaxed text-muted-foreground">
+                                    {modelOptionLabel(effectiveConfig, model)} · {t("workbench.groups.referenceCount", { count: references.length })} · {t("settingsPanels.image.images", { count: generationCount })}
+                                </p>
+                                <p role="status" aria-live="polite" className="text-xs text-muted-foreground">
+                                    {running ? t("workbench.generating") : !canGenerate ? t("imageWorkbench.promptRequired") : t("workbench.groups.ready")}
+                                </p>
+                            </div>
+                            <Button type="primary" size="large" block className="!h-11 !rounded-lg !font-medium !shadow-none" icon={<Sparkles className="size-4" />} loading={running} disabled={running || (deliveryIndex < 0 && (unknownResult || !canGenerate))} onClick={() => deliveryIndex >= 0 ? void retryResult(deliveryIndex) : void generate()}>
+                                {t(deliveryIndex >= 0 ? "videoRecovery.retrieveResult" : unknownResult ? "videoRecovery.unknown" : "workbench.generate")}
                             </Button>
-                        </div>
+                            {unknownResult || deliveryIndex >= 0 ? <Button type="text" block className="mt-2" disabled={running} onClick={confirmNewGeneration}>{t("videoRecovery.newGeneration")}</Button> : null}
+                        </section>
                     </div>
 
-                    <div className="thin-scrollbar rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:min-h-0 lg:overflow-y-auto lg:p-5">
-                        <div className="mb-4 flex items-center justify-between gap-3">
+                    <div className="thin-scrollbar flex min-w-0 flex-col ui-card border border-border bg-card p-4 sm:p-5 lg:min-h-0 lg:overflow-y-auto">
+                        <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
                             <div>
-                                <h2 className="text-xl font-semibold">{t("workbench.results")}</h2>
+                                <h2 className="ui-panel-title">{t("workbench.results")}</h2>
                             </div>
-                            {running ? <Tag className="m-0 px-2 py-1">{t("workbench.waiting", { time: formatDuration(elapsedMs) })}</Tag> : null}
+                            {running ? (
+                                <Tag role="status" className="m-0 px-2 py-1">
+                                    {t("workbench.waiting", { time: formatDuration(elapsedMs) })}
+                                </Tag>
+                            ) : null}
                         </div>
                         {results.length ? (
-                            <div className="grid gap-4 sm:grid-cols-2 2xl:grid-cols-3">
+                            <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,220px),1fr))] items-start gap-4">
                                 {results.map((result, index) =>
                                     result.status === "success" && result.image ? (
                                         <ResultImageCard key={result.id} image={result.image} index={index} onEdit={addResultToReferences} onDownload={downloadImage} onSaveAsset={saveResultToAssets} />
+                                    ) : result.status === "unknown" ? (
+                                        <div key={result.id} role="status" className="rounded-lg border border-border p-4 space-y-3"><h3>{t("videoRecovery.unknown")}</h3><p className="text-sm">{t("videoRecovery.noReceipt")}</p><details className="text-xs break-words"><summary>{t("videoRecovery.errorDetails")}</summary>{result.error}</details><Button type="text" onClick={confirmNewGeneration}>{t("videoRecovery.newGeneration")}</Button></div>
                                     ) : result.status === "failed" ? (
-                                        <FailedImageCard key={result.id} error={result.error || t("workbench.generationFailed")} onRetry={() => retryResult(index)} />
+                                        <FailedImageCard deliveryOnly={deliveryResultsRef.current.has(index)} key={result.id} error={result.error || t("workbench.generationFailed")} onRetry={() => retryResult(index)} />
                                     ) : (
                                         <PendingImageCard key={result.id} />
                                     ),
                                 )}
                             </div>
                         ) : (
-                            <div className="flex min-h-[320px] flex-col items-center justify-center rounded-lg border border-dashed border-stone-300 text-center dark:border-stone-700 lg:min-h-[560px]">
-                                <ImagePlus className="mb-4 size-11 text-stone-400" />
-                                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("imageWorkbench.empty")} />
+                            <div className="flex min-h-[280px] flex-1 flex-col items-center justify-center rounded-lg bg-muted/45 px-6 py-12 text-center lg:min-h-[360px]">
+                                <ImagePlus className="mb-4 size-8 text-muted-foreground/65" />
+                                <Empty image={false} description={t("imageWorkbench.empty")} />
                             </div>
                         )}
                     </div>
@@ -739,8 +826,8 @@ export default function ImagePage() {
                     onPreviewLog={(log) => void previewGenerationLog(log)}
                 />
             </Drawer>
-            <Drawer title={t("workbench.settings")} placement="bottom" size="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
-                <div className="grid grid-cols-2 gap-3 pb-4">
+            <Drawer title={t("workbench.groups.defaults")} placement="bottom" size="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
+                <div className="mx-auto grid max-w-2xl grid-cols-2 gap-4 pb-6">
                     <GenerationSettings
                         config={effectiveConfig}
                         model={model}
@@ -786,14 +873,20 @@ function GenerationSettings({
 
     return (
         <>
-            <label className="col-span-2 block min-w-0 sm:col-span-1">
-                <span className="mb-1.5 block text-sm font-semibold sm:mb-2 sm:text-base">{t("workbench.model")}</span>
+            <div className="col-span-2 space-y-1">
+                <h2 className="ui-group-title">{t("workbench.groups.defaults")}</h2>
+                <p className="text-xs leading-relaxed text-muted-foreground">{t("workbench.groups.defaultsHint")}</p>
+            </div>
+            <div className="col-span-2 block min-w-0" role="group" aria-label={t("workbench.model")}>
+                <span className="mb-2 block text-xs font-medium text-muted-foreground">{t("workbench.model")}</span>
                 <ModelPicker config={config} value={model} onChange={(value) => updateConfig("imageModel", value)} capability="image" fullWidth onMissingConfig={() => openConfigDialog(false)} />
-            </label>
+            </div>
             {displayFields.length > 0 && (
-                <div className="col-span-2">
+                <section className="col-span-2 space-y-2" aria-label={t("settingsPanels.image.workflowFields")}>
+                    <h3 className="ui-group-title">{t("settingsPanels.image.workflowFields")}</h3>
+                    <p className="text-xs leading-relaxed text-muted-foreground">{t("workbench.groups.workflowHint")}</p>
                     <WorkflowCustomFields fields={displayFields} values={customFieldValues} onChange={(id, value) => setCustomFieldValues((prev) => ({ ...prev, [id]: value }))} />
-                </div>
+                </section>
             )}
             <div className="col-span-2">
                 <ImageSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" maxCount={10} hideStandardImageOptions={hideStandardImageOptions} />
@@ -817,29 +910,29 @@ function ResultImageCard({
 }) {
     const { t } = useTranslation();
     return (
-        <div className="overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800">
-            <MediaImage src={image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl} alt={t("imageWorkbench.resultAlt", { count: index + 1 })} className="aspect-square object-cover" />
-            <div className="space-y-2 border-t border-stone-200 px-3 py-2.5 dark:border-stone-800">
-                <div className="flex min-w-0 gap-x-2 gap-y-1 text-xs text-stone-500 dark:text-stone-400">
+        <div className="overflow-hidden rounded-lg border border-border bg-card">
+            <MediaImage src={image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl} alt={t("imageWorkbench.resultAlt", { count: index + 1 })} className="aspect-square w-full bg-muted/40 object-contain" />
+            <div className="space-y-2 border-t border-border px-3 py-3">
+                <div className="flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs tabular-nums text-muted-foreground">
                     <span>
                         {image.width}x{image.height}
                     </span>
                     <span>{formatBytes(image.bytes)}</span>
                     <span>{formatDuration(image.durationMs)}</span>
                 </div>
-                <div className="grid min-w-0 grid-cols-3 gap-2">
+                <div className="grid min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,108px),1fr))] gap-2" role="group" aria-label={t("workbench.groups.resultActions")}>
                     <Tooltip title={t("common.addToAssets")}>
-                        <Button className={RESULT_ACTION_BUTTON_CLASS} size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => void onSaveAsset(image, index)}>
+                        <Button className={RESULT_ACTION_BUTTON_CLASS} size="small" icon={<FolderPlus className="size-4" />} onClick={() => void onSaveAsset(image, index)}>
                             {t("common.addToAssets")}
                         </Button>
                     </Tooltip>
                     <Tooltip title={t("imageWorkbench.addReference")}>
-                        <Button className={RESULT_ACTION_BUTTON_CLASS} size="small" icon={<PenLine className="size-3.5" />} onClick={() => void onEdit(image, index)}>
+                        <Button className={RESULT_ACTION_BUTTON_CLASS} size="small" icon={<PenLine className="size-4" />} onClick={() => void onEdit(image, index)}>
                             {t("imageWorkbench.addReference")}
                         </Button>
                     </Tooltip>
                     <Tooltip title={t("common.download")}>
-                        <Button className={RESULT_ACTION_BUTTON_CLASS} size="small" icon={<Download className="size-3.5" />} onClick={() => onDownload(image, index)}>
+                        <Button className={RESULT_ACTION_BUTTON_CLASS} size="small" icon={<Download className="size-4" />} onClick={() => onDownload(image, index)}>
                             {t("common.download")}
                         </Button>
                     </Tooltip>
@@ -852,15 +945,15 @@ function ResultImageCard({
 function PendingImageCard() {
     const { t } = useTranslation();
     return (
-        <div className="relative aspect-square overflow-hidden rounded-lg border border-dashed border-stone-300 bg-stone-50 dark:border-stone-700 dark:bg-stone-900">
+        <div className="relative aspect-square overflow-hidden rounded-lg border border-dashed border-border bg-muted/40">
             <div
                 className="absolute inset-0 opacity-60"
                 style={{
-                    backgroundImage: "radial-gradient(circle, rgba(120,113,108,0.35) 1.4px, transparent 1.6px)",
+                    backgroundImage: "radial-gradient(circle, var(--border) 1px, transparent 1px)",
                     backgroundSize: "16px 16px",
                 }}
             />
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-sm text-stone-500 dark:text-stone-400">
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
                 <LoaderCircle className="size-6 animate-spin" />
                 <span>{t("workbench.generating")}</span>
             </div>
@@ -868,19 +961,19 @@ function PendingImageCard() {
     );
 }
 
-function FailedImageCard({ error, onRetry }: { error: string; onRetry: () => void }) {
+function FailedImageCard({ error, onRetry, deliveryOnly }: { error: string; onRetry: () => void; deliveryOnly: boolean }) {
     const { t } = useTranslation();
     return (
-        <div className="overflow-hidden rounded-lg border border-red-200 bg-red-50 dark:border-red-950 dark:bg-red-950/20">
+        <div className="overflow-hidden rounded-lg border border-destructive/25 bg-destructive/5">
             <div className="flex aspect-square flex-col items-center justify-center gap-3 p-5 text-center">
-                <div className="text-sm font-medium text-red-600 dark:text-red-300">{t("workbench.failed")}</div>
-                <Typography.Paragraph ellipsis={{ rows: 4 }} className="!mb-0 !text-xs !text-red-500 dark:!text-red-300">
+                <div className="text-sm font-medium text-destructive">{t(deliveryOnly ? "videoRecovery.deliveryFailed" : "workbench.failed")}</div>
+                <Typography.Paragraph ellipsis={{ rows: 4, expandable: true }} className="!mb-0 !text-sm !leading-[22px] !text-destructive">
                     {error}
                 </Typography.Paragraph>
             </div>
-            <div className="flex justify-end border-t border-red-200 p-3 dark:border-red-950">
+            <div className="flex justify-end border-t border-destructive/20 p-3">
                 <Button size="small" danger onClick={onRetry}>
-                    {t("workbench.retry")}
+                    {t(deliveryOnly ? "videoRecovery.retrieveResult" : "videoRecovery.newGeneration")}
                 </Button>
             </div>
         </div>
@@ -916,19 +1009,23 @@ function LogPanel({
         <>
             <div className="mb-3 flex items-center justify-between gap-3">
                 <div>
-                    <h2 className="text-base font-semibold">{t("workbench.logs")}</h2>
+                    <h2 className="ui-group-title">{t("workbench.logs")}</h2>
                 </div>
                 <Tag className="m-0">{logs.length}</Tag>
             </div>
-            <div className="mb-4 flex flex-wrap gap-2">
-                <Button size="small" icon={<Plus className="size-3.5" />} onClick={onCreateSession}>
+            <p className="mb-3 text-xs leading-relaxed text-muted-foreground">{t("workbench.groups.historyHint")}</p>
+            <div className="mb-3">
+                <Button size="small" block icon={<Plus className="size-4" />} onClick={onCreateSession}>
                     {t("workbench.new")}
                 </Button>
-                <Button size="small" icon={<CheckSquare className="size-3.5" />} disabled={!logs.length} onClick={toggleAll}>
+            </div>
+            <div className="mb-4 flex flex-wrap items-center gap-2" role="group" aria-label={t("workbench.groups.historyManagement")}>
+                <Button size="small" icon={<CheckSquare className="size-4" />} disabled={!logs.length} onClick={toggleAll}>
                     {allSelected ? t("common.cancel") : t("workbench.selectAll")}
                 </Button>
-                <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={!selectedLogIds.length} onClick={onDeleteSelected}>
+                <Button size="small" danger icon={<Trash2 className="size-4" />} disabled={!selectedLogIds.length} onClick={onDeleteSelected}>
                     {t("common.delete")}
+                    {selectedLogIds.length ? ` (${selectedLogIds.length})` : ""}
                 </Button>
             </div>
             <div className="space-y-3">
@@ -942,7 +1039,7 @@ function LogPanel({
                         onClick={() => onPreviewLog(log)}
                     />
                 ))}
-                {!logs.length ? <div className="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-stone-300 text-center text-sm text-stone-500 dark:border-stone-700">{t("workbench.noLogs")}</div> : null}
+                {!logs.length ? <div className="flex min-h-40 items-center justify-center rounded-lg border border-dashed border-border px-4 text-center text-xs leading-relaxed text-muted-foreground">{t("workbench.noLogs")}</div> : null}
             </div>
         </>
     );
@@ -953,16 +1050,18 @@ function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: Ge
     const thumbnails = (log.thumbnails || []).filter(Boolean).slice(0, 4);
 
     return (
-        <button
-            type="button"
-            className={`block w-full rounded-lg border p-2 text-left transition ${active ? "border-stone-900 bg-blue-50 dark:border-stone-100 dark:bg-blue-950/20" : "border-stone-200 bg-background hover:bg-stone-50 dark:border-stone-800 dark:hover:bg-stone-900"}`}
-            onClick={onClick}
-        >
-            <div className="grid grid-cols-[minmax(128px,1fr)_auto] gap-2">
-                <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-2">
-                    <Checkbox className="mt-0.5" checked={selected} onClick={(event) => event.stopPropagation()} onChange={(event) => onSelectedChange(event.target.checked)} />
+        <div className={`relative w-full rounded-lg border p-3 text-left transition-colors ${active ? "border-primary/35 bg-primary/5" : "border-border bg-card hover:border-primary/25 hover:bg-muted/50"}`}>
+            <Checkbox aria-label={t("workbench.groups.selectHistory", { title: log.title })} className="absolute left-3 top-3.5 z-10" checked={selected} onChange={(event) => onSelectedChange(event.target.checked)} />
+            <button
+                type="button"
+                aria-label={t("workbench.groups.restoreHistory", { title: log.title })}
+                aria-current={active ? "true" : undefined}
+                onClick={onClick}
+                className="grid w-full min-w-0 gap-3 rounded-sm text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+            >
+                <div className="min-w-0 pl-6">
                     <div className="min-w-0">
-                        <div className="truncate text-sm font-semibold leading-5">{log.title}</div>
+                        <div className="truncate ui-group-title leading-5">{log.title}</div>
                         {thumbnails.length ? (
                             <div className="mt-2 flex gap-1 overflow-hidden">
                                 {thumbnails.map((image, index) => (
@@ -972,7 +1071,7 @@ function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: Ge
                         ) : null}
                     </div>
                 </div>
-                <div className="grid justify-items-end gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-1.5">
                     <div className="flex gap-1">
                         <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color="blue">
                             {t("workbench.successCount", { count: log.successCount ?? log.imageCount })}
@@ -993,8 +1092,8 @@ function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: Ge
                         <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none">{log.time}</Tag>
                     </div>
                 </div>
-            </div>
-        </button>
+            </button>
+        </div>
     );
 }
 
@@ -1012,11 +1111,26 @@ function moveListItem<T>(items: T[], index: number, offset: number) {
 }
 
 function ReferenceOrderButtons({ index, total, onMove }: { index: number; total: number; onMove: (offset: number) => void }) {
+    const { t } = useTranslation();
     if (total <= 1) return null;
     return (
-        <div className="absolute inset-x-1 bottom-1 flex justify-between">
-            <Button size="small" className="!h-6 !w-6 !min-w-6 !rounded-full !bg-white/85 !p-0 !shadow-sm" icon={<ArrowLeft className="size-3" />} disabled={index <= 0} onClick={() => onMove(-1)} />
-            <Button size="small" className="!h-6 !w-6 !min-w-6 !rounded-full !bg-white/85 !p-0 !shadow-sm" icon={<ArrowRight className="size-3" />} disabled={index >= total - 1} onClick={() => onMove(1)} />
+        <div className="absolute inset-x-0.5 bottom-1 flex justify-between">
+            <Button
+                size="small"
+                className="!h-11 !w-11 !min-w-11 sm:!h-8 sm:!w-8 sm:!min-w-8 !rounded-md !border-border !bg-background/90 !p-0 !text-foreground"
+                aria-label={t("workbench.groups.moveReferenceEarlier", { count: index + 1 })}
+                icon={<ArrowLeft className="size-4" />}
+                disabled={index <= 0}
+                onClick={() => onMove(-1)}
+            />
+            <Button
+                size="small"
+                className="!h-11 !w-11 !min-w-11 sm:!h-8 sm:!w-8 sm:!min-w-8 !rounded-md !border-border !bg-background/90 !p-0 !text-foreground"
+                aria-label={t("workbench.groups.moveReferenceLater", { count: index + 1 })}
+                icon={<ArrowRight className="size-4" />}
+                disabled={index >= total - 1}
+                onClick={() => onMove(1)}
+            />
         </div>
     );
 }
@@ -1029,6 +1143,7 @@ function buildLog({
     durationMs,
     successCount,
     failCount,
+    uncertainCount,
     status,
     images,
 }: {
@@ -1039,6 +1154,7 @@ function buildLog({
     durationMs: number;
     successCount: number;
     failCount: number;
+    uncertainCount?: number;
     status: GenerationLog["status"];
     images: GeneratedImage[];
 }): GenerationLog {
@@ -1061,6 +1177,7 @@ function buildLog({
         durationMs,
         successCount,
         failCount,
+        uncertainCount,
         imageCount: Number(logConfig.count) || successCount,
         size: logConfig.size,
         quality: logConfig.quality,

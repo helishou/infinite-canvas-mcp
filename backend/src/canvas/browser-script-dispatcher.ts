@@ -20,7 +20,7 @@ export type BrowserTaskExecutor = "browser-script" | "browser-provider";
  * task, claim arbitration and canvas writeback. No script is evaluated here.
  */
 export class CanvasBrowserScriptDispatcher {
-    private readonly claims = new Map<string, string>();
+    private readonly claims = new Map<string, { workerId: string; token: string; submissionGranted: boolean }>();
 
     constructor(
         private readonly stores: Stores,
@@ -61,70 +61,130 @@ export class CanvasBrowserScriptDispatcher {
     }
 
     claim(id: string, workerId: string) {
-        const task = this.requireTask(id);
+        let task = this.requireTask(id);
         if (!workerId.trim()) throw new Error("浏览器执行器缺少 workerId");
         if (!["queued", "running"].includes(task.status)) throw new Error(`任务状态 ${task.status} 不可认领`);
         const owner = this.claims.get(id);
-        if (owner && owner !== workerId) throw new Error("任务已由另一个浏览器认领");
-        this.claims.set(id, workerId);
+        if (owner && owner.workerId !== workerId) throw new Error("任务已由另一个浏览器认领");
+        if (!owner && task.status === "running" && !recoveryOf(task).phase) {
+            this.resume(task);
+            task = this.requireTask(id);
+        }
+        const claim = owner || { workerId, token: crypto.randomUUID(), submissionGranted: false };
         const claimed = task.status === "queued" ? this.update(id, { status: "running", progress: 0.02 }) : task;
+        this.claims.set(id, claim);
         this.stores.tasks.addEvent(id, "browser_claimed", { workerId });
-        return claimed;
+        return { task: claimed, claimToken: claim.token };
     }
 
-    complete(id: string, workerId: string, result: Record<string, unknown>) {
-        const task = this.requireClaim(id, workerId);
+    checkpoint(id: string, workerId: string, claimToken: string, value: Record<string, unknown>) {
+        const task = this.requireClaim(id, workerId, claimToken);
+        const previous = recoveryOf(task);
+        const next = normalizeRecovery(this.stores, value, String(task.input.mode || ""));
+        const oldPhase = String(previous.phase || "");
+        if (previous.cacheOwner && previous.cacheOwner !== next.cacheOwner) throw new Error("浏览器回执属于另一连接身份，不能替换恢复所有者");
+        if (!oldPhase && !next.providerFingerprint) throw new Error("首次提交回执缺少渠道身份指纹");
+        if (previous.providerFingerprint && previous.providerFingerprint !== next.providerFingerprint) throw new Error("渠道身份已改变，不能替换原任务的渠道指纹");
+        if (!oldPhase && next.phase !== "submitting") throw new Error("缺少提交前回执，不能跳过提交检查点");
+        if (oldPhase && phaseRank(next.phase) < phaseRank(oldPhase)) throw new Error("浏览器回执不能退回先前阶段");
+        const oldExternal = recordOf(previous.externalTask);
+        const newExternal = recordOf(next.externalTask);
+        if (oldExternal.id && newExternal.id && ["id", "provider", "model"].some(key => oldExternal[key] !== newExternal[key])) throw new Error("浏览器外部任务身份不能替换");
+        if (next.phase === "submitting" && oldPhase && !this.claims.get(id)!.submissionGranted) throw new Error("已有提交回执，只能恢复查询或归档；请核对服务商，不能重新提交");
+        if (oldPhase === "archived" && JSON.stringify(previous.output) !== JSON.stringify(next.output)) throw new Error("已归档回执不能替换");
+        const recovery = { ...previous, ...next, ...(oldExternal.id && !newExternal.id ? { externalTask: oldExternal } : {}) };
+        const updated = this.update(id, { result: { ...recordOf(task.result), browserRecovery: recovery }, error: null });
+        if (next.phase === "submitting") this.claims.get(id)!.submissionGranted = true;
+        this.stores.tasks.addEvent(id, "browser_checkpoint", { phase: next.phase });
+        return updated;
+    }
+
+    complete(id: string, workerId: string, result: Record<string, unknown>, claimToken: string) {
+        const task = this.requireClaim(id, workerId, claimToken);
         const input = task.input as BrowserScriptTaskInput;
+        const recovery = recoveryOf(task);
+        if (recovery.phase === "archived") result = recordOf(recovery.output);
+        const alreadyWritten = recovery.phase === "archived" && this.hasWritebackReceipt(task, input);
         let normalized: Record<string, unknown>;
         if (input.mode === "text") {
             const texts = normalizeTexts(result.texts);
             if (!texts.length) throw new Error("浏览器文本执行器没有返回内容");
-            const written = this.text.writeBackExternal(task.id, input as CanvasTextGenerationInput, texts);
+            const written = alreadyWritten || this.text.writeBackExternal(task.id, input as CanvasTextGenerationInput, texts);
             if (!written) throw new Error("文本任务已失去节点绑定，放弃迟到结果");
             normalized = { texts: texts.map((content, index) => ({ index, content })) };
         } else {
             const media = normalizeMedia(this.stores, result.media);
             if (!media.length) throw new Error("浏览器媒体执行器没有返回已入库媒体");
-            this.writeBackMedia(task, input, media);
+            if (!alreadyWritten) this.writeBackMedia(task, input, media);
             normalized = { media };
         }
+        const completed = this.update(id, { status: "succeeded", progress: 1, result: { ...recordOf(task.result), ...normalized }, error: null });
         this.claims.delete(id);
-        const completed = this.update(id, { status: "succeeded", progress: 1, result: normalized, error: null });
         this.stores.tasks.addEvent(id, "result", normalized);
         return completed;
     }
 
-    fail(id: string, workerId: string, error: string) {
-        const task = this.requireClaim(id, workerId);
+    fail(id: string, workerId: string, error: string, claimToken: string, terminalConfirmed = false, notSubmitted = false) {
+        const task = this.requireClaim(id, workerId, claimToken);
+        const previous = recoveryOf(task);
+        if (terminalConfirmed && notSubmitted) throw new Error("失败证据不能同时声明已提交与未提交");
+        if (notSubmitted) {
+            if (previous.phase) throw new Error("已有提交回执，不能声明未提交");
+            const failed = this.update(id, { status: "failed", error: "生成前检查未通过，尚未提交服务商；请检查模型配置和参考素材后重试", result: { ...recordOf(task.result), browserRecovery: { version: 1, notSubmitted: true } } });
+            this.claims.delete(id);
+            this.markCanvasFailed(failed, failed.error || "", false);
+            this.stores.tasks.addEvent(id, "error", { notSubmitted: true });
+            return failed;
+        }
+        if (!terminalConfirmed || phaseRank(previous.phase) >= phaseRank("result_available")) return this.release(id, workerId, claimToken, error);
+        const failed = this.update(id, { status: "failed", error: "服务商已确认浏览器模型任务失败", result: { ...recordOf(task.result), browserRecovery: { ...previous, terminalConfirmed: true } } });
         this.claims.delete(id);
-        const message = error.trim() || "浏览器模型执行失败";
-        const failed = this.update(id, { status: "failed", error: message });
-        this.markCanvasFailed(failed, message, false);
-        this.stores.tasks.addEvent(id, "error", { error: message });
+        this.markCanvasFailed(failed, failed.error || "", false);
+        this.stores.tasks.addEvent(id, "error", { terminalConfirmed: true });
         return failed;
     }
 
-    release(id: string, workerId: string) {
-        const task = this.requireClaim(id, workerId);
+    release(id: string, workerId: string, claimToken: string, _error = "") {
+        const task = this.requireClaim(id, workerId, claimToken);
+        const recovery = recoveryOf(task);
+        const submitted = Boolean(recovery.phase);
+        // A submitted provider request is not cancelled by closing a browser tab.
+        const released = this.update(id, submitted
+            ? { status: "running", error: recoveryMessage(recovery) }
+            : { status: "queued", progress: 0 });
         this.claims.delete(id);
-        if (task.status !== "running") return task;
-        const queued = this.update(id, { status: "queued", progress: 0 });
-        this.stores.tasks.addEvent(id, "browser_released", { workerId });
-        return queued;
+        this.stores.tasks.addEvent(id, "browser_released", { workerId, recoveryRequired: submitted });
+        return released;
     }
 
     cancel(id: string) {
         const task = this.requireTask(id);
         if (!["queued", "running"].includes(task.status)) throw new Error(`任务状态 ${task.status} 不可取消`);
+        const recovery = recoveryOf(task);
+        const wasClaimed = this.claims.has(id) || this.stores.tasks.events(id).some(event => event.type === "browser_claimed");
+        if (recovery.phase || task.status === "running" || wasClaimed) {
+            const retained = Object.keys(recovery).length ? recovery : { version: 1, phase: "submitting", cacheOwner: "", legacyUnknown: true };
+            const stopped = this.update(id, { status: "running", error: "已停止浏览器处理；服务商任务可能仍在运行，请核对回执后恢复，不能重新提交", result: { ...recordOf(task.result), browserRecovery: retained } });
+            this.claims.delete(id);
+            return stopped;
+        }
         this.claims.delete(id);
-        const cancelled = this.stores.tasks.cancel(id);
-        this.publish(cancelled, "task.updated");
+        const cancelled = this.update(id, { status: "cancelled", result: { ...recordOf(task.result), browserRecovery: { version: 1, notSubmitted: true } } });
+        this.stores.tasks.addEvent(id, "cancelled", { taskId: id, notSubmitted: true });
         this.markCanvasFailed(cancelled, "", true);
         return cancelled;
     }
 
     retry(task: RuntimeTask) {
-        if (task.kind !== CANVAS_BROWSER_TASK_KIND) throw new Error(`任务类型 ${task.kind} 不是浏览器模型任务`);
+        task = this.requireTask(task.id);
+        const recovery = recoveryOf(task);
+        if (task.status === "succeeded") throw new Error("任务已完成，无需重新生成");
+        if (!recovery.terminalConfirmed && !recovery.notSubmitted) {
+            if (recordOf(recovery.externalTask).id || ["result_available", "archived"].includes(String(recovery.phase))) {
+                return this.update(task.id, { status: "running", error: null });
+            }
+            throw new Error("服务商提交结果尚未确认，请核对服务商或原浏览器缓存；不能重新提交以免重复费用");
+        }
         const input = task.input as BrowserScriptTaskInput;
         const executor = task.executor === "browser-provider" ? "browser-provider" : "browser-script";
         const result = this.start({ ...input, ...(input.loopOutput ? { nodeId: input.sourceNodeId, imageIds: undefined } : {}), idempotencyKey: undefined, clientTaskId: `canvas-browser-retry-${crypto.randomUUID()}` }, input.script, executor);
@@ -134,12 +194,13 @@ export class CanvasBrowserScriptDispatcher {
         return retried;
     }
 
-    /** Running claims cannot survive a Backend restart; fail closed instead of charging twice. */
+    /** Restart invalidates ownership, never the durable provider receipt. */
     resume(task: RuntimeTask) {
         if (task.kind !== CANVAS_BROWSER_TASK_KIND || task.status !== "running") return;
-        const message = "Backend 重启导致浏览器模型认领失效，请手动重试";
-        const failed = this.update(task.id, { status: "failed", error: message });
-        this.markCanvasFailed(failed, message, false);
+        this.claims.delete(task.id);
+        const recovery = recoveryOf(task);
+        const retained = Object.keys(recovery).length ? recovery : { version: 1, phase: "submitting", cacheOwner: "", legacyUnknown: true };
+        this.update(task.id, { status: "running", error: recoveryMessage(retained), result: { ...recordOf(task.result), browserRecovery: retained } });
     }
 
     private prepare(command: CanvasGenerationCommand, script: string, executor: BrowserTaskExecutor): BrowserScriptTaskInput {
@@ -177,6 +238,16 @@ export class CanvasBrowserScriptDispatcher {
             operationId: `browser-task-bind:${taskId}`, runtimeWrite: true,
             source: { clientId: `task:${taskId}`, kind: "task", label: input.script ? "浏览器脚本任务" : "浏览器模型任务" },
         });
+    }
+
+    /** Canvas writeback and task status have separate acknowledgements; replay neither output nor fees. */
+    private hasWritebackReceipt(task: RuntimeTask, input: BrowserScriptTaskInput) {
+        if (!input.projectId || !input.nodeId) return false;
+        const project = this.stores.projects.get(input.projectId);
+        return Boolean(project && arrayRecords(project.nodes).filter(item => [input.nodeId, input.sourceNodeId].includes(String(item.id || ""))).some(node => {
+            const metadata = recordOf(node.metadata);
+            return metadata.generationTaskId === task.id || arrayRecords(metadata.generatedImageHistory).some(item => item.taskId === task.id);
+        }));
     }
 
     private writeBackMedia(task: RuntimeTask, input: BrowserScriptTaskInput, media: Array<Record<string, unknown>>) {
@@ -227,10 +298,10 @@ export class CanvasBrowserScriptDispatcher {
         return task;
     }
 
-    private requireClaim(id: string, workerId: string) {
+    private requireClaim(id: string, workerId: string, claimToken: string) {
         const task = this.requireTask(id);
         if (task.status !== "running") throw new Error(`任务状态 ${task.status} 不接受浏览器结果`);
-        if (this.claims.get(id) !== workerId) throw new Error("浏览器模型任务认领已失效");
+        if (!claimToken || this.claims.get(id)?.workerId !== workerId || this.claims.get(id)?.token !== claimToken) throw new Error("浏览器模型任务认领已失效");
         return task;
     }
 
@@ -263,3 +334,45 @@ function arrayRecords(value: unknown): Array<Record<string, unknown>> {
 }
 function recordOf(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 function messageOf(error: unknown) { return error instanceof Error ? error.message : String(error); }
+
+function recoveryOf(task: RuntimeTask) { return recordOf(recordOf(task.result).browserRecovery); }
+function phaseRank(phase: unknown) { return ["submitting", "external_task", "result_available", "archived"].indexOf(String(phase)); }
+function recoveryMessage(recovery: Record<string, unknown>) {
+    return recordOf(recovery.externalTask).id || ["result_available", "archived"].includes(String(recovery.phase))
+        ? "浏览器处理已暂停，原任务回执已保留；恢复时只查询或归档，不重新生成"
+        : "服务商提交结果尚未确认，请核对服务商或原浏览器缓存；不能重新提交以免重复费用";
+}
+function normalizeRecovery(stores: Stores, value: Record<string, unknown>, mode: string): Record<string, unknown> & { phase: string } {
+    const phase = String(value.phase || "");
+    if (value.version !== 1 || phaseRank(phase) < 0 || typeof value.cacheOwner !== "string" || !value.cacheOwner.trim() || value.cacheOwner.length > 256) throw new Error("浏览器回执格式无效");
+    const result: Record<string, unknown> & { phase: string } = { version: 1, phase, cacheOwner: value.cacheOwner };
+    if (value.providerFingerprint !== undefined) {
+        if (typeof value.providerFingerprint !== "string" || !/^[a-f0-9]{64}$/i.test(value.providerFingerprint)) throw new Error("渠道身份指纹格式无效");
+        result.providerFingerprint = value.providerFingerprint;
+    }
+    if (value.externalTask !== undefined) {
+        const external = recordOf(value.externalTask);
+        if (typeof external.id !== "string" || !external.id.trim() || external.id.length > 1024 || !["openai", "plugin", "comfyui"].includes(String(external.provider)) || typeof external.model !== "string" || !external.model.trim() || external.model.length > 256) throw new Error("外部任务回执格式无效");
+        const parameters = recordOf(external.parameters);
+        const safeParameters: Record<string, string | number> = {};
+        for (const key of ["size", "resolution", "seconds"]) if (parameters[key] !== undefined) {
+            const entry = parameters[key];
+            if (!((typeof entry === "string" && entry.length <= 100) || (typeof entry === "number" && Number.isFinite(entry)))) throw new Error("外部任务参数格式无效");
+            safeParameters[key] = entry;
+        }
+        result.externalTask = { id: external.id, provider: external.provider, model: external.model, ...(Object.keys(safeParameters).length ? { parameters: safeParameters } : {}) };
+    }
+    if (phase === "external_task" && !result.externalTask) throw new Error("外部任务回执缺少任务编号");
+    if (phase === "archived") {
+        if (mode === "text") {
+            const texts = recordOf(value.output).texts;
+            if (!Array.isArray(texts) || !texts.length || !texts.every(item => typeof item === "string" && item.trim())) throw new Error("归档回执缺少文本结果");
+            result.output = { texts: texts.map(item => item.trim()) };
+        } else {
+            const media = normalizeMedia(stores, recordOf(value.output).media);
+            if (!media.length) throw new Error("归档回执缺少已入库媒体");
+            result.output = { media: media.map(item => ({ storageKey: item.storageKey })) };
+        }
+    }
+    return result;
+}

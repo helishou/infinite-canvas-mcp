@@ -56,7 +56,7 @@ test("project covers never borrow another project's output or use audio as an im
         generationLog({ id: "2", projectId: "p", status: "success", createdAt: "2026-01-02", outputs: [{ storageKey: "audio:voice" }] }),
     ]);
     assert.equal(projectCover(project, outputs), null);
-    assert.deepEqual(projectCover(project, outputs, { id: "f", name: "Drama", createdAt: "", coverStorageKey: "image:cover" }), { kind: "image", storageKey: "image:cover" });
+    assert.deepEqual(projectCover(project, outputs, { id: "f", name: "Drama", createdAt: "", isDrama: true, coverStorageKey: "image:cover" }), { kind: "image", storageKey: "image:cover" });
 });
 
 test("task navigation preserves project ownership, including deleted projects", () => {
@@ -71,4 +71,14 @@ test("covers use the selected character image and never old image-mode results o
     assert.equal(projectCover(project, [])?.storageKey, "image:selected");
     project.nodes = [{ type: "config", metadata: { smart: true, generationMode: "video", mimeType: "video/mp4", storageKey: "video:current", images: [{ id: "old", status: "success", content: "", storageKey: "image:old" }] } }] as CanvasProject["nodes"];
     assert.equal(projectCover(project, [])?.storageKey, "video:current");
+});
+
+
+test("retired ordinary folders cannot supply canvas previews, while canvas media stays available", () => {
+    const project = { id: "p", nodes: [] } as unknown as CanvasProject;
+    const oldFolder = { id: "f", name: "Retired folder", createdAt: "", coverStorageKey: "image:folder-cover" };
+    assert.equal(projectCover(project, [], oldFolder), null);
+    project.nodes = [{ type: "image", metadata: { images: [{ id: "own", status: "success", storageKey: "image:canvas" }] } }] as CanvasProject["nodes"];
+    assert.equal(projectCover(project, [], oldFolder)?.storageKey, "image:canvas");
+    assert.equal(oldFolder.coverStorageKey, "image:folder-cover", "legacy metadata remains untouched");
 });

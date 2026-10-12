@@ -321,6 +321,32 @@ function syncWebdavToBackend(webdav: WebdavSyncConfig) {
     webdavSyncQueue = webdavSyncQueue.then(() => saveStructuredSetting("webdav", webdav)).catch(() => undefined);
 }
 
+/** Import waits behind pending edits and only publishes acknowledged values. */
+export function importConfigConfirmed(input: AiConfig, expected = useConfigStore.getState().config): Promise<void> {
+    const config = normalizeConfig(input);
+    const before = expected;
+    const operation = configSyncQueue.then(async () => {
+        if (JSON.stringify(useConfigStore.getState().config) !== JSON.stringify(before)) throw new Error("CONFIG_CHANGED_DURING_IMPORT");
+        const { syncBackendAiConfig } = await import("@/services/backend-api");
+        await syncBackendAiConfig(config);
+        if (useConfigStore.getState().config === before) useConfigStore.setState({ config });
+    });
+    configSyncQueue = operation.catch(() => undefined);
+    return operation;
+}
+
+export function importWebdavConfirmed(input: WebdavSyncConfig, expected = useConfigStore.getState().webdav): Promise<void> {
+    const webdav = { ...defaultWebdavSyncConfig, ...input };
+    const before = expected;
+    const operation = webdavSyncQueue.then(async () => {
+        if (JSON.stringify(useConfigStore.getState().webdav) !== JSON.stringify(before)) throw new Error("CONFIG_CHANGED_DURING_IMPORT");
+        await saveStructuredSetting("webdav", webdav);
+        if (useConfigStore.getState().webdav === before) useConfigStore.setState({ webdav });
+    });
+    webdavSyncQueue = operation.catch(() => undefined);
+    return operation;
+}
+
 function normalizeConfig(input: Partial<AiConfig>): AiConfig {
     // Discard retired proxy settings when loading Backend data or importing old exports.
     const { proxyEnabled: _proxyEnabled, proxyUrl: _proxyUrl, ...current } = input as Partial<AiConfig> & { proxyEnabled?: unknown; proxyUrl?: unknown };

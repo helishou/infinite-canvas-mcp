@@ -3,6 +3,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import "antd/dist/reset.css";
 import "streamdown/styles.css";
+import "@fontsource-variable/noto-sans-sc";
 import "./styles/globals.css";
 import { RouterProvider } from "react-router-dom";
 
@@ -14,8 +15,6 @@ import { initBackendConnection } from "@/stores/use-backend-store";
 
 initAnalytics();
 initBackendConnection();
-
-document.body.style.fontFamily = '"SF Pro Display","SF Pro Text","PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif';
 
 createRoot(document.getElementById("root")!).render(
     <React.StrictMode>

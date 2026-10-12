@@ -1,4 +1,5 @@
 import axios from "axios";
+import { fetchBackendTask } from "@/services/backend-api";
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
@@ -19,6 +20,13 @@ type ApiVideoResponse = VideoResponse | { code?: number | string; data?: VideoRe
 type ApiEnvelope<T> = T | { code?: number | string; data?: T | null; msg?: string; message?: string; error?: { message?: string } };
 type RequestOptions = { signal?: AbortSignal; videoReferences?: LocalReference[]; onTaskId?: (taskId: string) => void };
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
+
+/** Opaque binding for recovery; never persist the provider credential itself. */
+export async function videoProviderFingerprint(config: AiConfig, model: string) {
+    const resolved = resolveModelRequestConfig(config, model);
+    const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([resolved.baseUrl, resolved.apiKey, resolved.model])));
+    return Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, "0")).join("");
+}
 
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string };
 export type VideoGenerationTask = { id: string; provider: "openai" | "plugin" | "comfyui"; model: string; parameters?: { size: string; resolution: string; seconds: string } };
@@ -152,15 +160,19 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
 
 export async function pollVideoGenerationTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     if (task.provider === "comfyui") {
-        // 使用已有本地工作流轮询，避免本地生成误走视频 API 的轮询窗口。
-        const run = await pollWorkflowTask(task.id, { signal: options?.signal });
-        const first = run.media?.[0];
-        if (!first?.url) return { status: "failed", error: "ComfyUI 工作流完成但没有返回媒体" };
+        const response = await fetchBackendTask(task.id, options?.signal);
+        const run = response.task;
+        if (!run) throw new Error(apiText("videoTaskQueryFailed"));
+        if (run.status === "failed" || run.status === "cancelled") return { status: "failed", error: run.error || apiText("videoGenerationFailed") };
+        if (run.status !== "succeeded") return { status: "pending" };
+        const first = (run.result?.media || run.result?.images || [])[0];
+        if (!first?.url) throw new Error("ComfyUI 工作流完成但没有返回媒体");
         return { status: "completed", result: { url: first.url, mimeType: first.mimeType || "video/mp4" } };
     }
     if (task.provider === "plugin") {
         const result = pluginVideoResults.get(task.id);
-        return result ? { status: "completed", result } : { status: "failed", error: apiText("pluginVideoExpired") };
+        if (!result) throw new Error(apiText("pluginVideoExpired"));
+        return { status: "completed", result };
     }
     const requestConfig = resolveModelRequestConfig(config, task.model);
     assertVideoConfig(requestConfig, requestConfig.model);
@@ -250,6 +262,7 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
         if (video.status === "failed" || video.status === "cancelled") return { status: "failed", error: readApiErrorMessage(video.error?.message) || apiText("videoGenerationFailed") };
         return { status: "pending" };
     } catch (error) {
+        if (options?.signal?.aborted || axios.isCancel(error)) throw error;
         throw new Error(readAxiosError(error, apiText("videoTaskQueryFailed")));
     }
 }

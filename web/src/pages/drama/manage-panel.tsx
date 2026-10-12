@@ -1,13 +1,15 @@
+import { ProductionPageHeading } from "./production-page-heading";
 import { dramaWorkbenchPath } from "./workbench-entry";
+import { useWorkbenchCanvas } from "@/lib/canvas/canvas-host";
+import { useProductionFollowStore } from "@/stores/use-production-follow-store";
+import type { SeriesWorkspaceView } from "./production-workspace";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { App, Button, Input, Modal, Select, Switch, Tag } from "antd";
-import { ArrowUpRight, Clapperboard, Download, FileArchive, ImagePlus, Images, PencilLine, Plus, Trash2, Upload } from "lucide-react";
+import { ArrowUpRight, Clapperboard, Download, FileArchive, ImagePlus, PencilLine, Plus, Trash2, Upload } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
-import { loadCanvasProjectPage } from "@/lib/canvas-project-loader";
-import { cn } from "@/lib/utils";
 import { backendMediaUrl, createBackendDramaEpisode, deleteBackendDramaAsset, deleteBackendDramaEpisode, fetchBackendDramaAssets, fetchBackendDramaEpisodes, updateBackendDramaEpisode, uploadBackendDramaAsset, ensureSharedAssetCanvas, ensureEpisodeCanvas, upsertBackendCanvasFolder, type DramaCustomAsset, type DramaEpisode } from "@/services/backend-api";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { useCanvasStore, type CanvasFolder, type CanvasProject } from "@/stores/canvas/use-canvas-store";
@@ -40,16 +42,19 @@ type EpisodeDraft = {
 
 /**
  * 剧目管理面板：剧目规划、共享资产画布、分集列表与自定义资产。
- * 既嵌在导演工作台的「剧目」页签里，也用于无分集剧目的工作台首屏。
+ * 按全剧规划、分集与共享素材分区，也兼容旧入口的完整管理视图。
  */
-export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode }: {
+export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode, view, navigationTitleVisible = false }: {
     dramaId: string;
+    view?: SeriesWorkspaceView;
+    navigationTitleVisible?: boolean;
     onEpisodesChanged?: (episodes: DramaEpisode[]) => void;
     onProduceEpisode?: (episode: DramaEpisode) => void;
 }) {
     const { message, modal } = App.useApp();
     const { t } = useTranslation();
     const navigate = useNavigate();
+    const canvasHost = useWorkbenchCanvas();
     const projects = useCanvasStore((state) => state.projects);
     const folders = useCanvasStore((state) => state.folders);
     const deleteDramaProject = useCanvasStore((state) => state.deleteDramaProject);
@@ -269,55 +274,39 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode 
             },
         });
     };
-    const openProject = (project: CanvasProject) => {
-        // The canvas route owns a very large lazy chunk. Start loading it before
-        // navigation so React Router can render the target page immediately.
-        void loadCanvasProjectPage();
-        navigate(`/canvas/${project.id}?from=dramas`);
-    };
 
     return (
         <div>
-            <div className="mb-10 grid overflow-hidden rounded-2xl border border-stone-200 bg-stone-100/70 dark:border-stone-800 dark:bg-stone-900/60 md:grid-cols-[200px_minmax(0,1fr)_auto]">
-                <div className="relative min-h-44 overflow-hidden rounded-2xl bg-stone-200 dark:bg-stone-800">
-                    {activeCoverUrl ? <img src={activeCoverUrl} alt={folder.name} className="h-full w-full object-cover" /> : <div className="grid h-full min-h-44 place-items-center text-orange-500"><Clapperboard className="size-10 stroke-[1.2]" /></div>}
+            {(!view || view === "planning") && <section className="mb-5 space-y-3">
+                <ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t("productionCanvas.dramaPlanning")} summary={t(folder.productionPlan?.confirmedAt && folder.productionPlan.confirmedOutline === folder.outline ? "productionCanvas.planConfirmed" : "productionCanvas.planUnconfirmed")} help={<p>{t("productionCanvas.dramaPlanningHint")}</p>} actions={<Button icon={<PencilLine className="size-4" />} onClick={openFolderEditor}>{t("productionCanvas.dramaPlanning")}</Button>} />
+                <div className="flex items-start gap-4 rounded-xl border border-border bg-card p-4">
+                    {activeCoverUrl && <img src={activeCoverUrl} alt={folder.name} className="h-24 w-20 shrink-0 rounded-lg object-cover" />}
+                    <div className="min-w-0"><p className="whitespace-pre-line text-sm leading-6 text-muted-foreground">{folder.outline || t("drama.outlineEmpty")}</p>
+                    {(folder.tags || []).length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{(folder.tags || []).map((tag) => <Tag key={tag}>{tag}</Tag>)}</div>}</div>
                 </div>
-                <div className="min-w-0 p-6">
-                    <p className="text-xs font-medium uppercase tracking-[0.16em] text-orange-600 dark:text-orange-400">{t("drama.projectProfile")}</p>
-                    <h2 className="mt-2 text-lg font-semibold tracking-tight">{t("productionCanvas.dramaPlanning")}</h2>
-                    <p className="mt-2 text-xs text-muted-foreground">{t("productionCanvas.dramaPlanningHint")}</p>
-                    <p className="mt-2 text-xs text-muted-foreground">{t(folder.productionPlan?.confirmedAt && folder.productionPlan.confirmedOutline === folder.outline ? "productionCanvas.planConfirmed" : "productionCanvas.planUnconfirmed")}</p>
-                    <p className="mt-3 line-clamp-4 whitespace-pre-line text-sm leading-6 text-stone-500 dark:text-stone-400">{folder.outline || t("drama.outlineEmpty")}</p>
-                    <div className="mt-4 flex flex-wrap gap-1.5">{(folder.tags || []).map((tag) => <Tag key={tag} className="m-0 border-stone-300 bg-transparent text-xs text-stone-500 dark:border-stone-700 dark:text-stone-400">{tag}</Tag>)}</div>
-                </div>
-                <div className="flex items-start p-5 md:justify-end"><Button icon={<PencilLine className="size-4" />} onClick={openFolderEditor}>{t("productionCanvas.dramaPlanning")}</Button></div>
-            </div>
+            </section>}
 
-            <section data-drama-shared-canvas className="mb-10 flex flex-wrap items-center justify-between gap-4 rounded-xl border border-border bg-card p-5">
-                <div className="flex min-w-0 items-start gap-3"><Images className="mt-1 size-5 shrink-0 text-muted-foreground" /><div><h2 className="text-base font-semibold">{t("productionCanvas.sharedCanvas")}</h2><p className="mt-1 text-sm text-muted-foreground">{t("productionCanvas.sharedCanvasDescription")}</p><p className="mt-2 text-xs text-muted-foreground">{t(folder.sharedAssetCanvasId ? "productionCanvas.sharedCanvasReady" : "productionCanvas.sharedCanvasEmpty")}</p></div></div>
-                <Button loading={openingSharedCanvas} onClick={async () => {
+            {(!view || view === "shared") && <section data-drama-shared-canvas className="mb-5">
+                <ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t("productionCanvas.sharedCanvas")} summary={t(folder.sharedAssetCanvasId ? "productionCanvas.sharedCanvasReady" : "productionCanvas.sharedCanvasEmpty")} help={<p>{t("productionCanvas.sharedCanvasDescription")}</p>} actions={<Button loading={openingSharedCanvas} onClick={async () => {
                     if (openingSharedCanvas) return;
                     if (!folder.sharedAssetCanvasId && !(folder.productionPlan?.confirmedAt && folder.productionPlan.confirmedOutline === folder.outline)) { openFolderEditor(); return; }
                     setOpeningSharedCanvas(true);
-                    try { const { project } = await ensureSharedAssetCanvas(folder.id); navigate(`/canvas/${encodeURIComponent(String(project.id))}`); }
+                    try {
+                        const { project } = await ensureSharedAssetCanvas(folder.id);
+                        const projectId = String(project.id);
+                        useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"));
+                        if (canvasHost) canvasHost.openCanvas({ projectId });
+                        else navigate(`/canvas/${encodeURIComponent(projectId)}`);
+                    }
                     catch (error) { message.error(String(error)); }
                     finally { setOpeningSharedCanvas(false); }
-                }}>{t("productionCanvas.openSharedCanvas")}<ArrowUpRight className="ml-1 size-4" /></Button>
-            </section>
-            <section>
-                <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
-                    <div>
-                        <p className="text-xs font-medium uppercase tracking-[0.16em] text-orange-600 dark:text-orange-400">{t("drama.episodes")}</p>
-                        <h2 className="mt-2 text-2xl font-semibold tracking-tight">{t("drama.episodeListTitle")}</h2>
-                    </div>
-                    <div className="flex items-center gap-3">
-                        <span className="text-sm text-stone-400">{episodes.length} {t("drama.episodeUnit")}</span>
-                        <Button type="primary" onClick={() => openEpisodeEditor()} icon={<Plus className="size-4" />}>{t("drama.newEpisode")}</Button>
-                    </div>
-                </div>
+                }}>{t("productionCanvas.openSharedCanvas")}<ArrowUpRight className="ml-1 size-4" /></Button>} />
+            </section>}
+            {(!view || view === "episodes") && <section>
+                <div className="mb-3"><ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t("drama.episodeListTitle")} summary={`${episodes.length} ${t("drama.episodeUnit")}`} actions={<Button type="primary" onClick={() => openEpisodeEditor()} icon={<Plus className="size-4" />}>{t("drama.newEpisode")}</Button>} /></div>
                 {episodes.length ? (
                     <div className="grid gap-4 sm:grid-cols-2">
-                        {episodes.map((episode, index) => <EpisodeCard key={episode.id} episode={episode} project={episode.canvasId ? projects.find((item) => item.id === episode.canvasId) : undefined} index={index} onOpen={openProject} onProduce={() => produceEpisode(episode)} onEdit={() => openEpisodeEditor(episode)} onDelete={() => removeEpisode(episode)} t={t} />)}
+                        {episodes.map((episode) => <EpisodeCard key={episode.id} episode={episode} project={episode.canvasId ? projects.find((item) => item.id === episode.canvasId) : undefined} onProduce={() => produceEpisode(episode)} onEdit={() => openEpisodeEditor(episode)} onDelete={() => removeEpisode(episode)} t={t} />)}
                     </div>
                 ) : (
                     <div className="flex min-h-60 flex-col items-center justify-center rounded-2xl border border-dashed border-stone-300 px-6 text-center dark:border-stone-700">
@@ -327,9 +316,9 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode 
                         <Button type="primary" className="mt-5" icon={<Plus className="size-4" />} onClick={() => openEpisodeEditor()}>{t("drama.newEpisode")}</Button>
                     </div>
                 )}
-            </section>
+            </section>}
 
-            <section className="mt-10 rounded-2xl border border-stone-200 bg-background p-5 dark:border-stone-800">
+            {(!view || view === "shared" || view === "planning") && <section className="mt-10 rounded-2xl border border-stone-200 bg-background p-5 dark:border-stone-800">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
                         <p className="text-xs font-medium uppercase tracking-[0.16em] text-orange-600 dark:text-orange-400">{t("drama.customAssets.eyebrow")}</p>
@@ -351,7 +340,7 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode 
                         ))}
                     </div>
                 ) : <div className="mt-4 rounded-xl border border-dashed border-stone-300 px-4 py-6 text-center text-sm text-stone-400 dark:border-stone-700">{t("drama.customAssets.empty")}</div>}
-            </section>
+            </section>}
 
             <Modal width={720} title={episodeDraft?.id ? t("drama.editEpisode") : t("drama.newEpisode")} open={episodeEditorOpen} onCancel={() => { if (!episodeSaving) { setEpisodeEditorOpen(false); setEpisodeDraft(null); } }} onOk={() => void saveEpisode()} okText={t("drama.saveEpisode")} cancelText={t("common.cancel")} confirmLoading={episodeSaving}>
                 {episodeDraft ? <div className="max-h-[70vh] space-y-5 overflow-y-auto pr-1">
@@ -399,11 +388,10 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode 
     );
 }
 
-function EpisodeCard({ episode, project, index, onOpen, onProduce, onEdit, onDelete, t }: { episode: DramaEpisode; project?: CanvasProject; index: number; onOpen: (project: CanvasProject) => void; onProduce: () => void; onEdit: () => void; onDelete: () => void; t: TFunction }) {
-    const canOpen = Boolean(project);
-    return <article className={cn("group relative flex min-h-48 flex-col justify-between overflow-hidden rounded-2xl border border-stone-200 bg-background p-5 text-left transition dark:border-stone-800", canOpen ? "hover:-translate-y-0.5 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-950/5 dark:hover:border-orange-900" : "opacity-70")}>
+function EpisodeCard({ episode, project, onProduce, onEdit, onDelete, t }: { episode: DramaEpisode; project?: CanvasProject; onProduce: () => void; onEdit: () => void; onDelete: () => void; t: TFunction }) {
+    return <article className="group relative flex min-h-48 min-w-0 flex-col justify-between overflow-hidden rounded-2xl border border-stone-200 bg-background p-5 text-left transition hover:-translate-y-0.5 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-950/5 dark:border-stone-800 dark:hover:border-orange-900">
         <div className="absolute right-0 top-0 h-24 w-24 translate-x-8 -translate-y-8 rounded-full border border-orange-200/70 transition group-hover:scale-125 dark:border-orange-950/60" />
-        <div className="relative flex items-start justify-between gap-3">
+        <div className="relative flex flex-wrap items-start justify-between gap-3">
             <button type="button" className="text-left text-xs font-medium text-orange-600 dark:text-orange-400" onClick={onProduce}>{t("drama.episodeLabel", { number: episode.episodeNumber })}</button>
             <div className="flex flex-wrap items-center gap-1">
                 <Button size="small" onClick={onProduce}>{t("drama.editEpisodeDirector")}</Button>
@@ -412,8 +400,8 @@ function EpisodeCard({ episode, project, index, onOpen, onProduce, onEdit, onDel
             </div>
         </div>
         <button type="button" className="relative mt-6 min-w-0 text-left" onClick={onProduce}>
-            <h3 className="truncate text-lg font-semibold">{episode.title || t("drama.episodeLabel", { number: episode.episodeNumber })}</h3>
-            <p className="mt-2 line-clamp-3 whitespace-pre-line text-sm leading-6 text-stone-500 dark:text-stone-400">{episode.synopsis || t("drama.noEpisodeSynopsis")}</p>
+            <h3 className="truncate text-lg font-semibold" title={episode.title}>{episode.title || t("drama.episodeLabel", { number: episode.episodeNumber })}</h3>
+            <p className="mt-2 line-clamp-3 whitespace-pre-line break-words text-sm leading-6 text-stone-500 dark:text-stone-400">{episode.synopsis || t("drama.noEpisodeSynopsis")}</p>
         </button>
         <div className="relative mt-5 flex items-center justify-between gap-3 text-xs text-stone-400">
             <span className="truncate">{project?.title || t("drama.sceneCanvasPerEpisode")}</span>

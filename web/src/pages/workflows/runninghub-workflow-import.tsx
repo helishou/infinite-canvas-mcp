@@ -102,8 +102,17 @@ export function RunningHubWorkflowImport({ workflows, onImported }: { workflows:
     };
 
     return <>
-        <Tooltip title="把云端工作流抓成一份本地 ComfyUI JSON，与云端各自独立；云端后续改动不会同步到本地副本">
-            <Button icon={<DownloadCloud className="size-3.5" />} onClick={show}>转换为本地副本</Button>
+        <Tooltip title={<><div>{t("runningHub.import.localCopy")}</div><div>{t("runningHub.import.localCopyHint")}</div></>}>
+            <Button
+                type="text"
+                size="small"
+                className="shrink-0"
+                aria-label={t("runningHub.import.localCopy")}
+                title={t("runningHub.import.localCopy")}
+                icon={<DownloadCloud className="size-3.5" />}
+                loading={loadingProfiles || importing}
+                onClick={show}
+            />
         </Tooltip>
         <Modal
             title={t("runningHub.import.title")}

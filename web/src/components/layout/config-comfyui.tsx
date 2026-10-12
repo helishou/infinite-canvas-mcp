@@ -2,7 +2,7 @@ import { App, Button, Form, Input } from "antd";
 import { useEffect, useState } from "react";
 import { fetchComfyConfig, saveComfyRoot } from "@/services/api/comfyui";
 
-export function ConfigComfyui({ active }: { active: boolean }) {
+export function ConfigComfyui({ active, showHeading = true }: { active: boolean; showHeading?: boolean }) {
     const { message } = App.useApp();
     const [root, setRoot] = useState("");
     const [mediaDir, setMediaDir] = useState("");
@@ -36,7 +36,7 @@ export function ConfigComfyui({ active }: { active: boolean }) {
     };
 
     return <>
-        <div className="mb-2 mt-4 text-sm font-semibold">本地 ComfyUI</div>
+        {showHeading && <div className="mb-2 mt-4 text-sm font-semibold">本地 ComfyUI</div>}
         <Form.Item label="ComfyUI 根目录 / 绘世安装目录" validateStatus={error ? "error" : undefined} help={error || undefined} extra="仅用于本地任务的输入缓存，不会移动画布素材。删除 ComfyUI 或其缓存不会删除画布媒体库。">
             <div className="flex gap-2">
                 <Input aria-label="ComfyUI 根目录 / 绘世安装目录" value={root} disabled={loading || saving} onChange={(event) => setRoot(event.target.value)} />

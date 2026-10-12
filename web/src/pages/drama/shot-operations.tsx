@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { App, Button, Checkbox, Dropdown, Input, InputNumber, Modal, Select } from "antd";
-import { Copy, Plus, Scissors, Trash2, ArrowUp, ArrowDown, Combine } from "lucide-react";
+import { Copy, MoreHorizontal, Plus, Scissors, Trash2, ArrowUp, ArrowDown, Combine } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { nanoid } from "nanoid";
 import { resolveSubjectPictureBindingIds, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
@@ -69,7 +69,7 @@ export function ShotOperations({ source, shot, busy, onEdit, onSelect, contextMe
             } },
         ] : [] };
     return <>
-        {shot ? contextMenu ? <Dropdown trigger={["contextMenu"]} disabled={busy || saving} menu={menu}>{children}</Dropdown> : children : <div className="flex flex-wrap items-center gap-2" data-shot-operations>
+        {shot ? contextMenu ? <Dropdown trigger={["contextMenu"]} disabled={busy || saving} menu={menu}><div className="storyboard-shot-actions relative">{children}<Dropdown trigger={["click"]} disabled={busy || saving} menu={menu}><Button className="storyboard-shot-menu" type="text" icon={<MoreHorizontal className="size-4" />} aria-label={t("director.shotCrud.actions") + " · " + String(shot.title || "")} title={t("director.shotCrud.actions")} disabled={busy || saving} /></Dropdown></div></Dropdown> : children : <div className="flex flex-wrap items-center gap-2" data-shot-operations>
             <Button size="small" icon={<Plus className="size-3.5" />} disabled={busy || saving} onClick={() => open("insert")}>{t("director.shotCrud.add")}</Button>
         </div>}
         <Modal open={Boolean(mode)} title={t(`director.shotCrud.${mode === "insert" ? "add" : mode === "split" ? "split" : "mergeNext"}`)} onCancel={() => setMode(undefined)} onOk={() => void submit()} okText={t("director.shotCrud.save")} cancelText={t("common.cancel")} confirmLoading={saving} okButtonProps={{ disabled: busy }} width={720}>
