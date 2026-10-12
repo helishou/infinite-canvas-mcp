@@ -3,11 +3,11 @@ type Row = Record<string, any>;
 export const continuityReasonLength = (value: string) => Array.from(value.trim()).length;
 export type ContinuityChangeInput = { shotId: string; factId: string; frame: string; after: string; reason: string; sourceBlockId: string };
 /** Both editing surfaces use the same atomic six-collection ledger update. */
-export function appendContinuityChange(ledger: Row, shots: Row[], input: ContinuityChangeInput, sourceDigest: string, makeId: () => string, local: boolean) {
+export function appendContinuityChange(ledger: Row, shots: Row[], input: ContinuityChangeInput, sourceDigest: string, makeId: () => string, local: boolean, persistLocal = local) {
     const shot = shots.find(row => row.id === input.shotId), fact = (ledger.facts || []).find((row: Row) => row.id === input.factId);
     if (!shot || !fact || continuityReasonLength(input.reason) < 8 || !input.sourceBlockId || !sourceDigest || !input.after || !(input.after === 'unknown' || fact.allowed_values?.includes(input.after))) throw new Error('EVENT_FIELDS_REQUIRED');
     if (!input.frame.trim()) throw new Error('INVALID_EVENT_FRAME');
-    const state = continuityEventAnchor(ledger, shots, input.shotId, input.factId, Number(input.frame), local);
+    const state = continuityEventAnchor(ledger, shots, input.shotId, input.factId, Number(input.frame), local, persistLocal);
     const eventId = makeId(), timeline_id = shot.timeline_id, source_anchor = { block_id: input.sourceBlockId };
     const event = { id: eventId, timeline_id, fact_id: input.factId, shot_id: input.shotId, ...state.anchor, before: state.before, after: input.after, reason: input.reason.trim(), source_anchor };
     const coverage = [...(ledger.coverage || [])], prior = coverage.find((row: Row) => row.source_anchor?.block_id === input.sourceBlockId && row.evidence_kind === 'explicit_change');

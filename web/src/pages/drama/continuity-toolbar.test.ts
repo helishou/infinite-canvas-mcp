@@ -37,7 +37,8 @@ function harness(patch: Record<string, any> = {}, locale: any = zhCN) {
         stable: JSON.stringify, formalLedger: fixture(), ledger: fixture(), editable: true, legacy: false,
         changeDraft: undefined, sourceConflict: false, invalidLedgerDraft: false, busy: false, snapshotLoading: false,
         sourceHash: "source", report: { sourceHash: "source", snapshot: "draft", status: "passed", report: { diagnostics: [] } },
-        subjectAssembly: true, activeView: "workbench", entryFocus: "events:E", issues: [{}], titleAlreadyVisible: true,
+        subjectAssembly: true, ledgerV2: true, activeView: "workbench", entryFocus: "events:E", issues: [{}], titleAlreadyVisible: true,
+        filterObject: "all", filterTarget: "all", objectOptions: [], targetOptions: [],
         continuityPreviewStatus, invalidEventPositions: [], lastDeletion: { rows: [] },
         t: (key: string, values: Record<string, any> = {}) => {
             const value = key.split(".").reduce((value: any, key) => value?.[key], locale);
@@ -47,6 +48,7 @@ function harness(patch: Record<string, any> = {}, locale: any = zhCN) {
         React: { createElement: (type: string, props: any, ...children: any[]): Element => ({ type, props: props || {}, children }) },
         Dropdown: "Dropdown", Button: "Button", Select: "Select", Tag: "Tag", Popover: "Popover", ChevronDown: "ChevronDown", CircleHelp: "CircleHelp",
         setEntryFocus: (value: string) => { c.entryFocus = value; }, setActiveView: (value: string) => { c.activeView = value; },
+        setFilterObject: (value: string) => { c.filterObject = value; }, setFilterTarget: (value: string) => { c.filterTarget = value; },
         onCheck: async () => { checks.push(c.report?.snapshot || "draft"); }, onSave: async (value: any) => { saves.push(value); return false; },
         setLastDeletion: (value: any) => { c.lastDeletion = value; }, onSnapshot: (value: string) => { snapshots.push(value); },
         message: { warning: (value: string) => { notices.push(value); } }, ...patch,
@@ -63,14 +65,21 @@ const saveActions = (render: Element[]) => render.filter(node => node.props["dat
 const blockedHint = (render: Element[]) => render.find(node => node.props["data-continuity-check-blocked"]);
 const edited = () => ({ ...fixture(), initial: [{ timeline_id: "T", fact_id: "F", value: "b" }] });
 
-test("one grouped chooser retains every subject and non-subject view, including issues, in both locales", () => {
+test("the v2 ledger timeline has a direct entry regardless of Prompt version; management views stay grouped", () => {
     for (const subjectAssembly of [true, false]) for (const locale of [zhCN, enUS]) {
         const { c, render, refresh } = harness({ subjectAssembly, activeView: subjectAssembly ? "workbench" : "objects" }, locale);
         const dropdowns = render.filter(node => node.type === "Dropdown");
         assert.equal(dropdowns.length, 1);
         const menu = dropdowns[0].props.menu;
         const keys = menu.items.flatMap((group: any) => group.children.map((item: any) => item.key));
-        assert.deepEqual(keys, [...(subjectAssembly ? ["workbench"] : []), "objects", "shots", "timeline", "issues", "ledger", "boundaries"]);
+        assert.deepEqual(keys, ["objects", "shots", "timeline", "issues", "ledger", "boundaries"]);
+        const timelineEntry = render.find(node => node.props["data-continuity-timeline-entry"]);
+        assert.equal(Boolean(timelineEntry), true);
+        if (timelineEntry) {
+            timelineEntry.props.onClick();
+            assert.equal(c.activeView, "workbench");
+            assert.equal(c.entryFocus, "");
+        }
         assert.equal(render.some(node => node.props["data-continuity-record-action"]), false);
         for (const key of keys) {
             menu.onClick({ key });
@@ -78,9 +87,14 @@ test("one grouped chooser retains every subject and non-subject view, including 
             assert.equal(c.entryFocus, "");
             const next = refresh();
             assert.deepEqual(next.find(node => node.type === "Dropdown")!.props.menu.selectedKeys, [key]);
-            assert.ok(next.find(node => node.props["data-continuity-view-selector"])!.props["aria-label"].includes(c.viewName(key)));
+            assert.equal(next.find(node => node.props["data-continuity-view-selector"])!.props["aria-label"], locale.director.workspace.continuity.views);
         }
     }
+});
+
+test("a source assembly version alone never exposes the ledger timeline without a saved v2 ledger", () => {
+    const { render } = harness({ subjectAssembly: true, ledgerV2: false });
+    assert.equal(render.some(node => node.props["data-continuity-timeline-entry"]), false);
 });
 
 test("clean draft/published checks use the selected saved snapshot without saving or adding a warning row", async () => {

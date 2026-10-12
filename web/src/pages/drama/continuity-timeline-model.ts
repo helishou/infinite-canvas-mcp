@@ -10,6 +10,79 @@ export type ContinuityTrack = { shot: ContinuityRow; before: string; after: stri
 const id = (value: unknown) => String(value ?? "");
 export const continuityEntityKey = (kind: unknown, value: unknown) => `${id(kind)}:${id(value)}`;
 
+function legacyReferencesFact(shot: ContinuityRow, fact: ContinuityRow) {
+    const objectKind = id(fact.object_kind), objectId = id(fact.object_id);
+    const refs = (value: unknown) => Array.isArray(value) ? value.map(row => id(typeof row === "string" ? row : row?.id || row?.asset_id)) : [];
+    if (Array.isArray(shot.continuity_facts) && shot.continuity_facts.some((row: unknown) => id(typeof row === "string" ? row : (row as ContinuityRow)?.fact_id || (row as ContinuityRow)?.id) === id(fact.id))) return true;
+    if (objectKind === "character" && refs(shot.characters).includes(objectId)) return true;
+    if (objectKind === "character" && Array.isArray(shot.dialogues) && shot.dialogues.some((row: unknown) => id(typeof row === "string" ? row : (row as ContinuityRow)?.speaker_id || (row as ContinuityRow)?.character_id) === objectId)) return true;
+    if (objectKind === "scene" && id(shot.scene_id) === objectId) return true;
+    if (objectKind === "asset" && [...refs(shot.required_assets), ...refs(shot.required_prop_ids)].includes(objectId)) return true;
+    return false;
+}
+
+/**
+ * View-only compatibility projection for v1 production sources with a real v2
+ * ledger. Ledger object identity is authoritative; old Shot references only
+ * establish a contextual association, never visible presence.
+ */
+export function continuityWorkbenchSource(source: ContinuityRow, ledger: ContinuityRow, input = records(source.shots)): ContinuityRow {
+    if (ledger.contract_version !== 2) return source;
+    const timelineIds = records(ledger.timelines).map(row => id(row.id)).filter(Boolean);
+    const defaultTimelineId = timelineIds.includes("main") ? "main" : timelineIds[0] || "main";
+    const nextOrder = new Map<string, number>(), occupied = new Map<string, Set<number>>();
+    const shotsWithDefaults = input.map(shot => {
+        const timelineId = id(shot.timeline_id) || defaultTimelineId;
+        const used = occupied.get(timelineId) || new Set<number>();
+        let storyOrder = Number.isInteger(shot.story_order) && Number(shot.story_order) >= 0 ? Number(shot.story_order) : nextOrder.get(timelineId) || 0;
+        if (!Number.isInteger(shot.story_order) || Number(shot.story_order) < 0) while (used.has(storyOrder)) storyOrder++;
+        used.add(storyOrder); occupied.set(timelineId, used);
+        nextOrder.set(timelineId, Math.max(nextOrder.get(timelineId) || 0, storyOrder + 1));
+        return { ...shot, timeline_id: timelineId, story_order: storyOrder };
+    });
+    const projectedLedger = timelineIds.length ? ledger : { ...ledger, timelines: [{ id: defaultTimelineId, start_frame: 0 }] };
+    if (source.prompt_assembly?.version === 2) return { ...source, ledger: projectedLedger, shots: shotsWithDefaults };
+    const subjects = records(source.subject_registry).map(row => ({ ...row }));
+    const subjectByEntity = new Map(subjects.map(subject => [continuityEntityKey(subject.entityRef?.kind, subject.entityRef?.id), subject]));
+    const registries: Record<string, ContinuityRow[]> = {
+        character: records(source.character_registry),
+        scene: records(source.scene_registry),
+        asset: records(source.asset_plan),
+    };
+    const projectedFacts = records(ledger.facts).map(fact => {
+        const key = continuityEntityKey(fact.object_kind, fact.object_id);
+        let subject = subjectByEntity.get(key);
+        if (!subject) {
+            const kind = id(fact.object_kind), objectId = id(fact.object_id), existing = registries[kind]?.find(row => id(row.id || row.asset_id) === objectId);
+            subject = {
+                id: `legacy:${key}`,
+                entityRef: { kind, id: objectId },
+                display_name: id(existing?.name || existing?.asset_name || existing?.scene_name || existing?.title) || (objectId ? `${kind || "object"}:${objectId}` : "object:missing-id"),
+                legacyProjection: true,
+                legacyUnregistered: !existing,
+                legacyObjectId: objectId,
+            };
+            subjects.push(subject); subjectByEntity.set(key, subject);
+        }
+        return { fact, subject };
+    });
+    const events = records(ledger.events);
+    const shots = shotsWithDefaults.map(shot => {
+        const usages = records(shot.subject_usages).map(row => ({ ...row }));
+        const duration = Number(shot.duration_frames ?? Number(shot.end_frame) - Number(shot.start_frame));
+        if (Number.isInteger(duration) && duration > 0) for (const { fact, subject } of projectedFacts) {
+            const alreadyDeclared = usages.some(usage => id(usage.subjectId) === id(subject.id));
+            const eventBound = events.some(event => id(event.shot_id) === id(shot.id) && id(event.fact_id) === id(fact.id));
+            if (!alreadyDeclared && (eventBound || legacyReferencesFact(shot, fact))) usages.push({
+                subjectId: subject.id, presentation: "state_context", localStartFrame: 0, localEndFrame: duration,
+                continuityDisplay: "unregistered",
+            });
+        }
+        return { ...shot, subject_usages: usages };
+    });
+    return { ...source, subject_registry: subjects, shots };
+}
+
 /** A view-only adapter. Absolute windows are derived, never written to v2 Shots. */
 export function continuityTimelineShots(source: ContinuityRow, ledger: ContinuityRow, input = records(source.shots)): ContinuityRow[] {
     const windows = subjectShotWindows({ ...source, ledger, shots: input });
@@ -64,23 +137,28 @@ export function continuityUsage(shot: ContinuityRow, subjectId: string) {
         start: Number(usage.localStartFrame ?? 0), end: Number(usage.localEndFrame ?? duration),
     })).filter(window => Number.isInteger(window.start) && Number.isInteger(window.end) && window.start >= 0 && window.end <= duration && window.end > window.start)
         .sort((a, b) => a.start - b.start);
+    const contextual = usages.filter(usage => usage.presentation === "state_context" && usage.continuityDisplay === "unregistered").map(usage => ({
+        start: Number(usage.localStartFrame ?? 0), end: Number(usage.localEndFrame ?? duration),
+    })).filter(window => Number.isInteger(window.start) && Number.isInteger(window.end) && window.start >= 0 && window.end <= duration && window.end > window.start)
+        .sort((a, b) => a.start - b.start);
     const windows: ContinuityWindow[] = [];
     for (const window of visible) {
         const previous = windows.at(-1);
         if (previous && window.start <= previous.end) previous.end = Math.max(previous.end, window.end); else windows.push({ ...window });
     }
-    return { usages, windows, light: [...new Set(usages.filter(usage => usage.presentation !== "visible").map(usage => id(usage.presentation)))] };
+    return { usages, windows, contextual, light: [...new Set(usages.filter(usage => usage.presentation !== "visible" && usage.continuityDisplay !== "unregistered").map(usage => id(usage.presentation)))] };
 }
 export function visibleContinuityTrack(track: ContinuityTrack, subjectId: string, previous?: ContinuityTrack, adjacent = false) {
-    const usage = continuityUsage(track.shot, subjectId), duration = Number(track.shot.duration_frames);
-    const segments = track.segments.flatMap(segment => usage.windows.flatMap(window => {
+    const usage = continuityUsage(track.shot, subjectId), duration = Number(track.shot.duration_frames), timelineWindows = [...usage.windows, ...usage.contextual].sort((a, b) => a.start - b.start);
+    const segments = track.segments.flatMap(segment => timelineWindows.flatMap(window => {
         const start = Math.max(segment.start, window.start), end = Math.min(segment.end, window.end);
         return end > start ? [{ ...segment, start, end, windowStart: window.start }] : [];
     }));
-    const markers = track.markers.filter(marker => usage.windows.some(window => marker.frame >= window.start && marker.frame < window.end));
+    const markers = track.markers.filter(marker => timelineWindows.some(window => marker.frame >= window.start && marker.frame < window.end));
     const previousUsage = previous && continuityUsage(previous.shot, subjectId);
-    const continuous = Boolean(adjacent && previous && previousUsage?.windows.some(window => window.end === Number(previous.shot.duration_frames)) && usage.windows.some(window => window.start === 0));
-    return { ...track, usage, segments, markers, continuous, hiddenEvents: track.markers.filter(marker => !markers.includes(marker)).map(marker => marker.event).concat(track.invalidEvents), duration };
+    const previousWindows = previousUsage ? [...previousUsage.windows, ...previousUsage.contextual] : [];
+    const continuous = Boolean(adjacent && previous && previousWindows.some(window => window.end === Number(previous.shot.duration_frames)) && timelineWindows.some(window => window.start === 0));
+    return { ...track, usage, timelineWindows, contextOnly: usage.windows.length === 0 && usage.contextual.length > 0, segments, markers, continuous, hiddenEvents: track.markers.filter(marker => !markers.includes(marker)).map(marker => marker.event).concat(track.invalidEvents), duration };
 }
 
 /** Canonical prior state for event creation/editing, with deterministic same-frame ordering. */
@@ -119,7 +197,7 @@ export function continuityPreviewStatus(report: ContinuityRow | undefined, sourc
 
 /** Only nested evidence blocks currently accepted by the continuity validator. */
 export function continuitySourceBlocks(scenes: ContinuityRow[]) {
-    return scenes.flatMap(scene => records(scene.blocks).map(block => ({ ...block,
+    return scenes.flatMap(scene => (records(scene.blocks).length ? records(scene.blocks) : typeof scene.text === "string" && scene.id ? [scene] : []).map(block => ({ ...block,
         sceneId: String(scene.scene_id || scene.id), occurrenceId: String(scene.id || scene.scene_id),
         sceneName: String(scene.scene_name || scene.heading || scene.id), sourceBlock: block,
     })));
@@ -136,6 +214,17 @@ export function continuityBlocksForShot(source: ContinuityRow, blocks: Continuit
 
 /** Reuse the formal contract's technical event-position checks; quality warnings do not gate saves. */
 export function continuityEventPositionIssues(source: ContinuityRow, ledger: ContinuityRow) {
+    if (source.prompt_assembly?.version !== 2) {
+        const shots = records(source.shots), issues: Array<{ path: (string | number)[]; message: string }> = [];
+        const shotById = new Map(shots.map(shot => [id(shot.id), shot]));
+        for (const [index, event] of records(ledger.events).entries()) {
+            const shot = shotById.get(id(event.shot_id));
+            if (!shot) { issues.push({ path: ["ledger", "events", index, "shot_id"], message: "Unknown Shot" }); continue; }
+            const local = continuityLocalFrame(event, shot), duration = Number(shot.duration_frames ?? Number(shot.end_frame) - Number(shot.start_frame));
+            if (!Number.isInteger(local) || local < 0 || local >= duration) issues.push({ path: ["ledger", "events", index, Number.isInteger(event.local_frame) ? "local_frame" : "frame"], message: "Event frame is outside the Shot" });
+        }
+        return issues;
+    }
     // Position checks must still run if an unrelated registry draft fails early schema parsing.
     return directorSourceV2Diagnostics({ ...source, subject_registry: [], utterances: [], ledger }).filter(issue => issue.path[0] === "ledger" && issue.path[1] === "events" && ["local_frame", "shot_id"].includes(String(issue.path[3])));
 }

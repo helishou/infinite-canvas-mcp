@@ -5808,7 +5808,9 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         );
     const missingTarget = active && projectLoaded && (searchParams.get("nodeId") ? !nodes.some(node => node.id === searchParams.get("nodeId")) : searchParams.get("segmentId") ? !nodes.some(node => Array.isArray(node.metadata?.segments) && (node.metadata.segments as Array<{ id: string }>).some(segment => segment.id === searchParams.get("segmentId"))) : false);
     if (!projectLoaded) return <CanvasRefreshShell />;
-    const screenEditorOpen = Boolean(dialogNodeId && !getNodeDefinition(nodeById.get(dialogNodeId)?.type || "")?.Panel);
+    const screenEditorOpen = Boolean(dialogNodeId
+        && !getNodeDefinition(nodeById.get(dialogNodeId)?.type || "")?.Panel
+        && !(nodeById.get(dialogNodeId)?.type === CanvasNodeType.Config && nodeById.get(dialogNodeId)?.metadata?.smart === true));
     const pickerTargetName = nodeById.get(pendingVideoComparison?.source.id || (characterImagePickerActive ? characterEditNodeId : sceneImagePickerActive ? sceneEditNodeId : propImagePickerActive ? propEditNodeId : pluginReferencePickNodeId || referencePickerNodeId) || "")?.title;
 
     return (
@@ -5987,7 +5989,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                                 registryVersion={nodeRegistryVersion}
                                 // 图片/视频/音频/文本节点不会消费这些渲染器；不传无用函数，
                                 // 避免生成状态或面板回调变化时让所有媒体节点失去 React.memo 命中。
-                                panelContainer={showPanel && !nodeDefinition?.Panel ? containerRef.current : undefined}
+                                panelContainer={showPanel && !nodeDefinition?.Panel && !(node.type === CanvasNodeType.Config && node.metadata?.smart === true) ? containerRef.current : undefined}
                                 onClosePanel={() => setDialogNodeId(null)}
                                 renderPanel={showPanel ? renderNodePanel : undefined}
                                 renderNodeContent={node.type === CanvasNodeType.Config || node.type === CanvasNodeType.Loop ? renderNodeContentPanel : undefined}

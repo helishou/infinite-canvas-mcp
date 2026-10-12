@@ -30,6 +30,8 @@
 .continuity-view-tools .production-view-tabs [role=tab]{min-height:32px;padding:4px 2px;font-size:12px}
 .continuity-view-actions{display:flex;align-items:center;flex-wrap:wrap;gap:6px;min-width:0;margin-left:auto}
 .continuity-view-actions .ant-tag{margin:0}
+.continuity-upgrade-state{display:grid;gap:8px;max-width:56rem;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);padding:12px 14px;color:var(--foreground)}
+.continuity-upgrade-state>p{margin:0}
 
 .continuity-view-tools .production-view-tabs{align-items:center}
 .continuity-view-tools .production-view-tabs>button:not(.ant-btn){min-height:32px;padding:4px 2px;font-size:12px;border-bottom:2px solid transparent;color:var(--muted-foreground)}
@@ -37,6 +39,9 @@
 .continuity-view-tools .production-view-tabs>button:focus-visible{outline:2px solid var(--ring);outline-offset:-2px}
 /* Keep action hit areas above the unchanged Director launcher in wrapped English layouts. */
 .continuity-live-inspector>footer{padding-bottom:20px}
+.continuity-context-cell{background:repeating-linear-gradient(135deg,color-mix(in srgb,var(--muted-foreground) 8%,transparent) 0 5px,transparent 5px 10px)}
+.continuity-context-cell .continuity-presence-label{right:4px;white-space:normal;line-height:1.2}
+.continuity-track-cell.is-context-only .continuity-state-line:not(.is-unknown){background:repeating-linear-gradient(90deg,var(--muted-foreground) 0 3px,transparent 3px 6px);opacity:.6}
 
 /* Direct timeline editing shares the ledger form; its card stays anchored to a frame. */
 .continuity-track-add{position:absolute;right:3px;bottom:3px;z-index:3;display:grid;place-items:center;width:20px;height:20px;border-radius:4px;background:var(--background);color:var(--primary);opacity:.7}

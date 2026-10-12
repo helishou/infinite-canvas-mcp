@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { boundaryCounts, clipBoundaryPositions, clipDurationSeconds, clipPartitionProfileMix, materializeClipPartition, nearestBoundaryCount, outsideClipWindow, partitionAt } from "./clip-boundary";
+import { boundaryCounts, clipBoundaryAutoScrollDelta, clipBoundaryPositions, clipDurationSeconds, clipPartitionProfileMix, createClipBoundaryPointerHandlers, materializeClipPartition, nearestBoundaryCount, outsideClipWindow, partitionAt } from "./clip-boundary";
 
 const clips = [
     { id: "A", shot_ids: ["S1", "S2"], mode: "H3", mode_lock: true, mode_selection_reason: "locked", styleTemplateId: "style-1" },
@@ -111,4 +111,67 @@ test("vertical boundary uses client Y and preserves content coordinates while sc
  assert.equal(moved[0].content, first[0].content);
  assert.equal(nearestBoundaryCount(239, moved.map(edge => ({ count: edge.count, edge: edge.viewport }))), 1);
  assert.deepEqual(clipBoundaryPositions(rects, [1], { left: 20, top: 100 }, 10), [{ count: 1, viewport: 120, content: 110 }]);
+});
+
+test("vertical boundary drag auto-scrolls toward either reachable edge and clamps to the track", () => {
+ const track = { top: 100, bottom: 500 };
+ assert.equal(clipBoundaryAutoScrollDelta(110, track, 50, 1000, 400), -12);
+ assert.equal(clipBoundaryAutoScrollDelta(490, track, 595, 1000, 400), 5);
+ assert.equal(clipBoundaryAutoScrollDelta(300, track, 300, 1000, 400), 0);
+ assert.equal(clipBoundaryAutoScrollDelta(110, track, 0, 1000, 400), 0);
+ assert.equal(clipBoundaryAutoScrollDelta(490, track, 600, 1000, 400), 0);
+});
+
+test("boundary pointer events capture one primary pointer, prevent selection, and commit its final drop", () => {
+ type PointerSample = { pointerId: number; button: number; clientY: number; currentTarget: { setPointerCapture: (pointerId: number) => void }; preventDefault: () => void };
+ const pointer = { current: null as number | null }, captured: number[] = [], committed: number[] = [];
+ const edges = [{ count: 1, edge: 100 }, { count: 2, edge: 250 }, { count: 3, edge: 400 }];
+ let starts = 0, finishes = 0, cancellations = 0, prevented = false, preview = 1;
+ const handlers = createClipBoundaryPointerHandlers<PointerSample>(pointer, {
+  begin: () => { starts += 1; return true; },
+  move: event => { preview = nearestBoundaryCount(event.clientY, edges) ?? preview; },
+  finish: event => {
+   finishes += 1;
+   const finalCount = nearestBoundaryCount(event.clientY, edges) ?? preview;
+   if (finalCount !== 1) committed.push(finalCount);
+  },
+  cancel: () => { cancellations += 1; },
+ });
+ const target = { setPointerCapture: (pointerId: number) => captured.push(pointerId) };
+ const event = (pointerId: number, button: number, clientY: number): PointerSample => ({
+  pointerId, button, clientY, currentTarget: target,
+  preventDefault: () => { prevented = true; },
+ });
+
+ handlers.onPointerDown(event(4, 2, 110));
+ assert.equal(starts, 0, "secondary button does not start a drag");
+ assert.equal(prevented, false);
+ handlers.onPointerDown(event(4, 0, 110));
+ assert.equal(starts, 1);
+ assert.equal(prevented, true, "a drag start suppresses browser text selection");
+ assert.deepEqual(captured, [4], "the full drag surface captures the active pointer");
+ assert.equal(pointer.current, 4);
+
+ handlers.onPointerDown(event(5, 0, 200));
+ handlers.onPointerMove(event(5, 0, 350));
+ assert.equal(starts, 1, "a second pointer cannot take over the boundary");
+ assert.equal(preview, 1, "moves from another pointer are ignored");
+ handlers.onPointerMove(event(4, 0, 350));
+ assert.equal(preview, 3);
+ handlers.onPointerUp(event(5, 0, 350));
+ assert.equal(finishes, 0, "only the captured pointer can finish the drag");
+ assert.equal(pointer.current, 4);
+ handlers.onPointerUp(event(4, 0, 390));
+ assert.equal(finishes, 1);
+ assert.deepEqual(committed, [3], "pointerup commits the final snapped boundary count");
+ assert.equal(pointer.current, null);
+ handlers.onLostPointerCapture(event(4, 0, 390));
+ assert.equal(cancellations, 0, "implicit capture release after pointerup does not undo the completed drag");
+
+ handlers.onPointerDown(event(6, 0, 110));
+ handlers.onPointerMove(event(6, 0, 300));
+ handlers.onPointerCancel(event(6, 0, 300));
+ assert.equal(cancellations, 1);
+ assert.equal(pointer.current, null);
+ assert.deepEqual(committed, [3], "cancelling a drag does not save a partial boundary");
 });
