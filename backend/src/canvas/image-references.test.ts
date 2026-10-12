@@ -93,21 +93,57 @@ test("场景参考只提交栅格场景图，不把 SVG 色卡作为图片模型
     assert.deepEqual(resolveCanvasImageReferences(project, "config")?.map((reference) => reference.storageKey), ["image:scene"]);
 });
 
-test("智能生成节点作为参考入边时只解析主图", () => {
+test("智能生成节点作为参考入边时按引用策略解析：缺省跟随最新成功归档结果", () => {
     const project = {
         id: "project-1",
         nodes: [
             { id: "target", type: "config", metadata: { smart: true, generationMode: "image" } },
             { id: "source", type: "config", title: "源智能节点", metadata: { smart: true, generationMode: "image", primaryImageId: "image-2", images: [
-                { id: "image-1", content: "first.png", storageKey: "image:first", mimeType: "image/png" },
-                { id: "image-2", content: "second.png", storageKey: "image:second", mimeType: "image/png" },
-                { id: "image-3", content: "third.png", storageKey: "image:third", mimeType: "image/png" },
+                { id: "image-1", status: "success", content: "first.png", storageKey: "image:first", mimeType: "image/png" },
+                { id: "image-2", status: "success", content: "second.png", storageKey: "image:second", mimeType: "image/png" },
+                { id: "image-3", status: "success", content: "third.png", storageKey: "image:third", mimeType: "image/png" },
             ] } },
         ],
         connections: [{ id: "source-target", fromNodeId: "source", toNodeId: "target", role: "reference" }],
     };
 
+    // 缺省跟随最新成功归档结果，而不是冻结在 primaryImageId 指的那张快照。
+    const references = resolveCanvasImageReferences(project, "target");
+    assert.deepEqual(references?.map((reference) => reference.storageKey), ["image:third"]);
+    assert.deepEqual(references?.map((reference) => reference.id), ["source:image:image-3"]);
+});
+
+test("智能节点显式钉选历史结果后，新结果归档不会改写引用", () => {
+    const pinned = { id: "pinned", type: "config", title: "钉选节点", metadata: { smart: true, generationMode: "image", primaryImageId: "image-3",
+        smartImageReferenceSelection: { mode: "selected_result", resultId: "image-2" }, images: [
+            { id: "image-1", status: "success", content: "first.png", storageKey: "image:first", mimeType: "image/png" },
+            { id: "image-2", status: "success", content: "second.png", storageKey: "image:second", mimeType: "image/png" },
+            { id: "image-3", status: "success", content: "third.png", storageKey: "image:third", mimeType: "image/png" },
+        ] } };
+    const project = {
+        id: "project-1",
+        nodes: [{ id: "target", type: "config", metadata: { smart: true, generationMode: "image" } }, pinned],
+        connections: [{ id: "pinned-target", fromNodeId: "pinned", toNodeId: "target", role: "reference" }],
+    };
+
     assert.deepEqual(resolveCanvasImageReferences(project, "target")?.map((reference) => reference.storageKey), ["image:second"]);
+});
+
+test("智能节点的引用策略失效时回落到最新成功归档结果，不引用失败或运行中的槽位", () => {
+    const project = {
+        id: "project-1",
+        nodes: [
+            { id: "target", type: "config", metadata: { smart: true, generationMode: "image" } },
+            { id: "source", type: "config", title: "源智能节点", metadata: { smart: true, generationMode: "image",
+                smartImageReferenceSelection: { mode: "selected_result", resultId: "missing" }, images: [
+                    { id: "image-1", status: "success", content: "first.png", storageKey: "image:first", mimeType: "image/png" },
+                    { id: "image-2", status: "running", content: "pending.png", mimeType: "image/png" },
+                ] } },
+        ],
+        connections: [{ id: "source-target", fromNodeId: "source", toNodeId: "target", role: "reference" }],
+    };
+
+    assert.deepEqual(resolveCanvasImageReferences(project, "target")?.map((reference) => reference.storageKey), ["image:first"]);
 });
 
 test("局部修改结果节点把智能节点主图当原图、蒙版排最后", () => {

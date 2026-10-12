@@ -1527,6 +1527,7 @@ export class EpisodeProductionService {
             addTarget({ id: `frame:${shotId}`, targetId: shotId, kind: "keyframe", title: String(shot.title || shotId), status, blockers: [...new Set(blockers)], ...(rejected && input.keyframePolicy === "new" ? { notice: "关键帧已退回；再次生成会创建一个新的显式生产任务。" } : {}), ...(artifact ? { artifactId: artifact.id } : {}) });
         }
         const boundaryByFrom = new Map(director.boundaries.map(boundary => [boundary.from, boundary]));
+        const registeredSceneEntries = productionSceneEntries(director.source);
         const completionBatches = this.listBatches(episodeId);
         for (const [index, segment] of segments.entries()) {
             const segmentId = String(segment.id || "");
@@ -1536,8 +1537,18 @@ export class EpisodeProductionService {
             const blockers = [...(canvasRole === "shared-assets" ? ["剧目共享资产画布不能生产分集视频 Clip"] : []), ...compiled(artifact, `Segment ${segmentId}`)];
             const continuityWarnings = hasContinuityV2 ? continuityTargetBlockers(continuityReport, [segmentId]).map(item => `${item.code}: ${item.message}`) : [];
             const group = data.clipGroups.find(item => item.id === segmentId);
-            const sceneIds = productionSceneIdsForShots(productionSceneEntries(director.source), shotIds);
+            const sceneIds = productionSceneIdsForShots(registeredSceneEntries, shotIds);
             if (sceneIds.length !== 1) blockers.push(sceneIds.length ? "Segment 跨越多个正式场次；先按场次拆分" : "Segment 未映射到唯一正式场次；无法分配场次 H3 节点");
+            const sameSceneAdjacent = sceneIds.length === 1 && [segments[index - 1], segments[index + 1]].some(adjacent => {
+                if (!adjacent) return false;
+                const adjacentShotIds = Array.isArray(adjacent.shot_ids) ? adjacent.shot_ids.map(String) : [];
+                const adjacentSceneIds = productionSceneIdsForShots(registeredSceneEntries, adjacentShotIds);
+                return adjacentSceneIds.length === 1 && adjacentSceneIds[0] === sceneIds[0];
+            });
+            const hasSceneReference = artifact?.references.some(reference => ["scene", "environment"].includes(String(reference.role).toLowerCase())) || false;
+            if (sameSceneAdjacent && artifact && !hasSceneReference) {
+                continuityWarnings.push("相邻 Segment 位于同一场景，但此段没有场景参考图；独立生成时环境布局缺少图像锚点");
+            }
             if (!h3ModelFor(segmentId, group?.nodeId ?? undefined)) blockers.push("缺少 H3 模型；请在现有模型设置中选择模型");
             if (!shotIds.length) blockers.push("Segment 尚未编入 Shot");
             const fps = Number(director.source.fps_num || 24) / Number(director.source.fps_den || 1);

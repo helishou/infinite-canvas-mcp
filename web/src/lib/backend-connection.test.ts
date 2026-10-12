@@ -11,6 +11,8 @@ test("部署默认连接使用访问者的网页来源和代理前缀；不向�
         for (const value of ["https://user:secret@example.com/api", "https://example.com/api?token=x", "https://example.com/#x", "file:///tmp"]) assert.throws(() => normalizeBackendAddress(value));
         window.__RUNTIME_CONFIG__ = {};
         assert.equal(defaultBackendUrl(), "http://127.0.0.1:17370");
+        Object.defineProperty(window, "location", { configurable: true, value: { origin: "http://192.168.1.116:3001", protocol: "http:", hostname: "192.168.1.116" } });
+        assert.equal(defaultBackendUrl(), "http://192.168.1.116:17370");
     } finally { Reflect.deleteProperty(globalThis, "window"); }
 });
 

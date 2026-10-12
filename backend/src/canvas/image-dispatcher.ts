@@ -757,9 +757,9 @@ export class CanvasImageDispatcher {
     const detail = await this.workflows.get(workflowName);
     const fields = detail.config?.fields || [];
     const fieldValues: Record<string, unknown> = { ...(input.params || {}) };
-    if (input.prompt?.trim() && !fields.some(field => field.type === "text" && (field.isPrompt || field.id.toLowerCase() === "prompt"))) {
-      throw new Error(`工作流 ${workflowName} 未配置提示词入口；请将实际正向提示词字段标记为 isPrompt，不能使用模板残留正文执行本次请求`);
-    }
+    // Prompt is optional at the workflow level. Only an explicitly mapped prompt
+    // field consumes input.prompt in the loop below; image/parameter-only flows
+    // must still run when a generic canvas caller carries a leftover prompt.
     const dimensions = requestedImageDimensions(input);
     const expectedRatio = requestedImageRatio(input);
     for (const field of fields) {

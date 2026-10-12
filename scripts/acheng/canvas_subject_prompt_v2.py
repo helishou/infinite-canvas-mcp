@@ -40,7 +40,14 @@ def entity_text(source, subject):
     registry = {"character": "character_registry", "scene": "scene_registry", "asset": "asset_plan"}.get(ref.get("kind"), "asset_plan")
     row = next((item for item in rows(source.get(registry)) if str(item.get("id") or item.get("asset_id") or "") == entity_id), {})
     name = str(row.get("name") or row.get("asset_name") or row.get("title") or row.get("scene_name") or entity_id)
-    description = " ".join(str(row.get(key) or "").strip() for key in ("prompt_description", "appearance", "description") if str(row.get(key) or "").strip())
+    descriptions = []
+    seen = set()
+    for key in ("prompt_description", "appearance", "description"):
+        value = str(row.get(key) or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            descriptions.append(value)
+    description = " ".join(descriptions)
     return name, description
 
 
@@ -92,7 +99,7 @@ def _state_start_descriptions(source, report, shot, subjects):
         owner = subject_by_entity.get((str(fact.get("object_kind")), str(fact.get("object_id"))))
         name = entity_text(source, owner)[0] if owner else "The registered subject"
         values.append(name + " " + str(fact.get("property") or fact.get("name") or "state") + ": " + str(description))
-    return "; ".join(values) if values else "No registered continuity facts apply at this shot's opening."
+    return "; ".join(values) if values else "No structured continuity facts are registered for this Shot's opening."
 
 
 def _render_state_end(source, report, shot, subjects):
@@ -111,7 +118,7 @@ def _render_state_end(source, report, shot, subjects):
         owner = subject_by_entity.get((str(fact.get("object_kind")), str(fact.get("object_id"))))
         name = entity_text(source, owner)[0] if owner else "The registered subject"
         chunks.append(name + " " + str(fact.get("property") or fact.get("name") or "state") + " remains: " + str(description))
-    return "; ".join(chunks) if chunks else "No registered continuity facts change at this shot's ending."
+    return "; ".join(chunks) if chunks else "No structured continuity state changes are registered for this Shot's ending."
 
 
 def project_continuity_source(production):
@@ -498,7 +505,12 @@ def _source_map_inputs(source, segment, shot_ids, windows, subject_uses):
 
 
 def build_source_map(prompt, inputs):
-    detail = "detailed_description:\n"
+    # Ref2VA uses detailed_description; the other H3 modes put authored Shot
+    # text in integrated_multimodal_description. Both sections need the same
+    # field-level map for prompt edits to sync back to their source.
+    detail = next((header for header in ("detailed_description:\n", "integrated_multimodal_description:\n") if header in prompt), None)
+    if detail is None:
+        return None
     start_body = prompt.find(detail)
     if start_body < 0:
         return None

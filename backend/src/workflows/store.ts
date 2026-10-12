@@ -11,7 +11,7 @@ const CUSTOM_SUBDIR = "custom";
 const NAME_RE = /^[^\x00-\x1f\\/:*?"<>|]+\.json$/;
 const MEDIA_INPUT_KEYS = ["image", "video", "audio", "mask", "filename", "file"];
 const MEDIA_EXT_RE = /\.(png|jpe?g|webp|gif|bmp|tiff?|mp4|webm|mov|m4v|avi|mkv|mp3|wav|m4a|aac|ogg|flac)(?:\?|$)/i;
-const BUNDLED_WORKFLOWS = ["IndexTTS-2.5.json", "MiniMax_H3.json", "custom/视频修复FlashVSR1.1.json", "custom/moyou-自动色阶.json"];
+const BUNDLED_WORKFLOWS = ["IndexTTS-2.5.json", "MiniMax_H3.json", "MiniMax_H3_T2I.json", "custom/视频修复FlashVSR1.1.json", "custom/moyou-自动色阶.json"];
 const BUILTIN_CONFIGS: Record<string, WorkflowConfig> = {
     "IndexTTS-2.5.json": {
         title: "IndexTTS 2.5 配音",
@@ -39,6 +39,21 @@ const BUILTIN_CONFIGS: Record<string, WorkflowConfig> = {
             { id: "height", node: "141", input: "value", name: "高度（像素）", type: "number", default: 480, step: 32 },
             { id: "duration", node: "132", input: "value", name: "时长（秒）", type: "number", default: 8 },
             { id: "noise_seed", node: "129", input: "noise_seed", name: "随机种子", type: "number", default: -1, randomEnabled: true },
+        ],
+    },
+    "MiniMax_H3_T2I.json": {
+        title: "MiniMax H3 文生图",
+        backend: "comfyui",
+        operation: "text-to-image",
+        description: "使用 MiniMax H3 FL2VA INT8 底模从文字生成约 1MP 静态候选图；默认 20 步，输出 5 帧供挑选。",
+        outputNodes: ["70"],
+        fields: [
+            { id: "prompt", node: "5", input: "value", name: "画面描述", type: "text", required: true, default: "", isPrompt: true },
+            { id: "width", node: "6", input: "value", name: "宽度（像素）", type: "number", default: 864, min: 32, max: 8192, step: 32 },
+            { id: "height", node: "7", input: "value", name: "高度（像素）", type: "number", default: 1152, min: 32, max: 8192, step: 32 },
+            { id: "duration_seconds", node: "8", input: "value", name: "候选时长（秒）", type: "number", default: 0.2, min: 0.2, max: 1.6, step: 0.1 },
+            { id: "seed", node: "10", input: "value", name: "随机种子", type: "number", default: -1, randomEnabled: true },
+            { id: "steps", node: "11", input: "value", name: "采样步数", type: "number", default: 20, min: 1, max: 40, step: 1 },
         ],
     },
     "custom/视频修复FlashVSR1.1.json": {

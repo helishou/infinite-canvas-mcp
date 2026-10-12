@@ -346,6 +346,27 @@ test("multi-shot Segment is preserved, invalid windows remain saved but blocked,
     assert.throws(() => publish(service, invalid), /legacy_fixture/);
 });
 
+test("readiness separates compiled prompts from continuity verification and warns on unanchored same-scene clips", t => {
+    const { service } = fixture(t), d = doc(2);
+    d.modules.continuity = { status: "planned", evidence: [], unresolved: [] };
+    d.source.script_scenes = [];
+    d.source.scene_registry = [{ id: "scene", name: "Room" }];
+    d.sourceHash = directorHash(d.source);
+    d.artifacts.forEach(artifact => { artifact.sourceHash = d.sourceHash; artifact.receipt.sourceHash = d.sourceHash; });
+    d.artifacts[0].references = [{ label: "<Picture 1>", nodeId: "scene-image", storageKey: "image:scene", sha256: "b".repeat(64), role: "scene" }];
+    const current = service.get("ep");
+    service.edit("ep", { operationId: "set-model", expectedRevision: current.revision, ops: [{ type: "set_settings", patch: { h3Model: "test-model" } }] });
+    publish(service, d);
+    const readiness = service.workflowReadiness("ep", "published");
+    assert.equal((readiness.modules.continuity as Record<string, unknown>).verifiedStatus, "diagnosticOnly", "compiled artifacts do not imply continuity verification");
+    const targets = readiness.targets.filter(item => item.kind === "segment");
+    const first = targets.find(item => item.targetId === "seg0")!;
+    const second = targets.find(item => item.targetId === "seg1")!;
+    assert.ok(!first.warnings?.some(item => item.includes("此段没有场景参考图")), "a scene reference anchors the first Clip");
+    assert.ok(second.warnings?.some(item => item.includes("此段没有场景参考图")), "the adjacent independent Clip lacks a scene anchor");
+    assert.equal(second.blockers.some(item => item.includes("此段没有场景参考图")), false, "quality warnings do not become blockers");
+});
+
 test("structured Segment regrouping preserves Shot content and invalidates only its compile receipt", t => {
     const { service } = fixture(t); const d = doc(3);
     (d.source.shots as any[])[1].dialogues = [{ speaker: "信使", text: "这句对白必须保留。" }]; d.sourceHash = directorHash(d.source);

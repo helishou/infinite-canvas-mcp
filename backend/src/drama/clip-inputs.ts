@@ -46,7 +46,7 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
     if (!currentCompilationArtifact(d, authored) || authored.receipt.promptHash !== authored.sha256) throw new Error("编译回执已过期，请修改源稿后重新编译");
     const planned = (d.source.segments as Array<Record<string, any>>).find(s => s.id === group.id)!;
     const styleTemplateId = planned.styleTemplateId ?? null;
-    if (styleTemplateId !== null && !isH3StyleTemplateId(styleTemplateId)) throw new Error(`未知 H3 风格模板：${styleTemplateId}`);
+    if (styleTemplateId !== null && !(isH3StyleTemplateId(styleTemplateId) || typeof styleTemplateId === "string" && /^[a-z0-9][a-z0-9-]{0,47}$/i.test(styleTemplateId))) throw new Error(`无效 H3 风格模板 ID：${styleTemplateId}`);
     const subjectIdsByAsset = new Map<string, Set<string>>();
     for (const subject of Array.isArray(d.source.subject_registry) ? d.source.subject_registry as Array<Record<string, any>> : []) {
         for (const binding of Array.isArray(subject.pictureBindings) ? subject.pictureBindings as Array<Record<string, any>> : []) {

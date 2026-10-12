@@ -799,7 +799,7 @@ export class CanvasH3Runner {
             && stableH3Fingerprint(stableReferenceInputs(firstPassReferences)) === stableH3Fingerprint(stableReferenceInputs(compilation.references));
         const segmentFingerprintInput = { ...segment, previousTailFrameContinuation: previous?.tailFrameContinuation === true };
         const fingerprintInput = { segment: segmentFingerprintInput, params: h3ConfirmationFingerprintParams(segment, params), compiledPrompt: scenePrompt, previousFingerprint };
-        const fingerprint = h3ClipCacheFingerprint({ ...fingerprintInput, references: referenceFingerprintInputs(compilation.references) });
+        const fingerprint = h3ClipCacheFingerprint({ ...fingerprintInput, styleTemplates: defaults.styleTemplates, references: referenceFingerprintInputs(compilation.references) });
         // v1 first-pass caches were fingerprinted from the raw params and complete
         // CompiledReference objects. Keep both exact historical inputs and the
         // log-backed reference snapshot so settings/timestamp normalization updates
@@ -966,8 +966,9 @@ export class CanvasH3Runner {
         const { compilation, composite, editableReferences } = compileH3Submission(project, segment, taskMode);
         assertReferenceCompilation(compilation);
         const scenePrompt = segment.directorEngine ? compilation.compiledPrompt : appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
-        const styleTemplateId = params.styleTemplateId === undefined ? styleTemplateFromPrompt(scenePrompt, taskMode) : params.styleTemplateId;
-        if (styleTemplateId && !isH3StyleTemplateId(styleTemplateId)) throw new Error(`无效的 H3 视觉风格模板：${styleTemplateId}`);
+        const styleTemplates = defaults.styleTemplates;
+        const styleTemplateId = params.styleTemplateId === undefined ? styleTemplateFromPrompt(scenePrompt, taskMode, styleTemplates) : params.styleTemplateId;
+        if (styleTemplateId && !isH3StyleTemplateId(styleTemplateId, styleTemplates)) throw new Error(`无效的 H3 视觉风格模板：${styleTemplateId}`);
         params.styleTemplateId = styleTemplateId || null;
         // 实时预览节点靠 target_node_id 把帧推回画布上的 H3 节点；不传就是空串，
         // 帧无处可去，预览功能等于没开。节点 id 在这里才确定，必须在提交前注入。
@@ -987,6 +988,11 @@ export class CanvasH3Runner {
         const imageRefs = isT2v ? [] : refs.filter((ref) => ref.type === "image");
         const audioRefs = isT2v || isI2v || isFl2v ? [] : refs.filter((ref) => ref.type === "audio");
         const videoRefs = isT2v || isI2v || isFl2v ? [] : refs.filter((ref) => ref.type === "video");
+        if (params.audioDrive === true) {
+            const driverIndex = audioRefs.findIndex((ref) => String(ref.id || ref.bindingId || "") === String(params.audioDriveFile || ""));
+            if (driverIndex < 0) throw new Error("音频驱动文件必须从当前 Clip 的参考音频中选择");
+            params.audioDriveFile = await this.resolveRef(audioRefs[driverIndex]);
+        }
         if (isI2v && imageRefs.length !== 1) throw new Error("I2V 必须且只能使用 1 张图片作为首帧");
         if (isFl2v && imageRefs.length !== 2) throw new Error("FL2V 必须使用 2 张图片作为首尾帧");
         if (imageRefs.length > 9) throw new Error("MiniMax H3 最多支持 9 张参考图片");
@@ -1047,7 +1053,7 @@ export class CanvasH3Runner {
             runtimeTaskMode = routed.taskMode;
             prompt = appendTailFramePrompt(prompt, `Clip ${plan.segmentIndex}`, routed.tailImageOrdinal);
         }
-        prompt = applyH3StyleTemplate(prompt, taskMode, styleTemplateId as string | null);
+        prompt = applyH3StyleTemplate(prompt, taskMode, styleTemplateId as string | null, styleTemplates);
         // Only explicitly bound video references enter model conditioning.
         const referenceVideos = [...videos];
         const useSelectedVideoModel = params.selectedVideoModelEnabled === true;

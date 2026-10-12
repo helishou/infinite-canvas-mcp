@@ -1,6 +1,6 @@
 import { useRef, useState } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
-import { message, Select, Switch } from "antd";
+import { Button, Input, message, Modal, Select, Switch } from "antd";
 import type { H3Segment } from "../types";
 import { exportH3Settings, importH3Settings } from "../services/h3-segment-utils";
 import { useDefaultParams, writeDefaultParams } from "../services/h3-defaults";
@@ -12,6 +12,8 @@ import { ClipSettings } from "./ClipSettings";
 import { H3Icon } from "./H3Icon";
 import { requestH3Run, resolveH3PaneSizes } from "./H3WorkbenchPrimitives";
 import { h3Label, useH3Locale } from "../h3-locale";
+import { refsForSegment } from "../services/h3-data";
+import { H3_STYLE_TEMPLATES, resolveH3StyleTemplates, type H3StyleTemplate } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
 
 type Props = { ctx: CanvasNodeContext; metadata: Record<string, unknown>; selected?: H3Segment; submitting?: boolean; patchSelected: (patch: Partial<H3Segment>) => void; patchAllSettings: (patch: Partial<H3Segment>) => void };
 
@@ -86,6 +88,28 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, submitting = fals
     const fileRef = useRef<HTMLInputElement | null>(null);
     const [transferMessage, setTransferMessage] = useState("");
     const [decisionBusy, setDecisionBusy] = useState(false);
+    const [stylesOpen, setStylesOpen] = useState(false);
+    const [styleDraft, setStyleDraft] = useState<H3StyleTemplate | null>(null);
+    const styleTemplates = resolveH3StyleTemplates(defaults.styleTemplates);
+    const saveStyleTemplates = async (next: H3StyleTemplate[]) => {
+        const current = await ctx.h3Defaults.get();
+        const committed = await ctx.h3Defaults.set({ ...current, styleTemplates: next });
+        writeDefaultParams(committed);
+    };
+    const editStyle = (template: H3StyleTemplate) => setStyleDraft({ ...template });
+    const removeStyle = async (id: string) => {
+        try {
+            await saveStyleTemplates((Array.isArray(defaults.styleTemplates) ? defaults.styleTemplates as H3StyleTemplate[] : []).filter(item => item.id !== id));
+            setStyleDraft(null);
+        } catch (error) { message.error(error instanceof Error ? error.message : "删除风格模板失败"); }
+    };
+    const commitStyle = async () => {
+        if (!styleDraft?.label.trim() || !styleDraft.text.trim()) { message.warning("请填写模板名称和风格提示词"); return; }
+        const stored = Array.isArray(defaults.styleTemplates) ? defaults.styleTemplates as H3StyleTemplate[] : [];
+        const next = [...stored.filter(item => item.id !== styleDraft.id), { ...styleDraft, label: styleDraft.label.trim(), text: styleDraft.text.trim() }];
+        try { await saveStyleTemplates(next); setStyleDraft(null); message.success("视觉风格模板已保存"); }
+        catch (error) { message.error(error instanceof Error ? error.message : "保存风格模板失败"); }
+    };
     const resolveConfirmation = async (action: "confirm" | "keep_first_pass" | "discard") => {
         if (decisionBusy) return;
         if (!runtimeTaskId || !selected?.id || !selected.firstPassFingerprint) { setTransferMessage("缺少待确认任务或一采快照，请刷新后重试"); return; }
@@ -151,7 +175,14 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, submitting = fals
         </div>
         <p className="nfh3-hint">{h3Label(locale, "parameterPolicy")}：{h3Label(locale, resolved?.policy === "defaults" ? "inheritDefaults" : "explicitOverrides")} · {h3Label(locale, "effectiveParameters")}</p>
         {motionGroup ? <p className="nfh3-hint" role="status">{locale === "en-US" ? `Motion group: Clip ${motionGroup.head + 1}–${motionGroup.tail + 1}. Generate current Clip from the group head to run the entire group in order.` : `接续组：Clip ${motionGroup.head + 1}–${motionGroup.tail + 1}。从组首点击「生成当前 Clip」会依次运行全组。`}</p> : null}
-        <ClipSettings key="clip-settings" ctx={ctx} metadata={metadata} segment={selected} patch={patchSettings} />
+        <ClipSettings key="clip-settings" ctx={ctx} metadata={metadata} segment={selected} audioRefs={effectiveSegment ? refsForSegment(effectiveSegment).filter((ref) => ref.type === "audio") : []} patch={patchSettings} onManageStyleTemplates={() => setStylesOpen(true)} />
+        <Modal title="管理视觉风格模板" open={stylesOpen} onCancel={() => { setStylesOpen(false); setStyleDraft(null); }} footer={null} width={720}>
+            <div style={{ display: "grid", gap: 10, maxHeight: "55vh", overflow: "auto", marginBottom: 16 }}>
+                {styleTemplates.map(template => <div key={template.id} style={{ display: "flex", alignItems: "center", gap: 10 }}><strong style={{ flex: 1 }}>{template.label}</strong><Button size="small" onClick={() => editStyle(template)}>编辑</Button><Button size="small" danger onClick={() => void removeStyle(template.id)}>{H3_STYLE_TEMPLATES.some(item => item.id === template.id) ? "恢复默认" : "删除"}</Button></div>)}
+            </div>
+            <Button type="dashed" block onClick={() => setStyleDraft({ id: `custom-${crypto.randomUUID()}`, label: "", text: "" })}>添加模板</Button>
+            {styleDraft ? <div style={{ display: "grid", gap: 10, marginTop: 16 }}><Input value={styleDraft.label} placeholder="模板名称" onChange={event => setStyleDraft({ ...styleDraft, label: event.target.value })} /><Input.TextArea value={styleDraft.text} placeholder="风格提示词（运行时加入视频描述段开头）" autoSize={{ minRows: 5, maxRows: 12 }} onChange={event => setStyleDraft({ ...styleDraft, text: event.target.value })} /><div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}><Button onClick={() => setStyleDraft(null)}>取消</Button><Button type="primary" onClick={() => void commitStyle()}>保存模板</Button></div></div> : null}
+        </Modal>
         <div key="panel-actions" className="nfh3-panel-actions">{awaitingConfirmation ? <><button type="button" className="minimax-run" disabled={decisionBusy || !confirmationEnabled} onClick={() => void resolveConfirmation("confirm")}><H3Icon name="sparkles" /> {selected?.latentUpscaleEnabled ? "确认一采并继续二采" : "确认并精修"}</button><button type="button" disabled={decisionBusy} onClick={() => void resolveConfirmation("keep_first_pass")}>保留一采</button><button type="button" disabled={decisionBusy} onClick={() => void resolveConfirmation("discard")}>放弃任务</button></> : status === "awaiting_confirmation" ? <span>请选中待确认的 Clip</span> : <H3RunActionButtons ctx={ctx} selected={selected} runtimeTaskId={runtimeTaskId} busy={busy} stuck={stuck} canCancel={canCancel} canResetAndRun={canResetAndRun} locale={locale} />}</div>
     </div>;
 }

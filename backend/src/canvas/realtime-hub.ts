@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { BackendDatabase } from "../db.js";
 import type { BackendEventBus } from "../events.js";
 import type { ResolvedConfig } from "../config.js";
+import { isLanAuthBypassed } from "../server/lan-access-policy.js";
 import { textTargetSchema } from "@basketikun/canvas-agent/schemas";
 
 const point = z.object({ x: z.number().finite(), y: z.number().finite() });
@@ -85,7 +86,8 @@ export class CanvasRealtimeHub {
         const projectId = url.searchParams.get("projectId") || "";
         const clientId = url.searchParams.get("clientId") || "";
         const denied = request.headers.origin && !this.config.origins.includes(request.headers.origin);
-        const status = denied ? 403 : url.searchParams.get("token") !== this.config.token ? 401 : !projectId || !clientId ? 400 : this.db.getCanvasProjectRevision(projectId) === null ? 404 : 0;
+        const tokenRequired = !isLanAuthBypassed(socket.remoteAddress, this.config.listenHost);
+        const status = denied ? 403 : tokenRequired && url.searchParams.get("token") !== this.config.token ? 401 : !projectId || !clientId ? 400 : this.db.getCanvasProjectRevision(projectId) === null ? 404 : 0;
         if (status) {
             socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\n\r\n`);
             return;

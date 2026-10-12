@@ -95,6 +95,7 @@
 ## 媒体与执行结果
 
 - Subject 图片及 Shot 关键帧的 `node_selection` 绑定消费智能节点独立的 `smartImageReferenceSelection`：缺省跟随最新成功归档结果，显式历史选择只改变引用。绑定声明的 `latest_success` 或 `selected_result` 保持自身覆盖。浏览历史不恢复生成输入；恢复生成设置必须显式执行，且不改引用策略。选择、归档及实际消费者刷新沿现有 ops／事件与持久刷新链处理；不改在途快照或旧 Clip 的兼容引用语义。
+- 普通画布生成与预览对智能图片节点的引用必须与正式绑定同类语义：前端 `canvasNodeImage` 与 Backend `addSmartImageReferences` 都经 `selectSmartImageResult(...,{mode:"node_selection"})` 解析，禁止直接按 `primaryImageId` 取快照——批量结果归档保持 `primaryImageId` 折叠时，引用方仍须自动跟随最新成功归档结果。钉选结果失效或策略非法时回落到最新成功归档结果，不得静默引用运行中／失败／占位图片，双方回落规则必须一致。引用输入 ID 保持 `${nodeId}:image:${imageId}` 稳定格式，供 `referenceNodeIds` 显式调用方定位。
 - Subject 绑定去重必须连同 Shot 的字符串绑定 ID 在同一编辑事务内处理。只有除稳定 ID 外语义完全相同的绑定可合并；用途、保留／排除、状态或结果选择不同必须保留。未知引用在提交前定位拒绝，不按唯一剩余绑定猜选图；读取不得归一化源内容或改变其哈希身份。一个 Clip 多镜复用绑定只登记一个消费者索引条目。
 
 - MEDIA_DIR 独立于 ComfyUI 安装目录；ComfyUI 只用执行缓存，输出归档回 Backend。迁出旧耦合目录先备份、复制并校验，再切换索引，保留原文件。

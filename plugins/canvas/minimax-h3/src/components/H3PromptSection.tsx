@@ -9,6 +9,7 @@ import { inferReferenceRole, refsForSegment, segmentRefsPatch, withSegmentRefs }
 import { sameRef } from "../services/h3-compatibility";
 import { orderedGroupStoryboardRefs } from "../services/h3-refs";
 import { storyboardShotMarkers } from "../services/h3-storyboard-markers";
+import { storyboardTrackItems } from "../services/h3-storyboard-track";
 import { alignStoryboardShotsToReferences } from "../services/storyboard-shot-alignment";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { persistPromptCandidate, promptJobs, setPromptJob } from "../services/h3-prompt-jobs";
@@ -1040,16 +1041,24 @@ export function H3PromptSection({
     ],
     [imageRefs, videoRefs, audioRefs],
   );
-  const storyboardPictureOptions = imageRefs.flatMap((ref, index) => isStoryboardPictureRef(ref) && ref.bindingId
-    ? [{
-      ref,
-      value: ref.bindingId,
-      label: <span className="nfh3-storyboard-picture-option">
-        {ref.url ? <img src={ref.url} alt="" /> : null}
-        <span>{`<Picture ${index + 1}> · ${storyboardRefDisplayName(ref.name) || "未命名分镜图"}`}</span>
-      </span>,
-    }]
-    : []);
+  const storyboardPictureOptions = (() => {
+    const seen = new Set<string>();
+    return (selected ? storyboardTrackItems(selected) : []).flatMap(({ ref }) => {
+      if (!ref || !isStoryboardPictureRef(ref) || !ref.bindingId || seen.has(ref.bindingId)) return [];
+      seen.add(ref.bindingId);
+      const index = imageRefs.findIndex((item) => item.bindingId === ref.bindingId);
+      if (index < 0) return [];
+      const imageUrl = ref.storageKey ? ctx.mediaUrl(ref.storageKey) : ref.url;
+      return [{
+        ref,
+        value: ref.bindingId,
+        label: <span className="nfh3-storyboard-picture-option">
+          {imageUrl ? <img src={imageUrl} alt="" /> : null}
+          <span>{`<Picture ${index + 1}> · ${storyboardRefDisplayName(ref.name) || "未命名分镜图"}`}</span>
+        </span>,
+      }];
+    });
+  })();
   const canvasNodes = storyboardMode ? ctx.getNodes() : [];
   const orderedStoryboardGroups = canvasNodes.filter((node) => node.type === "group" && node.metadata?.orderedGroup)
     .map((group) => ({ value: `ordered-group:${group.id}`, label: `导入有序组 · ${group.title || "未命名组"}` }));
@@ -1338,18 +1347,21 @@ export function H3PromptSection({
         .filter((ref) => ref.type === "image" && isStoryboardPictureRef(ref))
         .sort((left, right) => (storyboardOrder.get(left.bindingId || "") ?? Number.MAX_SAFE_INTEGER) - (storyboardOrder.get(right.bindingId || "") ?? Number.MAX_SAFE_INTEGER));
       const hasExplicitHardCut = /(?:\b(?:hard[- ]cut|the\s+(?:shot|camera)\s+cuts?\s+to)\b|\[Transition:\s*cut\]|硬切)/iu.test(promptAtCall);
-      let transitionPlan = "";
       let transitionInstruction = "";
       if (storyboardMode && storyboardImageRefs.length >= 2) {
-        if (!hasExplicitHardCut) transitionPlan = await analyzeStoryboardTransitions(ctx, storyboardImageRefs, model);
-        const lastOrd = storyboardImageRefs.length;
+        // 在最终增强调用中一次性逐对推理，避免每一对分镜都另起一个模型请求。
+        const imageReferences = references.filter((ref) => ref.type === "image");
+        const storyboardSequence = storyboardImageRefs.map((ref, index) => {
+          const pictureOrdinal = imageReferences.indexOf(ref) + 1;
+          return `第${index + 1}帧=<Picture ${pictureOrdinal}>${ref.name ? `（${ref.name}）` : ""}`;
+        }).join(" → ");
+        const lastPictureOrdinal = imageReferences.indexOf(storyboardImageRefs[storyboardImageRefs.length - 1]) + 1;
         transitionInstruction = [
-          `只有标记为 storyboard 的参考图才是本段分镜帧序列（图1为起始姿势，图${lastOrd}为目标姿势）；角色转面图、人物身份图和风格参考图不是过渡帧。`,
+          `本段分镜帧的固定顺序为：${storyboardSequence}。只有这些 storyboard 图片是过渡帧；角色转面图、人物身份图和风格参考图不是过渡帧。`,
           hasExplicitHardCut
             ? `严格保留用户已经写明的切镜边界；需要 hard cut 的位置保持 hard cut，不要把切镜改写成跨镜连续运动。`
-            : `从图1的姿势出发，依次经过每一对相邻分镜帧（图k→图k+1）的连续动作，最终收尾于图${lastOrd}的姿势；不得瞬移或重置。`,
-          `末句必须明确落到图${lastOrd}的目标姿势（例如图1站立、图2蹲下，则末句写“此人缓缓蹲下成蹲姿”）。`,
-          transitionPlan ? `按下面的「过渡计划」落实每段肢体、重心、朝向的具体变化。` : `没有生成跨镜过渡计划时，只依据各镜自己的分镜图和正文描述。`,
+            : `在本次提示词编写中，逐对比较该顺序中每两张相邻分镜图，推断肢体运动、重心转移、身体朝向和视线变化，并将这些动作写入详细描述；不得瞬移或重置。`,
+          `动作应从第一帧姿势出发，并在末句明确落到最后一帧 <Picture ${lastPictureOrdinal}> 的目标姿势。`,
         ].join("\n");
       }
       const structure = normalizedMode === "ref2va"
@@ -1383,7 +1395,6 @@ export function H3PromptSection({
       const userPrompt = buildPromptEnhancementInput({
         currentPrompt: promptAtCall,
         manifest,
-        transitionPlan,
       });
       const refPayload = promptEnhanceImagePayload(references);
       const result = await ctx.ai.generateText(userPrompt, {
@@ -2194,33 +2205,3 @@ export function H3PromptSection({
   );
 }
 
-// 分镜图参考过渡分析：只对连续相邻的 storyboard 分镜帧提取「姿势如何连续过渡」的可执行动作，
-// 供增强提示词把段尾落到下一张分镜姿势（如站→蹲，末句写「此人蹲了下来」）。
-async function analyzeStoryboardTransitions(
-  ctx: CanvasNodeContext,
-  refs: H3Ref[],
-  model: string,
-): Promise<string> {
-  const lines: string[] = [];
-  for (let k = 0; k < refs.length - 1; k++) {
-    const from = refs[k];
-    const to = refs[k + 1];
-    const fromOrd = k + 1;
-    const toOrd = k + 2;
-    try {
-      const res = await ctx.ai.generateText(
-        `下面是连续分镜姿势序列中的两张 storyboard 分镜帧：图${fromOrd}（起始姿势）与图${toOrd}（目标姿势）。只提取从图${fromOrd}到图${toOrd}的连续过渡动作：主体肢体如何运动、重心如何转移、身体朝向/视线/姿态如何变化，用若干可执行的自然语言短句描述这段过渡（不重复身份、服装、外观，只写动作与姿态变化）。只返回过渡动作正文，不要追问、不要写英文模板。`,
-        {
-          model,
-          system: "你是 H3 分镜姿势过渡分析器。严格按图序对比两张关键帧，只输出从前者到后者的连续动作描述，不编造图中未出现的变化。",
-          references: promptEnhanceImagePayload([from, to]),
-        },
-      );
-      const text = res.text.trim();
-      if (text) lines.push(`图${fromOrd}→图${toOrd}：${text}`);
-    } catch {
-      lines.push(`图${fromOrd}→图${toOrd}：（过渡分析失败，请人工核对姿势变化）`);
-    }
-  }
-  return lines.join("\n\n");
-}

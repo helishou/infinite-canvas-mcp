@@ -143,7 +143,7 @@ export function applyDirectorSourcePatch(director: DirectorProduction, entity: k
             if (!target) throw new Error(`${entity} ${id} 不存在；先由 Acheng 创建稳定对象`);
             const forbidden = Object.keys(patch).filter(key => !(directorPatchFields[entity] as readonly string[]).includes(key));
             if (forbidden.length) throw new Error(`不允许直接修改字段：${forbidden.join(", ")}`);
-            if (entity === "segment" && Object.hasOwn(patch, "styleTemplateId") && patch.styleTemplateId !== null && !isH3StyleTemplateId(patch.styleTemplateId)) throw new Error("未知 H3 风格模板；styleTemplateId 必须为已登记模板 ID 或 null");
+            if (entity === "segment" && Object.hasOwn(patch, "styleTemplateId") && patch.styleTemplateId !== null && !(isH3StyleTemplateId(patch.styleTemplateId) || typeof patch.styleTemplateId === "string" && /^[a-z0-9][a-z0-9-]{0,47}$/i.test(patch.styleTemplateId))) throw new Error("无效 H3 风格模板 ID");
             if (entity === "asset" && patch.canvas_scope !== undefined && !["shared", "episode"].includes(String(patch.canvas_scope))) throw new Error("资产画布归属只能是 shared 或 episode");
             if (entity === "asset" && patch.canvas_scope === "episode" && director.assets[id]?.sharedSource) throw new Error("已采用的剧目共享资产必须保留 shared 归属；需要本集专用版本时请新建分集资产");
             if (entity === "asset" && patch.status !== undefined && !["planned", "approved"].includes(String(patch.status))) throw new Error("资产计划状态只能是 planned 或 approved");

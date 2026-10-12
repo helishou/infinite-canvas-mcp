@@ -460,13 +460,40 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       }
       const diagnostics: ProductionCompilationDiagnostic[] = status.diagnosticCount
         ? (await fetchProductionCompilation(target, pending.operationId, "diagnostics", { pageSize: 100 })).compilation.items || [] : [];
-      const describe = (item: ProductionCompilationDiagnostic) => [item.targetId, item.path, item.code, item.message].filter(Boolean).join(" · ");
-      const warningDetails = diagnostics.map(describe).filter(Boolean).slice(0, 10);
+      const targetResponse = status.targetCount
+        ? await fetchProductionCompilation(target, pending.operationId, "targets", { pageSize: 100 }) : undefined;
+      const compilationTargets = (targetResponse?.compilation.items || []) as Array<ProductionCompilationDiagnostic & { status?: string }>;
+      const describe = (item: ProductionCompilationDiagnostic) => item.message?.trim() || "";
+      const clipContext = (items: ProductionCompilationDiagnostic[]) => [...new Set(items.map(item => item.targetId).filter((id): id is string => Boolean(id)))].map(id => {
+        const index = compileSource.draft.clipGroups.findIndex(group => String(group.id) === id);
+        return index >= 0 ? t("director.studio.clipNumber", { number: index + 1 }) : id;
+      }).join("、");
+      const diagnosticContext = (items: ProductionCompilationDiagnostic[]) => [...new Set(items.map(describe).filter(Boolean))].join("；");
+      const groupedDiagnostics = new Map<string, ProductionCompilationDiagnostic[]>();
+      for (const item of diagnostics) {
+        const key = item.code === "CONTINUITY_COVERAGE_MISSING" || item.code === "PROMPT_SOURCE_MAP_INVALID"
+          ? item.code
+          : `other:${describe(item) || item.code || "unknown"}`;
+        groupedDiagnostics.set(key, [...(groupedDiagnostics.get(key) || []), item]);
+      }
+      const warningDetails = [...groupedDiagnostics].slice(0, 10).map(([key, items]) => {
+        const affected = new Set(items.map(item => item.targetId).filter(Boolean));
+        const count = affected.size || items.length;
+        const countText = t("director.atomic.compileAffectedCount", { count });
+        if (key === "CONTINUITY_COVERAGE_MISSING") return t("director.atomic.compileHintContinuity", { count: countText, clips: clipContext(items), evidence: diagnosticContext(items) });
+        if (key === "PROMPT_SOURCE_MAP_INVALID") return t("director.atomic.compileHintSourceMap", { count: countText, clips: clipContext(items) });
+        return `${countText}：${describe(items[0]) || t("director.atomic.compileHintOther")}`;
+      });
       const completionNotice = () => {
         const warningNotice = status.verdict === "passed_with_warnings" && status.diagnosticCount
           ? ` · ${t("director.atomic.compileWarnings", { count: status.diagnosticCount })}` : "";
-        return t("director.atomic.compileDone", { count: status.targetCount || compileSource.draft.clipGroups.length })
-          + warningNotice + (warningDetails.length ? `\n${warningDetails.join("\n")}` : "");
+        const readyTargets = compilationTargets.filter(item => item.status === "ready");
+        const notReadyTargets = compilationTargets.filter(item => item.status !== "ready");
+        const resultNotice = compilationTargets.length && notReadyTargets.length
+          ? t("director.atomic.compilePartial", { ready: readyTargets.length, total: compilationTargets.length, notReady: notReadyTargets.length, clips: clipContext(notReadyTargets) })
+          : t("director.atomic.compileDone", { count: compilationTargets.length ? readyTargets.length : status.targetCount || compileSource.draft.clipGroups.length });
+        return resultNotice
+          + warningNotice + (warningDetails.length ? `\n\n${warningDetails.join("\n\n")}` : "");
       };
       if (status.application?.revision !== undefined) {
         await persistPendingCompilation(null);
@@ -486,12 +513,24 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       }
       if (["succeeded", "blocked", "interrupted", "failed"].includes(status.status)) await persistPendingCompilation(null);
       const blocker = status.blockingDiagnostic;
-      const blockingDetails = diagnostics.filter(blocksCompilationDiagnostic).map(describe).filter(Boolean).slice(0, 10);
+      const blockingItems = diagnostics.filter(blocksCompilationDiagnostic);
+      const blockingDetails = [...new Set(blockingItems.map(item => {
+        const matching = blockingItems.filter(candidate => candidate.code === item.code);
+        const affected = new Set(matching.map(candidate => candidate.targetId).filter(Boolean));
+        const count = affected.size || matching.length;
+        const countText = t("director.atomic.compileAffectedCount", { count });
+        if (item.code === "CONTINUITY_COVERAGE_MISSING") return t("director.atomic.compileHintContinuity", { count: countText, clips: clipContext(matching), evidence: diagnosticContext(matching) });
+        if (item.code === "PROMPT_SOURCE_MAP_INVALID") return t("director.atomic.compileHintSourceMap", { count: countText, clips: clipContext(matching) });
+        return describe(item);
+      }).filter(Boolean))].slice(0, 10);
       setCompileError(blockingDetails.length ? blockingDetails.join("\n") : blocker
-        ? [blocker.targetId, blocker.path, blocker.code, blocker.message].filter(Boolean).join(" · ")
+        ? describe(blocker)
         : t("director.atomic.compileBlocked", { status: status.status === "succeeded" ? status.verdict : status.status }));
     } catch (error) {
-      if (error instanceof BackendApiError && error.status >= 400 && error.status < 500 && error.status !== 408) await persistPendingCompilation(null);
+      // 终局失败（连不上服务器 status 0、4xx 除 408）清掉待编译标记；只有可能已送达的
+      // 408/5xx 保留标记以便幂等续编。
+      const uncertain = error instanceof BackendApiError && (error.status === 408 || error.status >= 500);
+      if (!uncertain) await persistPendingCompilation(null);
       setCompileError(error instanceof Error ? error.message : String(error));
     } finally {
       setCompiling(false);
@@ -687,8 +726,17 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       pending(null); setProduction(previous => !previous || previous.episodeId !== result.production.episodeId || result.production.revision > previous.revision ? result.production : previous); setRemoteRevision(null);
       return result.production;
     } catch (error) {
-      const rejected = error instanceof BackendApiError && error.status >= 400 && error.status < 500 && error.status !== 408;
-      const saved: PendingCommand = { ...command, status: rejected ? "rejected" : "unknown", error: error instanceof Error ? error.message : String(error),
+      // 只有「请求可能已送达但回执丢失」才需要保留恢复记录并锁提交态。
+      // 明确的终局失败（连不上服务器 status 0、4xx 除 408）直接报错，不再占用提交态。
+      const recoverable = error instanceof BackendApiError
+        ? error.status === 0 ? false : error.status === 408 || error.status === 409 || error.status >= 500
+        : true;
+      if (!recoverable) {
+        pendingCommandRef.current = null;
+        pending(null);
+        throw error;
+      }
+      const saved: PendingCommand = { ...command, status: error instanceof BackendApiError && error.status >= 400 && error.status < 500 && error.status !== 408 ? "rejected" : "unknown", error: error instanceof Error ? error.message : String(error),
         ...(error instanceof BackendApiError ? { httpStatus: error.status, errorCode: String(error.details.code || "") } : {}) };
       pending(saved);
       await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: saved, pendingRunStart } satisfies LocalDraft);
@@ -956,11 +1004,14 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       const result = await startProductionRun(target, request);
       await acceptRunStart(result.run);
     } catch (error) {
-      if (error instanceof BackendApiError && error.status >= 400 && error.status < 500) {
+      // 连不上服务器（status 0）请求根本没送达，是终局失败，必须释放启动态；
+      // 4xx（除 408）也是确定拒绝。只有 408/409/5xx 才保留原 runId 等幂等恢复。
+      const uncertain = error instanceof BackendApiError && (error.status === 408 || error.status === 409 || error.status >= 500);
+      if (!uncertain) {
         setPendingRun(null);
         pendingRunStartRef.current = null;
-        await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: commandNoticeRef.current, pendingRunStart: null } satisfies LocalDraft);
-        if (error.status === 409) void refreshRemote();
+        if (draftKey) await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: commandNoticeRef.current, pendingRunStart: null } satisfies LocalDraft);
+        if (error instanceof BackendApiError && error.status === 409) void refreshRemote();
       }
       fail(error);
     }
@@ -976,7 +1027,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       const run = existing || (await startProductionRun(target, request)).run;
       await acceptRunStart(run);
     } catch (error) {
-      if (error instanceof BackendApiError && error.status >= 400 && error.status < 500) {
+      const uncertain = error instanceof BackendApiError && (error.status === 408 || error.status === 409 || error.status >= 500);
+      if (!uncertain) {
         setPendingRun(null);
         pendingRunStartRef.current = null;
         if (draftKey) await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: commandNoticeRef.current, pendingRunStart: null } satisfies LocalDraft);

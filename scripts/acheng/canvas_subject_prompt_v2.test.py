@@ -9,7 +9,7 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 
-from canvas_subject_prompt_v2 import adapt_production, build_source_map, compile_prompt_v2, project_continuity_source, write_prompt_text
+from canvas_subject_prompt_v2 import adapt_production, build_source_map, compile_prompt_v2, entity_text, project_continuity_source, write_prompt_text, _state_start_descriptions, _render_state_end
 
 source_contract_spec = importlib.util.spec_from_file_location("canvas_source_contract", Path(__file__).with_name("source-contract.py"))
 source_contract = importlib.util.module_from_spec(source_contract_spec)
@@ -17,6 +17,22 @@ source_contract_spec.loader.exec_module(source_contract)
 
 
 class SubjectPromptV2ProjectionTest(unittest.TestCase):
+    def test_entity_descriptions_deduplicate_identical_fields_but_keep_distinct_details(self):
+        source = {"character_registry": [{"id": "CHAR_A", "name": "A", "prompt_description": "same appearance",
+                                          "appearance": "same appearance", "description": "additional acting detail"}]}
+        subject = {"entityRef": {"kind": "character", "id": "CHAR_A"}}
+        name, description = entity_text(source, subject)
+        self.assertEqual(name, "A")
+        self.assertEqual(description, "same appearance additional acting detail")
+
+    def test_missing_continuity_is_described_as_unregistered_not_verified_unchanged(self):
+        source = {"ledger": {"facts": []}}
+        shot = {"id": "SHOT_A", "subject_usages": [], "continuity_facts": []}
+        self.assertEqual(_state_start_descriptions(source, {"trajectories": {}}, shot, []),
+                         "No structured continuity facts are registered for this Shot's opening.")
+        self.assertEqual(_render_state_end(source, {"trajectories": {}}, shot, []),
+                         "No structured continuity state changes are registered for this Shot's ending.")
+
     def test_continuity_projection_uses_subject_entity_refs_without_mutating_source(self):
         source = {
             "prompt_assembly": {"version": 2},
@@ -94,8 +110,10 @@ class SubjectPromptV2ProjectionTest(unittest.TestCase):
                                   "retain": ["coop layout"], "exclude": ["people and original blocking"], "defaultFor": ["identity"]},
                 },
                 "fps_num": 24, "fps_den": 1, "brief": "A child investigates a real egg.",
-                "character_registry": [{"id": "CHILD", "name": "Child", "prompt_description": "A small child in a blue cotton shirt."}],
-                "scene_registry": [{"id": "COOP", "name": "Chicken coop", "prompt_description": "A mud-brick coop with a straw nest behind a small opening."}],
+                "character_registry": [{"id": "CHILD", "name": "Child", "prompt_description": "A small child in a blue cotton shirt.",
+                                        "appearance": "A small child in a blue cotton shirt.", "description": "A small child in a blue cotton shirt."}],
+                "scene_registry": [{"id": "COOP", "name": "Chicken coop", "prompt_description": "A mud-brick coop with a straw nest behind a small opening.",
+                                    "description": "A mud-brick coop with a straw nest behind a small opening."}],
                 "subject_registry": [
                     {"id": "CHAR", "kind": "character", "entityRef": {"kind": "character", "id": "CHILD", "ownerKind": "episode", "ownerId": "EP"}, "pictureBindings": [
                         {"id": "CHAR_IMG", "assetId": "CHAR_ASSET", "provides": ["identity"], "retain": ["face and hair"], "exclude": ["pose and background"], "defaultFor": ["identity"]}]},
@@ -206,6 +224,9 @@ class SubjectPromptV2ProjectionTest(unittest.TestCase):
                 self.assertEqual(index[0]["format_pass"], "PASSED", index[0].get("blockers"))
                 self.assertEqual(index[0]["source_map"]["segmentId"], "CLIP_1")
                 self.assertTrue(index[0]["source_map"]["entries"])
+                compiled_text = (output_path / index[0]["file"]).read_text(encoding="utf-8")
+                self.assertEqual(compiled_text.count("A small child in a blue cotton shirt."), 1)
+                self.assertEqual(compiled_text.count("A mud-brick coop with a straw nest behind a small opening."), 1)
                 draft_output = Path(directory) / "compiled-missing-image"
                 draft_index = compile_runtime(draft_source, draft_output)
                 self.assertEqual(len(draft_index), 1)

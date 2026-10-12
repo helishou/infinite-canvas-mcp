@@ -4,6 +4,7 @@ import { useCanvasHost } from "@/lib/canvas/canvas-host";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { ViewportTransform } from "@/types/canvas";
+import { shouldStartCanvasPan } from "@/lib/canvas/canvas-gesture";
 
 /** 平移/缩放时是否只做命令式 DOM 写入（跳过 React 渲染）。 */
 export type ViewportChangeOptions = { live?: boolean };
@@ -180,7 +181,8 @@ export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWrit
         const isBackgroundClick = !target?.closest("[data-node-id],[data-connection-id]");
         const temporaryTool = event.ctrlKey || isSpacePressed;
         const activeTool = temporaryTool ? (tool === "select" ? "pan" : "select") : tool;
-        const shouldPan = event.button === 1 || (event.button === 0 && activeTool === "pan" && isBackgroundClick);
+        const hitInteractiveControl = Boolean(target?.closest("button,input,textarea,select,[contenteditable='true'],video,audio,[data-canvas-node-panel],[data-resize-handle],[data-connection-handle]"));
+        const shouldPan = shouldStartCanvasPan(event.button, activeTool, hitInteractiveControl);
 
         if (shouldPan) {
             event.preventDefault();

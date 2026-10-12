@@ -32,8 +32,9 @@ export function h3ClipCacheFingerprint(input: {
     references: unknown[];
     compiledPrompt: string;
     previousFingerprint?: string;
+    styleTemplates?: unknown;
 }) {
-    const { segment, params, references, compiledPrompt, previousFingerprint } = input;
+    const { segment, params, references, compiledPrompt, previousFingerprint, styleTemplates } = input;
     const dependency = h3ClipDependsOnPrevious(segment, params) ? String(previousFingerprint || "missing") : "independent";
     const segmentInputs = Object.fromEntries([
         "confirmationMode", "latentUpscaleConfirmationMode", "motionContextEnabled", "tailFrameContinuation",
@@ -42,9 +43,9 @@ export function h3ClipCacheFingerprint(input: {
     const fingerprintParams = Object.fromEntries(Object.entries(params).filter(([key]) => !["confirmSecondPass", "postGenerationOnly", "previousVideoAsReference"].includes(key)));
     // 同一模板 ID 的正文修订也会改变生成输入，不能复用旧风格的成片。
     const styleTemplateId = segment.styleTemplateId === undefined
-        ? styleTemplateFromPrompt(compiledPrompt, String(params.mode || params.taskMode || "ref2va"))
+        ? styleTemplateFromPrompt(compiledPrompt, String(params.mode || params.taskMode || "ref2va"), styleTemplates)
         : segment.styleTemplateId;
-    const styleTemplate = styleTemplateText(styleTemplateId as string | null) || undefined;
+    const styleTemplate = styleTemplateText(styleTemplateId as string | null, styleTemplates) || undefined;
     // Older tail-frame runs replaced opening keyframes/storyboards. The appended
     // reference semantics and authoritative opening state require a new fingerprint.
     return stableH3Fingerprint({ version: segment.previousTailFrameContinuation === true ? 5 : 2, segment: segmentInputs, params: fingerprintParams, references, compiledPrompt, dependency, styleTemplate });

@@ -129,7 +129,7 @@ export const directorProductionSchema = z.object({
     // Preserve every upstream field; Canvas does not maintain a second creative compiler.
     source: z.record(z.unknown()).superRefine((source, context) => {
         if (Array.isArray(source.segments)) source.segments.forEach((segment, index) => {
-            if (segment && typeof segment === "object" && Object.hasOwn(segment, "styleTemplateId") && segment.styleTemplateId !== null && !isH3StyleTemplateId(segment.styleTemplateId)) context.addIssue({ code: "custom", path: ["segments", index, "styleTemplateId"], message: "未知 H3 风格模板，使用已登记的模板 ID 或 null" });
+            if (segment && typeof segment === "object" && Object.hasOwn(segment, "styleTemplateId") && segment.styleTemplateId !== null && !(isH3StyleTemplateId(segment.styleTemplateId) || typeof segment.styleTemplateId === "string" && /^[a-z0-9][a-z0-9-]{0,47}$/i.test(segment.styleTemplateId))) context.addIssue({ code: "custom", path: ["segments", index, "styleTemplateId"], message: "无效 H3 风格模板 ID" });
         });
         for (const issue of directorSourceV2Diagnostics(source)) context.addIssue({ code: "custom", path: issue.path, message: issue.message });
     }),

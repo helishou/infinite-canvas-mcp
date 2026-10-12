@@ -209,8 +209,8 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                     <Button size="small" type="primary" icon={<WandSparkles className="size-3.5" />} loading={compileBusy} disabled={busy || compileBusy || !clipStates.length || !onCompile} onClick={() => onCompile?.()}>{compilePending ? t("drama.production.recoverReceipt") : t("director.atomic.compileAction")}</Button>
                 </div>
             </div>
-            {compileError && <Alert type="error" showIcon message={t("director.atomic.compileFailed")} description={compileError} />}
-            {compileNotice && <Alert type="success" showIcon message={compileNotice} />}
+            {compileError && <Alert type="error" showIcon message={t("director.atomic.compileFailed")} description={compileError} style={{ whiteSpace: "pre-line" }} />}
+            {compileNotice && <Alert type="success" showIcon message={compileNotice} style={{ whiteSpace: "pre-line" }} />}
             {clipStates.length > 0 && <div className="flex flex-wrap items-center gap-1.5" aria-label={t("director.atomic.compileStatus")}>
                 <span className="mr-1 text-xs text-muted-foreground">{t("director.atomic.compileStatus")}</span>
                 {clipStates.map((item, index) => <span key={item.id} className="flex items-center gap-1.5 rounded-md border border-border px-2 py-0.5 text-xs">

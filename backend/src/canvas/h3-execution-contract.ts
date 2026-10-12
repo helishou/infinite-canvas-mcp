@@ -79,7 +79,13 @@ export function compareH3MediaSpecification(measured: { width: number; height: n
     if (measured.sampleAspectRatio && !['1:1', 'N/A', '0:1'].includes(measured.sampleAspectRatio)) issues.push('视频像素不是方形，显示画幅需要核对');
     if (ratio) {
         const [rw, rh] = ratio.split(':').map(Number);
-        if ((rw < rh && measured.width >= measured.height) || (rw > rh && measured.width <= measured.height) || Math.abs(measured.width - measured.height * rw / rh) > (dimensions?.grid || 32)) issues.push(`媒体画幅 ${measured.width}×${measured.height} 不符合 ${ratio}`);
+        // H3 dimensions are rounded up independently to the latent grid. The
+        // resulting executable dimensions can therefore differ from the ideal
+        // ratio by more than one grid (for example 7:3 -> 1376×608). Include
+        // that known quantization drift before treating the media as a mismatch.
+        const quantizationDrift = dimensions ? Math.abs(dimensions.width - dimensions.height * rw / rh) : 0;
+        const ratioTolerance = (dimensions?.grid || 32) + quantizationDrift;
+        if ((rw < rh && measured.width >= measured.height) || (rw > rh && measured.width <= measured.height) || Math.abs(measured.width - measured.height * rw / rh) > ratioTolerance) issues.push(`媒体画幅 ${measured.width}×${measured.height} 不符合 ${ratio}`);
     }
     if (dimensions && expected.rtxEnabled !== true && (!expected.dlssUpscaleMode || expected.dlssUpscaleMode === '关闭') && (Math.abs(dimensions.width - measured.width) > dimensions.grid || Math.abs(dimensions.height - measured.height) > dimensions.grid)) issues.push(`媒体尺寸不符合${second ? '二采' : '一采'}规格 ${dimensions.width}×${dimensions.height}`);
     return { status: issues.length ? 'mismatch' : 'passed', measured: { ...measured, kind: 'media-probe' }, expected: dimensions, issues };

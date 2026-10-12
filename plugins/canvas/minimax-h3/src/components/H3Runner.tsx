@@ -3,6 +3,7 @@ import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { useH3RunEvents } from "../hooks/useH3RunEvents";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { clipRuntimeState } from "../services/h3-clip-runtime";
+import { refsForSegment } from "../services/h3-data";
 import { message } from "antd";
 
 export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
@@ -52,6 +53,12 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
             if (!segments.length) throw new Error("当前节点没有可生成的 Clip");
             const selectedId = String(selected?.id || metadata.selectedSegmentId || "");
             if (!selectedId) throw new Error("当前节点没有可定位的 Clip");
+            if (selected?.audioDrive === true) {
+                const audioRefs = refsForSegment(selected).filter((ref) => ref.type === "audio" && ref.enabled !== false);
+                if (!audioRefs.some((ref) => ref.bindingId === selected.audioDriveFile)) {
+                    throw new Error(audioRefs.length ? "请先在“驱动音频”中选择当前 Clip 的参考音频" : "请先为当前 Clip 添加参考音频，再选择驱动音频");
+                }
+            }
             // The host's runCanvasGeneration path flushes the canvas before submitting this H3 command.
             if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("minimax-h3:submit-pending", { detail: { nodeId: ctx.node.id, segmentId: selectedId, pending: true } }));
             await ctx.ai.runCanvasGeneration({ mode: "video", operation: "h3-run", projectId: ctx.projectId, nodeId: ctx.node.id, segmentId: selectedId, runFromCurrent, forceRegenerate });

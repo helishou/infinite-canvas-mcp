@@ -494,6 +494,8 @@
 .nfh3-preset-actions button:disabled { cursor:not-allowed; opacity:.45; }
 @keyframes nfh3-section-in { from { opacity:0; transform:translateY(-3px); } to { opacity:1; transform:none; } }
 .nfh3-control-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.nfh3-inline-button { flex:0 0 auto; border:1px solid var(--h3-border); border-radius:5px; padding:0 10px; background:transparent; color:var(--h3-text); cursor:pointer; }
+.nfh3-inline-button:hover { border-color:var(--h3-active); background:var(--h3-hover); }
 .nfh3-control { min-width:0; min-height:54px; display:grid; grid-template-columns:minmax(58px,92px) minmax(0,1fr); align-items:center; gap:8px; padding:6px 9px; border:1px solid #34404c; border-radius:6px; background:#252c33; color:#9eafc1; font-size:18px; font-weight:800; }
 .nfh3-control > span { min-width:0; line-height:1.2; overflow-wrap:anywhere; }
 .nfh3-control[data-control="视觉风格模板"] { grid-template-columns:128px minmax(0,1fr); }

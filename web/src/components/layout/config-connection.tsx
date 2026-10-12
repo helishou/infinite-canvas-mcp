@@ -53,7 +53,7 @@ export function ConfigConnection({ active }: { active: boolean }) {
                 <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
                         <div className="flex items-center gap-2 text-sm font-semibold"><Network className="size-4" />此窗口连接</div>
-                        <p className="mt-1 text-xs text-stone-500 dark:text-stone-400">所有协作者连接同一后台，再打开同一项目。不是账号云同步；密钥拥有整个后台权限，只交给可信协作者。</p>
+                        <p className="mt-1 text-xs text-stone-500 dark:text-stone-400">所有协作者连接同一后台，可共同访问后台中的画布、素材和模型配置。</p>
                     </div>
                     <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${connected ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300" : "bg-stone-100 text-stone-500 dark:bg-stone-900 dark:text-stone-400"}`}>
                         {connected ? <CheckCircle2 className="size-3.5" /> : <CircleAlert className="size-3.5" />}
@@ -78,10 +78,10 @@ export function ConfigConnection({ active }: { active: boolean }) {
                     </div>
                     <div className="flex items-center gap-3"><Switch aria-label="允许局域网连接" checked={enabled} onChange={setEnabled} disabled={!info.canConfigure || busy} /><span className="text-sm">允许其他设备连接</span></div>
                 </div>
-                <p className="mt-4 rounded-md border border-orange-200 bg-orange-50/70 px-3 py-2 text-xs leading-5 text-orange-900 dark:border-orange-900/60 dark:bg-orange-950/20 dark:text-orange-200">默认仅本机。开启后监听所有网卡，请确认防火墙与网络可信，不要映射到公网。HTTP 传输未加密，建议使用可信 HTTPS 代理。设置保存后需重启后台，不会自动中断当前任务。</p>
+                <p className="mt-4 rounded-md border border-orange-200 bg-orange-50/70 px-3 py-2 text-xs leading-5 text-orange-900 dark:border-orange-900/60 dark:bg-orange-950/20 dark:text-orange-200">开启后，私有/链路本地网络中的设备无需密钥即可读写全部画布、素材和模型配置。请只用于可信局域网，不要映射到公网；HTTP 传输未加密。设置保存后需重启后台。</p>
                 <Form.Item label="允许的网页来源（每行一个，包含协议和端口）" className="mb-0 mt-4"><Input.TextArea aria-label="允许的网页来源" rows={3} value={origins} onChange={(event) => setOrigins(event.target.value)} disabled={!info.canConfigure || busy} placeholder="http://192.168.1.10:3001" /></Form.Item>
                 <div className="mt-4 flex flex-wrap items-center gap-2">
-                    {info.canConfigure ? <Button type="primary" disabled={busy} onClick={() => modal.confirm({ title: enabled ? "保存局域网开放设置？" : "保存仅本机设置？", content: "仅保存到后台，重启后生效。开放后持有密钥的人能访问所有画布、素材与模型配置；这不是按项目授权的邀请。", okText: "保存设置", cancelText: "取消", onOk: save })}>保存主机设置</Button> : <p className="text-xs text-stone-500 dark:text-stone-400">请在主机的 localhost 页面修改开放设置。</p>}
+                    {info.canConfigure ? <Button type="primary" disabled={busy} onClick={() => modal.confirm({ title: enabled ? "保存局域网开放设置？" : "保存仅本机设置？", content: "仅保存到后台，重启后生效。开启后，可信私有局域网内的设备无需密钥即可访问和修改全部画布、素材及模型配置；这不是按项目授权的邀请。", okText: "保存设置", cancelText: "取消", onOk: save })}>保存主机设置</Button> : <p className="text-xs text-stone-500 dark:text-stone-400">请在主机的 localhost 页面修改开放设置。</p>}
                     {info.canConfigure ? <Button type="text" size="small" icon={<Copy className="size-3.5" />} onClick={() => modal.confirm({ title: "复制后台密钥？", content: "密钥允许访问整个后台，请只通过可信渠道发送，不要放进公开链接或截图。", okText: "复制密钥", cancelText: "取消", onOk: () => copy(currentToken) })}>复制主机密钥</Button> : null}
                 </div>
                 <p className="mt-3 text-xs text-stone-500 dark:text-stone-400">实际运行：{info.current.lanEnabled ? "局域网开放" : "仅本机"}{info.restartRequired ? " · 有配置等待重启" : ""}。前端网页服务也须能被另一台设备访问；这里只配置后台。</p>
