@@ -86,17 +86,18 @@ try {
 
     const labels = await page.evaluate(async () => { const { default: i18n } = await import("/src/i18n/index.ts"); return { expand: i18n.t("canvas.expandPanel"), select: i18n.t("canvas.sidePanel.select") }; });
     if (await page.getByRole("button", { name: labels.expand, exact: true }).count()) await page.getByRole("button", { name: labels.expand, exact: true }).click();
-    await page.getByRole("button", { name: labels.select, exact: true }).click();
-    const sidebarSearch = page.getByPlaceholder("名称、类型、提示词或节点 ID", { exact: true });
+    const sidebar = page.getByRole("complementary").filter({ has: search });
+    await sidebar.getByRole("button", { name: labels.select, exact: true }).click();
+    const sidebarSearch = sidebar.getByPlaceholder("名称、类型、提示词或节点 ID", { exact: true });
     const clearFiltered = await page.evaluate(async () => (await import("/src/i18n/index.ts")).default.t("canvas.sidePanel.clearAll"));
     await sidebarSearch.fill("far");
-    await page.getByRole("button", { name: clearFiltered, exact: true }).click();
+    await sidebar.getByRole("button", { name: clearFiltered, exact: true }).click();
     await sidebarSearch.fill("");
     await page.locator('[data-canvas-node-row="a"]').click();
     await page.locator('[data-canvas-node-row="b"]').click();
     assert.equal(await page.locator('[data-canvas-node-row="a"]').getAttribute("aria-pressed"), "true");
     await sidebarSearch.fill("镜头 A");
-    await page.getByRole("button", { name: clearFiltered, exact: true }).click();
+    await sidebar.getByRole("button", { name: clearFiltered, exact: true }).click();
     await sidebarSearch.fill("");
     assert.equal(await page.locator('[data-canvas-node-row="a"]').getAttribute("aria-pressed"), "false");
     assert.equal(await page.locator('[data-canvas-node-row="b"]').getAttribute("aria-pressed"), "true");
@@ -139,7 +140,7 @@ try {
     await peer.close();
     console.log("PASS: Batch rename previews numbering, updates the other window, changes titles only, and supports one-step undo/redo");
 
-    await page.getByRole("button", { name: "完成多选", exact: true }).click();
+    await sidebar.getByRole("button", { name: "完成多选", exact: true }).click();
     await selectedActions(2).waitFor();
     await page.locator('[data-canvas-node-row="far"]').click({ modifiers: ["Control"] });
     await openBatchRename(3);
