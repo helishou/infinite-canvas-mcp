@@ -269,7 +269,7 @@ test('manual model, sampler and explicit null style override defaults without ch
 });
 
 
-test('explicit review policy waits for media approval and resumes without a second submission', async t => {
+test('generated image output continues without an approval step even under a legacy review policy', async t => {
     const f = fixture(t);
     f.data.settings.reviewPolicy = { mode: 'manual', shared: 'manual', scene: 'manual' };
     f.db.db.prepare("UPDATE episode_productions SET draft_json=? WHERE episode_id='ep'").run(JSON.stringify(f.data));
@@ -284,11 +284,9 @@ test('explicit review policy waits for media approval and resumes without a seco
     f.service.startBatch('ep', { runId: 'review', idempotencyKey: 'review', expectedRevision: 0, targets: ['asset:A'] });
     const runner = new EpisodeProductionRunner(f.service, f.stores, generation);
     await runner.runBatch('ep', 'review');
-    assert.equal(f.service.getBatch('ep', 'review')!.status, 'awaiting_review');
-    const current = f.service.get('ep'), asset = current.draft.director!.assets.A;
-    f.service.edit('ep', { operationId: 'approve', expectedRevision: current.revision, ops: [{ type: 'review_director_asset', assetId: 'A', version: 0, sourceHash: current.draft.director!.sourceHash, nodeId: 'image', storageKey: 'ref', sha256: asset.sha256!, verdict: 'approved', evidence: 'Reviewed this exact output' }] });
-    f.service.resumeBatch('ep', 'review'); await runner.runBatch('ep', 'review');
-    assert.equal(f.service.getBatch('ep', 'review')!.status, 'succeeded'); assert.equal(calls, 1);
+    assert.equal(f.service.getBatch('ep', 'review')!.status, 'succeeded');
+    assert.equal(f.service.get('ep').draft.director!.assets.A.status, 'generated');
+    assert.equal(calls, 1);
 });
 
 

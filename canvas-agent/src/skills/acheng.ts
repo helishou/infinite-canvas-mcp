@@ -221,7 +221,6 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
         }
     }
    director.sourceHash = crypto.createHash("sha256").update(canonicalProduction(director.source)).digest("hex");
-    const sourceHashForArtifacts = director.sourceHash;
     hydrateSubjectPictureSources(director, resolveReferenceFile);
    fs.writeFileSync(sourceFile, JSON.stringify(director.source), "utf8");
     const onlyAssets = !Array.isArray(director.source.segments) || !director.source.segments.length;
@@ -272,7 +271,13 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
                 const digest = crypto.createHash("sha256").update(bytes).digest("hex");
                 const asset = ref.asset_id ? director.assets[ref.asset_id] : undefined;
                 const old = prior.find(a => a.targetId === targetId && a.kind === kind)?.references.find(r => r.label === label && r.sha256 === digest);
-                const binding = asset?.nodeId && asset.storageKey && asset.sha256 === digest ? asset : old;
+                const canvasStyleAnchorId = String(director.source.style_anchor_node_id || "");
+                const canvasStyleBinding = ref.canvas_style_anchor === true && ref.role === "style"
+                    && String(ref.canvas_node_id || "") === canvasStyleAnchorId
+                    && typeof ref.canvas_storage_key === "string" && ref.canvas_storage_key
+                    ? { nodeId: canvasStyleAnchorId, storageKey: ref.canvas_storage_key, sha256: digest }
+                    : undefined;
+                const binding = asset?.nodeId && asset.storageKey && asset.sha256 === digest ? asset : canvasStyleBinding || old;
                 if (!binding?.nodeId || !binding.storageKey || ref.sha256 !== digest) {
                     diagnostics.push({ code: "MISSING_REFERENCE_BINDING", path: `artifacts.${kind}-${targetId}.references`, targetId,
                         message: `No matching Canvas media binding for ${label}`, severity: "warning", blocksCompilation: false, blockingActions: ["generate"] });
@@ -291,12 +296,18 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
                    diagnostics: { englishWords: entry.detailed_description_english_words ?? null, detailPolicy: entry.h3_detail_policy ?? null, blockers: entry.blockers || [], formatPass: entry.format_pass || null, accepted: entry.accepted ?? ready } } });
         }
     }
-   delete (director.source as Record<string, unknown>)._canvas_subject_picture_sources;
+    if (Array.isArray(director.source.asset_cards)) {
+        director.source.asset_cards = (director.source.asset_cards as Array<Record<string, any>>).map(card => ({
+            ...card,
+            references: Array.isArray(card.references) ? card.references.filter((ref: Record<string, any>) => ref.canvas_style_anchor !== true) : card.references,
+        }));
+    }
+    delete (director.source as Record<string, unknown>)._canvas_subject_picture_sources;
     delete (director.source as Record<string, unknown>)._canvas_subject_source_hash;
-    director.sourceHash = sourceHashForArtifacts;
+    director.sourceHash = crypto.createHash("sha256").update(canonicalProduction(director.source)).digest("hex");
     for (const artifact of director.artifacts) {
-        artifact.sourceHash = sourceHashForArtifacts;
-        artifact.receipt.sourceHash = sourceHashForArtifacts;
+        artifact.sourceHash = director.sourceHash;
+        artifact.receipt.sourceHash = director.sourceHash;
     }
     const audit = JSON.parse(readFile("audit.json").toString("utf8"));
     const located: ProductionDiagnostic[] = Array.isArray(audit.diagnostics) ? audit.diagnostics.filter((item: ProductionDiagnostic) => item.code === "PROMPT_EXTERNAL_CONTEXT")

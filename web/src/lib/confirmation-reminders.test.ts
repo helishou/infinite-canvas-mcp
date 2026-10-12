@@ -58,16 +58,14 @@ test("failed notification can be retried explicitly without a business-state mut
     state.controller.retry(); state.controller.update([request("approval")], true); assert.equal(state.sent.length, 2);
 });
 
-test("collector uses formal decisions and manual reviews, excluding automatic review and other threads", () => {
+test("collector uses formal decisions and excludes image review and other threads", () => {
     const context = { role: "standalone", canvasId: "canvas", owner: { kind: "canvas", id: "canvas" } } as any;
     const production = { episodeId: "canvas", revision: 1, publishedVersion: 1, draft: { settings: { mode: "manual" }, keyframes: {},
         director: { workflow: { mediaProductionMode: "per_item", pendingDecisions: [{ id: "choice", workId: "work", sourceHash: "source", status: "pending" }] }, shotInputs: {}, assets: { STYLE: { nodeId: "style", storageKey: "image:style", sha256: "media" } } } } } as any;
-    const readiness = { targets: [{ id: "asset:STYLE", targetId: "STYLE", kind: "asset", status: "needs_review", title: "Style" }] } as any;
-    const input = { context, production, readiness, threadId: "current", route: "/canvas/canvas", pendingTool: null, approvals: [{ requestId: "other", method: "approval", threadId: "other" }] };
+    const input = { context, production, threadId: "current", route: "/canvas/canvas", pendingTool: null, approvals: [{ requestId: "other", method: "approval", threadId: "other" }] };
     const items = collectConfirmationReminders(input);
-    assert.deepEqual(items.map(item => item.kind), ["decision", "review"]);
+    assert.deepEqual(items.map(item => item.kind), ["decision"]);
     assert.ok(items[0].path.includes("productionKind=canvas"), "notification must retain standalone production ownership");
-    assert.ok(items[1].path.includes("target=asset%3ASTYLE"));
     production.revision++;
     assert.deepEqual(collectConfirmationReminders(input).map(item => item.id), items.map(item => item.id));
     production.draft.director.workflow.mediaProductionMode = "automatic";
@@ -81,7 +79,7 @@ test("H3 confirmations use exact clip fingerprints and do not duplicate their ch
     const child = { id: "child", parentTaskId: "parent", projectId: "canvas", nodeId: "h3", segmentId: "clip", status: "awaiting_confirmation" } as any;
     const tasks = taskConfirmationReminders([parent, child, { ...child, id: "foreign", projectId: "another" }], "canvas");
     assert.equal(tasks.length, 1); assert.equal(tasks[0].taskId, "parent");
-    const reminders = collectConfirmationReminders({ threadId: "", route: "/canvas/canvas", pendingTool: null, approvals: [], context: null, production: null, readiness: null, taskConfirmations: tasks });
+    const reminders = collectConfirmationReminders({ threadId: "", route: "/canvas/canvas", pendingTool: null, approvals: [], context: null, production: null, taskConfirmations: tasks });
     assert.equal(reminders[0].kind, "task"); assert.equal(reminders[0].path, "/canvas/canvas?nodeId=h3&segmentId=clip");
     parent.result.confirmation.pending[0].firstPassFingerprint = "new-frame";
     assert.notEqual(taskConfirmationReminders([parent], "canvas")[0].id, tasks[0].id);

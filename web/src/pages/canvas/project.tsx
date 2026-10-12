@@ -1357,7 +1357,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             useAgentStore.getState().openPanel();
         } },
     ] : [];
-    const nodeAction = (action: "review" | "reject" | "source" | "generate" | "video") => {
+    const nodeAction = (action: "source" | "generate" | "video") => {
         if (!toolbarObject) return;
         useProductionWorkspaceStore.getState().setSelectedObject(toolbarObject);
         window.dispatchEvent(new CustomEvent("production-node-action", { detail: { owner: toolbarObject.owner, object: toolbarObject, action } }));
@@ -1365,7 +1365,6 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const productionPrimaryActions = toolbarObject ? [
         { ...productionToolbarItems[0], title: t(toolbarSharedSource ? "productionCanvas.source" : "productionCanvas.editObject"), label: t(toolbarSharedSource ? "productionCanvas.source" : "productionCanvas.editObject"), onClick: toolbarSharedSource ? () => { navigate(`/canvas/${encodeURIComponent(toolbarSharedSource.sourceProjectId)}?workspace=assets&edit=1&nodeId=${encodeURIComponent(toolbarSharedSource.sourceNodeId)}&target=asset%3A${encodeURIComponent(toolbarSharedSource.assetId)}`); useProductionWorkspaceStore.getState().setPanelTab("object"); useAgentStore.getState().openPanel(); } : productionToolbarItems[0].onClick },
         ...(toolbarObject.targetKind === "asset" || toolbarObject.targetKind === "shot" ? [
-            ...(toolbarState?.canReview && ["needs_review", "outdated"].includes(toolbarState.status) ? [{ id: "production-use", title: t("productionCanvas.useImage"), label: t("productionCanvas.useImage"), disabled: productionActionBusy, icon: <Pencil className="size-4" />, onClick: () => nodeAction("review") }] : []),
             ...(!toolbarSharedSource ? [{ id: "production-redo", title: t(toolbarNode?.metadata?.storageKey ? "productionCanvas.redo" : "productionCanvas.generateImage"), label: t(toolbarNode?.metadata?.storageKey ? "productionCanvas.redo" : "productionCanvas.generateImage"), disabled: productionActionBusy, icon: <Pencil className="size-4" />, onClick: () => nodeAction("generate") }] : []),
         ] : []),
         ...(toolbarObject.targetKind === "shot" ? [{ id: "production-video", title: t("productionCanvas.generateVideo"), label: t("productionCanvas.generateVideo"), disabled: productionActionBusy, icon: <Video className="size-4" />, onClick: () => nodeAction("video") }] : []),
@@ -1375,7 +1374,6 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         ...productionToolbarItems.slice(1),
         { id: "production-history", title: t("productionCanvas.objectHistory"), label: t("productionCanvas.objectHistory"), icon: <History className="size-4" />, onClick: () => setObjectHistory(toolbarObject) },
         { id: "production-source", title: t("productionCanvas.objectSource"), label: t("productionCanvas.objectSource"), icon: <ExternalLink className="size-4" />, onClick: toolbarSharedSource ? productionPrimaryActions![0].onClick : () => nodeAction("source") },
-        ...(toolbarState?.canReview ? [{ id: "production-reject", title: t("productionCanvas.returnImage"), label: t("productionCanvas.returnImage"), icon: <Pencil className="size-4" />, disabled: productionActionBusy, onClick: () => nodeAction("reject") }] : []),
     ] : [];
     useEffect(() => {
         const node = selectedNodeIds.size === 1 ? nodesRef.current.find(node => selectedNodeIds.has(node.id)) : undefined;
@@ -5883,8 +5881,11 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onCanvasDeselect={refPickActive || characterImagePickerActive ? undefined : deselectCanvas}
                     onCanvasDoubleClick={(event) => {
                         if (refPickActive || characterImagePickerActive) return;
+                        const position = screenToCanvas(event.clientX, event.clientY);
+                        const hitNode = nodesRef.current.some((node) => position.x >= node.position.x && position.x <= node.position.x + node.width && position.y >= node.position.y && position.y <= node.position.y + node.height);
+                        if (hitNode) { event.stopPropagation(); return; }
                         setContextMenu(null);
-                        setNodeCreatePosition(screenToCanvas(event.clientX, event.clientY));
+                        setNodeCreatePosition(position);
                     }}
                     onContextMenu={preventCanvasContextMenu}
                     onDrop={handleDrop}

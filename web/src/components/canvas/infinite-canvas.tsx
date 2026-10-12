@@ -214,7 +214,12 @@ export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWrit
 
     const handleDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
         const target = event.target instanceof Element ? event.target : null;
-        if (target?.closest("[data-canvas-no-zoom],[data-node-id],[data-connection-id]")) return;
+        const hitCanvasNode = event.nativeEvent.composedPath().some((item) => item instanceof Element && (item.hasAttribute("data-node-id") || item.hasAttribute("data-connection-id")));
+        const hitBlankCanvas = target === event.currentTarget || target === transformRef.current;
+        if (hitCanvasNode || !hitBlankCanvas) {
+            event.stopPropagation();
+            return;
+        }
         onCanvasDoubleClick?.(event);
     };
 

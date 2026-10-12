@@ -181,14 +181,16 @@ export class WorkflowModelCatalog {
 }
 
 function workflowModel(name: string, detail: WorkflowDetail): ChannelModel {
+  const textOnlyImage =
+    String(detail.config.operation || "").toLowerCase() === "text-to-image";
   return {
     name,
     capability: capabilityOf(detail),
     workflows: [detail.name],
     workflowRouting: {
       text: detail.name,
-      single: detail.name,
-      multi: detail.name,
+      single: textOnlyImage ? WORKFLOW_ROUTE_UNSUPPORTED : detail.name,
+      multi: textOnlyImage ? WORKFLOW_ROUTE_UNSUPPORTED : detail.name,
     },
   };
 }
@@ -204,6 +206,7 @@ function capabilityOf(detail: WorkflowDetail): ModelCapability {
     fieldTypes.has("audio")
   )
     return "audio";
+  if (operation === "text-to-image") return "image";
   if (/(text|chat|llm)/.test(operation)) return "text";
   return "image";
 }

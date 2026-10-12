@@ -345,6 +345,7 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
             }}
             onMouseEnter={() => onHoverStart(data.id)}
             onMouseLeave={() => onHoverEnd(data.id)}
+            onDoubleClick={(event) => event.stopPropagation()}
             onMouseDownCapture={(event) => {
                 if (event.button === 0) onSelectCapture?.(event, data.id);
             }}
@@ -472,6 +473,7 @@ type NodeContentRendererProps = {
     node: CanvasNodeData;
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     scale: number;
+    onEditEntity?: (node: CanvasNodeData) => void;
     isEditingContent: boolean;
     textareaRef: React.RefObject<HTMLDivElement | null>;
     isBatchRoot: boolean;
@@ -797,6 +799,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 setHovered(false);
                 onHoverEnd(data.id);
             }}
+            onDoubleClick={(event) => event.stopPropagation()}
             onMouseDownCapture={(event) => {
                 if (referenceSelectionState) {
                     event.stopPropagation();
@@ -913,8 +916,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                         event.stopPropagation();
                         return;
                     }
-                    // 节点内的按钮/输入控件自己消费双击：click 上的 stopPropagation 拦不住独立的 dblclick 事件，
-                    // 不判断落点会让「下载 / 创建副本 / 张数」这类工具条按钮的双击冒泡到节点，误触发预览或编辑。
+                    // 节点内的按钮/输入控件双击只由控件处理；外层节点边界会在它到达画布前拦住事件。
                     if (event.target instanceof Element && event.target.closest("button, [role='button'], input, textarea, select")) return;
                     if (data.type === CanvasNodeType.Text || (isSmartGenerationNode && smartMode === "text")) {
                         event.stopPropagation();
@@ -995,6 +997,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                         node={data}
                         theme={theme}
                         scale={scale}
+                        onEditEntity={data.type === CanvasNodeType.Character ? onEditCharacter : data.type === CanvasNodeType.Scene ? onEditScene : data.type === CanvasNodeType.Prop ? onEditProp : undefined}
                         isEditingContent={isEditingContent}
                         textareaRef={textareaRef}
                         isBatchRoot={isBatchRoot}
@@ -1424,7 +1427,28 @@ function EmptyImageContent({ theme }: NodeContentRendererProps) {
     );
 }
 
-function SceneNodeContent({ node, theme, scale }: NodeContentRendererProps) {
+function ProductionEntityPlaceholder({ icon, name, description, theme, node, onEditEntity }: { icon: ReactNode; name: string; description: string; theme: CanvasTheme; node: CanvasNodeData; onEditEntity?: (node: CanvasNodeData) => void }) {
+    const { t } = useTranslation();
+    return (
+        <div className="flex h-full w-full flex-col items-center justify-center gap-2.5 p-6 text-center" style={{ color: theme.node.text }}>
+            <div className="flex size-14 shrink-0 items-center justify-center rounded-2xl" style={{ background: theme.toolbar.activeBg, color: theme.node.placeholder }}>
+                {icon}
+            </div>
+            <span className="max-w-full truncate text-sm font-medium">{name}</span>
+            {description ? <p className="line-clamp-6 max-w-[min(100%,32rem)] text-xs leading-5" style={{ color: theme.node.muted }}>{description}</p> : null}
+            {onEditEntity ? <button type="button" className="rounded-lg border px-3 py-1.5 text-xs font-medium transition hover:bg-black/5 dark:hover:bg-white/10" style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel, color: theme.node.text }} onClick={(event) => { event.stopPropagation(); onEditEntity(node); }} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>{t("canvas.entity.addReferenceImage")}</button> : null}
+        </div>
+    );
+}
+
+function entityDescriptionText(value: unknown) {
+    if (typeof value === "string") return value.trim();
+    if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+    const record = value as Record<string, unknown>;
+    return String(record.description || record.text || "").trim();
+}
+
+function SceneNodeContent({ node, theme, scale, onEditEntity }: NodeContentRendererProps) {
     const { t } = useTranslation();
     const image = node.metadata?.sceneImage;
     const colorCard = node.metadata?.sceneColorCard;
@@ -1473,6 +1497,8 @@ function SceneNodeContent({ node, theme, scale }: NodeContentRendererProps) {
         };
     }, [backendConnected, backendToken, colorCard?.storageKey, colorCard?.url]);
 
+    if (!image?.url && !image?.storageKey && node.metadata?.productionEntity)
+        return <ProductionEntityPlaceholder icon={<MapPinned className="size-6 opacity-50" />} node={node} name={String(node.metadata.sceneName || node.title || "")} description={entityDescriptionText(node.metadata.sceneDescription)} theme={theme} onEditEntity={onEditEntity} />;
     if (!image)
         return (
             <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.placeholder }}>
@@ -1505,7 +1531,7 @@ function SceneNodeContent({ node, theme, scale }: NodeContentRendererProps) {
     );
 }
 
-function PropNodeContent({ node, theme, scale }: NodeContentRendererProps) {
+function PropNodeContent({ node, theme, scale, onEditEntity }: NodeContentRendererProps) {
     const { t } = useTranslation();
     const image = node.metadata?.propImage;
     const [imageUrl, setImageUrl] = useState("");
@@ -1521,6 +1547,7 @@ function PropNodeContent({ node, theme, scale }: NodeContentRendererProps) {
         return () => { cancelled = true; };
     }, [backendConnected, backendToken, image?.storageKey, image?.url]);
 
+    if (!image?.url && !image?.storageKey && node.metadata?.productionEntity) return <ProductionEntityPlaceholder icon={<Package className="size-6 opacity-50" />} node={node} name={String(node.metadata.propName || node.title || "")} description={entityDescriptionText(node.metadata.propDescription)} theme={theme} onEditEntity={onEditEntity} />;
     if (!image?.url && !image?.storageKey) return <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.placeholder }}><Package className="size-9 opacity-30" /><span className="text-[10px] tracking-[0.18em] opacity-50">{t("canvas.prop.noImage")}</span></div>;
     const source = imageUrl ? pickImageSource({ previewUrl: previewUrlFor(image.storageKey), originalUrl: imageUrl, naturalWidth: image.width, naturalHeight: image.height, renderedWidth: node.width, renderedHeight: node.height, scale }) : "";
     return <div className="relative h-full w-full overflow-hidden rounded-[inherit]" style={{ background: theme.node.panel }}>
@@ -1614,6 +1641,7 @@ function CharacterNodeContent(props: NodeContentRendererProps) {
     );
 
     if (!images.length) {
+        if (node.metadata?.productionEntity) return <ProductionEntityPlaceholder icon={<User className="size-6 opacity-50" />} node={node} name={String(node.metadata.characterName || node.title || "")} description={entityDescriptionText(node.metadata.characterDescription)} theme={theme} onEditEntity={props.onEditEntity} />;
         return (
             <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-4" style={{ color: theme.node.placeholder }}>
                 <div className="flex size-14 items-center justify-center rounded-2xl" style={{ background: theme.toolbar.activeBg }}>

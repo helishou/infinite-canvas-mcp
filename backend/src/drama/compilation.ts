@@ -73,6 +73,36 @@ export class ProductionCompilationService {
         return director;
     }
 
+    /** Add the selected canvas image only to this compiler copy. The authored source keeps the node ID; compiled artifacts freeze its exact media binding. */
+    private bindCanvasStyleAnchor(id: string, director: DirectorProduction) {
+        const anchor = this.service.canvasStyleAnchorInput(id, director);
+        if (!anchor) return director;
+        const plans = new Map((Array.isArray(director.source.asset_plan) ? director.source.asset_plan : [])
+            .filter(item => item && typeof item === "object").map((item: any) => [String(item.asset_id || item.id || ""), item]));
+        for (const card of (Array.isArray(director.source.asset_cards) ? director.source.asset_cards : []).filter(item => item && typeof item === "object") as Array<Record<string, any>>) {
+            const targetId = String(card.id || "");
+            if (!targetId || String(plans.get(targetId)?.kind || plans.get(targetId)?.asset_type || "").toLowerCase() === "style") continue;
+            const references = (Array.isArray(card.references) ? card.references : []).filter((ref: Record<string, any>) => ref && typeof ref === "object" && ref.canvas_style_anchor !== true);
+            const image = references.reduce((max: number, ref: Record<string, any>) => Math.max(max, Number.isInteger(Number(ref.image)) ? Number(ref.image) : 0), 0) + 1;
+            references.push({
+                image,
+                label: "CANVAS_STYLE_ANCHOR",
+                role: "style",
+                subject: "the visual rendering style",
+                preserve: "medium, linework, palette, shading, and material response",
+                exclude: "identity, pose, objects, composition, background, and exact lighting",
+                file: anchor.filePath,
+                sha256: anchor.sha256,
+                canvas_style_anchor: true,
+                canvas_node_id: anchor.nodeId,
+                canvas_storage_key: anchor.storageKey,
+            });
+            card.references = references;
+            card.reference_policy = "required";
+        }
+        return director;
+    }
+
     private jobFile(operationId: string) { return path.join(this.root, "operations", hash(operationId) + ".json"); }
     private saveJob(job: CompilationJob | CompilationAlias) {
         const file = this.jobFile(job.operationId);
@@ -111,10 +141,10 @@ export class ProductionCompilationService {
         const job = this.loadJob(entry.operationId);
         return job && !job.reusedFromOperationId && job.id === id && job.owner === owner && job.compilerInputFingerprint === fingerprint && this.reusableBlock(job) ? job : undefined;
     }
-    private effectiveInput(director: DirectorProduction, scope?: CompilationScope) {
+    private effectiveInput(id: string, director: DirectorProduction, scope?: CompilationScope) {
         const projection = scope ? compilationScopeInput(director, scope) : undefined;
         const targetIds = projection?.targetIds || this.compilationTargets(director);
-        const reusable = this.reusableArtifacts(director, targetIds);
+        const reusable = this.reusableArtifacts(id, director, targetIds);
         const pending = targetIds.filter(id => !reusable.some(artifact => artifact.targetId === id));
         const compileScope = scope && pending.length && reusable.length ? { ...scope, targetIds: pending } : scope;
         const compileProjection = compileScope === scope ? projection : compileScope ? compilationScopeInput(director, compileScope) : undefined;
@@ -178,9 +208,9 @@ export class ProductionCompilationService {
         scope = this.authoredScope(candidate || current.draft.director, scope);
         const requestHash = requestFingerprint;
         const compileInputDiagnostics: ProductionDiagnostic[] = [];
-        const director = this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director), scope?.targetIds, true, undefined, compileInputDiagnostics);
+        const director = this.bindCanvasStyleAnchor(id, this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director), scope?.targetIds, true, undefined, compileInputDiagnostics));
         if (scope && this.compiler === compileAchengDirector && !resolveAchengRuntime(director.engine.runtimeId).sourceContract?.scopedCompilation) throw new Error("SCOPED_COMPILATION_UNSUPPORTED: 当前激活引擎不支持按场次编译，请更新本机引擎");
-        const effective = this.effectiveInput(director, scope);
+        const effective = this.effectiveInput(id, director, scope);
         const boundFiles = this.service.compilationReferenceFiles(id, effective.input);
         const material = this.collectMaterial(boundFiles, effective.input);
         // Resolve relative file references (asset_plan[].file, style_lock.approved_file) to the real media path so the
@@ -244,7 +274,7 @@ export class ProductionCompilationService {
         if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
         if (!current.draft.director) throw new Error("COMPILE_STAGE_NOT_READY: 请先保存正式导演源稿");
         const compileInputDiagnostics: ProductionDiagnostic[] = [];
-        const director = this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director), scope?.targetIds, true, undefined, compileInputDiagnostics);
+        const director = this.bindCanvasStyleAnchor(id, this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director), scope?.targetIds, true, undefined, compileInputDiagnostics));
         const scoped = scope ? compilationScopeInput(director, scope) : undefined;
         const references = this.service.compilationReferenceFiles(id, scoped?.director || director);
         const compileInput = scope ? scopedCompilerInput(scoped!.director, scope) : director;
@@ -310,12 +340,18 @@ export class ProductionCompilationService {
             reportRuntimeId: continuity.report?.runtimeId || null, reportOperationId: continuity.report?.operationId || null,
             checkedAt: continuity.report?.checkedAt || null, status: continuity.status };
     }
-    private reusableArtifacts(director: DirectorProduction, targetIds: string[]) {
+    private reusableArtifacts(id: string, director: DirectorProduction, targetIds: string[]) {
+        const styleAnchor = this.service.canvasStyleAnchorInput(id, director);
+        const plan = new Map((Array.isArray(director.source.asset_plan) ? director.source.asset_plan : []).filter(item => item && typeof item === "object")
+            .map((item: any) => [String(item.asset_id || item.id || ""), item]));
         return director.artifacts.filter(artifact => targetIds.includes(artifact.targetId) && artifact.status === "ready"
             && artifact.receipt.engineRuntimeId === director.engine.runtimeId && currentCompilationArtifact(director, artifact)
             && crypto.createHash("sha256").update(artifact.prompt, "utf8").digest("hex") === artifact.sha256
             && artifact.receipt.promptHash === artifact.sha256
-            && !hasBlockingArtifactDiagnostics(artifact.receipt.diagnostics));
+            && !hasBlockingArtifactDiagnostics(artifact.receipt.diagnostics)
+            && (!styleAnchor || artifact.kind !== "image" || String(plan.get(artifact.targetId)?.kind || plan.get(artifact.targetId)?.asset_type || "").toLowerCase() === "style"
+                || artifact.references.at(-1)?.nodeId === styleAnchor.nodeId && artifact.references.at(-1)?.role === "style"
+                && artifact.references.at(-1)?.storageKey === styleAnchor.storageKey && artifact.references.at(-1)?.sha256 === styleAnchor.sha256));
     }
     private compilationTargets(director: DirectorProduction) {
         return [...new Set(["asset_plan", "asset_cards", "segments"].flatMap(field => {
@@ -332,7 +368,7 @@ export class ProductionCompilationService {
                 job.status = "running"; this.saveJob(job);
                 const directory = path.join(this.root, job.preparedId);
                 const projection = job.scope ? compilationScopeInput(job.director, job.scope) : undefined;
-                const { targetIds, reusable, input: compileInput } = this.effectiveInput(job.director, job.scope);
+                const { targetIds, reusable, input: compileInput } = this.effectiveInput(job.id, job.director, job.scope);
                 const pending = targetIds.filter(id => !reusable.some(artifact => artifact.targetId === id));
                 let compiled: ReturnType<Compiler>;
                 const cached = targetIds.length > 0 && !pending.length;
@@ -441,18 +477,18 @@ export class ProductionCompilationService {
         if (!current.draft.director) throw new Error("Missing formal director source");
         const scope = this.authoredScope(candidate || current.draft.director);
         const compileInputDiagnostics: ProductionDiagnostic[] = [];
-        const director = this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director), scope?.targetIds, true, undefined, compileInputDiagnostics);
+        const director = this.bindCanvasStyleAnchor(id, this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director), scope?.targetIds, true, undefined, compileInputDiagnostics));
         const checked = this.service.preflight(id, { action: "compile", request: { expectedRevision, director } }, this.compiler === compileAchengDirector ? director.engine.runtimeId : undefined);
         const compileBlockers = checked.diagnostics.filter(item => diagnosticForAction(item, "compile"));
         const globalCompileBlockers = compileBlockers.filter(isGlobalCompilationBlocker);
         if (globalCompileBlockers.length) throw new ProductionValidationError(globalCompileBlockers);
         compileInputDiagnostics.push(...checked.diagnostics.filter(item => !compileInputDiagnostics.some(existing => existing.code === item.code && existing.targetId === item.targetId && existing.path === item.path)));
-        const effective = this.effectiveInput(director, scope);
+        const effective = this.effectiveInput(id, director, scope);
         const boundFiles = this.service.compilationReferenceFiles(id, effective.input);
         const references = this.writePool(this.collectMaterial(boundFiles, effective.input));
         const preparedId = crypto.randomUUID();
         const directory = path.join(this.root, preparedId);
-        const targets = this.compilationTargets(director), reusable = this.reusableArtifacts(director, targets);
+        const targets = this.compilationTargets(director), reusable = this.reusableArtifacts(id, director, targets);
         const compiled: ReturnType<Compiler> = targets.length > 0 && targets.every(id => reusable.some(artifact => artifact.targetId === id))
             ? { director: structuredClone(effective.input), exitCode: 0, diagnostics: reusable.flatMap(artifact => artifact.receipt.diagnostics || []) as ReturnType<Compiler>["diagnostics"], audit: { status: "REUSED", artifactIds: reusable.map(item => item.id) }, sourceAdjustments: [], acceptance: { reused: true } }
             : this.compiler(effective.input, directory, (targetId, label) => references[`${targetId}\0${label}`], this.compiler === compileAchengDirector ? director.engine.runtimeId : undefined);

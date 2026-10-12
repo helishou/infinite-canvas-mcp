@@ -126,8 +126,15 @@ export function validateDirectorMedia(db: BackendDatabase, projectId: string, d:
                 || !asset.storageKey || !asset.sha256 || (plan.get(String(id))?.version && plan.get(String(id))?.version !== asset.version)) throw new Error(`产物 ${artifact.id} 依赖媒体未就绪或版本不一致：${id}`);
         }
         if (d.source.style_policy === "waived" && !String(d.source.style_policy_reason || "").trim()) throw new Error("风格豁免缺少用户决定与理由");
-        const styleRequired = d.source.style_policy === "required" || (plan.size > 1 && d.source.style_policy !== "waived");
-        if (artifact.kind === "image" && styleRequired && artifact.targetId !== obj(d.source.style_lock).anchor_asset_id) {
+        const styleRequired = d.source.style_policy === "required";
+        const styleAnchorNodeId = String(d.source.style_anchor_node_id || "");
+        const planKind = String(plan.get(artifact.targetId)?.kind || plan.get(artifact.targetId)?.asset_type || "").toLowerCase();
+        const isStyleAsset = artifact.kind === "image" && planKind === "style";
+        if (artifact.kind === "image" && styleAnchorNodeId && !isStyleAsset) {
+            const styleReference = artifact.references.at(-1);
+            if (styleReference?.nodeId !== styleAnchorNodeId || styleReference.role !== "style") throw new Error("所选画布风格锚点未作为末槽风格参考编译");
+        }
+        if (artifact.kind === "image" && styleRequired && !isStyleAsset && !styleAnchorNodeId && artifact.targetId !== obj(d.source.style_lock).anchor_asset_id) {
             const styleId = String(obj(d.source.style_lock).anchor_asset_id || "");
             const style = d.assets[styleId];
             if (!style || !["approved", "generated"].includes(style.status) || artifact.references.at(-1)?.storageKey !== style.storageKey || !dependencies.includes(styleId)) throw new Error("缺少有效的末槽 STYLE_MOTHER 引用");
@@ -139,8 +146,10 @@ export function validateDirectorMedia(db: BackendDatabase, projectId: string, d:
             if (!node || !keys.includes(ref.storageKey)) throw new Error(`参考不属于目标画布节点：${ref.label}`);
             const media = db.getMediaFile(ref.storageKey);
             if (!media || !fs.existsSync(media.filePath) || crypto.createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex") !== ref.sha256) throw new Error(`参考媒体字节或版本不一致：${ref.label}`);
-            if (!Object.values(d.assets).some(a => a.nodeId === ref.nodeId && a.storageKey === ref.storageKey && a.sha256 === ref.sha256
-                && ["approved", "generated"].includes(a.status) && (a.status === "generated" || Boolean(a.evidence?.trim())))) throw new Error(`参考媒体未就绪或缺少可验证归属：${ref.label}`);
+            const selectedCanvasStyleAnchor = ref.role === "style" && ref.nodeId === styleAnchorNodeId;
+            const registeredAssetBinding = Object.values(d.assets).some(a => a.nodeId === ref.nodeId && a.storageKey === ref.storageKey && a.sha256 === ref.sha256
+                && ["approved", "generated"].includes(a.status) && (a.status === "generated" || Boolean(a.evidence?.trim())));
+            if (!selectedCanvasStyleAnchor && !registeredAssetBinding) throw new Error(`参考媒体未就绪或缺少可验证归属：${ref.label}`);
         }
     }
 }

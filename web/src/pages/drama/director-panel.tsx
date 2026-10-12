@@ -34,7 +34,6 @@ export type DirectorWorkspace = "series" | "overview" | "story" | "assets" | "sh
 type CanvasNodeOption = { id: string; title?: string; type?: string; metadata?: Record<string, unknown> };
 type LegacySource = { source: "fullPlot" | "script.md" | "storyboard.md"; text: string; sha256?: string };
 type ProductionVersion = { version: number; stage: string; createdAt: string };
-export type AssetReview = { assetId: string; version: number; sourceHash: string; nodeId: string; storageKey: string; sha256: string; verdict: "approved" | "rejected"; evidence: string };
 type DirectorDecision = NonNullable<DirectorProduction["workflow"]["pendingDecisions"]>[number];
 const objectWorkspaces: Array<{ key: Exclude<DirectorWorkspace, "overview" | "advanced" | "series">; modules: Array<(typeof directorModules)[number]>; targetKinds: Array<"asset" | "keyframe" | "segment"> }> = [
   { key: "story", modules: ["story"], targetKinds: [] },
@@ -440,7 +439,7 @@ export function DirectorPanel({
   briefDraft, onBriefDraftChange, onOpenSharedAsset, onPromoteExistingSharedAsset,
   onPrepareEntities, onUpsertSubject, onDeleteSubject, onDeleteScene, onDeleteManualAsset, onCreateManualAsset, onSaveV2Shot, onRepartitionClips, onEditShot,
   compact = false, onSaveScript, generationSupported = true,
-  onBrief, onPatch, onEditCanvasClip, onAdoptDirectorFields, onAdoptClipStyle, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onReview, onPublish, onReplace, onAskDirector, onRequestContinuityUpgrade, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRestore, onRefresh, onSceneCommand, sceneCommandPending, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onPreviewContinuityUpgrade, onCheckContinuity, onContinuitySnapshot,
+  onBrief, onPatch, onEditCanvasClip, onAdoptDirectorFields, onAdoptClipStyle, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onPublish, onReplace, onAskDirector, onRequestContinuityUpgrade, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRestore, onRefresh, onSceneCommand, sceneCommandPending, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onPreviewContinuityUpgrade, onCheckContinuity, onContinuitySnapshot,
   onCompile, compileBusy = false, compilePending = false, compileError = "", compileNotice = "",
 }: {
   workspace: DirectorWorkspace; director?: DirectorProduction; production: EpisodeProduction; readiness?: ProductionReadiness; run?: ProductionBatch | null;
@@ -483,7 +482,6 @@ export function DirectorPanel({
   onPreviewContinuityUpgrade?: (ledger: Record<string, unknown>, fromSourceHash: string) => Promise<Record<string, any>>;
   onCheckContinuity?: () => Promise<void>;
   onContinuitySnapshot?: (value: "draft" | "published") => void;
-  onReview: (review: AssetReview) => Promise<boolean | void> | boolean | void;
   onPublish: () => void;
   onReplace: (value: DirectorProduction) => Promise<boolean> | void;
   onAskDirector: (scope: { workspace: DirectorWorkspace; targetId?: string; instruction?: string; brief?: string; workId?: string }) => void;
@@ -523,15 +521,13 @@ export function DirectorPanel({
   const [newAssetPrompt, setNewAssetPrompt] = useState("");
   const [newAssetPurpose, setNewAssetPurpose] = useState("");
   const [creatingAsset, setCreatingAsset] = useState(false);
-  const [selectedReviewAssetId, setSelectedReviewAssetId] = useState('');
+  const [selectedAssetId, setSelectedAssetId] = useState('');
   const [selectedSubjectId, setSelectedSubjectId] = useState('');
   const [selectedDeliveryId, setSelectedDeliveryId] = useState('');
   const [videoPreviewErrors, setVideoPreviewErrors] = useState<Record<string, string>>({});
   const [assetPreviewKeys, setAssetPreviewKeys] = useState<Record<string, string>>({});
   const [json, setJson] = useState<string | null>(null);
   const [error, setError] = useState("");
-  const [evidence, setEvidence] = useState<Record<string, string>>({});
-  const [reviewingAssets, setReviewingAssets] = useState<Record<string, boolean>>({});
   const [decisionReplies, setDecisionReplies] = useState<Record<string, string>>({});
   // 预览统一走全站唯一弹窗（MediaPreviewHost）：这里只提交请求，不再自带 Modal。
   const previewOpen = useMediaPreviewStore(state => Boolean(state.request));
@@ -546,6 +542,15 @@ export function DirectorPanel({
   const source = d?.source || {};
   const scriptScenes = Array.isArray(source.script_scenes) ? source.script_scenes.map(value => value && typeof value === "object" ? value as Record<string, any> : {}) : [];
   const assetPlan = Array.isArray(source.asset_plan) ? source.asset_plan.map(value => value && typeof value === "object" ? value as Record<string, any> : {}) : [];
+  const entityOwner = { kind: typeof subjectOwner === "string" ? "episode" : "canvas", id: typeof subjectOwner === "string" ? subjectOwner : canvasId };
+  const hasMissingEntityNode = Boolean(d && productionEntities(source, entityOwner).some(entity => !canvasNodes.some(node => productionEntityBinding(node.metadata?.productionEntity)?.entityId === entity.entityId && productionEntityBinding(node.metadata?.productionEntity)?.kind === entity.kind)));
+  const styleAnchorNodeReference = String(source.style_anchor_node_id || "");
+  const styleAnchorAssetId = styleAnchorNodeReference ? "" : String((source.style_lock as Record<string, unknown> | undefined)?.anchor_asset_id || "");
+  const styleAnchorPlan = styleAnchorAssetId ? assetPlan.find(item => String(item.asset_id || item.id || "") === styleAnchorAssetId && (String(item.role || item.asset_type || "").toUpperCase() === "STYLE_MOTHER" || String(item.kind || "").toLowerCase() === "style")) : undefined;
+  const styleAnchorNodeId = String(d?.assets[styleAnchorAssetId]?.nodeId || "");
+  const styleAnchorScope = String(styleAnchorPlan?.canvas_scope || (d?.assets[styleAnchorAssetId]?.sharedSource || canvasRole === "shared-assets" ? "shared" : "episode"));
+  const canPrepareStyleAnchor = Boolean(styleAnchorPlan && styleAnchorScope === (canvasRole === "shared-assets" ? "shared" : "episode"));
+  const hasMissingStyleAnchorNode = Boolean(canPrepareStyleAnchor && !canvasNodes.some(node => node.id === styleAnchorNodeId || String(node.metadata?.productionAssetId || "") === styleAnchorAssetId));
   const subjectAssembly = isSubjectPromptAssembly(source);
   const subjectWindows = subjectAssembly ? subjectShotWindows(source) : new Map();
   const sourceShots = Array.isArray(source.shots) ? source.shots.map(value => {
@@ -614,7 +619,7 @@ export function DirectorPanel({
       if (saved === false) return;
       setNewAssetOpen(false);
       setNewAssetName(""); setNewAssetDescription(""); setNewAssetPrompt(""); setNewAssetPurpose("");
-      setSelectedReviewAssetId(id);
+      setSelectedAssetId(id);
       message.success(t("director.crud.manualAssetAdded"));
     } catch (cause) {
       message.error(cause instanceof Error ? cause.message : String(cause));
@@ -732,9 +737,9 @@ export function DirectorPanel({
     const frame = shotId ? production.draft.keyframes[shotId] || production.published?.keyframes[shotId] : undefined;
     const review = shotId ? production.draft.keyframeReviews[shotId] || production.published?.keyframeReviews[shotId] : undefined;
     const status = shotId
-      ? review?.verdict === "approved" || review?.verdict === "auto-accepted" ? "approved" : review?.verdict === "rejected" || review?.verdict === "needs-redo" ? "rejected" : frame?.storageKey ? "generated" : mapped?.status || "planned"
-      : mapped?.status || "planned";
-    return { asset: mapped, nodeId: shotId ? frame?.nodeId || mapped?.nodeId || "" : mapped?.nodeId || "", storageKey: shotId ? frame?.storageKey || mapped?.storageKey || "" : mapped?.storageKey || "", sha256: mapped?.sha256 || "", status: mapped?.inputOutdated ? "generated" : status, inputOutdated: mapped?.inputOutdated, evidence: mapped?.evidence || review?.evidence || "" };
+      ? review?.verdict === "rejected" || review?.verdict === "needs-redo" ? "rejected" : frame?.storageKey ? "approved" : mapped?.status || "planned"
+      : mapped?.status === "generated" && mapped.storageKey ? "approved" : mapped?.status || "planned";
+    return { asset: mapped, nodeId: shotId ? frame?.nodeId || mapped?.nodeId || "" : mapped?.nodeId || "", storageKey: shotId ? frame?.storageKey || mapped?.storageKey || "" : mapped?.storageKey || "", sha256: mapped?.sha256 || "", status, inputOutdated: mapped?.inputOutdated, evidence: mapped?.evidence || review?.evidence || "" };
   };
   const deliveredClips = (production.published?.clipGroups || []).flatMap(group => {
     const node = canvasNodes.find(item => item.id === group.nodeId);
@@ -817,34 +822,6 @@ export function DirectorPanel({
     }];
   });
 
-  const submitReview = async (assetId: string, nodeId: string, storageKey: string, providedHash: string, verdict: "approved" | "rejected") => {
-    const currentAsset = d?.assets[assetId];
-    if ((!publishedDirector || !production.publishedVersion) && !currentAsset?.generationTaskId) { setError(t("productionCanvas.reviewFailed")); return; }
-    const note = evidence[assetId]?.trim() || (verdict === "approved" ? t("director.workspace.approvalEvidence") : "");
-    if (!note) { setError(t("director.workspace.reviewReasonRequired")); return; }
-    setReviewingAssets(current => ({ ...current, [assetId]: true }));
-    setError("");
-    try {
-      let sha256 = providedHash;
-      if (!sha256) {
-        const response = await fetch(backendMediaUrl(storageKey));
-        if (!response.ok) throw new Error(t("director.workspace.mediaReadFailed"));
-        const digest = await crypto.subtle.digest("SHA-256", await response.arrayBuffer());
-        sha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
-      }
-      const saved = await onReview({ assetId, version: currentAsset?.generationTaskId ? 0 : production.publishedVersion, sourceHash: currentAsset?.generationTaskId ? d!.sourceHash : publishedDirector!.sourceHash, nodeId, storageKey, sha256, verdict, evidence: note });
-      if (saved === false) {
-        const failure = t("productionCanvas.reviewFailed");
-        setError(failure); message.error(failure); return;
-      }
-      setError("");
-      message.success(t(verdict === "approved" ? "director.workspace.reviewApproved" : "director.workspace.reviewReturned"));
-    } catch (cause) {
-      const failure = cause instanceof Error ? cause.message : String(cause);
-      setError(failure); message.error(failure);
-    } finally { setReviewingAssets(current => ({ ...current, [assetId]: false })); }
-  };
-
   const assetName = (id: string) => {
     const item = assetPlan.find(item => assetIdOf(item) === id);
     const node = canvasNodes.find(node => node.id === d?.assets[id]?.nodeId);
@@ -864,9 +841,6 @@ export function DirectorPanel({
     const names = { ...nameMap, ...Object.fromEntries(allAssetIds.map(id => [id, assetName(id)])), ...Object.fromEntries(sourceShots.map(shot => [String(shot.id), shotTitle(String(shot.id))])), ...Object.fromEntries(segments.map(segment => [String(segment.id), segmentTitle(String(segment.id))])) };
     return Object.entries(names).sort(([a], [b]) => b.length - a.length).reduce((value, [id, name]) => id ? value.split(id).join(String(name)) : value, text);
   };
-  // 分镜图（关键帧素材）是否可审核：草稿或已发布的这次生成都能审。
-  const reviewableAsset = (assetId: string, media: ReturnType<typeof mediaForAsset>) => Boolean(media.nodeId && media.storageKey && media.status === "generated"
-    && (media.asset?.generationTaskId || (publishedDirector?.assets[assetId]?.nodeId === media.nodeId && publishedDirector?.assets[assetId]?.storageKey === media.storageKey && production.publishedVersion)));
   // 人物/资产名称字段：解析顺序＝显式名称(asset_name/name/title) → entity_id 关联的注册表名（权威人物/场景名，如 Lixi）→ 画布节点标题主段（兜底，格式不统一）→ 回退 asset_title。
   // 源稿 asset 条目通常不带名称字段（assetTitle 会回退到内部 id），注册表名是权威来源；节点标题只读不动。
   const assetDisplayName = (assetId: string, item?: Record<string, any>) => {
@@ -930,7 +904,6 @@ export function DirectorPanel({
     const { images: previewImages, previewKey, browsingHistory } = assetImagePreview(media.storageKey, imageNode?.metadata?.images, gallery ? assetPreviewKeys[assetId] : undefined);
     const title = keyframeShot ? `${shotTitle(keyframeShot)} · ${t("director.studio.keyframe")}` : assetName(assetId);
     const card = records(source.asset_cards).find(value => assetIdOf(value) === assetId);
-    const reviewTargetMatches = !browsingHistory && reviewableAsset(assetId, media);
     const field = item?.description !== undefined || item?.prompt === undefined ? "description" : "prompt";
     return <article key={`${assetId}:${keyframeShot || "asset"}`} data-production-target={keyframeShot ? `frame:${keyframeShot}` : `asset:${assetId}`} className={gallery ? "grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_320px]" : compact ? "grid min-w-0 items-start gap-4 md:grid-cols-[280px_minmax(0,1fr)]" : "min-w-0 overflow-hidden rounded-xl border border-border bg-card"}>
       <section className={gallery ? "flex min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-card" : "contents"}>
@@ -948,7 +921,6 @@ export function DirectorPanel({
       <div className="mt-4 flex flex-wrap gap-2">{media.storageKey && !gallery && <Button size="small" onClick={() => setMediaPreview({ assetId, title, storageKey: media.storageKey })}>{t("director.workspace.viewOriginal")}</Button>}<Button icon={<WandSparkles className="size-3" />} size="small" onClick={() => onAskDirector({ workspace: "assets", targetId: assetId, instruction: t("director.workspace.reviseAssetContract") })}>{t("director.studio.collaborate")}</Button>{!keyframeShot && item?.created_by === "manual" && <Button size="small" danger disabled={busy || Boolean(media.asset?.sharedSource)} onClick={() => deleteManualAsset(assetId)}>{t("director.workspace.deleteManualAssetAction")}</Button>}</div>
       <details className="mt-3 border-t border-border pt-3"><summary className="cursor-pointer text-xs text-muted-foreground">{t(compact ? "productionCanvas.objectDetails" : "director.studio.assetDetails")}</summary><div className="mt-3 space-y-3">{renderAssetContractFields(assetId, item, media, { description: !compact && !gallery })}</div></details>
       {media.inputOutdated && <p className="mt-2 text-xs">{t("productionCanvas.outdatedMedia")}</p>}
-      {reviewTargetMatches && <div className="mt-3 space-y-2 border-t border-border pt-3"><Input.TextArea value={evidence[assetId] ?? media.evidence} disabled={busy || Boolean(reviewingAssets[assetId])} autoSize={{ minRows: 1, maxRows: 3 }} placeholder={t("director.workspace.reviewReason")} onChange={event => setEvidence(current => ({ ...current, [assetId]: event.target.value }))} /><div className="flex flex-wrap gap-2"><Button size="small" type="primary" loading={Boolean(reviewingAssets[assetId])} disabled={busy || Boolean(reviewingAssets[assetId])} onClick={() => void submitReview(assetId, media.nodeId, media.storageKey, media.sha256, "approved")}>{t("director.workspace.approve")}</Button><Button size="small" danger loading={Boolean(reviewingAssets[assetId])} disabled={busy || Boolean(reviewingAssets[assetId])} onClick={() => void submitReview(assetId, media.nodeId, media.storageKey, media.sha256, "rejected")}>{t("director.workspace.returnAsset")}</Button></div></div>}
       </div>
     </article>;
   };
@@ -1069,10 +1041,47 @@ export function DirectorPanel({
       </div>
     </Modal>
     {error && <Alert type="error" showIcon message={error} />}
-    {d && onPrepareEntities && productionEntities(source, { kind: typeof subjectOwner === "string" ? "episode" : "canvas", id: typeof subjectOwner === "string" ? subjectOwner : canvasId }).some(entity => !canvasNodes.some(node => productionEntityBinding(node.metadata?.productionEntity)?.entityId === entity.entityId && productionEntityBinding(node.metadata?.productionEntity)?.kind === entity.kind)) && <Button size="small" disabled={busy} onClick={() => void onPrepareEntities()}>{t("director.crud.prepareEntityNodes")}</Button>}
+    {d && onPrepareEntities && (hasMissingEntityNode || hasMissingStyleAnchorNode) && <Button size="small" disabled={busy} onClick={() => void onPrepareEntities()}>{t("director.crud.prepareEntityNodes")}</Button>}
     {d && <details className="border-b border-border pb-4"><summary className="cursor-pointer text-sm text-muted-foreground">{t("director.studio.styleSettings")}</summary><section className="mt-3 grid gap-3 md:grid-cols-2">
-      <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.styleMother")}</span><Select allowClear value={String((source.style_lock as Record<string, unknown> | undefined)?.anchor_asset_id || "") || undefined} disabled={busy} placeholder={t("director.workspace.chooseStyleMother")} options={assetPlan.filter(item => String(item.role || item.asset_type || "").toUpperCase() === "STYLE_MOTHER" || String(item.kind || "").toLowerCase() === "style").map(item => ({ value: assetIdOf(item), label: assetTitle(item) }))} onChange={value => void onPatch("style", undefined, { anchor_asset_id: value || "" })} /></label>
-      <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.stylePolicy")}</span><Select value={String(source.style_policy || "required")} disabled={busy} options={[{ value: "required", label: t("director.workspace.styleRequired") }, { value: "waived", label: t("director.workspace.styleWaived") }]} onChange={value => void onPatch("style", undefined, { style_policy: value })} /></label>
+      {(() => {
+        const lock = source.style_lock as Record<string, unknown> | undefined;
+        const anchorAssetId = String(lock?.anchor_asset_id || "");
+        const anchorNodeId = String(source.style_anchor_node_id || "");
+        const value = anchorNodeId ? `node:${anchorNodeId}` : anchorAssetId ? `asset:${anchorAssetId}` : undefined;
+        const styleAssets = assetPlan.filter(item => String(item.role || item.asset_type || "").toUpperCase() === "STYLE_MOTHER" || String(item.kind || "").toLowerCase() === "style");
+        const hasArchivedImage = (node: CanvasNodeOption) => {
+          const metadata = node.metadata || {};
+          if (node.type === "image") return Boolean(metadata.storageKey);
+          if (node.type === "character") return Array.isArray(metadata.characterImages) && metadata.characterImages.some((image: Record<string, unknown>) => typeof image.storageKey === "string" && image.storageKey);
+          if (node.type === "scene") return Boolean((metadata.sceneImage as Record<string, unknown> | undefined)?.storageKey);
+          if (node.type === "prop") return Boolean((metadata.propImage as Record<string, unknown> | undefined)?.storageKey);
+          if (node.type === "config" && (metadata.generationMode || "image") === "image") {
+            return metadata.smart === true
+              ? Array.isArray(metadata.images) && metadata.images.some((image: Record<string, unknown>) => typeof image.storageKey === "string" && image.storageKey)
+              : metadata.status === "success" && typeof metadata.storageKey === "string" && Boolean(metadata.storageKey);
+          }
+          return false;
+        };
+        const styleNodes = canvasNodes.filter(hasArchivedImage);
+        const options = [
+          ...styleAssets.map(item => ({ value: `asset:${assetIdOf(item)}`, label: assetTitle(item) })),
+          ...styleNodes.map(node => ({ value: `node:${node.id}`, label: t("director.workspace.styleCanvasNode", { title: node.title || node.id }) })),
+        ];
+        return <>
+          <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.styleMother")}</span><Select allowClear value={value} disabled={busy} placeholder={t("director.workspace.chooseStyleMother")} options={options} onChange={selected => {
+            if (!selected) {
+              void onPatch("style", undefined, { anchor_asset_id: "", style_anchor_node_id: "", style_policy: "waived", style_policy_reason: t("director.workspace.styleUnboundReason") });
+            } else if (selected.startsWith("node:")) {
+              const nodeId = selected.slice("node:".length);
+              const node = styleNodes.find(item => item.id === nodeId);
+              void onPatch("style", undefined, { anchor_asset_id: "", style_anchor_node_id: nodeId, style_policy: "waived", style_policy_reason: t("director.workspace.styleCanvasNodeReason", { title: node?.title || nodeId }) });
+            } else {
+              void onPatch("style", undefined, { anchor_asset_id: selected.slice("asset:".length), style_anchor_node_id: "", style_policy: "required", style_policy_reason: "" });
+            }
+          }} /></label>
+          <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.stylePolicy")}</span><Select value={String(source.style_policy || "") || undefined} placeholder={t("director.workspace.styleOptional")} disabled={busy || Boolean(anchorNodeId)} options={[{ value: "required", label: t("director.workspace.styleRequired") }, { value: "waived", label: t("director.workspace.styleWaived") }]} onChange={value => void onPatch("style", undefined, { style_policy: value, style_policy_reason: value === "waived" ? String(source.style_policy_reason || "") : "" })} /></label>
+        </>;
+      })()}
       {source.style_policy === "waived" && <label className="grid gap-1 text-sm md:col-span-2"><span>{t("director.workspace.styleWaiverReason")}</span><SourceField value={source.style_policy_reason || ""} draftValue={sourceDrafts["style:style_policy_reason"]} onDraftChange={value => onSourceDraftChange("style:style_policy_reason", value)} multiline rows={2} disabled={busy} onCommit={value => onPatch("style", undefined, { style_policy_reason: value })} /></label>}
 
     </section></details>}
@@ -1133,12 +1142,11 @@ export function DirectorPanel({
       })}</div></div>
       {!records(source.subject_registry).length && <Alert type="info" message={t("director.workspace.subjectsEmpty")} />}
     </section> : allAssetIds.length ? (() => {
-      // 分镜图（关键帧素材）归分镜工作台，资产页审核队列不再收。
+      // 分镜关键帧归分镜工作台；这里展示普通制作资产。
       const visibleAssetIds = allAssetIds.filter(id => !keyframeAssetIds.has(id) && (!embedded || !focusTarget?.startsWith("asset:") || id === focusedId) && (assetFilter === "all" || assetCategory(id) === assetFilter) && assetName(id).toLowerCase().includes(assetSearch.toLowerCase()));
       const shotForAsset = (id: string) => Object.entries(d.shotInputs).find(([, input]) => input.keyframeAssetId === id)?.[0];
-      const isPendingReview = (id: string) => mediaForAsset(id, shotForAsset(id)).status === "generated";
-      const orderedAssetIds = [...visibleAssetIds].sort((a, b) => Number(isPendingReview(b)) - Number(isPendingReview(a)) || visibleAssetIds.indexOf(a) - visibleAssetIds.indexOf(b));
-      const activeAssetId = orderedAssetIds.includes(selectedReviewAssetId) ? selectedReviewAssetId : orderedAssetIds.find(isPendingReview) || orderedAssetIds[0];
+      const orderedAssetIds = visibleAssetIds;
+      const activeAssetId = orderedAssetIds.includes(selectedAssetId) ? selectedAssetId : orderedAssetIds[0];
       const activeShotId = activeAssetId ? shotForAsset(activeAssetId) : undefined;
       if (embedded && focusTarget?.startsWith("asset:") && activeAssetId) return renderAssetCard(activeAssetId, assetPlan.find(value => assetIdOf(value) === activeAssetId), activeShotId);
       return <div className="grid min-h-[28rem] items-start gap-4 lg:grid-cols-[220px_minmax(0,1fr)]">
@@ -1149,7 +1157,7 @@ export function DirectorPanel({
               const shotId = shotForAsset(assetId);
               const media = mediaForAsset(assetId, shotId);
               const active = assetId === activeAssetId;
-              return <button key={assetId} type="button" aria-current={active ? "true" : undefined} onClick={() => setSelectedReviewAssetId(assetId)} className={`flex w-full items-center gap-2 border-b border-border px-3 py-3 text-left last:border-b-0 ${active ? "bg-muted/60" : "hover:bg-muted/30"}`}>
+              return <button key={assetId} type="button" aria-current={active ? "true" : undefined} onClick={() => setSelectedAssetId(assetId)} className={`flex w-full items-center gap-2 border-b border-border px-3 py-3 text-left last:border-b-0 ${active ? "bg-muted/60" : "hover:bg-muted/30"}`}>
                 <span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded border border-border">{media.storageKey ? <img className="h-full w-full object-contain" src={backendMediaUrl(media.storageKey)} alt="" loading="lazy" /> : <ImageIcon className="size-4 text-muted-foreground" />}</span><span className="min-w-0 flex-1"><strong className="block truncate text-sm font-medium" title={assetName(assetId)}>{shotId ? `${shotTitle(shotId)} · ${t("director.studio.keyframe")}` : assetName(assetId)}</strong><span className="mt-1 block truncate text-xs text-muted-foreground">{t(`director.studio.filter.${assetCategory(assetId)}`)}</span></span>
                 <Tag className="shrink-0" color={media.status === "generated" ? "blue" : media.status === "approved" ? "green" : media.status === "rejected" ? "red" : undefined}>{t(`director.workspace.assetStatus.${media.status}`)}</Tag>
               </button>;
@@ -1157,13 +1165,13 @@ export function DirectorPanel({
             {!orderedAssetIds.length && <p className="p-5 text-sm text-muted-foreground">{t("director.studio.emptySearch")}</p>}
           </div>
         </nav>
-        <div className="min-w-0">{activeAssetId ? renderAssetCard(activeAssetId, assetPlan.find(value => assetIdOf(value) === activeAssetId), activeShotId, { gallery: true }) : <div className="flex h-full items-center justify-center rounded-xl border border-border bg-card p-8 text-sm text-muted-foreground">{t("director.workspace.noPendingReviews")}</div>}</div>
+        <div className="min-w-0">{activeAssetId ? renderAssetCard(activeAssetId, assetPlan.find(value => assetIdOf(value) === activeAssetId), activeShotId, { gallery: true }) : <div className="flex h-full items-center justify-center rounded-xl border border-border bg-card p-8 text-sm text-muted-foreground">{t("director.workspace.noAssets")}</div>}</div>
       </div>;
     })() : <Alert type="info" message={t("director.workspace.noAssets")} description={t("director.workspace.noAssetsHint")} />}
     {d && allAssetIds.length > 0 && !allAssetIds.some(id => (assetFilter === "all" || assetCategory(id) === assetFilter) && assetName(id).toLowerCase().includes(assetSearch.toLowerCase())) && <p className="py-12 text-center text-sm text-muted-foreground">{t("director.studio.emptySearch")}</p>}
   </div>;
 
-  // 分镜图跟随镜头，但只占一小条：缩略图 + 状态 + 审核；点缩略图看大图，合同编辑收进「详情」。
+  // 分镜图跟随镜头，但只占一小条：缩略图 + 状态；合同编辑收进「详情」。
   const renderShotKeyframe = (shotId: string) => {
     const assetId = d?.shotInputs[shotId]?.keyframeAssetId;
     const media = assetId ? mediaForAsset(assetId, shotId) : undefined;
@@ -1171,7 +1179,6 @@ export function DirectorPanel({
     if (!storageKey) return null;
     const title = `${shotTitle(shotId)} · ${t("director.studio.keyframe")}`;
     const openPreview = () => setMediaPreview({ assetId: assetId || "", title, storageKey });
-    const pendingReview = Boolean(assetId && media && reviewableAsset(assetId, media));
     return <section data-production-target={`frame:${shotId}`} className="rounded-lg border border-border bg-card">
       <div className="flex flex-wrap items-center gap-3 px-3 py-2">
         <button type="button" onClick={openPreview} title={title} aria-label={t("director.studio.previewAsset", { title })} className="h-[54px] w-[96px] shrink-0 overflow-hidden rounded border border-border bg-muted/30">
@@ -1184,11 +1191,6 @@ export function DirectorPanel({
         {/* 跳画布：直接定位到这张分镜图所在的画布节点（缩略图仍可点开大图预览）。 */}
         {media?.nodeId && <ReferenceNodeLink sourceNode={{ projectId: media.asset?.sharedSource?.sourceProjectId || canvasId, nodeId: media.nodeId }} />}
       </div>
-      {pendingReview && assetId && media && <div className="flex flex-wrap items-center gap-2 border-t border-border px-3 py-2">
-        <Input size="small" className="min-w-40 flex-1" value={evidence[assetId] ?? media.evidence} disabled={busy || Boolean(reviewingAssets[assetId])} placeholder={t("director.workspace.reviewReason")} onChange={event => setEvidence(current => ({ ...current, [assetId]: event.target.value }))} />
-        <Button size="small" type="primary" loading={Boolean(reviewingAssets[assetId])} disabled={busy || Boolean(reviewingAssets[assetId])} onClick={() => void submitReview(assetId, media.nodeId, media.storageKey, media.sha256, "approved")}>{t("director.workspace.approve")}</Button>
-        <Button size="small" danger loading={Boolean(reviewingAssets[assetId])} disabled={busy || Boolean(reviewingAssets[assetId])} onClick={() => void submitReview(assetId, media.nodeId, media.storageKey, media.sha256, "rejected")}>{t("director.workspace.returnAsset")}</Button>
-      </div>}
       {assetId && media && <details className="border-t border-border px-3 py-2"><summary className="cursor-pointer text-[11px] text-muted-foreground">{t("director.studio.keyframeDetails")}</summary><div className="mt-3 space-y-3">{renderAssetContractFields(assetId, assetPlan.find(item => assetIdOf(item) === assetId), media, { description: true })}</div></details>}
     </section>;
   };

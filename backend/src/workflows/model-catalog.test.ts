@@ -78,6 +78,60 @@ test("现有工作流一次性转换为本地模型并推断能力", async () =>
   );
 });
 
+test("文生图工作流进入图片模型目录且拒绝参考图路由", async () => {
+  const values = new Map<string, unknown>([["ai.config", { channels: [] }]]);
+  const detail = {
+    name: "MiniMax_H3_T2I.json",
+    workflow: {},
+    builtin: true,
+    config: {
+      title: "MiniMax H3 文生图",
+      backend: "comfyui",
+      operation: "text-to-image",
+      description: "",
+      fields: [
+        { id: "prompt", node: "5", input: "value", name: "画面描述", type: "text" },
+      ],
+    },
+  };
+  const catalog = new WorkflowModelCatalog(
+    {
+      list: async () => [
+        { name: detail.name, title: detail.config.title, builtin: true, fieldCount: 1 },
+      ],
+      get: async () => detail,
+    } as never,
+    {
+      get: (key) => values.get(key),
+      set: (key, value) => void values.set(key, structuredClone(value)),
+    },
+  );
+
+  const result = await catalog.syncStoredConfig();
+  const config = values.get("ai.config");
+  const model = (config as { channels: Array<{ kind: string; models: Array<Record<string, unknown>> }> })
+    .channels.find((channel) => channel.kind === "comfyui")!.models[0];
+
+  assert.deepEqual(result.added, ["MiniMax H3 文生图"]);
+  assert.equal(model.capability, "image");
+  assert.deepEqual(model.workflowRouting, {
+    text: detail.name,
+    single: "__unsupported__",
+    multi: "__unsupported__",
+  });
+  assert.deepEqual(resolveWorkflowForModel(config, model.name as string, 0), {
+    ok: true,
+    workflow: detail.name,
+    scenario: "text",
+    channelId: "local-comfyui",
+    params: {},
+  });
+  assert.equal(
+    resolveWorkflowForModel(config, model.name as string, 1).reason,
+    "unsupported",
+  );
+});
+
 test("已处理工作流不会在用户删除模型后被重新暴露", async () => {
   const { values, catalog } = fixtures();
   await catalog.syncStoredConfig();

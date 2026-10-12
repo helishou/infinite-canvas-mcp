@@ -71,7 +71,7 @@ export function productionObjectPath(object: ProductionObject) {
     return `/canvas/${encodeURIComponent(object.canvasId)}?${query}`;
 }
 
-/** Review state belongs to the formal record; H3 runtime state belongs to the selected Clip. */
+/** Unchanged generated image media is accepted; H3 runtime state belongs to the selected Clip. */
 export function productionObjectState(production: EpisodeProduction, object: ProductionObject, node: { metadata?: Record<string, unknown> }) {
     const director = production.draft.director;
     const assetId = object.targetKind === "shot" ? director?.shotInputs[object.targetId || ""]?.keyframeAssetId : object.targetId;
@@ -85,13 +85,10 @@ export function productionObjectState(production: EpisodeProduction, object: Pro
     const failed = ["error", "failed"].includes(String(runtime?.status));
     const storageKey = object.targetKind === "segment" ? runtime?.resultStorageKey : frame?.storageKey || asset?.storageKey;
     const verdict = review?.verdict;
-    const status = working ? "working" : failed ? "failed" : asset?.inputOutdated || group?.inputOutdated ? "outdated" : verdict === "approved" || verdict === "auto-accepted" ? "approved" : verdict === "rejected" || verdict === "needs-redo" ? "rejected" : asset?.status === "approved" ? "approved" : asset?.status === "rejected" ? "rejected" : storageKey ? object.targetKind === "segment" ? "complete" : "needs_review" : "planned";
-    const publishedAsset = assetId ? production.published?.director?.assets[assetId] : undefined;
-    const publishedFrame = object.targetKind === "shot" ? production.published?.keyframes[object.targetId || ""] : undefined;
-    const canReview = Boolean(!working && !asset?.sharedSource && assetId && production.publishedVersion && storageKey && storageKey === node.metadata?.storageKey && storageKey === (publishedFrame?.storageKey || publishedAsset?.storageKey) && object.nodeId === (publishedFrame?.nodeId || publishedAsset?.nodeId));
-    return { status, working, canReview, assetId, storageKey };
+    const status = working ? "working" : failed ? "failed" : asset?.inputOutdated || group?.inputOutdated ? "outdated" : verdict === "rejected" || verdict === "needs-redo" ? "rejected" : asset?.status === "rejected" ? "rejected" : verdict === "approved" || verdict === "auto-accepted" || asset?.status === "approved" || Boolean(storageKey && object.targetKind !== "segment") ? "approved" : storageKey ? "complete" : "planned";
+    return { status, working, assetId, storageKey };
 }
 
 export function productionObjectPrompt(object: ProductionObject) {
-    return `【当前画布制作对象】\n制作归属：${object.owner.kind}:${object.owner.id}\n画布：${object.canvasId}\n对象：${object.targetKind || "production"}:${object.targetId || ""}（${object.title}）\n${object.nodeId ? `节点：${object.nodeId}\n` : ""}${object.segmentId ? `H3 Clip：${object.segmentId}\n` : ""}本条用户请求关联上述对象。先核验正式制作记录及节点／Clip 映射，再按用户要求处理；参考选择、生成和审核沿用正式制作链路。`;
+    return `【当前画布制作对象】\n制作归属：${object.owner.kind}:${object.owner.id}\n画布：${object.canvasId}\n对象：${object.targetKind || "production"}:${object.targetId || ""}（${object.title}）\n${object.nodeId ? `节点：${object.nodeId}\n` : ""}${object.segmentId ? `H3 Clip：${object.segmentId}\n` : ""}本条用户请求关联上述对象。先核验正式制作记录及节点／Clip 映射，再按用户要求处理；参考选择和生成沿用正式制作链路。`;
 }

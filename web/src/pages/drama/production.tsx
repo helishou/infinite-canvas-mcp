@@ -37,7 +37,7 @@ import {
   previewProductionSharedAssetPromotion, promoteExistingProductionSharedAsset,
   backendMediaUrl, startCanvasGeneration, fetchBackendTasks, type BackendRuntimeTask,
 } from "@/services/backend-api";
-import { DirectorPanel, type DirectorWorkspace, type AssetReview } from "./director-panel";
+import { DirectorPanel, type DirectorWorkspace } from "./director-panel";
 import { DramaManagePanel } from "./manage-panel";
 import "./production.css";
 import { registerProductionPromptEditor, registerProductionStoryboardEditor, sourceSegmentForCanvasClip, buildDirectorClipStoryboardOperation } from "@/lib/canvas/production-editing";
@@ -1071,18 +1071,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     catch (error) { fail(error); }
   };
 
-  const reviewAsset = async (review: AssetReview) => {
-    const saved = await edit([{ type: "review_director_asset", ...review }]);
-    const automaticRun = batches.find(batch => {
-      const workflow = batch.settings.workflow as Record<string, unknown> | undefined;
-      return batch.status === "awaiting_review" && workflow?.runScope === "all_ready" && workflow.mediaProductionMode === "automatic";
-    });
-    if (saved && review.verdict === "approved" && automaticRun) await resumeRun(automaticRun.runId);
-    return saved;
-  };
   const bindAsset = async (assetId: string, nodeId: string) => edit([{ type: "bind_director_asset", assetId, nodeId }]);
-  const reviewAssetRef = useRef(reviewAsset);
-  reviewAssetRef.current = reviewAsset;
   const selectHistoryResult = async (object: ProductionObject, generationLogId: string, storageKey: string, canvasRevision: number) => {
     const saved = await edit([{ type: "select_director_result", targetKind: object.targetKind === "segment" ? "segment" : object.targetKind === "shot" ? "keyframe" : "asset", targetId: object.targetId!, nodeId: object.nodeId!, generationLogId, storageKey, canvasRevision }]);
     if (!saved) return false;
@@ -1098,7 +1087,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   useEffect(() => {
     if (!owner || !production || !embedded) return;
     const receive = (event: Event) => {
-      const detail = (event as CustomEvent<{ owner: NonNullable<ProductionCanvasContext["owner"]>; object: ProductionObject; action: "review" | "reject" | "source" | "generate" | "video" | "select-result"; history?: { generationLogId: string; storageKey: string; mimeType: string } }>).detail;
+      const detail = (event as CustomEvent<{ owner: NonNullable<ProductionCanvasContext["owner"]>; object: ProductionObject; action: "source" | "generate" | "video" | "select-result"; history?: { generationLogId: string; storageKey: string; mimeType: string } }>).detail;
       if (!detail || detail.owner.kind !== owner.kind || detail.owner.id !== owner.id || nodeActionInFlight.current) return;
       const object = detail.object;
       const open = (value: ProductionObject) => { navigate(productionObjectPath(value)); useProductionWorkspaceStore.getState().setSelectedObject(value); useProductionWorkspaceStore.getState().setPanelTab("object"); useAgentStore.getState().openPanel(); };
@@ -1127,27 +1116,6 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
           }
           if (pendingCommandRef.current) throw new Error(pendingCommandMessage(pendingCommandRef.current));
           if (busy) throw new Error(t("drama.production.commandInProgress"));
-          if (detail.action === "review" || detail.action === "reject") {
-            const published = production.published?.director;
-            const mapped = assetId ? published?.assets[assetId] : undefined;
-            const frame = object.targetKind === "shot" ? production.published?.keyframes[object.targetId || ""] : undefined;
-            const storageKey = frame?.storageKey || mapped && mapped.storageKey;
-            const node = useCanvasStore.getState().projects.find(project => project.id === canvasId)?.nodes.find(node => node.id === object.nodeId);
-            if (!assetId || !published || !production.publishedVersion || !storageKey || (frame?.nodeId || mapped && mapped.nodeId) !== object.nodeId || node?.metadata?.storageKey !== storageKey) { open(object); return; }
-            const bytes = await fetch(backendMediaUrl(storageKey)).then(response => { if (!response.ok) throw new Error(t("director.workspace.mediaReadFailed")); return response.arrayBuffer(); });
-            const hash = await crypto.subtle.digest("SHA-256", bytes);
-            const sha256 = Array.from(new Uint8Array(hash)).map(value => value.toString(16).padStart(2, "0")).join("");
-            if (useProductionWorkspaceStore.getState().context?.canvasId !== canvasId) return;
-            const rejecting = detail.action === "reject";
-            let viewed = false, reason = "";
-            const updateReviewButton = () => confirmation.update({ okButtonProps: { disabled: !viewed || rejecting && !reason.trim(), danger: rejecting } });
-            const confirmation = modal.confirm({ title: t(rejecting ? "productionCanvas.confirmReturn" : "productionCanvas.confirmImage"), content: <div className="space-y-4"><img src={backendMediaUrl(storageKey)} alt={object.title} className="mx-auto max-h-[45dvh] max-w-full object-contain" onLoad={() => { viewed = true; updateReviewButton(); }} onError={() => message.error(t("director.workspace.mediaReadFailed"))} />{rejecting && <Input.TextArea aria-label={t("productionCanvas.returnReason")} placeholder={t("productionCanvas.returnReason")} autoSize={{ minRows: 2, maxRows: 5 }} onChange={event => { reason = event.target.value; updateReviewButton(); }} />}</div>, width: 720, okText: t(rejecting ? "productionCanvas.returnImage" : "productionCanvas.useImage"), okButtonProps: { disabled: true, danger: rejecting }, cancelText: t("common.cancel"), onOk: async () => {
-              if (useProductionWorkspaceStore.getState().context?.canvasId !== canvasId) throw new Error(t("productionCanvas.targetUnavailable"));
-              if (!viewed || rejecting && !reason.trim()) throw new Error(t("director.workspace.reviewReasonRequired"));
-              if (!await reviewAssetRef.current({ assetId, version: production.publishedVersion, sourceHash: published.sourceHash, nodeId: object.nodeId!, storageKey, sha256, verdict: rejecting ? "rejected" : "approved", evidence: rejecting ? reason.trim() : t("productionCanvas.reviewEvidence") })) throw new Error(t("productionCanvas.reviewFailed"));
-            } });
-            return;
-          }
           if (detail.action === "video") {
             const groups = production.draft.clipGroups.filter(group => group.shotIds.includes(object.targetId || ""));
             if (groups.length !== 1) { open({ ...object, workspace: "production" }); message.info(t("productionCanvas.chooseClip")); return; }
@@ -1473,14 +1441,26 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
                 setBusy(true);
                 try {
                   const entityOwner = owner || { kind: projectId ? "canvas" as const : "episode" as const, id: projectId || episodeId! };
-                  const targets = productionEntities(production.draft.director.source, entityOwner).map(entity => `entity:${entity.kind}:${entity.entityId}`);
+                  const source = production.draft.director.source;
+                  const targets = productionEntities(source, entityOwner).map(entity => `entity:${entity.kind}:${entity.entityId}`);
+                  const styleLock = source.style_lock as Record<string, unknown> | undefined;
+                  const styleAnchorNodeReference = String(source.style_anchor_node_id || "");
+                  const styleAnchorAssetId = styleAnchorNodeReference ? "" : String(styleLock?.anchor_asset_id || "");
+                  const styleAnchorPlan = styleAnchorAssetId ? (Array.isArray(source.asset_plan) ? source.asset_plan : []).map(value => {
+                    const asset = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+                    return asset;
+                  }).find(asset => String(asset.asset_id || asset.id || "") === styleAnchorAssetId
+                    && (String(asset.role || asset.asset_type || "").toUpperCase() === "STYLE_MOTHER" || String(asset.kind || "").toLowerCase() === "style")) : undefined;
+                  const styleAsset = production.draft.director.assets[styleAnchorAssetId];
+                  const styleAnchorScope = String(styleAnchorPlan?.canvas_scope || (styleAsset?.sharedSource || productionContext?.role === "shared-assets" ? "shared" : "episode"));
+                  if (styleAnchorPlan && styleAnchorScope === (productionContext?.role === "shared-assets" ? "shared" : "episode")) targets.push(`asset:${styleAnchorAssetId}`);
                   if (targets.length) await sendCommand({ kind: "prepare", targets, operationId: nanoid(), expectedRevision: production.revision, status: "unknown" });
                   await refreshRemote();
                 } catch (cause) { fail(cause); } finally { setBusy(false); }
               }}
               onUpsertSubject={upsertSubject} onDeleteSubject={deleteSubject} onDeleteScene={deleteScene} onDeleteManualAsset={deleteManualAsset} onCreateManualAsset={createManualAsset} onSaveV2Shot={saveV2Shot} onRepartitionClips={repartitionV2} onEditShot={editV2Shot}
               onOpenSharedAsset={(assetId, title) => void openSharedAsset(assetId, title).catch(fail)} onPromoteExistingSharedAsset={(assetId, title) => void promoteExistingSharedAsset(assetId, title).catch(fail)}
-              onBoundary={setBoundary} onReview={reviewAsset} onPublish={() => void publish()} onSaveContinuity={saveContinuity} onPreviewContinuityUpgrade={previewContinuityUpgrade} onCheckContinuity={checkContinuity} onContinuitySnapshot={changeContinuitySnapshot}
+              onBoundary={setBoundary} onPublish={() => void publish()} onSaveContinuity={saveContinuity} onPreviewContinuityUpgrade={previewContinuityUpgrade} onCheckContinuity={checkContinuity} onContinuitySnapshot={changeContinuitySnapshot}
               onReplace={value => void replaceDirector(value)} onAskDirector={scope => void askDirector(scope)} onRequestContinuityUpgrade={requestContinuityUpgradeFromAgent} onNavigate={navigateWorkspace}
               onCompile={() => void runProductionCompile()} compileBusy={compiling} compilePending={Boolean(pendingCompilation)} compileError={compileError} compileNotice={compileNotice}
               onLocateTarget={(kind, id) => {

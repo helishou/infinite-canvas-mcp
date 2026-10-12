@@ -4,7 +4,7 @@ import { inputHash, type CanvasExecutionTarget } from "./canvas-inputs.js";
 import { createH3NodeMetadata } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { H3_DEFAULTS_KEY } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
-import { canonicalProduction, productionEntities, isSubjectPromptAssembly, productionSceneEntries, productionImageModel, resolveDirectorReviewPolicy, type ProductionLayoutPlan, type ProductionLayoutUnit, type ProductionLayoutReceipt } from "@basketikun/canvas-agent/drama/production-contract";
+import { canonicalProduction, productionEntities, isSubjectPromptAssembly, productionSceneEntries, productionImageModel, type ProductionLayoutPlan, type ProductionLayoutUnit, type ProductionLayoutReceipt } from "@basketikun/canvas-agent/drama/production-contract";
 
 import type { CanvasGenerationService } from "../canvas/generation-service.js";
 import { resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
@@ -661,15 +661,6 @@ export class EpisodeProductionRunner {
             else await finish();
         }
         await this.finishIndependent(frameCompletions);
-        const latest = this.service.version(episodeId, version).snapshot;
-        const reviewRequired = resolveDirectorReviewPolicy(run.settings?.reviewPolicy as any).mode !== "none";
-        const rejected = reviewRequired ? run.plan.imageShotIds.find((shotId) => ["needs-redo", "rejected"].includes(latest.keyframeReviews[shotId]?.verdict || "")) : undefined;
-        if (rejected) throw new Error(`镜头 ${rejected} 的关键帧自检要求返修；未提交后续 H3`);
-        const unreviewed = reviewRequired ? run.plan.imageShotIds.filter((shotId) => !["auto-accepted", "approved"].includes(latest.keyframeReviews[shotId]?.verdict || "") || latest.keyframeReviews[shotId]?.sourceVersion !== version) : [];
-        if (unreviewed.length) {
-            this.service.updateRun({ ...run, status: "awaiting_review", error: `等待 Agent 查看关键帧并记录视觉自检：${unreviewed.join(", ")}` });
-            return;
-        }
         if (!run.runId && snapshot.clipGroups.some(g => !snapshot.director!.artifacts.some(a => a.kind === "h3" && a.targetId === g.id && a.status === "ready"))) {
             this.service.updateRun({ ...run, status: "awaiting_review", error: "等待 Acheng 完成当前素材版本的 H3 编译" });
             return;
@@ -782,12 +773,6 @@ export class EpisodeProductionRunner {
                 const media = [...task.outputs, ...(Array.isArray(task.result?.media) ? task.result.media as Record<string, unknown>[] : [])];
                 const output = media.find(output => output.storageKey);
                 if (!output) throw new Error(`前置任务缺少归档结果：${task.id}`);
-                if (resolveDirectorReviewPolicy(run.settings?.reviewPolicy as any).mode !== "none") {
-                    const data = this.service.get(run.episodeId).draft;
-                    const assetId = preceding.id.startsWith("frame:") ? data.director?.shotInputs[preceding.id.slice(6)]?.keyframeAssetId : preceding.id.slice(6);
-                    const asset = assetId && data.director?.assets[assetId];
-                    if (!asset || asset.status !== "approved" || asset.storageKey !== output.storageKey) throw Object.assign(new Error(`等待已启用的素材审核：${preceding.id}`), { code: "AWAITING_REVIEW" });
-                }
                 const latest = this.service.resolveCanvasDependency(run.episodeId, run.runId!, member.id, dependency.nodeId, task.id, String(output.storageKey));
                 Object.assign(snapshot, latest);
                 Object.assign(member, snapshot.targets.find(item => item.id === member.id));
@@ -829,13 +814,11 @@ export class EpisodeProductionRunner {
                 if (inFlight.get(target.id) === execution) inFlight.delete(target.id);
             });
         };
-        let awaitingReview = false;
         let pauseError: unknown;
         const settleTarget = async (target: CanvasExecutionTarget) => {
             try { await work(target); }
             catch (error) {
                 if (this.service.batchPauseRequested(run.episodeId, run.runId!)) { pauseError ||= error; return; }
-                awaitingReview ||= (error as any).code === "AWAITING_REVIEW";
                 failures.set(target.id, (error as Error).message);
                 done.add(target.id);
             }
@@ -849,16 +832,7 @@ export class EpisodeProductionRunner {
         })();
         await Promise.all([imageWork, videoWork]);
         if (pauseError) throw pauseError;
-        if (resolveDirectorReviewPolicy(run.settings?.reviewPolicy as any).mode !== "none") {
-            const current = this.service.get(run.episodeId).draft;
-            for (const target of snapshot.targets.filter(target => !target.segmentId)) {
-                const submitted = run.submitted.find(item => item.id === target.id);
-                if (submitted?.status !== "succeeded") continue;
-                const assetId = target.id.startsWith("frame:") ? current.director?.shotInputs[target.id.slice(6)]?.keyframeAssetId : target.id.slice(6);
-                if (assetId && current.director?.assets[assetId]?.status !== "approved") { awaitingReview = true; failures.set(target.id, "等待已启用的素材审核"); }
-            }
-        }
-        this.service.updateRun({ ...run, status: awaitingReview ? "awaiting_review" : failures.size ? "failed" : "succeeded",
+        this.service.updateRun({ ...run, status: failures.size ? "failed" : "succeeded",
             error: failures.size ? [...failures].map(([id, message]) => `${id}: ${message}`).join("；") : null });
     }
 

@@ -1056,6 +1056,20 @@ export class EpisodeProductionService {
         }
     }
 
+    canvasStyleAnchorInput(id: string, director: DirectorProduction) {
+        const nodeId = String(director.source.style_anchor_node_id || "");
+        if (!nodeId) return undefined;
+        const canvasId = this.episodeInfo(id).canvasId;
+        const nodes = canvasId ? this.db.getCanvasProject(canvasId)?.nodes as Array<Record<string, any>> | undefined : undefined;
+        const node = nodes?.find(item => String(item.id || "") === nodeId);
+        if (!node) throw new Error(`风格锚点画布节点不存在：${nodeId}`);
+        const reference = resolveCanvasImageReferenceNode(node).find(item => item.storageKey);
+        if (!reference?.storageKey) throw new Error(`风格锚点画布节点「${String(node.title || nodeId)}」没有可用的归档图片`);
+        const media = this.db.getMediaFile(reference.storageKey);
+        if (!media || !fs.existsSync(media.filePath)) throw new Error(`风格锚点图片文件不可用：${reference.storageKey}`);
+        return { nodeId, storageKey: reference.storageKey, sha256: promptHashBytes(media.filePath), filePath: media.filePath };
+    }
+
     compilationReferenceFiles(id: string, director: DirectorProduction) {
         this.verifyCompilationBindings(id, director);
         const files: Record<string, string> = {};
@@ -1066,6 +1080,14 @@ export class EpisodeProductionService {
         for (const artifact of director.artifacts) for (const ref of artifact.references) {
             const file = this.db.getMediaFile(ref.storageKey)?.filePath;
             if (file) files[`${artifact.targetId}\0${ref.label}`] = file;
+        }
+        const styleAnchor = this.canvasStyleAnchorInput(id, director);
+        if (styleAnchor) for (const card of Array.isArray(director.source.asset_cards) ? director.source.asset_cards.map(record) : []) {
+            for (const ref of Array.isArray(card.references) ? card.references.map(record) : []) {
+                if (ref.canvas_style_anchor === true && ref.canvas_node_id === styleAnchor.nodeId && ref.canvas_storage_key === styleAnchor.storageKey && ref.sha256 === styleAnchor.sha256) {
+                    files[`${String(card.id || "")}\0${String(ref.label || `<Picture ${ref.image}>`)}`] = styleAnchor.filePath;
+                }
+            }
         }
         return files;
     }

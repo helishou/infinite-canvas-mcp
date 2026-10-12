@@ -36,7 +36,7 @@ export type ProductionLayoutReceipt = {
 export const directorPatchFields = {
     brief: ["value"],
     continuity: ["ledger"],
-    style: ["style_policy", "style_policy_reason", "anchor_asset_id"],
+    style: ["style_policy", "style_policy_reason", "anchor_asset_id", "style_anchor_node_id"],
     scene: ["scene_name", "heading", "location", "time_of_day", "text"],
     environment: ["name", "description", "prompt_description"],
     character: ["name", "appearance", "description", "prompt_description", "identity", "voice_description"],

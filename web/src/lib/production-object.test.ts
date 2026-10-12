@@ -31,17 +31,16 @@ test("a keyframe review and runtime state use the exact selected Clip and formal
     assert.equal(productionObjectState(production, object, node).working, true);
 });
 
-test("adopted media, outdated inputs and unpublished replacement media have distinct review eligibility", () => {
+test("unchanged generated media is accepted while outdated inputs remain visible", () => {
     const record = structuredClone(production);
     const asset = record.draft.director!.assets.hero;
-    Object.assign(asset, { status: "approved", storageKey: "image:old" });
+    Object.assign(asset, { status: "generated", storageKey: "image:old" });
     record.published = structuredClone(record.draft); record.publishedVersion = 1;
     const object = productionObjectForNode(context, record, { id: "hero-a", title: "Hero" })!;
     assert.equal(productionObjectState(record, object, { metadata: { storageKey: "image:old" } }).status, "approved");
     asset.inputOutdated = true;
     assert.equal(productionObjectState(record, object, { metadata: { storageKey: "image:old" } }).status, "outdated");
-    assert.equal(productionObjectState(record, object, { metadata: { storageKey: "image:new" } }).canReview, false);
-    assert.equal(productionObjectState(record, object, { metadata: { storageKey: "image:old", status: "queued" } }).canReview, false);
+    assert.equal(productionObjectState(record, object, { metadata: { storageKey: "image:old", status: "queued" } }).working, true);
 });
 
 test("identical display names do not associate an unrelated node with a formal asset", () => {

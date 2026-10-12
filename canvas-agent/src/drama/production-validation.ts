@@ -126,14 +126,54 @@ export function applyDirectorSourcePatch(director: DirectorProduction, entity: k
             if (patch.style_policy !== undefined && !["required", "waived"].includes(String(patch.style_policy))) throw new Error("风格策略只能是 required 或 waived");
             if (patch.style_policy_reason !== undefined && typeof patch.style_policy_reason !== "string") throw new Error("风格理由必须是字符串");
             if (patch.anchor_asset_id !== undefined && typeof patch.anchor_asset_id !== "string") throw new Error("风格锚点 ID 必须是字符串");
+            if (patch.style_anchor_node_id !== undefined && typeof patch.style_anchor_node_id !== "string") throw new Error("画布风格锚点节点 ID 必须是字符串");
             if (patch.anchor_asset_id) {
                 const anchorId = String(patch.anchor_asset_id);
                 const plans = Array.isArray(director.source.asset_plan) ? director.source.asset_plan.map(record) : [];
                 if (!plans.some(item => String(item.asset_id || item.id || "") === anchorId && (String(item.role || item.asset_type || "").toUpperCase() === "STYLE_MOTHER" || String(item.kind || "").toLowerCase() === "style"))) throw new Error(`风格锚点 ${anchorId} 不是已登记的 STYLE_MOTHER 资产`);
             }
+            const previousAnchorId = String(record(director.source.style_lock).anchor_asset_id || "");
+            if (previousAnchorId && patch.anchor_asset_id !== undefined && !patch.anchor_asset_id) {
+                const cards = Array.isArray(director.source.asset_cards) ? director.source.asset_cards.map(record) : [];
+                const plans = Array.isArray(director.source.asset_plan) ? director.source.asset_plan.map(record) : [];
+                const cardById = new Map(cards.map(card => [String(card.id || card.asset_id || ""), card]));
+                for (const card of cards) {
+                    const references = Array.isArray(card.references) ? card.references.map(record) : [];
+                    card.references = references.filter(ref => !(String(ref.asset_id || "") === previousAnchorId && String(ref.role || "").toLowerCase() === "style"));
+                    const stillUsed = (card.references as Array<Record<string, unknown>>).some(ref => String(ref.asset_id || "") === previousAnchorId);
+                    if (stillUsed) continue;
+                    const targetId = String(card.id || card.asset_id || "");
+                    const plan = plans.find(item => String(item.asset_id || item.id || "") === targetId);
+                    if (plan && Array.isArray(plan.depends_on)) plan.depends_on = plan.depends_on.filter((dependency: unknown) => String(dependency) !== previousAnchorId);
+                }
+                for (const plan of plans) {
+                    const targetId = String(plan.asset_id || plan.id || "");
+                    if (cardById.has(targetId)) continue;
+                    const dependencyReferences = cards.some(card => String(card.id || card.asset_id || "") === targetId
+                        && Array.isArray(card.references) && card.references.map(record).some(ref => String(ref.asset_id || "") === previousAnchorId));
+                    if (!dependencyReferences && Array.isArray(plan.depends_on)) plan.depends_on = plan.depends_on.filter((dependency: unknown) => String(dependency) !== previousAnchorId);
+                }
+            }
             if (patch.style_policy !== undefined) director.source.style_policy = patch.style_policy;
             if (patch.style_policy_reason !== undefined) director.source.style_policy_reason = patch.style_policy_reason;
-            if (patch.anchor_asset_id !== undefined) director.source.style_lock = { ...record(director.source.style_lock), anchor_asset_id: patch.anchor_asset_id };
+            if (patch.style_anchor_node_id !== undefined) {
+                if (patch.style_anchor_node_id) {
+                    director.source.style_anchor_node_id = patch.style_anchor_node_id;
+                    delete director.source.style_lock;
+                } else {
+                    delete director.source.style_anchor_node_id;
+                }
+            }
+            if (patch.anchor_asset_id !== undefined) {
+                if (patch.anchor_asset_id) {
+                    director.source.style_lock = { ...record(director.source.style_lock), anchor_asset_id: patch.anchor_asset_id };
+                    delete director.source.style_anchor_node_id;
+                } else if (patch.style_anchor_node_id !== undefined) {
+                    delete director.source.style_lock;
+                } else {
+                    director.source.style_lock = { ...record(director.source.style_lock), anchor_asset_id: "" };
+                }
+            }
         } else {
             if (!id) throw new Error("源对象修改缺少稳定 ID");
             const collection = ({ scene: "script_scenes", environment: "scene_registry", character: "character_registry", asset: "asset_plan", asset_card: "asset_cards", shot: "shots", segment: "segments" } as const)[entity];
