@@ -89,9 +89,11 @@ test("Subject picture binding asset IDs never replace stable Segment compilation
         ledger: { contract_version: 2, facts: [], timelines: [{ id: "main" }], initial: [], events: [], requirements: [], coverage: [] },
     };
     candidate.sourceHash = directorHash(candidate.source);
+    const settled = new Promise<void>(resolve => { compilations.onSettled = () => resolve(); });
     const started = compilations.enqueue("episode", "episode", "stable-segment-scope", service.get("episode").revision, candidate);
     assert.ok(["queued", "running"].includes(started.status));
-    const completed = await done(compilations, "stable-segment-scope");
+    await settled;
+    const completed = compilations.getCompilation("episode", "episode", "stable-segment-scope");
     assert.equal(completed.status, "succeeded");
 });
 

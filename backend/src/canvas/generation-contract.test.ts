@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { KNOWN_FIRST_PARTY } from "@basketikun/canvas-agent/plugin-mcp";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
 
@@ -27,11 +28,16 @@ test("前端、Agent 和 Backend 的生成调用方共用唯一 HTTP 入口", ()
     assert.match(source("canvas-agent/src/plugins/minimax-h3/mcp.ts"), /context\.backend\.canvasRunGeneration/);
 });
 
-test("H3 片段更新按稳定 segmentId 定位，禁止 MCP 依赖数组下标", () => {
-    const agentMcp = source("canvas-agent/src/plugins/minimax-h3/mcp.ts");
-    assert.match(agentMcp, /segmentId: \{ type: "string"/);
-    assert.match(agentMcp, /required: \["projectId", "nodeId", "segmentId", "patch"\]/);
-    assert.match(agentMcp, /findIndex\(\(segment\) => String\(segment\.id \|\| ""\) === segmentId\)/);
+test("Backend 消费的 H3 更新契约要求稳定 segmentId，不暴露数组下标", async () => {
+    const plugin = await KNOWN_FIRST_PARTY["minimax-h3"].load();
+    const tool = plugin.tools.find((item) => item.id === "h3_update_clips");
+    assert.ok(tool);
+    const schema = tool.inputJsonSchema as Record<string, any>;
+    assert.deepEqual(schema.required, ["projectId", "nodeId"]);
+    assert.deepEqual(schema.properties.updates.items.required, ["segmentId"]);
+    assert.equal(schema.properties.updates.items.properties.segmentId.type, "string");
+    assert.equal(schema.properties.updates.items.additionalProperties, false);
+    assert.equal(Object.hasOwn(schema.properties.updates.items.properties, "segmentIndex"), false);
 });
 
 test("取消与重试由所有客户端共用 Backend 任务端点", () => {

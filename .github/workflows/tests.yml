@@ -13,11 +13,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Configure isolated test directories
         run: |
           echo "INFINITE_CANVAS_DATA_DIR=$RUNNER_TEMP/canvas-unit-data" >> "$GITHUB_ENV"
           echo "INFINITE_CANVAS_MEDIA_DIR=$RUNNER_TEMP/canvas-unit-media" >> "$GITHUB_ENV"
           echo "INFINITE_CANVAS_AGENT_CONFIG_DIR=$RUNNER_TEMP/canvas-unit-agent" >> "$GITHUB_ENV"
+          echo "CODEX_HOME=$RUNNER_TEMP/canvas-unit-codex" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -26,6 +29,8 @@ jobs:
       - run: npm ci --prefix plugins/canvas/minimax-h3
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: npm run build --workspace canvas-agent
+      - name: Build pinned Acheng test runtime
+        run: npm run acheng:vendor
       - run: npm run typecheck --workspace web
       - run: npm run build --workspace backend
       - name: Build Web

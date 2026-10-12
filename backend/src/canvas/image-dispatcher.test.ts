@@ -272,10 +272,11 @@ test("workflow 使用真实节点输入名映射 width/height 并拒绝旧尺寸
     assert.equal(values.length, 1);
 });
 
-test("workflow 方图结果保留归档证据且不写回画布结果槽", async () => {
+test("workflow 自定画幅结果按真实像素归档并回写，不因请求比例不同而失败", async () => {
     const image = await sharp({ create: { width: 64, height: 64, channels: 3, background: "red" } }).png().toBuffer();
     const updates: Array<Record<string, unknown>> = [];
     let completed = 0, failed = 0;
+    let written: Array<{ storageKey: string; width: number; height: number }> = [];
     const taskRecord = { ...task("square-output", {}, "running"), result: null as unknown };
     const dispatcher = dispatcherWith({
         tasks: { get: () => taskRecord, update: (_id: string, patch: Record<string, unknown>) => { updates.push(patch); Object.assign(taskRecord, patch); }, addEvent: () => ({}) },
@@ -283,13 +284,15 @@ test("workflow 方图结果保留归档证据且不写回画布结果槽", async
     });
     (dispatcher as any).dispatch = async () => ({ taskId: "square-output", media: [{ url: "/media/square", storageKey: "image:square", mimeType: "image/png" }] });
     await (dispatcher as any).execute({ executor: "comfy-workflow", input: { size: "16:9" } }, taskRecord, {
-        onCompleted: () => { completed++; }, onFailed: () => { failed++; },
+        onCompleted: (result: { media: typeof written }) => { completed++; written = result.media; }, onFailed: () => { failed++; },
     });
-    assert.equal(completed, 0);
-    assert.equal(failed, 1);
-    assert.equal(taskRecord.status, "failed");
+    assert.equal(completed, 1);
+    assert.equal(failed, 0);
+    assert.equal(taskRecord.status, "succeeded");
+    assert.deepEqual(written.map((item) => [item.storageKey, item.width, item.height]), [["image:square", 64, 64]]);
     assert.deepEqual((taskRecord.result as any).media.map((item: any) => [item.storageKey, item.width, item.height]), [["image:square", 64, 64]]);
-    assert.match(String(updates.at(-1)?.error), /目标 16:9，实际 64×64/);
+    assert.equal(taskRecord.error, null);
+    assert.equal(updates.some((patch) => patch.status === "failed"), false);
 });
 
 test("workflow 横图结果按真实像素写入任务并允许回写", async () => {

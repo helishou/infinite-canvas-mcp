@@ -37,7 +37,7 @@ export function createProjectStore(db: BackendDatabase): CanvasProjectStore {
         create: (project) => db.createCanvasProject(project),
         delete: (id) => db.deleteCanvasProject(id),
         applyOperations: (id, expectedRevision, operations, context) => db.applyCanvasProjectOperations(id, expectedRevision, operations, context),
-        writeBackH3Task: (task, binding, output) => db.writeBackH3Task(task, binding, output),
+        writeBackH3Task: (task, binding, output, completion) => db.writeBackH3Task(task, binding, output, completion),
         writeBackCanvasImageTask: (task, input, media) => db.writeBackCanvasImageTask(task, input, media),
         markCanvasImageTaskFailed: (task, input, error) => db.markCanvasImageTaskFailed(task, input, error),
         writeBackCanvasVideoTask: (task, input, media) => db.writeBackCanvasVideoTask(task, input, media),

@@ -3,8 +3,24 @@ import test, { type TestContext } from "node:test";
 import { BackendDatabase } from "../db.js";
 import { BackendEventBus } from "../events.js";
 import { createStores } from "../stores/index.js";
+import { createProjectStore } from "../stores/project-store.js";
 import { CanvasH3Runner } from "./h3-runner.js";
 const localProvider = () => ({ ready: () => false, queue: { select: () => "local", unreserve() {} } });
+
+test("项目 store 原样转发可选 H3 完成字段，兼容三参数调用", () => {
+    const calls: unknown[][] = [];
+    const saved = { project: {}, log: null, operations: [] };
+    const store = createProjectStore({ writeBackH3Task: (...args: unknown[]) => { calls.push(args); return saved; } } as never);
+    const task = { id: "child" } as never;
+    const binding = { projectId: "p", nodeId: "n", segmentId: "clip" };
+    const output = { storageKey: "video:child" };
+    assert.equal(store.writeBackH3Task(task, binding, output), saved);
+    assert.deepEqual(calls[0], [task, binding, output, undefined], "旧调用不得合成完成字段");
+    const completion = { cacheFingerprint: "fingerprint", firstPassReady: false };
+    assert.equal(store.writeBackH3Task(task, binding, output, completion), saved);
+    assert.equal(calls[1][3], completion, "false 和缓存身份必须保留并原样传入数据库");
+    assert.deepEqual(completion, { cacheFingerprint: "fingerprint", firstPassReady: false });
+});
 
 function fixture(t: TestContext, count = 1, previousOutput = false, failSecondPass = false, withoutCheckpoint = false) {
     const db = new BackendDatabase(":memory:");
@@ -129,6 +145,10 @@ test("潜空间二采关闭时残留确认字段不暂停、不提交视频重�
     assert.equal(db.getTask(submitted[0].id)?.params.latentConfirmationPhase, undefined);
     assert.equal(db.getTask(submitted[0].id)?.params.postGenerationOnly, undefined);
     assert.equal(segment().firstPassReady, false);
+    const completed = stores.tasks.events(task.id).find((event) => event.type === "clip_completed");
+    assert.equal(typeof completed?.payload.fingerprint, "string");
+    assert.ok(String(completed?.payload.fingerprint).length > 0);
+    assert.equal(segment().cacheFingerprint, completed?.payload.fingerprint, "终态回写必须保存本轮缓存身份");
     assert.equal(stores.tasks.events(task.id).some((event) => event.type === "first_pass_ready"), false);
 });
 

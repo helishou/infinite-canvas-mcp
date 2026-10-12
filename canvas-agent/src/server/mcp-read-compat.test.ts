@@ -49,7 +49,11 @@ test("Agent HTTP forwards historical views and Backend export references", async
     for (const [name, input] of [["production_get_version", { kind: "episode", id: "e", version: 2 }], ["production_get_version", { kind: "canvas", id: "c", version: 2 }], ["production_get_scene_version", { sceneId: "s", version: 2 }]] as const) {
         assert.equal((await call(name, input)).result.version.snapshot.view, "summary");
     }
-    assert.equal((await call("production_get", { kind: "episode", id: "e", view: "source", sourceSection: "segments", ifRevision: 7 })).result.production.unchanged, true);
+    assert.equal((await call("production_get_source", { kind: "episode", id: "e", sourceSection: "segments", ifRevision: 7 })).result.production.unchanged, true);
+    const beforeInvalidRead = businessRequests;
+    const invalidRead = await fetch(`${url}/agent/api/tools`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "production_get", input: { kind: "episode", id: "e", view: "source", sourceSection: "segments", ifRevision: 7 } }) });
+    assert.equal(invalidRead.status, 400);
+    assert.equal(businessRequests, beforeInvalidRead, "retired full-read selectors must fail before reaching Backend");
     assert.equal((await call("canvas_export_snapshot", { projectId: "c" })).result.export.projectId, "c");
     assert.equal((await call("director_subagent", { action: "spawn", projectId: "c", parentThreadId: "director-thread", operationId: "stable", title: "分镜核对", role: "shots", prompt: "只核对已有源稿" })).result.task.taskId, "child");
     const priorRequests = businessRequests;

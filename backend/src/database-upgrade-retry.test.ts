@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { BackendDatabase } from "./db.js";
 import { DATABASE_SCHEMA_VERSION } from "./database-upgrade.js";
+import { historicalDatabase } from "./test-helpers/historical-database.js";
 
 test("H3 migration retries after rollback without overwriting old or failed-attempt backups", (t) => {
     const base = path.resolve(process.env.INFINITE_CANVAS_DATA_DIR || os.tmpdir());
@@ -18,9 +19,9 @@ test("H3 migration retries after rollback without overwriting old or failed-atte
         fs.rmSync(directory, { recursive: true, force: true });
     });
     const file = path.join(directory, "runtime.sqlite");
-    const initial = new BackendDatabase(file);
-    initial.createCanvasProject({ id: "p", title: "User content", nodes: [], connections: [] });
-    initial.db.prepare("DELETE FROM schema_migrations WHERE version >= 14").run();
+    const initial = historicalDatabase(t, file, 13);
+    initial.prepare("INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?)")
+        .run("p", JSON.stringify({ id: "p", title: "User content", nodes: [], connections: [] }), "2026-01-01");
     initial.close();
     // A previous release may have left its fixed-name snapshot behind.
     const oldBackup = `${file}.pre-h3-v14-reference-archive.sqlite`;
@@ -56,16 +57,17 @@ test("H3 migration retries after rollback without overwriting old or failed-atte
     }
 });
 
-test("v41 scene archive migration is idempotent and preserves existing project data", t => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "scene-archive-v37-"));
+for (const existingArchiveTable of [false, true]) test(`v41 scene archive migration preserves project data and is idempotent: existing=${existingArchiveTable}`, t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "scene-archive-v41-"));
     const file = path.join(directory, "runtime.sqlite");
     let db: BackendDatabase | undefined;
     t.after(() => { db?.close(); fs.rmSync(directory, { recursive: true, force: true }); });
-    db = new BackendDatabase(file);
-    db.createCanvasProject({ id: "keep", title: "Keep me", nodes: [], connections: [] });
-    db.db.prepare("DROP TABLE production_scene_archives").run();
-    db.db.prepare("DELETE FROM schema_migrations WHERE version >= 41").run();
-    db.close(); db = undefined;
+    const seed = historicalDatabase(t, file, 40);
+    seed.prepare("INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?)")
+        .run("keep", JSON.stringify({ id: "keep", title: "Keep me", nodes: [], connections: [] }), "2026-01-01");
+    // v41 also repairs releases where the earlier v37 archive table was absent.
+    if (!existingArchiveTable) seed.exec("DROP TABLE production_scene_archives");
+    seed.close();
 
     db = new BackendDatabase(file);
     assert.equal(db.getCanvasProject("keep")?.title, "Keep me");
@@ -74,4 +76,8 @@ test("v41 scene archive migration is idempotent and preserves existing project d
     assert.ok(columns.includes("snapshot_json"));
     assert.ok(columns.includes("expires_at"));
     assert.ok(columns.includes("restored_at"));
+    db.close();
+    db = new BackendDatabase(file);
+    assert.equal(db.getCanvasProject("keep")?.title, "Keep me");
+    assert.equal(fs.readdirSync(directory).filter(name => name.includes(`.pre-schema-v40-to-v${DATABASE_SCHEMA_VERSION}-`)).length, 1);
 });

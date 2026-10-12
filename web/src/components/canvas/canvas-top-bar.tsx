@@ -1,6 +1,6 @@
 import { useCanvasHost, useCanvasRoute, useCanvasTransientEscape } from "@/lib/canvas/canvas-host";
 import { useEffect, useRef, useState } from "react";
-import { Clapperboard, Download, FileText, Home, Images, LoaderCircle, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Trash2, Undo2, Upload, UsersRound } from "lucide-react";
+import { ArchiveRestore, Clapperboard, MessagesSquare, Download, FileText, Home, Images, LoaderCircle, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Trash2, Undo2, Upload, UsersRound } from "lucide-react";
 import { Button, Dropdown, Popover, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 import { Link, useSearchParams } from "react-router-dom";
@@ -11,6 +11,8 @@ import { useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
 import type { CanvasCollaborator } from "@/stores/canvas/use-canvas-store";
+import { CanvasDraftsDialog } from "./canvas-drafts-button";
+import { CanvasTextSuggestionsDialog } from "./canvas-text-suggestions-dialog";
 import { CanvasShortcutsDialog } from "./canvas-shortcuts-dialog";
 import { CanvasTaskCenterButton } from "./canvas-task-center";
 import { CanvasProductionToolbar } from "@/components/production/canvas-production-workspace";
@@ -73,6 +75,7 @@ export function CanvasTopBar({
     const titleRef = useRef<HTMLDivElement>(null);
     const [shortcutsOpen, setShortcutsOpen] = useState(false);
     const [toolsOpen, setToolsOpen] = useState(false);
+    const [recoveryDialog, setRecoveryDialog] = useState<"suggestions" | "drafts" | null>(null);
     useCanvasTransientEscape(toolsOpen, () => setToolsOpen(false));
     const sidePanelOpen = useCanvasSidePanelStore((state) => state.panelOpen);
     const toggleSidePanel = useCanvasSidePanelStore((state) => state.togglePanel);
@@ -157,11 +160,18 @@ export function CanvasTopBar({
                 </div>
 
                 <div className="pointer-events-auto flex shrink-0 items-center gap-1.5">
-                    {<Popover destroyOnHidden open={toolsOpen} onOpenChange={setToolsOpen} trigger="click" content={<div data-canvas-transient-tool className="flex max-w-80 flex-col gap-3"><UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} /></div>}><button type="button" className="grid size-8 place-items-center" aria-label={t("productionCanvas.tools")}><Menu className="size-4" /></button></Popover>}
+                    {<Popover destroyOnHidden open={toolsOpen} onOpenChange={setToolsOpen} trigger="click" content={<div data-canvas-transient-tool className="flex max-w-80 flex-col gap-3">
+                        <div className="flex flex-col gap-1">
+                            <button type="button" className="flex h-8 items-center gap-2 rounded px-2 text-xs hover:bg-black/5 dark:hover:bg-white/10" onClick={() => { setToolsOpen(false); setRecoveryDialog("suggestions"); }}><MessagesSquare className="size-3.5" />{t("canvasRecovery.suggestions")}</button>
+                            <button type="button" className="flex h-8 items-center gap-2 rounded px-2 text-xs hover:bg-black/5 dark:hover:bg-white/10" onClick={() => { setToolsOpen(false); setRecoveryDialog("drafts"); }}><ArchiveRestore className="size-3.5" />{t("canvasRecovery.localDrafts")}</button>
+                        </div>
+                        <UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} /></div>}><button type="button" className="grid size-8 place-items-center" aria-label={t("productionCanvas.tools")}><Menu className="size-4" /></button></Popover>}
                     <Tooltip title={t("productionCanvas.generationLogs")}><button type="button" aria-label={t("productionCanvas.generationLogs")} className="grid size-8 place-items-center rounded-lg transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={onOpenGenerationLogs}><FileText className="size-4" /></button></Tooltip>
                     <CanvasTaskCenterButton projectId={projectId} />
                 </div>
             </div>
+            <CanvasTextSuggestionsDialog key={projectId} projectId={projectId} open={recoveryDialog === "suggestions"} onClose={() => setRecoveryDialog(null)} />
+            <CanvasDraftsDialog open={recoveryDialog === "drafts"} onClose={() => setRecoveryDialog(null)} />
             <CanvasShortcutsDialog open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
         </>
     );
