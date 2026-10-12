@@ -1,4 +1,5 @@
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { App, Modal } from "antd";
 import { ArchiveRestore } from "lucide-react";
 import { saveAs } from "file-saver";
@@ -34,8 +35,19 @@ function describeDraftRecord(value: unknown): { hint: string; snapshot: boolean 
 
 export function CanvasDraftsButton() {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    const { modal, message } = App.useApp();
+    const { t } = useTranslation();
     const [open, setOpen] = useState(false);
+    return <>
+        <button type="button" aria-label={t("canvasRecovery.localDrafts")} className="flex h-8 shrink-0 items-center gap-1 whitespace-nowrap rounded px-2 py-1 text-xs hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.muted }} onClick={() => setOpen(true)}>
+            <ArchiveRestore className="size-3.5" /><span>{t("canvasRecovery.localDrafts")}</span>
+        </button>
+        <CanvasDraftsDialog open={open} onClose={() => setOpen(false)} />
+    </>;
+}
+
+export function CanvasDraftsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+    const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const { modal, message } = App.useApp();
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState("");
     const [bundles, setBundles] = useState<CanvasDraftBundle[]>([]);
@@ -44,12 +56,13 @@ export function CanvasDraftsButton() {
     const [preview, setPreview] = useState<DraftImport | null>(null);
     const importProject = useCanvasStore((state) => state.importProject);
     const fileInput = useRef<HTMLInputElement>(null);
-    const refresh = async () => {
+    const refresh = useCallback(async () => {
         setBusy(true); setError("");
         try { setBundles(await listCanvasDrafts()); }
         catch (error) { setError(error instanceof Error ? error.message : String(error)); }
         finally { setBusy(false); }
-    };
+    }, []);
+    useEffect(() => { if (open) void refresh(); }, [open, refresh]);
     const importBackup = async (archive: DraftImport) => {
         setBusy(true); setError("");
         try {
@@ -65,10 +78,7 @@ export function CanvasDraftsButton() {
     };
     const buttonStyle = "rounded px-2 py-1 text-xs hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-40";
     return <>
-        <button type="button" aria-label="本机草稿" className={`flex h-8 shrink-0 items-center gap-1 whitespace-nowrap ${buttonStyle}`} style={{ color: theme.node.muted }} onClick={() => { setOpen(true); void refresh(); }}>
-            <ArchiveRestore className="size-3.5" /><span>本机草稿</span>
-        </button>
-        <Modal title="本机未确认草稿" open={open} onCancel={() => setOpen(false)} footer={null} width={680}>
+        <Modal title="本机未确认草稿" open={open} onCancel={onClose} footer={null} width={680}>
             <p className="text-sm" style={{ color: theme.node.muted }}>这里只读取当前浏览器的草稿。恢复会话会刷新页面并继续同步原操作；当前窗口草稿仍会保留。已同步内容以后台为准。</p>
             <div className="my-3 flex items-center justify-between text-xs" style={{ color: theme.node.muted }}>
                 <span>{busy ? "正在读取…" : `${bundles.length} 份会话草稿`}</span>

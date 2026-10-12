@@ -5,6 +5,8 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- Canvas tools and settings again includes project-wide rewrite suggestions and local draft recovery without adding top-bar buttons. Verify opening, Escape/close and reopening both dialogs on standalone and embedded canvases; deleted targets remain readable, copyable and dismissible but cannot be applied. Existing targets retain text-conflict checks, and the local draft dialog keeps its original session-ownership, import/export and explicit recovery protections. Check English/Chinese and light/dark themes.
+
 - Legacy H3 clips with a saved nonzero seed and no explicit noise mode keep that seed fixed across new runs. Verify both seed aliases and request/Clip/node/default precedence, explicit random mode, explicit fixed zero, duplicate-request idempotency and unchanged saved inputs. Built-in fallback behavior for missing or zero legacy seeds remains unchanged.
 
 - Current-canvas production keeps a byte-verified, correctly bound image complete when the editable draft differs from the published snapshot. Verify that tampered or missing archived media and changed or missing node bindings still prevent completion, and that restoring the original evidence restores completion without changing the published snapshot. For legacy production runs without an execution snapshot, verify that enabled manual asset review pauses on the original run, invalid review evidence remains blocked, and approving the original result resumes without creating another task; a frozen no-review policy must remain non-blocking.

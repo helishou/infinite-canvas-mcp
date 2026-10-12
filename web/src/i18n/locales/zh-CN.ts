@@ -2,6 +2,14 @@ import { generationGroupsZhCN } from "../generation-groups";
 import { workspaceNavigationZhCN } from "../workspace-navigation";
 
 export default {
+    canvasRecovery: {
+        suggestions: "改写候选", localDrafts: "本机草稿", loading: "正在读取…",
+        summary: "{{pending}} 条待确认 · {{count}} 条记录", refresh: "刷新", empty: "当前画布没有改写候选",
+        legacyTarget: "旧画布文本（功能已移除）", targetDeleted: "目标已删除", featureRemoved: "功能已移除",
+        targetUnavailable: "目标已删除或功能已移除，不能采用；可忽略或复制候选内容", textNotReady: "目标文本尚未就绪",
+        appliedMessage: "已采用候选", copiedMessage: "已复制候选", dismissedMessage: "已忽略候选",
+        copy: "复制", apply: "采用", dismiss: "忽略", status: { pending: "待确认", applied: "已采用", dismissed: "已忽略" },
+    },
     workflowDelete: {"confirm": "删除", "cancel": "取消", "failed": "删除失败", "workflowTitle": "删除「{{name}}」？", "workflowDescription": "将删除本地工作流 {{name}} 及其配置，此操作不可恢复。", "historyTitle": "删除这条运行历史？", "historyDescription": "将删除「{{name}}」在 {{time}} 的本地运行记录（{{id}}），此操作不可恢复。", "historyAction": "删除 {{name}} 的运行历史"},
     browserRecovery: {"unknown": "状态待确认", "check": "检查原任务回执", "query": "继续查询原任务", "archive": "恢复结果保存", "checkProvider": "请先核对服务商原任务，未确认前不会新建生成。", "resumed": "已恢复原任务，不会重新生成", "created": "已创建新任务"},
     workflowRecovery: {"mediaConflict": "多个字段为同一个 {{kind}} 素材槽 {{index}} 选择了不同文件，请使用同一文件或调整映射。","viewCloud": "去 RunningHub 核对原任务", "acknowledgeCancellation": "已核对云端，允许新运行","localHistory": "当前工作流在最近 50 条本地运行记录中的历史", "cloudStatusUnknown": "正在确认 RunningHub 连接配置","saveFailed": "保存失败", "configureCloud": "请先在运行环境配置 RunningHub API Key", "submitting": "正在提交…", "running": "已提交，等待任务完成…", "submissionUnknown": "提交结果未确认。请刷新状态；重试会沿用同一任务，不会新建任务。", "queryFailed": "暂时无法读取任务状态，保留原任务并继续查询。", "refreshStatus": "刷新状态", "retrySameSubmission": "重试原提交", "cancelWaiting": "本地追踪已停止，正在确认云端取消；任务可能仍在云端运行。", "cancelUnconfirmed": "本地追踪已停止，云端取消失败或未确认；请在 RunningHub 查看原任务。", "cancelConfirmed": "任务已取消（不代表退款）。", "cloudHistory": "当前档案最近 50 条后台任务", "historyFailed": "历史读取失败，请重试", "cancelLocalOnly": "本地追踪已停止，尚无云端取消回执。"},

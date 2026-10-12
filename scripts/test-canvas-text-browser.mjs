@@ -21,6 +21,26 @@ const api = async (method, route, body) => {
     assert.ok(response.ok, JSON.stringify({ status: response.status, error: result.error }));
     return result;
 };
+// These surfaces mount only after main.tsx has claimed the draft owner and loaded the route.
+// Recovery actions live inside the canvas tools popover, or directly in the project directory.
+const waitForCanvasApp = (page) => page.locator('[data-canvas-topbar], [data-testid="project-directory"]').waitFor();
+const openCanvasTool = async (page, name, checkMenuReopen = false) => {
+    await waitForCanvasApp(page);
+    const action = page.getByRole("button", { name, exact: true });
+    const toolsButton = page.getByRole("button", { name: "画布工具与设置", exact: true });
+    const toolsMenu = page.locator("[data-canvas-transient-tool]").filter({ has: action });
+    if (!(await action.isVisible())) await toolsButton.click();
+    if (checkMenuReopen) {
+        await toolsMenu.waitFor();
+        await page.keyboard.press("Escape");
+        await toolsMenu.waitFor({ state: "hidden" });
+        await toolsButton.click();
+        await toolsMenu.waitFor();
+    }
+    await action.click();
+    await toolsMenu.waitFor({ state: "hidden" });
+    await page.getByRole("dialog", { name: name === "本机草稿" ? "本机未确认草稿" : name, exact: true }).waitFor();
+};
 let browser;
 let mcp;
 let mcpTransport;
@@ -231,9 +251,14 @@ try {
     const deletedCandidate = await mcp.callTool({ name: "canvas_save_text_suggestion", arguments: { projectId, operationId: randomUUID(), suggestion: { id: deletedTargetCandidateId, target: deletedTarget, documentId: deletedTargetDoc.documentId, base: deletedTargetDoc.text, text: "删后保留的候选" } } });
     assert.equal(deletedCandidate.isError, undefined, JSON.stringify(deletedCandidate));
     await api("POST", "/canvas/projects/" + projectId + "/ops", { operationId: randomUUID(), operations: [{ type: "delete_node", id: "deleted-candidate-target" }] });
-    await a.getByRole("button", { name: /改写候选/ }).click();
+    await openCanvasTool(a, "改写候选", true);
     const candidateDialog = a.getByRole("dialog").filter({ hasText: "改写候选" });
     const deletedCandidateRow = candidateDialog.locator("section").filter({ hasText: "删后保留的候选" });
+    await deletedCandidateRow.getByText("目标已删除 · 待确认", { exact: true }).waitFor();
+    assert.equal(await deletedCandidateRow.getByRole("button", { name: "采用", exact: true }).isDisabled(), true);
+    await a.keyboard.press("Escape");
+    await candidateDialog.waitFor({ state: "hidden" });
+    await openCanvasTool(a, "改写候选");
     await deletedCandidateRow.getByText("目标已删除 · 待确认", { exact: true }).waitFor();
     assert.equal(await deletedCandidateRow.getByRole("button", { name: "采用", exact: true }).isDisabled(), true);
     await deletedCandidateRow.getByRole("button", { name: "忽略", exact: true }).click();
@@ -245,7 +270,7 @@ try {
     await b.goto(web + "/canvas/" + projectId);
     const editCanvas = async (page, action) => {
         // 应用必须先完成 owner 认领与正常入口加载，不能由测试抢先导入 Store。
-        if (action.kind === "init") await page.getByRole("button", { name: "本机草稿", exact: true }).waitFor();
+        if (action.kind === "init") await waitForCanvasApp(page);
         return page.evaluate(async ({ projectId, action }) => {
         const { useCanvasStore, ensureCanvasProjectLoaded, hydrateCanvasProjects, flushCanvasSyncNow } = await import("/tests/canvas-command-harness.ts");
         if (action.kind === "init") { await hydrateCanvasProjects(); await ensureCanvasProjectLoaded(projectId); return; }
@@ -469,14 +494,20 @@ try {
     const copied = await popupReady;
     const recoveredRequests = [];
     copied.on("request", (request) => { if (request.url().includes("/canvas/projects/" + projectId + "/ops") && request.method() === "POST") recoveredRequests.push(request.postDataJSON()); });
-    await copied.getByRole("button", { name: "本机草稿", exact: true }).waitFor();
+    await waitForCanvasApp(copied);
     const copiedOwner = await copied.evaluate(() => sessionStorage.getItem("canvas-draft-session"));
     assert.notEqual(copiedOwner, originalOwner);
     await copied.reload();
-    await copied.getByRole("button", { name: "本机草稿", exact: true }).waitFor();
+    await waitForCanvasApp(copied);
     assert.equal(await copied.evaluate(() => sessionStorage.getItem("canvas-draft-session")), copiedOwner);
-    await copied.getByRole("button", { name: "本机草稿", exact: true }).click();
+    await openCanvasTool(copied, "本机草稿", true);
     const oldSessionRow = copied.locator("section").filter({ hasText: "窗口 " + originalOwner.slice(-8) });
+    await oldSessionRow.getByText("另一窗口仍在使用，不能抢占。", { exact: true }).waitFor();
+    assert.equal(await oldSessionRow.getByRole("button", { name: "恢复会话", exact: true }).isDisabled(), true);
+    const draftsDialog = copied.getByRole("dialog", { name: "本机未确认草稿", exact: true });
+    await copied.keyboard.press("Escape");
+    await draftsDialog.waitFor({ state: "hidden" });
+    await openCanvasTool(copied, "本机草稿");
     await oldSessionRow.getByText("另一窗口仍在使用，不能抢占。", { exact: true }).waitFor();
     assert.equal(await oldSessionRow.getByRole("button", { name: "恢复会话", exact: true }).isDisabled(), true);
     if (process.env.CANVAS_DRAFT_SCREENSHOT) await copied.screenshot({ path: process.env.CANVAS_DRAFT_SCREENSHOT, animations: "disabled" });
@@ -490,7 +521,7 @@ try {
     await oldSessionRow.getByRole("button", { name: "恢复会话", exact: true }).click();
     await copied.getByRole("dialog").filter({ hasText: "恢复这份会话草稿？" }).getByRole("button", { name: "恢复会话", exact: true }).click();
     await copied.waitForFunction((owner) => sessionStorage.getItem("canvas-draft-session") === owner, originalOwner);
-    await copied.getByRole("button", { name: "本机草稿", exact: true }).waitFor();
+    await waitForCanvasApp(copied);
     await editCanvas(copied, { kind: "init" });
     await editCanvas(copied, { kind: "flush" });
     assert.equal((await api("GET", "/canvas/projects/" + projectId)).project.title, "关闭原窗口后恢复的草稿");
@@ -585,7 +616,7 @@ try {
         { key: importedCacheKey, record: { backend, ownerId: importedOwner, project: storageRecovered, base: storageRecovered, queueVersion: 2 } },
         { key: "command:acknowledged-cleanup", record: null },
     ] };
-    await copied.getByRole("button", { name: "本机草稿", exact: true }).click();
+    await openCanvasTool(copied, "本机草稿");
     await copied.getByLabel("选择草稿备份", { exact: true }).setInputFiles({ name: "canvas-memory-backup.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(importFile)) });
     const preview = copied.getByRole("region", { name: "备份导入预览" });
     await preview.getByText("已跳过 1 条清理记录，不会删除本机已有数据。", { exact: true }).waitFor();
@@ -602,7 +633,7 @@ try {
     await importedRow.waitFor();
     assert.equal(await importedRow.getByRole("button", { name: "恢复会话", exact: true }).isDisabled(), true);
     await copied.reload();
-    await copied.getByRole("button", { name: "本机草稿", exact: true }).click();
+    await openCanvasTool(copied, "本机草稿");
     await importedRow.waitFor();
     assert.equal((await api("GET", "/canvas/projects/" + projectId)).project.title, storageRecovered.title);
     await importedRow.getByRole("button", { name: "继续导入", exact: true }).click();
@@ -625,7 +656,7 @@ try {
     // 连接界面验证只读测试、确认取消、切换窗口隔离；绝不保存真实主机开放设置。
     const networkBefore = await api("GET", "/connection");
     await copied.evaluate(async () => (await import("/tests/canvas-command-harness.ts")).useConfigStore.getState().openConfigDialog(false, "connection"));
-    await copied.getByRole("tab", { name: "连接与协作", exact: true }).click();
+    await copied.getByRole("tab", { name: "连接与目录", exact: true }).click();
     const connectionDialog = copied.getByRole("dialog").filter({ has: copied.getByLabel("后台地址", { exact: true }) });
     await connectionDialog.getByLabel("允许局域网连接", { exact: true }).waitFor();
     await connectionDialog.getByLabel("连接密钥", { exact: true }).fill("intentionally-wrong");
@@ -640,19 +671,19 @@ try {
     assert.deepEqual(await api("GET", "/connection"), networkBefore);
     const connectionPeer = await copied.context().newPage();
     await connectionPeer.goto(web + "/canvas");
-    await connectionPeer.getByRole("button", { name: "本机草稿", exact: true }).waitFor();
+    await waitForCanvasApp(connectionPeer);
     const otherConnectionBefore = await connectionPeer.evaluate(async () => (await import("/tests/canvas-command-harness.ts")).getBackendUrl());
     const alias = new URL(backend); alias.hostname = alias.hostname === "localhost" ? "127.0.0.1" : "localhost";
     await connectionDialog.getByLabel("后台地址", { exact: true }).fill(alias.origin);
     await connectionDialog.getByRole("button", { name: "连接并重新加载", exact: true }).click();
     await copied.getByRole("dialog").filter({ hasText: "切换此窗口的后台？" }).getByRole("button", { name: "验证并连接", exact: true }).click();
     await copied.waitForURL(web + "/canvas");
-    await copied.getByRole("button", { name: "本机草稿", exact: true }).waitFor();
+    await waitForCanvasApp(copied);
     assert.equal(await copied.evaluate(async () => (await import("/tests/canvas-command-harness.ts")).getBackendUrl()), alias.origin);
     assert.equal(await connectionPeer.evaluate(() => localStorage.getItem("backend-url")), alias.origin);
     assert.equal(await connectionPeer.evaluate(async () => (await import("/tests/canvas-command-harness.ts")).getBackendUrl()), otherConnectionBefore);
     await connectionPeer.reload();
-    await connectionPeer.getByRole("button", { name: "本机草稿", exact: true }).waitFor();
+    await waitForCanvasApp(connectionPeer);
     assert.equal(await connectionPeer.evaluate(async () => (await import("/tests/canvas-command-harness.ts")).getBackendUrl()), otherConnectionBefore);
     await connectionPeer.close();
     console.log("PASS: 连接设置验证密钥、取消不改监听配置；切换只影响本窗口，另一窗口刷新仍保留原后台");
