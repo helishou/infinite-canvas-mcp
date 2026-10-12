@@ -169,21 +169,32 @@ export function CustomPromptDialog({ open, mode, initial, canvasNodes, onClose, 
             confirmLoading={submitting}
             destroyOnHidden
             forceRender
-            width={600}
+            width={680}
+            centered
+            styles={{ body: { maxHeight: "min(72dvh, calc(100dvh - 160px))", overflowY: "auto" } }}
         >
             <Form form={form} layout="vertical" preserve={false}>
+                <section className="mb-6" data-resource-group="prompt-body">
+                    <h3 className="mb-1 text-sm font-medium">{t("prompts.workspace.promptBody")}</h3>
+                    <p className="mb-4 text-xs leading-5 text-muted-foreground">{t("prompts.workspace.promptBodyHint")}</p>
                 <Form.Item label={t("prompts.custom.form.title")} name="title" rules={[{ required: true, whitespace: true, message: t("prompts.custom.form.titleRequired") }]}>
                     <Input maxLength={80} showCount placeholder={t("prompts.custom.form.titlePlaceholder")} />
                 </Form.Item>
                 <Form.Item label={t("prompts.custom.form.prompt")} name="prompt" rules={[{ required: true, whitespace: true, message: t("prompts.custom.form.promptRequired") }]}>
                     <Input.TextArea rows={6} placeholder={t("prompts.custom.form.promptPlaceholder")} />
                 </Form.Item>
+                </section>
+                <section className="mb-6 border-t border-border pt-5" data-resource-group="prompt-discovery">
+                    <h3 className="mb-4 text-sm font-medium">{t("prompts.workspace.discovery")}</h3>
                 <Form.Item label={t("prompts.custom.form.description")} name="description">
                     <Input.TextArea rows={2} placeholder={t("prompts.custom.form.descriptionPlaceholder")} />
                 </Form.Item>
                 <Form.Item label={t("prompts.custom.form.tags")} name="tags">
                     <Input placeholder={t("prompts.custom.form.tagsPlaceholder")} />
                 </Form.Item>
+                </section>
+                <section className="border-t border-border pt-5" data-resource-group="prompt-images">
+                    <h3 className="mb-4 text-sm font-medium">{t("prompts.workspace.imageMaterials")}</h3>
                 <Form.Item label={t("prompts.custom.form.cover")}>
                     <input ref={coverInputRef} type="file" accept="image/*" className="hidden" onChange={handleCoverSelect} />
                     {coverUrl ? (
@@ -195,6 +206,7 @@ export function CustomPromptDialog({ open, mode, initial, canvasNodes, onClose, 
                                 danger
                                 icon={<X className="size-3.5" />}
                                 className="!absolute !-right-2 !-top-2 !h-6 !w-6 !min-w-0 !rounded-full !border !border-stone-200 !bg-white !p-0 dark:!border-stone-700 dark:!bg-stone-900"
+                                aria-label={t("prompts.workspace.removeCover")}
                                 onClick={() => setCoverUrl("")}
                             />
                         </div>
@@ -222,6 +234,7 @@ export function CustomPromptDialog({ open, mode, initial, canvasNodes, onClose, 
                                     danger
                                     icon={<X className="size-3.5" />}
                                     className="!absolute !-right-2 !-top-2 !h-6 !w-6 !min-w-0 !rounded-full !border !border-stone-200 !bg-white !p-0 dark:!border-stone-700 dark:!bg-stone-900"
+                                    aria-label={t("prompts.workspace.removeReference", { index: index + 1 })}
                                     onClick={() => removeReference(index)}
                                 />
                             </div>
@@ -231,6 +244,7 @@ export function CustomPromptDialog({ open, mode, initial, canvasNodes, onClose, 
                         </Button>
                     </div>
                 </Form.Item>
+                </section>
             </Form>
             {canvasNodes ? <CanvasCoverPicker open={coverPickerOpen} nodes={canvasNodes} onSelect={(candidate) => void applyCanvasCover(candidate)} onClose={() => setCoverPickerOpen(false)} /> : null}
         </Modal>

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { storyBeatCards, assetImagePreview, dialogueSpeakerLabel, shotDurationPatch } from "./director-display";
+import { storyBeatCards, assetImagePreview, dialogueSpeakerLabel, shotDurationPatch, matchesAssetSearch } from "./director-display";
 test("story beats show scoped authored action instead of repeated abstract goals", () => {
  const beats = [{ id: "1", scene_id: "A", goal: "A generic goal", choice: "主管递出处罚任务。" }, { id: "2", scene_id: "A", goal: "A generic goal", choice: "黎希拿起档案离开。" }, { id: "3", scene_id: "B", goal: "去签约", result: "张伟签下契约。" }];
  const before = structuredClone(beats), cards = storyBeatCards(beats, "A");
@@ -49,4 +49,17 @@ test("shot duration converts seconds to frames without moving the shot start", (
  assert.deepEqual(shotDurationPatch({ start_frame: 0, end_frame: 120, duration_frames: 120 }, 8, 24), { end_frame: 192, duration_frames: 192 });
  // 帧率异常时回落 24fps；时长下限 1 帧
  assert.deepEqual(shotDurationPatch({ start_frame: 0, end_frame: 0 }, 0.001, 0), { end_frame: 1 });
+});
+
+
+test("asset search ignores pasted edge whitespace, preserves interior spaces and clears to all labels", () => {
+ const names = ["阿青", "Old House", "OldHouse", "BRASS BELL"];
+ const find = (query: string) => names.filter(name => matchesAssetSearch(name, query));
+ assert.deepEqual(find("  阿青\n"), ["阿青"]);
+ assert.deepEqual(find("\told house "), ["Old House"]);
+ assert.deepEqual(find(" brass bell "), ["BRASS BELL"]);
+ assert.deepEqual(find(""), names);
+ assert.deepEqual(find("  \n\t"), names);
+ assert.deepEqual(find("missing"), []);
+ assert.deepEqual(names, ["阿青", "Old House", "OldHouse", "BRASS BELL"]);
 });

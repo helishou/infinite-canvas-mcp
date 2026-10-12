@@ -71,3 +71,10 @@ export function materializeClipPartition(clips: ClipRow[], entries: ClipPartitio
         };
     });
 }
+
+export function clipBoundaryPositions(rects: Array<{ left: number; right: number; top: number; bottom: number }>, counts: number[], track: { left: number; top: number }, scroll: number, vertical = false) {
+    return counts.map(count => {
+        const viewport = vertical ? (rects[count - 1].bottom + rects[count].top) / 2 : (rects[count - 1].right + rects[count].left) / 2;
+        return { count, viewport, content: viewport - (vertical ? track.top : track.left) + scroll };
+    });
+}

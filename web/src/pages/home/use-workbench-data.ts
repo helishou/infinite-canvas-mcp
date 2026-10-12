@@ -4,6 +4,7 @@ import { fetchBackendDramaEpisodes, fetchBackendGenerationLogs, fetchBackendTask
 import { saveSettings, type FrontendSettings } from "@/services/settings-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import { dramaCanvasOwners } from "@/pages/projects/directory-data";
 import { collectOutputs, retainProjectCovers, type WorkbenchMedia } from "./workbench-data";
 
 /** Keep the first available cover for a project version while other snapshots arrive. */
@@ -57,11 +58,9 @@ export function useWorkbenchData() {
             },
         ]),
     });
-    const episodeFolders: Record<string, string> = {};
-    ownershipQueries.forEach((result, index) => {
-        for (const id of result.data || []) if (id) episodeFolders[id] = dramas[index].id;
-    });
-    for (const folder of dramas) if (folder.sharedAssetCanvasId) episodeFolders[folder.sharedAssetCanvasId] = folder.id;
+    const episodesByDrama: Record<string, { canvasId: string }[] | undefined> = {};
+    ownershipQueries.forEach((result, index) => { episodesByDrama[dramas[index].id] = result.data?.map(canvasId => ({ canvasId })); });
+    const canvasOwners = dramaCanvasOwners(folders, episodesByDrama);
     const dramaReady = ownershipQueries.every((result) => result.data !== undefined);
     const dramaError = ownershipQueries.some((result) => result.isError);
     const [pinning, setPinning] = useState(false);
@@ -153,5 +152,5 @@ export function useWorkbenchData() {
             setPinning(false);
         }
     };
-    return { connected, backendUrl, logs, tasks, settings, settingsReady, loading, errors, hasMore, refresh, episodeFolders, dramaReady, dramaError, pinning, togglePin, loadMore: () => setLogCount((count) => count + 30) };
+    return { connected, backendUrl, logs, tasks, settings, settingsReady, loading, errors, hasMore, refresh, canvasOwners, dramaReady, dramaError, pinning, togglePin, loadMore: () => setLogCount((count) => count + 30) };
 }

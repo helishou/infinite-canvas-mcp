@@ -28,10 +28,10 @@ function fieldTypeOf(field: RunningHubField): WorkflowField["type"] {
  */
 export function runningHubFieldToLocal(field: RunningHubField): WorkflowField | null {
     const source = field.source || "constant";
-    const type = fieldTypeOf(field);
+    const type = source === "image" || source === "video" || source === "audio" ? source : fieldTypeOf(field);
     const media = type === "image" || type === "video" || type === "audio";
     return {
-        id: `${field.nodeId}::${field.fieldName}`,
+        id: field.id || `${field.nodeId}::${field.fieldName}`,
         node: field.nodeId,
         input: field.fieldName,
         name: field.label || `${field.nodeId}.${field.fieldName}`,
@@ -79,9 +79,43 @@ export function runningHubMediaSlots(profile: RunningHubWorkflowProfile) {
         .filter((field) => field.enabled !== false && ["image", "video", "audio"].includes(field.source || ""))
         .sort((a, b) => (order[a.source || "image"] ?? 0) - (order[b.source || "image"] ?? 0) || (a.index || 1) - (b.index || 1))
         .map((field, position) => ({
-            id: `${field.nodeId}::${field.fieldName}`,
+            id: field.id || `${field.nodeId}::${field.fieldName}`,
             label: field.label || `${field.nodeId}.${field.fieldName}`,
             kind: field.source as "image" | "video" | "audio",
             position,
         }));
+}
+
+export class RunningHubMediaConflict extends Error {
+    constructor(readonly kind: string, readonly index: number) { super(`Conflicting ${kind} inputs for slot ${index}`); }
+}
+
+/** Build the existing Backend input contract without losing prompt text or media slot identity. */
+export function runningHubRequestFromForm(profile: RunningHubWorkflowProfile, form: Record<string, string>) {
+    const input: Record<string, unknown> = {};
+    const values: Record<string, unknown> = {};
+    const media: Record<"image" | "video" | "audio", string[]> = { image: [], video: [], audio: [] };
+    const cursors = { image: 0, video: 0, audio: 0 };
+    for (const field of (profile.fields || []).filter((item) => item.enabled !== false)) {
+        const id = field.id || `${field.nodeId}::${field.fieldName}`;
+        const source = field.source || "constant";
+        const raw = form[id];
+        if (source === "image" || source === "video" || source === "audio") {
+            const index = field.index === undefined ? cursors[source]++ : field.index - 1;
+            cursors[source] = Math.max(cursors[source], index + 1);
+            while (media[source].length <= index) media[source].push("");
+            if (raw !== undefined) {
+                if (media[source][index] && raw && media[source][index] !== raw) throw new RunningHubMediaConflict(source, index + 1);
+                if (raw || !media[source][index]) media[source][index] = raw;
+            }
+        } else if (raw !== undefined) {
+            values[id] = source !== "prompt" && (field.fieldType === "number" || field.fieldType === "slider") && raw.trim() !== "" && Number.isFinite(Number(raw))
+                ? Number(raw)
+                : field.fieldType === "boolean" ? raw === "true" : raw;
+        }
+    }
+    if (media.image.length) input.references = media.image;
+    if (media.video.length) input.videos = media.video;
+    if (media.audio.length) input.audios = media.audio;
+    return { input, values };
 }

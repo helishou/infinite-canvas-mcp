@@ -703,19 +703,23 @@ export function retryBackendTask(id: string) {
 }
 
 export function claimBackendBrowserTask(id: string, workerId: string) {
-    return request<{ ok: boolean; task: BackendRuntimeTask }>("POST", `/canvas/browser-tasks/${encodeURIComponent(id)}/claim`, { workerId });
+    return request<{ ok: boolean; task: BackendRuntimeTask; claimToken: string }>("POST", `/canvas/browser-tasks/${encodeURIComponent(id)}/claim`, { workerId });
 }
 
-export function completeBackendBrowserTask(id: string, workerId: string, result: Record<string, unknown>) {
-    return request<{ ok: boolean; task: BackendRuntimeTask }>("POST", `/canvas/browser-tasks/${encodeURIComponent(id)}/complete`, { workerId, result });
+export function checkpointBackendBrowserTask(id: string, workerId: string, claimToken: string, recovery: import("./api/browser-task-recovery").BrowserRecovery) {
+    return request<{ ok: boolean; task: BackendRuntimeTask }>("POST", `/canvas/browser-tasks/${encodeURIComponent(id)}/checkpoint`, { workerId, claimToken, recovery });
 }
 
-export function failBackendBrowserTask(id: string, workerId: string, error: string) {
-    return request<{ ok: boolean; task: BackendRuntimeTask }>("POST", `/canvas/browser-tasks/${encodeURIComponent(id)}/fail`, { workerId, error });
+export function completeBackendBrowserTask(id: string, workerId: string, result: Record<string, unknown>, claimToken?: string) {
+    return request<{ ok: boolean; task: BackendRuntimeTask }>("POST", `/canvas/browser-tasks/${encodeURIComponent(id)}/complete`, { workerId, result, claimToken });
 }
 
-export function releaseBackendBrowserTask(id: string, workerId: string) {
-    return request<{ ok: boolean; task: BackendRuntimeTask }>("POST", `/canvas/browser-tasks/${encodeURIComponent(id)}/release`, { workerId });
+export function failBackendBrowserTask(id: string, workerId: string, error: string, claimToken?: string, terminalConfirmed = false, notSubmitted = false) {
+    return request<{ ok: boolean; task: BackendRuntimeTask }>("POST", `/canvas/browser-tasks/${encodeURIComponent(id)}/fail`, { workerId, error, claimToken, terminalConfirmed, notSubmitted });
+}
+
+export function releaseBackendBrowserTask(id: string, workerId: string, claimToken?: string, error?: string) {
+    return request<{ ok: boolean; task: BackendRuntimeTask }>("POST", `/canvas/browser-tasks/${encodeURIComponent(id)}/release`, { workerId, claimToken, error });
 }
 
 export function diagnoseBackendCanvasProject(projectId: string) {

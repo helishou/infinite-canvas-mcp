@@ -6,6 +6,7 @@ import UserLayout from "@/layouts/user-layout";
 const AssetsPage = lazy(() => import("@/pages/assets"));
 import { loadCanvasProjectPage } from "@/lib/canvas-project-loader";
 
+const ProjectsPage = lazy(() => import("@/pages/projects"));
 const CanvasPage = lazy(() => import("@/pages/canvas"));
 const CanvasProjectPage = lazy(loadCanvasProjectPage);
 const CanvasPerformanceFixture = lazy(() => import("@/pages/canvas/performance-fixture"));
@@ -45,6 +46,7 @@ export const router = createBrowserRouter([
         ),
         children: [
             { path: "/", element: lazyPage(HomePage) },
+            { path: "/projects", element: lazyPage(ProjectsPage) },
             { path: "/production", element: lazyPage(ProductionHubPage) },
             { path: "/director", element: lazyPage(LegacyDirectorPage) },
             { path: "/director/:projectId", element: lazyPage(EpisodeProductionPage) },

@@ -1,4 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { abortCanvasBrowserTask, isCanvasBrowserTaskPaused, resumeCanvasBrowserTask } from "@/services/api/canvas-browser-task";
+import { browserTaskRecoveryAction } from "./browser-task-recovery-view";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Empty, Modal, Progress, Select, Tag, Tooltip, message } from "antd";
 import { ChevronDown, ChevronRight, ListChecks, RefreshCw, Square } from "lucide-react";
 import { backendMediaUrl, cancelBackendTask, fetchBackendProject, fetchBackendTasks, resolveBackendH3Confirmation, retryBackendTask, type BackendRuntimeTask } from "@/services/backend-api";
@@ -110,6 +113,11 @@ function modelShortName(model?: string | null): string | undefined {
 }
 
 export function CanvasTaskCenter({ open, projectId, onClose }: { open: boolean; projectId: string; onClose: () => void }) {
+    const { t } = useTranslation();
+    const [locallyPaused, setLocallyPaused] = useState(new Set<string>());
+    const recoveryAction = (task: BackendRuntimeTask) => browserTaskRecoveryAction({ ...task, locallyPaused: locallyPaused.has(task.id) || isCanvasBrowserTaskPaused(task.id) });
+    const retryingRef = useRef(new Set<string>());
+    const [retryingIds, setRetryingIds] = useState(new Set<string>());
     const [tasks, setTasks] = useState<BackendRuntimeTask[]>([]);
     const [status, setStatus] = useState<string>("");
     const [loading, setLoading] = useState(false);
@@ -195,8 +203,9 @@ export function CanvasTaskCenter({ open, projectId, onClose }: { open: boolean; 
         }
     };
 
-    const cancel = async (id: string) => { try { await cancelBackendTask(id); await load(); } catch (error) { message.error(error instanceof Error ? error.message : String(error)); } };
-    const retry = async (id: string) => { try { await retryBackendTask(id); await load(); message.success("已创建重试任务"); } catch (error) { message.error(error instanceof Error ? error.message : String(error)); } };
+    const cancel = async (id: string) => { try { setLocallyPaused(current => new Set(current).add(id)); abortCanvasBrowserTask(id); await cancelBackendTask(id); await load(); } catch (error) { message.error(error instanceof Error ? error.message : String(error)); } };
+    const resumeLocal = (id: string) => { setLocallyPaused(current => { const next=new Set(current);next.delete(id);return next; }); resumeCanvasBrowserTask(id); };
+    const retry = async (id: string) => { if (retryingRef.current.has(id)) return; retryingRef.current.add(id); setRetryingIds(new Set(retryingRef.current)); try { const response = await retryBackendTask(id); if (response.task?.id === id) resumeLocal(id); await load(); message.success(response.task?.id === id ? t("browserRecovery.resumed") : t("browserRecovery.created")); } catch (error) { message.error(error instanceof Error ? error.message : String(error)); } finally { retryingRef.current.delete(id); setRetryingIds(new Set(retryingRef.current)); } };
     const resolve = async (task: BackendRuntimeTask, action: "confirm" | "keep_first_pass" | "discard") => {
         const pending = task.result?.confirmation?.pending?.[0];
         if (!pending) { message.error("找不到待确认 Clip，请刷新任务"); return; }
@@ -237,13 +246,13 @@ export function CanvasTaskCenter({ open, projectId, onClose }: { open: boolean; 
                                         {isExpanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
                                     </button>
                                     : <span className="inline-block w-5" />}
-                                <Tag color={statusColor(parent.status)}>{parent.status}</Tag>
+                                <Tag color={statusColor(parent.status)}>{recoveryAction(parent) ? t("browserRecovery.unknown") : parent.status}</Tag>
                                 <Tag>{parent.kind || parent.executor || "task"}</Tag>
                                 {modelShortName(parent.model) ? <Tag title={parent.model}>{modelShortName(parent.model)}</Tag> : null}
                                 <span className="truncate text-xs text-stone-500">{parent.id}</span>
                             </div>
                             <div className="flex shrink-0 gap-1">
-                                {terminal && parent.status !== "succeeded" ? <Button type="text" size="small" icon={<RefreshCw className="size-3.5" />} onClick={() => void retry(parent.id)}>重试</Button> : null}
+                                {recoveryAction(parent) === "blocked" ? <span className="max-w-52 text-xs text-muted-foreground">{t("browserRecovery.checkProvider")}</span> : recoveryAction(parent) ? <Button type="text" size="small" loading={retryingIds.has(parent.id)} icon={<RefreshCw className="size-3.5" />} onClick={() => recoveryAction(parent) === "check" ? resumeLocal(parent.id) : void retry(parent.id)}>{t(`browserRecovery.${recoveryAction(parent)}`)}</Button> : terminal && parent.status !== "succeeded" ? <Button type="text" size="small" loading={retryingIds.has(parent.id)} icon={<RefreshCw className="size-3.5" />} onClick={() => void retry(parent.id)}>重试</Button> : null}
                                 {parent.status === "awaiting_confirmation" && parent.kind === "canvas-h3-run" ? <><Button type="text" size="small" onClick={() => void resolve(parent, "confirm")}>确认二采</Button><Button type="text" size="small" onClick={() => void resolve(parent, "keep_first_pass")}>保留一采</Button><Button danger type="text" size="small" onClick={() => void resolve(parent, "discard")}>放弃</Button></> : null}
                                 {!terminal && parent.status !== "awaiting_confirmation" ? <Button danger type="text" size="small" icon={<Square className="size-3.5" />} onClick={() => void cancel(parent.id)}>取消</Button> : null}
                             </div>
@@ -269,13 +278,13 @@ export function CanvasTaskCenter({ open, projectId, onClose }: { open: boolean; 
                             return <div key={child.id} className={`pl-9 pr-3 py-2 ${isLast ? "" : "border-b border-stone-100 dark:border-stone-800"}`}>
                                 <div className="flex items-center justify-between gap-3">
                                     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                                        <Tag color={statusColor(child.status)}>{child.status}</Tag>
+                                        <Tag color={statusColor(child.status)}>{recoveryAction(child) ? t("browserRecovery.unknown") : child.status}</Tag>
                                         <Tag>{child.kind || child.executor || "task"}</Tag>
                                         {modelShortName(child.model) ? <Tag title={child.model}>{modelShortName(child.model)}</Tag> : null}
                                         <span className="truncate text-xs text-stone-500">{child.id}</span>
                                     </div>
                                     <div className="flex shrink-0 gap-1">
-                                        {childTerminal && child.status !== "succeeded" ? <Button type="text" size="small" icon={<RefreshCw className="size-3.5" />} onClick={() => void retry(child.id)}>重试</Button> : null}
+                                        {recoveryAction(child) === "blocked" ? <span className="max-w-52 text-xs text-muted-foreground">{t("browserRecovery.checkProvider")}</span> : recoveryAction(child) ? <Button type="text" size="small" loading={retryingIds.has(child.id)} icon={<RefreshCw className="size-3.5" />} onClick={() => recoveryAction(child) === "check" ? resumeLocal(child.id) : void retry(child.id)}>{t(`browserRecovery.${recoveryAction(child)}`)}</Button> : childTerminal && child.status !== "succeeded" ? <Button type="text" size="small" loading={retryingIds.has(child.id)} icon={<RefreshCw className="size-3.5" />} onClick={() => void retry(child.id)}>重试</Button> : null}
                                         {!childTerminal && child.status !== "awaiting_confirmation" ? <Button danger type="text" size="small" icon={<Square className="size-3.5" />} onClick={() => void cancel(child.id)}>取消</Button> : null}
                                     </div>
                                 </div>

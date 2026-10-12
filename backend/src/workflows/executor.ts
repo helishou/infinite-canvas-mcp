@@ -561,6 +561,7 @@ export function applyWorkflowFieldDefaults(
 }
 
 export class WorkflowExecutor {
+    private readonly backgroundSubmissions = new Map<string, Promise<{ taskId: string }>>();
     private readonly controllers = new Map<string, AbortController>();
     private readonly comfyExecutions = new Map<string, { url: string; promptId?: string; cancelRequested: boolean; cancellation?: Promise<void> }>();
     constructor(
@@ -849,10 +850,25 @@ export class WorkflowExecutor {
         nodeId?: string,
         parentTaskId?: string,
     ): Promise<{ taskId: string }> {
-        const ctx = await this.prepareRun(workflowJson, config, fieldValues, clientId, comfyUrl, name, clientTaskId, projectId, nodeId, parentTaskId);
-        // executeAndFinalize 内部已捕获异常并把任务标 failed + 写生成日志，这里吞掉重抛避免 unhandled rejection。
-        void this.executeAndFinalize(ctx).catch(() => {});
-        return { taskId: ctx.task.id };
+        // A client ID identifies one submission, including a failed/completed one. Explicit reruns use a new ID.
+        if (clientTaskId) {
+            const existing = this.tasks.get(clientTaskId);
+            if (existing) {
+                if (existing.kind !== "workflow") throw new Error("clientTaskId belongs to a different task kind");
+                return { taskId: existing.id };
+            }
+            const pending = this.backgroundSubmissions.get(clientTaskId);
+            if (pending) return pending;
+        }
+        const submission = (async () => {
+            const ctx = await this.prepareRun(workflowJson, config, fieldValues, clientId, comfyUrl, name, clientTaskId, projectId, nodeId, parentTaskId);
+            // executeAndFinalize owns terminal state and logs; a detached caller must not rerun it.
+            void this.executeAndFinalize(ctx).catch(() => {});
+            return { taskId: ctx.task.id };
+        })();
+        if (clientTaskId) this.backgroundSubmissions.set(clientTaskId, submission);
+        try { return await submission; }
+        finally { if (clientTaskId) this.backgroundSubmissions.delete(clientTaskId); }
     }
 
     cancel(id: string) {

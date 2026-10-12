@@ -2,7 +2,7 @@ import { type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
-import { ImageSettingsTheme } from "@/components/image-settings-panel";
+import { ImageSettingsTheme, SettingsSection } from "@/components/image-settings-panel";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import type { AiConfig, ReasoningEffort } from "@/stores/use-config-store";
 
@@ -21,18 +21,15 @@ export function TextSettingsPanel({ config, onConfigChange, theme, className = "
         <ImageSettingsTheme theme={theme}>
             <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
                 <div className="text-lg font-semibold">{t("settingsPanels.text.title")}</div>
-                <div className="space-y-2.5">
-                    <div className="text-sm font-medium" style={{ color: theme.node.muted }}>
-                        {t("settingsPanels.text.reasoning")}
-                    </div>
-                    <div className="grid grid-cols-5 gap-2">
+                <SettingsSection title={t("settingsPanels.text.reasoning")} theme={theme}>
+                    <div className="grid grid-cols-3 gap-2">
                         {reasoningEffortOptions.map((value) => (
                             <OptionPill key={value} selected={config.reasoningEffort === value} theme={theme} onClick={() => onConfigChange("reasoningEffort", value)}>
                                 {t(`settingsPanels.common.${value}`)}
                             </OptionPill>
                         ))}
                     </div>
-                </div>
+                </SettingsSection>
             </div>
         </ImageSettingsTheme>
     );
@@ -46,7 +43,8 @@ function OptionPill({ selected, theme, onClick, children }: { selected: boolean;
     return (
         <button
             type="button"
-            className="h-9 cursor-pointer rounded-full border px-2 text-sm transition hover:opacity-80"
+            aria-pressed={selected}
+            className="min-h-9 min-w-0 cursor-pointer rounded-full border px-2 text-sm transition hover:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
             style={{ background: "transparent", borderColor: selected ? theme.node.text : theme.node.stroke, color: theme.node.text }}
             onMouseDown={(event) => event.stopPropagation()}
             onClick={onClick}

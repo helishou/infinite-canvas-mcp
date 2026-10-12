@@ -45,6 +45,8 @@ type SourceCache = PromptSourceStatus & {
     items: Prompt[];
     fetchedAt: number;
     signature: string;
+    lastAttemptAt?: number;
+    lastAttemptSignature?: string;
 };
 
 const cacheTtlMs = 1000 * 60 * 60;
@@ -106,7 +108,7 @@ async function refreshSourceRecord(source: PromptSource): Promise<PromptSourceRe
     try {
         const items = withSourceMeta(source, await runPromptSource(source));
         const lastSuccessAt = new Date().toISOString();
-        const cache: SourceCache = { sourceId: source.id, items, count: items.length, fetchedAt: Date.now(), lastSuccessAt, lastError: "", signature: sourceSignature(source) };
+        const cache: SourceCache = { sourceId: source.id, items, count: items.length, fetchedAt: Date.now(), lastSuccessAt, lastError: "", signature: sourceSignature(source), lastAttemptAt: Date.now(), lastAttemptSignature: sourceSignature(source) };
         await writeSourceCache(source.id, cache);
         return { sourceId: source.id, sourceName: source.name, count: items.length, lastSuccessAt, lastError: "", success: true };
     } catch (error) {
@@ -119,6 +121,8 @@ async function refreshSourceRecord(source: PromptSource): Promise<PromptSourceRe
             lastSuccessAt: previous?.lastSuccessAt || "",
             lastError,
             signature: previous?.signature || sourceSignature(source),
+            lastAttemptAt: Date.now(),
+            lastAttemptSignature: sourceSignature(source),
         };
         await writeSourceCache(source.id, cache);
         return { sourceId: source.id, sourceName: source.name, count: cache.count, lastSuccessAt: cache.lastSuccessAt, lastError, success: false };
@@ -128,15 +132,33 @@ async function refreshSourceRecord(source: PromptSource): Promise<PromptSourceRe
 function getOrStartRefresh(source: PromptSource) {
     const current = loadingSources.get(source.id);
     if (current) return current;
-    const loading = refreshSourceRecord(source).finally(() => loadingSources.delete(source.id));
+    const loading = refreshSourceRecord({ ...source }).finally(() => loadingSources.delete(source.id));
     loadingSources.set(source.id, loading);
     return loading;
+}
+
+// A failed fetch does not make cached content fresh, but it must still respect
+// the configured refresh interval at every automatic entry point.
+function shouldRefreshSource(source: PromptSource, cached: SourceCache | null, maxAgeMs: number, now = Date.now()) {
+    if (!cached) return true;
+    const signature = sourceSignature(source);
+    const attemptedSignature = cached.lastAttemptSignature ?? cached.signature;
+    if (attemptedSignature !== signature) return true;
+    if (cached.lastError && typeof cached.lastAttemptAt === "number") {
+        return now - cached.lastAttemptAt >= maxAgeMs;
+    }
+    return cached.signature !== signature || now - cached.fetchedAt >= maxAgeMs;
+}
+
+function failureRefreshInterval() {
+    const minutes = usePromptSourceStore.getState().schedule.intervalMinutes;
+    return minutes > 0 ? minutes * 60_000 : cacheTtlMs;
 }
 
 async function getSourcePrompts(source: PromptSource): Promise<Prompt[]> {
     const cached = await readSourceCache(source.id);
     if (cached) {
-        const stale = cached.signature !== sourceSignature(source) || Date.now() - cached.fetchedAt >= cacheTtlMs;
+        const stale = shouldRefreshSource(source, cached, cached.lastError ? failureRefreshInterval() : cacheTtlMs);
         if (stale) {
             const refresh = getOrStartRefresh(source);
             if (!cached.items.length && cached.lastError) {
@@ -212,8 +234,7 @@ export async function refreshDueSources(maxAgeMs: number): Promise<PromptSourceR
     const sources = await Promise.all(
         enabledSources().map(async (source) => {
             const cached = await readSourceCache(source.id);
-            const lastSuccess = cached?.lastSuccessAt ? new Date(cached.lastSuccessAt).getTime() : 0;
-            return !lastSuccess || Boolean(cached?.lastError) || Date.now() - lastSuccess >= maxAgeMs || cached?.signature !== sourceSignature(source) ? source : null;
+            return shouldRefreshSource(source, cached, maxAgeMs) ? source : null;
         }),
     );
     const results = await Promise.all(sources.filter((source): source is PromptSource => Boolean(source)).map(getOrStartRefresh));

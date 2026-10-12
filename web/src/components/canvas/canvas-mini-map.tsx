@@ -1,3 +1,5 @@
+import { X } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { memo, useCallback, useMemo, useRef, useState } from "react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -5,7 +7,8 @@ import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { type CanvasNodeData, type ViewportTransform } from "@/types/canvas";
 
-export const Minimap = memo(function Minimap({ nodes, viewport, viewportSize, onViewportChange }: { nodes: CanvasNodeData[]; viewport: ViewportTransform; viewportSize: { width: number; height: number }; onViewportChange: (viewport: ViewportTransform) => void }) {
+export const Minimap = memo(function Minimap({ nodes, viewport, viewportSize, onViewportChange, onClose }: { nodes: CanvasNodeData[]; viewport: ViewportTransform; viewportSize: { width: number; height: number }; onViewportChange: (viewport: ViewportTransform) => void; onClose: () => void }) {
+    const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const containerRef = useRef<HTMLDivElement>(null);
     const [isDragging, setIsDragging] = useState(false);
@@ -105,7 +108,8 @@ export const Minimap = memo(function Minimap({ nodes, viewport, viewportSize, on
     };
 
     return (
-        <div className="absolute bottom-24 left-6 z-50 overflow-hidden rounded-lg border shadow-2xl backdrop-blur-sm" style={{ width, height, background: theme.toolbar.panel, borderColor: theme.toolbar.border }}>
+        <div data-canvas-minimap className="absolute z-50 overflow-hidden rounded-lg border shadow-sm" style={{ width, height, background: theme.toolbar.panel, borderColor: theme.toolbar.border }}>
+            <button type="button" aria-label={t("canvas.miniMapClose")} onClick={onClose} className="absolute right-1 top-1 z-10 grid size-8 place-items-center rounded bg-background/90"><X className="size-4" /></button>
             <div
                 ref={containerRef}
                 className="relative h-full w-full cursor-crosshair"

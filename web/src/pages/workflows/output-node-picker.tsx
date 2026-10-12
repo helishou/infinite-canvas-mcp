@@ -24,12 +24,13 @@ export function normalizeOutputNodeSelection(value: string[], graph: WorkflowGra
  * 未指定时保持不过滤，因此这里默认全不选而不是默认全选。
  */
 export function OutputNodePicker({
-    graph, value, onChange, title = "输出节点",
+    graph, value, onChange, disabled, title = "输出节点",
 }: {
     graph: WorkflowGraphJson;
     value: string[];
     onChange: (next: string[]) => void;
     title?: string;
+    disabled?: boolean;
 }) {
     const candidates = outputCandidates(graph);
     const normalizedValue = normalizeOutputNodeSelection(value, graph);
@@ -47,8 +48,8 @@ export function OutputNodePicker({
                     <p className="text-xs text-stone-500">不勾选则保留工作流全部输出；勾选后只归档这些节点的产物。</p>
                 </div>
                 <div className="flex shrink-0 gap-2">
-                    <Button size="small" disabled={!candidates.length} onClick={() => onChange(candidates.map((c) => c.nodeId))}>全选</Button>
-                    <Button size="small" disabled={!normalizedValue.length} onClick={() => onChange([])}>清空</Button>
+                    <Button size="small" disabled={disabled || !candidates.length} onClick={() => onChange(candidates.map((c) => c.nodeId))}>全选</Button>
+                    <Button size="small" disabled={disabled || !normalizedValue.length} onClick={() => onChange([])}>清空</Button>
                 </div>
             </div>
             {candidates.length === 0 ? (
@@ -57,7 +58,7 @@ export function OutputNodePicker({
                 <div className="grid grid-cols-2 gap-x-4 gap-y-1">
                     {candidates.map((item) => (
                         <label key={item.nodeId} className="flex min-w-0 items-center gap-2 py-1 text-xs">
-                            <Checkbox checked={selected.has(item.nodeId)} onChange={(event) => toggle(item.nodeId, event.target.checked)} />
+                            <Checkbox disabled={disabled} checked={selected.has(item.nodeId)} onChange={(event) => toggle(item.nodeId, event.target.checked)} />
                             <span className="truncate" title={`${item.label} #${item.nodeId}`}>{item.label}</span>
                             <span className="shrink-0 text-stone-400">#{item.nodeId}</span>
                         </label>

@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import type { ReactNode } from "react";
 import { Code, History, Play } from "lucide-react";
 
@@ -39,26 +40,29 @@ export function WorkflowWorkbench({
     activeTab, onTabChange, historyCount, title, subtitle, actions, alerts, emptyHint,
     graph, run, history, graphMinHeight = "min-h-[280px]",
 }: Props) {
+    const { t } = useTranslation();
     return (
         <div className="flex h-full min-h-0 flex-col gap-3">
-            <div className="flex shrink-0 items-center justify-between rounded-lg border border-stone-200 bg-white px-4 py-3 dark:border-stone-700 dark:bg-stone-900">
+            <div className="flex shrink-0 flex-wrap items-start justify-between gap-3 border-b border-border px-1 py-3">
                 <div className="min-w-0">
                     <div className="truncate text-base font-semibold">{title}</div>
                     {subtitle ? <p className="mt-0.5 truncate text-xs text-stone-500">{subtitle}</p> : null}
                 </div>
-                {actions ? <div className="ml-3 flex shrink-0 gap-2">{actions}</div> : null}
+                {actions ? <div aria-label={t("microTools.workflow.manage")} className="flex flex-wrap gap-2">{actions}</div> : null}
             </div>
 
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-stone-200 bg-white dark:border-stone-700 dark:bg-stone-900">
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border bg-card">
                 {alerts}
-                <div className="flex shrink-0 border-b border-stone-200 dark:border-stone-700">
+                <div className="flex shrink-0 border-b border-border">
                     {TABS.map(({ key, label, icon: Icon }) => (
                         <button
                             key={key}
-                            className={`flex items-center gap-1.5 px-3 py-2 text-xs transition ${activeTab === key ? "border-b-2 border-blue-500 text-blue-600" : "text-stone-500 hover:text-stone-700"}`}
+                            type="button"
+                            aria-pressed={activeTab === key}
+                            className={`flex items-center gap-1.5 px-3 py-2 text-xs transition ${activeTab === key ? "border-b-2 border-blue-500 text-blue-600" : "text-muted-foreground hover:text-foreground"}`}
                             onClick={() => onTabChange(key)}
                         >
-                            <Icon className="size-3.5" /> {label}
+                            <Icon className="size-3.5" /> {t(`microTools.workflow.tab_${key}`, label)}
                             {key === "history" ? ` (${historyCount})` : ""}
                         </button>
                     ))}
@@ -68,7 +72,8 @@ export function WorkflowWorkbench({
                     {emptyHint ?? (
                         <>
                             {activeTab === "graph" ? <div className={`h-full ${graphMinHeight}`}>{graph}</div> : null}
-                            {activeTab === "run" ? run : null}
+                            {/* Keep this owner’s unsaved inputs and uploads alive while inspecting its graph/history. */}
+                            <div hidden={activeTab !== "run"}>{run}</div>
                             {activeTab === "history" ? history : null}
                         </>
                     )}

@@ -1,4 +1,5 @@
-import { Button, Empty, Spin, Tag } from "antd";
+import { useTranslation } from "react-i18next";
+import { Alert, Button, Empty, Spin, Tag } from "antd";
 import { Trash2 } from "lucide-react";
 
 /** 一条运行历史。两个数据源（生图日志 / RunningHub 任务）都归一成这个形状。 */
@@ -13,6 +14,7 @@ export type RunHistoryEntry = {
     outputs: Array<{ url: string; mimeType?: string }>;
     texts?: string[];
     onDelete?: () => void;
+    deletePending?: boolean;
 };
 
 const statusColor = (status: string) => (status === "success" || status === "succeeded" ? "green" : status === "failed" ? "red" : "blue");
@@ -28,21 +30,24 @@ function OutputThumb({ item }: { item: { url: string; mimeType?: string } }) {
  * 差异只在数据源怎么把条目填出来，不在怎么显示。
  */
 export function RunHistoryList({
-    entries, loading, emptyText, onRefresh, hint,
+    entries, loading, emptyText, onRefresh, hint, error,
 }: {
     entries: RunHistoryEntry[];
     loading?: boolean;
     emptyText?: string;
     onRefresh?: () => void;
     hint?: string;
+    error?: string;
 }) {
+    const { t } = useTranslation();
     return (
         <div>
             <div className="mb-3 flex items-center justify-between">
                 <p className="text-xs text-stone-500">{hint || "工作流运行历史"}</p>
                 {onRefresh ? <Button size="small" onClick={onRefresh} disabled={loading}>刷新</Button> : null}
             </div>
-            {loading ? <Spin /> : entries.length === 0 ? <Empty description={emptyText || "暂无运行历史"} /> : (
+            {error ? <Alert type="error" description={error} /> : null}
+            {loading ? <Spin /> : error && entries.length === 0 ? null : entries.length === 0 ? <Empty description={emptyText || "暂无运行历史"} /> : (
                 <div className="space-y-2">
                     {entries.map((entry) => (
                         <div key={entry.id} className="flex items-center gap-3 rounded border border-stone-200 bg-white p-3 text-sm dark:border-stone-700 dark:bg-stone-800">
@@ -66,7 +71,7 @@ export function RunHistoryList({
                                     </div>
                                 )}
                             </div>
-                            {entry.onDelete ? <Button size="small" danger icon={<Trash2 className="size-3" />} onClick={entry.onDelete} /> : null}
+                            {entry.onDelete ? <Button size="small" danger loading={entry.deletePending} aria-label={t("workflowDelete.historyAction", { name: entry.title })} icon={<Trash2 className="size-3" />} onClick={entry.onDelete} /> : null}
                         </div>
                     ))}
                 </div>

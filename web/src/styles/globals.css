@@ -50,71 +50,85 @@
 
 :root {
     --radius: 0.625rem;
-    --border: oklch(0.922 0 0);
-    --ring: oklch(0.708 0 0);
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.145 0 0);
-    --card: oklch(1 0 0);
-    --card-foreground: oklch(0.145 0 0);
-    --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.205 0 0);
-    --primary-foreground: oklch(0.985 0 0);
-    --secondary: oklch(0.97 0 0);
-    --secondary-foreground: oklch(0.205 0 0);
-    --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
-    --accent: oklch(0.97 0 0);
-    --accent-foreground: oklch(0.205 0 0);
-    --destructive: oklch(0.577 0.245 27.325);
-    --input: oklch(0.922 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-primary: oklch(0.205 0 0);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
-    --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
-    --sidebar-ring: oklch(0.708 0 0);
+    --font-sans: "Noto Sans SC Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", sans-serif;
+    --ui-title-size: 24px;
+    --ui-title-leading: 32px;
+    --ui-panel-size: 16px;
+    --ui-panel-leading: 24px;
+    --ui-body-size: 14px;
+    --ui-body-leading: 22px;
+    --ui-caption-size: 12px;
+    --ui-caption-leading: 18px;
+    --ui-control-height: 36px;
+    --ui-icon-hit: 36px;
+    --ui-radius-control: 6px;
+    --ui-radius-card: 10px;
+    --ui-radius-overlay: 12px;
+    --background: #f6f5f0;
+    --foreground: #30352e;
+    --card: #fcfbf7;
+    --card-foreground: var(--foreground);
+    --popover: #fcfbf7;
+    --popover-foreground: var(--foreground);
+    --primary: #4e6048;
+    --primary-foreground: #ffffff;
+    --secondary: #eeeee6;
+    --secondary-foreground: #3c4637;
+    --muted: #eaeae2;
+    --muted-foreground: #62695b;
+    --accent: #e8ecdf;
+    --accent-foreground: #384c31;
+    --destructive: #b6453c;
+    --border: #dddfd4;
+    --input: #cdd1c3;
+    --ring: #708566;
+    --chart-1: #708566;
+    --chart-2: #9b7356;
+    --chart-3: #687f89;
+    --chart-4: #a08b55;
+    --chart-5: #887390;
+    --sidebar: #f0f0e9;
+    --sidebar-foreground: var(--foreground);
+    --sidebar-primary: var(--primary);
+    --sidebar-primary-foreground: var(--primary-foreground);
+    --sidebar-accent: var(--accent);
+    --sidebar-accent-foreground: var(--accent-foreground);
+    --sidebar-border: var(--border);
+    --sidebar-ring: var(--ring);
 }
 
 .dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --border: oklch(1 0 0 / 10%);
-    --ring: oklch(0.556 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --input: oklch(1 0 0 / 15%);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
+    --background: #20231f;
+    --foreground: #e9ece3;
+    --card: #272b25;
+    --card-foreground: var(--foreground);
+    --popover: #2b3028;
+    --popover-foreground: var(--foreground);
+    --primary: #c1cfa3;
+    --primary-foreground: #20271c;
+    --secondary: #30362c;
+    --secondary-foreground: #e1e8d6;
+    --muted: #30352d;
+    --muted-foreground: #adb5a5;
+    --accent: #384332;
+    --accent-foreground: #d6e4c0;
+    --destructive: #f19689;
+    --border: #3c4436;
+    --input: #4b5643;
+    --ring: #b3c796;
+    --chart-1: #c1cfa3;
+    --chart-2: #c39979;
+    --chart-3: #96b5c3;
+    --chart-4: #c7b573;
+    --chart-5: #b6a0bd;
+    --sidebar: #242820;
+    --sidebar-foreground: var(--foreground);
+    --sidebar-primary: var(--primary);
+    --sidebar-primary-foreground: var(--primary-foreground);
+    --sidebar-accent: var(--accent);
+    --sidebar-accent-foreground: var(--accent-foreground);
+    --sidebar-border: var(--border);
+    --sidebar-ring: var(--ring);
 }
 
 @layer base {
@@ -128,6 +142,11 @@
     }
     body {
         @apply bg-background text-foreground;
+        -webkit-font-smoothing: antialiased;
+    }
+    button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
+        outline: 2px solid var(--ring);
+        outline-offset: 3px;
     }
     textarea {
         resize: none;
@@ -181,49 +200,25 @@
     .prompt-filter-tag.ant-tag-checkable {
         margin: 0;
         border: 1px solid transparent;
-        border-radius: 6px;
-        padding: 5px 10px;
-        color: #57534e;
-        font-size: 14px;
-        line-height: 1;
-        transition:
-            background 0.15s ease,
-            border-color 0.15s ease,
-            box-shadow 0.15s ease,
-            color 0.15s ease;
+        border-radius: 5px;
+        padding: 5px 9px;
+        color: var(--muted-foreground);
+        font-size: 12px;
+        line-height: 1.35;
+        transition: background 0.15s ease, color 0.15s ease;
     }
 
     .prompt-filter-tag.ant-tag-checkable:hover {
-        background: rgba(28, 25, 23, 0.06);
-        color: #1c1917;
+        background: var(--muted);
+        color: var(--foreground);
     }
 
     .prompt-filter-tag.ant-tag-checkable.is-active,
     .prompt-filter-tag.ant-tag-checkable-checked {
-        background: #111111;
-        border-color: #111111;
-        color: #ffffff;
+        background: var(--accent);
+        border-color: var(--border);
+        color: var(--accent-foreground);
         font-weight: 600;
-    }
-
-    .dark .prompt-filter-tag.ant-tag-checkable {
-        color: #e7e5e4;
-    }
-
-    .dark .prompt-filter-tag.ant-tag-checkable:hover {
-        background: rgba(255, 255, 255, 0.1);
-        color: #ffffff;
-    }
-
-    .dark .prompt-filter-tag.ant-tag-checkable.is-active,
-    .dark .prompt-filter-tag.ant-tag-checkable-checked {
-        background: rgba(250, 250, 249, 0.96);
-        border-color: rgba(255, 255, 255, 0.88);
-        box-shadow:
-            0 0 0 1px rgba(255, 255, 255, 0.18),
-            0 6px 18px rgba(0, 0, 0, 0.22);
-        color: #0c0a09 !important;
-        font-weight: 700;
     }
 
     .thin-scrollbar {
@@ -642,4 +637,47 @@
     padding: 0.5rem 0.8rem;
     border-radius: 0.6rem;
     font-size: 0.75rem;
+}
+
+/* Ant reset is unlayered: explicitly share the host face with native UI and portals. */
+body { font-family: var(--font-sans); }
+
+/* Keep the pre-existing authored prompt face while host UI adopts the system stack.
+   Text nodes already use their own monospace face and explicit metadata sizes. */
+.canvas-authored-prompt { font-family: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; }
+
+/* UI roles are opt-in: never target canvas nodes, user text, or code editors. */
+.ui-page-title { font-size: var(--ui-title-size); line-height: var(--ui-title-leading); font-weight: 600; letter-spacing: 0; }
+.ui-panel-title { font-size: var(--ui-panel-size); line-height: var(--ui-panel-leading); font-weight: 500; letter-spacing: 0; }
+.ui-group-title { font-size: var(--ui-body-size); line-height: var(--ui-body-leading); font-weight: 500; letter-spacing: 0; }
+.ui-body { font-size: var(--ui-body-size); line-height: var(--ui-body-leading); font-weight: 400; }
+.ui-caption { font-size: var(--ui-caption-size); line-height: var(--ui-caption-leading); font-weight: 400; }
+.ui-nav-label { font-size: 13px; line-height: 20px; }
+.ui-card { border-radius: var(--ui-radius-card); }
+.ui-icon-button, .ui-icon-button.ant-btn {
+    width: var(--ui-icon-hit); min-width: var(--ui-icon-hit); height: var(--ui-icon-hit); padding: 0;
+    flex-shrink: 0; border-radius: var(--ui-radius-control);
+}
+.ui-icon-button svg { width: 18px; height: 18px; flex-shrink: 0; }
+/* Compact route actions share button geometry without heading margins or SVG overrides. */
+.ui-action-link {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    height: var(--ui-control-height); min-height: var(--ui-control-height); padding: 0 15px;
+    border-radius: var(--ui-radius-control); white-space: nowrap;
+    font-size: var(--ui-body-size); line-height: var(--ui-body-leading); font-weight: 400;
+}
+.ui-action-link:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.ui-controls .ant-btn, .ui-controls aside button { min-height: var(--ui-control-height); }
+.ui-controls .prompt-filter-tag.ant-tag-checkable { display: inline-flex; align-items: center; min-height: 32px; font-size: 13px; line-height: 20px; border-radius: var(--ui-radius-control); }
+.ui-controls .ant-btn-sm { min-height: 32px; }
+.ui-result-action.ant-btn { height: auto; min-height: 36px; padding: 6px 8px; white-space: normal; font-size: 13px; line-height: 20px; }
+.ui-result-action.ant-btn > span:last-child { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+@media (max-width: 639px) {
+    :root { --ui-title-size: 22px; --ui-title-leading: 30px; }
+}
+@media (max-width: 639px), (pointer: coarse) {
+    :root { --ui-control-height: 44px; --ui-icon-hit: 44px; }
+    .ui-nav-label { font-size: 14px; line-height: 22px; }
+    .ui-controls .ant-btn-sm, .ui-result-action.ant-btn, .ui-controls .prompt-filter-tag.ant-tag-checkable, .ui-controls .ant-dropdown-menu-item { min-height: 44px; }
+    .ui-controls .ant-input-affix-wrapper, .ui-controls .ant-select { min-height: 44px; }
 }

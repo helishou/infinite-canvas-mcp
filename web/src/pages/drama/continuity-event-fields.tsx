@@ -1,0 +1,19 @@
+import { continuityReasonLength } from "./continuity-event-draft";
+import { Input, Select } from 'antd';
+import { useTranslation } from 'react-i18next';
+import type { continuityPresentation } from './continuity-presentation';
+type Row = Record<string, any>;
+export function ContinuityEventFields({ value, onChange, shot, fact, blocks, display, disabled, compact = false }: { value: { frame: string; after: string; reason: string; sourceBlockId: string }; onChange: (patch: Partial<typeof value>) => void; shot: Row; fact: Row; blocks: Row[]; display: ReturnType<typeof continuityPresentation>; disabled: boolean; compact?: boolean }) {
+ const { t } = useTranslation(); const label = (key: string, values?: Record<string, unknown>) => t(`director.workspace.continuity.subjectTimeline.${key}`, values);
+ const last = Number(shot.duration_frames) - 1, frame = value.frame.trim() ? Number(value.frame) : NaN;
+ const valid = Number.isInteger(frame) && frame >= 0 && frame <= last;
+ const block = blocks.find(row => row.id === value.sourceBlockId);
+ return <>
+  <label className="continuity-field"><span>{label('changePosition')} · {valid ? label('framePosition', { frame, duration: last + 1 }) : label('invalidPosition')}</span><input data-continuity-frame-slider type="range" min={0} max={last} step={1} disabled={disabled} aria-label={label('changePosition')} value={valid ? frame : 0} onChange={event => onChange({ frame: event.target.value })} /><span className="flex justify-between text-xs"><span>{label('shotStart')}</span><span>{label('shotMiddle')}</span><span>{label('shotEnd')}</span></span></label>
+  <details className="mb-3 text-xs" open={!valid || undefined}><summary>{label('preciseFrame')}</summary><Input className="mt-2" type="number" min={0} max={last} step={1} disabled={disabled} aria-label={t('director.atomic.localEventFrame')} value={value.frame} onChange={event => onChange({ frame: event.target.value })} />{!valid && <p role="alert" className="continuity-local-warning">{label('frameRange', { last })}</p>}</details>
+  <label className="continuity-field"><span>{t('director.workspace.continuity.afterChange')} *</span><Select aria-label={t('director.workspace.continuity.afterChange')} disabled={disabled} value={value.after || undefined} placeholder={label('chooseAfter')} options={[...new Set<string>([...(fact.allowed_values || []), 'unknown'])].map(item => ({ value: item, label: display.value(fact.id, item) }))} onChange={after => onChange({ after })} /></label>
+  <label className="continuity-field"><span>{t('director.workspace.continuity.eventReason')} *</span><Input.TextArea disabled={disabled} aria-label={t('director.workspace.continuity.eventReason')} placeholder={label('reasonPlaceholder')} value={value.reason} onChange={event => onChange({ reason: event.target.value })} autoSize={{ minRows: 2, maxRows: 4 }} /><small>{label('reasonMinimum', { count: continuityReasonLength(value.reason) })}</small></label>
+  <label className="continuity-field"><span>{t('director.workspace.continuity.scriptEvidence')} *</span><Select showSearch optionFilterProp="label" disabled={disabled} aria-label={t('director.workspace.continuity.scriptEvidence')} placeholder={label('chooseEvidence')} value={value.sourceBlockId || undefined} options={blocks.map(row => ({ value: String(row.id), label: String(row.sourceBlock?.text || display.source(row.id)) }))} onChange={sourceBlockId => onChange({ sourceBlockId })} /></label>
+  {block ? compact ? <details className="mb-2 text-xs"><summary>{t('director.workspace.continuity.scriptEvidence')}</summary><p className="mt-2 whitespace-pre-wrap leading-relaxed">{String(block.sourceBlock?.text || '')}</p></details> : <blockquote className="m-0 mb-3 border-l-2 border-primary pl-3 text-xs leading-relaxed text-muted-foreground">{String(block.sourceBlock?.text || '')}</blockquote> : !blocks.length && <p className="continuity-local-warning">{label('noEvidence')}</p>}
+ </>;
+}

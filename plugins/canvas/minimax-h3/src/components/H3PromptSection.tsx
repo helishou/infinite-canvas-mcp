@@ -1689,7 +1689,7 @@ export function H3PromptSection({
             : "当前 Clip 尚无可用的编译 Prompt；源稿修改后由 Backend 自动编译。"}
         {manualPromptOverride && canReverseSyncPrompt ? <Button size="small" loading={promptReverseSyncing} disabled={promptReverseSyncing || !textStatus.ready || textStatus.blocked} onClick={() => void requestPromptReverseSync()}>反向同步到分镜源稿</Button> : null}
         {manualPromptOverride && !canReverseSyncPrompt ? <span>当前编译回执没有可用的唯一来源映射，不能自动反向同步。</span> : null}
-        {manualPromptOverride && !manualPromptEditMode ? <Input.TextArea value={prompt} readOnly aria-label="保留的人工 Prompt 覆盖" autoSize={{ minRows: 8, maxRows: 22 }} /> : null}
+        {manualPromptOverride && !manualPromptEditMode ? <Input.TextArea className="nfh3-authored-prompt" value={prompt} readOnly aria-label="保留的人工 Prompt 覆盖" autoSize={{ minRows: 8, maxRows: 22 }} /> : null}
       </div> : null}
       {promptReverseSyncError ? <div className="minimax-prompt-reference-error" role="alert">反向同步未完成：{promptReverseSyncError}</div> : null}
       {manualPromptModeError ? <div className="minimax-prompt-reference-error" role="alert">切换回编译预览失败：{manualPromptModeError}</div> : null}
@@ -1763,7 +1763,7 @@ export function H3PromptSection({
       {!storyboardMode && showPromptEditor ? suggestionState.items.filter((item) => item.status === "pending").map((item) => (
         <details key={item.id} className="minimax-prompt-help-panel">
           <summary>{item.documentId !== textDocument.getDocumentId() ? "旧文本对象的强化候选（只读保留）" : "待确认的强化候选（仅对应此 Clip）"}</summary>
-          <textarea value={item.text} readOnly aria-label="待确认的强化提示词" />
+          <textarea className="nfh3-authored-prompt" value={item.text} readOnly aria-label="待确认的强化提示词" />
           <button type="button" disabled={!textStatus.ready || textStatus.blocked || item.documentId !== textDocument.getDocumentId() || !item.revision}
             onClick={() => void suggestions.apply(item.id, textDocument.getDocumentId(), prompt).catch(() => {})}>用此结果替换当前显示的原文</button>
           <button type="button" disabled={!item.revision} onClick={() => void suggestions.dismiss(item.id).catch(() => {})}>保留原文并忽略此候选</button>
@@ -1771,7 +1771,7 @@ export function H3PromptSection({
       )) : null}
       {!storyboardMode && showPromptEditor && enhancement?.text && enhancement.status === "suggestion" && !suggestionState.items.some((item) => item.id === enhancement.requestId) ? <details className="minimax-prompt-help-panel">
         <summary>候选尚未存入草稿，请先复制保留</summary>
-        <textarea value={enhancement.text} readOnly aria-label="未保存的强化提示词" />
+        <textarea className="nfh3-authored-prompt" value={enhancement.text} readOnly aria-label="未保存的强化提示词" />
       </details> : null}
       {!storyboardMode && showPromptEditor ? <div key="prompt-actions" className="nfh3-prompt-actions">
        <Select
@@ -1824,11 +1824,11 @@ export function H3PromptSection({
       <div key="prompt-textarea-wrap" className={`minimax-prompt-translate-wrap${selected ? " has-line-map" : ""}`}>
         {/* 原提示词编辑器始终挂载：翻译只做叠加展示，绝不卸载/改写原文。 */}
         {selected && structuredPromptV2 && !manualPromptOverride ? <div className="minimax-compiled-prompt-preview">
-          <Input.TextArea value={prompt} readOnly aria-label="编译生成的 Prompt（只读）" autoSize={{ minRows: 8, maxRows: 22 }} />
+          <Input.TextArea className="nfh3-authored-prompt" value={prompt} readOnly aria-label="编译生成的 Prompt（只读）" autoSize={{ minRows: 8, maxRows: 22 }} />
         </div> : selected ? <TextEditor key={selected.id} projectId={ctx.projectId} target={textTarget} editorRef={editorRef} references={editorReferences} chips clipReferenceTags speakers={speakerRoster} dialogue lineMap placeholder="请输入提示词" className="minimax-collaborative-prompt minimax-prompt-line-map-enabled" style={{ minHeight: 160, height: 240, fontSize: 29 }} /> : null}
         {/* 翻译结果：纯只读展示面板，独立存在，不影响上面的原提示词编辑器与文档。 */}
         {isTranslated && translation && translation.segmentId === selected?.id && translation.prompt === prompt
-          ? <textarea readOnly value={translation.text} aria-label="中文翻译（只读）" className="minimax-prompt-translation" />
+          ? <textarea readOnly value={translation.text} aria-label="中文翻译（只读）" className="minimax-prompt-translation nfh3-authored-prompt" />
           : null}
         <button
           key="prompt-translate"

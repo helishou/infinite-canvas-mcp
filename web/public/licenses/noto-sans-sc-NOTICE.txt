@@ -1,0 +1,10 @@
+Noto Sans SC Variable
+Distributed by @fontsource-variable/noto-sans-sc 5.3.1 (Google Fonts v41)
+Source: https://github.com/google/fonts/tree/main/ofl/notosanssc
+Package: https://www.npmjs.com/package/@fontsource-variable/noto-sans-sc/v/5.3.1
+License: SIL Open Font License 1.1; original text in noto-sans-sc-OFL-1.1.txt
+
+Original, unmodified WOFF2 unicode subsets are bundled by Vite with the application.
+Weights 100–900, normal style. The browser requests subsets needed for displayed
+characters; no font CDN or blanket preload is required. Characters outside the
+package coverage fall back to the declared platform fonts.

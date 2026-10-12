@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { boundaryCounts, clipDurationSeconds, clipPartitionProfileMix, materializeClipPartition, nearestBoundaryCount, outsideClipWindow, partitionAt } from "./clip-boundary";
+import { boundaryCounts, clipBoundaryPositions, clipDurationSeconds, clipPartitionProfileMix, materializeClipPartition, nearestBoundaryCount, outsideClipWindow, partitionAt } from "./clip-boundary";
 
 const clips = [
     { id: "A", shot_ids: ["S1", "S2"], mode: "H3", mode_lock: true, mode_selection_reason: "locked", styleTemplateId: "style-1" },
@@ -101,4 +101,14 @@ test("未指明来源时混合分组不带 executionProfileSourceId", () => {
     ];
     const [left] = materializeClipPartition(realistic, [{ ids: ["S1", "S2", "S3"] }]);
     assert.equal(left.executionProfileSourceId, undefined);
+});
+
+test("vertical boundary uses client Y and preserves content coordinates while scrolling", () => {
+ const rects = [{ left: 40, right: 200, top: 180, bottom: 260 }, { left: 40, right: 200, top: 280, bottom: 360 }];
+ const first = clipBoundaryPositions(rects, [1], { left: 20, top: 100 }, 50, true);
+ assert.deepEqual(first, [{ count: 1, viewport: 270, content: 220 }]);
+ const moved = clipBoundaryPositions(rects.map(rect => ({ ...rect, top: rect.top - 30, bottom: rect.bottom - 30 })), [1], { left: 20, top: 100 }, 80, true);
+ assert.equal(moved[0].content, first[0].content);
+ assert.equal(nearestBoundaryCount(239, moved.map(edge => ({ count: edge.count, edge: edge.viewport }))), 1);
+ assert.deepEqual(clipBoundaryPositions(rects, [1], { left: 20, top: 100 }, 10), [{ count: 1, viewport: 120, content: 110 }]);
 });

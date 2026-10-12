@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { CanvasPortal, useCanvasTransientEscape } from "@/lib/canvas/canvas-host";
+import { CanvasSettingsContext } from "./canvas-settings-context";
+import { canvasSettingsPosition } from "./canvas-settings-position";
 import { Settings2 } from "lucide-react";
 import { Button, InputNumber } from "antd";
 import { useTranslation } from "react-i18next";
@@ -11,6 +13,7 @@ import type { AiConfig, ReasoningEffort } from "@/stores/use-config-store";
 
 type CanvasTextSettingsPopoverProps = {
     config: AiConfig;
+    targetLabel?: string;
     onConfigChange: (key: "reasoningEffort", value: ReasoningEffort) => void;
     count?: number;
     onCountChange?: (count: number) => void;
@@ -18,7 +21,7 @@ type CanvasTextSettingsPopoverProps = {
     placement?: "topLeft" | "top" | "topRight" | "bottomLeft" | "bottom" | "bottomRight";
 };
 
-export function CanvasTextSettingsPopover({ config, onConfigChange, count, onCountChange, buttonClassName, placement = "topLeft" }: CanvasTextSettingsPopoverProps) {
+export function CanvasTextSettingsPopover({ config, targetLabel, onConfigChange, count, onCountChange, buttonClassName, placement = "topLeft" }: CanvasTextSettingsPopoverProps) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const buttonRef = useRef<HTMLSpanElement>(null);
@@ -33,6 +36,7 @@ export function CanvasTextSettingsPopover({ config, onConfigChange, count, onCou
         const closeOnOutsidePointer = (event: PointerEvent) => {
             const target = event.target;
             if (!(target instanceof Node) || buttonRef.current?.contains(target) || panelRef.current?.contains(target)) return;
+            if (target instanceof Element && target.closest(".ant-select-dropdown")) return;
             setOpen(false);
         };
         syncPosition();
@@ -46,12 +50,12 @@ export function CanvasTextSettingsPopover({ config, onConfigChange, count, onCou
         };
     }, [open]);
 
-    const panel = open && buttonRect ? <TextSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={config} count={count} onConfigChange={onConfigChange} onCountChange={onCountChange} /> : null;
+    const panel = open && buttonRect ? <TextSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} targetLabel={targetLabel} config={config} count={count} onConfigChange={onConfigChange} onCountChange={onCountChange} /> : null;
 
     return (
         <>
             <span ref={buttonRef} className="inline-flex min-w-0">
-                <Button size="small" type="text" className={buttonClassName || "!h-8 !max-w-[170px] !justify-start !rounded-full !px-2.5"} style={{ background: theme.node.fill, color: theme.node.text }} icon={<Settings2 className="size-3.5" />} onClick={() => setOpen((current) => !current)}>
+                <Button size="small" type="text" className={buttonClassName || "!h-8 !max-w-[170px] !justify-start !rounded-full !px-2.5"} style={{ background: theme.node.fill, color: theme.node.text }} icon={<Settings2 className="size-3.5" />} aria-expanded={open} onClick={() => setOpen((current) => !current)}>
                     <span className="truncate">{t("canvas.controls.reasoning")} · {reasoningEffortLabel(config.reasoningEffort)}{onCountChange ? ` · ${t("canvas.controls.generations", { count })}` : ""}</span>
                 </Button>
             </span>
@@ -60,39 +64,34 @@ export function CanvasTextSettingsPopover({ config, onConfigChange, count, onCou
     );
 }
 
-function TextSettingsPortal({ buttonRect, panelRef, placement, theme, config, count, onConfigChange, onCountChange }: {
+function TextSettingsPortal({ buttonRect, panelRef, placement, theme, targetLabel, config, count, onConfigChange, onCountChange }: {
     buttonRect: DOMRect;
     panelRef: RefObject<HTMLDivElement | null>;
     placement: CanvasTextSettingsPopoverProps["placement"];
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     config: AiConfig;
+    targetLabel?: string;
     count?: number;
     onConfigChange: CanvasTextSettingsPopoverProps["onConfigChange"];
     onCountChange?: (count: number) => void;
 }) {
     const { t } = useTranslation();
-    const width = 356;
-    const gap = 8;
-    const margin = 12;
-    const alignRight = placement?.endsWith("Right");
-    const alignCenter = placement === "top" || placement === "bottom";
-    const left = alignCenter ? buttonRect.left + buttonRect.width / 2 - width / 2 : alignRight ? buttonRect.right - width : buttonRect.left;
-    const topPlacement = placement?.startsWith("top");
     const style = {
         position: "fixed",
         zIndex: 1200,
-        width,
-        left: Math.max(margin, Math.min(window.innerWidth - width - margin, left)),
-        ...(topPlacement ? { bottom: window.innerHeight - buttonRect.top + gap } : { top: buttonRect.bottom + gap }),
+        ...canvasSettingsPosition(buttonRect, { width: window.innerWidth, height: window.innerHeight }, placement),
+        boxSizing: "border-box",
         background: theme.toolbar.panel,
         borderRadius: 18,
         boxShadow: "0 18px 54px rgba(28, 25, 23, 0.16)",
         padding: 18,
+        overflowY: "auto",
         color: theme.node.text,
     } as const;
 
     return <CanvasPortal>
-        <div ref={panelRef} style={style} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
+        <div ref={panelRef} data-canvas-shortcuts-ignore data-canvas-no-zoom style={style} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
+            <CanvasSettingsContext targetLabel={targetLabel} />
             <TextSettingsPanel config={config} onConfigChange={onConfigChange} theme={theme} />
             {onCountChange ? (
                 <div className="mt-4 space-y-2.5">

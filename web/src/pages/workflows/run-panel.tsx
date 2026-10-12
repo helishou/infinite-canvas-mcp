@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button, Input, Progress, Select, Switch, Tag, message } from "antd";
+import { useTranslation } from "react-i18next";
+import { groupWorkflowFields } from "./field-groups";
 import { Play, Trash2, Upload } from "lucide-react";
 import { uploadBackendMedia, backendMediaUrl } from "@/services/backend-api";
 import type { WorkflowConfig, WorkflowField, WorkflowRunResult } from "@/services/api/workflows";
@@ -10,13 +12,16 @@ type MediaFieldUploadProps = {
     value: string;
     kind: "image" | "audio" | "video";
     onChange: (value: string) => void;
+    onUploadingChange: (uploading: boolean) => void;
 };
 
-function MediaFieldUpload({ fieldId, value, kind, onChange }: MediaFieldUploadProps) {
+function MediaFieldUpload({ fieldId, value, kind, onChange, onUploadingChange }: MediaFieldUploadProps) {
     const inputRef = useRef<HTMLInputElement>(null);
     const [previewUrl, setPreviewUrl] = useState(value);
     const [filename, setFilename] = useState("");
     const [uploading, setUploading] = useState(false);
+    const uploadVersion = useRef(0);
+    const uploadPending = useRef(false);
 
     const previewValue = (source: string) => {
         if (!source.startsWith("/media/")) return source;
@@ -25,38 +30,58 @@ function MediaFieldUpload({ fieldId, value, kind, onChange }: MediaFieldUploadPr
     };
 
     useEffect(() => {
+        // A changed value or field belongs to a new input, even if an earlier upload finishes later.
+        uploadVersion.current += 1;
+        uploadPending.current = false;
+        setUploading(false);
+        onUploadingChange(false);
         setPreviewUrl(previewValue(value));
         if (!value) setFilename("");
+        return () => {
+            uploadVersion.current += 1;
+            uploadPending.current = false;
+            onUploadingChange(false);
+        };
+        // The callback is an inline field setter; its identity must not cancel an upload on every render.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [fieldId, kind, value]);
 
     const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         e.target.value = "";
-        if (!file) return;
+        if (!file || uploadPending.current) return;
+        const version = ++uploadVersion.current;
+        uploadPending.current = true;
         setUploading(true);
+        onUploadingChange(true);
         try {
             const media = await uploadBackendMedia({ name: file.name, blob: file, mimeType: file.type || undefined, category: "input" });
+            if (version !== uploadVersion.current) return;
             setPreviewUrl(backendMediaUrl(media.storageKey));
             setFilename(file.name);
             onChange(media.url);
         } catch (error) {
-            message.error(error instanceof Error ? error.message : "媒体上传失败");
+            if (version === uploadVersion.current) message.error(error instanceof Error ? error.message : "媒体上传失败");
         } finally {
-            setUploading(false);
+            if (version === uploadVersion.current) {
+                uploadPending.current = false;
+                setUploading(false);
+                onUploadingChange(false);
+            }
         }
     };
 
     return (
         <div className="space-y-2">
             <div className="flex items-center gap-2">
-                <input ref={inputRef} type="file" accept={`${kind}/*`} className="hidden" onChange={handleFileChange} />
+                <input ref={inputRef} type="file" accept={`${kind}/*`} className="hidden" disabled={uploading} onChange={handleFileChange} />
                 <Button size="small" loading={uploading} icon={<Upload className="size-3" />} onClick={() => inputRef.current?.click()}>
                     {previewUrl ? `更换${kind === "audio" ? "音频" : kind === "video" ? "视频" : "图片"}` : `选择${kind === "audio" ? "音频" : kind === "video" ? "视频" : "图片"}`}
                 </Button>
                 {previewUrl && (
                     <>
                         <Tag color="blue" className="max-w-48 truncate text-xs">{filename || `已选择${kind === "audio" ? "音频" : kind === "video" ? "视频" : "图片"}`}</Tag>
-                        <Button size="small" danger type="text" onClick={() => { setPreviewUrl(""); setFilename(""); onChange(""); }}>
+                        <Button size="small" danger type="text" disabled={uploading} onClick={() => { setPreviewUrl(""); setFilename(""); onChange(""); }}>
                             <Trash2 className="size-3" />
                         </Button>
                     </>
@@ -77,6 +102,8 @@ export type RunPanelProps = {
     config: WorkflowConfig;
     onRun: (fields: Record<string, string>) => void;
     running: boolean;
+    disabled?: boolean;
+    cancelPending?: boolean;
     result: WorkflowRunResult | null;
     emptyText?: string;
     runLabel?: string;
@@ -98,7 +125,7 @@ export type RunPanelProps = {
  * 各自的特有内容（默认值运行、取消、批量映射表）通过插槽传入。
  */
 export function RunTab({
-    config, onRun, running, result, emptyText, runLabel, hint, toolbar, footer, extra, progress, statusText, onCancel, outputPicker,
+    config, onRun, running, disabled, cancelPending, result, emptyText, runLabel, hint, toolbar, footer, extra, progress, statusText, onCancel, outputPicker,
 }: RunPanelProps & {
     hint?: ReactNode;
     toolbar?: ReactNode;
@@ -118,6 +145,8 @@ export function RunTab({
                 config={config}
                 onRun={onRun}
                 running={running}
+                disabled={disabled}
+                cancelPending={cancelPending}
                 result={result}
                 emptyText={emptyText}
                 runLabel={runLabel}
@@ -135,32 +164,45 @@ export function RunTab({
  * 运行面板：按 config.fields 渲染可填写输入并提交。本地 ComfyUI 与 RunningHub
  * 都把字段归一化成 WorkflowConfig 后复用它，所以两边运行体验一致。
  */
-export function RunPanel({ config, onRun, running, result, emptyText, runLabel, progress, statusText, onCancel }: RunPanelProps) {
-    const [fields, setFields] = useState<Record<string, string>>({});
-    // 只有「字段集合或默认值真的变了」才重置表单。
-    // 不能依赖 config.fields 这个数组本身：调用方常在渲染时用 map 派生它
-    // （RunningHub 面板就是这样），数组身份每次都不同，于是点一下运行
-    // 触发 re-render 后，用户刚填的内容就被冲回 default。
-    const defaultsKey = JSON.stringify(config.fields.map((f) => [f.id, f.default ?? null]));
-
-    useEffect(() => {
-        const defaults: Record<string, string> = {};
-        for (const f of config.fields) {
-            if (f.default !== undefined && f.default !== null) defaults[f.id] = String(f.default);
+export function RunPanel({ config, onRun, running, disabled, cancelPending, result, emptyText, runLabel, progress, statusText, onCancel }: RunPanelProps) {
+    const { t } = useTranslation();
+    const uploadingFields = useRef(new Set<string>());
+    const [uploadCount, setUploadCount] = useState(0);
+    // An owner is isolated by RunTab's key. Within that owner, names/defaults and fresh
+    // config objects must not overwrite input; only a different field binding starts anew.
+    const fieldKey = (field: WorkflowField) => JSON.stringify([field.id, field.node, field.input, field.type]);
+    const identities = Object.fromEntries(config.fields.map((field) => [field.id, fieldKey(field)]));
+    const signature = JSON.stringify(identities);
+    const defaults = Object.fromEntries(config.fields.filter((field) => field.default !== undefined && field.default !== null).map((field) => [field.id, String(field.default)]));
+    const [draft, setDraft] = useState(() => ({ signature, identities, fields: defaults }));
+    const fields = draft.signature === signature ? draft.fields : { ...defaults };
+    // Reconcile before submission: preserve surviving bindings, seed additions, discard removals.
+    if (draft.signature !== signature) {
+        for (const field of config.fields) {
+            if (draft.identities[field.id] === identities[field.id] && Object.hasOwn(draft.fields, field.id)) fields[field.id] = draft.fields[field.id];
         }
-        setFields(defaults);
-    }, [defaultsKey]);
-
-    const setField = (id: string, value: string) => setFields((p) => ({ ...p, [id]: value }));
+        setDraft({ signature, identities, fields });
+    }
+    const setField = (id: string, value: string) => setDraft((current) => current.identities[id] !== identities[id] ? current : ({
+        ...current, fields: { ...current.fields, [id]: value },
+    }));
+    const setUploading = (id: string, uploading: boolean) => {
+        if (uploading) uploadingFields.current.add(id);
+        else uploadingFields.current.delete(id);
+        setUploadCount(uploadingFields.current.size);
+    };
 
     return (
         <div className="space-y-4">
+            <p className="text-xs text-muted-foreground">{t("microTools.workflow.scope")}</p>
             {config.fields.length === 0 ? (
                 <div className="text-center text-sm text-stone-500">{emptyText ?? "请先点击节点配置字段后再运行"}</div>
             ) : (
                 <div className="space-y-3">
-                    {config.fields.map((field) => (
-                        <div key={field.id}>
+                    {groupWorkflowFields(config.fields).map(group => <section key={group.key} aria-label={t(`microTools.workflow.${group.key}`)} className="space-y-3">
+                        <h3 className="text-sm font-medium text-foreground">{t(`microTools.workflow.${group.key}`)}</h3>
+                    {group.fields.map((field) => (
+                        <div key={fieldKey(field)}>
                             <label className="mb-1 flex items-center gap-2 text-xs text-stone-500">
                                 {field.name || field.id}
                                 <Tag color="default" className="text-xs">{field.node.includes(",") ? `多节点 · ${field.input}` : `${field.node}.${field.input}`}</Tag>
@@ -168,11 +210,11 @@ export function RunPanel({ config, onRun, running, result, emptyText, runLabel, 
                             {field.type === "text" ? (
                                 <Input.TextArea value={fields[field.id] || ""} onChange={(e) => setField(field.id, e.target.value)} rows={2} placeholder={field.name} />
                             ) : field.type === "image" ? (
-                                <MediaFieldUpload fieldId={field.id} kind="image" value={fields[field.id] || ""} onChange={(v) => setField(field.id, v)} />
+                                <MediaFieldUpload fieldId={field.id} kind="image" value={fields[field.id] || ""} onChange={(v) => setField(field.id, v)} onUploadingChange={(pending) => setUploading(fieldKey(field), pending)} />
                             ) : field.type === "audio" ? (
-                                <MediaFieldUpload fieldId={field.id} kind="audio" value={fields[field.id] || ""} onChange={(v) => setField(field.id, v)} />
+                                <MediaFieldUpload fieldId={field.id} kind="audio" value={fields[field.id] || ""} onChange={(v) => setField(field.id, v)} onUploadingChange={(pending) => setUploading(fieldKey(field), pending)} />
                             ) : field.type === "video" ? (
-                                <MediaFieldUpload fieldId={field.id} kind="video" value={fields[field.id] || ""} onChange={(v) => setField(field.id, v)} />
+                                <MediaFieldUpload fieldId={field.id} kind="video" value={fields[field.id] || ""} onChange={(v) => setField(field.id, v)} onUploadingChange={(pending) => setUploading(fieldKey(field), pending)} />
                             ) : field.type === "dropdown" ? (
                                 <Select value={fields[field.id] || undefined} onChange={(v) => setField(field.id, v)} options={(field.options ?? []).map((o) => ({ label: o, value: o }))} placeholder={field.name} className="w-full" />
                             ) : field.type === "boolean" ? (
@@ -182,10 +224,12 @@ export function RunPanel({ config, onRun, running, result, emptyText, runLabel, 
                             )}
                         </div>
                     ))}
+                    </section>)}
                 </div>
             )}
 
-            <Button type="primary" icon={<Play className="size-4" />} onClick={() => onRun(fields)} loading={running} disabled={config.fields.length === 0}>
+            <div className="border-t border-border pt-3" aria-label={t("microTools.workflow.submit")}>
+            <Button type="primary" icon={<Play className="size-4" />} onClick={() => { if (!running && !disabled && !uploadingFields.current.size) onRun({ ...fields }); }} loading={running} disabled={disabled || running || uploadCount > 0 || config.fields.length === 0}>
                 {running ? "执行中..." : runLabel ?? "运行工作流"}
             </Button>
 
@@ -196,16 +240,18 @@ export function RunPanel({ config, onRun, running, result, emptyText, runLabel, 
                         <span className="tabular-nums">{progress === undefined ? "进度未知" : `${Math.round(Math.min(1, Math.max(0, progress)) * 100)}%`}</span>
                     </div>
                     <Progress percent={progress === undefined ? undefined : Math.round(Math.min(1, Math.max(0, progress)) * 100)} status="active" showInfo={false} size="small" />
-                    {onCancel ? <Button danger size="small" onClick={onCancel}>取消</Button> : null}
+                    {onCancel ? <Button danger size="small" onClick={onCancel} loading={cancelPending} disabled={cancelPending}>取消</Button> : null}
                 </div>
             ) : null}
+
+            </div>
 
             {result?.warning ? <div className="rounded bg-amber-50 p-3 text-sm text-amber-700 dark:bg-amber-900/20 dark:text-amber-400">已按输出节点抢救出结果：{result.warning}</div> : null}
 
             {result && result.media.length > 0 && (
                 <div>
                     <h4 className="mb-2 text-sm font-medium">执行结果</h4>
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                         {result.media.map((item, i) => (
                             <div key={i} className="overflow-hidden rounded border border-stone-200 dark:border-stone-700">
                                 {item.mimeType?.startsWith("video/") ? <video src={item.url} controls className="w-full" /> : item.mimeType?.startsWith("audio/") ? <audio src={item.url} controls className="w-full p-2" /> : item.mimeType?.startsWith("image/") ? <img src={item.url} alt={item.filename} className="w-full" /> : <a href={item.url} download={item.filename} className="block break-all p-3 text-blue-600">下载 {item.filename || "输出文件"}</a>}

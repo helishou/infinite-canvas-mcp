@@ -12,17 +12,18 @@ export function CanvasPortal({ children }: { children: ReactNode }) {
     return host && !host.active ? null : createPortal(children, host?.popupContainer() || document.body);
 }
 /** Transient tools consume Escape before the canvas host collapses. */
-export function useCanvasTransientEscape(open: boolean, close: () => void) {
+export function useCanvasTransientEscape(open: boolean, close: () => void, deferToPopovers = false) {
     const active = useCanvasHost()?.active ?? true;
     useEffect(() => {
         if (!open || !active) return;
         const escape = (event: KeyboardEvent) => {
-            if (event.key !== "Escape" || document.querySelector(".ant-modal-wrap:not([style*='display: none']), .ant-select-dropdown:not(.ant-select-dropdown-hidden)")) return;
+            if (deferToPopovers && document.querySelector(".ant-popover:not(.ant-popover-hidden)")) return;
+            if (event.key !== "Escape" || document.querySelector(".ant-modal-wrap:not([style*='display: none']), .ant-drawer-open, .ant-select-dropdown:not(.ant-select-dropdown-hidden), [data-slot='select-content'][data-state='open'], [data-slot='dropdown-menu-content'][data-state='open'], [data-slot='popover-content'][data-state='open']")) return;
             event.preventDefault(); event.stopImmediatePropagation(); close();
         };
         window.addEventListener("keydown", escape, true);
         return () => window.removeEventListener("keydown", escape, true);
-    }, [open, active, close]);
+    }, [open, active, close, deferToPopovers]);
 }
 
 /** Embedded canvas navigation stays inside its host; standalone canvas uses the router. */

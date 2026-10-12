@@ -1,4 +1,7 @@
 import { saveAs } from "file-saver";
+import { nanoid } from "nanoid";
+import { importAssetMedia } from "./asset-import-media";
+import { requireAssetBlob, validateAssetPackage } from "./asset-transfer-validation";
 
 import { createZip, readZip } from "@/lib/zip";
 import { getMediaBlob, setMediaBlob } from "@/services/file-storage";
@@ -28,51 +31,48 @@ export async function exportAssets(assets: Asset[], filename: string) {
     await Promise.all(
         assets.map(async (asset) => {
             if (asset.kind === "image") {
-                if (!asset.data.storageKey) return;
+                if (!asset.data.storageKey) throw new Error("ASSET_MEDIA_INCOMPLETE");
                 if (requestedKeys.has(asset.data.storageKey)) return;
                 requestedKeys.add(asset.data.storageKey);
-                const blob = await getImageBlob(asset.data.storageKey);
-                if (!blob) return;
-                const path = `files/${safeFileName(asset.data.storageKey)}.${fileExtension(blob.type, "image")}`;
+                const blob = requireAssetBlob(await getImageBlob(asset.data.storageKey));
+                const path = `files/${files.length}-${safeFileName(asset.data.storageKey)}.${fileExtension(blob.type, "image")}`;
                 files.push({ storageKey: asset.data.storageKey, path, mimeType: blob.type || asset.data.mimeType, bytes: blob.size });
                 zipFiles.push({ name: path, data: blob });
             } else if (asset.kind === "video" || asset.kind === "audio") {
-                if (!asset.data.storageKey) return;
+                if (!asset.data.storageKey) throw new Error("ASSET_MEDIA_INCOMPLETE");
                 if (requestedKeys.has(asset.data.storageKey)) return;
                 requestedKeys.add(asset.data.storageKey);
-                const blob = await getMediaBlob(asset.data.storageKey);
-                if (!blob) return;
-                const path = `files/${safeFileName(asset.data.storageKey)}.${fileExtension(blob.type, asset.kind)}`;
+                const blob = requireAssetBlob(await getMediaBlob(asset.data.storageKey));
+                const path = `files/${files.length}-${safeFileName(asset.data.storageKey)}.${fileExtension(blob.type, asset.kind)}`;
                 files.push({ storageKey: asset.data.storageKey, path, mimeType: blob.type || asset.data.mimeType, bytes: blob.size });
                 zipFiles.push({ name: path, data: blob });
             } else if (asset.kind === "character") {
                 // 角色资产的每一张图都打包到 zip，并把 storageKey 一起导出，导入端按 storageKey 还原
                 for (const image of asset.data.images) {
-                    if (!image.storageKey) continue;
+                    if (!image.storageKey) throw new Error("ASSET_MEDIA_INCOMPLETE");
                     if (requestedKeys.has(image.storageKey)) continue;
                     requestedKeys.add(image.storageKey);
-                    const blob = await getImageBlob(image.storageKey);
-                    if (!blob) continue;
-                    const path = `files/${safeFileName(image.storageKey)}.${fileExtension(blob.type, "image")}`;
+                    const blob = requireAssetBlob(await getImageBlob(image.storageKey));
+                        const path = `files/${files.length}-${safeFileName(image.storageKey)}.${fileExtension(blob.type, "image")}`;
                     files.push({ storageKey: image.storageKey, path, mimeType: blob.type || image.mimeType, bytes: blob.size });
                     zipFiles.push({ name: path, data: blob });
                 }
                 if (asset.data.voiceStorageKey && !requestedKeys.has(asset.data.voiceStorageKey)) {
                     requestedKeys.add(asset.data.voiceStorageKey);
-                    const blob = await getMediaBlob(asset.data.voiceStorageKey);
+                    const blob = requireAssetBlob(await getMediaBlob(asset.data.voiceStorageKey));
                     if (blob) {
-                        const path = `files/${safeFileName(asset.data.voiceStorageKey)}.${fileExtension(blob.type, "audio")}`;
+                        const path = `files/${files.length}-${safeFileName(asset.data.voiceStorageKey)}.${fileExtension(blob.type, "audio")}`;
                         files.push({ storageKey: asset.data.voiceStorageKey, path, mimeType: blob.type || "audio/*", bytes: blob.size });
                         zipFiles.push({ name: path, data: blob });
                     }
                 }
             } else if (asset.kind === "scene") {
                 for (const image of [asset.data.image, asset.data.colorCard].filter((item): item is NonNullable<SceneAsset["data"]["colorCard"]> => Boolean(item))) {
-                    if (!image.storageKey || requestedKeys.has(image.storageKey)) continue;
+                    if (!image.storageKey) throw new Error("ASSET_MEDIA_INCOMPLETE");
+                    if (requestedKeys.has(image.storageKey)) continue;
                     requestedKeys.add(image.storageKey);
-                    const blob = await getImageBlob(image.storageKey);
-                    if (!blob) continue;
-                    const path = `files/${safeFileName(image.storageKey)}.${fileExtension(blob.type, "image")}`;
+                    const blob = requireAssetBlob(await getImageBlob(image.storageKey));
+                        const path = `files/${files.length}-${safeFileName(image.storageKey)}.${fileExtension(blob.type, "image")}`;
                     files.push({ storageKey: image.storageKey, path, mimeType: blob.type || image.mimeType, bytes: blob.size });
                     zipFiles.push({ name: path, data: blob });
                 }
@@ -93,9 +93,9 @@ export async function exportCharacterImages(asset: CharacterAsset, filename: str
             try {
                 const response = await fetch(image.url);
                 if (response.ok) blob = await response.blob();
-            } catch { /* 单张远程图片不可读时继续导出其余图片 */ }
+            } catch { throw new Error("ASSET_MEDIA_INCOMPLETE"); }
         }
-        if (!blob) continue;
+        blob = requireAssetBlob(blob);
         const label = safeFileName(image.outfit || image.name || `image-${index + 1}`) || `image-${index + 1}`;
         files.push({ name: `${String(index + 1).padStart(2, "0")}-${label}.${fileExtension(blob.type || image.mimeType, "image")}`, data: blob });
     }
@@ -108,15 +108,11 @@ export async function readAssetPackage(file: File) {
     const assetFile = zip.get("assets.json");
     if (!assetFile) throw new Error("missing assets.json");
     const data = JSON.parse(await assetFile.text()) as AssetExportFile;
-    await Promise.all(
-        data.files.map(async (item) => {
-            const blob = zip.get(item.path);
-            if (!blob) return;
-            const typedBlob = blob.type ? blob : blob.slice(0, blob.size, item.mimeType);
-            await (item.storageKey.startsWith("image:") ? setImageBlob(item.storageKey, typedBlob) : setMediaBlob(item.storageKey, typedBlob));
-        }),
+    validateAssetPackage(data, zip);
+    return importAssetMedia(data.assets, data.files, zip,
+        key => `${key.includes(":") ? key.split(":")[0] : "media"}:${nanoid()}`,
+        (key, blob, image) => image ? setImageBlob(key, blob) : setMediaBlob(key, blob),
     );
-    return data.assets;
 }
 
 function safeFileName(value: string) {

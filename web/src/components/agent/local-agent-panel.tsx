@@ -1725,11 +1725,11 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                 value={activeTab}
                 theme={theme}
                 leading={
-                    <div className="flex items-center gap-1">
+                    <div className="flex min-w-0 items-center gap-1">
+                        <div className="mr-1 shrink-0 text-sm font-semibold leading-5">{compact ? t("productionCanvas.director") : "Agent"}</div>
                         {headerAction || <span className="grid size-8 place-items-center">
                             <Bot className="size-4" />
                         </span>}
-                        <div className={compact ? "text-sm font-medium" : "hidden text-base font-semibold leading-5 @min-[560px]:block"}>{compact ? t("productionCanvas.director") : "Agent"}</div>
                         <Tooltip title={t("agent.panel.connectionSettings", { status: connectionStatus })} placement="bottom">
                             <Button size="small" type="text" className="!h-8 !w-8 !min-w-8 !px-0 @min-[560px]:!w-auto @min-[560px]:!min-w-0 @min-[560px]:!px-[7px]" aria-label={t("agent.panel.connectionSettingsLabel", { status: connectionStatus })} icon={<PlugZap className="size-3.5" style={{ color: connectionStatusColor }} />} onClick={() => setAgentState({ activeTab: "setup" })}>
                                 <span className="hidden @min-[560px]:inline">{connectionStatus}</span>

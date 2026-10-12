@@ -1,3 +1,4 @@
+import { productionSceneEntries } from "@basketikun/canvas-agent/drama/production-contract";
 import { records, readableText } from "./director-display";
 import { subjectDisplayName } from "./subject-shot-draft";
 type Row = Record<string, any>;
@@ -25,4 +26,33 @@ export function storyboardReportedState(continuity: Row | undefined, shotId: str
     const facts = records(continuity.facts);
     const phase = (key: string) => Object.entries(trajectory?.[key] || {}).filter(([, value]) => value !== "unknown").map(([factId, value]) => ({ factId, value, property: facts.find(fact => fact.id === factId)?.name || factId }));
     return { start: phase("start"), end: phase("end"), unresolved: [] };
+}
+
+/** Use narrative occurrences, never merge shots merely because their environment is shared. */
+export function storyboardScenes(source: Row) {
+    const scenes = productionSceneEntries(source);
+    const assigned = new Set(scenes.flatMap(scene => scene.shotIds));
+    return { scenes, unassigned: records(source.shots).filter(shot => !assigned.has(String(shot.id))).map(shot => String(shot.id)) };
+}
+
+/** Keep a whole existing Clip visible if any member belongs to the selected scene. */
+export function storyboardSceneShotIds(source: Row, sceneId: string) {
+    const { scenes, unassigned } = storyboardScenes(source);
+    const ids = sceneId === "__unassigned__" ? unassigned : scenes.find(scene => scene.id === sceneId)?.shotIds;
+    if (!sceneId || !ids) return new Set(records(source.shots).map(shot => String(shot.id)));
+    const visible = new Set(ids);
+    for (const clip of records(source.segments)) if ((clip.shot_ids || []).some((id: string) => visible.has(String(id)))) {
+        for (const id of clip.shot_ids || []) visible.add(String(id));
+    }
+    return visible;
+}
+
+/** Freshness comes from the workbench projection, not a second client-side hash policy. */
+export function storyboardArtifactState(artifact: Row | undefined, projection?: Row): "pending" | "stale" | "ready" | "recorded" {
+    if (!artifact || artifact.status === "draft" || !artifact.receipt) return "pending";
+    if (artifact.status === "stale") return "stale";
+    const matching = projection?.id === artifact.id && projection?.sha256 === artifact.sha256;
+    if (matching && projection?.current === false) return "stale";
+    if (matching && projection?.current === true && projection?.status === "ready") return "ready";
+    return artifact.status === "ready" ? "recorded" : "pending";
 }

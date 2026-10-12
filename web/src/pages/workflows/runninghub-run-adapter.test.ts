@@ -10,6 +10,8 @@ import {
     runningHubMediaSlots,
     runningHubProfileToConfig,
     runningHubValuesFromForm,
+    runningHubRequestFromForm,
+    RunningHubMediaConflict,
 } from "./runninghub-run-adapter";
 import type { RunningHubWorkflowProfile } from "@/services/api/runninghub";
 
@@ -71,4 +73,35 @@ test("表单值转平台参数：数字保持数值，空值不提交", () => {
 test("档案没有启用字段时表单为空，不报错", () => {
     const empty: RunningHubWorkflowProfile = { ...profile, fields: [{ nodeId: "1", fieldName: "x", enabled: false }] };
     assert.deepEqual(runningHubProfileToConfig(empty).fields, []);
+});
+
+
+test("run request routes media to Backend input slots and preserves numeric-looking prompts", () => {
+    const result = runningHubRequestFromForm(profile, { "12::prompt": "00123", "49::image": "/media/image:first", "51::image": "/media/image:last", "60::duration": "6", "61::cfg": "0.5" });
+    assert.deepEqual(result.input, { references: ["/media/image:first", "/media/image:last"] });
+    assert.deepEqual(result.values, { "12::prompt": "00123", "60::duration": 6, "61::cfg": 0.5 });
+});
+test("explicit field IDs, cleared values and sparse media slot positions survive", () => {
+    const custom = { ...profile, fields: [
+        { id: "prompt-key", nodeId: "1", fieldName: "prompt", source: "prompt" as const, fieldType: "text" as const, fieldValue: "default" },
+        { id: "audio-key", nodeId: "2", fieldName: "audio", source: "audio" as const, fieldType: "audio" as const, index: 2 },
+        { id: "bool-key", nodeId: "3", fieldName: "flag", fieldType: "boolean" as const },
+    ] };
+    assert.equal(runningHubProfileToConfig(custom).fields[0].id, "prompt-key");
+    assert.deepEqual(runningHubRequestFromForm(custom, { "prompt-key": "", "audio-key": "/media/audio:a", "bool-key": "false" }), { input: { audios: ["", "/media/audio:a"] }, values: { "prompt-key": "", "bool-key": false } });
+});
+
+
+test("media source controls picker kind and audio/video inputs never become image references", () => {
+    const source = { ...profile, fields: [
+        { nodeId: "v", fieldName: "clip", source: "video" as const, fieldType: "image" as const },
+        { nodeId: "a", fieldName: "sound", source: "audio" as const, fieldType: "audio" as const },
+    ] };
+    assert.equal(runningHubProfileToConfig(source).fields[0].type, "video");
+    assert.deepEqual(runningHubRequestFromForm(source, { "v::clip": "/media/video:v", "a::sound": "" }), { input: { videos: ["/media/video:v"], audios: [""] }, values: {} });
+});
+test("two mappings sharing one slot cannot silently overwrite distinct selected files", () => {
+    const source = { ...profile, fields: profile.fields.filter(f => f.source === "image").map(f => ({ ...f, index: 1 })) };
+    assert.throws(() => runningHubRequestFromForm(source, { "49::image": "/media/image:a", "51::image": "/media/image:b" }), RunningHubMediaConflict);
+    assert.deepEqual(runningHubRequestFromForm(source, { "49::image": "/media/image:a", "51::image": "/media/image:a" }).input, { references: ["/media/image:a"] });
 });

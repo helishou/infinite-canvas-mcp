@@ -61,20 +61,22 @@ test("本地视频创建任务不检查 API Key，按输入数量提交工作流
     }
 });
 
-test("本地任务轮询按真实任务 ID 恢复，成功/失败/取消不进入 API 查询", async (t) => {
+test("本地任务单次查询按真实任务 ID 返回成功、失败和取消回执", async (t) => {
     let status = "succeeded";
     const paths: string[] = [];
-    t.mock.method(globalThis, "fetch", async (input: any) => {
+    t.mock.method(globalThis, "fetch", async (input: any, init: any) => {
+        assert.equal(init?.method, "GET");
         paths.push(new URL(String(input)).pathname);
-        return Response.json({ task: { id: "persisted-local", status, error: status === "failed" ? "工作流错误" : undefined,
+        return Response.json({ task: { id: "persisted-local", status, error: status === "failed" ? "工作流错误" : status === "cancelled" ? "任务已取消" : undefined,
             result: { media: [{ url: "/media/video%3Atest", mimeType: "video/mp4" }] } } });
     });
     const task = { id: "persisted-local", provider: "comfyui" as const, model: "local::H3" };
     assert.deepEqual(await pollVideoGenerationTask({ ...defaultConfig, channels: [], apiKey: "" }, task), { status: "completed", result: { url: "/media/video%3Atest", mimeType: "video/mp4" } });
     status = "failed";
-    await assert.rejects(pollVideoGenerationTask(defaultConfig, task), /工作流错误/);
+    assert.deepEqual(await pollVideoGenerationTask(defaultConfig, task), { status: "failed", error: "工作流错误" });
     status = "cancelled";
-    await assert.rejects(pollVideoGenerationTask(defaultConfig, task), /取消/);
+    assert.deepEqual(await pollVideoGenerationTask(defaultConfig, task), { status: "failed", error: "任务已取消" });
+    assert.equal(paths.length, 3);
     assert.ok(paths.every((path) => path.endsWith("/persisted-local") && !path.includes("/videos/")));
 });
 
@@ -87,16 +89,37 @@ test("明确不支持的本地输入场景不会回退其它工作流或 API", a
     assert.equal(requests, 0);
 });
 
-test("本地运行中的任务沿用工作流轮询，不重新创建任务", async (t) => {
+test("本地运行中的任务单次查询返回 pending，再沿原任务查询完成而不重新创建", async (t) => {
     let polls = 0;
     t.mock.method(globalThis, "fetch", async (input: any, init: any) => {
         assert.equal(init.method, "GET");
         assert.ok(new URL(String(input)).pathname.endsWith("/local-running"));
         return Response.json({ task: { id: "local-running", status: ++polls === 1 ? "running" : "succeeded", result: { media: [{ url: "/media/video%3Aresult", mimeType: "video/mp4" }] } } });
     });
-    const result = await pollVideoGenerationTask(localConfig(), { id: "local-running", provider: "comfyui", model: "local::H3" });
-    assert.equal(result.status, "completed");
+    const task = { id: "local-running", provider: "comfyui" as const, model: "local::H3" };
+    assert.deepEqual(await pollVideoGenerationTask(localConfig(), task), { status: "pending" });
+    assert.equal(polls, 1);
+    assert.deepEqual(await pollVideoGenerationTask(localConfig(), task), { status: "completed", result: { url: "/media/video%3Aresult", mimeType: "video/mp4" } });
     assert.equal(polls, 2);
+});
+
+test("本地任务查询中断保持未知，恢复只查询原任务而不重新生成", async (t) => {
+    const task = { id: "local-query-interrupted", provider: "comfyui" as const, model: "local::H3" };
+    let status = 503;
+    const paths: string[] = [];
+    t.mock.method(globalThis, "fetch", async (input: any, init: any) => {
+        assert.equal(init?.method, "GET");
+        paths.push(new URL(String(input)).pathname);
+        if (status !== 200) return Response.json({ error: `query HTTP ${status}` }, { status });
+        return Response.json({ task: { id: task.id, status: "running" } });
+    });
+    for (status of [401, 404, 503]) {
+        await assert.rejects(pollVideoGenerationTask(localConfig(), task), new RegExp(`HTTP ${status}`));
+    }
+    status = 200;
+    assert.deepEqual(await pollVideoGenerationTask(localConfig(), task), { status: "pending" });
+    assert.equal(paths.length, 4);
+    assert.ok(paths.every(path => path.endsWith(`/${task.id}`) && !path.includes("/videos/")));
 });
 
 test("API 视频渠道仍要求 API Key", async () => {

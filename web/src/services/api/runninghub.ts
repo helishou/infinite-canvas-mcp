@@ -5,12 +5,12 @@ export type { RunningHubConfig, RunningHubField, RunningHubWorkflowGraph, Runnin
 export const fetchRunningHubConfig = () => request<{ config: RunningHubConfig }>("GET", "/agent/runninghub/config");
 export const saveRunningHubConfig = (config: Partial<RunningHubConfig>) => request<{ config: RunningHubConfig }>("PUT", "/agent/runninghub/config", config);
 export const inspectRunningHubWorkflow = (workflowId: string) => request<{ workflowId: string; workflowJson: RunningHubWorkflowGraph; fields: RunningHubField[] }>("POST", "/agent/runninghub/workflow/inspect", { workflowId });
-export const fetchRunningHubStatus = () => request<{ hasApiKey: boolean; url?: string; configured?: boolean }>("GET", "/agent/runninghub/status");
+export const fetchRunningHubStatus = () => request<{ hasApiKey: boolean; url?: string; configured?: boolean; workflowTaskReplaySafe?: boolean }>("GET", "/agent/runninghub/status");
 export const fetchRunningHubWorkflows = () => request<{ workflows: RunningHubWorkflowProfile[] }>("GET", "/agent/runninghub/workflows");
 export const saveRunningHubWorkflow = (profile: RunningHubWorkflowProfile) => request<{ workflow: RunningHubWorkflowProfile }>("PUT", `/agent/runninghub/workflows/${encodeURIComponent(profile.id)}`, profile);
 export const resyncRunningHubWorkflow = (profileId: string) => request<{ workflow: RunningHubWorkflowProfile }>("POST", `/agent/runninghub/workflows/${encodeURIComponent(profileId)}/resync`);
 export const deleteRunningHubWorkflow = (profileId: string) => request<{ deleted: number }>("DELETE", `/agent/runninghub/workflows/${encodeURIComponent(profileId)}`);
 // 运行端点返回 202 + { ok, task }，任务 ID 在 task.id 上；不要按本地工作流的 { taskId } 读。
-export const runRunningHubWorkflow = (profileId: string, input: Record<string, unknown>, values: Record<string, unknown>, params: Record<string, unknown>) => request<{ task: BackendRuntimeTask }>("POST", `/agent/runninghub/workflows/${encodeURIComponent(profileId)}/run`, { input, values, params });
+export const runRunningHubWorkflow = (profileId: string, input: Record<string, unknown>, values: Record<string, unknown>, params: Record<string, unknown>, clientTaskId?: string) => request<{ task: BackendRuntimeTask }>("POST", `/agent/runninghub/workflows/${encodeURIComponent(profileId)}/run`, { input, values, params, clientTaskId });
 export const fetchRunningHubWorkflowTasks = (profileId: string) => request<{ tasks: BackendRuntimeTask[] }>("GET", `/agent/runninghub/workflows/${encodeURIComponent(profileId)}/tasks`);
 export const cancelRunningHubTask = (taskId: string) => request("POST", `/agent/runninghub/tasks/${encodeURIComponent(taskId)}/cancel`);
