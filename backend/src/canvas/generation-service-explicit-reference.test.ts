@@ -36,7 +36,7 @@ test("referenceNodeIds 明确选择的智能图片节点不会被图谱解析覆
                     connections: [{ id: "blocking-target", fromNodeId: "blocking", toNodeId: "target", order: 0 }],
                 }),
             },
-            tasks: { get: () => null },
+            tasks: { get: () => null, list: () => [] },
         },
     });
 
@@ -66,7 +66,7 @@ test("智能循环保留本轮显式参考，不回退到源节点的旧输出",
                 { id: "old", type: "image", metadata: { content: "old.png", storageKey: "image:old" } },
                 { id: "target", type: "config", metadata: { smart: true, generationMode: "image" } },
             ], connections: [{ id: "old-target", fromNodeId: "old", toNodeId: "target" }, { id: "loop-target", fromNodeId: "loop", toNodeId: "target" }] }) },
-            tasks: { get: () => null },
+            tasks: { get: () => null, list: () => [] },
         },
     });
     await service.start({ mode: "image", projectId: "p", nodeId: "target", model: "gpt-image-2", prompt: "本轮",

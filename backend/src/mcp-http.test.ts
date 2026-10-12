@@ -17,7 +17,8 @@ test("HTTP MCP exposes located compilation blockers, aliases and complete diagno
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "mcp-compilation-blocker-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const director: any = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "1" }, source: { brief: "Authored source ".repeat(10000) }, sourceHash: "b".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
-  const service: any = { get: () => ({ revision: 1, draft: { director } }), compilationReferenceFiles: () => ({}) };
+  const service: any = { get: () => ({ revision: 1, draft: { director } }), compilationReferenceFiles: () => ({}),
+    resolveSubjectPictureInputs: (_id: string, input: unknown) => structuredClone(input) };
   let compilerCalls = 0;
   const diagnostics = ["SH1", "SH2"].map(shotId => ({ code: "PROMPT_EXTERNAL_CONTEXT", path: `director.source.shots.${shotId}.visual`, targetId: "SEG1", shotId, origin: "source" as const, matchedText: "preceding segment", blocksCompilation: true, severity: "error" as const, message: "Prompt depends on external prose: preceding segment" }));
   const jobs = new ProductionCompilationService(service, root, (input: any) => { compilerCalls++; return { director: input, exitCode: 2, diagnostics, audit: {}, sourceAdjustments: [], acceptance: {} }; });
@@ -30,10 +31,12 @@ test("HTTP MCP exposes located compilation blockers, aliases and complete diagno
   const address = server.address(); assert.ok(address && typeof address !== "string");
   const client = await mcpClient(t, await fixture(t, `http://127.0.0.1:${address.port}`));
   const tools = (await client.listTools()).tools;
-  assert.match(tools.find(tool => tool.name === "production_compile")!.description!, /PROMPT_EXTERNAL_CONTEXT/);
+  const compileDescription = tools.find(tool => tool.name === "production_compile")!.description!;
+  assert.match(compileDescription, /blockingDiagnostic/);
+  assert.match(compileDescription, /targetId\/shotId\/path/);
   let bytes = 0, calls = 0;
   const started = performance.now();
-  const call = async (name: string, args: object) => { const response = await client.callTool({ name, arguments: args as any }); bytes += Buffer.byteLength(JSON.stringify(response)); calls++; return textPayload(response).compilation; };
+  const call = async (name: string, args: object) => { const response = await client.callTool({ name, arguments: args as any }); bytes += Buffer.byteLength(JSON.stringify(response)); calls++; assert.notEqual(response.isError, true, JSON.stringify(response)); return textPayload(response).compilation; };
   await call("production_compile", { kind: "episode", id: "episode", expectedRevision: 1, operationId: "original" });
   const status = await call("production_get_compilation", { kind: "episode", id: "episode", operationId: "original" });
   assert.equal(status.status, "blocked"); assert.equal(status.blockingDiagnostic.shotId, "SH1"); assert.equal(status.items, undefined);

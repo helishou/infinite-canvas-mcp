@@ -17,10 +17,12 @@ function fixture(t: TestContext, segments: Array<Record<string, unknown>>) {
             const child = stores.tasks.create(id!, "comfyui:minimax-h3", input, params);
             submitted.push(structuredClone(params));
             onCreated?.(child);
+            stores.media.store(Buffer.from("test-video"), { name: `${child.id}.mp4`, storageKey: child.id, mimeType: "video/mp4", category: "output" });
             return stores.tasks.update(child.id, { status: "succeeded", progress: 1, result: { media: [{ url: `/media/${child.id}`, storageKey: child.id, mimeType: "video/mp4" }] } });
         },
     };
-    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, {} as never);
+    const localProvider = { ready: () => false, queue: { select: () => "local", unreserve() {} } };
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, localProvider as never);
     const settle = async (id: string) => {
         for (let i = 0; i < 200 && !["succeeded", "failed"].includes(db.getTask(id)!.status); i++) await new Promise((resolve) => setTimeout(resolve, 5));
         assert.equal(db.getTask(id)?.status, "succeeded", db.getTask(id)?.error || "runner timeout");
@@ -30,6 +32,21 @@ function fixture(t: TestContext, segments: Array<Record<string, unknown>>) {
 }
 
 test("random mode rerolls copied seeds per Clip and per new run, while duplicate requests keep the frozen seed", async (t) => {
+    let workflowParams: Record<string, unknown> = {};
+    const discoveryRequests: Array<{ url: string; method: string }> = [];
+    // Graph construction discovers node capabilities; satisfy those reads locally and never contact a provider.
+    t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        discoveryRequests.push({ url, method: init?.method || "GET" });
+        assert.match(url, /^http:\/\/comfy\.test\/object_info\/(?:UNETLoader|NanFengH3MultiReferenceGeneratorV15)$/);
+        assert.equal(init?.method || "GET", "GET");
+        if (url.endsWith("/UNETLoader")) return Response.json({ UNETLoader: { input: { required: { unet_name: [[workflowParams.modelName]] } } } });
+        const required = Object.fromEntries([
+            ["模型", "modelName"], ["文本编码器", "textEncoder"], ["视频VAE", "videoVae"], ["音频VAE", "audioVae"],
+        ].map(([name, key]) => [name, [[workflowParams[key]]]]));
+        for (const [index, slot] of ((workflowParams.loraSlots || []) as Array<{ name: string }>).entries()) required[`LoRA${index + 1}`] = [[slot.name]];
+        return Response.json({ NanFengH3MultiReferenceGeneratorV15: { input: { required } } });
+    });
     const { db, runner, submitted, settle, clips } = fixture(t, [
         { id: "a", noiseSeedMode: "random", seed: 123, noiseSeed: 123 },
         { id: "b", noiseSeedMode: "random", seed: 123, noiseSeed: 123 },
@@ -46,8 +63,14 @@ test("random mode rerolls copied seeds per Clip and per new run, while duplicate
     for (const params of submitted) {
         assert.ok(Number.isSafeInteger(params.seed) && Number(params.seed) > 0);
         assert.equal(params.seed, params.noiseSeed);
-        const graph = await buildNativeNanFengV15Workflow({ prompt: "A bell." }, params, async (value) => value, "http://comfy.local", new AbortController().signal);
+        workflowParams = params;
+        const graph = await buildNativeNanFengV15Workflow({ prompt: "A bell." }, params, async (value) => value, "http://comfy.test", new AbortController().signal);
         assert.equal(graph.nf_v15.inputs["随机种子"], params.seed);
+    }
+    assert.ok(discoveryRequests.length > 0);
+    for (const request of discoveryRequests) {
+        assert.match(request.url, /^http:\/\/comfy\.test\/object_info\/(?:UNETLoader|NanFengH3MultiReferenceGeneratorV15)$/);
+        assert.equal(request.method, "GET");
     }
     const second = runner.start(input, "second");
     await settle(second.id);

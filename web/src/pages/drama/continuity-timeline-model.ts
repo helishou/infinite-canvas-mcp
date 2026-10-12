@@ -26,12 +26,12 @@ function legacyReferencesFact(shot: ContinuityRow, fact: ContinuityRow) {
  * ledger. Ledger object identity is authoritative; old Shot references only
  * establish a contextual association, never visible presence.
  */
-export function continuityWorkbenchSource(source: ContinuityRow, ledger: ContinuityRow, input = records(source.shots)): ContinuityRow {
+export function continuityWorkbenchSource(source: ContinuityRow, ledger: ContinuityRow, input: ContinuityRow[] = records(source.shots)): ContinuityRow {
     if (ledger.contract_version !== 2) return source;
     const timelineIds = records(ledger.timelines).map(row => id(row.id)).filter(Boolean);
     const defaultTimelineId = timelineIds.includes("main") ? "main" : timelineIds[0] || "main";
     const nextOrder = new Map<string, number>(), occupied = new Map<string, Set<number>>();
-    const shotsWithDefaults = input.map(shot => {
+    const shotsWithDefaults: ContinuityRow[] = input.map((shot: ContinuityRow): ContinuityRow => {
         const timelineId = id(shot.timeline_id) || defaultTimelineId;
         const used = occupied.get(timelineId) || new Set<number>();
         let storyOrder = Number.isInteger(shot.story_order) && Number(shot.story_order) >= 0 ? Number(shot.story_order) : nextOrder.get(timelineId) || 0;
@@ -67,7 +67,7 @@ export function continuityWorkbenchSource(source: ContinuityRow, ledger: Continu
         return { fact, subject };
     });
     const events = records(ledger.events);
-    const shots = shotsWithDefaults.map(shot => {
+    const shots: ContinuityRow[] = shotsWithDefaults.map((shot: ContinuityRow): ContinuityRow => {
         const usages = records(shot.subject_usages).map(row => ({ ...row }));
         const duration = Number(shot.duration_frames ?? Number(shot.end_frame) - Number(shot.start_frame));
         if (Number.isInteger(duration) && duration > 0) for (const { fact, subject } of projectedFacts) {
@@ -197,7 +197,7 @@ export function continuityPreviewStatus(report: ContinuityRow | undefined, sourc
 
 /** Only nested evidence blocks currently accepted by the continuity validator. */
 export function continuitySourceBlocks(scenes: ContinuityRow[]) {
-    return scenes.flatMap(scene => (records(scene.blocks).length ? records(scene.blocks) : typeof scene.text === "string" && scene.id ? [scene] : []).map(block => ({ ...block,
+    return scenes.flatMap(scene => records(scene.blocks).map(block => ({ ...block,
         sceneId: String(scene.scene_id || scene.id), occurrenceId: String(scene.id || scene.scene_id),
         sceneName: String(scene.scene_name || scene.heading || scene.id), sourceBlock: block,
     })));

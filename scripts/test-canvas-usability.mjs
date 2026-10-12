@@ -22,6 +22,11 @@ const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));
 const flush = () => page.evaluate(async () => (await import("/tests/canvas-command-harness.ts")).flushCanvasSyncNow());
 const project = async () => (await api("GET", `/canvas/projects/${id}`)).project;
+const selectedActions = (count) => page.getByRole("button", { name: `已选 ${count} 个对象`, exact: true });
+const openBatchRename = async (count) => {
+    await selectedActions(count).click();
+    await page.getByRole("menuitem", { name: "批量重命名", exact: true }).click();
+};
 const readyDialog = async (title) => page.waitForFunction((title) => {
     const dialog = [...document.querySelectorAll('[role="dialog"]')].find((element) => element.textContent.includes(title));
     if (!dialog) return false;
@@ -81,32 +86,33 @@ try {
 
     const labels = await page.evaluate(async () => { const { default: i18n } = await import("/src/i18n/index.ts"); return { expand: i18n.t("canvas.expandPanel"), select: i18n.t("canvas.sidePanel.select") }; });
     if (await page.getByRole("button", { name: labels.expand, exact: true }).count()) await page.getByRole("button", { name: labels.expand, exact: true }).click();
-    await page.getByRole("button", { name: labels.select, exact: true }).click();
-    const sidebarSearch = page.getByPlaceholder("名称、类型、提示词或节点 ID", { exact: true });
+    const sidebar = page.getByRole("complementary").filter({ has: search });
+    await sidebar.getByRole("button", { name: labels.select, exact: true }).click();
+    const sidebarSearch = sidebar.getByPlaceholder("名称、类型、提示词或节点 ID", { exact: true });
     const clearFiltered = await page.evaluate(async () => (await import("/src/i18n/index.ts")).default.t("canvas.sidePanel.clearAll"));
     await sidebarSearch.fill("far");
-    await page.getByRole("button", { name: clearFiltered, exact: true }).click();
+    await sidebar.getByRole("button", { name: clearFiltered, exact: true }).click();
     await sidebarSearch.fill("");
     await page.locator('[data-canvas-node-row="a"]').click();
     await page.locator('[data-canvas-node-row="b"]').click();
     assert.equal(await page.locator('[data-canvas-node-row="a"]').getAttribute("aria-pressed"), "true");
     await sidebarSearch.fill("镜头 A");
-    await page.getByRole("button", { name: clearFiltered, exact: true }).click();
+    await sidebar.getByRole("button", { name: clearFiltered, exact: true }).click();
     await sidebarSearch.fill("");
     assert.equal(await page.locator('[data-canvas-node-row="a"]').getAttribute("aria-pressed"), "false");
     assert.equal(await page.locator('[data-canvas-node-row="b"]').getAttribute("aria-pressed"), "true");
     await page.locator('[data-canvas-node-row="a"]').click();
-    await page.getByRole("button", { name: "批量重命名", exact: true }).waitFor();
+    await selectedActions(2).waitFor();
     await page.keyboard.press("f"); await visible("a"); await visible("b");
     await page.keyboard.press("Shift+f");
     for (const node of nodes) await visible(node.id);
-    await page.getByRole("button", { name: "批量重命名", exact: true }).waitFor();
+    await selectedActions(2).waitFor();
     console.log("PASS: Sidebar multi-selection drives canvas actions; F/Shift+F focus without clearing selection");
 
     const peer = await context.newPage();
     await peer.goto(`${web}/canvas/${id}`);
     await peer.locator('[data-node-id="a"]').waitFor();
-    await page.getByRole("button", { name: "批量重命名", exact: true }).click();
+    await openBatchRename(2);
     const rename = page.getByRole("dialog", { name: "批量重命名", exact: true });
     await readyDialog("批量重命名");
     await rename.getByRole("textbox", { name: "名称前缀", exact: true }).fill("分镜");
@@ -134,10 +140,10 @@ try {
     await peer.close();
     console.log("PASS: Batch rename previews numbering, updates the other window, changes titles only, and supports one-step undo/redo");
 
-    await page.getByRole("button", { name: "完成多选", exact: true }).click();
-    await page.getByRole("button", { name: "批量重命名", exact: true }).waitFor();
+    await sidebar.getByRole("button", { name: "完成多选", exact: true }).click();
+    await selectedActions(2).waitFor();
     await page.locator('[data-canvas-node-row="far"]').click({ modifiers: ["Control"] });
-    await page.getByRole("button", { name: "批量重命名", exact: true }).click();
+    await openBatchRename(3);
     await readyDialog("批量重命名");
     await rename.getByRole("button", { name: "重命名 3 个节点", exact: true }).waitFor();
     await rename.getByRole("button", { name: "重命名 3 个节点", exact: true }).focus();

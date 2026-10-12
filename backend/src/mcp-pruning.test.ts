@@ -37,7 +37,8 @@ test("MCP v3 removes 37 names, exposes all unified tools, and rejects retired ca
     const bytes = Buffer.byteLength(JSON.stringify(catalog.tools));
     assert.ok(bytes < 216777, `catalog must shrink from the observed baseline: ${bytes}`);
     console.log(JSON.stringify({ catalogTools: catalog.tools.length, catalogBytes: bytes, unifiedTools: productionToolNames.length, removedNames: Object.keys(removedToolMigrations).length }));
-    assert.equal(catalog.tools.length, 149);
+    assert.equal(catalog.tools.length, 159);
+    assert.equal(names.size, catalog.tools.length, "catalog names must remain unique");
     const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "mcp-stdio-retirement-"));
     await fs.writeFile(path.join(temporary, "backend.json"), JSON.stringify({ url, token: "fixture", port: (server.address() as any).port, origins: [] }));
     const stdio = new Client({ name: "stdio-retirement-fixture", version: "1" });
@@ -45,6 +46,7 @@ test("MCP v3 removes 37 names, exposes all unified tools, and rejects retired ca
         await stdio.connect(new StdioClientTransport({ command: process.execPath, args: ["--import", "tsx", "--input-type=module", "-e", 'import {startBackendMcpServer} from "./src/mcp.ts"; await startBackendMcpServer();'], cwd: process.cwd(),
             env: { ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string")), PORT: "", INFINITE_CANVAS_DATA_DIR: temporary, INFINITE_CANVAS_BACKEND_TOKEN: "fixture" }, stderr: "pipe" }));
         const stdioNames = new Set((await stdio.listTools()).tools.map(tool => tool.name));
+        assert.deepEqual(stdioNames, names, "HTTP and stdio must expose the same current catalog");
         for (const name of Object.keys(removedToolMigrations)) assert.equal(stdioNames.has(name), false);
         const missing: any = await stdio.callTool({ name: "h3_update_clip", arguments: {} });
         assert.equal(missing.isError, true); assert.match(missing.content[0].text, /not found/);

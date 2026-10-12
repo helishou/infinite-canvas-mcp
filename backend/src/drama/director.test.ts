@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { BackendDatabase } from "../db.js";
 import { createStores } from "../stores/index.js";
 import { EpisodeProductionService, ProductionConflictError } from "./production.js";
@@ -12,13 +13,15 @@ import { NativeProductionGeneration } from "./native-generation.js";
 import { BackendEventBus } from "../events.js";
 import { resolveH3Runtime } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { directorHash, promptHash } from "./director.js";
-import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
-import { compilationScopeInput } from "@basketikun/canvas-agent/drama/compilation-scope";
+import { emptyEpisodeProduction, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
+import { compilationScopeInput, currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { effectiveTargetInput, inputHash } from "./canvas-inputs.js";
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 import type { CanvasGenerationService } from "../canvas/generation-service.js";
 import express from "express";
 import { registerDramaProductionRoutes } from "../server/drama-production-routes.js";
+import { DATABASE_SCHEMA_VERSION } from "../database-upgrade.js";
+import { historicalDatabase } from "../test-helpers/historical-database.js";
 
 function fixture(t: test.TestContext) {
     const dir = mkdtempSync(join(tmpdir(), "acheng-canvas-"));
@@ -36,7 +39,7 @@ function doc(count = 2): DirectorProduction {
     const engine = { commit: "a".repeat(40), patchVersion: "patch", runtimeId: "engine-test", version: "4.3.9" };
     const shots = Array.from({ length: count }, (_, i) => ({ id: `s${i}`, scene_id: "scene", source_scene_id: "scene-block", start_frame: i * 120, end_frame: (i + 1) * 120, visual: `authored ${i}`, camera: { description: "static" }, state_in: {}, state_out: {}, dialogues: [], audio: {} }));
     const segments = shots.map((s, i) => ({ id: `seg${i}`, shot_ids: [s.id], start_frame: s.start_frame, end_frame: s.end_frame, generation_clip_duration: 5, mode: "T2VA" }));
-    const source = { fps_num: 24, fps_den: 1, script_scenes: [{ id: "scene-block", scene_id: "scene", text: "Original full text" }], shots, segments, extra_preserved: { detail: "never summarized" } };
+    const source = { fps_num: 24, fps_den: 1, script_scenes: [{ id: "scene-block", scene_id: "scene", text: "Original full text" }], shots, segments, asset_plan: [], extra_preserved: { detail: "never summarized" } };
     const sourceHash = directorHash(source);
     return { schemaVersion: 1, engine, source, sourceHash, modules: { story: { status: "committed", evidence: ["source reviewed"], unresolved: [] } }, assets: {},
         shotInputs: Object.fromEntries(shots.map(s => [s.id, { keyframePolicy: "none", assetIds: [] }])), boundaries: segments.slice(0, -1).map((s, i) => ({ from: s.id, to: segments[i + 1].id, tailFrame: false, motionContext: false, reason: "authored cut" })),
@@ -319,17 +322,22 @@ test("early Acheng planning drafts save without node bindings and readiness scop
     assert.match(readiness.targets.find(item => item.id === "asset:STYLE_MOTHER")?.blockers.join(" ") || "", /未绑定画布/);
 });
 
-test("source revisions reject stale receipts, preserve drafts and prohibit projection-only edits", t => {
+test("source revisions retire stale receipts, preserve drafts and prohibit projection-only edits", t => {
     const { service } = fixture(t); const d = doc(); publish(service, d);
     const rev = service.get("ep").revision;
     assert.throws(() => service.edit("ep", { operationId: "bad", expectedRevision: rev - 1, ops: [{ type: "set_director_production", director: d }] }), ProductionConflictError);
     const changed = structuredClone(d); changed.source.newFact = "changed"; changed.sourceHash = directorHash(changed.source);
-    assert.throws(() => service.edit("ep", { operationId: "stale", expectedRevision: rev, ops: [{ type: "set_director_production", director: changed }] }), /回执版本/);
+    const saved = service.edit("ep", { operationId: "stale", expectedRevision: rev, ops: [{ type: "set_director_production", director: changed }] });
+    assert.equal(saved.draft.director!.source.newFact, "changed");
+    assert.ok(saved.draft.director!.artifacts.every(artifact => artifact.status === "stale"));
+    assert.deepEqual(saved.draft.director!.artifacts.map(artifact => artifact.receipt), d.artifacts.map(artifact => artifact.receipt), "old receipts remain historical evidence, never rewritten to approve new input");
+    assert.ok(saved.draft.director!.artifacts.every(artifact => !currentCompilationArtifact(saved.draft.director!, artifact)));
+    assert.equal(saved.published!.director!.sourceHash, d.sourceHash, "saving a new source never rewrites the published version");
     changed.artifacts.forEach(a => a.status = "stale"); changed.modules.story = { status: "partial", cursor: "paragraph-2", evidence: [], unresolved: ["continue"] };
-    const input = { operationId: "partial", expectedRevision: rev, ops: [{ type: "set_director_production", director: changed }] };
+    const input = { operationId: "partial", expectedRevision: saved.revision, ops: [{ type: "set_director_production", director: changed }] };
     service.edit("ep", input); assert.equal(service.edit("ep", input).replayed, true);
     assert.equal(service.get("ep").draft.director!.modules.story?.cursor, "paragraph-2");
-    assert.throws(() => service.edit("ep", { operationId: "projection", expectedRevision: rev + 1, ops: [{ type: "delete_shot", id: "s0" }] }), /正式源/);
+    assert.throws(() => service.edit("ep", { operationId: "projection", expectedRevision: service.get("ep").revision, ops: [{ type: "delete_shot", id: "s0" }] }), /正式源/);
 });
 
 test("multi-shot Segment is preserved, invalid windows remain saved but blocked, and legacy fixtures are rejected", t => {
@@ -397,26 +405,37 @@ test("project scope supports independent assets and linked views share the same 
     assert.equal(db.getDramaEpisode("independent"), null);
 });
 
-test("version 16 migration backs up data and creates run history without rewriting production rows", t => {
-    const { db, file, dir } = fixture(t);
-    db.db.prepare("DELETE FROM schema_migrations WHERE version>=17").run();
-    for (const table of ["canvas_productions", "canvas_production_operations", "canvas_production_versions", "canvas_production_runs"]) db.db.exec(`DROP TABLE ${table}`);
-    db.db.exec("DROP TABLE canvas_production_batches; DROP TABLE episode_production_batches");
-    const reopened = new BackendDatabase(file);
-    assert.equal(reopened.getDramaEpisode("ep")?.title, "Episode");
-    assert.ok(reopened.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='canvas_production_batches'").get());
-    assert.ok(readdirSync(dir).some(n => n.includes("pre-schema-v16-to-v33"))); reopened.close();
-});
-
-test("version 21 databases upgrade to the current schema and retain production batch storage", t => {
-    const { db, file } = fixture(t);
-    db.db.exec("DELETE FROM schema_migrations WHERE version>=22; DROP TABLE canvas_production_batches; DROP TABLE episode_production_batches");
+for (const previousVersion of [16, 21] as const) test(`version ${previousVersion} upgrades with a verified backup and preserves production history`, t => {
+    const dir = mkdtempSync(join(tmpdir(), "director-migration-")), file = join(dir, "db.sqlite");
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const seed = historicalDatabase(t, file, previousVersion);
+    seed.prepare("INSERT INTO canvas_folders (id,name,created_at) VALUES ('d','Drama','2026-01-01')").run();
+    seed.prepare("INSERT INTO drama_projects (folder_id,outline,updated_at) VALUES ('d','Original outline','2026-01-01')").run();
+    seed.prepare("INSERT INTO drama_episodes (id,drama_id,episode_number,title,created_at,updated_at) VALUES ('ep','d',1,'Episode','2026-01-01','2026-01-01')").run();
+    const snapshot = JSON.stringify({ ...emptyEpisodeProduction(), scenes: [{ id: "original-scene", heading: "Original scene", location: "Room", timeOfDay: "Night", blocks: [{ id: "original-text", kind: "action", text: "Keep this complete published production" }] }] });
+    seed.prepare("INSERT INTO episode_productions (episode_id,revision,draft_json,published_json,published_version,updated_at) VALUES ('ep',7,?,?,2,'2026-01-01')").run(snapshot, snapshot);
+    seed.prepare("INSERT INTO episode_production_versions (episode_id,version,stage,snapshot_json,impact_json,created_at) VALUES ('ep',2,'director',?,'{}','2026-01-01')").run(snapshot);
+    seed.close();
     const upgraded = new BackendDatabase(file);
-    const version = upgraded.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number };
-    assert.equal(version.version, 33);
-    assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='episode_production_batches'").get());
-    assert.equal(upgraded.getDramaEpisode("ep")?.title, "Episode");
-    upgraded.close();
+    try {
+        assert.equal(upgraded.getDramaEpisode("ep")?.title, "Episode");
+        assert.equal(upgraded.db.prepare("SELECT MAX(version) version FROM schema_migrations").get()?.version, DATABASE_SCHEMA_VERSION);
+        for (const table of ["canvas_productions", "canvas_production_runs", "canvas_production_batches", "episode_production_batches"]) {
+            assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table));
+        }
+        assert.deepEqual({ ...upgraded.db.prepare("SELECT revision,draft_json,published_json,published_version FROM episode_productions WHERE episode_id='ep'").get() },
+            { revision: 7, draft_json: snapshot, published_json: snapshot, published_version: 2 });
+        assert.equal(upgraded.db.prepare("SELECT snapshot_json FROM episode_production_versions WHERE episode_id='ep' AND version=2").get()?.snapshot_json, snapshot);
+        const backups = readdirSync(dir).filter(name => name.includes(`pre-schema-v${previousVersion}-to-v${DATABASE_SCHEMA_VERSION}-`));
+        assert.equal(backups.length, 1);
+        const backup = new DatabaseSync(join(dir, backups[0]), { readOnly: true });
+        try {
+            assert.equal(backup.prepare("PRAGMA integrity_check").get()?.integrity_check, "ok");
+            assert.equal(backup.prepare("SELECT MAX(version) version FROM schema_migrations").get()?.version, previousVersion);
+            assert.equal(backup.prepare("SELECT 1 FROM sqlite_master WHERE name='episode_production_batches'").get(), undefined);
+            assert.equal(backup.prepare("SELECT published_json FROM episode_productions WHERE episode_id='ep'").get()?.published_json, snapshot);
+        } finally { backup.close(); }
+    } finally { upgraded.close(); }
 });
 
 test("Motion Context group submits one bounded task and standalone next Clip remains separate", async t => {
@@ -432,7 +451,7 @@ test("Motion Context group submits one bounded task and standalone next Clip rem
         const media = { storageKey: `video:${task.id}`, filePath: join(dir, `${task.id}.mp4`), mimeType: "video/mp4", bytes: 10, width: 16, height: 9, durationMs: 5000, createdAt: new Date().toISOString() };
         writeFileSync(media.filePath, "test video"); db.upsertMediaFile(media);
         db.applyCanvasProjectOperations("canvas", undefined, node.metadata.segments.slice(start, end + 1).map((s: any) => ({ type: "update_h3_segment", nodeId: node.id, segmentId: s.id, patch: { resultStorageKey: media.storageKey } })), { runtimeWrite: true });
-        stores.tasks.update(task.id, { status: "succeeded" }); return { taskId: task.id };
+        stores.tasks.update(task.id, { status: "succeeded", result: { media: [{ storageKey: media.storageKey }] } }); return { taskId: task.id };
     } } as unknown as CanvasGenerationService;
     const runner = new EpisodeProductionRunner(service, stores, fake);
     const first = service.startBatch("ep", { inputBasis: "published", runId: "motion-chain", idempotencyKey: "motion-chain", expectedRevision: service.get("ep").revision, version: 1, targets: ["segment:seg0"] });
@@ -445,7 +464,8 @@ test("Motion Context group submits one bounded task and standalone next Clip rem
     assert.equal(JSON.stringify(commands).includes('"previousVideoAsReference":true'), false);
     const second = service.startBatch("ep", { inputBasis: "published", runId: "tail-frame-next", idempotencyKey: "tail-frame-next", expectedRevision: service.get("ep").revision, version: 1, targets: ["segment:seg2"] });
     await runner.runBatch("ep", second.runId);
-    assert.equal(commands.length, 2); assert.equal(commands[1].runFromCurrent, false);
+    assert.equal(commands.length, 2); assert.equal(commands[1].runFromCurrent ?? false, false);
+    assert.equal(commands[1].endSegmentId, undefined, "the standalone Clip must not include a following range");
     await runner.runBatch("ep", first.runId); assert.equal(commands.length, 2);
 });
 
@@ -476,7 +496,7 @@ test("asset dependencies and style approval block premature execution while draf
     assert.equal(service.get("ep").draft.director?.sourceHash, d.sourceHash);
 });
 
-test("automatic dependency runs pause for review, then continue the same runId without regenerating approved media", async t => {
+for (const reviewMode of ["manual", "none"] as const) test(`automatic dependency runs preserve review policy and original task IDs: ${reviewMode}`, async t => {
     const { service, stores, db, dir } = fixture(t); const d = doc(0);
     db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "style", nodeType: "config", metadata: { smart: true, generationMode: "image", model: "mock-image" } }]);
     db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "character", nodeType: "image", metadata: { model: "mock-image" } }]);
@@ -492,6 +512,7 @@ test("automatic dependency runs pause for review, then continue the same runId w
         { id: "style-image", kind: "image", targetId: "STYLE_MOTHER", prompt: stylePrompt, sha256: styleDigest, sourceHash: d.sourceHash, status: "ready", references: [], receipt: { sourceHash: d.sourceHash, promptHash: styleDigest, engineRuntimeId: d.engine.runtimeId, validator: "fixture" } },
         { id: "character-image", kind: "image", targetId: "CHAR", prompt: characterPrompt, sha256: characterDigest, sourceHash: d.sourceHash, status: "ready", references: [{ label: "<Picture 1>", nodeId: "style", storageKey: "image:style_mother", sha256: styleMediaHash, role: "style mother" }], receipt: { sourceHash: d.sourceHash, promptHash: characterDigest, engineRuntimeId: d.engine.runtimeId, validator: "fixture" } },
     ];
+    service.edit("ep", { operationId: "review-policy", expectedRevision: service.get("ep").revision, ops: [{ type: "set_settings", patch: { reviewPolicy: { mode: reviewMode, shared: reviewMode, scene: reviewMode } } }] });
     publish(service, d); let submitted = 0;
     const fake = { start: async (command: CanvasGenerationCommand) => {
         submitted++;
@@ -501,15 +522,27 @@ test("automatic dependency runs pause for review, then continue the same runId w
         const storageKey = `image:${assetId.toLowerCase()}`, bytes = `test-${assetId}`, filePath = join(dir, `${assetId}.png`); writeFileSync(filePath, bytes);
         db.upsertMediaFile({ storageKey, filePath, bytes: bytes.length, mimeType: "image/png", width: 8, height: 8, durationMs: null, createdAt: new Date().toISOString() });
         db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: command.nodeId, metadata: { storageKey } }]);
-        stores.tasks.update(task.id, { status: "succeeded" }); return { taskId: task.id };
+        stores.tasks.update(task.id, { status: "succeeded", result: { media: [{ storageKey }] } }); return { taskId: task.id };
     } } as unknown as CanvasGenerationService;
     const runner = new EpisodeProductionRunner(service, stores, fake);
     const batch = service.startBatch("ep", { inputBasis: "published", runId: "style-run", idempotencyKey: "style-run", expectedRevision: service.get("ep").revision, version: 1, targets: ["asset:STYLE_MOTHER"], scope: "all_ready" });
     db.db.prepare("UPDATE episode_production_batches SET execution_snapshot_json=NULL WHERE run_id=?").run(batch.runId); // Legacy runs retain their original review/expansion semantics.
     await runner.runBatch("ep", batch.runId); await runner.runBatch("ep", batch.runId);
-    assert.equal(submitted, 1); assert.equal(service.getBatch("ep", batch.runId)?.status, "awaiting_review");
+    assert.equal(submitted, 1);
     assert.equal(service.get("ep").published!.director!.assets.STYLE_MOTHER.status, "generated");
     assert.equal(service.get("ep").published!.director!.assets.STYLE_MOTHER.storageKey, "image:style_mother");
+    if (reviewMode === "none") {
+        assert.equal(service.getBatch("ep", batch.runId)?.status, "succeeded");
+        assert.equal(service.get("ep").published!.director!.assets.STYLE_MOTHER.evidence, undefined, "disabled reviews never manufacture approval");
+        return;
+    }
+    assert.equal(service.getBatch("ep", batch.runId)?.status, "awaiting_review");
+    const originalTaskId = service.getBatch("ep", batch.runId)!.submitted[0].taskId;
+    service.resumeBatch("ep", batch.runId);
+    await runner.runBatch("ep", batch.runId);
+    assert.equal(service.getBatch("ep", batch.runId)?.status, "awaiting_review", service.getBatch("ep", batch.runId)?.error || "");
+    assert.equal(submitted, 1, "resume before approval cannot release a newly ready dependent asset");
+    assert.equal(service.getBatch("ep", batch.runId)!.submitted[0].taskId, originalTaskId);
     const duplicateReviewTarget = () => service.startBatch("ep", { inputBasis: "published", runId: "style-rerun", idempotencyKey: "style-rerun", expectedRevision: service.get("ep").revision, version: 1, targets: ["asset:STYLE_MOTHER"], scope: "selected" });
     assert.throws(duplicateReviewTarget, /暂停不会释放目标.*退回旧结果/);
     const pausedReview = service.pauseBatch("ep", batch.runId);
@@ -539,10 +572,30 @@ test("automatic dependency runs pause for review, then continue the same runId w
     const current = service.get("ep");
     assert.throws(() => service.edit("ep", { operationId: "bad-review", expectedRevision: current.revision, ops: [{ type: "review_director_asset", assetId: "STYLE_MOTHER", version: 2, sourceHash: d.sourceHash, nodeId: "style", storageKey: "image:style_mother", sha256, verdict: "approved", evidence: "checked" }] }), /审核目标不属于/);
     assert.throws(() => service.edit("ep", { operationId: "bad-hash", expectedRevision: current.revision, ops: [{ type: "review_director_asset", assetId: "STYLE_MOTHER", version: 1, sourceHash: d.sourceHash, nodeId: "style", storageKey: "image:style_mother", sha256: "0".repeat(64), verdict: "approved", evidence: "checked" }] }), /摘要/);
+    assert.equal(service.getBatch("ep", batch.runId)?.status, "awaiting_review");
+    assert.equal(service.get("ep").published!.director!.assets.STYLE_MOTHER.status, "generated");
     const reviewed = service.edit("ep", { operationId: "asset-review", expectedRevision: service.get("ep").revision, ops: [{ type: "review_director_asset", assetId: "STYLE_MOTHER", version: 1, sourceHash: d.sourceHash, nodeId: "style", storageKey: "image:style_mother", sha256, verdict: "approved", evidence: "identity and style checked" }] });
     assert.equal(reviewed.published!.director!.assets.STYLE_MOTHER.status, "approved");
     const readinessAfterStyle = service.workflowReadiness("ep", "published");
     assert.equal(readinessAfterStyle.targets.find(item => item.id === "asset:CHAR")?.status, "ready", JSON.stringify(readinessAfterStyle.targets));
+    const historical = service.getBatch("ep", batch.runId)!;
+    service.updateBatch({ ...historical, submitted: historical.submitted.map(({ projectId, nodeId, ...item }) => item) });
+    assert.equal(service.getBatch("ep", batch.runId)!.submitted[0].nodeId, undefined, "older receipts can lack denormalized node context");
+    const originalResult = stores.tasks.get(originalTaskId)!.result;
+    const styleFile = db.getMediaFile("image:style_mother")!.filePath;
+    for (const invalidate of [
+        () => stores.tasks.update(originalTaskId, { result: null }),
+        () => writeFileSync(styleFile, "changed-after-review"),
+    ]) {
+        invalidate();
+        service.resumeBatch("ep", batch.runId);
+        await runner.runBatch("ep", batch.runId);
+        assert.equal(service.getBatch("ep", batch.runId)?.status, "awaiting_review");
+        assert.equal(submitted, 1, "approval cannot release dependencies when original task media or archived bytes no longer match");
+        stores.tasks.update(originalTaskId, { result: originalResult });
+        writeFileSync(styleFile, "test-STYLE_MOTHER");
+    }
+    runner.prepareTargets("ep", service.get("ep").revision, ["asset:CHAR"], "prepare-character-reference");
     const continued = service.resumeBatch("ep", batch.runId);
     assert.ok(continued.targets.includes("asset:CHAR"), "automatic scope should release newly ready dependencies after approval");
     await runner.runBatch("ep", batch.runId);
@@ -554,6 +607,51 @@ test("automatic dependency runs pause for review, then continue the same runId w
     await runner.runBatch("ep", batch.runId);
     assert.equal(service.getBatch("ep", batch.runId)?.status, "succeeded");
     assert.equal(submitted, 2);
+    assert.equal(service.getBatch("ep", batch.runId)!.submitted[0].taskId, originalTaskId);
+});
+
+test("legacy version-only runs resume reviewed keyframes without misclassifying Shot IDs as assets", async t => {
+    const { service, stores, db, dir } = fixture(t), director = doc(1);
+    director.source.segments = [];
+    director.source.asset_plan = [{ id: "FRAME", kind: "keyframe", version: "v1", depends_on: [] }];
+    director.boundaries = [];
+    director.shotInputs.s0 = { keyframePolicy: "new", keyframeAssetId: "FRAME", assetIds: [] };
+    director.assets.FRAME = { version: "v1", status: "planned" };
+    director.sourceHash = directorHash(director.source);
+    director.executionAuthorized = true;
+    const prompt = "A complete keyframe prompt", sha256 = promptHash(prompt);
+    director.artifacts = [{ id: "frame-image", kind: "image", targetId: "FRAME", prompt, sha256, sourceHash: director.sourceHash, status: "ready", references: [],
+        receipt: { sourceHash: director.sourceHash, promptHash: sha256, engineRuntimeId: director.engine.runtimeId, validator: "test-fixture" } }];
+    service.edit("ep", { operationId: "legacy-frame", expectedRevision: 0, ops: [{ type: "set_director_production", director },
+        { type: "set_settings", patch: { imageModel: "mock-image", reviewPolicy: { mode: "manual", shared: "manual", scene: "manual" } } }] });
+    let submitted = 0;
+    const fake = { start: async (command: CanvasGenerationCommand) => {
+        submitted++;
+        const task = stores.tasks.create(command.idempotencyKey!, "image", command, {});
+        const storageKey = "image:legacy-frame", filePath = join(dir, "frame.png"), bytes = "legacy-frame";
+        writeFileSync(filePath, bytes);
+        db.upsertMediaFile({ storageKey, filePath, bytes: bytes.length, mimeType: "image/png", width: 8, height: 8, durationMs: null, createdAt: new Date().toISOString() });
+        db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: command.nodeId, metadata: { storageKey } }]);
+        stores.tasks.update(task.id, { status: "succeeded", result: { media: [{ storageKey }] } });
+        return { taskId: task.id };
+    } } as unknown as CanvasGenerationService;
+    const runner = new EpisodeProductionRunner(service, stores, fake);
+    runner.prepareTargets("ep", service.get("ep").revision, ["frame:s0"], "prepare-legacy-frame");
+    service.publish("ep", { operationId: "publish-legacy-frame", expectedRevision: service.get("ep").revision, stage: "director" });
+    const plan = { changedSceneIds: [], affectedShotIds: ["s0"], imageShotIds: ["s0"], clipGroupIds: [], missingAssetNodeIds: [] };
+    db.db.prepare("INSERT INTO episode_production_runs (episode_id,version,status,plan_json,submitted_json,updated_at) VALUES ('ep',1,'pending',?,'[]','2026-01-01')").run(JSON.stringify(plan));
+    await runner.run("ep", 1);
+    const pending = service.run("ep", 1)!;
+    assert.equal(pending.runId, undefined);
+    assert.equal(pending.status, "awaiting_review", pending.error || "");
+    assert.equal(pending.submitted[0].id, "s0");
+    const frame = service.get("ep").published!.keyframes.s0;
+    service.edit("ep", { operationId: "review-legacy-frame", expectedRevision: service.get("ep").revision, ops: [{ type: "review_director_asset", assetId: "FRAME", version: 1,
+        sourceHash: director.sourceHash, nodeId: frame.nodeId, storageKey: frame.storageKey!, sha256: promptHash("legacy-frame"), verdict: "approved", evidence: "frame reviewed" }] });
+    await runner.run("ep", 1);
+    assert.equal(service.run("ep", 1)?.status, "succeeded", service.run("ep", 1)?.error || "");
+    assert.equal(submitted, 1);
+    assert.equal(service.run("ep", 1)!.submitted[0].taskId, pending.submitted[0].taskId);
 });
 
 test("HTTP hashes the source itself through the shared production contract", async t => {
@@ -588,7 +686,7 @@ test("HTTP director operations round-trip and project facade shares the episode 
     const current = await (await fetch(base + "/canvas/projects/canvas/production")).json() as any;
     assert.equal(current.production.publishedVersion, 1); assert.equal(current.production.published.director.sourceHash, doc().sourceHash);
     const readiness = await (await fetch(base + "/drama/episodes/ep/production/readiness")).json() as any;
-    assert.equal(readiness.readiness.targets.find((item: any) => item.id === "segment:seg0")?.status, "blocked");
+    assert.equal(readiness.readiness.targets.find((item: any) => item.id === "segment:seg0")?.status, "ready");
     const missingBatch = await fetch(base + "/drama/episodes/ep/production/batches/not-started");
     assert.equal(missingBatch.status, 200);
     assert.equal((await missingBatch.json() as any).run, null);
