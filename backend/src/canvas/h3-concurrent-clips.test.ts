@@ -334,9 +334,38 @@ test("潜空间续写不能绕过参考不完整的中间 Clip", (t: TestContext
     t.after(() => db.close());
     db.createCanvasProject({ id: "p", nodes: [{ id: "n", type: "minimax-h3", metadata: { segments: [
         { id: "head", prompt: "A", mode: "t2v", aspectRatio: "9:16 (Portrait)", megapixels: 0.8, motionContextEnabled: true },
-        { id: "missing-image", prompt: "B", mode: "i2v" },
+        { id: "missing-image", prompt: "B", mode: "i2v", motionContextEnabled: true },
         { id: "tail", prompt: "C", mode: "t2v" },
     ] } }], connections: [] });
-    const runner = new CanvasH3Runner(createStores(db), new BackendEventBus(), {} as never, localProvider() as never);
-    assert.throws(() => runner.start({ projectId: "p", nodeId: "n", segmentId: "head", runFromCurrent: true }), /不能跳过连续组中的 Clip/);
+    const stores = createStores(db);
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), { run: () => assert.fail("无有效连续组时不能提交模型") } as never, localProvider() as never);
+    assert.throws(() => runner.start({ projectId: "p", nodeId: "n", segmentId: "head", runFromCurrent: true }), /没有可运行的 H3 Clip/);
+    assert.deepEqual(stores.tasks.list(), [], "不可运行的连续组不能创建父任务或子任务");
+});
+
+test("参考不完整时排除整个潜空间连续组，仍运行边界外的独立 Clip", async (t: TestContext) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "p", nodes: [{ id: "n", type: "minimax-h3", metadata: { segments: [
+        { id: "head", prompt: "A", mode: "t2v", aspectRatio: "9:16 (Portrait)", megapixels: 0.8, motionContextEnabled: true },
+        { id: "missing-image", prompt: "B", mode: "i2v", motionContextEnabled: false },
+        { id: "independent", prompt: "C", mode: "t2v" },
+    ] } }], connections: [] });
+    const stores = createStores(db);
+    const submitted: string[] = [];
+    const comfy = {
+        async run(_preset: string, input: Record<string, unknown>, params: Record<string, unknown>, _url?: string, id?: string, onCreated?: (task: ReturnType<typeof stores.tasks.create>) => void) {
+            const child = stores.tasks.create(id!, "comfyui:minimax-h3", input, params);
+            submitted.push(String((params.canvasBinding as Record<string, unknown>).segmentId));
+            onCreated?.(child);
+            const media = stores.media.store(Buffer.from("test-video"), { name: "independent.mp4", mimeType: "video/mp4", category: "output" });
+            return stores.tasks.update(child.id, { status: "succeeded", progress: 1, result: { media: [{ url: stores.media.url(media), storageKey: media.storageKey, mimeType: "video/mp4" }] } });
+        },
+    };
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, localProvider() as never);
+    const parent = runner.start({ projectId: "p", nodeId: "n", segmentId: "head", runFromCurrent: true }, "partial-chain");
+    assert.deepEqual(parent.result?.plans, [{ nodeId: "n", segmentId: "independent", segmentIndex: 2 }]);
+    for (let i = 0; i < 100 && !["succeeded", "failed"].includes(db.getTask(parent.id)?.status || ""); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(db.getTask(parent.id)?.status, "succeeded", db.getTask(parent.id)?.error || "独立 Clip 未成功");
+    assert.deepEqual(submitted, ["independent"], "不能绕过坏 Clip 提交组首或其他连续组成员");
 });

@@ -5,8 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { BackendDatabase } from "../db.js";
 import { DATABASE_SCHEMA_VERSION } from "../database-upgrade.js";
+import { historicalDatabase } from "../test-helpers/historical-database.js";
 import { EpisodeProductionService } from "./production.js";
-import { dramaProductionPlanSchema, productionImageModel } from "@basketikun/canvas-agent/drama/production-contract";
+import { dramaProductionPlanSchema, emptyEpisodeProduction, productionImageModel } from "@basketikun/canvas-agent/drama/production-contract";
 
 test("confirmed category models persist, seed new production, and leave existing settings intact", t => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "drama-planning-"));
@@ -41,28 +42,25 @@ test("confirmed category models persist, seed new production, and leave existing
 test("v40 migrates episode and standalone canvas defaults to none while preserving published snapshots and waiting runs", t => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "drama-review-policy-v40-"));
     const file = path.join(directory, "db.sqlite");
-    let db = new BackendDatabase(file);
-    t.after(() => { db.close(); fs.rmSync(directory, { recursive: true, force: true }); });
-    const folder = db.upsertCanvasFolder({ id: "drama", name: "Drama", isDrama: true, outline: "Story", createdAt: "2026-01-01", updatedAt: "2026-01-01" });
-    const manualPlan = dramaProductionPlanSchema.parse({ imageModel: "", imageModelsByKind: {}, h3Model: "", confirmedOutline: "Story", confirmedAt: new Date().toISOString(),
+    let db: BackendDatabase | undefined;
+    t.after(() => { db?.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+    const seed = historicalDatabase(t, file, 39);
+    const manualPlan = dramaProductionPlanSchema.parse({ imageModel: "", imageModelsByKind: {}, h3Model: "", confirmedOutline: "Story", confirmedAt: "2026-01-01T00:00:00.000Z",
         reviewPolicy: { mode: "manual", shared: "manual", scene: "manual" } });
-    db.upsertCanvasFolder({ ...folder, productionPlan: manualPlan, expectedPlanningUpdatedAt: folder.updatedAt });
-    db.upsertDramaEpisode({ dramaId: "drama", id: "episode", episodeNumber: 1, title: "Episode", synopsis: "" });
-    const service = new EpisodeProductionService(db, undefined, directory, false, () => {});
-    service.edit("episode", { operationId: "manual-review-setting", expectedRevision: 0, ops: [{ type: "set_settings", patch: { reviewPolicy: manualPlan.reviewPolicy } }] });
-    const publishedEpisode = JSON.stringify(service.get("episode").draft);
-    db.db.prepare("UPDATE episode_productions SET published_json=? WHERE episode_id=?").run(publishedEpisode, "episode");
-
-    db.createCanvasProject({ id: "standalone-canvas", title: "Standalone", nodes: [], connections: [] });
-    const canvasService = new EpisodeProductionService(db, undefined, directory, true, () => {});
-    canvasService.edit("standalone-canvas", { operationId: "canvas-manual-review-setting", expectedRevision: 0, ops: [{ type: "set_settings", patch: { reviewPolicy: manualPlan.reviewPolicy } }] });
-    const publishedCanvas = JSON.stringify(canvasService.get("standalone-canvas").draft);
-    db.db.prepare("UPDATE canvas_productions SET published_json=? WHERE project_id=?").run(publishedCanvas, "standalone-canvas");
-    db.db.prepare(`INSERT INTO canvas_production_batches
+    seed.prepare("INSERT INTO canvas_folders (id,name,created_at) VALUES ('drama','Drama','2026-01-01')").run();
+    seed.prepare("INSERT INTO drama_projects (folder_id,outline,production_plan_json,updated_at) VALUES ('drama','Story',?,'2026-01-01')").run(JSON.stringify(manualPlan));
+    seed.prepare("INSERT INTO drama_episodes (id,drama_id,episode_number,title,created_at,updated_at) VALUES ('episode','drama',1,'Episode','2026-01-01','2026-01-01')").run();
+    seed.prepare("INSERT INTO canvas_projects (id,data_json,updated_at) VALUES ('standalone-canvas',?,'2026-01-01')")
+        .run(JSON.stringify({ id: "standalone-canvas", title: "Standalone", nodes: [], connections: [] }));
+    const draft = emptyEpisodeProduction();
+    draft.settings.reviewPolicy = manualPlan.reviewPolicy!;
+    const publishedEpisode = JSON.stringify(draft), publishedCanvas = JSON.stringify(draft);
+    seed.prepare("INSERT INTO episode_productions (episode_id,draft_json,published_json,updated_at) VALUES ('episode',?,?,'2026-01-01')").run(publishedEpisode, publishedEpisode);
+    seed.prepare("INSERT INTO canvas_productions (project_id,draft_json,published_json,updated_at) VALUES ('standalone-canvas',?,?,'2026-01-01')").run(publishedCanvas, publishedCanvas);
+    seed.prepare(`INSERT INTO canvas_production_batches
         (run_id,project_id,idempotency_key,request_hash,version,source_revision,status,targets_json,plan_json,settings_json,submitted_json,created_at,updated_at)
         VALUES ('waiting-review','standalone-canvas','waiting-review','fixture',1,1,'awaiting_review','[]','{}','{}','[]','now','now')`).run();
-    db.db.prepare("DELETE FROM schema_migrations WHERE version=40").run();
-    db.close();
+    seed.close();
 
     db = new BackendDatabase(file);
     const migratedService = new EpisodeProductionService(db, undefined, directory, false, () => {});
@@ -74,21 +72,18 @@ test("v40 migrates episode and standalone canvas defaults to none while preservi
     assert.equal(db.db.prepare("SELECT published_json FROM canvas_productions WHERE project_id=?").get("standalone-canvas")?.published_json, publishedCanvas);
     assert.equal(db.db.prepare("SELECT status FROM canvas_production_batches WHERE run_id=?").get("waiting-review")?.status, "awaiting_review");
     assert.equal(db.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, DATABASE_SCHEMA_VERSION);
-    assert.equal(fs.readdirSync(directory).filter(name => name.includes(".pre-schema-v39-to-v40-")).length, 1);
+    assert.equal(fs.readdirSync(directory).filter(name => name.includes(`.pre-schema-v39-to-v${DATABASE_SCHEMA_VERSION}-`)).length, 1);
 });
 
 test("a v24 database upgrades to the current schema, snapshots first and preserves existing outlines", t => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "drama-plan-upgrade-"));
     t.after(() => { assert.equal(path.dirname(directory), os.tmpdir()); fs.rmSync(directory, { recursive: true, force: true }); });
     const file = path.join(directory, "db.sqlite");
-    let db = new BackendDatabase(file);
-    db.upsertCanvasFolder({ id: "drama", name: "Drama", isDrama: true, outline: "Preserved", createdAt: "2026-01-01" });
-    // Simulate a genuine v24 database: nothing above v24 recorded and the v25 column absent.
-    // Dropping only the v25 row would leave MAX(version) at the current schema and skip every migration.
-    db.db.exec(`ALTER TABLE drama_projects DROP COLUMN production_plan_json`);
-    db.db.exec(`DELETE FROM schema_migrations WHERE version > 24`);
-    db.close();
-    db = new BackendDatabase(file);
+    const seed = historicalDatabase(t, file, 24);
+    seed.prepare("INSERT INTO canvas_folders (id,name,created_at) VALUES ('drama','Drama','2026-01-01')").run();
+    seed.prepare("INSERT INTO drama_projects (folder_id,outline,updated_at) VALUES ('drama','Preserved','2026-01-01')").run();
+    seed.close();
+    const db = new BackendDatabase(file);
     try {
         assert.equal(db.listCanvasFolders()[0].outline, "Preserved");
         assert.equal(db.listCanvasFolders()[0].productionPlan, undefined);

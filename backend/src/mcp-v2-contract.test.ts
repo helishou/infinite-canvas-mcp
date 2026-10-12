@@ -20,12 +20,13 @@ test("HTTP MCP v3 exposes the new contracts, compact asset reads, idempotent wri
   const largeProduction = { episodeId: "large", revision: 1, publishedVersion: 1, draft: { director: { engine: { runtimeId: "pinned" }, sourceHash: "full-source-hash", modules: {}, workflow: {}, assets: {}, source: { brief: "sample", script: largePrompt }, artifacts: [{ id: "h3-segment", targetId: "segment", prompt: largePrompt, sha256: "prompt-hash" }] }, scenes: [], shots: [], clipGroups: [] } };
   backend.get("/canvas/projects/large/production", (req, res) => res.json({ ok: true, production: projectProductionRead(largeProduction, req.query) }));
   backend.post("/canvas/projects/large/production/ops", (_req, res) => res.json({ ok: true, production: { ...largeProduction, revision: 2, replayed: false } }));
-  let productionBlocked = true, productionSubmissions = 0, simulateProductionRace = false;
+  let productionBlocked = true, productionSubmissions = 0, productionAttempts = 0, preflightCalls = 0, simulateProductionRace = false;
   const productionIssue = { code: "TARGET_AWAITING_REVIEW", path: "request.targets", message: "Original image needs review", severity: "error", blockingRun: { runId: "original", status: "awaiting_review", taskIds: ["original-task"] }, nextAction: { action: "review", message: "Read the existing run", tool: "production_get_batch", input: { kind: "episode", id: "guarded", runId: "original" } } };
-  backend.post(["/drama/episodes/guarded/production/preflight", "/canvas/projects/guarded/production/preflight"], (_req, res) => res.json({ ok: true, preflight: { valid: !productionBlocked, diagnostics: productionBlocked ? [productionIssue] : [], nextActions: productionBlocked ? [productionIssue.nextAction] : [] } }));
+  backend.post(["/drama/episodes/guarded/production/preflight", "/canvas/projects/guarded/production/preflight"], (_req, res) => { preflightCalls++; res.json({ ok: true, preflight: { valid: !productionBlocked, diagnostics: productionBlocked ? [productionIssue] : [], nextActions: productionBlocked ? [productionIssue.nextAction] : [] } }); });
   backend.post(["/drama/episodes/guarded/production/compile", "/drama/episodes/guarded/production/runs", "/canvas/projects/guarded/production/runs"], (_req, res) => {
+    productionAttempts++;
+    if (productionBlocked || simulateProductionRace) return void res.status(400).json({ ok: false, code: productionIssue.code, error: productionIssue.message, diagnostics: [productionIssue], nextActions: [productionIssue.nextAction] });
     productionSubmissions++;
-    if (simulateProductionRace) return void res.status(400).json({ ok: false, code: productionIssue.code, error: productionIssue.message, diagnostics: [productionIssue], nextActions: [productionIssue.nextAction] });
     res.json({ ok: true, compilation: { preparedId: "prepared" }, run: { runId: "new" } });
   });
   registerMcpCommandTestRoutes(backend, db);
@@ -73,13 +74,15 @@ test("HTTP MCP v3 exposes the new contracts, compact asset reads, idempotent wri
   ];
   for (const call of productionCalls.slice(1)) {
     const result = await client.callTool(call);
-    assert.equal(result.isError, undefined);
+    assert.equal(result.isError, true);
     const blocked = JSON.parse(textOf(result));
-    assert.equal(blocked.status, "blocked");
-    assert.equal(blocked.mediaSubmitted, false);
-    assert.deepEqual(blocked.preflight.nextActions[0].input, { kind: "episode", id: "guarded", runId: "original" });
+    assert.equal(blocked.error.code, "TARGET_AWAITING_REVIEW");
+    assert.equal(blocked.error.issues[0].blockingRun.runId, "original");
+    assert.deepEqual(blocked.suggestedAction.input, { kind: "episode", id: "guarded", runId: "original" });
   }
-  assert.equal(productionSubmissions, 0, "blocked preflights must never reach a compile/start endpoint");
+  assert.equal(productionSubmissions, 0, "blocked submission-boundary checks must never submit production");
+  assert.equal(productionAttempts, 2, "each authorized start reaches the authoritative Backend boundary exactly once");
+  assert.equal(preflightCalls, 0, "MCP must not add a duplicate automatic preflight");
   productionBlocked = false;
   const prepared = await client.callTool(productionCalls[0]);
   assert.equal(JSON.parse(textOf(prepared)).compilation.preparedId, "prepared");
@@ -92,7 +95,9 @@ test("HTTP MCP v3 exposes the new contracts, compact asset reads, idempotent wri
   assert.equal(race.error.issues[0].path, "request.targets");
   assert.equal(race.error.issues[0].blockingRun.runId, "original");
   assert.equal(race.suggestedAction.tool, "production_get_batch");
-  assert.equal(productionSubmissions, 2);
+  assert.equal(productionSubmissions, 1, "a race must not create a second production submission");
+  assert.equal(productionAttempts, 4);
+  assert.equal(preflightCalls, 0);
   assert.ok((tool("production_apply_compilation").inputSchema as any).required.includes("preparedId"));
   const largeRead = await client.callTool({ name: "production_get", arguments: { kind: "canvas", id: "large" } });
   assert.equal(largeRead.isError, undefined);

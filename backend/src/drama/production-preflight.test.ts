@@ -93,9 +93,9 @@ test("target edits report the original occupying run and tasks before changing s
     assert.equal(service.edit("episode", { operationId: "other-clip", expectedRevision: original.revision, ops: [{ type: "patch_director_source", entity: "segment", id: "seg2", patch: { styleTemplateId: "soft-light" } }] }).replayed, true);
 });
 
-test("offline and Backend share the activated engine source diagnostics", t => {
+test("offline and Backend share the activated engine blocking source diagnostics", t => {
     const contract = getProductionContract();
-    if (!contract.sourceContract) return t.skip("Activate the versioned Canvas source contract to run this integration check");
+    assert.ok(contract.sourceContract, "the pinned test runtime must provide the Canvas source contract");
     const { db } = fixture(t);
     const service = new EpisodeProductionService(db);
     const source = { fps_num: 24, fps_den: 1, shots: [], segments: [{ id: "SEG001", mode: "Ref2VA", mode_lock: true, mode_selection_reason: "Use the actual reference." }], asset_cards: [{ id: "asset", recipe: "invented" }], style_lock: { preserve_scope: "palette", exclude_scope: ["x"] } };
@@ -104,7 +104,10 @@ test("offline and Backend share the activated engine source diagnostics", t => {
     const online = service.preflight("episode", { action: "edit", request: { operationId: "check", expectedRevision: 0, ops: [{ type: "set_director_production", director }] } });
     assert.equal(offline.valid, false); assert.equal(online.valid, false);
     assert.ok(offline.diagnostics.some(item => item.code === "INVALID_SOURCE"), JSON.stringify(offline.diagnostics));
-    assert.deepEqual(online.diagnostics.filter(item => item.code === "INVALID_SOURCE"), offline.diagnostics.filter(item => item.code === "INVALID_SOURCE"));
+    // An invalid edit stops at assertAchengSource, which returns its blocking diagnostics.
+    // The standalone audit also includes advisory diagnostics from the remaining source.
+    assert.ok(offline.diagnostics.some(item => item.code === "INVALID_SOURCE" && item.severity === "warning"));
+    assert.deepEqual(online.diagnostics, offline.diagnostics.filter(item => item.code === "INVALID_SOURCE" && item.severity === "error"));
     assert.equal(offline.generationReady, false);
     assert.equal(service.get("episode").revision, 0);
 });

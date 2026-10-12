@@ -80,7 +80,8 @@ test("execute derives ordinary/face/latent weights, persists progress and publis
             },
             cancel(id: string) { return stores.tasks.update(id, { status: "cancelled" }); },
         };
-        const runner = new CanvasH3Runner(stores, events, comfy as never, {} as never);
+        const localProvider = { ready: () => false, queue: { select: () => "local", unreserve() {} } };
+        const runner = new CanvasH3Runner(stores, events, comfy as never, localProvider as never);
         try {
             runner.start({ projectId: "p", nodeId: "n" }, "parent");
             for (let i = 0; i < 100 && db.getTask("parent")?.progress !== expected; i++) await new Promise((resolve) => setTimeout(resolve, 5));
@@ -88,7 +89,7 @@ test("execute derives ordinary/face/latent weights, persists progress and publis
             assert.equal(db.getTask("parent")?.progress, expected);
             assert.ok(published.includes(expected), "parent progress must reach SSE event bus");
         } finally {
-            runner.cancel("parent");
+            if (["queued", "running"].includes(db.getTask("parent")?.status || "")) runner.cancel("parent");
             await new Promise((resolve) => setTimeout(resolve, 550));
             db.close();
         }

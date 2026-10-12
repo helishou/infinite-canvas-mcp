@@ -1479,7 +1479,8 @@ export class EpisodeProductionService {
         const targets: DirectorReadinessTarget[] = [];
         const addTarget = (input: Omit<DirectorReadinessTarget, "status"> & { status?: DirectorReadinessTarget["status"] }) => {
             const blockers = [...input.blockers];
-            const unpublished = source === "draft" && (publicationWide || unpublishedTargets.has(input.id));
+            // Verified archived output stays complete when current-canvas generation updates the draft only.
+            const unpublished = source === "draft" && input.status !== "complete" && (publicationWide || unpublishedTargets.has(input.id));
             if (unpublished) blockers.push("当前工作稿或引用映射尚未发布；先发布再生产。");
             const item = { ...input, blockers: [...new Set(blockers)], status: unpublished ? "blocked" as const : input.status || (blockers.length ? "blocked" as const : "ready" as const) };
             targets.push(item);

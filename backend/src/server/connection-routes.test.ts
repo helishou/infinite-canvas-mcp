@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
+import os from "node:os";
 import type { Request } from "express";
 import test from "node:test";
 import { BackendDatabase } from "../db.js";
@@ -24,7 +25,21 @@ test("来源只接受准确 origin，保留本机入口，不支持路径/通配
     assert.deepEqual(value.origins, ["http://127.0.0.1:3001", "http://localhost:3001", "http://192.168.1.10:3001"]);
 });
 
-test("远端必须持有密钥；主机设置存 SQLite 等待重启，不热开放或向远端返回密钥", async () => {
+test("远端必须持有密钥；主机设置存 SQLite 等待重启，不热开放或向远端返回密钥", async (t) => {
+    const ipv4 = (address: string, internal = false): os.NetworkInterfaceInfoIPv4 => ({
+        address, family: "IPv4", internal, netmask: "255.255.255.0", mac: "00:00:00:00:00:00", cidr: `${address}/24`,
+    });
+    // 使用文档地址覆盖过滤与去重，不枚举宿主机网卡，也不依赖沙箱的系统调用权限。
+    t.mock.method(os, "networkInterfaces", () => ({
+        lo: [ipv4("127.0.0.1", true)],
+        eth0: [ipv4("192.0.2.10"), {
+            address: "2001:db8::1", family: "IPv6" as const, internal: false,
+            netmask: "ffff:ffff:ffff:ffff::", mac: "00:00:00:00:00:00", cidr: "2001:db8::1/64", scopeid: 0,
+        }],
+        eth1: [ipv4("198.51.100.20"), ipv4("192.0.2.10")],
+        missing: undefined,
+    }));
+    const addresses = ["http://192.0.2.10:0", "http://198.51.100.20:0"];
     const db = new BackendDatabase(":memory:");
     const origin = "http://192.168.1.10:3001";
     const config = { url: "http://127.0.0.1", token: "test-secret", port: 0, listenHost: "127.0.0.1" as const, origins: ["http://localhost:3001", origin] };
@@ -40,14 +55,21 @@ test("远端必须持有密钥；主机设置存 SQLite 等待重启，不热开
         assert.equal((await call("/config", "GET", true)).status, 200);
         assert.equal((await call("/config", "GET", false, false)).status, 200);
         assert.equal((await call("/connection", "GET", true, false)).status, 401);
-        const remote = await (await call("/connection", "GET", true)).json() as { canConfigure: boolean };
+        const remoteResponse = await call("/connection", "GET", true);
+        assert.equal(remoteResponse.status, 200);
+        const remote = await remoteResponse.json() as { canConfigure: boolean; addresses: string[] };
         assert.equal(remote.canConfigure, false);
+        assert.deepEqual(remote.addresses, addresses);
         assert.equal(JSON.stringify(remote).includes("test-secret"), false);
         const settings = { lanEnabled: true, origins: [origin] };
         assert.equal((await call("/connection", "PUT", true, true, settings)).status, 403);
-        const saved = await (await call("/connection", "PUT", false, true, settings)).json() as { restartRequired: boolean; current: { lanEnabled: boolean } };
+        const savedResponse = await call("/connection", "PUT", false, true, settings);
+        assert.equal(savedResponse.status, 200);
+        const saved = await savedResponse.json() as { canConfigure: boolean; restartRequired: boolean; current: { lanEnabled: boolean }; addresses: string[] };
+        assert.equal(saved.canConfigure, true);
         assert.equal(saved.restartRequired, true);
         assert.equal(saved.current.lanEnabled, false);
+        assert.deepEqual(saved.addresses, addresses);
         assert.equal(config.listenHost, "127.0.0.1");
         const next = structuredClone(config);
         applyNetworkSettings(next, db.getSetting(NETWORK_SETTINGS_KEY));

@@ -23,7 +23,7 @@ async function fixture(t: TestContext) {
     db.createCanvasProject({ id: "delta-http", title: "isolated ten narrative edits", revision: 0, updatedAt: new Date().toISOString(), connections: [], nodes: [{
         id: "h3", type: "minimax-h3:video", title: "isolated", position: { x: 0, y: 0 }, width: 400, height: 300,
         metadata: { rootMarker: "keep", segments: Array.from({ length: 11 }, (_, i) => ({
-            id: `s${i + 1}`, title: `clip-${i + 1}`, duration: 8, taskMode: "t2va", status: i === 0 ? "running" : "success",
+            id: `s${i + 1}`, title: `clip-${i + 1}`, start: i * 8, duration: 8, taskMode: "t2va", status: i === 0 ? "running" : "success",
             runtimeTaskId: i === 0 ? "existing-child" : "", parentTaskId: "existing-parent", resultStorageKey: `video:history-${i}`,
             prompt: "Unrelated camera, dialogue and lighting must remain intact. ".repeat(300) + "😀 She holds the golden bell, not the doorbell. <d>Keep my dialogue.</d>" + Array.from({ length: 20 }, (_, j) => ` Hidden prop reminder ${j};`).join(""),
             openingState: "golden bell visible", endingState: "golden bell concealed",

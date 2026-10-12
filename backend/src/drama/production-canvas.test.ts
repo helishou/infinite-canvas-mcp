@@ -16,12 +16,12 @@ import { EpisodeProductionService } from "./production.js";
 import { EpisodeProductionRunner } from "./production-runner.js";
 import { ensureProductionCanvas, productionCanvasContext } from "./production-canvas.js";
 import { SharedAssetCoordinator, listApprovedSharedAssets, sharedProjectionNodeId, validateSharedAssetSource } from "./shared-assets.js";
-import { directorHash, promptHash } from "./director.js";
+import { directorHash, projectDirector, promptHash } from "./director.js";
 import { NativeProductionGeneration } from "./native-generation.js";
 import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import type { CanvasGenerationService } from "../canvas/generation-service.js";
 import type { compileAchengDirector } from "@basketikun/canvas-agent/skills/acheng";
-import { productionWriteReceipt } from "@basketikun/canvas-agent/drama/production-contract";
+import { emptyEpisodeProduction, productionWriteReceipt } from "@basketikun/canvas-agent/drama/production-contract";
 import express from "express";
 import { once } from "node:events";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -60,6 +60,16 @@ function director(): DirectorProduction {
 function save(service: EpisodeProductionService, id: string, d: DirectorProduction) {
     const current = service.get(id);
     return service.edit(id, { operationId: crypto.randomUUID(), expectedRevision: current.revision, ops: [{ type: "set_director_production", director: d }] });
+}
+// Old persisted productions can predate automatic canvas materialization during edits.
+// Seed that storage state directly so preparation tests still exercise first binding.
+function seedUnboundEpisode(f: ReturnType<typeof fixture>, id = "ep", d = director()) {
+    const draft = emptyEpisodeProduction();
+    draft.director = structuredClone(d);
+    projectDirector(draft);
+    f.db.db.prepare("INSERT INTO episode_productions (episode_id, revision, draft_json, published_json, published_version, updated_at) VALUES (?, 1, ?, NULL, 0, ?)")
+        .run(id, JSON.stringify(draft), new Date().toISOString());
+    assert.equal(f.db.getDramaEpisode(id)!.canvasId, null);
 }
 function publish(service: EpisodeProductionService, id: string) {
     return service.publish(id, { operationId: crypto.randomUUID(), expectedRevision: service.get(id).revision, stage: "director" });
@@ -621,7 +631,7 @@ function approve(f: ReturnType<typeof fixture>, projectId: string, revision: num
 }
 
 test("first target preparation creates only the unbound episode canvas and replays its receipt", t => {
-    const f = fixture(t); save(f.episode, "ep", director());
+    const f = fixture(t); seedUnboundEpisode(f);
     let submitted = 0;
     const runner = new EpisodeProductionRunner(f.episode, f.stores, { start() { submitted++; throw new Error("No generation"); } } as unknown as CanvasGenerationService);
     const revision = f.episode.get("ep").revision;
@@ -637,7 +647,7 @@ test("first target preparation creates only the unbound episode canvas and repla
 });
 
 test("first target preparation rejects invalid requests before reserving an operation or creating a canvas", t => {
-    const f = fixture(t); save(f.episode, "ep", director());
+    const f = fixture(t); seedUnboundEpisode(f);
     const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
     const revision = f.episode.get("ep").revision;
     for (const [index, targets] of [["ROLE"], ["unknown:ROLE"], ["scene:missing"], ["frame:missing"], ["asset:missing"]].entries()) {
@@ -651,7 +661,7 @@ test("first target preparation rejects invalid requests before reserving an oper
 });
 
 test("first target preparation recovers an accepted layout failure on the same seeded canvas", t => {
-    const f = fixture(t); save(f.episode, "ep", director());
+    const f = fixture(t); seedUnboundEpisode(f);
     const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
     const revision = f.episode.get("ep").revision, original = f.episode.ensureLayoutPlan.bind(f.episode);
     f.episode.ensureLayoutPlan = () => { throw new Error("injected layout failure"); };
@@ -664,7 +674,7 @@ test("first target preparation recovers an accepted layout failure on the same s
 });
 
 test("first target preparation preserves foreign seeds and refuses missing fixed bindings", t => {
-    const f = fixture(t); save(f.episode, "ep", director());
+    const f = fixture(t); seedUnboundEpisode(f);
     const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
     const seedId = "production-episode-" + crypto.createHash("sha256").update("ep").digest("hex").slice(0, 24);
     f.db.createCanvasProject({ id: seedId, title: "User canvas", nodes: [], connections: [] });
@@ -682,7 +692,7 @@ test("first target preparation preserves foreign seeds and refuses missing fixed
 });
 
 test("preparation receipt write failure rolls back bindings and nodes before recovering the original operation", t => {
-    const f = fixture(t); save(f.episode, "ep", director());
+    const f = fixture(t); seedUnboundEpisode(f);
     const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
     const revision = f.episode.get("ep").revision;
     const prepare = f.db.db.prepare.bind(f.db.db);
@@ -704,7 +714,7 @@ test("first target preparation rejects shared-scope assets and cross-owner opera
     const f = fixture(t), d = director();
     (d.source.asset_plan as any[])[0].canvas_scope = "shared"; d.sourceHash = directorHash(d.source);
     d.artifacts = d.artifacts.map(artifact => ({ ...artifact, status: "stale" }));
-    save(f.episode, "ep", d);
+    seedUnboundEpisode(f, "ep", d);
     const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
     assert.throws(() => runner.prepareTargets("ep", f.episode.get("ep").revision, ["asset:ROLE"], "shared-unbound"), /共享/);
     assert.equal(f.db.getDramaEpisode("ep")!.canvasId, null);
@@ -1103,6 +1113,7 @@ test("adoption work survives a new database connection and failed compilation pr
 test("native image controls use the original node and expose an exact task without accepting stale command edits", t => {
     const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
     save(f.episode, "ep", director());
+    f.episode.edit("ep", { operationId: "native-image-model", expectedRevision: f.episode.get("ep").revision, ops: [{ type: "set_settings", patch: { imageModel: "fixture" } }] });
     const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
     runner.prepareTargets("ep", f.episode.get("ep").revision, ["asset:ROLE"], "prepare-native");
     const published = publish(f.episode, "ep"), nodeId = published.published!.director!.assets.ROLE.nodeId!;
@@ -1110,20 +1121,59 @@ test("native image controls use the original node and expose an exact task witho
     const prepared = observer.prepare({ mode: "image", projectId, nodeId, prompt: published.published!.director!.artifacts.find(artifact => artifact.targetId === "ROLE")!.prompt, model: "fixture" });
     assert.equal(prepared.command.params?.writeBackToTarget, true);
     assert.throws(() => observer.prepare({ ...prepared.command, prompt: "uncompiled edit" }), /正式图像产物/);
-    const task = f.stores.tasks.create("native-task", "canvas-image", { projectId, nodeId }, { canvasBinding: { projectId, nodeId } });
+    const task = f.stores.tasks.create("native-task", "canvas-image", prepared.command, { canvasBinding: { projectId, nodeId } });
     const unsubscribe = observer.start();
     observer.submitted(task.id, prepared.context);
     assert.equal(f.episode.get("ep").draft.director?.workflow.currentWork?.taskId, task.id);
     assert.equal(f.episode.workflowReadiness("ep").presentation?.taskId, task.id);
-    const filePath = path.join(f.directory, "native.png"); fs.writeFileSync(filePath, "native bytes");
-    f.db.upsertMediaFile({ storageKey: "image:native", filePath, bytes: 12, mimeType: "image/png", width: 8, height: 8, durationMs: null, createdAt: new Date().toISOString() });
+    const filePath = path.join(f.directory, "native.png");
+    const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg==", "base64");
+    fs.writeFileSync(filePath, image);
+    f.db.upsertMediaFile({ storageKey: "image:native", filePath, bytes: image.length, mimeType: "image/png", width: 1, height: 1, durationMs: null, createdAt: new Date().toISOString() });
     f.db.applyCanvasProjectOperations(projectId, Number(f.db.getCanvasProject(projectId)!.revision), [{ type: "update_node", id: nodeId, metadata: { storageKey: "image:native" } }], { runtimeWrite: true });
     f.stores.tasks.update(task.id, { status: "succeeded", result: { media: [{ storageKey: "image:native" }] } });
     f.events.publish({ type: "task.updated", entityId: task.id, payload: { status: "succeeded" } });
-    assert.equal(f.episode.get("ep").published!.director!.assets.ROLE.status, "generated");
-    assert.equal(f.episode.get("ep").published!.director!.assets.ROLE.storageKey, "image:native");
-    assert.equal(f.episode.workflowReadiness("ep").presentation?.status, "complete");
+    assert.equal(f.episode.get("ep").draft.director!.assets.ROLE.status, "generated");
+    assert.equal(f.episode.get("ep").draft.director!.assets.ROLE.storageKey, "image:native");
+    assert.equal(f.episode.get("ep").draft.director!.assets.ROLE.generationTaskId, task.id);
+    assert.equal(f.episode.get("ep").draft.director!.assets.ROLE.sha256, crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex"));
+    assert.deepEqual(f.episode.get("ep").published, published.published, "current canvas generation preserves the published snapshot");
+    const readiness = () => f.episode.workflowReadiness("ep");
+    const targetStatus = () => readiness().targets.find(target => target.id === "asset:ROLE")!.status;
+    assert.equal(targetStatus(), "complete");
+    assert.equal(readiness().presentation?.status, "complete");
+    assert.notEqual(f.episode.workflowReadiness("ep", "published").targets.find(target => target.id === "asset:ROLE")!.status, "complete", "draft media cannot complete the published target");
     assert.equal(f.db.db.prepare("SELECT status FROM production_task_bindings WHERE task_id=?").get(task.id)?.status, "bound");
+
+    fs.writeFileSync(filePath, "tampered output bytes");
+    assert.notEqual(targetStatus(), "complete", "a matching database digest cannot certify changed bytes");
+    assert.notEqual(readiness().presentation?.status, "complete");
+    fs.writeFileSync(filePath, image);
+    assert.equal(targetStatus(), "complete");
+    assert.equal(readiness().presentation?.status, "complete");
+
+    const bindMedia = (storageKey: string) => f.db.applyCanvasProjectOperations(projectId, Number(f.db.getCanvasProject(projectId)!.revision), [
+        { type: "update_node", id: nodeId, metadata: { storageKey } },
+    ], { runtimeWrite: true });
+    f.db.upsertMediaFile({ storageKey: "image:replacement", filePath, bytes: image.length, mimeType: "image/png", width: 1, height: 1, durationMs: null, createdAt: new Date().toISOString() });
+    bindMedia("image:replacement");
+    assert.notEqual(targetStatus(), "complete", "another valid archived image is not the original task's active binding");
+    assert.notEqual(readiness().presentation?.status, "complete");
+    bindMedia("image:native");
+    assert.equal(targetStatus(), "complete");
+    assert.equal(readiness().presentation?.status, "complete");
+
+    const activeNode = structuredClone((f.db.getCanvasProject(projectId)!.nodes as any[]).find(node => node.id === nodeId));
+    f.db.applyCanvasProjectOperations(projectId, Number(f.db.getCanvasProject(projectId)!.revision), [{ type: "delete_node", id: nodeId }], { runtimeWrite: true });
+    assert.notEqual(targetStatus(), "complete", "archived bytes cannot complete a deleted target node");
+    assert.notEqual(readiness().presentation?.status, "complete");
+    f.db.applyCanvasProjectOperations(projectId, Number(f.db.getCanvasProject(projectId)!.revision), [{
+        type: "add_node", id: nodeId, nodeType: activeNode.type, title: activeNode.title,
+        position: activeNode.position, width: activeNode.width, height: activeNode.height, metadata: activeNode.metadata,
+    }], { runtimeWrite: true });
+    assert.equal(targetStatus(), "complete");
+    assert.equal(readiness().presentation?.status, "complete");
+    assert.deepEqual(f.episode.get("ep").published, published.published);
     unsubscribe();
 });
 

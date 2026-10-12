@@ -1,4 +1,4 @@
-# Build all consumers from the same npm workspace lockfile.
+# Build workspace consumers and the built-in H3 plugin from their lockfiles.
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -6,8 +6,10 @@ COPY backend/package.json backend/package.json
 COPY canvas-agent/package.json canvas-agent/package.json
 COPY web/package.json web/package.json
 COPY plugins/canvas/sdk plugins/canvas/sdk
+COPY plugins/canvas/minimax-h3/package.json plugins/canvas/minimax-h3/package-lock.json ./plugins/canvas/minimax-h3/
 COPY scripts/patch-rc-portal.mjs scripts/patch-rc-portal.mjs
-RUN --mount=type=cache,target=/root/.npm npm ci
+RUN --mount=type=cache,target=/root/.npm npm ci \
+    && npm ci --prefix plugins/canvas/minimax-h3
 COPY . .
 RUN node scripts/build-official-plugins.mjs \
     && npm run build --workspace canvas-agent \

@@ -32,6 +32,12 @@ export function resolveH3Runtime(segment: Record<string, unknown>, override: Rec
     for (const slot of requestedSlots) if (slot.enabled !== false && slot.name && slot.strength !== undefined && (!Number.isFinite(Number(slot.strength)) || Number(slot.strength) < H3_LORA_STRENGTH_MIN || Number(slot.strength) > H3_LORA_STRENGTH_MAX)) parameterIssues.push(`LoRA ${slot.name} 的强度超出当前 H3 节点已声明的范围 ${H3_LORA_STRENGTH_MIN}–${H3_LORA_STRENGTH_MAX}，拒绝静默夹紧`);
     if (!Number.isFinite(Number(values.megapixels)) || Number(values.megapixels) <= 0) parameterIssues.push('H3 分辨率必须为有效正数');
     if (sources.loraSlots === 'builtIn' && values.loraName) values.loraSlots = normalizeH3LoraSlots({ ...values, loraSlots: undefined });
+    // Legacy saved seeds predate noiseSeedMode; only an explicit mode may override their existing inference.
+    const legacySeedSource = parseH3Seed(values.seed) !== undefined ? sources.seed : parseH3Seed(values.noiseSeed) !== undefined ? sources.noiseSeed : undefined;
+    if (sources.noiseSeedMode === 'builtIn' && legacySeedSource && legacySeedSource !== 'builtIn') {
+        delete values.noiseSeedMode;
+        sources.noiseSeedMode = legacySeedSource;
+    }
     const params = normalizeH3Params({ ...values, ...override }, false);
     delete params.videoSteps;
     const requestedMode = override.mode ?? override.taskMode ?? params.mode ?? params.taskMode;

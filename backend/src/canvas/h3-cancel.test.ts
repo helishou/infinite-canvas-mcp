@@ -24,7 +24,8 @@ test("取消连续父任务停止当前和后续Clip，不取消其他并发父�
         },
         cancel(id: string) { cancelled.push(id); return stores.tasks.update(id, { status: "cancelled" }); },
     };
-    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, {} as never);
+    const localProvider = { ready: () => false, queue: { select: () => "local", unreserve() {} } };
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, localProvider as never);
     const first = runner.start({ projectId: "p", nodeId: "first", segmentId: "a", runFromCurrent: true }, "parent-first");
     const other = runner.start({ projectId: "p", nodeId: "other", segmentId: "c" }, "parent-other");
     for (let i = 0; i < 100 && submitted.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 5));
