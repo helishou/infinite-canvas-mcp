@@ -2884,6 +2884,7 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 
 ### Manual production recovery
 
+- The production asset list and manual-asset management expose deletion for assets with existing bindings or generation history. Verify that deletion detaches links to the asset ID in dependencies, Shot material lists, asset references and Subject picture bindings while preserving registered scene/character entities, scene and Shot assignments, script text, and continuity records about those entities. Facts that directly describe the asset and their state records are removed; the asset stays absent after refresh. Same-name assets remain identity-scoped. An active production batch must finish first. If an asset appears in a published version, deletion changes only the current draft and keeps the published snapshot; canvas nodes, archived media and task history remain intact.
 - Overview progress follows saved scripts, Subjects, Shots and live target blockers. Earlier director notes about receipts, style or approval remain in source/advanced details and do not become manual workflow gates.
 - Each target provides an existing manual editor action for prompts, references, models or timing, plus optional director discussion. Blocked targets appear first; physical Clips also link to their canvas Prompt editor.
 - Native character, scene, prop and archived image nodes can be selected and bound manually. Subject previews resolve archived bindings even before a Shot uses them, without writing media projections back to source.

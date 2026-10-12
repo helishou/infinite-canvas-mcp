@@ -681,7 +681,7 @@ test("production batches bind workId and runId atomically and replay without a s
     assert.equal(service.get("ep").revision, after.revision);
 });
 
-test("manual asset deletion is revision-checked, refuses dependencies atomically, and leaves canvas media untouched", t => {
+test("asset deletion clears draft dependencies and leaves canvas media untouched", t => {
     const { service, db } = fixture(t);
     const director = doc(0);
     const before = service.get("ep");
@@ -697,18 +697,11 @@ test("manual asset deletion is revision-checked, refuses dependencies atomically
     const created = service.get("ep");
     service.edit("ep", { operationId: "link-manual-asset", expectedRevision: created.revision, ops: [{ type: "patch_director_source", entity: "asset", id: "PROP_B", patch: { depends_on: ["PROP_A"] } }] });
     const seeded = service.get("ep");
-    const unchangedSource = JSON.stringify(seeded.draft.director?.source);
-    assert.throws(() => service.edit("ep", { operationId: "blocked-asset-delete", expectedRevision: seeded.revision, ops: [{ type: "delete_director_asset", id: "PROP_A", confirmed: true }] }), /ASSET_STILL_REFERENCED/);
-    assert.equal(service.get("ep").revision, seeded.revision);
-    assert.equal(JSON.stringify(service.get("ep").draft.director?.source), unchangedSource);
-
-    const current = service.get("ep");
-    service.edit("ep", { operationId: "unlink-manual-asset", expectedRevision: current.revision, ops: [{ type: "patch_director_source", entity: "asset", id: "PROP_B", patch: { depends_on: [] } }] });
-    const readyToDelete = service.get("ep");
     const canvasRevision = db.getCanvasProject("canvas")!.revision;
-    service.edit("ep", { operationId: "delete-manual-asset", expectedRevision: readyToDelete.revision, ops: [{ type: "delete_director_asset", id: "PROP_A", confirmed: true }] });
+    service.edit("ep", { operationId: "delete-linked-manual-asset", expectedRevision: seeded.revision, ops: [{ type: "delete_director_asset", id: "PROP_A", confirmed: true }] });
     const deleted = service.get("ep");
     assert.deepEqual((deleted.draft.director!.source.asset_plan as any[]).map(item => item.id), ["PROP_B"]);
+    assert.deepEqual((deleted.draft.director!.source.asset_plan as any[]).find(item => item.id === "PROP_B").depends_on, []);
     assert.deepEqual((deleted.draft.director!.source.asset_cards as any[]).map(item => item.id), ["PROP_B"]);
     assert.deepEqual(deleted.draft.director!.source.subject_registry, []);
     assert.equal(deleted.draft.director!.assets.PROP_A, undefined);
@@ -719,11 +712,14 @@ test("manual asset deletion is revision-checked, refuses dependencies atomically
     db.db.prepare("INSERT INTO tasks (id,kind,status,input_json,params_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?)").run("asset-history-task", "image", "failed", "{}", "{}", timestamp, timestamp);
     db.db.prepare("INSERT INTO production_task_bindings (task_id,owner_kind,owner_id,version,source_hash,target_kind,target_id,project_id,node_id,targets_json) VALUES (?,?,?,?,?,?,?,?,?,?)").run("asset-history-task", "episode", "ep", 1, deleted.draft.director!.sourceHash, "asset", "PROP_B", "canvas", "asset-node", "[]");
     const withHistory = service.get("ep");
-    assert.throws(() => service.edit("ep", { operationId: "delete-asset-with-task-history", expectedRevision: withHistory.revision, ops: [{ type: "delete_director_asset", id: "PROP_B", confirmed: true }] }), /ASSET_HAS_MEDIA_OR_HISTORY/);
-    assert.equal(service.get("ep").revision, withHistory.revision);
+    service.edit("ep", { operationId: "delete-asset-with-task-history", expectedRevision: withHistory.revision, ops: [{ type: "delete_director_asset", id: "PROP_B", confirmed: true }] });
+    const removedWithHistory = service.get("ep");
+    assert.equal(removedWithHistory.revision, withHistory.revision + 1);
+    assert.equal(removedWithHistory.draft.director!.source.asset_plan!.some(item => item.id === "PROP_B"), false);
+    assert.equal((db.db.prepare("SELECT task_id FROM production_task_bindings WHERE target_id='PROP_B'").get() as any)?.task_id, "asset-history-task");
 });
 
-test("manual provenance cannot be minted by wholesale source replacement", t => {
+test("wholesale source replacement strips manual provenance without blocking safe asset deletion", t => {
     const { service } = fixture(t);
     const director = doc(0);
     director.source.asset_plan = [{ id: "FORGED_MANUAL", kind: "prop", created_by: "manual", asset_name: "Forged", version: "v1", description: "", purpose: "", depends_on: [], status: "planned" }];
@@ -733,11 +729,13 @@ test("manual provenance cannot be minted by wholesale source replacement", t => 
     service.edit("ep", { operationId: "forged-manual-origin", expectedRevision: before.revision, ops: [{ type: "set_director_production", director }] });
     const current = service.get("ep");
     assert.equal((current.draft.director!.source.asset_plan as any[])[0].created_by, undefined);
-    assert.throws(() => service.edit("ep", { operationId: "delete-forged-manual-origin", expectedRevision: current.revision, ops: [{ type: "delete_director_asset", id: "FORGED_MANUAL", confirmed: true }] }), /ASSET_NOT_MANUAL/);
-    assert.equal(service.get("ep").revision, current.revision);
+    service.edit("ep", { operationId: "delete-unused-director-asset", expectedRevision: current.revision, ops: [{ type: "delete_director_asset", id: "FORGED_MANUAL", confirmed: true }] });
+    const deleted = service.get("ep");
+    assert.equal(deleted.revision, current.revision + 1);
+    assert.equal(deleted.draft.director!.source.asset_plan!.some(item => item.id === "FORGED_MANUAL"), false);
 });
 
-test("manual asset deletion refuses an asset recorded in an immutable published version", t => {
+test("asset deletion removes only the current draft when the asset is in an immutable published version", t => {
     const { service } = fixture(t);
     const director = doc(0);
     const initial = service.get("ep");
@@ -749,8 +747,10 @@ test("manual asset deletion refuses an asset recorded in an immutable published 
     const withAsset = service.get("ep");
     publish(service, withAsset.draft.director!);
     const current = service.get("ep");
-    assert.throws(() => service.edit("ep", { operationId: "delete-published-asset", expectedRevision: current.revision, ops: [{ type: "delete_director_asset", id: "PROP_PUBLISHED", confirmed: true }] }), /ASSET_PUBLISHED/);
-    assert.equal(service.get("ep").revision, current.revision);
-    assert.ok(service.get("ep").published?.director?.source.asset_plan?.some(item => item.id === "PROP_PUBLISHED"));
+    service.edit("ep", { operationId: "delete-published-asset-from-draft", expectedRevision: current.revision, ops: [{ type: "delete_director_asset", id: "PROP_PUBLISHED", confirmed: true }] });
+    const after = service.get("ep");
+    assert.equal(after.revision, current.revision + 1);
+    assert.equal(after.draft.director!.source.asset_plan!.some(item => item.id === "PROP_PUBLISHED"), false);
+    assert.ok(after.published?.director?.source.asset_plan?.some(item => item.id === "PROP_PUBLISHED"));
 });
 

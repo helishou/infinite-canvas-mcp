@@ -2,7 +2,7 @@ import { entityNodeOperations } from "./entity-nodes.js";
 import { captureCanvasInputs, effectiveTargetInput, inputHash, type CanvasExecutionSnapshot } from "./canvas-inputs.js";
 import { replaceDirectorSceneStoryboard } from "./scene-storyboard.js";
 import { editDirectorShot } from "./shot-edit.js";
-import { createManualDirectorAsset, deleteManualDirectorAsset, directorHasAssetHistory } from "./director-asset-delete.js";
+import { createManualDirectorAsset, deleteDirectorAsset } from "./director-asset-delete.js";
 import { replaceDirectorClipStoryboard, repartitionDirectorClips, assertClipEdit, clipShots, rows as clipRows } from "./clip-storyboard.js";
 import { ClipRefreshStore, clipRefreshReceipt, clipRefreshScope } from "./clip-refresh.js";
 import { reverseSyncPromptEdit, type PromptSourceMap } from "./prompt-reverse-sync.js";
@@ -201,7 +201,7 @@ export class EpisodeProductionService {
                 const selectedShots = shotIds.map(shotId => shotsById.get(shotId)).filter(Boolean) as Array<Record<string, any>>;
                 const frames = selectedShots.flatMap(shot => clipRows(shot.keyframes).filter(frame => frame.requiredForSubmission));
                 const hasVisibleSubjectReference = selectedShots.some(shot => clipRows(shot.subject_usages).some(usage =>
-                    usage.presentation === "visible" || clipRows(usage.pictureBindingIds).length > 0));
+                    resolveSubjectPictureBindingIds(subjects.find(subject => String(subject.id) === String(usage.subjectId)), usage).bindingIds.length > 0));
                 const anchors = new Set(frames.map(frame => String(frame.anchor || "")));
                 const sourceMode = anchors.has("opening") && anchors.has("closing") ? "FL2VA"
                     : anchors.has("opening") ? "I2VA"
@@ -2292,6 +2292,32 @@ export class EpisodeProductionService {
         });
     }
 
+    private defaultMissingShotTimeline(source: Record<string, any>) {
+        if (source.ledger?.contract_version !== 2 || !Array.isArray(source.shots)) return false;
+        const ledger = source.ledger as Record<string, any>;
+        let changed = false;
+        let timelineRows = clipRows(ledger.timelines);
+        if (!timelineRows.some(row => String(row.id || "") === "main")) {
+            if (!timelineRows.length) { ledger.timelines = [{ id: "main", start_frame: 0 }]; timelineRows = clipRows(ledger.timelines); changed = true; }
+        }
+        const timelineIds = timelineRows.map(row => String(row.id || "")).filter(Boolean);
+        const defaultTimelineId = timelineIds.includes("main") ? "main" : timelineIds[0] || "main";
+        const nextOrder = new Map<string, number>(), occupied = new Map<string, Set<number>>();
+        for (const shot of clipRows(source.shots)) {
+            const timelineId = String(shot.timeline_id || defaultTimelineId);
+            if (shot.timeline_id !== timelineId) { shot.timeline_id = timelineId; changed = true; }
+            const used = occupied.get(timelineId) || new Set<number>();
+            let storyOrder = Number.isInteger(shot.story_order) && shot.story_order >= 0 ? Number(shot.story_order) : nextOrder.get(timelineId) || 0;
+            if (!Number.isInteger(shot.story_order) || shot.story_order < 0) {
+                while (used.has(storyOrder)) storyOrder += 1;
+                shot.story_order = storyOrder; changed = true;
+            }
+            used.add(storyOrder); occupied.set(timelineId, used);
+            nextOrder.set(timelineId, Math.max(nextOrder.get(timelineId) || 0, storyOrder + 1));
+        }
+        return changed;
+    }
+
     private editedCandidate(episodeId: string, record: ProductionRecord, input: ProductionEdit, canvasCommits?: CanvasCommit[], sceneRuntime = false) {
             const draft = structuredClone(record.draft);
             const published = record.published ? structuredClone(record.published) : null;
@@ -2317,11 +2343,6 @@ export class EpisodeProductionService {
                         this.applyDirectorAssetReview(episodeId, draft, published, operation, record.publishedVersion);
                     }
                 } else if (operation.type === "delete_director_asset") {
-                    const historicalVersion = this.versions(episodeId).find(item => directorHasAssetHistory(this.version(episodeId, item.version).snapshot.director, operation.id));
-                    const publishedVersion = directorHasAssetHistory(published?.director, operation.id) ? record.publishedVersion : historicalVersion?.version;
-                    if (publishedVersion) throw new Error(`ASSET_PUBLISHED: 资产 ${operation.id} 已包含在不可变发布版本 v${publishedVersion} 中`);
-                    const taskHistory = this.db.db.prepare("SELECT task_id FROM production_task_bindings WHERE owner_kind=? AND owner_id=? AND target_kind='asset' AND target_id=? LIMIT 1").get(this.ownerKind, episodeId, operation.id) as { task_id: string } | undefined;
-                    if (taskHistory) throw new Error(`ASSET_HAS_MEDIA_OR_HISTORY: ${operation.id} · task ${taskHistory.task_id}`);
                     const active = this.listBatches(episodeId).find(batch => ["pending", "running", "paused", "awaiting_review"].includes(batch.status) && batch.targets.includes(`asset:${operation.id}`));
                     if (active) throw new Error(`ASSET_RUN_ACTIVE: 资产正被生产批次 ${active.runId} 使用`);
                     this.apply(episodeId, draft, operation, record.publishedVersion, canvasCommits);
@@ -2331,6 +2352,14 @@ export class EpisodeProductionService {
                     console.error("[edit-op-error] op=", operation?.type, "index=", index, "msg=", error instanceof Error ? error.message : String(error), "\nSTACK=", error instanceof Error ? (error.stack || "") : "");
                     throw new ProductionValidationError([{ code: "INVALID_OPERATION", path: `request.ops.${index}`, targetId: "id" in operation ? String(operation.id) : undefined, message: error instanceof Error ? error.message : String(error), severity: "error" }]);
                 }
+            }
+            const previousSource = record.draft.director?.source;
+            if (draft.director && (!record.draft.director || fingerprint(previousSource) !== fingerprint(draft.director.source))
+                && this.defaultMissingShotTimeline(draft.director.source as Record<string, any>)) {
+                draft.director.sourceHash = directorHash(draft.director.source);
+                draft.director.executionAuthorized = false;
+                draft.director.artifacts = draft.director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));
+                if (draft.director.workflow.currentWork) draft.director.workflow.currentWork = { ...draft.director.workflow.currentWork, sourceHash: draft.director.sourceHash };
             }
             for (const operation of input.ops) if (operation.type === "set_director_workflow") {
                 const director = draft.director;
@@ -3237,7 +3266,7 @@ export class EpisodeProductionService {
         }
         if (op.type === "delete_director_asset") {
             if (!draft.director) throw new Error("DIRECTOR_NOT_INITIALIZED: 没有正式制作稿");
-            deleteManualDirectorAsset(draft.director, op.id);
+            deleteDirectorAsset(draft.director, op.id);
             projectDirector(draft);
             return;
         }
