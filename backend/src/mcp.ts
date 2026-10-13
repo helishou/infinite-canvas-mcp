@@ -1902,7 +1902,7 @@ function registerBackendCanvasTools(
       }
       if (name === "production_compile") {
         const compile = toolInputSchemas.production_compile.parse(rawInput);
-        return textResult(await backendApi.post(`${base}/compile`, { operationId: compile.operationId, expectedRevision: compile.expectedRevision, director: compile.director, scope: compile.scope }));
+        return textResult(await backendApi.post(`${base}/compile`, { operationId: compile.operationId, expectedRevision: compile.expectedRevision, scope: compile.scope }));
       }
       throw new Error("Invalid compilation request");
     });

@@ -301,7 +301,7 @@ description: Implemented changes that still need manual verification
 
 - Settings and history no longer show a pinned compiler version. Director stage tasks and continuity repair requests read the active contract without selecting a historical runtimeId. Actual compiler provenance and original batch snapshots remain preserved.
 
-- Manually update and activate the engine with `npm run acheng:update`. Existing productions use the locally active version for their next contract read, compilation and validation, without a production upgrade step. The `production_get_contract` runtimeId parameter remains accepted for compatibility but no longer selects a compiler.
+- Manually update and activate the engine with `pnpm run acheng:update`. Existing productions use the locally active version for their next contract read, compilation and validation, without a production upgrade step. The `production_get_contract` runtimeId parameter remains accepted for compatibility but no longer selects a compiler.
 - Verify that scoped compilation updates only its targets and retains other scenes’ prompts and actual compiler receipts. Activation does not regenerate media or change submitted compilation requests and task inputs. Later Agent turns synchronize the active Skill while preserving workspace edits.
 
 ## ComfyUI preset task timeout
@@ -688,7 +688,7 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 
 ## Acheng production and upstream updates
 
-- Use `npm run acheng:status`, `acheng:update -- --check`, `acheng:update`, and `acheng:rollback` to inspect, validate, activate, and revert engine versions. Dirty sources, contract changes and patch conflicts must leave the active version intact.
+- Use `pnpm run acheng:status`, `pnpm run acheng:update -- --check`, `pnpm run acheng:update`, and `pnpm run acheng:rollback` to inspect, validate, activate, and revert engine versions. Dirty sources, contract changes and patch conflicts must leave the active version intact.
 - The episode Acheng tab shows seven modules, asset states, complete prompts and continuity boundaries. Import through native production tools and publish the director stage; Clips follow authored Segments, with no implicit one-shot grouping. Only authorized automatic production advances ready tasks.
 - Independent asset canvases use the same production contract through canvas production tools. Keep legacy drafts/media recoverable and, after source changes, rerun the locally active compiler/validator scripts for affected prompts and receipts. This step does not regenerate media.
 - Tail-frame references and Motion Context remain independent. Bounded groups must stop at the specified last Clip. Legacy previousVideoAsReference no longer injects the preceding MP4; explicit ordinary video references remain supported.
@@ -721,7 +721,7 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 
 ## Canvas history maintenance and performance
 
-- Run `npm run prune-canvas-batches --workspace backend -- 30` to preview only. Explicit `--apply` creates and verifies a unique backup, advances each checkpoint and removes only the contiguous expired prefix in one transaction. Invalid history or backup failures must preserve all existing records. Maintenance is manual; the default retention remains 30 days.
+- Run `pnpm --filter @helishou/infinite-canvas-backend run prune-canvas-batches -- 30` to preview only. Explicit `--apply` creates and verifies a unique backup, advances each checkpoint and removes only the contiguous expired prefix in one transaction. Invalid history or backup failures must preserve all existing records. Maintenance is manual; the default retention remains 30 days.
 - A retained request must recover its original receipt after cleanup. Older committed requests must never execute again: the browser fetches the latest canvas, acknowledges the original command durably, and preserves subsequent edits or conflict drafts. A failed refresh must keep the pending command. Existing databases receive a verified backup before the receipt schema migration.
 - Check content editing, reference order, grouping, node movement, fast panning and 5% zoom on large canvases. Content updates should reuse spatial geometry while displaying the latest content. Viewport thresholds remain unchanged.
 - PR checks include Web types/build, Backend build, H3 types/tests and isolated browser collaboration scenarios. After building `canvas-agent` and Backend and installing the locked Playwright Chromium, use `node scripts/run-canvas-browser-tests.mjs collaboration` or `node scripts/run-canvas-browser-tests.mjs performance label`. Tests isolate Backend data, media, Agent configuration, ports and Vite cache; measurements and failure evidence are saved under `artifacts/browser-tests`. No paid generation is submitted.
@@ -861,7 +861,7 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 
 ## Local startup and upgrade protection
 
-- From a clean installation, root `npm run dev` should build the shared package before starting the Backend (17370) and Web (3001). A failed build must prevent startup. `dev:services` optionally includes the legacy proxy; Agent startup on Unix must not require Windows `set`.
+- From a clean installation, root `pnpm run dev` should build the shared package before starting the Backend (17370) and Web (3001). A failed build must prevent startup. `dev:services` optionally includes the legacy proxy; Agent startup on Unix must not require Windows `set`.
 - Without Codex installed, HTTP/MCP and local ComfyUI should work; Codex chat should explain how to install it. After installation, check app-server startup through project dependencies and global PATH installations.
 - In temporary old databases, verify that pre-migration snapshots include committed WAL data, backup failure blocks migration, and retries never overwrite snapshots. Refuse newer schemas without changing the source. Protect media and browser drafts separately. Running services require a safe reload before verifying the new behavior.
 
@@ -1045,8 +1045,8 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 
 ## Local Backend startup
 
-- From a VS Code terminal, run `npm run dev:local`. Backend should report that it has started and `/health` should respond before opening the canvas; Web and Agent should remain available. The default `dev:backend` and explicit `dev:watch` commands use guarded reload. Use `dev:once` for a single run.
-- Start `npm run dev:backend` with a canvas that has accumulated H3 history. The Backend health check should become available promptly, and opening the canvas should connect without waiting for all historical H3 tasks to replay. Startup should process at most the 10 newest recovery candidates, including unfinished tasks and terminal H3 tasks still bound to a node or Clip. Older candidates should remain unchanged if excluded. A selected terminal H3 task should finish its saved writeback even if its older generation log has been pruned.
+- From a VS Code terminal, run `pnpm run dev:local`. Backend should report that it has started and `/health` should respond before opening the canvas; Web and Agent should remain available. The default `dev:backend` and explicit `dev:watch` commands use guarded reload. Use `pnpm --filter @helishou/infinite-canvas-backend run dev:once` for a single run.
+- Start `pnpm run dev:backend` with a canvas that has accumulated H3 history. The Backend health check should become available promptly, and opening the canvas should connect without waiting for all historical H3 tasks to replay. Startup should process at most the 10 newest recovery candidates, including unfinished tasks and terminal H3 tasks still bound to a node or Clip. Older candidates should remain unchanged if excluded. A selected terminal H3 task should finish its saved writeback even if its older generation log has been pruned.
 
 ## Canvas video comparison
 
@@ -1185,7 +1185,7 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 - 调 `assets_list`：不再返回内联 base64（`coverUrl` 显示为 `[inline-media:image/png]`），`pageSize`/`page`/`keyword` 真正生效。
 - **后端进程需要重启后上述 MCP 改动才生效**（backend 是 `tsx src/index.ts`，无热重载）。
 
-**未自动执行**：`backend/src/maintenance/prune-canvas-batches.ts`（画布操作批次保留清理，实测该表 5.3 万行 / 44 MB 无 TTL）。需要时手动执行 `cd backend && npm run prune-canvas-batches -- 30`，脚本会先 `VACUUM INTO` 备份再删。
+**未自动执行**：`backend/src/maintenance/prune-canvas-batches.ts`（画布操作批次保留清理，实测该表 5.3 万行 / 44 MB 无 TTL）。需要时手动执行 `pnpm --filter @helishou/infinite-canvas-backend run prune-canvas-batches -- 30`，脚本会先 `VACUUM INTO` 备份再删。
 
 ## 文本节点右键「复制内容」
 
@@ -2144,7 +2144,7 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 - 启动 Backend 后分别运行 `codex mcp list` 与 `hermes mcp test infinite-canvas`，确认两者都显示 HTTP 传输并发现同一组工具；新开多个任务时不应再出现对应数量的 `backend/dist/index.js mcp` 子进程。
 - 同时建立两个 MCP 会话，在两个会话中设置不同的活动画布，再省略 `projectId` 读取画布状态；两个会话应各自返回自己的画布，不能互相串改。
 - 打开多个画布页面并切换浏览器焦点，调用 MCP `canvas_inspect`、`canvas_get_state` 或生成工具且省略 `projectId`，确认目标跟随当前聚焦画布；只有一个浏览器画布连接但页面处于后台时也应能读取该画布；调用 `canvas_set_active_project({ id })` 后应固定到该 MCP 会话的画布，调用不带 id 的版本后恢复跟随网页焦点。
-- 连续两次运行 `npm run dev:local`，第二次应提示已有本地开发栈并退出；关闭首个启动器后应可正常重新启动 Backend、Agent 与 Web。
+- 连续两次运行 `pnpm run dev:local`，第二次应提示已有本地开发栈并退出；关闭首个启动器后应可正常重新启动 Backend、Agent 与 Web。
 
 ## H3 参考素材统一链路
 
@@ -2204,7 +2204,7 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 - 导出未打开过的画布、同步 WebDAV 或清理媒体前应加载完整详情，避免摘要占位数据被当成空画布；文件夹归属和封面媒体随导出保留。
 - 超过一页的任务记录应完整导出；任一媒体缺失或日志/任务请求失败应显示明确错误，不下载部分归档。导出 ZIP 后重新导入，校验图片、视频、中文文件名与 SHA-256。
 - 多节点画布编辑单个文本或更新单个任务时，未变化节点应保持引用稳定；验证平移、缩放和 H3 播放交互。性能收益尚待浏览器实测。
-- 根目录 `npm test` 自动执行三个 workspace 中的全部 `*.test.ts/tsx`；新增 CI 在 PR 和 main 推送时执行。Windows 文件权限测试按原有条件跳过。
+- 根目录 `pnpm test` 自动执行三个 workspace 中的全部 `*.test.ts/tsx`；新增 CI 在 PR 和 main 推送时执行。Windows 文件权限测试按原有条件跳过。
 
 ## 短剧制作 Tab
 
@@ -2744,7 +2744,7 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 
 ### 本地服务单实例启动
 
-- 运行 `npm run dev:local` 两次，确认第二次会先清理 17370、17371、3001 的旧进程，再只保留一套 Backend、Canvas Agent 和 Web 服务。
+- 运行 `pnpm run dev:local` 两次，确认第二次会先清理 17370、17371、3001 的旧进程，再只保留一套 Backend、Canvas Agent 和 Web 服务。
 - 在已有 Backend 运行时直接启动另一套 Backend，确认新实例因 `backend.lock` 明确退出，不会打开同一份 SQLite。
 - 保持 MCP stdio 连接调用画布操作，确认多个 MCP 客户端仍统一经由唯一 HTTP Backend 写入，且不会各自创建 SQLite/ComfyUI 业务副本。
 

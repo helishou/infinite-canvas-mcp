@@ -8,13 +8,13 @@
 |---|---|---|
 | Backend dev / dev:watch | 带空闲保护的开发重载器，监听 Backend src 和共享 Agent dist | 核对 pending / ready 日志与新 PID；运行任务、待确认、Agent 回合或写请求会延后重载 |
 | Backend dev:once | `tsx src/index.ts`，单次启动 | 核对实际进程是否加载源码，需要时再处理必要重载 |
-| Backend start 或明确的 dist 消费方 | `backend/dist` | 根目录 `npm run build --workspace backend` |
-| Backend 导入 canvas-agent | 包 exports 指向 `canvas-agent/dist` | 根目录 `npm run build --workspace canvas-agent`，确认消费进程加载 |
-| 普通画布插件 | `web/public/plugins` 的 bundle | 根目录 `npm run build:plugins`，核对实际加载 URL |
+| Backend start 或明确的 dist 消费方 | `backend/dist` | 根目录 `corepack pnpm --filter @helishou/infinite-canvas-backend run build` |
+| Backend 导入 canvas-agent | 包 exports 指向 `canvas-agent/dist` | 根目录 `corepack pnpm --filter @basketikun/canvas-agent run build`，确认消费进程加载 |
+| 普通画布插件 | `web/public/plugins` 的 bundle | 根目录 `corepack pnpm run build:plugins`，核对实际加载 URL |
 | H3 内置 UI，Vite dev | HOST_SYSTEM_PLUGINS 引用源码 | HMR 后验证页面 |
-| H3 内置 UI，静态页面 | Web 打包后的 JS | 根目录 `npm run build --workspace web` |
+| H3 内置 UI，静态页面 | Web 打包后的 JS | 根目录 `corepack pnpm --filter infinite-canvas run build` |
 
-根目录 `npm run build` 按显式链 `build:plugins → canvas-agent → backend → web` 执行，不依赖 npm 的 workspace 顺序；`npm run typecheck` 会先构建 canvas-agent，因为 web 的类型来自它的 `dist`。只改单个 workspace 时才用 `--workspace` 单跑。
+根目录 `corepack pnpm run build` 按显式链 `build:plugins → canvas-agent → backend → web` 执行，不依赖 workspace 的任务顺序；`corepack pnpm run typecheck` 会先构建 canvas-agent，因为 web 的类型来自它的 `dist`。只改单个 workspace 时才用 `corepack pnpm --filter <workspace> run <script>` 单跑。
 
 `web/dist` 是构建快照，只有重建 Web 才会更新宿主 JS，而 H3 的 UI 就在宿主 JS 里。H3 不产出 `web/public/plugins` 副本（其 build 传 `publicDir: null`），改它只需刷新页面或重建 Web；其余官方插件核对 `web/public/plugins` 产物。被 Git 忽略的产物仍是本地运行所需，提交源码不代表进程更新。
 
@@ -32,7 +32,7 @@ H3 版本来源与 SDK 构建规则见[插件约定](../../../../plugins/canvas/
 
 ## 精确验证
 
-根/workspace `npm test` 通过 `scripts/test.mjs` 枚举整个 src 测试目录，不会把附加文件名当过滤条件。只测单文件时，从能解析 tsx 的 workspace 使用 Node 的显式文件参数，例如：
+根/workspace `corepack pnpm test` 通过 `scripts/test.mjs` 枚举各包的整个 src 测试目录，不会把附加文件名当过滤条件。只测单文件时，从能解析 tsx 的 workspace 使用 Node 的显式文件参数，例如：
 
 ```powershell
 node --import tsx --test src/canvas/collaboration.test.ts

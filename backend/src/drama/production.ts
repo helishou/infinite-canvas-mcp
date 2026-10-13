@@ -1322,7 +1322,7 @@ export class EpisodeProductionService {
             else if (input.action === "publish") candidate = this.publishedCandidate(current, input.request.stage, input.request.scope);
             else if (input.action === "compile") {
                 if (!current.draft.director) throw new ProductionValidationError([{ code: "COMPILE_STAGE_NOT_READY", path: "director", message: "请先保存正式导演源稿，再准备编译。", severity: "error" }]);
-                const director = directorProductionSchema.parse(structuredClone(input.request.director || current.draft.director));
+                const director = directorProductionSchema.parse(structuredClone(current.draft.director));
                 const referenceFiles = this.compilationReferenceFiles(episodeId, director);
                 if (this.checkEngine === assertDirectorEngine) {
                     const checked = preflightCompilationDirector(director, (targetId, label) => referenceFiles[`${targetId}\0${label}`], compilationRuntimeId);

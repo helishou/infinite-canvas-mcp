@@ -38,4 +38,4 @@
 
 遵循根目录验证矩阵。页面变更核对相关语言、主题和交互；涉及 Portal 或高频渲染时在弹层打开状态复现。视口改动按交互约束验证覆盖范围、缩放锚点和低倍率。
 
-Vite dev 走 HMR；静态页面消费 `web/dist` 时重建 Web。`scripts/test.mjs` 会枚举整个 workspace 的测试，不能把 `npm test -- 文件名` 当成只跑该文件；精确测试调用见[运行与验证](../.agents/skills/canvas-h3-implementation/references/development-verification.md)。
+Vite dev 走 HMR；静态页面消费 `web/dist` 时重建 Web。`scripts/test.mjs` 会枚举整个 workspace 的测试，不能把 `corepack pnpm --filter infinite-canvas run test -- 文件名` 当成只跑该文件；精确测试调用见[运行与验证](../.agents/skills/canvas-h3-implementation/references/development-verification.md)。

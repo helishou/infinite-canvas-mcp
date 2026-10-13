@@ -66,14 +66,26 @@ def binding_ids(subject, usage, *, allow_missing=False):
     purposes = usage.get("referencePurpose") or ["identity"]
     selected = []
     for purpose in dict.fromkeys(map(str, purposes)):
-        candidates = [item for item in bindings
-                      if purpose in [str(value) for value in item.get("defaultFor", [])]
-                      and all(requirements.get(str(key)) == str(value) for key, value in (item.get("applicableState") or {}).items())]
-        if len(candidates) != 1:
+        eligible = [item for item in bindings
+                    if purpose in [str(value) for value in item.get("provides", [])]
+                    and all(requirements.get(str(key)) == str(value) for key, value in (item.get("applicableState") or {}).items())]
+        candidates = [item for item in eligible if purpose in [str(value) for value in item.get("defaultFor", [])]]
+        if len(candidates) == 1:
+            selected.append(str(candidates[0]["id"]))
+        elif len(candidates) > 1:
+            if allow_missing:
+                continue
+            raise ValueError("Subject " + str(subject.get("id")) + " has ambiguous " + purpose + " default picture bindings")
+        elif len(eligible) == 1:
+            # A default-mode usage with one applicable picture is unambiguous,
+            # even when older saved bindings omitted the redundant defaultFor tag.
+            selected.append(str(eligible[0]["id"]))
+        elif not eligible:
             if allow_missing:
                 continue
             raise ValueError("Subject " + str(subject.get("id")) + " lacks one unambiguous " + purpose + " default picture binding")
-        selected.append(str(candidates[0]["id"]))
+        elif not allow_missing:
+            raise ValueError("Subject " + str(subject.get("id")) + " has ambiguous " + purpose + " default picture bindings")
     return selected
 
 

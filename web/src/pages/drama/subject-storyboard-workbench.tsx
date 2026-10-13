@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import { isSubjectPromptAssembly, resolveSubjectPictureBindingIds, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import { setShotPictureBindingIds, setShotPictureBindingMode, shotPictureBindingMode } from "./subject-picture-selection";
 import { subjectShotWindows, subjectStateProjection } from "@basketikun/canvas-agent/drama/subject-assembly";
-import { backendMediaUrl, fetchProductionWorkbench, type EpisodeProduction, type ProductionTarget } from "@/services/backend-api";
+import { backendMediaUrl, fetchProductionWorkbench, type EpisodeProduction, type ProductionCompilationDiagnostic, type ProductionTarget } from "@/services/backend-api";
 import { records, formatSeconds } from "./director-display";
 import { productionWorkbenchValue, subjectDisplayName } from "./subject-shot-draft";
 import { continuityPresentation } from "./continuity-presentation";
@@ -47,7 +47,8 @@ type Props = {
 
     shotDrafts?: Record<string, string>;
     /** Clip 组合使用与交付页相同的 Backend 编译提交与恢复流程。 */
-    busy?: boolean; compileBusy?: boolean; compilePending?: boolean; compileError?: string; compileNotice?: string; onCompile?: (sceneId?: string) => void;
+    busy?: boolean; compileBusy?: boolean; compilePending?: boolean; compileError?: string; compileNotice?: string; compileDiagnostics?: ProductionCompilationDiagnostic[];
+    compileTargets?: { sourceHash: string; items: Array<{ targetId: string; status: string }> }; onCompile?: (sceneId?: string) => void;
     onClip: (id: string) => void;
     onDiscuss: (shotId?: string) => void;
     /** 跳转到指定工作区（参考素材点开进素材库）。 */
@@ -55,7 +56,7 @@ type Props = {
 };
 
 /** The v2 authoring surface: stable Shots, derived Clip packaging, and compiler evidence. */
-export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, viewMemory, canvasNodes, canvasId, onLocateClip, renderEditor, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onEditShot, onSaveShotPatch, onUpdateLegacyShotReferences, shotKeyframe, shotDrafts = {}, busy, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", onCompile, onClip, onDiscuss, onNavigate }: Props) {
+export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, viewMemory, canvasNodes, canvasId, onLocateClip, renderEditor, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onEditShot, onSaveShotPatch, onUpdateLegacyShotReferences, shotKeyframe, shotDrafts = {}, busy, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets, onCompile, onClip, onDiscuss, onNavigate }: Props) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const source = director.source as Record<string, any>;
@@ -150,7 +151,10 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const currentRefreshes = currentClipRefreshes(production.clipRefreshes || [], clips.map(item => String(item.id)), director.sourceHash);
     const refreshCandidate = currentRefreshes.find(item => item.segmentId === clip?.id);
     const compiled = Boolean(workbenchReadKey.current === expectedReadKey && artifact && records(subjectAssembly ? workbench?.directorArtifacts : workbench?.directorReferences?.compiled).some(item => item.id === artifact.id && item.sha256 === artifact.sha256 && item.current === true && item.status === "ready"));
-    const refresh = compiled && ["blocked", "failed"].includes(refreshCandidate?.status || "") ? undefined : refreshCandidate;
+    const compiledByLatestReceipt = compileTargets?.sourceHash === director.sourceHash
+        && compileTargets.items.some(item => item.targetId === String(clip?.id) && item.status === "ready");
+    const currentCompiled = compiled || compiledByLatestReceipt;
+    const refresh = currentCompiled && ["blocked", "failed"].includes(refreshCandidate?.status || "") ? undefined : refreshCandidate;
     const state = subjectAssembly ? workbench?.continuity || states[activeId] : storyboardReportedState(workbench?.continuity, activeId);
     const assetIds = [...new Set([...(selected?.required_assets || []), ...(director.shotInputs[activeId]?.assetIds || [])].map(String))];
     const keyframeAssetIds = new Set(Object.values(director.shotInputs).map(input => String(input.keyframeAssetId || "")).filter(Boolean));
@@ -185,17 +189,18 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     // 起止状态（镜头开始时 / 镜头结束时）：从「画面与摄影」挪进来，与台账状态、边界开关同区展示。
     const shotStateFields = selected ? renderShotState?.(selected) : undefined;
     const statusLabel = refresh ? t("director.workspace.clipRefreshStatus." + refresh.status, { segment: t("director.studio.clipNumber", { number: clipIndex + 1 }) })
-        : t(compiled ? "director.atomic.compiled" : "director.atomic.pendingCompile");
+        : t(currentCompiled ? "director.atomic.compiled" : "director.atomic.pendingCompile");
     // Clip 组合视图的编译状态：优先显示正在进行的自动刷新作业，其次读导演产物的真实编译状态（ready / 过期 / 未编译）。
     const clipCompileState = (clipId: string) => {
         const job = currentRefreshes.find(item => String(item.segmentId) === clipId);
         const artifact = director.artifacts.find(item => item.kind === "h3" && String(item.targetId) === clipId);
         const projection = workbenchReadKey.current === expectedReadKey && clipId === String(clip?.id) ? records(subjectAssembly ? workbench?.directorArtifacts : workbench?.directorReferences?.compiled).find(item => item.id === artifact?.id && item.sha256 === artifact?.sha256) : undefined;
         const status = storyboardArtifactState(artifact, projection);
-        if (job && !(status === "ready" && ["failed", "blocked"].includes(job.status))) return { label: t("director.atomic.clipRefreshPhase." + job.status), color: ["failed", "blocked"].includes(job.status) ? "red" : "processing", tone: ["failed", "blocked"].includes(job.status) ? "blocked" as const : "live" as const };
+        const readyByLatestReceipt = compileTargets?.sourceHash === director.sourceHash && compileTargets.items.some(item => item.targetId === clipId && item.status === "ready");
+        if (job && !(readyByLatestReceipt || status === "ready") ) return { label: t("director.atomic.clipRefreshPhase." + job.status), color: ["failed", "blocked"].includes(job.status) ? "red" : "processing", tone: ["failed", "blocked"].includes(job.status) ? "blocked" as const : "live" as const };
         if (status === "pending") return { label: t("director.atomic.pendingCompile"), color: undefined, tone: "pending" as const };
         if (status === "recorded") return { label: t("director.atomic.recordedCompile"), color: undefined, tone: "recorded" as const };
-        return status === "ready"
+        return status === "ready" || readyByLatestReceipt
             ? { label: t("director.atomic.compiled"), color: "green", tone: "ready" as const }
             : { label: t("director.atomic.compileStale"), color: "orange", tone: "stale" as const };
     };
@@ -304,7 +309,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                 </div>
             </div>
             {compileError && <Alert type="error" showIcon message={t("director.atomic.compileFailed")} description={compileError} style={{ whiteSpace: "pre-line" }} />}
-            {compileNotice && <Alert type="success" showIcon message={compileNotice} style={{ whiteSpace: "pre-line" }} />}
+            {compileNotice && <Alert type="success" showIcon message={compileNotice} description={compileDiagnostics.length > 0 ? <details className="text-sm"><summary className="cursor-pointer underline underline-offset-2">{t("director.atomic.compileViewDiagnostics", { count: compileDiagnostics.length })}</summary><ul className="mt-2 max-h-72 list-disc space-y-2 overflow-auto pl-5">{compileDiagnostics.map((item, index) => <li key={`${item.code || "diagnostic"}:${item.path || ""}:${item.targetId || ""}:${index}`}><p>{item.message || item.code || t("director.atomic.compileHintOther")}</p><p className="mt-0.5 text-xs text-muted-foreground">{[item.code, item.path, item.targetId, item.shotId].filter(Boolean).join(" · ")}</p></li>)}</ul></details> : undefined} style={{ whiteSpace: "pre-line" }} />}
             {visibleClipStates.length > 0 && <div className="flex flex-wrap items-center gap-1.5" aria-label={t("director.atomic.compileStatus")}>
                 <span className="mr-1 text-xs text-muted-foreground">{t("director.atomic.compileStatus")}</span>
                 {visibleClipStates.map(item => <span key={item.id} className="flex items-center gap-1.5 rounded-md border border-border px-2 py-0.5 text-xs">
@@ -359,15 +364,15 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
             <div className="storyboard-detail-panel" data-detail-view={detailView}>
                 <header className="storyboard-detail-heading">
                     <div className="storyboard-mobile-actions"><Button type="text" icon={<ArrowLeft className="size-4" />} onClick={() => { setMobileEditing(false); requestAnimationFrame(() => chipRefs.current.get(activeId)?.focus({ preventScroll: true })); }}>{t("director.atomic.backToShots")}</Button></div>
-                    <div className="flex min-w-0 flex-1 items-center justify-between gap-2"><p className="min-w-0 text-xs text-muted-foreground">{t("director.studio.shotNumber", { number })} · {clip ? clipLabel(clipIndex) : t("director.atomic.ungroupedShot")}</p><div className="flex shrink-0 items-center gap-1"><Button type="text" onClick={() => setDetailView(detailView === "editing" ? "context" : "editing")}>{t(detailView === "editing" ? "director.atomic.contextDetails" : "director.atomic.returnToEditor")}</Button>{clip && production.draft.clipGroups.find(group => group.id === String(clip.id))?.nodeId && <Button type="text" icon={<ArrowUpRight className="size-4" />} onClick={() => onLocateClip?.(String(clip.id))} aria-label={t("director.atomic.locateClip")}>H3</Button>}</div></div>
                 </header>
             {selected && !visible.some(shot => shot.id === selected.id) && <div className="storyboard-selection-notice" role="status"><span>{t(sceneIds.has(activeId) ? "director.atomic.currentOutsideFilter" : "director.atomic.currentOutsideScene")}</span><button type="button" onClick={() => revealShot(activeId)}>{t("director.atomic.revealCurrent")}</button></div>}
             <div className="storyboard-detail-surfaces">
-                <section className="storyboard-editing" hidden={detailView !== "editing"} data-production-target={`shot:${activeId}`} data-production-section="shot-editing" tabIndex={-1}>
-                    {(referenceDiagnostics.length > 0 || (!compiled && refresh?.blockingDiagnostic)) && <details className="mb-4 text-sm"><summary className="cursor-pointer text-muted-foreground">{t("director.workspace.shotIssueDetails")}</summary><div className="mt-2 space-y-2">{[...new Set([...(referenceDiagnostics.map(diagnostic => String(diagnostic.message || diagnostic.code))), ...(!compiled && refresh?.blockingDiagnostic ? [refresh.blockingDiagnostic.message] : [])])].map(message => <p key={message} className="whitespace-pre-wrap text-muted-foreground">{message}</p>)}</div></details>}
-                    <div className="storyboard-editor-content" data-subject-editor={subjectAssembly || undefined}>{renderEditor(selected, workbench)}</div>
+                <section className="storyboard-editing" data-production-target={`shot:${activeId}`} data-production-section="shot-editing" tabIndex={-1}>
+                    {(referenceDiagnostics.length > 0 || (!compiled && refresh?.blockingDiagnostic)) && <details className="mb-4 text-sm" hidden={detailView !== "editing"}><summary className="cursor-pointer text-muted-foreground">{t("director.workspace.shotIssueDetails")}</summary><div className="mt-2 space-y-2">{[...new Set([...(referenceDiagnostics.map(diagnostic => String(diagnostic.message || diagnostic.code))), ...(!compiled && refresh?.blockingDiagnostic ? [refresh.blockingDiagnostic.message] : [])])].map(message => <p key={message} className="whitespace-pre-wrap text-muted-foreground">{message}</p>)}</div></details>}
+                    {/* 「连续性」收编为编辑器页签：detailView 开关经 __contextControl 传给 SubjectShotEditor，选中时它隐藏表单体与保存栏。 */}
+                    <div className="storyboard-editor-content" data-subject-editor={subjectAssembly || undefined}>{renderEditor(selected, { ...(workbench || {}), __contextControl: { active: detailView === "context", enter: () => setDetailView("context"), exit: () => setDetailView("editing") } })}</div>
                     {/* 镜头操作行（和导演讨论 / 跳到所在片段）：整个左栏的最后一块，不再夹在对白与连续性状态之间。 */}
-                    {renderShotActions?.(selected)}
+                    <div hidden={detailView !== "editing"}>{renderShotActions?.(selected)}</div>
                 </section>
                 <aside className="storyboard-context space-y-6" hidden={detailView !== "context"}>
                     <div className="mb-4 flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs text-muted-foreground">{formatSeconds((windows.get(activeId)?.startFrame || 0) / fps)}–{formatSeconds((windows.get(activeId)?.endFrame || 0) / fps)}s</p></div><Tag color={refresh?.blockingDiagnostic ? "orange" : compiled ? "green" : undefined}>{statusLabel}</Tag></div>

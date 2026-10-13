@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { DB_FILE } from "../config.js";
 import { applyCanvasHistoryPrune, previewCanvasHistoryPrune } from "../canvas/history-maintenance.js";
 
-// Manual only. Default is read-only: npm run prune-canvas-batches -- 30 [--apply]
+// Manual only. Default is read-only: corepack pnpm --filter @helishou/infinite-canvas-backend run prune-canvas-batches -- 30 [--apply]
 const args = process.argv.slice(2);
 const positional = args.filter((arg) => !arg.startsWith("--"));
 if (args.some((arg) => arg.startsWith("--") && arg !== "--apply") || positional.length > 1) throw new Error("Usage: prune-canvas-batches [days=30] [--apply]");

@@ -10,8 +10,8 @@ The Backend manages data, media, and canvas tasks; `web/` provides the interface
 ## Start from the repository root
 
 ```bash
-npm ci
-npm run dev
+corepack pnpm install --frozen-lockfile
+corepack pnpm run dev
 ```
 
 Open `http://localhost:3001`. Root startup commands build `canvas-agent/dist` before starting the Backend (17370) and Web (3001); a failed shared build prevents dependent services from starting. Build the shared package yourself before invoking workspace commands directly. Backend `dev` and `dev:watch` use guarded automatic reload: edits are coalesced, running or confirmation tasks, Agent/production turns and writes delay restart. `dev:once` starts once. Shared Agent source changes need a build; the watcher observes the resulting dist changes. HTTP/MCP connections reconnect after reload.

@@ -356,7 +356,8 @@ export class ProductionCompilationService {
                 && artifact.references.at(-1)?.storageKey === styleAnchor.storageKey && artifact.references.at(-1)?.sha256 === styleAnchor.sha256));
     }
     private compilationTargets(director: DirectorProduction) {
-        return [...new Set(["asset_plan", "asset_cards", "segments"].flatMap(field => {
+        const fields = isSubjectPromptAssembly(director.source) ? ["asset_cards", "segments"] : ["asset_plan", "asset_cards", "segments"];
+        return [...new Set(fields.flatMap(field => {
             const entries = director.source[field];
             return Array.isArray(entries) ? entries.map(item => String(field === "segments" ? item.id || "" : item.asset_id || item.id || "")).filter(Boolean) : [];
         }))];

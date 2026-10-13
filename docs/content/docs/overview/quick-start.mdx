@@ -12,13 +12,13 @@ Normal use requires the Backend and the `web/` frontend. The Backend integrates 
 ```bash
 git clone --depth 1 --recurse-submodules https://github.com/helishou/infinite-canvas-mcp.git
 cd infinite-canvas-mcp
-npm ci
-npm run dev
+corepack pnpm install --frozen-lockfile
+corepack pnpm run dev
 ```
 
 Open `http://localhost:3001`.
 
-`npm run dev` builds the official plugin registry and `canvas-agent/dist` before starting either service and does not clear existing services. Root-level `dev:backend`, `dev:web`, and `dev:services` also build those shared assets first; direct workspace `dev` commands do not. Backend `dev` and `dev:watch` reload after source changes when tasks, confirmations, Agent turns and writes are idle. Use `dev:once` for a single run. Rebuild shared Agent sources to update the watched `dist` outputs.
+`corepack pnpm run dev` builds the official plugin registry and `canvas-agent/dist` before starting either service and does not clear existing services. Root-level `dev:backend`, `dev:web`, and `dev:services` also build those shared assets first; direct workspace `dev` commands do not. Backend `dev` and `dev:watch` reload after source changes when tasks, confirmations, Agent turns and writes are idle. Use `dev:once` for a single run. Rebuild shared Agent sources to update the watched `dist` outputs.
 
 | Address | Purpose |
 | --- | --- |
@@ -34,8 +34,9 @@ Use source mode or the full Compose deployment for the base stack; configure mod
 ## Installation and startup troubleshooting
 
 - For slow downloads, use an HTTPS shallow clone, or download the source ZIP from GitHub's Code menu if Git history is unnecessary. The project does not switch to third-party mirrors automatically.
-- The repository maintains an npm lockfile; prefer `npm ci`. An already installed Bun can run `bun install` from the repository root, followed by Node/npm startup commands. Do not create separate workspace dependency trees or commit a parallel lockfile without review. The Backend requires the Node version declared in `backend/package.json`; Bun as an installer does not replace Node's SQLite runtime.
-- If `canvas-agent/dist/...` is missing, run `npm run build --workspace canvas-agent` or use the root startup commands. A failed build is not a Backend connection error.
+- Use `corepack pnpm` for repository commands so Corepack selects pnpm 12.12.1 from the root `package.json`; if Corepack is unavailable, install that pinned pnpm version. Node must be version 22.13 or newer.
+- The repository maintains one workspace lockfile. From the repository root, run `corepack pnpm install --frozen-lockfile`; do not install from an individual workspace or create a second lockfile.
+- If `canvas-agent/dist/...` is missing, run `corepack pnpm --filter @basketikun/canvas-agent run build` or use the root startup commands. A failed build is not a Backend connection error.
 - If `safe-delete state lock timeout` comes from host-injected `NODE_OPTIONS`, investigate the host injection and Vite cache-cleanup conflict. Startup scripts preserve `NODE_OPTIONS` and do not automatically disable deletion guards or other host protections.
 - Codex CLI is optional. For sidebar Codex chat, run `npm install -g @openai/codex@0.160.0` and sign in. Canvas, MCP, and local ComfyUI can skip this installation. The model picker uses the catalog returned by the Codex app-server that Canvas Agent actually starts.
 

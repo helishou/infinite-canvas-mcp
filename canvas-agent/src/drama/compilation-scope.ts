@@ -13,13 +13,19 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     const scene = scope.sceneId ? productionSceneEntries(source).find(item => item.id === scope.sceneId) : undefined;
     if (scope.sceneId && !scene) throw new Error("COMPILATION_SCOPE_UNKNOWN_SCENE: 编译场次不存在");
     const allShots = rows(source.shots), allSegments = rows(source.segments), plans = rows(source.asset_plan), cards = rows(source.asset_cards);
+    const subjectAssembly = isSubjectPromptAssembly(source);
     const wanted = new Set(scope.targetIds || []);
     const segmentIds = new Set(allSegments.map(stableId));
-    const assetTargetIds = new Set([...plans, ...cards].map(key).filter(Boolean));
+    // In Subject Prompt v2 the plan is dependency/identity metadata, not an
+    // image-prompt output. Without this distinction, a full compile can narrow
+    // down to plan-only "pending targets" after ready H3 artifacts are reused;
+    // the resulting scope contains neither cards nor segments and is rejected
+    // as though the saved episode had no compilable content.
+    const assetTargetIds = new Set([...(!subjectAssembly ? plans : []), ...cards].map(key).filter(Boolean));
     const compilerTargetIds = new Set([...segmentIds, ...assetTargetIds]);
     const shots = new Set(wanted.size ? [] : scene?.shotIds || []);
     for (const id of wanted) {
-        if (![...allShots.map(stableId), ...allSegments.map(stableId), ...plans.map(key)].includes(id)) throw new Error(`COMPILATION_SCOPE_UNKNOWN_TARGET: 编译目标不存在：${id}`);
+        if (![...allShots.map(stableId), ...allSegments.map(stableId), ...assetTargetIds].includes(id)) throw new Error(`COMPILATION_SCOPE_UNKNOWN_TARGET: 编译目标不存在：${id}`);
         if (allShots.some(item => stableId(item) === id)) shots.add(id);
         for (const shotId of plans.find(item => key(item) === id)?.shot_ids || []) shots.add(String(shotId));
         const segment = allSegments.find(item => stableId(item) === id);
@@ -29,7 +35,6 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     const includeShotSegments = Boolean(scene && !wanted.size) || [...wanted].some(id => allShots.some(item => stableId(item) === id));
     const segments = allSegments.filter(item => wanted.has(stableId(item)) || includeShotSegments && (item.shot_ids || []).some((id: string) => shots.has(id)));
     for (const segment of segments) if ((segment.shot_ids || []).some((id: string) => !shots.has(id))) throw new Error("COMPILATION_SCOPE_CROSS_SCENE: Segment 跨越编译范围");
-    const subjectAssembly = isSubjectPromptAssembly(source);
     const outputShotIds = new Set(shots);
     const subjectRegistry = rows(source.subject_registry);
     const subjectById = new Map(subjectRegistry.map(subject => [String(subject.id), subject]));
@@ -74,7 +79,7 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     const targetIds = [...new Set(scope.output === "selected"
         ? [...wanted].filter(id => compilerTargetIds.has(id))
         : [...assetTargetIds].filter(id => assets.has(id)).concat(segments.map(stableId)))].sort();
-    if (!targetIds.length && !shots.size && !scene) throw new Error("COMPILATION_SCOPE_EMPTY: 编译范围没有正式目标");
+    if (!targetIds.length) throw new Error("COMPILATION_SCOPE_EMPTY: 编译范围没有可生成的资产提示词卡或视频段落");
     const projected = structuredClone(director);
     projected.source.shots = allShots.filter(item => shots.has(stableId(item)));
     projected.source.segments = segments;

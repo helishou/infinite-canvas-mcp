@@ -28,10 +28,10 @@
     "purge-scene-productions": "tsx src/maintenance/purge-scene-productions.ts",
     "test": "node ../scripts/test.mjs",
     "start": "node dist/index.js",
-    "prepack": "npm run build"
+    "prepack": "corepack pnpm run build"
   },
   "dependencies": {
-    "@basketikun/canvas-agent": "^0.6.0",
+    "@basketikun/canvas-agent": "workspace:^",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "express": "^5.1.0",
     "nanoid": "^5.1.16",

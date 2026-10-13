@@ -16,3 +16,14 @@ export function setShotPictureBindingMode(subject: unknown, usage: Record<string
 export function setShotPictureBindingIds(usage: Record<string, any>, pictureBindingIds: string[]) {
     return { ...usage, pictureBindingMode: "explicit", pictureBindingIds };
 }
+
+/** Change this Shot's outfit references without dropping its identity or other picture bindings. */
+export function setShotOutfitBindingIds(subject: unknown, usage: Record<string, any>, outfitBindingIds: string[]) {
+    const bindings = subject && typeof subject === "object" && Array.isArray((subject as Record<string, any>).pictureBindings)
+        ? (subject as Record<string, any>).pictureBindings as Array<Record<string, any>> : [];
+    const outfitIds = new Set(bindings.filter(binding => Array.isArray(binding.provides) && binding.provides.map(String).includes("clothing")).map(binding => String(binding.id)));
+    const current = resolveSubjectPictureBindingIds(subject, usage).bindingIds;
+    const retained = current.filter(id => !outfitIds.has(id));
+    const selected = outfitBindingIds.filter(id => outfitIds.has(String(id))).map(String);
+    return setShotPictureBindingIds(usage, [...new Set([...retained, ...selected])]);
+}

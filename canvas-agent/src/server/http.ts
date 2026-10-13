@@ -10,6 +10,7 @@ import { productionWorkspaceRequest } from "../drama/production-workspace-contra
 import { productionToolPreflight } from "../drama/production-tool-preflight.js";
 import path from "node:path";
 import express, {
+  type Express,
   type NextFunction,
   type Request,
   type Response,
@@ -84,8 +85,17 @@ export type AgentHttpOptions = {
   settings?: LlmSettings;
 };
 
+export type AgentHttpRuntime = {
+  app: Express;
+  config: CanvasAgentConfig;
+  session: CanvasSession;
+  skillStore: SkillStore;
+  backend: ReturnType<typeof createBackendClient>;
+  comfyUi: ComfyUiClient;
+};
+
 /** 创建 Agent Express 应用；嵌入 Backend 时不监听端口。 */
-export function createAgentApp(options: AgentHttpOptions = {}) {
+export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime {
   const config = loadConfig(true);
   const port =
     Number(process.env.PORT) ||

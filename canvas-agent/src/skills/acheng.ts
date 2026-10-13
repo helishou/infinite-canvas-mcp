@@ -364,6 +364,8 @@ function liveCompilerOverlay() {
     for (const file of ["canvas_subject_prompt_v2.py", "source-contract.py", "live-compile.py"]) {
         digest.update(file).update("\0").update(fs.readFileSync(path.join(directory, file))).update("\0");
     }
+    const runtimeModule = fileURLToPath(import.meta.url);
+    digest.update("acheng-runtime-module").update("\0").update(fs.readFileSync(runtimeModule)).update("\0");
     return { directory, runnerPath: path.join(directory, "live-compile.py"), compilerHash: digest.digest("hex") };
 }
 

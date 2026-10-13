@@ -61,21 +61,23 @@ export async function prepareDevServices(root, groups, runBuild) {
 const script = fileURLToPath(import.meta.url);
 if (process.argv[1] && path.resolve(process.argv[1]) === script) {
     const root = path.resolve(path.dirname(script), '..');
-    const sharedInputs = ['package.json', 'package-lock.json', 'scripts/prepare-dev-services.mjs'];
+    const sharedInputs = ['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml', 'scripts/prepare-dev-services.mjs'];
     await prepareDevServices(root, [
         // 只登记 build:plugins 真正读取的输入。minimax-h3 是宿主内置插件（Web 直接 import 源码），
         // 编辑它不应触发官方插件重建；template 是脚手架，不参与分发构建。
         { name: 'plugins', inputs: [...sharedInputs, 'scripts/build-official-plugins.mjs', 'plugins/canvas/registry', 'plugins/canvas/sdk',
             'plugins/canvas/markdown', 'plugins/canvas/svg', 'plugins/canvas/html', 'plugins/canvas/panorama', 'plugins/canvas/sticky-note'],
-            outputs: ['plugins/canvas/registry/dist', 'web/public/plugins'], command: ['run', 'build:plugins'] },
-        { name: 'canvas-agent', inputs: [...sharedInputs, 'canvas-agent/src', 'canvas-agent/scripts', 'canvas-agent/package.json', 'canvas-agent/package-lock.json', 'canvas-agent/tsconfig.json', '.agents/skills/canvas-video-production-sop'],
-            outputs: ['canvas-agent/dist'], command: ['run', 'build', '--workspace', 'canvas-agent'] },
+            outputs: ['plugins/canvas/registry/dist', 'web/public/plugins'], build: [{ cwd: root, args: ['scripts/build-official-plugins.mjs'] }] },
+        { name: 'canvas-agent', inputs: [...sharedInputs, 'canvas-agent/src', 'canvas-agent/scripts', 'canvas-agent/package.json', 'canvas-agent/tsconfig.json', '.agents/skills/canvas-video-production-sop'],
+            outputs: ['canvas-agent/dist'], build: [
+                { cwd: path.join(root, 'canvas-agent'), args: ['scripts/build-tsc.mjs'] },
+                { cwd: path.join(root, 'canvas-agent'), args: ['--stack-size=8000', 'scripts/bundle-production-sop.mjs'] },
+            ] },
     ], (group) => {
-        const npmCli = process.env.npm_execpath;
-        const result = npmCli
-            ? spawnSync(process.execPath, [npmCli, ...group.command], { cwd: root, stdio: 'inherit', windowsHide: true })
-            : spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', group.command, { cwd: root, stdio: 'inherit', shell: process.platform === 'win32', windowsHide: true });
-        if (result.error) throw result.error;
-        if (result.status !== 0) throw new Error(`${group.name} build failed (${result.status ?? result.signal})`);
+        for (const step of group.build) {
+            const result = spawnSync(process.execPath, step.args, { cwd: step.cwd, stdio: 'inherit', windowsHide: true });
+            if (result.error) throw result.error;
+            if (result.status !== 0) throw new Error(`${group.name} build failed (${result.status ?? result.signal})`);
+        }
     });
 }

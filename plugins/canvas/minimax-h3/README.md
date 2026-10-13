@@ -15,9 +15,9 @@ RunningHub 凭据和工作流字段保存在 Agent 的运行时数据库中，�
 ## 开发
 
 ```bash
-npm install
-npm run typecheck
-npm run dev
+corepack pnpm install --frozen-lockfile
+corepack pnpm --filter canvas-plugin-minimax-h3 run typecheck
+corepack pnpm --filter canvas-plugin-minimax-h3 run dev
 ```
 
 H3 是宿主内置插件：Web 经 `web/src/lib/canvas/plugin-loader.ts` 直接 import 本目录源码，随宿主 JS 一起打包，Vite dev 下走 HMR。`node build.mjs` 只产出 `dist/minimax-h3.js` 供外部宿主分发，**不再同步到 `web/public/plugins/`**；改完源码刷新画布即可生效。

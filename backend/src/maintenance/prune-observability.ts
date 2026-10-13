@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import { DB_FILE } from "../config.js";
 
-// Manual only. Default is read-only: npm run prune-observability -- [days=7] [--apply]
+// Manual only. Default is read-only: corepack pnpm --filter @helishou/infinite-canvas-backend run prune-observability -- [days=7] [--apply]
 const args = process.argv.slice(2);
 const positional = args.filter((arg) => !arg.startsWith("--"));
 if (args.some((arg) => arg.startsWith("--") && arg !== "--apply") || positional.length > 1) throw new Error("Usage: prune-observability [days=7] [--apply]");

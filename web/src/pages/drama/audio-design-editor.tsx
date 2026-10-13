@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Button, Input, InputNumber } from "antd";
+import { Button, Input, InputNumber, Select } from "antd";
 import { Plus, Trash2, Volume2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -10,7 +10,7 @@ const readAudio = (value: unknown): AudioObject => (value && typeof value === "o
 const cueTexts = (audio: AudioObject): string[] => Array.isArray(audio.foley) ? audio.foley.map(item => typeof item === "string" ? item : JSON.stringify(item)) : [];
 const reasonOf = (audio: AudioObject): string => String(audio.no_low_frequency_reason || "");
 const hzOf = (audio: AudioObject): number | null | undefined => typeof audio.low_frequency_hz === "number" ? audio.low_frequency_hz : undefined;
-const nextAudioFrom = (base: unknown, cues: string[], hz: number | null | undefined, reason: string): AudioObject => ({ ...readAudio(base), foley: cues.filter(text => text.trim()), low_frequency_hz: hz ?? null, no_low_frequency_reason: reason });
+const nextAudioFrom = (base: unknown, cues: string[], hz: number | null | undefined, reason: string, keepPendingEmpty = false): AudioObject => ({ ...readAudio(base), foley: keepPendingEmpty ? cues : cues.filter(text => text.trim()), low_frequency_hz: hz ?? null, no_low_frequency_reason: reason });
 
 type Props = {
     value: unknown;
@@ -37,7 +37,14 @@ export function AudioDesignEditor({ value, disabled, onChange, onPersist }: Prop
     const dirty = JSON.stringify(cues) !== JSON.stringify(cueTexts(source)) || JSON.stringify(hz ?? null) !== JSON.stringify(hzOf(source) ?? null) || reason !== reasonOf(source);
     const applyChange = (patch: { cues?: string[]; hz?: number | null | undefined; reason?: string }) => {
         const nextCues = patch.cues ?? cues, nextHz = patch.hz === undefined ? hz : patch.hz, nextReason = patch.reason === undefined ? reason : patch.reason;
-        if (onChange) { onChange(nextAudioFrom(value, nextCues, nextHz, nextReason)); return; }
+        if (onChange) {
+            // 受控模式也要保留编辑期空槽位并同步本地草稿：否则新增的空串会被 filter 掉，父级判定"无变化"直接重置，按钮看起来完全没反应。
+            onChange(nextAudioFrom(value, nextCues, nextHz, nextReason, true));
+            if (patch.cues !== undefined) setCues(patch.cues);
+            if (patch.hz !== undefined) setHz(patch.hz);
+            if (patch.reason !== undefined) setReason(patch.reason);
+            return;
+        }
         if (patch.cues !== undefined) setCues(patch.cues);
         if (patch.hz !== undefined) setHz(patch.hz);
         if (patch.reason !== undefined) setReason(patch.reason);
@@ -79,5 +86,47 @@ export function SevenStepsReferencesEditor({ card, disabled, onSave }: { card: R
             <Button size="small" icon={<Plus className="size-3.5" />} disabled={disabled} onClick={() => setRefTexts(current => [...current, ""])}>{t("director.crud.addReference")}</Button>
         </div>
         <div className="flex items-center gap-2">{dirty && <span className="text-xs text-amber-600">{t("director.studio.unsavedText")}</span>}<Button type="primary" size="small" loading={saving} disabled={disabled || !dirty} onClick={() => void save()}>{t("director.crud.saveCardDetails")}</Button></div>
+    </div>;
+}
+
+// B 类补齐：Clip 级精确音频绑定（segments[].audio_bindings）。新增只能从制作画布已归档的音频源里选
+// （_canvas_subject_audio_sources 注册表给出 storageKey/sha256/nodeId，mimeType 按扩展名派生），
+// 手写存储键会绕过哈希校验，所以不让用户自由填。
+export type AudioSourceEntry = { nodeId?: string; storageKey?: string; sha256?: string; file?: string };
+const audioMimeFrom = (file: string): string | undefined => /\.wav$/i.test(file) ? "audio/wav" : /\.ogg$/i.test(file) || /\.oga$/i.test(file) ? "audio/ogg" : /\.flac$/i.test(file) ? "audio/flac" : /\.m4a$/i.test(file) ? "audio/mp4" : /\.aac$/i.test(file) ? "audio/aac" : /\.webm$/i.test(file) ? "audio/webm" : /\.opus$/i.test(file) ? "audio/opus" : /\.(mp3|mpga)$/i.test(file) ? "audio/mpeg" : undefined;
+
+export function SegmentAudioBindingEditor({ bindings, shots, sources, projectId, disabled, onPersist }: {
+    bindings: Array<Record<string, any>>;
+    shots: string[];
+    sources: Record<string, AudioSourceEntry>;
+    projectId: string;
+    disabled: boolean;
+    onPersist: (next: Array<Record<string, unknown>>) => Promise<boolean>;
+}) {
+    const { t } = useTranslation();
+    const sourceIds = Object.entries(sources).filter(([, source]) => Boolean(source.nodeId && source.storageKey && source.sha256 && audioMimeFrom(source.file || ""))).map(([id]) => id);
+    const [nodeId, setNodeId] = useState("");
+    const [label, setLabel] = useState("");
+    const [role, setRole] = useState("source_audio");
+    const [shotIds, setShotIds] = useState<string[]>([]);
+    const [saving, setSaving] = useState(false);
+    useEffect(() => { setShotIds(shots); }, [JSON.stringify(shots)]);
+    const persist = (next: Array<Record<string, unknown>>) => (async () => { setSaving(true); try { return await onPersist(next); } catch { return false; } finally { setSaving(false); } })();
+    return <div className="space-y-2">
+        {bindings.map(binding => {
+            const meta = sources[String(binding.id)];
+            return <div key={String(binding.id)} className="grid gap-2 rounded border border-border px-2 py-2 text-xs md:grid-cols-[minmax(0,1fr)_minmax(150px,0.8fr)_auto]">
+                <div className="grid min-w-0 gap-1 md:grid-cols-2"><Input size="small" aria-label={t("director.workspace.audioBindingLabel")} defaultValue={String(binding.label || "")} disabled={disabled || saving} onBlur={event => { const value = event.target.value.trim(); if (value && value !== binding.label) void persist(bindings.map(item => String(item.id) === String(binding.id) ? { ...item, label: value } : item)); }} /><Input size="small" aria-label={t("director.workspace.audioBindingRole")} defaultValue={String(binding.role || "")} disabled={disabled || saving} onBlur={event => { const value = event.target.value.trim(); if (value && value !== binding.role) void persist(bindings.map(item => String(item.id) === String(binding.id) ? { ...item, role: value } : item)); }} /><span className="col-span-full truncate text-muted-foreground">{meta?.file ? meta.file.split(/[\\/]/).pop() : String(binding.sourceNode?.nodeId || "")}</span></div>
+                <Select size="small" mode="multiple" value={Array.isArray(binding.shotIds) ? binding.shotIds.map(String) : []} disabled={disabled || saving} placeholder={t("director.workspace.pickBoundShots")} options={shots.map(id => ({ value: id, label: id }))} onChange={ids => void persist(bindings.map(item => String(item.id) === String(binding.id) ? { ...item, shotIds: ids } : item))} />
+                <Button size="small" type="text" danger icon={<Trash2 className="size-3.5" />} aria-label={t("common.remove")} disabled={disabled || saving} onClick={() => void persist(bindings.filter(item => String(item.id) !== String(binding.id)))} />
+            </div>;
+        })}
+        {sourceIds.length ? <div className="flex flex-wrap items-end gap-2">
+            <Select size="small" className="min-w-40 flex-1" value={nodeId || undefined} placeholder={t("director.workspace.pickAudioSource")} options={sourceIds.map(id => ({ value: id, label: `${id} · ${(sources[id].file || "").split(/[\\/]/).pop()}` }))} onChange={setNodeId} />
+            <Input size="small" className="w-28" value={label} placeholder={`<Audio ${bindings.length + 1}>`} onChange={event => setLabel(event.target.value)} />
+            <Input size="small" className="w-28" value={role} placeholder="source_audio" onChange={event => setRole(event.target.value)} />
+            <Select size="small" mode="multiple" className="min-w-36 max-w-56" value={shotIds} placeholder={t("director.workspace.pickBoundShots")} options={shots.map(id => ({ value: id, label: id }))} onChange={setShotIds} />
+            <Button size="small" icon={<Plus className="size-3.5" />} loading={saving} disabled={disabled || !nodeId || !shotIds.length} onClick={() => { const source = sources[nodeId]; const mimeType = audioMimeFrom(String(source?.file || "")); if (!source || !mimeType) return; void (async () => { const ok = await persist([...bindings, { id: `AUD-UI-${Date.now()}`, label: label.trim() || `<Audio ${bindings.length + 1}>`, sourceNode: { projectId, nodeId: String(source.nodeId || nodeId) }, storageKey: String(source.storageKey || ""), sha256: String(source.sha256 || ""), role: role.trim() || "source_audio", shotIds, mimeType }]); if (ok) { setNodeId(""); setLabel(""); setRole("source_audio"); } })(); }}>{t("director.workspace.addAudioBinding")}</Button>
+        </div> : <p className="text-xs text-muted-foreground">{t("director.workspace.noArchivedAudio")}</p>}
     </div>;
 }

@@ -78,7 +78,7 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         try {
             const input = productionCompileSchema.extend({ operationId: z.string().min(1).optional() }).parse(req.body);
             if (input.scope && !input.operationId) throw new Error("按范围编译必须提供稳定 operationId");
-            res.json({ ok: true, compilation: input.operationId ? compilations.enqueue(req.params.episodeId, base, input.operationId, input.expectedRevision, input.director, input.scope) : compilations.prepare(req.params.episodeId, base, input.expectedRevision, input.director) });
+            res.json({ ok: true, compilation: input.operationId ? compilations.enqueue(req.params.episodeId, base, input.operationId, input.expectedRevision, undefined, input.scope) : compilations.prepare(req.params.episodeId, base, input.expectedRevision) });
         } catch (error) { handle(res, error); }
     });
     for (const action of ["start", "resume", "pause", "review"] as const) router.post<Record<string, string>>(`${base}/scene-work/${action}`, async (req, res) => {

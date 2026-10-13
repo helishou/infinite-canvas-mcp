@@ -35,6 +35,8 @@ export type ProductionLayoutReceipt = {
 };
 export const directorPatchFields = {
     brief: ["value"],
+    spec: ["fps_num", "fps_den", "production_total_duration", "generation_clip_limit", "delivery_scope", "prompt_detail_policy"],
+    story: ["synopsis", "A", "B", "C", "five_stage_arc"],
     continuity: ["ledger"],
     style: ["style_policy", "style_policy_reason", "anchor_asset_id", "style_anchor_node_id"],
     scene: ["scene_name", "heading", "location", "time_of_day", "text", "blocks"],
@@ -42,8 +44,8 @@ export const directorPatchFields = {
     character: ["name", "appearance", "description", "prompt_description", "identity", "voice_description"],
     asset_card: ["prompt", "seven_steps", "references"],
     asset: ["asset_name", "name", "title", "kind", "description", "prompt", "depends_on", "role", "version", "reference_role", "canvas_scope", "status"],
-    shot: ["title", "visual", "camera", "start_frame", "end_frame", "duration_frames", "dialogues", "audio", "required_assets", "description", "shot_type", "timeline_id", "story_order", "continuity_facts", "characters", "performance", "state_description", "continuity_cues", "reference_requirements", "prompt_contract_version", "identity_context", "offscreen_character_ids", "subject_usages", "keyframes", "utterance_refs"],
-    segment: ["shot_ids", "start_frame", "end_frame", "generation_clip_duration", "mode", "audio", "sound", "overall_soundscape", "non_diegetic_music", "references", "subjects", "execution_gate", "styleTemplateId"],
+    shot: ["title", "visual", "camera", "start_frame", "end_frame", "duration_frames", "dialogues", "audio", "required_assets", "description", "shot_type", "timeline_id", "story_order", "continuity_facts", "characters", "performance", "combat", "state_description", "continuity_cues", "reference_requirements", "prompt_contract_version", "identity_context", "offscreen_character_ids", "subject_usages", "keyframes", "utterance_refs", "features"],
+    segment: ["shot_ids", "start_frame", "end_frame", "generation_clip_duration", "mode", "audio", "sound", "overall_soundscape", "non_diegetic_music", "references", "subjects", "execution_gate", "styleTemplateId", "motion_profile", "summary", "audio_bindings", "animation_term_ids", "animation_term_evidence"],
 } as const;
 
 export const directorModules = ["story", "assets", "shots", "performance", "effects", "model", "continuity"] as const;
@@ -159,6 +161,25 @@ export function isSubjectPromptAssembly(source: Record<string, unknown>) {
         && (source.prompt_assembly as Record<string, unknown> | undefined)?.version === 2
         && (source.ledger as Record<string, unknown> | undefined)?.contract_version === 2;
 }
+
+/** Materialize the required default when a source write introduces keyframes; preserve explicit false. */
+export function defaultRequiredShotKeyframes(source: Record<string, unknown>) {
+    let changed = false;
+    for (const shot of Array.isArray(source.shots) ? source.shots : []) {
+        if (!shot || typeof shot !== "object" || Array.isArray(shot)) continue;
+        const row = shot as Record<string, unknown>;
+        for (const keyframe of Array.isArray(row.keyframes) ? row.keyframes : []) {
+            if (!keyframe || typeof keyframe !== "object" || Array.isArray(keyframe)) continue;
+            const frame = keyframe as Record<string, unknown>;
+            if (!Object.hasOwn(frame, "requiredForSubmission")) {
+                frame.requiredForSubmission = true;
+                changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
 export function resolveSubjectPictureBindingIds(subjectValue: unknown, usageValue: unknown) {
     const subject = subjectValue && typeof subjectValue === "object" ? subjectValue as Record<string, any> : {};
     const usage = usageValue && typeof usageValue === "object" ? usageValue as Record<string, any> : {};
@@ -185,15 +206,25 @@ export function resolveSubjectPictureBindingIds(subjectValue: unknown, usageValu
     const purposes = [...new Set((Array.isArray(usage.referencePurpose) && usage.referencePurpose.length ? usage.referencePurpose : ["identity"]).map(String))];
     const selected: string[] = [], issues: string[] = [];
     for (const purpose of purposes) {
-        const matches = bindings.filter(binding => Array.isArray(binding.defaultFor) && binding.defaultFor.map(String).includes(purpose) && applicable(binding));
-        if (!matches.length) issues.push("缺少适用于 " + purpose + " 的默认图片绑定");
+        const eligible = bindings.filter(binding => Array.isArray(binding.provides) && binding.provides.map(String).includes(purpose) && applicable(binding));
+        const matches = eligible.filter(binding => Array.isArray(binding.defaultFor) && binding.defaultFor.map(String).includes(purpose));
+        if (matches.length === 1) selected.push(String(matches[0].id));
         else if (matches.length > 1) issues.push(purpose + " 默认图片绑定有歧义：" + matches.map(binding => binding.id).join(", "));
-        else selected.push(String(matches[0].id));
+        else if (eligible.length === 1) selected.push(String(eligible[0].id));
+        else if (!eligible.length) issues.push("缺少适用于 " + purpose + " 的默认图片绑定");
+        else issues.push(purpose + " 默认图片绑定有歧义：" + eligible.map(binding => binding.id).join(", "));
     }
     return { bindingIds: [...new Set(selected)], issues };
 }
 export const productionCompilationScopeSchema = z.object({ sceneId: id.optional(), targetIds: z.array(id).min(1).optional(), output: z.literal("selected").optional() }).strict().refine(scope => Boolean(scope.sceneId || scope.targetIds?.length), "编译范围不能为空");
-export const productionCompileSchema = z.object({ operationId: id.optional(), expectedRevision: z.number().int().nonnegative(), director: directorProductionSchema.optional(), scope: productionCompilationScopeSchema.optional() }).strict();
+export const productionCompileSchema = z.object({
+    operationId: id.optional(),
+    expectedRevision: z.number().int().nonnegative(),
+    // Kept for compatibility with older HTTP clients. Backend compilation must
+    // use its saved draft; a caller-provided snapshot is never authoritative.
+    director: directorProductionSchema.optional().describe("已废弃并忽略；编译始终使用 Backend 已保存的正式制作稿。"),
+    scope: productionCompilationScopeSchema.optional(),
+}).strict();
 export const productionApplyCompilationSchema = z.object({ preparedId: z.string().uuid() }).strict();
 export const promptSourceMapSchema = z.object({
     version: z.literal(1), offsetUnit: z.literal("utf16"), segmentId: id, sourceHash: hash, promptHash: hash,
@@ -245,7 +276,7 @@ const shotKeyframeSchema = z.object({
         z.object({ mode: z.literal("selected_result"), resultId: id }).strict(),
     ]),
     anchor: z.enum(["composition", "opening", "closing", "at_frame"]), localFrame: z.number().int().nonnegative().optional(),
-    subjectIds: z.array(id).default([]), retain: z.array(z.string()), exclude: z.array(z.string()), requiredForSubmission: z.boolean().default(false),
+    subjectIds: z.array(id).default([]), retain: z.array(z.string()), exclude: z.array(z.string()), requiredForSubmission: z.boolean().default(true),
 }).strict().superRefine((keyframe, context) => {
     if (keyframe.anchor === "at_frame" && keyframe.localFrame === undefined) context.addIssue({ code: "custom", path: ["localFrame"], message: "at_frame 关键帧必须提供镜头局部帧" });
     if (keyframe.anchor !== "at_frame" && keyframe.localFrame !== undefined) context.addIssue({ code: "custom", path: ["localFrame"], message: "非定时锚点不能指定 localFrame" });
@@ -257,7 +288,7 @@ const utteranceSchema = z.object({
     end: z.object({ shotId: id, localFrame: z.number().int().positive() }).strict(),
 }).strict();
 /** Exact archived audio inputs for a Subject Prompt v2 Clip. Images remain on Subject/keyframe bindings. */
-const shotAudioBindingSchema = z.object({
+export const shotAudioBindingSchema = z.object({
     id, label: z.string().trim().min(1), sourceNode: z.object({ projectId: id, nodeId: id }).strict(),
     storageKey: id, sha256: hash, role: id, shotIds: z.array(id).min(1), mimeType: z.string().startsWith("audio/"),
 }).strict();
@@ -579,7 +610,7 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("replace_director_clip_storyboard"), segmentId: id, segment: z.record(z.unknown()), shots: z.array(z.record(z.unknown())).min(1), shotInputs: z.record(z.unknown()) }).strict(),
     z.object({ type: z.literal("request_director_clip_refresh"), segmentId: id }).strict(),
     z.object({ type: z.literal("set_director_brief"), brief: z.string() }).strict(),
-    z.object({ type: z.literal("patch_director_source"), entity: z.enum(["brief", "style", "scene", "environment", "character", "asset", "asset_card", "shot", "segment"]), id: id.optional(), patch: z.record(z.unknown()) }).strict(),
+    z.object({ type: z.literal("patch_director_source"), entity: z.enum(["brief", "spec", "story", "style", "scene", "environment", "character", "asset", "asset_card", "shot", "segment"]), id: id.optional(), patch: z.record(z.unknown()) }).strict(),
     z.object({ type: z.literal("adopt_director_fields"), targetId: id, nodeId: id, segmentId: id.optional(), canvasRevision: z.number().int().nonnegative(), fields: z.array(id).min(1) }).strict(),
     z.object({ type: z.literal("adopt_director_clip_style"), targetId: id, nodeId: id, segmentId: id, canvasRevision: z.number().int().nonnegative(), styleTemplateId: z.string().nullable() }).strict(),
     z.object({ type: z.literal("set_director_workflow"), patch: directorWorkflowSchema.partial() }).strict(),

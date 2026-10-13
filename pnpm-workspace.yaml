@@ -1,0 +1,9 @@
+packages:
+  - backend
+  - canvas-agent
+  - web
+  - plugins/canvas/sdk
+  - plugins/canvas/minimax-h3
+allowBuilds:
+  esbuild: true
+  msw: false

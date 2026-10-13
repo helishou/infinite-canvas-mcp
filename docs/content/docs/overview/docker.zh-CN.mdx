@@ -92,12 +92,12 @@ PowerShell：`$env:COMFYUI_HOST_PATH = 'C:/ComfyUI'`，然后运行相同的 `do
 无需 Docker 时，在仓库根目录安装并构建项目、启动 Backend，再由自己的静态服务器提供 web/dist：
 
 ```bash
-npm ci
-npm run build --workspace canvas-agent
-npm run build:plugins
-npm run build --workspace backend
-npm run build --workspace web
-npm run start --workspace backend
+corepack pnpm install --frozen-lockfile
+corepack pnpm --filter @basketikun/canvas-agent run build
+corepack pnpm run build:plugins
+corepack pnpm --filter @helishou/infinite-canvas-backend run build
+corepack pnpm --filter infinite-canvas run build
+corepack pnpm --filter @helishou/infinite-canvas-backend run start
 ```
 
 构建会包含本地官方插件清单。若连接独立 Backend，在 Web 构建环境设置 `VITE_BACKEND_URL`，并在 Backend 来源名单中加入网页 origin。

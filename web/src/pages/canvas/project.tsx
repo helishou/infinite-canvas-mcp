@@ -319,7 +319,7 @@ export default function CanvasPage() {
     const location = useLocation();
     const { t } = useTranslation();
     const [retry, setRetry] = useState(0);
-    const [entry, setEntry] = useState<{ key: string; destination?: { pathname: string; search: string; hash: string }; error?: string } | null>(null);
+    const [entry, setEntry] = useState<{ key: string; destination?: { pathname: string; search: string; hash: string }; error?: string; unreachable?: boolean } | null>(null);
 
     useEffect(() => {
         if (!id) { setEntry({ key: "" }); return; }
@@ -349,14 +349,17 @@ export default function CanvasPage() {
             }
             setEntry({ key, destination: { pathname: "/production", search: `?${query.toString()}`, hash: location.hash } });
         }).catch(error => {
-            if (active) setEntry({ key, error: error instanceof Error ? error.message : String(error) });
+            // status 0 是「后端不可达」（网络/跨域失败），与 404/401 这类确定性错误分开记录。
+            if (active) setEntry({ key, error: error instanceof Error ? error.message : String(error), unreachable: error instanceof BackendApiError && error.status === 0 });
         });
         return () => { active = false; };
     }, [id, location.hash, location.search, retry]);
 
     const entryKey = JSON.stringify([id, location.search, location.hash, retry]);
     if (!entry || entry.key !== entryKey) return <CanvasRefreshShell />;
-    if (entry.error) return <main className="mx-auto max-w-[720px] space-y-4 p-6"><Alert type="error" showIcon message={t("director.loadFailed")} description={entry.error} /><Button onClick={() => setRetry(value => value + 1)}>{t("director.refresh")}</Button></main>;
+    // 后端不可达时不跳转、也不把画布换成错误页：原地保留画布页（读不到就由 CanvasSurface 自己的失败态兜底），
+    // 断联原因由顶部横幅说明。只有确定性错误（404/401、缺少剧目归属等）才提示读取失败。
+    if (entry.error && !entry.unreachable) return <main className="mx-auto max-w-[720px] space-y-4 p-6"><Alert type="error" showIcon message={t("director.loadFailed")} description={entry.error} /><Button onClick={() => setRetry(value => value + 1)}>{t("director.refresh")}</Button></main>;
     if (entry.destination) return <Navigate to={entry.destination} replace />;
 
     return <CanvasSurface key={id} projectId={id || ""} />;

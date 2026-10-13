@@ -169,3 +169,76 @@ test("diagnostic actions override severity and retain legacy error compatibility
     const legacy: ProductionDiagnostic = { code: "LEGACY_SOURCE_INVALID", path: "director.source", message: "Invalid source", severity: "error" };
     assert.equal(diagnosticBlocksAction(legacy, "compile"), true);
 });
+
+test("production spec fields patch document-level settings with strict shapes", () => {
+    const director = productionOperationContract("set_director_production").operations[0].example.director as DirectorProduction;
+    const ops = [
+        { type: "patch_director_source", entity: "spec", patch: { fps_num: 25, fps_den: 1, generation_clip_limit: 10, delivery_scope: "prompt_only", prompt_detail_policy: { profile: "ref2va_v2" } } },
+        { type: "patch_director_source", entity: "spec", patch: { production_total_duration: "90/1" } },
+    ];
+    assert.equal(productionEditSchema.safeParse({ operationId: "spec", expectedRevision: 1, ops }).success, true);
+    const priorHash = director.sourceHash;
+    applyDirectorSourcePatch(director, "spec", undefined, { fps_num: 25 });
+    assert.equal(Number((director.source as Record<string, unknown>).fps_num), 25);
+    assert.notEqual(director.sourceHash, priorHash);
+    applyDirectorSourcePatch(director, "spec", undefined, { production_total_duration: "90/1" });
+    assert.equal(String((director.source as Record<string, unknown>).production_total_duration), "90/1");
+    applyDirectorSourcePatch(director, "spec", undefined, { production_total_duration: "" });
+    assert.equal(Object.hasOwn(director.source, "production_total_duration"), false);
+    assert.throws(() => applyDirectorSourcePatch(director, "spec", undefined, { fps_num: 0 }), /整数/);
+    assert.throws(() => applyDirectorSourcePatch(director, "spec", undefined, { fps_num: "24" }), /整数/);
+    assert.throws(() => applyDirectorSourcePatch(director, "spec", undefined, { generation_clip_limit: 0 }), /整数/);
+    assert.throws(() => applyDirectorSourcePatch(director, "spec", undefined, { invented: true }), /规格字段/);
+    assert.throws(() => applyDirectorSourcePatch(director, "spec", "X", { fps_num: 24 }), /ID/);
+    assert.throws(() => applyDirectorSourcePatch(director, "spec", undefined, { production_total_duration: "soon" }), /秒数或/);
+    assert.throws(() => applyDirectorSourcePatch(director, "spec", undefined, { prompt_detail_policy: { profile: " " } }), /profile/);
+});
+
+test("story structure patches synopsis, threads and five-stage arc without losing other keys", () => {
+    const director = productionOperationContract("set_director_production").operations[0].example.director as DirectorProduction;
+    director.source.story = { extra_key: "keep" };
+    applyDirectorSourcePatch(director, "story", undefined, { synopsis: "s", A: "a", B: "b", C: "c", five_stage_arc: ["一", "二", "三", "四", "五"] });
+    const story = director.source.story as Record<string, any>;
+    assert.deepEqual([story.synopsis, story.A, story.B, story.C], ["s", "a", "b", "c"]);
+    assert.equal(story.extra_key, "keep");
+    assert.equal(story.five_stage_arc.length, 5);
+    assert.ok(productionEditSchema.safeParse({ operationId: "story", expectedRevision: 1, ops: [{ type: "patch_director_source", entity: "story", patch: { synopsis: "s" } }] }).success);
+    assert.throws(() => applyDirectorSourcePatch(director, "story", undefined, { five_stage_arc: ["一", "二", "三", "四"] }), /五/);
+    assert.throws(() => applyDirectorSourcePatch(director, "story", undefined, { A: 7 }), /文字/);
+    assert.throws(() => applyDirectorSourcePatch(director, "story", "S1", { synopsis: "x" }), /ID/);
+    assert.throws(() => applyDirectorSourcePatch(director, "story", undefined, { beats: [] }), /故事线字段/);
+});
+
+test("shot features, combat, performance, segment motion, summary, audio and animation evidence validate at the patch boundary", () => {
+    const director = productionOperationContract("set_director_production").operations[0].example.director as DirectorProduction;
+    director.source.shots = [{ id: "SH1" }];
+    director.source.segments = [{ id: "SEG1", shot_ids: ["SH1"], summary: "before" }];
+    applyDirectorSourcePatch(director, "shot", "SH1", { features: { combat: true, colossal: false } });
+    assert.deepEqual((director.source.shots as Array<Record<string, any>>)[0].features, { combat: true, colossal: false });
+    const combat = { force_source: "foot plants", timing: { axis_lock: "north-south", spatial_direction: "left-to-right", speed_curve: "accelerate", camera_sync: "track impact", phases: [], direction_facts: {}, speed_profile: {}, slow_motion: { enabled: false } } };
+    applyDirectorSourcePatch(director, "shot", "SH1", { combat });
+    assert.deepEqual((director.source.shots as Array<Record<string, any>>)[0].combat, combat);
+    const performance = { beat_id: "B1", dominant_track: "gaze", tracks: { gaze: { start: 0, end: 12, cue: "shifts gaze", visibility: "close-up" } }, acting_design: { objective: "decide" } };
+    applyDirectorSourcePatch(director, "shot", "SH1", { performance });
+    assert.deepEqual((director.source.shots as Array<Record<string, any>>)[0].performance, performance);
+    assert.throws(() => applyDirectorSourcePatch(director, "shot", "SH1", { performance: { tracks: { gaze: { start: 12, end: 0, cue: "bad", visibility: "close" } } } }), /帧无效/);
+    assert.throws(() => applyDirectorSourcePatch(director, "shot", "SH1", { features: { combat: "yes" } }), /true 或 false/);
+    applyDirectorSourcePatch(director, "shot", "SH1", { features: { combat: false } });
+    assert.throws(() => applyDirectorSourcePatch(director, "shot", "SH1", { features: { combat: false }, combat: {} }), /关闭/);
+    applyDirectorSourcePatch(director, "shot", "SH1", { features: { combat: true } });
+    applyDirectorSourcePatch(director, "segment", "SEG1", { motion_profile: { medium: "live_action", cut_style: "硬切" } });
+    assert.equal((director.source.segments as Array<Record<string, any>>)[0].motion_profile.cut_style, "硬切");
+    assert.throws(() => applyDirectorSourcePatch(director, "segment", "SEG1", { motion_profile: { fps: 24 } }), /文字说明/);
+    applyDirectorSourcePatch(director, "segment", "SEG1", { summary: "" });
+    assert.equal(Object.hasOwn((director.source.segments as Array<Record<string, any>>)[0], "summary"), false);
+    const binding = { id: "AUD1", label: "<Audio 1>", sourceNode: { projectId: "P", nodeId: "N" }, storageKey: "k", sha256: "a".repeat(64), role: "source_audio", shotIds: ["SH1"], mimeType: "audio/mpeg" };
+    applyDirectorSourcePatch(director, "segment", "SEG1", { audio_bindings: [binding] });
+    assert.equal((director.source.segments as Array<Record<string, any>>)[0].audio_bindings.length, 1);
+    assert.throws(() => applyDirectorSourcePatch(director, "segment", "SEG1", { audio_bindings: [{ ...binding, mimeType: "video/mp4" }] }), /不合格/);
+    assert.throws(() => applyDirectorSourcePatch(director, "segment", "SEG1", { audio_bindings: [{ ...binding, shotIds: [] }] }), /不合格/);
+    const evidence = [{ term_id: "ANIM-01", term: "anticipation", time_window: "0-12f", observable_fact: "weight shifts before the strike", camera_or_layout: "full-body profile keeps both feet visible", sound_or_qa: "shoe scrape precedes contact" }];
+    applyDirectorSourcePatch(director, "segment", "SEG1", { animation_term_ids: ["ANIM-01"], animation_term_evidence: evidence });
+    assert.deepEqual((director.source.segments as Array<Record<string, any>>)[0].animation_term_evidence, evidence);
+    assert.throws(() => applyDirectorSourcePatch(director, "segment", "SEG1", { animation_term_ids: [""] }), /非空字符串数组/);
+    assert.throws(() => applyDirectorSourcePatch(director, "segment", "SEG1", { animation_term_evidence: [{ ...evidence[0], sound_or_qa: "" }] }), /sound_or_qa/);
+});

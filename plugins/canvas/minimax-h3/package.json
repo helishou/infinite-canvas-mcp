@@ -11,8 +11,9 @@
         "typecheck": "tsc --noEmit"
     },
     "devDependencies": {
-        "@infinite-canvas/plugin-sdk": "file:../sdk",
+        "@infinite-canvas/plugin-sdk": "workspace:*",
         "@types/react": "19.1.12",
+        "esbuild": "^0.25.0",
         "typescript": "^5"
     },
     "dependencies": {

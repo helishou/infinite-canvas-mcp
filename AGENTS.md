@@ -27,7 +27,7 @@
 - `backend` 是业务数据与任务的权威：SQLite、媒体归档、ops 事务、任务执行、共享 HTTP MCP。
 - `canvas-agent` 提供对话运行时、工具与共享契约；Backend 通过该包导出的 `dist` 消费它。
 - `web` 提供界面、用户编辑和浏览器执行器；`plugins/canvas` 通过 SDK 接入宿主。画布生成由 Backend 统一建任务。
-- npm workspaces 为 `backend`、`canvas-agent`、`web`；文档和插件按各自 package 配置执行。依赖版本、命令和模型能力以当前代码与运行配置为准。
+- pnpm workspace 为 `backend`、`canvas-agent`、`web`、Canvas 插件 SDK 与内置 H3 插件；独立插件模板与外部消费示例可保留适用于 npm 用户的命令。依赖版本、命令和模型能力以当前代码与运行配置为准。
 
 ## 效率优先，拒绝过度设计
 

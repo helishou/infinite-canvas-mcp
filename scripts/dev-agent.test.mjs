@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import childProcess from "node:child_process";
-import { syncBuiltinESMExports } from "node:module";
+import { createRequire, syncBuiltinESMExports } from "node:module";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
 test("Agent launcher supports both platforms, sets only its port, and preserves host Node options", async () => {
@@ -21,9 +23,12 @@ test("Agent launcher supports both platforms, sets only its port, and preserves 
             };
             syncBuiltinESMExports();
             await import(`./dev-agent.mjs?test-platform=${platform}`);
-            assert.equal(launch.command, platform === "win32" ? "npm.cmd" : "npm");
-            assert.deepEqual(launch.args, ["run", "dev", "--workspace", "canvas-agent"]);
-            assert.equal(launch.options.shell, platform === "win32");
+            const agent = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "canvas-agent");
+            const tsx = pathToFileURL(createRequire(path.join(agent, "package.json")).resolve("tsx")).href;
+            assert.equal(launch.command, process.execPath);
+            assert.deepEqual(launch.args, ["--import", tsx, "src/index.ts"]);
+            assert.equal(launch.options.cwd, agent);
+            assert.equal(launch.options.shell, undefined);
             assert.equal(launch.options.env.PORT, "17371");
             assert.equal(launch.options.env.NODE_OPTIONS, process.env.NODE_OPTIONS);
         }

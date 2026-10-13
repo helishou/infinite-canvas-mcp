@@ -7,7 +7,7 @@ try {
 }
 if (-not $hasLock) {
     Write-Host "[dev-local] Another local development stack is already running."
-    Write-Host "[dev-local] If its terminal is unavailable, run: npm run dev:stop"
+    Write-Host "[dev-local] If its terminal is unavailable, run: corepack pnpm run dev:stop"
     $mutex.Dispose()
     exit 0
 }
@@ -44,7 +44,7 @@ foreach ($processId in $pids) {
 Start-Sleep -Seconds 2
 Write-Host "[dev-local] Starting backend, agent and web..."
 try {
-    npm run dev:services
+    corepack pnpm run dev:services
 } finally {
     try { $mutex.ReleaseMutex() } catch { }
     $mutex.Dispose()

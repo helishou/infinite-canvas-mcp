@@ -92,12 +92,12 @@ In PowerShell set `$env:COMFYUI_HOST_PATH = 'C:/ComfyUI'` and run the same docke
 Without Docker, install and build from the repository root, run the Backend, and serve web/dist with your own static server:
 
 ```bash
-npm ci
-npm run build --workspace canvas-agent
-npm run build:plugins
-npm run build --workspace backend
-npm run build --workspace web
-npm run start --workspace backend
+corepack pnpm install --frozen-lockfile
+corepack pnpm --filter @basketikun/canvas-agent run build
+corepack pnpm run build:plugins
+corepack pnpm --filter @helishou/infinite-canvas-backend run build
+corepack pnpm --filter infinite-canvas run build
+corepack pnpm --filter @helishou/infinite-canvas-backend run start
 ```
 
 The build includes the local official-plugin registry. For another Backend, set VITE_BACKEND_URL in the Web build environment and allow the site's origin in Backend configuration.

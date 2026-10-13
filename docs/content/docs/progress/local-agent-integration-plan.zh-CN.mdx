@@ -67,8 +67,8 @@ npx -y @basketikun/canvas-agent
 
 ```bash
 cd canvas-agent
-npm install
-npm run build
+pnpm install --frozen-lockfile
+pnpm --filter @basketikun/canvas-agent run build
 node dist/index.js
 ```
 

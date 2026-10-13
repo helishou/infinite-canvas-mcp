@@ -131,6 +131,13 @@ def content_hash(value):
         value = {key: item for key, item in value.items() if key != "_continuity_report"}
     return _canvas_authored_content_hash(value)
 ''', encoding="utf-8")
+    compiler = root / "scripts/compile_h3.py"
+    binding_call = "        snapshot = resolve_bindings(production, seg, source.parent)"
+    replace(compiler, binding_call, binding_call + '''
+        # Keep the manifest and binding snapshot on the same frozen source revision.
+        snapshot["input_revision"] = revision
+        snapshot.pop("binding_sha256", None)
+        snapshot["binding_sha256"] = content_hash(snapshot)''')
     audit = root / "scripts/audit_storyboard_quality.py"
     text = audit.read_text(encoding="utf-8")
     text = text.replace('p.get("ledger", {}).get("initial", {}).get("props", {})', '(p.get("ledger", {}).get("initial", {}) if isinstance(p.get("ledger", {}).get("initial", {}), dict) else {}).get("props", {})')
@@ -274,14 +281,38 @@ def compile_segment(p, seg, *, draft=False):
     replace(references,
             '''        if node and ref.get("asset_version") != node.get("version"):
             errors.append("asset version conflict")''',
-            '''        if node and ref.get("asset_version") != node.get("version"):
-            # Subject Prompt v2 references may bind an exact archived result by
-            # content hash while retaining the asset's authored semantic version.
-            content_bound = (node.get("status") == "selected_result"
-                             and ref.get("asset_version") == "sha256:" + str(ref.get("sha256") or "")
-                             and ref.get("sha256") == node.get("sha256"))
+            '''        content_bound = (node.get("status") == "selected_result"
+                         and ref.get("asset_version") == "sha256:" + str(ref.get("sha256") or "")
+                         and bool(ref.get("sha256")))
+        if node and ref.get("asset_version") != node.get("version"):
+            # Subject Prompt v2 references pin their selected archived result by
+            # the per-reference content hash, independently of shared asset state.
             if not content_bound:
                 errors.append("asset version conflict")''')
+    replace(references,
+            '''        if media_status:
+            node_file = node.get("file")
+            if not node_file:
+                errors.append("generated asset file missing")
+            else:
+                if file and (base / file).resolve() != (base / node_file).resolve():
+                    errors.append("file conflicts with generated asset version")
+                file = node_file''',
+            '''        if media_status:
+            node_file = node.get("file")
+            if not node_file:
+                errors.append("generated asset file missing")
+            elif content_bound:
+                # A selected archived result is pinned by the per-reference hash.
+                # The shared asset plan may point at another result for this same asset.
+                file = file or node_file
+            else:
+                if file and (base / file).resolve() != (base / node_file).resolve():
+                    errors.append("file conflicts with generated asset version")
+                file = node_file''')
+    replace(references,
+            '        expected = node.get("sha256") if media_status else ref.get("sha256")',
+            '        expected = ref.get("sha256") if content_bound else (node.get("sha256") if media_status else ref.get("sha256"))')
     if 'media_status = node.get("status") in ("approved", "generated", "selected_result")' not in references.read_text(encoding="utf-8"):
         replace(references,
             '''        elif node:

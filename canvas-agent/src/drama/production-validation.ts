@@ -4,12 +4,12 @@ import { isH3StyleTemplateId } from "../plugins/minimax-h3/style-templates.js";
 import { currentCompilationArtifact } from "./compilation-scope.js";
 import { toJsonSchemaCompat } from "@modelcontextprotocol/sdk/server/zod-json-schema-compat.js";
 import { z } from "zod";
-import { directorPatchFields, productionContractVersion, productionOperationSchema, productionEditSchema, productionPublishSchema, productionCompileSchema, directorRunStartSchema, canonicalProduction, isSubjectPromptAssembly, scriptBlockSchema, type DirectorProduction, type ProductionDiagnostic } from "./production-contract.js";
+import { directorPatchFields, productionContractVersion, productionOperationSchema, productionEditSchema, productionPublishSchema, productionCompileSchema, directorRunStartSchema, canonicalProduction, isSubjectPromptAssembly, scriptBlockSchema, shotAudioBindingSchema, type DirectorProduction, type ProductionDiagnostic } from "./production-contract.js";
 
 const scene = { id: "scene-1", heading: "Interior", location: "Room", timeOfDay: "Day", blocks: [] };
 const block = { id: "block-1", kind: "action", text: "The door opens." };
 const examples: Record<string, unknown> = {
-    set_director_production: { director: { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "example", runtimeId: "a".repeat(40) + "-" + "b".repeat(16), version: "example" }, source: { prompt_assembly: { version: 2 }, subject_registry: [], shots: [], segments: [], utterances: [], asset_plan: [], character_registry: [], scene_registry: [], ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } }, sourceHash: "0".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], unresolved: [] } },
+    set_director_production: { director: { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "example", runtimeId: "a".repeat(40) + "-" + "b".repeat(16), version: "example" }, source: { version: 2, prompt_assembly: { version: 2 }, subject_registry: [], shots: [], segments: [], utterances: [], asset_plan: [], character_registry: [], scene_registry: [], ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } }, sourceHash: "0".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], unresolved: [] } },
     delete_director_subject: { id: "SUBJECT1" },
     create_manual_director_asset: { assetPlan: { id: "PROP1", kind: "prop", asset_name: "Prop", version: "v1", description: "", purpose: "", depends_on: [], status: "planned" }, assetCard: { id: "PROP1", asset_id: "PROP1", asset_kind: "prop", asset_version: "v1", prompt: "", references: [] } },
     upsert_director_subject: { subject: { id: "SUBJECT1", kind: "character", entityRef: { ownerKind: "episode", ownerId: "episode1", kind: "character", id: "CHARACTER1" }, pictureBindings: [
@@ -172,6 +172,45 @@ export function applyDirectorSourcePatch(director: DirectorProduction, entity: k
                     director.source.style_lock = { ...record(director.source.style_lock), anchor_asset_id: "" };
                 }
             }
+        } else if (entity === "spec") {
+            // 文档级制作规格（fps、总时长、Clip 上限、交付范围、提示词细则）直接挂在 source 顶层，无对象 ID。
+            if (id) throw new Error("制作规格不接受对象 ID");
+            const forbidden = Object.keys(patch).filter(key => !(directorPatchFields.spec as readonly string[]).includes(key));
+            if (forbidden.length) throw new Error(`不允许直接修改规格字段：${forbidden.join(", ")}`);
+            for (const label of ["fps_num", "fps_den"]) if (Object.hasOwn(patch, label) && (!Number.isInteger(patch[label]) || Number(patch[label]) < 1)) throw new Error(`${label} 必须是 ≥1 的整数`);
+            if (Object.hasOwn(patch, "generation_clip_limit") && (!Number.isInteger(patch.generation_clip_limit) || Number(patch.generation_clip_limit) < 1)) throw new Error("generation_clip_limit 必须是 ≥1 的整数");
+            if (Object.hasOwn(patch, "delivery_scope") && typeof patch.delivery_scope !== "string") throw new Error("delivery_scope 必须是文字");
+            if (Object.hasOwn(patch, "prompt_detail_policy")) {
+                const policy = patch.prompt_detail_policy;
+                if (!policy || typeof policy !== "object" || Array.isArray(policy) || typeof (policy as Record<string, unknown>).profile !== "string" || !String((policy as Record<string, unknown>).profile).trim()) throw new Error("prompt_detail_policy 必须是带非空 profile 的对象");
+            }
+            if (Object.hasOwn(patch, "production_total_duration")) {
+                const value = String(patch.production_total_duration ?? "").trim();
+                if (!value) delete director.source.production_total_duration;
+                else if (!/^\d+(\.\d+)?$/.test(value) && !/^\d+\/\d+$/.test(value)) throw new Error("production_total_duration 只接受秒数或「帧数/每秒帧数」分数");
+                else director.source.production_total_duration = /^\d+(\.\d+)?$/.test(value) ? Number(value) : value;
+            }
+            for (const key of ["fps_num", "fps_den", "generation_clip_limit", "delivery_scope", "prompt_detail_policy"] as const) if (Object.hasOwn(patch, key)) {
+                if (key === "delivery_scope" && !String(patch[key]).trim()) delete director.source[key];
+                else director.source[key] = patch[key];
+            }
+        } else if (entity === "story") {
+            // 结构化故事线（梗概/A-B-C 支线/五幕弧光）合并进 source.story，保留其余键。
+            if (id) throw new Error("故事线结构不接受对象 ID");
+            const allowed = directorPatchFields.story as readonly string[];
+            const forbidden = Object.keys(patch).filter(key => !allowed.includes(key));
+            if (forbidden.length) throw new Error(`不允许直接修改故事线字段：${forbidden.join(", ")}`);
+            const story = record(director.source.story);
+            for (const key of ["synopsis", "A", "B", "C"] as const) if (Object.hasOwn(patch, key)) {
+                if (typeof patch[key] !== "string") throw new Error(`故事线 ${key} 必须是文字`);
+                story[key] = String(patch[key]);
+            }
+            if (Object.hasOwn(patch, "five_stage_arc")) {
+                const arc = patch.five_stage_arc;
+                if (!Array.isArray(arc) || arc.length !== 5 || arc.some(item => typeof item !== "string" || !String(item).trim())) throw new Error("five_stage_arc 必须是恰好五个非空阶段说明");
+                story.five_stage_arc = arc.map(String);
+            }
+            if (Object.keys(patch).length) director.source.story = story;
         } else {
             if (!id) throw new Error("源对象修改缺少稳定 ID");
             const collection = ({ scene: "script_scenes", environment: "scene_registry", character: "character_registry", asset: "asset_plan", asset_card: "asset_cards", shot: "shots", segment: "segments" } as const)[entity];
@@ -204,6 +243,52 @@ export function applyDirectorSourcePatch(director: DirectorProduction, entity: k
                     if (otherPlan && planStatus !== lockStatus && director.assets[anchorId]?.status !== planStatus)
                         throw new Error(`STYLE_MOTHER 状态必须与 style_lock.status（${lockStatus}）一致；请一并调整 style_lock 或先审批资产`);
                 }
+            }
+            if (entity === "shot" && Object.hasOwn(patch, "features")) {
+                const features = patch.features;
+                if (!features || typeof features !== "object" || Array.isArray(features)) throw new Error("镜头特性必须是布尔标记对象");
+                for (const [key, value] of Object.entries(features)) if (typeof value !== "boolean") throw new Error(`镜头特性 ${key} 只能是 true 或 false`);
+            }
+            if (entity === "shot" && Object.hasOwn(patch, "combat") && patch.combat !== null) {
+                if (!patch.combat || typeof patch.combat !== "object" || Array.isArray(patch.combat)) throw new Error("打戏数据必须是对象，或用 null 清除");
+                if (record(patch.features).combat === false) throw new Error("features.combat 关闭时不能保存打戏数据");
+            }
+            if (entity === "shot" && Object.hasOwn(patch, "performance") && patch.performance !== null) {
+                const performance = patch.performance;
+                if (!performance || typeof performance !== "object" || Array.isArray(performance)) throw new Error("表演设计必须是对象，或用 null 清除");
+                const data = record(performance);
+                const tracks = data.tracks;
+                if (tracks !== undefined && (!tracks || typeof tracks !== "object" || Array.isArray(tracks))) throw new Error("表演轨道必须是对象");
+                if (tracks && typeof tracks === "object" && !Array.isArray(tracks)) for (const [name, raw] of Object.entries(tracks)) {
+                    const track = record(raw);
+                    if (!Number.isInteger(track.start) || !Number.isInteger(track.end) || Number(track.start) < 0 || Number(track.end) < Number(track.start)) throw new Error(`表演轨道 ${name} 的 start/end 帧无效`);
+                    if (typeof track.cue !== "string" || typeof track.visibility !== "string") throw new Error(`表演轨道 ${name} 需要 cue 与 visibility 文本`);
+                }
+            }
+            if (entity === "segment" && Object.hasOwn(patch, "animation_term_ids")) {
+                if (!Array.isArray(patch.animation_term_ids) || patch.animation_term_ids.some(item => typeof item !== "string" || !item.trim())) throw new Error("动画术语 ID 必须是非空字符串数组");
+            }
+            if (entity === "segment" && Object.hasOwn(patch, "animation_term_evidence")) {
+                if (!Array.isArray(patch.animation_term_evidence)) throw new Error("动画术语证据必须是数组");
+                const required = ["term_id", "term", "time_window", "observable_fact", "camera_or_layout", "sound_or_qa"];
+                for (const [index, item] of patch.animation_term_evidence.entries()) {
+                    const evidence = record(item);
+                    for (const key of required) if (typeof evidence[key] !== "string" || !String(evidence[key]).trim()) throw new Error(`动画术语证据第 ${index + 1} 条缺少 ${key}`);
+                }
+            }
+            if (entity === "segment" && Object.hasOwn(patch, "motion_profile")) {
+                const profile = patch.motion_profile;
+                if (!profile || typeof profile !== "object" || Array.isArray(profile)) throw new Error("运动档案必须是字符串键值对象");
+                for (const [key, value] of Object.entries(profile)) if (typeof value !== "string") throw new Error(`运动档案 ${key} 只能是文字说明`);
+            }
+            if (entity === "segment" && Object.hasOwn(patch, "summary")) {
+                if (typeof patch.summary !== "string") throw new Error("段摘要必须是文字");
+                if (!String(patch.summary).trim()) { delete patch.summary; delete target.summary; }
+            }
+            if (entity === "segment" && Object.hasOwn(patch, "audio_bindings")) {
+                const parsed = z.array(shotAudioBindingSchema).safeParse(patch.audio_bindings);
+                if (!parsed.success) throw new Error(`音频绑定不合格：${parsed.error.issues.slice(0, 4).map(issue => issue.path.join(".") || "(根)").join(", ")}`);
+                patch.audio_bindings = parsed.data;
             }
             const previousDuration = Number(target.duration_frames);
             Object.assign(target, patch);

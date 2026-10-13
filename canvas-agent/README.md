@@ -21,9 +21,9 @@ Debug 日志会以 `[DEBUG][HH:mm:ss]` 等传统格式输出到终端，并按�
 本仓库开发时也可以直接运行：
 
 ```bash
+corepack pnpm install --frozen-lockfile
+corepack pnpm --filter @basketikun/canvas-agent run build
 cd canvas-agent
-npm install
-npm run build
 node dist/index.js
 ```
 

@@ -8,7 +8,7 @@ import { Alert, App, Button, Input, InputNumber, Modal, Select, Switch, Tag } fr
 import { ArrowRight, ArrowLeft, ArrowUp, ArrowDown, ArrowDownToLine, Check, Pause, Play, RotateCcw, WandSparkles, Users, MapPin, Image as ImageIcon, Film, Pencil, BookOpen, Search, ChevronDown, Plus, Trash2, TriangleAlert, Volume2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { directorModules, resolveSubjectPictureBindingIds, directorProductionSchema, isSubjectPromptAssembly, canonicalProduction, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
-import { backendMediaUrl, fetchProductionWorkbench, type ProductionTarget, type ProductionSceneAction, type BackendRuntimeTask, type EpisodeProduction, type ProductionBatch, type ProductionReadiness } from "@/services/backend-api";
+import { backendMediaUrl, fetchProductionWorkbench, type ProductionCompilationDiagnostic, type ProductionTarget, type ProductionSceneAction, type BackendRuntimeTask, type EpisodeProduction, type ProductionBatch, type ProductionReadiness } from "@/services/backend-api";
 import { nanoid } from "nanoid";
 import { MediaImage } from "@/components/media/media-image";
 import { canvasNodeImage } from "@/lib/canvas/canvas-image-renderability";
@@ -25,8 +25,9 @@ import { SubjectShotEditor } from "./subject-shot-editor";
 import { keyframeBindingState } from "./keyframe-binding-state";
 import { SubjectStoryboardWorkbench, type StoryboardViewMemory } from "./subject-storyboard-workbench";
 import { productionWorkbenchValue, subjectDisplayName, subjectDescriptionField } from "./subject-shot-draft";
-import { AudioDesignEditor, SevenStepsReferencesEditor } from "./audio-design-editor";
+import { AudioDesignEditor, SevenStepsReferencesEditor, SegmentAudioBindingEditor, type AudioSourceEntry } from "./audio-design-editor";
 import { ReferenceNodeLink } from "./reference-node-link";
+import { SourceJsonEditor } from "./source-json-editor";
 import { matchesProductionEntityTarget, subjectPictureNavigation } from "./subject-picture-navigation";
 import { PictureBindingEditor } from "./picture-binding-editor";
 import { SmartImageNodePicker } from "./smart-image-node-picker";
@@ -51,6 +52,26 @@ const objectWorkspaces: Array<{ key: Exclude<DirectorWorkspace, "overview" | "ad
   { key: "continuity", modules: ["continuity"], targetKinds: ["segment"] },
   { key: "production", modules: ["model"], targetKinds: ["segment"] },
 ];
+const COMBAT_JSON_FIELD_ORDER = ["force_source", "trajectory", "contact", "resistance", "impact_hold", "transfer", "recoil", "chain", "timing"];
+const COMBAT_JSON_NESTED_FIELD_ORDER: Record<string, string[]> = {
+  chain: ["attack", "response", "result", "continuation"],
+  timing: ["axis_lock", "spatial_direction", "speed_curve", "camera_sync", "direction_facts", "speed_profile", "phases", "slow_motion"],
+  direction_facts: ["origin", "target", "screen_direction", "body_orientation", "weapon_direction", "support_point", "result_direction"],
+  speed_profile: ["support", "acceleration", "contact_read", "recovery"],
+  phases: ["name", "start", "end", "playback", "purpose", "motion", "positions", "orientation", "action", "combat_logic", "camera", "dof", "composition", "dynamics", "tail_frame"],
+  combat_logic: ["attacker", "target", "target_point", "intent", "defender_state", "response", "result", "next_authority"],
+  camera: ["framing", "movement", "motion_vector", "action_anchor"],
+  slow_motion: ["enabled", "start", "end", "rate", "trigger", "reason", "exit"],
+};
+const PERFORMANCE_JSON_FIELD_ORDER = ["beat_id", "dominant_track", "tracks", "acting_design", "strategy"];
+const PERFORMANCE_JSON_NESTED_FIELD_ORDER: Record<string, string[]> = {
+  tracks: ["gaze", "body_hands", "breath", "shoulder", "dialogue"],
+  acting_design: ["objective", "tactic", "subtext", "trigger", "personality_signature", "action_units", "motion_arc", "speech_delivery", "cut_behavior", "continuity_in", "continuity_out", "exclusions"],
+  gaze: ["start", "end", "cue", "visibility"], body_hands: ["start", "end", "cue", "visibility"], breath: ["start", "end", "cue", "visibility"], shoulder: ["start", "end", "cue", "visibility"], dialogue: ["start", "end", "cue", "visibility"],
+  action_units: ["start", "end", "cause", "action", "gaze", "face", "follow_through", "speech_anchor", "delivery", "prop", "camera", "sound"],
+  motion_arc: ["anticipation", "accent", "follow_through", "settle"],
+  speech_delivery: ["voice_timbre", "pace", "pitch", "volume", "pauses", "emphasis"],
+};
 
 function Image({ src, alt, className }: { src: string; alt: string; className?: string }) {
   if (alt.startsWith("<Video")) return <video className="max-h-24 max-w-48 rounded object-contain" controls preload="metadata" src={src} aria-label={alt} />;
@@ -384,6 +405,10 @@ function ShotSourceFields({ shot, busy, names, characters, fps, onSave, keyframe
     </div>
     {/* A 类补齐：源稿结构化声音（foley / low_frequency_hz）原先完全不可见，这里就地编辑，走 shot patch 链路。 */}
     <details className="rounded-lg border border-border" data-shot-audio-design open={Boolean((shot.audio as Record<string, any> | undefined)?.foley?.length)}><summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-muted-foreground"><span className="flex items-center gap-1.5"><Volume2 className="size-3.5" />{t("director.atomic.soundDesign")}</span></summary>{shot.audio && typeof shot.audio === "object" && !Array.isArray(shot.audio) ? <div className="p-3 pt-2"><AudioDesignEditor value={shot.audio} disabled={busy || saving} onPersist={async nextAudio => { if (saving) return false; setSaving(true); const saved = await onSave({ audio: nextAudio }); setSaving(false); return saved !== false; }} /></div> : <p className="px-3 pb-3 text-xs text-muted-foreground">{t("director.atomic.noStructuredAudio")}</p>}</details>
+ {/* B 类补齐：镜头特性即时保存，兼容尚未初始化 features 的旧源稿。 */}
+ {(() => { const current = shot.features && typeof shot.features === "object" && !Array.isArray(shot.features) ? shot.features as Record<string, unknown> : {}; const features = { core_emotion: false, combat: false, supernatural_vfx: false, colossal: false, ...current }; return <><div className="flex flex-wrap gap-x-4 gap-y-2 rounded-lg border border-border px-3 py-2" data-shot-features aria-label={t("director.studio.shotFeatures")}>{Object.entries(features).map(([key, value]) => <label key={key} className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground"><Switch size="small" checked={Boolean(value)} disabled={busy || saving} onChange={next => { const updated = { ...features, [key]: next }; void onSave({ features: updated, ...(key === "combat" ? next ? (!shot.combat ? { combat: {} } : {}) : { combat: null } : {}) }); }} />{t(`director.studio.shotFeature.${key}`, key)}</label>)}</div>
+ <details className="rounded-lg border border-border p-3" data-shot-performance-editor><summary className="cursor-pointer text-xs font-medium">{t("director.studio.performancePayload")}</summary><div className="mt-2"><SourceJsonEditor title={t("director.studio.performancePayload")} hint={t("director.studio.performancePayloadHint")} value={shot.performance} fieldOrder={PERFORMANCE_JSON_FIELD_ORDER} nestedFieldOrder={PERFORMANCE_JSON_NESTED_FIELD_ORDER} disabled={busy || saving} onSave={next => onSave({ performance: next })} /></div></details>
+ {Boolean(features.combat || shot.combat) && <details className="rounded-lg border border-border p-3" data-shot-combat-editor><summary className="cursor-pointer text-xs font-medium">{t("director.studio.combatPayload")}</summary><div className="mt-2"><SourceJsonEditor title={t("director.studio.combatPayload")} hint={t("director.studio.combatPayloadHint")} value={shot.combat} fieldOrder={COMBAT_JSON_FIELD_ORDER} nestedFieldOrder={COMBAT_JSON_NESTED_FIELD_ORDER} disabled={busy || saving} onSave={next => onSave({ combat: next })} /></div></details>}</>; })()}
     {includeCompleteSource && <details className="text-xs text-muted-foreground" data-shot-complete-source-details><summary className="cursor-pointer">{t("director.studio.shotCompleteSource")}</summary><div className="mt-3" data-shot-complete-source><SourceData value={shot} names={names} /></div></details>}
   </section>;
 }
@@ -585,7 +610,7 @@ export function DirectorPanel({
   onPrepareEntities, onUpsertSubject, onDeleteSubject, onDeleteScene, onDeleteAsset, onRemoveCanvasAsset, onPatchCanvasAsset, onCreateManualAsset, onSaveV2Shot, onRepartitionClips, onEditShot,
   compact = false, navigationTitleVisible = false, onSaveScript, generationSupported = true, assetScopeHint,
   onBrief, onPatch, onEditCanvasClip, onAdoptDirectorFields, onAdoptClipStyle, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onPublish, onReplace, onAskDirector, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRestore, onRefresh, onSceneCommand, sceneCommandPending, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onCheckContinuity, onContinuitySnapshot,
-  onCompile, compileBusy = false, compilePending = false, compileError = "", compileNotice = "",
+  onCompile, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets,
 }: {
   workspace: DirectorWorkspace; director?: DirectorProduction; production: EpisodeProduction; readiness?: ProductionReadiness; run?: ProductionBatch | null;
   continuityReport?: import("@/services/backend-api").ProductionContinuity;
@@ -605,7 +630,7 @@ export function DirectorPanel({
   onPromoteExistingSharedAsset: (assetId: string, title: string) => void;
   runtimeTasks?: BackendRuntimeTask[];
   onBrief: (brief: string) => Promise<void> | void;
-  onPatch: (entity: "style" | "scene" | "environment" | "character" | "asset" | "asset_card" | "shot" | "segment", id: string | undefined, patch: Record<string, unknown>) => Promise<boolean> | void;
+  onPatch: (entity: "style" | "spec" | "story" | "scene" | "environment" | "character" | "asset" | "asset_card" | "shot" | "segment", id: string | undefined, patch: Record<string, unknown>) => Promise<boolean> | void;
   onPrepareEntities?: () => Promise<void>;
   onUpsertSubject?: (subject: Extract<ProductionOperation, { type: "upsert_director_subject" }>["subject"]) => Promise<boolean>;
   onDeleteSubject?: (id: string) => Promise<boolean>;
@@ -651,6 +676,8 @@ export function DirectorPanel({
   compilePending?: boolean;
   compileError?: string;
   compileNotice?: string;
+  compileDiagnostics?: ProductionCompilationDiagnostic[];
+  compileTargets?: { sourceHash: string; items: Array<{ targetId: string; status: string }> };
   runStartPending: boolean;
   activeTargetIds: string[];
 }) {
@@ -1245,7 +1272,60 @@ export function DirectorPanel({
 
   const renderStoryWorkspace = () => <div className="space-y-3">
     <ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t("director.studio.script")} summary={t("director.studio.scriptSummary", { scenes: sceneGroups.length, characters: characters.length })} actions={<> <Button icon={<Plus className="size-4" />} disabled={busy || !d} onClick={() => void addScene()}>{t("director.workspace.addScene")}</Button><Button icon={editingScript ? <BookOpen className="size-4" /> : <Pencil className="size-4" />} disabled={!activeScene} onClick={() => setEditingScript(value => !value)}>{t(editingScript ? "director.studio.readScript" : "director.studio.editScript")}</Button><Button icon={<WandSparkles className="size-4" />} disabled={busy} onClick={() => onAskDirector({ workspace: "story", targetId: activeScene?.key })}>{t("director.studio.collaborate")}</Button> </>} />
-    <details className="border-b border-border pb-2"><summary className="cursor-pointer text-sm font-medium">{t("director.studio.creativeNotes")}</summary><div className="mt-3 space-y-3"><Input.TextArea aria-label={t("director.studio.creativeNotes")} value={briefDraft} disabled={busy} autoSize={{ minRows: 4, maxRows: 10 }} onChange={event => onBriefDraftChange(event.target.value)} /><Button disabled={busy || briefDraft === String(source.brief || "")} onClick={() => void onBrief(briefDraft)}>{t("director.workspace.saveBrief")}</Button></div></details>
+    <details className="border-b border-border pb-2">
+      <summary className="cursor-pointer text-sm font-medium">{t("director.studio.creativeNotes")}</summary>
+      <div className="mt-3 space-y-3">
+        <Input.TextArea
+          aria-label={t("director.studio.creativeNotes")}
+          value={briefDraft}
+          disabled={busy}
+          autoSize={{ minRows: 4, maxRows: 10 }}
+          onChange={event => onBriefDraftChange(event.target.value)}
+        />
+        <Button disabled={busy || briefDraft === String(source.brief || "")} onClick={() => void onBrief(briefDraft)}>
+          {t("director.workspace.saveBrief")}
+        </Button>
+        {Object.keys(story).length > 0 && <section className="space-y-3 rounded-lg border border-border p-3" data-story-structure aria-label={t("director.studio.storyStructure")}>
+          <p className="text-sm font-medium">{t("director.studio.storyStructure")}</p>
+          {(["synopsis", "A", "B", "C"] as const).map(key => <label key={key} className="grid gap-1">
+            <span className="text-xs text-muted-foreground">{t(`director.studio.storyThread.${key}`, key)}</span>
+            <SourceField
+              value={String(story[key] ?? "")}
+              draftValue={sourceDrafts[`story:${key}`]}
+              onDraftChange={value => onSourceDraftChange(`story:${key}`, value)}
+              multiline rows={2} disabled={busy}
+              onCommit={value => onPatch("story", undefined, { [key]: value })}
+            />
+          </label>)}
+          <div className="space-y-1.5">
+            <span className="text-xs font-medium text-muted-foreground">{t("director.studio.fiveStageArc")}</span>
+            <div className="grid gap-1.5 md:grid-cols-5">
+              {[0, 1, 2, 3, 4].map(index => <Input
+                key={`arc:${String(story.five_stage_arc?.[index] ?? "")}:${index}`}
+                size="small"
+                defaultValue={String(story.five_stage_arc?.[index] ?? "")}
+                placeholder={`${index + 1}`}
+                disabled={busy}
+                aria-label={t("director.studio.fiveStageArcSlot", { number: index + 1 })}
+                onBlur={async event => {
+                  onSourceDraftChange(`story:arc:${index}`, event.target.value);
+                  const arcs = [0, 1, 2, 3, 4].map(slot => slot === index
+                    ? event.target.value
+                    : String(sourceDrafts[`story:arc:${slot}`] ?? story.five_stage_arc?.[slot] ?? "")).map(text => text.trim());
+                  if (!arcs.every(Boolean)) return;
+                  const saved = await onPatch("story", undefined, { five_stage_arc: arcs });
+                  if (saved !== false) for (const slot of [0, 1, 2, 3, 4]) onSourceDraftChange(`story:arc:${slot}`, undefined);
+                }}
+              />)}
+            </div>
+          </div>
+          {(["synopsis", "A", "B", "C"] as const).some(key => sourceDrafts[`story:${key}`] !== undefined)
+            || [0, 1, 2, 3, 4].some(index => sourceDrafts[`story:arc:${index}`] !== undefined)
+            ? <p className="text-xs text-amber-600">{t("director.studio.unsavedText")}</p>
+            : null}
+        </section>}
+      </div>
+    </details>
     {!d ? <Alert type="info" message={t("director.workspace.storyStartsFromBrief")} /> : !activeScene ? <Alert type="info" message={t("director.workspace.storyNotDrafted")} description={t("director.workspace.storyNotDraftedHint")} /> : <div className="grid items-start gap-6 md:grid-cols-[190px_minmax(0,1fr)] xl:grid-cols-[190px_minmax(0,1fr)_190px]">
       <nav aria-label={t("director.studio.sceneDirectory")} className="min-w-0 md:sticky md:top-4"><h3 className="mb-3 text-xs font-medium text-muted-foreground">{t("director.studio.sceneDirectory")}</h3><div className="flex gap-2 overflow-x-auto pb-2 md:flex-col md:overflow-visible">
         {sceneGroups.map((group, index) => <button key={group.key} type="button" aria-current={group.key === activeScene.key ? "true" : undefined} onClick={() => setActiveSceneKey(group.key)} className={`flex min-w-40 items-start gap-3 rounded-lg px-3 py-3 text-left transition-colors md:min-w-0 ${group.key === activeScene.key ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"}`}><span className="pt-0.5 text-xs tabular-nums">{String(index + 1).padStart(2, "0")}</span><span className="min-w-0"><strong className="block break-words text-sm font-medium">{sceneTitle(group, index)}</strong><span className="mt-1 block text-xs">{t("director.studio.blockCount", { count: Array.isArray(group.blocks[0]?.blocks) ? group.blocks[0].blocks.length : group.blocks.length })}</span></span></button>)}
@@ -1556,7 +1636,7 @@ export function DirectorPanel({
         return <div className="space-y-4">{scopedSegments.map(segment => <section key={segment.id} className="border-b border-border pb-4"><h3 className="text-sm font-medium">{segmentTitle(String(segment.id))}</h3><SegmentGroupEditor segment={segment} shots={scopedShots} segments={scopedSegments} fps={fps} draftValue={sourceDrafts[`segment:${segment.id}:shot_ids`]} onDraftChange={value => onSourceDraftChange(`segment:${segment.id}:shot_ids`, value)} disabled={busy || !scope.editable} onSave={onRegroup} /></section>)}</div>;
       }}
       onClip={id => onNavigate("production", { kind: "segment", id })}
-      busy={busy} compileBusy={compileBusy} compilePending={compilePending} compileError={compileError} compileNotice={compileNotice} onCompile={onCompile}
+      busy={busy} compileBusy={compileBusy} compilePending={compilePending} compileError={compileError} compileNotice={compileNotice} compileDiagnostics={compileDiagnostics} compileTargets={compileTargets} onCompile={onCompile}
       onDiscuss={targetId => onAskDirector({ workspace: "shots", targetId })} onNavigate={onNavigate} />;
     return <div className="space-y-3"><Alert type="info" message={t("director.workspace.noShots")} /><Button type="text" disabled={busy} icon={<WandSparkles className="size-3.5" />} onClick={() => onAskDirector({ workspace: "shots" })}>{t("director.studio.collaborate")}</Button></div>;
   };
@@ -1618,7 +1698,13 @@ export function DirectorPanel({
           <div className="flex flex-wrap items-start justify-between gap-2"><div className="min-w-0"><h3 className="break-words font-semibold">{targetName(selected.kind, selected.targetId, selected.title)}</h3><p className="mt-1 text-xs text-muted-foreground">{t(`director.generation.kind.${selected.kind}`)}{duration !== undefined && ` · ${formatSeconds(duration)}s`}</p></div><Tag color={selected.status === "ready" ? "green" : selected.status === "blocked" ? "orange" : undefined}>{active ? t("director.canvasOverlay.stage.running") : t(`director.workspace.targetStatus.${selected.status}`)}</Tag></div>
           {segment && <p className="text-xs text-muted-foreground">{t("director.generation.containsShots", { shots: (segment.shot_ids || []).map((id: string) => shotTitle(String(id))).join(" · ") })}</p>}
           {/* A 类补齐：段级整体声景 / 非介观音乐原先只读（只在提示词里出现），契约允许 patch，补上直接编辑。 */}
-          {selected.kind === "segment" && segment && <div className="space-y-2" data-generation-segment-sound>{(["overall_soundscape", "non_diegetic_music"] as const).map(field => <label key={field} className="grid gap-1 text-xs text-muted-foreground"><span>{t(field === "overall_soundscape" ? "director.workspace.overallSoundscape" : "director.workspace.nonDiegeticMusic")}</span><SourceField value={String(segment[field] || "")} draftValue={sourceDrafts[`segment:${String(segment.id)}:${field}`]} onDraftChange={value => onSourceDraftChange(`segment:${String(segment.id)}:${field}`, value)} multiline rows={2} disabled={busy} onCommit={value => onPatch("segment", String(segment.id), { [field]: value })} /></label>)}</div>}
+          {selected.kind === "segment" && segment && <div className="space-y-3" data-generation-segment-sound>
+            <label className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.workspace.segmentSummary")}</span><SourceField value={String(segment.summary || "")} draftValue={sourceDrafts[`segment:${String(segment.id)}:summary`]} onDraftChange={value => onSourceDraftChange(`segment:${String(segment.id)}:summary`, value)} multiline rows={2} disabled={busy} onCommit={value => onPatch("segment", String(segment.id), { summary: value })} /></label>
+            {(["overall_soundscape", "non_diegetic_music"] as const).map(field => <label key={field} className="grid gap-1 text-xs text-muted-foreground"><span>{t(field === "overall_soundscape" ? "director.workspace.overallSoundscape" : "director.workspace.nonDiegeticMusic")}</span><SourceField value={String(segment[field] || "")} draftValue={sourceDrafts[`segment:${String(segment.id)}:${field}`]} onDraftChange={value => onSourceDraftChange(`segment:${String(segment.id)}:${field}`, value)} multiline rows={2} disabled={busy} onCommit={value => onPatch("segment", String(segment.id), { [field]: value })} /></label>)}
+            {segment.motion_profile && typeof segment.motion_profile === "object" && !Array.isArray(segment.motion_profile) && <section className="space-y-2 rounded border border-border p-3" data-segment-motion-profile><p className="text-xs font-medium">{t("director.workspace.motionProfile")}</p>{Object.entries(segment.motion_profile as Record<string, unknown>).map(([field, raw]) => <label key={field} className="grid gap-1 text-xs text-muted-foreground"><span>{t(`director.workspace.motionField.${field}`, field)}</span><SourceField value={String(raw ?? "")} draftValue={sourceDrafts[`segment:${String(segment.id)}:motion_profile:${field}`]} onDraftChange={value => onSourceDraftChange(`segment:${String(segment.id)}:motion_profile:${field}`, value)} disabled={busy} multiline rows={field.includes("principle") ? 2 : 1} onCommit={value => onPatch("segment", String(segment.id), { motion_profile: { ...(segment.motion_profile as Record<string, unknown>), [field]: value } })} /></label>)}</section>}
+            <details className="rounded border border-border p-3" data-segment-audio-bindings><summary className="cursor-pointer text-xs font-medium">{t("director.workspace.audioBindings")}</summary><div className="mt-2"><SegmentAudioBindingEditor bindings={Array.isArray(segment.audio_bindings) ? segment.audio_bindings : []} shots={(segment.shot_ids || []).map(String)} sources={(source._canvas_subject_audio_sources && typeof source._canvas_subject_audio_sources === "object" ? source._canvas_subject_audio_sources : {}) as Record<string, AudioSourceEntry>} projectId={String(source.project_id || canvasId)} disabled={busy} onPersist={next => onPatch("segment", String(segment.id), { audio_bindings: next }) as Promise<boolean>} /></div></details>
+            <details className="rounded border border-border p-3" data-segment-animation-term-editor><summary className="cursor-pointer text-xs font-medium">{t("director.studio.animationTermsPayload")}</summary><div className="mt-2"><SourceJsonEditor title={t("director.studio.animationTermsPayload")} hint={t("director.studio.animationTermsPayloadHint")} value={{ animation_term_ids: Array.isArray(segment.animation_term_ids) ? segment.animation_term_ids : [], animation_term_evidence: Array.isArray(segment.animation_term_evidence) ? segment.animation_term_evidence : [] }} fieldOrder={["animation_term_ids", "animation_term_evidence"]} nestedFieldOrder={{ animation_term_evidence: ["term_id", "term", "time_window", "observable_fact", "camera_or_layout", "sound_or_qa"] }} disabled={busy} onSave={next => { if (!Array.isArray(next.animation_term_ids) || !Array.isArray(next.animation_term_evidence)) return false; return onPatch("segment", String(segment.id), next) as Promise<boolean>; }} /></div></details>
+          </div>}
           {selected.blockers.length > 0 && <div className="space-y-2" data-generation-blockers><h4 className="text-sm font-medium">{t("director.generation.currentIssues")}</h4><ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">{selected.blockers.map((reason, index) => <li key={`${index}:${reason}`}>{humanMessage(reason)}</li>)}</ul></div>}
           {selected.notice && <p className="text-sm text-muted-foreground">{humanMessage(selected.notice)}</p>}
           <div className="flex flex-wrap items-center gap-2" data-generation-target-actions>
@@ -1640,6 +1726,14 @@ export function DirectorPanel({
       <Select className="min-w-48" disabled={busy} value={production.draft.settings.videoAspectRatio || ''} onChange={value => onSettings({ videoAspectRatio: value || null, videoAspectRatioConfirmed: true })} options={['', '9:16', '16:9', '1:1', '4:3', '3:4', '2:3', '3:2', '21:9'].map(value => ({ value, label: value || t('director.workspace.inheritVideoAspectRatio') }))} />
       <p className="mt-2 text-xs text-muted-foreground">{t('director.workspace.videoAspectRatioHint')}</p>
     </section>
+    {d && <section className="grid gap-3 rounded-lg border border-border bg-card p-4 md:grid-cols-2" data-production-spec-settings aria-label={t("director.workspace.productionSpec")}>
+      <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.fps")}</span><div className="flex items-center gap-2"><InputNumber className="w-24" min={1} precision={0} disabled={busy || !onPatch} value={Number(source.fps_num ?? 24)} onChange={value => { if (Number.isInteger(value)) void onPatch("spec", undefined, { fps_num: value }); }} /><span className="text-xs text-muted-foreground">/</span><InputNumber className="w-24" min={1} precision={0} disabled={busy || !onPatch} value={Number(source.fps_den ?? 1)} onChange={value => { if (Number.isInteger(value)) void onPatch("spec", undefined, { fps_den: value }); }} /></div></label>
+      <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.totalDuration")}</span><Input key={`spec-duration:${String(source.production_total_duration ?? "")}`} defaultValue={String(source.production_total_duration ?? "")} placeholder="90 · 2160/24" disabled={busy || !onPatch} onBlur={event => { const value = event.target.value.trim(); if (!value || /^\d+(\.\d+)?$/.test(value) || /^\d+\/\d+$/.test(value)) void onPatch("spec", undefined, { production_total_duration: value }); else event.target.value = String(source.production_total_duration ?? ""); }} /></label>
+      <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.clipLimit")}</span><InputNumber className="w-28" min={1} precision={0} disabled={busy || !onPatch} value={Number(source.generation_clip_limit ?? 0) || null} placeholder="12" onChange={value => { if (Number.isInteger(value)) void onPatch("spec", undefined, { generation_clip_limit: value }); }} /></label>
+      <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.deliveryScope")}</span><Select className="min-w-40" disabled={busy || !onPatch} value={String(source.delivery_scope ?? "prompt_only")} options={[{ value: "prompt_only", label: t("director.workspace.promptOnly") }, { value: "full_production", label: t("director.workspace.fullProduction") }]} onChange={value => void onPatch("spec", undefined, { delivery_scope: value })} /></label>
+      <label className="grid gap-1 text-sm md:col-span-2"><span className="font-medium">{t("director.workspace.detailPolicy")}</span><Input key={`spec-policy:${String((source.prompt_detail_policy as Record<string, unknown> | undefined)?.profile ?? "")}`} defaultValue={String((source.prompt_detail_policy as Record<string, unknown> | undefined)?.profile ?? "")} placeholder="ref2va_v2" disabled={busy || !onPatch} onBlur={event => { const profile = event.target.value.trim(); if (profile) void onPatch("spec", undefined, { prompt_detail_policy: { ...((source.prompt_detail_policy && typeof source.prompt_detail_policy === "object" && !Array.isArray(source.prompt_detail_policy) ? source.prompt_detail_policy : {}) as Record<string, unknown>), profile } }); }} /></label>
+      <p className="text-xs text-muted-foreground md:col-span-2">{t("director.workspace.specHint")}</p>
+    </section>}
     {d && <section className="grid gap-3 rounded-lg border border-border bg-card p-4 md:grid-cols-2"><label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.contentDelivery")}</span><Select value={delivery} disabled={busy} options={[{ value: "auto_file_batch", label: t("director.workspace.autoFileBatch") }, { value: "interactive_segment", label: t("director.workspace.interactiveSegment") }]} onChange={value => onWorkflow({ contentDeliveryMode: value })} /></label><label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.mediaProduction")}</span><Select value={mode} disabled={busy} options={[{ value: "prompt_only", label: t("director.workspace.promptOnly") }, { value: "per_item", label: t("director.workspace.perItem") }, { value: "automatic", label: t("director.workspace.automatic") }]} onChange={value => onWorkflow({ mediaProductionMode: value })} /></label><p className="text-xs text-muted-foreground md:col-span-2">{t("director.workspace.settingsNextRun")}</p></section>}
 </div></details>
     </details>
