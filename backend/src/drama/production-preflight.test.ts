@@ -41,7 +41,7 @@ test("edit diagnostics and successful preflight leave every production table unc
 
 test("missing patch targets and unavailable publication/generation are diagnosed without mutation", t => {
     const { db, service } = fixture(t);
-    const source = { brief: "Plan a character", shots: [], segments: [], asset_plan: [] };
+    const source = { version: 2, prompt_assembly: { version: 2 }, brief: "Plan a character", fps_num: 24, fps_den: 1, subject_registry: [], character_registry: [], scene_registry: [], shots: [], segments: [], utterances: [], asset_plan: [], ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } };
     const director: DirectorProduction = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "fixture", runtimeId: "fixture", version: "fixture" }, source, sourceHash: directorHash(source), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
     service.edit("episode", { operationId: "seed", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
     const before = snapshot(db);
@@ -68,12 +68,11 @@ test("stage-specific checks do not prohibit unfinished planning drafts", t => {
 
 test("target edits report the original occupying run and tasks before changing source, while unrelated Clips remain editable", t => {
     const { db, service } = fixture(t);
-    const source = { fps_num: 24, fps_den: 1, scene_registry: [{ id: "room", name: "Room" }],
+    const source = { version: 2, prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1, subject_registry: [], character_registry: [], scene_registry: [{ id: "room", name: "Room" }],
         script_scenes: [{ id: "scene", scene_id: "room", beat_ids: ["b1", "b2"] }],
-        shots: [{ id: "s1", source_scene_id: "scene", scene_id: "room", story_beat_ids: ["b1"], start_frame: 0, end_frame: 120, visual: "first" },
-            { id: "s2", source_scene_id: "scene", scene_id: "room", story_beat_ids: ["b2"], start_frame: 120, end_frame: 240, visual: "second" }],
-        segments: [{ id: "seg1", shot_ids: ["s1"], start_frame: 0, end_frame: 120, generation_clip_duration: 5, mode: "T2VA" },
-            { id: "seg2", shot_ids: ["s2"], start_frame: 120, end_frame: 240, generation_clip_duration: 5, mode: "T2VA" }] };
+        shots: [{ id: "s1", source_scene_id: "scene", scene_id: "room", story_beat_ids: ["b1"], story_order: 0, duration_frames: 120, visual: "first" },
+            { id: "s2", source_scene_id: "scene", scene_id: "room", story_beat_ids: ["b2"], story_order: 1, duration_frames: 120, visual: "second" }],
+        segments: [{ id: "seg1", shot_ids: ["s1"], mode: "T2VA" }, { id: "seg2", shot_ids: ["s2"], mode: "T2VA" }], utterances: [], ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } };
     const director: DirectorProduction = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "fixture", runtimeId: "fixture", version: "fixture" }, source, sourceHash: directorHash(source), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
     service.edit("episode", { operationId: "seed-occupied", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
     db.db.prepare("INSERT INTO episode_production_batches (run_id,episode_id,idempotency_key,request_hash,version,source_revision,status,targets_json,plan_json,engine_json,settings_json,submitted_json,pause_requested,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")

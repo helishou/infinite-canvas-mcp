@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Alert, App, Button, Dropdown, Input, Modal, Radio, Select, Tag } from "antd";
-import { ArrowLeft, ArrowRight, ArrowUpRight, ChevronLeft, ChevronRight, Clapperboard, GripHorizontal, Image as ImageIcon, Layers3, Search, WandSparkles } from "lucide-react";
+import { ArrowLeft, ArrowRight, ArrowUpRight, ChevronDown, Clapperboard, GripHorizontal, Image as ImageIcon, Layers3, Search, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { isSubjectPromptAssembly, resolveSubjectPictureBindingIds, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import { setShotPictureBindingIds, setShotPictureBindingMode, shotPictureBindingMode } from "./subject-picture-selection";
@@ -42,6 +42,9 @@ type Props = {
     onSaveShotPatch?: (shotId: string, patch: Record<string, unknown>) => Promise<boolean>;
     onUpdateLegacyShotReferences?: (shotId: string, assetIds: string[], keyframeAssetId: string | null) => Promise<boolean>;
 
+    /** 该镜头卡片左侧关键帧缩略图的存储键；由 DirectorPanel 注入，与右栏「关键帧」共用同一份取图逻辑。 */
+    shotKeyframe?: (shotId: string) => string | undefined;
+
     shotDrafts?: Record<string, string>;
     /** Clip 组合使用与交付页相同的 Backend 编译提交与恢复流程。 */
     busy?: boolean; compileBusy?: boolean; compilePending?: boolean; compileError?: string; compileNotice?: string; onCompile?: (sceneId?: string) => void;
@@ -52,7 +55,7 @@ type Props = {
 };
 
 /** The v2 authoring surface: stable Shots, derived Clip packaging, and compiler evidence. */
-export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, viewMemory, canvasNodes, canvasId, onLocateClip, renderEditor, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onEditShot, onSaveShotPatch, onUpdateLegacyShotReferences, shotDrafts = {}, busy, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", onCompile, onClip, onDiscuss, onNavigate }: Props) {
+export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, viewMemory, canvasNodes, canvasId, onLocateClip, renderEditor, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onEditShot, onSaveShotPatch, onUpdateLegacyShotReferences, shotKeyframe, shotDrafts = {}, busy, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", onCompile, onClip, onDiscuss, onNavigate }: Props) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const source = director.source as Record<string, any>;
@@ -67,7 +70,6 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const [draggingShotId, setDraggingShotId] = useState("");
     const [search, setSearch] = useState(viewMemory?.current?.search || "");
     const [sceneFilter, setSceneFilter] = useState(viewMemory?.current?.sceneFilter || "");
-    const [sceneDirectoryCollapsed, setSceneDirectoryCollapsed] = useState(false);
     const [mobileEditing, setMobileEditing] = useState(Boolean(initialShotId) || Boolean(viewMemory?.current?.mobileEditing));
     const [detailView, setDetailView] = useState<"editing" | "context">(viewMemory?.current?.detailView || "editing");
     const selectShot = (id: string) => { setSelectedId(id); setMobileEditing(true); setDetailView("editing"); };
@@ -96,6 +98,8 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const framing = (shot: Record<string, any>) => ["EWS", "WS", "FS", "MS", "MCU", "CU", "ECU"].includes(shot.camera?.framing) ? t("director.atomic.framingName." + shot.camera.framing) : shot.camera?.framing || "—";
     const duration = (shot: Record<string, any>) => storyboardDurationFrames(shot) / fps;
     const people = (shot: Record<string, any>) => storyboardPeople(source, shot, subjectAssembly).join(" · ");
+    // 镜头卡片左侧的关键帧缩略图：取不到图时保留同尺寸占位，列表纵向仍然对齐。
+    const shotFrame = (id: string) => String(shotKeyframe?.(id) || "");
     const directSceneIds = sceneFilter === "__unassigned__" ? sceneDirectory.unassigned : sceneDirectory.scenes.find(scene => scene.id === sceneFilter)?.shotIds;
     const directSceneShotIds = new Set(sceneFilter ? directSceneIds || [] : shots.map(shot => String(shot.id)));
     const crossSceneCount = directSceneIds ? [...sceneIds].filter(id => !directSceneIds.includes(id)).length : 0;
@@ -256,11 +260,32 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
         const rect = event.currentTarget.getBoundingClientRect();
         void onEditShot({ type: "edit_director_shot", action: "move", shotId: sourceShotId, targetShotId, position: event.clientY < rect.top + rect.height / 2 ? "before" : "after" });
     };
+    // 场次切换并到标题上：点标题直接换场次，选项与计数沿用原来左侧场次目录那一份。
+    const sceneTitle = sceneFilter === "__unassigned__" ? t("director.atomic.unassignedScene") : sceneDirectory.scenes.find(scene => scene.id === sceneFilter)?.title || t("director.atomic.allScenes");
+    const sceneOptions = [
+        { key: "", label: t("director.atomic.allScenes"), count: shots.length, shotIds: undefined as string[] | undefined },
+        ...sceneDirectory.scenes.map(scene => ({ key: scene.id, label: scene.title, count: scene.shotIds.length, shotIds: scene.shotIds })),
+        ...(sceneDirectory.unassigned.length ? [{ key: "__unassigned__", label: t("director.atomic.unassignedScene"), count: sceneDirectory.unassigned.length, shotIds: sceneDirectory.unassigned }] : []),
+    ];
+    const selectScene = (key: string) => {
+        const next = key === "__all__" ? "" : key;
+        setSceneFilter(next);
+        const shotIds = sceneOptions.find(option => option.key === next)?.shotIds;
+        if (shotIds && !shotIds.includes(activeId) && shotIds[0]) setSelectedId(shotIds[0]);
+    };
+    const sceneMenuItems = sceneOptions.map(option => ({ key: option.key || "__all__", label: <span className="flex items-center gap-3"><span>{option.label}</span><span className="text-xs tabular-nums text-muted-foreground">{option.count}</span></span> }));
     return <div className="space-y-6" data-subject-storyboard-workbench data-storyboard-view={view} data-canvas-id={canvasId} data-mobile-editing={mobileEditing && Boolean(selected) && view === "shots"} data-production-section-root>
         {/* 紧凑头部：标题 + 统计 + 视图页签合一行；「主体与图片 / 连续性台账」与顶部工作区页签重复，已去掉（连续性入口就是顶部工作区页签）。 */}
         <header className="storyboard-toolbar flex flex-wrap items-center gap-x-4 gap-y-3 border-b border-border pb-4">
             <div className="storyboard-scene-context flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
-                <h2 className="m-0 text-lg font-semibold">{sceneFilter === "__unassigned__" ? t("director.atomic.unassignedScene") : sceneDirectory.scenes.find(scene => scene.id === sceneFilter)?.title || (view === "clips" ? t("director.atomic.view.clips") : t("director.atomic.allScenes"))}</h2>
+                <h2 className="m-0 min-w-0">
+                    <Dropdown trigger={["click"]} menu={{ items: sceneMenuItems, selectable: true, selectedKeys: [sceneFilter || "__all__"], onClick: ({ key }) => selectScene(key) }}>
+                        <button type="button" className="storyboard-scene-switch" aria-label={t("director.atomic.sceneNavigation")} aria-haspopup="menu">
+                            <span className="storyboard-scene-switch-label">{sceneTitle}</span>
+                            <ChevronDown className="size-4 shrink-0" aria-hidden="true" />
+                        </button>
+                    </Dropdown>
+                </h2>
                 <p className="m-0 text-xs text-muted-foreground">{t("director.atomic.counts", { shots: scopeShots.length, clips: visibleClipStates.length, seconds: formatSeconds(scopeShots.reduce((sum, shot) => sum + duration(shot), 0)) })}{view === "shots" && crossSceneCount > 0 && <span className="block mt-1">{t("director.atomic.crossSceneIncluded", { count: crossSceneCount })}</span>}</p>
             </div>
             <div className="ml-auto flex flex-wrap items-center gap-3">
@@ -269,17 +294,6 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                 <Button type="text" size="small" icon={<WandSparkles className="size-3.5" />} onClick={() => onDiscuss(activeId || undefined)}>{t("director.studio.collaborate")}</Button>
             </div>
         </header>
-        {(shots.length > 0 || sceneDirectory.scenes.length > 0) && <nav className={`storyboard-scenes${sceneDirectoryCollapsed ? " is-collapsed" : ""}`} data-scene-directory-collapsed={sceneDirectoryCollapsed} aria-label={t("director.atomic.sceneNavigation")}>
-            <button type="button" className="storyboard-scene-toggle" aria-label={t("director.atomic.sceneNavigation")} aria-expanded={!sceneDirectoryCollapsed} title={t("director.atomic.sceneNavigation")} onClick={() => setSceneDirectoryCollapsed(value => !value)}>
-                {sceneDirectoryCollapsed ? <ChevronRight className="size-4" aria-hidden="true" /> : <><ChevronLeft className="size-4" aria-hidden="true" /><span>{t("director.atomic.sceneNavigation")}</span></>}
-            </button>
-            {!sceneDirectoryCollapsed && <>
-            <h2 className="storyboard-scene-label">{t("director.atomic.sceneNavigation")}</h2>
-            <button type="button" aria-pressed={!sceneFilter} onClick={() => setSceneFilter("")}>{t("director.atomic.allScenes")}<span>{shots.length}</span></button>
-            {sceneDirectory.scenes.map(scene => <button type="button" key={scene.id} aria-pressed={sceneFilter === scene.id} onClick={() => { setSceneFilter(scene.id); if (!scene.shotIds.includes(activeId) && scene.shotIds[0]) setSelectedId(scene.shotIds[0]); }}>{scene.title}<span>{scene.shotIds.length}</span></button>)}
-            {sceneDirectory.unassigned.length > 0 && <button type="button" aria-pressed={sceneFilter === "__unassigned__"} onClick={() => { setSceneFilter("__unassigned__"); if (!sceneDirectory.unassigned.includes(activeId)) setSelectedId(sceneDirectory.unassigned[0]); }}>{t("director.atomic.unassignedScene")}<span>{sceneDirectory.unassigned.length}</span></button>}
-            </>}
-        </nav>}
         {view === "clips" ? <div className="storyboard-clip-editor space-y-3">
             {/* 编译状态与编译入口：Clip 组合是「保存 → 校验 → 编译 → 同步」的落点，状态与按钮放同一行，逐 Clip 显示。 */}
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -327,7 +341,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                                 const leftIds = ids.slice(0, boundaryIndex), rightIds = ids.slice(boundaryIndex);
                                 return <Fragment key={String(shot.id)}>
                                     <ShotOperations source={{ ...source, shots: operationShots }} shot={operationShots.find(item => item.id === shot.id)} busy={busy} onEdit={onEditShot || (async () => false)} onSelect={selectShot} contextMenu={subjectAssembly && Boolean(onEditShot)}>
-                                        <button type="button" draggable={Boolean(subjectAssembly && onEditShot && !busy)} data-track-shot={String(shot.id)} ref={element => { if (element) chipRefs.current.set(String(shot.id), element); else chipRefs.current.delete(String(shot.id)); }} onClick={() => selectShot(String(shot.id))} onContextMenu={() => setSelectedId(String(shot.id))} onDragStart={event => { if (!subjectAssembly || !onEditShot || busy) return event.preventDefault(); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(shot.id)); setDraggingShotId(String(shot.id)); }} onDragOver={event => { const sourceId = event.dataTransfer.getData("text/plain") || draggingShotId; if (sourceId && sourceId !== String(shot.id) && clips.some(item => clipShotIds(item).includes(sourceId) && clipShotIds(item).includes(String(shot.id)))) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={event => moveShotByDrop(event, String(shot.id))} onDragEnd={() => setDraggingShotId("")} aria-pressed={activeId === String(shot.id)} title={title(shot)} className={`storyboard-shot-row w-full text-left ${draggingShotId === String(shot.id) ? "opacity-50" : ""} ${activeId === String(shot.id) ? "is-selected" : ""} ${subjectAssembly && onEditShot && !busy ? "cursor-grab active:cursor-grabbing" : ""}`}><span className="flex items-start justify-between gap-3"><span className="storyboard-shot-title">{String(shots.findIndex(item => item.id === shot.id) + 1).padStart(2, "0")} · {title(shot)}{unsavedIds.has(String(shot.id)) && <span className="storyboard-unsaved-mark" title={t("director.atomic.draftKept")} aria-label={t("director.atomic.draftKept")}> · {t("director.atomic.unsavedShort")}</span>}</span><span className="shrink-0 text-xs tabular-nums text-muted-foreground">{formatSeconds(duration(shot))}s</span></span><span className="mt-1 block text-xs text-muted-foreground">{framing(shot)} · {people(shot)}</span><span className="mt-2 line-clamp-2 block text-sm leading-6 text-muted-foreground">{String(shot.visual?.description || shot.visual?.text || (typeof shot.visual === "string" ? shot.visual : ""))}</span></button>
+                                        <button type="button" draggable={Boolean(subjectAssembly && onEditShot && !busy)} data-track-shot={String(shot.id)} ref={element => { if (element) chipRefs.current.set(String(shot.id), element); else chipRefs.current.delete(String(shot.id)); }} onClick={() => selectShot(String(shot.id))} onContextMenu={() => setSelectedId(String(shot.id))} onDragStart={event => { if (!subjectAssembly || !onEditShot || busy) return event.preventDefault(); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(shot.id)); setDraggingShotId(String(shot.id)); }} onDragOver={event => { const sourceId = event.dataTransfer.getData("text/plain") || draggingShotId; if (sourceId && sourceId !== String(shot.id) && clips.some(item => clipShotIds(item).includes(sourceId) && clipShotIds(item).includes(String(shot.id)))) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={event => moveShotByDrop(event, String(shot.id))} onDragEnd={() => setDraggingShotId("")} aria-pressed={activeId === String(shot.id)} title={title(shot)} className={`storyboard-shot-row w-full text-left ${draggingShotId === String(shot.id) ? "opacity-50" : ""} ${activeId === String(shot.id) ? "is-selected" : ""} ${subjectAssembly && onEditShot && !busy ? "cursor-grab active:cursor-grabbing" : ""}`}><span className="flex items-start gap-3"><ShotKeyframeThumb storageKey={shotFrame(String(shot.id))} /><span className="min-w-0 flex-1"><span className="flex items-start justify-between gap-3"><span className="storyboard-shot-title">{String(shots.findIndex(item => item.id === shot.id) + 1).padStart(2, "0")} · {title(shot)}{unsavedIds.has(String(shot.id)) && <span className="storyboard-unsaved-mark" title={t("director.atomic.draftKept")} aria-label={t("director.atomic.draftKept")}> · {t("director.atomic.unsavedShort")}</span>}</span><span className="shrink-0 text-xs tabular-nums text-muted-foreground">{formatSeconds(duration(shot))}s</span></span><span className="mt-1 block text-xs text-muted-foreground">{framing(shot)} · {people(shot)}</span><span className="mt-2 line-clamp-2 block text-sm leading-6 text-muted-foreground">{String(shot.visual?.description || shot.visual?.text || (typeof shot.visual === "string" ? shot.visual : ""))}</span></span></span></button>
                                     </ShotOperations>
                                     {canSplitHere && <ShotClipSplitHandle vertical disabled={!partitionEnabled} onSplit={() => {
                                         void saveClipPartition(ids, materializeClipPartition(clips, [{ ids: leftIds }, { ids: rightIds }]));
@@ -338,7 +352,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                     </section>
                     {boundary ? <ClipBoundaryHandle vertical pairIndex={entry.index} leftClipId={String(entry.group.id)} rightClipId={String(boundary.group.id)} leftIds={clipShotIds(entry.group)} rightIds={clipShotIds(boundary.group)} profileConflict={clipProfileKey(entry.group) !== clipProfileKey(boundary.group)} shots={shots} fps={fps} chips={chipRefs} track={trackRef} disabled={!partitionEnabled} onCommit={count => commitBoundary(entry.index, count)} onMerge={profileSourceId => mergeBoundaryClips(entry.index, profileSourceId)} /> : null}
                 </Fragment>; })}
-                {visible.filter(shot => !clips.some(item => clipShotIds(item).includes(String(shot.id)))).map(shot => <section key={shot.id} className="storyboard-clip-group"><p className="p-3 text-xs text-muted-foreground">{t("director.atomic.ungroupedShot")}</p><ShotOperations source={{ ...source, shots: operationShots }} shot={operationShots.find(item => item.id === shot.id)} busy={busy} onEdit={onEditShot || (async () => false)} onSelect={selectShot} contextMenu={subjectAssembly && Boolean(onEditShot)}><button type="button" data-track-shot={String(shot.id)} ref={element => { if (element) chipRefs.current.set(String(shot.id), element); else chipRefs.current.delete(String(shot.id)); }} onClick={() => selectShot(String(shot.id))} className="storyboard-shot-row w-full text-left" aria-pressed={activeId === String(shot.id)}>{title(shot)}{unsavedIds.has(String(shot.id)) && <span className="storyboard-unsaved-mark"> · {t("director.atomic.unsavedShort")}</span>}</button></ShotOperations></section>)}
+                {visible.filter(shot => !clips.some(item => clipShotIds(item).includes(String(shot.id)))).map(shot => <section key={shot.id} className="storyboard-clip-group"><p className="p-3 text-xs text-muted-foreground">{t("director.atomic.ungroupedShot")}</p><ShotOperations source={{ ...source, shots: operationShots }} shot={operationShots.find(item => item.id === shot.id)} busy={busy} onEdit={onEditShot || (async () => false)} onSelect={selectShot} contextMenu={subjectAssembly && Boolean(onEditShot)}><button type="button" data-track-shot={String(shot.id)} ref={element => { if (element) chipRefs.current.set(String(shot.id), element); else chipRefs.current.delete(String(shot.id)); }} onClick={() => selectShot(String(shot.id))} className="storyboard-shot-row w-full text-left" aria-pressed={activeId === String(shot.id)}><span className="flex items-center gap-3"><ShotKeyframeThumb storageKey={shotFrame(String(shot.id))} /><span className="min-w-0 flex-1">{title(shot)}{unsavedIds.has(String(shot.id)) && <span className="storyboard-unsaved-mark"> · {t("director.atomic.unsavedShort")}</span>}</span></span></button></ShotOperations></section>)}
                 {!visible.length && <div className="storyboard-empty-state"><Search className="size-5" /><p>{t(search.trim() ? "director.studio.emptyShotSearch" : "director.atomic.emptyScene")}</p><Button onClick={() => { setSearch(""); setSceneFilter(""); }}>{t("director.atomic.showAllShots")}</Button></div>}
             </div>
             </div>
@@ -409,6 +423,17 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
             </div>
         </>}
     </div>;
+}
+
+/**
+ * 镜头卡片左侧的关键帧缩略图。未绑定关键帧时渲染同尺寸占位，避免同一列表里各行文字左右跳动。
+ * 只读展示，点击仍然落在整张卡片上（选中镜头），所以这里不拦截事件。
+ */
+function ShotKeyframeThumb({ storageKey }: { storageKey: string }) {
+    const frameClass = "h-11 w-20 shrink-0 rounded-md border border-border bg-muted/30";
+    return storageKey
+        ? <img className={`${frameClass} object-cover`} src={backendMediaUrl(storageKey)} alt="" loading="lazy" />
+        : <span aria-hidden="true" className={`${frameClass} flex items-center justify-center text-muted-foreground`}><ImageIcon className="size-4" /></span>;
 }
 
 function ShotClipSplitHandle({ disabled, onSplit, vertical = false }: { disabled: boolean; vertical?: boolean; onSplit: () => void }) {

@@ -12,7 +12,12 @@ function director(source: Record<string, any>): DirectorProduction {
     return { schemaVersion: 1, engine: { commit, patchVersion, runtimeId, version }, source,
         sourceHash: crypto.createHash("sha256").update(canonicalProduction(source)).digest("hex"), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], workflow: {}, unresolved: [], executionAuthorized: false };
 }
-const styleSource = () => JSON.parse(fs.readFileSync(path.join(resolveAchengEngine().path, "templates", "style-anchor-stage.json"), "utf8"));
+/** The installed template ships unmarked; stamp it with the current production-format envelope. */
+const styleSource = () => {
+    const source = JSON.parse(fs.readFileSync(path.join(resolveAchengEngine().path, "templates", "style-anchor-stage.json"), "utf8"));
+    source.version = 2; source.ledger = { contract_version: 2 }; source.prompt_assembly = { version: 2 }; source.subject_registry = [];
+    return source;
+};
 
 test("scoped approval hydrates style lock from verified media without rewriting source", t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "style-approval-preflight-"));
@@ -54,7 +59,7 @@ test("purpose and reference policy examples repair the same pinned source withou
 });
 
 test("story-only source is diagnosed as not yet compilable without launching a compiler", () => {
-    const result = preflightCompilationDirector(director({ brief: "A story still being written", script_scenes: [], asset_cards: [] }));
+    const result = preflightCompilationDirector(director({ version: 2, brief: "A story still being writing", script_scenes: [], asset_cards: [], ledger: { contract_version: 2 }, prompt_assembly: { version: 2 }, subject_registry: [] }));
     assert.equal(result.compileReady, false);
     assert.ok(result.diagnostics.some(item => item.code === "COMPILE_STAGE_NOT_READY"));
 });
@@ -104,7 +109,8 @@ test("compilation can rebuild stale receipts and retain an unfinished video draf
     input.artifacts = [{ id: "old", kind: "image", targetId: "STYLE_MOTHER", prompt: "Old prompt to replace", sha256: "0".repeat(64), sourceHash: "1".repeat(64), status: "ready", references: [], receipt: { sourceHash: "1".repeat(64), promptHash: "0".repeat(64), engineRuntimeId: "old", validator: "old" } }];
     assert.equal(preflightCompilationDirector(input).compileReady, true, "previous output receipts must not block recompiling authored source");
     source.fps_num = 24; source.fps_den = 1;
-    source.segments = [{ id: "SEG001", mode: "T2VA", mode_lock: "T2VA", mode_selection_reason: "This establishing scene has no image-reference requirement.", generation_clip_duration: 4, start_frame: 0, end_frame: 96, shot_ids: [], summary: "A planned establishing view of the rural house.", references: [] }];
+    source.shots = [{ id: "SHOT_1", duration_frames: 96 }];
+    source.segments = [{ id: "SEG001", mode: "T2VA", mode_lock: "T2VA", mode_selection_reason: "This establishing scene has no image-reference requirement.", shot_ids: ["SHOT_1"], summary: "A planned establishing view of the rural house." }];
     const draft = preflightCompilationDirector(director(source));
     assert.equal(draft.compileReady, true, JSON.stringify(draft.diagnostics));
     assert.ok(draft.diagnostics.some(item => item.code === "COMPILE_VIDEO_DRAFT" && item.severity === "warning"));
@@ -113,9 +119,10 @@ test("compilation can rebuild stale receipts and retain an unfinished video draf
 test("continuity boundary diagnostics remain visible but do not block prompt compilation", () => {
     const source = styleSource();
     source.fps_num = 24; source.fps_den = 1;
+    source.shots = [{ id: "SHOT_A", duration_frames: 96 }, { id: "SHOT_B", duration_frames: 96 }];
     source.segments = [
-        { id: "SEG_A", mode: "T2VA", generation_clip_duration: 4, start_frame: 0, end_frame: 96, shot_ids: [], summary: "Opening beat." },
-        { id: "SEG_B", mode: "T2VA", generation_clip_duration: 4, start_frame: 96, end_frame: 192, shot_ids: [], summary: "Following beat." },
+        { id: "SEG_A", mode: "T2VA", shot_ids: ["SHOT_A"], summary: "Opening beat." },
+        { id: "SEG_B", mode: "T2VA", shot_ids: ["SHOT_B"], summary: "Following beat." },
     ];
     const input = director(source);
     input.boundaries = [];
@@ -129,9 +136,10 @@ test("continuity boundary diagnostics remain visible but do not block prompt com
 test("a missing incoming continuity boundary remains a warning at compile preflight", () => {
     const source = styleSource();
     source.fps_num = 24; source.fps_den = 1;
+    source.shots = [{ id: "SHOT_A", duration_frames: 96 }, { id: "SHOT_B", duration_frames: 96 }];
     source.segments = [
-        { id: "SEG_A", mode: "T2VA", generation_clip_duration: 4, start_frame: 0, end_frame: 96, shot_ids: [], summary: "Opening beat." },
-        { id: "SEG_B", mode: "T2VA", generation_clip_duration: 4, start_frame: 96, end_frame: 192, shot_ids: [], summary: "Following beat." },
+        { id: "SEG_A", mode: "T2VA", shot_ids: ["SHOT_A"], summary: "Opening beat." },
+        { id: "SEG_B", mode: "T2VA", shot_ids: ["SHOT_B"], summary: "Following beat." },
     ];
     const input = director(source);
     input.boundaries = [];

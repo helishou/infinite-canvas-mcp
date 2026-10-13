@@ -4,7 +4,7 @@ import { isH3StyleTemplateId } from "../plugins/minimax-h3/style-templates.js";
 import { currentCompilationArtifact } from "./compilation-scope.js";
 import { toJsonSchemaCompat } from "@modelcontextprotocol/sdk/server/zod-json-schema-compat.js";
 import { z } from "zod";
-import { directorPatchFields, productionContractVersion, productionOperationSchema, productionEditSchema, productionPublishSchema, productionCompileSchema, directorRunStartSchema, canonicalProduction, isSubjectPromptAssembly, type DirectorProduction, type ProductionDiagnostic } from "./production-contract.js";
+import { directorPatchFields, productionContractVersion, productionOperationSchema, productionEditSchema, productionPublishSchema, productionCompileSchema, directorRunStartSchema, canonicalProduction, isSubjectPromptAssembly, scriptBlockSchema, type DirectorProduction, type ProductionDiagnostic } from "./production-contract.js";
 
 const scene = { id: "scene-1", heading: "Interior", location: "Room", timeOfDay: "Day", blocks: [] };
 const block = { id: "block-1", kind: "action", text: "The door opens." };
@@ -181,6 +181,13 @@ export function applyDirectorSourcePatch(director: DirectorProduction, entity: k
             if (!target) throw new Error(`${entity} ${id} 不存在；先由 Acheng 创建稳定对象`);
             const forbidden = Object.keys(patch).filter(key => !(directorPatchFields[entity] as readonly string[]).includes(key));
             if (forbidden.length) throw new Error(`不允许直接修改字段：${forbidden.join(", ")}`);
+            if (entity === "scene" && Object.hasOwn(patch, "blocks")) {
+                // 结构化剧本场次以整段数组替换 blocks（增段/删段/重排/换说话人都走这里）。
+                // passthrough 保留编译期可能附加的段落扩展字段，不替作者删数据。
+                const parsed = z.array(scriptBlockSchema.passthrough()).safeParse(patch.blocks);
+                if (!parsed.success) throw new Error(`剧本段落必须是 {{id, kind: action|dialogue, text, speaker?}} 的数组；不合格条目：${parsed.error.issues.slice(0, 4).map(issue => issue.path.join(".") || "(根)").join(", ")}`);
+                patch.blocks = parsed.data;
+            }
             if (entity === "segment" && Object.hasOwn(patch, "styleTemplateId") && patch.styleTemplateId !== null && !(isH3StyleTemplateId(patch.styleTemplateId) || typeof patch.styleTemplateId === "string" && /^[a-z0-9][a-z0-9-]{0,47}$/i.test(patch.styleTemplateId))) throw new Error("无效 H3 风格模板 ID");
             if (entity === "asset" && patch.canvas_scope !== undefined && !["shared", "episode"].includes(String(patch.canvas_scope))) throw new Error("资产画布归属只能是 shared 或 episode");
             if (entity === "asset" && patch.canvas_scope === "episode" && director.assets[id]?.sharedSource) throw new Error("已采用的剧目共享资产必须保留 shared 归属；需要本集专用版本时请新建分集资产");

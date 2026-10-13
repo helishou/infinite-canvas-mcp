@@ -28,7 +28,7 @@ function fixture(t: test.TestContext, withCanvas = false, setup?: (db: BackendDa
 
 function directorV2(): DirectorProduction {
     const source = {
-        prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
+        version: 2, prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
         character_registry: [{ id: "P", name: "人物" }], scene_registry: [{ id: "SCENE", name: "鸡窝外" }],
         script_scenes: [{ id: "SCENE", scene_id: "SCENE", scene_name: "鸡窝外", text: "", beat_ids: [] }],
         subject_registry: [{ id: "P", kind: "character", entityRef: { ownerKind: "episode", ownerId: "ep", kind: "character", id: "P" }, pictureBindings: [

@@ -13,7 +13,7 @@ import { BackendEventBus } from "../events.js";
 import { EpisodeProductionService } from "./production.js";
 
 function fixture(): DirectorProduction {
-    const source = { prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
+    const source = { version: 2, prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
         character_registry: [{ id: "P", name: "栓子" }], subject_registry: [{ id: "SUB", kind: "character", entityRef: { ownerKind: "episode", ownerId: "ep", kind: "character", id: "P" }, pictureBindings: [{ id: "PB", assetId: "A", sourceNode: { projectId: "project", nodeId: "node" }, selection: { mode: "node_selection" }, provides: ["identity"], retain: [], exclude: [], defaultFor: ["identity"], applicableState: {} }] }],
         shots: [{ id: "S1", timeline_id: "T", scene_id: "SC", story_order: 0, title: "问蛋", duration_frames: 48, visual: "孩子发问。", camera: { framing: "CU", attention_subject_ids: ["SUB"], editorial_reason: "看清孩子发问" }, subject_usages: [{ subjectId: "SUB", presentation: "visible" }],
             performance: { source_beat_id: "B", events: [{ phase: "action", start: 0, end: 40, cue: "孩子抬头" }] }, audio: { description: "风声", events: [{ start: 30, end: 38, cue: "脚步" }] }, keyframes: [{ id: "K", assetId: "A", sourceNode: { projectId: "project", nodeId: "node" }, selection: { mode: "node_selection" }, anchor: "at_frame", localFrame: 36, subjectIds: ["SUB"], retain: [], exclude: [], requiredForSubmission: false }], utterance_refs: [{ utteranceId: "U", role: "speaker", localStartFrame: 0, localEndFrame: 48, textStart: 0, textEnd: 5 }] },

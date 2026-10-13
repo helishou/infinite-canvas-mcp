@@ -37,7 +37,7 @@ export const directorPatchFields = {
     brief: ["value"],
     continuity: ["ledger"],
     style: ["style_policy", "style_policy_reason", "anchor_asset_id", "style_anchor_node_id"],
-    scene: ["scene_name", "heading", "location", "time_of_day", "text"],
+    scene: ["scene_name", "heading", "location", "time_of_day", "text", "blocks"],
     environment: ["name", "description", "prompt_description"],
     character: ["name", "appearance", "description", "prompt_description", "identity", "voice_description"],
     asset_card: ["prompt", "seven_steps", "references"],
@@ -94,7 +94,7 @@ export const directorSceneReviewSchema = z.object({
     media: z.array(z.object({ targetId: id, storageKey: id, sha256: hash })),
     checkedAt: z.string().datetime(),
 }).strict();
-const directorEngineSchema = z.object({ commit: z.string().regex(/^[a-f0-9]{40}$/), patchVersion: id, runtimeId: id, version: id });
+const directorEngineSchema = z.object({ commit: z.string().regex(/^[a-f0-9]{40}$/), patchVersion: id, runtimeId: id, version: id, compilerHash: hash.optional() });
 export const directorSceneWorkSchema = z.object({
     workId: id, sceneId: id, inputRevision: z.number().int().nonnegative(), sourceHash: hash, inputHash: hash,
     inputEngine: directorEngineSchema.optional(),
@@ -617,7 +617,12 @@ export const productionContinuityCheckSchema = z.object({ expectedRevision: z.nu
 // Keep requests unparsed at this boundary so invalid inputs produce diagnostics,
 // rather than disappearing into a transport-level schema error.
 export const productionPreflightSchema = z.object({ action: z.enum(["edit", "publish", "compile", "generate"]), request: z.record(z.unknown()) }).strict();
-export const productionPreflightRequestSchema = z.discriminatedUnion("action", [
+type ProductionPreflightRequest =
+    | { action: "edit"; request: z.infer<typeof productionEditSchema> }
+    | { action: "publish"; request: z.infer<typeof productionPublishSchema> }
+    | { action: "compile"; request: z.infer<typeof productionCompileSchema> }
+    | { action: "generate"; request: z.infer<typeof directorRunStartSchema> };
+export const productionPreflightRequestSchema: z.ZodType<ProductionPreflightRequest, z.ZodTypeDef, any> = z.discriminatedUnion("action", [
     z.object({ action: z.literal("edit"), request: productionEditSchema }),
     z.object({ action: z.literal("publish"), request: productionPublishSchema }),
     z.object({ action: z.literal("compile"), request: productionCompileSchema }),

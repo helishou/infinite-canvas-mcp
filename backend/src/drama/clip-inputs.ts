@@ -35,6 +35,21 @@ export function clipInputHash(segment: Record<string, any>) {
     if (segment.productionClipProjection?.styleTemplateDeclared === true) fields.push(["styleTemplateDeclared", true]);
     return clipFieldHash(fields);
 }
+function requiredSubjectStoryboardFrame(director: NonNullable<EpisodeProductionData["director"]>, shotId: string) {
+    if (!isSubjectPromptAssembly(director.source)) return undefined;
+    const shot = (Array.isArray(director.source.shots) ? director.source.shots : []).map(object).find(item => String(item.id || "") === shotId);
+    const frames = Array.isArray(shot?.keyframes) ? shot.keyframes.map(object).filter(frame => frame.requiredForSubmission === true) : [];
+    return frames.find(frame => frame.anchor === "opening" || frame.anchor === "composition") || frames[0];
+}
+function referenceMatchesSubjectFrame(director: NonNullable<EpisodeProductionData["director"]>, frame: Record<string, any>, reference: Record<string, any>) {
+    const assetId = String(frame.assetId || frame.id || "");
+    if (assetId && String(reference.assetId || "") === assetId) return true;
+    const asset = director.assets[assetId];
+    const nodeId = String(asset?.nodeId || frame.sourceNode?.nodeId || "");
+    const referenceNodeId = String(reference.nodeId || reference.sourceNodeId || "");
+    const storageKey = String(asset?.storageKey || "");
+    return Boolean(nodeId && referenceNodeId === nodeId && (!storageKey || String(reference.storageKey || "") === storageKey));
+}
 export function buildProductionClip(project: Record<string, any>, published: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], segmentId: string, runSettings?: Record<string, unknown>) {
     const nodes: Record<string, any>[] = Array.isArray(project.nodes) ? project.nodes : [];
     const shots = group.shotIds.map(id => published.shots.find(shot => shot.id === id)).filter((shot): shot is NonNullable<typeof shot> => !!shot);
@@ -90,13 +105,26 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
     if (!taskMode) throw new Error(`未知 Acheng 模式 ${planned.mode}`);
     const prompt = authored.prompt;
     const boundary = outgoingDirectorBoundary(d, group.id);
+    const subjectAssembly = isSubjectPromptAssembly(d.source);
     // Production Shot identity must survive independently of generated/approved keyframe media.
     // H3 renders unbound cells as placeholders; storyboardImageMode controls image references,
     // never the Shot-to-cell mapping itself.
     const storyboardShots = shots.map(shot => {
-        const input = d.shotInputs[shot.id];
         const duration = Number(shot.duration || 0);
-        if (settings.storyboardImageMode === "skip" || input?.keyframePolicy === "none" || !input?.keyframeAssetId) return { id: shot.id, duration };
+        if (settings.storyboardImageMode === "skip") return { id: shot.id, duration };
+        if (subjectAssembly) {
+            // Subject Prompt v2 owns keyframes on source.shots[].keyframes. The
+            // legacy shotInputs projection can be stale or empty and must not
+            // override that source (or block an otherwise valid Clip sync).
+            const frame = requiredSubjectStoryboardFrame(d, String(shot.id));
+            if (!frame) return { id: shot.id, duration };
+            const binding = bindings.find(ref => (ref.role === "keyframe" || ref.role === "storyboard") && referenceMatchesSubjectFrame(d, frame, ref));
+            if (!binding) throw new Error(`镜头 ${shot.id} 的正式关键帧未进入本段参考绑定`);
+            binding.role = "storyboard";
+            return { id: shot.id, referenceBindingId: String(binding.id), duration };
+        }
+        const input = d.shotInputs[shot.id];
+        if (input?.keyframePolicy === "none" || !input?.keyframeAssetId) return { id: shot.id, duration };
         const asset = d.assets[input.keyframeAssetId];
         const sourceNodeId = asset?.nodeId || input.keyframeAssetId;
         const binding = bindings.find(ref => ref.sourceNodeId === sourceNodeId);
@@ -158,9 +186,14 @@ export function formalStoryboardTrack(data: EpisodeProductionData, group: Episod
         const duration = Number.isFinite(frames) && frames > 0 ? frames / fps
             : Number.isFinite(start) && Number.isFinite(end) && end > start ? (end - start) / fps
                 : Number(data.shots.find(item => item.id === shot.id)?.duration || 0);
-        const input = director.shotInputs[shot.id], asset = input?.keyframePolicy !== "none" && input?.keyframeAssetId ? director.assets[input.keyframeAssetId] : undefined;
-        const binding = asset && refs.find(ref => ref.role === "storyboard" && ref.mediaType === "image" && ref.storageKey === asset.storageKey
-            && (!asset.nodeId || ref.sourceNodeId === asset.nodeId));
+        const subjectAssembly = isSubjectPromptAssembly(director.source);
+        const frame = subjectAssembly ? requiredSubjectStoryboardFrame(director, String(shot.id)) : undefined;
+        const input = subjectAssembly ? undefined : director.shotInputs[shot.id];
+        const asset = input?.keyframePolicy !== "none" && input?.keyframeAssetId ? director.assets[input.keyframeAssetId] : undefined;
+        const binding = subjectAssembly
+            ? frame && refs.find(ref => ref.role === "storyboard" && ref.mediaType === "image" && referenceMatchesSubjectFrame(director, frame, ref))
+            : asset && refs.find(ref => ref.role === "storyboard" && ref.mediaType === "image" && ref.storageKey === asset.storageKey
+                && (!asset.nodeId || ref.sourceNodeId === asset.nodeId));
         return { id: String(shot.id), duration, ...(binding?.id ? { referenceBindingId: String(binding.id) } : {}) };
     });
     return { storyboardModeEnabled: true, storyboardShots, duration: storyboardShots.reduce((sum, shot) => sum + shot.duration, 0) };

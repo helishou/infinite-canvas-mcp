@@ -31,6 +31,7 @@ test("Clip scope skips dormant storyboard frames but retains explicitly requeste
 
 test("V2 frame-only scope retains replay binding declarations and flat-block coverage", () => {
     const d = scopedDirector();
+    d.source.version = 2;
     d.source.prompt_assembly = { version: 2 };
     d.source.character_registry = [{ id: "P", name: "人物" }];
     d.source.subject_registry = [{ id: "P", kind: "character", entityRef: { ownerKind: "episode", ownerId: "EP", kind: "character", id: "P" }, pictureBindings: [
@@ -58,6 +59,7 @@ test("V2 frame-only scope retains replay binding declarations and flat-block cov
 
 test("V2 Clip scope retains a registered dialogue speaker even without a visual Subject usage", () => {
     const d = scopedDirector();
+    d.source.version = 2;
     d.source.prompt_assembly = { version: 2 };
     d.source.character_registry = [{ id: "LIN", name: "林澄" }];
     d.source.scene_registry = [{ id: "ROOM", name: "厨房" }];

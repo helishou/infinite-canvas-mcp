@@ -167,6 +167,16 @@ type CanvasClipboardContent = {
     value: string;
 };
 
+const CANVAS_TOOL_PREFERENCE_KEY = "canvas.toolPreference";
+
+function readCanvasToolPreference(): "select" | "pan" {
+    try {
+        return localStorage.getItem(CANVAS_TOOL_PREFERENCE_KEY) === "pan" ? "pan" : "select";
+    } catch {
+        return "select";
+    }
+}
+
 function getCanvasClipboardContent(node: CanvasNodeData): CanvasClipboardContent | null {
     const metadata = node.metadata;
     const smartMode = node.type === CanvasNodeType.Config && metadata?.smart ? metadata.generationMode || "image" : null;
@@ -473,7 +483,15 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         browserTaskIds.forEach(kickCanvasBrowserTask);
     }, [browserTaskIds]);
     const [viewport, setViewport] = useState<ViewportTransform>({ x: 0, y: 0, k: 1 });
-    const [canvasTool, setCanvasTool] = useState<"select" | "pan">("select");
+    const [canvasTool, setCanvasTool] = useState<"select" | "pan">(readCanvasToolPreference);
+    const changeCanvasTool = useCallback((tool: "select" | "pan") => {
+        setCanvasTool(tool);
+        try {
+            localStorage.setItem(CANVAS_TOOL_PREFERENCE_KEY, tool);
+        } catch {
+            // Tool preference remains usable for this page even when storage is unavailable.
+        }
+    }, []);
     const [size, setSize] = useState({ width: 1200, height: 720 });
     const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
     const { publishCursor: publishRealtimeCursor, publishDrag: publishRealtimeDrag } = useCanvasRealtimePresence(projectId, selectedNodeIds);
@@ -6205,7 +6223,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onDelete={() => deleteNodes(new Set(selectedNodeIds))}
                     onArrange={arrangeSelectedNodes}
                     onClear={() => setClearConfirmOpen(true)}
-                    onCanvasToolChange={setCanvasTool}
+                    onCanvasToolChange={changeCanvasTool}
                 />
 
                 {isMiniMapOpen ? <Minimap onClose={() => setIsMiniMapOpen(false)} nodes={nodes} viewport={viewport} viewportSize={size} onViewportChange={commitViewport} /> : null}

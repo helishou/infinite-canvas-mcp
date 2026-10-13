@@ -36,6 +36,7 @@ import {
     resolveDirectorReviewPolicy,
     diagnosticBlocksAction,
     isSubjectPromptAssembly,
+    defaultRequiredShotKeyframes,
     resolveSubjectPictureBindingIds,
     promptSourceMapSchema,
     type ProductionLayoutPlan,
@@ -2401,6 +2402,12 @@ export class EpisodeProductionService {
                     console.error("[edit-op-error] op=", operation?.type, "index=", index, "msg=", error instanceof Error ? error.message : String(error), "\nSTACK=", error instanceof Error ? (error.stack || "") : "");
                     throw new ProductionValidationError([{ code: "INVALID_OPERATION", path: `request.ops.${index}`, targetId: "id" in operation ? String(operation.id) : undefined, message: error instanceof Error ? error.message : String(error), severity: "error" }]);
                 }
+            }
+            if (draft.director && defaultRequiredShotKeyframes(draft.director.source)) {
+                draft.director.sourceHash = directorHash(draft.director.source);
+                draft.director.executionAuthorized = false;
+                draft.director.artifacts = draft.director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));
+                if (draft.director.workflow.currentWork) draft.director.workflow.currentWork = { ...draft.director.workflow.currentWork, sourceHash: draft.director.sourceHash };
             }
             const previousSource = record.draft.director?.source;
             if (draft.director && (!record.draft.director || fingerprint(previousSource) !== fingerprint(draft.director.source))

@@ -26,6 +26,10 @@ RECIPES = ("portrait", "dark", "fantasy", "hard_surface", "ink", "monochrome", "
 MODES = ("T2VA", "I2VA", "FL2VA", "L2VA", "Ref2VA")
 
 
+def rows(value):
+    return value if isinstance(value, list) else []
+
+
 def is_scope(value):
     from audit_storyboard_quality import substantive
     return isinstance(value, list) and bool(value) and all(substantive(x) for x in value)
@@ -172,7 +176,7 @@ def validate_subject_prompt_v2(source, stage="edit"):
                             issue("shots." + shot_id + ".subject_usages.pictureBindingIds", "Missing or ambiguous default binding for " + str(purpose), shot_id,
                                   severity="warning" if stage == "compile" else None)
         for frame in shot.get("keyframes", []) if isinstance(shot.get("keyframes"), list) else []:
-            if frame.get("requiredForSubmission") and str(frame.get("id")) not in binding_owner and not frame.get("sourceNode"):
+            if frame.get("requiredForSubmission", True) and str(frame.get("id")) not in binding_owner and not frame.get("sourceNode"):
                 issue("shots." + shot_id + ".keyframes", "Required keyframe lacks a smart node binding", shot_id)
     by_segment = {}
     selected_scope = source.get("_canvas_compilation_scope") if isinstance(source.get("_canvas_compilation_scope"), dict) else {}
@@ -377,27 +381,31 @@ def main():
         result = contract()
     else:
         source = request.get("source")
-        issues = validate(source, request.get("stage", "edit"))
-        if isinstance(source, dict) and source.get("prompt_assembly", {}).get("version") == 2:
+        # 旧版前端兼容已移除：无标记草稿曾静默落入下方 legacy 校验。现在给出显式升级引导，
+        # 只有完整标记的 Subject Prompt v2 源稿继续进入校验。（旧行为：无条件 issues = validate(...)）
+        raw_assembly = source.get("prompt_assembly") if isinstance(source, dict) else None
+        assembly = raw_assembly if isinstance(raw_assembly, dict) else {}
+        raw_ledger = source.get("ledger") if isinstance(source, dict) else None
+        ledger = raw_ledger if isinstance(raw_ledger, dict) else {}
+        unsupported_message = "UNSUPPORTED_PRODUCTION_FORMAT: 当前制作台仅支持 Subject Prompt Assembly v2 与 Shot 局部帧账本 v2。请使用当前版 Acheng Director 升级后重新提交；原稿未修改。"
+        if not isinstance(source, dict) or source.get("version") != 2:
+            issues = [{"code": "UNSUPPORTED_PRODUCTION_FORMAT", "path": "director.source.version", "message": unsupported_message, "severity": "error"}]
+        elif ledger.get("contract_version") != 2:
+            issues = [{"code": "UNSUPPORTED_PRODUCTION_FORMAT", "path": "director.source.ledger.contract_version", "message": unsupported_message, "severity": "error"}]
+        elif assembly.get("version") != 2:
+            issues = [{"code": "UNSUPPORTED_PRODUCTION_FORMAT", "path": "director.source.prompt_assembly.version", "message": "UNSUPPORTED_PRODUCTION_FORMAT: 当前制作稿 v2 的 Prompt Assembly 结构不受支持。请使用当前版 Acheng Director 升级后重新提交；原稿未修改。", "severity": "error"}]
+        else:
+            issues = validate(source, request.get("stage", "edit"))
+            # if assembly.get("version") == 2:  # v2 分支在上方门控后恒为真
             issues.extend(validate_prompt_source_maps(request.get("artifacts", [])))
-        elif isinstance(source, dict) and isinstance(source.get("segments", []), list):
-            from h3_contract import detail_policy, english_word_count
-            from h3_final_format import validate_h3_format
-            segments = {s.get("id"): s for s in source.get("segments", []) if isinstance(s, dict)}
-            for index, artifact in enumerate(request.get("artifacts", [])):
-                if artifact.get("kind") != "h3" or artifact.get("status") != "ready":
-                    continue
-                seg = segments.get(artifact.get("targetId"))
-                if not seg:
-                    issues.append({"code": "INVALID_ARTIFACT_TARGET", "path": f"director.artifacts.{index}.targetId", "targetId": artifact.get("targetId"), "message": "Compiled Segment is not registered", "severity": "error"})
-                    continue
-                try:
-                    from canvas_model_contract import check_source_and_text
-                    check_source_and_text(source, seg, artifact["prompt"])
-                    policy = detail_policy(source, seg)
-                    validate_h3_format(artifact["prompt"], mode=seg["mode"], shot_count=len(seg.get("shot_ids", [])), reference_labels=[r["label"] for r in artifact.get("references", [])], subject_labels=[r["label"] for r in seg.get("subjects", [])], minimum_words=policy["minimum_words"] if seg["mode"] == "Ref2VA" else 0, duration_seconds=float(Fraction(str(seg["generation_clip_duration"]))))
-                except (ValueError, KeyError, TypeError) as error:
-                    issues.append({"code": "INVALID_COMPILED_PROMPT", "path": f"director.artifacts.{index}.prompt", "targetId": artifact.get("targetId"), "message": str(error), "severity": "error"})
+            # 旧版编译产物校验（无标记 Segment 提示词回读）随旧稿兼容一并注释：
+            # 能到达这里的源稿必然是完整 v2 标记，legacy h3 提示词回读不再需要。
+            # elif isinstance(source, dict) and isinstance(source.get("segments", []), list):
+            #     from h3_contract import detail_policy, english_word_count
+            #     from h3_final_format import validate_h3_format
+            #     segments = {s.get("id"): s for s in source.get("segments", []) if isinstance(s, "dict")}
+            #     for index, artifact in enumerate(request.get("artifacts", [])):
+            #         ... INVALID_ARTIFACT_TARGET / INVALID_COMPILED_PROMPT 回读循环 ...
         result = {"diagnostics": issues}
     print(json.dumps(result, ensure_ascii=False))
 

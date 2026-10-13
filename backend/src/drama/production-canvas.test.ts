@@ -42,12 +42,12 @@ function fixture(t: test.TestContext) {
     return { db, stores, events, episode, shared, directory, file };
 }
 function director(): DirectorProduction {
-    const source = { fps_num: 24, fps_den: 1, style_policy: "waived", style_policy_reason: "one existing identity reference",
-        scene_registry: [{ id: "room", name: "Room" }], script_scenes: [{ id: "morning", scene_id: "room", scene_name: "Morning", text: "First visit", beat_ids: ["b1"] }, { id: "night", scene_id: "room", scene_name: "Night", text: "Return", beat_ids: ["b2"] }],
+    const source = { version: 2, prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1, style_policy: "waived", style_policy_reason: "one existing identity reference",
+        subject_registry: [], character_registry: [], scene_registry: [{ id: "room", name: "Room" }], script_scenes: [{ id: "morning", scene_id: "room", scene_name: "Morning", text: "First visit", beat_ids: ["b1"] }, { id: "night", scene_id: "room", scene_name: "Night", text: "Return", beat_ids: ["b2"] }],
         asset_plan: [{ asset_id: "ROLE", asset_name: "Character", version: "v1", depends_on: [] }, { asset_id: "FRAME", asset_name: "Opening frame", version: "v1", depends_on: ["ROLE"] }],
-        shots: [{ id: "s1", title: "Entrance", scene_id: "room", story_beat_ids: ["b1"], start_frame: 0, end_frame: 120, visual: "Enter", camera: "static", state_in: {}, state_out: {}, required_assets: ["ROLE"], dialogues: [] },
-            { id: "s2", title: "Return", scene_id: "room", story_beat_ids: ["b2"], start_frame: 120, end_frame: 240, visual: "Return", camera: "static", state_in: {}, state_out: {}, required_assets: ["ROLE"], dialogues: [] }],
-        segments: [{ id: "seg1", shot_ids: ["s1"], start_frame: 0, end_frame: 120, generation_clip_duration: 5, mode: "T2VA" }, { id: "seg2", shot_ids: ["s2"], start_frame: 120, end_frame: 240, generation_clip_duration: 5, mode: "T2VA" }] };
+        shots: [{ id: "s1", title: "Entrance", scene_id: "room", story_beat_ids: ["b1"], story_order: 0, duration_frames: 120, visual: "Enter", camera: "static" },
+            { id: "s2", title: "Return", scene_id: "room", story_beat_ids: ["b2"], story_order: 1, duration_frames: 120, visual: "Return", camera: "static" }],
+        segments: [{ id: "seg1", shot_ids: ["s1"], mode: "T2VA" }, { id: "seg2", shot_ids: ["s2"], mode: "T2VA" }], ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } };
     const sourceHash = directorHash(source), engine = { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test-engine", version: "4.3.9" };
     const artifacts: DirectorProduction["artifacts"] = ["ROLE", "FRAME", "seg1", "seg2"].map(id => {
         const prompt = `integrated_multimodal_description:\n[Shot 1] Complete ${id}.\n\noverall_soundscape:\nN/A\n\nnon_diegetic_music:\nN/A\n`, sha256 = promptHash(prompt);
@@ -84,7 +84,7 @@ test("scene storyboard replacement replays once and refuses stale revisions with
     const before = save(f.episode, "ep", d);
     const first = (d.source.shots as any[])[0];
     const request = { operationId: "scene-replacement", expectedRevision: before.revision, ops: [{ type: "replace_director_scene_storyboard", sceneId: "morning",
-        shots: [{ ...first, end_frame: 60 }, { ...first, id: "s1b", start_frame: 60 }],
+        shots: [{ ...first, duration_frames: 60, timeline_id: "main" }, { ...first, id: "s1b", story_order: 1, duration_frames: 60, timeline_id: "main" }],
         segments: [{ ...(d.source.segments as any[])[0], shot_ids: ["s1", "s1b"] }], shotInputs: { s1: { keyframePolicy: "none", assetIds: ["ROLE"] }, s1b: { keyframePolicy: "none", assetIds: ["ROLE"] } } }] };
     const saved = f.episode.edit("ep", request);
     assert.equal(saved.revision, before.revision + 1);
@@ -105,7 +105,7 @@ test("Clip storyboard edits replace formal Shots and immediately reproject H3 tr
     const formalSegment = (d.source.segments as any[])[0];
     const request = { operationId: "clip-track-writeback", expectedRevision: before.revision, ops: [{ type: "replace_director_clip_storyboard", segmentId: "seg1",
         segment: { ...formalSegment, shot_ids: ["s1", "s1b"] },
-        shots: [{ ...original, end_frame: 60 }, { ...original, id: "s1b", start_frame: 60, end_frame: 120 }],
+        shots: [{ ...original, duration_frames: 60, timeline_id: "main" }, { ...original, id: "s1b", story_order: 1, duration_frames: 60, timeline_id: "main" }],
         shotInputs: { s1: { keyframePolicy: "none", assetIds: [] }, s1b: { keyframePolicy: "none", assetIds: [] } } }] };
     const saved = f.episode.edit("ep", request);
     assert.deepEqual((saved.draft.director!.source.shots as any[]).map(shot => shot.id), ["s1", "s1b", "s2"]);
@@ -122,7 +122,6 @@ test("large preparation, arrangement and synchronization recover lost responses 
     const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
     const d = director();
     (d.source.script_scenes as any[]).forEach(scene => { scene.text = "完整剧情😀".repeat(25000); });
-    (d.source.shots as any[]).forEach(shot => { shot.required_assets = []; });
     Object.values(d.shotInputs).forEach(input => { input.assetIds = []; input.keyframePolicy = "none"; delete input.keyframeAssetId; });
     d.sourceHash = directorHash(d.source);
     d.artifacts.forEach(artifact => { artifact.prompt += "完整镜头正文😀".repeat(10000); artifact.sha256 = promptHash(artifact.prompt); artifact.sourceHash = d.sourceHash; artifact.receipt.sourceHash = d.sourceHash; artifact.receipt.promptHash = artifact.sha256; });
@@ -186,7 +185,6 @@ test("synchronization repairs shared-node Clip ordering once and then leaves rev
     const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
     const d = director();
     d.source.script_scenes = [{ id: "morning", scene_id: "room", scene_name: "Morning", text: "One scene", beat_ids: ["b1", "b2"] }];
-    (d.source.shots as any[]).forEach(shot => { shot.required_assets = []; });
     Object.values(d.shotInputs).forEach(input => { input.assetIds = []; input.keyframePolicy = "none"; delete input.keyframeAssetId; });
     d.sourceHash = directorHash(d.source);
     d.artifacts.forEach(artifact => { artifact.sourceHash = d.sourceHash; artifact.receipt.sourceHash = d.sourceHash; });
@@ -210,7 +208,6 @@ test("complete draft preparation repairs Clip order without publishing or submit
     const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
     const d = director();
     d.source.script_scenes = [{ id: "morning", scene_id: "room", scene_name: "Morning", text: "One scene", beat_ids: ["b1", "b2"] }];
-    (d.source.shots as any[]).forEach(shot => { shot.required_assets = []; });
     Object.values(d.shotInputs).forEach(input => { input.assetIds = []; input.keyframePolicy = "none"; delete input.keyframeAssetId; });
     d.sourceHash = directorHash(d.source);
     d.artifacts.forEach(artifact => { artifact.sourceHash = d.sourceHash; artifact.receipt.sourceHash = d.sourceHash; });
@@ -366,6 +363,7 @@ test("Subject Prompt v2 continuity edits stale old compile receipts before repro
     const f = fixture(t), d = director();
     const shots = d.source.shots as any[];
     d.source = {
+        version: 2,
         prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1, scene_registry: [{ id: "room", name: "Room" }],
         character_registry: [{ id: "ROLE", name: "Character" }], subject_registry: [{ id: "SUB_ROLE", kind: "character",
             entityRef: { ownerKind: "episode", ownerId: "ep", kind: "character", id: "ROLE" }, pictureBindings: [] }], asset_plan: d.source.asset_plan, asset_cards: [],
@@ -558,7 +556,6 @@ test("batch history resolves a shared parent by exact Clip and rolls back a mixe
 test("archived H3 video results return to their scene Clips with original task provenance and no new task", t => {
     const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
     const d = director();
-    (d.source.shots as any[]).forEach(shot => { shot.required_assets = []; });
     Object.values(d.shotInputs).forEach(input => { input.assetIds = []; input.keyframePolicy = "none"; delete input.keyframeAssetId; });
     d.sourceHash = directorHash(d.source);
     d.artifacts = d.artifacts.map(artifact => ({ ...artifact, sourceHash: d.sourceHash, receipt: { ...artifact.receipt, sourceHash: d.sourceHash } }));
@@ -1181,7 +1178,6 @@ test("native H3 tracking follows the active Clip while a pending decision keeps 
     const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
     const d = director();
     d.source.script_scenes = [{ id: "sequence", scene_id: "room", scene_name: "Sequence", text: "Both shots share this scene", beat_ids: ["b1", "b2"] }];
-    (d.source.shots as any[]).forEach(shot => { shot.required_assets = []; });
     Object.values(d.shotInputs).forEach(input => { input.assetIds = []; input.keyframePolicy = "none"; delete input.keyframeAssetId; });
     d.sourceHash = directorHash(d.source); d.artifacts.forEach(artifact => { artifact.sourceHash = d.sourceHash; artifact.receipt.sourceHash = d.sourceHash; });
     save(f.episode, "ep", d);
@@ -1277,7 +1273,6 @@ test("scene H3 preparation inherits saved layout and preserves materialized and 
 test("Clip synchronization also assigns unbound segments to their scene H3 nodes", t => {
     const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
     const d = director();
-    (d.source.shots as any[]).forEach(shot => { shot.required_assets = []; });
     Object.values(d.shotInputs).forEach(input => { input.assetIds = []; input.keyframePolicy = "none"; delete input.keyframeAssetId; });
     d.sourceHash = directorHash(d.source);
     d.artifacts.forEach(artifact => { artifact.sourceHash = d.sourceHash; artifact.receipt.sourceHash = d.sourceHash; });

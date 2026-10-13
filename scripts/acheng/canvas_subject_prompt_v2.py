@@ -23,6 +23,10 @@ def rows(value):
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
+def string_rows(value):
+    return [item for item in value if isinstance(item, str) and item] if isinstance(value, list) else []
+
+
 def utf16_length(value):
     return len(value.encode("utf-16-le")) // 2
 
@@ -230,12 +234,12 @@ def _infer_segment_mode(source, segment):
     subjects = {str(item.get("id")): item for item in rows(source.get("subject_registry"))}
     for shot_id in segment.get("shot_ids", []):
         shot = shot_by_id.get(str(shot_id), {})
-        if any(frame.get("requiredForSubmission") for frame in rows(shot.get("keyframes"))):
+        if any(frame.get("requiredForSubmission", True) for frame in rows(shot.get("keyframes"))):
             return "Ref2VA"
         for usage in rows(shot.get("subject_usages")):
             if str(usage.get("subjectId")) in subjects and (usage.get("presentation") == "visible" or usage.get("pictureBindingIds")):
                 subject = subjects[str(usage.get("subjectId"))]
-                explicit = [str(value) for value in rows(usage.get("pictureBindingIds"))]
+                explicit = string_rows(usage.get("pictureBindingIds"))
                 bindings = rows(subject.get("pictureBindings"))
                 entity_ref = subject.get("entityRef") if isinstance(subject.get("entityRef"), dict) else {}
                 if entity_ref.get("kind") == "scene" and not explicit:
@@ -246,7 +250,7 @@ def _infer_segment_mode(source, segment):
                     requirements = {str(item.get("factId")): str(item.get("value")) for item in rows(usage.get("stateRequirements"))}
                     purposes = [str(value) for value in rows(usage.get("referencePurpose"))] or ["identity"]
                     matches = [[binding for binding in bindings
-                                if purpose in [str(value) for value in rows(binding.get("defaultFor"))]
+                                if purpose in string_rows(binding.get("defaultFor"))
                                 and all(requirements.get(str(key)) == str(value) for key, value in (binding.get("applicableState") or {}).items())]
                                for purpose in purposes]
                     if matches and all(len(items) == 1 for items in matches):
@@ -331,7 +335,7 @@ def adapt_production(production, *, draft=False):
                     subject_uses[subject_id].append((shot_id, picture["label"], binding))
                     reference_requirements[shot_id].append({"entity_id": entity_id, "asset_version": picture["asset_version"], "purpose": str(snapshot.get("role") or "identity")})
             for frame in rows(shot.get("keyframes")):
-                if not frame.get("requiredForSubmission"):
+                if not frame.get("requiredForSubmission", True):
                     continue
                 binding_id = str(frame.get("id") or "")
                 snapshot = snapshots.get(binding_id)
@@ -439,7 +443,8 @@ def adapt_production(production, *, draft=False):
                           "file": str(snapshot["file"]), "sha256": digest}
             source.setdefault("asset_plan", []).append(audio_plan)
             assets[binding_id] = audio_plan
-            binding_shots = [str(value) for value in rows(binding.get("shotIds"))]
+            shot_scope = binding.get("shotIds")
+            binding_shots = string_rows(shot_scope)
             if not binding_shots or any(shot_id not in shot_ids for shot_id in binding_shots):
                 raise ValueError("Audio binding " + binding_id + " has an invalid Shot scope")
             label = str(binding.get("label") or "")
@@ -448,7 +453,7 @@ def adapt_production(production, *, draft=False):
                          "role": str(binding.get("role") or "audio"), "preserve": "Use as the registered audio reference.",
                          "exclude": "Do not treat audio as a visual identity reference.",
                          "definition": label + " is the archived audio reference for this Segment.",
-                         "retention": label + ": preserve its audible reference only.", "shot_ids": binding_shots,
+                         "retention": label + ": reference - preserve its audible reference only.", "shot_ids": binding_shots,
                          "start_frame": start_frame, "end_frame": end_frame, "mediaType": "audio"})
             for shot_id in binding_shots:
                 reference_requirements[shot_id].append({"asset_id": binding_id, "asset_version": version, "purpose": "audio"})
@@ -612,7 +617,7 @@ def _plain_text(value):
     if isinstance(value, list):
         return "; ".join(text for text in (_plain_text(item) for item in value) if text)
     if isinstance(value, dict):
-        excluded = {"id", "factId", "subjectId", "shotId", "timeline_id", "story_order", "start", "end"}
+        excluded = {"id", "beat_id", "factId", "subjectId", "shotId", "timeline_id", "story_order", "start", "end"}
         return "; ".join(text for text in (_plain_text(item) for key, item in value.items() if key not in excluded) if text)
     return ""
 
@@ -711,6 +716,11 @@ def _shot_prompt_v2(production, segment, shot, shot_number, speakers):
     else:
         header = "[Shot " + str(shot_number) + "] At " + start_time + ", covering " + start_time + "–" + end_time + " within this Clip."
     parts = [header]
+    scene_id = str(shot.get("scene_id") or "")
+    scene = next((item for item in rows(production.get("scene_registry")) if str(item.get("id") or "") == scene_id), {})
+    scene_name, scene_description = entity_text(production, {"entityRef": {"kind": "scene", "id": scene_id}}) if scene else ("", "")
+    if scene_description:
+        parts.append("Scene setting: " + (scene_name + ": " if scene_name else "") + scene_description)
     state = str(shot.get("state_description") or "").strip()
     if state:
         parts.append("At shot start, preserve these registered Subject states: " + state)
@@ -819,7 +829,7 @@ def compile_prompt_v2(production, segment, *, draft=False):
     references = rows(segment.get("references"))
     shots_by_id = {str(item["id"]): item for item in production["shots"]}
     shots = [shots_by_id[str(shot_id)] for shot_id in segment["shot_ids"]]
-    anchor_roles = [str(item.get("anchor") or "") for shot in shots for item in rows(shot.get("keyframes")) if item.get("requiredForSubmission")]
+    anchor_roles = [str(item.get("anchor") or "") for shot in shots for item in rows(shot.get("keyframes")) if item.get("requiredForSubmission", True)]
     if not draft and mode == "T2VA" and references:
         raise ValueError("T2VA cannot consume bound Subject or required keyframe pictures; preserve the bindings and select a compatible mode.")
     if not draft and mode == "I2VA" and (len(references) != 1 or "opening" not in anchor_roles):

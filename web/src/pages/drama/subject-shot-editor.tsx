@@ -10,6 +10,7 @@ import { ReferenceNodeLink } from "./reference-node-link";
 import { SmartImageNodePicker } from "./smart-image-node-picker";
 import type { ImageNodeChoice } from "./smart-image-node-options";
 import { readShotFormDraft, rebaseShotFormDraft, shotDraftChanged, shotDraftSourceChanged, shotFormChanges, shotFormValue, subjectDisplayName, type ShotFormValue } from "./subject-shot-draft";
+import { AudioDesignEditor } from "./audio-design-editor";
 
 type Keyframes = Extract<ProductionOperation, { type: "set_director_shot_keyframes" }>["keyframes"];
 type Utterances = Extract<ProductionOperation, { type: "set_director_shot_utterances" }>["utterances"];
@@ -75,7 +76,7 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
     const addKeyframe = () => {
         if (!keyframeNode || !keyframeChoiceValid) return;
         const keyframeId = `KF:${id}:${encodeURIComponent(keyframeNode.projectId)}:${encodeURIComponent(keyframeNode.nodeId)}`;
-        update({ keyframes: [...value.keyframes, { id: keyframeId, assetId: keyframeNode.assetId || keyframeId, sourceNode: { projectId: keyframeNode.projectId, nodeId: keyframeNode.nodeId }, selection: { mode: "node_selection" }, anchor: "composition", subjectIds: value.subject_usages.filter(item => item.presentation === "visible").map(item => String(item.subjectId)), retain: ["构图", "人物调度"], exclude: ["身份变化", "未登记人物"], requiredForSubmission: false }] });
+        update({ keyframes: [...value.keyframes, { id: keyframeId, assetId: keyframeNode.assetId || keyframeId, sourceNode: { projectId: keyframeNode.projectId, nodeId: keyframeNode.nodeId }, selection: { mode: "node_selection" }, anchor: "composition", subjectIds: value.subject_usages.filter(item => item.presentation === "visible").map(item => String(item.subjectId)), retain: ["构图", "人物调度"], exclude: ["身份变化", "未登记人物"], requiredForSubmission: true }] });
         setKeyframeNode(undefined);
     };
     const save = async () => {
@@ -117,6 +118,8 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
         </div>}
         {section === "sound" && <div className="space-y-4">
             <section className="space-y-2"><h4 className="flex items-center gap-2 text-sm font-medium"><Volume2 className="size-4" />{t("director.atomic.sound")}</h4><Input.TextArea value={typeof value.audio === "string" ? value.audio : readableText(value.audio)} autoSize={{ minRows: 2, maxRows: 5 }} disabled={disabled} onChange={event => update({ audio: value.audio && typeof value.audio === "object" && !Array.isArray(value.audio) ? { ...value.audio as Record<string, unknown>, description: event.target.value } : event.target.value })} />
+            {/* A 类补齐：结构化声音字段（逐条 foley / 低频约束）原先只能靠上面的自由文本带过，跟随整表单草稿一起保存。 */}
+            {value.audio != null && typeof value.audio === "object" && !Array.isArray(value.audio) ? <AudioDesignEditor key={id} value={value.audio} disabled={disabled} onChange={nextAudio => update({ audio: nextAudio })} /> : null}
                 {utteranceRows.map((item, index) => <article key={item.utteranceId || `new:${index}`} className="space-y-2 rounded-lg border border-border p-3">
                     <div className="flex items-center gap-2">
                         <Select className="min-w-0 flex-1" value={item.speakerSubjectId || undefined} disabled={disabled} placeholder={t("director.atomic.dialogueSpeaker")} options={subjects.map(subject => ({ value: String(subject.id), label: subjectDisplayName(source, String(subject.id)) }))} onChange={speakerSubjectId => utterancePatch(index, { speakerSubjectId })} />

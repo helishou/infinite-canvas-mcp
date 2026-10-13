@@ -294,7 +294,7 @@ export type ProductionCompilationStatus = {
     application?: { revision?: number; sourceHash?: string; operationId?: string; replayed?: boolean; referenceSync?: Array<{ targetId: string; status: string; referenceCount?: number }> };
     mediaSubmitted: false;
 };
-export type ProductionCompilationDiagnostic = { code?: string; severity?: string; path?: string; targetId?: string; shotId?: string; message?: string; blockingActions?: string[]; blocksCompilation?: boolean; nextAction?: unknown };
+export type ProductionCompilationDiagnostic = { code?: string; severity?: string; path?: string; targetId?: string; shotId?: string; affectedTargets?: string[]; message?: string; blockingActions?: string[]; blocksCompilation?: boolean; nextAction?: unknown };
 export function compileProduction(target: ProductionTarget, expectedRevision: number, operationId: string, scope?: { sceneId: string }) {
     return request<{ ok: boolean; compilation: ProductionCompilationStatus }>("POST", `${productionPath(target)}/compile`, { expectedRevision, operationId, ...(scope ? { scope } : {}) });
 }

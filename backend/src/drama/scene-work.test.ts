@@ -25,7 +25,7 @@ function fixture(t: test.TestContext) {
     db.createCanvasProject({ id: "canvas", title: "Canvas", nodes: [], connections: [] });
     db.upsertDramaEpisode({ id: "ep", dramaId: "drama", episodeNumber: 1, title: "Episode", synopsis: "", fullPlot: "", canvasId: "canvas" });
     const service = new EpisodeProductionService(db, undefined, root, false, () => {});
-    const source = { brief: "confirmed", script_scenes: [{ id: "A", scene_id: "ROOM", beat_ids: ["a"] }, { id: "B", scene_id: "ROOM", beat_ids: ["b"] }], shots: [], segments: [], asset_plan: [], asset_cards: [] };
+    const source = { version: 2, prompt_assembly: { version: 2 }, brief: "confirmed", fps_num: 24, fps_den: 1, subject_registry: [], character_registry: [], scene_registry: [], script_scenes: [{ id: "A", scene_id: "ROOM", beat_ids: ["a"] }, { id: "B", scene_id: "ROOM", beat_ids: ["b"] }], shots: [], segments: [], utterances: [], asset_plan: [], asset_cards: [], ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } };
     const director: DirectorProduction = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "test" }, source, sourceHash: compilationHash(source), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], workflow: {}, unresolved: [], executionAuthorized: false };
     service.edit("ep", { operationId: "seed", expectedRevision: 0, ops: [{ type: "set_director_production", director }, { type: "set_settings", patch: { parallelScenes: true, reviewPolicy: { mode: "manual", shared: "manual", scene: "manual" } } }] });
     const compilations = new ProductionCompilationService(service, path.join(root, "compile"));
@@ -36,7 +36,8 @@ function fixture(t: test.TestContext) {
 
 function reviewFixture(t: test.TestContext) {
     const value = fixture(t), { root, service, director, db, coordinator } = value;
-    director.source.shots = [{ id: "SA", source_scene_id: "A", scene_id: "ROOM", start_frame: 0, end_frame: 120, visual: "look" }];
+    director.source.shots = [{ id: "SA", source_scene_id: "A", scene_id: "ROOM", story_order: 0, duration_frames: 120, visual: "look" }];
+    director.source.segments = [{ id: "SEG-A", shot_ids: ["SA"], mode: "T2VA" }];
     director.source.asset_plan = ["K1", "K2"].map(id => ({ id, kind: "prop", canvas_scope: "episode", shot_ids: ["SA"], version: "v1" }));
     director.shotInputs = { SA: { keyframePolicy: "none", assetIds: [] } };
     director.sourceHash = compilationHash(director.source);
@@ -350,7 +351,8 @@ test("scene source merge rejects shared and other-scene writes, keeps unrelated 
     const work = directorSceneWorkSchema.parse({ workId: "work-A", sceneId: "A", inputRevision: 1, sourceHash: director.sourceHash, inputHash: input.inputHash, status: "running", stage: "create", policy: { mode: "manual", shared: "manual", scene: "manual" }, updatedAt: new Date().toISOString() });
     const response = { status: "complete", sourceJson: JSON.stringify(input.director.source), shotInputsJson: "{}", boundariesJson: "[]", evidence: ["authored"], unresolved: [], cursor: "" };
     const source = structuredClone(input.director.source) as any;
-    source.shots = [{ id: "S-A", source_scene_id: "A", scene_id: "ROOM", visual: "visible event" }];
+    source.shots = [{ id: "S-A", source_scene_id: "A", scene_id: "ROOM", story_order: 0, duration_frames: 120, visual: "visible event" }];
+    source.segments = [{ id: "SEG-A", shot_ids: ["S-A"], mode: "T2VA" }];
     assert.ok(mergeSceneSource(director, work, { ...response, sourceJson: JSON.stringify(source) }).director);
     source.shots[0].source_scene_id = "B";
     assert.throws(() => mergeSceneSource(director, work, { ...response, sourceJson: JSON.stringify(source) }), /OUTSIDE_SCOPE/);
@@ -474,9 +476,9 @@ test("scene coordinator progresses independent source, scoped compilation, autom
             return { threadId: "review", output: { verdict: payload.source.script_scenes[0].id === "A" ? "needs_human" : "approved", evidence: "mock scene A needs a creative decision; B can proceed", inspectedMedia: [], unresolved: [] } };
         }
         const source = JSON.parse(request.prompt.slice(request.prompt.lastIndexOf("\n") + 1)).source;
-        const sceneId = source.script_scenes[0].id, start = sceneId === "A" ? 0 : 120;
-        source.shots = [{ id: `shot-${sceneId}`, source_scene_id: sceneId, scene_id: "ROOM", start_frame: start, end_frame: start + 120, visual: "move", dialogues: [], audio: {} }];
-        source.segments = [{ id: `segment-${sceneId}`, shot_ids: [`shot-${sceneId}`], start_frame: start, end_frame: start + 120, generation_clip_duration: 5, mode: "T2VA" }];
+        const sceneId = source.script_scenes[0].id, storyOrder = sceneId === "A" ? 0 : 1;
+        source.shots = [{ id: `shot-${sceneId}`, source_scene_id: sceneId, scene_id: "ROOM", story_order: storyOrder, duration_frames: 120, visual: "move" }];
+        source.segments = [{ id: `segment-${sceneId}`, shot_ids: [`shot-${sceneId}`], mode: "T2VA" }];
         return { threadId: `agent-${sceneId}`, output: { status: "complete", sourceJson: JSON.stringify(source), shotInputsJson: JSON.stringify({ [`shot-${sceneId}`]: { assetIds: [], keyframePolicy: "none" } }), boundariesJson: "[]", evidence: ["mock authoring"], unresolved: [], cursor: "" } };
     } });
     compilation.onSettled = id => coordinator.wake(id);

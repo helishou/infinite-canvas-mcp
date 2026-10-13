@@ -9,6 +9,7 @@ function shot(id: string, storyOrder: number, timelineId = "main") {
 
 function director(segmentGroups: Array<Record<string, any>>) {
     const source = {
+        version: 2,
         prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
         character_registry: [], scene_registry: [], subject_registry: [], utterances: [], asset_plan: [], asset_cards: [],
         shots: [shot("S1", 0), shot("S2", 1), shot("S3", 2), shot("S4", 3)],

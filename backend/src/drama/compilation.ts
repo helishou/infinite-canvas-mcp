@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { Worker } from "node:worker_threads";
-import { compileAchengDirector, resolveAchengEngine, resolveAchengRuntime, achengEngineIdentity } from "@basketikun/canvas-agent/skills/acheng";
+import { compileAchengDirector, resolveAchengEngine, achengEngineIdentity } from "@basketikun/canvas-agent/skills/acheng";
 import { canonicalProduction, diagnosticBlocksAction, directorProductionSchema, isSubjectPromptAssembly, type DirectorProduction, type ProductionBlockingAction, type ProductionDiagnostic } from "@basketikun/canvas-agent/drama/production-contract";
 import { EpisodeProductionService, ProductionConflictError } from "./production.js";
 import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
@@ -68,6 +68,8 @@ export class ProductionCompilationService {
             if (isSubjectPromptAssembly(director.source) && !((runtime.sourceContract as any)?.promptAssemblyVersions || []).includes(2)) {
                 throw Object.assign(new Error("当前激活的 Acheng 编译器尚未支持 Subject Prompt v2；源稿已保存，尚未生成或同步 Prompt。"), { code: "SUBJECT_PROMPT_COMPILER_UNSUPPORTED" });
             }
+            // Runtime metadata records the compiler used for this request. It is
+            // refreshed on every compile and never selects future compiler code.
             director.engine = achengEngineIdentity(runtime);
         }
         return director;
@@ -209,7 +211,7 @@ export class ProductionCompilationService {
         const requestHash = requestFingerprint;
         const compileInputDiagnostics: ProductionDiagnostic[] = [];
         const director = this.bindCanvasStyleAnchor(id, this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director), scope?.targetIds, true, undefined, compileInputDiagnostics));
-        if (scope && this.compiler === compileAchengDirector && !resolveAchengRuntime(director.engine.runtimeId).sourceContract?.scopedCompilation) throw new Error("SCOPED_COMPILATION_UNSUPPORTED: 当前激活引擎不支持按场次编译，请更新本机引擎");
+        if (scope && this.compiler === compileAchengDirector && !resolveAchengEngine().sourceContract?.scopedCompilation) throw new Error("SCOPED_COMPILATION_UNSUPPORTED: 当前激活引擎不支持按场次编译，请更新本机引擎");
         const effective = this.effectiveInput(id, director, scope);
         const boundFiles = this.service.compilationReferenceFiles(id, effective.input);
         const material = this.collectMaterial(boundFiles, effective.input);
@@ -280,7 +282,7 @@ export class ProductionCompilationService {
         const compileInput = scope ? scopedCompilerInput(scoped!.director, scope) : director;
         const result = await new Promise<any>((resolve, reject) => {
             const worker = new Worker(`const { parentPort, workerData } = require("node:worker_threads");
-                (async () => { const engine = await import(workerData.module); parentPort.postMessage(engine.preflightCompilationDirector(workerData.director, (id, label) => workerData.references[id + "\\0" + label], workerData.director.engine.runtimeId)); })().catch(error => parentPort.postMessage({ error: error.message }));`, { eval: true, workerData: { module: import.meta.resolve("@basketikun/canvas-agent/skills/acheng"), director: compileInput, references } });
+                (async () => { const engine = await import(workerData.module); parentPort.postMessage(engine.preflightCompilationDirector(workerData.director, (id, label) => workerData.references[id + "\\0" + label])); })().catch(error => parentPort.postMessage({ error: error.message }));`, { eval: true, workerData: { module: import.meta.resolve("@basketikun/canvas-agent/skills/acheng"), director: compileInput, references } });
             let delivered = false;
             worker.once("message", message => { delivered = true; message.error ? reject(new Error(message.error)) : resolve(message); }); worker.once("error", reject);
             worker.once("exit", code => { if (!delivered) reject(new Error(`预检执行单元退出 (${code})`)); });
@@ -381,12 +383,12 @@ export class ProductionCompilationService {
                         (async () => { const engine = await import(workerData.module);
                           const contract = await import(workerData.contractModule);
                           const resolveRef = (targetId, label) => workerData.references[targetId + "\\0" + label];
-                          const checked = engine.preflightCompilationDirector(workerData.director, resolveRef, workerData.director.engine.runtimeId);
+                          const checked = engine.preflightCompilationDirector(workerData.director, resolveRef);
                           const blocking = checked.diagnostics.filter(item => contract.diagnosticBlocksAction(item, "compile"));
                           const globalCodes = new Set(workerData.globalCompileBlockerCodes);
                           const global = blocking.filter(item => !item.targetId && globalCodes.has(item.code));
                           if (global.length) { parentPort.postMessage({ blocked: global }); return; }
-                          const compiled = engine.compileAchengDirector(workerData.director, workerData.directory, resolveRef, workerData.director.engine.runtimeId);
+                          const compiled = engine.compileAchengDirector(workerData.director, workerData.directory, resolveRef);
                           compiled.diagnostics.push(...blocking);
                           parentPort.postMessage({ compiled });
                         })().catch(error => parentPort.postMessage({ error: error.message }));`, { eval: true, workerData: { module: import.meta.resolve("@basketikun/canvas-agent/skills/acheng"), contractModule: import.meta.resolve("@basketikun/canvas-agent/drama/production-contract"), globalCompileBlockerCodes: GLOBAL_COMPILE_BLOCKER_CODES, director: compileInput, references: job.references, directory } });
@@ -480,7 +482,7 @@ export class ProductionCompilationService {
         const scope = this.authoredScope(candidate || current.draft.director);
         const compileInputDiagnostics: ProductionDiagnostic[] = [];
         const director = this.bindCanvasStyleAnchor(id, this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director), scope?.targetIds, true, undefined, compileInputDiagnostics));
-        const checked = this.service.preflight(id, { action: "compile", request: { expectedRevision, director } }, this.compiler === compileAchengDirector ? director.engine.runtimeId : undefined);
+        const checked = this.service.preflight(id, { action: "compile", request: { expectedRevision, director } });
         const compileBlockers = checked.diagnostics.filter(item => diagnosticForAction(item, "compile"));
         const globalCompileBlockers = compileBlockers.filter(isGlobalCompilationBlocker);
         if (globalCompileBlockers.length) throw new ProductionValidationError(globalCompileBlockers);

@@ -112,7 +112,7 @@ test("Subject picture binding asset IDs never replace stable Segment compilation
     const { service, director, compilations } = fixture(t);
     const candidate = structuredClone(director);
     candidate.source = {
-        prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
+        version: 2, prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
         script_scenes: [{ id: "SCENE", scene_id: "ROOM", scene_name: "厨房", text: "", beat_ids: ["BEAT"] }],
         scene_registry: [{ id: "ROOM", name: "厨房" }], subject_registry: [], asset_plan: [], asset_cards: [],
         shots: [{ id: "SHOT", scene_id: "ROOM", timeline_id: "main", story_order: 0, duration_frames: 96,
@@ -290,7 +290,7 @@ function fixture(t: test.TestContext) {
     db.createCanvasProject({ id: "canvas", title: "Canvas", nodes: [], connections: [] });
     db.upsertDramaEpisode({ id: "episode", dramaId: "drama", episodeNumber: 1, title: "Episode", synopsis: "", fullPlot: "", canvasId: "canvas" });
     const service = new EpisodeProductionService(db, undefined, root, false, () => {});
-    const source = { brief: "Preserve the sample", shots: [], segments: [], asset_plan: [], asset_cards: [{ id: "STYLE", prompt: "The authored image prompt" }] };
+    const source = { version: 2, prompt_assembly: { version: 2 }, brief: "Preserve the sample", fps_num: 24, fps_den: 1, subject_registry: [], character_registry: [], scene_registry: [], shots: [], segments: [], utterances: [], asset_plan: [], asset_cards: [{ id: "STYLE", prompt: "The authored image prompt" }], ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } };
     const director: DirectorProduction = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "fixture", runtimeId: "fixture", version: "fixture" }, source, sourceHash: directorHash(source), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
     service.edit("episode", { operationId: "seed", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
     const compiler = (input: DirectorProduction) => ({ director: input, exitCode: 0, diagnostics: [], audit: { status: "PASS" }, sourceAdjustments: [], acceptance: {} });
@@ -499,7 +499,7 @@ test("tampered compiler packet is rejected without a revision change", t => {
 
 test("continuity issues remain target-level warnings while H3 prompts apply and publish", t => {
     const { root, service, director } = fixture(t);
-    director.source = { ...director.source, ledger: { contract_version: 2 }, segments: [{ id: "SEG01" }, { id: "SEG02" }] };
+    director.source = { ...director.source, ledger: { contract_version: 2 }, script_scenes: [{ id: "SCENE", scene_id: "ROOM", scene_name: "Room", text: "", beat_ids: [] }], shots: [{ id: "SH1", scene_id: "ROOM", timeline_id: "main", story_order: 0, duration_frames: 120 }, { id: "SH2", scene_id: "ROOM", timeline_id: "main", story_order: 1, duration_frames: 120 }], segments: [{ id: "SEG01", shot_ids: ["SH1"], mode: "T2VA" }, { id: "SEG02", shot_ids: ["SH2"], mode: "T2VA" }] };
     director.sourceHash = directorHash(director.source);
     service.edit("episode", { operationId: "ledger-v2", expectedRevision: 1, ops: [{ type: "set_director_production", director }] });
     const owner = { kind: "episode", id: "episode" };
@@ -570,7 +570,7 @@ test("story-only compile is blocked before a compiler packet or task is created"
 test("missing identity media applies a compiled text draft while keeping generation unavailable", async t => {
     const { root, service, director } = fixture(t);
     director.source = {
-        prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
+        version: 2, prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
         character_registry: [{ id: "P", name: "Person" }], scene_registry: [{ id: "SCENE", name: "Room" }],
         script_scenes: [{ id: "SCENE", scene_id: "SCENE", scene_name: "Room", text: "", beat_ids: [] }],
         subject_registry: [{ id: "P", kind: "character", entityRef: { ownerKind: "episode", ownerId: "episode", kind: "character", id: "P" }, pictureBindings: [] }],

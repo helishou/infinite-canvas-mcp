@@ -84,8 +84,7 @@ export function CanvasToolbar({
     ];
     return <>
         <div data-canvas-create-tools className="canvas-create-dock" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.item }} onPointerDown={event => event.stopPropagation()}>
-            <Tooltip title={t("canvas.toolbar.select")}><Button type="text" aria-label={t("canvas.toolbar.select")} aria-pressed={canvasTool === "select"} onClick={() => onCanvasToolChange("select")} icon={<MousePointer2 className="size-4" />} /></Tooltip>
-            <Tooltip title={t("canvas.toolbar.pan")}><Button type="text" aria-label={t("canvas.toolbar.pan")} aria-pressed={canvasTool === "pan"} onClick={() => onCanvasToolChange("pan")} icon={<Hand className="size-4" />} /></Tooltip>
+            <Tooltip title={t(canvasTool === "select" ? "canvas.toolbar.select" : "canvas.toolbar.pan")}><Button type="text" aria-label={t(canvasTool === "select" ? "canvas.toolbar.select" : "canvas.toolbar.pan")} onClick={() => onCanvasToolChange(canvasTool === "select" ? "pan" : "select")} icon={canvasTool === "select" ? <MousePointer2 className="size-4" /> : <Hand className="size-4" />} /></Tooltip>
             <Tooltip title={t("canvas.undo")}><Button type="text" aria-label={t("canvas.undo")} disabled={!canUndo} onClick={onUndo} icon={<Undo2 className="size-4" />} /></Tooltip>
             <Tooltip title={t("canvas.redo")}><Button type="text" aria-label={t("canvas.redo")} disabled={!canRedo} onClick={onRedo} icon={<Redo2 className="size-4" />} /></Tooltip>
             <span className="mx-1 h-5 border-l border-border" />

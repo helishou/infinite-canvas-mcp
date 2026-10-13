@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { setImmediate as immediate } from "node:timers/promises";
 import { ProductionCompilationService, productionCompilationBusy } from "./compilation.js";
-const director: any = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "1" }, source: { brief: "source" }, sourceHash: "b".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
+const director: any = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "1" }, source: { version: 2, prompt_assembly: { version: 2 }, brief: "source", fps_num: 24, fps_den: 1, subject_registry: [], character_registry: [], scene_registry: [], shots: [], segments: [], utterances: [], asset_plan: [], asset_cards: [], ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } }, sourceHash: "b".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
 
 test("active Python audit preserves standalone quality-warning provenance through the shared compiler adapter", async t => {
     const { resolveAchengEngine, compileAchengDirector, achengEngineIdentity } = await import("@basketikun/canvas-agent/skills/acheng");
@@ -35,7 +35,7 @@ test("active Python audit preserves standalone quality-warning provenance throug
 function setup(t: any, compiler: any) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "compilation-jobs-")); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
     let current: any = { revision: 1, draft: { director: structuredClone(director) } };
-    const service: any = { get: () => structuredClone(current), verifyCompilationBindings: () => {}, compilationReferenceFiles: () => ({}),
+    const service: any = { get: () => structuredClone(current), canvasStyleAnchorInput: () => undefined, verifyCompilationBindings: () => {}, compilationReferenceFiles: () => ({}),
         resolveSubjectPictureInputs: (_id: string, input: any) => structuredClone(input), preflight: (_id: string, request: any) => request.action === "compile" &&
             !request.request?.director?.source?.asset_cards?.length && !request.request?.director?.source?.segments?.length
             ? { valid: false, diagnostics: [{ code: "COMPILE_STAGE_NOT_READY", path: "director.source", message: "incomplete", severity: "error" }] }

@@ -30,8 +30,8 @@ const read = (taskId: string) => ({ action: "get", projectId: "canvas", parentTh
 function formalFixture(t: test.TestContext) {
     const fixtureValue = fixture(t), { db, events, root, stores, calls, settles } = fixtureValue;
     const production = new EpisodeProductionService(db, events, root, true, () => {});
-    const source = { brief: "confirmed", script_scenes: [{ id: "A", scene_id: "ROOM" }, { id: "B", scene_id: "ROOM" }],
-        shots: [{ id: "SA", source_scene_id: "A", scene_id: "ROOM", title: "A", start_frame: 0, end_frame: 120 }, { id: "SB", source_scene_id: "B", scene_id: "ROOM", title: "B", start_frame: 120, end_frame: 240 }], segments: [], asset_plan: [], asset_cards: [] };
+    const source = { version: 2, prompt_assembly: { version: 2 }, brief: "confirmed", fps_num: 24, fps_den: 1, subject_registry: [], character_registry: [], scene_registry: [], script_scenes: [{ id: "A", scene_id: "ROOM" }, { id: "B", scene_id: "ROOM" }],
+        shots: [{ id: "SA", source_scene_id: "A", scene_id: "ROOM", title: "A", story_order: 0, duration_frames: 120 }, { id: "SB", source_scene_id: "B", scene_id: "ROOM", title: "B", story_order: 1, duration_frames: 120 }], segments: [{ id: "SEG-A", shot_ids: ["SA"], mode: "T2VA" }, { id: "SEG-B", shot_ids: ["SB"], mode: "T2VA" }], utterances: [], asset_plan: [], asset_cards: [], ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } };
     const director: DirectorProduction = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "test" }, source, sourceHash: compilationHash(source), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], workflow: {}, unresolved: [], executionAuthorized: false };
     production.edit("canvas", { operationId: "seed", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
     const service = new DirectorSubagents(stores, { run: request => { calls.push(request); return new Promise(resolve => settles.push(output => resolve({ threadId: "worker", output }))); } }, events, root, undefined, () => production);

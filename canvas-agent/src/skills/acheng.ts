@@ -172,7 +172,9 @@ export function readCompilationReference(output: string, filename: string, verif
 export function compileAchengDirector(input: DirectorProduction, directory: string, resolveReferenceFile?: (targetId: string, label: string) => string | undefined, selectedRuntimeId?: string) {
     const director = directorProductionSchema.parse(structuredClone(input));
     hydrateScopedApprovedInputs(director, resolveReferenceFile);
-    const runtime = selectedRuntimeId ? resolveAchengRuntime(selectedRuntimeId) : resolveAchengEngine();
+    // Runtime metadata in the source is descriptive, never a compiler selector.
+    void selectedRuntimeId;
+    const runtime = resolveAchengEngine();
     director.engine = achengEngineIdentity(runtime);
     if (JSON.stringify(director.source).includes('"legacy_fixture"')) throw new Error("Historical fixtures cannot be submitted as new production");
     fs.mkdirSync(directory, { recursive: true });
@@ -242,7 +244,11 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
     const onlyAssets = !Array.isArray(director.source.segments) || !director.source.segments.length;
     let exitCode = 0;
     try {
-        runAchengPython(["-B", "-X", "utf8", path.join(runtime.path, "scripts", onlyAssets ? "compile_assets.py" : "compile_h3.py"), sourceFile, "--out", output, "--draft"], { cwd: runtime.path, windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+        const compiler = path.join(runtime.path, "scripts", onlyAssets ? "compile_assets.py" : "compile_h3.py");
+        const args = runtime.liveCompiler && !onlyAssets
+            ? ["-B", "-X", "utf8", runtime.liveCompiler.runnerPath, compiler, runtime.liveCompiler.directory, sourceFile, "--out", output, "--draft"]
+            : ["-B", "-X", "utf8", compiler, sourceFile, "--out", output, "--draft"];
+        runAchengPython(args, { cwd: runtime.path, windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     } catch (error: any) {
         exitCode = error.status;
         if (exitCode !== 2 || !fs.existsSync(path.join(output, "index.json"))) throw new Error(`Acheng compiler failed: ${String(error.stderr || error.stdout || error.message).trim()}`);
@@ -344,13 +350,30 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
     return { director, exitCode, diagnostics, audit, sourceAdjustments, acceptance: JSON.parse(readFile("delivery.acceptance.json").toString("utf8")) };
 }
 
-/** Resolve, never install or update, the engine selected by the local manager. */
-export function resolveAchengEngine(home = process.env.CODEX_HOME || path.join(os.homedir(), ".codex")) {
+/** Resolve the active engine and, in the dev watcher, the current project-owned compiler overlays. */
+function liveCompilerOverlay() {
+    if (process.env.INFINITE_CANVAS_DEV_WATCH !== "1") return undefined;
+    const candidates = [
+        path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../scripts/acheng"),
+        path.resolve(process.cwd(), "../scripts/acheng"),
+    ];
+    const directory = candidates.find(candidate => ["canvas_subject_prompt_v2.py", "source-contract.py", "live-compile.py"]
+        .every(file => fs.existsSync(path.join(candidate, file))));
+    if (!directory) return undefined;
+    const digest = crypto.createHash("sha256");
+    for (const file of ["canvas_subject_prompt_v2.py", "source-contract.py", "live-compile.py"]) {
+        digest.update(file).update("\0").update(fs.readFileSync(path.join(directory, file))).update("\0");
+    }
+    return { directory, runnerPath: path.join(directory, "live-compile.py"), compilerHash: digest.digest("hex") };
+}
+
+export function resolveAchengEngine(home = process.env.CODEX_HOME || path.join(os.homedir(), ".codex")): AchengRuntime {
     const base = path.resolve(home, "skill-runtimes", "acheng-director");
     const state = JSON.parse(fs.readFileSync(path.join(base, "active.json"), "utf8")) as { active: { path: string; runtimeId: string; commit: string; patchVersion: string; version: string } };
     const resolved = resolveAchengRuntime(state.active.runtimeId, home);
     if (path.resolve(state.active.path) !== resolved.path) throw new Error("Acheng 激活路径与运行包不一致");
-    return resolved;
+    const liveCompiler = liveCompilerOverlay();
+    return liveCompiler ? { ...resolved, liveCompiler, compilerHash: liveCompiler.compilerHash } : resolved;
 }
 
 export function resolveAchengRuntime(runtimeId: string, home = process.env.CODEX_HOME || path.join(os.homedir(), ".codex")) {
@@ -388,9 +411,13 @@ export function getProductionContract(runtimeId?: string, operationType?: string
         ...(runtime.sourceContract ? {} : { sourceContractNotice: "The active runtime has no machine-readable Canvas source contract; compiler validation remains authoritative." }) };
 }
 
-export type AchengRuntime = ReturnType<typeof resolveAchengRuntime>;
+export type AchengRuntime = ReturnType<typeof resolveAchengRuntime> & {
+    compilerHash?: string;
+    liveCompiler?: { directory: string; runnerPath: string; compilerHash: string };
+};
 export function achengEngineIdentity(runtime: AchengRuntime): DirectorProduction["engine"] {
-    return { runtimeId: runtime.runtimeId, commit: runtime.commit, patchVersion: runtime.patchVersion, version: runtime.version };
+    return { runtimeId: runtime.runtimeId, commit: runtime.commit, patchVersion: runtime.patchVersion, version: runtime.version,
+        ...(runtime.compilerHash ? { compilerHash: runtime.compilerHash } : {}) };
 }
 
 /** Each new check follows the locally active runtime; its report records the actual validator. */
@@ -429,7 +456,8 @@ export function assertAchengSource(director: DirectorProduction, stage: "edit" |
 /** Read-only checks use the active compiler, or the runtime captured for this compilation request. */
 export function preflightCompilationDirector(raw: unknown, resolveReferenceFile?: (targetId: string, label: string) => string | undefined, selectedRuntimeId?: string): ProductionPreflight {
     let runtime: AchengRuntime;
-    try { runtime = selectedRuntimeId ? resolveAchengRuntime(selectedRuntimeId) : resolveAchengEngine(); }
+    void selectedRuntimeId;
+    try { runtime = resolveAchengEngine(); }
     catch (error) { return { valid: false, compileReady: false, generationReady: false, contractVersion: productionContractVersion, engine: null, revision: null,
         diagnostics: [{ code: "ENGINE_UNAVAILABLE", path: "director.engine", message: error instanceof Error ? error.message : String(error), severity: "error" }] }; }
     const parsed = directorProductionSchema.safeParse(raw);
@@ -470,7 +498,11 @@ export function preflightCompilationDirector(raw: unknown, resolveReferenceFile?
         }
     }
     try {
-        const response = runAchengPython(["-B", "-X", "utf8", fileURLToPath(new URL("./compile-preflight.py", import.meta.url)), runtime.path], {
+        const preflightScript = fileURLToPath(new URL("./compile-preflight.py", import.meta.url));
+        const args = runtime.liveCompiler
+            ? ["-B", "-X", "utf8", runtime.liveCompiler.runnerPath, preflightScript, runtime.liveCompiler.directory, runtime.path]
+            : ["-B", "-X", "utf8", preflightScript, runtime.path];
+        const response = runAchengPython(args, {
             cwd: runtime.path, windowsHide: true, encoding: "utf8", input: JSON.stringify({ source }),
         });
         result.diagnostics.push(...JSON.parse(response).diagnostics);

@@ -9,7 +9,7 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 
-from canvas_subject_prompt_v2 import adapt_production, build_source_map, compile_prompt_v2, entity_text, project_continuity_source, write_prompt_text, _state_start_descriptions, _render_state_end
+from canvas_subject_prompt_v2 import adapt_production, build_source_map, compile_prompt_v2, entity_text, project_continuity_source, write_prompt_text, _state_start_descriptions, _render_state_end, _plain_text, _infer_segment_mode
 
 source_contract_spec = importlib.util.spec_from_file_location("canvas_source_contract", Path(__file__).with_name("source-contract.py"))
 source_contract = importlib.util.module_from_spec(source_contract_spec)
@@ -235,6 +235,43 @@ class SubjectPromptV2ProjectionTest(unittest.TestCase):
                 draft_prompt_file = draft_index[0].get("prompt_file") or draft_index[0].get("file")
                 self.assertTrue(draft_prompt_file)
                 self.assertTrue((draft_output / draft_prompt_file).is_file())
+
+
+class SubjectAudioBindingTest(unittest.TestCase):
+    def test_keyframes_default_to_required_unless_explicitly_optional(self):
+        source = {"shots": [{"id": "S1", "keyframes": [{"id": "KF1"}]}], "subject_registry": []}
+        segment = {"id": "C1", "shot_ids": ["S1"]}
+
+        self.assertEqual(_infer_segment_mode(source, segment), "Ref2VA")
+
+        source["shots"][0]["keyframes"][0]["requiredForSubmission"] = False
+        self.assertEqual(_infer_segment_mode(source, segment), "T2VA")
+
+    def test_performance_projection_omits_internal_beat_ids(self):
+        self.assertEqual(_plain_text({"beat_id": "SH-18-01-B01", "dominant_track": "gaze"}), "gaze")
+
+    def test_audio_binding_shot_ids_are_preserved_as_string_rows(self):
+        source = {
+            "prompt_assembly": {"version": 2}, "project_id": "EP", "fps_num": 24, "fps_den": 1,
+            "scene_registry": [{"id": "SCENE", "name": "Scene"}],
+            "subject_registry": [{"id": "SUB_SCENE", "kind": "scene",
+                                  "entityRef": {"ownerKind": "episode", "ownerId": "EP", "kind": "scene", "id": "SCENE"},
+                                  "pictureBindings": []}],
+            "shots": [{"id": "SHOT_1", "scene_id": "SCENE", "timeline_id": "main", "story_order": 0,
+                       "duration_frames": 120, "subject_usages": [], "keyframes": [], "utterance_refs": []}],
+            "segments": [{"id": "CLIP_1", "mode": "Ref2VA", "shot_ids": ["SHOT_1"],
+                          "audio_bindings": [{"id": "AUDIO_1", "label": "<Audio 1>", "shotIds": ["SHOT_1"],
+                                              "sha256": "a" * 64}]}],
+            "ledger": {"contract_version": 2, "facts": [], "timelines": [{"id": "main", "start_frame": 0}],
+                       "initial": [], "events": [], "requirements": [], "coverage": []},
+            "_canvas_subject_audio_sources": {"AUDIO_1": {"file": "audio.mp3", "sha256": "a" * 64}},
+        }
+
+        projected = adapt_production(source, draft=True)
+
+        self.assertEqual(projected["segments"][0]["references"][0]["shot_ids"], ["SHOT_1"])
+        prompt = compile_prompt_v2(projected, projected["segments"][0], draft=True)
+        self.assertIn("<Audio 1>: reference - preserve its audible reference only.", prompt)
 
 
 class ContinuityProjectionTest(unittest.TestCase):

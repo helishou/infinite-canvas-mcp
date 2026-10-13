@@ -227,6 +227,8 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
 }
 
 export function currentCompilationArtifact(director: DirectorProduction, artifact: DirectorProduction["artifacts"][number]) {
+    const compiledEngine = artifact.receipt.engine as DirectorProduction["engine"] | undefined;
+    if ((compiledEngine?.compilerHash || "") !== (director.engine.compilerHash || "")) return false;
     // A matching full-source SHA256 proves the artifact was compiled from exactly this
     // director. The engine runtime id may drift after an engine upgrade (the receipt
     // records the compile-time engine while the live draft engine advances), so accept
@@ -234,7 +236,7 @@ export function currentCompilationArtifact(director: DirectorProduction, artifac
     // mismatch. This must run before the engine-identity guard below, which would
     // otherwise short-circuit and reject a valid artifact.
     if (artifact.receipt.sourceHash && artifact.receipt.sourceHash === director.sourceHash) return true;
-    const identity = artifact.receipt.engine as DirectorProduction["engine"] | undefined;
+    const identity = compiledEngine;
     if (identity && identity.runtimeId !== artifact.receipt.engineRuntimeId) return false;
     const scoped = artifact.receipt.compilationScope as { scope: CompilationScope; inputHash: string; engine?: DirectorProduction["engine"] } | undefined;
     if (!scoped) return artifact.sourceHash === director.sourceHash && artifact.receipt.sourceHash === director.sourceHash;

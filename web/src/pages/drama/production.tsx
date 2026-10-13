@@ -47,6 +47,7 @@ import { dramaWorkbenchEpisode, dramaWorkbenchPath } from "./workbench-entry";
 import { commandNeedsRecovery, commandFailureRecord, normalizeCommandRecovery, commandErrorSummary } from "./production-command-recovery";
 import { productionNavigationGroups, productionTargetTitle, productionWorkspaceQuery, productionWorkspaces, seriesWorkspaceView, type SeriesWorkspaceView, type ProductionWorkspaceScope } from "./production-workspace";
 import { ProductionWorkspaceBreadcrumb, ProductionWorkspaceMenus, ProductionWorkspaceNavigation } from "./production-workspace-navigation";
+import { continuityDiagnosticLocations, frameTimecode } from "./continuity-diagnostic-context";
 
 type PendingCommand = { operationId: string; expectedRevision: number; status: "unknown" | "rejected"; error?: string; errorSummary?: string; httpStatus?: number; errorCode?: string; workspace?: DirectorWorkspace } & (
   { kind: "scene"; command: ProductionSceneAction } | { kind: "edit"; ops: ProductionOperation[] } | { kind: "publish"; stage: "director" } | { kind: "restore"; version: number }
@@ -496,6 +497,14 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       let compileSource = production;
       let pending = pendingCompilationRef.current;
       if (!pending) {
+        if (pendingCommandRef.current) {
+          setCompileError(pendingCommandMessage(pendingCommandRef.current));
+          return;
+        }
+        if (dirtySourceDraftKeys.length || briefDraft !== String(production.draft.director.source.brief || "")) {
+          setCompileError(t("drama.production.compileUnsavedDrafts"));
+          return;
+        }
         // Compile the canvas state the user just saved through this page, not a stale
         // Backend projection. Recovery keeps the original frozen operation unchanged.
         if (canvasId) await flushCanvasProjectBeforeGeneration(canvasId);
@@ -527,6 +536,37 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         return index >= 0 ? t("director.studio.clipNumber", { number: index + 1 }) : id;
       }).join("、");
       const diagnosticContext = (items: ProductionCompilationDiagnostic[]) => [...new Set(items.map(describe).filter(Boolean))].join("；");
+      const continuityLocationContext = (items: ProductionCompilationDiagnostic[]) => {
+        const source = compileSource.draft.director?.source as Record<string, any> | undefined;
+        if (!source) return "";
+        const fps = Number(source.fps_num || 24) / Number(source.fps_den || 1);
+        return continuityDiagnosticLocations(source, items).map(location => {
+          const clipIndex = compileSource.draft.clipGroups.findIndex(group => String(group.id) === location.segmentId);
+          const clip = clipIndex >= 0 ? `${t("director.studio.clipNumber", { number: clipIndex + 1 })} ${location.segmentId}` : location.segmentId;
+          return t("director.atomic.compileFrameLocation", {
+            clip, shot: `${location.shotTitle} (${location.shotId})`,
+            start: frameTimecode(location.startFrame, fps), end: frameTimecode(location.endFrameExclusive, fps),
+            firstFrame: location.startFrame + 1, lastFrame: location.endFrameExclusive,
+          });
+        }).join("；");
+      };
+      const appendContinuityLocations = (message: string, items: ProductionCompilationDiagnostic[]) => {
+        const locations = continuityLocationContext(items);
+        return locations ? `${message}\n${t("director.atomic.compileFrameRangeHint", { locations })}` : message;
+      };
+      const continuitySummary = (items: ProductionCompilationDiagnostic[]) => {
+        const affectedClipIds = [...new Set(items.flatMap(item => item.affectedTargets || []))];
+        const clipNames = affectedClipIds.map(id => {
+          const index = compileSource.draft.clipGroups.findIndex(group => String(group.id) === id);
+          return index >= 0 ? `${t("director.studio.clipNumber", { number: index + 1 })} ${id}` : id;
+        });
+        const count = affectedClipIds.length || new Set(items.map(item => item.targetId).filter(Boolean)).size || items.length;
+        const clips = clipNames.length ? `（${clipNames.join("、")}）` : "";
+        const message = items.some(item => item.code === "CONTINUITY_COVERAGE_MISSING")
+          ? t("director.atomic.compileHintContinuity", { count: t("director.atomic.compileAffectedCount", { count }), clips: clipNames.join("、"), evidence: diagnosticContext(items) })
+          : `${t("director.atomic.compileAffectedCount", { count })}${clips}：${diagnosticContext(items)}`;
+        return appendContinuityLocations(message, items);
+      };
       const groupedDiagnostics = new Map<string, ProductionCompilationDiagnostic[]>();
       for (const item of diagnostics) {
         const key = item.code === "CONTINUITY_COVERAGE_MISSING" || item.code === "PROMPT_SOURCE_MAP_INVALID"
@@ -538,7 +578,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         const affected = new Set(items.map(item => item.targetId).filter(Boolean));
         const count = affected.size || items.length;
         const countText = t("director.atomic.compileAffectedCount", { count });
-        if (key === "CONTINUITY_COVERAGE_MISSING") return t("director.atomic.compileHintContinuity", { count: countText, clips: clipContext(items), evidence: diagnosticContext(items) });
+        if (items.some(item => item.code?.startsWith("CONTINUITY_"))) return continuitySummary(items);
         if (key === "PROMPT_SOURCE_MAP_INVALID") return t("director.atomic.compileHintSourceMap", { count: countText, clips: clipContext(items) });
         return `${countText}：${describe(items[0]) || t("director.atomic.compileHintOther")}`;
       });
@@ -577,7 +617,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         const affected = new Set(matching.map(candidate => candidate.targetId).filter(Boolean));
         const count = affected.size || matching.length;
         const countText = t("director.atomic.compileAffectedCount", { count });
-        if (item.code === "CONTINUITY_COVERAGE_MISSING") return t("director.atomic.compileHintContinuity", { count: countText, clips: clipContext(matching), evidence: diagnosticContext(matching) });
+        if (matching.some(candidate => candidate.code?.startsWith("CONTINUITY_"))) return continuitySummary(matching);
         if (item.code === "PROMPT_SOURCE_MAP_INVALID") return t("director.atomic.compileHintSourceMap", { count: countText, clips: clipContext(matching) });
         return describe(item);
       }).filter(Boolean))].slice(0, 10);

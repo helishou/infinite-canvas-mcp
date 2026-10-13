@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { directorModules, directorProductionSchema, directorSourceV2Diagnostics, promptSourceMapSchema, resolveSubjectPictureBindingIds } from "./production-contract.js";
+import { defaultRequiredShotKeyframes, directorModules, directorProductionSchema, directorSourceV2Diagnostics, promptSourceMapSchema, resolveSubjectPictureBindingIds } from "./production-contract.js";
 import { compilationScopeInput } from "./compilation-scope.js";
 import { subjectShotWindows, subjectStateProjection } from "./subject-assembly.js";
 
@@ -38,6 +38,17 @@ function source() {
 test("Subject assembly v2 accepts node-bound pictures, sparse shot keyframes and Subject-owned ledger facts", () => {
     assert.deepEqual(directorSourceV2Diagnostics(source()), []);
 });
+test("a newly authored keyframe defaults to required while an explicit optional choice is preserved", () => {
+    const candidate = source();
+    delete (candidate.shots[0].keyframes[0] as any).requiredForSubmission;
+    assert.equal(defaultRequiredShotKeyframes(candidate), true);
+    assert.equal((candidate.shots[0].keyframes[0] as any).requiredForSubmission, true);
+
+    const explicitOptional = source();
+    (explicitOptional.shots[0].keyframes[0] as any).requiredForSubmission = false;
+    assert.equal(defaultRequiredShotKeyframes(explicitOptional), false);
+    assert.equal((explicitOptional.shots[0].keyframes[0] as any).requiredForSubmission, false);
+});
 test("the Director source root version is the sole production format gate", () => {
     for (const version of [undefined, 1, 3]) {
         const candidate = source();
@@ -45,9 +56,16 @@ test("the Director source root version is the sole production format gate", () =
         else (candidate as any).version = version;
         assert.ok(directorSourceV2Diagnostics(candidate).some(issue => issue.message.startsWith("UNSUPPORTED_PRODUCTION_FORMAT:")));
     }
+    // 旧版兼容注释（曾静默放行缺少装配标记的草稿，无升级引导）：
+    // const noAssemblyMarker = source();
+    // delete (noAssemblyMarker as any).prompt_assembly;
+    // assert.deepEqual(directorSourceV2Diagnostics(noAssemblyMarker), []);
     const noAssemblyMarker = source();
     delete (noAssemblyMarker as any).prompt_assembly;
-    assert.deepEqual(directorSourceV2Diagnostics(noAssemblyMarker), []);
+    const assemblyIssues = directorSourceV2Diagnostics(noAssemblyMarker);
+    assert.equal(assemblyIssues.length, 1);
+    assert.equal(assemblyIssues[0].path.join("."), "prompt_assembly.version");
+    assert.match(assemblyIssues[0].message, /Prompt Assembly 结构不受支持/);
     const oldLedger = source();
     (oldLedger.ledger as any).contract_version = 1;
     assert.ok(directorSourceV2Diagnostics(oldLedger).some(issue => issue.path.join(".") === "ledger.contract_version"));

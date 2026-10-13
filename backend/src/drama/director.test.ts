@@ -37,9 +37,9 @@ function fixture(t: test.TestContext) {
 }
 function doc(count = 2): DirectorProduction {
     const engine = { commit: "a".repeat(40), patchVersion: "patch", runtimeId: "engine-test", version: "4.3.9" };
-    const shots = Array.from({ length: count }, (_, i) => ({ id: `s${i}`, scene_id: "scene", source_scene_id: "scene-block", start_frame: i * 120, end_frame: (i + 1) * 120, visual: `authored ${i}`, camera: { description: "static" }, state_in: {}, state_out: {}, dialogues: [], audio: {} }));
-    const segments = shots.map((s, i) => ({ id: `seg${i}`, shot_ids: [s.id], start_frame: s.start_frame, end_frame: s.end_frame, generation_clip_duration: 5, mode: "T2VA" }));
-    const source = { fps_num: 24, fps_den: 1, script_scenes: [{ id: "scene-block", scene_id: "scene", text: "Original full text" }], shots, segments, asset_plan: [], extra_preserved: { detail: "never summarized" } };
+    const shots = Array.from({ length: count }, (_, i) => ({ id: `s${i}`, scene_id: "scene", source_scene_id: "scene-block", story_order: i, duration_frames: 120, visual: `authored ${i}`, camera: { description: "static" } }));
+    const segments = shots.map((s, i) => ({ id: `seg${i}`, shot_ids: [s.id], mode: "T2VA" }));
+    const source = { version: 2, prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1, subject_registry: [], character_registry: [], scene_registry: [], script_scenes: [{ id: "scene-block", scene_id: "scene", text: "Original full text" }], shots, segments, utterances: [], asset_plan: [], extra_preserved: { detail: "never summarized" }, ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } };
     const sourceHash = directorHash(source);
     return { schemaVersion: 1, engine, source, sourceHash, modules: { story: { status: "committed", evidence: ["source reviewed"], unresolved: [] } }, assets: {},
         shotInputs: Object.fromEntries(shots.map(s => [s.id, { keyframePolicy: "none", assetIds: [] }])), boundaries: segments.slice(0, -1).map((s, i) => ({ from: s.id, to: segments[i + 1].id, tailFrame: false, motionContext: false, reason: "authored cut" })),
@@ -299,7 +299,7 @@ test("director source, complete prompt, partial cursor and stable IDs round-trip
 test("early Acheng planning drafts save without node bindings and readiness scopes missing compile work", t => {
     const { service } = fixture(t);
     const d = doc(0);
-    d.source = { brief: "写一个独立资产计划", fps_num: 24, fps_den: 1, script_scenes: [{ id: "scene1", scene_id: "scene1", scene_name: "雨夜站台", text: "保留的逐字对白。", extension: { owner: "acheng" } }], shots: [], asset_plan: [{ id: "STYLE_MOTHER", kind: "style", description: "冷雨与暖灯形成对照。", depends_on: [] }], segments: [], extension: { authored: true } };
+    d.source = { version: 2, prompt_assembly: { version: 2 }, brief: "写一个独立资产计划", fps_num: 24, fps_den: 1, subject_registry: [], character_registry: [], scene_registry: [], script_scenes: [{ id: "scene1", scene_id: "scene1", scene_name: "雨夜站台", text: "保留的逐字对白。", extension: { owner: "acheng" } }], shots: [], asset_plan: [{ id: "STYLE_MOTHER", kind: "style", description: "冷雨与暖灯形成对照。", depends_on: [] }], segments: [], utterances: [], ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] }, extension: { authored: true } };
     d.sourceHash = directorHash(d.source);
     d.assets = { STYLE_MOTHER: { version: "v1", status: "planned" } };
     d.artifacts = [];
@@ -320,6 +320,37 @@ test("early Acheng planning drafts save without node bindings and readiness scop
     const readiness = service.workflowReadiness("ep");
     assert.equal(readiness.targets.find(item => item.id === "asset:STYLE_MOTHER")?.status, "blocked");
     assert.match(readiness.targets.find(item => item.id === "asset:STYLE_MOTHER")?.blockers.join(" ") || "", /未绑定画布/);
+});
+
+test("scene script-block patches replace the structured blocks with full-array semantics", t => {
+    const { service } = fixture(t);
+    const d = doc(0);
+    d.source = { version: 2, prompt_assembly: { version: 2 }, brief: "测试剧本段落结构编辑", fps_num: 24, fps_den: 1, subject_registry: [], character_registry: [{ id: "C1", name: "栓子" }], scene_registry: [{ id: "LOC3", name: "栓子家院落" }],
+        script_scenes: [{ id: "SC03", scene_id: "LOC3", scene_name: "第三场：无人相信", text: "第一段。",
+            blocks: [
+                { id: "SC03-N01", kind: "action", text: "第一段。", beat_ids: ["B3"] },
+                { id: "SC03-N02", kind: "dialogue", speaker: "旁白", text: "邻居不信栓子。" },
+                { id: "SC03-N03", kind: "action", text: "硬切至傍晚。" }],
+            beat_ids: ["B3"] }] as any, shots: [], asset_plan: [], segments: [], utterances: [], ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } };
+    d.sourceHash = directorHash(d.source);
+    const current = service.get("ep");
+    const base = service.edit("ep", { operationId: "seed-scene-blocks", expectedRevision: current.revision, ops: [{ type: "set_director_production", director: d }] });
+    // 整段数组替换：删一段、换说话人、重排、补新段——一次提交全部生效，扩展字段不被吞掉。
+    const nextBlocks = [
+        { id: "SC03-N02", kind: "dialogue", speaker: "栓子", text: "不是我偷的。" },
+        { id: "SC03-N01", kind: "action", text: "第一段改写了。", beat_ids: ["B3"] },
+        { id: "SC03-N04", kind: "action", text: "新补的一段动作。" }];
+    const patched = service.edit("ep", { operationId: "patch-scene-blocks", expectedRevision: base.revision, ops: [{ type: "patch_director_source", entity: "scene", id: "SC03", patch: { blocks: nextBlocks } }] });
+    const scene = (patched.draft.director!.source.script_scenes as any[])[0];
+    assert.equal(scene.blocks.length, 3, "整段数组直接替换，旧 N03 消失且顺序按提交为准");
+    assert.deepEqual(scene.blocks.map((block: any) => block.id), ["SC03-N02", "SC03-N01", "SC03-N04"]);
+    assert.equal(scene.blocks[0].speaker, "栓子", "对白块的说话人随段落一起修改");
+    assert.deepEqual(scene.blocks[1].beat_ids, ["B3"], "passthrough 保留段落的编译扩展字段");
+    assert.notEqual(patched.draft.director!.sourceHash, base.draft.director!.sourceHash);
+    // 空数组合法（清空全部段落），但形状不合格的条目必须拒绝且不改动源稿。
+    assert.throws(() => service.edit("ep", { operationId: "bad-blocks", expectedRevision: patched.revision, ops: [{ type: "patch_director_source", entity: "scene", id: "SC03", patch: { blocks: [{ id: "X", kind: "narration", text: "" }] } }] }), /剧本段落/);
+    const empty = service.edit("ep", { operationId: "clear-blocks", expectedRevision: patched.revision, ops: [{ type: "patch_director_source", entity: "scene", id: "SC03", patch: { blocks: [] } }] });
+    assert.equal((empty.draft.director!.source.script_scenes as any[])[0].blocks.length, 0);
 });
 
 test("source revisions retire stale receipts, preserve drafts and prohibit projection-only edits", t => {

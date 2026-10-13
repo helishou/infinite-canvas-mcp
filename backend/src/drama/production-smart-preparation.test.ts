@@ -16,7 +16,7 @@ function fixture(t: test.TestContext, existing?: Record<string, any>) {
  db.upsertCanvasFolder({id:"drama",name:"剧目",isDrama:true,createdAt:new Date().toISOString()});
  db.createCanvasProject({id:"canvas",title:"场次",nodes:existing?[existing]:[],connections:[]});
  db.upsertDramaEpisode({id:"ep",dramaId:"drama",episodeNumber:1,title:"机甲",synopsis:"",canvasId:"canvas"});
- const source={prompt_assembly:{version:2},fps_num:24,fps_den:1,subject_registry:[],character_registry:[],scene_registry:[],shots:[],segments:[],utterances:[],asset_plan:[{id:"A",kind:"vehicle",asset_name:"铆钉",canvas_scope:"episode"}],asset_cards:[],ledger:{contract_version:2,facts:[],timelines:[],initial:[],events:[],requirements:[],coverage:[]}};
+ const source={version:2,prompt_assembly:{version:2},fps_num:24,fps_den:1,subject_registry:[],character_registry:[],scene_registry:[],shots:[],segments:[],utterances:[],asset_plan:[{id:"A",kind:"vehicle",asset_name:"铆钉",canvas_scope:"episode"}],asset_cards:[],ledger:{contract_version:2,facts:[],timelines:[],initial:[],events:[],requirements:[],coverage:[]}};
  const director=directorProductionSchema.parse({schemaVersion:1,engine:{commit:"a".repeat(40),patchVersion:"test",runtimeId:"test",version:"test"},source,sourceHash:directorHash(source),assets:{A:{version:"v1",status:"planned",...(existing?{nodeId:existing.id}:{})}},shotInputs:{},modules:{},artifacts:[],boundaries:[],unresolved:[],workflow:{},executionAuthorized:false});
  const service=new EpisodeProductionService(db,new BackendEventBus(),dir,false,()=>{});
  const saved=service.edit("ep",{operationId:"init",expectedRevision:0,ops:[{type:"set_director_production",director}]});

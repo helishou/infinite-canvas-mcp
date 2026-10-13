@@ -66,11 +66,12 @@ test("old production contracts, preflight, compilation and continuity follow the
     assert.ok(result.director.artifacts.every(artifact => artifact.receipt.engineRuntimeId === f.next.runtimeId));
     assert.deepEqual(f.director, before);
 
-    // A captured request remains coherent after activation changes.
+    // A new formal compile follows the current active runtime even if its source
+    // still carries the identity that was active when the request was composed.
     f.activate(f.old);
     const captured = compileAchengDirector(f.director, path.join(f.home, "captured"), undefined, f.next.runtimeId);
-    assert.equal(captured.director.engine.runtimeId, f.next.runtimeId);
-    assert.equal(preflightCompilationDirector(f.director, undefined, f.next.runtimeId).engine?.runtimeId, f.next.runtimeId);
+    assert.equal(captured.director.engine.runtimeId, f.old.runtimeId);
+    assert.equal(preflightCompilationDirector(f.director, undefined, f.next.runtimeId).engine?.runtimeId, f.old.runtimeId);
     assert.equal(getProductionContract(f.next.runtimeId).engine.runtimeId, f.old.runtimeId);
 });
 
