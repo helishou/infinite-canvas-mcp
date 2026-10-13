@@ -63,7 +63,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === script) {
     const root = path.resolve(path.dirname(script), '..');
     const sharedInputs = ['package.json', 'package-lock.json', 'scripts/prepare-dev-services.mjs'];
     await prepareDevServices(root, [
-        { name: 'plugins', inputs: [...sharedInputs, 'plugins/canvas', 'scripts/build-official-plugins.mjs'],
+        // 只登记 build:plugins 真正读取的输入。minimax-h3 是宿主内置插件（Web 直接 import 源码），
+        // 编辑它不应触发官方插件重建；template 是脚手架，不参与分发构建。
+        { name: 'plugins', inputs: [...sharedInputs, 'scripts/build-official-plugins.mjs', 'plugins/canvas/registry', 'plugins/canvas/sdk',
+            'plugins/canvas/markdown', 'plugins/canvas/svg', 'plugins/canvas/html', 'plugins/canvas/panorama', 'plugins/canvas/sticky-note'],
             outputs: ['plugins/canvas/registry/dist', 'web/public/plugins'], command: ['run', 'build:plugins'] },
         { name: 'canvas-agent', inputs: [...sharedInputs, 'canvas-agent/src', 'canvas-agent/scripts', 'canvas-agent/package.json', 'canvas-agent/package-lock.json', 'canvas-agent/tsconfig.json', '.agents/skills/canvas-video-production-sop'],
             outputs: ['canvas-agent/dist'], command: ['run', 'build', '--workspace', 'canvas-agent'] },

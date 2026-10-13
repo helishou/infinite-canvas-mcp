@@ -9,14 +9,15 @@ import { fileURLToPath } from "node:url";
 
 /**
  * @param {string} metaUrl 插件 build.mjs 的 import.meta.url
- * @param {{ name?: string, entry?: string, publicDir?: string, esbuild?: object, plugins?: import("esbuild").Plugin[] }} [overrides]
+ * @param {{ name?: string, entry?: string, publicDir?: string | null, esbuild?: object, plugins?: import("esbuild").Plugin[] }} [overrides]
  */
 export async function buildPlugin(metaUrl, overrides = {}) {
     const root = dirname(fileURLToPath(metaUrl));
     const name = overrides.name ?? basename(root); // 目录名即产物名,如 markdown → markdown.js
     const distDir = join(root, "dist");
     // 开发时同步到前端静态目录,供手动 URL 安装或 VITE_DEV_PLUGINS 热刷新。
-    const publicDir = overrides.publicDir ?? join(root, "..", "..", "..", "web", "public", "plugins");
+    // 宿主内置插件(由 Web 直接 import 源码)传 publicDir: null 跳过同步,避免产出无人消费的副本。
+    const publicDir = overrides.publicDir === null ? null : overrides.publicDir ?? join(root, "..", "..", "..", "web", "public", "plugins");
     const watch = process.argv.includes("--watch");
     const entry = overrides.entry ?? join(root, "src", "index.tsx");
 
@@ -46,7 +47,7 @@ export async function buildPlugin(metaUrl, overrides = {}) {
         // 宿主提供单例 React,插件不打包 react;https:// 依赖 esbuild 自动 external
         external: ["react", "react-dom"],
         minify: !watch,
-        plugins: [syncToPublic, ...(overrides.plugins ?? [])],
+        plugins: [...(publicDir ? [syncToPublic] : []), ...(overrides.plugins ?? [])],
         ...overrides.esbuild,
     };
 

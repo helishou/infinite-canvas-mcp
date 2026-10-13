@@ -20,7 +20,7 @@ npm run typecheck
 npm run dev
 ```
 
-构建产物会同步到 `web/public/plugins/minimax-h3.js`，刷新新画布后在“节点插件”中启用即可。
+H3 是宿主内置插件：Web 经 `web/src/lib/canvas/plugin-loader.ts` 直接 import 本目录源码，随宿主 JS 一起打包，Vite dev 下走 HMR。`node build.mjs` 只产出 `dist/minimax-h3.js` 供外部宿主分发，**不再同步到 `web/public/plugins/`**；改完源码刷新画布即可生效。
 
 ## MCP 能力(双入口架构)
 

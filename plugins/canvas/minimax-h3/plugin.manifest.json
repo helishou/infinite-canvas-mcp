@@ -4,7 +4,7 @@
   "version": "1.5.12",
   "trust": "first-party",
   "entries": {
-    "browser": "/plugins/minimax-h3.js",
+    "browser": "src/system.tsx",
     "mcp": "canvas-agent/src/plugins/minimax-h3/mcp.ts"
   },
   "mcp": {

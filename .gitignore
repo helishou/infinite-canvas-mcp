@@ -12,7 +12,7 @@ data/
 .codex-runtime/
 .hermes/
 .learnings/
-web/dist
+web/dist*
 web/_test_report.txt
 web/_diag.txt
 

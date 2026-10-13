@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { cp } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,6 +16,8 @@ if (!fs.existsSync(path.join(source, "SKILL.md"))) throw new Error(`Missing prod
 const existingParent = fs.existsSync(path.dirname(target)) ? path.dirname(target) : path.dirname(path.dirname(target));
 if (!insidePackage(existingParent) || (fs.existsSync(target) && !insidePackage(target))) throw new Error("Bundled skill target escaped the package workspace");
 fs.rmSync(target, { recursive: true, force: true });
-fs.cpSync(source, target, { recursive: true, dereference: false });
+// 目录复制走异步 cp:部分 Node 22 的 Windows 构建里 fs.cpSync 递归复制会直接终止进程
+// (0xC0000409,无异常无输出),整个构建表现为静默失败。
+await cp(source, target, { recursive: true, dereference: false });
 fs.mkdirSync(path.join(packageRoot, "dist", "skills"), { recursive: true });
 fs.copyFileSync(path.join(packageRoot, "src", "skills", "compile-preflight.py"), path.join(packageRoot, "dist", "skills", "compile-preflight.py"));
