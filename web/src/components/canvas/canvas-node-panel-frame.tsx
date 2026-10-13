@@ -4,7 +4,7 @@ type PanelBounds = { left: number; top: number; right: number; bottom: number; w
 
 export function canvasNodePanelLayout(anchor: { x: number; y: number }, panel: PanelBounds, viewport: PanelBounds) {
     const margin = 12;
-    const width = Math.max(0, Math.min(600, viewport.width - margin * 2));
+    const width = Math.max(0, Math.min(360, viewport.width - margin * 2));
     const horizontalMargin = Math.min(margin, Math.max(0, (viewport.width - width) / 2));
     const minLeft = viewport.left + horizontalMargin;
     const maxLeft = viewport.right - horizontalMargin - width;
@@ -41,15 +41,16 @@ export function syncCanvasZoom(element: Pick<HTMLElement, "style"> | null, zoom:
 
 const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
-/** Keep smart-generation controls screen-sized and inside the visible canvas while anchored to their node. */
-export function CanvasNodePanelFrame({ children, isSmartGenerationNode }: { children: ReactNode; isSmartGenerationNode: boolean }) {
+/** Keep generation controls screen-sized and inside the visible canvas while anchored to their node. */
+export function CanvasNodePanelFrame({ children, isSmartGenerationNode, screenSized = false }: { children: ReactNode; isSmartGenerationNode: boolean; screenSized?: boolean }) {
     const frameRef = useRef<HTMLDivElement>(null);
-    const style: CSSProperties | undefined = isSmartGenerationNode
-        ? { marginLeft: -300, transform: "scale(calc(1 / var(--canvas-zoom, 1)))", transformOrigin: "top center", maxHeight: "calc(100dvh - 24px)", overflowY: "auto", overscrollBehavior: "contain" }
+    const useViewportLayout = isSmartGenerationNode || screenSized;
+    const style: CSSProperties | undefined = useViewportLayout
+        ? { marginLeft: -180, transform: "scale(calc(1 / var(--canvas-zoom, 1)))", transformOrigin: "top center", maxHeight: "min(42dvh, calc(100dvh - 24px))", overflowY: "auto", overscrollBehavior: "contain" }
         : undefined;
 
     useIsomorphicLayoutEffect(() => {
-        if (!isSmartGenerationNode) return;
+        if (!useViewportLayout) return;
         const frame = frameRef.current;
         const node = frame?.parentElement;
         const surface = frame?.closest<HTMLElement>("[data-canvas-interaction-surface]");
@@ -67,7 +68,7 @@ export function CanvasNodePanelFrame({ children, isSmartGenerationNode }: { chil
                 const viewportRect = surface.getBoundingClientRect();
                 const layout = canvasNodePanelLayout(
                     { x: nodeRect.left + nodeRect.width / 2, y: nodeRect.bottom },
-                    { left: frameRect.left, top: frameRect.top, right: frameRect.right, bottom: frameRect.bottom, width: frameRect.width, height: Math.max(frame.scrollHeight, frameRect.height) },
+                    { left: frameRect.left, top: frameRect.top, right: frameRect.right, bottom: frameRect.bottom, width: frameRect.width, height: Math.min(frame.scrollHeight, viewportRect.height * 0.42) },
                     { left: viewportRect.left, top: viewportRect.top, right: viewportRect.right, bottom: viewportRect.bottom, width: viewportRect.width, height: viewportRect.height },
                 );
                 frame.style.width = `${layout.width}px`;
@@ -93,14 +94,14 @@ export function CanvasNodePanelFrame({ children, isSmartGenerationNode }: { chil
             window.removeEventListener("resize", update);
             window.removeEventListener("scroll", update, true);
         };
-    }, [isSmartGenerationNode]);
+    }, [useViewportLayout]);
 
     return (
         <div
             ref={frameRef}
             data-canvas-node-panel
-            data-canvas-node-panel-kind={isSmartGenerationNode ? "smart-generation" : "node"}
-            className={`absolute left-1/2 top-full z-[70] w-[600px] pt-4 ${isSmartGenerationNode ? "overflow-y-auto overscroll-contain" : "-translate-x-1/2"}`.trim()}
+            data-canvas-node-panel-kind={isSmartGenerationNode ? "smart-generation" : screenSized ? "generation" : "node"}
+            className={`absolute left-1/2 top-full z-[70] w-[360px] pt-2 ${useViewportLayout ? "overflow-y-auto overscroll-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" : "-translate-x-1/2"}`.trim()}
             style={style}
         >
             {children}

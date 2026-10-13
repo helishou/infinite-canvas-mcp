@@ -14,7 +14,7 @@ test("smart generation panel renders its controls below the node at screen size"
 
     assert.match(markup, /data-canvas-node-panel-kind="smart-generation"/);
     assert.match(markup, /absolute left-1\/2 top-full/);
-    assert.match(markup, /margin-left:-300px/);
+    assert.match(markup, /margin-left:-180px/);
     assert.match(markup, /scale\(calc\(1 \/ var\(--canvas-zoom, 1\)\)\)/);
     assert.match(markup, /transform-origin:top center/);
     assert.match(markup, /aria-label="references-prompt-model-generate"/);
@@ -47,7 +47,7 @@ test("smart panel stays below the node when possible and scrolls within viewport
         { left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600 },
     );
 
-    assert.deepEqual(layout, { width: 600, maxHeight: 388, shiftX: 0, shiftY: 0 });
+    assert.deepEqual(layout, { width: 360, maxHeight: 388, shiftX: 0, shiftY: 0 });
 });
 
 test("smart panel clamps to narrow edges and moves above the node only when below space is insufficient", () => {

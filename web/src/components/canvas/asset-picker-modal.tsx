@@ -1,6 +1,6 @@
 import type { SharedAssetSource } from "@basketikun/canvas-agent/shared-asset-reference";
 import { useEffect, useMemo, useState } from "react";
-import { Empty, Input, Modal, Pagination, Tag } from "antd";
+import { Alert, Empty, Input, Modal, Pagination, Tag } from "antd";
 import { Search } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -66,6 +66,7 @@ function PickerCard({ title, kind, cover, onClick }: { title: string; kind: stri
 function MyAssetsTab({ allowedKinds, onInsert }: { allowedKinds?: string[]; onInsert: (payload: InsertAssetPayload) => void }) {
     const { t } = useTranslation();
     const assets = useAssetStore((state) => state.assets);
+    const missingSourceCount = assets.filter((asset) => asset.metadata?.sharedAssetMissing === true).length;
     const [keyword, setKeyword] = useState("");
     const [kindFilter, setKindFilter] = useState("all");
     const [page, setPage] = useState(1);
@@ -74,6 +75,7 @@ function MyAssetsTab({ allowedKinds, onInsert }: { allowedKinds?: string[]; onIn
         const query = keyword.trim().toLowerCase();
         return assets
             .filter((a) => a.kind === "text" || a.kind === "image" || a.kind === "video" || a.kind === "audio" || a.kind === "character" || a.kind === "scene")
+            .filter((a) => a.metadata?.sharedAssetMissing !== true)
             .filter((a) => !allowedKinds?.length || allowedKinds.includes(a.kind))
             .filter((a) => kindFilter === "all" || a.kind === kindFilter)
             .filter((a) => !query || [a.title, ...(a.kind === "character" || a.kind === "scene" ? [] : a.tags || [])].join(" ").toLowerCase().includes(query));
@@ -127,6 +129,7 @@ function MyAssetsTab({ allowedKinds, onInsert }: { allowedKinds?: string[]; onIn
 
     return (
         <div className="space-y-4">
+            {missingSourceCount > 0 && <Alert type="warning" showIcon message={t("assets.sharedAssetMissingSummary", { count: missingSourceCount, names: t("assets.sharedAssetMissing") })} />}
             <div className="flex flex-wrap items-center gap-3">
                 <Input
                     className="w-56"

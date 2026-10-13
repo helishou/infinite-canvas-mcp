@@ -20,6 +20,7 @@ import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useAssetStore, libraryErrorText, type Asset, type AssetKind, type CharacterAsset, type CharacterImage, type ImageAsset, type VideoAsset, type AudioAsset, type SceneAsset, type SceneImage } from "@/stores/use-asset-store";
 import { readAssetRemoteBlob } from "./asset-transfer-validation";
 import { exportAssets, exportCharacterImages, readAssetPackage } from "./asset-transfer";
+import { ALL_DRAMAS, ROOT_FOLDER, UNASSIGNED_DRAMA, countByDrama, countByFolder, filterAssets, isTagFolder, type AssetLibraryFilters } from "./asset-facet-counts";
 
 type AssetFormValues = {
     kind: AssetKind;
@@ -37,8 +38,6 @@ type ImageDraft = ImageAsset["data"] | null;
 type VideoDraft = VideoAsset["data"] | null;
 
 const kindOptions = ["all", "text", "image", "video", "audio", "character", "scene"] as const;
-const ALL_DRAMAS = "__all-dramas__";
-const UNASSIGNED_DRAMA = "__unassigned-drama__";
 
 export default function AssetsPage() {
     const { message, modal } = App.useApp();
@@ -61,6 +60,7 @@ export default function AssetsPage() {
     const assetInputRef = useRef<HTMLInputElement>(null);
     const dramas = useCanvasStore((state) => state.folders);
     const assets = useAssetStore((state) => state.assets);
+    const missingSourceAssets = useMemo(() => assets.filter((asset) => asset.metadata?.sharedAssetMissing === true), [assets]);
     const hydrateError = useAssetStore((state) => state.hydrateError);
     const folders = useAssetStore((state) => state.folders);
     const addAsset = useAssetStore((state) => state.addAsset);
@@ -123,26 +123,15 @@ export default function AssetsPage() {
         { label: t("assets.drama.unassigned"), value: UNASSIGNED_DRAMA },
         ...dramas.map((drama) => ({ label: drama.name, value: drama.id })),
     ], [dramas, t]);
-    const matchesDrama = useCallback((asset: Asset) => (
-        dramaFilter === ALL_DRAMAS
-        || (dramaFilter === UNASSIGNED_DRAMA ? !asset.dramaId || !dramas.some((drama) => drama.id === asset.dramaId) : asset.dramaId === dramaFilter)
-    ), [dramaFilter, dramas]);
+    const filters = useMemo<AssetLibraryFilters>(() => ({
+        keyword,
+        kind: kindFilter,
+        dramaId: dramaFilter,
+        folderId: folderFilter,
+        dramaIds: dramas.map((drama) => drama.id),
+    }), [dramas, dramaFilter, folderFilter, keyword, kindFilter]);
 
-    const filteredAssets = useMemo(() => {
-        const query = keyword.trim().toLowerCase();
-        return validAssets.filter((asset) => {
-            if (!matchesDrama(asset)) return false;
-            if (kindFilter !== "all" && asset.kind !== kindFilter) return false;
-            if (folderFilter) {
-                if (folderFilter.startsWith("tag:")) {
-                    if (asset.kind === "character" || asset.kind === "scene") return false;
-                    if (!(asset.tags || []).includes(folderFilter.slice(4))) return false;
-                } else if ((asset.folderId ?? null) !== folderFilter) return false;
-            }
-            if (!query) return true;
-            return assetSearchText(asset).includes(query);
-        });
-    }, [validAssets, keyword, kindFilter, folderFilter, matchesDrama]);
+    const filteredAssets = useMemo(() => filterAssets(validAssets, filters), [validAssets, filters]);
 
     const visibleAssets = useMemo(() => {
         const start = (page - 1) * pageSize;
@@ -158,7 +147,8 @@ export default function AssetsPage() {
     }, [assets]);
     const currentFolderName = useMemo(() => {
         if (!folderFilter) return t("assets.allAssets");
-        if (folderFilter.startsWith("tag:")) return folderFilter.slice(4);
+        if (folderFilter === ROOT_FOLDER) return t("assets.folder.unfiled");
+        if (isTagFolder(folderFilter)) return folderFilter.slice("tag:".length);
         const folder = folders.find((item) => item.id === folderFilter);
         return folder ? folder.name : t("assets.allAssets");
     }, [folderFilter, folders, t]);
@@ -167,10 +157,15 @@ export default function AssetsPage() {
         : dramaFilter === UNASSIGNED_DRAMA
             ? t("assets.drama.unassigned")
             : dramas.find((drama) => drama.id === dramaFilter)?.name || t("assets.drama.all");
-    const folderCounts = (id: string | null) => {
-        if (id === null) return validAssets.filter((asset) => matchesDrama(asset) && !asset.folderId).length;
-        return validAssets.filter((asset) => matchesDrama(asset) && asset.folderId === id).length;
-    };
+    // 侧栏计数与列表同源：每个入口只忽略自身维度，保证「点进去看到的条数」就是这里显示的数字。
+    const facetCounts = useMemo(() => ({
+        allDramas: countByDrama(validAssets, filters, ALL_DRAMAS),
+        unassigned: countByDrama(validAssets, filters, UNASSIGNED_DRAMA),
+        dramas: new Map(dramas.map((drama) => [drama.id, countByDrama(validAssets, filters, drama.id)])),
+        allFolders: countByFolder(validAssets, filters, null),
+        unfiled: countByFolder(validAssets, filters, ROOT_FOLDER),
+        folders: new Map(folders.map((folder) => [folder.id, countByFolder(validAssets, filters, folder.id)])),
+    }), [dramas, filters, folders, validAssets]);
 
     useEffect(() => {
         if (dramaFilter !== ALL_DRAMAS && dramaFilter !== UNASSIGNED_DRAMA && !dramas.some((drama) => drama.id === dramaFilter)) setDramaFilter(UNASSIGNED_DRAMA);
@@ -217,7 +212,8 @@ export default function AssetsPage() {
 
     const [isDragging, setIsDragging] = useState(false);
     const dragDepth = useRef(0);
-    const dropFolderId = folderFilter && !folderFilter.startsWith("tag:") ? folderFilter : null;
+    // 当前真实文件夹：未归档与标签分组不是可写入的文件夹，拖放和新建子文件夹都回到根目录。
+    const currentFolderId = folderFilter && folderFilter !== ROOT_FOLDER && !isTagFolder(folderFilter) ? folderFilter : null;
     const dropDramaId = dramaFilter !== ALL_DRAMAS && dramaFilter !== UNASSIGNED_DRAMA ? dramaFilter : null;
     const addDroppedFiles = useCallback(async (files: File[]) => {
         const importable = files.filter((file) => file.type.startsWith("image/") || file.type.startsWith("audio/") || file.type.startsWith("video/"));
@@ -229,7 +225,7 @@ export default function AssetsPage() {
         let failed = 0;
         for (const file of importable) {
             const title = file.name.replace(/\.[^.]+$/, "") || file.name;
-            const base = { title, coverUrl: "", tags: [], source: t("assets.droppedSource"), note: "", folderId: dropFolderId, dramaId: dropDramaId };
+            const base = { title, coverUrl: "", tags: [], source: t("assets.droppedSource"), note: "", folderId: currentFolderId, dramaId: dropDramaId };
             try {
                 if (file.type.startsWith("image/")) {
                     const image = await uploadImage(file, { category: "library" });
@@ -249,7 +245,7 @@ export default function AssetsPage() {
         if (added) message.success(t("assets.filesImported", { count: added }));
         const skipped = files.length - importable.length + failed;
         if (skipped > 0) message.warning(t("assets.filesSkipped", { count: skipped }));
-    }, [addAsset, dropDramaId, dropFolderId, message, t]);
+    }, [addAsset, dropDramaId, currentFolderId, message, t]);
 
     useEffect(() => {
         const onPaste = (event: ClipboardEvent) => {
@@ -586,7 +582,7 @@ export default function AssetsPage() {
                         <span className="min-w-0 truncate">{folder.name}</span>
                     </button>
                     <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-                        <span>{folderCounts(folderId)}</span>
+                        <span>{facetCounts.folders.get(folderId) ?? 0}</span>
                         <Dropdown trigger={["click"]} menu={{
                             items: [
                                 { key: "new", label: t("assets.folder.newFolder"), onClick: () => addFolder("新文件夹", folderId) },
@@ -622,7 +618,7 @@ export default function AssetsPage() {
                     onClick={() => { setDramaFilter(ALL_DRAMAS); setPage(1); }}
                 >
                     <span>{t("assets.drama.all")}</span>
-                    <span className="text-xs text-muted-foreground">{validAssets.length}</span>
+                    <span className="text-xs text-muted-foreground">{facetCounts.allDramas}</span>
                 </button>
                 <div className="space-y-0.5">
                     {dramas.map((drama) => (
@@ -633,7 +629,7 @@ export default function AssetsPage() {
                             onClick={() => { setDramaFilter(drama.id); setPage(1); }}
                         >
                             <span className="flex min-w-0 items-center gap-2"><Clapperboard className="size-4 shrink-0 text-muted-foreground" /><span className="truncate">{drama.name}</span></span>
-                            <span className="text-xs text-muted-foreground">{validAssets.filter((asset) => asset.dramaId === drama.id).length}</span>
+                            <span className="text-xs text-muted-foreground">{facetCounts.dramas.get(drama.id) ?? 0}</span>
                         </button>
                     ))}
                     <button
@@ -642,7 +638,7 @@ export default function AssetsPage() {
                         onClick={() => { setDramaFilter(UNASSIGNED_DRAMA); setPage(1); }}
                     >
                         <span>{t("assets.drama.unassigned")}</span>
-                        <span className="text-xs text-muted-foreground">{validAssets.filter((asset) => !asset.dramaId || !dramas.some((drama) => drama.id === asset.dramaId)).length}</span>
+                        <span className="text-xs text-muted-foreground">{facetCounts.unassigned}</span>
                     </button>
                 </div>
                 <div className="ui-group-title mb-3 mt-5 border-t border-border px-2 pt-5 text-muted-foreground">{t("assets.foldersTitle")}</div>
@@ -652,7 +648,15 @@ export default function AssetsPage() {
                     onClick={() => { setFolderFilter(null); setPage(1); }}
                 >
                     <span>{t("assets.folder.all")}</span>
-                    <span className="text-xs text-muted-foreground">{validAssets.filter(matchesDrama).length}</span>
+                    <span className="text-xs text-muted-foreground">{facetCounts.allFolders}</span>
+                </button>
+                <button
+                    type="button"
+                    className={cn("mb-1 flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-muted", folderFilter === ROOT_FOLDER && "bg-muted font-medium text-foreground")}
+                    onClick={() => { setFolderFilter(ROOT_FOLDER); setPage(1); }}
+                >
+                    <span className="flex min-w-0 items-center gap-2"><Folder className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" /><span className="truncate">{t("assets.folder.unfiled")}</span></span>
+                    <span className="text-xs text-muted-foreground">{facetCounts.unfiled}</span>
                 </button>
                 <div className="flex-1 space-y-0.5 overflow-y-auto">
                     <div>
@@ -716,7 +720,7 @@ export default function AssetsPage() {
                                 <div className="mt-2 max-h-64 overflow-y-auto">
                                     <button type="button" className="ui-body mb-1 min-h-11 w-full rounded-md px-3 py-2 text-left hover:bg-muted" onClick={() => { setFolderFilter(null); setPage(1); }}>{t("assets.folder.all")}</button>
                                     {rootFolders.map((folder) => renderFolderItem(folder.id, 0))}
-                                    <Button type="text" icon={<FolderPlus className="size-4" />} onClick={() => { const id = addFolder("新文件夹", folderFilter && !folderFilter.startsWith("tag:") ? folderFilter : null); setFolderFilter(id); setPage(1); }}>{t("assets.folder.newFolder")}</Button>
+                                    <Button type="text" icon={<FolderPlus className="size-4" />} onClick={() => { const id = addFolder("新文件夹", currentFolderId); setFolderFilter(id); setPage(1); }}>{t("assets.folder.newFolder")}</Button>
                                 </div>
                             </details>
                             <div className="flex items-start gap-2">
@@ -745,7 +749,7 @@ export default function AssetsPage() {
                             </div>
                             <div className="flex flex-wrap gap-2">
                                 {keyword || kindFilter !== "all" || dramaFilter !== ALL_DRAMAS || folderFilter ? <Button size="small" type="text" onClick={() => { setKeyword(""); setKindFilter("all"); setDramaFilter(ALL_DRAMAS); setFolderFilter(null); setPage(1); }}>{t("assets.workspace.clearFilters")}</Button> : null}
-                                <Button size="small" type="text" className="!hidden md:!inline-flex" icon={<FolderPlus className="size-4" />} onClick={() => { const id = addFolder("新文件夹", folderFilter && !folderFilter.startsWith("tag:") ? folderFilter : null); setFolderFilter(id); setPage(1); }}>{t("assets.folder.newFolder")}</Button>
+                                <Button size="small" type="text" className="!hidden md:!inline-flex" icon={<FolderPlus className="size-4" />} onClick={() => { const id = addFolder("新文件夹", currentFolderId); setFolderFilter(id); setPage(1); }}>{t("assets.folder.newFolder")}</Button>
                             </div>
                         </div>
                     </div>
@@ -812,6 +816,7 @@ export default function AssetsPage() {
                     ) : null}
 
                     <div className="flex flex-col gap-4 sm:gap-6">
+                        {missingSourceAssets.length > 0 && <Alert type="warning" showIcon message={t("assets.sharedAssetMissingSummary", { count: missingSourceAssets.length, names: missingSourceAssets.map(asset => asset.title || asset.id).join("、") })} />}
                         <div className="grid gap-4 sm:gap-5 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
                             {visibleAssets.map((asset) => (
                                 <AssetCard
@@ -849,6 +854,7 @@ export default function AssetsPage() {
                                 pageSize={pageSize}
                                 total={filteredAssets.length}
                                 showSizeChanger
+                                showTotal={(total) => t("assets.totalCount", { count: total })}
                                 pageSizeOptions={[10, 20, 50, 100]}
                                 onChange={(nextPage, nextPageSize) => {
                                     setPage(nextPage);
@@ -1196,8 +1202,9 @@ function AssetDramaTag({ asset }: { asset: Asset }) {
 
 function AssetCard({ asset, selected, onSelect, onOpen, onEdit, onCopy, onDownload, onDownloadCharacter, onDelete }: { asset: Asset; selected: boolean; onSelect: () => void; onOpen: () => void; onEdit: () => void; onCopy: (asset: Asset) => void; onDownload: (asset: Asset) => void; onDownloadCharacter: (asset: Asset) => void; onDelete: () => void }) {
     const { t } = useTranslation();
+    const missingSource = asset.metadata?.sharedAssetMissing === true;
     const cover = useResolvedCoverUrl(asset);
-    const summary = assetSummary(asset);
+    const summary = missingSource ? t("assets.sharedAssetMissing") : assetSummary(asset);
     return (
         <Card
             hoverable
@@ -1213,7 +1220,7 @@ function AssetCard({ asset, selected, onSelect, onOpen, onEdit, onCopy, onDownlo
                         )}
                     </button>
                     <label className="absolute right-1 top-1 flex size-9 cursor-pointer items-center justify-center max-sm:size-11">
-                        <input type="checkbox" checked={selected} onChange={onSelect} aria-label={t("canvas.project.select", { name: asset.title })} className="size-4 cursor-pointer accent-primary" />
+                        <input type="checkbox" checked={selected} disabled={missingSource} onChange={onSelect} aria-label={t("canvas.project.select", { name: asset.title })} className="size-4 cursor-pointer accent-primary" />
                     </label>
                 </div>
             }
@@ -1227,6 +1234,7 @@ function AssetCard({ asset, selected, onSelect, onOpen, onEdit, onCopy, onDownlo
                                 {asset.source || t("assets.unknownSource")}
                             </Typography.Text>
                         </div>
+                        {missingSource && <Tag color="orange" className="m-0 shrink-0 ui-caption">{t("assets.sharedAssetMissing")}</Tag>}
                         <Tag className="m-0 shrink-0 ui-caption">{t(`assets.kinds.${asset.kind}`)}</Tag>
                     </div>
                     <Typography.Paragraph type="secondary" ellipsis={{ rows: 3 }} className="ui-body !mb-0 !mt-2">
@@ -1254,20 +1262,20 @@ function AssetCard({ asset, selected, onSelect, onOpen, onEdit, onCopy, onDownlo
                     </Button>
                 ) : null}
                 {asset.kind === "image" || asset.kind === "video" || asset.kind === "audio" || asset.kind === "scene" ? (
-                    <Button size="small" icon={<Download className="size-4" />} onClick={() => onDownload(asset)}>
+                    <Button size="small" disabled={missingSource} icon={<Download className="size-4" />} onClick={() => onDownload(asset)}>
                         {t("common.download")}
                     </Button>
                 ) : null}
                 {asset.kind === "character" ? (
-                    <Button size="small" icon={<Download className="size-4" />} onClick={() => onDownloadCharacter(asset)}>
+                    <Button size="small" disabled={missingSource} icon={<Download className="size-4" />} onClick={() => onDownloadCharacter(asset)}>
                         {t("assets.character.downloadImages")}
                     </Button>
                 ) : null}
                 </div>
                 <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-border pt-2">
                     <span className="mr-auto ui-caption text-muted-foreground">{t("assets.workspace.manageItem")}</span>
-                    <Button type="text" size="small" icon={<PencilLine className="size-4" />} onClick={onEdit}>{t("common.edit")}</Button>
-                    <Button type="text" size="small" danger icon={<Trash2 className="size-4" />} onClick={onDelete}>{t("common.delete")}</Button>
+                    <Button type="text" size="small" disabled={missingSource} icon={<PencilLine className="size-4" />} onClick={onEdit}>{t("common.edit")}</Button>
+                    <Button type="text" size="small" danger disabled={missingSource} icon={<Trash2 className="size-4" />} onClick={onDelete}>{t("common.delete")}</Button>
                 </div>
             </div>
         </Card>
@@ -1281,6 +1289,7 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload, onDownloadCharacter }
         <Drawer title={t("assets.details")} open={Boolean(asset)} size="large" onClose={onClose}>
             {asset ? (
                 <div className="space-y-5">
+                    {asset.metadata?.sharedAssetMissing === true && <Alert type="warning" showIcon message={t("assets.sharedAssetMissing")} />}
                     {cover ? (
                         <MediaImage src={cover} alt={asset.title} name={asset.title} className="rounded-lg" />
                     ) : (
@@ -1390,14 +1399,6 @@ function assetSummary(asset: Asset) {
     if (asset.kind === "character") return asset.data.description || `${asset.data.images.length} images`;
     if (asset.kind === "scene") return asset.data.description || asset.data.colorCardPrompt || `${asset.data.image.width}x${asset.data.image.height}`;
     return `${asset.data.width}x${asset.data.height} · ${formatBytes(asset.data.bytes)} · ${asset.data.mimeType}`;
-}
-
-function assetSearchText(asset: Asset) {
-    const extra = asset.kind === "text" ? asset.data.content
-        : asset.kind === "character" ? `${asset.data.name} ${asset.data.description} ${asset.data.voiceName} ${asset.data.voiceDescription || ""} ${asset.data.images.length} images`
-        : asset.kind === "scene" ? `${asset.data.name} ${asset.data.description} ${asset.data.colorCardPrompt}`
-        : asset.data.mimeType;
-    return [asset.title, asset.source || "", asset.note || "", asset.kind === "character" || asset.kind === "scene" ? "" : (asset.tags || []).join(" "), extra].join(" ").toLowerCase();
 }
 
 function CharacterEditor({ images, primaryIndex, onPrimaryIndexChange, onChange }: { images: CharacterImage[]; primaryIndex: number; onPrimaryIndexChange: (index: number) => void; onChange: (images: CharacterImage[]) => void }) {

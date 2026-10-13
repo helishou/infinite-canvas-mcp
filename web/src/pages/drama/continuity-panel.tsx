@@ -9,7 +9,6 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Alert, App, Button, Dropdown, Input, message, Popover, Select, Switch, Tag } from "antd";
 import { useTranslation } from "react-i18next";
 import type { ProductionContinuity } from "@/services/backend-api";
-import { useAgentStore } from "@/stores/use-agent-store";
 import { continuityPresentation } from "./continuity-presentation";
 import { records } from "./director-display";
 import { continuityEventAnchor, continuityEventFrame } from "./continuity-event-anchor";
@@ -19,16 +18,6 @@ type Row = Record<string, any>;
 const blankLedger = () => ({ contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] });
 const id = () => `C_${crypto.randomUUID()}`;
 const stable = (value: any): string => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object" ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}` : JSON.stringify(value);
-function ledgerV2FromAgent(text: string): Row | null {
-  const fenced = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map(match => match[1]);
-  for (const candidate of [...fenced.reverse(), text]) {
-    try {
-      const value = JSON.parse(candidate.trim());
-      if (value && typeof value === "object" && value.contract_version === 2 && ["facts", "timelines", "initial", "events", "requirements", "coverage"].every(key => Array.isArray(value[key]))) return value;
-    } catch { /* Check the next fenced block or the complete message. */ }
-  }
-  return null;
-}
 async function sourceDigest(sceneId: string, block: Row) {
   const bytes = new TextEncoder().encode(stable({ scene_id: sceneId, block }));
   const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -49,12 +38,12 @@ function BoundaryContinuityRow({ from, to, fromLabel, toLabel, boundary, disable
   </article>;
 }
 
-export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subjectAssembly = false, draftValue, onDraftChange, scenes, locations = [], shots, segments, boundaries, characters, assets, report, workId, agentThreadId, busy, snapshotLoading = false, titleAlreadyVisible = false, editable, onSave, onPreviewUpgrade, onCheck, onLocate, onAskDirector, onRequestAgentUpgrade, onBoundary, onSnapshot }: {
+export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subjectAssembly = false, draftValue, onDraftChange, scenes, locations = [], shots, segments, boundaries, characters, assets, report, workId, busy, snapshotLoading = false, titleAlreadyVisible = false, editable, onSave, onCheck, onLocate, onAskDirector, onBoundary, onSnapshot }: {
   source?: Row; ledger?: Row; sourceHash: string; scenes: Row[]; locations?: Row[]; shots: Row[]; segments: Row[]; boundaries: Row[]; characters: Row[]; assets: Row[]; report?: ProductionContinuity;
-  workId?: string; agentThreadId?: string;
+  workId?: string;
   subjectAssembly?: boolean;
   draftValue?: string; onDraftChange?: (value: string | undefined) => void;
-  snapshotLoading?: boolean; titleAlreadyVisible?: boolean; busy: boolean; editable: boolean; onSave: (ledger: Row, upgradePreview?: Row) => Promise<boolean>; onPreviewUpgrade: (ledger: Row, fromSourceHash: string) => Promise<Row>; onCheck: () => Promise<void>; onLocate: (kind: string, id: string) => void; onAskDirector?: (scope: { workspace: "continuity"; targetId?: string; workId?: string; instruction: string }) => void; onRequestAgentUpgrade?: (instruction: string, workId?: string) => Promise<{ id: string; threadId?: string } | undefined>; onBoundary: (value: Row) => void; onSnapshot?: (value: "draft" | "published") => void;
+  snapshotLoading?: boolean; titleAlreadyVisible?: boolean; busy: boolean; editable: boolean; onSave: (ledger: Row) => Promise<boolean>; onCheck: () => Promise<void>; onLocate: (kind: string, id: string) => void; onAskDirector?: (scope: { workspace: "continuity"; targetId?: string; workId?: string; instruction: string }) => void; onBoundary: (value: Row) => void; onSnapshot?: (value: "draft" | "published") => void;
 }) {
   const { t } = useTranslation();
   const { modal } = App.useApp();
@@ -76,7 +65,6 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
   const [workbenchEventId, setWorkbenchEventId] = useState<string>();
   const [activeView, setActiveView] = useState<"workbench" | "objects" | "shots" | "ledger" | "issues" | "timeline" | "boundaries">(ledgerV2 ? "workbench" : "objects");
   const [manualOpen, setManualOpen] = useState(false);
-  const [manualImportOpen, setManualImportOpen] = useState(false);
   const [ledgerCategory, setLedgerCategory] = useState("facts");
   const [entryFocus, setEntryFocus] = useState("");
   useEffect(() => {
@@ -107,16 +95,6 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
   const [sourceBlockId, setSourceBlockId] = useState("");
   const [exemptionReason, setExemptionReason] = useState("");
   const [reviewRef, setReviewRef] = useState("");
-  const [draftText, setDraftText] = useState("");
-  const [draftError, setDraftError] = useState("");
-  const [proposedLedger, setProposedLedger] = useState<Row | null>(null);
-  const [upgradePreview, setUpgradePreview] = useState<Row | null>(null);
-  const [agentUpgradeRequest, setAgentUpgradeRequest] = useState<{ id: string; threadId: string; baselineIds: string[]; sourceHash: string } | null>(null);
-  const [agentUpgradeStarting, setAgentUpgradeStarting] = useState(false);
-  const agentUpgradeProcessing = useRef("");
-  const agentMessages = useAgentStore(state => state.messages);
-  const agentBusy = useAgentStore(state => state.sending || state.waiting || ["preparing", "running"].includes(state.conversation.status));
-  const agentTaskResult = useAgentStore(state => state.scopedTaskResult);
 
   useEffect(() => {
     if (savedLedger?.contract_version === 2) {
@@ -135,8 +113,8 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
     previousSource.current = { sourceHash, ledgerKey: savedLedgerKey };
   }, [sourceHash, savedLedgerKey]);
   useEffect(() => {
-    if (ledgerV2 && !legacy) setActiveView("workbench");
-  }, [ledgerV2, legacy]);
+    if (ledgerV2) setActiveView("workbench");
+  }, [ledgerV2]);
   const ledgerKey = stable(ledger);
   useEffect(() => {
     if (!ledgerV2 || !editable || !onDraftChange || invalidLedgerDraft) return;
@@ -146,7 +124,6 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
   const invalidEventPositions = ledgerV2 && source ? continuityEventPositionIssues(source, ledger) : [];
   const saveLedger = async () => { if (editable && !legacy && !changeDraft && !snapshotLoading && !busy && !sourceConflict && !invalidLedgerDraft && !invalidEventPositions.length && await onSave(ledger)) setLastDeletion(undefined); };
   useEffect(() => { setLastDeletion(undefined); }, [sourceHash, stable(source), savedLedgerKey, editable]);
-  useEffect(() => { setProposedLedger(null); setUpgradePreview(null); setAgentUpgradeRequest(null); agentUpgradeProcessing.current = ""; }, [sourceHash]);
 
   const sourceBlocks: Row[] = useMemo(() => continuitySourceBlocks(scenes), [stable(scenes)]);
   const factRows = Array.isArray(ledger.facts) ? ledger.facts as Row[] : [];
@@ -266,77 +243,6 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
       latestLedger.current = next; setLedger(next);
     } catch (error) { message.error(t("director.atomic.eventError." + (error instanceof Error ? error.message : "EVENT_FIELDS_REQUIRED"))); }
   };
-  const saveJson = async () => {
-    try {
-      const parsed = JSON.parse(draftText);
-      if (parsed.contract_version !== 2) throw new Error(t("director.workspace.continuity.ledgerV2Required"));
-      setDraftError("");
-      setProposedLedger(parsed);
-      setUpgradePreview(await onPreviewUpgrade(parsed, sourceHash));
-    } catch (error) { setDraftError(String(error)); }
-  };
-  const applyUpgrade = async () => {
-    if (!proposedLedger || !upgradePreview || !await onSave(proposedLedger, upgradePreview)) return;
-    setLedger(proposedLedger); setDraftText(""); setProposedLedger(null); setUpgradePreview(null);
-  };
-  const upgradePreviewPanel = upgradePreview ? <div className="space-y-2 rounded-lg border border-border p-3" data-continuity-upgrade-preview>
-    <Tag color={upgradePreview.report?.status === "passed" ? "green" : "orange"}>{t(`director.workspace.continuity.status.${upgradePreview.report?.status || "blocked"}`)}</Tag>
-    <p className="break-all text-xs">{t("director.workspace.continuity.upgradeSource")}: {upgradePreview.fromSourceHash}</p>
-    <p className="text-xs">{t("director.workspace.continuity.upgradeRuntime")}: {upgradePreview.targetRuntime?.version} · {upgradePreview.targetRuntime?.runtimeId}</p>
-    <p className="text-xs">{t("director.workspace.continuity.upgradeImpact", { count: upgradePreview.affectedTargets?.length || 0, unresolved: upgradePreview.report?.diagnostics?.length || 0 })}</p>
-    <div className="space-y-1 border-t border-border pt-2 text-xs text-muted-foreground">
-      <p>{t("director.workspace.continuity.upgradeEquivalent", { count: upgradePreview.changeClassification?.equivalentConversions?.length || 0 })}</p>
-      <p>{t("director.workspace.continuity.upgradeHistorical", { count: upgradePreview.changeClassification?.historicalProjection?.length || 0 })}</p>
-      <p>{t("director.workspace.continuity.upgradeSemanticGaps", { count: upgradePreview.changeClassification?.semanticGaps?.length || 0 })}</p>
-      <p>{t("director.workspace.continuity.upgradeSpeculative", { count: upgradePreview.changeClassification?.speculativeSuggestions?.length || 0 })}</p>
-    </div>
-    {(upgradePreview.activeRuns || []).length > 0 && <Alert type="warning" showIcon message={t("director.workspace.continuity.upgradeActiveRuns", { count: upgradePreview.activeRuns.length })} description={upgradePreview.activeRuns.map((run: Row) => `${run.runId} · ${run.status}`).join(" / ")} />}
-    <Button type="primary" disabled={busy || (upgradePreview.activeRuns || []).length > 0} onClick={() => void applyUpgrade()}>{t("director.workspace.continuity.applyUpgrade")}</Button>
-  </div> : null;
-  const requestAgentUpgrade = async () => {
-    if (!onRequestAgentUpgrade || busy || agentUpgradeRequest || agentUpgradeStarting) return;
-    const agent = useAgentStore.getState();
-    if (agent.sending || agent.waiting || ["preparing", "running"].includes(agent.conversation.status)) {
-      message.warning(t("director.workspace.agentBusy"));
-      return;
-    }
-    const expectedThreadId = agentThreadId || agent.activeThreadId || agent.conversation.threadId;
-    const initialBaseline = agent.messages.filter(item => item.role === "assistant").map(item => item.id);
-    setAgentUpgradeStarting(true); setDraftError(""); setProposedLedger(null); setUpgradePreview(null);
-    try {
-      const task = await onRequestAgentUpgrade(t("director.workspace.continuity.upgradeAgentPrompt"), workId);
-      if (!task) return;
-      const threadId = task.threadId || expectedThreadId;
-      if (!threadId) { setDraftError(t("director.workspace.continuity.upgradeAgentJsonMissing")); return; }
-      const baselineIds = threadId === expectedThreadId ? initialBaseline : useAgentStore.getState().messages.filter(item => item.role === "assistant").map(item => item.id);
-      setAgentUpgradeRequest({ id: task.id, threadId, baselineIds, sourceHash });
-    } catch (error) { setDraftError(error instanceof Error ? error.message : String(error)); }
-    finally { setAgentUpgradeStarting(false); }
-  };
-  useEffect(() => {
-    const request = agentUpgradeRequest;
-    if (!request || agentBusy || agentUpgradeProcessing.current === request.id) return;
-    if (request.sourceHash !== sourceHash) { setAgentUpgradeRequest(null); setDraftError(t("director.workspace.continuity.sourceConflict")); return; }
-    const responses = agentMessages.filter(item => item.role === "assistant" && (!item.threadId || item.threadId === request.threadId) && !request.baselineIds.includes(item.id));
-    const result = [...responses].reverse().map(item => ledgerV2FromAgent(item.text)).find((value): value is Row => Boolean(value));
-    if (!result) {
-      if (agentTaskResult?.id === request.id && agentTaskResult.status === "failed") {
-        setAgentUpgradeRequest(null); setDraftError(agentTaskResult.error || t("director.workspace.agentTaskFailed"));
-      } else if (responses.length) {
-        setAgentUpgradeRequest(null); setDraftError(t("director.workspace.continuity.upgradeAgentJsonMissing"));
-      }
-      return;
-    }
-    agentUpgradeProcessing.current = request.id;
-    setDraftText(JSON.stringify(result, null, 2)); setProposedLedger(result); setDraftError("");
-    void onPreviewUpgrade(result, request.sourceHash).then(preview => {
-      if (agentUpgradeProcessing.current === request.id) setUpgradePreview(preview);
-    }).catch(error => {
-      if (agentUpgradeProcessing.current === request.id) setDraftError(error instanceof Error ? error.message : String(error));
-    }).finally(() => {
-      if (agentUpgradeProcessing.current === request.id) { agentUpgradeProcessing.current = ""; setAgentUpgradeRequest(null); }
-    });
-  }, [agentUpgradeRequest, agentBusy, agentMessages, agentTaskResult, onPreviewUpgrade, sourceHash, t]);
   const issues = report?.report?.diagnostics || report?.items || [];
   const workbenchSource = useMemo(() => ledgerV2 && source ? continuityWorkbenchSource(source, ledger, shots) : source, [ledgerV2, source, ledgerKey, shots]);
   const workbenchShots = workbenchSource ? records(workbenchSource.shots) : shots;
@@ -425,25 +331,7 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
     { type: "group" as const, key: "reading", label: t("director.workspace.continuity.crud.stateViews"), children: readingViews.filter(view => view !== "workbench").map(view => ({ key: view, label: viewName(view) })) },
     { type: "group" as const, key: "management", label: t("director.workspace.continuity.crud.reviewViews"), children: managementViews.map(view => ({ key: view, label: viewName(view) })) },
   ];
-  if (legacy) return <section className="space-y-3" data-continuity-workspace data-continuity-upgrade-required>
-    <header className="continuity-view-tools"><h2 className={titleAlreadyVisible ? "sr-only" : "m-0 text-base font-semibold"}>{t("director.workspace.tab.continuity")}</h2></header>
-    {legacy && <div className="continuity-upgrade-state" data-continuity-legacy role="status">
-      <p>{t("director.workspace.continuity.legacyReadOnly")}</p>
-      <p className="text-sm text-muted-foreground">{t("director.workspace.continuity.legacyUpgradeHint")}</p>
-      {editable && <Button data-continuity-upgrade-agent type="primary" size="small" loading={agentUpgradeStarting || Boolean(agentUpgradeRequest)} disabled={busy || !onRequestAgentUpgrade} onClick={() => void requestAgentUpgrade()}>{t("director.workspace.continuity.upgradeWithAgent")}</Button>}
-    </div>}
-    {legacy && editable && <div className="space-y-3" data-continuity-ledger-import>
-      {draftError && <Alert type="error" message={draftError} />}
-      <details open={manualImportOpen || Boolean(draftError)} onToggle={event => setManualImportOpen(event.currentTarget.open)} className="border-t border-border pt-3" data-continuity-manual-import>
-        <summary className="cursor-pointer text-sm font-medium">{t("director.workspace.continuity.manualEditing")} · {t("director.workspace.continuity.previewUpgrade")}</summary>
-        <div className="mt-3 space-y-3">
-          <Input.TextArea value={draftText} disabled={busy || agentUpgradeStarting || Boolean(agentUpgradeRequest)} onChange={event => { setDraftText(event.target.value); setProposedLedger(null); setUpgradePreview(null); }} placeholder={t("director.workspace.continuity.upgradeJson")} autoSize={{ minRows: 3, maxRows: 8 }} />
-          <Button disabled={busy || agentUpgradeStarting || Boolean(agentUpgradeRequest) || !draftText.trim()} onClick={() => void saveJson()}>{t("director.workspace.continuity.previewUpgrade")}</Button>
-        </div>
-      </details>
-      {upgradePreviewPanel}
-    </div>}
-  </section>;
+  if (legacy) return <Alert type="error" showIcon message={t("director.workspace.unsupportedProductionFormat")} />;
   return <section className={activeView === "workbench" ? "continuity-workspace-main" : "space-y-3"} data-continuity-workspace>
     <header className="continuity-view-tools" aria-label={t("director.workspace.tab.continuity")}><h2 className={titleAlreadyVisible ? "sr-only" : "m-0 text-base font-semibold"}>{t("director.workspace.tab.continuity")}</h2>
       <nav className="production-view-tabs" aria-label={t("director.workspace.continuity.views")}>
@@ -488,9 +376,7 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
         {readableFactRows}
       </tbody></table></div> : <div className="continuity-empty-state" data-continuity-empty-state>
         <p role="status">{(activeView === "objects" ? filterObject : filterTarget) !== "all" ? t("director.workspace.continuity.subjectTimeline.empty") : factRows.length === 0 ? t("director.workspace.continuity.emptyEntries") : t("director.workspace.continuity.subjectTimeline.empty")}</p>
-        {(activeView === "objects" ? filterObject : filterTarget) !== "all" && <Button data-continuity-empty-action size="small" onClick={() => activeView === "objects" ? setFilterObject("all") : setFilterTarget("all")}>{t(`director.workspace.continuity.${activeView === "objects" ? "filterAllObjects" : "filterAllTargets"}`)}</Button>}
-        {(activeView === "objects" ? filterObject : filterTarget) === "all" && factRows.length === 0 && editable && legacy && <Button data-continuity-empty-action type="primary" size="small" loading={agentUpgradeStarting || Boolean(agentUpgradeRequest)} disabled={busy || !onRequestAgentUpgrade} onClick={() => void requestAgentUpgrade()}>{t("director.workspace.continuity.upgradeWithAgent")}</Button>}
-        {(activeView === "objects" ? filterObject : filterTarget) === "all" && factRows.length === 0 && editable && !legacy && <Button data-continuity-empty-action size="small" onClick={openManualLedger}>{t("director.workspace.continuity.manualEditing")}</Button>}
+        {(activeView === "objects" ? filterObject : filterTarget) !== "all" && <Button data-continuity-empty-action size="small" onClick={() => activeView === "objects" ? setFilterObject("all") : setFilterTarget("all")}>{t(`director.workspace.continuity.${activeView === "objects" ? "filterAllObjects" : "filterAllTargets"}`)}</Button>}        {(activeView === "objects" ? filterObject : filterTarget) === "all" && factRows.length === 0 && editable && !legacy && <Button data-continuity-empty-action size="small" onClick={openManualLedger}>{t("director.workspace.continuity.manualEditing")}</Button>}
       </div>}
     </section>}
     {activeView === "ledger" && <div className="space-y-4">

@@ -26,7 +26,6 @@ export const productionWorkspaceSchemas = {
     production_prepare_targets: owner.extend({ expectedRevision: z.number().int().nonnegative(), operationId: id, targets: z.array(id).min(1) }),
     production_get_continuity: owner.extend({ snapshot: z.enum(["draft", "published"]).default("draft"), view: z.enum(["summary", "issues", "timeline", "shot"]).default("summary"), targetId: id.optional(), objectId: id.optional(), pageSize: z.number().int().positive().optional(), cursor: z.string().optional() }),
     production_check_continuity: owner.extend({ expectedRevision: z.number().int().nonnegative(), operationId: id, snapshot: z.enum(["draft", "published"]).optional(), targetIds: z.array(id).optional() }),
-    production_preview_continuity_upgrade: owner.extend({ expectedRevision: z.number().int().nonnegative(), operationId: id, fromSourceHash: z.string().regex(/^[a-f0-9]{64}$/), ledger: z.record(z.unknown()) }),
     production_get_shared_assets: owner,
     production_adopt_shared_asset: episodeOwner.extend({ assetId: id, approvedId: id, expectedRevision: z.number().int().nonnegative(), operationId: id }),
     production_adopt_shared_assets: episodeOwner.extend({ assets: z.array(z.object({ assetId: id, approvedId: id }).strict()).min(1), expectedRevision: z.number().int().nonnegative(), operationId: id }),
@@ -56,7 +55,6 @@ export const productionWorkspaceDescriptions = {
     production_prepare_targets: "在固定画布按 Backend 持久化布局计划准备正式 entity:<character|scene|prop>:<实体ID> 素材节点、scene 剧本文本节点、asset/frame 节点或 segment Clip；返回布局回执，不发布或生成。",
     production_get_continuity: "只读读取正式连续性检查状态、问题、对象轨迹或单镜状态；不会触发检查或修改制作稿。",
     production_check_continuity: "按正式 owner 和 revision 执行 Acheng 固定 runtime 的连续性检查并持久化回执；检查完成不表示 verdict passed，不发布或生成。",
-    production_preview_continuity_upgrade: "只读预览旧连续性源稿升级到 ledger v2 的诊断与版本影响；不会改动制作稿、发布版、历史媒体或生成任务。",
     production_get_shared_assets: "读取同剧目最新共享素材版本、真实审核状态及当前集持久更新状态。",
     production_adopt_shared_asset: "将同剧目批准资产采用到已登记的集内目标；核验来源、媒体和版本，不生成。",
     production_adopt_shared_assets: "一次事务批量采用多项同剧目批准资产；后台自动发布推版本时不会逐项冲突，全部核验来源、媒体和版本，不生成。",
@@ -70,16 +68,14 @@ export function productionWorkspaceRequest(name: string, raw: unknown) {
     if (name === "production_get_canvas_context") return { method: "GET" as const, path: `/canvas/projects/${encodeURIComponent(input.projectId)}/production-context` };
     if (name === "production_list_scenes") return { method: "GET" as const, path: `/dramas/${encodeURIComponent(input.dramaId)}/scenes${input.episodeId || input.includeOrphaned ? `?${new URLSearchParams({ ...(input.episodeId ? { episodeId: input.episodeId } : {}), ...(input.includeOrphaned ? { includeOrphaned: "true" } : {}) })}` : ""}` };
     if (name === "production_get_scene") return { method: "GET" as const, path: `/drama/scenes/${encodeURIComponent(input.sceneId)}` };
-    if (["production_get_continuity", "production_check_continuity", "production_preview_continuity_upgrade"].includes(name)) {
+    if (["production_get_continuity", "production_check_continuity"].includes(name)) {
         const base = input.kind === "canvas" ? `/canvas/projects/${encodeURIComponent(input.id)}/production` : input.kind === "scene" ? `/drama/scenes/${encodeURIComponent(input.id)}/production` : `/drama/episodes/${encodeURIComponent(input.id)}/production`;
         if (name === "production_get_continuity") {
             const { kind: _kind, id: _id, ...query } = input;
             return { method: "GET" as const, path: `${base}/continuity?${new URLSearchParams(Object.fromEntries(Object.entries(query).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)])))}` };
         }
         const { kind: _kind, id: _id, ...body } = input;
-        return name === "production_preview_continuity_upgrade"
-            ? { method: "POST" as const, path: `${base}/continuity/upgrade-preview`, body }
-            : { method: "POST" as const, path: `${base}/continuity/check`, body };
+        return { method: "POST" as const, path: `${base}/continuity/check`, body };
     }
     const sceneProductionBase = `/drama/scenes/${encodeURIComponent(input.sceneId)}/production`;
     if (name === "production_get_scene_production") return { method: "GET" as const, path: `${sceneProductionBase}${productionReadQuery(input)}` };

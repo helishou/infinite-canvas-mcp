@@ -22,6 +22,7 @@ import {
     productionSceneEntries,
     productionScriptGroups,
     episodeProductionDataSchema,
+    episodeProductionHistoryDataSchema,
     directorRunStartSchema,
     directorModules,
     directorProductionSchema,
@@ -30,7 +31,6 @@ import {
     productionPreflightRequestSchema,
     productionContinuityReadSchema,
     productionContinuityCheckSchema,
-    productionContinuityUpgradePreviewSchema,
     productionContractVersion,
     productionEntities,
     resolveDirectorReviewPolicy,
@@ -53,11 +53,10 @@ import {
 import { BASE_H3_NODE_METADATA, createH3NodeMetadata, isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { H3_DEFAULTS_KEY } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { H3_RUNTIME_NODE_FIELDS, H3_RUNTIME_SEGMENT_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
-import { resolveAchengEngine, resolveAchengRuntime } from "@basketikun/canvas-agent/skills/acheng";
+import { resolveAchengEngine } from "@basketikun/canvas-agent/skills/acheng";
 import { assertAchengSource, auditAchengContinuity, validateAchengSource, preflightCompilationDirector } from "@basketikun/canvas-agent/skills/acheng";
 import { schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch } from "@basketikun/canvas-agent/drama/production-validation";
 import { selectSmartImageResult } from "@basketikun/canvas-agent/reference-contract";
-import { convertDirectorSourceToSubjectV2 } from "./subject-v2-upgrade.js";
 
 import { directorHash, projectDirector, validateDirectorMedia, assertDirectorEngine } from "./director.js";
 import { DATA_DIR } from "../config.js";
@@ -346,7 +345,6 @@ export class EpisodeProductionService {
             if (!media || !fs.existsSync(media.filePath)) throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_NOT_ARCHIVED", path: `subject_registry.${subjectId}.pictureBindings.${bindingId}.selection`, targetId: bindingId, message: "所选图片尚未归档，不能作为模型参考", severity: "error" }]);
             const stat = fs.statSync(media.filePath), digestCacheKey = `${stat.size}:${stat.mtimeMs}`, cachedDigest = this.mediaDigestCache.get(storageKey);
             if (media.mimeType && !String(media.mimeType).toLowerCase().startsWith("image/")) throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_TYPE_INVALID", path: `subject_registry.${subjectId}.pictureBindings.${bindingId}.selection`, targetId: bindingId, message: "所选归档素材不是受支持的图片类型", severity: "error" }]);
-            if (media.bytes != null && Number.isFinite(Number(media.bytes)) && Number(media.bytes) !== stat.size) throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_BYTES_MISMATCH", path: `subject_registry.${subjectId}.pictureBindings.${bindingId}.selection`, targetId: bindingId, message: "归档图片记录的字节数与文件不一致", severity: "error" }]);
             const digest = cachedDigest && cachedDigest.statKey === digestCacheKey ? cachedDigest.digest
                 : crypto.createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex");
             if (!cachedDigest || cachedDigest.statKey !== digestCacheKey) {
@@ -556,9 +554,10 @@ export class EpisodeProductionService {
         const current = this.get(id);
         const selected = query.snapshot === "published" ? current.published : current.draft;
         const director = selected?.director;
-        const legacy = Boolean(director?.source.ledger && (director.source.ledger as any).contract_version !== 2);
         if (!director) return { owner: { kind: this.ownerKind, id }, snapshot: query.snapshot, revision: current.revision, publishedVersion: current.publishedVersion,
             status: "missing", coverageStatus: "unchecked", semanticDiscovery: "not_performed", checkedAt: null, diagnostics: { total: 1, blocked: 1, unresolved: 1 }, items: [], total: 0, nextCursor: null };
+        // Continuity report reads are observational; an older source format must
+        // remain inspectable even though compile/check/write paths reject it.
         const reports = this.continuityReports();
         let projected = reports.get({ kind: this.ownerKind, id }, query.snapshot,
             { sourceHash: director.sourceHash, snapshotVersion: current.publishedVersion }, query.view, query.targetId, query.objectId, query.pageSize, query.cursor);
@@ -570,13 +569,12 @@ export class EpisodeProductionService {
         const allSegments = ((director.source.segments || []) as any[]).map(item => String(item.id || ""));
         const checkedTargets = projected.report?.selectedTargets as string[] | undefined;
         const effectiveStatus = projected.status === "passed" && checkedTargets?.length && allSegments.some(target => !checkedTargets.includes(target)) ? "partial" : projected.status;
-        const legacyIssue = legacy && !projected.report ? [{ code: "LEGACY_CONTINUITY_UNCHECKED", message: "旧版草稿尚未运行只读诊断；诊断结果不会授权新门禁。" }] : [];
         return { owner: { kind: this.ownerKind, id }, snapshot: query.snapshot, revision: current.revision, publishedVersion: current.publishedVersion,
-            sourceHash: director.sourceHash, runtime: projected.report?.engine || { ...director.engine, runtimeId: projected.report?.runtimeId || director.engine.runtimeId }, status: legacy ? "diagnosticOnly" : effectiveStatus,
+            sourceHash: director.sourceHash, runtime: projected.report?.engine || { ...director.engine, runtimeId: projected.report?.runtimeId || director.engine.runtimeId }, status: effectiveStatus,
             coverageStatus: projected.report?.coverageStatus || "unchecked", semanticDiscovery: "not_performed", checkedAt: projected.report?.checkedAt || null,
-            diagnostics: { total: (projected.report?.diagnostics?.length || 0) + legacyIssue.length, blocked: legacy ? 0 : (projected.report?.diagnostics || []).filter((item: any) => item.severity !== "warning").length,
+            diagnostics: { total: projected.report?.diagnostics?.length || 0, blocked: (projected.report?.diagnostics || []).filter((item: any) => item.severity !== "warning").length,
                 unresolved: (projected.report?.diagnostics || []).filter((item: any) => /UNKNOWN|UNRESOLVED|MISSING/.test(String(item.code))).length },
-            items: [...legacyIssue, ...items], total: projected.total + legacyIssue.length, nextCursor: projected.nextCursor, ...(projected.report ? { report: projected.report } : {}) };
+            items, total: projected.total, nextCursor: projected.nextCursor, ...(projected.report ? { report: projected.report } : {}) };
     }
 
     continuityForDirector(id: string, director: NonNullable<EpisodeProductionData["director"]>, snapshot: "draft" | "published" = "draft") {
@@ -586,18 +584,6 @@ export class EpisodeProductionService {
             return { status: "stale", sourceHash: director.sourceHash, runtime: director.engine, report: null };
         }
         return this.getContinuity(id, { snapshot, view: "summary" });
-    }
-
-    continuityUpgradeActiveRuns(id: string) {
-        const batches = this.listBatches(id).filter(batch => ["pending", "running", "paused", "awaiting_review"].includes(batch.status))
-            .map(batch => ({ runId: batch.runId, status: batch.status, targets: batch.targets }));
-        const legacyRuns = this.pendingRuns().filter(run => run.episodeId === id)
-            .map(run => ({ runId: run.runId || `legacy-v${run.version}`, status: run.status, targets: run.targets || run.plan.clipGroupIds }));
-        const nativeTasks = this.db.db.prepare(`SELECT b.task_id, b.targets_json, t.status FROM production_task_bindings b
-            JOIN tasks t ON t.id=b.task_id WHERE b.owner_kind=? AND b.owner_id=? AND b.status='submitted'
-            AND t.status IN ('queued','running','awaiting_confirmation')`).all(this.ownerKind, id) as Array<{ task_id: string; targets_json: string; status: string }>;
-        const active = [...batches, ...legacyRuns, ...nativeTasks.map(task => ({ runId: task.task_id, status: task.status, targets: JSON.parse(task.targets_json) }))];
-        return active.filter((run, index) => active.findIndex(item => item.runId === run.runId) === index);
     }
 
     checkContinuity(id: string, raw: unknown): Record<string, any> {
@@ -616,46 +602,16 @@ export class EpisodeProductionService {
         const selected = input.snapshot === "published" ? current.published : current.draft;
         const director = selected?.director;
         if (!director) throw new Error("CONTINUITY_SOURCE_MISSING: 缺少正式 Acheng 制作稿");
-        const legacy = director.source.ledger && (director.source.ledger as any).contract_version !== 2;
+        this.assertCurrentDirectorFormat(director);
         const segments = new Set(((director.source.segments || []) as any[]).map(item => String(item.id || "")));
         if ((input.targetIds || []).some(target => !segments.has(target))) throw new Error("连续性检查目标必须属于当前制作稿 Segment");
-        const engineReport = auditAchengContinuity(director, input.targetIds, Boolean(legacy));
-        const report = { ...engineReport, verdict: legacy ? "diagnosticOnly" : engineReport.status, owner, snapshot: input.snapshot, snapshotVersion: current.publishedVersion, sourceHash: director.sourceHash,
+        const engineReport = auditAchengContinuity(director, input.targetIds, false);
+        const report = { ...engineReport, verdict: engineReport.status, owner, snapshot: input.snapshot, snapshotVersion: current.publishedVersion, sourceHash: director.sourceHash,
             runtimeId: engineReport.validatorRuntimeId, engine: engineReport.validatorEngine, revision: current.revision, checkedAt: new Date().toISOString(), operationId: input.operationId,
             selectedTargets: input.targetIds || (segments.size ? [...segments] : []) };
         const persisted = reports.persist(owner, input.operationId, requestHash, report);
         this.events?.publish({ type: "drama-production.updated", entityId: id, payload: { revision: current.revision, continuitySourceHash: director.sourceHash, continuitySnapshot: input.snapshot } });
         return { ...persisted, revision: current.revision };
-    }
-
-    previewContinuityUpgrade(id: string, raw: unknown): Record<string, any> {
-        const linked = this.linked(id); if (linked) return linked.service.previewContinuityUpgrade(linked.id, raw);
-        const input = productionContinuityUpgradePreviewSchema.parse(raw);
-        const current = this.get(id);
-        if (current.revision !== input.expectedRevision) throw new ProductionConflictError(current);
-        const director = current.draft.director;
-        if (!director) throw new Error("CONTINUITY_SOURCE_MISSING: 缺少正式 Acheng 制作稿");
-        if (director.sourceHash !== input.fromSourceHash) throw new Error("CONTINUITY_UPGRADE_PREVIEW_STALE: 回读当前源稿后重新预览");
-        if ((director.source.ledger as any)?.contract_version === 2) throw new Error("连续性账本已经升级到 v2");
-        if (input.ledger.contract_version !== 2) throw new Error("升级预览必须明确声明 contract_version: 2");
-        const target = resolveAchengEngine();
-        const targetEngine = { commit: target.commit, patchVersion: target.patchVersion, runtimeId: target.runtimeId, version: target.version };
-        const candidate = structuredClone(director);
-        candidate.source = { ...candidate.source, legacyContinuityProjection: candidate.source.ledger ?? null, ledger: structuredClone(input.ledger) };
-        candidate.engine = targetEngine;
-        candidate.sourceHash = directorHash(candidate.source);
-        const report = auditAchengContinuity(candidate);
-        const previewHash = fingerprint({ owner: { kind: this.ownerKind, id }, expectedRevision: current.revision,
-            fromSourceHash: director.sourceHash, targetRuntimeId: target.runtimeId, ledger: input.ledger });
-        const activeRuns = this.continuityUpgradeActiveRuns(id);
-        const affectedTargets = Array.isArray(director.source.segments) ? director.source.segments.map((item: any) => String(item.id || "")) : [];
-        return { owner: { kind: this.ownerKind, id }, revision: current.revision, fromSourceHash: director.sourceHash,
-            fromRuntime: director.engine, targetRuntime: targetEngine, previewHash, candidateSourceHash: candidate.sourceHash,
-            migrationClass: "retained_legacy_projection",
-            changeClassification: { equivalentConversions: [], historicalProjection: director.source.ledger ? ["legacyContinuityProjection"] : [],
-                semanticGaps: report.diagnostics || [], speculativeSuggestions: [] },
-            report, affectedTargets,
-            activeRuns };
     }
 
     bindCanvasTaskResult(id: string, taskId: string, target: { projectId: string; nodeId: string; kind: string; targets: Array<{ targetId: string; segmentId?: string; inputHash?: string; controlHash?: string }> }): ProductionRecord {
@@ -1062,6 +1018,16 @@ export class EpisodeProductionService {
         if (!Array.isArray(rawNodes)) throw new Error("Production canvas does not exist");
         const nodes = rawNodes as Array<Record<string, any>>;
         for (const asset of Object.values(director.assets)) validateSharedAssetSource(this.db, canvasId!, asset);
+        for (const segment of clipRows(director.source.segments)) for (const binding of clipRows(segment.audio_bindings)) {
+            const nodeId = String(binding.sourceNode?.nodeId || ""), storageKey = String(binding.storageKey || "");
+            const node = nodes.find(item => String(item.id || "") === nodeId), metadata = record(node?.metadata);
+            if (binding.sourceNode?.projectId !== canvasId || node?.type !== "audio"
+                || String(node.storageKey || metadata.storageKey || "") !== storageKey) throw new Error(`音频绑定「${binding.label || binding.id}」已不属于当前制作画布`);
+            const media = this.db.getMediaFile(storageKey);
+            if (!media || !fs.existsSync(media.filePath) || !String(media.mimeType || binding.mimeType || "").startsWith("audio/")) throw new Error(`音频绑定「${binding.label || binding.id}」缺少有效归档媒体`);
+            const digest = promptHashBytes(media.filePath);
+            if (digest !== binding.sha256) throw new Error(`音频绑定「${binding.label || binding.id}」的归档字节已变化`);
+        }
         const bindings = [...Object.values(director.assets), ...director.artifacts.flatMap(a => a.references)];
         const mediaDigests = new Map<string, string>();
         for (const binding of bindings) {
@@ -1102,6 +1068,10 @@ export class EpisodeProductionService {
         for (const artifact of director.artifacts) for (const ref of artifact.references) {
             const file = this.db.getMediaFile(ref.storageKey)?.filePath;
             if (file) files[`${artifact.targetId}\0${ref.label}`] = file;
+        }
+        for (const segment of clipRows(director.source.segments)) for (const binding of clipRows(segment.audio_bindings)) {
+            const file = this.db.getMediaFile(String(binding.storageKey || ""))?.filePath;
+            if (file) files[`${String(segment.id || "")}\0${String(binding.label || "")}`] = file;
         }
         const styleAnchor = this.canvasStyleAnchorInput(id, director);
         if (styleAnchor) for (const card of Array.isArray(director.source.asset_cards) ? director.source.asset_cards.map(record) : []) {
@@ -1157,6 +1127,7 @@ export class EpisodeProductionService {
             record = { ...current, published: frozen, publishedVersion: version };
         }
         if (!record.published?.director) throw new Error("缺少正式发布导演稿");
+        this.assertCurrentDirectorFormat(record.published.director);
         this.checkEngine(record.published.director.engine);
         const canvasId = this.episodeInfo(episodeId).canvasId;
         if (!canvasId) throw new Error("制作稿未绑定画布");
@@ -1998,6 +1969,7 @@ export class EpisodeProductionService {
             if (input.inputBasis === "canvas") return this.canvasBatchCandidate(episodeId, current, input);
             if (current.revision !== input.expectedRevision) throw new ProductionConflictError(current);
             if (current.publishedVersion !== input.version || !current.published?.director) throw new Error("请先发布当前 Acheng 制作稿");
+            this.assertCurrentDirectorFormat(current.published.director);
             const currentWork = current.draft.director?.workflow.currentWork;
             if (input.workId && currentWork?.workId !== input.workId) throw new Error("runId 必须关联当前正式 currentWork");
             const executionSignature = (value: NonNullable<EpisodeProductionData["director"]>) => ({
@@ -2349,7 +2321,7 @@ export class EpisodeProductionService {
         this.episode(episodeId);
         const row = this.prepare("SELECT * FROM episode_production_versions WHERE episode_id = ? AND version = ?").get(episodeId, version) as { version: number; stage: string; snapshot_json: string; impact_json: string; created_at: string } | undefined;
         if (!row) throw new Error("找不到制作稿版本");
-        return { version: row.version, stage: row.stage, snapshot: episodeProductionDataSchema.parse(JSON.parse(row.snapshot_json)), impact: JSON.parse(row.impact_json) as ProductionImpact, createdAt: row.created_at };
+        return { version: row.version, stage: row.stage, snapshot: episodeProductionHistoryDataSchema.parse(JSON.parse(row.snapshot_json)), impact: JSON.parse(row.impact_json) as ProductionImpact, createdAt: row.created_at };
     }
 
     exportMarkdown(episodeId: string, stage: "script" | "shots" | "director", version?: number) {
@@ -2368,14 +2340,6 @@ export class EpisodeProductionService {
             lines.push(`## 镜 ${index + 1} · ${shot.title || shot.id}`, ``, `镜头 ID：${shot.id} · 场次 ID：${shot.sceneId} · ${shot.duration}s`, ``, `画面：${shot.visual}`, ``, `机位：${shot.camera}`, ``, `起始：${shot.openingState}`, ``, `结束：${shot.endingState}`, ``, `声音：${shot.sound}`, ``, `资产节点：${shot.assetNodeIds.join(", ") || "无"}`, ``, `关键帧策略：${shot.keyframePolicy} · 节点：${snapshot.keyframes[shot.id]?.nodeId || "未绑定"}`, ``, `Clip：${group?.nodeId || "未绑定"}/${group?.segmentId || "未绑定"}`, ``);
         });
         return { fileName: `${episodeId.replace(/[^A-Za-z0-9_-]/g, "_")}-${stage}-v${targetVersion}.md`, markdown: lines.join("\n") };
-    }
-
-    legacy(episodeId: string) {
-        const episode = this.episode(episodeId);
-        return (["fullPlot", "script.md", "storyboard.md"] as const).flatMap((source) => {
-            const text = this.legacyText(episode, source);
-            return text ? [{ source, sha256: crypto.createHash("sha256").update(text).digest("hex"), text }] : [];
-        });
     }
 
     private defaultMissingShotTimeline(source: Record<string, any>) {
@@ -2409,7 +2373,6 @@ export class EpisodeProductionService {
             const published = record.published ? structuredClone(record.published) : null;
             for (const [index, operation] of input.ops.entries()) {
                 try {
-                if (operation.type === "upgrade_director_continuity" && operation.previewRevision !== record.revision) throw new Error("CONTINUITY_UPGRADE_PREVIEW_STALE: 制作修订已变化，请重新预览");
                 if (operation.type === "restore_archived_scene_results") {
                     if (!published) throw new Error("尚无发布版本，不能核验迁移前 H3 结果");
                     this.restoreArchivedSceneResults(episodeId, record, draft, published, operation, input.operationId, canvasCommits);
@@ -2516,6 +2479,24 @@ export class EpisodeProductionService {
     }
 
 
+    /** One-time, source-only migration hook. Remove after the authorized target draft is upgraded. */
+    migrateSubjectPromptV2(episodeId: string, expectedRevision: number, operationId: string, source: Record<string, unknown>) {
+        const requestHash = fingerprint({ type: "migrate_subject_prompt_v2", episodeId, expectedRevision, source });
+        return this.commit(episodeId, operationId, expectedRevision, requestHash, current => {
+            if (!current.draft.director) throw new Error("缺少当前 Acheng Director 制作稿");
+            if (isSubjectPromptAssembly(current.draft.director.source)) throw new Error("制作稿已经使用 Subject Prompt Assembly v2");
+            const draft = structuredClone(current.draft);
+            const director = draft.director!;
+            director.source = structuredClone(source);
+            director.sourceHash = directorHash(director.source);
+            this.validateSource(director, "edit");
+            this.validateSubjectEntityOwnership(episodeId, director);
+            projectDirector(draft);
+            this.validateGraph(draft);
+            return { ...current, revision: current.revision + 1, draft, updatedAt: new Date().toISOString() };
+        });
+    }
+
     edit(episodeId: string, raw: unknown, canvasPreparation?: { projectId: string; expectedCanvasRevision: number; operationId: string; operations: CanvasOperation[] }, sceneRuntime = false, beforeCommit?: (record: ProductionRecord) => void): ProductionRecord & { replayed?: boolean; impact?: ProductionImpact } {
         const linked = this.linked(episodeId); if (linked) return linked.service.edit(linked.id, raw, canvasPreparation, sceneRuntime, beforeCommit);
         const input = productionEditSchema.parse(raw);
@@ -2528,7 +2509,7 @@ export class EpisodeProductionService {
             const packets: DirectorWorkPackage[] = [];
             if (input.adoptions) {
                 if (new Set(input.adoptions.map(item => item.taskId)).size !== input.adoptions.length) throw new Error("ADOPTION_DUPLICATE");
-                if (input.ops.some(op => !["patch_director_source", "patch_director_continuity", "set_director_production"].includes(op.type))) throw new Error("ADOPTION_PROTECTED_OPERATION: 采纳只允许创作源稿编辑");
+                if (input.ops.some(op => !["patch_director_source", "set_director_production"].includes(op.type))) throw new Error("ADOPTION_PROTECTED_OPERATION: 采纳只允许创作源稿编辑");
                 for (const adoption of input.adoptions) {
                     const task = this.db.getTask(adoption.taskId), packet = task?.input.workPackage as DirectorWorkPackage | undefined;
                     const output = task?.result;
@@ -2728,8 +2709,10 @@ export class EpisodeProductionService {
 
     restore(episodeId: string, version: number, operationId: string, expectedRevision: number): ProductionRecord & { replayed?: boolean } {
         const linked = this.linked(episodeId); if (linked) return linked.service.restore(linked.id, version, operationId, expectedRevision);
+        const snapshot = this.version(episodeId, version).snapshot;
+        if (snapshot.director) this.assertCurrentDirectorFormat(snapshot.director);
         return this.commit(episodeId, operationId, expectedRevision, fingerprint({ version, operationId, expectedRevision }), (record) => {
-            const draft = structuredClone(this.version(episodeId, version).snapshot);
+            const draft = structuredClone(snapshot);
             if (draft.director && record.draft.director) {
                 draft.director.workflow.sceneWorks = structuredClone(record.draft.director.workflow.sceneWorks);
                 draft.director.workflow.sharedReview = structuredClone(record.draft.director.workflow.sharedReview);
@@ -2743,36 +2726,6 @@ export class EpisodeProductionService {
             }
             return { ...record, revision: record.revision + 1, draft, updatedAt: new Date().toISOString() };
         });
-    }
-
-    upgradeSubjectV2(id: string, raw: unknown): Record<string, any> {
-        const linked = this.linked(id); if (linked) return linked.service.upgradeSubjectV2(linked.id, raw);
-        const input = (raw || {}) as Record<string, unknown>;
-        const operationId = String(input.operationId || "");
-        const expectedRevision = Number(input.expectedRevision);
-        if (!operationId) throw new Error("SUBJECT_V2_UPGRADE_OPERATION_ID_REQUIRED: 必须提供稳定 operationId");
-        if (!Number.isInteger(expectedRevision) || expectedRevision < 0) throw new Error("SUBJECT_V2_UPGRADE_REVISION_REQUIRED: 必须提供当前 expectedRevision");
-        const requestHash = fingerprint({ owner: { kind: this.ownerKind, id }, op: "subject-v2-upgrade" });
-        const upgradeNotes: string[] = [];
-        const receipt = this.commit(id, operationId, expectedRevision, requestHash, record => {
-            const director = record.draft.director;
-            if (!director) throw new Error("CONTINUITY_SOURCE_MISSING: 缺少正式 Acheng 制作稿");
-            if ((director.source as any).prompt_assembly?.version === 2) throw new Error("SUBJECT_SOURCE_ALREADY_V2: 源稿已经是 Subject Prompt v2");
-            const activeRuns = this.continuityUpgradeActiveRuns(id);
-            if (activeRuns.length) throw new Error(`CONTINUITY_UPGRADE_WAIT: 活动生成任务仍在占用版本：${activeRuns.map(run => run.runId).join(", ")}`);
-            const { source, notes, issues } = convertDirectorSourceToSubjectV2(id, director.source as Record<string, any>);
-            if (issues.length) throw new Error(`SUBJECT_V2_UPGRADE_INVALID: 迁移结果未通过 v2 合同校验：${JSON.stringify(issues.slice(0, 6))}`);
-            const runtime = resolveAchengEngine();
-            director.source = source;
-            director.engine = { commit: runtime.commit, patchVersion: runtime.patchVersion, runtimeId: runtime.runtimeId, version: runtime.version };
-            director.sourceHash = directorHash(source);
-            director.executionAuthorized = false;
-            director.artifacts = director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));
-            projectDirector(record.draft);
-            upgradeNotes.push(...notes);
-            return { ...record, revision: record.revision + 1, updatedAt: new Date().toISOString() };
-        });
-        return { ...receipt, notes: upgradeNotes };
     }
 
     private patchDirectorSource(director: NonNullable<EpisodeProductionData["director"]>, entity: keyof typeof directorPatchFields, id: string | undefined, patch: Record<string, unknown>) {
@@ -2942,7 +2895,10 @@ export class EpisodeProductionService {
     private fromRow(episodeId: string, row: Row): ProductionRecord {
         const draftRaw = JSON.parse(row.draft_json);
         const publishedRaw = row.published_json ? JSON.parse(row.published_json) : null;
-        return { episodeId, revision: row.revision, draft: episodeProductionDataSchema.parse(draftRaw), published: publishedRaw ? episodeProductionDataSchema.parse(publishedRaw) : null, publishedVersion: row.published_version, updatedAt: row.updated_at };
+        // Reads must preserve older Director source formats so users can inspect
+        // and migrate them. Current-format validation belongs at write/compile
+        // boundaries (validateGraph/assertCurrentDirectorFormat), not in GET.
+        return { episodeId, revision: row.revision, draft: episodeProductionHistoryDataSchema.parse(draftRaw) as EpisodeProductionData, published: publishedRaw ? episodeProductionHistoryDataSchema.parse(publishedRaw) : null, publishedVersion: row.published_version, updatedAt: row.updated_at };
     }
 
     private episode(episodeId: string) {
@@ -2951,16 +2907,6 @@ export class EpisodeProductionService {
             : this.db.getDramaEpisode(episodeId);
         if (!episode) throw new Error("分集不存在");
         return episode;
-    }
-
-    private legacyText(episode: { canvasId?: string | null; fullPlot?: string | null }, source: "fullPlot" | "script.md" | "storyboard.md") {
-        if (source === "fullPlot") return episode.fullPlot || "";
-        if (!episode.canvasId) return "";
-        const base = path.resolve(this.legacyDataDir, "productions");
-        const directory = path.resolve(base, episode.canvasId);
-        if (!directory.startsWith(`${base}${path.sep}`)) throw new Error("制作目录路径无效");
-        const file = path.join(directory, source);
-        return fs.existsSync(file) && fs.statSync(file).isFile() ? fs.readFileSync(file, "utf8") : "";
     }
 
     private restoreArchivedSceneResults(episodeId: string, current: ProductionRecord, draft: EpisodeProductionData, published: EpisodeProductionData,
@@ -3429,7 +3375,7 @@ export class EpisodeProductionService {
             return;
         }
         if (op.type === "edit_director_continuity") {
-            if (!draft.director || !isSubjectPromptAssembly(draft.director.source)) throw new Error("SUBJECT_SOURCE_VERSION_REQUIRED: 仅 Subject Prompt v2 可细粒度编辑连续性台账");
+            if (!draft.director || draft.director.source.version !== 2 || (draft.director.source.ledger as any)?.contract_version !== 2) throw new Error("UNSUPPORTED_PRODUCTION_FORMAT: 当前连续性编辑只支持 Acheng Director 制作稿 v2。");
             const ledger = draft.director.source.ledger as Record<string, any>;
             for (const change of op.changes) {
                 const collection = ledger[change.collection];
@@ -3543,14 +3489,6 @@ export class EpisodeProductionService {
             projectDirector(draft);
             return;
         }
-        if (op.type === "patch_director_continuity") {
-            if (!draft.director) throw new Error("缺少 Acheng 制作稿");
-            if ((draft.director.source.ledger as any)?.contract_version !== 2) throw new Error("LEGACY_CONTINUITY_UPGRADE_REQUIRED: 旧版账本必须通过显式升级操作切换合同");
-            if (isSubjectPromptAssembly(draft.director.source)) throw new Error("CONTINUITY_FINE_GRAIN_REQUIRED: Subject Prompt v2 必须使用 edit_director_continuity，不能整体覆盖连续性台账");
-            this.patchDirectorSource(draft.director, "continuity", undefined, { ledger: op.ledger });
-            projectDirector(draft);
-            return;
-        }
         if (op.type === "reverse_sync_director_prompt") {
             if (!draft.director || !isSubjectPromptAssembly(draft.director.source)) throw new Error("SUBJECT_SOURCE_VERSION_REQUIRED: Prompt 反向同步仅适用于 Subject Prompt v2");
             if (draft.director.sourceHash !== op.sourceHash) throw new Error("PROMPT_REVERSE_SYNC_STALE_SOURCE: 源稿版本已变化，保留人工 Prompt 并重新读取差异");
@@ -3592,29 +3530,6 @@ export class EpisodeProductionService {
             draft.director.sourceHash = directorHash(draft.director.source);
             draft.director.artifacts = draft.director.artifacts.map(item => item.status === "ready" && !currentCompilationArtifact(draft.director!, item) ? { ...item, status: "stale" as const } : item);
             draft.director.executionAuthorized = false;
-            projectDirector(draft);
-            return;
-        }
-        if (op.type === "upgrade_director_continuity") {
-            if (!draft.director) throw new Error("缺少 Acheng 制作稿");
-            if (draft.director.sourceHash !== op.fromSourceHash) throw new Error("CONTINUITY_UPGRADE_PREVIEW_STALE: 源稿变化，请重新预览后升级");
-            if ((draft.director.source.ledger as any)?.contract_version === 2) throw new Error("连续性账本已经升级到 v2");
-            if (op.ledger.contract_version !== 2) throw new Error("升级包必须明确声明 contract_version: 2");
-            const activeRuns = this.continuityUpgradeActiveRuns(episodeId);
-            if (activeRuns.length) throw new Error(`CONTINUITY_UPGRADE_WAIT: 活动生成任务仍在占用版本：${activeRuns.map(run => run.runId).join(", ")}`);
-            const target = resolveAchengEngine();
-            if (target.runtimeId !== op.toRuntimeId) throw new Error("CONTINUITY_UPGRADE_RUNTIME_STALE: 当前激活运行版本已变化，请重新预览");
-            const expectedPreview = fingerprint({ owner: { kind: this.ownerKind, id: episodeId }, expectedRevision: op.previewRevision,
-                fromSourceHash: op.fromSourceHash, targetRuntimeId: op.toRuntimeId, ledger: op.ledger });
-            if (op.previewHash !== expectedPreview) throw new Error("CONTINUITY_UPGRADE_PREVIEW_STALE: 预览内容与升级输入不一致");
-            const legacyLedger = draft.director.source.ledger;
-            this.patchDirectorSource(draft.director, "continuity", undefined, { ledger: op.ledger });
-            draft.director.source.legacyContinuityProjection = legacyLedger ?? null;
-            const engine = resolveAchengRuntime(op.toRuntimeId);
-            draft.director.engine = { commit: engine.commit, patchVersion: engine.patchVersion, runtimeId: engine.runtimeId, version: engine.version };
-            draft.director.sourceHash = directorHash(draft.director.source);
-            draft.director.executionAuthorized = false;
-            draft.director.artifacts = draft.director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));
             projectDirector(draft);
             return;
         }
@@ -3735,24 +3650,17 @@ export class EpisodeProductionService {
         } else if (op.type === "review_keyframe") {
             if (!draft.keyframes[op.shotId]?.storageKey) throw new Error("关键帧没有可访问媒体");
             draft.keyframeReviews[op.shotId] = { verdict: op.verdict, evidence: op.evidence, sourceVersion };
-        } else if (op.type === "import_legacy") {
-            const episode = this.episode(episodeId);
-            const text = this.legacyText(episode, op.source);
-            if (!text.trim()) throw new Error("导入来源为空");
-            const sha256 = crypto.createHash("sha256").update(text).digest("hex");
-            draft.legacyImports = [...draft.legacyImports.filter((item) => item.source !== op.source), { source: op.source, sha256, text, importedAt: new Date().toISOString() }];
-            if (op.source !== "storyboard.md" && !draft.scenes.length) draft.scenes.push({ id: crypto.randomUUID(), heading: "导入草稿", location: "", timeOfDay: "", blocks: [{ id: crypto.randomUUID(), kind: "action", text }] });
-            if (op.source === "storyboard.md" && !draft.shots.length) {
-                if (!draft.scenes.length) draft.scenes.push({ id: crypto.randomUUID(), heading: "待拆场", location: "", timeOfDay: "", blocks: [] });
-                draft.shots.push({ id: crypto.randomUUID(), sceneId: draft.scenes[0].id, title: "导入分镜草稿", duration: 0, visual: text, camera: "", openingState: "", endingState: "", sound: "", assetNodeIds: [], keyframePolicy: "none" });
-            }
         }
+    }
+
+    private assertCurrentDirectorFormat(director: DirectorProduction) {
+        const diagnostics = schemaDiagnostics(directorProductionSchema, director, "director");
+        if (diagnostics.length) throw new ProductionValidationError(diagnostics);
     }
 
     private validateGraph(draft: EpisodeProductionData) {
         if (draft.director) {
-            const diagnostics = schemaDiagnostics(directorProductionSchema, draft.director);
-            if (diagnostics.length) throw new ProductionValidationError(diagnostics.map(issue => ({ ...issue, path: `director.${issue.path}` })));
+            this.assertCurrentDirectorFormat(draft.director);
         }
         const unique = (values: string[], label: string) => { if (new Set(values).size !== values.length) throw new Error(`${label} ID 重复`); };
         unique(draft.scenes.map((item) => item.id), "场次");

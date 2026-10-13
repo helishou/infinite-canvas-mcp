@@ -30,14 +30,15 @@ export type CanvasGenerationControlsProps = {
     onTextCountChange?: (count: number) => void;
     onImageSettingsOpenChange?: (open: boolean) => void;
     onImagePromptRequiredChange?: (required: boolean) => void;
-    /** 紧凑模式：配置节点用整行栅格布局，提示面板用行内胶囊。 */
-    layout?: "grid" | "inline";
+    /** grid 用于配置节点，compact 用于节点浮动面板。 */
+    layout?: "grid" | "inline" | "compact";
     placement?: "topLeft" | "top" | "topRight";
     className?: string;
 };
 
 const GRID_BUTTON = "canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2";
 const INLINE_BUTTON = "!h-10 !max-w-full !justify-start !rounded-lg !px-3";
+const COMPACT_BUTTON = "!h-7 !max-w-full !min-w-0 !justify-start !rounded-md !px-2 !text-xs";
 
 export function CanvasGenerationControls({
     node,
@@ -59,7 +60,8 @@ export function CanvasGenerationControls({
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const grid = layout === "grid";
-    const buttonClassName = grid ? GRID_BUTTON : INLINE_BUTTON;
+    const compact = layout === "compact";
+    const buttonClassName = grid ? GRID_BUTTON : compact ? COMPACT_BUTTON : INLINE_BUTTON;
 
     const comfyParams = node.metadata?.comfyParams;
     const onComfyParamsChange = (value: Record<string, unknown>, size?: string) => onConfigChange(node.id, { comfyParams: value, ...(size ? { size } : {}) });
@@ -127,7 +129,7 @@ export function CanvasGenerationControls({
 
     const picker = (
         <ModelPicker
-            className={grid ? "canvas-compact-control h-10" : "max-w-full"}
+            className={grid ? "canvas-compact-control h-10" : compact ? "canvas-compact-control !h-7 !min-h-7 !max-w-full !px-2 !text-xs" : "max-w-full"}
             config={config}
             value={config.model}
             onChange={changeModel}
@@ -147,7 +149,7 @@ export function CanvasGenerationControls({
     }
 
     return (
-        <div className={className ?? "grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-center gap-2"} onMouseDown={(event) => event.stopPropagation()}>
+        <div className={className ?? `grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-center ${compact ? "gap-1.5" : "gap-2"}`} onMouseDown={(event) => event.stopPropagation()}>
             {picker}
             {settings}
         </div>

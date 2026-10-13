@@ -1,6 +1,5 @@
 import { executeDirectorSubagentTool } from "../agent/delegation.js";
 import { isProductionTool, executeProductionTool } from "../drama/production-tools.js";
-import { removedToolNotice, migrateToolGuidance } from "../canvas/tool-migrations.js";
 export { CanvasSession } from "../canvas/session.js";
 import { ZodError } from "zod";
 import { toolInputSchemas } from "../canvas/schemas.js";
@@ -675,9 +674,8 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     "/api/tools",
     route(async (req, res) => {
       const name = String(req.body?.name || "");
-      const notice = removedToolNotice(name);
-      if (notice) return void res.status(400).json(notice);
       const rawInput = objectBody(req.body?.input);
+      if (!Object.hasOwn(toolInputSchemas, name)) return void res.status(404).json({ ok: false, error: `Unknown tool: ${name}` });
       const schema = toolInputSchemas[name as keyof typeof toolInputSchemas];
       const input = schema ? schema.parse(rawInput) as Record<string, unknown> : rawInput;
       const blockedProduction = await productionToolPreflight(backend, name, input);
@@ -685,7 +683,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
       if (name === "director_subagent") return void res.json({ ok: true, result: await executeDirectorSubagentTool(backend, input) });
       if (isProductionTool(name)) return void res.json({ ok: true, result: await executeProductionTool(backend, name, input) });
       const workspaceRequest = productionWorkspaceRequest(name, input);
-      if (workspaceRequest) return void res.json({ ok: true, result: migrateToolGuidance(workspaceRequest.method === "GET" ? await backend.get(workspaceRequest.path) : productionWriteReceipt(await backend.post(workspaceRequest.path, workspaceRequest.body), { tool: name, input })) });
+      if (workspaceRequest) return void res.json({ ok: true, result: workspaceRequest.method === "GET" ? await backend.get(workspaceRequest.path) : productionWriteReceipt(await backend.post(workspaceRequest.path, workspaceRequest.body), { tool: name, input }) });
       if (isCollaborationTool(name))
         return void res.json({
           ok: true,

@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { BackendDatabase } from "../db.js";
 import { EpisodeProductionService, ProductionConflictError } from "./production.js";
+import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
+import { emptyEpisodeProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import { EpisodeProductionRunner } from "./production-runner.js";
 import { createStores } from "../stores/index.js";
 import type { CanvasGenerationService } from "../canvas/generation-service.js";
@@ -26,17 +28,51 @@ function fixture(t: test.TestContext) {
     return { db, dir, file, service };
 }
 
-test("legacy sources remain intact and import only the explicitly selected draft", (t) => {
-    const { dir, service } = fixture(t);
-    const productionDir = join(dir, "productions", "canvas");
-    mkdirSync(productionDir, { recursive: true });
-    writeFileSync(join(productionDir, "script.md"), "旧剧本文本");
-    writeFileSync(join(productionDir, "storyboard.md"), "旧分镜文本");
-    assert.deepEqual(service.legacy("episode").map((item) => item.source), ["fullPlot", "script.md", "storyboard.md"]);
-    const result = service.edit("episode", { operationId: "import-script", expectedRevision: 0, ops: [{ type: "import_legacy", source: "script.md" }] });
-    assert.equal(result.draft.scenes[0].blocks[0].text, "旧剧本文本");
-    assert.deepEqual(result.draft.legacyImports.map((item) => item.source), ["script.md"]);
-    assert.equal(readFileSync(join(productionDir, "script.md"), "utf8"), "旧剧本文本");
+test("current v2 draft remains usable with an older published snapshot, while restoring that snapshot is rejected without mutation", (t) => {
+    const { db, service } = fixture(t);
+    service.edit("episode", { operationId: "seed", expectedRevision: 0, ops: [{ type: "upsert_scene", scene }] });
+    service.publish("episode", { operationId: "publish", expectedRevision: 1, stage: "script" });
+    const draft = emptyEpisodeProduction();
+    draft.scenes = [scene];
+    draft.director = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "p", runtimeId: "r", version: "4.3.9" }, source: { version: 2, prompt_assembly: { version: 2 }, subject_registry: [], shots: [], segments: [], utterances: [], asset_plan: [], character_registry: [], scene_registry: [], ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } }, sourceHash: "b".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
+    const historical = structuredClone(draft);
+    const source = historical.director!.source as Record<string, any>;
+    delete source.prompt_assembly;
+    source.ledger = { contract_version: 1, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] };
+    source.character_registry = [];
+    source.scene_registry = [];
+    source.asset_plan = [];
+    source.shots = [];
+    source.segments = [];
+    db.db.prepare("UPDATE episode_productions SET draft_json=?, published_json=?, published_version=1 WHERE episode_id=?").run(JSON.stringify(draft), JSON.stringify(historical), "episode");
+    db.db.prepare("UPDATE episode_production_versions SET snapshot_json=? WHERE episode_id=? AND version=1").run(JSON.stringify(historical), "episode");
+
+    const readable = service.get("episode");
+    assert.equal((readable.draft.director?.source as any)?.prompt_assembly?.version, 2);
+    assert.equal((readable.published?.director?.source as Record<string, any>).prompt_assembly, undefined);
+    assert.equal((service.version("episode", 1).snapshot.director?.source as any)?.ledger.contract_version, 1);
+    assert.throws(() => service.restore("episode", 1, "restore-legacy", readable.revision), error => {
+        assert.ok(error instanceof ProductionValidationError);
+        assert.ok(error.diagnostics.some(item => item.code === "UNSUPPORTED_PRODUCTION_FORMAT"));
+        return true;
+    });
+    assert.equal(service.get("episode").revision, readable.revision);
+    assert.equal((service.get("episode").draft.director?.source as any)?.prompt_assembly?.version, 2);
+});
+
+test("the current Director source version edits its v2 continuity component without requiring a second format marker", (t) => {
+    const { service } = fixture(t);
+    const director = {
+        schemaVersion: 1 as const,
+        engine: { commit: "a".repeat(40), patchVersion: "p", runtimeId: "r", version: "4.3.9" },
+        source: { version: 2, shots: [], segments: [], ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } },
+        sourceHash: "b".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {},
+    };
+    service.edit("episode", { operationId: "current-source", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
+    const fact = { id: "FACT_1", object_kind: "character", object_id: "CHAR_1", allowed_values: ["outside"], value_descriptions: { outside: "The character stays outside." } };
+    const saved = service.edit("episode", { operationId: "current-ledger-edit", expectedRevision: 1, ops: [{ type: "edit_director_continuity", changes: [{ collection: "facts", action: "upsert", id: fact.id, value: fact }] }] });
+    assert.equal(saved.revision, 2);
+    assert.deepEqual((saved.draft.director!.source.ledger as any).facts, [fact]);
 });
 
 test("edit, publication, replay, conflict, impact and version restore retain identities", (t) => {

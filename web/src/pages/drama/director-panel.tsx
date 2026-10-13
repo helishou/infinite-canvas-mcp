@@ -3,14 +3,16 @@ import { canBindSubjectImage, manualWorkspaceProgress, manualTargetRecovery } fr
 import { productionEntities, productionEntityBinding } from "@basketikun/canvas-agent/drama/production-contract";
 import { ProductionInputDiff } from "./production-input-diff";
 import { currentClipRefreshes, groupedRefreshIssues } from "./production-refresh-display";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Alert, App, Button, Input, InputNumber, Modal, Select, Switch, Tag } from "antd";
-import { ArrowRight, ArrowLeft, ArrowDownToLine, Check, Pause, Play, RotateCcw, WandSparkles, Users, MapPin, Image as ImageIcon, Film, Pencil, BookOpen, Search, ChevronDown, Plus, Trash2 } from "lucide-react";
+import { ArrowRight, ArrowLeft, ArrowDownToLine, Check, Pause, Play, RotateCcw, WandSparkles, Users, MapPin, Image as ImageIcon, Film, Pencil, BookOpen, Search, ChevronDown, Plus, Trash2, TriangleAlert } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { directorModules, resolveSubjectPictureBindingIds, directorProductionSchema, isSubjectPromptAssembly, canonicalProduction, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 import { backendMediaUrl, fetchProductionWorkbench, type ProductionTarget, type ProductionSceneAction, type BackendRuntimeTask, type EpisodeProduction, type ProductionBatch, type ProductionReadiness } from "@/services/backend-api";
 import { nanoid } from "nanoid";
 import { MediaImage } from "@/components/media/media-image";
+import { canvasNodeImage } from "@/lib/canvas/canvas-image-renderability";
+import type { CanvasNodeData } from "@/types/canvas";
 import { groupScriptScenes, dialogueBody, dialogueSpeakerLabel, readableText, humanName, records, formatSeconds, storyBeatCards, assetImagePreview, shotDurationPatch, matchesAssetSearch } from "./director-display";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { useMediaPreviewStore } from "@/stores/use-media-preview-store";
@@ -35,10 +37,10 @@ import { storyboardDurationFrames } from "./storyboard-display";
 import { productionOverviewMedia } from "./production-overview-media";
 import { useReferenceResultVersion } from "./use-reference-result-version";
 import { ProductionSectionNavigation } from "./production-section-navigation";
+import { CanvasAssetEditModal, type CanvasAssetEditPayload } from "./canvas-asset-edit-modal";
 
 export type DirectorWorkspace = "series" | "overview" | "story" | "assets" | "shots" | "continuity" | "production" | "advanced";
 type CanvasNodeOption = { id: string; title?: string; type?: string; metadata?: Record<string, unknown> };
-type LegacySource = { source: "fullPlot" | "script.md" | "storyboard.md"; text: string; sha256?: string };
 type ProductionVersion = { version: number; stage: string; createdAt: string };
 type DirectorDecision = NonNullable<DirectorProduction["workflow"]["pendingDecisions"]>[number];
 const objectWorkspaces: Array<{ key: Exclude<DirectorWorkspace, "overview" | "advanced" | "series">; modules: Array<(typeof directorModules)[number]>; targetKinds: Array<"asset" | "keyframe" | "segment"> }> = [
@@ -216,8 +218,62 @@ function SourceField({ value, draftValue, onDraftChange, multiline, rows = 3, nu
     : <Input aria-label={ariaLabel} value={draft} disabled={disabled} placeholder={placeholder} onChange={event => { setDraft(event.target.value); onDraftChange?.(event.target.value); }} onBlur={() => { if (commitOnBlur) void save(); }} />;
 }
 
+function CanvasAssetInfoCard({ item, busy, onSave, onRemove, canvasId }: {
+  item: { node: CanvasNodeOption; kind: string; name: string; description: string; images: Array<{ storageKey?: string; url?: string; label: string; primary?: boolean }> };
+  busy: boolean;
+  onSave: (node: CanvasNodeOption, payload: CanvasAssetEditPayload) => Promise<boolean>;
+  onRemove?: () => void;
+  canvasId: string;
+}) {
+  const { t } = useTranslation();
+  const [editOpen, setEditOpen] = useState(false);
+  return <article className="flex min-w-0 gap-3 rounded-lg border border-border p-2.5" data-canvas-asset-node={item.node.id}>
+    <div className="grid h-24 w-28 shrink-0 grid-cols-2 gap-1 overflow-y-auto rounded bg-muted/30 p-1">{item.images.length ? item.images.map((image, index) => {
+      const imageSource = image.storageKey ? backendMediaUrl(image.storageKey) : image.url || "";
+      return <div key={`${image.storageKey || image.url}:${index}`} className={`relative min-h-0 overflow-hidden rounded bg-background/40 ${item.images.length === 1 ? "col-span-2 row-span-2" : ""}`} title={image.label} aria-label={`${item.name}: ${image.label}`}>
+        <MediaImage className="h-full w-full object-contain" src={imageSource} alt={`${item.name} ${image.label}`} />
+        {image.primary && <span className="absolute bottom-0.5 left-0.5 rounded bg-background/80 px-1 text-[9px] leading-4 text-foreground">{t("director.workspace.currentImage")}</span>}
+      </div>;
+    }) : <div className="col-span-2 row-span-2 flex items-center justify-center"><ImageIcon className="size-7 text-muted-foreground/50" /></div>}</div>
+    <div className="flex min-w-0 flex-1 flex-col justify-center gap-1.5">
+      <div className="flex min-w-0 items-center justify-between gap-2"><strong className="min-w-0 truncate text-sm" title={item.name}>{item.name}</strong><Tag className="m-0 shrink-0">{t(`director.studio.filter.${item.kind}`)}</Tag></div>
+      {item.description && <p className="line-clamp-2 text-xs text-muted-foreground">{item.description}</p>}
+      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1"><span className="flex flex-wrap items-center gap-1"><Button size="small" type="text" icon={<Pencil className="size-3.5" />} disabled={busy} onClick={() => setEditOpen(true)}>{t("director.crud.editCanvasAssetInfo")}</Button>{onRemove && <Button size="small" type="text" danger icon={<Trash2 className="size-3.5" />} disabled={busy} onClick={onRemove}>{t("director.crud.removeEpisodeAsset")}</Button>}</span><ReferenceNodeLink sourceNode={{ projectId: canvasId, nodeId: item.node.id }} label={t("director.crud.openEntityNode")} /></div>
+    </div>
+    <CanvasAssetEditModal open={editOpen} item={item} busy={busy} onCancel={() => setEditOpen(false)} onSave={payload => onSave(item.node, payload)} />
+  </article>;
+}
+
 const SHOT_SOURCE_FIELDS = ["visual", "camera"] as const;
 const SHOT_STATE_FIELDS = ["state_in", "state_out"] as const;
+type KeyframeEditor = (input: { editing: boolean; nodeId?: string; onNodeChange: (nodeId: string) => void; onUnbind: () => void }) => ReactNode;
+
+function BoundSubjectText({ text, shot, names }: { text: string; shot: Record<string, any>; names: Record<string, string> }) {
+  const boundNames = [
+    ...records(shot.subject_usages).map(usage => names[String(usage.subjectId)] || ""),
+    ...(Array.isArray(shot.characters) ? shot.characters : []).map((character: any) => {
+      const id = String(typeof character === "string" ? character : character?.id || character?.character_id || "");
+      return String(typeof character === "object" ? character?.name || character?.display_name || names[id] : names[id] || character || "");
+    }),
+  ];
+  const subjectNames = [...new Set(boundNames
+    .filter(name => name && text.includes(name)))].sort((a, b) => b.length - a.length);
+  if (!subjectNames.length) return <>{text}</>;
+  const parts: Array<{ text: string; subject: boolean }> = [];
+  for (let cursor = 0; cursor < text.length;) {
+    const match = subjectNames
+      .map(name => ({ name, index: text.indexOf(name, cursor) }))
+      .filter(item => item.index >= 0)
+      .sort((a, b) => a.index - b.index || b.name.length - a.name.length)[0];
+    if (!match) { parts.push({ text: text.slice(cursor), subject: false }); break; }
+    if (match.index > cursor) parts.push({ text: text.slice(cursor, match.index), subject: false });
+    parts.push({ text: match.name, subject: true });
+    cursor = match.index + match.name.length;
+  }
+  return <>{parts.map((part, index) => part.subject
+    ? <strong key={index} className="font-semibold text-primary">{part.text}</strong>
+    : part.text)}</>;
+}
 
 /**
  * 镜头源字段（画面与动作 / 机位与运镜 / 时长）的内联编辑器。
@@ -227,10 +283,13 @@ const SHOT_STATE_FIELDS = ["state_in", "state_out"] as const;
  * ⚠️ 这是页面上「画面」的唯一展示位——别处不要再渲染 shot.visual / display_summary，否则同一段文字会重复出现。
  * ⚠️ 镜头素材不在「画面与摄影」里列（与右栏「本镜图片参考」重复）：右栏那份负责展示与跳转。
  */
-function ShotSourceFields({ shot, busy, names, fps, onSave, includeCompleteSource = false }: {
+function ShotSourceFields({ shot, busy, names, characters, fps, onSave, keyframeAssetId, keyframeEditor, includeCompleteSource = false }: {
   shot: Record<string, any>; busy: boolean; names: Record<string, string>;
+  characters: Array<Record<string, any>>;
   fps: number;
-  onSave: (patch: Record<string, unknown>) => Promise<boolean | void>;
+  onSave: (patch: Record<string, unknown>, keyframeChange?: { type: "bind"; assetId: string; nodeId: string } | { type: "unbind"; shotId: string }) => Promise<boolean | void>;
+  keyframeAssetId?: string;
+  keyframeEditor?: KeyframeEditor;
   includeCompleteSource?: boolean;
 }) {
   const { t } = useTranslation();
@@ -238,6 +297,28 @@ function ShotSourceFields({ shot, busy, names, fps, onSave, includeCompleteSourc
   const values: Record<string, string> = {
     visual: proseOf(shot.visual), camera: proseOf(shot.camera),
   };
+  // 主体不匹配软提示（不作严格卡控）：「画面与动作」提到了未列入本镜可见主体的对象时给个提醒，不拦保存、不拦生成。
+  // 只取长度大于 1 的名字并按最长名优先扫描，减少单字与子串的误报——提醒宁松勿严。
+  const unboundSubjectNames = (() => {
+    const text = values.visual;
+    if (!text) return [];
+    const registered = new Set([
+      ...records(shot.subject_usages).map((usage: any) => String(names[String(usage?.subjectId)] || "")),
+      ...(Array.isArray(shot.characters) ? shot.characters : []).map((character: any) => String(typeof character === "string" ? names[character] || character : character?.name || character?.display_name || names[String(character?.id || character?.character_id || "")] || "")),
+    ].filter(Boolean));
+    const candidates = [...new Set([...Object.values(names), ...characters.map(character => String(character?.name || character?.display_name || character?.id || "")).filter(Boolean)])]
+      .filter(name => name.length > 1 && !registered.has(name)).sort((a, b) => b.length - a.length);
+    if (!candidates.length) return [];
+    const mentioned = new Set<string>();
+    for (let cursor = 0; cursor < text.length;) {
+      const match = candidates.map(name => ({ name, index: text.indexOf(name, cursor) }))
+        .filter(item => item.index >= 0).sort((a, b) => a.index - b.index || b.name.length - a.name.length)[0];
+      if (!match) break;
+      mentioned.add(match.name);
+      cursor = match.index + match.name.length;
+    }
+    return [...mentioned];
+  })();
   // 字段可能是结构化对象（没有 prose 正文）：这时用提示文案代替空值。
   const structured = (field: string) => Boolean(shot[field]) && !proseOf(shot[field]);
   const startFrame = Number(shot.start_frame || 0);
@@ -245,9 +326,16 @@ function ShotSourceFields({ shot, busy, names, fps, onSave, includeCompleteSourc
   const seconds = frameCount / fps;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<Record<string, string>>({});
+  const [characterDraft, setCharacterDraft] = useState<string[]>([]);
+  const [keyframeNodeDraft, setKeyframeNodeDraft] = useState<string>();
+  const [keyframeUnbound, setKeyframeUnbound] = useState(false);
   const [secondsDraft, setSecondsDraft] = useState("");
   const [saving, setSaving] = useState(false);
-  useEffect(() => { setEditing(false); setDraft({}); setSecondsDraft(""); }, [id]);
+  const originalCharacters = Array.isArray(shot.characters) ? shot.characters : [];
+  const visibleCharacterIds = originalCharacters.map(character => String(typeof character === "string" ? character : character?.id || character?.character_id || "")).filter(Boolean);
+  const characterOptions = characters.map(character => ({ value: String(character.id), label: String(character.name || character.display_name || character.id) }));
+  const characterValues = editing || saving ? characterDraft : visibleCharacterIds;
+  useEffect(() => { setEditing(false); setDraft({}); setCharacterDraft([]); setSecondsDraft(""); }, [id]);
   const save = async () => {
     const patch: Record<string, unknown> = {};
     SHOT_SOURCE_FIELDS.forEach(field => { if ((draft[field] ?? "") !== values[field]) patch[field] = patchProse(shot[field], draft[field] ?? ""); });
@@ -257,29 +345,37 @@ function ShotSourceFields({ shot, busy, names, fps, onSave, includeCompleteSourc
       const frames = Math.max(1, Math.round(nextSeconds * fps));
       if (frames !== frameCount) Object.assign(patch, shotDurationPatch(shot, nextSeconds, fps));
     }
-    if (!Object.keys(patch).length) { setEditing(false); setDraft({}); setSecondsDraft(""); return; }
+    if (JSON.stringify(characterDraft) !== JSON.stringify(visibleCharacterIds)) patch.characters = characterDraft.map(characterId => originalCharacters.find(character => String(typeof character === "string" ? character : character?.id || character?.character_id || "") === characterId)
+      ?? { id: characterId, name: characters.find(character => String(character.id) === characterId)?.name || characterId });
+    const keyframeChange = keyframeUnbound
+      ? { type: "unbind" as const, shotId: id }
+      : keyframeNodeDraft && keyframeAssetId ? { type: "bind" as const, assetId: keyframeAssetId, nodeId: keyframeNodeDraft } : undefined;
+    if (!Object.keys(patch).length && !keyframeChange) { setEditing(false); setDraft({}); setSecondsDraft(""); return; }
     setSaving(true);
-    const saved = await onSave(patch);
+    const saved = await onSave(patch, keyframeChange);
     setSaving(false);
-    if (saved !== false) { setEditing(false); setDraft({}); setSecondsDraft(""); }
+    if (saved !== false) { setEditing(false); setDraft({}); setCharacterDraft([]); setSecondsDraft(""); setKeyframeNodeDraft(undefined); setKeyframeUnbound(false); }
   };
   return <section className="space-y-4" data-shot-source-fields={id}>
     <div className="flex flex-wrap items-center justify-between gap-2">
       <h3 className="text-sm font-medium">{t("director.studio.shotSource")}</h3>
       {editing ? <div className="flex items-center gap-2" data-shot-source-actions>
         <Button size="small" type="primary" icon={<Check className="size-3.5" />} loading={saving} disabled={busy || saving} onClick={() => void save()}>{t("common.save")}</Button>
-        <Button size="small" disabled={saving} onClick={() => { setDraft({}); setSecondsDraft(""); setEditing(false); }}>{t("common.cancel")}</Button>
-      </div> : <Button size="small" type="text" data-shot-source-edit icon={<Pencil className="size-3.5" />} disabled={busy} onClick={() => { setDraft({ ...values }); setSecondsDraft(String(Number(seconds.toFixed(3)))); setEditing(true); }}>{t("director.studio.editShotFields")}</Button>}
+        <Button size="small" disabled={saving} onClick={() => { setDraft({}); setCharacterDraft([]); setSecondsDraft(""); setKeyframeNodeDraft(undefined); setKeyframeUnbound(false); setEditing(false); }}>{t("common.cancel")}</Button>
+      </div> : <Button size="small" type="text" data-shot-source-edit icon={<Pencil className="size-3.5" />} disabled={busy} onClick={() => { setDraft({ ...values }); setCharacterDraft((Array.isArray(shot.characters) ? shot.characters : []).map((character: any) => String(typeof character === "string" ? character : character?.id || character?.character_id || "")).filter(Boolean)); setSecondsDraft(String(Number(seconds.toFixed(3)))); setKeyframeNodeDraft(undefined); setKeyframeUnbound(false); setEditing(true); }}>{t("director.studio.editShotFields")}</Button>}
     </div>
     <div className="space-y-4">
+      {keyframeEditor?.({ editing, nodeId: keyframeNodeDraft, onNodeChange: nodeId => { setKeyframeNodeDraft(nodeId); setKeyframeUnbound(false); }, onUnbind: () => { setKeyframeNodeDraft(undefined); setKeyframeUnbound(true); } })}
+      <label className="grid gap-2"><span className="text-xs text-muted-foreground">{t("director.atomic.visibleSubjects")}</span><Select mode="multiple" value={characterValues} loading={busy || saving} disabled={!editing || busy || saving} options={characterOptions} onChange={ids => setCharacterDraft(ids)} /></label>
       {SHOT_SOURCE_FIELDS.map(field => <div key={field} className="grid gap-2">
         <span className="text-xs text-muted-foreground">{t(`director.studio.shotField.${field}`)}</span>
         {editing
           ? <Input.TextArea value={draft[field] ?? ""} autoSize={{ minRows: 3, maxRows: 12 }} disabled={busy || saving} placeholder={structured(field) ? t("director.studio.structuredState") : undefined} onChange={event => setDraft(current => ({ ...current, [field]: event.target.value }))} />
-          : values[field] ? <p className="whitespace-pre-wrap break-words text-sm leading-7">{values[field]}</p> : <p className="text-sm text-muted-foreground">{structured(field) ? t("director.studio.structuredState") : "—"}</p>}
+          : values[field] ? <p className="whitespace-pre-wrap break-words text-sm leading-7"><BoundSubjectText text={values[field]} shot={shot} names={names} /></p> : <p className="text-sm text-muted-foreground">{structured(field) ? t("director.studio.structuredState") : "—"}</p>}
       </div>)}
     </div>
-    <div className="grid gap-2" data-shot-duration>
+    {unboundSubjectNames.length > 0 && !editing && <p className="flex items-start gap-1.5 rounded-md bg-amber-50 px-2.5 py-1.5 text-xs leading-5 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400" data-shot-subject-mismatch><TriangleAlert className="mt-px size-3.5 shrink-0" /><span>{t("director.studio.shotSubjectMismatch", { names: unboundSubjectNames.join(", ") })}</span></p>}
+        <div className="grid gap-2" data-shot-duration>
       <span className="text-xs text-muted-foreground">{t("director.studio.durationSeconds")}</span>
       {editing
         ? <div className="flex flex-wrap items-baseline gap-3"><InputNumber className="w-32" min={0.1} step={0.5} precision={2} addonAfter={t("director.studio.secondsUnit")} value={secondsDraft === "" ? null : Number(secondsDraft)} disabled={busy || saving} onChange={value => setSecondsDraft(value === null || value === undefined ? "" : String(value))} /><span className="text-xs text-muted-foreground">{t("director.studio.frameRange", { start: startFrame, end: startFrame + Math.max(1, Math.round(Number(secondsDraft || seconds) * fps)) })}</span></div>
@@ -481,11 +577,11 @@ function SubjectClipPartitionEditor({ shots, segments, fps, busy, shotTitle, onS
 }
 
 export function DirectorPanel({
-  workspace, director, production, readiness, run, batches, runtimeTasks = [], canvasNodes, legacy, versions, busy, canvasId, canvasRole, focusTarget, embedded = false, continuityReport, continuitySnapshotLoading = false,
+  workspace, director, production, readiness, run, batches, runtimeTasks = [], canvasNodes, versions, busy, canvasId, canvasRole, focusTarget, embedded = false, continuityReport, continuitySnapshotLoading = false,
   briefDraft, onBriefDraftChange, onOpenSharedAsset, onPromoteExistingSharedAsset,
-  onPrepareEntities, onUpsertSubject, onDeleteSubject, onDeleteScene, onDeleteAsset, onRemoveCanvasAsset, onCreateManualAsset, onSaveV2Shot, onRepartitionClips, onEditShot, onUpdateLegacyShotReferences,
+  onPrepareEntities, onUpsertSubject, onDeleteSubject, onDeleteScene, onDeleteAsset, onRemoveCanvasAsset, onPatchCanvasAsset, onCreateManualAsset, onSaveV2Shot, onRepartitionClips, onEditShot,
   compact = false, navigationTitleVisible = false, onSaveScript, generationSupported = true, assetScopeHint,
-  onBrief, onPatch, onEditCanvasClip, onAdoptDirectorFields, onAdoptClipStyle, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onPublish, onReplace, onAskDirector, onRequestContinuityUpgrade, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRestore, onRefresh, onSceneCommand, sceneCommandPending, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onPreviewContinuityUpgrade, onCheckContinuity, onContinuitySnapshot,
+  onBrief, onPatch, onEditCanvasClip, onAdoptDirectorFields, onAdoptClipStyle, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onPublish, onReplace, onAskDirector, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRestore, onRefresh, onSceneCommand, sceneCommandPending, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onCheckContinuity, onContinuitySnapshot,
   onCompile, compileBusy = false, compilePending = false, compileError = "", compileNotice = "",
 }: {
   workspace: DirectorWorkspace; director?: DirectorProduction; production: EpisodeProduction; readiness?: ProductionReadiness; run?: ProductionBatch | null;
@@ -500,7 +596,7 @@ export function DirectorPanel({
   generationSupported?: boolean;
   assetScopeHint?: string;
   onSaveScript?: (ids: string[]) => Promise<boolean>;
-  batches: ProductionBatch[]; canvasNodes: CanvasNodeOption[]; legacy: LegacySource[]; versions: ProductionVersion[]; busy: boolean; canvasId: string;
+  batches: ProductionBatch[]; canvasNodes: CanvasNodeOption[]; versions: ProductionVersion[]; busy: boolean; canvasId: string;
   canvasRole: "ordinary" | "episode" | "shared-assets" | "standalone" | "scene";
   onOpenSharedAsset: (assetId: string, title: string) => void;
   onPromoteExistingSharedAsset: (assetId: string, title: string) => void;
@@ -513,9 +609,9 @@ export function DirectorPanel({
   onDeleteScene?: (sceneId: string) => Promise<boolean>;
   onDeleteAsset?: (assetId: string) => Promise<boolean>;
   onRemoveCanvasAsset?: (nodeId: string) => Promise<boolean>;
+  onPatchCanvasAsset?: (node: CanvasNodeOption, payload: CanvasAssetEditPayload) => Promise<boolean>;
   onCreateManualAsset: (operation: Extract<ProductionOperation, { type: "create_manual_director_asset" }>) => Promise<boolean>;
   onSaveV2Shot?: (shotId: string, patch: Record<string, unknown>, keyframes?: Extract<ProductionOperation, { type: "set_director_shot_keyframes" }>["keyframes"], utterances?: Extract<ProductionOperation, { type: "set_director_shot_utterances" }>["utterances"]) => Promise<boolean>;
-  onUpdateLegacyShotReferences?: (shotId: string, assetIds: string[], keyframeAssetId: string | null) => Promise<boolean>;
   onRepartitionClips?: (shotIds: string[], segments: Array<Record<string, unknown>>) => Promise<boolean>;
   onEditShot?: (operation: Extract<ProductionOperation, { type: "edit_director_shot" }>) => Promise<boolean>;
 
@@ -527,16 +623,14 @@ export function DirectorPanel({
   onSourceDraftChange: (key: string, value: string | undefined) => void;
   onWorkflow: (patch: Partial<DirectorProduction["workflow"]>) => void;
   onSettings: (patch: Partial<EpisodeProduction['draft']['settings']>) => void;
-  onBindAsset: (assetId: string, nodeId: string) => void;
+  onBindAsset: (assetId: string, nodeId: string) => Promise<boolean>;
   onBoundary: (boundary: DirectorProduction["boundaries"][number]) => void;
-  onSaveContinuity?: (ledger: Record<string, unknown>, upgradePreview?: Record<string, any>) => Promise<boolean>;
-  onPreviewContinuityUpgrade?: (ledger: Record<string, unknown>, fromSourceHash: string) => Promise<Record<string, any>>;
+  onSaveContinuity?: (ledger: Record<string, unknown>) => Promise<boolean>;
   onCheckContinuity?: () => Promise<void>;
   onContinuitySnapshot?: (value: "draft" | "published") => void;
   onPublish: () => void;
   onReplace: (value: DirectorProduction) => Promise<boolean> | void;
   onAskDirector: (scope: { workspace: DirectorWorkspace; targetId?: string; instruction?: string; brief?: string; workId?: string }) => void;
-  onRequestContinuityUpgrade?: (instruction: string, workId?: string) => Promise<{ id: string; threadId?: string } | undefined>;
   onAnswerDecision: (decisionId: string, answer: string) => Promise<boolean> | boolean;
   onNavigate: (workspace: DirectorWorkspace, target?: { kind: string; id: string }) => void;
   onLocateTarget?: (kind: string, id: string) => void;
@@ -619,7 +713,14 @@ export function DirectorPanel({
   const locations = records(source.scene_registry);
   const story = source.story && typeof source.story === 'object' ? source.story as Record<string, any> : {};
   const sceneGroups = useMemo(() => groupScriptScenes(scriptScenes), [JSON.stringify(scriptScenes)]);
-  const nameMap = Object.fromEntries([...characters, ...locations].map(item => [String(item.id || ''), String(item.name || item.scene_name || '')]).filter(([, name]) => name));
+  const nameMap = Object.fromEntries([
+    ...[...characters, ...locations].map(item => [String(item.id || ''), String(item.name || item.scene_name || '')]),
+    ...records(source.subject_registry).map(subject => {
+      const entityId = String(subject.entityRef?.id || "");
+      const entity = [...characters, ...locations, ...assetPlan].find(item => String(item.id || item.asset_id || "") === entityId);
+      return [String(subject.id || ""), String(subject.name || entity?.name || entity?.asset_name || entity?.scene_name || "")];
+    }),
+  ].filter(([id, name]) => id && name));
   const focusedId = focusTarget?.replace(/^[^:]+:/, '') || '';
   useEffect(() => {
     const focused = sceneGroups.find(group => group.key === focusedId || group.sceneId === focusedId || group.blocks.some(block => String(block.id) === focusedId));
@@ -733,8 +834,19 @@ export function DirectorPanel({
     },
   });
   const frameForShot = (id: string) => {
-    const key = d?.shotInputs[id]?.keyframeAssetId;
-    return key ? d?.assets[key]?.storageKey || publishedDirector?.assets[key]?.storageKey : production.draft.keyframes[id]?.storageKey || production.published?.keyframes[id]?.storageKey;
+    const input = d?.shotInputs[id];
+    if (input?.keyframePolicy === "none") return "";
+    const key = input?.keyframeAssetId;
+    if (key) {
+      const draftAsset = d?.assets[key];
+      const draftImage = draftAsset?.storageKey;
+      if (draftImage) return draftImage;
+      const publishedAsset = publishedDirector?.assets[key];
+      const publishedBindingMatches = publishedDirector?.shotInputs[id]?.keyframeAssetId === key
+        && (!draftAsset?.nodeId || publishedAsset?.nodeId === draftAsset.nodeId);
+      return publishedBindingMatches ? publishedAsset?.storageKey || "" : "";
+    }
+    return production.draft.keyframes[id]?.storageKey || production.published?.keyframes[id]?.storageKey;
   };
   const mode = d?.workflow.mediaProductionMode || "per_item";
   const delivery = d?.workflow.contentDeliveryMode || "auto_file_batch";
@@ -797,14 +909,21 @@ export function DirectorPanel({
   const nextManualAction = nextManualTarget ? manualTargetRecovery(nextManualTarget, source) : undefined;
 
   const imageNodes = canvasNodes.filter(node => ["image", "character", "scene", "prop"].includes(String(node.type)) || (node.type === "config" && (node.metadata?.generationMode || "image") === "image"));
+  const canvasImageStorageKey = (nodeId: string) => {
+    const assetNode = canvasAssetRows.find(item => item.node.id === nodeId);
+    if (assetNode) return assetNode.storageKey;
+    const node = canvasNodes.find(item => item.id === nodeId);
+    return node ? canvasNodeImage(node as unknown as CanvasNodeData)?.storageKey || "" : "";
+  };
   const mediaForAsset = (assetId: string, shotId?: string) => {
     const mapped = d?.assets[assetId] || publishedDirector?.assets[assetId];
     const frame = shotId ? production.draft.keyframes[shotId] || production.published?.keyframes[shotId] : undefined;
     const review = shotId ? production.draft.keyframeReviews[shotId] || production.published?.keyframeReviews[shotId] : undefined;
+    const frameMatchesBinding = !mapped?.nodeId || frame?.nodeId === mapped.nodeId;
     const status = shotId
-      ? review?.verdict === "rejected" || review?.verdict === "needs-redo" ? "rejected" : frame?.storageKey ? "approved" : mapped?.status || "planned"
+      ? review?.verdict === "rejected" || review?.verdict === "needs-redo" ? "rejected" : frame?.storageKey && frameMatchesBinding ? "approved" : mapped?.status || "planned"
       : mapped?.status === "generated" && mapped.storageKey ? "approved" : mapped?.status || "planned";
-    return { asset: mapped, nodeId: shotId ? frame?.nodeId || mapped?.nodeId || "" : mapped?.nodeId || "", storageKey: shotId ? frame?.storageKey || mapped?.storageKey || "" : mapped?.storageKey || "", sha256: mapped?.sha256 || "", status, inputOutdated: mapped?.inputOutdated, evidence: mapped?.evidence || review?.evidence || "" };
+    return { asset: mapped, nodeId: shotId ? frame?.nodeId && frameMatchesBinding ? frame.nodeId : mapped?.nodeId || "" : mapped?.nodeId || "", storageKey: shotId ? frame?.storageKey && frameMatchesBinding ? frame.storageKey : mapped?.storageKey || "" : mapped?.storageKey || "", sha256: mapped?.sha256 || "", status, inputOutdated: mapped?.inputOutdated, evidence: mapped?.evidence || review?.evidence || "" };
   };
   const deliveredClips = (production.published?.clipGroups || []).flatMap(group => {
     const node = canvasNodes.find(item => item.id === group.nodeId);
@@ -936,13 +1055,8 @@ export function DirectorPanel({
     const saved = await onPatch("asset", assetId, { asset_name: name });
     if (saved === false) return false;
     onSourceDraftChange(`asset:${assetId}:asset_name`, undefined);
-    // 同步注册表名：对白说话人、镜头与场景标题消费 character_registry/scene_registry 的 name，只改 asset_name 不会传播。
-    const kind = String(item.kind || "").toLowerCase(), entityId = String(item.entity_id || "");
-    try {
-      if (entityId && /character/.test(kind)) await onPatch("character", entityId, { name });
-      else if (entityId && /scene/.test(kind)) await onPatch("environment", entityId, { name });
-    } catch { /* 注册表缺该对象时保留资产级名称 */ }
-    // 同步镜头对白里的字面量说话人名（speaker_name 是快照文本，不随注册表刷新）。
+    // asset 与其关联注册表由 Backend 同一制作事务同步；对白 speaker_name
+    // 是快照文本，不随注册表刷新，因此仍需更新匹配的字面量。
     const key = previousName.trim().toLowerCase(), next = name.trim().toLowerCase();
     if (key && key !== next) {
       for (const shot of sourceShots) {
@@ -1231,20 +1345,7 @@ export function DirectorPanel({
       });
       return visibleCanvasAssets.length ? <details open={!subjectAssembly} className="space-y-2 rounded-lg border border-border bg-card p-3" data-canvas-asset-nodes>
         <summary className="cursor-pointer text-sm font-semibold">{t(subjectAssembly ? "director.crud.otherCanvasAssetNodes" : "director.crud.canvasAssetNodes")} <Tag>{visibleCanvasAssets.length}</Tag></summary>
-        <div className="grid gap-2 sm:grid-cols-2 2xl:grid-cols-4">{visibleCanvasAssets.map(item => {
-          const images = Array.isArray(item.images) ? item.images : [];
-          const previews: Array<{ storageKey?: string; url?: string; label: string; primary?: boolean }> = images.length ? images : item.storageKey || item.url ? [{ storageKey: item.storageKey, url: item.url, label: item.name }] : [];
-          return <article key={item.node.id} className="flex min-w-0 gap-3 rounded-lg border border-border p-2.5" data-canvas-asset-node={item.node.id}>
-            <div className="grid h-24 w-28 shrink-0 grid-cols-2 gap-1 overflow-y-auto rounded bg-muted/30 p-1">{previews.length ? previews.map((image, index) => {
-              const imageSource = image.storageKey ? backendMediaUrl(image.storageKey) : image.url || "";
-              return <div key={`${image.storageKey || image.url}:${index}`} className={`relative min-h-0 overflow-hidden rounded bg-background/40 ${previews.length === 1 ? "col-span-2 row-span-2" : ""}`} title={image.label} aria-label={`${item.name}: ${image.label}`}>
-                <MediaImage className="h-full w-full object-contain" src={imageSource} alt={`${item.name} ${image.label}`} />
-                {image.primary && <span className="absolute bottom-0.5 left-0.5 rounded bg-background/80 px-1 text-[9px] leading-4 text-foreground">{t("director.workspace.currentImage")}</span>}
-              </div>;
-            }) : <div className="col-span-2 row-span-2 flex items-center justify-center"><ImageIcon className="size-7 text-muted-foreground/50" /></div>}</div>
-            <div className="flex min-w-0 flex-1 flex-col justify-center gap-1.5"><div className="flex min-w-0 items-center justify-between gap-2"><strong className="min-w-0 truncate text-sm" title={item.name}>{item.name}</strong><Tag className="m-0 shrink-0">{t(`director.studio.filter.${item.kind}`)}</Tag></div>{item.description && <p className="line-clamp-2 text-xs text-muted-foreground">{item.description}</p>}<div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1"><ReferenceNodeLink sourceNode={{ projectId: canvasId, nodeId: item.node.id }} />{canvasRole === "episode" && onRemoveCanvasAsset && <Button size="small" type="text" danger icon={<Trash2 className="size-3.5" />} disabled={busy} onClick={() => removeCanvasAsset(item.node.id, item.name)}>{t("director.crud.removeEpisodeAsset")}</Button>}</div></div>
-          </article>;
-        })}</div>
+        <div className="grid gap-2 sm:grid-cols-2 2xl:grid-cols-4">{visibleCanvasAssets.map(item => <CanvasAssetInfoCard key={item.node.id} item={item} busy={busy} canvasId={canvasId} onSave={(node, payload) => onPatchCanvasAsset?.(node, payload) ?? Promise.resolve(false)} onRemove={canvasRole === "episode" && onRemoveCanvasAsset ? () => removeCanvasAsset(item.node.id, item.name) : undefined} />)}</div>
       </details> : null;
     })()}
     {!d ? <Alert type="info" message={t("director.workspace.assetsNeedDirector")} /> : isSubjectPromptAssembly(source) ? <section className="space-y-3" data-subject-registry-editor>
@@ -1312,11 +1413,13 @@ export function DirectorPanel({
   </div>;
 
   // 分镜图跟随镜头，但只占一小条：缩略图 + 状态；合同编辑收进「详情」。
-  const renderShotKeyframe = (shotId: string) => {
+  const renderShotKeyframe = (shotId: string, editor?: { editing: boolean; nodeId?: string; onNodeChange: (nodeId: string) => void; onUnbind: () => void }) => {
     const assetId = d?.shotInputs[shotId]?.keyframeAssetId;
     const media = assetId ? mediaForAsset(assetId, shotId) : undefined;
-    const storageKey = media?.storageKey || frameForShot(shotId) || "";
-    const binding = keyframeBindingState(assetId, media?.nodeId, storageKey, imageNodes.map(node => node.id));
+    const draftNodeId = editor?.editing ? editor.nodeId : undefined;
+    const storageKey = draftNodeId ? canvasImageStorageKey(draftNodeId) : media?.storageKey || frameForShot(shotId) || "";
+    const binding = keyframeBindingState(assetId, draftNodeId || media?.nodeId, storageKey, imageNodes.map(node => node.id));
+    const previewNode = draftNodeId ? canvasNodes.find(node => node.id === draftNodeId) : undefined;
     if (!storageKey && !binding.registered) return null;
     const title = `${shotTitle(shotId)} · ${t("director.studio.keyframe")}`;
     const openPreview = () => setMediaPreview({ assetId: assetId || "", title, storageKey });
@@ -1326,16 +1429,17 @@ export function DirectorPanel({
           <img className="h-full w-full object-cover" src={backendMediaUrl(storageKey)} alt={title} loading="lazy" />
         </button> : <div aria-hidden="true" className="flex h-[54px] w-[96px] shrink-0 items-center justify-center rounded border border-border bg-muted/30"><ImageIcon className="size-5 text-muted-foreground" /></div>}
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-          <span className="min-w-0 truncate text-xs font-medium">{assetId ? assetName(assetId) : t("director.studio.canvasKeyframe")}</span>
-          {media && <Tag className="m-0" color={media.status === "approved" ? "green" : media.status === "generated" ? "blue" : media.status === "rejected" ? "red" : "default"}>{t(`director.workspace.assetStatus.${media.status}`)}</Tag>}
+          <span className="min-w-0 truncate text-xs font-medium">{previewNode?.title || (assetId ? assetName(assetId) : t("director.studio.canvasKeyframe"))}</span>
+          {media && !draftNodeId && <Tag className="m-0" color={media.status === "approved" ? "green" : media.status === "generated" ? "blue" : media.status === "rejected" ? "red" : "default"}>{t(`director.workspace.assetStatus.${media.status}`)}</Tag>}
         </div>
         {/* 跳画布：直接定位到这张分镜图所在的画布节点（缩略图仍可点开大图预览）。 */}
-        {media?.nodeId && <ReferenceNodeLink sourceNode={{ projectId: media.asset?.sharedSource?.sourceProjectId || canvasId, nodeId: media.nodeId }} />}
+        {(draftNodeId || media?.nodeId) && <ReferenceNodeLink sourceNode={{ projectId: media?.asset?.sharedSource?.sourceProjectId || canvasId, nodeId: draftNodeId || media?.nodeId || "" }} />}
       </div>
-      {assetId && media && <div className="space-y-2 border-t border-border px-3 py-2" data-keyframe-binding>
-        <label className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.studio.linkImage")}</span><Select value={binding.selectedNodeId} disabled={busy || !imageNodes.length} placeholder={t("director.workspace.bindCanvasImage")} options={imageNodes.map((node, index) => ({ value: node.id, label: humanName(node.title, node.id, t("director.studio.imageNumber", { number: index + 1 })) }))} onChange={nodeId => nodeId && onBindAsset(assetId, nodeId)} /></label>
+      {assetId && <div className="space-y-2 border-t border-border px-3 py-2" data-keyframe-binding>
+        <div className="flex items-end gap-2"><label className="grid min-w-0 flex-1 gap-1 text-xs text-muted-foreground"><span>{t("director.studio.linkImage")}</span><Select value={editor?.nodeId || binding.selectedNodeId} disabled={!editor?.editing || busy || !imageNodes.length} placeholder={t("director.workspace.bindCanvasImage")} options={imageNodes.map((node, index) => ({ value: node.id, label: humanName(node.title, node.id, t("director.studio.imageNumber", { number: index + 1 })) }))} onChange={nodeId => nodeId && editor?.onNodeChange(nodeId)} /></label>
+        </div>
         {binding.unavailableNode && <Alert type="warning" showIcon message={t("director.studio.keyframeNodeUnavailable")} />}
-        <details><summary className="cursor-pointer text-[11px] text-muted-foreground">{t("director.studio.keyframeDetails")}</summary><div className="mt-3 space-y-3">{renderAssetContractFields(assetId, assetPlan.find(item => assetIdOf(item) === assetId), media, { description: true, binding: false })}</div></details>
+        {media && <details><summary className="cursor-pointer text-[11px] text-muted-foreground">{t("director.studio.keyframeDetails")}</summary><div className="mt-3 space-y-3">{renderAssetContractFields(assetId, assetPlan.find(item => assetIdOf(item) === assetId), media, { description: true, binding: false })}</div></details>}
       </div>}
     </section>;
   };
@@ -1348,7 +1452,6 @@ export function DirectorPanel({
     </div>;
     return <div className="space-y-5" data-shot-reading={id}>
       {renderShotKeyframe(id)}
-      {/* 画面与摄影（含起止状态 / 素材 / 时长）：页面里「画面」的唯一展示位，自带「修改 / 保存 / 取消」。 */}
       {renderShotFields(shot, includeCompleteSource)}
       {(records(shot.dialogues).length > 0 || !includeCompleteSource) && <section className="space-y-2">
         <h4 className="text-xs font-medium text-muted-foreground">{t("director.studio.dialogue")}</h4>
@@ -1373,11 +1476,17 @@ export function DirectorPanel({
 
   // 镜头源字段（画面 / 摄影 / 起止状态 / 素材 / 时长）：直接摊在页面上（不再开弹窗），右上角「修改」就地切换成「保存 / 取消」。
   // 由 renderShotDetails 统一渲染，workbench 不再单独注入一份，避免同一批字段在页面上出现两遍。
-  const renderShotFields = (shot: Record<string, any>, includeCompleteSource = false) => {
+  const renderShotFields = (shot: Record<string, any>, includeCompleteSource = false, keyframeEditor?: KeyframeEditor) => {
     const id = String(shot.id || "");
-    return <ShotSourceFields key={id} shot={shot} busy={busy} names={nameMap} fps={fps}
+    return <ShotSourceFields key={id} shot={shot} busy={busy} names={nameMap} characters={characters} fps={fps}
+      keyframeAssetId={d?.shotInputs[id]?.keyframeAssetId} keyframeEditor={keyframeEditor}
       includeCompleteSource={includeCompleteSource}
-      onSave={async patch => { const saved = await onPatch("shot", id, patch); return saved !== false; }} />;
+      onSave={async (patch, keyframeChange) => {
+        if (Object.keys(patch).length && await onPatch("shot", id, patch) === false) return false;
+        if (keyframeChange?.type === "bind") return await onBindAsset(keyframeChange.assetId, keyframeChange.nodeId);
+        if (keyframeChange?.type === "unbind") return false;
+        return true;
+      }} />;
   };
 
   // 起止状态（镜头开始时 / 镜头结束时）：从「画面与摄影」挪进左栏「连续性状态」模块，与边界开关同区展示。
@@ -1413,7 +1522,7 @@ export function DirectorPanel({
 
   const renderShots = () => {
     if (d) return <SubjectStoryboardWorkbench key={JSON.stringify(subjectOwner)} viewMemory={storyboardViews.current[JSON.stringify(subjectOwner)] ||= {}} director={d} production={production} owner={subjectOwner} canvasNodes={canvasNodes} canvasId={canvasId} onLocateClip={id => onLocateTarget?.("segment", id)}
-      initialShotId={focusTarget?.startsWith("shot:") ? focusedId : undefined} renderEditor={(shot, workbench) => renderShotDetails(shot, false, workbench)} onRepartitionClips={subjectAssembly ? onRepartitionClips : undefined} onEditShot={onEditShot} onSaveShotPatch={onSaveV2Shot ? (shotId, patch) => onSaveV2Shot(shotId, patch) : undefined} onUpdateLegacyShotReferences={onUpdateLegacyShotReferences} shotDrafts={sourceDrafts}
+      initialShotId={focusTarget?.startsWith("shot:") ? focusedId : undefined} renderEditor={(shot, workbench) => renderShotDetails(shot, false, workbench)} onRepartitionClips={subjectAssembly ? onRepartitionClips : undefined} onEditShot={subjectAssembly ? onEditShot : undefined} onSaveShotPatch={subjectAssembly && onSaveV2Shot ? (shotId, patch) => onSaveV2Shot(shotId, patch) : undefined} shotDrafts={sourceDrafts}
       renderContinuity={isSubjectPromptAssembly(d.source) ? undefined : shot => renderShotContinuity(shot)}
       renderShotState={shot => renderShotState(shot)}
       renderShotActions={subjectAssembly ? undefined : shot => renderShotActions(shot)}
@@ -1444,7 +1553,7 @@ export function DirectorPanel({
     source={continuitySource?.source} subjectAssembly={isSubjectPromptAssembly(continuitySource?.source || {})}
     workId={readiness?.presentation?.workId || continuitySource?.workflow.currentWork?.workId}
     scenes={Array.isArray(continuitySource?.source.script_scenes) ? records(continuitySource.source.script_scenes) : scriptScenes} shots={continuityShots} segments={Array.isArray(continuitySource?.source.segments) ? records(continuitySource.source.segments) : segments} boundaries={continuitySource?.boundaries || []} characters={Array.isArray(continuitySource?.source.character_registry) ? records(continuitySource.source.character_registry) : characters} assets={Array.isArray(continuitySource?.source.asset_plan) ? records(continuitySource.source.asset_plan) : assetPlan} report={continuityReport} busy={busy || continuitySnapshotLoading} snapshotLoading={continuitySnapshotLoading}
-    onSave={onSaveContinuity || (async () => false)} onPreviewUpgrade={onPreviewContinuityUpgrade || (async () => ({}))} onCheck={onCheckContinuity || (async () => undefined)} onBoundary={value => onBoundary(value as DirectorProduction["boundaries"][number])} onLocate={(kind, id) => onLocateTarget?.(kind, id)} onAskDirector={onAskDirector} onRequestAgentUpgrade={onRequestContinuityUpgrade} agentThreadId={d?.workflow.agentThreadId} onSnapshot={onContinuitySnapshot} />;
+    onSave={onSaveContinuity || (async () => false)} onCheck={onCheckContinuity || (async () => undefined)} onBoundary={value => onBoundary(value as DirectorProduction["boundaries"][number])} onLocate={(kind, id) => onLocateTarget?.(kind, id)} onAskDirector={onAskDirector} onSnapshot={onContinuitySnapshot} />;
 
   const renderProduction = () => <div className="space-y-4" data-production-section-root>
     <ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t("director.workspace.tab.production")} help={<p>{t("director.generation.flowHint")}</p>} actions={<Button size="small" onClick={onRefresh}>{t("director.workspace.refresh")}</Button>} toolbar={<ProductionSectionNavigation items={[
@@ -1574,7 +1683,6 @@ export function DirectorPanel({
     {d && <section className="rounded-lg border border-border bg-card p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs uppercase tracking-wide text-muted-foreground">{t("director.workspace.internalModules")}</p><h2 className="mt-1 text-lg font-semibold">{t("director.workspace.moduleRoles")}</h2></div><span className="text-xs text-muted-foreground">{t("director.workspace.modulesNotGates")}</span></div><div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">{directorModules.map(module => <div key={module} className="rounded-lg border border-border p-3"><div className="flex items-center justify-between gap-2"><strong>{t(`director.workspace.moduleName.${module}`)}</strong><Tag color={["committed", "continuity_passed"].includes(moduleViewStatus(module)) ? "green" : moduleViewStatus(module) === "blocked" ? "red" : undefined}>{t(`director.workspace.moduleStatus.${moduleViewStatus(module)}`)}</Tag></div><p className="mt-1 text-xs text-muted-foreground">{t("director.workspace.declaredModuleStatus", { status: t(`director.workspace.moduleStatus.${d.modules[module]?.status || "planned"}`) })}</p>{d.modules[module]?.unresolved.length ? <p className="mt-2 text-xs text-amber-600">{d.modules[module]?.unresolved[0]}</p> : null}</div>)}</div></section>}
       </div></details>}
     {d && <details className="rounded-lg border border-border bg-card p-4"><summary className="cursor-pointer font-medium">{t("director.studio.rawSource")}</summary><pre className="mt-4 max-h-[36rem] overflow-auto whitespace-pre-wrap break-words text-xs">{JSON.stringify({ revision: production.revision, localEdits: sourceDrafts, source: d.source, assets: d.assets, shotInputs: d.shotInputs, boundaries: d.boundaries, artifacts: d.artifacts, run, readiness }, null, 2)}</pre></details>}
-    <section className="space-y-2"><h3 className="font-semibold">{t("director.workspace.legacyTitle")}</h3><p className="text-sm text-muted-foreground">{t("director.workspace.legacyHint")}</p>{legacy.length ? legacy.map(item => <details key={item.source} className="rounded-lg border border-border bg-card p-3"><summary className="cursor-pointer font-medium">{item.source} · {item.sha256?.slice(0, 12)}</summary><pre className="mt-3 max-h-80 overflow-auto whitespace-pre-wrap break-words text-sm">{item.text}</pre><Button className="mt-3" size="small" disabled={busy} onClick={() => onAskDirector({ workspace: "advanced", instruction: `${t("director.workspace.adaptLegacy")}: ${item.source}\n\n${item.text}` })}>{t("director.workspace.adaptLegacy")}</Button></details>) : <p className="text-sm text-muted-foreground">{t("director.workspace.noLegacy")}</p>}</section>
     </section>
     <section className="space-y-3 border-t border-border pt-5" data-production-section="management" data-production-danger="source" tabIndex={-1}>
       <h3 className="font-semibold">{t("director.micro.advancedManagement")}</h3>

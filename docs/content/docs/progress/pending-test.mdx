@@ -5,6 +5,14 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- The Shot detail's Picture and Camera section always shows the Subjects appearing in the Shot and allows direct edits; while editing the full section, Subject changes join the draft save. Verify adding, removing and switching Subjects through save and refresh; existing image bindings and appearance timing remain intact, and offscreen-voice or continuity-context Subjects are unaffected. Check both locales and themes.
+
+- Double-clicking blank canvas no longer opens the node picker. Verify the popup does not appear on the background, grid, nodes, connections or node-result previews; existing node double-click editing/previews, right-click and other creation entry points still work.
+
+- Prompt, reference and generation controls for regular canvas nodes are anchored below their nodes and stay readable at screen size while the node moves. Verify edge clamping and scrolling, while the Config node editor remains in its side panel. Check Scene, Image, Video, Audio, Text and Loop nodes, zoom, narrow viewports, node reselection and model-parameter popovers.
+
+- Episode “Canvas characters and materials” cards edit the node name and description inside the workbench. Verify the node title, name and description update and persist after refresh; Cancel restores the prior values and a failed save retains the draft. Removal behavior and shared-asset ownership remain unchanged. Check both locales and themes.
+
 - Canvas tools and settings again includes project-wide rewrite suggestions and local draft recovery without adding top-bar buttons. Verify opening, Escape/close and reopening both dialogs on standalone and embedded canvases; deleted targets remain readable, copyable and dismissible but cannot be applied. Existing targets retain text-conflict checks, and the local draft dialog keeps its original session-ownership, import/export and explicit recovery protections. Check English/Chinese and light/dark themes.
 
 - Legacy H3 clips with a saved nonzero seed and no explicit noise mode keep that seed fixed across new runs. Verify both seed aliases and request/Clip/node/default precedence, explicit random mode, explicit fixed zero, duplicate-request idempotency and unchanged saved inputs. Built-in fallback behavior for missing or zero legacy seeds remains unchanged.

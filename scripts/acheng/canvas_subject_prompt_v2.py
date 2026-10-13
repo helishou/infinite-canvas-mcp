@@ -423,6 +423,36 @@ def adapt_production(production, *, draft=False):
                          "shot_ids": picture_shots, **({"anchor_shot_ids": list(dict.fromkeys(picture["anchor_shot_ids"]))} if picture["anchor_shot_ids"] else {}),
                          "start_frame": start_frame, "end_frame": end_frame})
 
+        # Audio remains a first-class current-format binding. Materialize a
+        # compiler-only asset/reference row so H3 receives the exact archived
+        # sound input without restoring Segment.references in saved source.
+        audio_sources = source.get("_canvas_subject_audio_sources") or {}
+        for binding in rows(segment.get("audio_bindings")):
+            binding_id = str(binding.get("id") or "")
+            snapshot = audio_sources.get(binding_id) if isinstance(audio_sources, dict) else None
+            if not binding_id or not isinstance(snapshot, dict) or not snapshot.get("file"):
+                raise ValueError("Audio binding " + binding_id + " is not in the frozen compiler inputs")
+            digest = str(binding.get("sha256") or snapshot.get("sha256") or "")
+            version = "sha256:" + digest
+            audio_plan = {"id": binding_id, "asset_id": binding_id, "kind": "audio", "name": str(binding.get("label") or binding_id),
+                          "version": version, "entity_id": binding_id, "entity_ids": [binding_id], "status": "selected_result",
+                          "file": str(snapshot["file"]), "sha256": digest}
+            source.setdefault("asset_plan", []).append(audio_plan)
+            assets[binding_id] = audio_plan
+            binding_shots = [str(value) for value in rows(binding.get("shotIds"))]
+            if not binding_shots or any(shot_id not in shot_ids for shot_id in binding_shots):
+                raise ValueError("Audio binding " + binding_id + " has an invalid Shot scope")
+            label = str(binding.get("label") or "")
+            refs.append({"label": label, "asset_id": binding_id, "asset_version": version, "sha256": digest,
+                         "file": str(snapshot["file"]), "entity_id": binding_id, "entity_ids": [binding_id],
+                         "role": str(binding.get("role") or "audio"), "preserve": "Use as the registered audio reference.",
+                         "exclude": "Do not treat audio as a visual identity reference.",
+                         "definition": label + " is the archived audio reference for this Segment.",
+                         "retention": label + ": preserve its audible reference only.", "shot_ids": binding_shots,
+                         "start_frame": start_frame, "end_frame": end_frame, "mediaType": "audio"})
+            for shot_id in binding_shots:
+                reference_requirements[shot_id].append({"asset_id": binding_id, "asset_version": version, "purpose": "audio"})
+
         subject_entries = []
         subject_labels = {}
         for subject_id, uses in subject_uses.items():

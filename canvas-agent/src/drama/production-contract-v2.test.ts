@@ -6,6 +6,7 @@ import { subjectShotWindows, subjectStateProjection } from "./subject-assembly.j
 
 function source() {
     return {
+        version: 2,
         prompt_assembly: { version: 2 },
         fps_num: 24, fps_den: 1,
         character_registry: [{ id: "SHUANZI", name: "栓子" }],
@@ -36,6 +37,29 @@ function source() {
 
 test("Subject assembly v2 accepts node-bound pictures, sparse shot keyframes and Subject-owned ledger facts", () => {
     assert.deepEqual(directorSourceV2Diagnostics(source()), []);
+});
+test("the Director source root version is the sole production format gate", () => {
+    for (const version of [undefined, 1, 3]) {
+        const candidate = source();
+        if (version === undefined) delete (candidate as any).version;
+        else (candidate as any).version = version;
+        assert.ok(directorSourceV2Diagnostics(candidate).some(issue => issue.message.startsWith("UNSUPPORTED_PRODUCTION_FORMAT:")));
+    }
+    const noAssemblyMarker = source();
+    delete (noAssemblyMarker as any).prompt_assembly;
+    assert.deepEqual(directorSourceV2Diagnostics(noAssemblyMarker), []);
+    const oldLedger = source();
+    (oldLedger.ledger as any).contract_version = 1;
+    assert.ok(directorSourceV2Diagnostics(oldLedger).some(issue => issue.path.join(".") === "ledger.contract_version"));
+    const oldShot = source();
+    (oldShot.shots[0] as any).prompt_contract_version = 1;
+    assert.ok(directorSourceV2Diagnostics(oldShot).some(issue => issue.path.join(".") === "shots.0.prompt_contract_version"));
+    const rejected = directorProductionSchema.safeParse({
+        schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "4.3.9" },
+        source: oldLedger, sourceHash: "b".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], unresolved: [],
+    });
+    assert.equal(rejected.success, false);
+    if (!rejected.success) assert.ok(rejected.error.issues.some(issue => issue.path.join(".").includes("ledger.contract_version")));
 });
 test("Subject and keyframe bindings can inherit a smart node's independent reference selection", () => {
     const value = source();

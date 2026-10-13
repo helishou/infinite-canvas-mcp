@@ -231,7 +231,9 @@ export function CanvasNodeHoverToolbar({
     const toolbarTools = hasImage ? [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => quickImageToolIdSet.has(tool.id as ImageQuickToolId)).concat(sharedTools) : [...baseToolbarTools, ...nodeToolbarTools, ...extraTools, ...sharedTools];
     const allToolbarTools: ToolbarTool[] = [...new Map([...baseToolbarTools, ...nodeToolbarTools, ...extraTools, ...sharedTools].map((tool) => [tool.id, tool])).values()];
     const nearbyTools = nearbyCanvasNodeActions(allToolbarTools, hasImage ? quickImageToolIdSet : undefined);
-    const actionMenuItems: MenuProps["items"] = groupCanvasNodeActions(allToolbarTools).map((group) => ({
+    const nearbyToolIds = new Set(nearbyTools.map((tool) => tool.id));
+    const moreTools = allToolbarTools.filter((tool) => !nearbyToolIds.has(tool.id));
+    const actionMenuItems: MenuProps["items"] = groupCanvasNodeActions(moreTools).map((group) => ({
         type: "group",
         key: group.id,
         label: t(`canvas.nodeActions.groups.${group.id}`),
@@ -283,7 +285,6 @@ export function CanvasNodeHoverToolbar({
                 onMouseDown={(event) => event.stopPropagation()}
                 onPointerDown={(event) => event.stopPropagation()}
             >
-                <span className="canvas-node-context" title={node.title}>{node.title || getNodeDefinition(node.type)?.title || node.type}</span>
                 <div className="flex min-w-0 flex-1 items-center overflow-x-auto hide-scrollbar" data-canvas-no-zoom onWheel={(event) => event.stopPropagation()}>
                     {nearbyTools.map((tool) => (
                         <ToolbarAction key={tool.id} {...tool} showLabel={isImage ? showImageToolLabels : true} />
@@ -299,7 +300,7 @@ export function CanvasNodeHoverToolbar({
                         if (event.key === "Tab") setActionsOpen(false);
                     }}>{menu}</div>}
                     onOpenChange={(open) => { setActionsOpen(open); if (open) onKeep(node.id); }}
-                    menu={{ items: actionMenuItems, selectable: true, selectedKeys: allToolbarTools.filter((tool) => tool.active).map((tool) => tool.id), onClick: () => setActionsOpen(false), style: { maxHeight: "min(560px, calc(100dvh - 32px))", overflowY: "auto", maxWidth: "calc(100vw - 24px)" } }}
+                    menu={{ items: actionMenuItems, selectable: true, selectedKeys: moreTools.filter((tool) => tool.active).map((tool) => tool.id), onClick: () => setActionsOpen(false), style: { maxHeight: "min(560px, calc(100dvh - 32px))", overflowY: "auto", maxWidth: "calc(100vw - 24px)" } }}
                 >
                     <button ref={actionsTriggerRef} type="button" data-canvas-shortcuts-ignore aria-label={t("canvas.nodeActions.all")} aria-expanded={actionsOpen} className="canvas-blocking-overlay flex h-12 shrink-0 items-center gap-1 border-l border-border px-3 hover:bg-muted">
                         <Ellipsis className="size-4" /><span>{t("canvas.imageTools.more")}</span>

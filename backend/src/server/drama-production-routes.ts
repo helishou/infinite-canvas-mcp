@@ -16,8 +16,10 @@ import { SceneWorkCoordinator } from "../drama/scene-work.js";
 import type { BackendEventBus } from "../events.js";
 import { directorHash } from "../drama/director.js";
 import type { ProductionAgentPool } from "@basketikun/canvas-agent/agent/production";
+import { createLogger } from "../logger.js";
 
 const sceneCoordinators = new Map<string, SceneWorkCoordinator>();
+const logger = createLogger("drama-production-routes");
 
 function batchReceipt(batch: ReturnType<EpisodeProductionService["getBatch"]>) {
     if (!batch?.executionSnapshot) return batch;
@@ -52,11 +54,22 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             if (sourceNodeIds.length) queueMicrotask(() => refreshes.wakeSourceCanvas(event.entityId!, sourceNodeIds, Number(event.revision || 0), event.id));
         }
     });
-    for (const id of service.sceneWorkOwners()) scenes.recover(id);
+    for (const id of service.sceneWorkOwners()) {
+        try { scenes.recover(id); }
+        catch (error) {
+            if (!(error instanceof ZodError) || !error.issues.some(issue => issue.message.startsWith("UNSUPPORTED_PRODUCTION_FORMAT:"))) throw error;
+            logger.warn("Skipped recovery for a production record with an unsupported source format; the stored record was left untouched", { ownerId: id });
+        }
+    }
     refreshes.recover();
     const handle = (res: { status: (code: number) => { json: (body: unknown) => void } }, error: unknown) => {
         if (error instanceof ProductionValidationError) return res.status(400).json({ ok: false, code: error.diagnostics[0]?.code || "PRODUCTION_BLOCKED", error: error.message, diagnostics: error.diagnostics, nextActions: error.diagnostics.flatMap(item => item.nextAction ? [item.nextAction] : []) });
-        if (error instanceof ZodError) return res.status(400).json({ ok: false, error: error.message, diagnostics: error.issues.map(issue => ({ code: "INVALID_SCHEMA", path: issue.path.join("."), message: issue.message, severity: "error" })) });
+        if (error instanceof ZodError) {
+            const diagnostics = error.issues.map(issue => ({ code: issue.message.startsWith("UNSUPPORTED_PRODUCTION_FORMAT:") ? "UNSUPPORTED_PRODUCTION_FORMAT" : "INVALID_SCHEMA", path: issue.path.join("."), message: issue.message, severity: "error" }));
+            const unsupported = diagnostics.find(item => item.code === "UNSUPPORTED_PRODUCTION_FORMAT");
+            if (unsupported) return res.status(422).json({ ok: false, code: "UNSUPPORTED_PRODUCTION_FORMAT", error: unsupported.message, diagnostics });
+            return res.status(400).json({ ok: false, error: error.message, diagnostics });
+        }
         if (error instanceof ProductionConflictError) return res.status(409).json({ ok: false, code: "REVISION_CONFLICT", error: error.message, current: error.current, diagnostics: [{ code: "REVISION_CONFLICT", path: "request.expectedRevision", message: error.message, severity: "error" }], nextActions: [{ action: "refresh", message: "回读当前制作对象并核对 revision 后继续；不要重复原写入请求。" }] });
         return res.status(error instanceof ZodError ? 400 : /不存在|找不到/.test(String(error)) ? 404 : 400)
             .json({ ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -127,14 +140,6 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
     });
     router.post<Record<string, string>>(`${base}/continuity/check`, (req, res) => {
         try { res.json({ ok: true, check: service.checkContinuity(req.params.episodeId, req.body) }); }
-        catch (error) { handle(res, error); }
-    });
-    router.post<Record<string, string>>(`${base}/continuity/upgrade-preview`, (req, res) => {
-        try { res.json({ ok: true, preview: service.previewContinuityUpgrade(req.params.episodeId, req.body) }); }
-        catch (error) { handle(res, error); }
-    });
-    router.post<Record<string, string>>(`${base}/subject-v2-upgrade`, (req, res) => {
-        try { res.json({ ok: true, production: service.upgradeSubjectV2(req.params.episodeId, req.body) }); }
         catch (error) { handle(res, error); }
     });
     if (base === "/drama/episodes/:episodeId/production") router.post("/canvas/production/hash", (req, res) => {
@@ -235,9 +240,6 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             res.json({ ok: true, readiness: service.workflowReadiness(req.params.episodeId, source, runId) });
         } catch (error) { handle(res, error); }
     });
-    router.get<Record<string, string>>(`${base}/legacy`, (req, res) => {
-        try { res.json({ ok: true, sources: service.legacy(req.params.episodeId) }); } catch (error) { handle(res, error); }
-    });
     router.get<Record<string, string>>(`${base}/scene-archives`, (req, res) => {
         try { res.json({ ok: true, archives: service.listArchivedScenes(req.params.episodeId) }); } catch (error) { handle(res, error); }
     });
@@ -273,6 +275,12 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             const production = service.edit(req.params.episodeId, req.body);
             res.json({ ok: true, production });
             queueMicrotask(() => refreshes.wake(req.params.episodeId));
+        } catch (error) { handle(res, error); }
+    });
+    router.get<Record<string, string>>(`${base}/operations/:operationId/receipt`, (req, res) => {
+        try {
+            const production = service.operationReceipt(req.params.episodeId, req.params.operationId);
+            res.json(production ? { ok: true, found: true, production } : { ok: true, found: false });
         } catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/publish`, (req, res) => {

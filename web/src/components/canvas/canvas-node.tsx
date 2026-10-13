@@ -1064,7 +1064,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border bg-popover px-3 py-2"><span className="truncate text-sm font-medium" title={data.title}>{data.title}</span><button type="button" className="grid size-9 shrink-0 place-items-center rounded hover:bg-muted" aria-label={t("canvasChrome.closeEditor")} onClick={onClosePanel}><X className="size-4" /></button></header>
                 <div className="min-h-0 overflow-y-auto overscroll-contain">{panelContent}</div>
             </section>, panelContainer) : (
-                <CanvasNodePanelFrame isSmartGenerationNode={isSmartGenerationNode}>
+                <CanvasNodePanelFrame isSmartGenerationNode={isSmartGenerationNode} screenSized={!definition?.Panel}>
                     {panelContent}
                 </CanvasNodePanelFrame>
             ) : null}

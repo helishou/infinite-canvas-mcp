@@ -533,19 +533,15 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
         media.addEventListener("ended", handler);
         return () => media.removeEventListener("ended", handler);
     }, [active, livePreview]);
-    // Tab / 窗口切到后台时强制 pause 双槽视频：浏览器在隐藏标签里仍会继续跑 video，
-    // 切回来时已经播过一段，看上去像"自动播放"。在不可见时主动 pause 一次，切回来由用户/下一次 playRequest 决定是否续播。
+    // 页面切到后台时强制 pause 双槽视频：浏览器可能在隐藏标签里继续跑 video，
+    // 切回来时已经播过一段，看上去像"自动播放"。窗口短暂失焦不暂停，避免系统浮层/切换应用打断连续播放。
     useEffect(() => {
         const pauseBoth = () => {
             for (const v of videosRef.current) if (v && !v.paused) v.pause();
         };
         const onVisibility = () => { if (document.visibilityState === "hidden") pauseBoth(); };
         document.addEventListener("visibilitychange", onVisibility);
-        window.addEventListener("blur", pauseBoth);
-        return () => {
-            document.removeEventListener("visibilitychange", onVisibility);
-            window.removeEventListener("blur", pauseBoth);
-        };
+        return () => document.removeEventListener("visibilitychange", onVisibility);
     }, []);
     // 拖动刻度 seek / 换段：跳到 active 槽对应本地帧（playhead 为绝对时间，减时间轴偏移得本地帧）
     // 以及「点击播放（playToken 变化）时先把当前帧跳到 playhead 再播放」的两个 seek effect，

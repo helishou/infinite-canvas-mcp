@@ -21,14 +21,13 @@ type InfiniteCanvasProps = {
     onViewportChange: (viewport: ViewportTransform, options?: ViewportChangeOptions) => void;
     onCanvasMouseDown?: (event: React.PointerEvent<HTMLDivElement>) => void;
     onCanvasDeselect?: () => void;
-    onCanvasDoubleClick?: (event: React.MouseEvent<HTMLDivElement>) => void;
     onContextMenu?: (event: React.MouseEvent) => void;
     onDrop?: (event: React.DragEvent<HTMLDivElement>) => void;
     overlay?: React.ReactNode;
     children: React.ReactNode;
 };
 
-export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWriter, tool, backgroundMode = "lines", onViewportChange, onCanvasMouseDown, onCanvasDeselect, onCanvasDoubleClick, onContextMenu, onDrop, overlay, children }: InfiniteCanvasProps) {
+export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWriter, tool, backgroundMode = "lines", onViewportChange, onCanvasMouseDown, onCanvasDeselect, onContextMenu, onDrop, overlay, children }: InfiniteCanvasProps) {
     const active = useCanvasHost()?.active ?? true;
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const transformRef = useRef<HTMLDivElement | null>(null);
@@ -185,7 +184,8 @@ export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWrit
         const isBackgroundClick = !target?.closest("[data-node-id],[data-connection-id]");
         const temporaryTool = event.ctrlKey || isSpacePressed;
         const activeTool = temporaryTool ? (tool === "select" ? "pan" : "select") : tool;
-        const hitInteractiveControl = Boolean(target?.closest("button,input,textarea,select,[contenteditable='true'],video,audio,[data-canvas-node-panel],[data-resize-handle],[data-connection-handle]"));
+        const handToolNodeTarget = !temporaryTool && tool === "pan" && Boolean(target?.closest("[data-node-id]"));
+        const hitInteractiveControl = handToolNodeTarget || Boolean(target?.closest("button,input,textarea,select,[contenteditable='true'],video,audio,[data-canvas-node-panel],[data-resize-handle],[data-connection-handle]"));
         const shouldPan = shouldStartCanvasPan(event.button, activeTool, hitInteractiveControl);
 
         if (shouldPan) {
@@ -214,17 +214,6 @@ export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWrit
             event.currentTarget.setPointerCapture(event.pointerId);
             onCanvasMouseDown?.(event);
         }
-    };
-
-    const handleDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
-        const target = event.target instanceof Element ? event.target : null;
-        const hitCanvasNode = event.nativeEvent.composedPath().some((item) => item instanceof Element && (item.hasAttribute("data-node-id") || item.hasAttribute("data-connection-id")));
-        const hitBlankCanvas = target === event.currentTarget || target === transformRef.current;
-        if (hitCanvasNode || !hitBlankCanvas) {
-            event.stopPropagation();
-            return;
-        }
-        onCanvasDoubleClick?.(event);
     };
 
     useEffect(() => {
@@ -303,7 +292,6 @@ export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWrit
             className="relative h-full w-full select-none overflow-hidden"
             style={{ background: theme.canvas.background, cursor }}
             onPointerDown={handlePointerDown}
-            onDoubleClick={handleDoubleClick}
             onWheel={handleWheel}
             onContextMenu={onContextMenu}
             onDragOver={(event) => event.preventDefault()}

@@ -51,6 +51,29 @@ test("promotion is atomic, idempotent and stores a single source with live refer
         assert.throws(() => db.applyCanvasProjectOperations(source.sourceProjectId, undefined, [{ type: "delete_node", id: source.sourceNodeId }]), /仍被画布引用/);
     } finally { db.close(); }
 });
+test("orphaned shared-asset sources are surfaced as placeholders without failing the library read", () => {
+    const { db, asset } = fixture();
+    try {
+        db.upsertAssetRecord(asset);
+        const orphan = (id: string, sourceProjectId: string, sourceNodeId: string): Asset => ({
+            ...asset, id, data: {}, metadata: { sharedAssetSource: { dramaId: "drama", assetId: id, sourceProjectId, sourceNodeId } },
+        });
+        db.upsertAssetRecord(orphan("missing-project", "deleted-project", "deleted-node"));
+        db.upsertAssetRecord(orphan("missing-node", "a", "deleted-node"));
+
+        const listed = db.listAssets();
+        const missingProject = listed.find(item => item.id === "missing-project")!;
+        const missingNode = db.getAsset("missing-node")!;
+        assert.ok(missingProject);
+        assert.equal(missingProject.metadata.sharedAssetMissing, true);
+        assert.equal(missingProject.metadata.sharedAssetMissingReason, "source_project_missing");
+        assert.equal(missingProject.data.images instanceof Array, true);
+        assert.equal(missingNode.metadata.sharedAssetMissing, true);
+        assert.equal(missingNode.metadata.sharedAssetMissingReason, "source_node_missing");
+        assert.ok(listed.some(item => item.id === "asset"), "unrelated assets remain readable");
+        assert.equal(db.getAssetRecord("missing-project")!.metadata.sharedAssetMissing, undefined, "projection does not rewrite the stored record");
+    } finally { db.close(); }
+});
 test("independent source fields merge, same fields conflict and discard restores current source", () => {
     const { db, asset } = fixture();
     try {

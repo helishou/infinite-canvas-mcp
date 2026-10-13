@@ -446,8 +446,10 @@ export class ProductionCompilationService {
             material.set(`${targetId}\0${label}`, { bytes, digest: crypto.createHash("sha256").update(bytes).digest("hex"), extension: path.extname(file), file });
         };
         for (const [assetId, asset] of Object.entries(input.assets)) if (asset.storageKey) collect(assetId, "asset");
-        for (const field of ["asset_cards", "segments"] as const) for (const card of (input.source[field] || []) as any[])
+        for (const field of ["asset_cards", "segments"] as const) for (const card of (input.source[field] || []) as any[]) {
             for (const ref of card.references || []) collect(card.id, ref.label || `<Picture ${ref.image}>`, path.isAbsolute(ref.file || "") ? ref.file : undefined);
+            if (field === "segments") for (const binding of card.audio_bindings || []) collect(String(card.id || ""), String(binding.label || ""));
+        }
         return material;
     }
     private writePool(material: Map<string, MaterialItem>) {

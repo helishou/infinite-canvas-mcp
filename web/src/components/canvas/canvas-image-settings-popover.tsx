@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { CanvasPortal, useCanvasTransientEscape } from "@/lib/canvas/canvas-host";
-import { CanvasSettingsContext } from "./canvas-settings-context";
 import { canvasSettingsPosition } from "./canvas-settings-position";
 import { Settings2 } from "lucide-react";
 import { Button } from "antd";
@@ -168,7 +167,6 @@ export function CanvasImageSettingsPopover({ config, targetLabel, onConfigChange
                 placement={placement}
                 theme={theme}
                 config={config}
-                targetLabel={targetLabel}
                 onConfigChange={(key, value) => {
                     onConfigChange(key, value);
                     updateConfig(key, value);
@@ -217,7 +215,6 @@ function ImageSettingsPortal({
     panelRef,
     placement,
     theme,
-    targetLabel,
     config,
     onConfigChange,
     customFields,
@@ -233,7 +230,6 @@ function ImageSettingsPortal({
     placement: CanvasImageSettingsPopoverProps["placement"];
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     config: AiConfig;
-    targetLabel?: string;
     onConfigChange: CanvasImageSettingsPopoverProps["onConfigChange"];
     customFields?: Parameters<typeof ImageSettingsPanel>[0]["customFields"];
     customFieldValues?: Parameters<typeof ImageSettingsPanel>[0]["customFieldValues"];
@@ -249,21 +245,20 @@ function ImageSettingsPortal({
         ...canvasSettingsPosition(buttonRect, { width: window.innerWidth, height: window.innerHeight }, placement),
         boxSizing: "border-box",
         background: theme.toolbar.panel,
-        borderRadius: 18,
-        boxShadow: "0 18px 54px rgba(28, 25, 23, 0.16)",
-        padding: 18,
+        borderRadius: 14,
+        boxShadow: "0 12px 36px rgba(28, 25, 23, 0.16)",
+        padding: 12,
         overflowY: "auto",
         color: theme.node.text,
     } as const;
 
     return <CanvasPortal>
-        <div ref={panelRef} data-canvas-shortcuts-ignore data-canvas-no-zoom className="canvas-image-settings-popover" style={style} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
-            <CanvasSettingsContext targetLabel={targetLabel} updatesImageDefaults />
+        <div ref={panelRef} data-canvas-shortcuts-ignore data-canvas-no-zoom className="canvas-image-settings-popover [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" style={style} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
             <ImageSettingsPanel
                 config={config}
                 onConfigChange={(key, value) => onConfigChange(key, value)}
                 theme={theme}
-                className="space-y-4"
+                className="space-y-3"
                 customFields={customFields}
                 customFieldValues={customFieldValues}
                 onCustomFieldChange={onCustomFieldChange}

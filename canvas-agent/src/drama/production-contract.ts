@@ -123,16 +123,11 @@ export const directorWorkflowSchema = z.object({
     sharedAssetReviews: z.array(directorSceneReviewSchema).optional(),
     sharedReviewContinuation: z.object({ authorizationId: id, contextHash: hash, status: z.enum(["active", "awaiting_review", "paused", "complete"]), policy: directorReviewPolicySchema, model: z.string().optional(), effort: z.string().optional(), error: z.string().nullable().optional(), updatedAt: z.string().datetime() }).strict().optional(),
 }).passthrough();
-export const directorProductionSchema = z.object({
+const directorProductionBaseSchema = z.object({
     schemaVersion: z.literal(1),
     engine: directorEngineSchema,
     // Preserve every upstream field; Canvas does not maintain a second creative compiler.
-    source: z.record(z.unknown()).superRefine((source, context) => {
-        if (Array.isArray(source.segments)) source.segments.forEach((segment, index) => {
-            if (segment && typeof segment === "object" && Object.hasOwn(segment, "styleTemplateId") && segment.styleTemplateId !== null && !(isH3StyleTemplateId(segment.styleTemplateId) || typeof segment.styleTemplateId === "string" && /^[a-z0-9][a-z0-9-]{0,47}$/i.test(segment.styleTemplateId))) context.addIssue({ code: "custom", path: ["segments", index, "styleTemplateId"], message: "无效 H3 风格模板 ID" });
-        });
-        for (const issue of directorSourceV2Diagnostics(source)) context.addIssue({ code: "custom", path: issue.path, message: issue.message });
-    }),
+    source: z.record(z.unknown()),
     sourceHash: hash,
     modules: z.record(z.enum(directorModules), z.object({ status: z.enum(["planned", "partial", "committed", "blocked"]), cursor: z.unknown().optional(), evidence: z.array(z.string()).default([]), unresolved: z.array(z.string()).default([]) })),
     artifacts: z.array(z.object({
@@ -149,9 +144,20 @@ export const directorProductionSchema = z.object({
     unresolved: z.array(z.string()).default([]),
     workflow: directorWorkflowSchema.default({}),
 }).passthrough();
+/** Stored snapshots remain structurally readable for history; they are never a write or execution contract. */
+export const directorProductionHistorySchema = directorProductionBaseSchema;
+export const directorProductionSchema = directorProductionBaseSchema.superRefine((director, context) => {
+    const source = director.source as Record<string, unknown>;
+    if (Array.isArray(source.segments)) source.segments.forEach((segment, index) => {
+        if (segment && typeof segment === "object" && Object.hasOwn(segment, "styleTemplateId") && segment.styleTemplateId !== null && !(isH3StyleTemplateId(segment.styleTemplateId) || typeof segment.styleTemplateId === "string" && /^[a-z0-9][a-z0-9-]{0,47}$/i.test(segment.styleTemplateId))) context.addIssue({ code: "custom", path: ["source", "segments", index, "styleTemplateId"], message: "无效 H3 风格模板 ID" });
+    });
+    for (const issue of directorSourceV2Diagnostics(source)) context.addIssue({ code: "custom", path: ["source", ...issue.path], message: issue.message });
+});
 export type DirectorProduction = z.infer<typeof directorProductionSchema>;
 export function isSubjectPromptAssembly(source: Record<string, unknown>) {
-    return (source.prompt_assembly as Record<string, unknown> | undefined)?.version === 2;
+    return source.version === 2
+        && (source.prompt_assembly as Record<string, unknown> | undefined)?.version === 2
+        && (source.ledger as Record<string, unknown> | undefined)?.contract_version === 2;
 }
 export function resolveSubjectPictureBindingIds(subjectValue: unknown, usageValue: unknown) {
     const subject = subjectValue && typeof subjectValue === "object" ? subjectValue as Record<string, any> : {};
@@ -250,13 +256,31 @@ const utteranceSchema = z.object({
     start: z.object({ shotId: id, localFrame: z.number().int().nonnegative() }).strict(),
     end: z.object({ shotId: id, localFrame: z.number().int().positive() }).strict(),
 }).strict();
+/** Exact archived audio inputs for a Subject Prompt v2 Clip. Images remain on Subject/keyframe bindings. */
+const shotAudioBindingSchema = z.object({
+    id, label: z.string().trim().min(1), sourceNode: z.object({ projectId: id, nodeId: id }).strict(),
+    storageKey: id, sha256: hash, role: id, shotIds: z.array(id).min(1), mimeType: z.string().startsWith("audio/"),
+}).strict();
 
 /** Structured, source-owned inputs for compiler-assembled Prompt v2. */
 export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
     const issues: Array<{ path: (string | number)[]; message: string }> = [];
     const add = (path: (string | number)[], message: string) => issues.push({ path, message });
     const assembly = source.prompt_assembly as Record<string, unknown> | undefined;
-    if (assembly?.version !== 2) return issues;
+    const unsupportedMessage = "UNSUPPORTED_PRODUCTION_FORMAT: 当前制作台仅支持 Subject Prompt Assembly v2 与 Shot 局部帧账本 v2。请使用当前版 Acheng Director 升级后重新提交；原稿未修改。";
+    if (source.version !== 2) {
+        add(["version"], unsupportedMessage);
+        return issues;
+    }
+    const ledger = source.ledger as Record<string, any> | undefined;
+    if (!ledger || ledger.contract_version !== 2) {
+        add(["ledger", "contract_version"], unsupportedMessage);
+        return issues;
+    }
+    if (!assembly || assembly.version !== 2) {
+        add(["prompt_assembly", "version"], "当前制作稿 v2 的 Prompt Assembly 结构不受支持。");
+        return issues;
+    }
     const subjectsResult = z.array(subjectEntrySchema).safeParse(source.subject_registry);
     const shots = Array.isArray(source.shots) ? source.shots as Array<Record<string, any>> : [];
     const segments = Array.isArray(source.segments) ? source.segments as Array<Record<string, any>> : [];
@@ -295,6 +319,7 @@ export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
     const nextStoryOrder = new Map<string, number>();
     for (const [index, shot] of shots.entries()) {
         const path = ["shots", index];
+        if (Object.hasOwn(shot, "prompt_contract_version") && shot.prompt_contract_version !== 2) add([...path, "prompt_contract_version"], "当前制作稿 v2 的 Shot 提示结构不受支持。");
         if (!shot.id || shotById.has(String(shot.id))) add([...path, "id"], "Shot ID 必须全局唯一");
         else shotById.set(String(shot.id), shot);
         if (!Number.isInteger(shot.duration_frames) || shot.duration_frames <= 0) add([...path, "duration_frames"], "新合同 Shot 必须使用正整数 duration_frames");
@@ -392,11 +417,16 @@ export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
         const durationFrames = ids.reduce((sum, id) => sum + Number(shotById.get(id)!.duration_frames), 0);
         if (Object.hasOwn(segment, "duration_frames") || Object.hasOwn(segment, "generation_clip_duration")) add(["segments", segmentIndex], "Clip 时长由 Shot 时长求和派生，不作为源稿字段保存");
         for (const field of ["references", "subjects", "definition", "retention", "prompt", "subject_definitions", "retention_analysis", "detailed_description"]) if (Object.hasOwn(segment, field)) add(["segments", segmentIndex, field], "prompt v2 Clip 的 Subject、Picture 与 Prompt 由 Shots 编译派生");
+        const audioBindings = z.array(shotAudioBindingSchema).safeParse(segment.audio_bindings ?? []);
+        if (!audioBindings.success) for (const issue of audioBindings.error.issues) add(["segments", segmentIndex, "audio_bindings", ...issue.path], issue.message);
+        else for (const [bindingIndex, binding] of audioBindings.data.entries()) {
+            const path = ["segments", segmentIndex, "audio_bindings", bindingIndex];
+            if (binding.sourceNode.projectId !== String(source.project_id || "")) add([...path, "sourceNode", "projectId"], "音频来源节点必须属于当前制作画布");
+            if (binding.shotIds.some(shotId => !ids.includes(shotId))) add([...path, "shotIds"], "音频绑定镜头必须属于当前 Clip");
+        }
     }
     for (const shot of shots) if ((!compiledShotIds || compiledShotIds.has(String(shot.id))) && !partitioned.has(String(shot.id))) add(["shots", shotOrder.get(String(shot.id)) ?? 0], "新合同每个输出 Shot 必须且只能归属一个 Clip");
-    const ledger = source.ledger as Record<string, any> | undefined;
-    if (!ledger || ledger.contract_version !== 2) add(["ledger"], "Prompt v2 必须沿用 continuity ledger v2");
-    else {
+    {
         const facts = rowsForContract(ledger.facts);
         const factsById = new Map(facts.map(fact => [String(fact.id), fact]));
         const subjectForEntity = new Map<string, string>();
@@ -520,6 +550,8 @@ export const episodeProductionDataSchema = z.object({
     settings: productionSettingsSchema,
     legacyImports: z.array(z.object({ source: z.enum(["fullPlot", "script.md", "storyboard.md"]), sha256: z.string(), text: z.string(), importedAt: z.string() })),
 });
+/** Historical published/revision snapshots can be read, but the current draft and every write use v2. */
+export const episodeProductionHistoryDataSchema = episodeProductionDataSchema.extend({ director: directorProductionHistorySchema.optional() });
 
 export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("set_director_production"), director: directorProductionSchema }).strict(),
@@ -550,8 +582,6 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("patch_director_source"), entity: z.enum(["brief", "style", "scene", "environment", "character", "asset", "asset_card", "shot", "segment"]), id: id.optional(), patch: z.record(z.unknown()) }).strict(),
     z.object({ type: z.literal("adopt_director_fields"), targetId: id, nodeId: id, segmentId: id.optional(), canvasRevision: z.number().int().nonnegative(), fields: z.array(id).min(1) }).strict(),
     z.object({ type: z.literal("adopt_director_clip_style"), targetId: id, nodeId: id, segmentId: id, canvasRevision: z.number().int().nonnegative(), styleTemplateId: z.string().nullable() }).strict(),
-    z.object({ type: z.literal("patch_director_continuity"), ledger: z.record(z.unknown()) }).strict(),
-    z.object({ type: z.literal("upgrade_director_continuity"), fromSourceHash: hash, previewRevision: z.number().int().nonnegative(), previewHash: hash, toRuntimeId: id, ledger: z.record(z.unknown()) }).strict(),
     z.object({ type: z.literal("set_director_workflow"), patch: directorWorkflowSchema.partial() }).strict(),
     z.object({ type: z.literal("bind_director_asset"), assetId: id, nodeId: id }).strict(),
     z.object({ type: z.literal("adopt_shared_asset"), assetId: id, approvedId: id, nodeId: id }).strict(),
@@ -574,7 +604,6 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("set_clip_group"), group: clipGroupSchema }).strict(),
     z.object({ type: z.literal("delete_clip_group"), id }).strict(),
     z.object({ type: z.literal("set_settings"), patch: productionSettingsSchema.partial() }).strict(),
-    z.object({ type: z.literal("import_legacy"), source: z.enum(["fullPlot", "script.md", "storyboard.md"]) }).strict(),
     z.object({ type: z.literal("review_keyframe"), shotId: id, verdict: z.enum(["auto-accepted", "needs-redo"]), evidence: z.string().min(1) }).strict(),
 ]);
 
@@ -585,7 +614,6 @@ export const directorRunControlSchema = z.object({ runId: id }).strict();
 export const productionContractQuerySchema = z.object({ runtimeId: id.optional().describe("Deprecated: accepted for compatibility; the contract always uses the locally active Acheng runtime."), operationType: id.optional().describe("只接受 contract.operations[].type 中的精确操作标识；edit/publish/compile/generate 属于 contract.requests，不是 operationType。省略时返回完整操作目录。"), moduleId: z.enum(directorModules).optional() }).strict();
 export const productionContinuityReadSchema = z.object({ snapshot: z.enum(["draft", "published"]).default("draft"), view: z.enum(["summary", "issues", "timeline", "shot"]).default("summary"), targetId: id.optional(), objectId: id.optional(), pageSize: z.coerce.number().int().positive().optional(), cursor: z.string().optional() }).strict();
 export const productionContinuityCheckSchema = z.object({ expectedRevision: z.number().int().nonnegative(), operationId: id, snapshot: z.enum(["draft", "published"]).default("draft"), targetIds: z.array(id).optional() }).strict();
-export const productionContinuityUpgradePreviewSchema = z.object({ expectedRevision: z.number().int().nonnegative(), operationId: id, fromSourceHash: hash, ledger: z.record(z.unknown()) }).strict();
 // Keep requests unparsed at this boundary so invalid inputs produce diagnostics,
 // rather than disappearing into a transport-level schema error.
 export const productionPreflightSchema = z.object({ action: z.enum(["edit", "publish", "compile", "generate"]), request: z.record(z.unknown()) }).strict();

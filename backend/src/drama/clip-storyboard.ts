@@ -135,7 +135,7 @@ export function assertClipEdit(before: DirectorProduction, after: DirectorProduc
         const valid = op.type === "request_director_clip_refresh" && op.segmentId === segmentId
             || op.type === "replace_director_clip_storyboard" && op.segmentId === segmentId
             || op.type === "patch_director_source" && (op.entity === "shot" && allowed.has(op.id) || op.entity === "segment" && op.id === segmentId)
-            || op.type === "patch_director_continuity";
+            || op.type === "edit_director_continuity";
         if (!valid) reject("CLIP_EDIT_SCOPE", "request.ops", "自动刷新仅接受当前 Clip 的镜头、Segment 和关联连续性修改");
     }
     if (left.segment.start_frame !== right.segment.start_frame || left.segment.end_frame !== right.segment.end_frame) reject("CLIP_DURATION_CHANGED", `segments.${segmentId}`, "自动刷新不能改变 Clip 起止帧");

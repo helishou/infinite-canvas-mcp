@@ -9,7 +9,7 @@ import { directorPatchFields, productionContractVersion, productionOperationSche
 const scene = { id: "scene-1", heading: "Interior", location: "Room", timeOfDay: "Day", blocks: [] };
 const block = { id: "block-1", kind: "action", text: "The door opens." };
 const examples: Record<string, unknown> = {
-    set_director_production: { director: { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "example", runtimeId: "a".repeat(40) + "-" + "b".repeat(16), version: "example" }, source: {}, sourceHash: "0".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], unresolved: [] } },
+    set_director_production: { director: { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "example", runtimeId: "a".repeat(40) + "-" + "b".repeat(16), version: "example" }, source: { prompt_assembly: { version: 2 }, subject_registry: [], shots: [], segments: [], utterances: [], asset_plan: [], character_registry: [], scene_registry: [], ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } }, sourceHash: "0".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], unresolved: [] } },
     delete_director_subject: { id: "SUBJECT1" },
     create_manual_director_asset: { assetPlan: { id: "PROP1", kind: "prop", asset_name: "Prop", version: "v1", description: "", purpose: "", depends_on: [], status: "planned" }, assetCard: { id: "PROP1", asset_id: "PROP1", asset_kind: "prop", asset_version: "v1", prompt: "", references: [] } },
     upsert_director_subject: { subject: { id: "SUBJECT1", kind: "character", entityRef: { ownerKind: "episode", ownerId: "episode1", kind: "character", id: "CHARACTER1" }, pictureBindings: [
@@ -32,8 +32,6 @@ const examples: Record<string, unknown> = {
     delete_director_clip: { segmentId: "SEG1", expectedCanvasRevision: 1, confirmed: true },
     adopt_director_fields: { targetId: "SEG001", nodeId: "h3-1", segmentId: "clip-1", canvasRevision: 1, fields: ["prompt"] },
     adopt_director_clip_style: { targetId: "segment-1", nodeId: "h3-node", segmentId: "clip-1", canvasRevision: 1, styleTemplateId: "soft-light" },
-    patch_director_continuity: { ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } },
-    upgrade_director_continuity: { fromSourceHash: "0".repeat(64), previewRevision: 0, previewHash: "0".repeat(64), toRuntimeId: "runtime-v2", ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } },
     set_director_workflow: { patch: { mediaProductionMode: "per_item" } },
     bind_director_asset: { assetId: "character-1", nodeId: "image-1" },
     adopt_shared_asset: { assetId: "character-1", approvedId: "approved-version-1", nodeId: "shared-reference-1" },
@@ -48,7 +46,7 @@ const examples: Record<string, unknown> = {
     upsert_shot: { shot: { id: "shot-1", sceneId: scene.id, title: "Arrival", duration: 5, visual: "The traveller enters.", camera: "Static", openingState: "Door closed", endingState: "Door open", sound: "Door creaks", assetNodeIds: [], keyframePolicy: "none" } },
     delete_shot: { id: "shot-1" }, reorder_shots: { sceneId: scene.id, ids: ["shot-1"] }, set_keyframe: { shotId: "shot-1", nodeId: "image-1" },
     set_clip_group: { group: { id: "SEG001", shotIds: ["shot-1"], nodeId: null, segmentId: null, sourceVersion: 0 } }, delete_clip_group: { id: "SEG001" },
-    set_settings: { patch: { mode: "manual" } }, import_legacy: { source: "fullPlot" },
+    set_settings: { patch: { mode: "manual" } },
     review_keyframe: { shotId: "shot-1", verdict: "needs-redo", evidence: "The authored costume is missing." },
 };
 
@@ -81,7 +79,7 @@ export function productionOperationContract(operationType?: string) {
 
 export function schemaDiagnostics(schema: z.ZodTypeAny, value: unknown, prefix = ""): ProductionDiagnostic[] {
     const parsed = schema.safeParse(value);
-    return parsed.success ? [] : parsed.error.issues.map(issue => ({ code: "INVALID_SCHEMA", path: [prefix, ...issue.path].filter(part => part !== "").join("."), message: issue.message, severity: "error" }));
+    return parsed.success ? [] : parsed.error.issues.map(issue => ({ code: issue.message.startsWith("UNSUPPORTED_PRODUCTION_FORMAT:") ? "UNSUPPORTED_PRODUCTION_FORMAT" : "INVALID_SCHEMA", path: [prefix, ...issue.path].filter(part => part !== "").join("."), message: issue.message, severity: "error" }));
 }
 
 export class ProductionValidationError extends Error {
@@ -202,6 +200,38 @@ export function applyDirectorSourcePatch(director: DirectorProduction, entity: k
             }
             const previousDuration = Number(target.duration_frames);
             Object.assign(target, patch);
+            // A production asset can point at a character/scene registry row. Keep
+            // those display fields together at the source boundary so the normal
+            // production projection updates the corresponding canvas entity node.
+            if (entity === "asset" && target.entity_id) {
+                const entityId = String(target.entity_id);
+                const registries = [
+                    ["character_registry", "character"],
+                    ["scene_registry", "scene"],
+                ] as const;
+                const matches = registries.flatMap(([collection, kind]) => {
+                    const row = (Array.isArray(director.source[collection]) ? director.source[collection] as Array<Record<string, any>> : [])
+                        .find(item => String(item.id || "") === entityId);
+                    return row ? [{ row, kind }] : [];
+                });
+                // Registry IDs are scoped by kind; an ambiguous cross-kind ID is
+                // left untouched rather than guessing which entity owns the asset.
+                if (matches.length === 1) {
+                    const { row, kind } = matches[0];
+                    if (["asset_name", "name", "title"].some(field => Object.hasOwn(patch, field))) {
+                        row.name = String(patch.asset_name ?? patch.name ?? patch.title ?? "");
+                    }
+                    if (Object.hasOwn(patch, "description")) {
+                        const fields = kind === "character" ? ["appearance", "description", "prompt_description", "identity"] : ["description", "prompt_description"];
+                        const field = fields.find(key => typeof row[key] === "string" ? Boolean(row[key].trim()) : Boolean(row[key] && typeof row[key] === "object")) || fields[0];
+                        const previous = row[field];
+                        const description = patch.description;
+                        row[field] = previous && typeof previous === "object"
+                            ? { ...previous, ...(Object.hasOwn(previous, "description") ? { description } : Object.hasOwn(previous, "text") ? { text: description } : { description }) }
+                            : description;
+                    }
+                }
+            }
             if (entity === "shot" && isSubjectPromptAssembly(director.source) && previousDuration > 0 && Object.hasOwn(patch, "duration_frames") && Number.isInteger(target.duration_frames) && Number(target.duration_frames) > 0 && Number(target.duration_frames) !== previousDuration) {
                 resizeShotAnchors(director.source, target, previousDuration);
             }

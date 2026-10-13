@@ -175,7 +175,10 @@ export class AchengEngine {
         if (actual !== expected) changedContracts.push(file);
       }
       let upstreamFixed = false;
-      const changedCodeContracts = changedContracts.filter(file => file !== 'SKILL.md');
+      // The module registry is executable routing metadata, but its schema and
+      // references are checked by validate_director_contract below rather than
+      // by the upstream code-contract byte hashes.
+      const changedCodeContracts = changedContracts.filter(file => file !== 'SKILL.md' && file !== 'data/module-registry.json');
       if (changedCodeContracts.length) {
         const fixes = ['SKILL.md', 'references/90-production-contract.md', 'scripts/reference_bindings.py', 'scripts/h3_contract.py', 'scripts/h3_final_format.py', 'scripts/style_anchor.py', 'scripts/asset_plan.py', 'scripts/compile_h3.py', 'scripts/compile_assets.py', 'scripts/post_hooks.py'];
         if (changedCodeContracts.some(file => !fixes.includes(file))) throw new Error(`Upstream contract changed: ${changedContracts.join(', ')}. Review compatibility before activation. Candidate retained: ${candidate}`);

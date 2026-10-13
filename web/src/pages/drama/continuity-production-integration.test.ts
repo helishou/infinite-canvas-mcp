@@ -327,12 +327,11 @@ test("actual initial load and refresh cannot replace a newer selected snapshot",
             refreshInFlight: { current: null }, refreshQueued: { current: false },
             fetchBackendDramaEpisode: async () => ({ episode: { id: "fixture", dramaId: "drama", title: "Fixture", canvasId: "" } }),
             fetchEpisodeProduction: async () => ({ production: context.production }),
-            fetchEpisodeProductionLegacy: async () => ({ sources: [] }),
             fetchEpisodeProductionVersions: async () => ({ versions: [] }),
             fetchProductionBatches: async () => ({ runs: [] }),
             fetchBackendProject: async () => ({ project: null }),
             setEpisode() {}, setProductionContext() {}, setTitle() {}, setCanvasId() {}, setCanvasRead() {},
-            setProduction() {}, setLegacy() {}, setVersions() {}, setBatches() {}, setRuntimeTasks() {}, setBriefDraft() {}, setLoadError() {},
+            setProduction() {}, setVersions() {}, setBatches() {}, setRuntimeTasks() {}, setBriefDraft() {}, setLoadError() {},
             fetchProductionContinuity: (_target: unknown, { snapshot }: { snapshot: string }) => snapshot === "draft" ? oldReport.promise : Promise.resolve({ continuity: { snapshot: "published", status: "passed" } }),
         });
         context[operation] = handler(operation, context);

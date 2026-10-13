@@ -5,7 +5,6 @@ import { once } from "node:events";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { removedToolMigrations } from "../canvas/tool-migrations.js";
 
 test("Agent HTTP forwards historical views and Backend export references", async t => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-mcp-compat-"));
@@ -57,10 +56,9 @@ test("Agent HTTP forwards historical views and Backend export references", async
     assert.equal((await call("canvas_export_snapshot", { projectId: "c" })).result.export.projectId, "c");
     assert.equal((await call("director_subagent", { action: "spawn", projectId: "c", parentThreadId: "director-thread", operationId: "stable", title: "分镜核对", role: "shots", prompt: "只核对已有源稿" })).result.task.taskId, "child");
     const priorRequests = businessRequests;
-    for (const name of Object.keys(removedToolMigrations)) {
+    for (const name of ["production_list_legacy", "production_preview_continuity_upgrade", "drama_get_production", "canvas_get_production"]) {
         const response = await fetch(`${url}/agent/api/tools`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, input: {} }) });
-        assert.equal(response.status, 400);
-        const notice: any = await response.json(); assert.equal(notice.code, "TOOL_REMOVED"); assert.equal(notice.migration.replacement, removedToolMigrations[name].replacement);
+        assert.equal(response.status, 404, `${name} is not callable through the current Agent tool catalog`);
     }
-    assert.equal(businessRequests, priorRequests, "retired calls must never be forwarded");
+    assert.equal(businessRequests, priorRequests, "retired calls must never reach Backend");
 });

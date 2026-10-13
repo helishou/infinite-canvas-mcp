@@ -61,6 +61,17 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
         update({ subject_usages: [...value.subject_usages, { subjectId: subjectChoice, presentation: "visible", pictureBindingIds: [], pictureBindingMode: "default", referencePurpose: ["identity"], continuityFactIds: [], stateRequirements: [] }] });
         setSubjectChoice(undefined);
     };
+    const setVisibleSubjects = (subjectIds: string[]) => {
+        const selected = new Set(subjectIds);
+        const existing = new Map(value.subject_usages.map(usage => [String(usage.subjectId), usage]));
+        const next = value.subject_usages
+            .filter(usage => usage.presentation !== "visible" || selected.has(String(usage.subjectId)))
+            .map(usage => selected.has(String(usage.subjectId)) ? { ...usage, presentation: "visible" } : usage);
+        for (const subjectId of subjectIds) {
+            if (!existing.has(subjectId)) next.push({ subjectId, presentation: "visible", pictureBindingIds: [], pictureBindingMode: "default", referencePurpose: ["identity"], continuityFactIds: [], stateRequirements: [] });
+        }
+        update({ subject_usages: next });
+    };
     const addKeyframe = () => {
         if (!keyframeNode || !keyframeChoiceValid) return;
         const keyframeId = `KF:${id}:${encodeURIComponent(keyframeNode.projectId)}:${encodeURIComponent(keyframeNode.nodeId)}`;
@@ -94,6 +105,7 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
         <div className="flex gap-5 border-b border-border" role="tablist" aria-label={t("director.atomic.shotSections")}>{(["direction", "sound", "subjects", "anchors"] as const).map(key => <button type="button" key={key} role="tab" aria-selected={section === key} onClick={() => setSection(key)} className={`flex items-center gap-2 border-b-2 py-2 text-sm ${section === key ? "border-primary font-medium" : "border-transparent text-muted-foreground"}`}>{key === "direction" ? <Camera className="size-3.5" /> : key === "sound" ? <Volume2 className="size-3.5" /> : key === "subjects" ? <Users className="size-3.5" /> : <ImageIcon className="size-3.5" />}{t("director.atomic.section." + key)}</button>)}</div>
         </div><div className="shot-editor-scroll" data-shot-editor-scroll>
         {section === "direction" && <div className="space-y-4">
+            <label className="grid gap-2 text-sm"><span className="font-medium">{t("director.atomic.visibleSubjects")}</span><Select mode="multiple" value={value.subject_usages.filter(usage => usage.presentation === "visible").map(usage => String(usage.subjectId))} disabled={disabled} placeholder={t("director.workspace.chooseSubject")} options={subjects.map(subject => ({ value: String(subject.id), label: subjectDisplayName(source, String(subject.id)) }))} onChange={setVisibleSubjects} /></label>
             <label className="grid gap-2 text-sm"><span className="font-medium">{t("director.atomic.action")}</span><Input.TextArea value={value.visual} autoSize={{ minRows: 4, maxRows: 10 }} disabled={disabled} onChange={event => update({ visual: event.target.value })} /><span className="text-xs text-muted-foreground">{t("director.atomic.actionHint")}</span></label>
             <div className="grid gap-3 sm:grid-cols-2"><label className="grid gap-1.5 text-xs text-muted-foreground"><span>{t("director.atomic.framing")}</span><Select value={value.camera.framing || undefined} disabled={disabled} placeholder={t("director.atomic.chooseFraming")} options={["EWS", "WS", "FS", "MS", "MCU", "CU", "ECU"].map(key => ({ value: key, label: t("director.atomic.framingName." + key) }))} onChange={framing => camera({ framing })} /></label><label className="grid gap-1.5 text-xs text-muted-foreground"><span>{t("director.atomic.angle")}</span><Input value={String(value.camera.angle || "")} disabled={disabled} onChange={event => camera({ angle: event.target.value })} /></label></div>
             <label className="grid gap-1.5 text-xs text-muted-foreground"><span>{t("director.atomic.cameraPath")}</span><Input.TextArea value={String(value.camera.path || "")} autoSize={{ minRows: 2, maxRows: 5 }} disabled={disabled} onChange={event => camera({ path: event.target.value })} /></label>

@@ -650,8 +650,9 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
 
 function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: CanvasTheme; onInsert: () => void; onRemove: () => void }) {
     const { t } = useTranslation();
+    const missingSource = asset.metadata?.sharedAssetMissing === true;
     const handleDragStart = (event: React.DragEvent<HTMLDivElement>) => {
-        if (asset.kind === "text") return;
+        if (asset.kind === "text" || missingSource) { event.preventDefault(); return; }
         // 角色资产：拖到画布生成 Character 节点，拖到 H3 ref 槽按角色组拆 outfit + voice。
         if (asset.kind === "character") {
             const ref = {
@@ -695,20 +696,23 @@ function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: 
         event.dataTransfer.setData("text/plain", payload);
     };
     return (
-        <div draggable={asset.kind !== "text"} onDragStart={handleDragStart} className="group relative aspect-square overflow-hidden rounded-xl border transition duration-200 hover:-translate-y-0.5 hover:shadow-lg" style={{ borderColor: theme.node.stroke, background: theme.node.panel, cursor: asset.kind === "text" ? undefined : "grab" }}>
+        <div draggable={asset.kind !== "text" && !missingSource} onDragStart={handleDragStart} className="group relative aspect-square overflow-hidden rounded-xl border transition duration-200 hover:-translate-y-0.5 hover:shadow-lg" style={{ borderColor: theme.node.stroke, background: theme.node.panel, cursor: asset.kind === "text" || missingSource ? undefined : "grab" }}>
             <AssetCover asset={asset} />
+            {missingSource && <div className="absolute inset-x-1 bottom-1 rounded bg-black/70 px-2 py-1 text-center text-[10px] leading-tight text-white">{t("assets.sharedAssetMissing")}</div>}
             <div className="absolute inset-0 flex items-center justify-center gap-2.5 opacity-0 transition duration-200 group-hover:opacity-100">
                 <button
                     type="button"
+                    disabled={missingSource}
                     onClick={onInsert}
                     className="grid size-8 place-items-center rounded-full bg-white/90 text-stone-700 shadow-sm backdrop-blur transition hover:bg-white hover:text-stone-900 dark:bg-black/60 dark:text-stone-100 dark:hover:bg-black/80"
                     aria-label={t("canvas.sidePanel.inserted")}
                 >
                     <Plus className="size-4" />
                 </button>
-                <Popconfirm title={t("canvas.sidePanel.removeAssetTitle", { name: asset.title })} description={t("canvas.sidePanel.removeAssetDescription")} okText={t("common.delete")} cancelText={t("common.cancel")} okButtonProps={{ danger: true }} onConfirm={onRemove}>
+                <Popconfirm disabled={missingSource} title={t("canvas.sidePanel.removeAssetTitle", { name: asset.title })} description={t("canvas.sidePanel.removeAssetDescription")} okText={t("common.delete")} cancelText={t("common.cancel")} okButtonProps={{ danger: true }} onConfirm={onRemove}>
                     <button
                         type="button"
+                        disabled={missingSource}
                         className="grid size-8 place-items-center rounded-full bg-white/90 text-stone-700 shadow-sm backdrop-blur transition hover:bg-white hover:text-red-500 dark:bg-black/60 dark:text-stone-100 dark:hover:bg-black/80 dark:hover:text-red-400"
                         aria-label={t("canvas.sidePanel.removeAsset")}
                     >

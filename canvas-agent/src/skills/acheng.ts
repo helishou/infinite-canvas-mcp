@@ -98,6 +98,21 @@ function hydrateSubjectPictureSources(director: DirectorProduction, resolver?: (
     (director.source as Record<string, unknown>)._canvas_subject_picture_sources = snapshots;
     (director.source as Record<string, unknown>)._canvas_subject_source_hash = director.sourceHash;
 }
+/** Freeze exact source-owned audio bytes for the compiler without restoring legacy Segment.references in authored source. */
+function hydrateSubjectAudioSources(director: DirectorProduction, resolver?: (targetId: string, label: string) => string | undefined) {
+    if (!isSubjectPromptAssembly(director.source) || !resolver) return;
+    const snapshots: Record<string, Record<string, unknown>> = {};
+    for (const segment of (Array.isArray(director.source.segments) ? director.source.segments : []) as Array<Record<string, any>>) {
+        for (const binding of Array.isArray(segment.audio_bindings) ? segment.audio_bindings as Array<Record<string, any>> : []) {
+            const id = String(binding.id || ""), label = String(binding.label || ""), file = resolver(String(segment.id || ""), label);
+            if (!id || !file || !fs.existsSync(file)) throw new Error("Subject Prompt v2 audio binding " + id + " has no frozen compiler file");
+            const bytes = fs.readFileSync(file), digest = crypto.createHash("sha256").update(bytes).digest("hex");
+            if (digest !== String(binding.sha256 || "")) throw new Error("Subject Prompt v2 audio binding " + id + " bytes differ from its source hash");
+            snapshots[id] = { file, sha256: digest, storageKey: String(binding.storageKey || ""), nodeId: String(binding.sourceNode?.nodeId || "") };
+        }
+    }
+    (director.source as Record<string, unknown>)._canvas_subject_audio_sources = snapshots;
+}
 /** Resolve once; a configured executable never silently falls back. */
 export function resolveAchengPython() {
     if (process.env.ACHENG_PYTHON) {
@@ -222,6 +237,7 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
     }
    director.sourceHash = crypto.createHash("sha256").update(canonicalProduction(director.source)).digest("hex");
     hydrateSubjectPictureSources(director, resolveReferenceFile);
+    hydrateSubjectAudioSources(director, resolveReferenceFile);
    fs.writeFileSync(sourceFile, JSON.stringify(director.source), "utf8");
     const onlyAssets = !Array.isArray(director.source.segments) || !director.source.segments.length;
     let exitCode = 0;
@@ -270,13 +286,9 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
                 const bytes = readCompilationReference(output, ref.file, [ref.asset_id ? resolveReferenceFile?.(ref.asset_id, "asset") : undefined, resolveReferenceFile?.(targetId, label)]);
                 const digest = crypto.createHash("sha256").update(bytes).digest("hex");
                 const asset = ref.asset_id ? director.assets[ref.asset_id] : undefined;
-                // Legacy imported audio is an authored external reference rather
-                // than an image asset. Match its exact compiled bytes; Backend
-                // still verifies the node/media ownership when applying inputs.
                 const segmentSource = (director.source.segments as Array<Record<string, any>> || []).find(segment => segment.id === targetId);
-                const authoredAudio = (segmentSource?.references as Array<Record<string, any>> || []).find(source =>
-                    source.label === label && (source.mediaType === "audio" || source.role === "audio")
-                    && source.sha256 === digest && source.nodeId && source.storageKey);
+                const authoredAudio = (segmentSource?.audio_bindings as Array<Record<string, any>> || []).find(binding =>
+                    binding.label === label && binding.sha256 === digest && binding.sourceNode?.nodeId && binding.storageKey);
                 const old = prior.find(a => a.targetId === targetId && a.kind === kind)?.references.find(r => r.label === label && r.sha256 === digest);
                 const canvasStyleAnchorId = String(director.source.style_anchor_node_id || "");
                 const canvasStyleBinding = ref.canvas_style_anchor === true && ref.role === "style"
@@ -284,7 +296,8 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
                     && typeof ref.canvas_storage_key === "string" && ref.canvas_storage_key
                     ? { nodeId: canvasStyleAnchorId, storageKey: ref.canvas_storage_key, sha256: digest }
                     : undefined;
-                const binding = asset?.nodeId && asset.storageKey && asset.sha256 === digest ? asset : canvasStyleBinding || old || authoredAudio;
+                const audioBinding = authoredAudio ? { nodeId: authoredAudio.sourceNode.nodeId, storageKey: authoredAudio.storageKey } : undefined;
+                const binding = asset?.nodeId && asset.storageKey && asset.sha256 === digest ? asset : canvasStyleBinding || old || audioBinding;
                 if (!binding?.nodeId || !binding.storageKey || ref.sha256 !== digest) {
                     diagnostics.push({ code: "MISSING_REFERENCE_BINDING", path: `artifacts.${kind}-${targetId}.references`, targetId,
                         message: `No matching Canvas media binding for ${label}`, severity: "warning", blocksCompilation: false, blockingActions: ["generate"] });
@@ -311,6 +324,7 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
     }
     delete (director.source as Record<string, unknown>)._canvas_subject_picture_sources;
     delete (director.source as Record<string, unknown>)._canvas_subject_source_hash;
+    delete (director.source as Record<string, unknown>)._canvas_subject_audio_sources;
     director.sourceHash = crypto.createHash("sha256").update(canonicalProduction(director.source)).digest("hex");
     for (const artifact of director.artifacts) {
         artifact.sourceHash = director.sourceHash;

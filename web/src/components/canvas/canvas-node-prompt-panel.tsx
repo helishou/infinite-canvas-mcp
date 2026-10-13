@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useCanvasRoute } from "@/lib/canvas/canvas-host";
 import { getCanvasTextSession } from "@/services/api/canvas-text";
 import type { CanvasTextEditorHandle, CanvasTextTarget } from "@/types/canvas-plugin";
-import { ArrowUp, Image as ImageIcon, LoaderCircle, Maximize2, MessageSquare, Music2, Square, Video } from "lucide-react";
+import { ArrowUp, Image as ImageIcon, LoaderCircle, Maximize2, MessageSquare, Music2, Video } from "lucide-react";
 import { Button, Modal, Segmented, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
@@ -92,14 +92,14 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
     return (
         <div
             data-canvas-no-zoom
-            className="max-w-full rounded-2xl border p-3 shadow-2xl backdrop-blur"
+            className="max-w-full rounded-xl border p-2 shadow-lg backdrop-blur"
             style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
             onMouseDown={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
             onDoubleClick={(event) => event.stopPropagation()}
             onWheel={(event) => event.stopPropagation()}
         >
-            <div className="mb-2 flex min-w-0 items-center gap-2 text-xs">
+            <div className="mb-1 flex min-w-0 items-center gap-2 text-[11px]">
                 <span className="shrink-0" style={{ color: theme.node.muted }}>{t("canvas.nodeActions.target")}</span>
                 <span className="truncate font-medium" title={node.title}>{node.title || t("canvas.node.untitled")}</span>
             </div>
@@ -109,7 +109,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
                 <div className="flex items-center gap-1">
                     <CanvasPromptLibrary onSelect={updatePrompt} />
                     <Tooltip title={t("canvas.promptPanel.expandEditor")}>
-                        <Button type="text" className="!h-8 !w-8 !min-w-8 shrink-0 !rounded-full !bg-transparent !p-0" style={{ color: theme.node.text }} icon={<Maximize2 className="size-3.5" />} onClick={openExpandedEditor} aria-label={t("canvas.promptPanel.expandEditor")} />
+                    <Button type="text" className="!h-7 !w-7 !min-w-7 shrink-0 !rounded-md !bg-transparent !p-0" style={{ color: theme.node.text }} icon={<Maximize2 className="size-3.5" />} onClick={openExpandedEditor} aria-label={t("canvas.promptPanel.expandEditor")} />
                     </Tooltip>
                 </div>
             </div>
@@ -118,32 +118,28 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
                 references={mentionReferences}
                 editorRef={editorRef}
                 onSubmit={submit}
-                className="canvas-authored-prompt thin-scrollbar h-40 w-full cursor-text resize-none rounded-xl px-3 py-2 text-sm leading-5 outline-none"
+                className="canvas-authored-prompt thin-scrollbar h-20 w-full cursor-text resize-none rounded-lg px-2.5 py-2 text-[13px] leading-5 outline-none"
                 style={{ background: "transparent", color: theme.node.text }}
                 placeholder={t(`canvas.promptPanel.${mode === "image" && hasImageContent ? "editImage" : mode === "text" && hasTextContent ? "editText" : mode}`)}
             />
 
-            <section className="mt-2 border-t pt-3" style={{ borderColor: theme.toolbar.border }} aria-label={t("canvas.nodeActions.modelParameters")}>
-                <div className="mb-2 flex items-center justify-between gap-2 text-[11px]" style={{ color: theme.node.muted }}>
-                    <span className="font-medium">{t("canvas.nodeActions.modelParameters")}</span>
-                    {mode === "image" ? <span title={t("canvas.nodeActions.imageModelDefault")}>{t("canvas.nodeActions.imageModelDefault")}</span> : null}
-                </div>
-                {isSmartGenerationNode ? (
-                    <Segmented
-                        className="mb-2 w-full"
-                        size="small"
-                        block
-                        disabled={isRunning}
-                        value={mode}
-                        onChange={(value) => onConfigChange(node.id, { generationMode: value as CanvasGenerationMode })}
-                        options={[
-                            { value: "image", label: <span className="inline-flex items-center gap-1"><ImageIcon className="size-3.5" />{t("canvas.configNode.image")}</span> },
-                            { value: "video", label: <span className="inline-flex items-center gap-1"><Video className="size-3.5" />{t("canvas.configNode.video")}</span> },
-                            { value: "audio", label: <span className="inline-flex items-center gap-1"><Music2 className="size-3.5" />{t("canvas.configNode.audio")}</span> },
-                            { value: "text", label: <span className="inline-flex items-center gap-1"><MessageSquare className="size-3.5" />{t("canvas.configNode.text")}</span> },
-                        ]}
-                    />
-                ) : null}
+            {isSmartGenerationNode ? (
+                <Segmented
+                    className="mt-2 w-full"
+                    size="small"
+                    block
+                    disabled={isRunning}
+                    value={mode}
+                    onChange={(value) => onConfigChange(node.id, { generationMode: value as CanvasGenerationMode })}
+                    options={[
+                        { value: "image", label: <span className="inline-flex items-center gap-1"><ImageIcon className="size-3.5" />{t("canvas.configNode.image")}</span> },
+                        { value: "video", label: <span className="inline-flex items-center gap-1"><Video className="size-3.5" />{t("canvas.configNode.video")}</span> },
+                        { value: "audio", label: <span className="inline-flex items-center gap-1"><Music2 className="size-3.5" />{t("canvas.configNode.audio")}</span> },
+                        { value: "text", label: <span className="inline-flex items-center gap-1"><MessageSquare className="size-3.5" />{t("canvas.configNode.text")}</span> },
+                    ]}
+                />
+            ) : null}
+            <div className="mt-2 flex min-w-0 items-center gap-1.5">
                 <CanvasGenerationControls
                     node={node}
                     mode={mode}
@@ -153,31 +149,24 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
                     imageReferenceCount={referenceCount}
                     textCount={node.metadata?.textCount || 1}
                     onTextCountChange={(next: number) => onConfigChange(node.id, { textCount: next })}
+                    layout="compact"
+                    className="grid min-w-0 flex-1 grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)] items-center gap-1.5"
                     onImageSettingsOpenChange={onImageSettingsOpenChange}
                     onImagePromptRequiredChange={setImagePromptRequired}
                 />
-            </section>
-            <div className="mt-3 flex justify-end">
-                <Button
-                    type="primary"
-                    className="!h-10 !min-w-16 shrink-0 !rounded-lg !px-3"
-                    danger={isRunning}
-                    disabled={!isRunning && (!textStatus.ready || textStatus.blocked || (promptRequired && !prompt.trim()))}
-                    onClick={() => (isRunning ? onStop(node.id) : submit())}
-                    aria-label={t(isRunning ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}
-                >
-                    <span className="flex items-center gap-1.5">
-                        {isRunning ? (
-                            <>
-                                <LoaderCircle className="size-4 animate-spin" />
-                                <Square className="size-3.5 fill-current" />
-                                <span className="text-xs font-medium">{t("canvas.promptPanel.stop")}</span>
-                            </>
-                        ) : (
-                            <><ArrowUp className="size-4" /><span>{t("canvas.promptPanel.generate")}</span></>
-                        )}
-                    </span>
-                </Button>
+                <Tooltip title={t(isRunning ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}>
+                    <Button
+                        type="primary"
+                        size="small"
+                        className="!grid !h-7 !w-7 !min-w-7 shrink-0 place-items-center !rounded-md !p-0"
+                        danger={isRunning}
+                        disabled={!isRunning && (!textStatus.ready || textStatus.blocked || (promptRequired && !prompt.trim()))}
+                        onClick={() => (isRunning ? onStop(node.id) : submit())}
+                        aria-label={t(isRunning ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}
+                    >
+                        {isRunning ? <LoaderCircle className="size-3.5 animate-spin" /> : <ArrowUp className="size-3.5" />}
+                    </Button>
+                </Tooltip>
             </div>
             <Modal title={`${t("canvas.promptPanel.editorTitle")} · ${node.title || t("canvas.node.untitled")}`} open={expanded} centered width={760} footer={null} onCancel={() => setExpanded(false)} destroyOnHidden>
                 <div data-canvas-no-zoom className="pt-2" onWheelCapture={(event) => event.stopPropagation()}>

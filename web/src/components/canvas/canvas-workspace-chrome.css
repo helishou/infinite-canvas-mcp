@@ -14,7 +14,6 @@
 .canvas-zoom-dock > div:first-child { height:48px; }
 .canvas-zoom-dock input[type="range"] { width:64px; }
 .canvas-selection-actions { position:absolute; z-index:75; right:12px; top:12px; border:1px solid; border-radius:8px; }
-.canvas-node-context { max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:0 10px; border-right:1px solid var(--border); font-size:12px; color:var(--muted-foreground); }
 [data-canvas-minimap] { bottom:12px; left:12px; }
 .canvas-stage:has([data-canvas-minimap]) .canvas-zoom-dock { bottom:184px; }
 .canvas-mode-notice { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:90; max-width:calc(100% - 24px); display:flex; align-items:center; gap:12px; border:1px solid var(--border); border-radius:8px; padding:8px 12px; background:var(--popover); color:var(--popover-foreground); font-size:13px; }
@@ -28,7 +27,6 @@
   .canvas-create-dock { gap:0; padding:2px; height:48px; right:96px; max-width:calc(100% - 108px); }
   .canvas-create-dock .ant-btn { padding-inline:5px; min-width:30px; }
   .canvas-create-dock > span { margin-inline:2px; }
-  .canvas-node-context { max-width:96px; }
   .canvas-selection-actions { top:auto; bottom:12px; }
 }
 

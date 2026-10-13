@@ -5,7 +5,7 @@ type SettingsPlacement = "topLeft" | "top" | "topRight" | "bottomLeft" | "bottom
 export function canvasSettingsPosition(anchor: SettingsAnchor, viewport: { width: number; height: number }, placement: SettingsPlacement = "topLeft") {
     const margin = 12;
     const gap = 8;
-    const width = Math.min(356, Math.max(0, viewport.width - margin * 2));
+    const width = Math.min(320, Math.max(0, viewport.width - margin * 2));
     const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
     const left = placement.endsWith("Right") ? anchor.right - width : placement === "top" || placement === "bottom" ? anchor.left + anchor.width / 2 - width / 2 : anchor.left;
     const upperEdge = clamp(anchor.top - gap, margin, viewport.height - margin);

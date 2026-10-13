@@ -273,11 +273,11 @@ const productionPath = (target: ProductionTarget) => typeof target === "string"
         ? `/drama/scenes/${encodeURIComponent(target.sceneId)}/production`
         : `/canvas/projects/${encodeURIComponent(target.projectId)}/production`;
 export function fetchEpisodeProduction(episodeId: ProductionTarget) { return request<{ ok: boolean; production: EpisodeProduction }>("GET", productionPath(episodeId)); }
+export function fetchProductionOperationReceipt(owner: ProductionTarget, operationId: string) { return request<{ ok: boolean; found: boolean; production?: EpisodeProduction }>("GET", `${productionPath(owner)}/operations/${encodeURIComponent(operationId)}/receipt`); }
 export function fetchProductionWorkbench(owner: ProductionTarget, view: "subject_workbench" | "shot_workbench" | "clip_workbench", targetId: string, snapshot: "draft" | "published" = "draft") {
     const query = new URLSearchParams({ view, targetIds: targetId, snapshot });
     return request<{ ok: boolean; production: Record<string, any> }>("GET", productionPath(owner) + "?" + query.toString());
 }
-export function fetchEpisodeProductionLegacy(episodeId: ProductionTarget) { return request<{ ok: boolean; sources: Array<{ source: "fullPlot" | "script.md" | "storyboard.md"; sha256: string; text: string }> }>("GET", `${productionPath(episodeId)}/legacy`); }
 export function editEpisodeProduction(episodeId: ProductionTarget, expectedRevision: number, ops: ProductionOperation[], operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/ops`, { operationId, expectedRevision, ops }); }
 export function previewEpisodeProductionImpact(episodeId: ProductionTarget, stage: "script" | "shots" | "director") { return request<{ ok: boolean; impact: NonNullable<EpisodeProduction["impact"]> }>("GET", `${productionPath(episodeId)}/impact?stage=${stage}`); }
 export function publishEpisodeProduction(episodeId: ProductionTarget, expectedRevision: number, stage: "script" | "shots" | "director", operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/publish`, { operationId, expectedRevision, stage }); }
@@ -328,9 +328,6 @@ export function fetchProductionContinuity(target: ProductionTarget, options?: { 
 }
 export function checkProductionContinuity(target: ProductionTarget, input: { expectedRevision: number; operationId: string; snapshot?: "draft" | "published"; targetIds?: string[] }) {
     return request<{ ok: boolean; check: { status: "succeeded"; verdict: string; report: Record<string, any>; revision: number; replayed?: boolean; mediaSubmitted: false } }>("POST", `${productionPath(target)}/continuity/check`, input);
-}
-export function previewProductionContinuityUpgrade(target: ProductionTarget, input: { expectedRevision: number; operationId: string; fromSourceHash: string; ledger: Record<string, unknown> }) {
-    return request<{ ok: boolean; preview: { owner: { kind: string; id: string }; revision: number; fromSourceHash: string; targetRuntime: Record<string, string>; previewHash: string; candidateSourceHash: string; migrationClass: string; changeClassification: { equivalentConversions: string[]; historicalProjection: string[]; semanticGaps: Array<Record<string, any>>; speculativeSuggestions: string[] }; report: Record<string, any>; affectedTargets: string[]; activeRuns: Array<{ runId: string; status: string; targets: unknown[] }> } }>("POST", `${productionPath(target)}/continuity/upgrade-preview`, input);
 }
 export function fetchProductionBatches(target: ProductionTarget) { return sharedGet<{ ok: boolean; runs: ProductionBatch[] }>(`${productionPath(target)}/batches`); }
 export function startProductionRun(target: ProductionTarget, input: { inputBasis?: "canvas" | "published"; expectedCanvasRevision?: number; expectedPlanHash?: string; runId: string; idempotencyKey: string; workId?: string; expectedRevision: number; version: number; targets: string[]; scope?: "selected" | "all_ready" }) { return request<{ ok: boolean; run: ProductionBatch }>("POST", `${productionPath(target)}/runs`, input); }

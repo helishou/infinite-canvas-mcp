@@ -1,6 +1,5 @@
 import { executeDirectorSubagentTool } from "@basketikun/canvas-agent/agent/delegation";
 import { productionToolNames, executeProductionTool } from "@basketikun/canvas-agent/drama/production-tools";
-import { removedToolNotice, migrateToolGuidance } from "@basketikun/canvas-agent/tool-migrations";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -62,7 +61,7 @@ import { createLogger } from "./logger.js";
 import type { McpObservabilityStore } from "./stores/types.js";
 import { PreparedH3UpdateFiles } from "./canvas/prepared-h3-update-files.js";
 
-type McpProjectSource = "browser" | "session";
+type McpProjectSource = "browser" | "session" | "automatic";
 type BrowserActiveProjectResolver = () => string | null;
 type McpSessionState = {
   activeProjectId: string | null;
@@ -280,13 +279,6 @@ export function registerBackendMcpHttpRoutes(
     const sessionId = sessionIdOf(req);
     const existing = sessionId ? sessions.get(sessionId) : undefined;
     if (existing) {
-      const validToolRequest = req.body?.jsonrpc === "2.0" && req.body?.method === "tools/call" && typeof req.body.params?.name === "string"
-        && ["number", "string"].includes(typeof req.body.id);
-      const notice = validToolRequest ? removedToolNotice(req.body.params.name) : undefined;
-      if (notice && req.body.id !== undefined) {
-        res.json({ jsonrpc: "2.0", id: req.body.id, error: { code: -32602, message: notice.error, data: notice } });
-        return;
-      }
       try {
         await existing.transport.handleRequest(req, res, req.body);
       } catch (error) {
@@ -480,9 +472,35 @@ function resolveMcpProjectId(
     state.activeProjectSource = "browser";
     return { projectId: browserProjectId, source: "browser-focused" as const };
   }
+  if (state.activeProjectSource === "automatic" && state.activeProjectId)
+    return { projectId: state.activeProjectId, source: "automatic" as const };
   state.activeProjectId = null;
   state.activeProjectSource = "browser";
   return { projectId: "", source: "none" as const };
+}
+
+/** If this MCP session has no explicit or browser-focused target, bind the only canvas. */
+async function resolveMcpProjectIdWithUniqueFallback(
+  config: ResolvedConfig,
+  state: McpSessionState,
+  rawProjectId: unknown,
+  getBrowserActiveProjectId?: BrowserActiveProjectResolver,
+) {
+  const target = resolveMcpProjectId(state, rawProjectId, getBrowserActiveProjectId);
+  if (target.projectId && target.source !== "automatic") return target;
+
+  const projects = await fetchCanvasProjects(config, undefined, { summary: true });
+  if (projects.length !== 1) {
+    if (target.source === "automatic") {
+      state.activeProjectId = null;
+      state.activeProjectSource = "browser";
+    }
+    return target.source === "automatic" ? { projectId: "", source: "none" as const } : target;
+  }
+
+  state.activeProjectId = projects[0].id;
+  state.activeProjectSource = "automatic";
+  return { projectId: projects[0].id, source: "automatic" as const };
 }
 
 type ActiveDramaResolution = { dramaId: string; source: "session-pinned" | "browser-focused" | "active-canvas" | "none" };
@@ -557,7 +575,7 @@ async function executeDirectCanvasTool(
   }
   if (name === "generation_get_status" || name === "canvas_task_status") {
     const taskId = String(input.taskId || "");
-    const target = resolveMcpProjectId(state, input.projectId, getBrowserActiveProjectId);
+    const target = await resolveMcpProjectIdWithUniqueFallback(config, state, input.projectId, getBrowserActiveProjectId);
     const query = {
       ...input,
       ...(!taskId && !input.projectId && target.projectId
@@ -621,7 +639,7 @@ async function executeDirectCanvasTool(
     return { models };
   }
   if (name === "canvas_generate_image_batch") {
-    const projectId = resolveMcpProjectId(state, input.projectId, getBrowserActiveProjectId).projectId;
+    const projectId = (await resolveMcpProjectIdWithUniqueFallback(config, state, input.projectId, getBrowserActiveProjectId)).projectId;
     if (!projectId) throw new Error("缺少 projectId；请先选择活动画布");
     const items = Array.isArray(input.items)
       ? (input.items as Array<Record<string, unknown>>)
@@ -740,7 +758,7 @@ async function executeDirectCanvasTool(
   }
   if (name === "canvas_inspect")
     return inspectCanvasContext(config, backendApi, state, input, getBrowserActiveProjectId);
-  const projectId = resolveMcpProjectId(state, input.projectId, getBrowserActiveProjectId).projectId;
+  const projectId = (await resolveMcpProjectIdWithUniqueFallback(config, state, input.projectId, getBrowserActiveProjectId)).projectId;
   const mcpCommandIdentity = name === "canvas_apply_ops" ? {
     tool: "canvas_apply_ops",
     targetId: projectId,
@@ -1163,7 +1181,7 @@ function registerBackendCanvasTools(
         segmentId?: string;
         limit?: number;
       };
-      const projectId = resolveMcpProjectId(state, input.projectId, getBrowserActiveProjectId).projectId;
+      const projectId = (await resolveMcpProjectIdWithUniqueFallback(config, state, input.projectId, getBrowserActiveProjectId)).projectId;
       if (!projectId)
         throw new Error(
           "缺少 projectId（先调用 canvas_set_active_project 或显式传入）",
@@ -1234,7 +1252,7 @@ function registerBackendCanvasTools(
         Math.min(12, Math.floor(Number(rawInput.columns ?? 2))),
       );
       const gap = Number(rawInput.gap ?? 24);
-      const projectId = resolveMcpProjectId(state, rawInput.projectId, getBrowserActiveProjectId).projectId;
+      const projectId = (await resolveMcpProjectIdWithUniqueFallback(config, state, rawInput.projectId, getBrowserActiveProjectId)).projectId;
       const project = await fetchCurrentCanvasProject(config, projectId);
       const node = nodesOf(project).find((item) => String(item.id) === nodeId);
       if (!node) throw new Error(`画布上找不到节点：${nodeId}`);
@@ -1363,7 +1381,7 @@ function registerBackendCanvasTools(
       }).shape,
     },
     async (rawInput: Record<string, unknown>) => {
-      const projectId = resolveMcpProjectId(state, rawInput.projectId, getBrowserActiveProjectId).projectId;
+      const projectId = (await resolveMcpProjectIdWithUniqueFallback(config, state, rawInput.projectId, getBrowserActiveProjectId)).projectId;
       if (!projectId) throw new Error("缺少 projectId；请先选择活动画布");
       const nodeIds = [
         ...(rawInput.nodeId ? [String(rawInput.nodeId)] : []),
@@ -1524,7 +1542,7 @@ function registerBackendCanvasTools(
       }).shape,
     },
     async (rawInput: Record<string, unknown>) => {
-      const projectId = resolveMcpProjectId(state, rawInput.projectId, getBrowserActiveProjectId).projectId;
+      const projectId = (await resolveMcpProjectIdWithUniqueFallback(config, state, rawInput.projectId, getBrowserActiveProjectId)).projectId;
       if (!projectId) throw new Error("缺少 projectId；请先选择活动画布");
       const sources = normalizeImportSources(rawInput.items);
 
@@ -1863,7 +1881,7 @@ function registerBackendCanvasTools(
   for (const name of productionWorkspaceToolNames) {
     server.registerTool(name, { description: toolDescriptions[name], inputSchema: toolInputSchemas[name] }, async (raw: Record<string, unknown>) => {
       const request = productionWorkspaceRequest(name, raw)!;
-      return textResult(migrateToolGuidance(request.method === "GET" ? await backendApi.get(request.path) : productionWriteReceipt(await backendApi.post(request.path, request.body), { tool: name, input: raw })));
+      return textResult(request.method === "GET" ? await backendApi.get(request.path) : productionWriteReceipt(await backendApi.post(request.path, request.body), { tool: name, input: raw }));
     });
   }
   for (const name of ["production_compile", "production_get_compilation", "production_apply_compilation", "production_diagnose_bindings"] as const) {
@@ -2761,6 +2779,15 @@ async function inspectCanvasContext(
 ) {
   const projects = await fetchCanvasProjects(config, undefined, { summary: true });
   const requestedId = String(input.projectId || "");
+  if (
+    !requestedId &&
+    state.activeProjectSource === "automatic" &&
+    projects.length !== 1 &&
+    !String(getBrowserActiveProjectId?.() || "").trim()
+  ) {
+    state.activeProjectId = null;
+    state.activeProjectSource = "browser";
+  }
   const target = resolveMcpProjectId(state, requestedId, getBrowserActiveProjectId);
   const selectedId = target.projectId;
   let project = selectedId
@@ -2799,9 +2826,9 @@ async function inspectCanvasContext(
           },
     };
   }
-  if (!state.activeProjectId && projects.length === 1 && !getBrowserActiveProjectId) {
+  if (!state.activeProjectId && projects.length === 1 && !String(getBrowserActiveProjectId?.() || "").trim()) {
     state.activeProjectId = project.id;
-    state.activeProjectSource = "session";
+    state.activeProjectSource = "automatic";
   }
   project = await fetchCurrentCanvasProject(config, project.id);
   const projectState = project as Record<string, unknown>;

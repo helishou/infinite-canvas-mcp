@@ -279,10 +279,31 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
         <div>
             {(!view || view === "planning") && <section className="mb-5 space-y-3">
                 <ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t("productionCanvas.dramaPlanning")} summary={t(folder.productionPlan?.confirmedAt && folder.productionPlan.confirmedOutline === folder.outline ? "productionCanvas.planConfirmed" : "productionCanvas.planUnconfirmed")} help={<p>{t("productionCanvas.dramaPlanningHint")}</p>} actions={<Button icon={<PencilLine className="size-4" />} onClick={openFolderEditor}>{t("productionCanvas.dramaPlanning")}</Button>} />
-                <div className="flex items-start gap-4 rounded-xl border border-border bg-card p-4">
-                    {activeCoverUrl && <img src={activeCoverUrl} alt={folder.name} className="h-24 w-20 shrink-0 rounded-lg object-cover" />}
-                    <div className="min-w-0"><p className="whitespace-pre-line text-sm leading-6 text-muted-foreground">{folder.outline || t("drama.outlineEmpty")}</p>
-                    {(folder.tags || []).length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{(folder.tags || []).map((tag) => <Tag key={tag}>{tag}</Tag>)}</div>}</div>
+                <div className="rounded-xl border border-border bg-card p-4 dark:border-stone-800">
+                    <div className="flex gap-4">
+                        {activeCoverUrl && <img src={activeCoverUrl} alt={folder.name} className="h-24 w-20 shrink-0 rounded-lg object-cover" />}
+                        <div className="min-w-0 flex-1 space-y-3">
+                            <div>
+                                <p className="text-xs font-medium text-muted-foreground">{t("productionCanvas.outlineSummary")}</p>
+                                <p className="mt-1 whitespace-pre-line text-sm leading-6">{folder.outline || t("productionCanvas.outlineEmptyHint")}</p>
+                            </div>
+                            {folder.description && (
+                                <div>
+                                    <p className="text-xs font-medium text-muted-foreground">{t("productionCanvas.description")}</p>
+                                    <p className="mt-1 text-sm text-muted-foreground">{folder.description}</p>
+                                </div>
+                            )}
+                            <div className="flex flex-wrap gap-2 text-xs">
+                                <Tag color="blue">{t("productionCanvas.storyboardImageMode")}: {folder.productionPlan?.storyboardImageMode === "generate" ? t("productionCanvas.storyboardImagesGenerate") : folder.productionPlan?.storyboardImageMode === "skip" ? t("productionCanvas.storyboardImagesSkip") : t("productionCanvas.notConfigured")}</Tag>
+                                <Tag>{t("director.workspace.videoAspectRatio")}: {planLabel(t, folder.productionPlan?.videoAspectRatio)}</Tag>
+                                <Tag>{t("productionCanvas.videoModel")}: {planLabel(t, folder.productionPlan?.h3Model)}</Tag>
+                                <Tag>{t("productionCanvas.generalImageModel")}: {planLabel(t, folder.productionPlan?.imageModel)}</Tag>
+                                <Tag>{t("sceneProduction.enable")}: {folder.productionPlan?.parallelScenes ? t(`sceneProduction.mode.${folder.productionPlan.reviewPolicy?.mode || "none"}`) : t("productionCanvas.notConfigured")}</Tag>
+                            </div>
+                            {(folder.tags || []).length > 0 &&
+                                <div className="flex flex-wrap gap-1.5">{(folder.tags || []).map(tag => <Tag key={tag}>{tag}</Tag>)}</div>}
+                        </div>
+                    </div>
                 </div>
             </section>}
 
@@ -354,7 +375,7 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
                     <div className="rounded-lg border border-stone-200 px-3 py-3 text-sm text-stone-500 dark:border-stone-800 dark:text-stone-400">{episodeDraft.canvasId ? t("drama.legacyEpisodeCanvasBound", { name: projects.find(project => project.id === episodeDraft.canvasId)?.title || episodeDraft.canvasId }) : t("drama.sceneCanvasWorkflowHint")}</div>
                 </div> : null}
             </Modal>
-            <Modal title={t("productionCanvas.dramaPlanning")} open={editorOpen} onCancel={() => { if (!savingPlan) setEditorOpen(false); }} onOk={() => void saveFolder()} okText={t("productionCanvas.confirmPlan")} cancelText={t("common.cancel")} confirmLoading={uploadingCover || savingPlan} width={760} styles={{ body: { maxHeight: "70dvh", overflow: "auto" } }} footer={(originNode) => <div className="flex w-full flex-wrap items-center justify-between gap-2"><Button danger type="text" disabled={savingPlan} icon={<Trash2 className="size-4" />} onClick={deleteDrama}>{t("drama.deleteProject")}</Button><div className="flex flex-wrap gap-2"><Button disabled={uploadingCover || savingPlan} onClick={() => void saveFolder(false)}>{t("sceneProduction.saveDraft")}</Button>{originNode}</div></div>}>
+            <Modal title={t("productionCanvas.dramaPlanning")} open={editorOpen} onCancel={() => { if (!savingPlan) setEditorOpen(false); }} onOk={() => void saveFolder()} okText={t("productionCanvas.confirmPlan")} cancelText={t("common.cancel")} confirmLoading={uploadingCover || savingPlan} width={760} styles={{ body: { maxHeight: "70dvh", overflow: "auto" } }} footer={(originNode) => <div className="flex w-full flex-wrap items-center justify-between gap-2"><div className="text-xs text-stone-400">{t("productionCanvas.deleteHint")}</div><div className="flex flex-wrap gap-2"><Button disabled={uploadingCover || savingPlan} onClick={() => void saveFolder(false)}>{t("sceneProduction.saveDraft")}</Button>{originNode}</div></div>}>
                 {draft ? (
                     <div className="space-y-5">
                         <div className="grid gap-5 sm:grid-cols-[180px_minmax(0,1fr)]">
@@ -371,15 +392,19 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
                         <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("productionCanvas.planRequirements")}</span><Input.TextArea rows={3} value={draft.productionPlan.requirements} onChange={event => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, requirements: event.target.value } })} /></label>
                         <p className="text-xs text-muted-foreground">{t("productionCanvas.newEpisodeDefaults")}</p>
                         <div className="grid gap-4 sm:grid-cols-2">
-                            <label><p className="mb-2 text-sm">{t("productionCanvas.storyboardImageMode")}</p><Select className="w-full" placeholder={t("productionCanvas.storyboardImageRequired")} value={draft.productionPlan.storyboardImageMode} onChange={storyboardImageMode => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, storyboardImageMode } })} options={[{ value: "generate", label: t("productionCanvas.storyboardImagesGenerate") }, { value: "skip", label: t("productionCanvas.storyboardImagesSkip") }]} /><p className="mt-2 text-xs text-muted-foreground">{t("productionCanvas.storyboardImageModeHint")}</p></label>
-                            <SceneProductionSettings value={draft.productionPlan} onChange={patch => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, ...patch } })} />
+                            <label><p className="mb-2 text-sm">{t("productionCanvas.storyboardImageMode")}</p><Select className="w-full" placeholder={t("productionCanvas.storyboardImageRequired")} value={draft.productionPlan.storyboardImageMode} onChange={storyboardImageMode => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, storyboardImageMode } })} options={[{ value: "generate", label: t("productionCanvas.storyboardImagesGenerate") }, { value: "skip", label: t("productionCanvas.storyboardImagesSkip") }]} />{!draft.productionPlan.storyboardImageMode && <p className="mb-1 mt-2 text-xs text-red-500">{t("productionCanvas.storyboardImageRequired")}</p>}<p className="mt-2 text-xs text-muted-foreground">{t("productionCanvas.storyboardImageModeHint")}</p></label>
+                            <SceneProductionSettings value={draft.productionPlan} onChange={patch => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, ...patch } })} />{draft.productionPlan.parallelScenes && !draft.productionPlan.reviewPolicy && <p className="mt-2 text-xs text-red-500">{t("sceneProduction.reviewRequired")}</p>}
                             <p className="text-xs text-muted-foreground">{t("sceneProduction.draftHint")}</p>
                             <div><p className="mb-2 text-sm">{t("productionCanvas.generalImageModel")}</p><ModelPicker config={modelConfig} capability="image" fullWidth value={draft.productionPlan.imageModel} onChange={imageModel => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, imageModel } })} /></div>
-                            {(["character", "scene", "prop", "style", "keyframe"] as const).map(kind => <div key={kind}><p className="mb-2 text-sm">{t(`productionCanvas.assetModel.${kind}`)}</p><ModelPicker config={modelConfig} capability="image" fullWidth placeholder={t("productionCanvas.inheritImageModel")} value={draft.productionPlan.imageModelsByKind[kind]} onChange={model => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, imageModelsByKind: { ...draft.productionPlan.imageModelsByKind, [kind]: model } } })} /><Button type="text" size="small" disabled={!draft.productionPlan.imageModelsByKind[kind]} onClick={() => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, imageModelsByKind: { ...draft.productionPlan.imageModelsByKind, [kind]: undefined } } })}>{t("productionCanvas.inheritImageModel")}</Button></div>)}
+                            {(["character", "scene", "prop", "style", "keyframe"] as const).map(kind => <div key={kind}><p className="mb-2 text-sm">{t(`productionCanvas.assetModel.${kind}`)}</p><ModelPicker config={modelConfig} capability="image" fullWidth placeholder={t("productionCanvas.inheritImageModel")} value={draft.productionPlan.imageModelsByKind[kind]} onChange={model => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, imageModelsByKind: { ...draft.productionPlan.imageModelsByKind, [kind]: model } } })} /><Button type="link" size="small" disabled={!draft.productionPlan.imageModelsByKind[kind]} onClick={() => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, imageModelsByKind: { ...draft.productionPlan.imageModelsByKind, [kind]: undefined } } })}>{t("productionCanvas.inheritImageModel")}</Button></div>)}
                             <div><p className="mb-2 text-sm">{t("productionCanvas.videoModel")}</p><ModelPicker config={modelConfig} capability="video" fullWidth value={draft.productionPlan.h3Model} onChange={h3Model => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, h3Model } })} /></div>
                             <label><p className="mb-2 text-sm">{t("director.workspace.videoAspectRatio")}</p><Select className="w-full" allowClear value={draft.productionPlan.videoAspectRatio || undefined} onChange={videoAspectRatio => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, videoAspectRatio: videoAspectRatio || null } })} options={["9:16", "16:9", "1:1", "4:3", "3:4", "2:3", "3:2", "21:9"].map(value => ({ value, label: value }))} /></label>
                         </div>
                         <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.description")}</span><Input.TextArea rows={3} placeholder={t("drama.descriptionPlaceholder")} value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label>
+                        <div className="rounded-xl border border-red-200 p-4 dark:border-red-950">
+                            <p className="text-sm font-medium text-red-600 dark:text-red-400">{t("productionCanvas.dangerZone")}</p>
+                            <Button danger type="text" className="mt-2" icon={<Trash2 className="size-4" />} onClick={deleteDrama}>{t("drama.deleteProject")}</Button>
+                        </div>
                         <input ref={coverInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => void handleCoverChange(event)} />
                     </div>
                 ) : null}
@@ -408,6 +433,12 @@ function EpisodeCard({ episode, project, onProduce, onEdit, onDelete, t }: { epi
             <span className="shrink-0">{project ? `${project.summary?.nodeCount ?? project.nodes.length} ${t("drama.nodes")}` : ""}</span>
         </div>
     </article>;
+}
+
+/** 生产规划展示：空值不显示空白，统一标记「未设置」。 */
+function planLabel(t: TFunction, value?: string | null) {
+    if (!value) return t("productionCanvas.notConfigured");
+    return value;
 }
 
 function formatBytes(bytes: number) {

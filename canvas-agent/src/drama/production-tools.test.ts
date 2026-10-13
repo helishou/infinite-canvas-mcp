@@ -12,8 +12,7 @@ test("unified run routing preserves canvas defaults and explicit published input
     assert.deepEqual((edit as { body: any }).body.adoptions, [{ taskId: "task", artifactHash: "a".repeat(64) }]);
 });
 import assert from "node:assert/strict";
-import { productionToolNames, productionToolRequest, productionToolSchemas, executeProductionTool } from "./production-tools.js";
-import { removedToolMigrations, removedToolNotice, migrateToolGuidance } from "../canvas/tool-migrations.js";
+import { productionToolNames, productionToolRequest, productionToolSchemas, executeProductionTool, isProductionTool } from "./production-tools.js";
 
 const cases: Record<string, { input?: Record<string, unknown>; method: string; suffix: string }> = {
     production_preflight: { input: { action: "generate", request: { expectedRevision: 2 } }, method: "POST", suffix: "/preflight" },
@@ -32,7 +31,6 @@ const cases: Record<string, { input?: Record<string, unknown>; method: string; s
     production_get_version_source: { input: { version: 2, sourceSection: "shots" }, method: "GET", suffix: "/versions/2?view=source&snapshot=published&sourceSection=shots&pageSize=50" },
     production_get_version_artifact_index: { input: { version: 2 }, method: "GET", suffix: "/versions/2?view=artifact_index&snapshot=published&pageSize=50" },
     production_get_version_artifact: { input: { version: 2, targetId: "seg/1" }, method: "GET", suffix: "/versions/2?view=artifacts&snapshot=published&targetIds=seg%2F1&chunkBytes=32768" },
-    production_list_legacy: { method: "GET", suffix: "/legacy" },
     production_preview_impact: { input: { stage: "director" }, method: "GET", suffix: "/impact?stage=director" },
     production_edit: { input: { operationId: "original", expectedRevision: 2, ops: [{ type: "set_director_brief", brief: "中文\n原文" }] }, method: "POST", suffix: "/ops" },
     production_publish: { input: { operationId: "original", expectedRevision: 2, stage: "director" }, method: "POST", suffix: "/publish" },
@@ -41,8 +39,8 @@ const cases: Record<string, { input?: Record<string, unknown>; method: string; s
     production_get_run: { input: { version: 2 }, method: "GET", suffix: "/runs/2" },
     production_export_markdown: { input: { stage: "shots", version: 2 }, method: "GET", suffix: "/export?stage=shots&version=2" },
 };
-test("24 unified contracts route same IDs by explicit owner and reject mixed identities", () => {
-    assert.equal(productionToolNames.length, 24);
+test("23 unified contracts route same IDs by explicit owner and reject mixed identities", () => {
+    assert.equal(productionToolNames.length, 23);
     for (const name of productionToolNames) for (const kind of ["episode", "canvas"] as const) {
         const c = cases[name], raw = { kind, id: "same:id", ...c.input };
         const request = productionToolRequest(name, raw);
@@ -52,17 +50,14 @@ test("24 unified contracts route same IDs by explicit owner and reject mixed ide
         if (request.method === "POST" && !["production_pause_run", "production_resume_run", "production_sync_clips"].includes(name)) assert.deepEqual(request.body, c.input);
     }
 });
-test("removed names are metadata, not executable aliases; guidance never rewrites authored content", () => {
-    assert.equal(Object.keys(removedToolMigrations).length, 37);
-    assert.equal(removedToolNotice("toString"), undefined);
-    for (const name of Object.keys(removedToolMigrations)) assert.equal(removedToolNotice(name)?.code, "TOOL_REMOVED");
-    const source = { nextRead: { tool: "drama_get_production", input: { episodeId: "original" } } };
-    const value = { source, snapshot: source, preflight: { nextActions: [source.nextRead], diagnostics: [{ nextAction: source.nextRead }] } };
-    const result = migrateToolGuidance(value);
-    assert.equal(result.source, source); assert.equal(result.snapshot, source);
-    assert.deepEqual(result.preflight.nextActions[0], { tool: "production_get", input: { kind: "episode", id: "original" } });
-    assert.deepEqual(migrateToolGuidance({ nextRead: { tool: "drama_get_production", input: { kind: "episode", id: "original" } } }).nextRead,
-        { tool: "production_get", input: { kind: "episode", id: "original" } });
+test("retired production names are absent and current guidance is not rewritten", () => {
+    assert.equal(Object.hasOwn(productionToolSchemas, "production_list_legacy"), false);
+    for (const name of ["production_list_legacy", "production_preview_continuity_upgrade", "drama_get_production", "canvas_get_production"]) {
+        assert.equal(isProductionTool(name), false);
+        assert.equal(Object.hasOwn(productionToolSchemas, name), false);
+    }
+    const source = { nextRead: { tool: "production_get", input: { kind: "episode", id: "original" } } };
+    assert.deepEqual(source.nextRead, { tool: "production_get", input: { kind: "episode", id: "original" } });
 });
 test("write routing preserves request identity and projects replies without carrying full source", async () => {
     const input = { kind: "canvas", id: "c", operationId: "original", expectedRevision: 2, ops: [{ type: "set_director_brief", brief: "中文\n原文" }] };
@@ -75,4 +70,11 @@ test("write routing preserves request identity and projects replies without carr
     assert.equal(count, 1); assert.equal(result.operationId, "original"); assert.equal(result.production.replayed, true);
     assert.deepEqual(result.nextRead, { tool: "production_get", input: { kind: "canvas", id: "c" } });
     assert.ok(JSON.stringify(result).length < 2000);
+});
+
+test("current MCP reads preserve Backend nextRead values without alias rewriting", async () => {
+    const payload = { nextRead: { tool: "drama_get_production", input: { episodeId: "e" } }, data: { stable: true } };
+    const result = await executeProductionTool({ get: async () => payload, post: async () => { throw new Error("Unexpected POST"); } }, "production_get", { kind: "episode", id: "e" });
+    assert.equal(result, payload);
+    assert.deepEqual((result as any).nextRead, { tool: "drama_get_production", input: { episodeId: "e" } });
 });

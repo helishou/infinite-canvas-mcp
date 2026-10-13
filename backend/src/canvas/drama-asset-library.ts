@@ -37,11 +37,25 @@ function effectiveSourceNode(node: AssetNode, kind: string): AssetNode {
     const image = selected.image;
     return image ? { ...node, type: kind, metadata: { ...node.metadata, content: image.content || image.url || "", storageKey: image.storageKey, naturalWidth: image.naturalWidth || image.width, naturalHeight: image.naturalHeight || image.height, bytes: image.bytes, mimeType: image.mimeType } } : { ...node, type: kind };
 }
+function missingSharedSourceAsset(asset: Asset, reason: "source_project_missing" | "source_node_missing"): Asset {
+    const metadata = { ...asset.metadata, sharedAssetMissing: true, sharedAssetMissingReason: reason };
+    if (asset.kind === "scene") return {
+        ...asset, coverUrl: "", metadata,
+        data: { ...asset.data, name: asset.title, description: "", image: { url: "", storageKey: "", name: asset.title, width: 0, height: 0, bytes: 0, mimeType: "" }, colorPalette: [], colorCardPrompt: "" },
+    };
+    if (asset.kind === "character") return {
+        ...asset, coverUrl: "", metadata,
+        data: { ...asset.data, name: asset.title, englishName: "", description: "", voice: "", voiceName: "", voiceDescription: "", voiceAssetId: "", images: [] },
+    };
+    return { ...asset, coverUrl: "", metadata };
+}
 export function projectAsset(db: BackendDatabase, asset: Asset): Asset {
     const source = sourceOf(asset);
     if (!source) return asset;
-    const node = nodes(rawProject(db, source.sourceProjectId)).find(n => n.id === source.sourceNodeId);
-    if (!node) throw collaborationError("ASSET_SOURCE_MISSING", `共享资产源不存在: ${asset.id}`);
+    const project = rawProject(db, source.sourceProjectId);
+    if (!project) return missingSharedSourceAsset(asset, "source_project_missing");
+    const node = nodes(project).find(n => n.id === source.sourceNodeId);
+    if (!node) return missingSharedSourceAsset(asset, "source_node_missing");
     const m = effectiveSourceNode(node, asset.kind).metadata || {};
     let data: Record<string, any> = {};
     if (asset.kind === "character") data = { name: node.title, englishName: m.characterEnglishName || "", description: m.characterDescription || "", images: m.characterImages || [], primaryIndex: m.characterPrimaryIndex || 0, voice: m.characterVoiceUrl || "", voiceName: m.characterVoiceName || "", voiceDescription: m.characterVoiceDescription || "", voiceStorageKey: m.characterVoiceStorageKey, voiceAssetId: m.characterVoiceAssetId || "" };

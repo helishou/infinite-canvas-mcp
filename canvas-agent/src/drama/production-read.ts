@@ -1,4 +1,3 @@
-import { migrateToolGuidance } from "../canvas/tool-migrations.js";
 import { z } from "zod";
 
 export const productionSourceSectionSchema = z.enum(["context", "script", "production_shots", "clip_groups", "keyframes", "keyframe_reviews", "settings", "asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "subject_registry", "utterances", "ledger.facts", "ledger.timelines", "ledger.initial", "ledger.events", "ledger.requirements", "ledger.coverage"]);
@@ -99,11 +98,11 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
     } : null;
     const owner = production.sceneId ? { tool: "production_get_scene_production", input: { sceneId: production.sceneId } }
         : production.projectId ? { tool: "production_get_artifact_index", input: { kind: "canvas", id: production.projectId } } : { tool: "production_get_artifact_index", input: { kind: "episode", id: production.episodeId } };
-    return migrateToolGuidance({ ...header, view: "summary", snapshot: input.snapshot, [input.snapshot]: summarize(selected),
+    return { ...header, view: "summary", snapshot: input.snapshot, [input.snapshot]: summarize(selected),
         omitted: ["source", "artifacts", "references", "scenes", "shots", "clipGroups", "keyframes", "keyframeReviews", "settings"],
         nextRead: { tool: owner.tool, input: { ...owner.input, snapshot: input.snapshot, pageSize: 50, ...(input.targetIds ? { targetIds: input.targetIds } : {}) } },
         readOptions: production.sceneId ? { tool: "production_get_scene_production", selectors: ["sourceSection", "targetIds", "pageSize", "cursor", "chunkBytes"] }
-            : { tools: ["production_get_source", "production_get_artifact_index", "production_get_artifact", "production_get_workbench"] } });
+            : { tools: ["production_get_source", "production_get_artifact_index", "production_get_artifact", "production_get_workbench"] } };
 }
 
 function count(value: any): number { return Array.isArray(value) ? value.length : value && typeof value === "object" ? Object.keys(value).length : 0; }
@@ -123,7 +122,6 @@ export function projectProductionVersion(owner: { episodeId: string; projectId?:
         summary.nextRead = { tool: owner.sceneId ? "production_get_scene_version" : "production_get_version_artifact_index",
             input: { ...(owner.sceneId ? { sceneId: owner.sceneId } : { kind: owner.projectId ? "canvas" : "episode", id: owner.projectId || owner.episodeId }), version: version.version, pageSize: 50 } };
     }
-    if (input.view === "summary") (projected as any).nextRead = migrateToolGuidance({ nextRead: (projected as any).nextRead }).nextRead;
     return { ...pick(version, ["version", "stage", "createdAt"]), ...owner, sha256: versionHash,
         ...(input.view === "full" && !input.chunkBytes ? { impact: version.impact } : {}), snapshot: projected };
 }
@@ -151,7 +149,7 @@ export function productionWriteReceipt(result: any, context: { tool?: string; in
     const kind = input.kind || (input.sceneId && !input.episodeId && !input.projectId ? "scene" : input.projectId || context.tool?.startsWith("canvas_") ? "canvas" : "episode");
     const tool = kind === "scene" ? "production_get_scene_production" : "production_get";
     const readInput = kind === "scene" ? { sceneId: ownerId, view: "summary" } : { kind, id: ownerId };
-    return migrateToolGuidance({ ...pick(result, ["ok", "replayed", "mediaSubmitted", "mediaAuthorized", "operationId", "workId", "runId", "status", "updated", "created", "reused", "skipped"]),
+    return { ...pick(result, ["ok", "replayed", "mediaSubmitted", "mediaAuthorized", "operationId", "workId", "runId", "status", "updated", "created", "reused", "skipped"]),
         ...(clipRefreshes.length ? { sourceSaved: true, clipRefreshes, ...(clipRefreshes.length === 1 ? { clipRefresh: clipRefreshes[0] } : {}), mediaSubmitted: false } : {}),
         ...pick(input, ["operationId", "sceneId", "projectId", "episodeId"]),
         production: { ...pick(p, ["episodeId", "revision", "publishedVersion", "updatedAt", "replayed"]), sourceHash: p.draft?.director?.sourceHash, engine: p.draft?.director?.engine },
@@ -168,5 +166,5 @@ export function productionWriteReceipt(result: any, context: { tool?: string; in
         warnings: { count: sync.reduce((n: number, item: any) => n + count(item.diagnostics), 0) + count(layout.diagnostics), codes: diagnosticCodes },
         ...(["production_edit", "production_publish", "production_restore", "production_sync_clips"].includes(context.tool || "") ? { readPolicy: { nextReadRequired: false, guidance: "成功回执已给出 revision/sourceHash；复用已知输入。仅缺少任务所需字段或遇到冲突时定向读取，不整稿回读或对已保存源稿重复计算哈希。" } } : {}),
         ...(result.project ? { nextRead: { tool: "production_get_canvas_context", input: { projectId: result.project.id } } } : ownerId ? { nextRead: { tool: context.tool?.includes("scene_work") || context.tool === "production_start_shared_review" ? "production_get_scene_work" : tool,
-            input: context.tool?.includes("scene_work") || context.tool === "production_start_shared_review" ? { kind, id: ownerId } : readInput } } : {}) });
+            input: context.tool?.includes("scene_work") || context.tool === "production_start_shared_review" ? { kind, id: ownerId } : readInput } } : {}) };
 }

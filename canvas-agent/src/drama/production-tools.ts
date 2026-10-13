@@ -1,7 +1,6 @@
 import { z } from "zod";
 import { productionEditSchema, productionOperationSchema, productionPreflightSchema, type ProductionOperation } from "./production-contract.js";
 import { productionReadQuery, productionSourceSectionSchema, productionWriteReceipt } from "./production-read.js";
-import { migrateToolGuidance } from "../canvas/tool-migrations.js";
 import { productionOwnerPath } from "./production-owner.js";
 export { productionOwnerPath } from "./production-owner.js";
 
@@ -38,7 +37,6 @@ export const productionToolSchemas = {
     production_get_version_source: versionSourceRead,
     production_get_version_artifact_index: versionArtifactIndexRead,
     production_get_version_artifact: versionArtifactRead,
-    production_list_legacy: identity,
     production_preview_impact: identity.extend({ stage }),
     production_edit: edit,
     production_publish: identity.extend({ ...write, stage }),
@@ -67,9 +65,8 @@ export const productionToolDescriptions: Record<ProductionToolName, string> = {
     production_get_version_source: "分页读取指定历史版本的 sourceSection；默认每页 50 条，最多 100 条。",
     production_get_version_artifact_index: "分页读取指定历史版本的轻量产物目录，不含提示词和引用。",
     production_get_version_artifact: "按 targetId 分块读取指定历史版本的单个产物提示词；使用 cursor 读完并核对 sha256。",
-    production_list_legacy: "读取 kind/id 的旧剧情与剧本文件及哈希，供明确选择导入。",
     production_preview_impact: "按 kind/id/stage 预览发布影响，不提交媒体。",
-    production_edit: "以 operationId/expectedRevision 原子编辑 kind/id draft。Subject Prompt v2 用 upsert_director_subject/delete_director_subject、原实体字段、Shot/关键帧字段、edit_director_continuity 和 repartition_director_clips；人工 Prompt 仅在编译器 SourceMap 可唯一定位时用 reverse_sync_director_prompt 回写，否则保留画布文本并返回诊断。选择正式历史媒体时可传精确 generationLogId 或 canvas_task_status 返回的 taskId。新合同编辑会登记真实受影响 Clip 的后台局部编译同步，不提交媒体或发布。响应丢失恢复原 operationId 回执。",
+    production_edit: "以 operationId/expectedRevision 原子编辑 Subject Prompt Assembly v2 + continuity ledger v2 制作稿。Shot、局部帧事件、Subject 图片绑定、关键帧、对白与 Clip 分区均写入唯一当前格式；Clip 音频引用使用 audio_bindings。人工 Prompt 仅在编译器 SourceMap 可唯一定位时用 reverse_sync_director_prompt 回写，否则保留画布文本并返回诊断。选择正式历史媒体时可传精确 generationLogId 或 canvas_task_status 返回的 taskId。新合同编辑会登记真实受影响 Clip 的后台局部编译同步，不提交媒体或发布。响应丢失恢复原 operationId 回执。",
     production_publish: "按 kind/id 发布指定制作阶段；保留 operationId、expectedRevision，返回短回执。",
     production_restore: "按 kind/id 恢复历史版本为草稿；保留 operationId 和 expectedRevision，不修改历史快照。",
     production_sync_clips: "同步 kind/id 当前发布 Clip 输入，不提交媒体；相同输入、绑定和顺序不推进版本。",
@@ -100,7 +97,6 @@ export function productionToolRequest(name: ProductionToolName, raw: unknown) {
         case "production_get_version_source": return get(`${base}/versions/${input.version}${productionReadQuery({ ...input, view: "source" })}`);
         case "production_get_version_artifact_index": return get(`${base}/versions/${input.version}${productionReadQuery({ ...input, view: "artifact_index" })}`);
         case "production_get_version_artifact": return get(`${base}/versions/${input.version}${productionReadQuery({ ...input, view: "artifacts", targetIds: [input.targetId] })}`);
-        case "production_list_legacy": return get(base + "/legacy");
         case "production_preview_impact": return get(`${base}/impact?stage=${input.stage}`);
         case "production_edit": return post(base + "/ops", input);
         case "production_publish": return post(base + "/publish", input);
@@ -115,5 +111,5 @@ export async function executeProductionTool(api: { get(path: string): Promise<un
     const result = request.method === "GET" ? await api.get(request.path) : await api.post(request.path, request.body);
     const projected = ["production_edit", "production_publish", "production_restore", "production_sync_clips"].includes(name)
         ? productionWriteReceipt(result, { tool: name, input: raw as Record<string, any> }) : result;
-    return migrateToolGuidance(projected);
+    return projected;
 }

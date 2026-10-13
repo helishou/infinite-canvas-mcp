@@ -13,7 +13,7 @@ import { CANVAS_CLIPBOARD_FORMAT, findClipboardMediaType, isLegacyCanvasClipboar
 import { createCanvasGraphIndexSelector } from "@/lib/canvas/canvas-graph-index";
 import { Suspense, startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
-import { useParams } from "react-router-dom";
+import { Navigate, useLocation, useParams } from "react-router-dom";
 import { ExternalLink, Group, History, MessageSquare, Pencil, Video } from "lucide-react";
 import { isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { productionImageInput } from "@basketikun/canvas-agent/reference-contract";
@@ -26,7 +26,7 @@ import { fetchWorkflowDetail, isWorkflowImageField } from "@/services/api/workfl
 import { resolveComfyImageSize } from "@/services/api/comfyui";
 import { uploadImage, resolveImageUrl, isImageFile, isSvgFile, type UploadedImage } from "@/services/image-storage";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
-import { BackendApiError, updateBackendAsset, backendMediaUrl, createBackendGenerationLog, createBackendTask, fetchBackendCanvasDrama, prepareCanvasLoop, request, resolveComfyMediaUrl, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
+import { BackendApiError, updateBackendAsset, backendMediaUrl, createBackendGenerationLog, createBackendTask, fetchBackendCanvasDrama, fetchProductionCanvasContext, prepareCanvasLoop, request, resolveComfyMediaUrl, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
 import { runCanvasImageTask } from "@/services/api/canvas-image";
 import { runCanvasVideoTask } from "@/services/api/canvas-video";
 import { runCanvasAudioTask } from "@/services/api/canvas-audio";
@@ -306,13 +306,48 @@ function canvasFocusWidth(rect: Pick<DOMRect, "width" | "left">) {
 
 export default function CanvasPage() {
     const { id } = useParams();
-    const [mounted, setMounted] = useState(false);
+    const location = useLocation();
+    const { t } = useTranslation();
+    const [retry, setRetry] = useState(0);
+    const [entry, setEntry] = useState<{ key: string; destination?: { pathname: string; search: string; hash: string }; error?: string } | null>(null);
 
     useEffect(() => {
-        setMounted(true);
-    }, []);
+        if (!id) { setEntry({ key: "" }); return; }
+        let active = true;
+        const key = JSON.stringify([id, location.search, location.hash, retry]);
+        setEntry(null);
+        void fetchProductionCanvasContext(id).then(({ context }) => {
+            if (!active) return;
+            if (!["episode", "shared-assets", "scene"].includes(context.role)) {
+                setEntry({ key });
+                return;
+            }
+            if (!context.dramaId) throw new Error(`剧目画布 ${id} 缺少剧目归属信息`);
+            if (context.role === "episode" && !context.episodeId) throw new Error(`分集画布 ${id} 缺少分集归属信息`);
 
-    if (!mounted) return <CanvasRefreshShell />;
+            // Direct URLs, task links, and old bookmarks must use the same fixed
+            // production canvas host as links opened from the production workbench.
+            const query = new URLSearchParams(location.search);
+            query.set("dramaId", context.dramaId);
+            query.set("openCanvasId", id);
+            if (context.episodeId) query.set("episodeId", context.episodeId);
+            else query.delete("episodeId");
+            if (context.role === "shared-assets") query.set("workspace", "assets");
+            if (context.role === "scene") {
+                query.set("workspace", "shots");
+                if (context.sceneId) query.set("sceneId", context.sceneId);
+            }
+            setEntry({ key, destination: { pathname: "/production", search: `?${query.toString()}`, hash: location.hash } });
+        }).catch(error => {
+            if (active) setEntry({ key, error: error instanceof Error ? error.message : String(error) });
+        });
+        return () => { active = false; };
+    }, [id, location.hash, location.search, retry]);
+
+    const entryKey = JSON.stringify([id, location.search, location.hash, retry]);
+    if (!entry || entry.key !== entryKey) return <CanvasRefreshShell />;
+    if (entry.error) return <main className="mx-auto max-w-[720px] space-y-4 p-6"><Alert type="error" showIcon message={t("director.loadFailed")} description={entry.error} /><Button onClick={() => setRetry(value => value + 1)}>{t("director.refresh")}</Button></main>;
+    if (entry.destination) return <Navigate to={entry.destination} replace />;
 
     return <CanvasSurface key={id} projectId={id || ""} />;
 }
@@ -438,7 +473,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         browserTaskIds.forEach(kickCanvasBrowserTask);
     }, [browserTaskIds]);
     const [viewport, setViewport] = useState<ViewportTransform>({ x: 0, y: 0, k: 1 });
-    const [canvasTool, setCanvasTool] = useState<"select" | "pan">("pan");
+    const [canvasTool, setCanvasTool] = useState<"select" | "pan">("select");
     const [size, setSize] = useState({ width: 1200, height: 720 });
     const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
     const { publishCursor: publishRealtimeCursor, publishDrag: publishRealtimeDrag } = useCanvasRealtimePresence(projectId, selectedNodeIds);
@@ -2190,7 +2225,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             setSelectedConnectionId(null);
             const { nextSelected } = selectNodeByEvent(event, nodeId);
             pendingSelectionRef.current = nextSelected;
-            if (event.shiftKey || event.metaKey || event.ctrlKey || target.closest("button, input, textarea, select, video, [contenteditable='true'], [data-canvas-node-panel]")) {
+            if (event.shiftKey || event.metaKey || event.ctrlKey || target.closest("button, input, textarea, select, [contenteditable='true'], [data-canvas-node-panel]")) {
                 pendingNodeClickRef.current = null;
             } else {
                 pendingNodeClickRef.current = { nodeId, clientX: event.clientX, clientY: event.clientY };
@@ -5899,14 +5934,6 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                         if (!refPickActive && !characterImagePickerActive) handleCanvasMouseDown(event);
                     }}
                     onCanvasDeselect={refPickActive || characterImagePickerActive ? undefined : deselectCanvas}
-                    onCanvasDoubleClick={(event) => {
-                        if (refPickActive || characterImagePickerActive) return;
-                        const position = screenToCanvas(event.clientX, event.clientY);
-                        const hitNode = nodesRef.current.some((node) => position.x >= node.position.x && position.x <= node.position.x + node.width && position.y >= node.position.y && position.y <= node.position.y + node.height);
-                        if (hitNode) { event.stopPropagation(); return; }
-                        setContextMenu(null);
-                        setNodeCreatePosition(position);
-                    }}
                     onContextMenu={preventCanvasContextMenu}
                     onDrop={handleDrop}
                 >
@@ -5992,7 +6019,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                                 registryVersion={nodeRegistryVersion}
                                 // 图片/视频/音频/文本节点不会消费这些渲染器；不传无用函数，
                                 // 避免生成状态或面板回调变化时让所有媒体节点失去 React.memo 命中。
-                                panelContainer={showPanel && !nodeDefinition?.Panel && !(node.type === CanvasNodeType.Config && node.metadata?.smart === true) ? containerRef.current : undefined}
+                                panelContainer={showPanel && node.type === CanvasNodeType.Config && node.metadata?.smart !== true ? containerRef.current : undefined}
                                 onClosePanel={() => setDialogNodeId(null)}
                                 renderPanel={showPanel ? renderNodePanel : undefined}
                                 renderNodeContent={node.type === CanvasNodeType.Config || node.type === CanvasNodeType.Loop ? renderNodeContentPanel : undefined}
@@ -6107,7 +6134,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
 
                 <CanvasNodeHoverToolbar
                     savingAsset={Boolean(toolbarNode && savingAssetNodes.has(`${projectId}:${toolbarNode.id}`))}
-                    node={screenEditorOpen || selectedNodeIds.size > 1 || isNodeDragging || isNodeResizing || nodeImageSettingsOpen || Boolean(referencePickerNodeId) || expandedBatchNodeIds.has(toolbarNode?.id || "") ? null : toolbarNode}
+                    node={selectedNodeIds.size > 1 || isNodeDragging || isNodeResizing || nodeImageSettingsOpen || Boolean(referencePickerNodeId) || expandedBatchNodeIds.has(toolbarNode?.id || "") ? null : toolbarNode}
                     viewport={viewport}
                     extraTools={[...productionMoreActions, ...(pluginToolbarItems || [])]}
                     onDiscardSharedEdits={(node) => void discardSharedAssetEdits(node)}
