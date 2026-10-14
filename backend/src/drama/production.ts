@@ -4071,4 +4071,3 @@ function reorder<T extends { id: string }>(items: T[], ids: string[]) {
 function orderShotsByScene(draft: EpisodeProductionData) {
     return draft.scenes.flatMap((scene) => draft.shots.filter((shot) => shot.sceneId === scene.id));
 }
-        
