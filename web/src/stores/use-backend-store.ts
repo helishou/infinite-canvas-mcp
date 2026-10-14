@@ -1,9 +1,9 @@
 import { create } from "zustand";
-import { backendHealth, discoverBackendToken, getBackendUrl, probeBackendBusinessApi } from "@/services/backend-api";
+import { backendHealth, discoverBackendToken, getBackendUrl, hasBackendWriteInFlight, probeBackendBusinessApi } from "@/services/backend-api";
 import { runBackendConnectionMonitorCycle } from "@/lib/backend-connection-monitor";
 import { startSingleFlightPoller } from "@/lib/single-flight-poll";
 import { getBackendTokenShared, setBackendToken } from "@/lib/backend-token";
-import { persistBackendConnection } from "@/lib/backend-connection";
+import { persistBackendConnection, shouldUseViteBackendProxy, viteBackendAgentEndpoint } from "@/lib/backend-connection";
 
 type BackendStore = {
     url: string;
@@ -28,20 +28,9 @@ let backendEventCursorUrl = "";
 let activeCanvasProjectId = "";
 let backendMonitorStarted = false;
 
-// 本地总后台（127.0.0.1/localhost:17370）在浏览器直连时会经过系统代理，
-// 而代理会截断长连接 SSE（net::ERR_INCOMPLETE_CHUNKED_ENCODING）。
-// 检测到本地总后台时改走同源相对路径，由 Vite 开发服务器代理转发（Node 端，不经浏览器代理），
-// 从而绕开代理对 SSE 的截断。非本地/远程总后台仍用绝对地址直连。
-function isLocalBackendUrl(url: string): boolean {
-    if (typeof window === "undefined") return false;
-    try {
-        const u = new URL(url);
-        return (u.hostname === "127.0.0.1" || u.hostname === "localhost") && u.port === "17370";
-    } catch {
-        return false;
-    }
-}
-
+// 本机 Backend（loopback，或本地 Vite 页面的同机地址）在浏览器直连时可能经过系统代理，
+// 代理会截断长连接 SSE（net::ERR_INCOMPLETE_CHUNKED_ENCODING）。改走 Vite 同源代理，
+// 由 Node 转发 /events；远程 Backend 仍使用绝对地址。
 function stopBackendEvents() {
     backendEvents?.close();
     backendEvents = null;
@@ -50,7 +39,7 @@ function stopBackendEvents() {
 
 function startBackendEvents(url: string, token: string) {
     if (typeof window === "undefined" || !token) return;
-    const baseEventsUrl = isLocalBackendUrl(url)
+    const baseEventsUrl = shouldUseViteBackendProxy(url)
         ? `/events?token=${encodeURIComponent(token)}`
         : `${url.replace(/\/$/, "")}/events?token=${encodeURIComponent(token)}`;
     const eventsUrl = baseEventsUrl;
@@ -93,7 +82,7 @@ function startBackendEvents(url: string, token: string) {
 
 function syncAgentEndpoint(url: string, token: string) {
     if (typeof window === "undefined") return;
-    void import("@/stores/use-agent-store").then(({ useAgentStore }) => useAgentStore.getState().setAgentState({ url: `${url.replace(/\/$/, "")}/agent`, token }));
+    void import("@/stores/use-agent-store").then(({ useAgentStore }) => useAgentStore.getState().setAgentState({ url: viteBackendAgentEndpoint(url), token }));
 }
 
 /** 总后台连接状态 store。自动在启动时检测连通性。 */
@@ -112,10 +101,15 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
     },
 
     checkConnection: async () => {
+        if (get().connected && hasBackendWriteInFlight()) return;
         set({ checking: true });
         const wasConnected = get().connected;
         const health = await backendHealth();
         if (!health.ok) {
+            // A slow synchronous production edit can temporarily block the health
+            // route on the same Backend event loop. Don't turn its own save into
+            // a global disconnected banner; the write request owns its receipt.
+            if (wasConnected && hasBackendWriteInFlight()) { set({ checking: false }); return; }
             stopBackendEvents();
             structuredSettingsHydrated = false;
             set({ connected: false, checking: false, businessError: "", error: `无法连接总后台 ${getBackendUrl()}` });
@@ -141,6 +135,7 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
         // 却在 /canvas/* 全部 404，页面会安静地显示"素材库是空的"。业务接口探活失败时
         // 仍保持 connected（后台确实在跑），但把真实原因挂到 businessError 上横幅显示。
         const business = await probeBackendBusinessApi();
+        if (wasConnected && !business.ok && hasBackendWriteInFlight()) { set({ checking: false }); return; }
         set({ connected: true, checking: true, error: "", businessError: business.detail });
         startBackendEvents(getBackendUrl(), get().token);
         if (!structuredSettingsHydrated) {
@@ -171,14 +166,10 @@ export function initBackendConnection() {
         intervalMs: 10_000,
         initiallyPaused: document.hidden,
         poll: async () => {
+            if (hasBackendWriteInFlight()) return;
             const result = await runBackendConnectionMonitorCycle(useBackendStore.getState(), forceFullCheck, {
                 healthCheck: backendHealth,
                 fullCheck: () => useBackendStore.getState().checkConnection(),
-                markDisconnected: () => {
-                    stopBackendEvents();
-                    structuredSettingsHydrated = false;
-                    useBackendStore.setState({ connected: false, checking: false, businessError: "", error: `无法连接总后台 ${getBackendUrl()}` });
-                },
             });
             if (result === "full") forceFullCheck = false;
         },

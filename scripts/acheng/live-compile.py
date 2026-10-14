@@ -38,8 +38,13 @@ def load_live_reference_bindings(file):
         ('        expected = node.get("sha256") if media_status else ref.get("sha256")',
          '        expected = ref.get("sha256") if content_bound else (node.get("sha256") if media_status else ref.get("sha256"))'),
     ]
-    for before, after in replacements:
+    for index, (before, after) in enumerate(replacements):
         if after in source:
+            continue
+        # Newer managed runtimes already have this exact behavior, but their
+        # explanatory comment makes the full replacement block differ. Treat
+        # that semantic form as applied so the dev overlay remains compatible.
+        if index == 1 and "elif content_bound:" in source and "file = file or node_file" in source:
             continue
         if source.count(before) != 1:
             raise RuntimeError("Unsupported Acheng selected-result binding contract in " + str(file))

@@ -1,13 +1,17 @@
 import type { CanvasNodeData } from "@/types/canvas";
 import type { CanvasProductionEditing, CanvasProductionStoryboardEditor } from "@/types/canvas-plugin";
 import { productionSceneEntries, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
+import { nanoid } from "nanoid";
+import { applyProductionCompilation, BackendApiError, compileProduction, fetchProductionCompilation, fetchProductionWorkbench, type ProductionCompilationStatus } from "@/services/backend-api";
 
 type Input = Parameters<CanvasProductionEditing["reverseSyncPrompt"]>[0];
 type Handler = CanvasProductionEditing["reverseSyncPrompt"];
 type StoryboardHandler = CanvasProductionEditing["replaceStoryboardTrack"];
+type CompilePromptInput = Parameters<CanvasProductionEditing["compilePrompt"]>[0];
 // Capability routing only: edits still use the production editor's existing persistent command journal.
 const editors = new Map<string, { token: symbol; handler: Handler }>();
 const storyboardEditors = new Map<string, { token: symbol; handler: StoryboardHandler }>();
+const pendingPromptCompiles = new Map<string, { expectedRevision: number; operationId: string }>();
 export function registerProductionPromptEditor(projectId: string, handler: Handler) {
     const token = Symbol(projectId);
     editors.set(projectId, { token, handler });
@@ -107,6 +111,60 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
         const editor = editors.get(projectId);
         if (!editor) throw new Error("PRODUCTION_EDITOR_NOT_READY");
         return editor.handler(input);
+    }, compilePrompt: async (input: CompilePromptInput) => {
+        await flush();
+        const node = getNode(input.nodeId), segments = node?.metadata?.segments;
+        const clip = Array.isArray(segments) ? segments.find(item => item.id === input.segmentId) : undefined;
+        const projection = clip?.productionClipProjection as Record<string, unknown> | undefined;
+        const targetId = typeof projection?.targetId === "string" ? projection.targetId : "";
+        if (!clip || !targetId) throw new Error("PROMPT_COMPILE_TARGET_MISMATCH: 当前 Clip 没有有效的正式制作编译基线");
+        const target = { projectId };
+        const key = `${projectId}:${input.nodeId}:${input.segmentId}`;
+        let pending = pendingPromptCompiles.get(key);
+        let status: ProductionCompilationStatus;
+        if (!pending) {
+            const loaded = await fetchProductionWorkbench(target, "clip_workbench", targetId);
+            const production = loaded.production as Record<string, any>;
+            if (String(production.clipWorkbench?.segment?.id || "") !== targetId) throw new Error("PROMPT_COMPILE_TARGET_MISMATCH: Backend 工作台返回了其他 Clip");
+            const expectedRevision = Number(production.revision);
+            if (!Number.isInteger(expectedRevision) || expectedRevision < 0) throw new Error("PROMPT_COMPILE_REVISION_UNAVAILABLE: 无法读取当前制作版本");
+            pending = { expectedRevision, operationId: `compile-${nanoid(14)}` };
+            pendingPromptCompiles.set(key, pending);
+        }
+        try { status = (await compileProduction(target, pending.expectedRevision, pending.operationId, { targetIds: [targetId] })).compilation; }
+        catch (error) { if (error instanceof BackendApiError && [400, 409, 422].includes(error.status)) pendingPromptCompiles.delete(key); throw error; }
+        let waitedMs = 0, delayMs = 1200;
+        const maxWaitMs = 600 * 1200;
+        while (["queued", "running"].includes(status.status) && waitedMs < maxWaitMs) {
+            await new Promise(resolve => setTimeout(resolve, Math.min(delayMs, maxWaitMs - waitedMs)));
+            const waited = Math.min(delayMs, maxWaitMs - waitedMs);
+            waitedMs += waited;
+            status = (await fetchProductionCompilation(target, pending.operationId)).compilation;
+            delayMs = Math.min(5000, Math.ceil(delayMs * 1.6));
+        }
+        if (status.status === "succeeded" && status.verdict !== "blocked") {
+            if (status.application?.revision === undefined) {
+                if (!status.preparedId) throw new Error("PROMPT_COMPILE_PREPARED_MISSING: 编译成功但没有可应用回执");
+                await applyProductionCompilation(target, status.preparedId);
+            }
+            const refreshed = await fetchProductionWorkbench(target, "clip_workbench", targetId);
+            const workbench = (refreshed.production as Record<string, any>).clipWorkbench;
+            if (String(workbench?.segment?.id || "") !== targetId || status.sourceHash && workbench?.sourceHash !== status.sourceHash) throw new Error("PROMPT_COMPILE_SOURCE_CHANGED: 编译完成后制作源稿已变化，请重新编译");
+            const canvasInput = (Array.isArray(workbench?.canvasInputs) ? workbench.canvasInputs : []).find((item: Record<string, any>) => item.nodeId === input.nodeId && item.segmentId === input.segmentId)
+                || (Array.isArray(workbench?.canvasInputs) ? workbench.canvasInputs[0] : undefined);
+            const baselinePrompt = canvasInput?.directorBaseline?.prompt;
+            const currentPrompt = canvasInput?.current?.prompt;
+            const manualPrompt = Array.isArray(canvasInput?.manualFields) && canvasInput.manualFields.includes("prompt");
+            const prompt = manualPrompt ? baselinePrompt : currentPrompt ?? baselinePrompt;
+            if (typeof prompt !== "string") throw new Error("PROMPT_COMPILE_RESULT_UNAVAILABLE: 编译已应用，但没有读到该 Clip 的编译 Prompt");
+            pendingPromptCompiles.delete(key);
+            return { prompt };
+        }
+        if (["blocked", "interrupted", "failed", "succeeded"].includes(status.status)) {
+            pendingPromptCompiles.delete(key);
+            throw new Error(status.blockingDiagnostic?.message || `PROMPT_COMPILE_${status.status.toUpperCase()}: 编译未能生成可应用 Prompt`);
+        }
+        throw new Error("PROMPT_COMPILE_STILL_RUNNING: 编译仍在运行；再次点击会继续查询同一编译任务");
     }, replaceStoryboardTrack: async (input: CanvasProductionStoryboardEditor) => {
         await flush();
         const node = getNode(input.nodeId), segments = node?.metadata?.segments;

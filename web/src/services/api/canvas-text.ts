@@ -95,7 +95,23 @@ export function receiveCanvasTextEvent(event: unknown) {
         const key = JSON.stringify([getBackendUrl(), value.entityId, canvasTextKey(target)]);
         try { sessions.get(key)?.session.receive({ state: update.update, documentId: update.documentId }); } catch { /* session records the blocking state */ }
     }
-    if (value.payload.operations.some((operation) => !operation.textUpdate && operation.type === "update_node" && ["texts", "segments"].some((key) => Object.hasOwn(operation.metadata || {}, key) || (operation.metadataDelete || []).includes(key)))) for (const entry of sessions.values()) if (entry.backend === getBackendUrl() && entry.projectId === value.entityId) void entry.session.reconnect();
+    const refreshAllNodeSegments = new Set<string>();
+    const refreshH3Prompts = new Set<string>();
+    for (const operation of value.payload.operations) {
+        if (operation.type === "update_node" && ["texts", "segments"].some((key) => Object.hasOwn(operation.metadata || {}, key) || (operation.metadataDelete || []).includes(key))) {
+            refreshAllNodeSegments.add(String(operation.id || ""));
+        } else if (operation.type === "update_h3_segment" && operation.patch && typeof operation.patch === "object" && Object.hasOwn(operation.patch, "prompt")) {
+            // Production compilation uses this fine-grained op. Refresh the open
+            // Yjs document too; metadata-only projection otherwise leaves an
+            // already-mounted H3 editor displaying its stale collaborative text.
+            refreshH3Prompts.add(JSON.stringify([String(operation.nodeId || ""), String(operation.segmentId || "")]));
+        }
+    }
+    if (refreshAllNodeSegments.size || refreshH3Prompts.size) for (const entry of sessions.values()) {
+        if (entry.backend !== getBackendUrl() || entry.projectId !== value.entityId || entry.target.field !== "prompt" || !entry.target.segmentId) continue;
+        const targetKey = JSON.stringify([entry.target.nodeId || "", entry.target.segmentId]);
+        if (refreshAllNodeSegments.has(String(entry.target.nodeId || "")) || refreshH3Prompts.has(targetKey)) void entry.session.reconnect();
+    }
 }
 
 export async function reconnectCanvasTexts(projectId: string) {

@@ -4167,7 +4167,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         const child: CanvasNodeData = {
             id: childId,
             type: CanvasNodeType.Image,
-            title: "Cropped Image",
+            title: t("canvas.projectPage.cropTitle", { name: node.title || t("assets.kinds.image") }),
             position: { x: node.position.x + node.width + 96, y: node.position.y },
             width,
             height: width * (image.height / image.width),
@@ -4181,7 +4181,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         setSelectedNodeIds(new Set([childId]));
         setDialogNodeId(childId);
         setCropNodeId(null);
-    }, [imageToolUrl]);
+    }, [imageToolUrl, t]);
 
     const splitImageNode = useCallback(
         async (node: CanvasNodeData, params: CanvasImageSplitParams) => {

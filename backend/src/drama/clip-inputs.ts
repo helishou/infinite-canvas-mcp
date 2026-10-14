@@ -38,8 +38,8 @@ export function clipInputHash(segment: Record<string, any>) {
 function requiredSubjectStoryboardFrame(director: NonNullable<EpisodeProductionData["director"]>, shotId: string) {
     if (!isSubjectPromptAssembly(director.source)) return undefined;
     const shot = (Array.isArray(director.source.shots) ? director.source.shots : []).map(object).find(item => String(item.id || "") === shotId);
-    const frames = Array.isArray(shot?.keyframes) ? shot.keyframes.map(object).filter(frame => frame.requiredForSubmission === true) : [];
-    return frames.find(frame => frame.anchor === "opening" || frame.anchor === "composition") || frames[0];
+    const frames = Array.isArray(shot?.keyframes) ? shot.keyframes.map(object).filter(frame => frame.requiredForSubmission === true && frame.anchor !== "composition") : [];
+    return frames.find(frame => frame.anchor === "opening") || frames[0];
 }
 function referenceMatchesSubjectFrame(director: NonNullable<EpisodeProductionData["director"]>, frame: Record<string, any>, reference: Record<string, any>) {
     const assetId = String(frame.assetId || frame.id || "");
@@ -264,6 +264,7 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
     const operations: CanvasOperation[] = [], referenceSync: ReferenceSync[] = [];
     const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, any>> : [];
     const pendingNodes = new Map<string, CanvasOperation>();
+    const retainedProjectedSegments = new Map<string, Set<string>>();
     for (const group of data.clipGroups) {
         const unit = layout.units.find(unit => unit.targets.includes(`segment:${group.id}`) && unit.members.some(member => member.role === "video"));
         const member = unit?.members.find(member => member.role === "video");
@@ -277,6 +278,9 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
         const existing = existingSegments.find(segment => segment.id === segmentId || segment.productionClipProjection?.targetId === group.id);
         const projected = productionClipProjection(project, data, group, segmentId, existing);
         referenceSync.push(projected.result);
+        const retained = retainedProjectedSegments.get(nodeId) || new Set<string>();
+        if (existing) retained.add(String(existing.id));
+        retainedProjectedSegments.set(nodeId, retained);
         if (existing) {
             if (!projected.segment) {
                 const storyboard = formalStoryboardTrack(data, group, existing);
@@ -293,6 +297,7 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
         }
         if (!materializeTargets.has(group.id)) continue;
         const segment = projected.segment || emptyProductionClip(project, data, group, segmentId, defaults);
+        retained.add(String(segment.id));
         if (pendingNode) {
             nodeMetadata.segments = [...existingSegments, segment];
             pendingNode.metadata = nodeMetadata;
@@ -307,6 +312,35 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
             const operation = { type: "add_node", id: nodeId, nodeType: member.nodeType, title: `${scene?.title || sceneId || "场次"} · H3`, position: member.position, width: member.size.width, height: member.size.height, metadata } as Extract<CanvasOperation, { type: "add_node" }>;
             pendingNodes.set(nodeId, operation);
             operations.push(operation);
+        }
+    }
+    // A production H3 node is a projection of its current formal Clip groups. Earlier
+    // compiles could leave projected segments behind after Clips were merged/split or
+    // moved to another node; they then appeared as extra timeline segments. Reconcile
+    // only compiler-owned segments, leaving manual H3 segments and their authored work intact.
+    const managedNodeIds = new Set([...retainedProjectedSegments.keys()]);
+    for (const node of nodes) {
+        const nodeId = String(node.id || "");
+        const metadata = object(node.metadata);
+        if (!nodeId || pendingNodes.has(nodeId) || metadata.productionOwnerId !== layout.owner.id) continue;
+        managedNodeIds.add(nodeId);
+    }
+    for (const nodeId of managedNodeIds) {
+        if (pendingNodes.has(nodeId)) continue;
+        const node = nodes.find(item => String(item.id) === nodeId);
+        if (!node) continue;
+        const segments = Array.isArray(object(node.metadata).segments) ? object(node.metadata).segments as Array<Record<string, any>> : [];
+        const retained = retainedProjectedSegments.get(nodeId) || new Set<string>();
+        for (const segment of segments) {
+            const projection = object(segment.productionClipProjection);
+            if (!Object.keys(projection).length || retained.has(String(segment.id || ""))) continue;
+            const fieldHashes = object(projection.fieldHashes);
+            const manuallyChanged = CLIP_PROJECTION_FIELDS.some(field =>
+                typeof fieldHashes[field] === "string" && clipFieldHash(segment[field]) !== fieldHashes[field]);
+            const hasActiveOrBoundResult = Boolean(segment.resultStorageKey || segment.runtimeTaskId || segment.taskId
+                || Number(segment.progress || 0) > 0 || segment.status && segment.status !== "idle");
+            if (manuallyChanged || hasActiveOrBoundResult) continue;
+            operations.push({ type: "delete_h3_segment", nodeId, segmentId: String(segment.id || "") });
         }
     }
     return { operations, referenceSync };

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
-import { productionPresentationPath, productionTarget, productionLocationKey } from "@/lib/production-navigation";
+import { markProductionEntry, productionPresentationPath, productionTarget, productionLocationKey } from "@/lib/production-navigation";
 import { fetchProductionReadiness } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
@@ -49,6 +49,7 @@ export function ProductionFollowController() {
                 return;
             }
             const path = productionPresentationPath(presentation);
+            if (path.startsWith("/director/")) markProductionEntry();
             if (path !== productionLocationKey(location.pathname, location.search)) {
                 latest.expectPath(path);
                 navigate(path, { replace: true });

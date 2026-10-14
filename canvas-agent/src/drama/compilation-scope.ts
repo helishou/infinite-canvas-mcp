@@ -47,7 +47,8 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
         for (const usage of rows(shot.subject_usages)) for (const bindingId of resolveSubjectPictureBindingIds(subjectById.get(String(usage.subjectId)), usage).bindingIds) {
             const assetId = bindingAssets.get(String(bindingId)); if (assetId) shotAssets.add(assetId);
         }
-        for (const frame of rows(shot.keyframes).filter(item => item.requiredForSubmission)) shotAssets.add(String(frame.assetId || frame.id));
+        for (const frame of rows(shot.keyframes).filter(item => item.requiredForSubmission && item.anchor !== "composition")) shotAssets.add(String(frame.assetId || frame.id));
+        for (const reference of rows(shot.reference_requirements).filter(item => item.requiredForSubmission)) shotAssets.add(String(reference.asset_id || reference.id));
     }
     const activeFrame = (item: Record<string, any>) => item.kind !== "keyframe" || subjectAssembly && shotAssets.has(key(item)) || Object.values(director.shotInputs).some(input => input.keyframePolicy !== "none" && input.keyframeAssetId === key(item));
     const assets = new Set(plans.filter(item => wanted.has(key(item)) || activeFrame(item) && (item.shot_ids || []).some((id: string) => shots.has(id))).map(key));
@@ -58,7 +59,8 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
             for (const usage of (subjectReferenceShotIds.has(stableId(shot)) ? rows(shot.subject_usages) : [])) for (const bindingId of resolveSubjectPictureBindingIds(subjectById.get(String(usage.subjectId)), usage).bindingIds) {
                 const assetId = bindingAssets.get(String(bindingId)); if (assetId) assets.add(assetId);
             }
-            for (const frame of rows(shot.keyframes).filter(item => item.requiredForSubmission)) assets.add(String(frame.assetId || frame.id));
+            for (const frame of rows(shot.keyframes).filter(item => item.requiredForSubmission && item.anchor !== "composition")) assets.add(String(frame.assetId || frame.id));
+            for (const reference of rows(shot.reference_requirements).filter(item => item.requiredForSubmission)) assets.add(String(reference.asset_id || reference.id));
         } else {
             for (const id of shot.required_assets || []) assets.add(String(id));
             const input = director.shotInputs[stableId(shot)];
@@ -163,7 +165,7 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
                     usedSubjects.add(String(usage.subjectId));
                     for (const factId of usage.continuityFactIds || []) usedFacts.add(String(factId));
                 }
-                for (const frame of rows(shot.keyframes).filter(item => item.requiredForSubmission)) for (const subjectId of frame.subjectIds || []) usedSubjects.add(String(subjectId));
+                for (const frame of rows(shot.keyframes).filter(item => item.requiredForSubmission && item.anchor !== "composition")) for (const subjectId of frame.subjectIds || []) usedSubjects.add(String(subjectId));
                 for (const factId of shot.continuity_facts || []) usedFacts.add(String(factId));
                 if (clipShots.has(stableId(shot))) for (const ref of rows(shot.utterance_refs)) outputUtteranceIds.add(String(ref.utteranceId));
             }
@@ -213,7 +215,8 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
         ...(subjectAssembly ? [] : segments.flatMap(item => rows(item.references).map(ref => String(ref.asset_id || "")))),
         ...rows(projected.source.shots).flatMap(item => (item.required_assets || []).map(String)),
         ...(subjectAssembly ? rows(projected.source.shots).filter(item => subjectReferenceShotIds.has(stableId(item))).flatMap(item => rows(item.subject_usages).flatMap(usage => resolveSubjectPictureBindingIds(subjectById.get(String(usage.subjectId)), usage).bindingIds.map(bindingId => bindingAssets.get(String(bindingId)) || ""))) : []),
-        ...(subjectAssembly ? rows(projected.source.shots).flatMap(item => rows(item.keyframes).filter(frame => frame.requiredForSubmission).map(frame => String(frame.assetId || frame.id))) : []),
+        ...(subjectAssembly ? rows(projected.source.shots).flatMap(item => rows(item.keyframes).filter(frame => frame.requiredForSubmission && frame.anchor !== "composition").map(frame => String(frame.assetId || frame.id))) : []),
+        ...(subjectAssembly ? rows(projected.source.shots).flatMap(item => rows(item.reference_requirements).filter(reference => reference.requiredForSubmission).map(reference => String(reference.asset_id || reference.id))) : []),
         ...rows(projected.source.asset_plan).flatMap(item => (item.depends_on || []).map(String)),
     ]);
     const inputAssets = Object.fromEntries(Object.entries(projected.assets).filter(([id]) => referenced.has(id) || Boolean(scene && !shots.size)).map(([id, asset]) => [id, { nodeId: asset.nodeId, assetId: asset.assetId, version: asset.version, storageKey: asset.storageKey, sha256: asset.sha256, sharedSource: asset.sharedSource }]));

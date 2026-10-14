@@ -690,7 +690,6 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
                 {typeof (selected?.productionClipProjection?.nextValues as any)?.prompt === "string" && selected?.prompt !== (selected.productionClipProjection?.nextValues as any).prompt && <details>
                     <summary>已手动修改 · 查看导演提示词差异</summary>
                     <pre style={{ maxHeight: 240, overflow: "auto", whiteSpace: "pre-wrap" }}>{String((selected.productionClipProjection?.nextValues as any).prompt)}</pre>
-                    <button type="button" onClick={() => patchSelected({ prompt: String((selected.productionClipProjection?.nextValues as any).prompt) })}>采用导演提示词</button>
                 </details>}
             </div>
             <H3CurrentClipPanel key="current-clip-panel" ctx={ctx} selected={selected} selectedIndex={selectedIndex} imageRefs={imageRefs} videoRefs={videoRefs} audioRefs={audioRefs} patchSelected={patchSelected} fmt={fmt} onOpenStoryboard={() => setSmartStoryboardOpen(true)} />

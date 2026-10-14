@@ -319,6 +319,44 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
         } finally { markSaving(name, false); }
     };
 
+    // 「在 ComfyUI 中打开」：后端把节点图写进该实例 user/default/workflows/（同名覆盖），
+    // 再新开客户端标签页，用户在 ComfyUI 的 File→Load 里直接看到它。官方客户端没有
+    // REST 端点能远程载入节点图，这是唯一可靠路径。远程实例无法写盘，兜底下载原始节点图。
+    const [comfyOpening, setComfyOpening] = useState("");
+    const handleOpenInComfyUI = async (id: string) => {
+        if (comfyOpening) return;
+        setComfyOpening(id);
+        try {
+            const result = await request<{ ok?: boolean; url?: string; file?: string; reason?: string; error?: string; pushed?: boolean; pushError?: string }>("POST", `/api/workflows/${encodeURIComponent(id)}/open-in-comfyui`);
+            if (result.ok && result.url) {
+                if (result.pushed === true) {
+                    message.success(`已在 ComfyUI 客户端打开：${result.file}`);
+                } else {
+                    window.open(result.url, "_blank", "noopener");
+                    message.info(`已写入 ${result.file}，但没推送到运行中的客户端（${result.pushError || "原因未知"}），请在 ComfyUI 的 File → Load 里加载`);
+                }
+                return;
+            }
+            if (result.reason === "remote") {
+                const detail = await request<WorkflowDetail>("GET", `/api/workflows/${encodeURIComponent(id)}`);
+                const anchor = document.createElement("a");
+                anchor.href = URL.createObjectURL(new Blob([JSON.stringify(detail.workflow, null, 2)], { type: "application/json" }));
+                anchor.download = id.split("/").pop()?.replace(/\.json$/, "") || "workflow";
+                if (!anchor.download.endsWith(".json")) anchor.download += ".json";
+                anchor.click();
+                URL.revokeObjectURL(anchor.href);
+                if (result.url) window.open(result.url, "_blank", "noopener");
+                message.info("远程实例：已下载节点图，请在 ComfyUI 中手动导入");
+                return;
+            }
+            message.error(result.error || "打开失败");
+        } catch (err) {
+            message.error(err instanceof Error ? err.message : "打开失败");
+        } finally {
+            setComfyOpening("");
+        }
+    };
+
     const handleLoadDetail = async (name: string) => {
         const version = ++detailRequest.current;
         setDetailLoading(true);
@@ -573,6 +611,9 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                             onSelect={(item) => void handleLoadDetail(item.id)}
                             onRename={(item, title) => void handleRename(item.id, title)}
                             emptyText="暂无本地工作流"
+                            onAction={(item) => void handleOpenInComfyUI(item.id)}
+                            actionTitle="在 ComfyUI 中打开"
+                            actionBusyId={comfyOpening || null}
                         /> : null}
                     </>
                 ) : (

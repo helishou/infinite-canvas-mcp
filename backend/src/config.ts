@@ -87,23 +87,35 @@ export function applyNetworkEnvironment(config: ResolvedConfig, env: NodeJS.Proc
 /** 读取 backend.json，不存在时生成默认配置。 */
 export function loadConfig(create = false): ResolvedConfig {
     let raw: Partial<BackendConfig> = {};
+    let staleToken = "";
     try {
         raw = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")) as Partial<BackendConfig>;
-    } catch { /* first run */ }
+    } catch {
+        // 文件缺失（首次运行）或内容损坏（并发写/进程被杀的瞬态）。
+        // 损坏时尽力从残留文本里救回旧密钥，保证「一旦生成的密钥不随重启更换」。
+        try {
+            const text = fs.readFileSync(CONFIG_FILE, "utf8");
+            const m = /"token"\s*:\s*"([A-Fa-f0-9]{16,})"/.exec(text) ?? /\b[A-Fa-f0-9]{36}\b/.exec(text);
+            staleToken = m ? m[1] : "";
+        } catch { /* 真的不存在 */ }
+    }
     const port = Number(process.env.PORT) || raw.port || DEFAULT_PORT;
     const url = process.env.PORT ? `http://127.0.0.1:${port}` : raw.url || `http://127.0.0.1:${port}`;
-    const token = process.env.INFINITE_CANVAS_BACKEND_TOKEN || raw.token || crypto.randomBytes(18).toString("hex");
+    const token = process.env.INFINITE_CANVAS_BACKEND_TOKEN || raw.token || staleToken || crypto.randomBytes(18).toString("hex");
     const configuredOrigins = Array.isArray(raw.origins) ? raw.origins.filter((origin) => origin && origin !== "*") : [];
     const config: ResolvedConfig = { url, token, port, listenHost: raw.listenHost === "0.0.0.0" ? "0.0.0.0" : "127.0.0.1", origins: configuredOrigins.length ? configuredOrigins : DEFAULT_ORIGINS };
     applyNetworkEnvironment(config);
-    if (create) saveConfig(config);
+    // 只补全缺失字段；文件完好就不碰它，杜绝无谓的重写窗口。
+    if (create && (!raw.token || !raw.url || !Array.isArray(raw.origins))) saveConfig(config);
     return config;
 }
 
-/** 写入 backend.json，目录 0700 文件 0600。 */
+/** 写入 backend.json，目录 0700 文件 0600。原子替换：先写临时文件再 rename，进程中途被杀也不会留下残缺 JSON。 */
 export function saveConfig(config: ResolvedConfig) {
     fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify({ url: config.url, token: config.token, port: config.port, origins: config.origins, listenHost: config.listenHost || "127.0.0.1" }, null, 2), { mode: 0o600 });
+    const tmp = `${CONFIG_FILE}.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify({ url: config.url, token: config.token, port: config.port, origins: config.origins, listenHost: config.listenHost || "127.0.0.1" }, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, CONFIG_FILE);
     fs.chmodSync(DATA_DIR, 0o700);
     fs.chmodSync(CONFIG_FILE, 0o600);
 }

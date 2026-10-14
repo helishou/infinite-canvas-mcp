@@ -16,6 +16,7 @@ import { CanvasTextSuggestionsDialog } from "./canvas-text-suggestions-dialog";
 import { CanvasShortcutsDialog } from "./canvas-shortcuts-dialog";
 import { CanvasTaskCenterButton } from "./canvas-task-center";
 import { CanvasProductionToolbar } from "@/components/production/canvas-production-workspace";
+import { markProductionEntry } from "@/lib/production-navigation";
 
 export function CanvasTopBar({
     projectId,
@@ -111,7 +112,7 @@ export function CanvasTopBar({
                             items: [
                                 ...(productionDramaId ? [{ key: "drama", icon: <Images className="size-4" />, label: <Link to={`/production?dramaId=${encodeURIComponent(productionDramaId)}&workspace=series`}>{t("productionCanvas.backDrama")}</Link> }] : []),
                                 { key: "home", icon: <Home className="size-4" />, label: t("productionCanvas.backHome"), onClick: onHome },
-                                ...(!productionOwner ? [{ key: "production-view", icon: <Clapperboard className="size-4" />, label: <Link to={`/director/${encodeURIComponent(projectId)}`}>{t("productionCanvas.enter")}</Link> }] : []),
+                                ...(!productionOwner ? [{ key: "production-view", icon: <Clapperboard className="size-4" />, label: <Link to={`/director/${encodeURIComponent(projectId)}`} onClick={() => markProductionEntry()}>{t("productionCanvas.enter")}</Link> }] : []),
                                 { key: "projects", icon: <Images className="size-4" />, label: t("canvas.projects"), onClick: onProjects },
                                 { type: "divider" },
                                 { key: "new", icon: <Plus className="size-4" />, label: t("canvas.create"), onClick: onCreateProject },

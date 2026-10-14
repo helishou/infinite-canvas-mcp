@@ -89,20 +89,27 @@ def binding_ids(subject, usage, *, allow_missing=False):
     return selected
 
 
+def _used_continuity_fact_ids(shot, subjects, facts):
+    subjects = list(subjects or [])
+    subject_by_id = {str(item.get("id")): item for item in subjects}
+    used = {str(value) for value in shot.get("continuity_facts", [])}
+    for usage in rows(shot.get("subject_usages")):
+        used.update(str(value) for value in usage.get("continuityFactIds", []))
+        used.update(str(item.get("factId")) for item in rows(usage.get("stateRequirements")))
+        subject = subject_by_id.get(str(usage.get("subjectId")))
+        ref = (subject or {}).get("entityRef", {})
+        for fact in facts.values():
+            if str(fact.get("object_kind")) == str(ref.get("kind")) and str(fact.get("object_id")) == str(ref.get("id")):
+                used.add(str(fact.get("id")))
+    return used
+
+
 def _state_start_descriptions(source, report, shot, subjects):
     trajectory = (report.get("trajectories") or {}).get(str(shot.get("id")), {})
     start = trajectory.get("start", {})
     facts = {str(item.get("id")): item for item in rows((source.get("ledger") or {}).get("facts"))}
     subject_by_entity = {(str(item.get("entityRef", {}).get("kind")), str(item.get("entityRef", {}).get("id"))): item for item in subjects}
-    used = {str(value) for value in shot.get("continuity_facts", [])}
-    for usage in rows(shot.get("subject_usages")):
-        used.update(str(value) for value in usage.get("continuityFactIds", []))
-        used.update(str(item.get("factId")) for item in rows(usage.get("stateRequirements")))
-        subject = next((item for item in subjects if str(item.get("id")) == str(usage.get("subjectId"))), None)
-        ref = (subject or {}).get("entityRef", {})
-        for fact in facts.values():
-            if str(fact.get("object_kind")) == str(ref.get("kind")) and str(fact.get("object_id")) == str(ref.get("id")):
-                used.add(str(fact.get("id")))
+    used = _used_continuity_fact_ids(shot, subjects, facts)
     values = []
     for fact_id in sorted(used):
         fact = facts.get(fact_id)
@@ -122,9 +129,13 @@ def _render_state_end(source, report, shot, subjects):
     trajectory = (report.get("trajectories") or {}).get(str(shot.get("id")), {})
     end = trajectory.get("end", {})
     facts = {str(item.get("id")): item for item in rows((source.get("ledger") or {}).get("facts"))}
+    subjects = list(subjects or [])
     subject_by_entity = {(str(item.get("entityRef", {}).get("kind")), str(item.get("entityRef", {}).get("id"))): item for item in subjects}
+    used = _used_continuity_fact_ids(shot, subjects, facts)
     chunks = []
     for fact_id, value in sorted(end.items()):
+        if str(fact_id) not in used:
+            continue
         fact = facts.get(str(fact_id))
         if not fact:
             continue
@@ -135,6 +146,29 @@ def _render_state_end(source, report, shot, subjects):
         name = entity_text(source, owner)[0] if owner else "The registered subject"
         chunks.append(name + " " + str(fact.get("property") or fact.get("name") or "state") + " remains: " + str(description))
     return "; ".join(chunks) if chunks else "No structured continuity state changes are registered for this Shot's ending."
+
+
+def _state_snapshot(source, report, shot, subjects, edge):
+    """Return authored state values and their readable labels for one Shot edge."""
+    trajectory = (report.get("trajectories") or {}).get(str(shot.get("id")), {})
+    snapshot = trajectory.get(edge, {})
+    facts = {str(item.get("id")): item for item in rows((source.get("ledger") or {}).get("facts"))}
+    subject_by_entity = {(str(item.get("entityRef", {}).get("kind")), str(item.get("entityRef", {}).get("id"))): item
+                         for item in subjects}
+    result = {}
+    for fact_id in sorted(_used_continuity_fact_ids(shot, subjects, facts)):
+        fact = facts.get(fact_id)
+        value = snapshot.get(fact_id)
+        if not fact or value is None:
+            continue
+        description = (fact.get("value_descriptions") or {}).get(str(value))
+        if not description:
+            continue
+        owner = subject_by_entity.get((str(fact.get("object_kind")), str(fact.get("object_id"))))
+        name = entity_text(source, owner)[0] if owner else "The registered subject"
+        label = name + " " + str(fact.get("property") or fact.get("name") or "state") + ": " + str(description)
+        result[fact_id] = {"value": value, "text": label}
+    return result
 
 
 def project_continuity_source(production):
@@ -246,7 +280,9 @@ def _infer_segment_mode(source, segment):
     subjects = {str(item.get("id")): item for item in rows(source.get("subject_registry"))}
     for shot_id in segment.get("shot_ids", []):
         shot = shot_by_id.get(str(shot_id), {})
-        if any(frame.get("requiredForSubmission", True) for frame in rows(shot.get("keyframes"))):
+        if any(frame.get("requiredForSubmission", True) and frame.get("anchor") != "composition" for frame in rows(shot.get("keyframes"))) \
+                or any(reference.get("requiredForSubmission", True) for reference in rows(shot.get("reference_requirements"))) \
+                or any(frame.get("requiredForSubmission", True) and frame.get("anchor") == "composition" for frame in rows(shot.get("keyframes"))):
             return "Ref2VA"
         for usage in rows(shot.get("subject_usages")):
             if str(usage.get("subjectId")) in subjects and (usage.get("presentation") == "visible" or usage.get("pictureBindingIds")):
@@ -346,8 +382,42 @@ def adapt_production(production, *, draft=False):
                     picture["exclude"].extend(str(value) for value in binding.get("exclude", []))
                     subject_uses[subject_id].append((shot_id, picture["label"], binding))
                     reference_requirements[shot_id].append({"entity_id": entity_id, "asset_version": picture["asset_version"], "purpose": str(snapshot.get("role") or "identity")})
+            composition_references = list(rows(shot.get("reference_requirements")))
+            composition_references.extend({
+                "id": str(frame.get("id") or ""), "asset_id": str(frame.get("assetId") or frame.get("id") or ""),
+                "asset_version": str(frame.get("asset_version") or ""), "purpose": "构图参考",
+                "retain": frame.get("retain") or [], "exclude": frame.get("exclude") or [],
+                "requiredForSubmission": frame.get("requiredForSubmission", True),
+            } for frame in rows(shot.get("keyframes")) if frame.get("anchor") == "composition")
+            for reference in composition_references:
+                if not reference.get("requiredForSubmission", True):
+                    continue
+                binding_id = str(reference.get("id") or reference.get("asset_id") or "")
+                snapshot = snapshots.get(binding_id)
+                if not snapshot:
+                    raise ValueError("Composition reference " + binding_id + " is not in the frozen compiler inputs")
+                digest = str(snapshot.get("sha256") or "")
+                if not digest or not snapshot.get("file"):
+                    raise ValueError("Composition reference " + binding_id + " has no verified media file")
+                picture = picture_by_digest.get(digest)
+                if not picture:
+                    picture = {"number": len(selected_pictures) + 1, "label": "<Picture " + str(len(selected_pictures) + 1) + ">",
+                               "sha256": digest, "file": str(snapshot["file"]), "asset_ids": [], "entity_ids": [],
+                               "subject_ids": [], "shot_ids": [], "roles": [], "retain": [], "exclude": [],
+                               "asset_version": str(snapshot.get("assetVersion") or reference.get("asset_version") or "sha256:" + digest),
+                               "is_keyframe": False, "anchor": "", "anchor_shot_ids": []}
+                    picture_by_digest[digest] = picture
+                    selected_pictures.append(picture)
+                asset_id = str(snapshot.get("assetId") or reference.get("asset_id") or "")
+                if asset_id:
+                    picture["asset_ids"].append(asset_id)
+                picture["shot_ids"].append(shot_id)
+                picture["roles"].append("composition")
+                picture["retain"].extend(str(value) for value in reference.get("retain", []))
+                picture["exclude"].extend(str(value) for value in reference.get("exclude", []))
+                reference_requirements[shot_id].append({"asset_id": asset_id, "asset_version": str(snapshot.get("assetVersion") or reference.get("asset_version") or picture["asset_version"]), "purpose": str(reference.get("purpose") or "构图参考")})
             for frame in rows(shot.get("keyframes")):
-                if not frame.get("requiredForSubmission", True):
+                if not frame.get("requiredForSubmission", True) or frame.get("anchor") == "composition":
                     continue
                 binding_id = str(frame.get("id") or "")
                 snapshot = snapshots.get(binding_id)
@@ -715,7 +785,7 @@ def render_continuity_text_v2(shot, production):
     return _render_state_end(production, production.get("_continuity_report") or {}, shot, rows(production.get("subject_registry")))
 
 
-def _shot_prompt_v2(production, segment, shot, shot_number, speakers):
+def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, include_scene=True, state_lines=None):
     camera = shot.get("camera") if isinstance(shot.get("camera"), dict) else {}
     fps_num, fps_den = int(production.get("fps_num", 24)), int(production.get("fps_den", 1))
     clip_start = int(segment["start_frame"])
@@ -731,11 +801,10 @@ def _shot_prompt_v2(production, segment, shot, shot_number, speakers):
     scene_id = str(shot.get("scene_id") or "")
     scene = next((item for item in rows(production.get("scene_registry")) if str(item.get("id") or "") == scene_id), {})
     scene_name, scene_description = entity_text(production, {"entityRef": {"kind": "scene", "id": scene_id}}) if scene else ("", "")
-    if scene_description:
+    if include_scene and scene_description:
         parts.append("Scene setting: " + (scene_name + ": " if scene_name else "") + scene_description)
-    state = str(shot.get("state_description") or "").strip()
-    if state:
-        parts.append("At shot start, preserve these registered Subject states: " + state)
+    for state_line in state_lines or []:
+        parts.append(state_line)
     framing = str(camera.get("framing") or "").strip()
     if framing:
         parts.append("Framing: " + framing + ".")
@@ -819,9 +888,6 @@ def _shot_prompt_v2(production, segment, shot, shot_number, speakers):
         if utterance_id:
             line_text += " The utterance continues seamlessly across the cut."
         parts.append(line_text)
-    end_state = _render_state_end(production, production.get("_continuity_report") or {}, shot, subjects.values())
-    if end_state:
-        parts.append("At shot end, carry forward: " + end_state)
     return " ".join(part for part in parts if part)
 
 
@@ -841,7 +907,7 @@ def compile_prompt_v2(production, segment, *, draft=False):
     references = rows(segment.get("references"))
     shots_by_id = {str(item["id"]): item for item in production["shots"]}
     shots = [shots_by_id[str(shot_id)] for shot_id in segment["shot_ids"]]
-    anchor_roles = [str(item.get("anchor") or "") for shot in shots for item in rows(shot.get("keyframes")) if item.get("requiredForSubmission", True)]
+    anchor_roles = [str(item.get("anchor") or "") for shot in shots for item in rows(shot.get("keyframes")) if item.get("requiredForSubmission", True) and item.get("anchor") != "composition"]
     if not draft and mode == "T2VA" and references:
         raise ValueError("T2VA cannot consume bound Subject or required keyframe pictures; preserve the bindings and select a compatible mode.")
     if not draft and mode == "I2VA" and (len(references) != 1 or "opening" not in anchor_roles):
@@ -856,7 +922,35 @@ def compile_prompt_v2(production, segment, *, draft=False):
             identity = str(line.get("character_id") or line.get("speaker_name") or "")
             if identity and identity not in speakers:
                 speakers[identity] = "S" + str(len(speakers) + 1)
-    detail = "\n".join(_shot_prompt_v2(production, segment, shot, index + 1, speakers) for index, shot in enumerate(shots))
+    report = production.get("_continuity_report") or {}
+    subjects = rows(production.get("subject_registry"))
+    detail_rows = []
+    previous_scene_id = None
+    carried_state = {}
+    for index, shot in enumerate(shots):
+        shot_id = str(shot.get("id"))
+        start_state = _state_snapshot(production, report, shot, subjects, "start")
+        end_state = _state_snapshot(production, report, shot, subjects, "end")
+        if index == 0:
+            state_lines = (["Clip opening states: " + "; ".join(item["text"] for item in start_state.values())]
+                           if start_state else [])
+        else:
+            changes_at_cut = [item["text"] for fact_id, item in start_state.items()
+                              if fact_id not in carried_state or item["value"] != carried_state[fact_id]["value"]]
+            state_lines = (["At this cut, state changes to: " + "; ".join(changes_at_cut)] if changes_at_cut else [])
+        event_fact_ids = {str(event.get("fact_id")) for event in shot.get("_canvas_v2_events", [])}
+        changes_by_end = [item["text"] for fact_id, item in end_state.items()
+                          if fact_id not in event_fact_ids and (fact_id not in start_state or item["value"] != start_state[fact_id]["value"])]
+        if changes_by_end:
+            state_lines.append("State changes by shot end: " + "; ".join(changes_by_end))
+        scene_id = str(shot.get("scene_id") or "")
+        detail_rows.append(_shot_prompt_v2(production, segment, shot, index + 1, speakers,
+                                           include_scene=index == 0 or scene_id != previous_scene_id,
+                                           state_lines=state_lines))
+        previous_scene_id = scene_id
+        carried_state.update(start_state)
+        carried_state.update(end_state)
+    detail = "\n".join(detail_rows)
     soundscape = str(segment.get("overall_soundscape") or "Synchronized dialogue, ambience and action sounds follow the authored shots.")
     music = str(segment.get("non_diegetic_music") or "N/A")
     if mode == "Ref2VA":

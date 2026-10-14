@@ -864,6 +864,26 @@ export function DirectorPanel({
     },
   });
   const frameForShot = (id: string) => {
+    if (d && isSubjectPromptAssembly(d.source)) {
+      const shot = records(d.source.shots).find(item => String(item.id) === id);
+      const temporalFrames = records(shot?.keyframes).filter(frame => frame.anchor !== "composition");
+      const frame = temporalFrames.find(item => item.anchor === "opening")
+        || temporalFrames.find(item => item.anchor === "at_frame" && Number(item.localFrame) === 0)
+        || temporalFrames.sort((a, b) => Number(a.localFrame ?? (a.anchor === "closing" ? Number.MAX_SAFE_INTEGER : 0)) - Number(b.localFrame ?? (b.anchor === "closing" ? Number.MAX_SAFE_INTEGER : 0)))[0];
+      if (frame) {
+        const assetId = String(frame.assetId || frame.id || ""), asset = d.assets[assetId];
+        const nodeId = String(frame.sourceNode?.nodeId || "");
+        if (asset?.storageKey && (asset.nodeId === nodeId || (asset as Record<string, any>).selectedResult?.nodeId === nodeId)) return String(asset.storageKey);
+        if (nodeId) {
+          const currentImage = canvasImageStorageKey(nodeId);
+          if (currentImage) return currentImage;
+          const generated = production.draft.keyframes[id] || production.published?.keyframes[id];
+          if (generated?.nodeId === nodeId && generated.storageKey) return generated.storageKey;
+        }
+        return "";
+      }
+      return "";
+    }
     const input = d?.shotInputs[id];
     if (input?.keyframePolicy === "none") return "";
     const key = input?.keyframeAssetId;
@@ -1545,7 +1565,9 @@ export function DirectorPanel({
   const renderShotDetails = (shot: Record<string, any>, includeCompleteSource = false, workbench?: Record<string, any>) => {
     const id = String(shot.id || "");
     if (d && isSubjectPromptAssembly(d.source)) return <div className="space-y-5" data-shot-details-editor>
-      <SubjectShotEditor preview={renderShotKeyframe(id)} key={id} shot={shot} source={d.source} canvasNodes={canvasNodes} canvasId={canvasId} busy={busy} workbench={workbench} assets={d.assets}
+      {/* v2 关键帧页签的每个镜头卡片自带缩略图、定位链接、解除绑定与更换节点选择器；
+          再传 renderShotKeyframe 预览会把同一份绑定信息在顶部重复渲染一遍。 */}
+      <SubjectShotEditor preview={undefined} key={id} shot={shot} source={d.source} canvasNodes={canvasNodes} canvasId={canvasId} busy={busy} workbench={workbench} assets={d.assets}
         draftValue={sourceDrafts[`v2shot:${id}`]} onDraftChange={value => onSourceDraftChange(`v2shot:${id}`, value)} onSave={onSaveV2Shot || (async () => false)} />
     </div>;
     return <div className="space-y-5" data-shot-reading={id}>
@@ -1629,15 +1651,13 @@ export function DirectorPanel({
         const included = new Set(scope.shotIds);
         const scopedShots = sourceShots.filter(shot => included.has(String(shot.id)));
         const scopedSegments = segments.filter(segment => (segment.shot_ids || []).some((id: string) => included.has(String(id))));
-        if (subjectAssembly) {
-          const draftKey = scope.sceneId ? `v2clips:${scope.sceneId}` : "v2clips";
-          return <SubjectClipPartitionEditor shots={scopedShots} segments={scopedSegments} fps={fps} busy={busy || !scope.editable} shotTitle={shotTitle} draftValue={sourceDrafts[draftKey]} onDraftChange={value => onSourceDraftChange(draftKey, value)} onSave={onRepartitionClips || (async () => false)} />;
-        }
+        // 「Shot 到 Clip 的分组」整块已从分镜页移除：边界调整仍走时间线上的分割/合并句柄与「制作对象详情」里的分组编辑器。
+        if (subjectAssembly) return null;
         return <div className="space-y-4">{scopedSegments.map(segment => <section key={segment.id} className="border-b border-border pb-4"><h3 className="text-sm font-medium">{segmentTitle(String(segment.id))}</h3><SegmentGroupEditor segment={segment} shots={scopedShots} segments={scopedSegments} fps={fps} draftValue={sourceDrafts[`segment:${segment.id}:shot_ids`]} onDraftChange={value => onSourceDraftChange(`segment:${segment.id}:shot_ids`, value)} disabled={busy || !scope.editable} onSave={onRegroup} /></section>)}</div>;
       }}
       onClip={id => onNavigate("production", { kind: "segment", id })}
       busy={busy} compileBusy={compileBusy} compilePending={compilePending} compileError={compileError} compileNotice={compileNotice} compileDiagnostics={compileDiagnostics} compileTargets={compileTargets} onCompile={onCompile}
-      onDiscuss={targetId => onAskDirector({ workspace: "shots", targetId })} onNavigate={onNavigate} />;
+        onDiscuss={(targetId, instruction) => onAskDirector({ workspace: "overview", targetId, instruction })} onNavigate={onNavigate} />;
     return <div className="space-y-3"><Alert type="info" message={t("director.workspace.noShots")} /><Button type="text" disabled={busy} icon={<WandSparkles className="size-3.5" />} onClick={() => onAskDirector({ workspace: "shots" })}>{t("director.studio.collaborate")}</Button></div>;
   };
 

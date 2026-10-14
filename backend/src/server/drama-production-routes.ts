@@ -43,16 +43,6 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
     compilations.onSettled = id => { queueMicrotask(() => { scenes.wake(id); refreshes.wake(id); }); };
     events?.subscribe(event => {
         if (event.type === "drama-production.updated" && service.sceneWorkOwners().includes(event.entityId || "")) queueMicrotask(() => scenes.wake(event.entityId!));
-        if (event.type === "canvas.updated" && event.entityId) {
-            const payload = event.payload && typeof event.payload === "object" ? event.payload as Record<string, any> : {};
-            const operations = Array.isArray(payload.operations) ? payload.operations as Array<Record<string, any>> : [];
-            const sourceNodeIds = [...new Set(operations.flatMap(operation => {
-                if (operation.type === "update_node") return [String(operation.id || "")];
-                if (operation.type === "add_node") return [String(operation.id || "")];
-                return [];
-            }).filter(Boolean))];
-            if (sourceNodeIds.length) queueMicrotask(() => refreshes.wakeSourceCanvas(event.entityId!, sourceNodeIds, Number(event.revision || 0), event.id));
-        }
     });
     for (const id of service.sceneWorkOwners()) {
         try { scenes.recover(id); }
@@ -271,11 +261,26 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         } catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/ops`, (req, res) => {
+        const startedAt = performance.now();
+        let serviceMs: number | undefined;
+        const stages: Record<string, number> = {};
+        res.once("finish", () => logger.info("Production edit timing", {
+            route: "ops", status: res.statusCode,
+            totalMs: Math.round(performance.now() - startedAt),
+            ...(serviceMs === undefined ? {} : { serviceMs }),
+            responseBytes: Number(res.getHeader("content-length") || 0),
+            stages,
+        }));
         try {
-            const production = service.edit(req.params.episodeId, req.body);
+            const serviceStartedAt = performance.now();
+            const production = service.edit(req.params.episodeId, req.body, undefined, false, undefined, (name, durationMs) => { stages[name] = (stages[name] || 0) + durationMs; });
+            serviceMs = Math.round(performance.now() - serviceStartedAt);
             res.json({ ok: true, production });
             queueMicrotask(() => refreshes.wake(req.params.episodeId));
-        } catch (error) { handle(res, error); }
+        } catch (error) {
+            serviceMs = Math.round(performance.now() - startedAt);
+            handle(res, error);
+        }
     });
     router.get<Record<string, string>>(`${base}/operations/:operationId/receipt`, (req, res) => {
         try {

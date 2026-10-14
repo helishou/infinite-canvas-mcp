@@ -147,6 +147,7 @@ export type CanvasTextEditorProps = {
 export type CanvasProductionStoryboardEditor = { nodeId: string; segmentId: string; segment: Record<string, unknown> };
 export type CanvasProductionEditing = {
     reverseSyncPrompt: (input: { nodeId: string; segmentId: string; prompt: string; artifactId: string; sourceHash: string; basePromptHash: string }) => Promise<{ sourceSaved: boolean }>;
+    compilePrompt: (input: { nodeId: string; segmentId: string }) => Promise<{ prompt: string }>;
     replaceStoryboardTrack: (input: CanvasProductionStoryboardEditor) => Promise<{ sourceSaved: boolean }>;
 };
 export type CanvasNodeContext = {

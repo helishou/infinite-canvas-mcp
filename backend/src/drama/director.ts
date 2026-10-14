@@ -12,7 +12,7 @@ import { assertImageReferenceCoverage } from "./image-inputs.js";
 import { productionCanvasContext } from "./production-canvas.js";
 
 export function assertDirectorEngine(_engine: DirectorProduction["engine"]) {
-    resolveAchengEngine();
+    return resolveAchengEngine();
 }
 
 export const directorHash = (value: unknown) => crypto.createHash("sha256").update(canonicalProduction(value)).digest("hex");
@@ -52,7 +52,7 @@ export function projectDirector(data: EpisodeProductionData) {
         const usages = subjectAssembly ? list(s.subject_usages) : [];
         const assetIds = subjectAssembly ? usages.flatMap(usage => resolveSubjectPictureBindingIds(subjectsById.get(String(usage.subjectId)), usage).bindingIds.map(bindingId => String(subjectBindings.get(bindingId)?.assetId || "")))
             : [...(input?.assetIds || [])];
-        const keyframeAssetIds = subjectAssembly ? list(s.keyframes).map(frame => String(frame.assetId || frame.id)) : input?.keyframeAssetId ? [input.keyframeAssetId] : [];
+        const keyframeAssetIds = subjectAssembly ? list(s.keyframes).filter(frame => frame.anchor !== "composition").map(frame => String(frame.assetId || frame.id)) : input?.keyframeAssetId ? [input.keyframeAssetId] : [];
         const assetNodeIds = [...new Set([...assetIds, ...keyframeAssetIds].flatMap(id => d.assets[id]?.nodeId ? [d.assets[id]!.nodeId!] : []))];
         const durationFrames = subjectAssembly ? Number(s.duration_frames) : Number(s.end_frame) - Number(s.start_frame);
         const duration = durationFrames / fps;

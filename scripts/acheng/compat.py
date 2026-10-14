@@ -4,7 +4,7 @@ import re
 import sys
 import subprocess
 
-PATCH_VERSION = "canvas-10"
+PATCH_VERSION = "canvas-12"
 
 
 def replace(path, before, after):

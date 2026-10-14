@@ -1,10 +1,9 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Alert, App, Button, Dropdown, Input, Modal, Radio, Select, Tag } from "antd";
-import { ArrowLeft, ArrowRight, ArrowUpRight, ChevronDown, Clapperboard, GripHorizontal, Image as ImageIcon, Layers3, Search, WandSparkles } from "lucide-react";
+import { ArrowLeft, ArrowRight, ArrowUpRight, ChevronDown, Clapperboard, GripHorizontal, Image as ImageIcon, Layers3, Locate, Search, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { isSubjectPromptAssembly, resolveSubjectPictureBindingIds, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
-import { setShotPictureBindingIds, setShotPictureBindingMode, shotPictureBindingMode } from "./subject-picture-selection";
+import { isSubjectPromptAssembly, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import { subjectShotWindows, subjectStateProjection } from "@basketikun/canvas-agent/drama/subject-assembly";
 import { backendMediaUrl, fetchProductionWorkbench, type EpisodeProduction, type ProductionCompilationDiagnostic, type ProductionTarget } from "@/services/backend-api";
 import { records, formatSeconds } from "./director-display";
@@ -22,7 +21,7 @@ import { boundaryCounts, clipBoundaryAutoScrollDelta, clipBoundaryPositions, cli
 /** 工作包读取缓存（LRU）：同一镜头、同一源稿版本、同一参考结果版本直接命中，避免反复「正在读取镜头工作包」。 */
 const workbenchCache = new Map<string, Record<string, any>>();
 
-export type StoryboardViewMemory = { current?: { selectedId: string; sceneFilter: string; search: string; view: "shots" | "clips"; mobileEditing: boolean; detailView: "editing" | "context"; scrollTop: number } };
+export type StoryboardViewMemory = { current?: { selectedId: string; sceneFilter: string; search: string; view: "shots" | "clips"; mobileEditing: boolean; detailView: "editing" | "context"; shotSection?: "direction" | "sound" | "subjects" | "anchors"; scrollTop: number } };
 
 type Props = {
     director: DirectorProduction; production: EpisodeProduction; owner: ProductionTarget; initialShotId?: string;
@@ -42,7 +41,7 @@ type Props = {
     onSaveShotPatch?: (shotId: string, patch: Record<string, unknown>) => Promise<boolean>;
     onUpdateLegacyShotReferences?: (shotId: string, assetIds: string[], keyframeAssetId: string | null) => Promise<boolean>;
 
-    /** 该镜头卡片左侧关键帧缩略图的存储键；由 DirectorPanel 注入，与右栏「关键帧」共用同一份取图逻辑。 */
+    /** 该镜头卡片左侧时间关键帧缩略图；由 DirectorPanel 注入，构图参考不作为此缩略图来源。 */
     shotKeyframe?: (shotId: string) => string | undefined;
 
     shotDrafts?: Record<string, string>;
@@ -50,13 +49,51 @@ type Props = {
     busy?: boolean; compileBusy?: boolean; compilePending?: boolean; compileError?: string; compileNotice?: string; compileDiagnostics?: ProductionCompilationDiagnostic[];
     compileTargets?: { sourceHash: string; items: Array<{ targetId: string; status: string }> }; onCompile?: (sceneId?: string) => void;
     onClip: (id: string) => void;
-    onDiscuss: (shotId?: string) => void;
+    onDiscuss: (shotId?: string, instruction?: string) => void;
     /** 跳转到指定工作区（参考素材点开进素材库）。 */
     onNavigate: (workspace: DirectorWorkspace, target?: { kind: string; id: string }) => void;
 };
 
+function compileDiagnosticTaskContext(diagnostics: ProductionCompilationDiagnostic[]) {
+    type Group = { severity: string; code: string; path: string; message: string; blocksCompilation?: boolean; blockingActions: string[]; count: number; targetIds: Set<string>; shotIds: Set<string> };
+    const groups = new Map<string, Group>();
+    const targetIds = new Set<string>();
+    for (const item of diagnostics) {
+        const severity = String(item.severity || "warning"), code = String(item.code || "UNKNOWN_COMPILATION_DIAGNOSTIC");
+        const path = String(item.path || "compile"), message = String(item.message || code).replace(/\s+/g, " ").trim();
+        const blockingActions = [...new Set(item.blockingActions || [])].sort();
+        const key = JSON.stringify([severity, code, path, message, item.blocksCompilation, blockingActions]);
+        let group = groups.get(key);
+        if (!group) {
+            group = { severity, code, path, message, blocksCompilation: item.blocksCompilation, blockingActions, count: 0, targetIds: new Set(), shotIds: new Set() };
+            groups.set(key, group);
+        }
+        group.count += 1;
+        for (const id of [...(item.affectedTargets || []), item.targetId].filter((value): value is string => Boolean(value))) {
+            group.targetIds.add(id); targetIds.add(id);
+        }
+        if (item.shotId) group.shotIds.add(item.shotId);
+    }
+    const details = [...groups.values()].map(group => [
+        `- [${group.severity}${group.blocksCompilation ? ", blocks compilation" : ""}] ${group.code} · ${group.path}`,
+        group.message,
+        group.count > 1 ? `重复 ${group.count} 次` : "",
+        group.targetIds.size ? `目标：${[...group.targetIds].sort().join(", ")}` : "",
+        group.shotIds.size ? `镜头：${[...group.shotIds].sort().join(", ")}` : "",
+        group.blockingActions.length ? `阻断动作：${group.blockingActions.join(", ")}` : "",
+    ].filter(Boolean).join("；"));
+    return {
+        targetId: targetIds.size === 1 ? [...targetIds][0] : undefined,
+        instruction: [
+            `请处理当前 Clip 组合最近一次编译返回的 ${diagnostics.length} 条诊断（相同诊断已归组为 ${groups.size} 项）：`,
+            ...details,
+            "先读取当前 Backend 正式源稿和相关工作包，按诊断修复可定位的源字段；保留已确认的故事、对白、连续性和未涉及内容。诊断若无法安全映射到源稿，说明原因并提出需要人工决定的选项。修改后核对 Backend 回执与诊断状态；不要生成媒体。",
+        ].join("\n"),
+    };
+}
+
 /** The v2 authoring surface: stable Shots, derived Clip packaging, and compiler evidence. */
-export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, viewMemory, canvasNodes, canvasId, onLocateClip, renderEditor, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onEditShot, onSaveShotPatch, onUpdateLegacyShotReferences, shotKeyframe, shotDrafts = {}, busy, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets, onCompile, onClip, onDiscuss, onNavigate }: Props) {
+export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, viewMemory, canvasNodes, canvasId, onLocateClip, renderEditor, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onEditShot, onUpdateLegacyShotReferences, shotKeyframe, shotDrafts = {}, busy, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets, onCompile, onClip, onDiscuss, onNavigate }: Props) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const source = director.source as Record<string, any>;
@@ -73,7 +110,8 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const [sceneFilter, setSceneFilter] = useState(viewMemory?.current?.sceneFilter || "");
     const [mobileEditing, setMobileEditing] = useState(Boolean(initialShotId) || Boolean(viewMemory?.current?.mobileEditing));
     const [detailView, setDetailView] = useState<"editing" | "context">(viewMemory?.current?.detailView || "editing");
-    const selectShot = (id: string) => { setSelectedId(id); setMobileEditing(true); setDetailView("editing"); };
+    const [shotSection, setShotSection] = useState<"direction" | "sound" | "subjects" | "anchors">(viewMemory?.current?.shotSection || "direction");
+    const selectShot = (id: string) => { setSelectedId(id); setMobileEditing(true); };
     const sceneDirectory = useMemo(() => storyboardScenes(source), [source, director.sourceHash]);
     const sceneIds = storyboardSceneShotIds(source, sceneFilter);
     const [view, setView] = useState<"shots" | "clips">(viewMemory?.current?.view || "shots");
@@ -98,6 +136,8 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const title = (shot: Record<string, any>) => String(operationShots.find(item => item.id === shot.id)?.title || shot.title || t("director.studio.shotNumber", { number: shots.findIndex(item => item.id === shot.id) + 1 }));
     const framing = (shot: Record<string, any>) => ["EWS", "WS", "FS", "MS", "MCU", "CU", "ECU"].includes(shot.camera?.framing) ? t("director.atomic.framingName." + shot.camera.framing) : shot.camera?.framing || "—";
     const duration = (shot: Record<string, any>) => storyboardDurationFrames(shot) / fps;
+    // 全片时间轴：该镜头在全片成片中的起止秒（前面所有镜头时长累加，按 story_order 顺序）。
+    const filmRanges = (() => { const ranges = new Map<string, { start: number; end: number }>(); let running = 0; for (const shot of shots) { const frames = storyboardDurationFrames(shot); ranges.set(String(shot.id), { start: running / fps, end: (running + frames) / fps }); running += frames; } return ranges; })();
     const people = (shot: Record<string, any>) => storyboardPeople(source, shot, subjectAssembly).join(" · ");
     // 镜头卡片左侧的关键帧缩略图：取不到图时保留同尺寸占位，列表纵向仍然对齐。
     const shotFrame = (id: string) => String(shotKeyframe?.(id) || "");
@@ -170,17 +210,6 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const selectedKeyframeAssetId = String(director.shotInputs[activeId]?.keyframeAssetId || "");
     const references: Array<Record<string, any> & { subjectId: string }> = subjectAssembly ? records(workbench?.subjectUsages).flatMap(usage => records(usage.pictureBindings).map(binding => ({ ...binding, subjectId: String(usage.subjectId), presentation: usage.presentation })))
         : assetIds.map(assetId => ({ id: assetId, subjectId: assetId, displayName: records(source.asset_plan).find(asset => String(asset.asset_id || asset.id) === assetId)?.asset_name || assetId, resolved: workbench?.assets?.[assetId] || director.assets[assetId] }));
-    const pictureBindingLabel = (binding: Record<string, any>) => {
-        const node = canvasNodes.find(item => item.id === binding.sourceNode?.nodeId);
-        const resultId = String(binding.selection?.resultId || "");
-        const selectedImage = records(node?.metadata?.characterImages).find(image => {
-            const key = String(image.storageKey || image.url || image.name || "");
-            return [key, String(image.storageKey || ""), `${node?.id}:character-image:${key}`].includes(resultId);
-        });
-        const sourceLabel = node?.title || node?.metadata?.name || t("director.crud.boundImage");
-        const mediaLabel = selectedImage?.outfit || selectedImage?.outfitDescription || selectedImage?.name || binding.displayName || binding.id;
-        return [sourceLabel, mediaLabel].map(value => String(value || "").trim()).filter(Boolean).join(" · ");
-    };
     const keyframes = records(workbench?.keyframes), referenceDiagnostics = records(workbench?.resolutionDiagnostics);
     // 左栏「连续性状态」里的动作块（与下一段的边界开关），由 DirectorPanel 注入。
     // Empty sources still pass through this setup before the empty-state branch below.
@@ -208,14 +237,37 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const visibleClipStates = !sceneFilter ? clipStates : clipStates.filter(item => clips.find(clip => String(clip.id) === item.id)?.shot_ids?.some((id: string) => directSceneShotIds.has(String(id))));
     const sceneCompileAvailable = !sceneFilter || sceneDirectory.scenes.some(scene => scene.id === sceneFilter);
     const compileCounts = { ready: visibleClipStates.filter(item => item.tone === "ready").length, pending: visibleClipStates.filter(item => item.tone === "pending").length, stale: visibleClipStates.filter(item => item.tone === "stale").length, running: visibleClipStates.filter(item => item.tone === "live").length, recorded: visibleClipStates.filter(item => item.tone === "recorded").length, blocked: visibleClipStates.filter(item => item.tone === "blocked").length };
+    const failedCompileTargetIds = new Set<string>();
+    if (compileTargets?.sourceHash === director.sourceHash) for (const item of compileTargets.items.filter(item => item.status !== "ready")) {
+        failedCompileTargetIds.add(String(item.targetId));
+        const targetClip = clips.find(entry => String(entry.id) === String(item.targetId));
+        for (const shotId of targetClip?.shot_ids || []) failedCompileTargetIds.add(String(shotId));
+    }
+    const orderedCompileDiagnostics = compileDiagnostics.map((item, index) => {
+        const relatedToFailedTarget = [item.targetId, item.shotId, ...(item.affectedTargets || [])].some(id => id && failedCompileTargetIds.has(String(id)));
+        const blocksCompile = item.blocksCompilation === true || item.severity === "error" || item.severity === "unverified" || item.blockingActions?.includes("compile");
+        return { item, index, priority: relatedToFailedTarget ? 0 : blocksCompile ? 1 : 2 };
+    }).sort((left, right) => left.priority - right.priority || left.index - right.index).map(entry => entry.item);
     // 分割块：拖动或右键调整相邻片段之间的分镜归属。芯片按 id 登记，拖动时按实际布局吸附到镜头边界。
     const chipRefs = useRef(new Map<string, HTMLElement>());
     const trackRef = useRef<HTMLDivElement | null>(null);
-    if (viewMemory) viewMemory.current = { selectedId: activeId, sceneFilter, search, view, mobileEditing, detailView, scrollTop: viewMemory.current?.scrollTop || 0 };
+    if (viewMemory) viewMemory.current = { selectedId: activeId, sceneFilter, search, view, mobileEditing, detailView, shotSection, scrollTop: viewMemory.current?.scrollTop || 0 };
     useLayoutEffect(() => { if (trackRef.current && viewMemory?.current) trackRef.current.scrollTop = viewMemory.current.scrollTop; }, [ownerKey, view]);
     const revealShot = (id: string) => {
         setView("shots"); setSearch(""); setSceneFilter(sceneDirectory.scenes.find(scene => scene.shotIds.includes(id))?.id || "__unassigned__"); selectShot(id);
         requestAnimationFrame(() => { const row = chipRefs.current.get(id), track = trackRef.current; if (row && track?.clientHeight) track.scrollTop += row.getBoundingClientRect().top - track.getBoundingClientRect().top - track.clientHeight / 2 + row.clientHeight / 2; row?.focus({ preventScroll: true }); });
+    };
+    const locateSelectedShot = () => {
+        if (!activeId) return;
+        setSearch(""); setSceneFilter(sceneDirectory.scenes.find(scene => scene.shotIds.includes(activeId))?.id || "__unassigned__");
+        const scrollToRow = (attempt = 0) => requestAnimationFrame(() => {
+            const row = chipRefs.current.get(activeId), track = trackRef.current;
+            if (!row && attempt < 2) return scrollToRow(attempt + 1);
+            if (!row || !track?.clientHeight) return;
+            track.scrollTop += row.getBoundingClientRect().top - track.getBoundingClientRect().top - track.clientHeight / 2 + row.clientHeight / 2;
+            row.focus({ preventScroll: true });
+        });
+        scrollToRow();
     };
     const clipLabel = (index: number) => t("director.atomic.clipHeading", { number: index + 1 });
     const saveClipPartition = async (shotIds: string[], groups: Array<Record<string, unknown>>) => {
@@ -281,7 +333,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const sceneMenuItems = sceneOptions.map(option => ({ key: option.key || "__all__", label: <span className="flex items-center gap-3"><span>{option.label}</span><span className="text-xs tabular-nums text-muted-foreground">{option.count}</span></span> }));
     return <div className="space-y-6" data-subject-storyboard-workbench data-storyboard-view={view} data-canvas-id={canvasId} data-mobile-editing={mobileEditing && Boolean(selected) && view === "shots"} data-production-section-root>
         {/* 紧凑头部：标题 + 统计 + 视图页签合一行；「主体与图片 / 连续性台账」与顶部工作区页签重复，已去掉（连续性入口就是顶部工作区页签）。 */}
-        <header className="storyboard-toolbar flex flex-wrap items-center gap-x-4 gap-y-3 border-b border-border pb-4">
+        <header className="storyboard-toolbar border-b border-border pb-1">
             <div className="storyboard-scene-context flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
                 <h2 className="m-0 min-w-0">
                     <Dropdown trigger={["click"]} menu={{ items: sceneMenuItems, selectable: true, selectedKeys: [sceneFilter || "__all__"], onClick: ({ key }) => selectScene(key) }}>
@@ -292,10 +344,11 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                     </Dropdown>
                 </h2>
                 <p className="m-0 text-xs text-muted-foreground">{t("director.atomic.counts", { shots: scopeShots.length, clips: visibleClipStates.length, seconds: formatSeconds(scopeShots.reduce((sum, shot) => sum + duration(shot), 0)) })}{view === "shots" && crossSceneCount > 0 && <span className="block mt-1">{t("director.atomic.crossSceneIncluded", { count: crossSceneCount })}</span>}</p>
-            </div>
-            <div className="ml-auto flex flex-wrap items-center gap-3">
-                <div className="flex items-center gap-1" role="tablist" aria-label={t("director.atomic.views")}>{(["shots", "clips"] as const).map(key => <button key={key} type="button" role="tab" aria-selected={view === key} onClick={() => setView(key)} className={`flex items-center gap-1.5 border-b-2 px-1 py-1 text-sm ${view === key ? "border-primary font-medium text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}`}>{key === "shots" ? <Clapperboard className="size-4" /> : <Layers3 className="size-4" />}{t("director.atomic.view." + key)}</button>)}</div>
                 {unsavedShots.length > 0 && <Dropdown trigger={["click"]} menu={{ items: unsavedShots.map(shot => ({ key: String(shot.id), label: title(shot) })), onClick: ({ key }) => revealShot(key) }}><Button type="text" size="small" className="storyboard-draft-locator">{t("director.atomic.unsavedCount", { count: unsavedShots.length })}</Button></Dropdown>}
+            </div>
+            <div className="storyboard-toolbar-actions">
+                <Button type="text" size="small" icon={<Locate className="size-3.5" />} aria-label={t("director.atomic.locateSelectedShot")} title={t("director.atomic.locateSelectedShot")} onClick={locateSelectedShot} />
+                <div className="storyboard-view-tabs" role="tablist" aria-label={t("director.atomic.views")}>{(["shots", "clips"] as const).map(key => <button key={key} type="button" role="tab" aria-selected={view === key} onClick={() => setView(key)}>{key === "shots" ? <Clapperboard className="size-4" /> : <Layers3 className="size-4" />}{t("director.atomic.view." + key)}</button>)}</div>
                 <Button type="text" size="small" icon={<WandSparkles className="size-3.5" />} onClick={() => onDiscuss(activeId || undefined)}>{t("director.studio.collaborate")}</Button>
             </div>
         </header>
@@ -309,7 +362,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                 </div>
             </div>
             {compileError && <Alert type="error" showIcon message={t("director.atomic.compileFailed")} description={compileError} style={{ whiteSpace: "pre-line" }} />}
-            {compileNotice && <Alert type="success" showIcon message={compileNotice} description={compileDiagnostics.length > 0 ? <details className="text-sm"><summary className="cursor-pointer underline underline-offset-2">{t("director.atomic.compileViewDiagnostics", { count: compileDiagnostics.length })}</summary><ul className="mt-2 max-h-72 list-disc space-y-2 overflow-auto pl-5">{compileDiagnostics.map((item, index) => <li key={`${item.code || "diagnostic"}:${item.path || ""}:${item.targetId || ""}:${index}`}><p>{item.message || item.code || t("director.atomic.compileHintOther")}</p><p className="mt-0.5 text-xs text-muted-foreground">{[item.code, item.path, item.targetId, item.shotId].filter(Boolean).join(" · ")}</p></li>)}</ul></details> : undefined} style={{ whiteSpace: "pre-line" }} />}
+            {compileNotice && <Alert type="success" showIcon message={<div className="flex flex-wrap items-center justify-between gap-2"><span>{compileNotice}</span>{orderedCompileDiagnostics.length > 0 && <Button type="link" size="small" className="px-0" icon={<WandSparkles className="size-3.5" />} disabled={busy || compileBusy} onClick={() => { const task = compileDiagnosticTaskContext(orderedCompileDiagnostics); onDiscuss(task.targetId, task.instruction); }}>{t("director.atomic.compileAskDirector")}</Button>}</div>} description={orderedCompileDiagnostics.length > 0 ? <details className="text-sm"><summary className="cursor-pointer underline underline-offset-2">{t("director.atomic.compileViewDiagnostics", { count: orderedCompileDiagnostics.length })}</summary><ul className="mt-2 max-h-72 list-disc space-y-2 overflow-auto pl-5">{orderedCompileDiagnostics.map((item, index) => <li key={`${item.code || "diagnostic"}:${item.path || ""}:${item.targetId || ""}:${index}`}><p>{item.message || item.code || t("director.atomic.compileHintOther")}</p><p className="mt-0.5 text-xs text-muted-foreground">{[item.code, item.path, item.targetId, item.shotId].filter(Boolean).join(" · ")}</p></li>)}</ul></details> : undefined} style={{ whiteSpace: "pre-line" }} />}
             {visibleClipStates.length > 0 && <div className="flex flex-wrap items-center gap-1.5" aria-label={t("director.atomic.compileStatus")}>
                 <span className="mr-1 text-xs text-muted-foreground">{t("director.atomic.compileStatus")}</span>
                 {visibleClipStates.map(item => <span key={item.id} className="flex items-center gap-1.5 rounded-md border border-border px-2 py-0.5 text-xs">
@@ -341,12 +394,13 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                         <div className="storyboard-clip-shots">
                             {entry.shown.map((shot, shotIndex) => {
                                 const nextShot = entry.shown[shotIndex + 1];
+                                const range = filmRanges.get(String(shot.id));
                                 const ids = clipShotIds(entry.group), boundaryIndex = ids.indexOf(String(shot.id)) + 1;
                                 const canSplitHere = Boolean(nextShot && ids[boundaryIndex] === String(nextShot.id));
                                 const leftIds = ids.slice(0, boundaryIndex), rightIds = ids.slice(boundaryIndex);
                                 return <Fragment key={String(shot.id)}>
                                     <ShotOperations source={{ ...source, shots: operationShots }} shot={operationShots.find(item => item.id === shot.id)} busy={busy} onEdit={onEditShot || (async () => false)} onSelect={selectShot} contextMenu={subjectAssembly && Boolean(onEditShot)}>
-                                        <button type="button" draggable={Boolean(subjectAssembly && onEditShot && !busy)} data-track-shot={String(shot.id)} ref={element => { if (element) chipRefs.current.set(String(shot.id), element); else chipRefs.current.delete(String(shot.id)); }} onClick={() => selectShot(String(shot.id))} onContextMenu={() => setSelectedId(String(shot.id))} onDragStart={event => { if (!subjectAssembly || !onEditShot || busy) return event.preventDefault(); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(shot.id)); setDraggingShotId(String(shot.id)); }} onDragOver={event => { const sourceId = event.dataTransfer.getData("text/plain") || draggingShotId; if (sourceId && sourceId !== String(shot.id) && clips.some(item => clipShotIds(item).includes(sourceId) && clipShotIds(item).includes(String(shot.id)))) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={event => moveShotByDrop(event, String(shot.id))} onDragEnd={() => setDraggingShotId("")} aria-pressed={activeId === String(shot.id)} title={title(shot)} className={`storyboard-shot-row w-full text-left ${draggingShotId === String(shot.id) ? "opacity-50" : ""} ${activeId === String(shot.id) ? "is-selected" : ""} ${subjectAssembly && onEditShot && !busy ? "cursor-grab active:cursor-grabbing" : ""}`}><span className="flex items-start gap-3"><ShotKeyframeThumb storageKey={shotFrame(String(shot.id))} /><span className="min-w-0 flex-1"><span className="flex items-start justify-between gap-3"><span className="storyboard-shot-title">{String(shots.findIndex(item => item.id === shot.id) + 1).padStart(2, "0")} · {title(shot)}{unsavedIds.has(String(shot.id)) && <span className="storyboard-unsaved-mark" title={t("director.atomic.draftKept")} aria-label={t("director.atomic.draftKept")}> · {t("director.atomic.unsavedShort")}</span>}</span><span className="shrink-0 text-xs tabular-nums text-muted-foreground">{formatSeconds(duration(shot))}s</span></span><span className="mt-1 block text-xs text-muted-foreground">{framing(shot)} · {people(shot)}</span><span className="mt-2 line-clamp-2 block text-sm leading-6 text-muted-foreground">{String(shot.visual?.description || shot.visual?.text || (typeof shot.visual === "string" ? shot.visual : ""))}</span></span></span></button>
+                                        <button type="button" draggable={Boolean(subjectAssembly && onEditShot && !busy)} data-track-shot={String(shot.id)} ref={element => { if (element) chipRefs.current.set(String(shot.id), element); else chipRefs.current.delete(String(shot.id)); }} onClick={() => selectShot(String(shot.id))} onContextMenu={() => setSelectedId(String(shot.id))} onDragStart={event => { if (!subjectAssembly || !onEditShot || busy) return event.preventDefault(); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(shot.id)); setDraggingShotId(String(shot.id)); }} onDragOver={event => { const sourceId = event.dataTransfer.getData("text/plain") || draggingShotId; if (sourceId && sourceId !== String(shot.id) && clips.some(item => clipShotIds(item).includes(sourceId) && clipShotIds(item).includes(String(shot.id)))) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={event => moveShotByDrop(event, String(shot.id))} onDragEnd={() => setDraggingShotId("")} aria-pressed={activeId === String(shot.id)} title={title(shot)} className={`storyboard-shot-row w-full text-left ${draggingShotId === String(shot.id) ? "opacity-50" : ""} ${activeId === String(shot.id) ? "is-selected" : ""} ${subjectAssembly && onEditShot && !busy ? "cursor-grab active:cursor-grabbing" : ""}`}><span className="flex items-start gap-3"><ShotKeyframeThumb storageKey={shotFrame(String(shot.id))} /><span className="min-w-0 flex-1"><span className="flex items-start justify-between gap-3"><span className="storyboard-shot-title">{String(shots.findIndex(item => item.id === shot.id) + 1).padStart(2, "0")} · {title(shot)}{unsavedIds.has(String(shot.id)) && <span className="storyboard-unsaved-mark"> · {t("director.atomic.unsavedShort")}</span>}</span><span className="flex shrink-0 flex-col items-end text-xs leading-4 tabular-nums text-muted-foreground"><span>{formatSeconds(duration(shot))}s</span>{range && <span>{t("director.atomic.clipFilmRange", { start: formatSeconds(range.start), end: formatSeconds(range.end) })}</span>}</span></span><span className="mt-1 block text-xs text-muted-foreground">{framing(shot)} · {people(shot)}</span><span className="mt-2 line-clamp-2 block text-sm leading-6 text-muted-foreground">{String(shot.visual?.description || shot.visual?.text || (typeof shot.visual === "string" ? shot.visual : ""))}</span></span></span></button>
                                     </ShotOperations>
                                     {canSplitHere && <ShotClipSplitHandle vertical disabled={!partitionEnabled} onSplit={() => {
                                         void saveClipPartition(ids, materializeClipPartition(clips, [{ ids: leftIds }, { ids: rightIds }]));
@@ -362,15 +416,14 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
             </div>
             </div>
             <div className="storyboard-detail-panel" data-detail-view={detailView}>
-                <header className="storyboard-detail-heading">
-                    <div className="storyboard-mobile-actions"><Button type="text" icon={<ArrowLeft className="size-4" />} onClick={() => { setMobileEditing(false); requestAnimationFrame(() => chipRefs.current.get(activeId)?.focus({ preventScroll: true })); }}>{t("director.atomic.backToShots")}</Button></div>
-                </header>
+                {/* 桌面端标题行已删；仅剩的移动端全屏编辑返回键直接挂在面板下（CSS 按类名独立生效，无需原 header 外壳）。 */}
+                <div className="storyboard-mobile-actions"><Button type="text" icon={<ArrowLeft className="size-4" />} onClick={() => { setMobileEditing(false); requestAnimationFrame(() => chipRefs.current.get(activeId)?.focus({ preventScroll: true })); }}>{t("director.atomic.backToShots")}</Button></div>
             {selected && !visible.some(shot => shot.id === selected.id) && <div className="storyboard-selection-notice" role="status"><span>{t(sceneIds.has(activeId) ? "director.atomic.currentOutsideFilter" : "director.atomic.currentOutsideScene")}</span><button type="button" onClick={() => revealShot(activeId)}>{t("director.atomic.revealCurrent")}</button></div>}
             <div className="storyboard-detail-surfaces">
                 <section className="storyboard-editing" data-production-target={`shot:${activeId}`} data-production-section="shot-editing" tabIndex={-1}>
                     {(referenceDiagnostics.length > 0 || (!compiled && refresh?.blockingDiagnostic)) && <details className="mb-4 text-sm" hidden={detailView !== "editing"}><summary className="cursor-pointer text-muted-foreground">{t("director.workspace.shotIssueDetails")}</summary><div className="mt-2 space-y-2">{[...new Set([...(referenceDiagnostics.map(diagnostic => String(diagnostic.message || diagnostic.code))), ...(!compiled && refresh?.blockingDiagnostic ? [refresh.blockingDiagnostic.message] : [])])].map(message => <p key={message} className="whitespace-pre-wrap text-muted-foreground">{message}</p>)}</div></details>}
                     {/* 「连续性」收编为编辑器页签：detailView 开关经 __contextControl 传给 SubjectShotEditor，选中时它隐藏表单体与保存栏。 */}
-                    <div className="storyboard-editor-content" data-subject-editor={subjectAssembly || undefined}>{renderEditor(selected, { ...(workbench || {}), __contextControl: { active: detailView === "context", enter: () => setDetailView("context"), exit: () => setDetailView("editing") } })}</div>
+                    <div className="storyboard-editor-content" data-subject-editor={subjectAssembly || undefined}>{renderEditor(selected, { ...(workbench || {}), __contextControl: { active: detailView === "context", enter: () => setDetailView("context"), exit: () => setDetailView("editing") }, __sectionControl: { current: shotSection, select: setShotSection } })}</div>
                     {/* 镜头操作行（和导演讨论 / 跳到所在片段）：整个左栏的最后一块，不再夹在对白与连续性状态之间。 */}
                     <div hidden={detailView !== "editing"}>{renderShotActions?.(selected)}</div>
                 </section>
@@ -378,35 +431,10 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                     <div className="mb-4 flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs text-muted-foreground">{formatSeconds((windows.get(activeId)?.startFrame || 0) / fps)}–{formatSeconds((windows.get(activeId)?.endFrame || 0) / fps)}s</p></div><Tag color={refresh?.blockingDiagnostic ? "orange" : compiled ? "green" : undefined}>{statusLabel}</Tag></div>
 
                     <section className="border-t border-border pt-4" data-production-section="shot-state" tabIndex={-1}><h3 className="text-sm font-medium">{t("director.atomic.state")}</h3><p className="mt-1 text-xs text-muted-foreground">{t(subjectAssembly ? "director.atomic.derivedState" : "director.atomic.legacyStateHint")}</p>{!subjectAssembly && shotStateFields && <div className="mt-3" data-shot-state>{shotStateFields}</div>}{continuityActions && <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-border pb-3 text-xs text-muted-foreground" data-shot-continuity-actions>{continuityActions}</div>}
-                        {records(state?.start).length + records(state?.end).length > 0 ? <div className="mt-3 grid gap-4 ">{(["start", "end"] as const).map(phase => <div key={phase}><p className="text-[11px] font-medium text-muted-foreground">{t("director.atomic.statePhase." + phase)}</p>{records(state?.[phase]).map(item => <div key={item.factId} className="mt-2"><p className="text-[10px] text-muted-foreground">{item.subjectId ? subjectDisplayName(source, String(item.subjectId)) : item.property}</p><p className="text-xs leading-5">{humanState.value(String(item.factId), item.value)}</p></div>)}{!records(state?.[phase]).length && <p className="mt-1 text-xs text-muted-foreground">{t("director.atomic.noState")}</p>}</div>)}</div> : <p className="mt-3 text-xs text-muted-foreground">{t("director.atomic.noState")}</p>}{records(state?.unresolved).length > 0 && <p className="mt-3 text-xs text-amber-600">{t("director.atomic.stateIssue")} · {records(state?.unresolved).map(item => humanState.fact(String(item.factId))).join(" · ")}</p>}</section>
+                        {records(state?.start).length + records(state?.end).length > 0 ? <div className="mt-3 grid gap-4 sm:grid-cols-2">{(["start", "end"] as const).map(phase => <div key={phase} className="min-w-0"><p className="text-[11px] font-medium text-muted-foreground">{t("director.atomic.statePhase." + phase)}</p>{records(state?.[phase]).map(item => <div key={item.factId} className="mt-2"><p className="text-[10px] text-muted-foreground">{item.subjectId ? subjectDisplayName(source, String(item.subjectId)) : item.property}</p><p className="text-xs leading-5">{humanState.value(String(item.factId), item.value)}</p></div>)}{!records(state?.[phase]).length && <p className="mt-1 text-xs text-muted-foreground">{t("director.atomic.noState")}</p>}</div>)}</div> : <p className="mt-3 text-xs text-muted-foreground">{t("director.atomic.noState")}</p>}{records(state?.unresolved).length > 0 && <p className="mt-3 text-xs text-amber-600">{t("director.atomic.stateIssue")} · {records(state?.unresolved).map(item => humanState.fact(String(item.factId))).join(" · ")}</p>}</section>
 
-                    {subjectAssembly && selected && <section className="border-t border-border pt-4" data-shot-picture-binding-editor>
-                        <h3 className="text-sm font-medium">{t("director.atomic.references")}</h3>
-                        <p className="mt-1 text-xs text-muted-foreground">{t("director.atomic.referencesHint")}</p>
-                        <div className="mt-3 space-y-3">{records(selected.subject_usages).map((usage, index) => {
-                            const subject = subjects.find(item => String(item.id) === String(usage.subjectId));
-                            const resolved = resolveSubjectPictureBindingIds(subject, usage);
-                            const pictureMode = shotPictureBindingMode(usage);
-                            return <div key={`${usage.subjectId}:${index}`} className="grid gap-2 text-xs">
-                                <span>{subjectDisplayName(source, String(usage.subjectId))}</span>
-                                <Select value={pictureMode} disabled={busy || reading || !subject || !onSaveShotPatch}
-                                    options={["default", "explicit"].map(mode => ({ value: mode, label: t(`director.workspace.pictureBindingMode${mode === "default" ? "Default" : "Explicit"}`) }))}
-                                    onChange={mode => {
-                                        const nextUsage = setShotPictureBindingMode(subject, usage, mode as "default" | "explicit");
-                                        const subject_usages = records(selected.subject_usages).map((item, itemIndex) => itemIndex === index ? nextUsage : item);
-                                        void onSaveShotPatch?.(activeId, { subject_usages });
-                                    }} />
-                                <Select mode="multiple" value={resolved.bindingIds} disabled={busy || reading || !subject || !onSaveShotPatch || pictureMode === "default"}
-                                    options={records(subject?.pictureBindings).map(binding => ({ value: String(binding.id), label: pictureBindingLabel(binding) }))}
-                                    onChange={pictureBindingIds => {
-                                        const subject_usages = records(selected.subject_usages).map((item, itemIndex) => itemIndex === index ? setShotPictureBindingIds(item, pictureBindingIds) : item);
-                                        void onSaveShotPatch?.(activeId, { subject_usages });
-                                    }} />
-                                {pictureMode === "default" ? <p className="text-[11px] text-muted-foreground">{t("director.workspace.pictureBindingDefaultHint")}</p> : !resolved.bindingIds.length && <p className="text-[11px] text-muted-foreground">{t("director.workspace.pictureBindingExplicitEmptyHint")}</p>}
-                            </div>;
-                        })}</div>
-                        <p className="mt-2 text-[11px] text-muted-foreground">{t("director.atomic.emptyBindingUsesDefault")}</p>
-                    </section>}
+                    {/* 图片绑定的编辑控件原先在这里和「主体引用」页签各有一份、走两条写入路径；统一收进「主体引用」页签，侧栏只留一行指引和下面的只读解析列表。 */}
+                    {subjectAssembly && selected && <section className="border-t border-border pt-4" data-shot-picture-binding-hint><p className="text-xs text-muted-foreground">{t("director.atomic.pictureBindingEditorMoved")}</p></section>}
                     {!subjectAssembly && selected && <section className="border-t border-border pt-4" data-legacy-shot-reference-editor>
                         <h3 className="text-sm font-medium">{t("director.atomic.editShotReferences")}</h3>
                         <div className="mt-3 space-y-3">
@@ -419,8 +447,9 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                                     onChange={nextAssetId => void onUpdateLegacyShotReferences?.(activeId, assetIds, nextAssetId || null)} />
                             </label>
                         </div>
-                    </section>}                    <section data-production-section="shot-references" tabIndex={-1}><h3 className="flex items-center gap-2 text-sm font-medium"><ImageIcon className="size-4" />{t("director.atomic.references")}</h3><p className="mt-1 text-xs text-muted-foreground">{t(subjectAssembly ? "director.atomic.referencesHint" : "director.atomic.legacyReferencesHint")}</p>{reading ? <p className="mt-3 text-xs text-muted-foreground">{t("director.atomic.loading")}</p> : workbenchError ? <div className="mt-3 text-xs"><p className="text-muted-foreground">{workbenchError}</p><Button size="small" type="text" onClick={() => setRetry(value => value + 1)}>{t("director.atomic.retry")}</Button></div> : <div className="mt-3 space-y-3">{references.map(reference => <div key={`${reference.subjectId}:${reference.id}`} className="flex gap-3">{reference.resolved?.storageKey ? <img src={backendMediaUrl(reference.resolved.storageKey)} alt={reference.displayName || subjectDisplayName(source, reference.subjectId)} className="h-16 w-16 shrink-0 rounded object-contain" loading="lazy" /> : <span className="flex h-16 w-16 shrink-0 items-center justify-center text-muted-foreground"><ImageIcon className="size-5" /></span>}<div className="min-w-0"><p className="text-xs font-medium">{reference.displayName || subjectDisplayName(source, reference.subjectId)}</p><p className="mt-1 text-[11px] text-muted-foreground">{(reference.provides || []).map((purpose: string) => t(`director.crud.purpose.${purpose}`, { defaultValue: /[\u4e00-\u9fff]/.test(purpose) ? purpose : t("director.crud.otherPurpose") })).join(" · ")}</p><p className="mt-1 text-[11px] text-muted-foreground">{t(!subjectAssembly ? "director.atomic.legacyReferenceBinding" : reference.selection?.mode === "node_selection" ? "director.atomic.followNodeReference" : reference.selection?.mode === "selected_result" ? "director.workspace.selectedHistory" : "director.workspace.followLatest")}</p><ReferenceNodeLink sourceNode={reference.sourceNode} /><button type="button" onClick={() => onNavigate("assets", { kind: "asset", id: subjectAssembly ? reference.subjectId : reference.id })} className="mt-1 inline-flex items-center gap-0.5 text-[11px] text-primary hover:underline">{t("director.atomic.viewReference")}<ArrowRight className="size-3" /></button></div></div>)}{!references.length && <p className="text-xs text-muted-foreground">{t("director.atomic.noResolvedReferences")}</p>}</div>}</section>
-                    {keyframes.length > 0 && <section className="border-t border-border pt-4"><h3 className="text-sm font-medium">{t("director.atomic.keyframeReferences")}</h3><div className="mt-3 space-y-3">{keyframes.map(frame => <div key={frame.id} className="flex gap-3">{frame.resolved?.storageKey ? <img src={backendMediaUrl(frame.resolved.storageKey)} alt={t("director.atomic.anchor." + frame.anchor)} className="h-16 w-16 shrink-0 rounded object-contain" loading="lazy" /> : <span className="flex h-16 w-16 shrink-0 items-center justify-center text-muted-foreground"><ImageIcon className="size-5" /></span>}<div className="min-w-0"><p className="text-xs font-medium">{t("director.atomic.anchor." + frame.anchor)}</p><p className="mt-1 text-[11px] text-muted-foreground">{frame.requiredForSubmission ? t("director.atomic.requiredAnchor") : t("director.atomic.designAnchor")}</p>{frame.anchor === "at_frame" && <p className="mt-1 text-[11px] text-muted-foreground">{frame.localFrame}f</p>}<ReferenceNodeLink sourceNode={frame.sourceNode} /></div></div>)}</div></section>}
+                    </section>}                    <section data-production-section="shot-references" tabIndex={-1} hidden={subjectAssembly}><h3 className="flex items-center gap-2 text-sm font-medium"><ImageIcon className="size-4" />{t("director.atomic.references")}</h3><p className="mt-1 text-xs text-muted-foreground">{t(subjectAssembly ? "director.atomic.referencesHint" : "director.atomic.legacyReferencesHint")}</p>{reading ? <p className="mt-3 text-xs text-muted-foreground">{t("director.atomic.loading")}</p> : workbenchError ? <div className="mt-3 text-xs"><p className="text-muted-foreground">{workbenchError}</p><Button size="small" type="text" onClick={() => setRetry(value => value + 1)}>{t("director.atomic.retry")}</Button></div> : <div className="mt-3 space-y-3">{references.map(reference => <div key={`${reference.subjectId}:${reference.id}`} className="flex gap-3">{reference.resolved?.storageKey ? <img src={backendMediaUrl(reference.resolved.storageKey)} alt={reference.displayName || subjectDisplayName(source, reference.subjectId)} className="h-16 w-16 shrink-0 rounded object-contain" loading="lazy" /> : <span className="flex h-16 w-16 shrink-0 items-center justify-center text-muted-foreground"><ImageIcon className="size-5" /></span>}<div className="min-w-0"><p className="text-xs font-medium">{reference.displayName || subjectDisplayName(source, reference.subjectId)}</p><p className="mt-1 text-[11px] text-muted-foreground">{(reference.provides || []).map((purpose: string) => t(`director.crud.purpose.${purpose}`, { defaultValue: /[\u4e00-\u9fff]/.test(purpose) ? purpose : t("director.crud.otherPurpose") })).join(" · ")}</p><p className="mt-1 text-[11px] text-muted-foreground">{t(!subjectAssembly ? "director.atomic.legacyReferenceBinding" : reference.selection?.mode === "node_selection" ? "director.atomic.followNodeReference" : reference.selection?.mode === "selected_result" ? "director.workspace.selectedHistory" : "director.workspace.followLatest")}</p><ReferenceNodeLink sourceNode={reference.sourceNode} /><button type="button" onClick={() => onNavigate("assets", { kind: "asset", id: subjectAssembly ? reference.subjectId : reference.id })} className="mt-1 inline-flex items-center gap-0.5 text-[11px] text-primary hover:underline">{t("director.atomic.viewReference")}<ArrowRight className="size-3" /></button></div></div>)}{!references.length && <p className="text-xs text-muted-foreground">{t("director.atomic.noResolvedReferences")}</p>}</div>}</section>
+                    {/* 关键帧只读概览：v2 有专门的「关键帧」页签，此处仅 legacy 源稿保留（那边没有对应编辑面）。 */}
+                    {keyframes.length > 0 && !subjectAssembly && <section className="border-t border-border pt-4"><h3 className="text-sm font-medium">{t("director.atomic.keyframeReferences")}</h3><div className="mt-3 space-y-3">{keyframes.map(frame => <div key={frame.id} className="flex gap-3">{frame.resolved?.storageKey ? <img src={backendMediaUrl(frame.resolved.storageKey)} alt={t("director.atomic.anchor." + frame.anchor)} className="h-16 w-16 shrink-0 rounded object-contain" loading="lazy" /> : <span className="flex h-16 w-16 shrink-0 items-center justify-center text-muted-foreground"><ImageIcon className="size-5" /></span>}<div className="min-w-0"><p className="text-xs font-medium">{t("director.atomic.anchor." + frame.anchor)}</p><p className="mt-1 text-[11px] text-muted-foreground">{frame.requiredForSubmission ? t("director.atomic.requiredAnchor") : t("director.atomic.designAnchor")}</p>{frame.anchor === "at_frame" && <p className="mt-1 text-[11px] text-muted-foreground">{frame.localFrame}f</p>}<ReferenceNodeLink sourceNode={frame.sourceNode} /></div></div>)}</div></section>}
                     <details className="border-t border-border pt-4"><summary className="cursor-pointer text-sm font-medium">{t("director.atomic.compiledOutput")}</summary><p className="mt-2 text-xs text-muted-foreground">{t(compiled ? "director.atomic.outputHint" : "director.atomic.previousOutput")}</p>{artifact ? <pre className="mt-3 max-h-80 overflow-auto whitespace-pre-wrap break-words text-xs leading-5">{artifact.prompt}</pre> : <p className="mt-3 text-xs text-muted-foreground">{t("director.atomic.pendingCompile")}</p>}<Button className="mt-2" size="small" type="text" disabled={!clip} onClick={() => clip && onClip(String(clip.id))}>{t("director.atomic.openClip")}<ArrowRight className="size-3" /></Button></details>
                 </aside>
             </div>

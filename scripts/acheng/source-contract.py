@@ -86,7 +86,7 @@ def contract():
     }
 
 
-def validate_subject_prompt_v2(source, stage="edit"):
+def validate_subject_prompt_v2(source, stage="edit", validation_scope=None):
     issues = []
     def issue(path, message, target=None, severity=None):
         issues.append({"code": "INVALID_SUBJECT_SOURCE", "path": "director.source." + path, "targetId": target,
@@ -96,6 +96,18 @@ def validate_subject_prompt_v2(source, stage="edit"):
         return issues
     subjects = source.get("subject_registry") if isinstance(source.get("subject_registry"), list) else []
     shots = source.get("shots") if isinstance(source.get("shots"), list) else []
+    scoped_shot_ids = set(map(str, validation_scope.get("shotIds", []))) if isinstance(validation_scope, dict) else set()
+    if scoped_shot_ids:
+        selected_utterance_ids = {
+            str(ref.get("utteranceId"))
+            for shot in shots if isinstance(shot, dict) and str(shot.get("id")) in scoped_shot_ids
+            for ref in rows(shot.get("utterance_refs")) if isinstance(ref, dict) and ref.get("utteranceId")
+        }
+        scoped_shot_ids.update(
+            str(shot.get("id")) for shot in shots if isinstance(shot, dict)
+            and any(str(ref.get("utteranceId")) in selected_utterance_ids for ref in rows(shot.get("utterance_refs")) if isinstance(ref, dict))
+        )
+    scoped = bool(scoped_shot_ids)
     segments = source.get("segments") if isinstance(source.get("segments"), list) else []
     utterances = source.get("utterances") if isinstance(source.get("utterances"), list) else []
     ledger = source.get("ledger") if isinstance(source.get("ledger"), dict) else {}
@@ -121,16 +133,18 @@ def validate_subject_prompt_v2(source, stage="edit"):
     timeline_by_shot, next_story_order = {}, {}
     for index, shot in enumerate(shots):
         if not isinstance(shot, dict):
-            issue("shots." + str(index), "Shot must be an object")
+            if not scoped:
+                issue("shots." + str(index), "Shot must be an object")
             continue
         shot_id = str(shot.get("id") or "")
         if not shot_id or shot_id in shot_by_id:
-            issue("shots." + str(index) + ".id", "Shot IDs must be present and unique", shot_id or None)
+            if not scoped or shot_id in scoped_shot_ids:
+                issue("shots." + str(index) + ".id", "Shot IDs must be present and unique", shot_id or None)
             continue
         shot_by_id[shot_id] = shot
         position[shot_id] = index
         duration = shot.get("duration_frames")
-        if type(duration) is not int or duration <= 0:
+        if (not scoped or shot_id in scoped_shot_ids) and (type(duration) is not int or duration <= 0):
             issue("shots." + shot_id + ".duration_frames", "Shot duration must be positive integer frames", shot_id)
         timeline_id = str(shot.get("timeline_id") or default_timeline_id)
         order = shot.get("story_order")
@@ -138,11 +152,13 @@ def validate_subject_prompt_v2(source, stage="edit"):
             order = next_story_order.get(timeline_id, 0)
             while (timeline_id, order) in order_keys:
                 order += 1
-        elif (timeline_id, order) in order_keys:
+        elif (timeline_id, order) in order_keys and (not scoped or shot_id in scoped_shot_ids):
             issue("shots." + shot_id, "Story order must be unique within its timeline", shot_id)
         order_keys.add((timeline_id, order))
         timeline_by_shot[shot_id] = timeline_id
         next_story_order[timeline_id] = max(next_story_order.get(timeline_id, 0), order + 1)
+        if scoped and shot_id not in scoped_shot_ids:
+            continue
         camera = shot.get("camera") if isinstance(shot.get("camera"), dict) else {}
         for field in ("framing", "editorial_reason"):
             if not str(camera.get(field) or "").strip():
@@ -176,8 +192,14 @@ def validate_subject_prompt_v2(source, stage="edit"):
                             issue("shots." + shot_id + ".subject_usages.pictureBindingIds", "Missing or ambiguous default binding for " + str(purpose), shot_id,
                                   severity="warning" if stage == "compile" else None)
         for frame in shot.get("keyframes", []) if isinstance(shot.get("keyframes"), list) else []:
-            if frame.get("requiredForSubmission", True) and str(frame.get("id")) not in binding_owner and not frame.get("sourceNode"):
+            if frame.get("anchor") != "composition" and frame.get("requiredForSubmission", True) and str(frame.get("id")) not in binding_owner and not frame.get("sourceNode"):
                 issue("shots." + shot_id + ".keyframes", "Required keyframe lacks a smart node binding", shot_id)
+        for reference in shot.get("reference_requirements", []) if isinstance(shot.get("reference_requirements"), list) else []:
+            if reference.get("requiredForSubmission", True) and (not reference.get("id") or not reference.get("asset_id") or not reference.get("asset_version") or not reference.get("purpose") or not reference.get("sourceNode")):
+                issue("shots." + shot_id + ".reference_requirements", "Required composition reference lacks a stable source, version or purpose", shot_id)
+    if scoped:
+        for shot_id in sorted(scoped_shot_ids.difference(shot_by_id)):
+            issue("shots." + shot_id, "Edited Shot does not exist in the source", shot_id)
     by_segment = {}
     selected_scope = source.get("_canvas_compilation_scope") if isinstance(source.get("_canvas_compilation_scope"), dict) else {}
     wanted = set(map(str, selected_scope.get("targetIds", [])))
@@ -192,6 +214,8 @@ def validate_subject_prompt_v2(source, stage="edit"):
     for index, segment in enumerate(segments):
         segment_id = str(segment.get("id") or "")
         ids = [str(value) for value in segment.get("shot_ids", [])]
+        if scoped and not scoped_shot_ids.intersection(ids):
+            continue
         if not ids or any(value not in position for value in ids):
             issue("segments." + str(index) + ".shot_ids", "Clip must contain known Shots", segment_id or None)
             continue
@@ -210,7 +234,7 @@ def validate_subject_prompt_v2(source, stage="edit"):
         if mode and segment.get("mode_lock") and segment.get("mode_lock") != mode:
             issue("segments." + segment_id + ".mode_lock", "Stored mode lock differs from the selected generation mode", segment_id, severity="warning")
     if not wanted:
-        for shot_id in shot_by_id:
+        for shot_id in (scoped_shot_ids if scoped else shot_by_id):
             if shot_id not in partitioned:
                 issue("shots." + shot_id, "Shot is not assigned to a Clip", shot_id)
     else:
@@ -222,11 +246,13 @@ def validate_subject_prompt_v2(source, stage="edit"):
                 issue("segments", "Selected compilation target is neither a Clip nor a registered asset: " + target, target)
     if ledger.get("contract_version") != 2:
         issue("ledger", "Subject Prompt v2 requires the registered ledger v2")
-    else:
+    elif not scoped:
        replay = audit_continuity_v2(source)
        for diagnostic in replay.get("diagnostics", []):
             issues.append({**diagnostic, "severity": "warning"})
     for utterance in utterances:
+        if scoped and not any(str(ref.get("utteranceId")) == str(utterance.get("id")) for shot in shots if isinstance(shot, dict) and str(shot.get("id")) in scoped_shot_ids for ref in rows(shot.get("utterance_refs")) if isinstance(ref, dict)):
+            continue
         refs = sorted([(position.get(str(shot.get("id")), -1), ref, shot) for shot in shots
                        for ref in shot.get("utterance_refs", []) if str(ref.get("utteranceId")) == str(utterance.get("id"))],
                       key=lambda item: (item[0], int(item[1].get("localStartFrame", 0))))
@@ -252,8 +278,10 @@ def validate_subject_prompt_v2(source, stage="edit"):
 
 def validate(source, stage="edit"):
     from audit_storyboard_quality import substantive
+    validation_scope = source.get("_canvas_source_validation_scope") if isinstance(source, dict) and isinstance(source.get("_canvas_source_validation_scope"), dict) else None
+    selected_shot_ids = set(map(str, validation_scope.get("shotIds", []))) if validation_scope else set()
     if isinstance(source, dict) and source.get("prompt_assembly", {}).get("version") == 2:
-        return validate_subject_prompt_v2(source, stage)
+        return validate_subject_prompt_v2(source, stage, validation_scope)
     issues = []
     def issue(path, message, target=None, missing=False):
         issues.append({"code": "SOURCE_INCOMPLETE" if missing else "INVALID_SOURCE", "path": "director.source." + path, "message": message, "severity": "warning" if missing and stage == "edit" else "error", **({"targetId": target} if target else {})})
@@ -281,17 +309,23 @@ def validate(source, stage="edit"):
             for field, child in schema.get("properties", {}).items():
                 if field in value:
                     check(value[field], child, f"{path}.{field}".strip("."), target)
-    check(source, contract()["jsonSchema"], "")
+    source_schema = contract()["jsonSchema"]
+    if selected_shot_ids:
+        selected_shots = [shot for shot in rows(source.get("shots")) if isinstance(shot, dict) and str(shot.get("id")) in selected_shot_ids]
+        check({"shots": selected_shots}, {"type": "object", "properties": {"shots": source_schema.get("properties", {}).get("shots", {})}}, "")
+    else:
+        check(source, source_schema, "")
     # The bridge is also imported while building the source-contract manifest.
     # Structural template generation needs no candidate-only dependencies.
     if isinstance(source, dict):
         from storyboard_policy import diagnostics
-        selected_shots = {sid for segment in source.get("segments", []) if isinstance(segment, dict) for sid in segment.get("shot_ids", [])} if source.get("_canvas_compilation_scope") else None
+        selected_shots = ({sid for segment in source.get("segments", []) if isinstance(segment, dict) for sid in segment.get("shot_ids", [])}
+                          if source.get("_canvas_compilation_scope") else selected_shot_ids or None)
         issues.extend({**item, "severity": "warning" if stage == "edit" else item["severity"]} for item in diagnostics(source, selected_shots))
         from canvas_model_contract import source_diagnostics
         issues.extend({**item, "severity": "warning" if stage == "edit" else item.get("severity", "error")} for item in source_diagnostics(source))
     continuity_issues = []
-    if isinstance(source, dict) and isinstance(source.get("ledger"), dict) and source["ledger"].get("contract_version") == 2:
+    if not selected_shot_ids and isinstance(source, dict) and isinstance(source.get("ledger"), dict) and source["ledger"].get("contract_version") == 2:
         report = audit_continuity_v2(source)
         for diagnostic in report["diagnostics"]:
             item = {**diagnostic, "severity": "warning" if stage == "edit" else "error"}

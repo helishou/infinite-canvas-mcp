@@ -5,6 +5,8 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- Shot image inputs now separate temporal keyframes from composition references. Keyframes accept opening, closing or Shot-local frame anchors and alone supply the timeline thumbnail; composition references remain sibling Shot requirements and constrain framing without implying a time point. Legacy `anchor: composition` entries stay readable and migrate on the next explicit Shot save. Verify save/reload, reference compilation and media validation, Ref2VA mode selection without I2VA/FL2VA inference, split/merge preservation, and both locales/themes.
+
 - The Shot detail's Picture and Camera section always shows the Subjects appearing in the Shot and allows direct edits; while editing the full section, Subject changes join the draft save. Verify adding, removing and switching Subjects through save and refresh; existing image bindings and appearance timing remain intact, and offscreen-voice or continuity-context Subjects are unaffected. Check both locales and themes.
 
 - Double-clicking blank canvas no longer opens the node picker. Verify the popup does not appear on the background, grid, nodes, connections or node-result previews; existing node double-click editing/previews, right-click and other creation entry points still work.

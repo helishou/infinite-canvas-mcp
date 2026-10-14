@@ -2,9 +2,8 @@ export type BackendConnectionMonitorState = { checking: boolean; connected: bool
 export type BackendConnectionMonitorDependencies = {
     healthCheck: () => Promise<{ ok: boolean }>;
     fullCheck: () => Promise<unknown>;
-    markDisconnected: () => void;
 };
-export type BackendConnectionMonitorResult = "skipped" | "full" | "healthy" | "disconnected";
+export type BackendConnectionMonitorResult = "skipped" | "full" | "healthy";
 
 /** Use the lightweight health endpoint while connected; re-run auth/business checks only for recovery. */
 export async function runBackendConnectionMonitorCycle(
@@ -19,8 +18,11 @@ export async function runBackendConnectionMonitorCycle(
     }
     const health = await dependencies.healthCheck();
     if (!health.ok) {
-        dependencies.markDisconnected();
-        return "disconnected";
+        // A single health timeout can be a brief event-loop stall while the write
+        // API is still available. Confirm with the normal auth + business probe
+        // before changing the global connection state to disconnected.
+        await dependencies.fullCheck();
+        return "full";
     }
     return "healthy";
 }

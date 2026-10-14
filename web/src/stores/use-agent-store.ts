@@ -3,6 +3,7 @@ import localforage from "localforage";
 import i18n from "@/i18n";
 
 import { getBackendUrl } from "@/services/backend-api";
+import { viteBackendAgentEndpoint } from "@/lib/backend-connection";
 import { fetchSettings, saveSettings, type FrontendSettings } from "@/services/settings-api";
 import type { CanvasAgentOp, CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
@@ -155,7 +156,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     scopedTask: null,
     scopedTaskResult: null,
     canvasContext: null,
-    url: getBackendUrl().replace(/\/$/, "") + "/agent",
+    url: viteBackendAgentEndpoint(getBackendUrl()),
     token: "",
     connected: false,
     enabled: false,

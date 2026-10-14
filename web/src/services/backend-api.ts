@@ -26,6 +26,11 @@ export type BackendTokenResponse = { ok: boolean; token: string };
 
 const DEFAULT_URL = "http://127.0.0.1:17370";
 const canvasClientId = `browser:${nanoid()}`;
+let backendWritesInFlight = 0;
+
+export function hasBackendWriteInFlight() {
+    return backendWritesInFlight > 0;
+}
 
 export { getCanvasDraftSessionId } from "@/lib/canvas/canvas-draft-session";
 
@@ -47,6 +52,8 @@ export async function request<T = unknown>(method: string, path: string, body?: 
     const token = getBackendTokenShared();
     const backendUrl = getBackendUrl().replace(/\/$/, "");
     const url = `${backendUrl}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+    const tracksWrite = !["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase());
+    if (tracksWrite) backendWritesInFlight++;
     let res: Response;
     try {
         res = await fetch(url, {
@@ -59,6 +66,8 @@ export async function request<T = unknown>(method: string, path: string, body?: 
         if (error instanceof DOMException && error.name === "AbortError") throw error;
         const reason = error instanceof Error ? `${error.name ? `${error.name}: ` : ""}${error.message}` : String(error);
         throw new BackendApiError(`无法连接 Backend：${method} ${path} → ${backendUrl}（${reason}）。请确认 Backend 已启动且端口可访问。`, 0, { method, path, backendUrl, cause: reason });
+    } finally {
+        if (tracksWrite) backendWritesInFlight = Math.max(0, backendWritesInFlight - 1);
     }
     const data = (await res.json().catch(() => ({}))) as T & { ok?: boolean; error?: string };
     if (res.status === 401 && typeof window !== "undefined") window.dispatchEvent(new Event("backend-auth-failed"));
@@ -295,7 +304,7 @@ export type ProductionCompilationStatus = {
     mediaSubmitted: false;
 };
 export type ProductionCompilationDiagnostic = { code?: string; severity?: string; path?: string; targetId?: string; shotId?: string; affectedTargets?: string[]; message?: string; blockingActions?: string[]; blocksCompilation?: boolean; nextAction?: unknown };
-export function compileProduction(target: ProductionTarget, expectedRevision: number, operationId: string, scope?: { sceneId: string }) {
+export function compileProduction(target: ProductionTarget, expectedRevision: number, operationId: string, scope?: { sceneId?: string; targetIds?: string[] }) {
     return request<{ ok: boolean; compilation: ProductionCompilationStatus }>("POST", `${productionPath(target)}/compile`, { expectedRevision, operationId, ...(scope ? { scope } : {}) });
 }
 export function fetchProductionCompilation(target: ProductionTarget, operationId: string, view: "status" | "targets" | "diagnostics" = "status", extra?: { offset?: number; pageSize?: number }) {

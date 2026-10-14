@@ -36,7 +36,7 @@ function detachReferences(value: unknown, assetIds: Set<string>, subjectIds: Set
                 if (parentKey === "subject_usages" && hasDirectMatch(row.subjectId ?? row.subject_id, subjectIds)) continue;
                 if (parentKey === "stateRequirements" && hasDirectMatch(row.factId ?? row.fact_id, factIds)) continue;
                 if (parentKey === "pictureBindings" && hasDirectMatch(row.assetId ?? row.asset_id, assetIds)) continue;
-                if ((parentKey === "keyframes" || parentKey === "references") && hasDirectMatch(row.assetId ?? row.asset_id, assetIds)) continue;
+                if ((parentKey === "keyframes" || parentKey === "references" || parentKey === "reference_requirements") && hasDirectMatch(row.assetId ?? row.asset_id, assetIds)) continue;
             }
             const next = detachReferences(item, assetIds, subjectIds, entityIds, factIds);
             if (next !== OMIT) result.push(next);

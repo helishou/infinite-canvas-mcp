@@ -4,11 +4,13 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
+import { execFileSync, spawnSync, type ExecFileSyncOptionsWithStringEncoding, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
 import { directorModules, directorProductionSchema, canonicalProduction, isSubjectPromptAssembly, resolveSubjectPictureBindingIds, productionContractVersion, productionPreflightRequestSchema, diagnosticBlocksAction, type DirectorProduction, type ProductionDiagnostic, type ProductionPreflight } from "../drama/production-contract.js";
 import { productionOperationContract, schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch, ref2vaPromptDiagnostics, continuityBoundaryDiagnostics } from "../drama/production-validation.js";
 
 let discoveredPython: string | undefined;
+let discoveredPythonLauncher: string[] | undefined;
+let useDiscoveredPythonLauncher = false;
 /** Only isolated compilation copies consume Backend-approved bindings; never change authored source. */
 function hydrateScopedApprovedInputs(director: DirectorProduction, resolver?: (targetId: string, label: string) => string | undefined) {
     if (!director.source._canvas_compilation_scope || !resolver) return;
@@ -58,12 +60,19 @@ function hydrateSubjectPictureSources(director: DirectorProduction, resolver?: (
     if (!isSubjectPromptAssembly(director.source) || !resolver) return;
     const subjects = (Array.isArray(director.source.subject_registry) ? director.source.subject_registry : []) as Array<Record<string, any>>;
     const subjectById = new Map(subjects.map(subject => [String(subject.id), subject]));
-    const selected = new Map<string, { assetId: string; subjectId: string; kind: "subject" | "keyframe"; role: string; binding: Record<string, any> }>();
-    const videoShotIds = new Set(((Array.isArray(director.source.segments) ? director.source.segments : []) as Array<Record<string, any>>)
+    const selected = new Map<string, { assetId: string; subjectId: string; kind: "subject" | "keyframe" | "composition"; role: string; binding: Record<string, any> }>();
+    const segments = (Array.isArray(director.source.segments) ? director.source.segments : []) as Array<Record<string, any>>;
+    const videoShotIds = new Set(segments
+        .flatMap(segment => (segment.shot_ids || []).map(String)));
+    // Scoped incremental compiles only freeze Subject pictures required by
+    // Ref2VA outputs. Other modes still carry subject usage for continuity,
+    // but their compiler input must not require picture files that the scope
+    // deliberately omitted.
+    const subjectReferenceShotIds = new Set(segments.filter(segment => String(segment.mode) === "Ref2VA")
         .flatMap(segment => (segment.shot_ids || []).map(String)));
     for (const shot of (Array.isArray(director.source.shots) ? director.source.shots : []) as Array<Record<string, any>>) {
         if (!videoShotIds.has(String(shot.id))) continue;
-        for (const usage of Array.isArray(shot.subject_usages) ? shot.subject_usages : []) {
+        for (const usage of subjectReferenceShotIds.has(String(shot.id)) && Array.isArray(shot.subject_usages) ? shot.subject_usages : []) {
             const subjectId = String(usage.subjectId || "");
             const subject = subjectById.get(subjectId);
             for (const bindingId of resolveSubjectPictureBindingIds(subject, usage).bindingIds) {
@@ -71,8 +80,14 @@ function hydrateSubjectPictureSources(director: DirectorProduction, resolver?: (
                 if (binding) selected.set(bindingId, { assetId: String(binding.assetId), subjectId, kind: "subject", role: String((binding.provides || [])[0] || "identity"), binding });
             }
         }
-        for (const frame of (Array.isArray(shot.keyframes) ? shot.keyframes.filter((item: Record<string, any>) => item.requiredForSubmission) : []) as Array<Record<string, any>>) {
+        for (const frame of (Array.isArray(shot.keyframes) ? shot.keyframes.filter((item: Record<string, any>) => item.requiredForSubmission && item.anchor !== "composition") : []) as Array<Record<string, any>>) {
             selected.set(String(frame.id), { assetId: String(frame.assetId || frame.id), subjectId: String((frame.subjectIds || [])[0] || ""), kind: "keyframe", role: "keyframe", binding: frame });
+        }
+        for (const reference of (Array.isArray(shot.reference_requirements) ? shot.reference_requirements.filter((item: Record<string, any>) => item.requiredForSubmission) : []) as Array<Record<string, any>>) {
+            selected.set(String(reference.id || reference.asset_id), { assetId: String(reference.asset_id), subjectId: String((reference.subjectIds || [])[0] || ""), kind: "composition", role: "composition", binding: reference });
+        }
+        for (const frame of (Array.isArray(shot.keyframes) ? shot.keyframes.filter((item: Record<string, any>) => item.requiredForSubmission && item.anchor === "composition") : []) as Array<Record<string, any>>) {
+            selected.set(String(frame.id), { assetId: String(frame.assetId || frame.id), subjectId: String((frame.subjectIds || [])[0] || ""), kind: "composition", role: "composition", binding: frame });
         }
     }
     const snapshots: Record<string, Record<string, unknown>> = {};
@@ -86,11 +101,12 @@ function hydrateSubjectPictureSources(director: DirectorProduction, resolver?: (
             ? asset.selectedResult as Record<string, unknown>
             : undefined;
         snapshots[bindingId] = {
-            id: bindingId, assetId: item.assetId, subjectId: item.subjectId, kind: item.kind, role: item.role,
+            id: bindingId, assetId: item.assetId, assetVersion: asset.version, subjectId: item.subjectId, kind: item.kind, role: item.role,
             file, sha256: digest, storageKey: asset.storageKey, nodeId: asset.nodeId || item.binding.sourceNode?.nodeId,
             resultId: item.binding.selection?.resultId || selectedResult?.imageId || "",
             generationTaskId: asset.generationTaskId || selectedResult?.taskId || "",
             retain: item.binding.retain || [], exclude: item.binding.exclude || [],
+            purpose: item.binding.purpose,
             applicableState: item.binding.applicableState || {}, defaultFor: item.binding.defaultFor || [],
             anchor: item.binding.anchor, localFrame: item.binding.localFrame, requiredForSubmission: item.binding.requiredForSubmission === true,
         };
@@ -124,7 +140,12 @@ export function resolveAchengPython() {
         for (const [launcher, ...flags] of launchers) {
             try {
                 const candidate = execFileSync(launcher, [...flags, "-c", "import sys; print(sys.executable)"], { windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-                if (path.isAbsolute(candidate) && fs.existsSync(candidate)) { discoveredPython = candidate; break; }
+                if (path.isAbsolute(candidate) && fs.existsSync(candidate)) {
+                    discoveredPython = candidate;
+                    discoveredPythonLauncher = [launcher, ...flags];
+                    useDiscoveredPythonLauncher = process.platform === "win32" && candidate.toLowerCase().includes(`${path.sep}windowsapps${path.sep}`);
+                    break;
+                }
             } catch { /* A stale system launcher may coexist with a working Python. */ }
         }
         if (!discoveredPython && process.platform === "win32") {
@@ -132,7 +153,11 @@ export function resolveAchengPython() {
             try {
                 const prefix = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "python -c 'import sys; print(sys.base_prefix)'"], { windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
                 const candidate = path.join(prefix, "python.exe");
-                if (path.isAbsolute(candidate) && fs.existsSync(candidate)) discoveredPython = candidate;
+                if (path.isAbsolute(candidate) && fs.existsSync(candidate)) {
+                    discoveredPython = candidate;
+                    discoveredPythonLauncher = ["python"];
+                    useDiscoveredPythonLauncher = candidate.toLowerCase().includes(`${path.sep}windowsapps${path.sep}`);
+                }
             } catch { /* Report unavailable below; never install a replacement interpreter. */ }
         }
         if (!discoveredPython) throw new Error("Cannot resolve Acheng Python; set ACHENG_PYTHON to an existing Python executable");
@@ -142,9 +167,32 @@ export function resolveAchengPython() {
 }
 
 export function runAchengPython(args: string[], options: ExecFileSyncOptionsWithStringEncoding) {
-    try { return execFileSync(resolveAchengPython(), args, options); }
+    const python = resolveAchengPython();
+    const runDiscoveredLauncher = () => {
+        if (!discoveredPythonLauncher) return undefined;
+        const result = spawnSync(discoveredPythonLauncher[0], [...discoveredPythonLauncher.slice(1), ...args], options as SpawnSyncOptionsWithStringEncoding);
+        if (result.error) throw result.error;
+        if (result.status !== 0) {
+            const error = new Error(String(result.stderr || result.stdout || `Acheng Python exited with ${result.status ?? result.signal ?? "unknown status"}`)) as NodeJS.ErrnoException & { status?: number; stdout?: string; stderr?: string; signal?: NodeJS.Signals | null };
+            error.status = result.status ?? undefined;
+            error.stdout = result.stdout || "";
+            error.stderr = result.stderr || "";
+            error.signal = result.signal;
+            throw error;
+        }
+        return result.stdout || "";
+    };
+    if (process.platform === "win32" && !process.env.ACHENG_PYTHON && useDiscoveredPythonLauncher) return runDiscoveredLauncher()!;
+    try { return execFileSync(python, args, options); }
     catch (error: any) {
         if (process.platform !== "win32" || process.env.ACHENG_PYTHON || !["EPERM", "ENOENT", "EBUSY"].includes(error.code)) throw error;
+        if (discoveredPythonLauncher) {
+            useDiscoveredPythonLauncher = true;
+            try { return runDiscoveredLauncher()!; }
+            catch (launcherError: any) {
+                if (!["EPERM", "ENOENT", "EBUSY"].includes(launcherError?.code)) throw launcherError;
+            }
+        }
         const literal = (s: string) => `'${s.replace(/'/g, "''")}'`;
         const invocation = `& python ${args.map(literal).join(" ")}`;
         const command = `$OutputEncoding=[Text.UTF8Encoding]::new($false); [Console]::InputEncoding=$OutputEncoding; [Console]::OutputEncoding=$OutputEncoding; $payload=[Console]::In.ReadToEnd(); if($payload.Length){$payload | ${invocation}}else{${invocation}}; exit $LASTEXITCODE`;
@@ -417,6 +465,7 @@ export type AchengRuntime = ReturnType<typeof resolveAchengRuntime> & {
     compilerHash?: string;
     liveCompiler?: { directory: string; runnerPath: string; compilerHash: string };
 };
+export type AchengSourceValidationScope = { shotIds: string[] };
 export function achengEngineIdentity(runtime: AchengRuntime): DirectorProduction["engine"] {
     return { runtimeId: runtime.runtimeId, commit: runtime.commit, patchVersion: runtime.patchVersion, version: runtime.version,
         ...(runtime.compilerHash ? { compilerHash: runtime.compilerHash } : {}) };
@@ -431,10 +480,13 @@ export function auditAchengContinuity(director: DirectorProduction, targetIds?: 
     return { ...JSON.parse(response), validatorRuntimeId: runtime.runtimeId, validatorEngine: achengEngineIdentity(runtime), diagnosticOnly };
 }
 
-export function validateAchengSource(director: DirectorProduction, stage: "edit" | "publish" | "generate", runtime = resolveAchengEngine()): ProductionDiagnostic[] {
-    if (!runtime.sourceContract) return [...ref2vaPromptDiagnostics(director, 2900), ...continuityBoundaryDiagnostics(director, stage), { code: "SOURCE_CONTRACT_UNAVAILABLE", path: "director.engine", message: "Active runtime has no source contract; final checks remain with the compiler", severity: "unverified" }];
+export function validateAchengSource(director: DirectorProduction, stage: "edit" | "publish" | "generate", runtime = resolveAchengEngine(), scope?: AchengSourceValidationScope): ProductionDiagnostic[] {
+    if (!runtime.sourceContract) return [...ref2vaPromptDiagnostics(director, 2900), ...(scope ? [] : continuityBoundaryDiagnostics(director, stage)), { code: "SOURCE_CONTRACT_UNAVAILABLE", path: "director.engine", message: "Active runtime has no source contract; final checks remain with the compiler", severity: "unverified" }];
+    const source = isSubjectPromptAssembly(director.source) && scope?.shotIds.length
+        ? { ...director.source, _canvas_source_validation_scope: { shotIds: scope.shotIds } }
+        : director.source;
     const response = runAchengPython(["-B", "-X", "utf8", path.join(runtime.path, "scripts", "canvas_source_contract.py")], {
-        cwd: runtime.path, windowsHide: true, encoding: "utf8", input: JSON.stringify({ source: director.source, artifacts: director.artifacts || [], stage }),
+        cwd: runtime.path, windowsHide: true, encoding: "utf8", input: JSON.stringify({ source, artifacts: director.artifacts || [], stage }),
     });
     const sourceDiagnostics: ProductionDiagnostic[] = JSON.parse(response).diagnostics;
     for (const item of sourceDiagnostics) {
@@ -447,11 +499,11 @@ export function validateAchengSource(director: DirectorProduction, stage: "edit"
     // Continuity readiness is target-scoped and comes from the persisted Backend
     // report. Source validation keeps a partial authored draft editable/publishable.
     for (const item of sourceDiagnostics) if (String(item.code).startsWith("CONTINUITY_")) item.severity = "warning";
-    return [...sourceDiagnostics, ...continuityBoundaryDiagnostics(director, stage)];
+    return [...sourceDiagnostics, ...(scope ? [] : continuityBoundaryDiagnostics(director, stage))];
 }
 
-export function assertAchengSource(director: DirectorProduction, stage: "edit" | "publish" | "generate") {
-    const diagnostics = validateAchengSource(director, stage).filter(item => diagnosticBlocksAction(item, stage));
+export function assertAchengSource(director: DirectorProduction, stage: "edit" | "publish" | "generate", runtime = resolveAchengEngine(), scope?: AchengSourceValidationScope) {
+    const diagnostics = validateAchengSource(director, stage, runtime, scope).filter(item => diagnosticBlocksAction(item, stage));
     if (diagnostics.length) throw new ProductionValidationError(diagnostics);
 }
 

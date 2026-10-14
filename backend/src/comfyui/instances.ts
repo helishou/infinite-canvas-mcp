@@ -6,13 +6,19 @@ const INSTANCES_FILE = path.join(DATA_DIR, "comfyui-instances.json");
 
 export interface ComfyInstances {
   instances: string[];
+  /** host:port → 该实例服务端的本机根目录（含 main.py）。仅本地实例有意义；远程实例留空走回退。 */
+  roots?: Record<string, string>;
 }
 
 export async function loadInstances(): Promise<ComfyInstances> {
   try {
     const raw = await fs.readFile(INSTANCES_FILE, "utf8");
     const data = JSON.parse(raw);
-    return { instances: Array.isArray(data.instances) ? data.instances.filter((s: unknown) => typeof s === "string") : [] };
+    const roots: Record<string, string> = {};
+    for (const [key, value] of Object.entries(data.roots || {})) {
+      if (typeof value === "string" && value.trim()) roots[key] = value.trim().replace(/\/+$/, "");
+    }
+    return { instances: Array.isArray(data.instances) ? data.instances.filter((s: unknown) => typeof s === "string") : [], ...(Object.keys(roots).length ? { roots } : {}) };
   } catch {
     return { instances: [] };
   }

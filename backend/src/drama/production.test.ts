@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { BackendDatabase } from "../db.js";
 import { EpisodeProductionService, ProductionConflictError } from "./production.js";
+import { directorHash } from "./director.js";
 import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
 import { emptyEpisodeProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import { EpisodeProductionRunner } from "./production-runner.js";
@@ -128,4 +129,42 @@ test("dialogue and action blocks can be inserted, edited and reordered by stable
     assert.equal(edited.draft.scenes[0].blocks[0].text, "她看见信封上的署名。");
     const deleted = service.edit("episode", { operationId: "delete-block", expectedRevision: 3, ops: [{ type: "delete_script_block", sceneId: "scene-a", id: "dialogue-a" }] });
     assert.deepEqual(deleted.draft.scenes[0].blocks.map((item) => item.id), ["action-a"]);
+});
+
+test("saving a shot's dialogue lets an untouched shared line pass and still blocks real edits or removals", (t) => {
+    const { service } = fixture(t);
+    service.edit("episode", { operationId: "scene", expectedRevision: 0, ops: [{ type: "upsert_scene", scene }] });
+    // UTT_SH_A_8 「这只信封搬不走。」(8 chars) is spoken by SUB_P across two shots: SH_A covers frames 0-96 with text 0-5,
+    // SH_B continues on frames 0-48 with text 5-8 — a legitimate cross-cut shared utterance.
+    const sharedLine = "这只信封搬不走。";
+    const shots = [
+        { id: "SH_A", scene_id: "scene-a", timeline_id: "main", story_order: 0, duration_frames: 96, visual: "她盯着桌上的信封。", camera: { description: "static close-up" }, subject_usages: [], keyframes: [], utterance_refs: [{ utteranceId: "UTT_SH_A_8", role: "speaker", localStartFrame: 0, localEndFrame: 96, textStart: 0, textEnd: 5 }] },
+        { id: "SH_B", scene_id: "scene-a", timeline_id: "main", story_order: 1, duration_frames: 96, visual: "特写：信封口被拆开。", camera: { description: "static insert" }, subject_usages: [], keyframes: [], utterance_refs: [{ utteranceId: "UTT_SH_A_8", role: "speaker", localStartFrame: 0, localEndFrame: 48, textStart: 5, textEnd: 8 }] },
+    ];
+    const source = { version: 2, prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1, character_registry: [{ id: "P", name: "小夏" }], scene_registry: [], subject_registry: [{ id: "SUB_P", kind: "character", entityRef: { ownerKind: "episode", ownerId: "episode", kind: "character", id: "P" }, pictureBindings: [] }], script_scenes: [{ id: "scene-a", scene_id: "scene-a", text: "她发现信封。" }], shots, segments: [{ id: "CLIP_1", shot_ids: ["SH_A", "SH_B"], mode: "T2VA" }], utterances: [{ id: "UTT_SH_A_8", speakerSubjectId: "SUB_P", text: sharedLine, voiceover: true, start: { shotId: "SH_A", localFrame: 0 }, end: { shotId: "SH_B", localFrame: 48 } }], asset_plan: [], ledger: { contract_version: 2, facts: [], timelines: [{ id: "main" }], initial: [], events: [], requirements: [], coverage: [] } };
+    const engine = { commit: "a".repeat(40), patchVersion: "p", runtimeId: "r", version: "4.3.9" };
+    const director = { schemaVersion: 1, engine, source, sourceHash: directorHash(source), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
+    service.edit("episode", { operationId: "director", expectedRevision: 1, ops: [{ type: "set_director_production", director }] });
+    const base = () => service.get("episode").revision;
+    const snapshot = () => structuredClone(service.get("episode").draft.director!.source as Record<string, any>);
+
+    // 1) Resave SH_A with the shared line byte-for-byte identical (plus its window): must succeed and touch nothing else.
+    const before = snapshot();
+    const resaved = service.edit("episode", { operationId: "resave-unchanged", expectedRevision: base(), ops: [{ type: "set_director_shot_utterances", shotId: "SH_A", utterances: [{ utteranceId: "UTT_SH_A_8", speakerSubjectId: "SUB_P", text: sharedLine, voiceover: true, localStartFrame: 0, localEndFrame: 96 }] }] });
+    assert.ok(resaved.revision > base() - 1);
+    const after = snapshot();
+    assert.deepEqual(after.utterances, before.utterances, "shared record must not be rewritten");
+    assert.deepEqual(after.shots[0].utterance_refs, before.shots[0].utterance_refs, "text slice must survive the resave");
+    assert.deepEqual(after.shots[1].utterance_refs, before.shots[1].utterance_refs, "the other shot's ref must be untouched");
+
+    // 2) Changing the shared line's content/timing from this shot stays blocked, with an actionable message.
+    assert.throws(() => service.edit("episode", { operationId: "modify-shared", expectedRevision: base(), ops: [{ type: "set_director_shot_utterances", shotId: "SH_A", utterances: [{ utteranceId: "UTT_SH_A_8", speakerSubjectId: "SUB_P", text: "换个说法。", voiceover: true, localStartFrame: 0, localEndFrame: 96 }] }] }), /共用（SH_A、SH_B）/);
+    // 3) Removing the shared line from one shot stays blocked; other shots still speak it.
+    assert.throws(() => service.edit("episode", { operationId: "remove-shared", expectedRevision: base(), ops: [{ type: "set_director_shot_utterances", shotId: "SH_A", utterances: [] }] }), /不能从本镜删除/);
+    // 4) Exclusive lines keep working normally while the shared one rides along untouched.
+    const extended = service.edit("episode", { operationId: "add-exclusive", expectedRevision: base(), ops: [{ type: "set_director_shot_utterances", shotId: "SH_A", utterances: [{ utteranceId: "UTT_SH_A_8", speakerSubjectId: "SUB_P", text: sharedLine, voiceover: true, localStartFrame: 0, localEndFrame: 96 }, { speakerSubjectId: "SUB_P", text: "是留给我的。", voiceover: false, localStartFrame: 70, localEndFrame: 90 }] }] });
+    const nextSource = extended.draft.director!.source as Record<string, any>;
+    assert.equal(nextSource.utterances.length, 2, "the exclusive line is added without touching the shared record");
+    assert.equal(nextSource.utterances.find((line: any) => String(line.id) === "UTT_SH_A_8").text, sharedLine);
+    assert.deepEqual(nextSource.shots[1].utterance_refs, before.shots[1].utterance_refs);
 });

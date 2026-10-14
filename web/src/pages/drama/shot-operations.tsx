@@ -3,7 +3,7 @@ import { App, Button, Checkbox, Dropdown, Input, InputNumber, Modal, Select } fr
 import { Copy, MoreHorizontal, Plus, Scissors, Trash2, ArrowUp, ArrowDown, Combine } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { nanoid } from "nanoid";
-import { isSubjectPromptAssembly, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
+import { canonicalProduction, isSubjectPromptAssembly, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 import { readableText, records } from "./director-display";
 import { subjectDisplayName } from "./subject-shot-draft";
 
@@ -20,6 +20,7 @@ export function ShotOperations({ source, shot, busy, onEdit, onSelect, contextMe
     const [visibleChanged, setVisibleChanged] = useState(false), [reason, setReason] = useState("");
     const [sceneId, setSceneId] = useState<string>(), [timelineId, setTimelineId] = useState<string>();
     const [mergedAudio, setMergedAudio] = useState<string>();
+    const [firstAudio, setFirstAudio] = useState(""), [secondAudio, setSecondAudio] = useState("");
     const [createdId, setCreatedId] = useState(""), [mergeTargetId, setMergeTargetId] = useState<string>();
     const shots = records(source.shots), subjectAssembly = isSubjectPromptAssembly(source), subjects = records(subjectAssembly ? source.subject_registry : source.character_registry), group = records(source.segments).find(group => group.shot_ids?.includes(shot?.id));
     const subjectLabel = (id: string) => subjectAssembly ? subjectDisplayName(source, id) : String(subjects.find(subject => String(subject.id || subject.character_id || "") === id)?.name || subjects.find(subject => String(subject.id || subject.character_id || "") === id)?.display_name || id);
@@ -36,18 +37,20 @@ export function ShotOperations({ source, shot, busy, onEdit, onSelect, contextMe
     const open = (action: typeof mode) => {
         setMode(action); setCreatedId(`SHOT_${nanoid()}`); setMergeTargetId(next?.id); setTitle(action === "insert" ? "" : `${shot?.title || ""} · ${t("director.shotCrud.secondPart")}`);
         setVisual(action === "merge" ? `[0–${shot?.duration_frames}帧] ${shot?.visual || ""}\n[${shot?.duration_frames}–${Number(shot?.duration_frames) + Number(next?.duration_frames)}帧] ${next?.visual || ""}` : ""); setFirstVisual(String(shot?.visual || "")); setMergedAudio(undefined);
+        setFirstAudio(readableText(shot?.audio)); setSecondAudio(readableText(shot?.audio));
         setFrames(action === "insert" ? Math.round(4 * fps) : Math.max(1, Math.floor(Number(shot?.duration_frames || 2) / 2)));
         setOffsets({}); setFraming(shot?.camera?.framing || "CU"); setAttention(shot?.camera?.attention_subject_ids || []);
         setVisible(subjectAssembly
             ? records(shot?.subject_usages).filter(usage => usage.presentation === "visible").map(usage => String(usage.subjectId))
             : (Array.isArray(shot?.characters) ? shot.characters : []).map((character: any) => String(typeof character === "string" ? character : character?.id || character?.character_id || "")).filter(Boolean));
-        setVisibleChanged(false); setReaction(false); setCameraId(shot?.id);
+        setVisibleChanged(false); setReaction(false); setCameraId(canonicalProduction(shot?.camera ?? {}) === canonicalProduction(next?.camera ?? {}) ? shot?.id : undefined);
         setReason(shot?.camera?.editorial_reason || ""); setSceneId(records(source.scene_registry)[0]?.id); setTimelineId(records(source.ledger?.timelines)[0]?.id);
     };
     const submit = async () => {
         if (mode === "merge") {
             if (!next || next.id !== mergeTargetId) return message.error(t("director.shotCrud.targetChanged"));
-            return run({ type: "edit_director_shot", action: "merge", shotId: shot!.id, targetShotId: mergeTargetId, cameraShotId: cameraId, firstShotPatch: { visual, ...(mergedAudio !== undefined ? { audio: mergedAudio } : {}) } }, shot!.id);
+            if (canonicalProduction(shot?.camera ?? {}) !== canonicalProduction(next.camera ?? {}) && !cameraId) return message.error(t("director.shotCrud.cameraChoiceRequired"));
+            return run({ type: "edit_director_shot", action: "merge", shotId: shot!.id, targetShotId: mergeTargetId, ...(cameraId ? { cameraShotId: cameraId } : {}), firstShotPatch: { visual, ...(mergedAudio !== undefined ? { audio: mergedAudio } : {}) } }, shot!.id);
         }
         if (!title.trim() || !visual.trim() || !reason.trim()) return message.error(t("director.shotCrud.requiredDesign"));
         const id = createdId;
@@ -58,9 +61,9 @@ export function ShotOperations({ source, shot, busy, onEdit, onSelect, contextMe
         });
         const camera = { ...(shot?.camera && typeof shot.camera === "object" ? shot.camera : {}), framing, attention_subject_ids: attention, editorial_reason: reason.trim() };
         const design = subjectAssembly
-            ? { title: title.trim(), visual: visual.trim(), camera, ...(mode === "insert" || visibleChanged ? { subject_usages: usages } : {}) }
+            ? { title: title.trim(), visual: visual.trim(), camera, ...(mode === "split" ? { audio: secondAudio } : {}), ...(mode === "insert" || visibleChanged ? { subject_usages: usages } : {}) }
             : { title: title.trim(), visual: visual.trim(), camera: { ...camera, description: [t(`director.atomic.framingName.${framing}`), reason.trim()].filter(Boolean).join("；") }, characters: subjects.filter(subject => visible.includes(String(subject.id || subject.character_id))).map(subject => ({ id: String(subject.id || subject.character_id), name: subjectLabel(String(subject.id || subject.character_id)) })) };
-        if (mode === "split") return run({ type: "edit_director_shot", action: "split", shotId: shot!.id, newShotId: id, splitFrame: frames, textOffsets: offsets, reaction, firstShotPatch: { visual: firstVisual }, shot: design }, id);
+        if (mode === "split") return run({ type: "edit_director_shot", action: "split", shotId: shot!.id, newShotId: id, splitFrame: frames, textOffsets: offsets, reaction, firstShotPatch: { visual: firstVisual, audio: firstAudio }, shot: design }, id);
         const timeline = shot?.timeline_id || timelineId;
         const scene = shot?.scene_id || sceneId;
         if (!timeline || !scene) return message.error(t("director.shotCrud.missingScene"));
@@ -90,8 +93,9 @@ export function ShotOperations({ source, shot, busy, onEdit, onSelect, contextMe
                 {!shot && <div className="grid gap-3 sm:grid-cols-2"><Select aria-label={t("director.shotCrud.scene")} value={sceneId} onChange={setSceneId} options={records(source.scene_registry).map(row => ({ value: row.id, label: records(source.script_scenes).find(block => String(block.scene_id || block.id) === String(row.id))?.scene_name || row.name || row.id }))} /><Select aria-label={t("director.shotCrud.timeline")} value={timelineId} onChange={setTimelineId} options={records(source.ledger?.timelines).map(row => ({ value: row.id, label: row.name || row.description || row.id }))} /></div>}
                 {mode === "split" && <label className="grid gap-1 text-xs"><span>{t("director.shotCrud.firstAction")}</span><Input.TextArea value={firstVisual} onChange={event => setFirstVisual(event.target.value)} autoSize={{ minRows: 2, maxRows: 5 }} /></label>}
                 <label className="grid gap-1 text-xs"><span>{t(mode === "split" ? "director.shotCrud.secondAction" : "director.atomic.action")}</span><Input.TextArea value={visual} onChange={event => setVisual(event.target.value)} autoSize={{ minRows: 3, maxRows: 6 }} /></label>
+                {mode === "split" && <><label className="grid gap-1 text-xs"><span>{t("director.shotCrud.firstSound")}</span><Input.TextArea value={firstAudio} onChange={event => setFirstAudio(event.target.value)} autoSize={{ minRows: 2, maxRows: 4 }} /></label><label className="grid gap-1 text-xs"><span>{t("director.shotCrud.secondSound")}</span><Input.TextArea value={secondAudio} onChange={event => setSecondAudio(event.target.value)} autoSize={{ minRows: 2, maxRows: 4 }} /></label></>}
                 {mode === "merge" && <label className="grid gap-1 text-xs"><span>{t("director.atomic.sound")}</span><Input.TextArea value={mergedAudio ?? `${readableText(shot?.audio)}\n${readableText(next?.audio)}`} onChange={event => setMergedAudio(event.target.value)} autoSize={{ minRows: 2, maxRows: 4 }} /></label>}
-                {mode === "merge" ? <Select className="w-full" aria-label={t("director.shotCrud.chooseCamera")} value={cameraId} onChange={setCameraId} options={[shot, next].filter(Boolean).map(row => ({ value: row!.id, label: `${row!.title} · ${row!.camera?.framing || ""}` }))} /> : <div className="grid gap-3 sm:grid-cols-2"><Select aria-label={t("director.atomic.framing")} value={framing} onChange={setFraming} options={["EWS", "WS", "FS", "MS", "MCU", "CU", "ECU"].map(value => ({ value, label: t(`director.atomic.framingName.${value}`) }))} /><Select mode="multiple" aria-label={t("director.atomic.attention")} value={attention} onChange={setAttention} options={subjects.map(subject => ({ value: subject.id || subject.character_id, label: subjectLabel(String(subject.id || subject.character_id)) }))} /><label className="grid gap-1 text-xs sm:col-span-2"><span>{t("director.shotCrud.visibleSubjects")}</span><Select mode="multiple" value={visible} onChange={value => { setVisible(value); setVisibleChanged(true); }} options={subjects.map(subject => ({ value: subject.id || subject.character_id, label: subjectLabel(String(subject.id || subject.character_id)) }))} /></label><label className="grid gap-1 text-xs sm:col-span-2"><span>{t("director.atomic.editorialReason")}</span><Input.TextArea value={reason} onChange={event => setReason(event.target.value)} autoSize={{ minRows: 2, maxRows: 4 }} /></label></div>}
+                {mode === "merge" ? <Select className="w-full" aria-label={t("director.shotCrud.chooseCamera")} placeholder={t("director.shotCrud.chooseCamera")} value={cameraId} onChange={setCameraId} options={[shot, next].filter(Boolean).map(row => ({ value: row!.id, label: `${row!.title} · ${row!.camera?.framing || ""}` }))} /> : <div className="grid gap-3 sm:grid-cols-2"><Select aria-label={t("director.atomic.framing")} value={framing} onChange={setFraming} options={["EWS", "WS", "FS", "MS", "MCU", "CU", "ECU"].map(value => ({ value, label: t(`director.atomic.framingName.${value}`) }))} /><Select mode="multiple" aria-label={t("director.atomic.attention")} value={attention} onChange={setAttention} options={subjects.map(subject => ({ value: subject.id || subject.character_id, label: subjectLabel(String(subject.id || subject.character_id)) }))} /><label className="grid gap-1 text-xs sm:col-span-2"><span>{t("director.shotCrud.visibleSubjects")}</span><Select mode="multiple" value={visible} onChange={value => { setVisible(value); setVisibleChanged(true); }} options={subjects.map(subject => ({ value: subject.id || subject.character_id, label: subjectLabel(String(subject.id || subject.character_id)) }))} /></label><label className="grid gap-1 text-xs sm:col-span-2"><span>{t("director.atomic.editorialReason")}</span><Input.TextArea value={reason} onChange={event => setReason(event.target.value)} autoSize={{ minRows: 2, maxRows: 4 }} /></label></div>}
                 {mode === "split" && crossing.map(ref => { const utterance = records(source.utterances).find(row => row.id === ref.utteranceId), text = Array.from(String(utterance?.text || "")); return <label key={ref.utteranceId} className="grid gap-2 border-t border-border pt-3 text-xs"><span>{t("director.shotCrud.dialogueCut")} · {utterance?.text}</span><Select allowClear placeholder={t("director.shotCrud.autoTextCut")} value={offsets[ref.utteranceId]} onChange={value => setOffsets(old => ({ ...old, [ref.utteranceId]: value }))} options={Array.from({ length: Math.max(0, ref.textEnd - ref.textStart - 1) }, (_, index) => { const value = ref.textStart + index + 1; return { value, label: `${text.slice(ref.textStart, value).join("")} ｜ ${text.slice(value, ref.textEnd).join("")}` }; })} /></label>; })}
                 {mode === "split" && <Checkbox checked={reaction} onChange={event => {
                     setReaction(event.target.checked);

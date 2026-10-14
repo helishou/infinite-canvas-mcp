@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { productionPresentationPath } from "./production-navigation";
+import { consumeProductionEntryMark, markProductionEntry, productionPresentationPath } from "./production-navigation";
 
 test("canvas production presentations open the Production workspace at the exact target", () => {
     const path = productionPresentationPath({
@@ -41,4 +41,26 @@ test("standalone production routes remain on their existing page", () => {
 
     assert.match(path, /^\/drama\/episodes\/episode-1\/production\?/);
     assert.doesNotMatch(path, /edit=1/);
+});
+
+test("in-app navigation marks are consumed exactly once so unreachable destinations return to the caller", () => {
+    const store = new Map<string, string>();
+    const previousStorage = (globalThis as Record<string, unknown>).sessionStorage;
+    Object.defineProperty(globalThis, "sessionStorage", {
+        configurable: true,
+        value: {
+            getItem: (key: string) => store.has(key) ? store.get(key)! : null,
+            setItem: (key: string, value: string) => void store.set(key, String(value)),
+            removeItem: (key: string) => void store.delete(key),
+        },
+    });
+    try {
+        assert.equal(consumeProductionEntryMark(), false, "no mark after a fresh module load");
+        markProductionEntry();
+        assert.equal(consumeProductionEntryMark(), true, "a click mark lets the destination go back");
+        assert.equal(consumeProductionEntryMark(), false, "the mark is single-use and never repeats the bounce");
+    } finally {
+        if (previousStorage === undefined) delete (globalThis as Record<string, unknown>).sessionStorage;
+        else Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: previousStorage });
+    }
 });

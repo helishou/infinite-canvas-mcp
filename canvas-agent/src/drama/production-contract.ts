@@ -44,7 +44,7 @@ export const directorPatchFields = {
     character: ["name", "appearance", "description", "prompt_description", "identity", "voice_description"],
     asset_card: ["prompt", "seven_steps", "references"],
     asset: ["asset_name", "name", "title", "kind", "description", "prompt", "depends_on", "role", "version", "reference_role", "canvas_scope", "status"],
-    shot: ["title", "visual", "camera", "start_frame", "end_frame", "duration_frames", "dialogues", "audio", "required_assets", "description", "shot_type", "timeline_id", "story_order", "continuity_facts", "characters", "performance", "combat", "state_description", "continuity_cues", "reference_requirements", "prompt_contract_version", "identity_context", "offscreen_character_ids", "subject_usages", "keyframes", "utterance_refs", "features"],
+    shot: ["title", "visual", "camera", "start_frame", "end_frame", "duration_frames", "dialogues", "audio", "required_assets", "description", "shot_type", "timeline_id", "story_order", "continuity_facts", "characters", "performance", "combat", "state_description", "continuity_cues", "reference_requirements", "prompt_contract_version", "identity_context", "offscreen_character_ids", "subject_usages", "utterance_refs", "features"],
     segment: ["shot_ids", "start_frame", "end_frame", "generation_clip_duration", "mode", "audio", "sound", "overall_soundscape", "non_diegetic_music", "references", "subjects", "execution_gate", "styleTemplateId", "motion_profile", "summary", "audio_bindings", "animation_term_ids", "animation_term_evidence"],
 } as const;
 
@@ -268,19 +268,34 @@ const shotSubjectUsageSchema = z.object({
     stateRequirements: z.array(z.object({ factId: id, value: id }).strict()).default([]),
     localNotes: z.string().optional(),
 }).strict();
-const shotKeyframeSchema = z.object({
+const shotKeyframeFields = {
     id, assetId: id, sourceNode: z.object({ projectId: id, nodeId: id }).strict(),
     selection: z.discriminatedUnion("mode", [
         z.object({ mode: z.literal("node_selection") }).strict(),
         z.object({ mode: z.literal("latest_success") }).strict(),
         z.object({ mode: z.literal("selected_result"), resultId: id }).strict(),
     ]),
-    anchor: z.enum(["composition", "opening", "closing", "at_frame"]), localFrame: z.number().int().nonnegative().optional(),
-    subjectIds: z.array(id).default([]), retain: z.array(z.string()), exclude: z.array(z.string()), requiredForSubmission: z.boolean().default(true),
-}).strict().superRefine((keyframe, context) => {
+    subjectIds: z.array(id).default([]), subjectPictureBindingIds: z.record(id, z.array(id)).optional(), retain: z.array(z.string()), exclude: z.array(z.string()), requiredForSubmission: z.boolean().default(true),
+};
+const validateShotKeyframe = (keyframe: { anchor: string; localFrame?: number }, context: z.RefinementCtx) => {
     if (keyframe.anchor === "at_frame" && keyframe.localFrame === undefined) context.addIssue({ code: "custom", path: ["localFrame"], message: "at_frame 关键帧必须提供镜头局部帧" });
     if (keyframe.anchor !== "at_frame" && keyframe.localFrame !== undefined) context.addIssue({ code: "custom", path: ["localFrame"], message: "非定时锚点不能指定 localFrame" });
-});
+};
+// Source reads accept the old composition anchor so saved v2 productions stay readable.
+// New writes use the temporal-only schema and move composition refs to reference_requirements.
+const shotKeyframeSchema = z.object({ ...shotKeyframeFields, anchor: z.enum(["composition", "opening", "closing", "at_frame"]), localFrame: z.number().int().nonnegative().optional() }).strict().superRefine(validateShotKeyframe);
+const shotKeyframeWriteSchema = z.object({ ...shotKeyframeFields, anchor: z.enum(["opening", "closing", "at_frame"]), localFrame: z.number().int().nonnegative().optional() }).strict().superRefine(validateShotKeyframe);
+const shotReferenceRequirementSchema = z.object({
+    id, asset_id: id, asset_version: id, purpose: z.string().trim().min(1),
+    sourceNode: z.object({ projectId: id, nodeId: id }).strict(),
+    selection: z.discriminatedUnion("mode", [
+        z.object({ mode: z.literal("node_selection") }).strict(),
+        z.object({ mode: z.literal("latest_success") }).strict(),
+        z.object({ mode: z.literal("selected_result"), resultId: id }).strict(),
+    ]),
+    retain: z.array(z.string()), exclude: z.array(z.string()), requiredForSubmission: z.boolean().default(true),
+    subjectIds: z.array(id).optional(), subjectPictureBindingIds: z.record(id, z.array(id)).optional(),
+}).strict();
 const shotUtteranceRefSchema = z.object({ utteranceId: id, role: z.enum(["speaker", "reaction"]), localStartFrame: z.number().int().nonnegative(), localEndFrame: z.number().int().positive(), textStart: z.number().int().nonnegative(), textEnd: z.number().int().positive() }).strict();
 const utteranceSchema = z.object({
     id, speakerSubjectId: id, text: z.string().min(1), delivery: z.string().optional(), voiceover: z.boolean().default(false),
@@ -355,7 +370,7 @@ export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
         else shotById.set(String(shot.id), shot);
         if (!Number.isInteger(shot.duration_frames) || shot.duration_frames <= 0) add([...path, "duration_frames"], "新合同 Shot 必须使用正整数 duration_frames");
         if (Object.hasOwn(shot, "start_frame") || Object.hasOwn(shot, "end_frame")) add(path, "prompt v2 Shot 的全局帧窗由 duration_frames、timeline 与 story_order 派生");
-        for (const field of ["state_description", "state_in", "state_out", "continuity_cues", "required_assets", "reference_requirements", "dialogues"]) if (Object.hasOwn(shot, field)) add([...path, field], "prompt v2 Shot 状态、参考与对白必须使用各自的结构化来源");
+        for (const field of ["state_description", "state_in", "state_out", "continuity_cues", "required_assets", "dialogues"]) if (Object.hasOwn(shot, field)) add([...path, field], "prompt v2 Shot 状态、参考与对白必须使用各自的结构化来源");
         const timelineId = String(shot.timeline_id || defaultTimelineId);
         let storyOrder = Number.isInteger(shot.story_order) && shot.story_order >= 0
             ? Number(shot.story_order)
@@ -371,9 +386,18 @@ export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
         shotOrder.set(String(shot.id), index);
         const usages = z.array(shotSubjectUsageSchema).safeParse(shot.subject_usages ?? []);
         const keyframes = z.array(shotKeyframeSchema).safeParse(shot.keyframes ?? []);
+        const references = z.array(shotReferenceRequirementSchema).safeParse(shot.reference_requirements ?? []);
         const utteranceRefs = z.array(shotUtteranceRefSchema).safeParse(shot.utterance_refs ?? []);
-        for (const [field, result] of [["subject_usages", usages], ["keyframes", keyframes], ["utterance_refs", utteranceRefs]] as const) {
+        for (const [field, result] of [["subject_usages", usages], ["keyframes", keyframes], ["reference_requirements", references], ["utterance_refs", utteranceRefs]] as const) {
             for (const issue of result.success ? [] : result.error.issues) add([...path, field, ...issue.path], issue.message);
+        }
+        if (references.success) {
+            const seenReferences = new Set<string>();
+            for (const [referenceIndex, reference] of references.data.entries()) {
+                if (seenReferences.has(reference.id)) add([...path, "reference_requirements", referenceIndex, "id"], `重复画面参考 ID：${reference.id}`);
+                seenReferences.add(reference.id);
+                if (reference.purpose !== "构图参考") add([...path, "reference_requirements", referenceIndex, "purpose"], "当前分镜页只允许登记构图参考用途");
+            }
         }
         if (usages.success) for (const [usageIndex, usage] of usages.data.entries()) {
             if (!subjectById.has(usage.subjectId)) add([...path, "subject_usages", usageIndex, "subjectId"], "Shot 引用了未登记 Subject");
@@ -393,6 +417,15 @@ export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
         if (keyframes.success) for (const [keyframeIndex, keyframe] of keyframes.data.entries()) {
             if (keyframe.localFrame !== undefined && keyframe.localFrame >= Number(shot.duration_frames)) add([...path, "keyframes", keyframeIndex, "localFrame"], "关键帧时刻超出 Shot 时长");
             for (const subjectId of keyframe.subjectIds) if (!subjectById.has(subjectId)) add([...path, "keyframes", keyframeIndex, "subjectIds"], `关键帧引用未登记 Subject ${subjectId}`);
+            for (const [subjectId, bindingIds] of Object.entries(keyframe.subjectPictureBindingIds || {})) {
+                if (!keyframe.subjectIds.includes(subjectId)) add([...path, "keyframes", keyframeIndex, "subjectPictureBindingIds", subjectId], "关键帧服装绑定必须属于已引用主体");
+                for (const bindingId of bindingIds) {
+                    const owner = bindingOwners.get(bindingId);
+                    const subject = subjectById.get(subjectId);
+                    const binding = rowsForContract(subject?.pictureBindings).find(item => String(item.id) === bindingId);
+                    if (owner !== subjectId || !binding?.provides?.includes("clothing")) add([...path, "keyframes", keyframeIndex, "subjectPictureBindingIds", subjectId], `服装绑定 ${bindingId} 不属于该主体或不是服装参考`);
+                }
+            }
         }
         if (utteranceRefs.success) for (const [refIndex, ref] of utteranceRefs.data.entries()) {
             if (ref.localEndFrame <= ref.localStartFrame || ref.localEndFrame > Number(shot.duration_frames)) add([...path, "utterance_refs", refIndex], "对白引用时窗须位于 Shot 内");
@@ -595,7 +628,7 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("delete_director_subject"), id }).strict(),
     z.object({ type: z.literal("create_manual_director_asset"), assetPlan: z.object({ id, kind: z.enum(["character", "scene", "prop"]), asset_name: z.string().min(1), entity_id: id.optional(), version: id, description: z.string(), purpose: z.string(), depends_on: z.array(id), status: z.literal("planned"), canvas_scope: z.enum(["episode", "shared"]).optional() }).strict(), assetCard: z.object({ id, asset_id: id, asset_kind: z.enum(["character", "scene", "prop"]), asset_version: id, prompt: z.string(), references: z.array(z.unknown()) }).strict(), registryKind: z.enum(["character", "scene"]).optional(), registryEntity: z.record(z.unknown()).optional(), subject: subjectEntrySchema.optional() }).strict(),
     z.object({ type: z.literal("delete_director_asset"), id, confirmed: z.literal(true) }).strict(),
-    z.object({ type: z.literal("set_director_shot_keyframes"), shotId: id, keyframes: z.array(shotKeyframeSchema) }).strict(),
+    z.object({ type: z.literal("set_director_shot_keyframes"), shotId: id, keyframes: z.array(shotKeyframeWriteSchema) }).strict(),
     z.object({
         type: z.literal("set_director_shot_utterances"), shotId: id,
         utterances: z.array(z.object({

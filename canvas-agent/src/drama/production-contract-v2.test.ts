@@ -49,6 +49,15 @@ test("a newly authored keyframe defaults to required while an explicit optional 
     assert.equal(defaultRequiredShotKeyframes(explicitOptional), false);
     assert.equal((explicitOptional.shots[0].keyframes[0] as any).requiredForSubmission, false);
 });
+
+test("keyframe outfit references are validated against the selected Subject clothing bindings", () => {
+    const candidate = source();
+    candidate.subject_registry[0].pictureBindings.push({ id: "SHUANZI_OUTFIT", assetId: "AST_SHUANZI_OUTFIT", sourceNode: { projectId: "CANVAS", nodeId: "IMG_SHUANZI_OUTFIT" }, selection: { mode: "latest_success" }, provides: ["clothing"], retain: ["costume"], exclude: [], applicableState: {}, defaultFor: [] });
+    (candidate.shots[0].keyframes[0] as any).subjectPictureBindingIds = { SHUANZI: ["SHUANZI_OUTFIT"] };
+    assert.deepEqual(directorSourceV2Diagnostics(candidate), []);
+    (candidate.shots[0].keyframes[0] as any).subjectPictureBindingIds = { EGG: ["SHUANZI_OUTFIT"] };
+    assert.ok(directorSourceV2Diagnostics(candidate).some(issue => issue.path.join(".").includes("subjectPictureBindingIds")));
+});
 test("the Director source root version is the sole production format gate", () => {
     for (const version of [undefined, 1, 3]) {
         const candidate = source();

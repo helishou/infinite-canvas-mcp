@@ -23,6 +23,7 @@ import { productionCanvasNodes, type ProductionCanvasSnapshot } from "./producti
 import { readShotFormDraft, shotFormChanges, shotDraftSourceChanged } from "./subject-shot-draft";
 import { startSingleFlightPoller } from "@/lib/single-flight-poll";
 import { productionObjectPath, type ProductionObject } from "@/lib/production-object";
+import { consumeProductionEntryMark } from "@/lib/production-navigation";
 import { applyBackendCanvasEvent, ensureCanvasProjectLoaded, flushCanvasProjectBeforeGeneration, useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { SharedAssetsPicker } from "@/components/production/canvas-production-workspace";
 import {
@@ -128,6 +129,15 @@ export default function ProductionRoute({ dramaId }: { dramaId?: string } = {}) 
     next.delete("episodeId");
     setQuery(next, { replace: true });
   }, [dramaId, episodes, episodeQuery.isFetching, episodeQuery.isError, requestedEpisodeId, query, setQuery]);
+  const navigate = useNavigate();
+  // 后端不可达（status 0，非 404/401 这类确定性错误）且是从应用内点进来的：退回点击前的页面，不留在空壳错误页；
+  // 已有缓存分集数据时页面仍可读，不回退；直接深链 / F5 没有跳转标记，保留下方的错误展示与刷新入口。
+  useEffect(() => {
+    if (!dramaId || episodes || !episodeQuery.isError) return;
+    const unreachable = episodeQuery.error instanceof BackendApiError && episodeQuery.error.status === 0;
+    if (!unreachable || !consumeProductionEntryMark()) return;
+    void navigate(-1);
+  }, [dramaId, episodes, episodeQuery.isError, episodeQuery.error, navigate]);
   if (!dramaId) return <ProductionEditor />;
   const seriesContext = { id: dramaId, episodes: episodes || [] };
   if (!episodes && !episodeQuery.isError) return <div className="p-6">{t("drama.production.loading")}</div>;
@@ -516,8 +526,18 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
           return;
         }
         if (dirtySourceDraftKeys.length || briefDraft !== String(production.draft.director.source.brief || "")) {
-          setCompileError(t("drama.production.compileUnsavedDrafts"));
-          return;
+          // 编译使用 Backend 已保存源稿。按用户偏好，编译即放弃纯前端编辑草稿，
+          // 同时保留回执未知/运行中的正式操作元数据，避免清理掉可恢复的提交。
+          const pendingCommand = pendingCommandRef.current;
+          const pendingRunStart = pendingRunStartRef.current;
+          const preserved: LocalDraft = {
+            remoteRevision,
+            ...(pendingCommand ? { pendingCommand } : {}),
+            ...(pendingRunStart ? { pendingRunStart } : {}),
+          };
+          setBriefDraft(String(production.draft.director.source.brief || ""));
+          setSourceDrafts({});
+          await writeLocalDraft(draftKey, remoteRevision !== null || Boolean(pendingCommand || pendingRunStart) ? preserved : null);
         }
         // Compile the canvas state the user just saved through this page, not a stale
         // Backend projection. Recovery keeps the original frozen operation unchanged.

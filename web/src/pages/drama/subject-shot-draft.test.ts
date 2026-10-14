@@ -68,6 +68,16 @@ test("unrelated source updates merge automatically without making Shot editing a
 });
 
 
+test("voiceover derives from subject presentation when the source tracks usages and honors stored flags otherwise", () => {
+    const tracked = { ...shot, subject_usages: [{ subjectId: "SUB", presentation: "state_context" }], utterance_refs: [{ utteranceId: "U", localStartFrame: 0, localEndFrame: 48, textStart: 0, textEnd: 2 }] };
+    const source = { utterances: [{ id: "U", speakerSubjectId: "SUB", text: "回来", start: { shotId: "S1", localFrame: 0 }, end: { shotId: "S1", localFrame: 48 } }] };
+    assert.equal(readShotFormDraft(undefined, tracked, source).draft.value.utterances![0].voiceover, true);
+    assert.equal(shotDraftChanged(readShotFormDraft(undefined, tracked, source).draft), true);
+    assert.equal(readShotFormDraft(undefined, { ...tracked, subject_usages: [{ subjectId: "SUB", presentation: "visible" }] }, source).draft.value.utterances![0].voiceover, false);
+    const speakingLegacy = { ...shot, subject_usages: [], utterance_refs: [{ utteranceId: "U", localStartFrame: 0, localEndFrame: 48, textStart: 0, textEnd: 2 }] };
+    assert.equal(readShotFormDraft(undefined, speakingLegacy, { ...source, utterances: [{ ...source.utterances[0], voiceover: false }] }).draft.value.utterances![0].voiceover, false);
+});
+
 test("machine Subject editing uses its original prompt_description without making a blank appearance copy", async () => {
     const { subjectDescriptionField } = await import("./subject-shot-draft");
     const row = { name: "铆钉", appearance: "", prompt_description: "钛灰与褪色橙装甲，右臂液压冲锤。" };

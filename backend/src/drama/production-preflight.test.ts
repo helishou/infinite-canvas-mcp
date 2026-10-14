@@ -66,7 +66,7 @@ test("stage-specific checks do not prohibit unfinished planning drafts", t => {
     assert.deepEqual(snapshot(db), before);
 });
 
-test("target edits report the original occupying run and tasks before changing source, while unrelated Clips remain editable", t => {
+test("target edits save a next source revision while the original run remains occupied and isolated", t => {
     const { db, service } = fixture(t);
     const source = { version: 2, prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1, subject_registry: [], character_registry: [], scene_registry: [{ id: "room", name: "Room" }],
         script_scenes: [{ id: "scene", scene_id: "room", beat_ids: ["b1", "b2"] }],
@@ -78,18 +78,19 @@ test("target edits report the original occupying run and tasks before changing s
     db.db.prepare("INSERT INTO episode_production_batches (run_id,episode_id,idempotency_key,request_hash,version,source_revision,status,targets_json,plan_json,engine_json,settings_json,submitted_json,pause_requested,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
         .run("original-run", "episode", "original-key", "hash", 1, 1, "running", '["segment:seg1"]', '{}', '{}', '{}', JSON.stringify([{ kind: "h3", id: "seg1", taskId: "exact-task" }]), 0, "now", "now");
     const original = service.get("episode");
-    const request = { operationId: "blocked-edit", expectedRevision: original.revision, ops: [{ type: "patch_director_source", entity: "segment", id: "seg1", patch: { styleTemplateId: "soft-light" } }] };
+    const request = { operationId: "edit-during-run", expectedRevision: original.revision, ops: [{ type: "patch_director_source", entity: "segment", id: "seg1", patch: { styleTemplateId: "soft-light" } }] };
     const checked = service.preflight("episode", { action: "edit", request });
-    assert.equal(checked.valid, false);
-    assert.equal(checked.diagnostics[0].code, "TARGET_OCCUPIED");
-    assert.deepEqual(checked.diagnostics[0].blockingRun?.taskIds, ["exact-task"]);
-    assert.equal(checked.nextActions?.[0].input?.runId, "original-run");
+    assert.equal(checked.valid, true);
     assert.equal(service.targetOccupancy("episode", ["seg1"])[0].runId, "original-run");
-    assert.throws(() => service.edit("episode", request), /original-run/);
-    assert.deepEqual(service.get("episode"), original);
-    const unrelated = service.edit("episode", { operationId: "other-clip", expectedRevision: original.revision, ops: [{ type: "patch_director_source", entity: "segment", id: "seg2", patch: { styleTemplateId: "soft-light" } }] });
-    assert.equal(unrelated.revision, original.revision + 1);
-    assert.equal(service.edit("episode", { operationId: "other-clip", expectedRevision: original.revision, ops: [{ type: "patch_director_source", entity: "segment", id: "seg2", patch: { styleTemplateId: "soft-light" } }] }).replayed, true);
+    const saved = service.edit("episode", request);
+    assert.equal(saved.revision, original.revision + 1);
+    assert.equal((saved.draft.director!.source.segments as any[]).find(segment => segment.id === "seg1").styleTemplateId, "soft-light");
+    assert.equal(service.getBatch("episode", "original-run")?.status, "running");
+    assert.deepEqual(service.getBatch("episode", "original-run")?.targets, ["segment:seg1"]);
+    assert.equal(service.targetOccupancy("episode", ["seg1"])[0].runId, "original-run");
+    const unrelated = service.edit("episode", { operationId: "other-clip", expectedRevision: saved.revision, ops: [{ type: "patch_director_source", entity: "segment", id: "seg2", patch: { styleTemplateId: "soft-light" } }] });
+    assert.equal(unrelated.revision, saved.revision + 1);
+    assert.equal(service.edit("episode", { operationId: "other-clip", expectedRevision: saved.revision, ops: [{ type: "patch_director_source", entity: "segment", id: "seg2", patch: { styleTemplateId: "soft-light" } }] }).replayed, true);
 });
 
 test("offline and Backend share the activated engine blocking source diagnostics", t => {

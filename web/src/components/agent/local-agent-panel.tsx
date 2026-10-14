@@ -25,7 +25,7 @@ import { flushAgentPromptQueue, hydrateAgentPromptQueue, useAgentStore, type Age
 import { useBackendStore } from "@/stores/use-backend-store";
 import { useConfigStore } from "@/stores/use-config-store";
 import { discoverBackendToken, editEpisodeProduction, fetchEpisodeProduction, fetchProductionReadiness } from "@/services/backend-api";
-import { productionPresentationPath, productionTarget } from "@/lib/production-navigation";
+import { markProductionEntry, productionPresentationPath, productionTarget } from "@/lib/production-navigation";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
 import { productionObjectForPresentation, productionObjectPath, productionObjectPrompt } from "@/lib/production-object";
@@ -1163,6 +1163,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                     follow.setTarget({ ...owner, workId, runId: presentation.runId || runId, threadId: activeThreadId });
                     follow.setPresentation(presentation);
                     const path = productionPresentationPath(presentation);
+                    if (path.startsWith("/director/")) markProductionEntry();
                     if (follow.guardReason) follow.setPendingPresentation(presentation);
                     else {
                         if (presentation.canvasId) {

@@ -27,3 +27,35 @@ export function setShotOutfitBindingIds(subject: unknown, usage: Record<string, 
     const selected = outfitBindingIds.filter(id => outfitIds.has(String(id))).map(String);
     return setShotPictureBindingIds(usage, [...new Set([...retained, ...selected])]);
 }
+
+/** Apply keyframe Subject appearances to Shot references once, with the same outfit selection saved on the keyframes. */
+export function syncKeyframeSubjectsToShotUsages(usages: Array<Record<string, any>>, keyframes: Array<Record<string, any>>, subjects: Array<Record<string, any>>) {
+    const next = structuredClone(usages), subjectById = new Map(subjects.map(subject => [String(subject.id), subject]));
+    const subjectIds = [...new Set(keyframes.flatMap(frame => (Array.isArray(frame.subjectIds) ? frame.subjectIds : []).map(String)))];
+    for (const subjectId of subjectIds) {
+        const subject = subjectById.get(subjectId);
+        if (!subject) continue;
+        let index = next.findIndex(usage => String(usage.subjectId) === subjectId);
+        if (index < 0) {
+            next.push({ subjectId, presentation: "visible", pictureBindingIds: [], pictureBindingMode: "default", referencePurpose: ["identity"], continuityFactIds: [], stateRequirements: [] });
+            index = next.length - 1;
+        }
+        next[index] = { ...next[index], presentation: "visible" };
+        const selections = keyframes.filter(frame => (Array.isArray(frame.subjectIds) ? frame.subjectIds : []).map(String).includes(subjectId)
+            && Object.prototype.hasOwnProperty.call(frame.subjectPictureBindingIds || {}, subjectId));
+        if (!selections.length) continue;
+        const outfits = [...new Set(selections.flatMap(frame => (frame.subjectPictureBindingIds?.[subjectId] || []).map(String)))];
+        next[index] = setShotOutfitBindingIds(subject, next[index], outfits);
+    }
+    return next;
+}
+
+/** Convert Cascader leaf paths into the keyframe's Subject and outfit fields. */
+export function keyframeSubjectSelectionFromPaths(paths: Array<Array<string | number>>) {
+    const selections = paths.map(path => path.map(String)).filter(path => path.length >= 2);
+    const subjectIds = [...new Set(selections.map(path => path[0]))];
+    const subjectPictureBindingIds = Object.fromEntries(subjectIds.map(subjectId => [subjectId,
+        [...new Set(selections.filter(path => path[0] === subjectId && path[1] !== "__default__").map(path => path[1]))],
+    ]));
+    return { subjectIds, subjectPictureBindingIds };
+}

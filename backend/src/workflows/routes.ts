@@ -1,5 +1,7 @@
 import type { Request, Response, Router } from "express";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
 import type { WorkflowStore } from "./store.js";
 import type { WorkflowExecutor } from "./executor.js";
 import type { WorkflowConfig } from "../db.js";
@@ -214,6 +216,62 @@ export function registerWorkflowRoutes(
     },
   );
 
+  // POST /api/workflows/:name/open-in-comfyui - 把该工作流的节点图写入 ComfyUI 实例的
+  // user/default/workflows/（同名覆盖），并返回客户端地址供前端新开标签页。
+  // 官方客户端没有 REST 端点能远程载入节点图，写文件是唯一可靠让它在 ComfyUI
+  // File→Load 里出现的方式。根目录必须由用户在「运行环境 → ComfyUI 实例」里登记，
+  // 不猜路径；未登记的本地实例报 no-root，非本机实例报 remote 由前端下载兜底。
+  router.post(
+    "/api/workflows/:name/open-in-comfyui",
+    async (req: Request, res: Response) => {
+      try {
+        const name = decodeURIComponent(req.params.name as string);
+        const detail = await store.get(name);
+        const data = await loadInstances();
+        const instance = (data.instances || []).find((addr) => addr.trim()) || "";
+        if (!instance) return res.status(503).json({ ok: false, reason: "no-instance", error: "未配置 ComfyUI 实例" });
+        const host = instance.split(":")[0];
+        const url = `http://${instance}/`;
+        if (host !== "127.0.0.1" && host !== "localhost") {
+          return res.status(503).json({ ok: false, reason: "remote", url, error: "远程实例无法写入文件系统，请下载后在 ComfyUI 中导入" });
+        }
+        const root = data.roots?.[instance] || "";
+        if (!root) return res.status(503).json({ ok: false, reason: "no-root", url, error: "未登记该实例的本机根目录：运行环境 → ComfyUI 实例管理" });
+        try {
+          await fs.access(path.join(root, "main.py"));
+        } catch {
+          return res.status(400).json({ ok: false, reason: "bad-root", url, error: `不是 ComfyUI 根目录（缺 main.py）：${root}` });
+        }
+        let file = path.basename(name).replace(/\\/g, "/");
+        if (!file.endsWith(".json")) file += ".json";
+        const workflowsDir = path.join(root, "user", "default", "workflows");
+        await fs.mkdir(workflowsDir, { recursive: true });
+        const target = path.join(workflowsDir, file);
+        await fs.writeFile(target, JSON.stringify(detail.workflow, null, 2), "utf8");
+        // 写盘只是保底；真正的「打开」是把节点图推给运行中的客户端载入。
+        // 失败不阻断：ComfyUI 没跑或还没装伴生扩展时，文件依然在，File→Load 兜底。
+        let pushed = false;
+        let pushError = "";
+        try {
+          const resp = await fetch(`http://${instance}/infinite-canvas/open-workflow`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ graph: detail.workflow, title: file }),
+            signal: AbortSignal.timeout(5000),
+          });
+          const json = await resp.json().catch(() => ({}));
+          pushed = Boolean(json?.ok);
+          if (!pushed) pushError = String(json?.error || `HTTP ${resp.status}`);
+        } catch (err) {
+          pushError = err instanceof Error ? err.message : String(err);
+        }
+        res.json({ ok: true, url, file, path: target, pushed, ...(pushed ? {} : { pushError }) });
+      } catch (error) {
+        res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+      }
+    },
+  );
+
   // PUT /api/workflows/:name/title - 重命名显示标题
   router.put(
     "/api/workflows/:name/title",
@@ -322,8 +380,13 @@ export function registerWorkflowRoutes(
         return res
           .status(400)
           .json({ ok: false, error: "至少保留一个 ComfyUI 后端地址" });
-      await saveInstances({ instances: cleaned });
-      res.json({ ok: true, instances: cleaned });
+      const incomingRoots = (req.body?.roots || {}) as Record<string, unknown>;
+      const roots: Record<string, string> = {};
+      for (const [key, value] of Object.entries(incomingRoots)) {
+        if (typeof value === "string" && value.trim()) roots[key] = value.trim().replace(/\/+$/, "");
+      }
+      await saveInstances({ instances: cleaned, ...(Object.keys(roots).length ? { roots } : {}) });
+      res.json({ ok: true, instances: cleaned, ...(Object.keys(roots).length ? { roots } : {}) });
     } catch (error) {
       res
         .status(500)
