@@ -2,7 +2,7 @@ import type { CanvasNodeData } from "@/types/canvas";
 import type { CanvasProductionEditing, CanvasProductionStoryboardEditor } from "@/types/canvas-plugin";
 import { productionSceneEntries, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 import { nanoid } from "nanoid";
-import { applyProductionCompilation, BackendApiError, compileProduction, fetchProductionCompilation, fetchProductionWorkbench, type ProductionCompilationStatus } from "@/services/backend-api";
+import { applyProductionCompilation, BackendApiError, compileProduction, fetchBackendProject, fetchProductionCompilation, fetchProductionWorkbench, type ProductionCompilationStatus } from "@/services/backend-api";
 
 type Input = Parameters<CanvasProductionEditing["reverseSyncPrompt"]>[0];
 type Handler = CanvasProductionEditing["reverseSyncPrompt"];
@@ -12,6 +12,25 @@ type CompilePromptInput = Parameters<CanvasProductionEditing["compilePrompt"]>[0
 const editors = new Map<string, { token: symbol; handler: Handler }>();
 const storyboardEditors = new Map<string, { token: symbol; handler: StoryboardHandler }>();
 const pendingPromptCompiles = new Map<string, { expectedRevision: number; operationId: string }>();
+const rows = (value: unknown): Array<Record<string, any>> => Array.isArray(value) ? value : [];
+
+function storyboardKeyframeForSlot(frame: Record<string, any>, slotId: string) {
+    return String(frame.id || "").startsWith(`KF:${slotId}:`);
+}
+
+function removeKeyframeOnlySubjectUsages(shot: Record<string, any>, removedFrames: Array<Record<string, any>>, source: Record<string, any>) {
+    const removedSubjects = new Set(removedFrames.flatMap(frame => Array.isArray(frame.subjectIds) ? frame.subjectIds.map(String) : []));
+    if (!removedSubjects.size) return;
+    const stillKeyframed = new Set(rows(shot.keyframes).flatMap(frame => Array.isArray(frame.subjectIds) ? frame.subjectIds.map(String) : []));
+    const attended = new Set(rows(shot.camera?.attention_subject_ids).map(value => String(value)));
+    const utteranceIds = new Set(rows(shot.utterance_refs).map(ref => String(ref.utteranceId)));
+    const speaking = new Set(rows(source.utterances).filter(line => utteranceIds.has(String(line.id))).map(line => String(line.speakerSubjectId || "")));
+    shot.subject_usages = rows(shot.subject_usages).filter(usage => {
+        const subjectId = String(usage.subjectId || "");
+        return !removedSubjects.has(subjectId) || stillKeyframed.has(subjectId) || attended.has(subjectId) || speaking.has(subjectId);
+    });
+}
+
 export function registerProductionPromptEditor(projectId: string, handler: Handler) {
     const token = Symbol(projectId);
     editors.set(projectId, { token, handler });
@@ -56,6 +75,7 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
     const refs = Array.isArray(h3Segment.referenceBindings) ? h3Segment.referenceBindings as Array<Record<string, any>> : [];
     const shots: Record<string, any>[] = [];
     const shotInputs: Record<string, unknown> = {};
+    const removedKeyframesByShot = new Map<string, Array<Record<string, any>>>();
     const originalById = new Map(oldShots.map(shot => [String(shot.id), shot]));
     const firstOrder = Number(oldShots[0].story_order || 0);
     const mappedSceneIds = [...new Set(productionSceneEntries(source).filter(scene => oldShots.some(shot => scene.shotIds.includes(String(shot.id)))).map(scene => scene.id))];
@@ -81,6 +101,9 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
         }
         const bindingId = String(slot.referenceBindingId || "");
         let keyframeAssetId: string | undefined;
+        const slotFrames = oldShots.flatMap(ownerShot => rows(ownerShot.keyframes)
+            .filter(frame => storyboardKeyframeForSlot(frame, String(slot.id)))
+            .map(frame => ({ ownerShot, frame })));
         if (bindingId) {
             const binding = refs.find(ref => String(ref.id || ref.bindingId || "") === bindingId);
             if (!binding || binding.mediaType && binding.mediaType !== "image" || binding.role && binding.role !== "storyboard") throw new Error(`STORYBOARD_BINDING_INVALID: 分镜格 ${slot.id} 引用了无效图片`);
@@ -88,12 +111,32 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
                 && (!binding.sourceNodeId || asset.nodeId === binding.sourceNodeId) && (source.asset_plan as Array<Record<string, any>> || []).some(assetPlan => String(assetPlan.asset_id || assetPlan.id) === assetId));
             if (!match) throw new Error(`STORYBOARD_ASSET_NOT_ADOPTED: 图片 ${binding.storageKey || bindingId} 尚未绑定为正式制作资产`);
             keyframeAssetId = match[0];
+        } else if (v2 && slotFrames.length) {
+            for (const { ownerShot, frame } of slotFrames) {
+                const removed = removedKeyframesByShot.get(String(ownerShot.id)) || [];
+                removed.push(frame);
+                removedKeyframesByShot.set(String(ownerShot.id), removed);
+            }
+        }
+        if (v2 && slotFrames.length) {
+            const removedFrameIds = new Set([...removedKeyframesByShot.values()].flat().map(frame => String(frame.id)));
+            next.keyframes = rows(next.keyframes).filter(frame => !removedFrameIds.has(String(frame.id)));
         }
         shots.push(next);
+        const previousInput = director.shotInputs[String(slot.id)];
+        const previousKeyframeAssetId = previousInput?.keyframeAssetId;
+        const retainedAssetIds = (previousInput?.assetIds || []).filter(assetId => assetId !== previousKeyframeAssetId);
         shotInputs[String(slot.id)] = keyframeAssetId
-            ? { ...(director.shotInputs[String(slot.id)] || {}), keyframePolicy: "reuse", assetIds: [...new Set([...(director.shotInputs[String(slot.id)]?.assetIds || []), keyframeAssetId])], keyframeAssetId }
-            : { keyframePolicy: "none", assetIds: [] };
+            ? { ...previousInput, keyframePolicy: "reuse", assetIds: [...new Set([...retainedAssetIds, keyframeAssetId])], keyframeAssetId }
+            : { ...previousInput, keyframePolicy: "none", assetIds: retainedAssetIds };
+        if (!keyframeAssetId) delete (shotInputs[String(slot.id)] as Record<string, unknown>).keyframeAssetId;
         cursor += frameCounts[index];
+    }
+    const removedKeyframeIds = new Set([...removedKeyframesByShot.values()].flat().map(frame => String(frame.id)));
+    for (const shot of shots) {
+        shot.keyframes = rows(shot.keyframes).filter(frame => !removedKeyframeIds.has(String(frame.id)));
+        const removed = removedKeyframesByShot.get(String(shot.id));
+        if (removed?.length) removeKeyframeOnlySubjectUsages(shot, removed, source);
     }
     if (!v2 && cursor !== endFrame) throw new Error("STORYBOARD_COVERAGE: 分镜格未覆盖整个 Clip");
     const segment = { ...structuredClone(planned), shot_ids: shots.map(shot => shot.id) };
@@ -125,7 +168,7 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
         if (!pending) {
             const loaded = await fetchProductionWorkbench(target, "clip_workbench", targetId);
             const production = loaded.production as Record<string, any>;
-            if (String(production.clipWorkbench?.segment?.id || "") !== targetId) throw new Error("PROMPT_COMPILE_TARGET_MISMATCH: Backend 工作台返回了其他 Clip");
+            if (String(production.workbench?.segment?.id || "") !== targetId) throw new Error("PROMPT_COMPILE_TARGET_MISMATCH: Backend 工作台返回了其他 Clip");
             const expectedRevision = Number(production.revision);
             if (!Number.isInteger(expectedRevision) || expectedRevision < 0) throw new Error("PROMPT_COMPILE_REVISION_UNAVAILABLE: 无法读取当前制作版本");
             pending = { expectedRevision, operationId: `compile-${nanoid(14)}` };
@@ -148,7 +191,7 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
                 await applyProductionCompilation(target, status.preparedId);
             }
             const refreshed = await fetchProductionWorkbench(target, "clip_workbench", targetId);
-            const workbench = (refreshed.production as Record<string, any>).clipWorkbench;
+            const workbench = (refreshed.production as Record<string, any>).workbench;
             if (String(workbench?.segment?.id || "") !== targetId || status.sourceHash && workbench?.sourceHash !== status.sourceHash) throw new Error("PROMPT_COMPILE_SOURCE_CHANGED: 编译完成后制作源稿已变化，请重新编译");
             const canvasInput = (Array.isArray(workbench?.canvasInputs) ? workbench.canvasInputs : []).find((item: Record<string, any>) => item.nodeId === input.nodeId && item.segmentId === input.segmentId)
                 || (Array.isArray(workbench?.canvasInputs) ? workbench.canvasInputs[0] : undefined);
@@ -167,13 +210,21 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
         throw new Error("PROMPT_COMPILE_STILL_RUNNING: 编译仍在运行；再次点击会继续查询同一编译任务");
     }, replaceStoryboardTrack: async (input: CanvasProductionStoryboardEditor) => {
         await flush();
-        const node = getNode(input.nodeId), segments = node?.metadata?.segments;
-        const clip = Array.isArray(segments) ? segments.find(item => item.id === input.segmentId) : undefined;
-        const projection = clip?.productionClipProjection as Record<string, unknown> | undefined;
+        let node = getNode(input.nodeId);
+        let segments = node?.metadata?.segments;
+        let clip = Array.isArray(segments) ? segments.find(item => item.id === input.segmentId) : undefined;
+        let projection = clip?.productionClipProjection as Record<string, unknown> | undefined;
+        if (!projection?.targetId) {
+            const { project } = await fetchBackendProject(projectId);
+            node = ((project.nodes as Array<Record<string, any>> | undefined)?.find(item => item.id === input.nodeId) as CanvasNodeData | undefined) || null;
+            segments = node?.metadata?.segments;
+            clip = Array.isArray(segments) ? segments.find(item => item.id === input.segmentId) : undefined;
+            projection = clip?.productionClipProjection as Record<string, unknown> | undefined;
+        }
         const nextProjection = (input.segment.productionClipProjection || {}) as Record<string, unknown>;
-        if (!clip || typeof projection?.targetId !== "string" || nextProjection.targetId !== projection.targetId) throw new Error("STORYBOARD_PROJECTION_MISMATCH");
+        if (!clip || typeof projection?.targetId !== "string" || nextProjection.targetId && nextProjection.targetId !== projection.targetId) throw new Error("STORYBOARD_PROJECTION_MISMATCH");
         const editor = storyboardEditors.get(projectId);
         if (!editor) throw new Error("PRODUCTION_EDITOR_NOT_READY");
-        return editor.handler(input);
+        return editor.handler({ ...input, segment: { ...input.segment, productionClipProjection: projection } });
     } };
 }

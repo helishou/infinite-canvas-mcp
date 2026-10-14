@@ -7,6 +7,13 @@ function sameReferenceEntry(left: H3Ref, right: H3Ref) {
     return sameRef(left, right);
 }
 
+/** Recalculate a stored H3 ordinal label after reference bindings move within a Clip. */
+export function displayReferenceName(ref: H3Ref, ordinal: number, fallback: string) {
+    const name = String(ref.name || "").trim();
+    const kind = ref.type === "image" ? "Picture" : ref.type === "video" ? "Video" : "Audio";
+    return /^<(?:Picture|Video|Audio)\s+\d+>$/u.test(name) ? "<" + kind + " " + ordinal + ">" : name || fallback;
+}
+
 function storedRefsForSegment(segment: H3Segment): H3Ref[] {
     if (segment.referenceBindings?.length) {
         return segment.referenceBindings.filter((binding) => (binding.url || binding.storageKey)).map((binding) => ({

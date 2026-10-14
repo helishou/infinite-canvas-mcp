@@ -292,6 +292,8 @@ body:has([data-production-workspace-shell]) [data-workspace-header] > div:first-
 .shot-advanced-settings summary span { display: block; margin-top: 4px; color: var(--muted-foreground); font-size: 12px; font-weight: 400; }
 [data-shot-workspace-shell] .storyboard-clip-heading { padding-block: 10px; }
 [data-shot-workspace-shell] .storyboard-clip-heading .ant-tag { max-width: 150px; white-space: normal; font-size: 12px; }
+[data-shot-workspace-shell] .storyboard-shot-row { min-height: 72px; padding-block: 10px; }
+[data-shot-workspace-shell] .storyboard-shot-row .line-clamp-2 { margin-top: 4px; line-height: 1.25rem; }
 [data-shot-workspace-shell] .storyboard-shot-title { overflow-wrap: anywhere; }
 [data-shot-workspace-shell] .storyboard-boundary:focus-visible,
 [data-shot-workspace-shell] .storyboard-scene-switch:focus-visible,

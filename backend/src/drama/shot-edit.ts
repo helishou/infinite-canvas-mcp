@@ -36,36 +36,75 @@ function slicePerformance(value: Row | undefined, start: number, end: number, ca
         return to > from ? [{ ...event, start: from - start, end: to - start, ...(event.start < start && typeof event.cue === "string" ? { cue: `延续切点前已经开始的${category}：${event.cue}` } : {}) }] : [];
     }) };
 }
+function mergeUtteranceRefs(left: Row[], right: Row[], offset: number) {
+    const combined: Row[] = [
+        ...left.map((ref): Row => ref),
+        ...right.map((ref): Row => ({ ...ref, localStartFrame: ref.localStartFrame + offset, localEndFrame: ref.localEndFrame + offset })),
+    ]
+        .sort((a, b) => Number(a.localStartFrame) - Number(b.localStartFrame) || Number(a.textStart) - Number(b.textStart));
+    return combined.reduce((result: Row[], ref) => {
+        const previous = result.at(-1);
+        if (previous && previous.utteranceId === ref.utteranceId && previous.role === ref.role
+            && previous.localEndFrame === ref.localStartFrame && previous.textEnd === ref.textStart) {
+            previous.localEndFrame = ref.localEndFrame;
+            previous.textEnd = ref.textEnd;
+        } else result.push(ref);
+        return result;
+    }, []);
+}
+
 function mergeAudio(left: unknown, right: unknown, offset: number, duration: number) {
     const a: Row = left && typeof left === "object" ? left : { description: typeof left === "string" ? left : "" };
     const b: Row = right && typeof right === "object" ? right : { description: typeof right === "string" ? right : "" };
     const extra = (row: Row) => Object.fromEntries(Object.entries(row).filter(([key]) => !["description", "events"].includes(key)));
     if (Object.keys(extra(a)).length && Object.keys(extra(b)).length && canonicalProduction(extra(a)) !== canonicalProduction(extra(b))) reject("SHOT_MERGE_AUDIO", "shots.audio", "两镜声音配置不同，请在合镜表单明确填写新的声音设计");
-    return { ...(Object.keys(extra(a)).length ? extra(a) : extra(b)), description: `[0–${offset}帧] ${a.description || ""}\n[${offset}–${offset + duration}帧] ${b.description || ""}`, events: [...rows(a.events), ...rows(b.events).map(event => ({ ...event, start: event.start + offset, end: event.end + offset }))] };
+    const descriptions = [a.description, b.description].filter((value): value is string => typeof value === "string" && Boolean(value.trim()));
+    const description = [...new Set(descriptions)].join("\n");
+    return { ...(Object.keys(extra(a)).length ? extra(a) : extra(b)), description, events: [...rows(a.events), ...rows(b.events).map(event => ({ ...event, start: event.start + offset, end: event.end + offset }))] };
 }
 function mergePerformance(left: unknown, right: unknown, offset: number) {
     const a: Row = left && typeof left === "object" ? left : {};
     const b: Row = right && typeof right === "object" ? right : {};
-    const fields = new Set([...Object.keys(a), ...Object.keys(b)].filter(key => key !== "events"));
+    const fields = new Set([...Object.keys(a), ...Object.keys(b)].filter(key => !["events", "beat_id", "beat_ids"].includes(key)));
     for (const key of fields) if (a[key] !== undefined && b[key] !== undefined && canonicalProduction(a[key]) !== canonicalProduction(b[key])) reject("SHOT_MERGE_PERFORMANCE", `shots.performance.${key}`, `两镜表演字段 ${key} 不同，请先统一后再合镜`);
     if (!Object.keys(a).length && !Object.keys(b).length) return undefined;
-    return {
+    const merged: Row = {
         ...b,
         ...a,
         events: [...rows(a.events), ...rows(b.events).map(event => ({ ...event, start: event.start + offset, end: event.end + offset }))],
     };
+    const beatIds = [...new Set([a.beat_id, ...rows(a.beat_ids), b.beat_id, ...rows(b.beat_ids)]
+        .filter((value): value is string => typeof value === "string" && Boolean(value.trim())))];
+    delete merged.beat_id;
+    delete merged.beat_ids;
+    if (beatIds.length === 1) merged.beat_id = beatIds[0];
+    else if (beatIds.length > 1) merged.beat_ids = beatIds;
+    return merged;
 }
-function mergeShotInputs(left: DirectorProduction["shotInputs"][string] | undefined, right: DirectorProduction["shotInputs"][string] | undefined, leftId: string, rightId: string) {
-    if (!left) return structuredClone(right);
-    if (!right) return structuredClone(left);
-    if (left.keyframePolicy !== undefined && right.keyframePolicy !== undefined && left.keyframePolicy !== right.keyframePolicy) reject("SHOT_MERGE_INPUT_POLICY", `shotInputs.${leftId}.keyframePolicy`, "两镜关键帧策略不同，请先统一后再合镜");
-    if (left.keyframeAssetId && right.keyframeAssetId && left.keyframeAssetId !== right.keyframeAssetId) reject("SHOT_MERGE_INPUT_KEYFRAME", `shotInputs.${leftId}.keyframeAssetId`, "两镜指定了不同关键帧素材，请先统一后再合镜");
+function mergeShotInputs(left: DirectorProduction["shotInputs"][string] | undefined, right: DirectorProduction["shotInputs"][string] | undefined, leftId: string, rightId: string, subjectAssembly: boolean) {
+    const projection = (input: DirectorProduction["shotInputs"][string] | undefined) => {
+        if (!input) return undefined;
+        const cloned = structuredClone(input);
+        if (subjectAssembly) {
+            // Prompt v2 stores the full keyframe list on source.shots[].keyframes.
+            // The legacy shotInputs slot can name only one frame, so it is not
+            // a valid merge constraint or source of keyframe truth here.
+            delete cloned.keyframeAssetId;
+            cloned.keyframePolicy = "none";
+        }
+        return cloned;
+    };
+    const projectedLeft = projection(left), projectedRight = projection(right);
+    if (!projectedLeft) return projectedRight;
+    if (!projectedRight) return projectedLeft;
+    if (!subjectAssembly && projectedLeft.keyframePolicy !== undefined && projectedRight.keyframePolicy !== undefined && projectedLeft.keyframePolicy !== projectedRight.keyframePolicy) reject("SHOT_MERGE_INPUT_POLICY", `shotInputs.${leftId}.keyframePolicy`, "两镜关键帧策略不同，请先统一后再合镜");
+    if (!subjectAssembly && projectedLeft.keyframeAssetId && projectedRight.keyframeAssetId && projectedLeft.keyframeAssetId !== projectedRight.keyframeAssetId) reject("SHOT_MERGE_INPUT_KEYFRAME", `shotInputs.${leftId}.keyframeAssetId`, "两镜指定了不同关键帧素材，请先统一后再合镜");
     return {
-        ...structuredClone(right),
-        ...structuredClone(left),
-        assetIds: [...new Set([...left.assetIds, ...right.assetIds])],
-        keyframePolicy: left.keyframePolicy ?? right.keyframePolicy,
-        keyframeAssetId: left.keyframeAssetId ?? right.keyframeAssetId,
+        ...projectedRight,
+        ...projectedLeft,
+        assetIds: [...new Set([...projectedLeft.assetIds, ...projectedRight.assetIds])],
+        keyframePolicy: projectedLeft.keyframePolicy ?? projectedRight.keyframePolicy,
+        keyframeAssetId: projectedLeft.keyframeAssetId ?? projectedRight.keyframeAssetId,
     };
 }
 function withAudioDescription(value: unknown, description: string): Row {
@@ -252,7 +291,7 @@ export function editDirectorShot(director: DirectorProduction, operation: Edit) 
         const mergedAudio = mergeAudio(left.audio, right.audio, offset, rightDuration);
         const audioPatch = operation.firstShotPatch?.audio;
         left.audio = typeof audioPatch === "string" ? { ...mergedAudio, description: audioPatch } : audioPatch !== undefined ? audioPatch : mergedAudio;
-        left.utterance_refs = [...rows(left.utterance_refs), ...rows(right.utterance_refs).map(ref => ({ ...ref, localStartFrame: ref.localStartFrame + offset, localEndFrame: ref.localEndFrame + offset }))];
+        left.utterance_refs = mergeUtteranceRefs(rows(left.utterance_refs), rows(right.utterance_refs), offset);
         const legacyCompositionReferences = (shot: Row) => rows(shot.keyframes).filter(frame => frame.anchor === "composition").map(frame => ({
             id: String(frame.id), asset_id: String(frame.assetId || frame.id), asset_version: String(frame.asset_version || `node:${frame.sourceNode?.nodeId || frame.id}`), purpose: "构图参考", sourceNode: frame.sourceNode,
             selection: frame.selection, retain: frame.retain || [], exclude: frame.exclude || [], requiredForSubmission: frame.requiredForSubmission !== false,
@@ -279,7 +318,11 @@ export function editDirectorShot(director: DirectorProduction, operation: Edit) 
             return !original || canonicalProduction({ ...row, id: original.id }) !== canonicalProduction(original);
         });
         left.outcome_events = [...new Set([...rows(source.shots).filter(row => row.id === left.id || row.id === right.id).flatMap(row => Array.isArray(row.outcome_events) ? row.outcome_events : [])])];
-        const mergedInput = mergeShotInputs(next.shotInputs[left.id], next.shotInputs[right.id], left.id, right.id);
+        if (Array.isArray(group!.audio_bindings)) group!.audio_bindings = group!.audio_bindings.map((binding: Row) => ({
+            ...binding,
+            shotIds: Array.isArray(binding.shotIds) ? [...new Set(binding.shotIds.map((id: string) => id === right.id ? left.id : id))] : binding.shotIds,
+        }));
+        const mergedInput = mergeShotInputs(next.shotInputs[left.id], next.shotInputs[right.id], left.id, right.id, isSubjectPromptAssembly(source));
         if (mergedInput) next.shotInputs[left.id] = mergedInput;
         patch(left, operation.firstShotPatch);
         shots.splice(index + 1, 1); group!.shot_ids = group!.shot_ids.filter((id: string) => id !== right.id); delete next.shotInputs[right.id];

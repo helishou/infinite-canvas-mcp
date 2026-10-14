@@ -8,13 +8,42 @@ import crypto from "node:crypto";
 import { currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { buildCharacterGroupFromExistingNode } from "@basketikun/canvas-agent/plugins/minimax-h3/character-groups";
 import { assertReferenceCompilation, compileReferenceSubmission } from "@basketikun/canvas-agent/reference-contract";
-import { canonicalProduction, isSubjectPromptAssembly, productionSceneEntries, promptSourceMapSchema, type EpisodeProductionData, type ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/production-contract";
+import { canonicalProduction, isSubjectPromptAssembly, productionSceneEntries, promptSourceMapSchema, resolveSubjectPictureBindingIds, type EpisodeProductionData, type ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/production-contract";
 import { directorArtifact } from "./director.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
 const stableId = (kind: string, ...parts: string[]) => `${kind}-${crypto.createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24)}`;
 const object = (value: any): Record<string, any> => value && typeof value === "object" && !Array.isArray(value) ? value : {};
 export type ReferenceSync = { targetId: string; status: "ready" | "blocked"; referenceCount: number; inputHash?: string; diagnostics: Array<{ code: string; message: string }> };
 export const CLIP_PROJECTION_FIELDS = ["sourceShotId", "title", "duration", "taskMode", "prompt", "referenceBindings", "tailFrameContinuation", "motionContextEnabled", "directorEngine", "directorSourceHash", "styleTemplateId", "h3CharacterGroups", "storyboardShots", "aspectRatio", "modelName"];
+const ACTIVE_H3_SEGMENT_STATUSES = new Set(["pending", "queued", "loading", "running", "generating", "awaiting_confirmation", "awaiting_review", "paused", "cancelling"]);
+const TERMINAL_H3_SEGMENT_STATUSES = new Set(["idle", "success", "succeeded", "failed", "error", "cancelled", "canceled", "complete", "completed"]);
+function hasActiveH3SegmentTask(segment: Record<string, any>) {
+    const status = String(segment.status || "").toLowerCase();
+    if (ACTIVE_H3_SEGMENT_STATUSES.has(status)) return true;
+    const hasTaskState = Boolean(segment.runtimeTaskId || segment.taskId) || Number(segment.progress || 0) > 0;
+    return hasTaskState && !TERMINAL_H3_SEGMENT_STATUSES.has(status);
+}
+function normalizeProjectedReferenceRoles(value: unknown) {
+    return Array.isArray(value) ? value.map(item => {
+        const reference = object(item), role = String(reference.role || "");
+        const normalized: Record<string, any> = { ...reference, ...(role === "character_identity" ? { role: "identity" } : role === "audio_reference" ? { role: "source_audio" } : {}) };
+        // H3 stores generated asset IDs under a display-local namespace. The
+        // source node plus storage key identifies the actual media across that
+        // adapter boundary, so its generated assetId alias is not a user edit.
+        delete normalized.assetId;
+        return normalized;
+    }) : value;
+}
+function hasManualProjectionEdits(segment: Record<string, any>) {
+    const projection = object(segment.productionClipProjection), nextValues = object(projection.nextValues);
+    if (Object.keys(nextValues).length) return CLIP_PROJECTION_FIELDS.some(field => {
+        const current = field === "referenceBindings" ? normalizeProjectedReferenceRoles(segment[field]) : segment[field];
+        const expected = field === "referenceBindings" ? normalizeProjectedReferenceRoles(nextValues[field]) : nextValues[field];
+        return canonicalProduction(current ?? null) !== canonicalProduction(expected ?? null);
+    });
+    const fieldHashes = object(projection.fieldHashes);
+    return CLIP_PROJECTION_FIELDS.some(field => typeof fieldHashes[field] === "string" && clipFieldHash(segment[field]) !== fieldHashes[field]);
+}
 function clipFieldHash(value: unknown) { return crypto.createHash("sha256").update(canonicalProduction(value ?? null)).digest("hex"); }
 function initialProjectionBaseline(existing: Record<string, any>, next: Record<string, any>) {
     const baseline: Record<string, string> = {};
@@ -62,6 +91,62 @@ function referenceMatchesSubjectFrame(director: NonNullable<EpisodeProductionDat
     const referenceNodeId = String(reference.nodeId || reference.sourceNodeId || "");
     const storageKey = String(asset?.storageKey || "");
     return Boolean(nodeId && referenceNodeId === nodeId && (!storageKey || String(reference.storageKey || "") === storageKey));
+}
+function reconcileSubjectImageReferences(segment: Record<string, any>, director: NonNullable<EpisodeProductionData["director"]>, group: EpisodeProductionData["clipGroups"][number]) {
+    if (!isSubjectPromptAssembly(director.source)) return;
+    const subjects = (Array.isArray(director.source.subject_registry) ? director.source.subject_registry : []).map(object);
+    const subjectsById = new Map(subjects.map(subject => [String(subject.id || ""), subject]));
+    const bindingsById = new Map<string, { subjectId: string; binding: Record<string, any> }>();
+    const bindingsByNodeId = new Map<string, { subjectId: string; binding: Record<string, any> }[]>();
+    for (const subject of subjects) for (const binding of (Array.isArray(subject.pictureBindings) ? subject.pictureBindings : []).map(object)) {
+        const subjectId = String(subject.id || ""), bindingId = String(binding.id || "");
+        if (bindingId) bindingsById.set(bindingId, { subjectId, binding });
+        const nodeId = String(object(binding.sourceNode).nodeId || "");
+        if (nodeId) bindingsByNodeId.set(nodeId, [...(bindingsByNodeId.get(nodeId) || []), { subjectId, binding }]);
+    }
+    const sourceShots = (Array.isArray(director.source.shots) ? director.source.shots : []).map(object);
+    const usedBindingIds = new Set<string>();
+    const visuallyUsedSubjectIds = new Set<string>();
+    for (const shotId of group.shotIds) {
+        const shot = sourceShots.find(item => String(item.id || "") === shotId);
+        for (const usage of (Array.isArray(shot?.subject_usages) ? shot.subject_usages : []).map(object)) {
+            const subjectId = String(usage.subjectId || ""), subject = subjectsById.get(subjectId);
+            if (!subject) continue;
+            const resolved = resolveSubjectPictureBindingIds(subject, usage);
+            for (const bindingId of resolved.bindingIds) usedBindingIds.add(bindingId);
+            if (usage.presentation === "visible" && resolved.bindingIds.length) visuallyUsedSubjectIds.add(subjectId);
+        }
+    }
+    const referenceIsUsed = (reference: Record<string, any>): boolean | undefined => {
+        const explicitSubjectId = String(reference.subjectId || "");
+        if (explicitSubjectId && !subjectsById.has(explicitSubjectId)) return false;
+        const nodeId = String(reference.sourceNodeId || reference.nodeId || "");
+        const nodeBindings = bindingsByNodeId.get(nodeId) || [];
+        const bindingId = String(reference.outfitId || reference.pictureBindingId || "");
+        const byId = bindingsById.get(bindingId);
+        if (byId) return usedBindingIds.has(bindingId);
+        const subjectId = explicitSubjectId && subjectsById.has(explicitSubjectId)
+            ? explicitSubjectId
+            : new Set(nodeBindings.map(item => item.subjectId)).size === 1 ? nodeBindings[0]?.subjectId || "" : "";
+        if (!subjectId) return undefined;
+        const pictureBindingIds = nodeBindings.filter(item => item.subjectId === subjectId).map(item => String(item.binding.id || ""));
+        return pictureBindingIds.length ? pictureBindingIds.some(id => usedBindingIds.has(id)) : visuallyUsedSubjectIds.has(subjectId);
+    };
+    const references = Array.isArray(segment.referenceBindings) ? segment.referenceBindings as Array<Record<string, any>> : [];
+    segment.referenceBindings = references.filter(reference => {
+        if (reference.enabled === false || reference.mediaType !== "image" || ["storyboard", "keyframe"].includes(String(reference.role || ""))) return true;
+        // A bound picture is retained only when a Shot explicitly selects it for this Clip.
+        // Keyframe subjectIds and camera attention do not participate in this decision.
+        const used = referenceIsUsed(reference);
+        return used === undefined || used;
+    });
+    const groups = object(segment.h3CharacterGroups);
+    for (const [id, value] of Object.entries(groups)) {
+        const characterGroup = object(value), subjectId = String(characterGroup.subjectId || "");
+        if (subjectId && subjectsById.has(subjectId) && !visuallyUsedSubjectIds.has(subjectId) && characterGroup.outfitEnabled !== false) {
+            groups[id] = { ...characterGroup, outfitEnabled: false };
+        }
+    }
 }
 export function buildProductionClip(project: Record<string, any>, published: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], segmentId: string, runSettings?: Record<string, unknown>) {
     const nodes: Record<string, any>[] = Array.isArray(project.nodes) ? project.nodes : [];
@@ -245,6 +330,7 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
             if (!hasExecutableH3Prompt(existing.prompt)) baseline.prompt = inputHash(existing.prompt);
             const merged = mergeDirectorInput(existing, segment, baseline, groups);
             const mergedSegment = merged.merged;
+            reconcileSubjectImageReferences(mergedSegment, data.director!, group);
             const storyboardDurations = Array.isArray(mergedSegment.storyboardShots)
                 ? mergedSegment.storyboardShots.map((shot: any) => Number(object(shot).duration)) : [];
             const storyboardTotal = storyboardDurations.reduce((sum: number, duration: number) => sum + duration, 0);
@@ -252,8 +338,10 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
                 && storyboardDurations.every((duration: number) => Number.isFinite(duration) && duration > 0)
                 && Number(mergedSegment.duration) !== storyboardTotal;
             if (repairDuration) mergedSegment.duration = storyboardTotal;
-            const conflicts = repairDuration ? merged.conflicts.filter(field => field !== "duration") : merged.conflicts;
-            const manualFields = repairDuration ? merged.manualFields.filter(field => field !== "duration") : merged.manualFields;
+            const conflicts = (repairDuration ? merged.conflicts.filter(field => field !== "duration") : merged.conflicts)
+                .filter(field => canonicalProduction(mergedSegment[field] ?? null) !== canonicalProduction(segment[field] ?? null));
+            const manualFields = (repairDuration ? merged.manualFields.filter(field => field !== "duration") : merged.manualFields)
+                .filter(field => canonicalProduction(mergedSegment[field] ?? null) !== canonicalProduction(segment[field] ?? null));
             const projection = { ...segment.productionClipProjection,
                 ...(repairDuration ? { fieldHashes: { ...segment.productionClipProjection.fieldHashes, duration: clipFieldHash(storyboardTotal) } } : {}),
                 nextValues, fieldGroups: groups, conflicts, manualFields };
@@ -304,13 +392,16 @@ function layoutSceneForClip(data: EpisodeProductionData, group: EpisodeProductio
 
 /** Project formal Clips; new groups are materialized only when their source operation explicitly creates them. */
 export function clipInputOperations(project: Record<string, any>, data: EpisodeProductionData, layout: ProductionLayoutPlan,
-    defaults: Record<string, unknown> = {}, materializeTargets: ReadonlySet<string> = new Set()) {
+    defaults: Record<string, unknown> = {}, materializeTargets: ReadonlySet<string> = new Set(), onlyTargets?: ReadonlySet<string>) {
     const operations: CanvasOperation[] = [], referenceSync: ReferenceSync[] = [];
     const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, any>> : [];
     const pendingNodes = new Map<string, CanvasOperation>();
     const retainedProjectedSegments = new Map<string, Set<string>>();
+    const unitForGroup = (group: EpisodeProductionData["clipGroups"][number]) => layout.units.find(unit => unit.targets.includes(`segment:${group.id}`) && unit.members.some(member => member.role === "video"));
+    const nodeForGroup = (group: EpisodeProductionData["clipGroups"][number]) => group.nodeId || unitForGroup(group)?.members.find(member => member.role === "video")?.nodeId;
     for (const group of data.clipGroups) {
-        const unit = layout.units.find(unit => unit.targets.includes(`segment:${group.id}`) && unit.members.some(member => member.role === "video"));
+        if (onlyTargets && !onlyTargets.has(group.id)) continue;
+        const unit = unitForGroup(group);
         const member = unit?.members.find(member => member.role === "video");
         const nodeId = group.nodeId || member?.nodeId;
         if (!nodeId) continue;
@@ -358,6 +449,23 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
             operations.push(operation);
         }
     }
+    if (onlyTargets) {
+        // A Shot/Clip-local edit still reconciles the whole timeline on each H3
+        // node it touched. Retain every current formal Clip on those nodes so
+        // targeted projection cannot mistake unselected siblings for orphans.
+        const touchedNodeIds = new Set(data.clipGroups.filter(group => onlyTargets.has(group.id)).map(nodeForGroup).filter((id): id is string => Boolean(id)));
+        for (const nodeId of touchedNodeIds) {
+            const node = nodes.find(item => String(item.id) === nodeId);
+            const segments = Array.isArray(object(node?.metadata).segments) ? object(node?.metadata).segments as Array<Record<string, any>> : [];
+            const retained = retainedProjectedSegments.get(nodeId) || new Set<string>();
+            for (const group of data.clipGroups) {
+                if (nodeForGroup(group) !== nodeId) continue;
+                const expectedId = group.segmentId || stableId("clip", layout.owner.id, group.id);
+                if (segments.some(segment => String(segment.id || "") === expectedId)) retained.add(expectedId);
+            }
+            retainedProjectedSegments.set(nodeId, retained);
+        }
+    }
     // A production H3 node is a projection of its current formal Clip groups. Earlier
     // compiles could leave projected segments behind after Clips were merged/split or
     // moved to another node; they then appeared as extra timeline segments. Reconcile
@@ -378,12 +486,11 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
         for (const segment of segments) {
             const projection = object(segment.productionClipProjection);
             if (!Object.keys(projection).length || retained.has(String(segment.id || ""))) continue;
-            const fieldHashes = object(projection.fieldHashes);
-            const manuallyChanged = CLIP_PROJECTION_FIELDS.some(field =>
-                typeof fieldHashes[field] === "string" && clipFieldHash(segment[field]) !== fieldHashes[field]);
-            const hasActiveOrBoundResult = Boolean(segment.resultStorageKey || segment.runtimeTaskId || segment.taskId
-                || Number(segment.progress || 0) > 0 || segment.status && segment.status !== "idle");
-            if (manuallyChanged || hasActiveOrBoundResult) continue;
+            const manuallyChanged = hasManualProjectionEdits(segment);
+            // The segment is no longer part of the active production timeline.
+            // Deleting its node entry leaves completed media/task history intact;
+            // only an active task or a manually edited Clip keeps the stale row.
+            if (manuallyChanged || hasActiveH3SegmentTask(segment)) continue;
             operations.push({ type: "delete_h3_segment", nodeId, segmentId: String(segment.id || "") });
         }
     }

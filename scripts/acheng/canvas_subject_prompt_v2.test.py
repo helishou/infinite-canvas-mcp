@@ -145,10 +145,36 @@ class SubjectPromptV2ProjectionTest(unittest.TestCase):
             prompt = compile_prompt_v2(projected, segment)
             self.assertLess(prompt.index("subject_definitions:"), prompt.index("summary:"))
             self.assertIn("[Shot 1]", prompt)
+            self.assertIn("Scene setting: Chicken coop: A mud-brick coop with a straw nest behind a small opening.", prompt)
             source_map = build_source_map(prompt, projected["_canvas_subject_v2_source_maps"]["CLIP_1"])
             self.assertEqual(source_map["sourceHash"], "a" * 64)
             self.assertTrue(any(item["sourceId"] == "SHOT_1" and item["field"] == "visual" for item in source_map["entries"]))
             self.assertTrue(any(item["sourceId"] == "U1" and item["field"] == "text" for item in source_map["entries"]))
+
+            unreferenced_scene_source = deepcopy(source)
+            unreferenced_scene_source["shots"][0]["subject_usages"] = [
+                usage for usage in unreferenced_scene_source["shots"][0]["subject_usages"]
+                if usage["subjectId"] != "SCENE"
+            ]
+            unreferenced_scene = adapt_production(unreferenced_scene_source)
+            unreferenced_prompt = compile_prompt_v2(unreferenced_scene, unreferenced_scene["segments"][0])
+            self.assertNotIn("Scene setting:", unreferenced_prompt)
+            self.assertNotIn("mud-brick coop", unreferenced_prompt)
+
+            per_shot_source = deepcopy(source)
+            second_shot = deepcopy(per_shot_source["shots"][0])
+            second_shot.update({"id": "SHOT_2", "story_order": 1, "visual": "The child turns away from the coop."})
+            second_shot["subject_usages"] = [usage for usage in second_shot["subject_usages"] if usage["subjectId"] != "SCENE"]
+            second_shot["keyframes"] = []
+            second_shot["utterance_refs"] = []
+            per_shot_source["shots"].append(second_shot)
+            per_shot_source["segments"][0]["shot_ids"].append("SHOT_2")
+            per_shot = adapt_production(per_shot_source)
+            per_shot_prompt = compile_prompt_v2(per_shot, per_shot["segments"][0])
+            per_shot_details = per_shot_prompt.split("detailed_description:\n", 1)[1]
+            second_shot_prompt = per_shot_details.split("[Shot 2] At", 1)[1]
+            self.assertIn("Scene setting:", per_shot_details.split("[Shot 2] At", 1)[0])
+            self.assertNotIn("Scene setting:", second_shot_prompt)
 
             # Missing lock prose is not an approval gate. A valid mode is inferred
             # from authored visible Subject references and frozen image inputs.

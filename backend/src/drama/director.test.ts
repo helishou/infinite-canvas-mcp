@@ -322,6 +322,27 @@ test("early Acheng planning drafts save without node bindings and readiness scop
     assert.match(readiness.targets.find(item => item.id === "asset:STYLE_MOTHER")?.blockers.join(" ") || "", /未绑定画布/);
 });
 
+test("changing a script scene environment updates its shots atomically and rejects clips crossing environments", t => {
+    const { service } = fixture(t);
+    const director = doc(2) as any;
+    director.source.scene_registry = [{ id: "scene", name: "草地" }, { id: "room", name: "车厢" }];
+    director.sourceHash = directorHash(director.source);
+    const seeded = service.edit("ep", { operationId: "seed-scene-environment", expectedRevision: service.get("ep").revision, ops: [{ type: "set_director_production", director }] });
+    const changed = service.edit("ep", { operationId: "change-scene-environment", expectedRevision: seeded.revision, ops: [{ type: "set_director_scene_environment", sceneId: "scene-block", environmentId: "room" }] });
+    assert.equal((changed.draft.director!.source.script_scenes as any[])[0].scene_id, "room");
+    assert.deepEqual((changed.draft.director!.source.shots as any[]).map(shot => shot.scene_id), ["room", "room"]);
+    assert.equal(changed.draft.director!.sourceHash, directorHash(changed.draft.director!.source));
+
+    const crossScene = structuredClone(changed.draft.director!) as any;
+    crossScene.source.script_scenes.push({ id: "other-occurrence", scene_id: "room", text: "Second scene" });
+    crossScene.source.shots[1].source_scene_id = "other-occurrence";
+    crossScene.source.segments[0].shot_ids.push("s1");
+    crossScene.source.segments.splice(1, 1);
+    crossScene.sourceHash = directorHash(crossScene.source);
+    const withCrossScene = service.edit("ep", { operationId: "seed-cross-scene-clip", expectedRevision: changed.revision, ops: [{ type: "set_director_production", director: crossScene }] });
+    assert.throws(() => service.edit("ep", { operationId: "reject-cross-scene-move", expectedRevision: withCrossScene.revision, ops: [{ type: "set_director_scene_environment", sceneId: "scene-block", environmentId: "scene" }] }), /会让 Clip .*跨场景/);
+});
+
 test("scene script-block patches replace the structured blocks with full-array semantics", t => {
     const { service } = fixture(t);
     const d = doc(0);

@@ -80,6 +80,37 @@ test("V2 Clip scope retains a registered dialogue speaker even without a visual 
     assert.equal(checked.success, true, checked.success ? "" : JSON.stringify(checked.error.issues));
 });
 
+test("continuity replay context does not retain a removed prior-Shot picture as a Clip reference", () => {
+    const d = scopedDirector();
+    d.source.version = 2;
+    d.source.prompt_assembly = { version: 2 };
+    d.source.character_registry = [{ id: "P", name: "人物" }];
+    d.source.subject_registry = [{ id: "P", kind: "character", entityRef: { ownerKind: "episode", ownerId: "EP", kind: "character", id: "P" }, pictureBindings: [
+        { id: "P_ID", assetId: "ROLE", sourceNode: { projectId: "CANVAS", nodeId: "IMAGE" }, selection: { mode: "node_selection" }, provides: ["identity"], retain: ["identity"], exclude: ["pose"], applicableState: {}, defaultFor: ["identity"] }
+    ] }];
+    d.source.shots = [
+        { id: "SA", source_scene_id: "A", scene_id: "ROOM", timeline_id: "T", story_order: 0, duration_frames: 96,
+            subject_usages: [{ subjectId: "P", presentation: "visible", pictureBindingIds: ["P_ID"], referencePurpose: ["identity"], continuityFactIds: [], stateRequirements: [] }], keyframes: [], utterance_refs: [] },
+        { id: "SB", source_scene_id: "B", scene_id: "ROOM", timeline_id: "T", story_order: 1, duration_frames: 96,
+            subject_usages: [], keyframes: [], utterance_refs: [] },
+    ];
+    d.source.segments = [
+        { id: "GA", shot_ids: ["SA"], mode: "Ref2VA" },
+        { id: "GB", shot_ids: ["SB"], mode: "Ref2VA" },
+    ];
+    d.source.ledger = { contract_version: 2, facts: [], timelines: [{ id: "T" }], initial: [], events: [], requirements: [], coverage: [] };
+    d.sourceHash = compilationHash(d.source);
+
+    const scoped = compilationScopeInput(d, { targetIds: ["GB"] });
+    assert.deepEqual((scoped.director.source.shots as any[]).map(shot => shot.id), ["SA", "SB"], "prior Shot remains for continuity replay");
+    assert.deepEqual((scoped.director.source.shots as any[])[0].subject_usages.map((usage: any) => usage.subjectId), ["P"]);
+    assert.deepEqual((scoped.director.source.subject_registry as any[])[0].pictureBindings, [], "prior Shot picture is not an H3 reference for GB");
+    d.source.segments = [{ id: "GAB", shot_ids: ["SA", "SB"], mode: "Ref2VA" }];
+    d.sourceHash = compilationHash(d.source);
+    const sharedClip = compilationScopeInput(d, { targetIds: ["GAB"] });
+    assert.deepEqual((sharedClip.director.source.subject_registry as any[])[0].pictureBindings.map((binding: any) => binding.id), ["P_ID"], "a Subject used by any Shot in the output Clip keeps its picture reference");
+});
+
 test("scoped ledger retains coverage using the authored source anchor", () => {
     const d = scopedDirector();
     (d.source.script_scenes as any[])[0].blocks = [{ id: "A1", kind: "action", text: "Enter" }];

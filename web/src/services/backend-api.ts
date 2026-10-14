@@ -8,6 +8,7 @@ import { nanoid } from "nanoid";
 import type { CanvasGenerationCommand, CanvasGenerationStartResult, CanvasLoopPrepare } from "@basketikun/canvas-agent/generation-contract";
 import { CANVAS_GENERATION_PATH, CANVAS_LOOP_PREPARE_PATH, CANVAS_TASKS_PATH, canvasTaskActionPath, canvasTaskPath, h3ConfirmationPath } from "@basketikun/canvas-agent/generation-api";
 import { ensureCanvasDraftLease } from "@/lib/canvas/canvas-draft-session";
+import { browserOperationName, watchSlowBrowserOperation } from "@/lib/slow-operation-monitor";
 import type { EpisodeProductionData, ProductionOperation, DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 
 export type BackendMediaResult = {
@@ -48,36 +49,44 @@ export class BackendApiError extends Error {
 }
 
 export async function request<T = unknown>(method: string, path: string, body?: unknown, options?: { signal?: AbortSignal }): Promise<T> {
-    if (method !== "GET" && (/^\/canvas\/projects(?:\/|$)/.test(path) || path === CANVAS_LOOP_PREPARE_PATH)) await ensureCanvasDraftLease();
-    const token = getBackendTokenShared();
-    const backendUrl = getBackendUrl().replace(/\/$/, "");
-    const url = `${backendUrl}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
-    const tracksWrite = !["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase());
-    if (tracksWrite) backendWritesInFlight++;
-    let res: Response;
+    const finishSlowOperation = watchSlowBrowserOperation(browserOperationName(method, path));
+    let outcome = "failed";
     try {
-        res = await fetch(url, {
-            method,
-            headers: body ? { "content-type": "application/json" } : {},
-            body: body !== undefined ? JSON.stringify(body) : undefined,
-            signal: options?.signal,
-        });
-    } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") throw error;
-        const reason = error instanceof Error ? `${error.name ? `${error.name}: ` : ""}${error.message}` : String(error);
-        throw new BackendApiError(`无法连接 Backend：${method} ${path} → ${backendUrl}（${reason}）。请确认 Backend 已启动且端口可访问。`, 0, { method, path, backendUrl, cause: reason });
+        if (method !== "GET" && (/^\/canvas\/projects(?:\/|$)/.test(path) || path === CANVAS_LOOP_PREPARE_PATH)) await ensureCanvasDraftLease();
+        const token = getBackendTokenShared();
+        const backendUrl = getBackendUrl().replace(/\/$/, "");
+        const url = `${backendUrl}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+        const tracksWrite = !["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase());
+        if (tracksWrite) backendWritesInFlight++;
+        let res: Response;
+        try {
+            res = await fetch(url, {
+                method,
+                headers: body ? { "content-type": "application/json" } : {},
+                body: body !== undefined ? JSON.stringify(body) : undefined,
+                signal: options?.signal,
+            });
+        } catch (error) {
+            if (error instanceof DOMException && error.name === "AbortError") throw error;
+            const reason = error instanceof Error ? `${error.name ? `${error.name}: ` : ""}${error.message}` : String(error);
+            throw new BackendApiError(`无法连接 Backend：${method} ${path} → ${backendUrl}（${reason}）。请确认 Backend 已启动且端口可访问。`, 0, { method, path, backendUrl, cause: reason });
+        } finally {
+            if (tracksWrite) backendWritesInFlight = Math.max(0, backendWritesInFlight - 1);
+        }
+        const data = (await res.json().catch(() => ({}))) as T & { ok?: boolean; error?: string };
+        if (res.status === 401 && typeof window !== "undefined") window.dispatchEvent(new Event("backend-auth-failed"));
+        if (!res.ok) {
+            // 把后端返回的 error 字符串完整透传（之前 30 字符截断导致 500 错看不到）
+            const errText = (data && typeof data === "object" && "error" in data && typeof data.error === "string") ? data.error : "";
+            const extra = errText || (res.headers.get("content-type")?.includes("application/json") ? "" : (await res.text().catch(() => "")));
+            outcome = `http-${res.status}`;
+            throw new BackendApiError(`Backend ${method} ${path} failed: HTTP ${res.status} ${extra}`.trim(), res.status, data && typeof data === "object" ? data as Record<string, unknown> : {});
+        }
+        outcome = `http-${res.status}`;
+        return data;
     } finally {
-        if (tracksWrite) backendWritesInFlight = Math.max(0, backendWritesInFlight - 1);
+        finishSlowOperation(outcome);
     }
-    const data = (await res.json().catch(() => ({}))) as T & { ok?: boolean; error?: string };
-    if (res.status === 401 && typeof window !== "undefined") window.dispatchEvent(new Event("backend-auth-failed"));
-    if (!res.ok) {
-        // 把后端返回的 error 字符串完整透传（之前 30 字符截断导致 500 错看不到）
-        const errText = (data && typeof data === "object" && "error" in data && typeof data.error === "string") ? data.error : "";
-        const extra = errText || (res.headers.get("content-type")?.includes("application/json") ? "" : (await res.text().catch(() => "")));
-        throw new BackendApiError(`Backend ${method} ${path} failed: HTTP ${res.status} ${extra}`.trim(), res.status, data && typeof data === "object" ? data as Record<string, unknown> : {});
-    }
-    return data;
 }
 
 function sharedGet<T>(path: string): Promise<T> {
@@ -298,7 +307,7 @@ export function syncEpisodeProductionClips(episodeId: ProductionTarget) { return
 // 编译：提交后返回 operationId，沿同一 operationId 轮询状态；成功后用 preparedId 应用回执写回正式源稿。
 export type ProductionCompilationStatus = {
     operationId: string; status: "queued" | "running" | "succeeded" | "blocked" | "interrupted" | "failed"; verdict: "passed" | "passed_with_warnings" | "blocked";
-    expectedRevision: number; sourceHash: string; preparedId?: string; diagnosticCount?: number; targetCount?: number; reused?: boolean;
+    expectedRevision: number; sourceHash: string; engineRuntimeId?: string; compilerHash?: string; preparedId?: string; diagnosticCount?: number; targetCount?: number; reused?: boolean;
     blockingDiagnostic?: { code: string; path?: string; targetId?: string; shotId?: string; message: string };
     application?: { revision?: number; sourceHash?: string; operationId?: string; replayed?: boolean; referenceSync?: Array<{ targetId: string; status: string; referenceCount?: number }> };
     mediaSubmitted: false;

@@ -166,6 +166,7 @@ export class ProductionCompilationService {
             : blocking?.nextAction || { action: "correct_source", message: "读取本次诊断并定位原因；确认输入或故障条件改变后再提交。" };
         const hasCompileNotice = job.diagnostics.length > 0;
         const base = { operationId, status: job.status, verdict: job.status === "blocked" ? "blocked" : hasCompileNotice ? "passed_with_warnings" : "passed", expectedRevision: job.expectedRevision, sourceHash: job.result?.sourceHash || job.director.sourceHash,
+            engineRuntimeId: job.director.engine.runtimeId, compilerHash: job.director.engine.compilerHash,
             ...(job.compilerInputFingerprint ? { compilerInputFingerprint: job.compilerInputFingerprint } : {}),
             ...(job.reusedFromOperationId ? { reused: true, reusedFromOperationId: job.reusedFromOperationId } : {}),
             ...(blockingDiagnostic ? { blockingDiagnostic } : {}), nextAction,

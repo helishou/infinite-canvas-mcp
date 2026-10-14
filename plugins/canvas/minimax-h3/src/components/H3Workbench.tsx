@@ -216,6 +216,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         const syncReferences = (changedNodeIds?: Set<string>) => {
             const ctx = ctxRef.current;
             const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
+            const productionOwnedNode = Boolean(liveMetadata.productionOwnerKind && liveMetadata.productionOwnerId || liveMetadata.productionSceneId);
             const currentSegments = segmentsFor(liveMetadata);
             let changed = false;
             const nextSegments = currentSegments.map((segment) => {
@@ -241,6 +242,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
                 const refs = refsForSegment(nextSegment);
                 const nextRefs = refs.map((ref) => {
                     if (!ref.nodeId || (changedNodeIds && !changedNodeIds.has(ref.nodeId))) return ref;
+                    if (productionOwnedNode && inferReferenceRole(ref) === "storyboard") return ref;
                     return refreshSmartImageReference(ref, ctx.getNode(ref.nodeId));
                 });
                 if (!nextRefs.every((ref, index) => ref === refs[index])) nextSegment = withSegmentRefs(nextSegment, nextRefs);
@@ -259,9 +261,11 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     }, [sharedContext.node.id, sharedContext.projectId]);
     useEffect(() => {
         const ctx = ctxRef.current;
+        const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
+        const productionOwnedNode = Boolean(liveMetadata.productionOwnerKind && liveMetadata.productionOwnerId || liveMetadata.productionSceneId);
         let changed = false;
         const next = segments.map((segment) => {
-            if (segment.productionClipProjection) return segment;
+            if (segment.productionClipProjection || productionOwnedNode) return segment;
             // 先清掉指向已不存在引用的分镜绑定（旧版本遗留的孤儿卡），再做常规归一化。
             const healed = dropUnboundStoryboardReferences(segment);
             const hasStoryboards = storyboardRefsForSegment(healed).length > 0;
@@ -293,7 +297,9 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             message.warning("末张分镜时长不足 1 秒，无法再平分新增分镜。");
             return false;
         }
-        const isFormalClip = Boolean((previous.productionClipProjection as Record<string, unknown> | undefined)?.targetId);
+        const isFormalClip = Boolean((previous.productionClipProjection as Record<string, unknown> | undefined)?.targetId)
+            || Boolean((updated.productionClipProjection as Record<string, unknown> | undefined)?.targetId)
+            || Boolean(metadata.productionOwnerKind && metadata.productionOwnerId || metadata.productionSceneId);
         const storyboardState = (segment: H3Segment) => JSON.stringify({ shots: segment.storyboardShots || [], refs: storyboardRefsForSegment(segment) });
         if (isFormalClip && storyboardState(previous) !== storyboardState(updated)) {
             if (!ctx.production) { message.error("正式制作 Clip 的分镜需要制作台编辑器接收；当前工作台未连接"); return false; }
@@ -308,6 +314,14 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     }, [ctx, metadata, message]);
     const patchSelected = useCallback((patch: Partial<H3Segment>) => {
         if (!selected) return;
+        if (patch.referenceBindings !== undefined || patch.storyboardShots !== undefined || patch.storyboardDurations !== undefined) {
+            const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata;
+            const latest = segmentsFor(liveMetadata).find((item) => item.id === selected.id) || selected;
+            const patched = { ...latest, ...patch };
+            const updated = withSegmentRefs(patched, refsForSegment(patched));
+            commitSegmentChange(updated);
+            return;
+        }
         if ((patch.duration !== undefined || patch.mode !== undefined || patch.taskMode !== undefined) && storyboardTrackItems(selected).length) {
             const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata;
             const latest = segmentsFor(liveMetadata).find((item) => item.id === selected.id) || selected;

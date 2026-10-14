@@ -19,6 +19,7 @@ import { syncOrderedGroupMembership } from "@/lib/canvas/ordered-group";
 import { compactH3SegmentStarts, CANVAS_ACTIVE_TASK_NODE_FIELDS, H3_RUNTIME_NODE_FIELDS, H3_RUNTIME_SEGMENT_FIELDS, H3_LOCAL_VIEW_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
 import { h3SegmentOrderOperations, recoverH3StartOperations } from "@/lib/canvas/h3-timeline-operations";
 import { flushCanvasTexts, invalidateDeletedCanvasTextSessions, onCanvasTextCommit, prepareCanvasTextWith, receiveCanvasTextEvent } from "@/services/api/canvas-text";
+import { watchSlowBrowserOperation } from "@/lib/slow-operation-monitor";
 
 export type CanvasProject = {
     id: string;
@@ -778,6 +779,21 @@ function scheduleCanvasSync() {
     }, 400);
 }
 
+/** 把同步冲突讲清楚：原因、后端版本、具体冲突目标，避免生成入口只抛一句"有冲突"。
+ *  生成 / 编译的提示条、toast 都直接展示这段文字，用户据此就能定位到冲突对象。 */
+function describeCanvasConflict(conflict: CanvasConflictRecord): string {
+    const head = conflict.reason === "rejected"
+        ? `画布有 ${conflict.pendingOperations} 个操作被后端拒绝（远端版本 ${conflict.revision}）`
+        : `画布有 ${conflict.pendingOperations} 个未保存操作与远端改动冲突（远端版本 ${conflict.revision}）`;
+    const parts = [head];
+    if (conflict.message) parts.push(conflict.message);
+    if (conflict.conflictTargets.length) {
+        const shown = conflict.conflictTargets.slice(0, 3).map((target) => target.detail).join("；");
+        parts.push(conflict.conflictTargets.length > 3 ? `${shown}；…还有 ${conflict.conflictTargets.length - 3} 项冲突` : shown);
+    }
+    return `${parts.join("：")}。请先在画布顶部提示条选择「采用远端」或「保留我的操作」，再重试`;
+}
+
 /** 生成前必须确认目标画布已落库；后台自动同步仍允许保留草稿后静默重试。 */
 export async function flushCanvasProjectBeforeGeneration(projectId: string) {
     if (!backendCanvasHydrated) throw new Error("画布尚未完成加载，请稍后再生成");
@@ -787,7 +803,8 @@ export async function flushCanvasProjectBeforeGeneration(projectId: string) {
     const project = state.projects.find((item) => item.id === projectId);
     const base = syncBases.get(projectId);
     if (!project || !base) throw new Error("目标画布尚未保存，未提交生成任务");
-    if (state.canvasConflicts[projectId]) throw new Error("请先处理此画布的同步冲突，再生成");
+    const conflict = state.canvasConflicts[projectId];
+    if (conflict) throw new Error(describeCanvasConflict(conflict));
     if (pendingCommands.has(projectId)) {
         throw new Error("画布修改尚未得到 Backend 确认，已保留草稿；恢复连接并保存后再生成");
     }
@@ -795,24 +812,33 @@ export async function flushCanvasProjectBeforeGeneration(projectId: string) {
 
 /** 立即尝试提交当前画布投影；生成入口应调用带项目确认的版本。 */
 export async function flushCanvasSyncNow() {
-    if (saveTimer) {
-        clearTimeout(saveTimer);
-        saveTimer = null;
-    }
-    while (true) {
-        syncRequested = true;
-        if (!syncPromise) {
-                syncPromise = flushCanvasSync(true).finally(() => {
-                syncPromise = null;
-                if (syncRequested) scheduleCanvasSync();
-            });
-        }
-        await syncPromise;
-        if (!syncRequested && !syncPromise) return;
+    const finishSlowOperation = watchSlowBrowserOperation("canvas.sync.flush");
+    let outcome = "complete";
+    try {
         if (saveTimer) {
             clearTimeout(saveTimer);
             saveTimer = null;
         }
+        while (true) {
+            syncRequested = true;
+            if (!syncPromise) {
+                syncPromise = flushCanvasSync(true).finally(() => {
+                    syncPromise = null;
+                    if (syncRequested) scheduleCanvasSync();
+            });
+            }
+            await syncPromise;
+            if (!syncRequested && !syncPromise) return;
+            if (saveTimer) {
+                clearTimeout(saveTimer);
+                saveTimer = null;
+        }
+        }
+    } catch (error) {
+        outcome = "failed";
+        throw error;
+    } finally {
+        finishSlowOperation(outcome);
     }
 }
 

@@ -207,7 +207,7 @@ export function usePluginHost(params: PluginHostParams) {
                 if (!project) throw new Error("画布已关闭，无法还原历史输出");
                 const node = project.nodes.find(node => node.id === input.nodeId);
                 if (!node) throw new Error("目标 H3 节点已不存在，请刷新后重新选择");
-                if (requestFormalH3OutputSelection(projectId, node, input)) return;
+                if (await requestFormalH3OutputSelection(projectId, node, input)) return;
                 await applyBackendCanvasOperations(projectId, [{ type: "restore_h3_output", ...input }], Number(project.revision || 0));
             },
             runVideoConcat: async (videos, options) => {

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
     applyCharacterGroupEdits,
+    displayReferenceName,
     promoteCharacterSourceReferences,
     refsForSegment,
     refsFromCharacterGroup,
@@ -12,9 +13,16 @@ import {
     removeCharacterGroup,
     segmentRefsPatch,
 } from "./h3-data";
-import type { H3CharacterGroup, H3Segment } from "../types";
+import type { H3CharacterGroup, H3Ref, H3Segment } from "../types";
 
 import { characterGroupBindings } from "../../../../../canvas-agent/src/canvas/reference-contract";
+
+test("ordinal-only H3 reference labels follow the current Clip order without renaming descriptive references", () => {
+    assert.equal(displayReferenceName({ type: "image", name: "<Picture 6>" } as H3Ref, 5, "Ref 5"), "<Picture 5>");
+    assert.equal(displayReferenceName({ type: "video", name: "<Video 2>" } as H3Ref, 1, "Ref 1"), "<Video 1>");
+    assert.equal(displayReferenceName({ type: "image", name: "苏青璃·金色礼服" } as H3Ref, 5, "Ref 5"), "苏青璃·金色礼服");
+    assert.equal(displayReferenceName({ type: "image", name: "" } as H3Ref, 5, "Ref 5"), "Ref 5");
+});
 
 function derivedFixture(): H3Segment {
     const groups = Object.fromEntries(["su", "shen"].map((id) => [id, {

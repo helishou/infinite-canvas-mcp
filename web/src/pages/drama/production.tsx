@@ -306,7 +306,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   const [compileError, setCompileError] = useState("");
   const [compileNotice, setCompileNotice] = useState("");
   const [compileDiagnostics, setCompileDiagnostics] = useState<ProductionCompilationDiagnostic[]>([]);
-  const [compileTargets, setCompileTargets] = useState<{ sourceHash: string; items: Array<{ targetId: string; status: string }>; notReadyTargetIds?: string[] }>();
+  const [compileTargets, setCompileTargets] = useState<{ sourceHash: string; engineRuntimeId?: string; compilerHash?: string; items: Array<{ targetId: string; status: string }>; notReadyTargetIds?: string[] }>();
   const startingRunRef = useRef(false);
   const handledAgentResultRef = useRef("");
   const setAgentState = useAgentStore(state => state.setAgentState);
@@ -585,7 +585,12 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       const targetItems = compilationTargets.filter((item): item is ProductionCompilationDiagnostic & { targetId: string; status: string } => Boolean(item.targetId && item.status));
       const notReadyTargetIds = targetItems.filter(item => item.status !== "ready").map(item => item.targetId);
       const touchedCompileScopeIds = new Set([...(pending.scope?.targetIds || []).map(String), ...targetItems.map(item => String(item.targetId))]);
-      const previousNotReady = compileTargets?.sourceHash === status.sourceHash ? (compileTargets.notReadyTargetIds || []).filter(id => !touchedCompileScopeIds.has(String(id))) : [];
+      const engineRuntimeId = status.engineRuntimeId ?? compileSource.draft.director?.engine.runtimeId;
+      const compilerHash = status.compilerHash ?? compileSource.draft.director?.engine.compilerHash;
+      const sameCompileBasis = compileTargets?.sourceHash === status.sourceHash
+        && compileTargets.engineRuntimeId === engineRuntimeId
+        && compileTargets.compilerHash === compilerHash;
+      const previousNotReady = sameCompileBasis ? (compileTargets.notReadyTargetIds || []).filter(id => !touchedCompileScopeIds.has(String(id))) : [];
       const failedCompileScopeIds = new Set([...previousNotReady, ...notReadyTargetIds].map(String));
       const compileSourceValue = compileSource.draft.director?.source as Record<string, any> | undefined;
       for (const segment of Array.isArray(compileSourceValue?.segments) ? compileSourceValue!.segments : []) {
@@ -608,11 +613,15 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         const touchedIds = new Set((hasSyncReceipt ? targetItems : targetItems.filter(item => item.status !== "ready")).map(item => item.targetId));
         const newlyNotReadyIds = targetItems.filter(item => item.status !== "ready" || hasSyncReceipt && !synced.has(item.targetId)).map(item => item.targetId);
         setCompileTargets(current => {
-          const previous = current?.sourceHash === status.sourceHash ? current : { sourceHash: status.sourceHash, items: [], notReadyTargetIds: [] as string[] };
+          const previous = current?.sourceHash === status.sourceHash
+            && current.engineRuntimeId === engineRuntimeId
+            && current.compilerHash === compilerHash
+            ? current
+            : { sourceHash: status.sourceHash, engineRuntimeId, compilerHash, items: [], notReadyTargetIds: [] as string[] };
           const readyItems = [...previous.items.filter(item => !touchedIds.has(item.targetId)), ...items];
           const notReady = new Set((previous.notReadyTargetIds || []).filter(id => !touchedIds.has(id)));
           for (const id of newlyNotReadyIds) notReady.add(id);
-          return { sourceHash: status.sourceHash, items: readyItems, ...(notReady.size ? { notReadyTargetIds: [...notReady] } : {}) };
+          return { sourceHash: status.sourceHash, engineRuntimeId, compilerHash, items: readyItems, ...(notReady.size ? { notReadyTargetIds: [...notReady] } : {}) };
         });
       };
       const describe = (item: ProductionCompilationDiagnostic) => item.message?.trim() || "";
@@ -1341,7 +1350,9 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     if (!owner || !production || !embedded) return;
     const receive = (event: Event) => {
       const detail = (event as CustomEvent<{ owner: NonNullable<ProductionCanvasContext["owner"]>; object: ProductionObject; action: "source" | "generate" | "video" | "select-result"; history?: { generationLogId: string; storageKey: string; mimeType: string } }>).detail;
-      if (!detail || detail.owner.kind !== owner.kind || detail.owner.id !== owner.id || nodeActionInFlight.current) return;
+      if (!detail || detail.owner.kind !== owner.kind || detail.owner.id !== owner.id) return;
+      event.preventDefault();
+      if (nodeActionInFlight.current) return;
       const object = detail.object;
       const open = (value: ProductionObject) => { navigate(productionObjectPath(value)); useProductionWorkspaceStore.getState().setSelectedObject(value); useProductionWorkspaceStore.getState().setPanelTab("object"); useAgentStore.getState().openPanel(); };
       void (async () => {
@@ -1434,7 +1445,10 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     if (utterances !== undefined) ops.push({ type: "set_director_shot_utterances", shotId, utterances });
     return ops.length ? edit(ops) : true;
   };
-  const patchSource = async (entity: "style" | "spec" | "story" | "scene" | "environment" | "character" | "asset" | "asset_card" | "shot" | "segment", id: string | undefined, patch: Record<string, unknown>) => edit([{ type: "patch_director_source", entity, ...(id ? { id } : {}), patch }]);
+  const patchSource = async (entity: "style" | "spec" | "story" | "scene" | "environment" | "character" | "asset" | "asset_card" | "shot" | "segment", id: string | undefined, patch: Record<string, unknown>) => {
+    if (entity === "scene" && id && typeof patch.scene_id === "string") return edit([{ type: "set_director_scene_environment", sceneId: id, environmentId: patch.scene_id }]);
+    return edit([{ type: "patch_director_source", entity, ...(id ? { id } : {}), patch }]);
+  };
   const editCanvasClip = async (nodeId: string, segmentId: string, patch: Record<string, unknown>) => {
     if (!canvasId) return false;
     try {

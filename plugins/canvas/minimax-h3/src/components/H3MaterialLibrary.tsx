@@ -5,7 +5,7 @@ import { buildRestoreParamsPatch } from "../services/h3-segment-utils";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { H3Icon } from "./H3Icon";
 import { H3MaterialCard } from "./H3MaterialCard";
-import { message } from "antd";
+import { App } from "antd";
 import { h3Label, useH3Locale } from "../h3-locale";
 import { buildH3OutputPreview } from "../services/h3-output-preview";
 
@@ -22,6 +22,7 @@ function formatOutputTime(value?: string): string {
 }
 
 export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
+    const { message } = App.useApp();
     const locale = useH3Locale();
     const [outputFilter, setOutputFilter] = useState<"all" | "current">(String(ctx.node.metadata?.minimaxOutputFilter || "") === "current" ? "current" : "all");
     const [historyOutputs, setHistoryOutputs] = useState<H3Ref[]>([]);

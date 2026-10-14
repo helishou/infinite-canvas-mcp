@@ -19,6 +19,10 @@ import { H3_VIDEO_RATIOS } from "@basketikun/canvas-agent/plugins/minimax-h3/nod
 import { assertH3LatentUpscalerReady } from "./h3-latent-upscaler-preflight.js";
 import { stageH3ContinuationSeed, type H3ContinuationIdentity } from "./continuation-seed.js";
 import { listLocalLoras } from "./local-lora-catalog.js";
+import { createLogger } from "../logger.js";
+import { watchSlowOperation } from "../slow-operation.js";
+
+const slowOperationLogger = createLogger("comfyui");
 
 /** ComfyUI Bridge 的总后台侧依赖：任务走 task store，URL 走 setting store。 */
 export type ComfyUiDeps = {
@@ -769,17 +773,21 @@ export class ComfyUiBackend {
         const url = comfyUrl.replace(/\/$/, "");
         const errors: string[] = [];
         if (promptId) {
+            const finishQueueDelete = watchSlowOperation(slowOperationLogger, "comfy.cancel.queue-delete");
             try {
                 const response = await fetch(`${url}/queue`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ delete: [promptId] }) });
+                finishQueueDelete(`http-${response.status}`);
                 if (!response.ok) errors.push(`/queue HTTP ${response.status}`);
-            } catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
+            } catch (error) { finishQueueDelete("network-error"); errors.push(error instanceof Error ? error.message : String(error)); }
         }
         // ComfyUI uses /interrupt for the currently executing prompt;
         // queued prompts are handled by the /queue delete above.
+        const finishInterrupt = watchSlowOperation(slowOperationLogger, "comfy.cancel.interrupt");
         try {
             const response = await fetch(`${url}/interrupt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(promptId ? { prompt_id: promptId } : {}) });
+            finishInterrupt(`http-${response.status}`);
             if (!response.ok) errors.push(`/interrupt HTTP ${response.status}`);
-        } catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
+        } catch (error) { finishInterrupt("network-error"); errors.push(error instanceof Error ? error.message : String(error)); }
         if (errors.length) this.deps.tasks.addEvent(taskId, "cancel_error", { promptId, errors });
     }
 

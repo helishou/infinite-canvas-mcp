@@ -35,8 +35,31 @@ test("split and merge preserve original dialogue, event frame, keyframe and time
     editDirectorShot(d, { type: "edit_director_shot", action: "merge", shotId: "S1", targetShotId: "N" });
     const merged = (d.source as any).shots[0];
     assert.equal(merged.duration_frames, 48); assert.equal(merged.keyframes[0].localFrame, 36); assert.equal(merged.audio.events[0].start, 30);
+    assert.equal(merged.audio.description, "风声"); assert.doesNotMatch(merged.audio.description, /\[\d+[–-]\d+帧\]/);
     assert.equal(merged.subject_usages.length, 1);
     assert.deepEqual((d.source as any).utterances[0].end, { shotId: "S1", localFrame: 48 }); assert.equal((d.source as any).ledger.events[0].local_frame, 36);
+});
+test("merging adjacent Shots coalesces contiguous pieces of the same utterance", () => {
+    const d = fixture(), source = d.source as any;
+    source.utterances[0].text = "回来先问蛋你";
+    source.utterances[0].end = { shotId: "S2", localFrame: 24 };
+    source.shots[0].utterance_refs = [
+        { utteranceId: "U", role: "speaker", localStartFrame: 0, localEndFrame: 24, textStart: 0, textEnd: 2 },
+        { utteranceId: "U", role: "speaker", localStartFrame: 24, localEndFrame: 48, textStart: 2, textEnd: 4 },
+    ];
+    source.shots[1].utterance_refs = [{ utteranceId: "U", role: "speaker", localStartFrame: 0, localEndFrame: 24, textStart: 4, textEnd: 6 }];
+    editDirectorShot(d, { type: "edit_director_shot", action: "merge", shotId: "S1", targetShotId: "S2" });
+    assert.deepEqual((d.source as any).shots[0].utterance_refs, [
+        { utteranceId: "U", role: "speaker", localStartFrame: 0, localEndFrame: 72, textStart: 0, textEnd: 6 },
+    ]);
+    assert.deepEqual((d.source as any).utterances[0].end, { shotId: "S1", localFrame: 72 });
+});
+test("merging Shots with no sound description keeps the description empty", () => {
+    const d = fixture(), source = d.source as any;
+    source.shots[0].audio.description = "";
+    source.shots[1].audio = { description: "" };
+    editDirectorShot(d, { type: "edit_director_shot", action: "merge", shotId: "S1", targetShotId: "S2" });
+    assert.equal((d.source as any).shots[0].audio.description, "");
 });
 test("copy is a new design, and deletion cleans only its own dialogue and ledger records", () => {
     const deleted = fixture();

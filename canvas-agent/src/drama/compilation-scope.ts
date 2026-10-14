@@ -50,7 +50,9 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
         for (const frame of rows(shot.keyframes).filter(item => item.requiredForSubmission && item.anchor !== "composition")) shotAssets.add(String(frame.assetId || frame.id));
         for (const reference of rows(shot.reference_requirements).filter(item => item.requiredForSubmission)) shotAssets.add(String(reference.asset_id || reference.id));
     }
-    const activeFrame = (item: Record<string, any>) => item.kind !== "keyframe" || subjectAssembly && shotAssets.has(key(item)) || Object.values(director.shotInputs).some(input => input.keyframePolicy !== "none" && input.keyframeAssetId === key(item));
+    const activeFrame = (item: Record<string, any>) => item.kind !== "keyframe" || (subjectAssembly
+        ? shotAssets.has(key(item))
+        : Object.values(director.shotInputs).some(input => input.keyframePolicy !== "none" && input.keyframeAssetId === key(item)));
     const assets = new Set(plans.filter(item => wanted.has(key(item)) || activeFrame(item) && (item.shot_ids || []).some((id: string) => shots.has(id))).map(key));
     shotAssets.forEach(id => assets.add(id));
     if (scene && !wanted.size && !shots.size) for (const plan of plans) if (plan.canvas_scope === "shared") assets.add(key(plan));
@@ -192,6 +194,10 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
             projected.source.subject_registry = allSubjectRows.filter(subject => usedSubjects.has(String(subject.id))).map(subject => {
                 // Replay context keeps valid identity declarations; its media is
                 // materialized separately only when an output Shot consumes it.
+                // Earlier Shots remain in this projection for continuity replay, so keep
+                // their authored binding identities for source-schema validation too.
+                // Media collection and Prompt assembly still use subjectReferenceShotIds,
+                // which is limited to the selected output Clip.
                 const selectedBindings = new Set(rows(source.shots).filter(shot => contextShots.has(stableId(shot))).flatMap(shot => rows(shot.subject_usages).filter(usage => usage.subjectId === subject.id).flatMap(usage => resolveSubjectPictureBindingIds(subject, usage).bindingIds)));
                 return { ...subject, pictureBindings: rows(subject.pictureBindings).filter(binding => selectedBindings.has(String(binding.id))) };
             });

@@ -131,7 +131,7 @@ test("dialogue and action blocks can be inserted, edited and reordered by stable
     assert.deepEqual(deleted.draft.scenes[0].blocks.map((item) => item.id), ["action-a"]);
 });
 
-test("saving a shot's dialogue lets an untouched shared line pass and still blocks real edits or removals", (t) => {
+test("saving a shot's dialogue edits its shared text slice and keeps the other shot's part", (t) => {
     const { service } = fixture(t);
     service.edit("episode", { operationId: "scene", expectedRevision: 0, ops: [{ type: "upsert_scene", scene }] });
     // UTT_SH_A_8 「这只信封搬不走。」(8 chars) is spoken by SUB_P across two shots: SH_A covers frames 0-96 with text 0-5,
@@ -157,14 +157,17 @@ test("saving a shot's dialogue lets an untouched shared line pass and still bloc
     assert.deepEqual(after.shots[0].utterance_refs, before.shots[0].utterance_refs, "text slice must survive the resave");
     assert.deepEqual(after.shots[1].utterance_refs, before.shots[1].utterance_refs, "the other shot's ref must be untouched");
 
-    // 2) Changing the shared line's content/timing from this shot stays blocked, with an actionable message.
-    assert.throws(() => service.edit("episode", { operationId: "modify-shared", expectedRevision: base(), ops: [{ type: "set_director_shot_utterances", shotId: "SH_A", utterances: [{ utteranceId: "UTT_SH_A_8", speakerSubjectId: "SUB_P", text: "换个说法。", voiceover: true, localStartFrame: 0, localEndFrame: 96 }] }] }), /共用（SH_A、SH_B）/);
+    // 2) Each Shot edits only its own text slice; the shared canonical utterance stays concatenated without duplication.
+    const editedPart = service.edit("episode", { operationId: "edit-first-part", expectedRevision: base(), ops: [{ type: "set_director_shot_utterances", shotId: "SH_A", utterances: [{ utteranceId: "UTT_SH_A_8", speakerSubjectId: "SUB_P", text: "她抱紧信封", textMode: "segment", voiceover: true, localStartFrame: 0, localEndFrame: 96 }] }] });
+    const editedSource = editedPart.draft.director!.source as Record<string, any>;
+    assert.equal(editedSource.utterances[0].text, "她抱紧信封不走。", "the edited slice is stored once with the untouched continuation");
+    assert.deepEqual(editedSource.shots[1].utterance_refs[0], before.shots[1].utterance_refs[0], "the continuation window and text range stay intact");
     // 3) Removing the shared line from one shot stays blocked; other shots still speak it.
     assert.throws(() => service.edit("episode", { operationId: "remove-shared", expectedRevision: base(), ops: [{ type: "set_director_shot_utterances", shotId: "SH_A", utterances: [] }] }), /不能从本镜删除/);
     // 4) Exclusive lines keep working normally while the shared one rides along untouched.
-    const extended = service.edit("episode", { operationId: "add-exclusive", expectedRevision: base(), ops: [{ type: "set_director_shot_utterances", shotId: "SH_A", utterances: [{ utteranceId: "UTT_SH_A_8", speakerSubjectId: "SUB_P", text: sharedLine, voiceover: true, localStartFrame: 0, localEndFrame: 96 }, { speakerSubjectId: "SUB_P", text: "是留给我的。", voiceover: false, localStartFrame: 70, localEndFrame: 90 }] }] });
+    const extended = service.edit("episode", { operationId: "add-exclusive", expectedRevision: base(), ops: [{ type: "set_director_shot_utterances", shotId: "SH_A", utterances: [{ utteranceId: "UTT_SH_A_8", speakerSubjectId: "SUB_P", text: "她抱紧信封", textMode: "segment", voiceover: true, localStartFrame: 0, localEndFrame: 96 }, { speakerSubjectId: "SUB_P", text: "是留给我的。", voiceover: false, localStartFrame: 70, localEndFrame: 90 }] }] });
     const nextSource = extended.draft.director!.source as Record<string, any>;
     assert.equal(nextSource.utterances.length, 2, "the exclusive line is added without touching the shared record");
-    assert.equal(nextSource.utterances.find((line: any) => String(line.id) === "UTT_SH_A_8").text, sharedLine);
+    assert.equal(nextSource.utterances.find((line: any) => String(line.id) === "UTT_SH_A_8").text, "她抱紧信封不走。");
     assert.deepEqual(nextSource.shots[1].utterance_refs, before.shots[1].utterance_refs);
 });

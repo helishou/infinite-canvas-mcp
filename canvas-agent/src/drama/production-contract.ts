@@ -208,9 +208,15 @@ export function resolveSubjectPictureBindingIds(subjectValue: unknown, usageValu
     for (const purpose of purposes) {
         const eligible = bindings.filter(binding => Array.isArray(binding.provides) && binding.provides.map(String).includes(purpose) && applicable(binding));
         const matches = eligible.filter(binding => Array.isArray(binding.defaultFor) && binding.defaultFor.map(String).includes(purpose));
+        const fixedResults = eligible.filter(binding => binding.selection?.mode === "selected_result");
         if (matches.length === 1) selected.push(String(matches[0].id));
         else if (matches.length > 1) issues.push(purpose + " 默认图片绑定有歧义：" + matches.map(binding => binding.id).join(", "));
         else if (eligible.length === 1) selected.push(String(eligible[0].id));
+        // A pinned generation result is an explicit, stable image choice. When
+        // no purpose default is declared and older node-selection bindings make
+        // the candidate set ambiguous, prefer that one pinned result rather than
+        // silently compiling a visible Subject without an identity reference.
+        else if (fixedResults.length === 1) selected.push(String(fixedResults[0].id));
         else if (!eligible.length) issues.push("缺少适用于 " + purpose + " 的默认图片绑定");
         else issues.push(purpose + " 默认图片绑定有歧义：" + eligible.map(binding => binding.id).join(", "));
     }
@@ -634,6 +640,7 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
         utterances: z.array(z.object({
             utteranceId: id.optional(), speakerSubjectId: id, text: z.string().min(1), delivery: z.string().optional(), voiceover: z.boolean(),
             localStartFrame: z.number().int().nonnegative(), localEndFrame: z.number().int().positive(),
+            textMode: z.enum(["whole", "segment", "partition"]).optional(), textCuts: z.array(z.number().int().positive()).optional(),
         }).strict()).max(32),
     }).strict(),
     z.object({ type: z.literal("edit_director_shot"), action: z.enum(["insert", "duplicate", "delete", "move", "split", "merge"]), shotId: id.optional(), targetShotId: id.optional(), newShotId: id.optional(), position: z.enum(["before", "after"]).optional(), splitFrame: z.number().int().positive().optional(), textOffsets: z.record(z.number().int().nonnegative()).optional(), reaction: z.boolean().optional(), shot: z.record(z.unknown()).optional(), firstShotPatch: z.record(z.unknown()).optional(), segment: z.record(z.unknown()).optional(), cameraShotId: id.optional() }).strict(),
@@ -644,6 +651,7 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("request_director_clip_refresh"), segmentId: id }).strict(),
     z.object({ type: z.literal("set_director_brief"), brief: z.string() }).strict(),
     z.object({ type: z.literal("patch_director_source"), entity: z.enum(["brief", "spec", "story", "style", "scene", "environment", "character", "asset", "asset_card", "shot", "segment"]), id: id.optional(), patch: z.record(z.unknown()) }).strict(),
+    z.object({ type: z.literal("set_director_scene_environment"), sceneId: id, environmentId: id }).strict(),
     z.object({ type: z.literal("adopt_director_fields"), targetId: id, nodeId: id, segmentId: id.optional(), canvasRevision: z.number().int().nonnegative(), fields: z.array(id).min(1) }).strict(),
     z.object({ type: z.literal("adopt_director_clip_style"), targetId: id, nodeId: id, segmentId: id, canvasRevision: z.number().int().nonnegative(), styleTemplateId: z.string().nullable() }).strict(),
     z.object({ type: z.literal("set_director_workflow"), patch: directorWorkflowSchema.partial() }).strict(),

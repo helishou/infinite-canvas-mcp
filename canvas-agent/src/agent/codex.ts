@@ -104,9 +104,10 @@ async function readUserInterruptEntries(cwd: string): Promise<UserInterruptEntry
 }
 
 /** 记录一次用户主动停止，供历史读取区分「手动停止」与意外离线。 */
+const interruptWriteChain = new Map<string, Promise<void>>();
 export function recordUserInterrupt(cwd: string, threadId: string, turnId: string) {
     if (!cwd || !threadId) return;
-    void (async () => {
+    const task = async () => {
         try {
             const entries = [...await readUserInterruptEntries(cwd), { threadId, turnId: turnId || "", at: Date.now() }].slice(-USER_INTERRUPT_MAX_ENTRIES);
             await fs.mkdir(path.dirname(userInterruptFile(cwd)), { recursive: true });
@@ -114,7 +115,12 @@ export function recordUserInterrupt(cwd: string, threadId: string, turnId: strin
         } catch (error) {
             logger.warn("Failed to record user interrupt marker", { error, cwd, threadId });
         }
-    })();
+    };
+    // 串行化同一工作空间的读改写，避免并发丢失更新。
+    const chained = (interruptWriteChain.get(cwd) ?? Promise.resolve()).then(task).catch(() => undefined);
+    interruptWriteChain.set(cwd, chained);
+    // 队列清空后移除键，防止无界增长。
+    void chained.then(() => { if (interruptWriteChain.get(cwd) === chained) interruptWriteChain.delete(cwd); });
 }
 
 /** 读取工作空间内已标记的用户手动停止 turn 集合。 */

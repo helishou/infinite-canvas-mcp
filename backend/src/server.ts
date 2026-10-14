@@ -64,6 +64,7 @@ import { registerMcpExportRoutes, type McpSnapshotExports } from "./server/mcp-e
 import { CHARACTER_VOICE_COMPRESSION_THRESHOLD_BYTES, prepareCharacterVoiceUpload } from "./server/character-voice-compression.js";
 import { redactInlineMedia } from "./runtime/redact-inline-media.js";
 import { CANVAS_TRANSLATION_TARGETS, translateCanvasText, type CanvasTranslationTarget } from "./canvas/translation.js";
+import { safeOperationPath, watchSlowOperation } from "./slow-operation.js";
 
 const logger = createLogger("backend");
 
@@ -190,17 +191,12 @@ export function startServer(
     next();
   });
 
-  // ── 请求日志 ─────────────────────────────────────────────────────────
+  // ── 慢请求本地遥测 ───────────────────────────────────────────────────
   app.use((req: Request, res: Response, next: NextFunction) => {
-    const startedAt = Date.now();
-    res.on("finish", () => {
-      if (req.method === "OPTIONS" || res.statusCode < 400) return;
-      // 查询参数可能携带 Backend token；日志只记录路由路径，禁止把凭据写进终端或日志文件。
-      logger.warn(`${req.method} ${req.path}`, {
-        status: res.statusCode,
-        durationMs: Date.now() - startedAt,
-      });
-    });
+    if (req.method === "OPTIONS") return next();
+    const finish = watchSlowOperation(logger, `${req.method} ${safeOperationPath(req.path)}`);
+    res.once("finish", () => finish(`http-${res.statusCode}`));
+    res.once("close", () => finish("connection-closed"));
     next();
   });
 

@@ -494,7 +494,7 @@ export class EpisodeProductionService {
             for (const fact of clipRows(ledger?.facts)) if (subjects.some(subject => subject.entityRef?.kind === fact.object_kind && subject.entityRef?.id === fact.object_id)) relatedFacts.add(String(fact.id));
             const canvasInputs = this.canvasEditorialState(id, [segmentId]);
             const segmentAudioBindings = clipRows(segment.audio_bindings);
-            const canvasEntry = canvasInputs.find(input => input.segmentId === segmentId);
+            const canvasEntry = canvasInputs.find(input => input.targetId === segmentId);
             const canvasInput = canvasEntry ? { ...canvasEntry.current, ...canvasEntry.runtime } as Record<string, any> : undefined;
             const workbench = { owner: this.ownerIdentity(id), sourceVersion: "subject-prompt-v2", segmentId, sourceHash: d.sourceHash,
                 inputHash: compilationScopeInput(resolved, clipRefreshScope(segmentId)).inputHash,
@@ -521,7 +521,7 @@ export class EpisodeProductionService {
         const report: any = continuity.report;
         const segmentAudioBindings = clipRows(segment.audio_bindings);
         const canvasInputs = this.canvasEditorialState(id, [segmentId]);
-        const canvasEntry = canvasInputs.find(input => input.segmentId === segmentId);
+        const canvasEntry = canvasInputs.find(input => input.targetId === segmentId);
         const canvasInput = canvasEntry ? { ...canvasEntry.current, ...canvasEntry.runtime } as Record<string, any> : undefined;
         const workbench = { owner: this.ownerIdentity(id), segmentId, sourceHash: d.sourceHash, inputHash: projection.inputHash, engine: d.engine,
             segment: { ...segment, audio_bindings: segmentAudioBindings }, audioRuntime: clipAudioRuntime(segmentAudioBindings, canvasInput), shots, shotInputs: Object.fromEntries(shots.map(s => [s.id, d.shotInputs[s.id]])),
@@ -571,7 +571,7 @@ export class EpisodeProductionService {
         const segmentId = String(clipRows(director.source.segments).find(clip => (clip.shot_ids || []).includes(shotId))?.id || "");
         const segment = clipRows(director.source.segments).find(clip => String(clip.id) === segmentId);
         const segmentAudioBindings = clipRows(segment?.audio_bindings);
-        const canvasEntry = segmentId ? this.canvasEditorialState(id, [segmentId]).find(input => input.segmentId === segmentId) : undefined;
+        const canvasEntry = segmentId ? this.canvasEditorialState(id, [segmentId]).find(input => input.targetId === segmentId) : undefined;
         const canvasInput = canvasEntry ? { ...canvasEntry.current, ...canvasEntry.runtime } as Record<string, any> : undefined;
         if (snapshot === "draft") try { director = this.resolveSubjectPictureInputs(id, authored, segmentId ? [segmentId] : []); } catch (error) { resolutionDiagnostics = (error as any)?.diagnostics || [{ code: "SUBJECT_IMAGE_RESOLUTION", message: error instanceof Error ? error.message : String(error) }]; }
         const shot = clipRows(director.source.shots).find(item => item.id === shotId);
@@ -1102,7 +1102,15 @@ export class EpisodeProductionService {
             const digest = promptHashBytes(media.filePath);
             if (digest !== binding.sha256) throw new Error(`音频绑定「${binding.label || binding.id}」的归档字节已变化`);
         }
-        const bindings = [...Object.values(director.assets), ...director.artifacts.flatMap(a => a.references)];
+        const isAudioReference = (binding: Record<string, any>) =>
+            String(binding.storageKey || "").startsWith("audio:")
+            || String(binding.mediaType || "").toLowerCase() === "audio"
+            || String(binding.mimeType || "").toLowerCase().startsWith("audio/")
+            || String(binding.role || "").toLowerCase().includes("audio");
+        // Clip audio references are verified against the authored audio_bindings above.
+        // Older compiled H3 artifact snapshots can retain the previous audio media key;
+        // treating those as image bindings makes a valid audio node fail image-node checks.
+        const bindings = [...Object.values(director.assets), ...director.artifacts.flatMap(a => a.references.filter(binding => !isAudioReference(binding)))];
         const mediaDigests = new Map<string, string>();
         for (const binding of bindings) {
             if (!binding.storageKey) continue;
@@ -2590,19 +2598,6 @@ export class EpisodeProductionService {
                 if (!sceneRuntime && fingerprint({ works: draft.director?.workflow.sceneWorks, review: draft.director?.workflow.sharedReview, sharedWorks: draft.director?.workflow.sharedReviewWorks, sharedAssets: draft.director?.workflow.sharedAssetReviews, sharedContinuation: draft.director?.workflow.sharedReviewContinuation }) !== fingerprint({ works: previousDirector?.workflow.sceneWorks, review: record.draft.director?.workflow.sharedReview, sharedWorks: record.draft.director?.workflow.sharedReviewWorks, sharedAssets: record.draft.director?.workflow.sharedAssetReviews, sharedContinuation: record.draft.director?.workflow.sharedReviewContinuation })) throw new Error("SCENE_RUNTIME_OWNED: 场次工作与审核记录只能通过场次协调服务更新");
                 return previousDirector;
             });
-            const before = record.draft.director, after = draft.director;
-            if (before && after) {
-                const priorSegments = before.source.segments as any[] || [], nextSegments = after.source.segments as any[] || [];
-                const priorShots = before.source.shots as any[] || [], nextShots = after.source.shots as any[] || [];
-                const changed = measure("affected_clip_detection", () => {
-                    const globalChange = fingerprint(before.source.ledger) !== fingerprint(after.source.ledger) || fingerprint(before.source.style_lock) !== fingerprint(after.source.style_lock);
-                    return [...new Set([...priorSegments, ...nextSegments].map(segment => String(segment.id)))].filter(id => {
-                        const left = priorSegments.find(segment => segment.id === id), right = nextSegments.find(segment => segment.id === id);
-                        const shotIds = new Set([...(left?.shot_ids || []), ...(right?.shot_ids || [])]);
-                        return globalChange || fingerprint(left) !== fingerprint(right) || fingerprint(priorShots.filter(shot => shotIds.has(shot.id))) !== fingerprint(nextShots.filter(shot => shotIds.has(shot.id))) || fingerprint(before.boundaries.filter(edge => edge.from === id)) !== fingerprint(after.boundaries.filter(edge => edge.from === id));
-                    });
-                });
-            }
             measure("graph_validation", () => this.validateGraph(draft));
             for (const operation of input.ops) if (operation.type === "review_keyframe") {
                 const link = published?.keyframes[operation.shotId];
@@ -2640,6 +2635,19 @@ export class EpisodeProductionService {
     edit(episodeId: string, raw: unknown, canvasPreparation?: { projectId: string; expectedCanvasRevision: number; operationId: string; operations: CanvasOperation[] }, sceneRuntime = false, beforeCommit?: (record: ProductionRecord) => void, onStage?: (name: string, durationMs: number) => void): ProductionRecord & { replayed?: boolean; impact?: ProductionImpact } {
         const linked = this.linked(episodeId); if (linked) return linked.service.edit(linked.id, raw, canvasPreparation, sceneRuntime, beforeCommit, onStage);
         const input = productionEditSchema.parse(raw);
+        const shotDependencyFreeEdit = input.ops.length > 0 && input.ops.every(operation => operation.type === "set_director_shot_utterances"
+            || operation.type === "patch_director_source" && operation.entity === "shot"
+                && !["subject_usages", "keyframes", "reference_requirements"].some(field => Object.hasOwn(operation.patch, field)));
+        const shotProjectionIds = (() => {
+            if (!input.ops.length) return undefined;
+            const ids = new Set<string>();
+            for (const operation of input.ops) {
+                if (operation.type === "patch_director_source" && operation.entity === "shot" && operation.id) ids.add(operation.id);
+                else if (operation.type === "set_director_shot_keyframes" || operation.type === "set_director_shot_utterances") ids.add(operation.shotId);
+                else return undefined;
+            }
+            return ids.size ? ids : undefined;
+        })();
         const refreshes = input.ops.filter(op => op.type === "request_director_clip_refresh");
         if (refreshes.length > 1 && !input.ops.some(op => op.type === "set_director_production" && isSubjectPromptAssembly(op.director.source))) throw new ProductionValidationError([{ code: "CLIP_REFRESH_SCOPE", path: "request.ops", message: "旧稿局部刷新单批仅允许一个 Clip", severity: "error" }]);
         if (input.ops.some(operation => operation.type === "restore_archived_scene_results") && input.ops.length !== 1) throw new Error("归档视频恢复必须单独提交，不能与其他制作编辑混批");
@@ -2722,7 +2730,7 @@ export class EpisodeProductionService {
         } : undefined, record => {
             for (const task of adoptedTasks) this.db.updateTask(task.taskId, { result: { ...task.result, adoption: directorAdoption(input.operationId, record.revision, record.draft.director!.sourceHash, input.ops, String(task.result.artifactHash)) } });
             beforeCommit?.(record);
-        }, onStage);
+        }, onStage, shotProjectionIds, shotDependencyFreeEdit);
         canvasCommits.forEach(commit => this.db.notifyCanvasCommit(commit));
         if (refreshes.length) {
             const editRefreshes = this.clipRefreshStore(episodeId).byEditAll(input.operationId);
@@ -2952,7 +2960,7 @@ export class EpisodeProductionService {
             .flatMap((row) => { const item = row as { owner_id: string; version: number }; const run = this.run(item.owner_id, item.version); return run ? [run] : []; });
     }
 
-    private commit(episodeId: string, operationId: string, expectedRevision: number, requestHash: string, mutate: (record: ProductionRecord) => ProductionRecord & { impact?: ProductionImpact }, beforeMutation?: (record: ProductionRecord, canvasCommits: CanvasCommit[]) => void, beforeCommit?: (record: ProductionRecord) => void, onStage?: (name: string, durationMs: number) => void) {
+    private commit(episodeId: string, operationId: string, expectedRevision: number, requestHash: string, mutate: (record: ProductionRecord) => ProductionRecord & { impact?: ProductionImpact }, beforeMutation?: (record: ProductionRecord, canvasCommits: CanvasCommit[]) => void, beforeCommit?: (record: ProductionRecord) => void, onStage?: (name: string, durationMs: number) => void, shotProjectionIds?: ReadonlySet<string>, shotDependencyFreeEdit = false) {
         const measure = <T>(name: string, action: () => T): T => {
             const startedAt = performance.now();
             try { return action(); }
@@ -3003,11 +3011,16 @@ export class EpisodeProductionService {
                         group.segmentId ||= `clip-${crypto.createHash("sha256").update([owner.id, group.id].join(String.fromCharCode(0))).digest("hex").slice(0, 24)}`;
                     }
                     const h3Defaults = record(this.db.getSetting("plugin:minimax-h3:defaults:v1"));
-                    const layout = measure("layout_compile", () => compileProductionLayout({ h3Defaults, canvasId: canvas.id, owner, production: next.draft, project: canvas, previous: this.db.getProductionLayoutPlan(canvas.id) }));
-                    this.db.saveProductionLayoutPlan(canvas.id, layout);
+                    const previousLayout = this.db.getProductionLayoutPlan(canvas.id);
+                    const shotTargets = shotProjectionIds && new Set(next.draft.clipGroups
+                        .filter(group => group.shotIds.some(shotId => shotProjectionIds.has(shotId)))
+                        .map(group => group.id));
+                    const scopedShotProjection = Boolean(previousLayout && shotTargets?.size);
+                    const layout = scopedShotProjection ? previousLayout! : measure("layout_compile", () => compileProductionLayout({ h3Defaults, canvasId: canvas.id, owner, production: next.draft, project: canvas, previous: previousLayout }));
+                    if (!scopedShotProjection) this.db.saveProductionLayoutPlan(canvas.id, layout);
                     const { sceneOperations, clips } = measure("clip_and_scene_projection", () => ({
-                        sceneOperations: productionSceneCreationOperations(canvas, next.draft, layout, owner, createdSceneIds, h3Defaults),
-                        clips: clipInputOperations(canvas, next.draft, layout, h3Defaults, materializeClipIds),
+                        sceneOperations: scopedShotProjection ? [] : productionSceneCreationOperations(canvas, next.draft, layout, owner, createdSceneIds, h3Defaults),
+                        clips: clipInputOperations(canvas, next.draft, layout, h3Defaults, materializeClipIds, scopedShotProjection ? shotTargets : undefined),
                     }));
                     next.referenceSync = clips.referenceSync;
                     const readyClips = new Set(clips.referenceSync.filter(item => item.status === "ready").map(item => item.targetId));
@@ -3016,7 +3029,7 @@ export class EpisodeProductionService {
                         const projection = record(record(op.patch).productionClipProjection);
                         return readyClips.has(String(projection.targetId || ""));
                     });
-                    const operations = measure("canvas_operation_plan", () => [...entityNodeOperations(canvas, next.draft, owner, current.draft, layout), ...sceneOperations, ...scriptNodeOperations(canvas, next.draft, owner, current.draft, layout), ...imageInputOperations(canvas, next.draft, episodeId, current.draft, layout), ...clipOperations]);
+                    const operations = measure("canvas_operation_plan", () => scopedShotProjection ? clipOperations : [...entityNodeOperations(canvas, next.draft, owner, current.draft, layout), ...sceneOperations, ...scriptNodeOperations(canvas, next.draft, owner, current.draft, layout), ...imageInputOperations(canvas, next.draft, episodeId, current.draft, layout), ...clipOperations]);
                     if (operations.length) measure("canvas_operation_apply", () => this.db.applyCanvasProjectOperations(canvasId!, Number(canvas.revision || 0), operations, { operationId: projectionOperationId, runtimeWrite: true, withinTransaction: true, deferredCommits: scriptCommits, source: { kind: "system", clientId: "production:scripts", label: "同步正式制作节点输入" } }));
                 } else {
                     const operations = scriptNodeOperations(canvas, next.draft, { kind: this.ownerKind, id: episodeId }, current.draft);
@@ -3024,7 +3037,7 @@ export class EpisodeProductionService {
                 }
             }
             measure("dependency_and_receipt_persist", () => {
-                this.syncSubjectClipDependencies(episodeId, next.draft.director);
+                if (!shotDependencyFreeEdit) this.syncSubjectClipDependencies(episodeId, next.draft.director);
                 this.prepare("INSERT INTO episode_productions (episode_id, revision, draft_json, published_json, published_version, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(episode_id) DO UPDATE SET revision = excluded.revision, draft_json = excluded.draft_json, published_json = excluded.published_json, published_version = excluded.published_version, updated_at = excluded.updated_at")
                     .run(episodeId, next.revision, JSON.stringify(next.draft), next.published ? JSON.stringify(next.published) : null, next.publishedVersion, next.updatedAt);
                 this.prepare("INSERT INTO episode_production_operations (operation_id, episode_id, request_hash, receipt_json, created_at) VALUES (?, ?, ?, ?, ?)")
@@ -3491,38 +3504,104 @@ export class EpisodeProductionService {
             if (!shot) throw new Error(`Shot ${op.shotId} 不存在`);
             const subjects = new Set(clipRows(source.subject_registry).map((item: any) => String(item.id)));
             const utterances = clipRows(source.utterances).map((item: any) => ({ ...item }));
-            const referencedBy = new Map<string, Set<string>>();
-            for (const other of clipRows(source.shots)) for (const ref of clipRows(other.utterance_refs)) {
-                const owners = referencedBy.get(String(ref.utteranceId)) || new Set<string>();
-                owners.add(String(other.id)); referencedBy.set(String(ref.utteranceId), owners);
+            const referencesByUtterance = new Map<string, Array<{ shot: Record<string, any>; ref: Record<string, any> }>>();
+            const orderedShots = clipRows(source.shots);
+            for (const other of orderedShots) for (const ref of clipRows(other.utterance_refs)) {
+                const references = referencesByUtterance.get(String(ref.utteranceId)) || [];
+                references.push({ shot: other, ref });
+                referencesByUtterance.set(String(ref.utteranceId), references);
             }
             const keptIds = new Set(op.utterances.map(item => item.utteranceId).filter((item): item is string => Boolean(item)));
             const removedIds = new Set<string>();
             const unchangedShared = new Set<string>();
+            const editedShared = new Map<string, { item: (typeof op.utterances)[number]; text: string; refs: Array<{ shotId: string; ref: Record<string, any> }> }>();
             const priorRefs = clipRows(shot.utterance_refs);
             for (const utterance of utterances) {
-                const utteranceId = String(utterance.id), owners = referencedBy.get(utteranceId) || new Set<string>();
+                const utteranceId = String(utterance.id), references = referencesByUtterance.get(utteranceId) || [];
+                const owners = new Set(references.map(({ shot: ownerShot }) => String(ownerShot.id)));
                 if (!owners.has(op.shotId)) continue;
                 if (keptIds.has(utteranceId)) {
                     if (owners.size <= 1) continue;
-                    // 跨镜头共用的台词：只要本镜的内容与时间窗都没动就按无操作放行；任何改动都会覆写其它镜头共享的记录，必须拦住。
+                    // Shared utterances keep one canonical concatenated text. New Shot forms edit only
+                    // their own slice; old persisted drafts still submit the whole line plus manual cuts.
                     const candidate = op.utterances.find(item => String(item.utteranceId || "") === utteranceId);
                     const priorRef = priorRefs.find(ref => String(ref.utteranceId) === utteranceId);
+                    if (!candidate || !priorRef) throw new Error("对白 " + utteranceId + " 在本镜缺少有效引用，无法修改");
+                    const oldCharacters = Array.from(String(utterance.text));
+                    const oldStart = Number(priorRef.textStart), oldEnd = Number(priorRef.textEnd);
+                    const oldSegment = oldCharacters.slice(oldStart, oldEnd).join("");
+                    const currentCuts = references.slice(0, -1).map(({ ref }) => Number(ref.textEnd));
+                    const cutsUnchanged = !candidate.textCuts || candidate.textCuts.length === currentCuts.length
+                        && candidate.textCuts.every((cut, index) => cut === currentCuts[index]);
+                    const newCharacters = candidate.textMode === "segment"
+                        ? [...oldCharacters.slice(0, oldStart), ...Array.from(candidate.text), ...oldCharacters.slice(oldEnd)]
+                        : candidate.textMode === "partition" ? oldCharacters : Array.from(candidate.text);
+                    const newText = newCharacters.join("");
                     const unchanged = candidate && priorRef
                         && String(candidate.speakerSubjectId) === String(utterance.speakerSubjectId)
-                        && String(candidate.text) === String(utterance.text)
+                        && (candidate.textMode === "segment" ? String(candidate.text) === oldSegment : String(candidate.text) === String(utterance.text))
                         && Number(candidate.localStartFrame) === Number(priorRef.localStartFrame)
                         && Number(candidate.localEndFrame) === Number(priorRef.localEndFrame)
-                        && Boolean(candidate.voiceover) === Boolean(utterance.voiceover)
-                        && String(candidate.delivery ?? "") === String(utterance.delivery ?? "");
-                    if (!unchanged) throw new Error(`对白 ${utteranceId} 被 ${owners.size} 个镜头共用（${[...owners].join("、")}），要改它的说话人、内容或时间窗，请先解除其他镜头的引用或从剧本统一修订`);
-                    unchangedShared.add(utteranceId);
+                        && String(candidate.delivery ?? "") === String(utterance.delivery ?? "")
+                        && cutsUnchanged;
+                    if (unchanged) {
+                        unchangedShared.add(utteranceId);
+                        continue;
+                    }
+                    const textChanged = newText !== String(utterance.text);
+                    let boundaries: number[] | undefined;
+                    if (candidate.textCuts?.length === references.length - 1) {
+                        const cuts = candidate.textCuts;
+                        if (cuts && cuts.length === references.length - 1) boundaries = [0, ...cuts, newCharacters.length];
+                    } else if (!textChanged) boundaries = [0, ...references.slice(0, -1).map(({ ref }) => Number(ref.textEnd)), newCharacters.length];
+                    else if (candidate.textMode === "whole") throw new Error("对白 " + utteranceId + " 跨镜共用，请手动选择每个镜头的切字位置");
+                    if (boundaries) {
+                        if (boundaries.length !== references.length + 1 || boundaries.some((value, index) => index > 0 && value <= boundaries![index - 1])
+                            || boundaries[0] !== 0 || boundaries.at(-1) !== newCharacters.length) {
+                            throw new Error("对白 " + utteranceId + " 的切字位置无效；每个镜头都必须分到连续且非空的一段");
+                        }
+                    }
+                    const targetReferenceIndex = references.findIndex(({ shot: ownerShot, ref }) => String(ownerShot.id) === op.shotId && ref === priorRef);
+                    if (targetReferenceIndex < 0) throw new Error("对白 " + utteranceId + " 的本镜引用已变化，请刷新后重试");
+                    const delta = newCharacters.length - oldCharacters.length;
+                    const updatedRefs = references.map(({ shot: ownerShot, ref }, index) => {
+                        let start = Number(ref.textStart), end = Number(ref.textEnd);
+                        if (boundaries) { start = boundaries[index]; end = boundaries[index + 1]; }
+                        else if (index === targetReferenceIndex) end = start + Array.from(candidate.text).length;
+                        else if (index > targetReferenceIndex) { start += delta; end += delta; }
+                        const ownerShotId = String(ownerShot.id);
+                        const window = ownerShotId === op.shotId ? {
+                            localStartFrame: candidate.localStartFrame,
+                            localEndFrame: candidate.localEndFrame,
+                        } : {};
+                        const updated = { ...ref, ...window, textStart: start, textEnd: end };
+                        return { shotId: ownerShotId, ref: updated };
+                    });
+                    editedShared.set(utteranceId, { item: candidate, text: newText, refs: updatedRefs });
                     continue;
                 }
                 if (owners.size > 1) throw new Error(`对白 ${utteranceId} 跨多个镜头引用，不能从本镜删除`);
                 removedIds.add(utteranceId);
             }
             const next = utterances.filter((utterance: any) => !removedIds.has(String(utterance.id)));
+            for (const [utteranceId, edit] of editedShared) {
+                const record = next.find((item: any) => String(item.id) === utteranceId);
+                if (!record) throw new Error(`共享对白 ${utteranceId} 不存在`);
+                record.speakerSubjectId = edit.item.speakerSubjectId;
+                record.text = edit.text;
+                if (edit.item.delivery) record.delivery = edit.item.delivery;
+                else delete record.delivery;
+                const orderedRefs = edit.refs.map(item => ({ ...item, order: orderedShots.findIndex((candidateShot: any) => String(candidateShot.id) === item.shotId) }))
+                    .sort((left, right) => left.order - right.order);
+                const first = orderedRefs[0], last = orderedRefs.at(-1)!;
+                record.start = { shotId: first.shotId, localFrame: first.ref.localStartFrame };
+                record.end = { shotId: last.shotId, localFrame: last.ref.localEndFrame };
+                for (const updated of edit.refs) {
+                    if (updated.shotId === op.shotId) continue;
+                    const ownerShot = orderedShots.find((candidateShot: any) => String(candidateShot.id) === updated.shotId);
+                    if (ownerShot) ownerShot.utterance_refs = clipRows(ownerShot.utterance_refs).map((ref: Record<string, any>) => String(ref.utteranceId) === utteranceId ? structuredClone(updated.ref) : ref);
+                }
+            }
             const duration = Number(shot.duration_frames);
             const refs: Array<Record<string, unknown>> = [];
             for (const [index, item] of op.utterances.entries()) {
@@ -3534,6 +3613,8 @@ export class EpisodeProductionService {
                     const priorRef = priorRefs.find(ref => String(ref.utteranceId) === utteranceId);
                     if (priorRef) { refs.push(structuredClone(priorRef)); continue; }
                 }
+                const sharedRef = editedShared.get(String(item.utteranceId))?.refs.find(ref => ref.shotId === op.shotId)?.ref;
+                if (sharedRef) { refs.push(structuredClone(sharedRef)); continue; }
                 const existing = next.findIndex((utterance: any) => String(utterance.id) === utteranceId);
                 const record: Record<string, unknown> = { id: utteranceId, speakerSubjectId: item.speakerSubjectId, text: item.text, ...(item.delivery ? { delivery: item.delivery } : {}), voiceover: Boolean(item.voiceover), start: { shotId: op.shotId, localFrame: item.localStartFrame }, end: { shotId: op.shotId, localFrame: item.localEndFrame } };
                 if (existing >= 0) next[existing] = record; else next.push(record);
@@ -3626,6 +3707,34 @@ export class EpisodeProductionService {
             if (!draft.director) throw new Error("缺少 Acheng 制作稿");
             this.patchDirectorSource(draft.director, op.entity, op.id, op.patch);
             if (!deferDirectorProjection) projectDirector(draft);
+            return;
+        }
+        if (op.type === "set_director_scene_environment") {
+            const director = draft.director;
+            if (!director) throw new Error("缺少导演源稿");
+            const source = director.source;
+            const group = productionScriptGroups(clipRows(source.script_scenes)).find(item => item.key === op.sceneId);
+            if (!group) throw new Error(`剧本场次不存在：${op.sceneId}`);
+            if (!clipRows(source.scene_registry).some(item => String(item.id || "") === op.environmentId)) throw new Error(`场景环境不存在：${op.environmentId}`);
+            const entry = productionSceneEntries(source).find(item => item.id === op.sceneId);
+            if (!entry) throw new Error(`剧本场次无法解析：${op.sceneId}`);
+            const affected = new Set(entry.shotIds);
+            const shots = clipRows(source.shots);
+            const segments = clipRows(source.segments);
+            for (const segment of segments) {
+                const members = (Array.isArray(segment.shot_ids) ? segment.shot_ids : []).map(String);
+                const resultingEnvironments = new Set(members.map(shotId => affected.has(shotId)
+                    ? op.environmentId
+                    : String(shots.find(shot => String(shot.id || "") === shotId)?.scene_id || "")));
+                if (resultingEnvironments.size > 1) throw new Error(`场景变更会让 Clip ${String(segment.id || "")} 跨场景；请先调整 Clip 边界`);
+            }
+            const occurrenceIds = new Set(group.blocks.map(block => String(block.id || "")).filter(Boolean));
+            source.script_scenes = clipRows(source.script_scenes).map(block => occurrenceIds.has(String(block.id || "")) ? { ...block, scene_id: op.environmentId } : block);
+            source.shots = shots.map(shot => affected.has(String(shot.id || "")) ? { ...shot, scene_id: op.environmentId } : shot);
+            director.sourceHash = directorHash(source);
+            director.artifacts = director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));
+            director.executionAuthorized = false;
+            projectDirector(draft);
             return;
         }
         if (op.type === "adopt_director_fields") {

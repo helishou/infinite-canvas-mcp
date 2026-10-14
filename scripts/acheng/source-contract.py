@@ -59,6 +59,13 @@ def contract():
                 "offscreen_character_ids": {"type": "array", "items": {"type": "string"}},
                 "camera": {"type": "object", "properties": {
                     "framing": {"type": "string", "enum": list(FRAMINGS)},
+                    "angle": {"type": "string"},
+                    "lens_mm": {"type": ["number", "null"], "exclusiveMinimum": 0},
+                    "lens": {"type": ["number", "null"], "exclusiveMinimum": 0},
+                    "movement": {"type": "string"},
+                    "path": {"type": "string"},
+                    "target": {"type": "string"},
+                    "focus": {"type": "string"},
                     "attention_subject_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}},
                     "editorial_reason": prose}},
                 "continuity_cues": {"type": "array", "items": {"type": "object", "properties": {
@@ -182,10 +189,14 @@ def validate_subject_prompt_v2(source, stage="edit", validation_scope=None):
                     requirements = {str(item.get("factId")): str(item.get("value")) for item in usage.get("stateRequirements", [])}
                     purposes = usage.get("referencePurpose") or ["identity"]
                     for purpose in purposes:
-                        matches = [binding for binding in subject.get("pictureBindings", [])
-                                   if str(purpose) in [str(value) for value in binding.get("defaultFor", [])]
-                                   and all(requirements.get(str(key)) == str(value) for key, value in (binding.get("applicableState") or {}).items())]
-                        if len(matches) != 1:
+                        eligible = [binding for binding in subject.get("pictureBindings", [])
+                                    if str(purpose) in [str(value) for value in binding.get("provides", [])]
+                                    and all(requirements.get(str(key)) == str(value) for key, value in (binding.get("applicableState") or {}).items())]
+                        matches = [binding for binding in eligible
+                                   if str(purpose) in [str(value) for value in binding.get("defaultFor", [])]]
+                        fixed_results = [binding for binding in eligible
+                                         if (binding.get("selection") or {}).get("mode") == "selected_result"]
+                        if len(matches) != 1 and len(eligible) != 1 and not (not matches and len(fixed_results) == 1):
                             # Text prompts remain compilable as drafts while the image is
                             # unavailable. A real media submission still requires one
                             # unambiguous binding for each requested reference purpose.

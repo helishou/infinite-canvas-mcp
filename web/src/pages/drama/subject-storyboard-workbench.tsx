@@ -47,7 +47,7 @@ type Props = {
     shotDrafts?: Record<string, string>;
     /** Clip 组合使用与交付页相同的 Backend 编译提交与恢复流程。 */
     busy?: boolean; compileBusy?: boolean; compilePending?: boolean; compileError?: string; compileNotice?: string; compileDiagnostics?: ProductionCompilationDiagnostic[];
-    compileTargets?: { sourceHash: string; items: Array<{ targetId: string; status: string }>; notReadyTargetIds?: string[] }; onCompile?: (sceneId?: string, targetId?: string) => void;
+    compileTargets?: { sourceHash: string; engineRuntimeId?: string; compilerHash?: string; items: Array<{ targetId: string; status: string }>; notReadyTargetIds?: string[] }; onCompile?: (sceneId?: string, targetId?: string) => void;
     onClip: (id: string) => void;
     onDiscuss: (shotId?: string, instruction?: string) => void;
     /** 跳转到指定工作区（参考素材点开进素材库）。 */
@@ -194,7 +194,10 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const currentRefreshes = currentClipRefreshes(production.clipRefreshes || [], clips.map(item => String(item.id)), director.sourceHash);
     const refreshCandidate = currentRefreshes.find(item => item.segmentId === clip?.id);
     const compiled = Boolean(workbenchReadKey.current === expectedReadKey && artifact && records(subjectAssembly ? workbench?.directorArtifacts : workbench?.directorReferences?.compiled).some(item => item.id === artifact.id && item.sha256 === artifact.sha256 && item.current === true && item.status === "ready"));
-    const compiledByLatestReceipt = compileTargets?.sourceHash === director.sourceHash
+    const compileBasisMatches = compileTargets?.sourceHash === director.sourceHash
+        && compileTargets.engineRuntimeId === director.engine.runtimeId
+        && compileTargets.compilerHash === director.engine.compilerHash;
+    const compiledByLatestReceipt = compileBasisMatches
         && compileTargets.items.some(item => item.targetId === String(clip?.id) && item.status === "ready");
     const currentCompiled = compiled || compiledByLatestReceipt;
     const refresh = currentCompiled && ["blocked", "failed"].includes(refreshCandidate?.status || "") ? undefined : refreshCandidate;
@@ -228,8 +231,8 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
         const artifact = director.artifacts.find(item => item.kind === "h3" && String(item.targetId) === clipId);
         const projection = workbenchReadKey.current === expectedReadKey && clipId === String(clip?.id) ? records(subjectAssembly ? workbench?.directorArtifacts : workbench?.directorReferences?.compiled).find(item => item.id === artifact?.id && item.sha256 === artifact?.sha256) : undefined;
         const status = storyboardArtifactState(artifact, projection);
-        const readyByLatestReceipt = compileTargets?.sourceHash === director.sourceHash && compileTargets.items.some(item => item.targetId === clipId && item.status === "ready");
-        const notReadyByLatestReceipt = compileTargets?.sourceHash === director.sourceHash && (compileTargets.notReadyTargetIds || compileTargets.items.filter(item => item.status !== "ready").map(item => item.targetId)).includes(clipId);
+        const readyByLatestReceipt = compileBasisMatches && compileTargets.items.some(item => item.targetId === clipId && item.status === "ready");
+        const notReadyByLatestReceipt = compileBasisMatches && (compileTargets.notReadyTargetIds || compileTargets.items.filter(item => item.status !== "ready").map(item => item.targetId)).includes(clipId);
         const artifactDiagnostics = artifact?.receipt?.diagnostics as Record<string, unknown> | undefined;
         const hasPersistedBlockers = Array.isArray(artifactDiagnostics?.blockers) && artifactDiagnostics.blockers.length > 0;
         if (job && !(readyByLatestReceipt || status === "ready") ) return { label: t("director.atomic.clipRefreshPhase." + job.status), color: ["failed", "blocked"].includes(job.status) ? "red" : "processing", tone: ["failed", "blocked"].includes(job.status) ? "blocked" as const : "live" as const };
@@ -245,7 +248,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const sceneCompileAvailable = !sceneFilter || sceneDirectory.scenes.some(scene => scene.id === sceneFilter);
     const compileCounts = { ready: visibleClipStates.filter(item => item.tone === "ready").length, pending: visibleClipStates.filter(item => item.tone === "pending").length, stale: visibleClipStates.filter(item => item.tone === "stale").length, running: visibleClipStates.filter(item => item.tone === "live").length, recorded: visibleClipStates.filter(item => item.tone === "recorded").length, blocked: visibleClipStates.filter(item => item.tone === "blocked").length };
     const failedCompileTargetIds = new Set<string>();
-    if (compileTargets?.sourceHash === director.sourceHash) for (const targetId of compileTargets.notReadyTargetIds || compileTargets.items.filter(item => item.status !== "ready").map(item => item.targetId)) {
+    if (compileBasisMatches) for (const targetId of compileTargets.notReadyTargetIds || compileTargets.items.filter(item => item.status !== "ready").map(item => item.targetId)) {
         failedCompileTargetIds.add(String(targetId));
         const targetClip = clips.find(entry => String(entry.id) === String(targetId));
         for (const shotId of targetClip?.shot_ids || []) failedCompileTargetIds.add(String(shotId));

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { continuityChangeInputHint, continuityDraftFocusTarget, continuityTrackPoint, continuityTrackInsertFrame, continuityInlineReturnFocus } from './continuity-workbench-interaction';
+import { continuityChangeInputHint, continuityDraftFocusTarget, continuityTrackPoint, continuityTrackInsertFrame, continuityInlineReturnFocus, continuityRowInsertTarget, continuityValueWith, continuitySecondLabel } from './continuity-workbench-interaction';
 const complete = { shotId: 'S', factId: 'F', frame: '12', after: 'known', reason: '明确登记发生变化', sourceBlockId: 'B' };
 test('draft focus follows entry, confirmation and cancellation without moving on edits', () => {
     assert.equal(continuityDraftFocusTarget(false, true, false), '[data-continuity-frame-slider]');
@@ -12,9 +12,9 @@ test('draft focus follows entry, confirmation and cancellation without moving on
 });
 test('disabled confirmation explains the first existing unmet requirement', () => {
     assert.equal(continuityChangeInputHint(complete, 'Frame is occupied')?.text, 'Frame is occupied');
-    assert.equal(continuityChangeInputHint({ ...complete, after: '' }, '')?.key, 'chooseAfter');
-    assert.deepEqual(continuityChangeInputHint({ ...complete, reason: '😀'.repeat(7) }, ''), { key: 'reasonMinimum', count: 7 });
-    assert.equal(continuityChangeInputHint({ ...complete, sourceBlockId: '' }, '')?.key, 'chooseEvidence');
+    assert.equal(continuityChangeInputHint({ ...complete, after: '' }, '')?.key, 'hintChooseAfter');
+    assert.equal(continuityChangeInputHint({ ...complete, reason: '' }, ''), undefined);
+    assert.equal(continuityChangeInputHint({ ...complete, sourceBlockId: '' }, ''), undefined);
     assert.equal(continuityChangeInputHint(complete, ''), undefined);
     assert.equal(continuityChangeInputHint(undefined, ''), undefined);
 });
@@ -54,6 +54,32 @@ test('explicit add stays in visible windows and refuses fully occupied visible f
     assert.equal(continuityTrackInsertFrame(view), 73);
     view.markers.push({ ...view.markers[0], frame: 73 });
     assert.equal(continuityTrackInsertFrame(view), undefined);
+});
+
+test('a new state value joins the fact enum once and never reintroduces the unknown sentinel', () => {
+    assert.deepEqual(continuityValueWith(['a', 'b'], ' c '), ['a', 'b', 'c']);
+    assert.deepEqual(continuityValueWith(['a'], 'a'), ['a']);
+    assert.deepEqual(continuityValueWith(['a'], 'unknown'), ['a']);
+    assert.deepEqual(continuityValueWith(undefined, ' x '), ['x']);
+    assert.deepEqual(continuityValueWith(['a'], '   '), ['a']);
+    assert.deepEqual(continuityValueWith('not-an-array', 'x'), ['x']);
+});
+
+test('a shot-local position reads as seconds with a safe frame-rate fallback', () => {
+    assert.equal(continuitySecondLabel(24, 24), '1.0');
+    assert.equal(continuitySecondLabel(0, 24), '0.0');
+    assert.equal(continuitySecondLabel(30, 25), '1.2');
+    assert.equal(continuitySecondLabel(12, 0), '0.5');
+    assert.equal(continuitySecondLabel(12, NaN), '0.5');
+});
+
+test('the row-level add targets the first visible Shot that still has a free change frame', () => {
+    const free = { duration: 96, segments: [{ start: 12, end: 36, windowStart: 12, value: 'open' }], markers: [] };
+    const full = { duration: 96, segments: [{ start: 12, end: 13, windowStart: 12, value: 'open' }], markers: [{ frame: 12, event: { id: 'E' } }] };
+    assert.deepEqual(continuityRowInsertTarget([{ shotId: 'S1', view: full }, { shotId: 'S2', view: free }]), { shotId: 'S2', frame: 12 });
+    assert.deepEqual(continuityRowInsertTarget([{ shotId: 'S1', view: free }]), { shotId: 'S1', frame: 12 });
+    assert.equal(continuityRowInsertTarget([{ shotId: 'S1', view: full }, { shotId: 'S2', view: { duration: 96, segments: [], markers: [] } }]), undefined);
+    assert.equal(continuityRowInsertTarget([]), undefined);
 });
 
 test('closing a retained draft prioritizes resume over earlier disabled tracks, and otherwise restores its real trigger', () => {

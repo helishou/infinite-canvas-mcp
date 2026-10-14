@@ -44,9 +44,10 @@
 .continuity-track-cell.is-context-only .continuity-state-line:not(.is-unknown){background:repeating-linear-gradient(90deg,var(--muted-foreground) 0 3px,transparent 3px 6px);opacity:.6}
 
 /* Direct timeline editing shares the ledger form; its card stays anchored to a frame. */
-.continuity-track-add{position:absolute;right:3px;bottom:3px;z-index:3;display:grid;place-items:center;width:20px;height:20px;border-radius:4px;background:var(--background);color:var(--primary);opacity:.7}
-.continuity-track-add:hover,.continuity-track-add:focus-visible{opacity:1;background:var(--muted)}
-.continuity-track-add:disabled{opacity:.25;cursor:not-allowed}
+.continuity-track-add{position:absolute;right:3px;bottom:3px;z-index:3;display:grid;place-items:center;width:24px;height:24px;border-radius:5px;border:1px solid var(--border);background:var(--background);color:var(--primary);box-shadow:0 1px 2px color-mix(in srgb,var(--foreground) 12%,transparent)}
+.continuity-track-add:hover,.continuity-track-add:focus-visible{background:color-mix(in srgb,var(--primary) 14%,var(--background));border-color:var(--primary)}
+.continuity-track-add:disabled{opacity:.3;cursor:not-allowed;box-shadow:none;color:var(--muted-foreground);border-color:var(--border)}
+.continuity-track-add.is-full{border-style:dashed}
 .continuity-inline-anchor{position:absolute;top:18px;width:1px;height:1px;pointer-events:none}
 .continuity-selected-position{position:absolute;top:9px;height:19px;border-left:1px solid var(--primary);pointer-events:none}
 .continuity-inline-popover{max-width:calc(100vw - 24px)}
@@ -59,4 +60,47 @@
 .continuity-inline-editor>footer{flex-shrink:0;padding:10px 12px;border-top:1px solid var(--border)}.continuity-inline-editor>footer>p{font-size:11px;color:var(--muted-foreground);margin:6px 0 0}
 .continuity-inline-editor button:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
 
-.continuity-track-cell:has(.continuity-track-add) .continuity-event-label{padding-right:24px}
+.continuity-track-cell:has(.continuity-track-add) .continuity-event-label{padding-right:30px}
+
+/* Row-level add keeps every fact reachable without hunting for the right Shot cell. */
+.continuity-fact-label{gap:4px;justify-content:space-between}
+.continuity-fact-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.continuity-row-add{flex-shrink:0;display:grid;place-items:center;width:20px;height:20px;border-radius:4px;color:var(--primary);background:color-mix(in srgb,var(--primary) 10%,transparent)}
+.continuity-row-add:hover,.continuity-row-add:focus-visible{background:color-mix(in srgb,var(--primary) 22%,transparent)}
+.continuity-row-add:disabled{color:var(--muted-foreground);background:transparent;opacity:.45;cursor:not-allowed}
+
+/* The inspector lists a Shot's changes so editing never depends on an 18px pin. */
+.continuity-shot-changes{display:flex;flex-direction:column;gap:4px;margin:10px 0}
+.continuity-shot-changes>p{margin:0}
+.continuity-change-row{display:flex;flex-direction:column;align-items:flex-start;gap:1px;width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;text-align:left;font-size:12px;color:var(--primary)}
+.continuity-change-row:hover,.continuity-change-row:focus-visible{background:color-mix(in srgb,var(--primary) 10%,transparent);border-color:var(--primary)}
+.continuity-change-row:disabled{opacity:.55;cursor:not-allowed}
+.continuity-change-row>small{font-size:10px;color:var(--muted-foreground)}
+.continuity-change-row>span{overflow-wrap:anywhere}
+
+/* Editing reads as a before/after pair instead of a buried "recorded before" line. */
+.continuity-before-after{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
+.continuity-before-after>div{min-width:0;display:flex;flex-direction:column;gap:2px;padding:6px 8px;border-radius:6px;background:var(--muted)}
+.continuity-before-after>div:last-child{background:color-mix(in srgb,var(--primary) 12%,transparent)}
+.continuity-before-after span{font-size:10px;color:var(--muted-foreground)}
+.continuity-before-after strong{font-size:13px;overflow-wrap:anywhere}
+.continuity-before-after small{font-size:10px;color:var(--muted-foreground)}
+.continuity-before-after.is-from-only{grid-template-columns:1fr}
+.continuity-before-after.is-from-only>div{background:var(--muted)}
+
+/* The chosen passage reads as a quote, not as a second copy of the picker. */
+.continuity-evidence-quote{margin:0 0 13px;padding:6px 10px;border-left:2px solid var(--primary);font-size:12px;line-height:1.6;color:var(--muted-foreground)}
+.continuity-evidence-quote>span{margin-right:6px;font-size:10px;color:var(--primary)}
+
+/* The position reads as a time first, with the exact frame available underneath. */
+.continuity-time-readout{display:flex;flex-direction:column;gap:2px}
+.continuity-time-readout>strong{font-size:12px;font-weight:600;color:var(--foreground)}
+
+/* Event labels are the primary edit target, so they advertise themselves on hover. */
+.continuity-event-label{cursor:pointer}
+.continuity-event-label:hover:not(.is-selected):not(:disabled),.continuity-event-label:focus-visible:not(.is-selected){background:color-mix(in srgb,var(--primary) 8%,transparent)}
+
+/* A typed state name is offered in place of the empty list, so it is added where it is typed. */
+.continuity-add-value-option{display:flex;align-items:center;gap:6px;width:100%;padding:8px 12px;text-align:left;font-size:13px;color:var(--primary)}
+.continuity-add-value-option:hover,.continuity-add-value-option:focus-visible{background:color-mix(in srgb,var(--primary) 12%,transparent)}
+.continuity-add-value-option:disabled{color:var(--muted-foreground);cursor:not-allowed}

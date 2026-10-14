@@ -26,6 +26,13 @@ test("a Shot draft survives a source refresh and locates a conflicting update wi
     assert.equal(shotDraftSourceChanged(restored.draft, shot), false);
     assert.equal(readShotFormDraft(JSON.stringify(draft), { ...shot, id: "S2" }).invalid, true);
 });
+test("an empty viewing-object selection remains a valid saved camera field", () => {
+    const { draft } = readShotFormDraft(undefined, shot);
+    draft.value.camera.attention_subject_ids = [];
+    const restored = readShotFormDraft(JSON.stringify(draft), shot);
+    assert.equal(restored.invalid, false);
+    assert.deepEqual(shotFormChanges(restored.draft).patch?.camera, { ...shot.camera, attention_subject_ids: [] });
+});
 test("Subject names use the registered entity and workbenches consume the Backend wire projection", () => {
     const source = { subject_registry: [{ id: "stable-subject", entityRef: { kind: "character", id: "actor" } }], character_registry: [{ id: "actor", name: "栓子" }] };
     assert.equal(subjectDisplayName(source, "stable-subject"), "栓子");

@@ -1291,7 +1291,13 @@ export function H3PromptSection({
           throw new Error("分镜图顺序更新时提示词发生并发修改，请重试。");
         }
         const updated = withSegmentRefs({ ...latestSegment, ...(trackChanged ? { storyboardShots: shotOrder } : {}) }, orderedRefs);
-        ctx.updateMetadata({ segments: segmentsFor(ctx.getNode(ctx.node.id)?.metadata || latestMetadata).map((item) => item.id === latestSegment.id ? updated : item) });
+        if (latestSegment.productionClipProjection?.targetId || ctx.node.metadata?.productionOwnerKind && ctx.node.metadata?.productionOwnerId || ctx.node.metadata?.productionSceneId) {
+          if (!ctx.production) throw new Error("正式制作 Clip 的分镜需要制作台 Shot 操作接收；当前工作台未连接。");
+          const result = await ctx.production.replaceStoryboardTrack({ nodeId: ctx.node.id, segmentId: updated.id, segment: updated as unknown as Record<string, unknown> });
+          if (!result.sourceSaved) throw new Error("制作台未保存分镜参考顺序。");
+        } else {
+          ctx.updateMetadata({ segments: segmentsFor(ctx.getNode(ctx.node.id)?.metadata || latestMetadata).map((item) => item.id === latestSegment.id ? updated : item) });
+        }
       }
       storyboardDirtyRef.current = false;
       setStoryboardDirty(false);

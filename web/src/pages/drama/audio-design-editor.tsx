@@ -3,14 +3,17 @@ import { Button, Input, InputNumber, Select } from "antd";
 import { Plus, Trash2, Volume2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-// A 类补齐：源稿结构化声音字段（shots[].audio.foley / low_frequency_hz / no_low_frequency_reason）
+// Shot-level foley cues and optional low-frequency limit.
 // 此前前端完全不可见——v2「声音」标签页的文本框只覆盖自由描述，逐条拟音与低频约束无法编辑。
 type AudioObject = Record<string, any>;
 const readAudio = (value: unknown): AudioObject => (value && typeof value === "object" && !Array.isArray(value) ? value as AudioObject : {});
 const cueTexts = (audio: AudioObject): string[] => Array.isArray(audio.foley) ? audio.foley.map(item => typeof item === "string" ? item : JSON.stringify(item)) : [];
-const reasonOf = (audio: AudioObject): string => String(audio.no_low_frequency_reason || "");
 const hzOf = (audio: AudioObject): number | null | undefined => typeof audio.low_frequency_hz === "number" ? audio.low_frequency_hz : undefined;
-const nextAudioFrom = (base: unknown, cues: string[], hz: number | null | undefined, reason: string, keepPendingEmpty = false): AudioObject => ({ ...readAudio(base), foley: keepPendingEmpty ? cues : cues.filter(text => text.trim()), low_frequency_hz: hz ?? null, no_low_frequency_reason: reason });
+const nextAudioFrom = (base: unknown, cues: string[], hz: number | null | undefined, keepPendingEmpty = false): AudioObject => {
+    const next = { ...readAudio(base), foley: keepPendingEmpty ? cues : cues.filter(text => text.trim()), low_frequency_hz: hz ?? null };
+    delete next.no_low_frequency_reason;
+    return next;
+};
 
 type Props = {
     value: unknown;
@@ -26,38 +29,34 @@ export function AudioDesignEditor({ value, disabled, onChange, onPersist }: Prop
     const source = readAudio(value);
     const [cues, setCues] = useState(() => cueTexts(source));
     const [hz, setHz] = useState<number | null | undefined>(() => hzOf(source));
-    const [reason, setReason] = useState(() => reasonOf(source));
     const [saving, setSaving] = useState(false);
     // 外部源稿更新（他人保存、重新加载）后把本地草稿同步回去，避免旧值覆盖新源。
     const sourceSnapshot = useRef(JSON.stringify(source));
     useEffect(() => {
         const now = JSON.stringify(readAudio(value));
-        if (now !== sourceSnapshot.current) { setCues(cueTexts(readAudio(value))); setHz(hzOf(readAudio(value))); setReason(reasonOf(readAudio(value))); sourceSnapshot.current = now; }
+        if (now !== sourceSnapshot.current) { setCues(cueTexts(readAudio(value))); setHz(hzOf(readAudio(value))); sourceSnapshot.current = now; }
     }, [value]);
-    const dirty = JSON.stringify(cues) !== JSON.stringify(cueTexts(source)) || JSON.stringify(hz ?? null) !== JSON.stringify(hzOf(source) ?? null) || reason !== reasonOf(source);
-    const applyChange = (patch: { cues?: string[]; hz?: number | null | undefined; reason?: string }) => {
-        const nextCues = patch.cues ?? cues, nextHz = patch.hz === undefined ? hz : patch.hz, nextReason = patch.reason === undefined ? reason : patch.reason;
+    const dirty = JSON.stringify(cues) !== JSON.stringify(cueTexts(source)) || JSON.stringify(hz ?? null) !== JSON.stringify(hzOf(source) ?? null);
+    const applyChange = (patch: { cues?: string[]; hz?: number | null | undefined }) => {
+        const nextCues = patch.cues ?? cues, nextHz = patch.hz === undefined ? hz : patch.hz;
         if (onChange) {
             // 受控模式也要保留编辑期空槽位并同步本地草稿：否则新增的空串会被 filter 掉，父级判定"无变化"直接重置，按钮看起来完全没反应。
-            onChange(nextAudioFrom(value, nextCues, nextHz, nextReason, true));
+            onChange(nextAudioFrom(value, nextCues, nextHz, true));
             if (patch.cues !== undefined) setCues(patch.cues);
             if (patch.hz !== undefined) setHz(patch.hz);
-            if (patch.reason !== undefined) setReason(patch.reason);
             return;
         }
         if (patch.cues !== undefined) setCues(patch.cues);
         if (patch.hz !== undefined) setHz(patch.hz);
-        if (patch.reason !== undefined) setReason(patch.reason);
     };
-    const resetToSource = () => { setCues(cueTexts(source)); setHz(hzOf(source)); setReason(reasonOf(source)); };
-    const persist = async () => { if (!onPersist || saving) return; setSaving(true); try { const saved = await onPersist(nextAudioFrom(value, cues, hz, reason)); if (!saved) resetToSource(); } finally { setSaving(false); } };
+    const resetToSource = () => { setCues(cueTexts(source)); setHz(hzOf(source)); };
+    const persist = async () => { if (!onPersist || saving) return; setSaving(true); try { const saved = await onPersist(nextAudioFrom(value, cues, hz)); if (!saved) resetToSource(); } finally { setSaving(false); } };
     return <div className="space-y-3">
         <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground"><Volume2 className="size-3.5" />{t("director.atomic.soundDesign")}</p>
         {cues.map((cue, index) => <div key={index} className="flex gap-2"><Input value={cue} aria-label={t("director.atomic.foleyCue", { count: index + 1 })} placeholder={t("director.atomic.foleyCuePlaceholder")} disabled={disabled} onChange={event => applyChange({ cues: cues.map((item, i) => i === index ? event.target.value : item) })} /><Button size="small" type="text" danger icon={<Trash2 className="size-3.5" />} aria-label={t("common.remove")} disabled={disabled} onClick={() => applyChange({ cues: cues.filter((_, i) => i !== index) })}>{t("common.remove")}</Button></div>)}
         <Button size="small" icon={<Plus className="size-3.5" />} disabled={disabled} onClick={() => applyChange({ cues: [...cues, ""] })}>{t("director.atomic.addFoleyCue")}</Button>
-        <div className="grid gap-2 sm:grid-cols-[140px_minmax(0,1fr)]">
+        <div className="grid gap-2 sm:grid-cols-[140px]">
             <label className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.atomic.lowFrequencyHz")}</span><InputNumber className="w-full" min={1} max={200} precision={0} value={hz} disabled={disabled} placeholder="—" onChange={next => applyChange({ hz: next ?? null })} /></label>
-            <label className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.atomic.noLowFrequencyReason")}</span><Input.TextArea autoSize={{ minRows: 1, maxRows: 4 }} value={reason} disabled={disabled} onChange={event => applyChange({ reason: event.target.value })} /></label>
         </div>
         {onPersist && <div className="flex items-center gap-2">{dirty && <span className="text-xs text-amber-600">{t("director.studio.unsavedText")}</span>}<Button type="primary" size="small" loading={saving} disabled={disabled || !dirty} onClick={() => void persist()}>{t("director.atomic.saveAudio")}</Button>{dirty && <Button size="small" type="text" disabled={disabled} onClick={resetToSource}>{t("common.cancel")}</Button>}</div>}
     </div>;

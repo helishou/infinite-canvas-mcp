@@ -203,10 +203,10 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
   const createChange = async (input: ContinuityChangeInput): Promise<string | undefined> => {
     const contextKey = activeEditContext.current.key;
     const shot = shots.find(row => row.id === input.shotId);
-    const block = continuityBlocksForShot({ ...source, script_scenes: scenes, shots }, sourceBlocks, shot).find(row => row.id === input.sourceBlockId);
-    if (!shot || !block) return;
+    const block = input.sourceBlockId ? continuityBlocksForShot({ ...source, script_scenes: scenes, shots }, sourceBlocks, shot).find(row => row.id === input.sourceBlockId) : undefined;
+    if (!shot || input.sourceBlockId && !block) return;
     try {
-      const digest = await sourceDigest(block.sceneId, block.sourceBlock);
+      const digest = block ? await sourceDigest(block.sceneId, block.sourceBlock) : undefined;
       if (!activeEditContext.current.alive || !activeEditContext.current.editable || activeEditContext.current.busy || activeEditContext.current.key !== contextKey) { message.warning(t("director.workspace.continuity.subjectTimeline.sourceChanged")); return; }
       const result = appendContinuityChange(latestLedger.current, shots, input, digest, id, true, subjectAssembly);
       latestLedger.current = result.ledger; setLedger(result.ledger); return result.eventId;

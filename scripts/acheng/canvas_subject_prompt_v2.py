@@ -80,6 +80,7 @@ def binding_ids(subject, usage, *, allow_missing=False):
                     if purpose in [str(value) for value in item.get("provides", [])]
                     and all(requirements.get(str(key)) == str(value) for key, value in (item.get("applicableState") or {}).items())]
         candidates = [item for item in eligible if purpose in [str(value) for value in item.get("defaultFor", [])]]
+        fixed_results = [item for item in eligible if (item.get("selection") or {}).get("mode") == "selected_result"]
         if len(candidates) == 1:
             selected.append(str(candidates[0]["id"]))
         elif len(candidates) > 1:
@@ -90,6 +91,11 @@ def binding_ids(subject, usage, *, allow_missing=False):
             # A default-mode usage with one applicable picture is unambiguous,
             # even when older saved bindings omitted the redundant defaultFor tag.
             selected.append(str(eligible[0]["id"]))
+        elif len(fixed_results) == 1:
+            # A pinned generation result is an explicit, stable image choice.
+            # Prefer it over legacy node-selection candidates when no purpose
+            # default is declared, so visible Subjects do not silently vanish.
+            selected.append(str(fixed_results[0]["id"]))
         elif not eligible:
             if allow_missing:
                 continue
@@ -159,19 +165,34 @@ def _render_state_end(source, report, shot, subjects):
 
 
 def _state_snapshot(source, report, shot, subjects, edge):
-    """Return authored state values and their readable labels for one Shot edge."""
+    """Return compiled state values; frame-zero events expose their post-event opening state."""
     trajectory = (report.get("trajectories") or {}).get(str(shot.get("id")), {})
     snapshot = trajectory.get(edge, {})
+    opening_event_values = {}
+    if edge == "start":
+        shot_id = str(shot.get("id"))
+        shot_start = shot.get("start_frame")
+        for event in rows((source.get("ledger") or {}).get("events")):
+            if str(event.get("shot_id")) != shot_id:
+                continue
+            if (event.get("local_frame") == 0
+                    or (shot_start is not None and event.get("frame") == shot_start)):
+                opening_event_values[str(event.get("fact_id"))] = event.get("after", "unknown")
     facts = {str(item.get("id")): item for item in rows((source.get("ledger") or {}).get("facts"))}
     subject_by_entity = {(str(item.get("entityRef", {}).get("kind")), str(item.get("entityRef", {}).get("id"))): item
                          for item in subjects}
     result = {}
-    for fact_id in sorted(_used_continuity_fact_ids(shot, subjects, facts)):
+    used_facts = _used_continuity_fact_ids(shot, subjects, facts)
+    used_facts.update(opening_event_values)
+    for fact_id in sorted(used_facts):
         fact = facts.get(fact_id)
-        value = snapshot.get(fact_id)
+        is_opening_change = fact_id in opening_event_values
+        value = opening_event_values[fact_id] if is_opening_change else snapshot.get(fact_id)
         if not fact or value is None:
             continue
         description = (fact.get("value_descriptions") or {}).get(str(value))
+        if not description and is_opening_change and value != "unknown":
+            description = str(value)
         if not description:
             continue
         owner = subject_by_entity.get((str(fact.get("object_kind")), str(fact.get("object_id"))))
@@ -304,15 +325,8 @@ def _infer_segment_mode(source, segment):
                     continue
                 if explicit and any(str(binding.get("id")) in explicit for binding in bindings):
                     return "Ref2VA"
-                if not explicit and usage.get("presentation") == "visible":
-                    requirements = {str(item.get("factId")): str(item.get("value")) for item in rows(usage.get("stateRequirements"))}
-                    purposes = [str(value) for value in rows(usage.get("referencePurpose"))] or ["identity"]
-                    matches = [[binding for binding in bindings
-                                if purpose in string_rows(binding.get("defaultFor"))
-                                and all(requirements.get(str(key)) == str(value) for key, value in (binding.get("applicableState") or {}).items())]
-                               for purpose in purposes]
-                    if matches and all(len(items) == 1 for items in matches):
-                        return "Ref2VA"
+                if not explicit and usage.get("presentation") == "visible" and binding_ids(subject, usage, allow_missing=True):
+                    return "Ref2VA"
     return "T2VA"
 
 
@@ -529,15 +543,27 @@ def adapt_production(production, *, draft=False):
                              "entity_id": entity_ids[0] if entity_ids else plan.get("entity_id"), "entity_ids": entity_ids})
             picture_shots = list(dict.fromkeys(picture["shot_ids"]))
             picture_scope = ", ".join("[Shot " + str(shot_ids.index(str(value)) + 1) + "]" for value in picture_shots if str(value) in shot_ids)
-            picture_preserve = "; ".join(dict.fromkeys(picture["retain"])) or "registered visual attributes"
-            picture_exclude = "; ".join(dict.fromkeys(picture["exclude"])) or "unregistered pose or background"
+            picture_preserve = "; ".join(dict.fromkeys(picture["retain"])) or ("original shot-entry composition and camera" if picture["is_keyframe"] else "registered visual attributes")
+            picture_exclude = "; ".join(dict.fromkeys(picture["exclude"])) or ("identity or staging changes" if picture["is_keyframe"] else "unregistered pose or background")
+            keyframe_anchor = {"opening": "shot-entry", "closing": "shot-ending", "at_frame": "declared-frame"}.get(str(picture["anchor"]), "shot-entry")
+            picture_definition = (picture["label"] + " is the persisted storyboard frame for " + picture_scope
+                                 + "; preserve its original " + keyframe_anchor + " composition and camera.") if picture["is_keyframe"] else (
+                                     picture["label"] + " is the archived " + str(picture["roles"][0] if picture["roles"] else "reference")
+                                     + " image for " + picture_scope + "; it contributes only its registered visual evidence.")
+            retention_level = "fully_preserved" if picture["is_keyframe"] else "partially_preserved"
+            retention_detail = ("retain composition, camera and subject placement; exclude identity or staging changes"
+                                if picture["is_keyframe"] else "retain " + picture_preserve + "; exclude " + picture_exclude)
             refs.append({"label": picture["label"], "image": picture["number"], "asset_id": asset_id,
                          "asset_version": picture["asset_version"], "sha256": picture["sha256"], "file": picture["file"],
                          "entity_id": entity_ids[0] if entity_ids else "", "entity_ids": entity_ids,
                          "role": picture["roles"][0] if picture["roles"] else "keyframe",
                          "preserve": picture_preserve, "exclude": picture_exclude,
-                         "definition": picture["label"] + " is the archived " + str(picture["roles"][0] if picture["roles"] else "reference") + " image for " + picture_scope + "; it contributes only its registered visual evidence.",
-                         "retention": picture["label"] + " (" + picture_scope + "): partially_preserved - retain " + picture_preserve + "; exclude " + picture_exclude + ".",
+                         "definition": picture_definition,
+                         "retention": picture["label"] + " (" + picture_scope + "): " + retention_level + " - " + retention_detail + ".",
+                         # Subject-bound identity images remain real uploaded references, but their
+                         # source label belongs inside the Subject definition rather than as a
+                         # standalone Picture entry. Independent frame/composition uses stay visible.
+                         "source_only": bool(picture["subject_ids"]) and not picture["is_keyframe"] and "composition" not in picture["roles"],
                          "shot_ids": picture_shots, **({"anchor_shot_ids": list(dict.fromkeys(picture["anchor_shot_ids"]))} if picture["anchor_shot_ids"] else {}),
                          "start_frame": start_frame, "end_frame": end_frame})
 
@@ -564,7 +590,7 @@ def adapt_production(production, *, draft=False):
             label = str(binding.get("label") or "")
             refs.append({"label": label, "asset_id": binding_id, "asset_version": version, "sha256": digest,
                          "file": str(snapshot["file"]), "entity_id": binding_id, "entity_ids": [binding_id],
-                         "role": str(binding.get("role") or "audio"), "preserve": "Use as the registered audio reference.",
+                         "role": str(binding.get("role") or "audio"), "preserve": "the registered audio reference",
                          "exclude": "Do not treat audio as a visual identity reference.",
                          "definition": label + " is the archived audio reference for this Segment.",
                          "retention": label + ": reference - preserve its audible reference only.", "shot_ids": binding_shots,
@@ -604,9 +630,10 @@ def adapt_production(production, *, draft=False):
             scene_subject = next((subject_by_id.get(str(usage.get("subjectId"))) for usage in rows(shot.get("subject_usages"))
                                   if subject_by_id.get(str(usage.get("subjectId")), {}).get("entityRef", {}).get("kind") == "scene"), None)
             scene_id = str((scene_subject or {}).get("entityRef", {}).get("id") or shot.get("scene_id") or "")
-            if not scene_id or not any(str(item.get("id")) == scene_id for item in rows(source.get("scene_registry"))):
-                raise ValueError("Shot " + shot_id + " requires a registered Scene Subject")
-            next_shot["scene_id"] = scene_id
+            if scene_subject and not any(str(item.get("id")) == scene_id for item in rows(source.get("scene_registry"))):
+                raise ValueError("Shot " + shot_id + " refers to an unregistered Scene Subject")
+            if scene_id:
+                next_shot["scene_id"] = scene_id
             for usage in rows(shot.get("subject_usages")):
                 subject = subject_by_id.get(str(usage.get("subjectId")))
                 if not subject or usage.get("presentation") != "visible":
@@ -736,6 +763,39 @@ def _plain_text(value):
     return ""
 
 
+def _performance_text(value):
+    # These fields classify the performance block; they are not acting cues.
+    if isinstance(value, dict):
+        value = {key: item for key, item in value.items() if key not in {"beat_id", "beat_ids", "dominant_track"}}
+    return _plain_text(value)
+
+
+def _camera_prompt_lines(camera):
+    fields = (("angle", "Angle"), ("movement", "Movement"), ("path", "Path"),
+              ("target", "Target"), ("focus", "Focus"))
+    rendered = []
+    for key, label in fields:
+        text = _plain_text(camera.get(key))
+        if text and text.casefold() != "per shot description":
+            rendered.append(label + ": " + text + ".")
+    lens = camera.get("lens_mm") if "lens_mm" in camera else camera.get("lens")
+    if isinstance(lens, (int, float)) and not isinstance(lens, bool):
+        lens_text = f"{lens:g} mm"
+    else:
+        lens_text = _plain_text(lens)
+        if lens_text and not lens_text.casefold().endswith("mm"):
+            lens_text += " mm"
+    if lens_text and lens_text.casefold() != "per shot description":
+        rendered.insert(1, "Lens: " + lens_text + ".")
+    return rendered
+
+
+def _audio_prompt_text(value):
+    if isinstance(value, dict):
+        value = {key: item for key, item in value.items() if key != "no_low_frequency_reason"}
+    return _plain_text(value)
+
+
 def _time(frame, production):
     milliseconds = round(Fraction(int(frame) * int(production.get("fps_den", 1)) * 1000, int(production.get("fps_num", 24))))
     return f"{milliseconds // 60000:02d}:{milliseconds // 1000 % 60:02d}.{milliseconds % 1000:03d}"
@@ -760,20 +820,17 @@ def render_shot_text_v2(shot, production, speakers, speech_parts, referenced_sub
     reason = str(camera.get("editorial_reason") or "")
     if reason:
         parts.append("Editorial reason: " + reason)
-    for key in ("angle", "lens", "movement", "path", "target", "focus"):
-        value = _plain_text(camera.get(key))
-        if value:
-            parts.append(key.capitalize() + ": " + value + ".")
+    parts.extend(_camera_prompt_lines(camera))
     visual = str(shot.get("visual") or "").strip()
     if visual:
         parts.append(visual)
     action = str(shot.get("action") or shot.get("action_description") or "").strip()
     if action and action != visual:
         parts.append("Action: " + action)
-    performance = _plain_text(shot.get("performance"))
+    performance = _performance_text(shot.get("performance"))
     if performance:
         parts.append("Performance: " + performance)
-    audio = _plain_text(shot.get("audio"))
+    audio = _audio_prompt_text(shot.get("audio"))
     if audio:
         parts.append("Sound: " + audio)
     for event in shot.get("_canvas_v2_events", []):
@@ -817,7 +874,7 @@ def render_continuity_text_v2(shot, production):
     return _render_state_end(production, production.get("_continuity_report") or {}, shot, rows(production.get("subject_registry")))
 
 
-def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, include_scene=True, state_lines=None):
+def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, state_lines=None):
     camera = shot.get("camera") if isinstance(shot.get("camera"), dict) else {}
     fps_num, fps_den = int(production.get("fps_num", 24)), int(production.get("fps_den", 1))
     clip_start = int(segment["start_frame"])
@@ -830,18 +887,25 @@ def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, include
     else:
         header = "[Shot " + str(shot_number) + "] At " + start_time + ", covering " + start_time + "–" + end_time + " within this Clip."
     parts = [header]
-    scene_id = str(shot.get("scene_id") or "")
-    scene = next((item for item in rows(production.get("scene_registry")) if str(item.get("id") or "") == scene_id), {})
-    scene_name, scene_description = entity_text(production, {"entityRef": {"kind": "scene", "id": scene_id}}) if scene else ("", "")
-    if include_scene and scene_description:
-        parts.append("Scene setting: " + (scene_name + ": " if scene_name else "") + scene_description)
+    scenes = {str(item.get("id") or ""): item for item in rows(production.get("scene_registry"))}
+    subjects = {str(item.get("id")): item for item in rows(production.get("subject_registry"))}
+    referenced_scene_ids = []
+    for usage in rows(shot.get("subject_usages")):
+        subject = subjects.get(str(usage.get("subjectId") or ""), {})
+        entity_ref = subject.get("entityRef") if isinstance(subject.get("entityRef"), dict) else {}
+        scene_id = str(entity_ref.get("id") or "")
+        if entity_ref.get("kind") == "scene" and scene_id in scenes and scene_id not in referenced_scene_ids:
+            referenced_scene_ids.append(scene_id)
+    for scene_id in referenced_scene_ids:
+        scene_name, scene_description = entity_text(production, {"entityRef": {"kind": "scene", "id": scene_id}})
+        if scene_description:
+            parts.append("Scene setting: " + (scene_name + ": " if scene_name else "") + scene_description)
     for state_line in state_lines or []:
         parts.append(state_line)
     framing = str(camera.get("framing") or "").strip()
     if framing:
         parts.append("Framing: " + framing + ".")
     attention = []
-    subjects = {str(item.get("id")): item for item in rows(production.get("subject_registry"))}
     for subject_id in camera.get("attention_subject_ids", []):
         subject = subjects.get(str(subject_id))
         if subject:
@@ -868,34 +932,45 @@ def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, include
     editorial_reason = str(camera.get("editorial_reason") or "").strip()
     if editorial_reason:
         parts.append("Editorial reason for this shot and cut: " + editorial_reason)
-    for field in ("angle", "lens", "movement", "path", "target", "focus"):
-        text = _plain_text(camera.get(field))
-        if text:
-            parts.append(field.capitalize() + ": " + text + ".")
+    parts.extend(_camera_prompt_lines(camera))
     visual = str(shot.get("visual") or "").strip()
     if visual:
         parts.append(visual)
     action = str(shot.get("action") or shot.get("action_description") or "").strip()
     if action and action != visual:
         parts.append("Action: " + action)
-    performance = _plain_text(shot.get("performance"))
+    performance = _performance_text(shot.get("performance"))
     if performance:
         parts.append("Performance: " + performance)
-    sound = _plain_text(shot.get("audio"))
+    sound = _audio_prompt_text(shot.get("audio"))
     if sound:
         parts.append("Diegetic sound: " + sound)
     for event in shot.get("_canvas_v2_events", []):
         fact = next((item for item in rows((production.get("ledger") or {}).get("facts")) if str(item.get("id")) == str(event.get("fact_id"))), {})
         description = (fact.get("value_descriptions") or {}).get(str(event.get("after")), str(event.get("after") or ""))
         local_frame = int(event.get("local_frame", 0))
+        if local_frame == 0:
+            continue
         parts.append("During " + _time(local_frame, production) + " of this Shot, the registered state changes: " + str(description) + ".")
     for picture in segment.get("references", []):
+        if picture.get("source_only"):
+            continue
         if str(shot["id"]) not in [str(value) for value in picture.get("shot_ids", [])]:
             continue
         if picture.get("anchor_shot_ids") and str(shot["id"]) not in [str(value) for value in picture["anchor_shot_ids"]]:
             continue
-        parts.append("Use " + str(picture["label"]) + " only for its declared " + str(picture.get("role") or "reference") + " attributes; preserve " + str(picture.get("preserve") or "the registered visual evidence") + ".")
-        if picture.get("anchor"):
+        if picture.get("is_keyframe"):
+            anchor = {"opening": "shot-entry", "closing": "shot-ending", "at_frame": "declared-frame"}.get(str(picture.get("anchor") or ""), "shot-entry")
+            start_seconds = float(Fraction(local_start * fps_den, fps_num))
+            end_seconds = float(Fraction(local_end * fps_den, fps_num))
+            parts.append("From " + f"{start_seconds:.3f}" + " to " + f"{end_seconds:.3f}"
+                         + " seconds of this request, " + str(picture["label"]) + " is the persisted storyboard frame for [Shot " + str(shot_number)
+                         + "]; preserve its original " + anchor + " composition and camera. Preserve only: "
+                         + str(picture.get("preserve") or "the registered visual evidence") + ". Do not inherit: "
+                         + str(picture.get("exclude") or "identity or staging changes") + ".")
+        else:
+            parts.append("Use " + str(picture["label"]) + " only for its declared " + str(picture.get("role") or "reference") + " attributes; preserve " + str(picture.get("preserve") or "the registered visual evidence") + ".")
+        if picture.get("anchor") and not picture.get("is_keyframe"):
             parts.append(str(picture["anchor"]).capitalize() + " keyframe anchor: " + str(picture["label"]) + ".")
     for line in sorted(rows(shot.get("dialogues")), key=lambda item: int(item.get("start", 0))):
         speaker_identity = str(line.get("character_id") or line.get("speaker_name") or "")
@@ -957,7 +1032,6 @@ def compile_prompt_v2(production, segment, *, draft=False):
     report = production.get("_continuity_report") or {}
     subjects = rows(production.get("subject_registry"))
     detail_rows = []
-    previous_scene_id = None
     carried_state = {}
     for index, shot in enumerate(shots):
         shot_id = str(shot.get("id"))
@@ -975,22 +1049,19 @@ def compile_prompt_v2(production, segment, *, draft=False):
                           if fact_id not in event_fact_ids and (fact_id not in start_state or item["value"] != start_state[fact_id]["value"])]
         if changes_by_end:
             state_lines.append("State changes by shot end: " + "; ".join(changes_by_end))
-        scene_id = str(shot.get("scene_id") or "")
-        detail_rows.append(_shot_prompt_v2(production, segment, shot, index + 1, speakers,
-                                           include_scene=index == 0 or scene_id != previous_scene_id,
-                                           state_lines=state_lines))
-        previous_scene_id = scene_id
+        detail_rows.append(_shot_prompt_v2(production, segment, shot, index + 1, speakers, state_lines=state_lines))
         carried_state.update(start_state)
         carried_state.update(end_state)
     detail = "\n".join(detail_rows)
     soundscape = str(segment.get("overall_soundscape") or "Synchronized dialogue, ambience and action sounds follow the authored shots.")
     music = str(segment.get("non_diegetic_music") or "N/A")
     if mode == "Ref2VA":
-        picture_definitions = [str(item.get("definition") or "") for item in references]
+        picture_definitions = [str(item.get("definition") or "") for item in references if not item.get("source_only", False)]
         definitions = "\n".join([*picture_definitions, *(str(subject.get("definition") or "") for subject in segment.get("subjects", []))])
         retention_lines = []
         for item in references:
-            retention_lines.append(str(item.get("retention") or ""))
+            if not item.get("source_only", False):
+                retention_lines.append(str(item.get("retention") or ""))
         retention_lines.extend(str(subject.get("retention") or "") for subject in segment.get("subjects", []))
         retention = "\n".join(retention_lines)
         fields = [
