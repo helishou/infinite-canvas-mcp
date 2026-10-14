@@ -55,7 +55,7 @@ type PendingCommand = { operationId: string; expectedRevision: number; status: "
   | { kind: "prepare"; targets: string[] } | { kind: "arrange"; sceneId: string } | { kind: "adopt"; assetId: string; approvedId: string }
 );
 type PendingRunStart = { inputBasis?: "canvas" | "published"; expectedCanvasRevision?: number; expectedPlanHash?: string; runId: string; idempotencyKey: string; workId?: string; expectedRevision: number; version: number; targets: string[]; scope: "selected" | "all_ready" };
-type PendingCompilation = { operationId: string; expectedRevision: number; scope?: { sceneId: string } };
+type PendingCompilation = { operationId: string; expectedRevision: number; scope?: { sceneId?: string; targetIds?: string[] } };
 type LocalDraft = { brief?: string; sourceDrafts?: Record<string, string>; remoteRevision: number | null; pendingCommand?: PendingCommand | null; pendingRunStart?: PendingRunStart | null };
 type VersionItem = { version: number; stage: string; createdAt: string };
 function sourceDraftDiffersFromSaved(key: string, value: string, director: NonNullable<EpisodeProduction["draft"]["director"]>) {
@@ -88,6 +88,17 @@ function blocksCompilationDiagnostic(item: ProductionCompilationDiagnostic) {
     ...(Array.isArray(item.blockingActions) ? { blockingActions: item.blockingActions as ProductionBlockingAction[] } : {}),
     ...(typeof item.blocksCompilation === "boolean" ? { blocksCompilation: item.blocksCompilation } : {}),
   } as ProductionDiagnostic, "compile");
+}
+function mergeScopedCompilationDiagnostics(previous: ProductionCompilationDiagnostic[], current: ProductionCompilationDiagnostic[], touchedTargets: Set<string>, replaceAll: boolean) {
+  if (replaceAll) return current;
+  const retained = previous.flatMap(item => {
+    const directHit = [item.targetId, item.shotId].some(id => id && touchedTargets.has(String(id)));
+    const affected = item.affectedTargets || [], remainingAffected = affected.filter(id => !touchedTargets.has(String(id)));
+    if (!directHit && remainingAffected.length === affected.length) return [item];
+    if (!remainingAffected.length && (directHit || affected.length)) return [];
+    return [{ ...item, ...(directHit ? { targetId: undefined } : {}), ...(affected.length ? { affectedTargets: remainingAffected } : {}) }];
+  });
+  return [...retained, ...current];
 }
 const localDrafts = localforage.createInstance({ name: "episode-production-drafts", storeName: "unfinished" });
 const pendingCompilationStorageKey = (draftKey: string) => `${draftKey}:pending-compilation`;
@@ -295,7 +306,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   const [compileError, setCompileError] = useState("");
   const [compileNotice, setCompileNotice] = useState("");
   const [compileDiagnostics, setCompileDiagnostics] = useState<ProductionCompilationDiagnostic[]>([]);
-  const [compileTargets, setCompileTargets] = useState<{ sourceHash: string; items: Array<{ targetId: string; status: string }> }>();
+  const [compileTargets, setCompileTargets] = useState<{ sourceHash: string; items: Array<{ targetId: string; status: string }>; notReadyTargetIds?: string[] }>();
   const startingRunRef = useRef(false);
   const handledAgentResultRef = useRef("");
   const setAgentState = useAgentStore(state => state.setAgentState);
@@ -506,7 +517,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     else await localDrafts.removeItem(pendingCompilationStorageKey(draftKey));
   };
 
-  const runProductionCompile = async (sceneId?: string) => {
+  const runProductionCompile = async (sceneId?: string, targetId?: string) => {
     if (compiling || !production?.draft.director) return;
     if (!draftKey) {
       setCompileError(t("drama.production.draftNotReady"));
@@ -515,8 +526,6 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     setCompiling(true);
     setCompileError("");
     setCompileNotice("");
-    setCompileDiagnostics([]);
-    setCompileTargets(undefined);
     try {
       let compileSource = production;
       let pending = pendingCompilationRef.current;
@@ -544,7 +553,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         if (canvasId) await flushCanvasProjectBeforeGeneration(canvasId);
         compileSource = (await fetchEpisodeProduction(target)).production;
         setProduction(previous => !previous || previous.episodeId !== compileSource.episodeId || compileSource.revision > previous.revision ? compileSource : previous);
-        pending = { operationId: `compile-${nanoid(14)}`, expectedRevision: compileSource.revision, ...(sceneId ? { scope: { sceneId } } : {}) };
+        pending = { operationId: `compile-${nanoid(14)}`, expectedRevision: compileSource.revision, ...(targetId ? { scope: { targetIds: [targetId] } } : sceneId ? { scope: { sceneId } } : {}) };
         await persistPendingCompilation(pending);
       }
       const started = await compileProduction(target, pending.expectedRevision, pending.operationId, pending.scope);
@@ -559,18 +568,52 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         status = (await fetchProductionCompilation(target, pending.operationId)).compilation;
         pollDelayMs = Math.min(5000, Math.ceil(pollDelayMs * 1.6));
       }
-      const diagnostics: ProductionCompilationDiagnostic[] = status.diagnosticCount
-        ? (await fetchProductionCompilation(target, pending.operationId, "diagnostics", { pageSize: 100 })).compilation.items || [] : [];
+      const diagnostics: ProductionCompilationDiagnostic[] = [];
+      if (status.diagnosticCount) {
+        let offset = 0;
+        while (true) {
+          const page = (await fetchProductionCompilation(target, pending.operationId, "diagnostics", { offset, pageSize: 100 })).compilation;
+          const pageItems = page.items || [];
+          diagnostics.push(...pageItems);
+          if (!pageItems.length || page.nextOffset == null || page.nextOffset <= offset) break;
+          offset = page.nextOffset;
+        }
+      }
       const targetResponse = status.targetCount
         ? await fetchProductionCompilation(target, pending.operationId, "targets", { pageSize: 100 }) : undefined;
       const compilationTargets = (targetResponse?.compilation.items || []) as Array<ProductionCompilationDiagnostic & { status?: string }>;
-      setCompileDiagnostics(diagnostics);
       const targetItems = compilationTargets.filter((item): item is ProductionCompilationDiagnostic & { targetId: string; status: string } => Boolean(item.targetId && item.status));
+      const notReadyTargetIds = targetItems.filter(item => item.status !== "ready").map(item => item.targetId);
+      const touchedCompileScopeIds = new Set([...(pending.scope?.targetIds || []).map(String), ...targetItems.map(item => String(item.targetId))]);
+      const previousNotReady = compileTargets?.sourceHash === status.sourceHash ? (compileTargets.notReadyTargetIds || []).filter(id => !touchedCompileScopeIds.has(String(id))) : [];
+      const failedCompileScopeIds = new Set([...previousNotReady, ...notReadyTargetIds].map(String));
+      const compileSourceValue = compileSource.draft.director?.source as Record<string, any> | undefined;
+      for (const segment of Array.isArray(compileSourceValue?.segments) ? compileSourceValue!.segments : []) {
+        if (touchedCompileScopeIds.has(String(segment.id))) for (const shotId of Array.isArray(segment.shot_ids) ? segment.shot_ids : []) touchedCompileScopeIds.add(String(shotId));
+        if (!failedCompileScopeIds.has(String(segment.id))) continue;
+        for (const shotId of Array.isArray(segment.shot_ids) ? segment.shot_ids : []) failedCompileScopeIds.add(String(shotId));
+      }
+      for (const group of compileSource.draft.clipGroups) if (touchedCompileScopeIds.has(String(group.id))) for (const shotId of group.shotIds || []) touchedCompileScopeIds.add(String(shotId));
+      const diagnosticsForView = mergeScopedCompilationDiagnostics(compileDiagnostics, diagnostics, touchedCompileScopeIds, !pending.scope);
+      const orderedDiagnostics = diagnosticsForView.map((item, index) => {
+        const relatedToNotReady = [item.targetId, item.shotId, ...(item.affectedTargets || [])].some(id => id && failedCompileScopeIds.has(String(id)));
+        const blocksCompile = item.blocksCompilation === true || item.severity === "error" || item.severity === "unverified" || item.blockingActions?.includes("compile");
+        return { item, index, relatedToNotReady, priority: relatedToNotReady ? 0 : blocksCompile ? 1 : 2 };
+      }).sort((left, right) => left.priority - right.priority || left.index - right.index).map(entry => entry.item);
+      setCompileDiagnostics(orderedDiagnostics);
       const recordSyncedTargets = (referenceSync?: Array<{ targetId: string; status: string }>) => {
-        if (!status.sourceHash || !referenceSync) return;
-        const synced = new Set(referenceSync.filter(item => item.status === "ready").map(item => item.targetId));
-        const items = targetItems.filter(item => item.status === "ready" && synced.has(item.targetId)).map(item => ({ targetId: item.targetId, status: "ready" }));
-        if (items.length) setCompileTargets({ sourceHash: status.sourceHash, items });
+        if (!status.sourceHash) return;
+        const hasSyncReceipt = Array.isArray(referenceSync), synced = new Set((referenceSync || []).filter(item => item.status === "ready").map(item => item.targetId));
+        const items = hasSyncReceipt ? targetItems.filter(item => item.status === "ready" && synced.has(item.targetId)).map(item => ({ targetId: item.targetId, status: "ready" })) : [];
+        const touchedIds = new Set((hasSyncReceipt ? targetItems : targetItems.filter(item => item.status !== "ready")).map(item => item.targetId));
+        const newlyNotReadyIds = targetItems.filter(item => item.status !== "ready" || hasSyncReceipt && !synced.has(item.targetId)).map(item => item.targetId);
+        setCompileTargets(current => {
+          const previous = current?.sourceHash === status.sourceHash ? current : { sourceHash: status.sourceHash, items: [], notReadyTargetIds: [] as string[] };
+          const readyItems = [...previous.items.filter(item => !touchedIds.has(item.targetId)), ...items];
+          const notReady = new Set((previous.notReadyTargetIds || []).filter(id => !touchedIds.has(id)));
+          for (const id of newlyNotReadyIds) notReady.add(id);
+          return { sourceHash: status.sourceHash, items: readyItems, ...(notReady.size ? { notReadyTargetIds: [...notReady] } : {}) };
+        });
       };
       const describe = (item: ProductionCompilationDiagnostic) => item.message?.trim() || "";
       const clipContext = (items: ProductionCompilationDiagnostic[]) => [...new Set(items.map(item => item.targetId).filter((id): id is string => Boolean(id)))].map(id => {
@@ -610,10 +653,12 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         return appendContinuityLocations(message, items);
       };
       const groupedDiagnostics = new Map<string, ProductionCompilationDiagnostic[]>();
-      for (const item of diagnostics) {
+      for (const item of orderedDiagnostics) {
+        const relatedToNotReady = [item.targetId, item.shotId, ...(item.affectedTargets || [])].some(id => id && failedCompileScopeIds.has(String(id)));
+        const scope = relatedToNotReady ? "not-ready:" : "other:";
         const key = item.code === "CONTINUITY_COVERAGE_MISSING" || item.code === "PROMPT_SOURCE_MAP_INVALID"
-          ? item.code
-          : `other:${describe(item) || item.code || "unknown"}`;
+          ? scope + item.code
+          : scope + (describe(item) || item.code || "unknown");
         groupedDiagnostics.set(key, [...(groupedDiagnostics.get(key) || []), item]);
       }
       const warningDetails = [...groupedDiagnostics].slice(0, 10).map(([key, items]) => {
@@ -621,19 +666,33 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         const count = affected.size || items.length;
         const countText = t("director.atomic.compileAffectedCount", { count });
         if (items.some(item => item.code?.startsWith("CONTINUITY_"))) return continuitySummary(items);
-        if (key === "PROMPT_SOURCE_MAP_INVALID") return t("director.atomic.compileHintSourceMap", { count: countText, clips: clipContext(items) });
+        if (key.endsWith("PROMPT_SOURCE_MAP_INVALID")) return t("director.atomic.compileHintSourceMap", { count: countText, clips: clipContext(items) });
         return `${countText}：${describe(items[0]) || items[0].code || t("director.atomic.compileHintOther")}`;
+      });
+      const notReadyTargetReasons = (items: Array<ProductionCompilationDiagnostic & { targetId: string; status: string }>) => items.map(targetItem => {
+        const targetId = String(targetItem.targetId), scopeIds = new Set([targetId]);
+        const source = compileSource.draft.director?.source as Record<string, any> | undefined;
+        const segment = (Array.isArray(source?.segments) ? source!.segments : []).find((item: Record<string, any>) => String(item.id) === targetId);
+        for (const shotId of segment?.shot_ids || []) scopeIds.add(String(shotId));
+        const group = compileSource.draft.clipGroups.find(item => String(item.id) === targetId || String(item.segmentId || "") === targetId);
+        for (const shotId of group?.shotIds || []) scopeIds.add(String(shotId));
+        const related = orderedDiagnostics.filter(item => [item.targetId, item.shotId, ...(item.affectedTargets || [])].some(id => id && scopeIds.has(String(id))));
+        const blockers = related.filter(blocksCompilationDiagnostic);
+        const reasons = [...new Set((blockers.length ? blockers : related).map(item => describe(item)).filter(Boolean))];
+        const label = clipContext([targetItem]);
+        return `${label}：${reasons.length ? reasons.join("；") : t("director.atomic.compileTargetNoReason", { status: targetItem.status })}`;
       });
       const completionNotice = () => {
         const warningNotice = status.verdict === "passed_with_warnings" && status.diagnosticCount
           ? ` · ${t("director.atomic.compileWarnings", { count: status.diagnosticCount })}` : "";
-        const readyTargets = compilationTargets.filter(item => item.status === "ready");
-        const notReadyTargets = compilationTargets.filter(item => item.status !== "ready");
-        const resultNotice = compilationTargets.length && notReadyTargets.length
-          ? t("director.atomic.compilePartial", { ready: readyTargets.length, total: compilationTargets.length, notReady: notReadyTargets.length, clips: clipContext(notReadyTargets) })
-          : t("director.atomic.compileDone", { count: compilationTargets.length ? readyTargets.length : status.targetCount || compileSource.draft.clipGroups.length });
+        const readyTargets = targetItems.filter(item => item.status === "ready");
+        const notReadyTargets = targetItems.filter(item => item.status !== "ready");
+        const resultNotice = targetItems.length && notReadyTargets.length
+          ? t("director.atomic.compilePartial", { ready: readyTargets.length, total: targetItems.length, notReady: notReadyTargets.length, clips: clipContext(notReadyTargets) })
+          : t("director.atomic.compileDone", { count: targetItems.length ? readyTargets.length : status.targetCount || compileSource.draft.clipGroups.length });
+        const causeNotice = notReadyTargets.length ? `\n${t("director.atomic.compileTargetCauseTitle")}\n${notReadyTargetReasons(notReadyTargets).join("\n")}` : "";
         return resultNotice
-          + warningNotice + (warningDetails.length ? `\n\n${warningDetails.join("\n\n")}` : "");
+          + causeNotice + warningNotice + (warningDetails.length ? `\n\n${warningDetails.join("\n\n")}` : "");
       };
       if (status.application?.revision !== undefined) {
         recordSyncedTargets(status.application.referenceSync);
@@ -654,6 +713,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         return;
       }
       if (["succeeded", "blocked", "interrupted", "failed"].includes(status.status)) await persistPendingCompilation(null);
+      recordSyncedTargets();
       const blocker = status.blockingDiagnostic;
       const blockingItems = diagnostics.filter(blocksCompilationDiagnostic);
       const blockingDetails = [...new Set(blockingItems.map(item => {
@@ -1761,7 +1821,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
               onOpenSharedAsset={(assetId, title) => void openSharedAsset(assetId, title).catch(fail)} onPromoteExistingSharedAsset={(assetId, title) => void promoteExistingSharedAsset(assetId, title).catch(fail)}
               onBoundary={setBoundary} onPublish={() => void publish()} onSaveContinuity={saveContinuity} onCheckContinuity={checkContinuity} onContinuitySnapshot={changeContinuitySnapshot}
               onReplace={value => void replaceDirector(value)} onAskDirector={scope => void askDirector(scope)} onNavigate={navigateWorkspace}
-              onCompile={sceneId => void runProductionCompile(sceneId)} compileBusy={compiling} compilePending={Boolean(pendingCompilation)} compileError={compileError} compileNotice={compileNotice} compileDiagnostics={compileDiagnostics} compileTargets={compileTargets}
+              onCompile={(sceneId, targetId) => void runProductionCompile(sceneId, targetId)} compileBusy={compiling} compilePending={Boolean(pendingCompilation)} compileError={compileError} compileNotice={compileNotice} compileDiagnostics={compileDiagnostics} compileTargets={compileTargets}
               onLocateTarget={(kind, id) => {
                 if (kind === "shot") { navigateWorkspace("shots", { kind, id }); return; }
                 const group = production.draft.clipGroups.find(group => group.id === id);

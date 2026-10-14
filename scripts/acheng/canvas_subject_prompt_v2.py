@@ -3,6 +3,7 @@ from collections import defaultdict
 from copy import deepcopy
 from fractions import Fraction
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -25,6 +26,15 @@ def rows(value):
 
 def string_rows(value):
     return [item for item in value if isinstance(item, str) and item] if isinstance(value, list) else []
+
+
+def _canvas_node_entity_id(source_node, fallback=""):
+    source_node = source_node if isinstance(source_node, dict) else {}
+    project_id = str(source_node.get("projectId") or "")
+    node_id = str(source_node.get("nodeId") or "")
+    if project_id and node_id:
+        return "canvas-node:" + json.dumps([project_id, node_id], ensure_ascii=False, separators=(",", ":"))
+    return str(fallback or "")
 
 
 def utf16_length(value):
@@ -386,6 +396,7 @@ def adapt_production(production, *, draft=False):
             composition_references.extend({
                 "id": str(frame.get("id") or ""), "asset_id": str(frame.get("assetId") or frame.get("id") or ""),
                 "asset_version": str(frame.get("asset_version") or ""), "purpose": "构图参考",
+                "sourceNode": frame.get("sourceNode"),
                 "retain": frame.get("retain") or [], "exclude": frame.get("exclude") or [],
                 "requiredForSubmission": frame.get("requiredForSubmission", True),
             } for frame in rows(shot.get("keyframes")) if frame.get("anchor") == "composition")
@@ -399,23 +410,35 @@ def adapt_production(production, *, draft=False):
                 digest = str(snapshot.get("sha256") or "")
                 if not digest or not snapshot.get("file"):
                     raise ValueError("Composition reference " + binding_id + " has no verified media file")
-                picture = picture_by_digest.get(digest)
+                asset_id = str(snapshot.get("assetId") or reference.get("asset_id") or "")
+                # Composition references are standalone content: give the source canvas node
+                # a stable identity, and keep equal bytes from different source nodes distinct.
+                # Digest-only deduplication used to collapse their separate asset/Shot links.
+                entity_id = str(reference.get("entity_id") or _canvas_node_entity_id(reference.get("sourceNode"), asset_id))
+                picture = next((candidate for candidate in selected_pictures
+                                if candidate["sha256"] == digest
+                                and not candidate["is_keyframe"]
+                                and "composition" in candidate["roles"]
+                                and asset_id in candidate["asset_ids"]
+                                and entity_id in candidate["entity_ids"]), None)
                 if not picture:
                     picture = {"number": len(selected_pictures) + 1, "label": "<Picture " + str(len(selected_pictures) + 1) + ">",
                                "sha256": digest, "file": str(snapshot["file"]), "asset_ids": [], "entity_ids": [],
                                "subject_ids": [], "shot_ids": [], "roles": [], "retain": [], "exclude": [],
                                "asset_version": str(snapshot.get("assetVersion") or reference.get("asset_version") or "sha256:" + digest),
                                "is_keyframe": False, "anchor": "", "anchor_shot_ids": []}
-                    picture_by_digest[digest] = picture
                     selected_pictures.append(picture)
-                asset_id = str(snapshot.get("assetId") or reference.get("asset_id") or "")
                 if asset_id:
                     picture["asset_ids"].append(asset_id)
+                if entity_id:
+                    picture["entity_ids"].append(entity_id)
                 picture["shot_ids"].append(shot_id)
                 picture["roles"].append("composition")
                 picture["retain"].extend(str(value) for value in reference.get("retain", []))
                 picture["exclude"].extend(str(value) for value in reference.get("exclude", []))
-                reference_requirements[shot_id].append({"asset_id": asset_id, "asset_version": str(snapshot.get("assetVersion") or reference.get("asset_version") or picture["asset_version"]), "purpose": str(reference.get("purpose") or "构图参考")})
+                reference_requirements[shot_id].append({"asset_id": asset_id, "entity_id": entity_id,
+                                                        "asset_version": str(snapshot.get("assetVersion") or reference.get("asset_version") or picture["asset_version"]),
+                                                        "purpose": str(reference.get("purpose") or "构图参考")})
             for frame in rows(shot.get("keyframes")):
                 if not frame.get("requiredForSubmission", True) or frame.get("anchor") == "composition":
                     continue
@@ -424,20 +447,29 @@ def adapt_production(production, *, draft=False):
                 if not snapshot:
                     raise ValueError("Required keyframe " + binding_id + " is not in the frozen compiler inputs")
                 digest = str(snapshot.get("sha256") or "")
-                picture = picture_by_digest.get(digest)
+                # A valid keyframe may be attached before a visible Subject is
+                # registered. Its archived source node (or stable asset ID) is
+                # still sufficient to identify and require this standalone image.
+                asset_id = str(snapshot.get("assetId") or frame.get("assetId") or frame.get("id") or "")
+                ref_subject = next((subject_by_id.get(str(sid)) for sid in frame.get("subjectIds", []) if str(sid) in subject_by_id), None)
+                entity_id = str((ref_subject or {}).get("entityRef", {}).get("id") or _canvas_node_entity_id(frame.get("sourceNode"), asset_id))
+                picture = next((candidate for candidate in selected_pictures
+                                if candidate["sha256"] == digest
+                                and candidate["is_keyframe"]
+                                and candidate["anchor"] == str(snapshot.get("anchor") or "")
+                                and asset_id in candidate["asset_ids"]
+                                and entity_id in candidate["entity_ids"]), None)
                 if not picture:
                     picture = {"number": len(selected_pictures) + 1, "label": "<Picture " + str(len(selected_pictures) + 1) + ">",
                                "sha256": digest, "file": str(snapshot["file"]), "asset_ids": [], "entity_ids": [],
                                "subject_ids": [], "shot_ids": [], "roles": [], "retain": [], "exclude": [],
                                "asset_version": "sha256:" + digest, "is_keyframe": True, "anchor": str(snapshot.get("anchor") or ""), "anchor_shot_ids": []}
-                    picture_by_digest[digest] = picture
                     selected_pictures.append(picture)
                 picture["is_keyframe"] = True
                 # Preserve the formal keyframe asset identity on the compiled
                 # reference so Backend can resolve its frozen archive path.
                 # Without this id, readCompilationReference only knows the
                 # segment label while the trusted snapshot is indexed by keyframe.
-                asset_id = str(snapshot.get("assetId") or frame.get("assetId") or frame.get("id") or "")
                 if asset_id:
                     picture["asset_ids"].append(asset_id)
                 picture["anchor_shot_ids"].append(shot_id)
@@ -445,12 +477,12 @@ def adapt_production(production, *, draft=False):
                 picture["roles"].append("keyframe")
                 picture["retain"].extend(str(value) for value in frame.get("retain", []))
                 picture["exclude"].extend(str(value) for value in frame.get("exclude", []))
-                ref_subject = next((subject_by_id.get(str(sid)) for sid in frame.get("subjectIds", []) if str(sid) in subject_by_id), None)
-                entity_id = str((ref_subject or {}).get("entityRef", {}).get("id") or "")
                 if entity_id:
                     picture["entity_ids"].append(entity_id)
-                    picture["subject_ids"].append(str(ref_subject.get("id")))
-                    reference_requirements[shot_id].append({"entity_id": entity_id, "asset_version": picture["asset_version"], "purpose": "keyframe"})
+                    if ref_subject:
+                        picture["subject_ids"].append(str(ref_subject.get("id")))
+                    reference_requirements[shot_id].append({"asset_id": asset_id, "entity_id": entity_id,
+                                                            "asset_version": picture["asset_version"], "purpose": "keyframe"})
 
         # H3 consumes storyboard/keyframe references before general reference
         # images. Keep the authored Picture numbering in that same order so

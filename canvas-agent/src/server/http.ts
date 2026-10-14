@@ -29,6 +29,7 @@ import {
   listCodexSkills,
   listCodexThreads,
   readCodexThread,
+  recordUserInterrupt,
   resolveCodexApproval,
   resolveCodexSkill,
   resumeCodexThread,
@@ -367,8 +368,8 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
   });
   app.get(agentRoute("/codex/state"), (_req, res) => res.json({ ok: true, runtime: session.runtimeStateSnapshot }));
   app.post("/canvas/activate", (req, res) => {
-    session.activateClient(String(req.query.clientId || ""));
-    res.json({ ok: true });
+    // 焦点提示是幂等的：网页重连握手完成前上报会被忽略，由随后的 hello 补发，不作为请求失败。
+    res.json({ ok: true, activated: session.activateClient(String(req.query.clientId || "")) });
   });
   app.post("/canvas/result", (req, res) => {
     const ok = session.resolveResult(
@@ -1445,6 +1446,11 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
       const ok = useLlm()
         ? llm!.interrupt(skillDraftRunning ? undefined : requestedThreadId)
         : await interruptCodexTurn(skillDraftRunning ? undefined : requestedThreadId);
+      // Skill 草稿的停止不是生产 turn，不打标记；其余手动停止记录当前 turn，历史读取据此区分「已停止」与意外离线。
+      if (ok && !skillDraftRunning) {
+        const scope = session.codexEventScope;
+        void recordUserInterrupt(ensureSiteWorkspace(config).workspacePath, requestedThreadId || scope.threadId, scope.turnId);
+      }
       res
         .status(ok ? 200 : 409)
         .json({ ok, ...(ok ? {} : { error: "当前没有可停止的任务" }) });

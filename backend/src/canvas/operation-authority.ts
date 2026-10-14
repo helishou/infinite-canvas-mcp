@@ -35,6 +35,19 @@ function isProductionBoundNode(node: Record<string, unknown>) {
     const metadata = recordOf(node.metadata);
     return Boolean(metadata.productionSceneId) || (Array.isArray(metadata.segments) && metadata.segments.some(value => Boolean(recordOf(recordOf(value).productionClipProjection).targetId)));
 }
+function isSceneBoundH3Node(node: Record<string, unknown>) {
+    return Boolean(recordOf(node.metadata).productionSceneId);
+}
+function isEmptySceneBoundH3Node(node: Record<string, unknown>, project: Record<string, unknown>) {
+    const metadata = recordOf(node.metadata);
+    const segments = Array.isArray(metadata.segments) ? metadata.segments : [];
+    const connections = Array.isArray(project.connections) ? project.connections as Array<Record<string, unknown>> : [];
+    return Boolean(metadata.productionSceneId)
+        && segments.length === 0
+        && !metadata.content && !metadata.storageKey && !metadata.runtimeTaskId
+        && !["queued", "loading", "generating", "awaiting_confirmation"].includes(String(metadata.status || ""))
+        && !connections.some(connection => connection.fromNodeId === node.id || connection.toNodeId === node.id);
+}
 function assertProductionSegmentMembership(previousMetadata: Record<string, unknown>, incoming: unknown) {
     if (!Array.isArray(incoming)) return;
     const previous = Array.isArray(previousMetadata.segments) ? previousMetadata.segments.map(recordOf) : [];
@@ -71,7 +84,7 @@ export function prepareClientCanvasOperation(project: Record<string, unknown>, o
     if (operation.type === "delete_node") {
         const ids = new Set(Array.isArray(operation.ids) ? operation.ids.map(String) : [String(operation.id || "")]);
         const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
-        if (nodes.some(node => ids.has(String(node.id)) && isH3CanvasNode(node) && isProductionBoundNode(node))) {
+        if (nodes.some(node => ids.has(String(node.id)) && isH3CanvasNode(node) && isSceneBoundH3Node(node) && !isEmptySceneBoundH3Node(node, project))) {
             throw collaborationError("PRODUCTION_SCENE_NODE_OWNED", "场次 H3 节点由制作台维护；请在制作台确认删除场次");
         }
     }

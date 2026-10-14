@@ -79,6 +79,27 @@ test("按精确 clientId 读取画布快照，不受当前焦点影响", (t) => 
     assert.equal(session.canvasStateForClient("first"), null);
 });
 
+test("重连握手完成前的焦点上报被忽略且不丢失原焦点，重连后补发生效", (t) => {
+    const session = new CanvasSession();
+    const first = connect(session, "first");
+    const second = connect(session, "second");
+    t.after(() => second.close());
+    session.updateState(snapshot("canvas-first"), "first");
+    session.updateState(snapshot("canvas-second"), "second");
+    assert.equal(session.activateClient("second"), true);
+
+    // SSE 断开到重连握手完成之间，网页在窗口聚焦时重复上报同一 clientId。
+    first.close();
+    assert.equal(session.activateClient("first"), false);
+    assert.equal(session.focusedCanvasProjectId(), "canvas-second", "断线网页的焦点上报不夺走当前焦点");
+
+    const reconnected = connect(session, "first");
+    t.after(() => reconnected.close());
+    session.updateState(snapshot("canvas-first-reconnected"), "first");
+    assert.equal(session.activateClient("first"), true);
+    assert.equal(session.focusedCanvasProjectId(), "canvas-first-reconnected");
+});
+
 test("画布写操作只发送给当前激活网页", async (t) => {
     const session = new CanvasSession();
     const first = connect(session, "first");
@@ -219,20 +240,33 @@ test("closing the active client falls back to the most recently focused client",
     assert.equal(field(await session.callTool("canvas_get_state", {}), "projectId"), "canvas-third");
 });
 
-test("closing a client rejects its pending tool requests", async () => {
-    const session = new CanvasSession();
+test("断线宽限窗到期后才拒绝该网页仍未回包的工具请求", async () => {
+    const session = new CanvasSession("", undefined, { clientGraceMs: 40 });
     const first = connect(session, "first");
     const result = session.callTool("canvas_create_text_node", { text: "pending" });
-    const call = first.event("tool_call");
-    const requestId = String(field(call, "requestId"));
     first.close();
 
     const outcome = await Promise.race([
         result.then(() => "resolved", (error) => error instanceof Error ? error.message : String(error)),
-        new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 20)),
+        new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 80)),
     ]);
-    if (outcome === "pending") session.resolveResult("first", { requestId, result: null });
     assert.match(outcome, /断开/);
+});
+
+test("断线宽限窗内网页重连即可恢复身份与未回包的工具请求", async () => {
+    const session = new CanvasSession("", undefined, { clientGraceMs: 60_000 });
+    const first = connect(session, "first");
+    session.setCodexState({ busy: true, threadId: "thread-1", turnId: "" });
+    const result = session.callTool("canvas_create_text_node", { text: "pending" });
+    const requestId = String(field(first.event("tool_call"), "requestId"));
+    first.close();
+
+    assert.equal(session.hasClient("first"), true, "宽限窗内仍保留发起页身份");
+    const reborn = connect(session, "first");
+    const resent = field(reborn.events("tool_call").at(-1), "requestId");
+    assert.equal(resent, requestId, "重连后补发仍在等待的工具请求");
+    assert.equal(session.resolveResult("first", { requestId, result: { done: true } }), true);
+    assert.deepEqual(await result, { done: true });
 });
 
 test("shared thread events are broadcast with the active thread id", (t) => {

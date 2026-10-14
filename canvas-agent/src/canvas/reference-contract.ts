@@ -326,7 +326,9 @@ export function selectSmartImageResult(metadataValue: unknown, policy?: NodeImag
         else return { error: "智能节点的引用选择策略无效；不会回退到浏览中的图片。" };
     }
     const images = Array.isArray(metadata.images) ? metadata.images.map(recordOf) : [];
-    const completed = (item: Record<string, unknown>) => item.status === "success" && Boolean(item.storageKey);
+    // 只把真正可引用的结果算作 candidate：失败/运行中的槽位即使带 storageKey 也不能被引用。
+    // 没有写 status 的条目是历史画布上的已完成结果，按契约继续可用。
+    const completed = (item: Record<string, unknown>) => Boolean(item.storageKey) && (item.status === undefined || item.status === "success");
     if (policy?.mode === "latest_success") {
         const image = images.map((item, index) => ({ item, index })).filter(entry => completed(entry.item)).sort((left, right) => {
             const leftSequence = Number.isSafeInteger(Number(left.item.generationTaskSequence)) ? Number(left.item.generationTaskSequence) : undefined;

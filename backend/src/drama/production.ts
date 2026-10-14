@@ -69,7 +69,7 @@ import type { CanvasOperation } from "../canvas/project-ops.js";
 import { approvedSharedAsset, listApprovedSharedAssets, prepareSharedAssetProjection, registerApprovedSharedAsset, registerSharedAssetVersion, sharedAssetHistory, sharedProjectionNodeId, validateSharedAssetSource, type ApprovedSharedAsset } from "./shared-assets.js";
 import { ensureProductionCanvas, productionCanvasContext } from "./production-canvas.js";
 import { scriptNodeOperations } from "./script-nodes.js";
-import { compileProductionLayout, productionAssetPosition, productionSceneIdsForShots } from "./production-layout.js";
+import { compileProductionLayout, existingProductionSceneH3NodeId, productionAssetPosition, productionSceneIdsForShots } from "./production-layout.js";
 import { productionLayoutStableId, productionNodePosition } from "./production-layout-geometry.js";
 import { compiledImageInput, assertImageReferenceCoverage, imageInputOperations, verifyImageInput } from "./image-inputs.js";
 import { buildPublishedProductionClip, clipInputHash, clipInputOperations, formalStoryboardTrack, productionClipProjection, type ReferenceSync } from "./clip-inputs.js";
@@ -100,6 +100,31 @@ export type DirectorReadiness = { revision: number; publishedVersion: number; so
 const fingerprint = (value: unknown) => crypto.createHash("sha256").update(JSON.stringify(value ?? null)).digest("hex");
 const batchRequestHash = (input: DirectorRunStart) => fingerprint({ idempotencyKey: input.idempotencyKey, workId: input.workId, expectedRevision: input.expectedRevision, version: input.version, targets: input.targets, scope: input.scope, inputBasis: input.inputBasis, expectedCanvasRevision: input.expectedCanvasRevision, expectedPlanHash: input.expectedPlanHash });
 const promptHashBytes = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+function clipAudioRuntime(segmentBindings: any[], canvasInput: Record<string, any> | undefined) {
+    const enabled = canvasInput?.audioDrive === true;
+    const selectedReferenceBindingId = typeof canvasInput?.audioDriveFile === "string" && canvasInput.audioDriveFile ? canvasInput.audioDriveFile : null;
+    const result = {
+        driverEnabled: enabled,
+        selectedReferenceBindingId,
+        start: canvasInput?.audioDriveStart != null && canvasInput.audioDriveStart !== "" && Number.isFinite(Number(canvasInput.audioDriveStart)) ? Number(canvasInput.audioDriveStart) : null,
+        end: canvasInput?.audioDriveEnd != null && canvasInput.audioDriveEnd !== "" && Number.isFinite(Number(canvasInput.audioDriveEnd)) ? Number(canvasInput.audioDriveEnd) : null,
+        authoredBindingId: null as string | null,
+        matchStatus: "disabled" as "disabled" | "unselected" | "matched" | "unmatched" | "ambiguous",
+    };
+    if (!enabled) return result;
+    if (!selectedReferenceBindingId) return { ...result, matchStatus: "unselected" as const };
+
+    const reference = clipRows(canvasInput?.referenceBindings).find(binding => String(binding?.id || "") === selectedReferenceBindingId);
+    const nodeId = String(reference?.sourceNodeId || reference?.nodeId || "");
+    const storageKey = String(reference?.storageKey || "");
+    if (!reference || !nodeId || !storageKey) return { ...result, matchStatus: "unmatched" as const };
+    const matches = segmentBindings.filter(binding =>
+        String(binding?.sourceNode?.nodeId || "") === nodeId
+        && String(binding?.storageKey || "") === storageKey
+        && (!reference.sha256 || !binding?.sha256 || String(reference.sha256) === String(binding.sha256)));
+    if (matches.length !== 1) return { ...result, matchStatus: matches.length > 1 ? "ambiguous" as const : "unmatched" as const };
+    return { ...result, authoredBindingId: String(matches[0].id), matchStatus: "matched" as const };
+}
 const productionMediaDependencyBlockers = (target: DirectorReadinessTarget | undefined) => (target?.blockers || []).filter(message =>
     message.startsWith("依赖资产 ")
     || message.includes("关键帧尚未生成或绑定")
@@ -467,9 +492,14 @@ export class EpisodeProductionService {
             const states = Object.fromEntries(shots.map(shot => [shot.id, projection[shot.id] || { start: [], end: [], unresolved: [] }]));
             const relatedFacts = new Set(usages.flatMap(usage => (((usage as any).continuityFactIds || []) as string[]).map(String)));
             for (const fact of clipRows(ledger?.facts)) if (subjects.some(subject => subject.entityRef?.kind === fact.object_kind && subject.entityRef?.id === fact.object_id)) relatedFacts.add(String(fact.id));
+            const canvasInputs = this.canvasEditorialState(id, [segmentId]);
+            const segmentAudioBindings = clipRows(segment.audio_bindings);
+            const canvasEntry = canvasInputs.find(input => input.segmentId === segmentId);
+            const canvasInput = canvasEntry ? { ...canvasEntry.current, ...canvasEntry.runtime } as Record<string, any> : undefined;
             const workbench = { owner: this.ownerIdentity(id), sourceVersion: "subject-prompt-v2", segmentId, sourceHash: d.sourceHash,
                 inputHash: compilationScopeInput(resolved, clipRefreshScope(segmentId)).inputHash,
-                segment: { id: segment.id, shot_ids: segment.shot_ids, mode: segment.mode, duration_frames: shots.reduce((n, shot) => n + Number(shot.duration_frames), 0) },
+                segment: { id: segment.id, shot_ids: segment.shot_ids, mode: segment.mode, duration_frames: shots.reduce((n, shot) => n + Number(shot.duration_frames), 0), audio_bindings: segmentAudioBindings },
+                audioRuntime: clipAudioRuntime(segmentAudioBindings, canvasInput),
                 shots: shots.map(shot => ({ ...shot, timelineWindow: windows.get(String(shot.id)), continuity: states[shot.id] })),
                 subjects: subjects.map(subject => ({ ...subject, assets: clipRows(subject.pictureBindings).map(binding => ({ ...binding, resolved: resolved.assets[String(binding.assetId)] || null })) })),
                 utterances: clipRows(d.source.utterances).filter(u => shots.some(shot => (shot.utterance_refs || []).some((ref: any) => ref.utteranceId === u.id))),
@@ -478,7 +508,7 @@ export class EpisodeProductionService {
                     coverage: clipRows(ledger?.coverage).filter(item => (item.shot_ids || []).some((shotId: string) => shotIds.has(shotId))) },
                 targetStatus: this.targetOccupancy(id, [segmentId]),
                 directorArtifacts: d.artifacts.filter(a => a.targetId === segmentId).map(a => ({ id: a.id, status: a.status, current: currentCompilationArtifact(resolved, a), sha256: a.sha256, promptBytes: Buffer.byteLength(a.prompt), references: a.references })),
-                canvasInputs: this.canvasEditorialState(id, [segmentId]), boundaries: d.boundaries.filter(b => b.from === segmentId || b.to === segmentId),
+                canvasInputs, boundaries: d.boundaries.filter(b => b.from === segmentId || b.to === segmentId),
                 resolutionDiagnostics, workbenchBuildMs: performance.now() - started };
             return { ...production, clipWorkbench: workbench, workbenchVersion: directorHash(workbench) };
         }
@@ -489,13 +519,17 @@ export class EpisodeProductionService {
         const related = (r: any) => shotIds.has(r.shot_id) || (r.shot_ids || []).some((s: string) => shotIds.has(s));
         const continuity = this.continuityForDirector(id, d, snapshot);
         const report: any = continuity.report;
+        const segmentAudioBindings = clipRows(segment.audio_bindings);
+        const canvasInputs = this.canvasEditorialState(id, [segmentId]);
+        const canvasEntry = canvasInputs.find(input => input.segmentId === segmentId);
+        const canvasInput = canvasEntry ? { ...canvasEntry.current, ...canvasEntry.runtime } as Record<string, any> : undefined;
         const workbench = { owner: this.ownerIdentity(id), segmentId, sourceHash: d.sourceHash, inputHash: projection.inputHash, engine: d.engine,
-            segment, shots, shotInputs: Object.fromEntries(shots.map(s => [s.id, d.shotInputs[s.id]])),
+            segment: { ...segment, audio_bindings: segmentAudioBindings }, audioRuntime: clipAudioRuntime(segmentAudioBindings, canvasInput), shots, shotInputs: Object.fromEntries(shots.map(s => [s.id, d.shotInputs[s.id]])),
             characterRegistry: clipRows(d.source.character_registry).filter(c => subjects.has(c.id)),
             sceneRegistry: clipRows(d.source.scene_registry).filter(c => shots.some(s => s.scene_id === c.id)),
             assetPlan: clipRows(projection.director.source.asset_plan), assetCards: clipRows(projection.director.source.asset_cards), assets: Object.fromEntries(Object.entries(d.assets).filter(([key]) => assetIds.has(key))),
             directorReferences: { authored: segment.references || [], compiled: d.artifacts.filter(a => a.targetId === segmentId).map(a => ({ id: a.id, status: a.status, current: currentCompilationArtifact(d, a), sha256: a.sha256, references: a.references })) },
-            canvasInputs: this.canvasEditorialState(id, [segmentId]), targetStatus: this.targetOccupancy(id, [segmentId]),
+            canvasInputs, targetStatus: this.targetOccupancy(id, [segmentId]),
             continuity: { status: continuity.status, stale: report?.stale ?? true, sourceHash: report?.sourceHash, runtimeId: report?.runtimeId,
                 trajectories: Object.fromEntries(Object.entries(report?.trajectories || {}).filter(([s]) => shotIds.has(s))),
                 diagnostics: (report?.diagnostics || []).filter((i: any) => !i.affectedTargets?.length || i.affectedTargets.includes(segmentId)),
@@ -535,6 +569,10 @@ export class EpisodeProductionService {
         if (!authored || !isSubjectPromptAssembly(authored.source)) throw new Error("SHOT_WORKBENCH_SOURCE_VERSION: 所选制作稿尚未采用 Subject Prompt v2");
         let director = authored, resolutionDiagnostics: Array<Record<string, unknown>> = [];
         const segmentId = String(clipRows(director.source.segments).find(clip => (clip.shot_ids || []).includes(shotId))?.id || "");
+        const segment = clipRows(director.source.segments).find(clip => String(clip.id) === segmentId);
+        const segmentAudioBindings = clipRows(segment?.audio_bindings);
+        const canvasEntry = segmentId ? this.canvasEditorialState(id, [segmentId]).find(input => input.segmentId === segmentId) : undefined;
+        const canvasInput = canvasEntry ? { ...canvasEntry.current, ...canvasEntry.runtime } as Record<string, any> : undefined;
         if (snapshot === "draft") try { director = this.resolveSubjectPictureInputs(id, authored, segmentId ? [segmentId] : []); } catch (error) { resolutionDiagnostics = (error as any)?.diagnostics || [{ code: "SUBJECT_IMAGE_RESOLUTION", message: error instanceof Error ? error.message : String(error) }]; }
         const shot = clipRows(director.source.shots).find(item => item.id === shotId);
         if (!shot) throw new Error(`Shot ${shotId} 不存在`);
@@ -551,7 +589,9 @@ export class EpisodeProductionService {
             try { compilationInput = this.resolveSubjectPictureInputs(id, authored, clipId ? [clipId] : [], true); }
             catch { compilationInput = undefined; }
         }
-        const workbench = { shot, timelineWindow: subjectShotWindows(director.source).get(shotId), continuity: states[shotId], subjectUsages: usages,
+        const workbench = { shot, segment: segment ? { id: segment.id, audio_bindings: segmentAudioBindings } : null,
+            audioRuntime: clipAudioRuntime(segmentAudioBindings, canvasInput),
+            timelineWindow: subjectShotWindows(director.source).get(shotId), continuity: states[shotId], subjectUsages: usages,
             subjectRegistry: clipRows(director.source.subject_registry).filter(subject => subjectIds.has(String(subject.id))),
             keyframes: clipRows(shot.keyframes).filter(frame => frame.anchor !== "composition").map(frame => {
                 let resolved: DirectorProduction["assets"][string] | null = director.assets[String(frame.assetId || frame.id)] || null;
@@ -1968,6 +2008,7 @@ export class EpisodeProductionService {
             if (!input) return [];
             const fields = group ? ["prompt", "referenceBindings", "storyboardShots", "duration", "styleTemplateId", "motionContextEnabled", "tailFrameContinuation"] : ["prompt", "model", "comfyParams", "size", "quality", "count"];
             return [{ targetId, nodeId, segmentId: group?.segmentId, canvasRevision: project.revision, current: Object.fromEntries(fields.map(field => [field, input[field]])),
+                ...(group ? { runtime: Object.fromEntries(["audioDrive", "audioDriveFile", "audioDriveStart", "audioDriveEnd"].map(field => [field, input[field]])) } : {}),
                 directorBaseline: projection?.nextValues || {}, manualFields: fields.filter(field => projection?.fieldHashes?.[field] && projection.fieldHashes[field] !== inputHash(input[field])), directorChanges: (projection?.conflicts || []).filter((field: string) => !fields.includes(field) || !projection?.fieldHashes?.[field] || projection.fieldHashes[field] !== inputHash(input[field])), inputOutdated: input.inputOutdated || false }];
         });
     }
@@ -2957,7 +2998,8 @@ export class EpisodeProductionService {
                         const isNewGroup = !previousClipIds.has(group.id);
                         if (!isNewGroup && !createdSceneSet.has(sceneIds[0])) continue;
                         materializeClipIds.add(group.id);
-                        group.nodeId ||= productionLayoutStableId("production-h3-scene", owner.id, sceneIds[0]);
+                        group.nodeId ||= existingProductionSceneH3NodeId(canvas, next.draft, owner, sceneIds[0])
+                            || productionLayoutStableId("production-h3-scene", owner.id, sceneIds[0]);
                         group.segmentId ||= `clip-${crypto.createHash("sha256").update([owner.id, group.id].join(String.fromCharCode(0))).digest("hex").slice(0, 24)}`;
                     }
                     const h3Defaults = record(this.db.getSetting("plugin:minimax-h3:defaults:v1"));
@@ -4029,3 +4071,4 @@ function reorder<T extends { id: string }>(items: T[], ids: string[]) {
 function orderShotsByScene(draft: EpisodeProductionData) {
     return draft.scenes.flatMap((scene) => draft.shots.filter((shot) => shot.sceneId === scene.id));
 }
+        

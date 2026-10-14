@@ -35,7 +35,7 @@ export function settledTurnIds(thread: unknown, supplementalHistory: CodexSupple
 }
 
 /** 将 Codex turn items 转换为网页聊天历史。 */
-export function threadMessages(thread: unknown, planUpdates: CodexPlanUpdate[] = [], supplementalHistory: CodexSupplementalHistory = emptySupplementalHistory): AgentHistoryMessage[] {
+export function threadMessages(thread: unknown, planUpdates: CodexPlanUpdate[] = [], supplementalHistory: CodexSupplementalHistory = emptySupplementalHistory, userInterruptedTurnIds: ReadonlySet<string> = new Set()): AgentHistoryMessage[] {
     const threadId = String(field(thread, "id") || "");
     if (!threadId) return [];
     const turns = mergeHistoryTurns(thread, supplementalHistory);
@@ -153,7 +153,12 @@ export function threadMessages(thread: unknown, planUpdates: CodexPlanUpdate[] =
             const error = userFacingCodexError(turnError || itemError);
             push({ id: "synthetic:error", role: "error", title: error.title, text: error.text });
         } else if (String(field(turn, "status")) === "interrupted") {
-            push({ id: "synthetic:interrupted", role: "error", title: "本轮已中断", text: "本轮任务已中断，已保存的内容和对话保留；这不是仍在运行的任务。继续前请核对当前制作记录。" });
+            if (userInterruptedTurnIds.has(turnId)) {
+                push({ id: "synthetic:interrupted", role: "error", title: "已停止", text: "本轮任务已手动停止，已保存的内容和对话保留。可直接继续下一轮，无需重跑。" });
+            } else {
+                // 非人为中断（断线、进程重启等）：不是失败，给出可恢复的提示而非红色报错。
+                push({ id: "synthetic:interrupted", role: "tool", title: "本轮暂时离线", text: "制作会话暂时失去连接，本轮未完成；已保存的内容和对话保留，不会自动重跑。发送「继续」即可从上次进度接着做。" });
+            }
         }
     });
     return latestCompleteTurns(messages.filter((item) => item.text || item.role === "tool"), 120);

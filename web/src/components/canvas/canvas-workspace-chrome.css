@@ -13,7 +13,8 @@
 .canvas-zoom-dock > div:first-child { pointer-events:auto; }
 .canvas-zoom-dock > div:first-child { height:48px; }
 .canvas-zoom-dock input[type="range"] { width:64px; }
-.canvas-selection-actions { position:absolute; z-index:75; right:12px; top:12px; border:1px solid; border-radius:8px; }
+.canvas-selection-actions { position:absolute; z-index:75; right:12px; top:12px; display:flex; align-items:center; gap:2px; max-width:calc(100% - 24px); overflow-x:auto; border:1px solid; border-radius:8px; white-space:nowrap; }
+.canvas-selection-actions .ant-btn { flex-shrink:0; }
 [data-canvas-minimap] { bottom:12px; left:12px; }
 .canvas-stage:has([data-canvas-minimap]) .canvas-zoom-dock { bottom:184px; }
 .canvas-mode-notice { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:90; max-width:calc(100% - 24px); display:flex; align-items:center; gap:12px; border:1px solid var(--border); border-radius:8px; padding:8px 12px; background:var(--popover); color:var(--popover-foreground); font-size:13px; }

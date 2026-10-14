@@ -12,6 +12,7 @@ import { useImageQuickToolsStore } from "@/stores/use-image-quick-tools-store";
 import { CanvasNodeType, type CanvasNodeData, type ViewportTransform } from "@/types/canvas";
 import { canvasNodeImage } from "@/lib/canvas/canvas-image-renderability";
 import type { CanvasNodeToolbarItem } from "@/types/canvas-plugin";
+import { isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { ImageToolSettingsModal, type ImageToolbarSettingsTool } from "./canvas-image-toolbar-settings-modal";
 import { groupCanvasNodeActions, nearbyCanvasNodeActions } from "./canvas-node-action-groups";
 import { buildImageToolbarTools, type ImageQuickToolId } from "./canvas-image-toolbar-tools";
@@ -177,6 +178,7 @@ export function CanvasNodeHoverToolbar({
     const hasText = isText && Boolean(node.metadata?.content?.trim());
     const isConfig = node.type === CanvasNodeType.Config && !isSmartGenerationNode;
     const isGroup = node.type === CanvasNodeType.Group;
+    const isSceneBoundH3 = isH3NodeType(node.type) && Boolean(String(node.metadata?.productionSceneId || "").trim());
     const canRetry = node.metadata?.status === "error";
     const quickImageToolIdSet = new Set(quickImageToolIds);
     const copyImagePrompt = (target: CanvasNodeData) => {
@@ -201,7 +203,7 @@ export function CanvasNodeHoverToolbar({
         { id: "info", title: t("canvas.nodeToolbar.infoTitle"), label: t("canvas.nodeToolbar.info"), icon: <Info className="size-4" />, onClick: () => onInfo(node) },
         ...(isGroup ? [{ id: "arrangeGroup", title: t("canvas.nodeToolbar.arrangeGroupTitle"), label: t("canvas.nodeToolbar.arrangeGroup"), icon: <LayoutGrid className="size-4" />, onClick: () => onArrangeGroup(node) }] : []),
         ...(isGroup ? [{ id: "toggleOrderedGroup", title: t(node.metadata?.orderedGroup ? "canvas.nodeActions.unorderedGroup" : "canvas.nodeActions.orderedGroup"), label: t(node.metadata?.orderedGroup ? "canvas.nodeActions.unorderedGroup" : "canvas.nodeActions.orderedGroup"), icon: <ListOrdered className="size-4" />, onClick: () => onToggleOrderedGroup(node), active: Boolean(node.metadata?.orderedGroup) }] : []),
-        { id: "delete", title: t("canvas.nodeToolbar.removeTitle"), label: t("common.delete"), icon: <Trash2 className="size-4" />, onClick: () => onDelete(node), danger: true },
+        ...(!isSceneBoundH3 ? [{ id: "delete", title: t("canvas.nodeToolbar.removeTitle"), label: t("common.delete"), icon: <Trash2 className="size-4" />, onClick: () => onDelete(node), danger: true }] : []),
         ...(isGroup ? [{ id: "groupLock", title: t(node.metadata?.groupLocked ? "canvas.nodeActions.unlockGroup" : "canvas.nodeActions.lockGroup"), label: t(node.metadata?.groupLocked ? "canvas.nodeActions.unlockGroup" : "canvas.nodeActions.lockGroup"), icon: node.metadata?.groupLocked ? <Unlock className="size-4" /> : <Lock className="size-4" />, onClick: () => onToggleGroupLock(node), active: Boolean(node.metadata?.groupLocked) }] : []),
     ];
     const nodeToolbarTools: ToolbarTool[] = [

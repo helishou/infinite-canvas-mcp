@@ -381,6 +381,10 @@ function findOrderedGroupDrop(nodes: CanvasNodeData[], point: Position) {
     return drop ? { group, drop } : null;
 }
 
+function isSceneBoundH3Node(node: CanvasNodeData | undefined | null) {
+    return Boolean(node && isH3NodeType(node.type) && String(node.metadata?.productionSceneId || "").trim());
+}
+
 export function CanvasSurface({ projectId }: { projectId: string }) {
     const { message, modal } = App.useApp();
     const { t } = useTranslation();
@@ -1147,6 +1151,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         () => nodes.reduce((count, node) => (selectedNodeIds.has(node.id) && node.type !== CanvasNodeType.Group ? count + 1 : count), 0),
         [nodes, selectedNodeIds],
     );
+    const hasDeletableSelectedNode = nodes.some(node => selectedNodeIds.has(node.id) && !isSceneBoundH3Node(node));
     const previewNode = previewNodeId ? nodeById.get(previewNodeId) || null : null;
     const previewImage = previewImageId ? previewNode?.metadata?.images?.find((image) => image.id === previewImageId) : undefined;
     const previewStorageKey = previewImage?.storageKey || previewNode?.metadata?.storageKey;
@@ -1487,7 +1492,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const deleteNodes = useCallback(
         (ids: Set<string>) => {
             if (!ids.size) return;
-            const protectedIds = new Set(nodesRef.current.filter((node) => ids.has(node.id) && isH3NodeType(node.type)).map((node) => node.id));
+            const protectedIds = new Set(nodesRef.current.filter((node) => ids.has(node.id) && isSceneBoundH3Node(node)).map((node) => node.id));
             const allIds = new Set([...ids].filter((id) => !protectedIds.has(id)));
             if (!allIds.size) return;
             setNodes((prev) => {
@@ -3021,7 +3026,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 } else if (event.key === "Delete" && selectedNodeIdsRef.current.size) {
                     event.preventDefault();
                     const selected = selectedNodeIdsRef.current;
-                    const deletableIds = new Set(nodesRef.current.filter((node) => selected.has(node.id) && !isH3NodeType(node.type)).map((node) => node.id));
+                    const deletableIds = new Set(nodesRef.current.filter((node) => selected.has(node.id) && !isSceneBoundH3Node(node)).map((node) => node.id));
                     if (deletableIds.size) {
                         deleteNodes(deletableIds);
                         setSelectedNodeIds(new Set([...selected].filter((id) => !deletableIds.has(id))));
@@ -6203,6 +6208,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onFocusSelection={focusSelection}
                     onBatchRename={openBatchRename}
                     selectedCount={selectedNodeIds.size}
+                    deleteDisabled={!hasDeletableSelectedNode}
                     showSelectionActions={!screenEditorOpen}
                     canvasTool={canvasTool}
                     canUndo={historyState.canUndo}
@@ -6236,7 +6242,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 {contextMenu ? (
                     <CanvasNodeContextMenu
                         menu={contextMenu}
-                        canDelete={contextMenu.type === "connection" || !isH3NodeType(contextMenuNode?.type)}
+                        canDelete={contextMenu.type === "connection" || !isSceneBoundH3Node(contextMenuNode)}
                         canCaptureVideoFrame={contextMenuNode?.type === CanvasNodeType.Video && Boolean(contextMenuNode.metadata?.content)}
                         canGroup={contextMenu.type === "node" && selectedNodeIds.has(contextMenu.nodeId) && groupableSelectedCount > 1}
                         canCopyContent={Boolean(contextMenuText)}

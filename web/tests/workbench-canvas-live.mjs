@@ -53,7 +53,7 @@ try {
  await page.goto(testURL);await page.getByRole('button',{name:'打开画布',exact:true}).first().waitFor();
  await page.setViewportSize({width:1600,height:1000});
  await page.getByRole('button',{name:'生成与交付',exact:true}).first().click();
- await page.locator('[data-production-target-groups]').waitFor();
+ await page.locator('[data-production-section-root]').waitFor();
  const light=await browser.newPage({viewport:{width:1440,height:900}});
  light.on('pageerror',error=>errors.push(error.message));
  light.on('request',r=>{if(r.method()==='POST' && /\/(production\/ops|tasks)$/.test(new URL(r.url()).pathname))writes.push(new URL(r.url()).pathname)});

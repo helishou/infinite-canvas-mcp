@@ -10,6 +10,7 @@ export function CanvasToolbar({
     onFocusSelection,
     onBatchRename,
     selectedCount,
+    deleteDisabled = false,
     showSelectionActions,
     canvasTool,
     canUndo,
@@ -38,6 +39,7 @@ export function CanvasToolbar({
     onFocusSelection: () => void;
     onBatchRename: () => void;
     selectedCount: number;
+    deleteDisabled?: boolean;
     showSelectionActions: boolean;
     canvasTool: "select" | "pan";
     canUndo: boolean;
@@ -75,13 +77,6 @@ export function CanvasToolbar({
         { type: "group", label: t("canvasChrome.structure"), children: [item("config", onAddConfig), item("loop", onAddLoop), { key: "group", label: t(groupSelection ? "canvas.controls.group" : "canvas.toolbar.group"), onClick: onAddGroup }] },
         ...(extensionDefs.length ? [{ type: "group" as const, label: t("canvas.toolbar.extensions"), children: extensionDefs.map(def => ({ key: `extension:${def.type}`, label: getNodeSpec(def.type).title, icon: <span>{def.icon}</span>, onClick: () => onAddExtensionNode(def.type) })) }] : []),
     ];
-    const selectionItems: MenuProps["items"] = [
-        { key: "focus", icon: <Focus className="size-4" />, label: t("canvas.navigation.focusSelection"), onClick: onFocusSelection },
-        ...(selectedCount > 1 ? [{ key: "rename", icon: <PencilLine className="size-4" />, label: t("canvas.navigation.rename"), onClick: onBatchRename }] : []),
-        { key: "arrange", icon: <Grid2x2 className="size-4" />, label: t("canvas.toolbar.arrange"), onClick: onArrange },
-        ...(groupSelection ? [{ key: "group", icon: <Group className="size-4" />, label: t("canvas.controls.group"), onClick: onAddGroup }] : []),
-        { type: "divider" }, { key: "delete", danger: true, icon: <Trash2 className="size-4" />, label: t("canvas.deleteSelected"), onClick: onDelete },
-    ];
     return <>
         <div data-canvas-create-tools className="canvas-create-dock" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.item }} onPointerDown={event => event.stopPropagation()}>
             <Tooltip title={t(canvasTool === "select" ? "canvas.toolbar.select" : "canvas.toolbar.pan")}><Button type="text" aria-label={t(canvasTool === "select" ? "canvas.toolbar.select" : "canvas.toolbar.pan")} onClick={() => onCanvasToolChange(canvasTool === "select" ? "pan" : "select")} icon={canvasTool === "select" ? <MousePointer2 className="size-4" /> : <Hand className="size-4" />} /></Tooltip>
@@ -92,6 +87,13 @@ export function CanvasToolbar({
             <Tooltip title={t("canvas.toolbar.upload")}><Button type="text" aria-label={t("canvas.toolbar.upload")} onClick={onUpload} icon={<Upload className="size-4" />} /></Tooltip>
             <Dropdown destroyOnHidden trigger={["click"]} placement="topRight" menu={{ items: [{ type: "group", label: t("canvasChrome.danger"), children: [{ key: "clear", danger: true, label: t("canvas.toolbar.clear"), onClick: onClear }] }] }}><Button type="text" aria-label={t("canvasChrome.canvasActions")} icon={<Ellipsis className="size-4" />} /></Dropdown>
         </div>
-        {showSelectionActions && selectedCount > 0 && <div className="canvas-selection-actions" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.item }} onPointerDown={event => event.stopPropagation()}><Tooltip title={t("canvas.navigation.focusSelection")}><Button type="text" aria-label={t("canvas.navigation.focusSelection")} onClick={onFocusSelection} icon={<Focus className="size-4" />} /></Tooltip><Dropdown destroyOnHidden trigger={["click"]} menu={{ items: selectionItems }}><Button type="text" icon={<Ellipsis className="size-4" />}>{t("canvasChrome.selected", { count: selectedCount })}</Button></Dropdown></div>}
+        {showSelectionActions && selectedCount > 0 && <div className="canvas-selection-actions" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.item }} onPointerDown={event => event.stopPropagation()}>
+            <span className="px-2 text-sm whitespace-nowrap">{t("canvasChrome.selected", { count: selectedCount })}</span>
+            <Tooltip title={t("canvas.navigation.focusSelection")}><Button type="text" onClick={onFocusSelection} icon={<Focus className="size-4" />}>{t("canvas.navigation.focusSelection")}</Button></Tooltip>
+            {selectedCount > 1 && <Tooltip title={t("canvas.navigation.rename")}><Button type="text" onClick={onBatchRename} icon={<PencilLine className="size-4" />}>{t("canvas.navigation.rename")}</Button></Tooltip>}
+            {groupSelection && <Tooltip title={t("canvas.controls.group")}><Button type="text" onClick={onAddGroup} icon={<Group className="size-4" />}>{t("canvas.controls.group")}</Button></Tooltip>}
+            <Tooltip title={t("canvas.toolbar.arrange")}><Button type="text" onClick={onArrange} icon={<Grid2x2 className="size-4" />}>{t("canvas.toolbar.arrange")}</Button></Tooltip>
+            <Tooltip title={t("canvas.deleteSelected")}><Button type="text" danger disabled={deleteDisabled} onClick={onDelete} icon={<Trash2 className="size-4" />}>{t("canvas.deleteSelected")}</Button></Tooltip>
+        </div>}
     </>;
 }

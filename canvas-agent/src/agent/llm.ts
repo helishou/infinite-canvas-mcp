@@ -84,9 +84,10 @@ export class LlmAgent {
         const thread = this.load(id, cwd);
         // A persisted running turn after process restart is evidence of interruption, never a retry instruction.
         if (!this.controllers.has(id)) for (const turn of thread.turns) if (turn.status === "running") {
-            turn.status = "interrupted"; turn.error = "Agent 进程已中断；工具可能已执行，请核对回执和任务，未自动重跑";
+            turn.status = "interrupted"; turn.error = "Agent 进程在中途被中断，本轮未完成；工具可能已执行，请核对回执和任务后再继续，未自动重跑";
             this.completeMissingResults(turn);
-            turn.display.push(this.display(id, turn.id, "interruption", "error", turn.error));
+            // 进程中断不是失败：用普通通知样式呈现，不触发整段对话的「处理失败」态。
+            turn.display.push(this.display(id, turn.id, "interruption", "tool", turn.error, "进程中断"));
             this.save(thread);
         }
         return { thread: this.summary(thread), messages: thread.turns.flatMap(turn => turn.display), settledTurnIds: thread.turns.filter(turn => turn.status !== "running").map(turn => turn.id), historyReady: true };

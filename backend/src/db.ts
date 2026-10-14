@@ -2037,6 +2037,39 @@ export class BackendDatabase {
         }
     }
 
+    private assertEmptySceneH3NodeCanBeDeleted(projectId: string, project: Record<string, unknown>, nodeId: string) {
+        const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, any>> : [];
+        const node = nodes.find(item => String(item.id) === nodeId);
+        if (!node || !isH3CanvasNode(node) || !node.metadata?.productionSceneId) return;
+        const metadata = node.metadata as Record<string, any>;
+        const segments = Array.isArray(metadata.segments) ? metadata.segments : [];
+        if (segments.length || metadata.content || metadata.storageKey || metadata.runtimeTaskId
+            || ["queued", "loading", "generating", "awaiting_confirmation"].includes(String(metadata.status || ""))) {
+            throw collaborationError("PRODUCTION_SCENE_NODE_OWNED", "该场次 H3 节点仍有 Clip、媒体或运行状态，不能作为空节点清理");
+        }
+        if ((Array.isArray(project.connections) ? project.connections as Array<Record<string, unknown>> : [])
+            .some(connection => connection.fromNodeId === nodeId || connection.toNodeId === nodeId)) {
+            throw collaborationError("PRODUCTION_SCENE_NODE_OWNED", "该场次 H3 节点仍有画布连接，不能清理");
+        }
+        if (this.listTasks({ projectId, nodeIds: [nodeId], limit: 1 }).length
+            || this.listGenerationLogs({ projectId, nodeId, limit: 1 }).length) {
+            throw collaborationError("PRODUCTION_SCENE_NODE_OWNED", "该场次 H3 节点仍有任务或生成历史，不能清理");
+        }
+        const productionRows = [
+            ...this.db.prepare("SELECT p.draft_json, p.published_json FROM episode_productions p JOIN drama_episodes e ON e.id = p.episode_id WHERE e.canvas_id = ?").all(projectId),
+            ...this.db.prepare("SELECT draft_json, published_json FROM canvas_productions WHERE project_id = ?").all(projectId),
+            ...this.db.prepare("SELECT p.draft_json, p.published_json FROM scene_productions p JOIN drama_scene_canvases c ON c.scene_id = p.scene_id WHERE c.canvas_id = ?").all(projectId),
+        ] as Array<{ draft_json: string; published_json?: string | null }>;
+        for (const row of productionRows) for (const json of [row.draft_json, row.published_json].filter((value): value is string => Boolean(value))) {
+            let production: Record<string, unknown>;
+            try { production = JSON.parse(json) as Record<string, unknown>; } catch { continue; }
+            const groups = Array.isArray(production.clipGroups) ? production.clipGroups as Array<Record<string, unknown>> : [];
+            if (groups.some(group => String(group.nodeId || "") === nodeId)) {
+                throw collaborationError("PRODUCTION_SCENE_NODE_OWNED", "仍有草稿或已发布 Clip 绑定此节点，不能清理");
+            }
+        }
+    }
+
     applyCanvasProjectOperations(id: string, expectedRevision: number | undefined, inputOperations: CanvasOperation[], context?: CanvasCommandContext) {
         const beginSql = context?.withinTransaction ? "SAVEPOINT production_canvas_ops" : "BEGIN IMMEDIATE";
         const commitSql = context?.withinTransaction ? "RELEASE SAVEPOINT production_canvas_ops" : "COMMIT";
@@ -2145,6 +2178,10 @@ export class BackendDatabase {
                 delete operation.textSuggestion;
                 const isSuggestion = operation.type === "save_text_suggestion" || operation.type === "resolve_text_suggestion";
                 const isText = isSuggestion || operation.type === "text_update" || operation.type === "text_replace";
+                if (!context?.runtimeWrite && operation.type === "delete_node") {
+                    const nodeIds = Array.isArray(operation.ids) ? operation.ids.map(String) : [String(operation.id || "")];
+                    for (const nodeId of nodeIds) this.assertEmptySceneH3NodeCanBeDeleted(id, project, nodeId);
+                }
                 if (operation.type === "restore_h3_output") operations[index] = this.restoreH3OutputOperation(id, project, operation, context?.withinTransaction === true && context.runtimeWrite === true);
                 if (isSuggestion) operations[index] = this.applyTextSuggestion(id, project, operation);
                 else if (isText) operations[index] = this.applyCanvasTextOperation(id, project, operation);

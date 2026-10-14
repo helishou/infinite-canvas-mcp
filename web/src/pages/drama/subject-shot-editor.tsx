@@ -29,6 +29,9 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
     const id = String(shot.id), { draft, invalid } = readShotFormDraft(draftValue, shot, source), value = draft.value;
     const dirty = shotDraftChanged(draft), changedSource = dirty && shotDraftSourceChanged(draft, shot, source);
     const sectionControl: { current: "direction" | "sound" | "subjects" | "anchors"; select: (key: "direction" | "sound" | "subjects" | "anchors") => void } | undefined = workbench && typeof (workbench as Record<string, any>).__sectionControl === "object" ? (workbench as Record<string, any>).__sectionControl : undefined;
+    const audioRuntime = workbench?.audioRuntime as Record<string, any> | undefined;
+    const authoredAudioBindings = records(workbench?.segment?.audio_bindings);
+    const matchedAudioBinding = authoredAudioBindings.find(binding => String(binding.id) === String(audioRuntime?.authoredBindingId || ""));
     const [section, setSection] = useState<"direction" | "sound" | "subjects" | "anchors">(sectionControl?.current || "direction");
     // 「参考与连续性」从右上角独立按钮收编为页签：工作台把 detailView 开关挂到 workbench.__contextControl，选中时表单体隐藏、上下文侧栏显示。
     const contextControl: { active: boolean; enter: () => void; exit: () => void } | undefined = workbench && typeof (workbench as Record<string, any>).__contextControl === "object" ? (workbench as Record<string, any>).__contextControl : undefined;
@@ -166,6 +169,15 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
             {/* A 类补齐：结构化声音字段（逐条 foley / 低频约束）原先只能靠上面的自由文本带过，跟随整表单草稿一起保存。 */}
             {value.audio != null && typeof value.audio === "object" && !Array.isArray(value.audio) ? <AudioDesignEditor key={id} value={value.audio} disabled={disabled} onChange={nextAudio => update({ audio: nextAudio })} /> : null}
             </section>
+            {workbench?.clipId && <section className="shot-editor-span-all space-y-2 rounded-lg border border-border bg-muted/20 p-3" data-h3-audio-driver>
+                <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="m-0 flex items-center gap-2 text-sm font-medium"><Volume2 className="size-4" />{t("director.atomic.audioDriverTitle")}</h4><span className="rounded border border-border px-2 py-0.5 text-xs text-muted-foreground">{audioRuntime?.driverEnabled ? t("director.atomic.audioDriverEnabled") : t("director.atomic.audioDriverDisabled")}</span></div>
+                {audioRuntime ? <>
+                    <p className="m-0 text-xs text-muted-foreground">{t(`director.atomic.audioDriverStatus.${audioRuntime.matchStatus || "unmatched"}`)}</p>
+                    {matchedAudioBinding && <p className="m-0 text-sm">{t("director.atomic.audioDriverSource")}: <strong>{String(matchedAudioBinding.label || matchedAudioBinding.id)}</strong>{Array.isArray(matchedAudioBinding.shotIds) && <span className="ml-2 text-xs text-muted-foreground">{matchedAudioBinding.shotIds.map(String).includes(id) ? t("director.atomic.audioDriverIncludesShot") : t("director.atomic.audioDriverExcludesShot")}</span>}</p>}
+                    {audioRuntime.driverEnabled && (audioRuntime.start != null || audioRuntime.end != null) && <p className="m-0 text-xs text-muted-foreground">{t("director.atomic.audioDriverRange")}: {audioRuntime.start == null ? "—" : Number(audioRuntime.start).toFixed(3)}–{audioRuntime.end == null ? "—" : Number(audioRuntime.end).toFixed(3)}s</p>}
+                    {authoredAudioBindings.length > 0 && !matchedAudioBinding && <p className="m-0 text-xs text-muted-foreground">{t("director.atomic.audioDriverBindings", { labels: authoredAudioBindings.map(binding => String(binding.label || binding.id)).join(" · ") })}</p>}
+                </> : <p className="m-0 text-xs text-amber-600">{t("director.atomic.audioDriverUnavailable")}</p>}
+            </section>}
             {utteranceRows.map((item, index) => <article key={item.utteranceId || `new:${index}`} className="space-y-2 rounded-lg border border-border p-3">
                     <div className="flex items-center gap-2">
                         <Select className="min-w-0 flex-1" value={item.speakerSubjectId || undefined} disabled={disabled} placeholder={t("director.atomic.dialogueSpeaker")} options={subjects.map(subject => ({ value: String(subject.id), label: subjectDisplayName(source, String(subject.id)) }))} onChange={speakerSubjectId => utterancePatch(index, { speakerSubjectId })} />

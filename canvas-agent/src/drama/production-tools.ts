@@ -54,7 +54,7 @@ export const productionToolDescriptions: Record<ProductionToolName, string> = {
     production_get_source: "只读取一个指定 sourceSection；script、production_shots、clip_groups、keyframes、keyframe_reviews、settings 是制作正文分区，其余章节来自导演源稿。默认每页 50 条、最多 100 条；用 cursor 续页。读取单个对象可传唯一 targetIds 和 chunkBytes 分块。",
     production_get_artifact_index: "分页读取轻量产物目录，不含提示词和引用；默认每页 50 条，最多 100 条。",
     production_get_artifact: "按 targetId 分块读取单个产物提示词；使用返回的 cursor 读完并核对 sha256。",
-    production_get_workbench: "只读取一个 targetId 的指定 Subject、Shot 或 Clip 工作台；Subject 草稿返回 entityNodeSource 时，可用其中真实 projectId/nodeId 定位角色、场景或道具节点，不按名称猜关联；动态工作包按 workbenchVersion 核验。",
+    production_get_workbench: "只读取一个 targetId 的指定 Subject、Shot 或 Clip 工作台；Shot/Clip 工作台返回所在 Clip 的 segment.audio_bindings（导演源稿正式音频绑定）和 audioRuntime（H3 画布驱动设置的只读映射）。映射依来源节点和 storageKey 确认，H3 referenceBindingId 与 authoredBindingId 不可互换；编辑音频只修改正式 audio_bindings。Subject 草稿返回 entityNodeSource 时，可用其中真实 projectId/nodeId 定位角色、场景或道具节点，不按名称猜关联；动态工作包按 workbenchVersion 核验。",
     production_get_readiness: "读取 kind/id 的制作依赖、缺项和下一步。",
     production_start_run: "按 kind/id 启动已有授权的制作运行；inputBasis 默认 canvas，冻结当前有效画布输入，显式 published 核验指定发布稿。Backend 在提交边界执行一次权威预检并返回 ready/blocked 目标，输入未变化时不要先重复调用 production_preflight。保留 runId/idempotencyKey 与版本边界；保存、编译、审核和发布不授权生成。",
     production_get_batch: "按 kind/id/runId 读取固定生产范围、状态与任务 ID。",

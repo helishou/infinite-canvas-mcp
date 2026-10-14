@@ -232,6 +232,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
     const threadOperationRef = useRef(0);
     const scopedTaskOperationRef = useRef("");
     const threadOperationSequenceRef = useRef(0);
+    const toolCallHandledRequestIdsRef = useRef(new Set<string>());
     const endpoint = useMemo(() => url.trim().replace(/\/$/, ""), [url]);
     const backendUrl = useBackendStore((state) => state.url);
     const backendAgentUrl = useMemo(() => backendUrl.replace(/\/$/, "") + "/agent", [backendUrl]);
@@ -576,7 +577,11 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         source.addEventListener("tool_call", (event) => {
             if (!isCurrentConnection()) return;
             const data = parseEventData<AgentPendingToolCall>(event);
-            if (data) void handleToolCall(endpoint, token, data);
+            if (!data?.requestId) return;
+            // 宽限窗补发或重连重放会再次投递同一 requestId，已处理过的直接丢弃防止重复执行。
+            if (toolCallHandledRequestIdsRef.current.has(data.requestId)) return;
+            toolCallHandledRequestIdsRef.current.add(data.requestId);
+            void handleToolCall(endpoint, token, data);
         });
         source.addEventListener("codex_approval", (event) => {
             if (!isCurrentConnection()) return;

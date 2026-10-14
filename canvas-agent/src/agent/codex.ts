@@ -85,6 +85,45 @@ export async function interruptCodexTurn(threadId?: string) {
     return await codexApp.interruptCurrentTurn(threadId);
 }
 
+type UserInterruptEntry = { threadId: string; turnId: string; at: number };
+const USER_INTERRUPT_FILE = "user-interrupts.json";
+const USER_INTERRUPT_MAX_ENTRIES = 50;
+
+function userInterruptFile(cwd: string) {
+    return path.join(cwd, ".canvas-agent", USER_INTERRUPT_FILE);
+}
+
+async function readUserInterruptEntries(cwd: string): Promise<UserInterruptEntry[]> {
+    try {
+        const raw = JSON.parse(await fs.readFile(userInterruptFile(cwd), "utf8")) as { v?: unknown; entries?: unknown };
+        if (raw.v !== 1 || !Array.isArray(raw.entries)) return [];
+        return raw.entries.filter((entry): entry is UserInterruptEntry => Boolean(entry && typeof entry === "object" && typeof (entry as Record<string, unknown>).threadId === "string" && typeof (entry as Record<string, unknown>).turnId === "string" && typeof (entry as Record<string, unknown>).at === "number"));
+    } catch {
+        return [];
+    }
+}
+
+/** 记录一次用户主动停止，供历史读取区分「手动停止」与意外离线。 */
+export function recordUserInterrupt(cwd: string, threadId: string, turnId: string) {
+    if (!cwd || !threadId) return;
+    void (async () => {
+        try {
+            const entries = [...await readUserInterruptEntries(cwd), { threadId, turnId: turnId || "", at: Date.now() }].slice(-USER_INTERRUPT_MAX_ENTRIES);
+            await fs.mkdir(path.dirname(userInterruptFile(cwd)), { recursive: true });
+            await fs.writeFile(userInterruptFile(cwd), JSON.stringify({ v: 1, entries }, null, 1), "utf8");
+        } catch (error) {
+            logger.warn("Failed to record user interrupt marker", { error, cwd, threadId });
+        }
+    })();
+}
+
+/** 读取工作空间内已标记的用户手动停止 turn 集合。 */
+export async function loadUserInterruptedTurnIds(cwd?: string): Promise<ReadonlySet<string>> {
+    if (!cwd) return new Set<string>();
+    const entries = await readUserInterruptEntries(cwd);
+    return new Set(entries.filter((entry) => entry.turnId).map((entry) => entry.turnId));
+}
+
 /** 回复当前 app-server 的待处理权限请求。 */
 export async function resolveCodexApproval(requestId: string, decision: string) {
     return Boolean(codexApp?.resolveApproval(requestId, decision));
@@ -104,7 +143,8 @@ export async function resumeCodexThread(emit: AgentEmit, threadId: string, cwd?:
     const thread = await resumeLoadedThread(app, threadId, cwd, permissionMode, true, preheat);
     const history = await loadCodexHistory(emit, threadId, cwd);
     const supplementalItems = await codexEventHistory.readThread(threadId);
-    const messages = await mergeMessageMetadata(threadId, threadMessages(history.thread, app.planUpdates(threadId), supplementalItems));
+    const userInterruptedTurnIds = await loadUserInterruptedTurnIds(cwd);
+    const messages = await mergeMessageMetadata(threadId, threadMessages(history.thread, app.planUpdates(threadId), supplementalItems, userInterruptedTurnIds));
     return { thread, messages, settledTurnIds: settledTurnIds(history.thread, supplementalItems), historyReady: history.historyReady };
 }
 
@@ -158,7 +198,8 @@ export async function readCodexThread(emit: AgentEmit, threadId: string, cwd?: s
     const app = await getCodexApp(emit);
     const history = await loadCodexHistory(emit, threadId, cwd);
     const supplementalItems = await codexEventHistory.readThread(threadId);
-    const messages = await mergeMessageMetadata(threadId, threadMessages(history.thread, app.planUpdates(threadId), supplementalItems));
+    const userInterruptedTurnIds = await loadUserInterruptedTurnIds(cwd);
+    const messages = await mergeMessageMetadata(threadId, threadMessages(history.thread, app.planUpdates(threadId), supplementalItems, userInterruptedTurnIds));
     return { thread: summarizeCodexThread(history.thread), messages, settledTurnIds: settledTurnIds(history.thread, supplementalItems), historyReady: history.historyReady };
 }
 

@@ -47,7 +47,7 @@ type Props = {
     shotDrafts?: Record<string, string>;
     /** Clip 组合使用与交付页相同的 Backend 编译提交与恢复流程。 */
     busy?: boolean; compileBusy?: boolean; compilePending?: boolean; compileError?: string; compileNotice?: string; compileDiagnostics?: ProductionCompilationDiagnostic[];
-    compileTargets?: { sourceHash: string; items: Array<{ targetId: string; status: string }> }; onCompile?: (sceneId?: string) => void;
+    compileTargets?: { sourceHash: string; items: Array<{ targetId: string; status: string }>; notReadyTargetIds?: string[] }; onCompile?: (sceneId?: string, targetId?: string) => void;
     onClip: (id: string) => void;
     onDiscuss: (shotId?: string, instruction?: string) => void;
     /** 跳转到指定工作区（参考素材点开进素材库）。 */
@@ -157,9 +157,12 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const visible = shots.filter(shot => sceneIds.has(String(shot.id)) && `${title(shot)} ${shot.visual || ""} ${people(shot)}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()));
     const referencedNodes = new Set(records(selected?.subject_usages).flatMap(usage => records(subjects.find(subject => subject.id === usage.subjectId)?.pictureBindings).map(binding => String(binding.sourceNode?.nodeId || "")))
         .concat(records(selected?.keyframes).map(frame => String(frame.sourceNode?.nodeId || ""))));
+    const h3ClipGroup = production.draft.clipGroups.find(group => String(group.id) === String(clip?.id || ""));
+    const h3ClipNodeIds = new Set(h3ClipGroup?.nodeId ? [String(h3ClipGroup.nodeId)] : []);
     const referenceEvents = useReferenceResultVersion(records(selected?.subject_usages).flatMap(usage => records(subjects.find(subject => subject.id === usage.subjectId)?.pictureBindings).map(binding => binding.sourceNode || {})).concat(records(selected?.keyframes).map(frame => frame.sourceNode || {})));
     // Metadata only invalidates this read; Backend still selects and verifies the result.
-    const referenceVersion = JSON.stringify(canvasNodes.filter(node => referencedNodes.has(node.id)).map(node => [node.id, node.metadata?.images, node.metadata?.storageKey, node.metadata?.resultStorageKey, node.metadata?.primaryImageId, node.metadata?.smartImageReferenceSelection]));
+    const referenceVersion = JSON.stringify(canvasNodes.filter(node => referencedNodes.has(node.id) || h3ClipNodeIds.has(node.id)).map(node => [node.id, node.metadata?.images, node.metadata?.storageKey, node.metadata?.resultStorageKey, node.metadata?.primaryImageId, node.metadata?.smartImageReferenceSelection,
+        h3ClipNodeIds.has(node.id) ? records(node.metadata?.segments).filter(segment => String(segment.id) === String(h3ClipGroup?.segmentId || "")).map(segment => [segment.audioDrive, segment.audioDriveFile, segment.audioDriveStart, segment.audioDriveEnd, segment.referenceBindings]) : null]));
     const readView = subjectAssembly ? "shot_workbench" : "clip_workbench";
     const readId = subjectAssembly ? activeId : String(clip?.id || "");
     const expectedReadKey = `${ownerKey}|${readView}|${readId}|${director.sourceHash}|${referenceVersion}|${referenceEvents}`;
@@ -226,7 +229,11 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
         const projection = workbenchReadKey.current === expectedReadKey && clipId === String(clip?.id) ? records(subjectAssembly ? workbench?.directorArtifacts : workbench?.directorReferences?.compiled).find(item => item.id === artifact?.id && item.sha256 === artifact?.sha256) : undefined;
         const status = storyboardArtifactState(artifact, projection);
         const readyByLatestReceipt = compileTargets?.sourceHash === director.sourceHash && compileTargets.items.some(item => item.targetId === clipId && item.status === "ready");
+        const notReadyByLatestReceipt = compileTargets?.sourceHash === director.sourceHash && (compileTargets.notReadyTargetIds || compileTargets.items.filter(item => item.status !== "ready").map(item => item.targetId)).includes(clipId);
+        const artifactDiagnostics = artifact?.receipt?.diagnostics as Record<string, unknown> | undefined;
+        const hasPersistedBlockers = Array.isArray(artifactDiagnostics?.blockers) && artifactDiagnostics.blockers.length > 0;
         if (job && !(readyByLatestReceipt || status === "ready") ) return { label: t("director.atomic.clipRefreshPhase." + job.status), color: ["failed", "blocked"].includes(job.status) ? "red" : "processing", tone: ["failed", "blocked"].includes(job.status) ? "blocked" as const : "live" as const };
+        if (notReadyByLatestReceipt || hasPersistedBlockers) return { label: t("director.atomic.compileTargetError"), color: "red", tone: "blocked" as const };
         if (status === "pending") return { label: t("director.atomic.pendingCompile"), color: undefined, tone: "pending" as const };
         if (status === "recorded") return { label: t("director.atomic.recordedCompile"), color: undefined, tone: "recorded" as const };
         return status === "ready" || readyByLatestReceipt
@@ -238,9 +245,9 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const sceneCompileAvailable = !sceneFilter || sceneDirectory.scenes.some(scene => scene.id === sceneFilter);
     const compileCounts = { ready: visibleClipStates.filter(item => item.tone === "ready").length, pending: visibleClipStates.filter(item => item.tone === "pending").length, stale: visibleClipStates.filter(item => item.tone === "stale").length, running: visibleClipStates.filter(item => item.tone === "live").length, recorded: visibleClipStates.filter(item => item.tone === "recorded").length, blocked: visibleClipStates.filter(item => item.tone === "blocked").length };
     const failedCompileTargetIds = new Set<string>();
-    if (compileTargets?.sourceHash === director.sourceHash) for (const item of compileTargets.items.filter(item => item.status !== "ready")) {
-        failedCompileTargetIds.add(String(item.targetId));
-        const targetClip = clips.find(entry => String(entry.id) === String(item.targetId));
+    if (compileTargets?.sourceHash === director.sourceHash) for (const targetId of compileTargets.notReadyTargetIds || compileTargets.items.filter(item => item.status !== "ready").map(item => item.targetId)) {
+        failedCompileTargetIds.add(String(targetId));
+        const targetClip = clips.find(entry => String(entry.id) === String(targetId));
         for (const shotId of targetClip?.shot_ids || []) failedCompileTargetIds.add(String(shotId));
     }
     const orderedCompileDiagnostics = compileDiagnostics.map((item, index) => {
@@ -248,6 +255,20 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
         const blocksCompile = item.blocksCompilation === true || item.severity === "error" || item.severity === "unverified" || item.blockingActions?.includes("compile");
         return { item, index, priority: relatedToFailedTarget ? 0 : blocksCompile ? 1 : 2 };
     }).sort((left, right) => left.priority - right.priority || left.index - right.index).map(entry => entry.item);
+    const clipCompileMessages = (clipId: string) => {
+        const group = clips.find(item => String(item.id) === clipId), scopeIds = new Set([clipId, ...(group?.shot_ids || []).map(String)]);
+        const related = orderedCompileDiagnostics.filter(item => [item.targetId, item.shotId, ...(item.affectedTargets || [])].some(id => id && scopeIds.has(String(id))));
+        const blockers = related.filter(item => item.blocksCompilation === true || item.severity === "error" || item.severity === "unverified" || item.blockingActions?.includes("compile"));
+        const artifact = director.artifacts.find(item => item.kind === "h3" && String(item.targetId) === clipId);
+        const receiptDiagnostics = artifact?.receipt?.diagnostics as Record<string, unknown> | undefined;
+        const persisted = Array.isArray(receiptDiagnostics?.blockers) ? receiptDiagnostics.blockers.map(String) : [];
+        return [...new Set([
+            ...blockers.map(item => item.message || item.code || ""),
+            ...persisted,
+            ...related.filter(item => !blockers.includes(item)).map(item => item.message || item.code || ""),
+        ].map(value => String(value).trim()).filter(Boolean))];
+    };
+    const clipsWithCompileErrors = visibleClipStates.filter(item => item.tone === "blocked").map(item => ({ ...item, messages: clipCompileMessages(item.id) }));
     // 分割块：拖动或右键调整相邻片段之间的分镜归属。芯片按 id 登记，拖动时按实际布局吸附到镜头边界。
     const chipRefs = useRef(new Map<string, HTMLElement>());
     const trackRef = useRef<HTMLDivElement | null>(null);
@@ -368,7 +389,11 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                 {visibleClipStates.map(item => <span key={item.id} className="flex items-center gap-1.5 rounded-md border border-border px-2 py-0.5 text-xs">
                     <button type="button" onClick={() => onClip(item.id)} className="text-muted-foreground hover:text-foreground">{t("director.studio.clipNumber", { number: clips.findIndex(clip => String(clip.id) === item.id) + 1 })}</button>
                     <Tag className="!mr-0 !text-[11px] !leading-4" color={item.color}>{item.label}</Tag>
+                    <Button type="text" size="small" className="!h-5 !px-1" icon={<WandSparkles className="size-3" />} aria-label={t("director.atomic.compileOneClip", { clip: t("director.studio.clipNumber", { number: clips.findIndex(clip => String(clip.id) === item.id) + 1 }) })} title={t("director.atomic.compileOneClip", { clip: t("director.studio.clipNumber", { number: clips.findIndex(clip => String(clip.id) === item.id) + 1 }) })} disabled={busy || compileBusy || compilePending || !onCompile} onClick={() => onCompile?.(undefined, item.id)} />
                 </span>)}
+            </div>}
+            {clipsWithCompileErrors.length > 0 && <div className="mt-2 w-full space-y-2" data-previous-clip-compile-errors>
+                {clipsWithCompileErrors.map(item => <Alert key={item.id} type="error" showIcon message={`${t("director.studio.clipNumber", { number: clips.findIndex(clip => String(clip.id) === item.id) + 1 })} · ${t("director.atomic.compileTargetError")}`} description={<div className="space-y-2"><ul className="list-disc space-y-1 pl-5">{(item.messages.length ? item.messages : [t("director.atomic.compileTargetNoReason", { status: item.label })]).map((value, index) => <li key={`${item.id}:${index}`}>{value}</li>)}</ul><Button size="small" type="primary" icon={<WandSparkles className="size-3" />} disabled={busy || compileBusy || compilePending || !onCompile} onClick={() => onCompile?.(undefined, item.id)}>{t("director.atomic.compileOneClip", { clip: t("director.studio.clipNumber", { number: clips.findIndex(clip => String(clip.id) === item.id) + 1 }) })}</Button></div>} />)}
             </div>}
             {sceneFilter && !clipEditorScope.editable && <Alert type="info" showIcon message={t("director.atomic.clipPartitionScopeHint")} />}
             {clipEditor(clipEditorScope)}

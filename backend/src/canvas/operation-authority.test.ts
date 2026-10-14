@@ -298,3 +298,21 @@ test("production scene H3 nodes and storyboard membership cannot be removed or e
     const archived = db.applyCanvasProjectOperations("owned", undefined, [{ type: "delete_node", id: "scene-h3" }], { runtimeWrite: true, operationId: "confirmed-scene-archive" });
     assert.equal(archived.project.nodes.length, 0, "the production archive transaction may remove the active scene node");
 });
+
+test("an empty unreferenced production scene H3 node can be removed, but a node with task history stays protected", t => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "empty-scene", nodes: [{ id: "empty-h3", type: "minimax-h3:video", metadata: {
+        productionSceneId: "SC01", productionOwnerKind: "episode", productionOwnerId: "ep", status: "idle", segments: [],
+    } }], connections: [] });
+    const removed = db.applyCanvasProjectOperations("empty-scene", undefined, [{ type: "delete_node", id: "empty-h3" }], { operationId: "remove-empty-scene-h3" });
+    assert.equal(removed.project.nodes.length, 0);
+
+    db.createCanvasProject({ id: "task-scene", nodes: [{ id: "task-h3", type: "minimax-h3:video", metadata: {
+        productionSceneId: "SC01", productionOwnerKind: "episode", productionOwnerId: "ep", status: "idle", segments: [],
+    } }], connections: [] });
+    db.createTask("empty-scene-old-task", "comfyui:minimax-h3", { projectId: "task-scene", nodeId: "task-h3" }, {});
+    const before = db.getCanvasProject("task-scene");
+    assert.throws(() => db.applyCanvasProjectOperations("task-scene", undefined, [{ type: "delete_node", id: "task-h3" }]), /任务或生成历史/);
+    assert.deepEqual(db.getCanvasProject("task-scene"), before);
+});

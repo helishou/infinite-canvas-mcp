@@ -20,6 +20,54 @@ export function productionSceneIdsForShots(scenes: ReturnType<typeof productionS
     return scenes.filter(scene => matched.has(scene.id)).map(scene => scene.id);
 }
 
+/**
+ * Reuse the existing episode H3 node when a legacy environment scene id is
+ * replaced by its script-occurrence id. Existing clip bindings are the strongest
+ * evidence of the scene's physical node; a freshly derived stable ID must not
+ * split one scene across a second H3 node during source migration.
+ */
+export function existingProductionSceneH3NodeId(
+    project: Record<string, any>,
+    production: EpisodeProductionData,
+    owner: { kind: "episode" | "canvas" | "scene"; id: string },
+    sceneId: string,
+) {
+    const scenes = production.director ? productionSceneEntries(production.director.source) : [];
+    const scene = scenes.find(item => item.id === sceneId);
+    if (!scene) return undefined;
+    const nodes = arr(project.nodes);
+    const byId = new Map(nodes.map(node => [String(node.id || ""), node]));
+    const counts = new Map<string, number>();
+    for (const group of production.clipGroups) {
+        const groupScenes = productionSceneIdsForShots(scenes, group.shotIds);
+        if (groupScenes.length === 1 && groupScenes[0] === sceneId && group.nodeId) {
+            counts.set(String(group.nodeId), (counts.get(String(group.nodeId)) || 0) + 1);
+        }
+    }
+    const eligible = (nodeId: string) => {
+        const node = byId.get(nodeId), metadata = obj(node?.metadata);
+        return node?.type === "minimax-h3:video"
+            && metadata.productionOwnerId === owner.id
+            && metadata.productionOwnerKind === owner.kind
+            && !metadata.productionArchiveLabel;
+    };
+    const candidates = new Set<string>(counts.keys());
+    for (const node of nodes) {
+        const metadata = obj(node.metadata), nodeId = String(node.id || "");
+        if (metadata.productionOwnerId === owner.id && metadata.productionOwnerKind === owner.kind
+            && (metadata.productionSceneId === sceneId || metadata.productionSceneId === scene.environmentId)) candidates.add(nodeId);
+    }
+    return [...candidates].filter(eligible).sort((left, right) => {
+        const leftCount = counts.get(left) || 0, rightCount = counts.get(right) || 0;
+        if (leftCount !== rightCount) return rightCount - leftCount;
+        const leftMeta = obj(byId.get(left)?.metadata), rightMeta = obj(byId.get(right)?.metadata);
+        const leftExact = leftMeta.productionSceneId === sceneId ? 1 : 0;
+        const rightExact = rightMeta.productionSceneId === sceneId ? 1 : 0;
+        if (leftExact !== rightExact) return rightExact - leftExact;
+        return left.localeCompare(right);
+    })[0];
+}
+
 type Node = Record<string, any>;
 type Owner = { kind: "episode" | "canvas" | "scene"; id: string };
 type Input = { canvasId: string; owner: Owner; production: EpisodeProductionData; project: Record<string, any>; previous?: ProductionLayoutPlan | null; h3Defaults?: Record<string, unknown> };
