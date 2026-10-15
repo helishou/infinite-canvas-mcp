@@ -1,6 +1,6 @@
 const defaultPrompt = "保持原视频的动作、镜头和环境，替换主体角色，动作连贯，人物外观稳定。";
 export { H3_VIDEO_MEGAPIXELS, H3_VIDEO_RATIOS, h3VideoDimensions, h3OriginalVideoDimensions } from "./video-settings.js";
-const defaultH3Model = "h3\\DasiwaMinimaxH3_dasiwaREF2VAHybridV1.safetensors";
+const defaultH3Model = "H3\\DasiwaMinimaxH3_dasiwaREF2VAHybridV1.safetensors";
 
 /** H3 节点的单一基础默认值来源；前端节点定义与 MCP 创建节点共用。 */
 export const BASE_H3_NODE_METADATA: Record<string, unknown> = {
@@ -9,8 +9,8 @@ export const BASE_H3_NODE_METADATA: Record<string, unknown> = {
     motionContextEnabled: false, tailFrameContinuation: false, motionContextNoiseEnabled: false,
     smartStoryboardCount: 3, smartStoryboardMode: "ref2va", smartStoryboardSkill: "regular_storyboard",
     textEncoder: "qwen3vl_32b_minimax_h3_fp8.safetensors",
-    videoVae: "minimax_h3_video_vae_fp16.safetensors",
-    audioVae: "minimax_h3_audio_vae_fp32.safetensors",
+    videoVae: "H3\\minimax_h3_video_vae_fp16.safetensors",
+    audioVae: "H3\\minimax_h3_audio_vae_fp32.safetensors",
     textEncoderType: "minimax", textEncoderDevice: "default", precision: "default",
     sageAttention: "H3专用Sage加速", megapixels: 0.4, sizeMultiple: 32, refImageSize: "match", referenceLongEdge: 1920,
     sampler: "res_multistep", scheduler: "simple", allowCompile: false,

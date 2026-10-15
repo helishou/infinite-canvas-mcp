@@ -26,6 +26,7 @@
     "prune-runtime-history": "tsx src/maintenance/prune-runtime-history.ts",
     "dedup-production-receipts": "tsx src/maintenance/dedup-production-receipts.ts",
     "purge-scene-productions": "tsx src/maintenance/purge-scene-productions.ts",
+    "repair-dangling-shared-assets": "tsx src/maintenance/repair-dangling-shared-assets.ts",
     "test": "node ../scripts/test.mjs",
     "start": "node dist/index.js",
     "prepack": "corepack pnpm run build"

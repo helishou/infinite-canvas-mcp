@@ -45,7 +45,17 @@ export function projectDirector(data: EpisodeProductionData) {
     const scenes = list(source.script_scenes);
     // Location is the shared Shot scene identity; preserve authored scene blocks.
     const sceneIds = [...new Set([...scenes.map(s => String(s.scene_id || s.id)), ...shots.map(s => String(s.scene_id))])];
-    data.scenes = sceneIds.map(sceneId => ({ id: sceneId, heading: String(scenes.find(s => (s.scene_id || s.id) === sceneId)?.scene_name || sceneId), location: sceneId, timeOfDay: "", blocks: scenes.filter(s => (s.scene_id || s.id) === sceneId).map(s => ({ id: String(s.id), kind: "action" as const, text: String(s.text || "") })) }));
+    data.scenes = sceneIds.map(sceneId => {
+        const sceneRows = scenes.filter(s => String(s.scene_id || s.id) === sceneId);
+        const first = sceneRows[0];
+        const blocks = sceneRows.flatMap(scene => {
+            const rows = Array.isArray(scene.blocks) ? list(scene.blocks) : [scene];
+            return rows.map(block => ({ id: String(block.id || block.scene_id), kind: block.kind === "dialogue" ? "dialogue" as const : "action" as const,
+                ...(typeof block.speaker === "string" && block.speaker ? { speaker: block.speaker } : {}), text: String(block.text || "") }));
+        });
+        return { id: sceneId, heading: String(first?.scene_name || first?.heading || sceneId), location: String(first?.location || sceneId),
+            timeOfDay: String(first?.time_of_day || first?.timeOfDay || ""), blocks };
+    });
     data.shots = shots.map(s => {
         const input = d.shotInputs[String(s.id)];
         const window = shotWindows.get(String(s.id));

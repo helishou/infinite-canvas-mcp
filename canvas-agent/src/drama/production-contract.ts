@@ -42,10 +42,10 @@ export const directorPatchFields = {
     scene: ["scene_name", "heading", "location", "time_of_day", "text", "blocks"],
     environment: ["name", "description", "prompt_description"],
     character: ["name", "appearance", "description", "prompt_description", "identity", "voice_description"],
-    asset_card: ["prompt", "seven_steps", "references"],
+    asset_card: ["prompt", "seven_steps", "references", "reference_policy", "target_skill", "source_repository", "recipe", "mode", "transaction", "character_name", "state_label", "view_layout", "generation_status", "actual_settings", "output_file", "heavy_scene", "structure_lock", "style_anchor_purpose"],
     asset: ["asset_name", "name", "title", "kind", "description", "prompt", "depends_on", "role", "version", "reference_role", "canvas_scope", "status"],
-    shot: ["title", "visual", "camera", "start_frame", "end_frame", "duration_frames", "dialogues", "audio", "required_assets", "description", "shot_type", "timeline_id", "story_order", "continuity_facts", "characters", "performance", "combat", "state_description", "continuity_cues", "reference_requirements", "prompt_contract_version", "identity_context", "offscreen_character_ids", "subject_usages", "utterance_refs", "features"],
-    segment: ["shot_ids", "start_frame", "end_frame", "generation_clip_duration", "mode", "audio", "sound", "overall_soundscape", "non_diegetic_music", "references", "subjects", "execution_gate", "styleTemplateId", "motion_profile", "summary", "audio_bindings", "animation_term_ids", "animation_term_evidence"],
+    shot: ["title", "visual", "camera", "scene_id", "source_scene_id", "start_frame", "end_frame", "duration_frames", "dialogues", "audio", "required_assets", "description", "shot_type", "timeline_id", "story_order", "continuity_facts", "characters", "performance", "combat", "state_description", "continuity_cues", "reference_requirements", "prompt_contract_version", "identity_context", "offscreen_character_ids", "subject_usages", "utterance_refs", "features"],
+    segment: ["shot_ids", "start_frame", "end_frame", "generation_clip_duration", "mode", "mode_lock", "mode_selection_reason", "audio", "sound", "overall_soundscape", "non_diegetic_music", "references", "subjects", "execution_gate", "styleTemplateId", "motion_profile", "summary", "audio_bindings", "animation_term_ids", "animation_term_evidence"],
 } as const;
 
 export const directorModules = ["story", "assets", "shots", "performance", "effects", "model", "continuity"] as const;
@@ -507,12 +507,15 @@ export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
             const values = Array.isArray(fact.allowed_values) ? fact.allowed_values.map(String) : [];
             if (!descriptions || typeof descriptions !== "object" || values.some(value => typeof descriptions[value] !== "string" || !descriptions[value].trim())) add(["ledger", "facts", index, "value_descriptions"], "每个合法连续性值都需要模型可读描述");
         }
+        const scriptBlocks = new Set(rowsForContract(source.script_scenes).flatMap(scene => rowsForContract(Array.isArray(scene.blocks) ? scene.blocks : typeof scene.text === "string" ? [scene] : []).map(block => String(block.id))));
         for (const [index, event] of rowsForContract(ledger.events).entries()) {
             if (!Number.isInteger(event.local_frame) || event.local_frame < 0) add(["ledger", "events", index, "local_frame"], "新合同状态事件使用 Shot 局部帧");
             const shot = shotById.get(String(event.shot_id));
             if (!shot) add(["ledger", "events", index, "shot_id"], "状态事件引用未知 Shot");
             else if (event.local_frame >= Number(shot.duration_frames)) add(["ledger", "events", index, "local_frame"], "状态事件超出 Shot 时长");
             if (!factsById.has(String(event.fact_id))) add(["ledger", "events", index, "fact_id"], "状态事件引用未知连续性事实");
+            const anchorBlock = String(event.source_anchor?.block_id ?? "");
+            if (anchorBlock && !scriptBlocks.has(anchorBlock)) add(["ledger", "events", index, "source_anchor"], "状态事件引用了未知剧本块");
         }
     }
     return issues;
@@ -632,8 +635,9 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("upsert_director_subject"), subject: subjectEntrySchema }).strict(),
     z.object({ type: z.literal("repair_director_subject_bindings") }).strict(),
     z.object({ type: z.literal("delete_director_subject"), id }).strict(),
-    z.object({ type: z.literal("create_manual_director_asset"), assetPlan: z.object({ id, kind: z.enum(["character", "scene", "prop"]), asset_name: z.string().min(1), entity_id: id.optional(), version: id, description: z.string(), purpose: z.string(), depends_on: z.array(id), status: z.literal("planned"), canvas_scope: z.enum(["episode", "shared"]).optional() }).strict(), assetCard: z.object({ id, asset_id: id, asset_kind: z.enum(["character", "scene", "prop"]), asset_version: id, prompt: z.string(), references: z.array(z.unknown()) }).strict(), registryKind: z.enum(["character", "scene"]).optional(), registryEntity: z.record(z.unknown()).optional(), subject: subjectEntrySchema.optional() }).strict(),
+    z.object({ type: z.literal("create_manual_director_asset"), assetPlan: z.object({ id, kind: z.enum(["character", "scene", "prop"]), asset_name: z.string().min(1), entity_id: id.optional(), version: id, description: z.string(), purpose: z.string(), depends_on: z.array(id), status: z.literal("planned"), canvas_scope: z.enum(["episode", "shared"]).optional(), sharedSource: z.object({ dramaId: id, assetId: id, sourceProjectId: id, sourceNodeId: id }).strict().optional() }).strict(), assetCard: z.object({ id, asset_id: id, asset_kind: z.enum(["character", "scene", "prop"]), asset_version: id, prompt: z.string(), references: z.array(z.unknown()) }).passthrough(), registryKind: z.enum(["character", "scene"]).optional(), registryEntity: z.record(z.unknown()).optional(), subject: subjectEntrySchema.optional() }).strict(),
     z.object({ type: z.literal("delete_director_asset"), id, confirmed: z.literal(true) }).strict(),
+    z.object({ type: z.literal("remove_shared_director_asset"), id }).strict(),
     z.object({ type: z.literal("set_director_shot_keyframes"), shotId: id, keyframes: z.array(shotKeyframeWriteSchema) }).strict(),
     z.object({
         type: z.literal("set_director_shot_utterances"), shotId: id,
@@ -650,6 +654,7 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("replace_director_clip_storyboard"), segmentId: id, segment: z.record(z.unknown()), shots: z.array(z.record(z.unknown())).min(1), shotInputs: z.record(z.unknown()) }).strict(),
     z.object({ type: z.literal("request_director_clip_refresh"), segmentId: id }).strict(),
     z.object({ type: z.literal("set_director_brief"), brief: z.string() }).strict(),
+    z.object({ type: z.literal("initialize_director_from_demand") }).strict(),
     z.object({ type: z.literal("patch_director_source"), entity: z.enum(["brief", "spec", "story", "style", "scene", "environment", "character", "asset", "asset_card", "shot", "segment"]), id: id.optional(), patch: z.record(z.unknown()) }).strict(),
     z.object({ type: z.literal("set_director_scene_environment"), sceneId: id, environmentId: id }).strict(),
     z.object({ type: z.literal("adopt_director_fields"), targetId: id, nodeId: id, segmentId: id.optional(), canvasRevision: z.number().int().nonnegative(), fields: z.array(id).min(1) }).strict(),

@@ -93,6 +93,30 @@ export function analyzeContinuityDeletion(source: Row | undefined, ledger: Row, 
     return result;
 }
 
+const stateValues = (fact: Row): string[] => Array.isArray(fact.allowed_values) ? fact.allowed_values.map(value => String(value)) : [];
+const descriptions = (fact: Row): Row => fact.value_descriptions && typeof fact.value_descriptions === 'object' && !Array.isArray(fact.value_descriptions) ? fact.value_descriptions : {};
+const missingDescription = (fact: Row) => { const current = descriptions(fact); return stateValues(fact).some(value => typeof current[value] !== 'string' || !current[value].trim()); };
+/** The save contract requires a model-readable description per allowed value, and the compiler already falls back to the raw value, so a missing description defaults to the value itself. */
+const completedDescriptions = (fact: Row, values: string[]): Row => {
+    const completed: Row = { ...descriptions(fact) };
+    for (const value of values) if (typeof completed[value] !== 'string' || !completed[value].trim()) completed[value] = value;
+    return completed;
+};
+
+/** Append a state value and keep every allowed value described, so the fact stays saveable. */
+export function continuityFactStateValue(fact: Row, value: string): { allowed_values: string[]; value_descriptions: Row } {
+    const allowed = [...new Set([...stateValues(fact), value.trim()].filter(item => item && item !== 'unknown'))];
+    return { allowed_values: allowed, value_descriptions: completedDescriptions(fact, [...new Set([...stateValues(fact), ...allowed])]) };
+}
+
+/** Complete descriptions across the ledger at the save boundary; returns the same ledger when nothing is missing. */
+export function continuityLedgerFactDescriptions(ledger: Row): Row {
+    const facts = Array.isArray(ledger.facts) ? ledger.facts : [];
+    const needs = (fact: unknown): fact is Row => Boolean(fact && typeof fact === 'object' && missingDescription(fact as Row));
+    if (!facts.some(needs)) return ledger;
+    return { ...ledger, facts: facts.map(fact => needs(fact) ? { ...fact, value_descriptions: completedDescriptions(fact, stateValues(fact)) } : fact) };
+}
+
 /** Reanalyze at application time so a stale UI confirmation cannot remove new dependencies. */
 export function applyContinuityDeletion(source: Row | undefined, ledger: Row, collection: ContinuityLedgerCollection, entry: Row | string): Row {
     const analysis = analyzeContinuityDeletion(source, ledger, collection, entry);

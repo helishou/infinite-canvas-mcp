@@ -6,7 +6,13 @@ import { productionNavigationGroups, productionTargetTitle, productionWorkspaceQ
 test("series navigation separates real shared canvas management from current-episode assets", () => {
     const groups = productionNavigationGroups({ hasSeries: true, scope: "episode" });
     assert.deepEqual(groups.map(group => group.id), ["series", "owner", "settings"]);
-    assert.deepEqual(groups[0].items.map(item => item.seriesView), ["planning", "episodes", "shared"]);
+    // 下拉里剧目规划与共享资产画布合并为一项，导航只剩两项。
+    assert.deepEqual(groups[0].items.map(item => item.seriesView), ["planning", "episodes"]);
+    assert.equal(groups[0].items[0].labelKey, "director.workspaceHierarchy.planningAssets");
+    // 子 Tab 栏展开共享资产画布，规划项回到「剧目规划」。
+    const subtabs = productionNavigationGroups({ hasSeries: true, scope: "episode", seriesSubviews: true });
+    assert.deepEqual(subtabs[0].items.map(item => item.seriesView), ["planning", "shared", "episodes"]);
+    assert.equal(subtabs[0].items[0].labelKey, "director.workspaceHierarchy.planning");
     assert.equal(groups[0].items.some(item => item.workspace === "assets"), false);
     assert.equal(groups[1].items.find(item => item.workspace === "assets")?.labelKey, "director.workspaceHierarchy.episodeAssets");
     assert.deepEqual([...new Set(groups.flatMap(group => group.items.map(item => item.workspace)))], productionWorkspaces);

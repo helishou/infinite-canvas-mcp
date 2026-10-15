@@ -49,6 +49,7 @@ import { commandNeedsRecovery, commandFailureRecord, normalizeCommandRecovery, c
 import { productionNavigationGroups, productionTargetTitle, productionWorkspaceQuery, productionWorkspaces, seriesWorkspaceView, type SeriesWorkspaceView, type ProductionWorkspaceScope } from "./production-workspace";
 import { ProductionWorkspaceBreadcrumb, ProductionWorkspaceMenus, ProductionWorkspaceNavigation } from "./production-workspace-navigation";
 import { continuityDiagnosticLocations, frameTimecode } from "./continuity-diagnostic-context";
+import { createManualDirectorAsset } from "./manual-director-assets";
 
 type PendingCommand = { operationId: string; expectedRevision: number; status: "unknown" | "rejected"; error?: string; errorSummary?: string; httpStatus?: number; errorCode?: string; workspace?: DirectorWorkspace } & (
   { kind: "scene"; command: ProductionSceneAction } | { kind: "edit"; ops: ProductionOperation[] } | { kind: "publish"; stage: "director" } | { kind: "restore"; version: number }
@@ -178,7 +179,9 @@ type ProductionEditorProps = { owner?: ProductionCanvasContext["owner"]; embedde
 export function ProductionEditor(props: ProductionEditorProps) {
   const params = useParams();
   if (props.embedded) return <ProductionEditorContent {...props} />;
-  return <WorkbenchCanvas key={`${props.owner?.kind || ""}:${props.owner?.id || params.episodeId || params.projectId || ""}`}><ProductionEditorContent {...props} /></WorkbenchCanvas>;
+  // storageKey 与组件 key 同源：画布开合状态按制作对象隔离，刷新后按归属恢复。
+  const ownerKey = `${props.owner?.kind || ""}:${props.owner?.id || params.episodeId || params.projectId || ""}`;
+  return <WorkbenchCanvas key={ownerKey} storageKey={ownerKey}><ProductionEditorContent {...props} /></WorkbenchCanvas>;
 }
 
 function useOpenCanvasFromQuery(canvasHost: ReturnType<typeof useWorkbenchCanvas>, searchParams: URLSearchParams) {
@@ -231,6 +234,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   const [canvasRead, setCanvasRead] = useState<ProductionCanvasSnapshot>();
   const liveCanvas = useCanvasStore(state => state.projects.find(project => project.id === canvasId));
   const canvasNodes = productionCanvasNodes(canvasId, liveCanvas, canvasRead);
+  // 风格锚点等选择器需要同一剧目的共享资产画布节点；分集页本身只持有分集画布。
+  const [sharedCanvasNodes, setSharedCanvasNodes] = useState<ProductionCanvasSnapshot>();
   const [production, setProduction] = useState<EpisodeProduction | null>(null);
   const [readiness, setReadiness] = useState<ProductionReadiness | null>(null);
   const [continuityReport, setContinuityReport] = useState<ProductionContinuity | undefined>();
@@ -332,10 +337,12 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     const continuityRead = beginContinuityRead();
     const contextRequest = projectId
         ? Promise.all([fetchBackendProject(projectId), fetchBackendCanvasDrama(projectId), fetchProductionCanvasContext(projectId)]).then(([canvas, relation, ownership]) => ({ canvas: canvas.project, episode: relation.episode, scene: null, productionContext: ownership.context }))
-        : fetchBackendDramaEpisode(episodeId).then(result => {
+        : fetchBackendDramaEpisode(episodeId).then(async result => {
           if (!result.episode) throw new Error(t("director.loadFailed"));
           const episode = result.episode;
-          return { ...result, scene: null, productionContext: { role: "episode" as const, canvasId: episode.canvasId || "", episodeId: episode.id, dramaId: episode.dramaId, owner: { kind: "episode" as const, id: episode.id } } };
+          // 分集画布的 production-context 才会带上剧目共享资产画布 ID；读不到时按无共享画布处理。
+          const ownership = episode.canvasId ? await fetchProductionCanvasContext(episode.canvasId).catch(() => null) : null;
+          return { ...result, scene: null, productionContext: { role: "episode" as const, canvasId: episode.canvasId || "", episodeId: episode.id, dramaId: episode.dramaId, owner: { kind: "episode" as const, id: episode.id }, sharedAssetCanvasId: ownership?.context?.sharedAssetCanvasId || null } };
         });
     const [context, prod, history, ready, runHistory, continuity] = await Promise.all([
       contextRequest, fetchEpisodeProduction(target), fetchEpisodeProductionVersions(target),
@@ -344,12 +351,15 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     const resolvedCanvasId = projectId || context.episode?.canvasId || "";
     const taskNodes = [...new Set([...(prod.production.draft.clipGroups || []).map(group => group.nodeId), ...Object.values(prod.production.draft.director?.assets || {}).map(asset => asset.nodeId)].filter((id): id is string => Boolean(id)))];
     const tasks = resolvedCanvasId && taskNodes.length ? (await fetchBackendTasks({ projectId: resolvedCanvasId, nodeIds: taskNodes }).catch(error => { finishContinuityRead(continuityRead); throw error; })).tasks || [] : [];
+    const sharedCanvasId = String(context.productionContext?.sharedAssetCanvasId || "");
+    const sharedNodes = sharedCanvasId && sharedCanvasId !== resolvedCanvasId ? (await fetchBackendProject(sharedCanvasId).catch(() => null))?.project : undefined;
     if (!isActive()) return null;
     setEpisode(context.episode || null);
     setProductionContext(context.productionContext);
     setTitle(context.episode?.title || String(context.canvas?.title || ""));
     setCanvasId(resolvedCanvasId);
     setCanvasRead(context.canvas && Array.isArray(context.canvas.nodes) ? { id: resolvedCanvasId, revision: Number(context.canvas.revision || 0), nodes: context.canvas.nodes as ProductionCanvasSnapshot["nodes"] } : undefined);
+    setSharedCanvasNodes(sharedNodes && Array.isArray(sharedNodes.nodes) ? { id: sharedCanvasId, revision: Number(sharedNodes.revision || 0), nodes: sharedNodes.nodes as ProductionCanvasSnapshot["nodes"] } : undefined);
     setProduction(prod.production);
     setReadiness(ready.readiness);
     finishContinuityRead(continuityRead, continuity.continuity);
@@ -1732,7 +1742,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   if (!production) {
     if (series && !projectId && !episodeId) {
       // 无分集剧目：跳过逐集工作区，只保留全剧规划、分集与共享画布入口。
-      const seriesNav = productionNavigationGroups({ hasSeries: true, scope: "episode", setup: true });
+      const seriesNav = productionNavigationGroups({ hasSeries: true, scope: "episode", setup: true, seriesSubviews: true });
       const seriesTitle = folders.find(folder => folder.id === series.id)?.name || t("director.atomic.seriesWorkbench");
       const currentView = seriesView || "planning";
       return <main className="min-h-full bg-background px-4 py-5 text-foreground sm:px-6 lg:px-10 lg:py-7">
@@ -1765,6 +1775,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   const activeTargetIds = [...new Set(batches.filter(item => ["pending", "running", "paused", "awaiting_review"].includes(item.status)).flatMap(item => item.targets))];
   const scope: ProductionWorkspaceScope = productionContext?.role === "shared-assets" ? "shared-assets" : productionOwner.kind === "episode" ? "episode" : "canvas";
   const navigationGroups = productionNavigationGroups({ hasSeries: Boolean(series), scope, setup: seriesOnly });
+  // 剧目工作区的子 Tab 栏展开「剧目规划 / 共享资产画布 / 分集管理」；顶部下拉保持「规划与资产 / 分集管理」。
+  const navigationGroupsWithSeriesSubtabs = workspace === "series" ? productionNavigationGroups({ hasSeries: Boolean(series), scope, setup: seriesOnly, seriesSubviews: true }) : navigationGroups;
   const selectedNavigationId = workspace === "series" ? `series:${seriesView || "planning"}` : workspace;
   const workspaceLabel = t(navigationGroups.flatMap(group => group.items).find(item => item.id === selectedNavigationId)?.labelKey || `director.workspace.tab.${workspace}`);
   const dramaId = series?.id || productionContext?.dramaId || episode?.dramaId;
@@ -1796,7 +1808,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       {(remoteRevision !== null || showCommandNotice) && <div data-production-recovery-notice className="mb-4 text-sm">{remoteRevision !== null && <p>{t("drama.production.conflictDetail", { number: remoteRevision })}</p>}{pendingNotice}</div>}
       {pendingRunNotice}
       <div data-production-workspace-layout className={embedded ? "min-w-0" : "grid min-w-0 items-start gap-5 lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-8"}>
-        <ProductionWorkspaceNavigation groups={navigationGroups} selectedId={selectedNavigationId} compact={embedded} horizontal={!embedded} onSelect={item => navigateWorkspace(item.workspace, undefined, item.seriesView)} />
+        <ProductionWorkspaceNavigation groups={navigationGroupsWithSeriesSubtabs} selectedId={selectedNavigationId} compact={embedded} horizontal={!embedded} onSelect={item => navigateWorkspace(item.workspace, undefined, item.seriesView)} />
         <section data-production-workspace-content={!embedded || undefined} aria-label={workspaceLabel} className="min-w-0">
           {workspace === "series" && series ? <DramaManagePanel navigationTitleVisible={!embedded} dramaId={series.id} view={seriesView || "planning"} onEpisodesChanged={() => onSeriesEpisodesChanged?.()} /> : <>
             {embedded && workspace === "assets" && <p className="mb-5 text-xs leading-5 text-muted-foreground" data-production-asset-scope={scope}>{t(`director.workspaceHierarchy.${scope === "episode" ? "episodeAssetsHint" : scope === "shared-assets" ? "sharedAssetsHint" : "projectAssetsHint"}`)}</p>}
@@ -1805,7 +1817,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
               assetScopeHint={!embedded ? t(`director.workspaceHierarchy.${scope === "episode" ? "episodeAssetsHint" : scope === "shared-assets" ? "sharedAssetsHint" : "projectAssetsHint"}`) : undefined}
               navigationTitleVisible={!embedded} embedded={embedded} compact={dialog} generationSupported={productionOwner.kind !== "scene"} onSaveScript={saveSceneDrafts}
               workspace={workspace} director={production.draft.director} production={production} readiness={readiness || undefined} continuityReport={continuityReport} continuitySnapshotLoading={continuitySnapshotLoading} run={run} batches={batches} runtimeTasks={runtimeTasks}
-              canvasNodes={canvasNodes} versions={versions} busy={busy} canvasId={canvasId} canvasRole={productionContext?.role || (projectId ? "ordinary" : "episode")} focusTarget={routeTarget}
+              canvasNodes={canvasNodes} sharedCanvasNodes={sharedCanvasNodes?.nodes} sharedCanvasId={sharedCanvasNodes?.id} versions={versions} busy={busy} canvasId={canvasId} canvasRole={productionContext?.role || (projectId ? "ordinary" : "episode")} focusTarget={routeTarget}
               sourceDrafts={sourceDrafts} onSourceDraftChange={setSourceDraft}
               briefDraft={briefDraft} onBriefDraftChange={setBriefDraft}
               onBrief={saveBrief} onEditCanvasClip={editCanvasClip} onAdoptDirectorFields={adoptDirectorFields} onPatch={patchSource} onAdoptClipStyle={adoptClipStyle} onRegroup={regroupSegment} onWorkflow={setWorkflow} onSettings={patch => void edit([{ type: 'set_settings', patch }])} onBindAsset={bindAsset}
@@ -1831,7 +1843,27 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
                   await refreshRemote();
                 } catch (cause) { fail(cause); } finally { setBusy(false); }
               }}
-              onUpsertSubject={upsertSubject} onDeleteSubject={deleteSubject} onDeleteScene={deleteScene} onDeleteAsset={deleteAsset} onRemoveCanvasAsset={removeCanvasAsset} onPatchCanvasAsset={patchCanvasAsset} onCreateManualAsset={createManualAsset} onSaveV2Shot={saveV2Shot} onRepartitionClips={repartitionV2} onEditShot={editV2Shot}
+              onUpsertSubject={upsertSubject} onDeleteSubject={deleteSubject} onDeleteScene={deleteScene} onDeleteAsset={deleteAsset} onRemoveCanvasAsset={removeCanvasAsset} onPatchCanvasAsset={patchCanvasAsset} onCreateManualAsset={createManualAsset}
+              onIncludeSharedNode={async node => {
+                if (!production?.draft.director || !episode || !sharedCanvasNodes || busy || productionOwner.kind !== "episode") return false;
+                const binding = node.metadata?.productionEntity as Record<string, any> | undefined;
+                const kind = String(binding?.kind || "") as "character" | "scene" | "prop";
+                if (!["character", "scene", "prop"].includes(kind) || binding?.ownerId !== sharedCanvasNodes.id) return false;
+                const assetId = `AST_${nanoid()}`;
+                const entityId = kind === "prop" ? undefined : `${kind === "character" ? "CHAR" : "SCENE"}_${nanoid()}`;
+                const name = String(node.title || node.metadata?.[`${kind}Name`] || node.id);
+                const description = String(node.metadata?.[`${kind}Description`] || "");
+                const source = createManualDirectorAsset(production.draft.director.source as Record<string, any>, {
+                  id: assetId, ...(entityId ? { entityId } : {}), subjectId: `SUBJECT_${nanoid()}`, kind, name, description, prompt: "", purpose: "剧目共享资产",
+                  canvasScope: "episode", registerSubject: true, ownerKind: "episode", ownerId: episode.id,
+                  sharedSource: { dramaId: String(episode.dramaId), assetId, sourceProjectId: sharedCanvasNodes.id, sourceNodeId: node.id },
+                });
+                const operation = { type: "create_manual_director_asset" as const, assetPlan: source.assetPlan, assetCard: source.assetCard,
+                  ...(source.registryKind && source.registryEntity ? { registryKind: source.registryKind, registryEntity: source.registryEntity } : {}), ...(source.subject ? { subject: source.subject } : {}) } as Extract<ProductionOperation, { type: "create_manual_director_asset" }>;
+                return createManualAsset(operation);
+              }}
+              onRemoveSharedAsset={assetId => edit([{ type: "remove_shared_director_asset", id: assetId }])}
+              onSaveV2Shot={saveV2Shot} onRepartitionClips={repartitionV2} onEditShot={editV2Shot}
               onOpenSharedAsset={(assetId, title) => void openSharedAsset(assetId, title).catch(fail)} onPromoteExistingSharedAsset={(assetId, title) => void promoteExistingSharedAsset(assetId, title).catch(fail)}
               onBoundary={setBoundary} onPublish={() => void publish()} onSaveContinuity={saveContinuity} onCheckContinuity={checkContinuity} onContinuitySnapshot={changeContinuitySnapshot}
               onReplace={value => void replaceDirector(value)} onAskDirector={scope => void askDirector(scope)} onNavigate={navigateWorkspace}

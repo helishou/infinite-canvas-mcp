@@ -76,6 +76,7 @@ export const toolNames = [
   "canvas_image_input_manifest",
   "canvas_run_generation",
   "canvas_task_status",
+  "canvas_task_cancel",
   "canvas_wait_tasks",
   "canvas_h3_confirmation",
   "generation_get_status",
@@ -595,6 +596,9 @@ export const toolInputSchemas = {
     nodeId: z.string().optional().describe("只查询某个画布节点的生成任务"),
     limit: z.number().int().min(1).max(100).optional().describe("最多返回多少条，默认 10"),
   }),
+  canvas_task_cancel: z.object({
+    taskId: z.string().min(1).describe("要取消的 Backend 画布任务 ID；会取消对应父任务及其执行子任务"),
+  }),
   canvas_wait_tasks: z.object({
     taskIds: z
       .array(z.string().min(1))
@@ -871,6 +875,8 @@ export const toolDescriptions: Record<ToolName, string> = {
     "触发指定节点生成。图片模式提交前解析真实参考图；多图 character 节点须通过 characterImageKeys 或节点已有选择指定具体图片，可传 expectedReferenceManifestHash 锁定预检清单。referenceNodeIds 会替换现有媒体参考连线；H3 节点可用 segmentId 单跑某分镜。",
   canvas_task_status:
     "即时查询 MCP 发起的画布生成任务。优先传 taskId 精确查询；传入 taskId 后忽略 projectId/nodeId 等过滤条件。不传 taskId 时默认使用当前活动画布，可用 nodeId 缩小范围。运行中任务建议使用 canvas_wait_tasks 等待收口；本工具用于即时查看，不会提交或重试任务。",
+  canvas_task_cancel:
+    "取消指定 Backend 画布任务，并通过 Backend 统一取消其执行子任务。用于明确放弃本任务或清理已确认错误的排队任务；不取消其他任务。返回简短终态摘要。",
   canvas_wait_tasks:
     "按原 taskId 有界等待 Backend 任务。timedOut=true 表示本轮等待结束，pendingTaskIds 和 next 给出原任务的继续查询入口；不要重新提交生成。awaiting_confirmation 表示等待人工确认，先查看一采再由用户选择操作。",
   canvas_h3_confirmation:

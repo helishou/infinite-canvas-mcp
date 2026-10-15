@@ -819,6 +819,10 @@ export class EpisodeProductionRunner {
             const executeTask = async () => {
                 let task = this.stores.tasks.get(taskId);
                 if (!task) {
+                    // A run may wait in the shared H3 lane after its initial pause check.
+                    // Recheck immediately before submission so a pause requested while
+                    // queued cannot leak into the next Segment.
+                    this.checkPause(run);
                     const started = await this.generation.start(command, { productionManaged: true, executionProject: snapshot.project, executionDefaults: snapshot.defaults });
                     task = this.stores.tasks.get(started.taskId);
                 }

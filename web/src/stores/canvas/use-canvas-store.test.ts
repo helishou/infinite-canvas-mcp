@@ -19,15 +19,19 @@ import { test } from "node:test";
 import { applyBackendCanvasDelta, diffCanvasProject, detectCanvasConflicts, isLocalProjectNewer, type CanvasProject } from "./use-canvas-store";
 import { reorderCanvasReferenceConnections } from "@/lib/canvas/canvas-resource-references";
 
-test("角色主图差量更新下游选择且不改旧基线或历史参考", () => {
+test("角色主图差量更新不改动仍在目录中的显式选择，失效键才回落到新主图", () => {
     const base = makeProject([
         { id: "char", type: "character", metadata: { characterPrimaryIndex: 0, characterImages: [{ storageKey: "image:a" }, { storageKey: "image:b" }] } } as any,
         { id: "target", type: "config", metadata: { characterReferences: { char: { imageKeys: ["image:a"], voiceEnabled: false } }, images: [{ id: "old", generationSnapshot: { references: [{ storageKey: "image:a" }] } }] } } as any,
     ]);
-    const next = applyBackendCanvasDelta(base, [{ type: "update_node", id: "char", metadata: { characterPrimaryIndex: 1 } }], 2);
-    assert.deepEqual(next.nodes[1].metadata?.characterReferences?.char?.imageKeys, ["image:b"]);
+    // 主图翻转但所选键仍在源目录中：显式媒体选择独立于封面（46e6330a 契约），历史快照不动。
+    const flipped = applyBackendCanvasDelta(base, [{ type: "update_node", id: "char", metadata: { characterPrimaryIndex: 1 } }], 2);
+    assert.deepEqual(flipped.nodes[1].metadata?.characterReferences?.char?.imageKeys, ["image:a"]);
+    assert.deepEqual(flipped.nodes[1].metadata?.images, base.nodes[1].metadata?.images);
+    // 所选键从源目录消失时才回落到新主图；原始基线始终不被修改。
+    const removed = applyBackendCanvasDelta(base, [{ type: "update_node", id: "char", metadata: { characterPrimaryIndex: 1, characterImages: [{ storageKey: "image:b" }] } }], 3);
+    assert.deepEqual(removed.nodes[1].metadata?.characterReferences?.char?.imageKeys, ["image:b"]);
     assert.deepEqual(base.nodes[1].metadata?.characterReferences?.char?.imageKeys, ["image:a"]);
-    assert.deepEqual(next.nodes[1].metadata?.images, base.nodes[1].metadata?.images);
 });
 
 test("列表摘要只提交列表字段，不把未加载的空节点解释成删除", () => {

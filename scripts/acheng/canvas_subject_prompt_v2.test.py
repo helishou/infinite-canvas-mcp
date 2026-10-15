@@ -301,6 +301,67 @@ class SubjectAudioBindingTest(unittest.TestCase):
 
 
 class ContinuityProjectionTest(unittest.TestCase):
+    def test_subject_audit_projection_does_not_expand_every_character_fact_into_each_shot(self):
+        from canvas_subject_prompt_v2 import _subject_continuity_audit_projection
+        source = {
+            "prompt_assembly": {"version": 2},
+            "subject_registry": [{"id": "SUB_A", "entityRef": {"kind": "character", "id": "CHAR_A"}}],
+            "scene_registry": [{"id": "SCENE_A"}],
+            "script_scenes": [{"id": "SCENE_OCC_A", "scene_id": "SCENE_A", "blocks": [{"id": "B1", "kind": "action", "text": "Scene evidence."}]}],
+            "shots": [{"id": "S1", "timeline_id": "T", "story_order": 0, "duration_frames": 24,
+                       "scene_id": "SCENE_A", "subject_usages": [
+                           {"subjectId": "SUB_A", "continuityFactIds": ["F_WEAPON", "F_INJURY"],
+                            "stateRequirements": [{"factId": "F_WEAPON", "value": "held"}]}
+                       ]}],
+            "segments": [{"id": "C1", "shot_ids": ["S1"]}],
+            "ledger": {"contract_version": 2, "timelines": [{"id": "T", "start_frame": 0}],
+                       "facts": [{"id": "F_WEAPON", "object_kind": "character", "object_id": "CHAR_A"},
+                                 {"id": "F_INJURY", "object_kind": "character", "object_id": "CHAR_A"},
+                                 {"id": "F_SCENE", "object_kind": "scene", "object_id": "SCENE_A"}],
+                       "initial": [], "events": [],
+                       "requirements": [
+                           {"id": "R_WEAPON", "timeline_id": "T", "shot_id": "S1", "fact_id": "F_WEAPON", "kind": "unresolved"},
+                           {"id": "R_INJURY", "timeline_id": "T", "shot_id": "S1", "fact_id": "F_INJURY", "kind": "unresolved"},
+                           {"id": "R_SCENE", "timeline_id": "T", "shot_id": "S1", "fact_id": "F_SCENE", "kind": "unresolved"}],
+                       "coverage": []},
+        }
+        projected = _subject_continuity_audit_projection(source)
+        shot = projected["shots"][0]
+        self.assertEqual(shot["characters"], [])
+        self.assertEqual(shot["required_assets"], [])
+        self.assertEqual(shot["scene_id"], "")
+        self.assertEqual(shot["source_scene_id"], "SCENE_OCC_A")
+        self.assertEqual(shot["continuity_facts"], ["F_WEAPON"])
+        self.assertEqual([row["id"] for row in projected["ledger"]["requirements"]], ["R_WEAPON"])
+        self.assertEqual(source["shots"][0]["scene_id"], "SCENE_A")
+        self.assertEqual(len(source["ledger"]["requirements"]), 3)
+
+    def test_first_unknown_event_is_not_misreported_as_an_opening_baseline(self):
+        from canvas_subject_prompt_v2 import _subject_continuity_audit_projection
+        source = {
+            "prompt_assembly": {"version": 2},
+            "shots": [{"id": "S1", "timeline_id": "T", "story_order": 0, "duration_frames": 24,
+                       "continuity_facts": ["F_STATE"], "subject_usages": []}],
+            "segments": [{"id": "C1", "shot_ids": ["S1"]}],
+            "script_scenes": [{"id": "SC1", "blocks": [{"id": "B1", "kind": "action", "text": "A state is first seen."}]}],
+            "ledger": {
+                "contract_version": 2,
+                "timelines": [{"id": "T", "start_frame": 0}],
+                "facts": [{"id": "F_STATE", "object_kind": "scene", "object_id": "UNUSED_SCENE", "allowed_values": ["observed"]}],
+                "initial": [{"timeline_id": "T", "fact_id": "F_STATE", "value": "unknown"}],
+                "events": [{"id": "E1", "timeline_id": "T", "fact_id": "F_STATE", "shot_id": "S1", "frame": 0,
+                            "local_frame": 0, "before": "unknown", "after": "observed"}],
+                "requirements": [{"id": "R1", "timeline_id": "T", "shot_id": "S1", "fact_id": "F_STATE",
+                                  "kind": "change", "event_ids": ["E1"]}],
+                "coverage": [],
+            },
+        }
+        projected = _subject_continuity_audit_projection(source)
+        self.assertEqual(projected["shots"][0]["continuity_facts"], [])
+        self.assertEqual(projected["ledger"]["events"][0]["before"], "unknown")
+        self.assertEqual(projected["ledger"]["requirements"][0]["id"], "R1")
+        self.assertEqual(source["shots"][0]["continuity_facts"], ["F_STATE"])
+
     def test_local_events_and_flat_screenplay_are_projected_without_rewriting_source(self):
         from copy import deepcopy
         from canvas_subject_prompt_v2 import project_continuity_source, audit_subject_continuity

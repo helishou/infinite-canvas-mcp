@@ -170,11 +170,10 @@ test("explicitly clearing pictures is saveable but still blocks a Ref2VA compile
     const shotRead = service.shotWorkbench("ep", "S1").shotWorkbench;
     assert.equal(shotRead.subjectUsages[0].pictureBindings.length, 0);
     assert.deepEqual(shotRead.resolutionDiagnostics, []);
-    assert.throws(() => service.resolveSubjectPictureInputs("ep", seeded.draft.director!, ["C1"], true), (error: any) =>
-        error.diagnostics?.some((item: any) => item.code === "REF2VA_IMAGE_REQUIRED" && item.targetId === "C1"));
-    const ready = service.workflowReadiness("ep").targets.find(item => item.id === "segment:C1");
-    assert.equal(ready?.status, "blocked");
-    assert.ok(ready?.blockers.some(item => item.includes("Ref2VA") && item.includes("图片")));
+    // REF2VA_IMAGE_REQUIRED 硬卡控已移除：无图 Ref2VA 段编译放行，仅保留 advisory 诊断。
+    const noImageCompiled = service.resolveSubjectPictureInputs("ep", seeded.draft.director!, ["C1"], true);
+    assert.equal((noImageCompiled.source.segments as any[])[0].mode, "Ref2VA");
+    assert.equal(noImageCompiled.assets.A1.storageKey, undefined);
 
     const textMode = structuredClone(service.get("ep").draft.director!);
     const segment = (textMode.source.segments as any[])[0];

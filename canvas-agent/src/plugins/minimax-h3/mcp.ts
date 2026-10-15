@@ -221,9 +221,9 @@ const TOOLS: PluginMcpToolWire[] = [
     },
     {
         id: "h3_write_storyboard_prompt",
-        version: "1.3.1",
+        version: "1.4.0",
         name: "H3 写入结构化分镜提示词",
-        description: "按分镜编辑器的新结构写入单个 Clip：开场总体描述、逐镜描述/切换时间/切换方式/已绑定分镜图、声景和配乐；Ref2VA 模式另写 summary，并由当前人物引用按规则生成 subject_definitions 与 retention_analysis，使用共享 SHA-256 缓存。",
+        description: "仅用于草稿（非制作绑定）Clip：按分镜编辑器的新结构写入单个 Clip——开场总体描述、逐镜描述/切换时间/切换方式/已绑定分镜图、声景和配乐；Ref2VA 模式另写 summary，并由当前人物引用按规则生成 subject_definitions 与 retention_analysis，使用共享 SHA-256 缓存。正式制作 Clip 的提示词由编译回写：改 Shot/源稿后用 request_director_clip_refresh 或 production_compile(scope.targetIds=[segmentId]) 重编译，本工具对其拒绝写入。",
         inputJsonSchema: {
             type: "object",
             properties: {
@@ -900,6 +900,7 @@ export const pluginMcp: PluginMcpModule = {
                 if (!isH3Node(node)) throw new Error(`节点 ${nodeId} 不是 MiniMax H3 节点`);
                 const segment = segmentsOf(node).find((item) => String(item.id || "") === segmentId);
                 if (!segment) throw new Error(`找不到片段:${segmentId}`);
+                if (recordOf(segment.productionClipProjection).targetId) throw new Error("FORMAL_CLIP_OWNED: 正式 Clip 提示词由编译回写；请在制作台修改对应 Shot/源稿后经 request_director_clip_refresh 或 production_compile 重新编译。本工具只写入草稿 Clip。");
                 const promptStarted = Date.now();
                 const generated = writeStoryboardPrompt(project, segment, input);
                 const promptBuildMs = Date.now() - promptStarted;

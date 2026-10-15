@@ -1,6 +1,7 @@
 import { getReact } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { readDefaultLayoutPanes } from "../services/h3-defaults";
+import { inferReferenceRole } from "../services/h3-data";
 
 export const H3_LOCAL_VIEW_DEFAULTS = {
     selectedSegmentId: "",
@@ -22,6 +23,32 @@ export const H3_LOCAL_VIEW_DEFAULTS = {
 };
 
 const localKeys = new Set(Object.keys(H3_LOCAL_VIEW_DEFAULTS));
+const productionStoryboardFields = ["referenceBindings", "refs", "refItems", "storyboardShots", "storyboardDurations", "storyboardModeEnabled"] as const;
+
+function storyboardEditChanged(before: Record<string, any>, after: Record<string, any>) {
+    // 指纹只取身份与归属字段。存储绑定与 withSegmentRefs 重建绑定的字段集不同
+    // （重建会丢掉 order 等、补上 mimeType 等），直接 JSON 比较会让任何参考写入
+    // 都被误判为分镜变更，从而路由进制作稿回写——后端忽略画布参考，参考静默丢失。
+    const fingerprint = (segment: Record<string, any>) => JSON.stringify({
+        refs: (Array.isArray(segment.referenceBindings) ? segment.referenceBindings : [])
+            .filter((ref: Record<string, unknown>) => inferReferenceRole(ref as any) === "storyboard")
+            .map((ref: Record<string, any>) => [ref.id, ref.role, ref.mediaType, ref.storageKey ?? "", ref.url ?? "", ref.enabled !== false]),
+        shots: (segment.storyboardShots || []).map((shot: Record<string, any>) => [shot.id, shot.duration, shot.referenceBindingId]),
+    });
+    return fingerprint(before) !== fingerprint(after);
+}
+
+function clearDeletedStoryboardBindings(before: Record<string, any>, after: Record<string, any>) {
+    const bindingIds = (segment: Record<string, any>) => new Set((Array.isArray(segment.referenceBindings) ? segment.referenceBindings : [])
+        .filter((reference: Record<string, unknown>) => inferReferenceRole(reference as any) === "storyboard")
+        .map((reference: Record<string, any>) => String(reference.id || "")).filter(Boolean));
+    const beforeIds = bindingIds(before), afterIds = bindingIds(after);
+    const removed = new Set([...beforeIds].filter(id => !afterIds.has(id)));
+    if (!removed.size || !Array.isArray(after.storyboardShots)) return after;
+    return { ...after, storyboardShots: after.storyboardShots.map((shot: Record<string, any>) => removed.has(String(shot.referenceBindingId || ""))
+        ? { id: shot.id, duration: shot.duration }
+        : shot) };
+}
 
 export function splitH3MetadataPatch(patch: Record<string, unknown>) {
     const personal: Record<string, unknown> = {};
@@ -73,7 +100,51 @@ export function useH3LocalView(ctx: CanvasNodeContext): CanvasNodeContext {
         updateMetadata: (patch) => {
             const { personal, shared } = splitH3MetadataPatch(patch);
             if (Object.keys(personal).length) view.update(personal);
-            if (Object.keys(shared).length) ctx.updateMetadata(shared);
+            if (!Object.keys(shared).length) return;
+            const liveNode = ctx.getNode(ctx.node.id) || ctx.node;
+            const liveMetadata = liveNode.metadata || {};
+            const productionOwned = Boolean(liveMetadata.productionOwnerKind && liveMetadata.productionOwnerId || liveMetadata.productionSceneId);
+            const beforeSegments = Array.isArray(liveMetadata.segments) ? liveMetadata.segments as Array<Record<string, any>> : [];
+            const nextSegments = Array.isArray(shared.segments) ? shared.segments as Array<Record<string, any>> : undefined;
+            const beforeById = new Map(beforeSegments.map(segment => [String(segment.id || ""), segment]));
+            const routed = (nextSegments || []).flatMap(segment => {
+                const before = beforeById.get(String(segment.id || ""));
+                if (!before || !(productionOwned || before.productionClipProjection?.targetId) || !storyboardEditChanged(before, segment)) return [];
+                return [{ before, segment: clearDeletedStoryboardBindings(before, segment) }];
+            });
+            if (!routed.length) { ctx.updateMetadata(shared); return; }
+
+            // This host boundary catches every H3 subpanel that edits a formal
+            // storyboard, even if it doesn't call the workbench's explicit handler.
+            const routedIds = new Set(routed.map(item => String(item.before.id || "")));
+            const ordinaryPatch = { ...shared };
+            if (nextSegments) {
+                const ordinarySegments = nextSegments.map(segment => {
+                    const id = String(segment.id || ""), before = beforeById.get(id);
+                    if (!before || !routedIds.has(id)) return segment;
+                    const ordinary = { ...segment };
+                    for (const field of productionStoryboardFields) {
+                        if (Object.hasOwn(before, field)) ordinary[field] = before[field]; else delete ordinary[field];
+                    }
+                    return ordinary;
+                });
+                const hasOrdinarySegmentChanges = ordinarySegments.some(segment => {
+                    const before = beforeById.get(String(segment.id || ""));
+                    return before && JSON.stringify(segment) !== JSON.stringify(before);
+                });
+                if (hasOrdinarySegmentChanges) ordinaryPatch.segments = ordinarySegments;
+                else delete ordinaryPatch.segments;
+            }
+            void (async () => {
+                if (!ctx.production?.replaceStoryboardTrack) throw new Error("正式制作分镜需要制作台 Shot 操作接收；当前工作台未连接。");
+                for (const { segment } of routed) {
+                    const result = await ctx.production.replaceStoryboardTrack({ nodeId: ctx.node.id, segmentId: String(segment.id), segment: segment as Record<string, unknown> });
+                    if (!result.sourceSaved) throw new Error("制作台未保存分镜与主体引用更改。");
+                }
+                if (Object.keys(ordinaryPatch).length) ctx.updateMetadata(ordinaryPatch);
+            })().catch(error => {
+                window.dispatchEvent(new CustomEvent("minimax-h3:production-edit-error", { detail: { message: error instanceof Error ? error.message : String(error) } }));
+            });
         },
     };
 }

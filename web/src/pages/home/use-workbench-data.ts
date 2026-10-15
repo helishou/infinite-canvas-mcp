@@ -96,8 +96,8 @@ export function useWorkbenchData() {
                 const readSettings = needsSettings;
                 needsSettings = false;
                 const [logResult, taskResult, settingsResult] = await Promise.allSettled([
-                    fetchBackendGenerationLogs({ limit: logCount }),
-                    fetchBackendTasks({ limit: 30 }),
+                    fetchBackendGenerationLogs({ limit: logCount, summary: true }),
+                    fetchBackendTasks({ limit: 30, summary: true }),
                     readSettings ? request<{ settings: FrontendSettings }>("GET", "/settings") : Promise.resolve(null),
                 ]);
                 if (disposed) return;

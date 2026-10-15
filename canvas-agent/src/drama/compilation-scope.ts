@@ -88,7 +88,12 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     projected.source.shots = allShots.filter(item => shots.has(stableId(item)));
     projected.source.segments = segments;
     projected.source.asset_plan = plans.filter(item => assets.has(key(item)));
-    projected.source.asset_cards = rows(source.asset_cards).filter(item => assets.has(key(item)));
+    // Asset cards are image-generation recipes, not media dependencies. Keep
+    // cards only when an image target is part of this compile output; H3 clips
+    // consume the already-bound Subject media and must not validate or regenerate
+    // unrelated identity-image layouts as a side effect.
+    const outputAssetCards = new Set(targetIds.filter(targetId => assetTargetIds.has(targetId)));
+    projected.source.asset_cards = rows(source.asset_cards).filter(item => outputAssetCards.has(key(item)));
     if (subjectAssembly) {
         // The pinned storyboard validator predates Subject Prompt v2 and checks
         // attention IDs against character/scene/asset registries. Keep the
@@ -191,7 +196,17 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
                 const subjectId = entitySubjects.get(`${fact.object_kind}:${fact.object_id}`);
                 if (subjectId && usedFacts.has(String(fact.id))) usedSubjects.add(subjectId);
             }
-            projected.source.subject_registry = allSubjectRows.filter(subject => usedSubjects.has(String(subject.id))).map(subject => {
+            const scopedSubjects = allSubjectRows.filter(subject => usedSubjects.has(String(subject.id)));
+            // Subject Prompt v2 stores props as asset-kind entity references.
+            // Their asset_plan rows are registry metadata, even when this scoped
+            // compile does not consume their images. Keep those rows for schema
+            // validation without adding them to `assets` or `targetIds`.
+            const subjectAssetIds = new Set(scopedSubjects
+                .filter(subject => subject.entityRef?.kind === "asset")
+                .map(subject => String(subject.entityRef?.id || "")));
+            const registryOnlyPlans = plans.filter(item => subjectAssetIds.has(key(item)) && !assets.has(key(item)));
+            projected.source.asset_plan = [...rows(projected.source.asset_plan), ...registryOnlyPlans];
+            projected.source.subject_registry = scopedSubjects.map(subject => {
                 // Replay context keeps valid identity declarations; its media is
                 // materialized separately only when an output Shot consumes it.
                 // Earlier Shots remain in this projection for continuity replay, so keep

@@ -21,7 +21,7 @@ export function ProductionWorkspaceNavigation({ groups, selectedId, onSelect, co
             <h2 className="mb-2 px-3 text-xs font-medium text-muted-foreground">{t(group.labelKey)}</h2>
             <ul className="space-y-1">
                 {group.items.map(item => {
-                    const Icon = item.seriesView === "shared" ? Images : item.seriesView === "episodes" ? ListVideo : icons[item.workspace];
+                    const Icon = item.seriesView === "episodes" ? ListVideo : item.seriesView === "planning" ? Images : icons[item.workspace];
                     return <li key={item.id}><button type="button" aria-current={selectedId === item.id ? "page" : undefined}
                         onClick={() => { setOpen(false); if (selectedId !== item.id) onSelect(item); }}
                         className={`flex min-h-11 w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary ${selectedId === item.id ? "bg-accent font-medium text-accent-foreground" : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"}`}
@@ -31,8 +31,9 @@ export function ProductionWorkspaceNavigation({ groups, selectedId, onSelect, co
         </section>)}
     </nav>;
     if (horizontal) return <><nav data-production-horizontal-navigation aria-label={t("director.workspace.navigation")}>
-        {groups.filter(group => group.id === "owner").flatMap(group => group.items).map(item => {
-            const Icon = icons[item.workspace];
+        {/* 剧目工作区显示剧目子 Tab（规划/共享画布/分集），分集制作区显示制作子 Tab。 */}
+        {groups.filter(group => selectedId.startsWith("series:") ? group.id === "series" : group.id === "owner").flatMap(group => group.items).map(item => {
+            const Icon = item.seriesView === "shared" ? Images : item.seriesView === "episodes" ? ListVideo : item.seriesView === "planning" ? Images : icons[item.workspace];
             return <button key={item.id} type="button" aria-current={selectedId === item.id ? "page" : undefined} onClick={() => { if (selectedId !== item.id) onSelect(item); }}><Icon className="size-4 shrink-0" /><span>{t(item.labelKey)}</span></button>;
         })}
     </nav>

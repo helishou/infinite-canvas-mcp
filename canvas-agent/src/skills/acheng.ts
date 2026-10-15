@@ -292,9 +292,17 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
     const onlyAssets = !Array.isArray(director.source.segments) || !director.source.segments.length;
     let exitCode = 0;
     try {
-        const compiler = path.join(runtime.path, "scripts", onlyAssets ? "compile_assets.py" : "compile_h3.py");
-        const args = runtime.liveCompiler && !onlyAssets
-            ? ["-B", "-X", "utf8", runtime.liveCompiler.runnerPath, compiler, runtime.liveCompiler.directory, sourceFile, "--out", output, "--draft"]
+        const liveCompiler = runtime.liveCompiler;
+        const projectAssetCompiler = liveCompiler
+            ? path.resolve(liveCompiler.directory, "../../.agents/skills/acheng-director/scripts/compile_assets.py")
+            : "";
+        const useProjectAssetCompiler = Boolean(onlyAssets && liveCompiler && fs.existsSync(projectAssetCompiler));
+        const compiler = useProjectAssetCompiler
+            ? projectAssetCompiler
+            : path.join(runtime.path, "scripts", onlyAssets ? "compile_assets.py" : "compile_h3.py");
+        const useLiveCompiler = Boolean(liveCompiler && (!onlyAssets || useProjectAssetCompiler));
+        const args = useLiveCompiler && liveCompiler
+            ? ["-B", "-X", "utf8", liveCompiler.runnerPath, compiler, liveCompiler.directory, sourceFile, "--out", output, "--draft"]
             : ["-B", "-X", "utf8", compiler, sourceFile, "--out", output, "--draft"];
         runAchengPython(args, { cwd: runtime.path, windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     } catch (error: any) {
@@ -411,6 +419,16 @@ function liveCompilerOverlay() {
     const digest = crypto.createHash("sha256");
     for (const file of ["canvas_subject_prompt_v2.py", "source-contract.py", "live-compile.py"]) {
         digest.update(file).update("\0").update(fs.readFileSync(path.join(directory, file))).update("\0");
+    }
+    const projectRoot = path.resolve(directory, "../..");
+    const assetCompilerFiles = [
+        "compile_assets.py", "asset_plan.py", "post_hooks.py", "asset_delivery.py",
+        "prompt_delivery.py", "reference_bindings.py", "contract_core.py",
+        "audit_storyboard_quality.py", "render_delivery_view.py",
+    ];
+    for (const file of assetCompilerFiles) {
+        const target = path.join(projectRoot, ".agents/skills/acheng-director/scripts", file);
+        if (fs.existsSync(target)) digest.update(file).update("\0").update(fs.readFileSync(target)).update("\0");
     }
     const runtimeModule = fileURLToPath(import.meta.url);
     digest.update("acheng-runtime-module").update("\0").update(fs.readFileSync(runtimeModule)).update("\0");

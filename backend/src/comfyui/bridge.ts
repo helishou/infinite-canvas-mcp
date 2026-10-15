@@ -1146,7 +1146,7 @@ export async function buildNativeNanFengV15Workflow(input: Record<string, unknow
     const selectedAttention = String(value("sageAttention", value("dedicatedAttention", "H3专用Sage加速")));
     const sageAttention = selectedAttention === "关闭" ? "disabled" : selectedAttention === "自动" || selectedAttention === "H3专用Sage加速" ? "auto" : selectedAttention;
     const inputs: Record<string, unknown> = {
-        "模型": String(value("modelName", "h3\\DasiwaMinimaxH3_dasiwaREF2VAHybridV1.safetensors")), "文本编码器": String(value("textEncoder", "qwen3vl_32b_minimax_h3_fp8.safetensors")), "文本编码器类型": String(value("textEncoderType", "minimax")), "文本编码器设备": String(value("textEncoderDevice", "default")), "视频VAE": String(value("videoVae", "minimax_h3_video_vae_fp16.safetensors")), "音频VAE": String(value("audioVae", "minimax_h3_audio_vae_fp32.safetensors")), "模型权重精度": String(value("precision", "default")),
+        "模型": String(value("modelName", "H3\\DasiwaMinimaxH3_dasiwaREF2VAHybridV1.safetensors")), "文本编码器": String(value("textEncoder", "qwen3vl_32b_minimax_h3_fp8.safetensors")), "文本编码器类型": String(value("textEncoderType", "minimax")), "文本编码器设备": String(value("textEncoderDevice", "default")), "视频VAE": String(value("videoVae", "H3\\minimax_h3_video_vae_fp16.safetensors")), "音频VAE": String(value("audioVae", "H3\\minimax_h3_audio_vae_fp32.safetensors")), "模型权重精度": String(value("precision", "default")),
         "SageAttention": sageAttention, "H3专用注意力": selectedAttention, "允许编译": value("allowCompile", false), "画面比例": normalizeH3AspectRatio(String(value("aspectRatio", "16:9 (Widescreen)"))), "百万像素": Number(value("megapixels", 0.4)), "尺寸倍数": Number(value("sizeMultiple", 32)), "时长秒": Number(value("duration", 5)), "提示词": withNoTextConstraint(String(input.prompt || ""), value("noCaption", true) !== false), "恒定触发词": String(value("constantTriggerWord", "")), "随机种子": resolveH3Seed(params), "采样器": String(value("sampler", "res_multistep")), "调度器": String(value("scheduler", "simple")), "采样步数": Number(value("steps", 20)), "降噪强度": Number(value("denoise", 1)), "参考图尺寸": String(value("refImageSize", "match")),
         "文生视频": mode === "t2v", "图生视频": mode === "i2v", "首尾帧": mode === "fl2v", "启用LoRA": slots.some((slot: any) => slot?.enabled !== false && String(slot?.name || "").trim()), "启用锁音频": value("lockAudio", false), "开启音频驱动模式": value("audioDrive", false), "音频驱动文件": params.audioDrive === true ? uploadedDriveAudio : "", "运行时预留显存GB": Number(value("reservedVramGb", 0.6)), "启用运行时预留显存": value("runtimeReserveEnabled", false), "启用UniBlockSwap": value("uniBlockSwapEnabled", false), "UniBlockSwap常驻块数": Number(value("uniBlockSwapBlocks", 1)), "启用H3潜空间放大二采": value("latentUpscaleEnabled", false), "H3潜空间放大模型": String(value("latentUpscaleModel", "minimax_h3_latent_upscaler_3d_fp16.safetensors")), "H3潜空间目标百万像素": Number(value("latentUpscaleMegapixels", 1)), "H3潜空间对齐": Number(value("latentUpscaleAlign", 2)), "H3潜空间精度": String(value("latentUpscalePrecision", "bf16")), "H3一采步数": Number(value("h3FirstSteps", 6)), "H3二采步数": Number(value("h3SecondSteps", 4)), "H3完整Sigma序列": String(value("h3FullSigma", "")), "V81一采使用手动Sigma": value("v81ManualSigma", false), "启用实时预览": value("realtimePreviewEnabled", true), "实时预览最长边": Number(value("realtimePreviewLongEdge", 512)), "实时预览帧数": Number(value("realtimePreviewFrames", 12)), "实时预览帧率": Number(value("realtimePreviewFps", 8)), "实时预览JPEG质量": Number(value("realtimePreviewJpegQuality", 75)), "参考图最长边": Number(value("referenceLongEdge", 1920)), "启用H3 SLA": value("slaEnabled", false), "SLA稀疏率": Number(value("slaSparsity", 0.9)), "SLA块大小": String(value("slaBlockSize", "64")), "SLA最短序列": Number(value("slaMinSequence", 4096)), "SLA末尾稠密步数": Number(value("slaDenseLastSteps", 1)), "SLA保护音频": value("slaProtectAudio", true), "SLA指定稠密步": String(value("slaDenseSteps", "0")), "SLA稠密后端": String(value("slaBackend", "comfy_kitchen")), "SLA关闭FP16累加": value("slaDisableFp16Accum", true), "SLA稳定运动": value("slaStabilizeMotion", true),
         // V15 继承链要求完整提交旧字段，即使对应功能未启用也必须显式提交默认值。
@@ -1248,14 +1248,14 @@ export async function buildDecodedH3SecondPassWorkflow(input: Record<string, unk
     const source = String(input.video || "").trim();
     if (!source) throw new Error("确认精修缺少已缓存的一采视频");
     const uploaded = await upload(source);
-    const modelName = String(params.modelName || "h3\\DasiwaMinimaxH3_dasiwaREF2VAHybridV1.safetensors");
+    const modelName = String(params.modelName || "H3\\DasiwaMinimaxH3_dasiwaREF2VAHybridV1.safetensors");
     const graph: Record<string, any> = {
         cached_first_pass: { class_type: "LoadVideo", inputs: { file: uploaded } },
         cached_parts: { class_type: "GetVideoComponents", inputs: { video: ["cached_first_pass", 0] } },
         refine_model: { class_type: "UNETLoader", inputs: { unet_name: modelName, weight_dtype: String(params.precision || "default") } },
         refine_clip: { class_type: "CLIPLoader", inputs: { clip_name: String(params.textEncoder || "qwen3vl_32b_minimax_h3_fp8.safetensors"), type: String(params.textEncoderType || "minimax"), device: String(params.textEncoderDevice || "default") } },
-        refine_video_vae: { class_type: "VAELoader", inputs: { vae_name: String(params.videoVae || "minimax_h3_video_vae_fp16.safetensors") } },
-        refine_audio_vae: { class_type: "VAELoader", inputs: { vae_name: String(params.audioVae || "minimax_h3_audio_vae_fp32.safetensors") } },
+        refine_video_vae: { class_type: "VAELoader", inputs: { vae_name: String(params.videoVae || "H3\\minimax_h3_video_vae_fp16.safetensors") } },
+        refine_audio_vae: { class_type: "VAELoader", inputs: { vae_name: String(params.audioVae || "H3\\minimax_h3_audio_vae_fp32.safetensors") } },
     };
     let model: [string, number] = ["refine_model", 0];
     const slots = Array.isArray(params.loraSlots) ? params.loraSlots as any[] : [];
@@ -1341,10 +1341,10 @@ export async function buildExpandedNanFengV10Workflow(
     const height = Math.max(32, Math.round(width * ratioHeight(ratio) / ratioWidth(ratio) / sizeMultiple) * sizeMultiple);
     const graph: Record<string, any> = {};
     const node = (id: string, class_type: string, inputs: Record<string, any>) => { graph[id] = { class_type, inputs }; return (output = 0) => [id, output]; };
-    const modelName = String(params.modelName || "h3\\DasiwaMinimaxH3_dasiwaREF2VAHybridV1.safetensors");
+    const modelName = String(params.modelName || "H3\\DasiwaMinimaxH3_dasiwaREF2VAHybridV1.safetensors");
     const textEncoder = String(params.textEncoder || "qwen3vl_32b_minimax_h3_fp8.safetensors");
-    const videoVaeName = String(params.videoVae || "minimax_h3_video_vae_fp16.safetensors");
-    const audioVaeName = String(params.audioVae || "minimax_h3_audio_vae_fp32.safetensors");
+    const videoVaeName = String(params.videoVae || "H3\\minimax_h3_video_vae_fp16.safetensors");
+    const audioVaeName = String(params.audioVae || "H3\\minimax_h3_audio_vae_fp32.safetensors");
     if (!modelName || !textEncoder || !videoVaeName || !audioVaeName) throw new Error("南风 H3 需要模型、文本编码器、视频 VAE 和音频 VAE");
 
     const start = node("nf_start", "NanFengH3ReleaseAtStartV15", { unet_name: modelName, clip_name: textEncoder, video_vae_name: videoVaeName, audio_vae_name: audioVaeName, reserved_vram_gb: params.runtimeReserveEnabled === true ? Number(params.reservedVramGb ?? 0.6) : 0 });
@@ -1631,13 +1631,14 @@ function normalizeUrl(value: string) {
 
 function normalizeH3WorkflowModel(value: string) {
     const requested = value.trim();
-    if (/hybrid_beta4_int8_convrot_2\.safetensors$/i.test(requested)) return "h3\\10Eros_minimax_h3_TURBO-hybrid_beta4_int8_convrot_2.safetensors";
-    if (/hybrid_beta3_int8_convrot\.safetensors$/i.test(requested)) return "h3\\10Eros_minimax_h3_TURBO-hybrid_beta3_int8_convrot.safetensors";
+    // beta4 模型文件已从 ComfyUI models 中移除，统一映射到当前现存的混合模型。
+    if (/hybrid_beta4_int8_convrot_2\.safetensors$/i.test(requested)) return "H3\\minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors";
+    if (/hybrid_beta3_int8_convrot\.safetensors$/i.test(requested)) return "H3\\10Eros_minimax_h3_TURBO-hybrid_beta3_int8_convrot.safetensors";
     const aliases: Record<string, string> = {
-        "minimax_h3_ref2va_pruned_int8_convrot.safetensors": "h3\\minimax_h3_ref2va_pruned_int8_convrot.safetensors",
-        "minimax_h3_ref2va_int8_convrot.safetensors": "h3\\minimax_h3_ref2va_int8_convrot.safetensors",
-        "10eros_max_h3_turbo-hybrid_beta4_int8_convrot_2.safetensors": "h3\\10Eros_minimax_h3_TURBO-hybrid_beta4_int8_convrot_2.safetensors",
-        "10eros_minimax_h3_turbo-hybrid_beta4_int8_convrot_2.safetensors": "h3\\10Eros_minimax_h3_TURBO-hybrid_beta4_int8_convrot_2.safetensors",
+        "minimax_h3_ref2va_pruned_int8_convrot.safetensors": "H3\\minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        "minimax_h3_ref2va_int8_convrot.safetensors": "H3\\minimax_h3_ref2va_int8_convrot.safetensors",
+        "10eros_max_h3_turbo-hybrid_beta4_int8_convrot_2.safetensors": "H3\\minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors",
+        "10eros_minimax_h3_turbo-hybrid_beta4_int8_convrot_2.safetensors": "H3\\minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors",
     };
     const key = requested.toLowerCase().replace(/^.*[\\/]/, "");
     return aliases[key] || requested;

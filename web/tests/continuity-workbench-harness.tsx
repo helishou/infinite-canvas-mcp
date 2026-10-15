@@ -39,6 +39,7 @@ function Panel() {
             draftValue={draft} onDraftChange={setDraft} busy={false} editable
             onSave={async next => { setSaved(structuredClone(next)); return true; }}
             onCheck={async () => {}} onLocate={() => {}} onBoundary={() => {}} onSnapshot={() => {}} />
+        <output hidden data-testid="continuity-ledger">{JSON.stringify(saved)}</output>
     </main>;
 }
 const router = createMemoryRouter([{ path: "/", element: <Panel /> }]);

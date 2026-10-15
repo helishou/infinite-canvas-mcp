@@ -5,13 +5,16 @@ import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import type { SeriesWorkspaceView } from "./production-workspace";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { App, Button, Input, Modal, Select, Switch, Tag } from "antd";
-import { ArrowUpRight, Clapperboard, Download, FileArchive, ImagePlus, PencilLine, Plus, Trash2, Upload } from "lucide-react";
+import { ArrowUpRight, Clapperboard, Download, FileArchive, ImagePlus, Images, PencilLine, Plus, Trash2, Upload } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
-import { backendMediaUrl, createBackendDramaEpisode, deleteBackendDramaAsset, deleteBackendDramaEpisode, fetchBackendDramaAssets, fetchBackendDramaEpisodes, updateBackendDramaEpisode, uploadBackendDramaAsset, ensureSharedAssetCanvas, ensureEpisodeCanvas, upsertBackendCanvasFolder, type DramaCustomAsset, type DramaEpisode } from "@/services/backend-api";
+import { backendMediaUrl, createBackendDramaEpisode, deleteBackendDramaAsset, deleteBackendDramaEpisode, editEpisodeProduction, fetchBackendDramaAssets, fetchBackendDramaEpisodes, fetchBackendProject, fetchEpisodeProduction, fetchProductionSharedAssets, updateBackendDramaEpisode, uploadBackendDramaAsset, ensureSharedAssetCanvas, ensureEpisodeCanvas, upsertBackendCanvasFolder, type ApprovedSharedAsset, type DramaCustomAsset, type DramaEpisode, type EpisodeProduction } from "@/services/backend-api";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
+import { MediaImage } from "@/components/media/media-image";
+import { nanoid } from "nanoid";
+import { productionCanvasNodes, type ProductionCanvasSnapshot } from "./production-canvas-nodes";
 import { useCanvasStore, type CanvasFolder, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { dramaProductionPlanSchema, type DramaProductionPlan } from "@basketikun/canvas-agent/drama/production-contract";
 import { ModelPicker } from "@/components/model-picker";
@@ -71,6 +74,13 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
     const [episodeSaving, setEpisodeSaving] = useState(false);
     const [assets, setAssets] = useState<DramaCustomAsset[]>([]);
     const [uploadingAssets, setUploadingAssets] = useState(false);
+    const [sharedAssets, setSharedAssets] = useState<ApprovedSharedAsset[]>([]);
+    const [sharedAssetsError, setSharedAssetsError] = useState(false);
+    const [sharedAssetsReload, setSharedAssetsReload] = useState(0);
+    const [sharedProduction, setSharedProduction] = useState<EpisodeProduction | null>(null);
+    const [sharedCanvasSnapshot, setSharedCanvasSnapshot] = useState<ProductionCanvasSnapshot>();
+    const [styleSaving, setStyleSaving] = useState(false);
+    const [styleWaiverDraft, setStyleWaiverDraft] = useState("");
     const coverInputRef = useRef<HTMLInputElement>(null);
     const assetInputRef = useRef<HTMLInputElement>(null);
 
@@ -99,10 +109,96 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
             .catch((error) => { if (!disposed) message.error(error instanceof Error ? error.message : t("drama.customAssets.loadFailed")); });
         return () => { disposed = true; };
     }, [folder?.id, message]);
+    useEffect(() => {
+        const sharedCanvasId = folder?.sharedAssetCanvasId;
+        let disposed = false;
+        setSharedAssetsError(false);
+        if (!sharedCanvasId) { setSharedAssets([]); return; }
+        void fetchProductionSharedAssets({ projectId: sharedCanvasId })
+            .then((result) => { if (!disposed) setSharedAssets(result.assets || []); })
+            .catch(() => { if (!disposed) setSharedAssetsError(true); });
+        return () => { disposed = true; };
+    }, [folder?.sharedAssetCanvasId, sharedAssetsReload]);
+    useEffect(() => {
+        const sharedCanvasId = folder?.sharedAssetCanvasId;
+        if (!sharedCanvasId) { setSharedProduction(null); setSharedCanvasSnapshot(undefined); return; }
+        let disposed = false;
+        void Promise.all([
+            fetchEpisodeProduction({ projectId: sharedCanvasId }).catch(() => null),
+            fetchBackendProject(sharedCanvasId).catch(() => null),
+        ]).then(([production, canvas]) => {
+            if (disposed) return;
+            setSharedProduction(production?.production || null);
+            const source = production?.production?.draft.director?.source as Record<string, unknown> | undefined;
+            setStyleWaiverDraft(String(source?.style_policy_reason || ""));
+            const projectRecord = canvas?.project as { nodes?: unknown; revision?: unknown } | undefined;
+            setSharedCanvasSnapshot({
+                id: sharedCanvasId,
+                revision: Number(projectRecord?.revision || 0),
+                nodes: Array.isArray(projectRecord?.nodes) ? projectRecord.nodes as ProductionCanvasSnapshot["nodes"] : [],
+            });
+        });
+        return () => { disposed = true; };
+    }, [folder?.sharedAssetCanvasId, sharedAssetsReload]);
 
     if (!folder) return <div className="py-12 text-center text-sm text-muted-foreground">{t("canvas.loading")}</div>;
 
     const produceEpisode = onProduceEpisode || ((episode: DramaEpisode) => navigate(dramaWorkbenchPath(dramaId, episode.id)));
+    const orderedSharedAssets = [...sharedAssets].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const sharedThumbs = orderedSharedAssets.slice(0, 5);
+    const sharedCanvasProject = folder.sharedAssetCanvasId ? projects.find((item) => item.id === folder.sharedAssetCanvasId) : undefined;
+    const sharedNodeCount = sharedCanvasProject?.summary?.nodeCount ?? sharedCanvasProject?.nodes.length;
+    const sharedLastUpdate = orderedSharedAssets[0]?.createdAt;
+    const styleSource = sharedProduction?.draft.director?.source as Record<string, any> | undefined;
+    const styleLock = styleSource?.style_lock as Record<string, unknown> | undefined;
+    const styleAnchorAssetId = String(styleLock?.anchor_asset_id || "");
+    const styleAnchorNodeId = String(styleSource?.style_anchor_node_id || "");
+    const styleAssetPlan = Array.isArray(styleSource?.asset_plan) ? styleSource.asset_plan as Record<string, any>[] : [];
+    const styleAssets = styleAssetPlan.filter(item => String(item.role || item.asset_type || "").toUpperCase() === "STYLE_MOTHER" || String(item.kind || "").toLowerCase() === "style");
+    const sharedStyleNodes = productionCanvasNodes(folder.sharedAssetCanvasId || "", undefined, sharedCanvasSnapshot).filter(node => {
+        const metadata = node.metadata || {};
+        if (node.type === "image") return Boolean(metadata.storageKey);
+        if (node.type === "character") return Array.isArray(metadata.characterImages) && metadata.characterImages.some((image: Record<string, unknown>) => typeof image.storageKey === "string" && image.storageKey);
+        if (node.type === "scene") return Boolean((metadata.sceneImage as Record<string, unknown> | undefined)?.storageKey);
+        if (node.type === "prop") return Boolean((metadata.propImage as Record<string, unknown> | undefined)?.storageKey);
+        if (node.type === "config" && (metadata.generationMode || "image") === "image") {
+            return metadata.smart === true
+                ? Array.isArray(metadata.images) && metadata.images.some((image: Record<string, unknown>) => typeof image.storageKey === "string" && image.storageKey)
+                : metadata.status === "success" && typeof metadata.storageKey === "string" && Boolean(metadata.storageKey);
+        }
+        return false;
+    });
+    const styleOptions = [
+        ...styleAssets.map(item => ({ value: `asset:${String(item.asset_id || item.id || "")}`, label: String(item.asset_name || item.name || item.title || item.asset_id || item.id || "") })),
+        ...sharedStyleNodes.map(node => ({ value: `node:${node.id}`, label: t("director.workspace.styleCanvasNode", { title: node.title || node.id }) })),
+    ];
+    const styleValue = styleAnchorNodeId ? `node:${styleAnchorNodeId}` : styleAnchorAssetId ? `asset:${styleAnchorAssetId}` : undefined;
+    const patchSharedStyle = async (patch: Record<string, unknown>) => {
+        if (!folder.sharedAssetCanvasId || !sharedProduction || styleSaving) return;
+        setStyleSaving(true);
+        try {
+            const result = await editEpisodeProduction({ projectId: folder.sharedAssetCanvasId }, sharedProduction.revision, [{ type: "patch_director_source", entity: "style", patch }], nanoid());
+            setSharedProduction(result.production);
+            setStyleWaiverDraft(String((result.production.draft.director?.source as Record<string, any> | undefined)?.style_policy_reason || ""));
+            message.success(t("productionCanvas.styleAnchorSaved"));
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : String(error));
+        } finally { setStyleSaving(false); }
+    };
+    const openSharedCanvas = async () => {
+        if (openingSharedCanvas) return;
+        if (!folder.sharedAssetCanvasId && !(folder.productionPlan?.confirmedAt && folder.productionPlan.confirmedOutline === folder.outline)) { openFolderEditor(); return; }
+        setOpeningSharedCanvas(true);
+        try {
+            const { project } = await ensureSharedAssetCanvas(folder.id);
+            const projectId = String(project.id);
+            useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"));
+            if (canvasHost) canvasHost.openCanvas({ projectId });
+            else navigate(`/canvas/${encodeURIComponent(projectId)}`);
+        }
+        catch (error) { message.error(String(error)); }
+        finally { setOpeningSharedCanvas(false); }
+    };
     const replaceEpisodes = (next: DramaEpisode[]) => {
         setEpisodes(next);
         onEpisodesChanged?.(next);
@@ -307,21 +403,97 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
                 </div>
             </section>}
 
-            {(!view || view === "shared") && <section data-drama-shared-canvas className="mb-5">
-                <ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t("productionCanvas.sharedCanvas")} summary={t(folder.sharedAssetCanvasId ? "productionCanvas.sharedCanvasReady" : "productionCanvas.sharedCanvasEmpty")} help={<p>{t("productionCanvas.sharedCanvasDescription")}</p>} actions={<Button loading={openingSharedCanvas} onClick={async () => {
-                    if (openingSharedCanvas) return;
-                    if (!folder.sharedAssetCanvasId && !(folder.productionPlan?.confirmedAt && folder.productionPlan.confirmedOutline === folder.outline)) { openFolderEditor(); return; }
-                    setOpeningSharedCanvas(true);
-                    try {
-                        const { project } = await ensureSharedAssetCanvas(folder.id);
-                        const projectId = String(project.id);
-                        useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"));
-                        if (canvasHost) canvasHost.openCanvas({ projectId });
-                        else navigate(`/canvas/${encodeURIComponent(projectId)}`);
-                    }
-                    catch (error) { message.error(String(error)); }
-                    finally { setOpeningSharedCanvas(false); }
-                }}>{t("productionCanvas.openSharedCanvas")}<ArrowUpRight className="ml-1 size-4" /></Button>} />
+            {(!view || view === "shared") && <section data-drama-shared-canvas className="mb-5 space-y-4">
+                <ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t("productionCanvas.sharedCanvas")} summary={t(folder.sharedAssetCanvasId ? "productionCanvas.sharedCanvasReady" : "productionCanvas.sharedCanvasEmpty")} help={<p>{t("productionCanvas.sharedCanvasDescription")}</p>} actions={<Button loading={openingSharedCanvas} onClick={() => void openSharedCanvas()}>{t("productionCanvas.openSharedCanvas")}<ArrowUpRight className="ml-1 size-4" /></Button>} />
+                {folder.sharedAssetCanvasId ? (
+                    <div className="overflow-hidden rounded-2xl border border-stone-200 bg-background dark:border-stone-800">
+                        <div className="flex flex-col gap-5 p-5 sm:flex-row sm:items-center">
+                            <div className="min-w-0 flex-1 space-y-3">
+                                <div className="flex items-center gap-3">
+                                    <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-orange-100 text-orange-600 dark:bg-orange-950/40 dark:text-orange-300"><Images className="size-5" /></span>
+                                    <div className="min-w-0">
+                                        <p className="truncate text-sm font-semibold" title={sharedCanvasProject?.title}>{sharedCanvasProject?.title || t("productionCanvas.sharedCanvas")}</p>
+                                        <p className="mt-0.5 text-xs text-stone-500 dark:text-stone-400">{t("productionCanvas.sharedCanvasDescription")}</p>
+                                    </div>
+                                </div>
+                                <div className="flex flex-wrap gap-2">
+                                    <Tag color="orange">{t("productionCanvas.sharedAssetGalleryCount", { count: orderedSharedAssets.length })}</Tag>
+                                    {typeof sharedNodeCount === "number" && <Tag>{t("productionCanvas.sharedCanvasNodes")}: {sharedNodeCount}</Tag>}
+                                    {sharedLastUpdate && <Tag>{t("productionCanvas.sharedCanvasLastUpdate")}: {new Date(sharedLastUpdate).toLocaleDateString()}</Tag>}
+                                </div>
+                            </div>
+                            {sharedThumbs.length > 0 && <div className="flex shrink-0 items-center">
+                                {sharedThumbs.map((asset, index) => <MediaImage key={asset.id} src={backendMediaUrl(asset.storageKey)} alt={asset.snapshot.title} name={asset.snapshot.title} className={`size-16 rounded-xl border-2 border-background object-cover shadow-sm ${index ? "-ml-4" : ""}`} preview={false} />)}
+                                {orderedSharedAssets.length > sharedThumbs.length && <span className="-ml-4 grid size-16 shrink-0 place-items-center rounded-xl border-2 border-background bg-stone-100 text-xs font-medium text-stone-500 dark:bg-stone-900 dark:text-stone-400">+{orderedSharedAssets.length - sharedThumbs.length}</span>}
+                            </div>}
+                        </div>
+                    </div>
+                ) : (
+                    <div className="flex items-center gap-4 rounded-2xl border border-dashed border-stone-300 bg-stone-50 p-5 dark:border-stone-700 dark:bg-stone-900/40">
+                        <span className="grid size-10 shrink-0 place-items-center rounded-full bg-orange-100 text-orange-600 dark:bg-orange-950/40 dark:text-orange-300"><Images className="size-5" /></span>
+                        <div className="min-w-0">
+                            <p className="text-sm font-medium">{t("productionCanvas.sharedCanvasDescription")}</p>
+                            <p className="mt-1 text-xs leading-5 text-stone-500 dark:text-stone-400">{t("productionCanvas.sharedCanvasEmpty")}</p>
+                        </div>
+                    </div>
+                )}
+                {folder.sharedAssetCanvasId && <div>
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                        <h3 className="text-sm font-semibold">{t("productionCanvas.sharedAssetGalleryTitle")}</h3>
+                        {orderedSharedAssets.length > 0 && <span className="text-xs text-stone-400">{t("productionCanvas.sharedAssetGalleryCount", { count: orderedSharedAssets.length })}</span>}
+                    </div>
+                    {sharedAssetsError ? (
+                        <div className="flex items-center justify-between gap-3 rounded-xl border border-dashed border-stone-300 px-4 py-4 text-sm text-stone-400 dark:border-stone-700">
+                            <span>{t("productionCanvas.sharedAssetGalleryLoadFailed")}</span>
+                            <Button size="small" onClick={() => setSharedAssetsReload((nonce) => nonce + 1)}>{t("productionCanvas.sharedAssetGalleryRetry")}</Button>
+                        </div>
+                    ) : orderedSharedAssets.length ? (
+                        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                            {orderedSharedAssets.map((asset) => (
+                                <button key={asset.id} type="button" onClick={() => void openSharedCanvas()} className="group min-w-0 overflow-hidden rounded-xl border border-stone-200 bg-background text-left transition hover:-translate-y-0.5 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-950/5 dark:border-stone-800 dark:hover:border-orange-900">
+                                    <MediaImage src={backendMediaUrl(asset.storageKey)} alt={asset.snapshot.title} name={asset.snapshot.title} className="aspect-[4/3] w-full bg-stone-100 object-cover dark:bg-stone-900" preview={false} />
+                                    <div className="space-y-1.5 p-3">
+                                        <p className="truncate text-sm font-medium" title={asset.snapshot.title}>{asset.snapshot.title || t("productionCanvas.sharedAssetUntitled")}</p>
+                                        <div className="flex items-center gap-2 text-xs text-stone-400">
+                                            <span className="shrink-0">v{asset.sourceVersion}</span>
+                                            <span className={`truncate ${asset.reviewStatus === "approved" ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"}`}>{t(`productionCanvas.reviewStatus.${asset.reviewStatus}`)}</span>
+                                            <span className="ml-auto shrink-0">{new Date(asset.createdAt).toLocaleDateString()}</span>
+                                        </div>
+                                    </div>
+                                </button>
+                            ))}
+                        </div>
+                    ) : (
+                        <div className="rounded-xl border border-dashed border-stone-300 px-4 py-6 text-center text-sm text-stone-400 dark:border-stone-700">{t("productionCanvas.sharedAssetGalleryEmpty")}</div>
+                    )}
+                </div>}
+                {folder.sharedAssetCanvasId && sharedProduction?.draft.director && <div className="rounded-2xl border border-stone-200 bg-background p-5 dark:border-stone-800" data-shared-style-anchor>
+                    <div className="mb-3">
+                        <h3 className="text-sm font-semibold">{t("productionCanvas.sharedStyleAnchorTitle")}</h3>
+                        <p className="mt-1 text-xs leading-5 text-stone-500 dark:text-stone-400">{t("productionCanvas.sharedStyleAnchorHint")}</p>
+                    </div>
+                    <div className="grid gap-4 md:grid-cols-2">
+                        <label className="grid gap-1.5 text-sm">
+                            <span className="font-medium">{t("director.workspace.styleMother")}</span>
+                            <Select allowClear value={styleValue} disabled={styleSaving} placeholder={t("director.workspace.chooseStyleMother")} options={styleOptions} onChange={selected => {
+                                if (!selected) void patchSharedStyle({ anchor_asset_id: "", style_anchor_node_id: "", style_policy: "waived", style_policy_reason: t("director.workspace.styleUnboundReason") });
+                                else if (selected.startsWith("node:")) {
+                                    const nodeId = selected.slice("node:".length);
+                                    const node = sharedStyleNodes.find(item => item.id === nodeId);
+                                    void patchSharedStyle({ anchor_asset_id: "", style_anchor_node_id: nodeId, style_policy: "waived", style_policy_reason: t("director.workspace.styleCanvasNodeReason", { title: node?.title || nodeId }) });
+                                } else void patchSharedStyle({ anchor_asset_id: selected.slice("asset:".length), style_anchor_node_id: "", style_policy: "required", style_policy_reason: "" });
+                            }} />
+                        </label>
+                        <label className="grid gap-1.5 text-sm">
+                            <span className="font-medium">{t("director.workspace.stylePolicy")}</span>
+                            <Select value={String(styleSource?.style_policy || "") || undefined} placeholder={t("director.workspace.styleOptional")} disabled={styleSaving || Boolean(styleAnchorNodeId)} options={[{ value: "required", label: t("director.workspace.styleRequired") }, { value: "waived", label: t("director.workspace.styleWaived") }]} onChange={value => void patchSharedStyle({ style_policy: value, style_policy_reason: value === "waived" ? String(styleSource?.style_policy_reason || "") : "" })} />
+                        </label>
+                        {String(styleSource?.style_policy || "") === "waived" && <label className="grid gap-1.5 text-sm md:col-span-2">
+                            <span>{t("director.workspace.styleWaiverReason")}</span>
+                            <Input.TextArea rows={2} value={styleWaiverDraft} disabled={styleSaving} onChange={event => setStyleWaiverDraft(event.target.value)} onBlur={() => { if (styleWaiverDraft !== String(styleSource?.style_policy_reason || "")) void patchSharedStyle({ style_policy_reason: styleWaiverDraft }); }} />
+                        </label>}
+                    </div>
+                </div>}
             </section>}
             {(!view || view === "episodes") && <section>
                 <div className="mb-3"><ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t("drama.episodeListTitle")} summary={`${episodes.length} ${t("drama.episodeUnit")}`} actions={<Button type="primary" onClick={() => openEpisodeEditor()} icon={<Plus className="size-4" />}>{t("drama.newEpisode")}</Button>} /></div>

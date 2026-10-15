@@ -17,7 +17,7 @@
   },
   "119": {
     "inputs": {
-      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+      "vae_name": "H3\\minimax_h3_video_vae_fp16.safetensors"
     },
     "class_type": "VAELoader",
     "_meta": {
@@ -26,7 +26,7 @@
   },
   "120": {
     "inputs": {
-      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+      "vae_name": "H3\\minimax_h3_audio_vae_fp32.safetensors"
     },
     "class_type": "VAELoader",
     "_meta": {
@@ -135,7 +135,7 @@
   },
   "127": {
     "inputs": {
-      "unet_name": "h3\\minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors",
+      "unet_name": "H3\\minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors",
       "weight_dtype": "default"
     },
     "class_type": "UNETLoader",

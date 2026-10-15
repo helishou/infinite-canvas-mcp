@@ -14,7 +14,15 @@ assets 映射保存实际 nodeId、assetId、storageKey、sha256 和 version；�
 
 素材身份节点与图像生成节点分开：角色、场景、道具先登记正式实体，由 Backend 建对应类型节点；缺失身份节点使用 `entity:<character|scene|prop>:<实体ID>` 准备。Subject 图片可绑定角色／场景／道具节点或智能图片节点，读取当前有效内容与真实归档来源。
 
-正式图片沿 `production_prepare_targets` 准备，回读 Backend 的正式图片输入投影及参考连线后再提交；缺失、过期或顺序不一致时先修正式源并重编译。不能另拼临时 references 掩盖空面板，也不能把生成结果自身或角色节点的全部服装图混入编号参考。画布增删/排序参考会回写正式源并使编译过期，已有任务继续使用自己的冻结清单。
+每个实际用于本集制作的 `asset_plan` 项都必须有正式画布媒体节点，并在 `director.assets[assetId]` 中绑定真实 nodeId、storageKey、sha256 与状态；只登记 asset_plan 或仅有角色/道具实体节点不算媒体已绑定。按范围调用 `production_prepare_targets` 准备缺失资产节点，生成或选用一个真实归档结果后用 `bind_director_asset` 写回；Subject 的 `pictureBindings.sourceNode` 必须指向同一正式来源。跨画布共享素材须先采用批准版本，未批准的普通生成节点不能冒充共享绑定。
+
+正式编译的图像卡必须完整写入当前 IM2 契约字段：`target_skill`、`source_repository`、`recipe`、`mode`、`seven_steps`、`transaction`、`generation_status` 与最终 `prompt`；人物另写 `character_name`、`state_label` 和 `view_layout`。单张身份图阶段使用单图布局，四视图另作独立阶段。缺字段时由编译诊断指出并修卡，不把“IM2 alias routing missing”误判成模型节点或参考图问题。
+
+角色图片按顺序分两阶段：先产出单张中立全身身份图；确认真实输出已归档后，选定它作为唯一身份来源，再生成四视图。四视图工作流必须绑定身份图的稳定节点、图片 ID 与用途；不得把四视图先于身份图提交，也不得把四视图板伪装成单张身份图。单张图若只有一个输出可直接沿正式归档绑定；多个输出须先明确选定一个。身份图与四视图作为不同生成阶段保留各自历史，后续 Subject 身份引用优先指向单张身份图。每个正式目标/阶段固定一个智能图片节点，修改提示词后在原节点以追加模式复跑，保留成功结果历史；禁止每轮尝试都新建配置节点。四视图可有自己的固定节点，但后续修订仍复用该节点。
+
+正式图片沿 `production_prepare_targets` 准备，回读 Backend 的正式图片输入投影及参考连线后再提交；缺失、过期或顺序不一致时先修正式源并重编译。角色四视图仅以第一阶段选定身份图作为正式身份参考；不能另拼临时 references 掩盖空面板，也不能把四视图目标自身或角色节点的全部服装图混入编号参考。普通关键帧不把生成目标自身作为输入。画布增删/排序参考会回写正式源并使编译过期，已有任务继续使用自己的冻结清单。
+
+普通智能图片节点先用 `canvas_image_input_manifest` 核实参考节点顺序和归档 `storageKey`，再按所选 Comfy 工作流已声明的图片输入槽数限制参考数量；manifest 只核对素材解析，工作流槽位由 Backend 在排队前同步校验，超限时精简低优先级道具参考后在原节点重跑。使用本地官方 PE 时，确保保存的工作流输入 `增强方式` 为「本地官方PE」；不能只看下拉模型名，因为旧的「API」值会继续调用本机 API 地址。中止画布图片任务时取消完整的父 taskId（`canvas_task_cancel`），让 Backend 同步取消执行子任务并释放目标；不要只取消 Comfy 子任务，以免父任务仍保持 running 并锁住节点。
 
 ### 图片并发调度
 

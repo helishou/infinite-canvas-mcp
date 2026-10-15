@@ -44,7 +44,7 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
     const latestDraft = useRef(draftValue); latestDraft.current = draftValue;
     const disabled = busy || saving || invalid;
     const subjects = records(source.subject_registry);
-    const framingValues = ["EWS", "WS", "FS", "MS", "MCU", "CU", "ECU"];
+    const framingValues = ["EWS", "WS", "FS", "MS", "MCU", "CU", "BSCU", "ECU"];
     const framingMissing = !framingValues.includes(String(value.camera.framing || ""));
 
     const attentionSubjectIds = value.camera.attention_subject_ids;

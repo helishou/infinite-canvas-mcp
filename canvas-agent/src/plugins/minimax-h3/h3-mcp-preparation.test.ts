@@ -187,3 +187,20 @@ test("h3_run_all_clips 可从指定组首不跳过已完成段地提交潜空间
     await assert.rejects(() => handlers.h3_run_all_clips!({ projectId: "project-1", nodeIds: ["h3-1"], startSegmentId: "missing", skipCompleted: false }), /精确选择一个/);
     assert.equal(requests.length, 1);
 });
+
+test("h3_write_storyboard_prompt 拒绝写入正式制作 Clip，草稿 Clip 不受影响", async () => {
+    const { project, calls, handlers } = fixture();
+    const inputBase = { projectId: "project-1", nodeId: "h3-1", openingDescription: "开场", shots: [{ description: "主体入场" }], overallSoundscape: "环境声", nonDiegeticMusic: "无" };
+    // 草稿 Clip（无投影）正常放行到预检
+    const draftPreview: any = await handlers.h3_write_storyboard_prompt!({ ...inputBase, segmentId: "s2", dryRun: true });
+    assert.equal(draftPreview.dryRun, true);
+    assert.equal(calls.length, 0);
+    // 正式 Clip（带 projection）在生成前被拒，且不产生任何写操作
+    const formal = project.nodes[0].metadata.segments.find((item: any) => item.id === "s1");
+    formal.productionClipProjection = { targetId: "clip-fmt" };
+    let rejected: any;
+    try { await handlers.h3_write_storyboard_prompt!({ ...inputBase, segmentId: "s1", dryRun: true }); } catch (error) { rejected = error; }
+    assert.match(rejected.message, /FORMAL_CLIP_OWNED/);
+    assert.match(rejected.message, /request_director_clip_refresh|production_compile/);
+    assert.equal(calls.length, 0);
+});

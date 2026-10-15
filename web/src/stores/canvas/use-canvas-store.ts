@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { message as antdMessage } from "antd";
 import { characterReferenceUpdates } from "@basketikun/canvas-agent/reference-contract";
 import localforage from "localforage";
 
@@ -418,6 +419,13 @@ function setCanvasCommandConflict(id: string, remote: CanvasProject, message: st
     const legacyHashFailure = (message: string) => /HTTP 400 The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView\. Received undefined/.test(message);
     const canRetryBackendFailure = rejected && commands.some(command => command.rejected && legacyHashFailure(command.rejected))
         && commands.every(command => !command.rejected || legacyHashFailure(command.rejected));
+    // C：被拒但不属于任何已知可恢复类型时，过去会静默保留草稿、一句提示都没有。
+    // 这里把后端的真实拒因（如“制作分镜图绑定必须通过 Shot 关键帧操作修改”）原样弹出来，只讲清原因、不承诺重提。
+    const alreadyTracked = Boolean(useCanvasStore.getState().canvasConflicts[id]);
+    if (!alreadyTracked && rejected && !canRecoverTimeline && !canRetryStoryboardDurations && !canRetryFormalClip && !canRetryBackendFailure) {
+        const reasons = [...new Set(commands.map((command) => typeof command.rejected === "string" ? command.rejected.replace(/^HTTP \d+\s*/, "").trim() : "").filter(Boolean))];
+        if (reasons.length) void antdMessage.warning(`画布编辑未保存：后端拒绝了这次更改（${reasons.join("；")}）`, 6);
+    }
     useCanvasStore.setState((state) => ({ canvasConflicts: { ...state.canvasConflicts, [id]: {
         message, reason: rejected ? "rejected" : "conflict", canRecoverTimeline, canRetryStoryboardDurations, canRetryFormalClip, canRetryBackendFailure, revision: Number(remote.revision || 0),
         pendingOperations: commands.reduce((count, command) => count + command.operations.length, 0),
@@ -486,15 +494,30 @@ async function hydrateCanvasProjectsFromBackend() {
         const [response, foldersResponse] = await Promise.all([fetchBackendProjects(true), fetchBackendCanvasFolders()]);
         const summaries = (response.projects || []).map(fromProjectSummary);
         const remoteIds = new Set(summaries.map((project) => project.id));
-        for (const summary of summaries) {
-            if (pendingDeletedProjectIds.has(summary.id)) continue;
-            const local = useCanvasStore.getState().projects.find((project) => project.id === summary.id);
+        // 需要重取全量图的项目按 6 并发分波进行：串行 await 在局域网或大画布下会把同步窗口
+        // 拉到秒级；各项目相互独立（applyBackendCanvasEvent 对各自 projectId 幂等）。
+        // 单个项目读取失败只跳过它自己（保留本地副本，后续同步重试），不再中止整页 hydration。
+        const dueSummaries = summaries.filter((summary) => {
+            if (pendingDeletedProjectIds.has(summary.id)) return false;
             const base = syncBases.get(summary.id);
-            if (base && base.revision === summary.revision && base.updatedAt === summary.updatedAt) continue;
-            const remote = local && !local.summary
-                ? normalizeProjectMediaUrls((await fetchBackendProject(summary.id)).project as unknown as CanvasProject)
-                : summary;
-            applyBackendCanvasEvent({ type: "canvas.updated", entityId: remote.id, revision: remote.revision, payload: remote }, true);
+            return !(base && base.revision === summary.revision && base.updatedAt === summary.updatedAt);
+        });
+        const SYNC_FETCH_WAVE_SIZE = 6;
+        for (let waveStart = 0; waveStart < dueSummaries.length; waveStart += SYNC_FETCH_WAVE_SIZE) {
+            const wave = dueSummaries.slice(waveStart, waveStart + SYNC_FETCH_WAVE_SIZE);
+            await Promise.all(wave.map(async (summary) => {
+                const local = useCanvasStore.getState().projects.find((project) => project.id === summary.id);
+                try {
+                    const remote = local && !local.summary
+                        ? normalizeProjectMediaUrls((await fetchBackendProject(summary.id)).project as unknown as CanvasProject)
+                        : summary;
+                    applyBackendCanvasEvent({ type: "canvas.updated", entityId: remote.id, revision: remote.revision, payload: remote }, true);
+                } catch (error) {
+                    // 单个项目详情失败不能让整页 hydration 失败：否则所有画布的同步与生成入口
+                    // 会一起卡在"未加载"，而实际只有一个项目读不到。保留本地副本，由后续同步重试。
+                    console.error("画布项目同步失败，已保留本地副本", error);
+                }
+            }));
         }
         for (const id of previouslyKnownIds) {
             if (remoteIds.has(id)) continue;
@@ -503,7 +526,12 @@ async function hydrateCanvasProjectsFromBackend() {
                 await fetchBackendProject(id, true);
                 remoteIds.add(id);
             } catch (error) {
-                if (!(error instanceof BackendApiError && error.status === 404)) throw error;
+                if (!(error instanceof BackendApiError && error.status === 404)) {
+                    // 读取失败不等于远端删除：保留本地画布，等下一次同步确认。
+                    console.error("画布删除确认失败，已保留本地副本", error);
+                    remoteIds.add(id);
+                    continue;
+                }
                 applyBackendCanvasEvent({ type: "canvas.updated", entityId: id, payload: { deleted: 1 } }, true);
             }
         }
@@ -794,9 +822,21 @@ function describeCanvasConflict(conflict: CanvasConflictRecord): string {
     return `${parts.join("：")}。请先在画布顶部提示条选择「采用远端」或「保留我的操作」，再重试`;
 }
 
+/** 同步管线只需要"后台已连上且列表同步过一次"。hydration 是一次性全局开关：
+ *  首次同步时后台还没连上、或某个项目详情读取出错，都会让它永远停在 false，
+ *  而原本只有重连事件才会重试 —— 页面看着正常，所有生成 / 制作入口却永久报
+ *  "画布尚未完成加载"。这里在后台已连接时主动补一次 hydration，补不上才把
+ *  真实原因抛给用户（旧文案让用户"稍后再生成"，但等待永远不会改变状态）。 */
+async function ensureBackendCanvasReady() {
+    if (backendCanvasHydrated) return;
+    if (!useBackendStore.getState().connected) throw new Error("后台未连接，画布无法同步；请检查后台连接后再试");
+    await hydrateCanvasProjects();
+    if (!backendCanvasHydrated) throw new Error("画布尚未与后台完成同步，请稍后重试；若持续失败请刷新页面");
+}
+
 /** 生成前必须确认目标画布已落库；后台自动同步仍允许保留草稿后静默重试。 */
 export async function flushCanvasProjectBeforeGeneration(projectId: string) {
-    if (!backendCanvasHydrated) throw new Error("画布尚未完成加载，请稍后再生成");
+    await ensureBackendCanvasReady();
     await flushCanvasTexts(projectId);
     await flushCanvasSyncNow();
     const state = useCanvasStore.getState();
@@ -923,9 +963,11 @@ export function diffCanvasProject(base: CanvasProject, next: CanvasProject): Arr
                     const segmentPatch: Record<string, unknown> = {};
                     const segmentDelete: string[] = [];
                     // 参考绑定和续接开关允许人工编辑，必须进入保存 op，不能只留下乐观显示。
+                    // h3CharacterGroups 同属参考绑定（角色组派生 Clip 参考），画布可编辑；
+                    // Backend preserveSegments 会保留人工修改并标记 manualFields，不再静默丢弃。
                     // 编译身份与源稿专属字段仍由 Backend 维护。
                     const formalClipFields = segment.productionClipProjection || (baseSegment as Record<string, unknown>).productionClipProjection
-                        ? new Set(["prompt", "directorEngine", "directorSourceHash", "h3CharacterGroups", "storyboardShots", "storyboardDurations", "productionClipProjection"])
+                        ? new Set(["prompt", "directorEngine", "directorSourceHash", "storyboardShots", "storyboardDurations", "productionClipProjection"])
                         : null;
                     for (const field of new Set([...Object.keys(baseSegment), ...Object.keys(segment)])) {
                         if (field === "id" || field === "start") continue;

@@ -11,11 +11,38 @@ import { canvasHostLocation } from "@/lib/canvas/canvas-host-navigation";
 
 const CanvasSurface = lazy(() => import("@/pages/canvas/project").then(module => ({ default: module.CanvasSurface })));
 
-export function WorkbenchCanvas({ children }: { children: ReactNode }) {
+const CANVAS_STATE_PREFIX = "workbench-canvas-v1:";
+type StoredCanvasState = { target: CanvasTarget; visible: boolean };
+function readStoredCanvasState(storageKey?: string): StoredCanvasState | null {
+    if (!storageKey || typeof window === "undefined") return null;
+    try {
+        const parsed = JSON.parse(sessionStorage.getItem(CANVAS_STATE_PREFIX + storageKey) || "null") as Partial<StoredCanvasState> | null;
+        if (!parsed?.target?.projectId) return null;
+        return {
+            target: {
+                projectId: String(parsed.target.projectId),
+                ...(parsed.target.nodeId ? { nodeId: String(parsed.target.nodeId) } : {}),
+                ...(parsed.target.segmentId ? { segmentId: String(parsed.target.segmentId) } : {}),
+            },
+            visible: parsed.visible === true,
+        };
+    } catch { return null; }
+}
+
+export function WorkbenchCanvas({ children, storageKey }: { children: ReactNode; storageKey?: string }) {
     const navigate = useNavigate(), { t } = useTranslation();
-    const [target, setTarget] = useState<CanvasTarget>();
-    const [search, setCanvasSearch] = useState(() => new URLSearchParams());
-    const [visible, setVisible] = useState(false), [requestId, setRequestId] = useState(0);
+    // 画布开合状态会话级持久化：制作台打开的画布在浏览器刷新后保持打开（折叠状态同样保留）。
+    const restored = useMemo(() => readStoredCanvasState(storageKey), [storageKey]);
+    const [target, setTarget] = useState<CanvasTarget | undefined>(restored?.target);
+    const [search, setCanvasSearch] = useState(() => new URLSearchParams({
+        ...(restored?.target.nodeId ? { nodeId: restored.target.nodeId } : {}),
+        ...(restored?.target.segmentId ? { segmentId: restored.target.segmentId } : {}),
+    }));
+    const [visible, setVisible] = useState(Boolean(restored?.visible)), [requestId, setRequestId] = useState(restored ? 1 : 0);
+    useEffect(() => {
+        if (!storageKey || !target) return;
+        try { sessionStorage.setItem(CANVAS_STATE_PREFIX + storageKey, JSON.stringify({ target, visible })); } catch { /* 存储不可用时只是刷新后不恢复 */ }
+    }, [storageKey, target, visible]);
     const returnFocus = useRef<HTMLElement | null>(null), panel = useRef<HTMLDivElement>(null), overlay = useRef<HTMLDivElement>(null), workbench = useRef<HTMLDivElement>(null);
     const popupContainer = useCallback(() => panel.current || document.body, []);
     const collapse = useCallback(() => { panel.current?.querySelectorAll<HTMLMediaElement>("video, audio").forEach(media => media.pause()); useMediaPreviewStore.getState().close(); setVisible(false); requestAnimationFrame(() => returnFocus.current?.focus({ preventScroll: true })); }, []);

@@ -61,9 +61,19 @@ try {
     assert.match(await inline.innerText(), /变化原因 · 可不填/);
     assert.equal(await inline.getByRole("button", { name: "确认这次变化" }).isDisabled(), false);
 
+    // The added value carries the description the save contract requires, so the
+    // ledger can actually be written.
     await page.getByRole("button", { name: "取消新增" }).click();
     await inline.getByRole("button", { name: /关闭就地编辑/ }).click();
     await inline.waitFor({ state: "hidden" });
+    await page.locator("[data-continuity-save-action]").click();
+    await page.waitForFunction(
+        text => (document.querySelector('[data-testid="continuity-ledger"]')?.textContent || "").includes(text),
+        `"${fresh}":"${fresh}"`,
+    );
+    const savedLedger = JSON.parse(await page.locator('[data-testid="continuity-ledger"]').textContent());
+    assert.deepEqual(savedLedger.facts[0].value_descriptions[fresh], fresh);
+    assert.equal(savedLedger.facts[0].allowed_values.includes(fresh), true, "the saved ledger keeps the new state");
 
     // Per-cell add is always visible and larger than before.
     const cellAdd = grid.locator("[data-continuity-add]").first();

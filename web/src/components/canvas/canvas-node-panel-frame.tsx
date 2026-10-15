@@ -2,8 +2,10 @@ import React, { useEffect, useLayoutEffect, useRef, type CSSProperties, type Rea
 
 type PanelBounds = { left: number; top: number; right: number; bottom: number; width: number; height: number };
 
-export function canvasNodePanelLayout(anchor: { x: number; y: number }, panel: PanelBounds, viewport: PanelBounds) {
+export function canvasNodePanelLayout(anchor: { x: number; y: number; top?: number }, panel: PanelBounds, viewport: PanelBounds) {
     const margin = 12;
+    // 与帧的 pt-2 一致：面板内容贴节点边缘时保留 8px 间距。
+    const gap = 8;
     const width = Math.max(0, Math.min(360, viewport.width - margin * 2));
     const horizontalMargin = Math.min(margin, Math.max(0, (viewport.width - width) / 2));
     const minLeft = viewport.left + horizontalMargin;
@@ -12,13 +14,24 @@ export function canvasNodePanelLayout(anchor: { x: number; y: number }, panel: P
     const shiftX = left - (anchor.x - width / 2);
     const viewportHeight = Math.max(0, viewport.height - margin * 2);
     const naturalHeight = Math.min(Math.max(panel.height, 0), viewportHeight);
+    // 空间按节点真实边缘计算：下方 = 节点底边到视口底；上方 = 视口顶到节点顶边。
+    // anchor.top 缺省时退化为锚点自身（旧行为，仅兼容未传节点顶边的调用方）。
+    const nodeTop = Math.min(anchor.top ?? anchor.y, anchor.y);
     const below = Math.max(0, viewport.bottom - margin - anchor.y);
-    const above = Math.max(0, anchor.y - viewport.top - margin);
+    const above = Math.max(0, nodeTop - gap - margin - viewport.top);
 
     // Keep the below-node placement when it can show a usable portion; otherwise use the larger side.
     const keepBelow = below >= Math.min(120, naturalHeight) || below >= above;
-    let top = keepBelow ? anchor.y : anchor.y - Math.min(naturalHeight, above);
-    let maxHeight = Math.min(naturalHeight, keepBelow ? below : above);
+    let top: number;
+    let maxHeight: number;
+    if (keepBelow) {
+        top = anchor.y;
+        maxHeight = Math.min(naturalHeight, below);
+    } else {
+        // 翻到节点上方：面板底边贴节点顶边，不允许压住节点本体。
+        maxHeight = Math.min(naturalHeight, above);
+        top = nodeTop - gap - maxHeight;
+    }
     if (top < viewport.top + margin) top = viewport.top + margin;
     maxHeight = Math.max(0, Math.min(maxHeight, viewport.bottom - margin - top));
 
@@ -67,7 +80,7 @@ export function CanvasNodePanelFrame({ children, isSmartGenerationNode, screenSi
                 const frameRect = frame.getBoundingClientRect();
                 const viewportRect = surface.getBoundingClientRect();
                 const layout = canvasNodePanelLayout(
-                    { x: nodeRect.left + nodeRect.width / 2, y: nodeRect.bottom },
+                    { x: nodeRect.left + nodeRect.width / 2, y: nodeRect.bottom, top: nodeRect.top },
                     { left: frameRect.left, top: frameRect.top, right: frameRect.right, bottom: frameRect.bottom, width: frameRect.width, height: Math.min(frame.scrollHeight, viewportRect.height * 0.42) },
                     { left: viewportRect.left, top: viewportRect.top, right: viewportRect.right, bottom: viewportRect.bottom, width: viewportRect.width, height: viewportRect.height },
                 );

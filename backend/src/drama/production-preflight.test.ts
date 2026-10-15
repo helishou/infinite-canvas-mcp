@@ -35,7 +35,8 @@ test("edit diagnostics and successful preflight leave every production table unc
     assert.equal(invalid.diagnostics[0].path, "request.ops.0.brief");
     assert.deepEqual(snapshot(db), before);
     service.edit("episode", valid);
-    assert.equal(service.preflight("episode", { action: "edit", request: valid }).diagnostics[0].code, "REVISION_CONFLICT");
+    const rePreflight = service.preflight("episode", { action: "edit", request: valid });
+    assert.ok(!rePreflight.diagnostics.some(d => d.code === "REVISION_CONFLICT"), "乐观锁放行：过期 revision 不再产生冲突诊断");
     assert.equal(service.edit("episode", valid).replayed, true);
 });
 

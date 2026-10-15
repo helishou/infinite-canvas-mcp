@@ -67,15 +67,8 @@ function assertProductionStoryboardUnchanged(previous: Record<string, unknown>, 
             throw collaborationError("PRODUCTION_SHOTBOARD_SOURCE_OWNED", `字段 ${field} 必须通过制作台 Shot 数据写入`);
         }
     }
-    if (removed.includes("referenceBindings")) {
-        if (productionStoryboardRefs(previous.referenceBindings).length) throw collaborationError("PRODUCTION_SHOTBOARD_SOURCE_OWNED", "制作分镜图绑定必须通过 Shot 关键帧操作修改");
-    } else if (Object.hasOwn(incoming, "referenceBindings")
-        && commandFingerprint(productionStoryboardRefs(incoming.referenceBindings)) !== commandFingerprint(productionStoryboardRefs(previous.referenceBindings))) {
-        throw collaborationError("PRODUCTION_SHOTBOARD_SOURCE_OWNED", "制作分镜图绑定必须通过 Shot 关键帧操作修改");
-    }
-}
-function productionStoryboardRefs(value: unknown) {
-    return Array.isArray(value) ? value.map(recordOf).filter(ref => String(ref.role || "") === "storyboard") : [];
+    // B（产品决定）：画布可直接增删改本 Clip 的参考绑定（含分镜图角色），不再拦 referenceBindings。
+    // 分镜 Shots / Durations 仍由生产台独占（见上方字段循环）；由此可能出现的孤儿空分镜卡风险已被接受。
 }
 
 /** 客户端携带的 source.kind 只是展示信息，不是写后台状态的权限。 */

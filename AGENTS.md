@@ -75,6 +75,12 @@
 
 默认不执行全仓 typecheck/test/build。一次相关检查通过后，不无理由扩大或重复；发布流程的验证例外见交付流程。不能执行的验证如实列出，不称为通过。
 
+## 文件编码
+
+- 仓库内所有文本文件（含 `.cjs`/`.ts` 脚本与注释）一律无 BOM UTF-8。PowerShell 写文件用 `Set-Content -Encoding utf8NoBOM`、`Out-File -Encoding utf8NoBOM` 或 `[System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($false))`；禁止 `-Encoding UTF8`（PS7 下该别名带 BOM，Node 直接报 Unexpected token）。
+- 读回校验：首字节为 `EF BB BF` 即 BOM 污染，重写。
+- 改写含中文内容的脚本优先用 write/edit 工具而非 PS 文本管道；必须用 PS 时遵守上述编码规则。
+
 ## 指引如何维护
 
 - 一条规则只有一个详细归属：全局边界放本文件；目录约定放对应 `AGENTS.md`；跨模块不变量放 `.agents/rules/`；Skill 写任务方法与验证。

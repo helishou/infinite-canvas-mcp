@@ -2186,11 +2186,11 @@ function ExpandedImageCard({
                         type="button"
                         className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]"
                         style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }}
-                        title={t(node.type === CanvasNodeType.Config && node.metadata?.smart ? "director.atomic.browseImage" : "canvas.node.setPrimary")}
+                        title={t("canvas.node.setPrimary")}
                         onClick={(event) => (event.stopPropagation(), onSetPrimary())}
                     >
                         <Star className="size-3 shrink-0" style={{ color: selectionBlue }} />
-                        {node.width >= 200 ? <span className="truncate">{t(node.type === CanvasNodeType.Config && node.metadata?.smart ? "director.atomic.browseImage" : "canvas.node.setPrimary")}</span> : null}
+                        {node.width >= 200 ? <span className="truncate">{t("canvas.node.setPrimary")}</span> : null}
                     </button>
                 </div>
             ) : null}

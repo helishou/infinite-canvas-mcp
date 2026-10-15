@@ -31,6 +31,8 @@ test("asset registration shares the search toolbar and keeps style controls and 
     assert.match(toolbar, /data-asset-search-actions><div className="w-60 max-w-full">/);
     assert.match(source, /<Modal open=\{newSubjectOpen\}/);
     assert.match(source, /director\.studio\.styleSettings/);
+    // 分集页不再提供风格锚点设置；只有非分集画布（共享资产画布等）保留该折叠面板。
+    assert.match(source, /canvasRole !== "episode" && <details/);
     assert.match(source, /sourceDrafts\["style:style_policy_reason"\]/);
     assert.match(source, /assetScopeHint\} help=/);
     assert.doesNotMatch(source, /justify-end gap-3"><Button disabled=\{busy\} onClick=\{\(\) => setNewSubjectOpen/);

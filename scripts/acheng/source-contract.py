@@ -300,9 +300,13 @@ def validate(source, stage="edit"):
         issues.append({"code": "INVALID_SOURCE", "path": "director.source." + path, "message": message, "severity": "warning", **({"targetId": target} if target else {})})
     def check(value, schema, path, target=None):
         kind = schema.get("type")
-        valid_type = {"object": isinstance(value, dict), "array": isinstance(value, list), "string": isinstance(value, str)}.get(kind, True)
+        declared_types = kind if isinstance(kind, list) else [kind]
+        type_matches = {"object": isinstance(value, dict), "array": isinstance(value, list), "string": isinstance(value, str),
+                        "number": isinstance(value, (int, float)) and not isinstance(value, bool), "integer": isinstance(value, int) and not isinstance(value, bool),
+                        "boolean": isinstance(value, bool), "null": value is None}
+        valid_type = any(type_matches.get(expected, True) for expected in declared_types)
         if not valid_type:
-            issue(path, "Expected " + kind, target)
+            issue(path, "Expected " + " or ".join(str(expected) for expected in declared_types), target)
             return
         if "enum" in schema and value not in schema["enum"]:
             issue(path, "Allowed values: " + ", ".join(map(str, schema["enum"])), target)

@@ -5,7 +5,7 @@ export type ContinuityChangeInput = { shotId: string; factId: string; frame: str
 /** Both editing surfaces use the same atomic six-collection ledger update. */
 export function appendContinuityChange(ledger: Row, shots: Row[], input: ContinuityChangeInput, sourceDigest: string | undefined, makeId: () => string, local: boolean, persistLocal = local): { eventId: string; ledger: Row } {
     const shot = shots.find(row => row.id === input.shotId), fact = (ledger.facts || []).find((row: Row) => row.id === input.factId);
-    if (!shot || !fact || Boolean(input.sourceBlockId) !== Boolean(sourceDigest) || !input.after || !(input.after === 'unknown' || fact.allowed_values?.includes(input.after))) throw new Error('EVENT_FIELDS_REQUIRED');
+    if (!shot || !fact || !input.after || !(input.after === 'unknown' || fact.allowed_values?.includes(input.after)) || Boolean(input.sourceBlockId) !== Boolean(sourceDigest)) throw new Error('EVENT_FIELDS_REQUIRED');
     if (!input.frame.trim()) throw new Error('INVALID_EVENT_FRAME');
     const state = continuityEventAnchor(ledger, shots, input.shotId, input.factId, Number(input.frame), local, persistLocal);
     const eventId = makeId(), timeline_id = shot.timeline_id, source_anchor = input.sourceBlockId ? { block_id: input.sourceBlockId } : undefined;

@@ -13,12 +13,13 @@ export function seriesWorkspaceView(value: string | null): SeriesWorkspaceView |
     return value === "planning" || value === "episodes" || value === "shared" ? value : undefined;
 }
 
-export function productionNavigationGroups({ hasSeries, scope, setup = false }: { hasSeries: boolean; scope: ProductionWorkspaceScope; setup?: boolean }): ProductionNavigationGroup[] {
+export function productionNavigationGroups({ hasSeries, scope, setup = false, seriesSubviews = false }: { hasSeries: boolean; scope: ProductionWorkspaceScope; setup?: boolean; seriesSubviews?: boolean }): ProductionNavigationGroup[] {
     const groups: ProductionNavigationGroup[] = [];
+    // 下拉只保留「规划与资产 / 分集管理」；seriesSubviews 在子 Tab 栏里展开共享资产画布，规划项回到「剧目规划」。
     if (hasSeries) groups.push({ id: "series", labelKey: "director.workspaceHierarchy.fullSeries", items: [
-        { id: "series:planning", workspace: "series", seriesView: "planning", labelKey: "director.workspaceHierarchy.planning" },
+        { id: "series:planning", workspace: "series", seriesView: "planning", labelKey: seriesSubviews ? "director.workspaceHierarchy.planning" : "director.workspaceHierarchy.planningAssets" },
+        ...(seriesSubviews ? [{ id: "series:shared", workspace: "series" as const, seriesView: "shared" as const, labelKey: "director.workspaceHierarchy.sharedCanvas" }] : []),
         { id: "series:episodes", workspace: "series", seriesView: "episodes", labelKey: "director.workspaceHierarchy.episodes" },
-        { id: "series:shared", workspace: "series", seriesView: "shared", labelKey: "director.workspaceHierarchy.sharedCanvas" },
     ] });
     if (setup) return groups;
     groups.push({ id: "owner", labelKey: `director.workspaceHierarchy.${scope === "episode" ? "currentEpisode" : scope === "shared-assets" ? "sharedProduction" : "currentProject"}`, items:

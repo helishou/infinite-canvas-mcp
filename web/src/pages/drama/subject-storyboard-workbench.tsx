@@ -104,10 +104,16 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const operationShots = shots.map(shot => { const draft = readShotFormDraft(shotDrafts[`v2shot:${shot.id}`], shot); return draft.invalid ? shot : { ...shot, ...draft.draft.value }; });
     const unsavedShots = shots.filter(shot => { const draft = readShotFormDraft(shotDrafts[`v2shot:${shot.id}`], shot, source); return draft.invalid || shotDraftChanged(draft.draft); });
     const unsavedIds = new Set(unsavedShots.map(shot => String(shot.id)));
+    const ownerKey = JSON.stringify(owner);
+    const sceneFilterStorageKey = `drama-storyboard-scene-filter:${ownerKey}`;
     const [selectedId, setSelectedId] = useState(initialShotId || viewMemory?.current?.selectedId || "");
     const [draggingShotId, setDraggingShotId] = useState("");
     const [search, setSearch] = useState(viewMemory?.current?.search || "");
-    const [sceneFilter, setSceneFilter] = useState(viewMemory?.current?.sceneFilter || "");
+    const [sceneFilter, setSceneFilter] = useState(() => {
+        if (initialShotId) return "";
+        try { return window.localStorage.getItem(sceneFilterStorageKey) ?? viewMemory?.current?.sceneFilter ?? ""; }
+        catch { return viewMemory?.current?.sceneFilter || ""; }
+    });
     const [mobileEditing, setMobileEditing] = useState(Boolean(initialShotId) || Boolean(viewMemory?.current?.mobileEditing));
     const [detailView, setDetailView] = useState<"editing" | "context">(viewMemory?.current?.detailView || "editing");
     const [shotSection, setShotSection] = useState<"direction" | "sound" | "subjects" | "anchors">(viewMemory?.current?.shotSection || "direction");
@@ -123,10 +129,12 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const [reading, setReading] = useState(false);
     const windows = useMemo(() => subjectShotWindows(source), [source]);
     const states = useMemo(() => subjectStateProjection(source), [source]);
-    const ownerKey = JSON.stringify(owner);
     useEffect(() => {
         if (sceneFilter && sceneFilter !== "__unassigned__" && !sceneDirectory.scenes.some(scene => scene.id === sceneFilter)) setSceneFilter("");
     }, [sceneFilter, sceneDirectory]);
+    useEffect(() => {
+        try { window.localStorage.setItem(sceneFilterStorageKey, sceneFilter); } catch { /* View preference storage is optional. */ }
+    }, [sceneFilterStorageKey, sceneFilter]);
     useEffect(() => { if (initialShotId) { setSelectedId(initialShotId); setView("shots"); setSceneFilter(""); setMobileEditing(true); } }, [initialShotId, ownerKey]);
     const selected = shots.find(shot => String(shot.id) === selectedId) || shots[0];
     const activeId = String(selected?.id || "");
@@ -134,7 +142,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const clipIndex = clips.findIndex(item => item.id === clip?.id);
     const number = shots.findIndex(item => String(item.id) === activeId) + 1;
     const title = (shot: Record<string, any>) => String(operationShots.find(item => item.id === shot.id)?.title || shot.title || t("director.studio.shotNumber", { number: shots.findIndex(item => item.id === shot.id) + 1 }));
-    const framing = (shot: Record<string, any>) => ["EWS", "WS", "FS", "MS", "MCU", "CU", "ECU"].includes(shot.camera?.framing) ? t("director.atomic.framingName." + shot.camera.framing) : shot.camera?.framing || "—";
+    const framing = (shot: Record<string, any>) => ["EWS", "WS", "FS", "MS", "MCU", "CU", "BSCU", "ECU"].includes(shot.camera?.framing) ? t("director.atomic.framingName." + shot.camera.framing) : shot.camera?.framing || "—";
     const duration = (shot: Record<string, any>) => storyboardDurationFrames(shot) / fps;
     // 全片时间轴：该镜头在全片成片中的起止秒（前面所有镜头时长累加，按 story_order 顺序）。
     const filmRanges = (() => { const ranges = new Map<string, { start: number; end: number }>(); let running = 0; for (const shot of shots) { const frames = storyboardDurationFrames(shot); ranges.set(String(shot.id), { start: running / fps, end: (running + frames) / fps }); running += frames; } return ranges; })();

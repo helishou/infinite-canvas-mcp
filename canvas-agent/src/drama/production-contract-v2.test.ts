@@ -27,6 +27,7 @@ function source() {
             ], keyframes: [], utterance_refs: [] },
         ],
         segments: [{ id: "C1", shot_ids: ["S1", "S2"], mode: "Ref2VA" }],
+        script_scenes: [{ id: "SC_A", scene_id: "ROOM", blocks: [{ id: "B1", kind: "action", text: "栓子站在院中，手里攥着鸡蛋。" }] }],
         utterances: [],
         ledger: { contract_version: 2, facts: [
             { id: "F_SHUANZI_LOCATION", object_kind: "character", object_id: "SHUANZI", allowed_values: ["outside", "threshold"], value_descriptions: { outside: "Shuanzi remains outside the coop window.", threshold: "Shuanzi stands near the doorway." } },
@@ -176,6 +177,19 @@ test("Subject ledger replay derives different start/end states per Shot without 
     assert.equal(states.S2.start.find(value => value.factId === "F_SHUANZI_LOCATION")?.value, "outside");
     assert.equal(states.S2.end.find(value => value.factId === "F_SHUANZI_LOCATION")?.value, "threshold");
     assert.equal(JSON.stringify(value), authored);
+});
+
+test("state events may be confirmed without a script line, but any supplied anchor must exist", () => {
+    const value = source();
+    value.ledger.initial = [{ timeline_id: "main", fact_id: "F_SHUANZI_LOCATION", value: "outside" }];
+    value.ledger.events = [{ id: "E1", timeline_id: "main", fact_id: "F_SHUANZI_LOCATION", shot_id: "S1", local_frame: 12, before: "outside", after: "threshold", source_anchor: { block_id: "B1" } }];
+    assert.deepEqual(directorSourceV2Diagnostics(value), []);
+    const unanchored = structuredClone(value);
+    delete (unanchored.ledger.events[0] as any).source_anchor;
+    assert.deepEqual(directorSourceV2Diagnostics(unanchored), []);
+    const ghostAnchor = structuredClone(value);
+    (ghostAnchor.ledger.events[0] as any).source_anchor.block_id = "NOPE";
+    assert.ok(directorSourceV2Diagnostics(ghostAnchor).some(issue => issue.message.includes("状态事件引用了未知剧本块")));
 });
 
 test("Subject assembly v2 locates unknown image bindings, facts, missing value prose and clip gaps", () => {

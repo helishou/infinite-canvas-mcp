@@ -605,9 +605,9 @@ function SubjectClipPartitionEditor({ shots, segments, fps, busy, shotTitle, onS
 }
 
 export function DirectorPanel({
-  workspace, director, production, readiness, run, batches, runtimeTasks = [], canvasNodes, versions, busy, canvasId, canvasRole, focusTarget, embedded = false, continuityReport, continuitySnapshotLoading = false,
+  workspace, director, production, readiness, run, batches, runtimeTasks = [], canvasNodes, sharedCanvasNodes, sharedCanvasId, versions, busy, canvasId, canvasRole, focusTarget, embedded = false, continuityReport, continuitySnapshotLoading = false,
   briefDraft, onBriefDraftChange, onOpenSharedAsset, onPromoteExistingSharedAsset,
-  onPrepareEntities, onUpsertSubject, onDeleteSubject, onDeleteScene, onDeleteAsset, onRemoveCanvasAsset, onPatchCanvasAsset, onCreateManualAsset, onSaveV2Shot, onRepartitionClips, onEditShot,
+  onPrepareEntities, onUpsertSubject, onDeleteSubject, onDeleteScene, onDeleteAsset, onRemoveCanvasAsset, onPatchCanvasAsset, onCreateManualAsset, onIncludeSharedNode, onRemoveSharedAsset, onSaveV2Shot, onRepartitionClips, onEditShot,
   compact = false, navigationTitleVisible = false, onSaveScript, generationSupported = true, assetScopeHint,
   onBrief, onPatch, onEditCanvasClip, onAdoptDirectorFields, onAdoptClipStyle, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onPublish, onReplace, onAskDirector, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRestore, onRefresh, onSceneCommand, sceneCommandPending, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onCheckContinuity, onContinuitySnapshot,
   onCompile, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets,
@@ -625,6 +625,9 @@ export function DirectorPanel({
   assetScopeHint?: string;
   onSaveScript?: (ids: string[]) => Promise<boolean>;
   batches: ProductionBatch[]; canvasNodes: CanvasNodeOption[]; versions: ProductionVersion[]; busy: boolean; canvasId: string;
+  /** 同一剧目的共享资产画布节点；风格锚点等跨画布选择需要它，分集页本身不持有这些节点。 */
+  sharedCanvasNodes?: CanvasNodeOption[];
+  sharedCanvasId?: string;
   canvasRole: "ordinary" | "episode" | "shared-assets" | "standalone" | "scene";
   onOpenSharedAsset: (assetId: string, title: string) => void;
   onPromoteExistingSharedAsset: (assetId: string, title: string) => void;
@@ -632,6 +635,8 @@ export function DirectorPanel({
   onBrief: (brief: string) => Promise<void> | void;
   onPatch: (entity: "style" | "spec" | "story" | "scene" | "environment" | "character" | "asset" | "asset_card" | "shot" | "segment", id: string | undefined, patch: Record<string, unknown>) => Promise<boolean> | void;
   onPrepareEntities?: () => Promise<void>;
+  onIncludeSharedNode?: (node: CanvasNodeOption) => Promise<boolean>;
+  onRemoveSharedAsset?: (assetId: string) => Promise<boolean>;
   onUpsertSubject?: (subject: Extract<ProductionOperation, { type: "upsert_director_subject" }>["subject"]) => Promise<boolean>;
   onDeleteSubject?: (id: string) => Promise<boolean>;
   onDeleteScene?: (sceneId: string) => Promise<boolean>;
@@ -1234,6 +1239,10 @@ export function DirectorPanel({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2"><h2 className="text-sm font-medium">{humanMessage(d && presentation?.action === "author" ? t("director.workspace.manual.currentWorkspace", { workspace: t(`director.workspace.tab.${presentationWorkspace}`) }) : taskTitle)}</h2>{presentation?.status && <Tag color={presentation.status === "needs_review" ? "orange" : presentation.status === "blocked" ? "red" : presentation.status === "complete" ? "green" : undefined}>{t(`director.workspace.presentationStatus.${presentation.status}`)}</Tag>}</div>
           <p className="mt-1 text-xs text-muted-foreground">{nextManualAction ? t("director.workspace.manual.nextStep", { action: t(`director.workspace.manual.${nextManualAction.actionKey}`) }) : humanMessage(readiness?.nextAction || t("director.workspace.noNextAction"))}</p>
+          {d && readiness?.stage?.draftInitialized && <div className="mt-2 flex flex-wrap items-center gap-2 text-xs" data-production-stage-readiness>
+            <Tag color={readiness.stage.compileGate === "blocked" ? "red" : readiness.stage.compileGate === "preflight_required" ? "blue" : undefined}>{t(`director.workspace.compileGate.${readiness.stage.compileGate}`)}</Tag>
+            <span className="text-muted-foreground">{t("director.workspace.stageCounts", { blocks: readiness.stage.scriptBlocks, cues: readiness.stage.explicitShotCues, shots: readiness.stage.structuredShots, assets: readiness.stage.assetCards, segments: readiness.stage.segments })}</span>
+          </div>}
         </div>
         <div className="flex flex-wrap gap-2"><Button size="small" type="primary" disabled={busy} onClick={() => {
           if (!d) { const brief = document.getElementById("director-current-brief") as HTMLDetailsElement | null; if (brief) { brief.open = true; brief.scrollIntoView({ block: "center", behavior: "smooth" }); brief.querySelector<HTMLTextAreaElement>("textarea")?.focus({ preventScroll: true }); } return; }
@@ -1399,8 +1408,22 @@ export function DirectorPanel({
       </div>
     </Modal>
     {error && <Alert type="error" showIcon message={error} />}
+    {d && canvasRole === "episode" && sharedCanvasId && onIncludeSharedNode && <section className="rounded-lg border border-border bg-card p-4" data-shared-episode-assets>
+      <div className="flex flex-wrap items-start justify-between gap-2"><div><h3 className="text-sm font-semibold">{t("director.workspace.sharedNodesTitle")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("director.workspace.sharedNodesHint")}</p></div><Tag>{(sharedCanvasNodes || []).filter(node => { const binding = node.metadata?.productionEntity as Record<string, unknown> | undefined; return ["character", "scene", "prop"].includes(String(binding?.kind)) && binding?.ownerKind === "canvas" && binding?.ownerId === sharedCanvasId; }).length}</Tag></div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">{(sharedCanvasNodes || []).filter(node => { const binding = node.metadata?.productionEntity as Record<string, unknown> | undefined; return ["character", "scene", "prop"].includes(String(binding?.kind)) && binding?.ownerKind === "canvas" && binding?.ownerId === sharedCanvasId && node.type === binding?.kind; }).map(node => {
+        const binding = node.metadata?.productionEntity as Record<string, unknown>;
+        const linked = assetPlan.find(plan => { const ref = plan.sharedSource as Record<string, unknown> | undefined; return ref?.sourceProjectId === sharedCanvasId && ref?.sourceNodeId === node.id; });
+        const kind = String(binding.kind), name = String(node.title || node.metadata?.[`${kind}Name`] || node.id);
+        return <article key={node.id} className="flex min-w-0 items-center justify-between gap-2 rounded-md border border-border px-3 py-2" data-shared-source-node={node.id}>
+          <div className="min-w-0"><p className="truncate text-sm font-medium">{name}</p><p className="text-xs text-muted-foreground">{t(`director.workspace.subjectKind.${kind}`)}</p></div>
+          {linked ? <Button size="small" type="text" disabled={busy || !onRemoveSharedAsset} onClick={() => void onRemoveSharedAsset?.(assetIdOf(linked))}>{t("director.workspace.removeSharedNode")}</Button>
+            : <Button size="small" disabled={busy} onClick={() => void onIncludeSharedNode(node)}>{t("director.workspace.useSharedNode")}</Button>}
+        </article>;
+      })}</div>
+    </section>}
     {d && onPrepareEntities && (hasMissingEntityNode || hasMissingStyleAnchorNode) && <Button size="small" disabled={busy} onClick={() => void onPrepareEntities()}>{t("director.crud.prepareEntityNodes")}</Button>}
-    {d && <details className="border-b border-border pb-4"><summary className="cursor-pointer text-sm text-muted-foreground">{t("director.studio.styleSettings")}</summary><section className="mt-3 grid gap-3 md:grid-cols-2">
+    {/* 分集页不再提供风格锚点设置：全剧统一在剧目管理的「共享资产画布」TAB 或共享画布工作台维护，分集制作稿按需继承。 */}
+    {d && canvasRole !== "episode" && <details className="border-b border-border pb-4"><summary className="cursor-pointer text-sm text-muted-foreground">{t("director.studio.styleSettings")}</summary><section className="mt-3 grid gap-3 md:grid-cols-2">
       {(() => {
         const lock = source.style_lock as Record<string, unknown> | undefined;
         const anchorAssetId = String(lock?.anchor_asset_id || "");
@@ -1422,9 +1445,12 @@ export function DirectorPanel({
         };
 
         const styleNodes = canvasNodes.filter(hasArchivedImage);
+        // 共享资产画布上的风格母版同样可选；同 ID 节点以当前画布为准，不重复登记。
+        const sharedStyleNodes = (sharedCanvasNodes || []).filter(hasArchivedImage).filter(node => !canvasNodes.some(item => item.id === node.id));
         const options = [
           ...styleAssets.map(item => ({ value: `asset:${assetIdOf(item)}`, label: assetTitle(item) })),
           ...styleNodes.map(node => ({ value: `node:${node.id}`, label: t("director.workspace.styleCanvasNode", { title: node.title || node.id }) })),
+          ...sharedStyleNodes.map(node => ({ value: `node:${node.id}`, label: t("director.workspace.styleSharedCanvasNode", { title: node.title || node.id }) })),
         ];
         return <>
           <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.styleMother")}</span><Select allowClear value={value} disabled={busy} placeholder={t("director.workspace.chooseStyleMother")} options={options} onChange={selected => {
@@ -1432,7 +1458,7 @@ export function DirectorPanel({
               void onPatch("style", undefined, { anchor_asset_id: "", style_anchor_node_id: "", style_policy: "waived", style_policy_reason: t("director.workspace.styleUnboundReason") });
             } else if (selected.startsWith("node:")) {
               const nodeId = selected.slice("node:".length);
-              const node = styleNodes.find(item => item.id === nodeId);
+              const node = styleNodes.find(item => item.id === nodeId) || sharedStyleNodes.find(item => item.id === nodeId);
               void onPatch("style", undefined, { anchor_asset_id: "", style_anchor_node_id: nodeId, style_policy: "waived", style_policy_reason: t("director.workspace.styleCanvasNodeReason", { title: node?.title || nodeId }) });
             } else {
               void onPatch("style", undefined, { anchor_asset_id: selected.slice("asset:".length), style_anchor_node_id: "", style_policy: "required", style_policy_reason: "" });

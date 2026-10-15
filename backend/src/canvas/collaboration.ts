@@ -10,6 +10,8 @@ export type CanvasCommandContext = {
     deferredCommits?: CanvasCommit[];
     /** Trusted propagation baseline, so derived character references see the actual before/after. */
     referenceSourceBefore?: { sourceProjectId: string; sourceNodeId: string; node: AssetNode };
+    /** Avoid a duplicate revision on the canvas whose edit was redirected to a shared source. */
+    originatingProjectId?: string;
     operationId?: string;
     source?: Record<string, unknown>;
     /** 与旧 expectedRevision 的整图 CAS 分离：新协议按写入字段检查并发。 */

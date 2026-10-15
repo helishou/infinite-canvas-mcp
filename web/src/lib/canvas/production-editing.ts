@@ -18,16 +18,33 @@ function storyboardKeyframeForSlot(frame: Record<string, any>, slotId: string) {
     return String(frame.id || "").startsWith(`KF:${slotId}:`);
 }
 
-function removeKeyframeOnlySubjectUsages(shot: Record<string, any>, removedFrames: Array<Record<string, any>>, source: Record<string, any>) {
+function removeKeyframeSubjectReferences(shot: Record<string, any>, removedFrames: Array<Record<string, any>>, source: Record<string, any>) {
     const removedSubjects = new Set(removedFrames.flatMap(frame => Array.isArray(frame.subjectIds) ? frame.subjectIds.map(String) : []));
-    if (!removedSubjects.size) return;
+    const removedPictureBindings = new Map<string, Set<string>>();
+    for (const frame of removedFrames) for (const [subjectId, bindings] of Object.entries(frame.subjectPictureBindingIds || {})) {
+        const selected = removedPictureBindings.get(subjectId) || new Set<string>();
+        for (const bindingId of Array.isArray(bindings) ? bindings : []) selected.add(String(bindingId));
+        removedPictureBindings.set(subjectId, selected);
+    }
+    if (!removedSubjects.size && !removedPictureBindings.size) return;
     const stillKeyframed = new Set(rows(shot.keyframes).flatMap(frame => Array.isArray(frame.subjectIds) ? frame.subjectIds.map(String) : []));
+    const remainingPictureBindings = new Map<string, Set<string>>();
+    for (const frame of rows(shot.keyframes)) for (const [subjectId, bindings] of Object.entries(frame.subjectPictureBindingIds || {})) {
+        const selected = remainingPictureBindings.get(subjectId) || new Set<string>();
+        for (const bindingId of Array.isArray(bindings) ? bindings : []) selected.add(String(bindingId));
+        remainingPictureBindings.set(subjectId, selected);
+    }
     const attended = new Set(rows(shot.camera?.attention_subject_ids).map(value => String(value)));
     const utteranceIds = new Set(rows(shot.utterance_refs).map(ref => String(ref.utteranceId)));
     const speaking = new Set(rows(source.utterances).filter(line => utteranceIds.has(String(line.id))).map(line => String(line.speakerSubjectId || "")));
-    shot.subject_usages = rows(shot.subject_usages).filter(usage => {
+    shot.subject_usages = rows(shot.subject_usages).flatMap(usage => {
         const subjectId = String(usage.subjectId || "");
-        return !removedSubjects.has(subjectId) || stillKeyframed.has(subjectId) || attended.has(subjectId) || speaking.has(subjectId);
+        const removed = removedPictureBindings.get(subjectId);
+        const retained = remainingPictureBindings.get(subjectId) || new Set<string>();
+        const pictureBindingIds = (Array.isArray(usage.pictureBindingIds) ? usage.pictureBindingIds : []).map(String)
+            .filter(bindingId => !removed?.has(bindingId) || retained.has(bindingId));
+        if (removedSubjects.has(subjectId) && !stillKeyframed.has(subjectId) && !attended.has(subjectId) && !speaking.has(subjectId)) return [];
+        return [{ ...usage, pictureBindingIds }];
     });
 }
 
@@ -94,6 +111,39 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
             };
             next.id = String(slot.id); next.timeline_id = oldShots[0].timeline_id; next.story_order = firstOrder + index; next.duration_frames = frameCounts[index];
             delete next.start_frame; delete next.end_frame;
+            // 重建改变了镜头时长时，按比例缩放 Subject 出现范围；否则克隆来的 localEndFrame 会超出
+            // 新时长，触发「Subject 出现范围必须位于 Shot 时长内且起止递增」校验，整个 Clip 的
+            // 分镜/参考回写被 400 拒绝（典型场景：画布上拆分镜头后时长减半）。
+            const previousFrames = existing ? Number(existing.duration_frames || 0) : 0;
+            if (previousFrames > 0 && frameCounts[index] > 0 && previousFrames !== frameCounts[index]) {
+                const scale = frameCounts[index] / previousFrames;
+                for (const usage of rows(next.subject_usages)) {
+                    const start = usage.localStartFrame, end = usage.localEndFrame;
+                    if (start === undefined && end === undefined) continue;
+                    const nextStart = start === undefined ? undefined : Math.min(Math.round(Number(start) * scale), frameCounts[index] - 1);
+                    let nextEnd = end === undefined ? undefined : Math.round(Number(end) * scale);
+                    if (nextEnd !== undefined) {
+                        nextEnd = Math.min(Math.max(nextEnd, (nextStart ?? 0) + 1), frameCounts[index]);
+                        if (nextStart !== undefined && nextEnd <= nextStart) nextEnd = Math.min(frameCounts[index], nextStart + 1);
+                    }
+                    if (nextStart !== undefined) usage.localStartFrame = nextStart;
+                    if (nextEnd !== undefined) usage.localEndFrame = nextEnd;
+                }
+                // 关键帧同样按比例缩放；校验要求 localFrame < duration_frames。
+                for (const keyframe of rows(next.keyframes)) {
+                    if (keyframe.localFrame === undefined) continue;
+                    keyframe.localFrame = Math.min(Math.round(Number(keyframe.localFrame) * scale), frameCounts[index] - 1);
+                }
+                // 对白引用时窗同理；校验要求 start < end <= duration_frames。
+                for (const ref of rows(next.utterance_refs)) {
+                    if (ref.localStartFrame === undefined && ref.localEndFrame === undefined) continue;
+                    const nextStart = ref.localStartFrame === undefined ? 0 : Math.min(Math.round(Number(ref.localStartFrame) * scale), frameCounts[index] - 1);
+                    let nextEnd = ref.localEndFrame === undefined ? frameCounts[index] : Math.round(Number(ref.localEndFrame) * scale);
+                    nextEnd = Math.min(Math.max(nextEnd, nextStart + 1), frameCounts[index]);
+                    ref.localStartFrame = nextStart;
+                    ref.localEndFrame = nextEnd;
+                }
+            }
         } else {
             const template = existing || oldShots[0];
             next = { ...structuredClone(template), id: String(slot.id), start_frame: cursor, end_frame: cursor + frameCounts[index],
@@ -136,7 +186,7 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
     for (const shot of shots) {
         shot.keyframes = rows(shot.keyframes).filter(frame => !removedKeyframeIds.has(String(frame.id)));
         const removed = removedKeyframesByShot.get(String(shot.id));
-        if (removed?.length) removeKeyframeOnlySubjectUsages(shot, removed, source);
+        if (removed?.length) removeKeyframeSubjectReferences(shot, removed, source);
     }
     if (!v2 && cursor !== endFrame) throw new Error("STORYBOARD_COVERAGE: 分镜格未覆盖整个 Clip");
     const segment = { ...structuredClone(planned), shot_ids: shots.map(shot => shot.id) };

@@ -326,7 +326,7 @@ export function applyProductionCompilation(target: ProductionTarget, preparedId:
 export function fetchEpisodeProductionRun(episodeId: ProductionTarget, version: number) { return request<{ ok: boolean; run: { status: string; submitted: Array<{ kind: "image" | "h3"; id: string; taskId: string }>; error: string | null } | null }>("GET", `${productionPath(episodeId)}/runs/${version}`); }
 export type ProductionReadinessTarget = { id: string; targetId: string; kind: "asset" | "keyframe" | "segment"; title: string; status: "ready" | "blocked" | "needs_review" | "complete"; blockers: string[]; warnings?: string[]; artifactId?: string; executionTargets?: string[]; notice?: string };
 export type ProductionPresentation = { key: string; workId: string; owner: { kind: "canvas" | "episode" | "scene"; id: string }; aliases?: string[]; workspace: "overview" | "story" | "assets" | "shots" | "continuity" | "production" | "advanced"; action: "author" | "compile" | "produce" | "review" | "deliver" | "blocked"; targetKind?: string; targetId?: string; canvasId?: string; nodeId?: string; segmentId?: string; runId?: string; taskId?: string; status: "ready" | "working" | "needs_review" | "blocked" | "complete"; reason?: string };
-export type ProductionReadiness = { revision: number; publishedVersion: number; source: "draft" | "published"; canvasId?: string; canvasRevision?: number; targets: ProductionReadinessTarget[]; modules: Record<string, unknown>; unresolved: string[]; nextAction: string; presentation?: ProductionPresentation; sceneWorks?: DirectorProduction["workflow"]["sceneWorks"] };
+export type ProductionReadiness = { revision: number; publishedVersion: number; source: "draft" | "published"; canvasId?: string; canvasRevision?: number; targets: ProductionReadinessTarget[]; modules: Record<string, unknown>; unresolved: string[]; nextAction: string; stage?: { draftInitialized: boolean; scriptBlocks: number; explicitShotCues: number; structuredShots: number; assetCards: number; segments: number; compileGate: "not_started" | "blocked" | "preflight_required"; compileBlockers: string[]; authoringGaps: string[]; nextAction: string }; presentation?: ProductionPresentation; sceneWorks?: DirectorProduction["workflow"]["sceneWorks"] };
 export type SceneWorkInspection = { revision: number; works: Array<NonNullable<DirectorProduction["workflow"]["sceneWorks"]>[string] & { reviewInputHash?: string; inputChanged?: boolean; reviewAssetIds?: string[]; source?: Record<string, unknown>; media?: Array<{ targetId: string; storageKey: string; sha256: string }> }>; shared: { continuation?: DirectorProduction["workflow"]["sharedReviewContinuation"]; inputHash?: string; reviewCurrent?: boolean; reviewAssetIds?: string[]; reviewWorks?: Array<NonNullable<DirectorProduction["workflow"]["sharedReviewWorks"]>[string]>; reviews?: NonNullable<DirectorProduction["workflow"]["sharedAssetReviews"]>; error?: string; review?: DirectorProduction["workflow"]["sharedReview"]; source?: Record<string, unknown>; media?: Array<{ targetId: string; storageKey: string; sha256: string }> } | null };
 export function fetchProductionSceneWork(target: ProductionTarget) { return request<{ ok: boolean; state: SceneWorkInspection }>("GET", `${productionPath(target)}/scene-work`); }
 export type ProductionSceneAction = { action: "shared-review"; model?: string; effort?: string } | { action: "start"; sceneIds: string[]; generateMedia: boolean; model?: string; effort?: string } | { action: "pause" | "resume"; workId: string } | { action: "review"; workId?: string; assetIds?: string[]; inputHash: string; verdict: "approved" | "rejected"; evidence: string };
@@ -631,7 +631,7 @@ export type BackendGenerationLog = {
     params: Record<string, unknown>; createdAt: string; updatedAt: string;
 };
 
-export function fetchBackendGenerationLogs(options: { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: string; from?: string; to?: string; limit?: number; offset?: number } = {}) {
+export function fetchBackendGenerationLogs(options: { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: string; from?: string; to?: string; limit?: number; offset?: number; summary?: boolean } = {}) {
     const params = new URLSearchParams();
     if (options.projectId) params.set("projectId", options.projectId);
     if (options.nodeId) params.set("nodeId", options.nodeId);
@@ -644,6 +644,8 @@ export function fetchBackendGenerationLogs(options: { projectId?: string; nodeId
     if (options.to) params.set("to", options.to);
     if (options.limit) params.set("limit", String(options.limit));
     if (typeof options.offset === "number" && options.offset > 0) params.set("offset", String(options.offset));
+    // summary：纯展示列表裁掉 params/references/inputCounts 大列（类型上它们仍是必填，后端以空值填充）。
+    if (options.summary) params.set("summary", "true");
     const qs = params.toString();
     return request<{ ok: boolean; logs?: BackendGenerationLog[] }>("GET", `/generation-logs${qs ? `?${qs}` : ""}`);
 }
@@ -684,7 +686,7 @@ export function resolveBackendH3Confirmation(id: string, input: { action: "confi
     return request<{ ok: boolean; task: BackendRuntimeTask }>("POST", h3ConfirmationPath(id), input);
 }
 
-export function fetchBackendTasks(options: { projectId?: string; nodeIds?: string[]; segmentIds?: string[]; scope?: "all" | "canvas" | "image" | "video"; status?: string; kind?: string; model?: string; taskId?: string; limit?: number; offset?: number } = {}) {
+export function fetchBackendTasks(options: { projectId?: string; nodeIds?: string[]; segmentIds?: string[]; scope?: "all" | "canvas" | "image" | "video"; status?: string; kind?: string; model?: string; taskId?: string; limit?: number; offset?: number; summary?: boolean } = {}) {
     const params = new URLSearchParams();
     if (options.projectId) params.set("projectId", options.projectId);
     if (options.nodeIds?.length) params.set("nodeIds", options.nodeIds.join(","));
@@ -696,6 +698,8 @@ export function fetchBackendTasks(options: { projectId?: string; nodeIds?: strin
     if (options.taskId) params.set("taskId", options.taskId);
     if (options.limit) params.set("limit", String(options.limit));
     if (options.offset) params.set("offset", String(options.offset));
+    // summary：纯展示列表只回标量 + 输出媒体引用，裁掉多 MB 的提示词大列。
+    if (options.summary) params.set("summary", "true");
     const qs = params.toString();
     const path = `${CANVAS_TASKS_PATH}${qs ? `?${qs}` : ""}`;
     return sharedGet<{ ok: boolean; tasks?: BackendRuntimeTask[] }>(path);

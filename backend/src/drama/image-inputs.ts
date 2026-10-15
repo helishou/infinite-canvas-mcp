@@ -85,7 +85,14 @@ export function imageInputOperations(project: Record<string, any>, data: Episode
             const baseline = projection?.fieldHashes || (oldArtifact && node.metadata?.prompt !== undefined ? { prompt: hash(oldArtifact.prompt) } : undefined);
             const smart = node.type === "config" && node.metadata?.smart === true;
             const currentPrompt = smart && typeof node.metadata?.composerContent === "string" ? node.metadata.composerContent : node.metadata?.prompt;
-            const merged = mergeDirectorInput({ ...(node.metadata || {}), prompt: currentPrompt, referenceNodeIds: currentIncoming }, nextValues, baseline, [["prompt"], ["referenceNodeIds"]]);
+            // Prepared image nodes begin with an empty prompt until their first
+            // compiled artifact is applied. Treat that blank placeholder as an
+            // untouched baseline; otherwise the changed source hash is mistaken
+            // for a manual edit and the official prompt never reaches the node.
+            const mergeBaseline = typeof currentPrompt === "string" && !currentPrompt.trim()
+                ? { ...(baseline || {}), prompt: hash(currentPrompt) }
+                : baseline;
+            const merged = mergeDirectorInput({ ...(node.metadata || {}), prompt: currentPrompt, referenceNodeIds: currentIncoming }, nextValues, mergeBaseline, [["prompt"], ["referenceNodeIds"]]);
             operations.push({ type: "update_node", id: node.id, metadata: { productionImageInput: input, prompt: merged.merged.prompt, ...(smart ? { composerContent: merged.merged.prompt } : {}), canvasReferenceNodeIds: keepReferences ? currentIncoming : nextValues.referenceNodeIds,
                 productionImageProjection: { targetId: artifact.targetId, sourceNodeId: sourceId, fieldHashes: { prompt: hash(artifact.prompt), referenceNodeIds: hash(nextValues.referenceNodeIds) }, nextValues, fieldGroups: [["prompt"], ["referenceNodeIds"]], conflicts: merged.conflicts, manualFields: merged.manualFields, referenceChanged: keepReferences } } });
         }

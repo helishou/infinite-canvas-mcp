@@ -52,12 +52,28 @@ test("smart panel stays below the node when possible and scrolls within viewport
 
 test("smart panel clamps to narrow edges and moves above the node only when below space is insufficient", () => {
     const layout = canvasNodePanelLayout(
-        { x: 10, y: 660 },
+        { x: 10, y: 660, top: 560 },
         { left: -290, top: 660, right: 310, bottom: 1160, width: 600, height: 500 },
         { left: 0, top: 0, right: 360, bottom: 700, width: 360, height: 700 },
     );
 
-    assert.deepEqual(layout, { width: 336, maxHeight: 500, shiftX: 170, shiftY: -500 });
+    // 上方翻转载：面板底边贴节点顶边（560 - 8 间距），高度 min(500, 540) = 500，top = 52。
+    assert.deepEqual(layout, { width: 336, maxHeight: 500, shiftX: 170, shiftY: -608 });
+});
+
+test("panel flipped above never covers the node body", () => {
+    // 节点顶 400、底 590，视口 800x600：下方仅 0 可用，必须翻到节点上方且不与节点重叠。
+    const anchor = { x: 400, y: 590, top: 400 };
+    const layout = canvasNodePanelLayout(
+        anchor,
+        { left: 220, top: 590, right: 580, bottom: 990, width: 360, height: 400 },
+        { left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600 },
+    );
+    const panelTop = anchor.y + layout.shiftY;
+    const panelBottom = panelTop + layout.maxHeight;
+
+    assert.ok(panelBottom <= anchor.top, `panel bottom ${panelBottom} must stay above node top ${anchor.top}`);
+    assert.ok(layout.maxHeight > 0, "panel must remain visible");
 });
 
 test("only the active node keeps its panel across repeated selection and node switches", () => {

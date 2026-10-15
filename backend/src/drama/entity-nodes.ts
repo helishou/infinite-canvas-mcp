@@ -22,6 +22,7 @@ export function normalizeEntityNodeOperation(project: Record<string, any>, opera
 export const entityNodeId = (owner: Owner, kind: string, id: string) => productionLayoutStableId("production-entity", owner.kind, owner.id, kind, id);
 export function entityNodeOperations(project: Record<string, any>, data: EpisodeProductionData, owner: Owner, previous: EpisodeProductionData | undefined, layout: ProductionLayoutPlan): CanvasOperation[] {
     if (!data.director) return [];
+    const planRows = Array.isArray(data.director.source.asset_plan) ? data.director.source.asset_plan as Array<Record<string, any>> : [];
     const prior = new Map(productionEntities(previous?.director?.source || {}, owner).map(entity => [`${entity.kind}:${entity.entityId}`, entity]));
     return productionEntities(data.director.source, owner).flatMap((entity): CanvasOperation[] => {
         const binding: ProductionEntityBinding = { ownerKind: owner.kind, ownerId: owner.id, kind: entity.kind, entityId: entity.entityId };
@@ -30,11 +31,18 @@ export function entityNodeOperations(project: Record<string, any>, data: Episode
         if (!member) throw new Error("制作实体缺少正式画布布局");
         const node = nodes(project).find(node => node.id === member.nodeId);
         const nameKey = `${entity.kind}Name`, descriptionKey = `${entity.kind}Description`;
+        const linkedPlan = planRows.find(plan => String(plan.entity_id || plan.id || plan.asset_id || "") === entity.entityId && plan.sharedSource);
+        const sharedSource = linkedPlan?.sharedSource as { dramaId?: string; assetId?: string; sourceProjectId?: string; sourceNodeId?: string } | undefined;
+        const sharedAssetReference = sharedSource?.dramaId && sharedSource.assetId && sharedSource.sourceProjectId && sharedSource.sourceNodeId
+            ? { dramaId: sharedSource.dramaId, assetId: sharedSource.assetId, sourceProjectId: sharedSource.sourceProjectId, sourceNodeId: sharedSource.sourceNodeId, writeThrough: true }
+            : undefined;
         if (!node) return [{ type: "add_node", id: member.nodeId, nodeType: entity.kind, title: entity.name, position: member.position, width: member.size.width, height: member.size.height,
-            metadata: { productionEntity: binding, [nameKey]: entity.name, [descriptionKey]: entity.description, productionLayoutUnitId: unit!.id, productionLayoutBounds: member.size } }];
+            metadata: { productionEntity: binding, [nameKey]: entity.name, [descriptionKey]: entity.description, productionLayoutUnitId: unit!.id, productionLayoutBounds: member.size,
+                ...(sharedAssetReference ? { sharedAssetReference } : {}) } }];
         if (node.type !== entity.kind) throw new Error("制作实体节点类型冲突，未覆盖原节点");
         if (node.metadata?.productionEntity && JSON.stringify(node.metadata.productionEntity) !== JSON.stringify(binding)) throw new Error("制作实体节点来源冲突");
         const metadata: Record<string, any> = { productionEntity: binding, productionLayoutUnitId: unit!.id, productionLayoutBounds: member.size };
+        if (sharedAssetReference) metadata.sharedAssetReference = sharedAssetReference;
         const old = prior.get(`${entity.kind}:${entity.entityId}`);
         for (const [field, value, baseline] of [[nameKey, entity.name, old?.name], [descriptionKey, entity.description, old?.description]] as const) {
             if (old && value === baseline) continue;
@@ -46,6 +54,10 @@ export function entityNodeOperations(project: Record<string, any>, data: Episode
         }
         const reference = node.metadata?.sharedAssetReference;
         if (reference) {
+            if (reference.writeThrough) {
+                metadata.sharedAssetReference = { ...reference };
+                delete metadata.sharedAssetReference.edits;
+            } else {
             const edits = { ...reference.edits };
             for (const key of [nameKey, descriptionKey]) if (Object.hasOwn(metadata, key)) {
                 const field = `metadata.${key}`, base = edits[field] ? edits[field].base : node.metadata?.[key];
@@ -57,9 +69,25 @@ export function entityNodeOperations(project: Record<string, any>, data: Episode
                 if (entity.name === base) delete edits.title; else edits.title = { base, value: entity.name };
             }
             metadata.sharedAssetReference = { ...reference, edits };
+            }
         }
         const patch = (!old || old.name !== entity.name) && node.title !== entity.name ? { title: entity.name } : undefined;
         return patch || Object.entries(metadata).some(([key, value]) => JSON.stringify(node.metadata?.[key]) !== JSON.stringify(value)) ? [{ type: "update_node", id: node.id, patch, metadata }] : [];
+    });
+}
+
+/** Unlink an explicitly removed shared production entity from its episode canvas. */
+export function removedSharedEntityNodeOperations(project: Record<string, any>, before: EpisodeProductionData | undefined, after: EpisodeProductionData, owner: Owner): CanvasOperation[] {
+    if (!before?.director || !after.director || owner.kind !== "episode") return [];
+    const nextIds = new Set(productionEntities(after.director.source, owner).map(entity => `${entity.kind}:${entity.entityId}`));
+    return productionEntities(before.director.source, owner).flatMap((entity): CanvasOperation[] => {
+        if (!entity.assetIds.some(assetId => {
+            const plan = (before.director!.source.asset_plan as Array<Record<string, any>> || []).find(item => String(item.id || item.asset_id || "") === assetId);
+            return Boolean(plan?.sharedSource);
+        }) || nextIds.has(`${entity.kind}:${entity.entityId}`)) return [];
+        const binding: ProductionEntityBinding = { ownerKind: owner.kind, ownerId: owner.id, kind: entity.kind, entityId: entity.entityId };
+        const node = nodes(project).find(item => JSON.stringify(item.metadata?.productionEntity) === JSON.stringify(binding));
+        return node ? [{ type: "delete_node", id: node.id }] : [];
     });
 }
 

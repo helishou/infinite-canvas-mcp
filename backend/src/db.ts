@@ -324,6 +324,9 @@ export class BackendDatabase {
                 updated_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS generation_logs_project_created ON generation_logs(project_id, created_at DESC);
+            -- 全局无过滤「最近生成」列表按创建时间倒序取前 N：必须有一条以 created_at 打头的
+            -- 索引才能避免全表扫描 + 临时排序（旧库只有 project/created 复合索引，服务不了空 projectId 的全局查询）。
+            CREATE INDEX IF NOT EXISTS generation_logs_created_global ON generation_logs(created_at DESC, id DESC);
             CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,
                 kind TEXT NOT NULL,
@@ -336,6 +339,10 @@ export class BackendDatabase {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            -- 任务列表（含无过滤的全局「最近任务」）按创建时间倒序取前 N：需要以 created_at 打头的索引，
+            -- 否则 6k+ 行全表扫描 + 临时排序会让首页 /tasks 卡 ~1s。其余 tasks_*_created 复合索引都以
+            -- status/model/project 打头，服务不了空过滤的全局排序。
+            CREATE INDEX IF NOT EXISTS tasks_created_global ON tasks(created_at DESC, id DESC);
             CREATE TABLE IF NOT EXISTS task_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -2124,13 +2131,9 @@ export class BackendDatabase {
                 const conflicts = history.reset ? ["history"] : concurrentCommandConflicts(operations, history.commits.flatMap((entry) => entry.operations));
                 if (conflicts.length) throw Object.assign(collaborationError("FIELD_CONFLICT", "目标字段已被其他协作者修改"), { project: current, revision: currentRevision, conflictTargets: conflicts });
             }
-            if (expectedRevision !== undefined && expectedRevision !== currentRevision) {
-                const error = new Error("画布版本冲突");
-                (error as Error & { code?: string; project?: CanvasProject; revision?: number }).code = "REVISION_CONFLICT";
-                (error as Error & { project?: CanvasProject }).project = current;
-                (error as Error & { revision?: number }).revision = currentRevision;
-                throw error;
-            }
+            // 乐观锁放行（last-write-wins）：客户端传的 expectedRevision 不再与 currentRevision 比对拦截，
+            // 画布版本号仍照常自增；事务内读到的快照即本次写入基线（SQLite 单写者保证一致性）。
+            // expectedRevision 仍参与命令指纹，同载荷重试的回放匹配不受影响。
             // getCanvasProject parses a fresh snapshot for this transaction; it has no shared owner.
             const project = current as CanvasProject;
             const assetBefore = structuredClone(current);
@@ -2151,6 +2154,8 @@ export class BackendDatabase {
             const committedOperations: CanvasOperation[] = [];
             const operationResults = operations.flatMap((operation, index) => {
                 if (!context?.runtimeWrite) operations[index] = operation = normalizeEntityNodeOperation(project, operation);
+                const previousNode = (project.nodes as AssetNode[]).find(node => node.id === String(operation.id || operation.nodeId || ""));
+                const previousNodeSnapshot = previousNode ? structuredClone(previousNode) : undefined;
                 validateAssetOperation(this, id, project, operation, context);
                 normalizeAssetInsertion(this, operation);
                 if (!context?.runtimeWrite) {
@@ -2189,7 +2194,7 @@ export class BackendDatabase {
                 const derivedOperations: CanvasOperation[] = [];
                 const result = applyCanvasProjectOperations(project, [operations[index]], { derivedOperations });
                 committedOperations.push(operations[index], ...derivedOperations);
-                committedOperations.push(...captureAssetEdits(this, project, operations[index], context));
+                committedOperations.push(...captureAssetEdits(this, project, operations[index], { ...context, operationId, deferredCommits: dependentCommits }, previousNodeSnapshot));
                 if (!isText) {
                     // 每一步删除后立即清理；同批 delete + add 同 ID 也必须得到新文本身份。
                     if (["delete_node", "delete_h3_segment", "replace_h3_segments"].includes(operation.type) || (operation.type === "update_node" && (["segments", "texts"].some((key) => Object.hasOwn(operation.metadata as object || {}, key) || (operation.metadataDelete as string[] || []).includes(key)) || Object.hasOwn(operation.patch as object || {}, "type")))) {
@@ -2249,7 +2254,7 @@ export class BackendDatabase {
             project.updatedAt = new Date().toISOString();
             this.db.prepare("UPDATE canvas_projects SET data_json = ?, updated_at = ? WHERE id = ?")
                 .run(JSON.stringify(stripProjectAssets(project)), String(project.updatedAt), id);
-            propagateAssetChanges(this, id, assetBefore, project, dependentCommits);
+            propagateAssetChanges(this, id, assetBefore, project, dependentCommits, context?.originatingProjectId);
             const source = context?.source || { clientId: "system:backend", kind: "system", label: "后台" };
             this.db.prepare("INSERT INTO canvas_operation_batches (operation_id, project_id, base_revision, revision, source_json, operations_json, results_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
                 .run(operationId, id, currentRevision, revision, JSON.stringify(source), JSON.stringify(committedOperations), JSON.stringify(operationResults), String(project.updatedAt));
@@ -3763,14 +3768,14 @@ export class BackendDatabase {
         return rows.map((row) => this.taskFromRow(row));
     }
 
-    listTasks(filter: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; parentThreadId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number } = {}): RuntimeTask[] {
+    private taskListWhere(filter: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; parentThreadId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number } = {}): { where: string; values: Array<string | number>; limit: number; offset: number } {
         const clauses: string[] = [];
         const values: Array<string | number> = [];
         if (filter.status) { clauses.push("status = ?"); values.push(filter.status); }
         if (filter.kind) { clauses.push("kind = ?"); values.push(filter.kind); }
         if (filter.model) { clauses.push("model = ?"); values.push(filter.model); }
         if (filter.projectId) { clauses.push("project_id = ?"); values.push(filter.projectId); }
-        if (filter.parentThreadId) { clauses.push("json_extract(input_json, '$.parentThreadId') = ?"); values.push(filter.parentThreadId); }
+        if (filter.parentThreadId) { clauses.push(`json_extract(input_json, '$.parentThreadId') = ?`); values.push(filter.parentThreadId); }
         if (filter.scope === "canvas") clauses.push("project_id IS NOT NULL");
         if (filter.scope === "image") clauses.push("is_image = 1");
         if (filter.scope === "video") clauses.push("is_video = 1");
@@ -3782,10 +3787,58 @@ export class BackendDatabase {
             clauses.push(`segment_id IN (${filter.segmentIds.map(() => "?").join(",")})`);
             values.push(...filter.segmentIds.map(String));
         }
-        const limit = Math.max(1, Math.min(500, Number(filter.limit || 500)));
-        const offset = Math.max(0, Number(filter.offset || 0));
-        const rows = this.db.prepare(`SELECT * FROM tasks ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`).all(...values, limit, offset) as Array<Record<string, unknown>>;
+        return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", values, limit: Math.max(1, Math.min(500, Number(filter.limit || 500))), offset: Math.max(0, Number(filter.offset || 0)) };
+    }
+
+    listTasks(filter: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; parentThreadId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number } = {}): RuntimeTask[] {
+        const { where, values, limit, offset } = this.taskListWhere(filter);
+        const rows = this.db.prepare(`SELECT * FROM tasks ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`).all(...values, limit, offset) as Array<Record<string, unknown>>;
         return rows.map((row) => this.taskFromRow(row));
+    }
+
+    /**
+     * 任务列表「摘要」投影：只保留卡片渲染所需标量 + 输出媒体引用，裁掉多 MB 的 input/params 提示词大列。
+     * 供首页 / 全局任务按钮这类纯展示场景用（summary=1），导出、任务中心、生产工作台等需要完整字段的
+     * 消费者仍走 list()。返回值在结构上就是合法的 RuntimeTask（重字段均为可选），可直接复用前端类型。
+     */
+    listTaskSummaries(filter: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; parentThreadId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number } = {}): RuntimeTask[] {
+        const { where, values, limit, offset } = this.taskListWhere(filter);
+        // 不取 params_json（第二大 JSON 列，卡片不需要）；input_json/result_json 仅用于抽取
+        // 路由标量(input.projectId/scope)与输出媒体引用，不把原文塞回响应体。
+        const rows = this.db.prepare(`SELECT id, kind, status, progress, error, created_at, updated_at, project_id, node_id, segment_id, model, input_json, result_json FROM tasks ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`).all(...values, limit, offset) as Array<Record<string, unknown>>;
+        return rows.map((row) => {
+            const input = parseJsonObject(row.input_json);
+            const inputScope = typeof input.scope === "string" && input.scope ? input.scope : undefined;
+            const inputProjectId = typeof input.projectId === "string" && input.projectId ? input.projectId : undefined;
+            const result = row.result_json ? parseJsonObject(row.result_json) : null;
+            const outputs = result && Array.isArray(result.media)
+                ? (result.media as Array<Record<string, unknown>>).filter((item) => item && typeof item === "object")
+                : result && Array.isArray(result.images)
+                    ? (result.images as Array<Record<string, unknown>>).filter((item) => item && typeof item === "object")
+                    : [];
+            const kind = String(row.kind);
+            return {
+                id: String(row.id), kind,
+                status: String(row.status) as RuntimeTaskStatus,
+                progress: Number(row.progress),
+                // projectId 用反范式列（创建时已按 input||params||binding 归一化），缺失再退回 input.projectId。
+                projectId: String(row.project_id || "") || inputProjectId || undefined,
+                nodeId: String(row.node_id || "") || undefined,
+                segmentId: String(row.segment_id || "") || undefined,
+                model: String(row.model || "") || undefined,
+                executor: kind.startsWith("comfyui:") ? "comfy" : kind,
+                // 只回传路由所需的两个标量，prompt/params 等大字段不入响应体。
+                // RuntimeTask 的 input/params/result 必填：摘要里是空值占位（不是缺失数据），
+                // 完整原文仍从 listTasks / getTask 获取。
+                input: inputProjectId || inputScope ? { ...(inputProjectId ? { projectId: inputProjectId } : {}), ...(inputScope ? { scope: inputScope } : {}) } : {},
+                params: {},
+                result: null,
+                outputs,
+                error: row.error ? String(row.error) : null,
+                createdAt: String(row.created_at),
+                updatedAt: String(row.updated_at),
+            };
+        });
     }
 
     private taskFromRow(row: Record<string, unknown>): RuntimeTask {

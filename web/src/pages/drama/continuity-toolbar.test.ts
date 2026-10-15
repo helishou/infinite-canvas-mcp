@@ -5,6 +5,7 @@ import ts from "typescript";
 import zhCN from "../../i18n/locales/zh-CN";
 import enUS from "../../i18n/locales/en-US";
 import { continuityPreviewStatus } from "./continuity-timeline-model";
+import { continuityLedgerFactDescriptions } from "./continuity-ledger-mutations";
 
 // Run the actual derived state, header and handlers. Production adapter tests
 // separately exercise the request lifecycle; these checks do not render a browser.
@@ -30,11 +31,12 @@ type Element = { type: string; props: Record<string, any>; children: any[] };
 function elements(node: Element): Element[] {
     return [node, ...node.children.flat(Infinity).filter(child => child && typeof child === "object" && child.type).flatMap(elements)];
 }
-const fixture = () => ({ contract_version: 2, facts: [{ id: "F", allowed_values: ["a", "b"] }], timelines: [{ id: "T" }], initial: [{ timeline_id: "T", fact_id: "F", value: "a" }], events: [], requirements: [], coverage: [] });
+const fixture = () => ({ contract_version: 2, facts: [{ id: "F", allowed_values: ["a", "b"], value_descriptions: { a: "State A", b: "State B" } }], timelines: [{ id: "T" }], initial: [{ timeline_id: "T", fact_id: "F", value: "a" }], events: [], requirements: [], coverage: [] });
 function harness(patch: Record<string, any> = {}, locale: any = zhCN) {
     const checks: string[] = [], saves: any[] = [], snapshots: string[] = [], notices: string[] = [];
     const c: Record<string, any> = {
         stable: JSON.stringify, formalLedger: fixture(), ledger: fixture(), editable: true, legacy: false,
+        continuityLedgerFactDescriptions,
         changeDraft: undefined, sourceConflict: false, invalidLedgerDraft: false, busy: false, snapshotLoading: false,
         sourceHash: "source", report: { sourceHash: "source", snapshot: "draft", status: "passed", report: { diagnostics: [] } },
         subjectAssembly: true, ledgerV2: true, activeView: "workbench", entryFocus: "events:E", issues: [{}], titleAlreadyVisible: true,

@@ -106,18 +106,13 @@ def binding_ids(subject, usage, *, allow_missing=False):
 
 
 def _used_continuity_fact_ids(shot, subjects, facts):
-    subjects = list(subjects or [])
-    subject_by_id = {str(item.get("id")): item for item in subjects}
+    # Continuity output is opt-in per Shot/fact. Subject presence alone must
+    # not expand the prompt to every ledger fact owned by that entity.
     used = {str(value) for value in shot.get("continuity_facts", [])}
     for usage in rows(shot.get("subject_usages")):
         used.update(str(value) for value in usage.get("continuityFactIds", []))
         used.update(str(item.get("factId")) for item in rows(usage.get("stateRequirements")))
-        subject = subject_by_id.get(str(usage.get("subjectId")))
-        ref = (subject or {}).get("entityRef", {})
-        for fact in facts.values():
-            if str(fact.get("object_kind")) == str(ref.get("kind")) and str(fact.get("object_id")) == str(ref.get("id")):
-                used.add(str(fact.get("id")))
-    return used
+    return used.intersection(facts)
 
 
 def _state_start_descriptions(source, report, shot, subjects):
@@ -168,31 +163,39 @@ def _state_snapshot(source, report, shot, subjects, edge):
     """Return compiled state values; frame-zero events expose their post-event opening state."""
     trajectory = (report.get("trajectories") or {}).get(str(shot.get("id")), {})
     snapshot = trajectory.get(edge, {})
-    opening_event_values = {}
-    if edge == "start":
-        shot_id = str(shot.get("id"))
-        shot_start = shot.get("start_frame")
-        for event in rows((source.get("ledger") or {}).get("events")):
-            if str(event.get("shot_id")) != shot_id:
-                continue
-            if (event.get("local_frame") == 0
-                    or (shot_start is not None and event.get("frame") == shot_start)):
-                opening_event_values[str(event.get("fact_id"))] = event.get("after", "unknown")
     facts = {str(item.get("id")): item for item in rows((source.get("ledger") or {}).get("facts"))}
     subject_by_entity = {(str(item.get("entityRef", {}).get("kind")), str(item.get("entityRef", {}).get("id"))): item
                          for item in subjects}
-    result = {}
     used_facts = _used_continuity_fact_ids(shot, subjects, facts)
-    used_facts.update(opening_event_values)
+    opening_event_values = {}
+    ending_unknown_values = {}
+    shot_id = str(shot.get("id"))
+    shot_events = [event for event in rows((source.get("ledger") or {}).get("events"))
+                   if str(event.get("shot_id")) == shot_id]
+    if edge == "start":
+        shot_start = shot.get("start_frame")
+        for event in shot_events:
+            if (event.get("local_frame") == 0
+                    or (shot_start is not None and event.get("frame") == shot_start)):
+                fact_id = str(event.get("fact_id"))
+                if fact_id in used_facts:
+                    opening_event_values[fact_id] = event.get("after", "unknown")
+    else:
+        ending_unknown_values = {
+            str(event.get("fact_id")): "unknown" for event in shot_events
+            if str(event.get("fact_id")) in used_facts and event.get("after") == "unknown"
+            and snapshot.get(str(event.get("fact_id"))) == "unknown"
+        }
+    result = {}
     for fact_id in sorted(used_facts):
         fact = facts.get(fact_id)
-        is_opening_change = fact_id in opening_event_values
-        value = opening_event_values[fact_id] if is_opening_change else snapshot.get(fact_id)
+        is_event_value = fact_id in opening_event_values or fact_id in ending_unknown_values
+        value = opening_event_values.get(fact_id, ending_unknown_values.get(fact_id, snapshot.get(fact_id)))
         if not fact or value is None:
             continue
         description = (fact.get("value_descriptions") or {}).get(str(value))
-        if not description and is_opening_change and value != "unknown":
-            description = str(value)
+        if not description and is_event_value:
+            description = "未知" if value == "unknown" else str(value)
         if not description:
             continue
         owner = subject_by_entity.get((str(fact.get("object_kind")), str(fact.get("object_id"))))
@@ -292,10 +295,108 @@ def project_continuity_source(production):
     return source
 
 
+def _subject_continuity_audit_projection(production):
+    projected = project_continuity_source(production)
+    if (production.get("prompt_assembly") or {}).get("version") == 2:
+        # Subject usages are the v2 authority for which facts a Shot consumes.
+        # The legacy validator otherwise expands every fact owned by each visible
+        # character/scene to every Shot, creating false baseline/requirement debt.
+        authored_shots = {str(row.get("id")): row for row in rows(production.get("shots")) if row.get("id")}
+        ledger = projected.get("ledger") if isinstance(projected.get("ledger"), dict) else {}
+        requirements = rows(ledger.get("requirements"))
+        events = rows(ledger.get("events"))
+        explicit_by_shot = {}
+        for shot_id, authored in authored_shots.items():
+            explicit = {str(value) for value in authored.get("continuity_facts", [])
+                        if isinstance(value, str) and value}
+            for usage in rows(authored.get("subject_usages")):
+                # continuityFactIds is a subject-level candidate inventory in
+                # persisted v2 sources, not proof that this Shot consumes each
+                # fact. Only shot-specific state requirements are consumption.
+                explicit.update(str(value.get("factId")) for value in rows(usage.get("stateRequirements"))
+                                if isinstance(value, dict) and value.get("factId"))
+            explicit.update(str(event.get("fact_id")) for event in events
+                            if str(event.get("shot_id")) == shot_id and event.get("fact_id"))
+            explicit_by_shot[shot_id] = explicit
+        for req in requirements:
+            if req.get("kind") in {"hold", "change"} and req.get("shot_id") and req.get("fact_id"):
+                explicit_by_shot.setdefault(str(req["shot_id"]), set()).add(str(req["fact_id"]))
+        initial_values = {(str(row.get("timeline_id", "")), str(row.get("fact_id", ""))): row.get("value", "unknown")
+                          for row in rows(ledger.get("initial"))}
+        change_event_refs = {
+            (str(req.get("shot_id", "")), str(req.get("fact_id", "")), str(event_id))
+            for req in requirements if req.get("kind") == "change"
+            for event_id in (req.get("event_ids") or []) if isinstance(event_id, str)
+        }
+        first_unknown_observations = set()
+        seen_event_facts = set()
+        for event in sorted(events, key=lambda row: (str(row.get("timeline_id", "")),
+                                                     row.get("frame", -1) if type(row.get("frame")) is int else -1,
+                                                     str(row.get("id", "")))):
+            timeline_id = str(event.get("timeline_id", ""))
+            fact_id = str(event.get("fact_id", ""))
+            key = (timeline_id, fact_id)
+            if key not in seen_event_facts:
+                if event.get("before") == "unknown" and initial_values.get(key, "unknown") == "unknown":
+                    first_unknown_observations.add((str(event.get("shot_id", "")), fact_id, str(event.get("id", ""))))
+                seen_event_facts.add(key)
+        state_requirements_by_shot = {}
+        for shot_id, authored in authored_shots.items():
+            state_requirements_by_shot[shot_id] = {
+                str(item.get("factId")) for usage in rows(authored.get("subject_usages"))
+                for item in rows(usage.get("stateRequirements")) if item.get("factId")
+            }
+        unbaselined_openings = {
+            (shot_id, fact_id) for shot_id, fact_id, event_id in first_unknown_observations
+            if (shot_id, fact_id, event_id) in change_event_refs
+            and fact_id not in state_requirements_by_shot.get(shot_id, set())
+        }
+        script_occurrences = {}
+        for scene in rows(projected.get("script_scenes")):
+            environment_id = str(scene.get("scene_id") or "")
+            occurrence_id = str(scene.get("id") or "")
+            if environment_id and occurrence_id:
+                script_occurrences.setdefault(environment_id, []).append(occurrence_id)
+        for shot in rows(projected.get("shots")):
+            shot_id = str(shot.get("id"))
+            authored = authored_shots.get(shot_id, {})
+            declared = set(explicit_by_shot.get(shot_id, set()))
+            # A first explicit change from `unknown` is the first observation,
+            # not a claim that the value was known at the Shot opening. The
+            # event and its change requirement remain audited; omit only the
+            # opening-baseline assertion for that one fact.
+            declared.difference_update(fact_id for shot_ref, fact_id in unbaselined_openings
+                                       if shot_ref == shot_id)
+            # Scene membership is not a declaration that every scene-owned
+            # continuity fact is consumed by every Shot. Preserve a uniquely
+            # matching screenplay occurrence for scoped coverage checks, then
+            # remove environment ownership from the legacy participant projection.
+            scene_id = str(authored.get("scene_id") or "")
+            if scene_id:
+                occurrence_id = str(authored.get("source_scene_id") or "")
+                matches = script_occurrences.get(scene_id, [])
+                if not occurrence_id and len(matches) == 1:
+                    occurrence_id = matches[0]
+                if occurrence_id:
+                    shot["source_scene_id"] = occurrence_id
+                shot["scene_id"] = ""
+            shot["characters"] = []
+            shot["required_assets"] = []
+            shot["continuity_facts"] = sorted(declared)
+        # Legacy bulk projections left unresolved rows on Shots that never
+        # declared or emitted the fact. Keep those rows only when the authored
+        # Shot scope actually consumes the fact; retain all explicit holds and
+        # changes because they are direct ledger assertions.
+        ledger["requirements"] = [req for req in requirements
+                                  if req.get("kind") != "unresolved"
+                                  or str(req.get("fact_id", "")) in explicit_by_shot.get(str(req.get("shot_id", "")), set())]
+
+    return projected
+
+
 def audit_subject_continuity(production, target_ids=None):
-    from continuity_v2 import audit
-    report = audit(project_continuity_source(production), target_ids)
-    from continuity_v2 import digest
+    from continuity_v2 import audit, digest
+    report = audit(_subject_continuity_audit_projection(production), target_ids)
     report["sourceDigest"] = digest(production)
     return report
 
@@ -356,6 +457,23 @@ def adapt_production(production, *, draft=False):
             windows[str(shot["id"])] = (start, cursor)
 
     continuity = audit_subject_continuity(source)
+    # Replay validates every event's authored `before` against the prior state.
+    # For compiler-visible Shot openings, a local-frame-zero event has already
+    # taken effect, so project its `after` into the opening snapshot only after
+    # that audit has captured the before-state verification result.
+    trajectories = continuity.get("trajectories") if isinstance(continuity.get("trajectories"), dict) else {}
+    for shot in shots:
+        shot_id = str(shot.get("id"))
+        trajectory = trajectories.get(shot_id)
+        if not isinstance(trajectory, dict):
+            continue
+        opening = trajectory.get("start")
+        if not isinstance(opening, dict):
+            continue
+        for event in rows((source.get("ledger") or {}).get("events")):
+            if str(event.get("shot_id")) == shot_id and event.get("local_frame") == 0:
+                opening[str(event.get("fact_id"))] = event.get("after", "unknown")
+    source["_continuity_report"] = continuity
     assets = {str(item.get("asset_id") or item.get("id")): item for item in rows(source.get("asset_plan"))}
     reference_cache = {}
     transformed_segments = []
@@ -874,7 +992,20 @@ def render_continuity_text_v2(shot, production):
     return _render_state_end(production, production.get("_continuity_report") or {}, shot, rows(production.get("subject_registry")))
 
 
-def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, state_lines=None):
+def _referenced_scene_ids(production, shot):
+    scenes = {str(item.get("id") or "") for item in rows(production.get("scene_registry"))}
+    subjects = {str(item.get("id")): item for item in rows(production.get("subject_registry"))}
+    referenced = []
+    for usage in rows(shot.get("subject_usages")):
+        subject = subjects.get(str(usage.get("subjectId") or ""), {})
+        entity_ref = subject.get("entityRef") if isinstance(subject.get("entityRef"), dict) else {}
+        scene_id = str(entity_ref.get("id") or "")
+        if entity_ref.get("kind") == "scene" and scene_id in scenes and scene_id not in referenced:
+            referenced.append(scene_id)
+    return referenced
+
+
+def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, state_lines=None, scene_ids_to_render=None):
     camera = shot.get("camera") if isinstance(shot.get("camera"), dict) else {}
     fps_num, fps_den = int(production.get("fps_num", 24)), int(production.get("fps_den", 1))
     clip_start = int(segment["start_frame"])
@@ -889,13 +1020,8 @@ def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, state_l
     parts = [header]
     scenes = {str(item.get("id") or ""): item for item in rows(production.get("scene_registry"))}
     subjects = {str(item.get("id")): item for item in rows(production.get("subject_registry"))}
-    referenced_scene_ids = []
-    for usage in rows(shot.get("subject_usages")):
-        subject = subjects.get(str(usage.get("subjectId") or ""), {})
-        entity_ref = subject.get("entityRef") if isinstance(subject.get("entityRef"), dict) else {}
-        scene_id = str(entity_ref.get("id") or "")
-        if entity_ref.get("kind") == "scene" and scene_id in scenes and scene_id not in referenced_scene_ids:
-            referenced_scene_ids.append(scene_id)
+    referenced_scene_ids = (_referenced_scene_ids(production, shot)
+                            if scene_ids_to_render is None else scene_ids_to_render)
     for scene_id in referenced_scene_ids:
         scene_name, scene_description = entity_text(production, {"entityRef": {"kind": "scene", "id": scene_id}})
         if scene_description:
@@ -947,7 +1073,8 @@ def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, state_l
         parts.append("Diegetic sound: " + sound)
     for event in shot.get("_canvas_v2_events", []):
         fact = next((item for item in rows((production.get("ledger") or {}).get("facts")) if str(item.get("id")) == str(event.get("fact_id"))), {})
-        description = (fact.get("value_descriptions") or {}).get(str(event.get("after")), str(event.get("after") or ""))
+        after = event.get("after")
+        description = (fact.get("value_descriptions") or {}).get(str(after), "未知" if after == "unknown" else str(after or ""))
         local_frame = int(event.get("local_frame", 0))
         if local_frame == 0:
             continue
@@ -1033,8 +1160,12 @@ def compile_prompt_v2(production, segment, *, draft=False):
     subjects = rows(production.get("subject_registry"))
     detail_rows = []
     carried_state = {}
+    previous_scene_ids = []
     for index, shot in enumerate(shots):
         shot_id = str(shot.get("id"))
+        current_scene_ids = _referenced_scene_ids(production, shot)
+        scene_ids_to_render = [scene_id for scene_id in current_scene_ids if scene_id not in previous_scene_ids]
+        previous_scene_ids = current_scene_ids
         start_state = _state_snapshot(production, report, shot, subjects, "start")
         end_state = _state_snapshot(production, report, shot, subjects, "end")
         if index == 0:
@@ -1049,7 +1180,8 @@ def compile_prompt_v2(production, segment, *, draft=False):
                           if fact_id not in event_fact_ids and (fact_id not in start_state or item["value"] != start_state[fact_id]["value"])]
         if changes_by_end:
             state_lines.append("State changes by shot end: " + "; ".join(changes_by_end))
-        detail_rows.append(_shot_prompt_v2(production, segment, shot, index + 1, speakers, state_lines=state_lines))
+        detail_rows.append(_shot_prompt_v2(production, segment, shot, index + 1, speakers,
+                                           state_lines=state_lines, scene_ids_to_render=scene_ids_to_render))
         carried_state.update(start_state)
         carried_state.update(end_state)
     detail = "\n".join(detail_rows)

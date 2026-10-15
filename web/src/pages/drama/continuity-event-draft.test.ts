@@ -10,10 +10,11 @@ test('inline and advanced creation append one atomic linked ledger change withou
  assert.deepEqual(ledger, before); assert.equal(result.ledger.events[0].before, 'a'); assert.equal(result.ledger.events[0].local_frame, 36);
  assert.equal(result.ledger.events[0].after, 'b'); assert.deepEqual(result.ledger.requirements[0].event_ids, [result.eventId]); assert.deepEqual(result.ledger.coverage[0].event_ids, [result.eventId]); assert.equal(result.ledger.coverage[0].source_digest, 'digest');
 });
-test('missing state cannot create partial records, while an empty reason or missing script evidence is allowed', () => {
+test('missing state is rejected, but a change without a matching script passage is still confirmable', () => {
  assert.throws(() => appendContinuityChange(fixture(), shots, { ...input, after: '' }, 'digest', id, true), /EVENT_FIELDS_REQUIRED/);
  assert.equal(appendContinuityChange(fixture(), shots, { ...input, reason: ' ' }, 'digest', id, true).ledger.events[0].reason, '');
  const result = appendContinuityChange(fixture(), shots, { ...input, sourceBlockId: '' }, undefined, id, true);
+ assert.equal(result.ledger.events[0].after, 'b');
  assert.equal(result.ledger.events[0].source_anchor, undefined);
  assert.equal(result.ledger.requirements[0].source_anchor, undefined);
  assert.equal(result.ledger.coverage.length, 0);

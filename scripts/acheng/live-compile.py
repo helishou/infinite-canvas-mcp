@@ -77,18 +77,25 @@ load("canvas_source_contract", overlay / "source-contract.py")
 if str(runtime_scripts) in sys.path:
     sys.path.remove(str(runtime_scripts))
 sys.path.insert(0, str(runtime_scripts))
-load_live_reference_bindings(runtime_scripts / "reference_bindings.py")
+project_asset_scripts = (overlay.parent.parent / ".agents/skills/acheng-director/scripts").resolve()
+if runtime_scripts.resolve() == project_asset_scripts:
+    # Project-owned asset compiler helpers are already the selected source of
+    # truth; compatibility replacements are only for the immutable managed runtime.
+    load("reference_bindings", runtime_scripts / "reference_bindings.py")
+else:
+    load_live_reference_bindings(runtime_scripts / "reference_bindings.py")
 
 # Resolve all production revision consumers against the same scratch-field
 # policy. These modules are imported by separate compiler entrypoints and can
 # otherwise retain different hash implementations in the managed runtime.
 contract_core = importlib.import_module("contract_core")
+def authored_content_hash(value, _raw=contract_core.content_hash):
+    if isinstance(value, dict) and "_continuity_report" in value:
+        value = {key: item for key, item in value.items() if key != "_continuity_report"}
+    return _raw(value)
+contract_core.content_hash = authored_content_hash
 for module_name in ("reference_bindings", "h3_delivery", "asset_delivery"):
     module = importlib.import_module(module_name)
-    def authored_content_hash(value, _raw=contract_core.content_hash):
-        if isinstance(value, dict) and "_continuity_report" in value:
-            value = {key: item for key, item in value.items() if key != "_continuity_report"}
-        return _raw(value)
     module.content_hash = authored_content_hash
 
 audit_module = importlib.import_module("audit_storyboard_quality")

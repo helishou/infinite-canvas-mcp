@@ -30,12 +30,6 @@ export function continuityRowInsertTarget(candidates: Array<{ shotId: string; vi
     }
 }
 
-/** Appending a state value keeps the fact enum deduped and never reintroduces the unknown sentinel. */
-export function continuityValueWith(current: unknown, value: string): string[] {
-    const values = Array.isArray(current) ? current.map(item => String(item)) : [];
-    return [...new Set([...values, value.trim()].filter(item => item && item !== 'unknown'))];
-}
-
 /** Shot-local time reads as seconds for people; exact frames stay next to it. */
 export function continuitySecondLabel(frame: number, fps: number) {
     const safe = Number.isFinite(fps) && fps > 0 ? fps : 24;

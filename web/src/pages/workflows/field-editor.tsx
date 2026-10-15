@@ -122,11 +122,32 @@ export function FieldEditor({
 
             {field.type === "dropdown" && (
                 <div>
-                    <label className="mb-1 block text-[10px] text-stone-500">选项列表</label>
+                    {(() => {
+                        const options = field.options || [];
+                        // 默认值已不在选项里（如选项被删/改名前残留）时保留展示，允许显式清掉。
+                        const stale = field.default !== undefined && field.default !== "" && !options.includes(String(field.default));
+                        return (
+                            <label className={label}>
+                                默认值
+                                <select value={String(field.default ?? "")} onChange={(e) => onUpdate({ default: e.target.value === "" ? undefined : e.target.value })} className={`mt-0.5 ${input}`}>
+                                    <option value="">（第一项）</option>
+                                    {stale && <option value={String(field.default)}>{String(field.default)}（已不在选项中）</option>}
+                                    {options.map((option) => <option key={option} value={option}>{option}</option>)}
+                                </select>
+                            </label>
+                        );
+                    })()}
+                    <label className="mb-1 mt-2 block text-[10px] text-stone-500">选项列表</label>
                     <div className="space-y-1">
                         {(field.options || []).map((option, index) => (
                             <div key={index} className="flex items-center gap-1">
-                                <input value={option} onChange={(e) => { const options = [...(field.options || [])]; options[index] = e.target.value; onUpdate({ options }); }} className={`flex-1 ${input}`} />
+                                <input value={option} onChange={(e) => {
+                                    const options = [...(field.options || [])];
+                                    const previous = options[index];
+                                    options[index] = e.target.value;
+                                    // 改名的是当前默认值时同步默认值，避免默认值悬空回退到第一项。
+                                    onUpdate(String(field.default ?? "") === previous && previous !== "" ? { options, default: e.target.value } : { options });
+                                }} className={`flex-1 ${input}`} />
                                 <button onClick={() => onUpdate({ options: (field.options || []).filter((_, i) => i !== index) })} className="text-xs text-red-400 hover:text-red-600">×</button>
                             </div>
                         ))}

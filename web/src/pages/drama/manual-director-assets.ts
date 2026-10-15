@@ -13,6 +13,7 @@ export type ManualAssetDraft = {
     registerSubject: boolean;
     ownerKind: "episode" | "canvas";
     ownerId: string;
+    sharedSource?: { dramaId: string; assetId: string; sourceProjectId: string; sourceNodeId: string };
 };
 
 const records = (value: unknown): Source[] => Array.isArray(value) ? value.filter((item): item is Source => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
@@ -35,6 +36,7 @@ export function createManualDirectorAsset(source: Source, draft: ManualAssetDraf
         depends_on: [],
         status: "planned",
         ...(draft.canvasScope ? { canvas_scope: draft.canvasScope } : {}),
+        ...(draft.sharedSource ? { sharedSource: draft.sharedSource } : {}),
     };
     const assetCard = {
         id,

@@ -523,6 +523,32 @@ test("production tools publish full operation schemas and forward read-only pref
   assert.equal(calls.length, 2);
 });
 
+test("production_initialize_from_current_demand submits one revisioned initialization op and reuses its receipt", async t => {
+  const app = express(); app.use(express.json());
+  app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, plugins: [] }));
+  app.get("/drama/episodes/:id/production", (_req, res) => res.json({ ok: true, production: { revision: 6 } }));
+  let received: unknown;
+  let wrote = false;
+  let posts = 0;
+  app.post("/drama/episodes/:id/production/ops", (req, res) => { received = req.body; wrote = true; posts++; res.json({ ok: true, production: { revision: 7, draft: { director: { source: { version: 2 } } } } }); });
+  app.get("/drama/episodes/:id/production/operations/:operationId/receipt", (_req, res) => res.json(wrote
+    ? { ok: true, found: true, production: { revision: 7, draft: { director: { source: { version: 2 } } } } }
+    : { ok: true, found: false }));
+  const server = app.listen(0, "127.0.0.1"); await once(server, "listening"); t.after(() => server.close());
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const client = await mcpClient(t, await fixture(t, `http://127.0.0.1:${address.port}`));
+  const { tools } = await client.listTools();
+  const tool = tools.find(item => item.name === "production_initialize_from_current_demand");
+  assert.ok(tool);
+  assert.deepEqual(tool.inputSchema.required, ["episodeId", "operationId"]);
+  const result = textPayload(await client.callTool({ name: "production_initialize_from_current_demand", arguments: { episodeId: "episode-1", operationId: "start-draft-1" } }));
+  assert.equal(result.production.revision, 7);
+  assert.deepEqual(received, { operationId: "start-draft-1", expectedRevision: 6, ops: [{ type: "initialize_director_from_demand" }] });
+  const replay = textPayload(await client.callTool({ name: "production_initialize_from_current_demand", arguments: { episodeId: "episode-1", operationId: "start-draft-1" } }));
+  assert.equal(replay.revision, 7);
+  assert.equal(posts, 1);
+});
+
 test("MCP forwards the authored compilation scope to Backend", async t => {
   const app = express(); app.use(express.json());
   app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
@@ -1209,4 +1235,47 @@ test("drama episode MCP forwards separate synopsis and fullPlot fields", async (
     { synopsis: "一集梗概", fullPlot: "从开场到结尾的完整剧情" },
     { synopsis: "新版梗概", fullPlot: "新版完整剧情" },
   ]);
+});
+
+test("unmapped 4xx input failures map to readable codes instead of CANVAS_TOOL_FAILED", async t => {
+  const app = express(); app.use(express.json());
+  app.post("/mcp/observability/events", (_req, res) => res.status(201).json({ ok: true }));
+  app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
+  // 不存在的分集 → EPISODE_NOT_FOUND（此前这类 404 落到 CANVAS_TOOL_FAILED）。
+  app.get("/drama/episodes/:id/production", (req, res) => {
+    if (req.params.id !== "exists") res.status(404).json({ ok: false, error: "分集不存在" });
+    else res.json({ ok: true, production: { revision: 1, draft: { director: {} } } });
+  });
+  // 分块读取没选到合法产物 → ARTIFACT_NOT_FOUND。
+  app.get("/canvas/projects/:id/production", (req, res) => {
+    if (String(req.query.targetIds ?? "") === "SEG-bad") res.status(400).json({ ok: false, error: "分块读取必须选定一个产物" });
+    else res.json({ ok: true, production: { revision: 1, draft: {} }, artifacts: [] });
+  });
+  // 缺参时后端返回序列化的 Zod issue 数组（放进 error 字符串字段），不是客户端 z.ZodError → INVALID_INPUT。
+  app.get("/production/contract", (req, res) => {
+    if (!req.query.moduleId) res.status(400).json({
+      ok: false,
+      error: JSON.stringify([{ code: "invalid_type", expected: "string", received: "undefined", path: ["moduleId"], message: "Required" }], null, 2),
+    });
+    else res.json({ ok: true, contract: { moduleId: String(req.query.moduleId) } });
+  });
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(async () => { server.close(); await once(server, "close"); });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const client = await mcpClient(t, await fixture(t, `http://127.0.0.1:${address.port}`));
+
+  const episode = textPayload(await client.callTool({ name: "production_get", arguments: { kind: "episode", id: "ghost-ep", snapshot: "draft" } }));
+  assert.equal(episode.error.code, "EPISODE_NOT_FOUND");
+  assert.equal(episode.error.recoverable, true);
+  assert.equal(episode.suggestedAction.tool, "drama_list_episodes");
+
+  const artifact = textPayload(await client.callTool({ name: "production_get_artifact", arguments: { kind: "canvas", id: "canvas-1", snapshot: "draft", targetId: "SEG-bad", chunkBytes: 65536 } }));
+  assert.equal(artifact.error.code, "ARTIFACT_NOT_FOUND");
+  assert.equal(artifact.error.recoverable, true);
+  assert.equal(artifact.suggestedAction.tool, "production_get_artifact_index");
+
+  const contract = textPayload(await client.callTool({ name: "production_get_contract", arguments: {} }));
+  assert.equal(contract.error.code, "INVALID_INPUT");
 });

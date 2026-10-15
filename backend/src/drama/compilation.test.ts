@@ -475,15 +475,17 @@ test("prepare is read-only; frozen apply is atomic and idempotent", t => {
     assert.equal(service.get("episode").revision, 2);
 });
 
-test("changed revision and owner cannot overwrite a production; old engine metadata does not lock compilation", t => {
+test("stale snapshot applies under last-write-wins; owner mismatch still rejects; old engine metadata does not lock compilation", t => {
     const { service, compilations, director } = fixture(t);
+    const originalBrief = service.get("episode").draft.director?.source.brief;
     const prepared = compilations.prepare("episode", "episode", 1);
     assert.throws(() => compilations.prepare("episode", "episode", 0), ProductionConflictError);
     assert.ok(compilations.prepare("episode", "episode", 1, { ...director, engine: { ...director.engine, runtimeId: "other" } }).preparedId);
     assert.throws(() => compilations.apply("episode", "canvas", prepared.preparedId), /different production/);
     service.edit("episode", { operationId: "concurrent", expectedRevision: 1, ops: [{ type: "set_director_brief", brief: "Another window's edit" }] });
-    assert.throws(() => compilations.apply("episode", "episode", prepared.preparedId), ProductionConflictError);
-    assert.equal(service.get("episode").draft.director?.source.brief, "Another window's edit");
+    // 乐观锁放行：过期快照不再被 revision 拦截，后到的 apply 胜出并覆盖并发编辑
+    compilations.apply("episode", "episode", prepared.preparedId);
+    assert.equal(service.get("episode").draft.director?.source.brief, originalBrief, "last-write-wins：过期快照的 apply 覆盖了并发的 brief");
 });
 
 test("tampered compiler packet is rejected without a revision change", t => {

@@ -10,7 +10,9 @@ const readAudio = (value: unknown): AudioObject => (value && typeof value === "o
 const cueTexts = (audio: AudioObject): string[] => Array.isArray(audio.foley) ? audio.foley.map(item => typeof item === "string" ? item : JSON.stringify(item)) : [];
 const hzOf = (audio: AudioObject): number | null | undefined => typeof audio.low_frequency_hz === "number" ? audio.low_frequency_hz : undefined;
 const nextAudioFrom = (base: unknown, cues: string[], hz: number | null | undefined, keepPendingEmpty = false): AudioObject => {
-    const next = { ...readAudio(base), foley: keepPendingEmpty ? cues : cues.filter(text => text.trim()), low_frequency_hz: hz ?? null };
+    // 标注为 AudioObject：把 Record<string,any> 展开进对象字面量时 TS 会丢掉索引签名，
+    // 不标注的话 next 被收窄成 {foley, low_frequency_hz}，下面的 delete 和返回类型都站不住。
+    const next: AudioObject = { ...readAudio(base), foley: keepPendingEmpty ? cues : cues.filter(text => text.trim()), low_frequency_hz: hz ?? null };
     delete next.no_low_frequency_reason;
     return next;
 };

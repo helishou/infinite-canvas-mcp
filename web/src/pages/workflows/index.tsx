@@ -108,6 +108,15 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
     const [profileHistoryError, setProfileHistoryError] = useState("");
     const savingRef = useRef(new Set<string>());
     const [savingOwners, setSavingOwners] = useState<Set<string>>(new Set());
+    // 字段编辑逐键触发，保存要防抖合并；ref 镜像最新选中项，供防抖回调读取。
+    const selectedRef = useRef<WorkflowDetail | null>(selected);
+    selectedRef.current = selected;
+    const selectedProfileRef = useRef<RunningHubWorkflowProfile | null>(selectedProfile);
+    selectedProfileRef.current = selectedProfile;
+    const pendingFieldsRef = useRef<Record<string, WorkflowField[]>>({});
+    const fieldsSaveTimerRef = useRef<Record<string, ReturnType<typeof setTimeout> | null>>({});
+    const pendingRhFieldsRef = useRef<Record<string, RunningHubWorkflowProfile["fields"]>>({});
+    const rhFieldsSaveTimerRef = useRef<Record<string, ReturnType<typeof setTimeout> | null>>({});
     const localOwner = selected ? `${connectionScope}:local:${selected.name}` : "";
     const cloudOwner = selectedProfile ? `${connectionScope}:cloud:${selectedProfile.id}` : "";
     const localRun = useSyncExternalStore(localRuns.subscribe, () => localRuns.get(localOwner));
@@ -380,7 +389,9 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
         markSaving(owner.name, true);
         try {
             await request("PUT", `/api/workflows/${encodeURIComponent(owner.name)}/config`, config);
-            setSelected((current) => current?.name === owner.name ? { ...current, config } : current);
+            // 保存期间用户可能又改了字段（pending 里有更新的值），不要用响应时的旧 config 回滚本地输入。
+            const pending = pendingFieldsRef.current[owner.name];
+            setSelected((current) => current?.name === owner.name ? { ...current, config: pending ? { ...config, fields: pending } : config } : current);
             void fetchWorkflows();
             return true;
         } catch (err) {
@@ -486,30 +497,68 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
         });
     };
 
+    // 字段编辑逐键触发：本地先更新（输入不失焦、所见即所得），600ms 防抖后合并落盘。
+    // 保存进行中又有新改动时延后重试，保证最后一次输入不丢；
+    // 落盘期间不得禁用表单，否则浏览器会把焦点从输入框里踢出去（打字即失焦）。
+    const flushFieldsSave = (name: string) => {
+        const fields = pendingFieldsRef.current[name];
+        if (!fields) return;
+        if (savingRef.current.has(name)) {
+            if (!fieldsSaveTimerRef.current[name]) {
+                fieldsSaveTimerRef.current[name] = setTimeout(() => { fieldsSaveTimerRef.current[name] = null; flushFieldsSave(name); }, 400);
+            }
+            return;
+        }
+        delete pendingFieldsRef.current[name];
+        const owner = selectedRef.current;
+        if (!owner || owner.name !== name) return;
+        void handleSaveConfig(owner, { ...owner.config, fields });
+    };
+
     const handleFieldsChange = (newFields: WorkflowField[]) => {
         if (!selected) return;
-        const updatedConfig = { ...selected.config, fields: newFields };
-        void handleSaveConfig(selected, updatedConfig);
+        pendingFieldsRef.current[selected.name] = newFields;
+        setSelected((current) => current?.name === selected.name ? { ...current, config: { ...current.config, fields: newFields } } : current);
+        const existingTimer = fieldsSaveTimerRef.current[selected.name];
+        if (existingTimer) clearTimeout(existingTimer);
+        fieldsSaveTimerRef.current[selected.name] = setTimeout(() => { fieldsSaveTimerRef.current[selected.name] = null; flushFieldsSave(selected.name); }, 600);
     };
 
     /**
-     * 节点图里改的档案映射立刻落盘，行为与本地字段编辑一致。
-     * 先更新本地选中项让浮窗马上反映新状态，再 PUT 回档案；
-     * 保存失败要回滚，否则界面显示的映射和平台档案会长期不一致。
+     * 节点图里改的档案映射立刻反映到本地选中项（输入不失焦），再防抖 PUT 回档案；
+     * 保存进行中又有新改动时延后重试；保存成功后本地 fields 以待保存的最新值为准，
+     * 避免服务器响应把保存期间继续编辑的内容回滚。失败要回滚提示，保持界面与平台一致。
      */
-    const handleProfileFieldsChange = async (nextFields: RunningHubWorkflowProfile["fields"]) => {
-        if (!selectedProfile) return;
-        const previous = selectedProfile;
-        if (savingRef.current.has(previous.id)) return;
-        markSaving(previous.id, true);
-        const next = { ...previous, fields: nextFields };
+    const flushProfileFieldsSave = async (id: string) => {
+        const nextFields = pendingRhFieldsRef.current[id];
+        if (!nextFields) return;
+        if (savingRef.current.has(id)) {
+            if (!rhFieldsSaveTimerRef.current[id]) {
+                rhFieldsSaveTimerRef.current[id] = setTimeout(() => { rhFieldsSaveTimerRef.current[id] = null; void flushProfileFieldsSave(id); }, 400);
+            }
+            return;
+        }
+        const previous = selectedProfileRef.current;
+        if (!previous || previous.id !== id) return;
+        markSaving(id, true);
         try {
-            const { workflow } = await saveRunningHubWorkflow(next);
-            setSelectedProfile((current) => current?.id === previous.id ? workflow : current);
-            setProfiles((current) => current.map((item) => (item.id === next.id ? workflow : item)));
+            const { workflow } = await saveRunningHubWorkflow({ ...previous, fields: nextFields });
+            if (pendingRhFieldsRef.current[id] === nextFields) delete pendingRhFieldsRef.current[id];
+            const pending = pendingRhFieldsRef.current[id];
+            setSelectedProfile((current) => current?.id === id ? { ...workflow, fields: pending ?? workflow.fields } : current);
+            setProfiles((current) => current.map((item) => (item.id === id ? { ...item, fields: pending ?? workflow.fields } : item)));
         } catch (err) {
             message.error(err instanceof Error ? err.message : "保存 RunningHub 映射失败");
-        } finally { markSaving(previous.id, false); }
+        } finally { markSaving(id, false); }
+    };
+
+    const handleProfileFieldsChange = (nextFields: RunningHubWorkflowProfile["fields"]) => {
+        if (!selectedProfile) return;
+        pendingRhFieldsRef.current[selectedProfile.id] = nextFields;
+        setSelectedProfile((current) => current?.id === selectedProfile.id ? { ...current, fields: nextFields } : current);
+        const existingRhTimer = rhFieldsSaveTimerRef.current[selectedProfile.id];
+        if (existingRhTimer) clearTimeout(existingRhTimer);
+        rhFieldsSaveTimerRef.current[selectedProfile.id] = setTimeout(() => { rhFieldsSaveTimerRef.current[selectedProfile.id] = null; void flushProfileFieldsSave(selectedProfile.id); }, 600);
     };
 
     /** 本地工作流库列表项：标题取配置标题，副标题是文件名，徽标是字段数。 */
@@ -678,7 +727,7 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                                     usedByModels={usedByModels}
                                 />}
                                 graph={
-                                    <fieldset className="h-full min-h-0" disabled={savingOwners.has(selectedProfile?.id || "")} aria-busy={savingOwners.has(selectedProfile?.id || "")}><RunningHubGraphPanel
+                                    <fieldset className="h-full min-h-0" aria-busy={savingOwners.has(selectedProfile?.id || "")}><RunningHubGraphPanel
                                         workflowId={selectedProfile.workflowId}
                                         workflow={selectedProfile.workflowJson}
                                         fields={selectedProfile.fields || []}
@@ -773,7 +822,7 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                                 </>
                             }
                             graph={
-                                <fieldset className="h-full min-h-0" disabled={savingOwners.has(selected?.name || "")} aria-busy={savingOwners.has(selected?.name || "")}><WorkflowGraphPanel
+                                <fieldset className="h-full min-h-0" aria-busy={savingOwners.has(selected?.name || "")}><WorkflowGraphPanel
                                     name={selected.name}
                                     workflow={selected.workflow}
                                     fields={selected.config.fields}

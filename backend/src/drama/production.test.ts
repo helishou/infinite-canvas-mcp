@@ -61,6 +61,73 @@ test("current v2 draft remains usable with an older published snapshot, while re
     assert.equal((service.get("episode").draft.director?.source as any)?.prompt_assembly?.version, 2);
 });
 
+test("initializes the first v2 Director draft from the saved demand and projects its full text into the script", (t) => {
+    const { db, service } = fixture(t);
+    const demand = "《首集》\n【场景】草庐·柴门前 / 廊下\n【时间】暴雨深夜\n【剧本正文】\n沈砚推开柴门。红绡倒在泥水中。";
+    db.upsertDramaEpisode({ id: "episode", dramaId: "drama", episodeNumber: 1, title: "雨夜恶祟", synopsis: demand, fullPlot: "fallback", canvasId: "canvas" });
+    const saved = service.edit("episode", { operationId: "init-from-demand", expectedRevision: 0, ops: [{ type: "initialize_director_from_demand" }] });
+    const director = saved.draft.director!;
+    const source = director.source as Record<string, any>;
+    assert.equal(saved.revision, 1);
+    assert.equal(source.version, 2);
+    assert.equal(source.prompt_assembly.version, 2);
+    assert.deepEqual(source.character_registry, []);
+    assert.equal(source.scene_registry[0].name, "草庐·柴门前 / 廊下");
+    assert.equal(source.script_scenes[0].time_of_day, "暴雨深夜");
+    assert.equal(saved.draft.scenes[0].timeOfDay, "暴雨深夜");
+    assert.equal(source.script_scenes[0].text, demand);
+    assert.equal(saved.draft.scenes[0].blocks[0].text, demand);
+    assert.deepEqual(source.shots, []);
+    assert.equal(director.sourceHash, directorHash(source));
+    assert.equal(service.edit("episode", { operationId: "init-from-demand", expectedRevision: 0, ops: [{ type: "initialize_director_from_demand" }] }).replayed, true);
+    assert.throws(() => service.edit("episode", { operationId: "init-again", expectedRevision: 1, ops: [{ type: "initialize_director_from_demand" }] }), /DIRECTOR_ALREADY_INITIALIZED/);
+});
+
+test("initializes explicit shot-marked demand as editable script blocks without inventing production Shots", (t) => {
+    const { db, service } = fixture(t);
+    const demand = "【时间】暴雨深夜\n人物与道具说明。\n\n【镜头1】雨水落在石板上。\n\n【镜头9A】闪回白貉倒下。";
+    db.upsertDramaEpisode({ id: "episode", dramaId: "drama", episodeNumber: 1, title: "雨夜恶祟", synopsis: demand, fullPlot: "fallback", canvasId: "canvas" });
+    const saved = service.edit("episode", { operationId: "init-marked-demand", expectedRevision: 0, ops: [{ type: "initialize_director_from_demand" }] });
+    const source = saved.draft.director!.source as Record<string, any>;
+    assert.equal(source.script_scenes.length, 3, "preamble and two explicit shot sections are independently editable script blocks");
+    assert.equal(source.script_scenes.map((block: any) => block.text).join(""), demand, "block concatenation preserves the saved demand byte-for-byte");
+    assert.deepEqual(saved.draft.scenes[0].blocks.map(block => block.text), source.script_scenes.map((block: any) => block.text));
+    const projected = (db.getCanvasProject("canvas")!.nodes as any[]).filter(node => node.metadata?.productionScriptId);
+    assert.equal(projected.length, 3);
+    assert.equal(projected.map(node => node.metadata.content).join(""), demand, "canvas script nodes preserve the original slices in order");
+    assert.equal(source.shots.length, 0, "shot labels are not silently promoted to timed production Shots");
+    const readiness = service.workflowReadiness("episode") as any;
+    assert.equal(readiness.stage.explicitShotCues, 2);
+    assert.equal(readiness.stage.structuredShots, 0);
+    assert.equal(readiness.stage.compileGate, "blocked");
+    assert.match(readiness.nextAction, /2 个镜头标记/);
+});
+
+test("fills an empty v2 Director shell from the saved demand without replacing its existing brief", (t) => {
+    const { db, service } = fixture(t);
+    const demand = "【场景】沈砚草庐·柴门前 / 廊下\n【时间】暴雨深夜\n完整的当前需求正文。";
+    db.upsertDramaEpisode({ id: "episode", dramaId: "drama", episodeNumber: 1, title: "雨夜恶祟", synopsis: demand, fullPlot: "fallback", canvasId: "canvas" });
+    const shell = service.edit("episode", { operationId: "save-empty-shell", expectedRevision: 0, ops: [{ type: "set_director_brief", brief: "1111" }] });
+    const saved = service.edit("episode", { operationId: "seed-empty-shell", expectedRevision: shell.revision, ops: [{ type: "initialize_director_from_demand" }] });
+    const director = saved.draft.director!;
+    const source = director.source as Record<string, any>;
+    assert.equal(saved.revision, 2);
+    assert.equal(source.brief, "1111");
+    assert.equal(source.script_scenes[0].text, demand);
+    assert.equal(saved.draft.scenes[0].blocks[0].text, demand);
+    assert.equal(director.sourceHash, directorHash(source));
+});
+
+test("does not seed an empty-looking Director shell while scene work is active", (t) => {
+    const { db, service } = fixture(t);
+    db.upsertDramaEpisode({ id: "episode", dramaId: "drama", episodeNumber: 1, title: "雨夜恶祟", synopsis: "需求正文。", fullPlot: "", canvasId: "canvas" });
+    const shell = service.edit("episode", { operationId: "save-shell-with-work", expectedRevision: 0, ops: [{ type: "set_director_brief", brief: "现有 brief" }] });
+    const seededDirector = service.get("episode").draft.director!;
+    const active = service.edit("episode", { operationId: "start-scene-work", expectedRevision: shell.revision, ops: [{ type: "set_director_workflow", patch: { sceneWorks: { workA: { workId: "workA", sceneId: "scene", inputRevision: shell.revision, sourceHash: seededDirector.sourceHash, inputHash: "a".repeat(64), status: "running", stage: "create", policy: { mode: "manual", shared: "manual", scene: "manual" }, updatedAt: new Date().toISOString() } } } }] }, undefined, true);
+    assert.throws(() => service.edit("episode", { operationId: "seed-during-work", expectedRevision: active.revision, ops: [{ type: "initialize_director_from_demand" }] }), /DIRECTOR_ALREADY_INITIALIZED/);
+    assert.equal((service.get("episode").draft.director!.source.script_scenes as any[]).length, 0);
+});
+
 test("the current Director source version edits its v2 continuity component without requiring a second format marker", (t) => {
     const { service } = fixture(t);
     const director = {
@@ -82,8 +149,8 @@ test("edit, publication, replay, conflict, impact and version restore retain ide
     const first = service.edit("episode", input);
     assert.equal(first.revision, 1);
     assert.equal(service.edit("episode", input).replayed, true);
-    assert.throws(() => service.edit("episode", { operationId: "stale", expectedRevision: 0, ops: [{ type: "upsert_scene", scene }] }), ProductionConflictError);
-    assert.equal(service.get("episode").revision, 1);
+    const stale = service.edit("episode", { operationId: "stale", expectedRevision: 0, ops: [{ type: "upsert_scene", scene }] }); // 乐观锁放行：过期 revision 写入仍落地
+    assert.equal(stale.revision, 2);
     const script = service.publish("episode", { operationId: "publish-script", expectedRevision: 1, stage: "script" });
     assert.equal(script.publishedVersion, 1);
     assert.equal(service.publish("episode", { operationId: "publish-script", expectedRevision: 1, stage: "script" }).replayed, true);

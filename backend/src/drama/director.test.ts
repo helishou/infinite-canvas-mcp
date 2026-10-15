@@ -377,7 +377,8 @@ test("scene script-block patches replace the structured blocks with full-array s
 test("source revisions retire stale receipts, preserve drafts and prohibit projection-only edits", t => {
     const { service } = fixture(t); const d = doc(); publish(service, d);
     const rev = service.get("ep").revision;
-    assert.throws(() => service.edit("ep", { operationId: "bad", expectedRevision: rev - 1, ops: [{ type: "set_director_production", director: d }] }), ProductionConflictError);
+    const acceptedStale = service.edit("ep", { operationId: "bad", expectedRevision: rev - 1, ops: [{ type: "set_director_production", director: d }] }); // 乐观锁放行：过期 revision 不再拦截，写入落地并推进版本
+    assert.equal(acceptedStale.revision, rev + 1);
     const changed = structuredClone(d); changed.source.newFact = "changed"; changed.sourceHash = directorHash(changed.source);
     const saved = service.edit("ep", { operationId: "stale", expectedRevision: rev, ops: [{ type: "set_director_production", director: changed }] });
     assert.equal(saved.draft.director!.source.newFact, "changed");

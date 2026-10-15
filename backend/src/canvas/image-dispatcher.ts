@@ -133,6 +133,16 @@ export class CanvasImageDispatcher {
         logId: undefined,
         executor: active.executor || plan.executor,
       };
+    if (plan.executor === "comfy-workflow" && plan.workflow) {
+      const imageSlotCount = this.workflows.getConfig?.(plan.workflow)?.fields
+        .filter((field) => field.type === "image").length;
+      const requestedImageCount = executionImageInputs(plan.input).length;
+      if (imageSlotCount && requestedImageCount > imageSlotCount) {
+        throw new Error(
+          `工作流「${plan.workflow}」只有 ${imageSlotCount} 个图片输入槽，本轮需要 ${requestedImageCount} 张（${plan.input.loopInputImages?.length || 0} 张循环图 + ${plan.input.references?.length || 0} 张固定参考图）；请减少参考输入后再提交`,
+        );
+      }
+    }
     const prepared = prepareCanvasGenerationTarget(this.stores, { ...plan.input, mode: "image" }, taskId);
     plan = { ...plan, input: prepared.command as CanvasImageGenerationInput };
     const normalized = plan.input;
@@ -774,25 +784,24 @@ export class CanvasImageDispatcher {
         if (value && fieldValues[field.id] === undefined) fieldValues[field.id] = value;
       }
       if (field.input === "aspect_ratio" && field.type === "dropdown" && expectedRatio !== null) {
+        // 目标优先：已保存画幅与目标不一致时自动改写为匹配目标比例的选项，不再拦截任务；
+        // 选项表里没有能匹配目标的比例时保留已保存值，交给工作流自身运行。
         const explicit = fieldValues[field.id];
         if (explicit !== undefined) {
           const selected = imageRatioFromText(String(explicit));
-          if (selected === null || Math.abs(selected - expectedRatio) >= 0.01) throw new Error(`工作流画幅与目标冲突：已保存「${explicit}」，目标「${input.size || `${input.width}x${input.height}`}」；请先修改工作流参数`);
-          if (!field.options?.includes(String(explicit))) {
+          if (selected === null || Math.abs(selected - expectedRatio) >= 0.01 || !field.options?.includes(String(explicit))) {
             const mapped = field.options?.find((option) => {
               const ratio = imageRatioFromText(option);
               return ratio !== null && Math.abs(ratio - expectedRatio) < 0.01;
             });
-            if (!mapped) throw new Error(`工作流画幅字段「${field.name || field.input}」没有合法的目标选项；不能回退到默认比例`);
-            fieldValues[field.id] = mapped;
+            if (mapped) fieldValues[field.id] = mapped;
           }
         } else {
           const option = field.options?.find((value) => {
             const match = /^(\d+)\s*:\s*(\d+)/.exec(value);
             return match && Math.abs(Number(match[1]) / Number(match[2]) - expectedRatio) < 0.01;
           });
-          if (!option) throw new Error(`工作流画幅选项不支持目标「${input.size || `${input.width}x${input.height}`}」；请配置对应 aspect_ratio 选项`);
-          fieldValues[field.id] = option;
+          if (option) fieldValues[field.id] = option;
         }
       }
     }

@@ -212,6 +212,11 @@ export function continuityBlocksForShot(source: ContinuityRow, blocks: Continuit
     return blocks.filter(block => ids.has(block.occurrenceId));
 }
 
+/** Auto-select evidence only when the Shot maps unambiguously to one script block. */
+export function continuityDefaultEvidenceBlockId(blocks: ContinuityRow[]) {
+    return blocks.length === 1 ? String(blocks[0].id || "") : "";
+}
+
 /** Reuse the formal contract's technical event-position checks; quality warnings do not gate saves. */
 export function continuityEventPositionIssues(source: ContinuityRow, ledger: ContinuityRow) {
     if (source.prompt_assembly?.version !== 2) {

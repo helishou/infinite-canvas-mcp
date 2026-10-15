@@ -1,12 +1,13 @@
 /** Live library references are distinct from immutable production approved versions. */
 export type SharedAssetSource = { dramaId: string; assetId: string; sourceProjectId: string; sourceNodeId: string };
 export type SharedAssetEdit = { base?: unknown; value?: unknown; deleted?: boolean };
-export type SharedAssetReference = SharedAssetSource & { edits?: Record<string, SharedAssetEdit> };
+export type SharedAssetReference = SharedAssetSource & { edits?: Record<string, SharedAssetEdit>; /** Production-selected refs write supported edits through to their canonical shared node. */ writeThrough?: boolean };
 export type AssetNode = { id: string; type: string; title?: string; metadata?: Record<string, any>; [key: string]: any };
 
 const COMMON = ["content", "storageKey", "naturalWidth", "naturalHeight", "bytes", "mimeType", "durationMs"];
 const FIELDS: Record<string, string[]> = {
     text: ["content"], image: COMMON, video: COMMON, audio: COMMON,
+    prop: [...COMMON, "propName", "propDescription", "itemName", "itemDescription"],
     character: [...COMMON, "characterName", "characterEnglishName", "characterDescription", "characterImages", "characterPrimaryIndex", "characterVoiceUrl", "characterVoiceName", "characterVoiceDescription", "characterVoiceStorageKey", "characterVoiceAssetId"],
     scene: [...COMMON, "sceneName", "sceneDescription", "sceneImage", "sceneColorCard", "sceneColorPalette", "sceneColorCardPrompt"],
 };
@@ -24,6 +25,7 @@ export function resolveSharedAssetNode(node: AssetNode, source: AssetNode): Asse
     delete result.metadata.sharedAssetMissing;
     if (node.type === "character") result.metadata.characterAssetId = ref.assetId;
     if (node.type === "scene") result.metadata.sceneAssetId = ref.assetId;
+    if (node.type === "prop") result.metadata.productionAssetId = ref.assetId;
     for (const field of sharedAssetFields(node.type)) {
         const edit = ref?.edits?.[field];
         setAssetField(result, field, edit ? edit.deleted ? undefined : edit.value : assetField(source, field));

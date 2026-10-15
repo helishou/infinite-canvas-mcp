@@ -12,7 +12,7 @@ Acheng Director 本身就是 Skill，完整上游文件和模块位于项目 `.a
 
 新制作采用 `prompt_assembly.version=2`：Shot 是摄影原子，摄影切点、时长和观看对象由结构化镜头明确设计；编译器组装 Prompt，不在单个 Shot 内暗中插入切镜。Subject、智能节点引用、台账与 Clip 分区沿当前激活导演合同。未启用新合同的旧稿保持原编译策略，不自动迁移。
 
-story、assets、shots、performance、effects、model、continuity 按 Acheng 原合同协作。空间设计在 assets 的 scene-design 支路，shots 消费空间事实；站位图是按需资产。多资产新制作采用 STYLE_MOTHER，新四视图默认采用等高的正脸近景、正面全身、侧面全身、背面全身和空手；色卡为辅助信息，不另建强制前置阶段。旧批准资产可保留并登记适用范围，缺项只补本轮所需。
+story、assets、shots、performance、effects、model、continuity 按 Acheng 原合同协作。空间设计在 assets 的 scene-design 支路，shots 消费空间事实；站位图是按需资产。角色形象按两阶段制作：先生成并归档单张中立身份图，选定一个真实输出后，再以该图作为正式参考生成固定2×2四视图；身份图与四视图分别保留用途和历史。多资产新制作可采用 STYLE_MOTHER；色卡为辅助信息，不另建强制前置阶段。旧批准资产可保留并登记适用范围，缺项只补本轮所需。
 
 用户明确指定其他角色布局时，在完整 `asset_cards[].view_layout` 中保存 `selection: user_explicit` 和具体 `selection_reason`，由支持该选择的当前激活运行包校验。当前可显式选择1:2行高的正脸近景、右侧脸近景、无头正面服装全身、完整背面四格，或等高的生物头正面、头侧面、盘绕全身、身体中段鳞片细节四格。类型、视图、顺序、行高、同一主体与用途必须完整；缺少明确选择不按历史布局放行。不能伪造批准状态或用历史 fixture 绕过新制作校验。
 

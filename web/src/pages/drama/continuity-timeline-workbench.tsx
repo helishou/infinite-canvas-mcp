@@ -1,7 +1,8 @@
-import { continuityChangeInputHint, continuityDraftFocusTarget, continuityTrackPoint, continuityTrackInsertFrame, continuityInlineReturnFocus, continuityRowInsertTarget, continuityValueWith } from "./continuity-workbench-interaction";
+import { continuityChangeInputHint, continuityDraftFocusTarget, continuityTrackPoint, continuityTrackInsertFrame, continuityInlineReturnFocus, continuityRowInsertTarget } from "./continuity-workbench-interaction";
 import { ContinuityEventFields } from "./continuity-event-fields";
 import { continuityChangeFormInput, type ContinuityChangeInput } from "./continuity-event-draft";
 import { continuityEventAnchor, continuityEventPositionPatch } from "./continuity-event-anchor";
+import { continuityFactStateValue } from "./continuity-ledger-mutations";
 import { Fragment, useEffect, useId, useMemo, useRef, useState, type Dispatch, type SetStateAction, type CSSProperties } from "react";
 import { Button, Popover, Select } from "antd";
 import type { TooltipRef } from "antd/es/tooltip";
@@ -11,7 +12,7 @@ import { productionSceneEntries } from "@basketikun/canvas-agent/drama/productio
 import { continuityPresentation } from "./continuity-presentation";
 import { subjectDisplayName } from "./subject-shot-draft";
 import { records } from "./director-display";
-import { continuityBlocksForShot, continuityEntityKey, continuityLocalFrame, continuityMarkerLanes, continuityTimelineShots, continuityUsage, orderedContinuityShots, replayContinuityFact, visibleContinuityTrack, type ContinuityRow as Row, type ContinuityMarker, type ContinuityTrack } from "./continuity-timeline-model";
+import { continuityBlocksForShot, continuityDefaultEvidenceBlockId, continuityEntityKey, continuityLocalFrame, continuityMarkerLanes, continuityTimelineShots, continuityUsage, orderedContinuityShots, replayContinuityFact, visibleContinuityTrack, type ContinuityRow as Row, type ContinuityMarker, type ContinuityTrack } from "./continuity-timeline-model";
 import "./continuity-timeline.css";
 
 type Selection = { shotId: string; factId: string; eventId?: string; frame?: number };
@@ -168,7 +169,8 @@ export function ContinuityTimelineWorkbench({ recordContext, onRecordContext, ch
         select(factId, shotId, undefined, frame);
         setInlinePoint({ factId, shotId, frame });
         if (trigger) triggerElement.current = trigger;
-        onChangeDraft({ factId, shotId, frame: String(frame), after: "", reason: "", sourceBlockId: "" });
+        const evidenceBlocks = continuityBlocksForShot(source, sourceBlocks, fullShots.find(shot => shot.id === shotId));
+        onChangeDraft({ factId, shotId, frame: String(frame), after: "", reason: "", sourceBlockId: continuityDefaultEvidenceBlockId(evidenceBlocks) });
     };
     /** The inspector owns a spacious form, so it opens the draft without the on-canvas popover. */
     const beginInspectorChange = (factId: string, shotId: string) => {
@@ -179,7 +181,8 @@ export function ContinuityTimelineWorkbench({ recordContext, onRecordContext, ch
         if (frame === undefined) return;
         select(factId, shotId, undefined, frame);
         setInlinePoint(undefined);
-        onChangeDraft(continuityChangeFormInput(ledger, view.shot, factId, frame));
+        const evidenceBlocks = continuityBlocksForShot(source, sourceBlocks, view.shot);
+        onChangeDraft({ ...continuityChangeFormInput(ledger, view.shot, factId, frame), sourceBlockId: continuityDefaultEvidenceBlockId(evidenceBlocks) });
     };
     /** Row-level add: the first visible Shot of this fact that still has a free change frame. */
     const rowInsertTarget = (factId: string) => continuityRowInsertTarget(visibleShots.flatMap(shot => {
@@ -193,14 +196,13 @@ export function ContinuityTimelineWorkbench({ recordContext, onRecordContext, ch
         const subject = owner.get(factId);
         if (subject) setExpanded(previous => new Set(previous).add(String(subject.id)));
     };
-    /** A new after-state also joins the fact enum, so the ledger validator keeps accepting this event. */
+    /** A new after-state joins the fact enum with a description, or the save contract rejects the ledger. */
     const addFactStateValue = (value: string) => {
         if (disabled || !selected) return;
         const fact = facts.find(row => row.id === String(selected.fact.id));
         if (!fact) return;
-        const allowed = continuityValueWith(fact.allowed_values, value);
-        if (allowed.length === (Array.isArray(fact.allowed_values) ? fact.allowed_values.length : 0)) return;
-        actions.update(current => ({ ...current, facts: records(current.facts).map(row => row.id === fact.id ? { ...row, allowed_values: allowed } : row) }));
+        const state = continuityFactStateValue(fact, value);
+        actions.update(current => ({ ...current, facts: records(current.facts).map(row => row.id === fact.id ? { ...row, ...state } : row) }));
         if (changeDraft) onChangeDraft({ ...changeDraft, after: value.trim() });
         else if (event) updateEvent({ after: value.trim() });
     };

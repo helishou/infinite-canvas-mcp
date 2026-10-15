@@ -80,7 +80,7 @@ import type { InsertAssetPayload } from "@/components/canvas/asset-picker-modal"
 import { CanvasSidePanel } from "@/components/canvas/canvas-side-panel";
 import { CanvasZoomControls } from "@/components/canvas/canvas-zoom-controls";
 import { useAgentStore } from "@/stores/use-agent-store";
-import { smartImageBrowsePatch } from "@/components/canvas/smart-image-history";
+import { smartImagePrimaryPatch } from "@/components/canvas/smart-image-history";
 import { applyBackendCanvasEvent, ensureCanvasProjectLoaded, flushCanvasProjectBeforeGeneration, useCanvasStore, type CanvasCollaborator } from "@/stores/canvas/use-canvas-store";
 import { getPluginNodeView } from "@/stores/canvas/plugin-node-view";
 import { emitCanvasEvent } from "@/lib/canvas/canvas-event-bus";
@@ -323,6 +323,9 @@ export default function CanvasPage() {
 
     useEffect(() => {
         if (!id) { setEntry({ key: "" }); return; }
+        // 后端未连接时不探测归属、不跳转制作台：原地保留画布页，断联原因由顶部横幅说明；
+        // 用 getState 而非订阅，重连后也不自动补跳，用户停留原页面，手动刷新才走正常入口。
+        if (!useBackendStore.getState().connected) { setEntry({ key: JSON.stringify([id, location.search, location.hash, retry]) }); return; }
         let active = true;
         const key = JSON.stringify([id, location.search, location.hash, retry]);
         setEntry(null);
@@ -1082,8 +1085,12 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         const visible = queryCanvasSpatialIndex(graphIndex.nodeSpatialIndex, visibleWorldBounds);
         // The screen editor has one owner; keep that node mounted while panning outside the cull bounds.
         const editing = dialogNodeId ? nodeById.get(dialogNodeId) : undefined;
-        return editing && !getNodeDefinition(editing.type)?.Panel && !visible.some(node => node.id === editing.id) ? [...visible, editing] : visible;
-    }, [graphIndex.nodeSpatialIndex, visibleWorldBounds, dialogNodeId, nodeById]);
+        // 「选节点作参考」期间目标节点（如 H3 工作台）可能在视口外：视口被带到候选参考处后，
+        // 目标被裁剪卸载会让 canvas-reference-pick 回抛事件失去接收方，点击候选就静默失败。
+        const pickTarget = refPickActive && refPickTargetNodeId ? nodeById.get(refPickTargetNodeId) : undefined;
+        const keep = editing || pickTarget;
+        return keep && !getNodeDefinition(keep.type)?.Panel && !visible.some(node => node.id === keep.id) ? [...visible, keep] : visible;
+    }, [graphIndex.nodeSpatialIndex, visibleWorldBounds, dialogNodeId, nodeById, refPickActive, refPickTargetNodeId]);
     // 节点过密时只降级详情控件；概览仍保留真实缩略图或信息卡，不能退化成透明空壳。
     const denseOverviewMode = visibleNodes.length >= DENSE_OVERVIEW_MIN_VISIBLE_NODES && viewport.k < DENSE_OVERVIEW_MIN_SCALE;
 
@@ -1685,16 +1692,36 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     }, [exitNodeReferenceSelection, pendingVideoComparison, pluginReferencePickNodeId]);
 
     // 插件节点点空 ref 槽 → 复用画布既有的「从画布选节点作参考」交互，而不是各插件自建一套选节点面板。
+    // focusNode 声明在本 effect 之后，经 ref 转发，保持监听器只注册一次。
+    const focusNodeRef = useRef<(nodeId: string, options?: { automatic: boolean }) => void>(() => {});
     useEffect(() => {
         const onRequest = (event: Event) => {
             const nodeId = String((event as CustomEvent<{ nodeId?: string }>).detail?.nodeId || "");
-            if (!nodeId || !nodesRef.current.some((node) => node.id === nodeId)) return;
+            const rect = containerRef.current?.getBoundingClientRect();
+            if (!nodeId || !rect || !nodesRef.current.some((node) => node.id === nodeId)) return;
+            // 可点候选必须让用户看得见：H3 工作台动辄占满视口，参考节点常在屏幕外，
+            // 只靠顶部提示条时用户会以为点击没生效。视口内没有候选就把最近的一个带到视口内；
+            // 整张画布都没有候选时明确告知，不再静默停在选节点模式。
+            const candidates = nodesRef.current.filter((node) => node.id !== nodeId && isCanvasReferenceNode(node, nodesRef.current));
+            if (!candidates.length) {
+                message.warning("画布上没有可用作参考的节点（图片 / 视频 / 音频 / 角色）");
+                return;
+            }
+            const view = liveViewportRef.current;
+            const centerX = (rect.width / 2 - view.x) / view.k;
+            const centerY = (rect.height / 2 - view.y) / view.k;
+            let nearest: { node: (typeof nodesRef.current)[number]; distance: number } | null = null;
+            for (const node of candidates) {
+                const distance = Math.hypot(node.position.x + node.width / 2 - centerX, node.position.y + node.height / 2 - centerY);
+                if (!nearest || distance < nearest.distance) nearest = { node, distance };
+            }
             setPluginReferencePickNodeId(nodeId);
             setReferencePickerNodeId(null);
             setSelectedNodeIds(new Set([nodeId]));
             setSelectedConnectionId(null);
             setDialogNodeId(null);
             setContextMenu(null);
+            if (nearest) focusNodeRef.current(nearest.node.id, { automatic: true });
         };
         window.addEventListener("canvas-reference-pick-request", onRequest);
         return () => window.removeEventListener("canvas-reference-pick-request", onRequest);
@@ -1997,6 +2024,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         target.y += topInset;
         animateFocus(target);
     }, [animateFocus, selectCanvasNodes, size.height, size.width, projectId, t]);
+    focusNodeRef.current = focusNode;
     const focusSelection = useCallback(() => {
         const target = viewportForCanvasNodes(nodesRef.current.filter((node) => selectedNodeIdsRef.current.has(node.id)), size);
         if (target) animateFocus(target);
@@ -3205,7 +3233,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                         bytes: image.bytes,
                         mimeType: image.mimeType,
                         primaryImageId: image.id,
-                        ...(node.type === CanvasNodeType.Config && node.metadata?.smart ? smartImageBrowsePatch(image) : {}),
+                        ...(node.type === CanvasNodeType.Config && node.metadata?.smart ? smartImagePrimaryPatch(image) : {}),
                     },
                 };
             }),

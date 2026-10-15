@@ -44,7 +44,8 @@ test("missing editors and changed compiled identities fail visibly without a sou
 });
 test("production storyboard writeback routes only a verified formal Clip and waits for the source editor", async () => {
     const order: string[] = [];
-    const request = { nodeId: "H3", segmentId: "canvas-clip", segment: { id: "canvas-clip", productionClipProjection: { targetId: "SOURCE_C4" }, storyboardShots: [{ id: "s1", duration: 1 }] } };
+    // replaceStoryboardTrack 会用从 Backend 校验过的完整 projection 覆盖调用方携带的摘要。
+    const request = { nodeId: "H3", segmentId: "canvas-clip", segment: { id: "canvas-clip", productionClipProjection: node().metadata!.segments[0].productionClipProjection }, storyboardShots: [{ id: "s1", duration: 1 }] };
     const remove = registerProductionStoryboardEditor("canvas", async input => { order.push("edit"); assert.deepEqual(input, request); return { sourceSaved: true }; });
     try {
         const service = createProductionEditing("canvas", () => node(), async () => { order.push("flush"); });
@@ -80,6 +81,34 @@ test("H3 storyboard writeback preserves Prompt v2 duration_frames without invent
     if (operation.type !== "replace_director_clip_storyboard") throw new Error("wrong operation");
     assert.deepEqual(operation.shots.map(shot => [shot.id, shot.duration_frames, shot.story_order, shot.start_frame, shot.end_frame]), [["v2b", 12, 0, undefined, undefined], ["v2c", 36, 1, undefined, undefined]]);
     assert.deepEqual(operation.segment.shot_ids, ["v2b", "v2c"]);
+});
+
+test("H3 storyboard writeback rescales Subject appearance ranges when a rebuilt Shot changes duration", () => {
+    // 画布拆分镜头后 SH-01-03 由 96 帧缩到 48 帧；克隆来的出现范围 (0,96) 必须缩放，否则
+    // 「Subject 出现范围必须位于 Shot 时长内且起止递增」校验会让整个 Clip 的分镜/参考回写 400。
+    const director = formalV2Director();
+    (director.source as Record<string, any>).asset_plan = [{ asset_id: "FRAME", kind: "keyframe" }];
+    (director as Record<string, any>).assets = { FRAME: { nodeId: "FRAME_NODE", storageKey: "k.png", version: "v1", status: "generated" } };
+    (director.source as Record<string, any>).shots = [
+        { id: "v2a", timeline_id: "TL", story_order: 0, duration_frames: 96, subject_usages: [{ subjectId: "SUB:1", localStartFrame: 0, localEndFrame: 96 }], keyframes: [{ id: "KF:v2a:1", localFrame: 48 }, { id: "KF:v2a:2", localFrame: 96 }], utterance_refs: [] },
+        { id: "v2b", timeline_id: "TL", story_order: 1, duration_frames: 24, subject_usages: [{ subjectId: "SUB:1", localStartFrame: 12, localEndFrame: 20 }], keyframes: [], utterance_refs: [] },
+    ];
+    const operation = buildDirectorClipStoryboardOperation(director, "SOURCE_V2", {
+        nodeId: "H3", segmentId: "canvas-clip", segment: {
+            id: "canvas-clip", productionClipProjection: { targetId: "SOURCE_V2" },
+            storyboardShots: [{ id: "v2a", duration: 3, referenceBindingId: "kb" }, { id: "v2b", duration: 2 }],
+            referenceBindings: [{ id: "kb", mediaType: "image", role: "storyboard", storageKey: "k.png", sourceNodeId: "FRAME_NODE" }],
+        },
+    });
+    if (operation.type !== "replace_director_clip_storyboard") throw new Error("wrong operation");
+    const [shotA, shotB] = operation.shots;
+    assert.equal(shotA.duration_frames, 72);
+    assert.deepEqual(shotA.subject_usages[0].localStartFrame, 0);
+    assert.deepEqual(shotA.subject_usages[0].localEndFrame, 72);
+    // 关键帧同步缩放且必须小于新时长（48→36，96→71 贴边收敛）
+    assert.deepEqual(shotA.keyframes.map((keyframe: any) => keyframe.localFrame), [36, 71]);
+    // v2b 时长 24→48 帧同样翻倍：出现范围按比例缩放 (12,20)→(24,40)
+    assert.deepEqual(shotB.subject_usages[0], { subjectId: "SUB:1", localStartFrame: 24, localEndFrame: 40 });
 });
 
 test("a production Clip cannot lose its final formal Shot or silently claim an unadopted H3 image", () => {

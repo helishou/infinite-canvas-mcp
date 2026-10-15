@@ -211,8 +211,12 @@ export function startServer(
   });
   app.get("/config", (req, res) => {
     const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
-    const localDiscoveryAllowed =
-      config.listenHost !== "0.0.0.0" && isLocalConnection(req);
+    // 本机来源始终可读 /config：判断依据是「客户端确实是本机」（isLocalConnection 已要求
+    // 真实回环 socket 对端 + 回环 Host + 非外部 Origin），与后端绑定在 127.0.0.1 还是
+    // 0.0.0.0 无关。原先把披露绑到 listenHost!=="0.0.0.0"，一旦开启局域网绑定就会让本机
+    // 浏览器也丢掉回环自动披露——轮换密钥后旧客户端既过不了业务接口、又打不开 /config
+    // 取新值，永久静默卡在 invalid token，无人自愈。远端调用方不受影响（其真实对端非回环）。
+    const localDiscoveryAllowed = isLocalConnection(req);
     if (
       !localDiscoveryAllowed &&
       !isLanAuthBypassed(req.socket.remoteAddress, config.listenHost) &&
@@ -1719,9 +1723,7 @@ export function startServer(
       ? (req.query.status as GenerationLogStatus)
       : undefined;
     const limit = Number(req.query.limit || 500);
-    res.json({
-      ok: true,
-      logs: stores.logs.list({
+    const logs = stores.logs.list({
         projectId,
         nodeId,
         status,
@@ -1743,8 +1745,13 @@ export function startServer(
           typeof req.query.model === "string" ? req.query.model : undefined,
         from: typeof req.query.from === "string" ? req.query.from : undefined,
         to: typeof req.query.to === "string" ? req.query.to : undefined,
-      }),
-    });
+      });
+    // summary=true：纯展示场景裁掉 params/references/inputCounts 三大列（占响应体约八成，首页网格不读）；
+    // prompt/outputs 保留（缩略图与预览需要）。详情弹窗、导出等按 projectId 取列表的路径仍走全量。
+    const responseLogs = req.query.summary === "true"
+      ? logs.map((log) => ({ ...log, references: [], inputCounts: {}, params: {} }))
+      : logs;
+    res.json({ ok: true, logs: responseLogs });
   });
   app.post("/generation-logs", (req, res) => {
     const body = req.body as GenerationLogInput;
@@ -1811,6 +1818,9 @@ export function startServer(
             .filter(Boolean)
         : [];
     const taskId = typeof req.query.taskId === "string" ? req.query.taskId : "";
+    // summary=true：纯展示场景（首页、全局任务按钮）只要标量 + 输出媒体引用，不吐多 MB 的提示词大列。
+    // 过滤条件与全量列表共用同一构造器，两条路径行为一致。
+    const useSummary = req.query.summary === "true";
     const taskIds = list(req.query.taskIds);
     const tasks = taskId
       ? stores.tasks.get(taskId)
@@ -1821,7 +1831,22 @@ export function startServer(
             const task = stores.tasks.get(id);
             return task ? [task] : [];
           })
-        : stores.tasks.list({
+        : useSummary
+          ? stores.tasks.listSummaries({
+              status: status as RuntimeTaskStatus | undefined,
+              kind,
+              model,
+              scope,
+              projectId:
+                typeof req.query.projectId === "string"
+                  ? req.query.projectId
+                  : undefined,
+              nodeIds: list(req.query.nodeIds),
+              segmentIds: list(req.query.segmentIds),
+              limit: Number(req.query.limit || 500),
+              offset: Number(req.query.offset || 0),
+            })
+          : stores.tasks.list({
           status: status as RuntimeTaskStatus | undefined,
           kind,
           model,

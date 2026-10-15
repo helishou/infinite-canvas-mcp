@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { continuityChangeInputHint, continuityDraftFocusTarget, continuityTrackPoint, continuityTrackInsertFrame, continuityInlineReturnFocus, continuityRowInsertTarget, continuityValueWith, continuitySecondLabel } from './continuity-workbench-interaction';
+import { continuityChangeInputHint, continuityDraftFocusTarget, continuityTrackPoint, continuityTrackInsertFrame, continuityInlineReturnFocus, continuityRowInsertTarget, continuitySecondLabel } from './continuity-workbench-interaction';
 const complete = { shotId: 'S', factId: 'F', frame: '12', after: 'known', reason: '明确登记发生变化', sourceBlockId: 'B' };
 test('draft focus follows entry, confirmation and cancellation without moving on edits', () => {
     assert.equal(continuityDraftFocusTarget(false, true, false), '[data-continuity-frame-slider]');
@@ -54,15 +54,6 @@ test('explicit add stays in visible windows and refuses fully occupied visible f
     assert.equal(continuityTrackInsertFrame(view), 73);
     view.markers.push({ ...view.markers[0], frame: 73 });
     assert.equal(continuityTrackInsertFrame(view), undefined);
-});
-
-test('a new state value joins the fact enum once and never reintroduces the unknown sentinel', () => {
-    assert.deepEqual(continuityValueWith(['a', 'b'], ' c '), ['a', 'b', 'c']);
-    assert.deepEqual(continuityValueWith(['a'], 'a'), ['a']);
-    assert.deepEqual(continuityValueWith(['a'], 'unknown'), ['a']);
-    assert.deepEqual(continuityValueWith(undefined, ' x '), ['x']);
-    assert.deepEqual(continuityValueWith(['a'], '   '), ['a']);
-    assert.deepEqual(continuityValueWith('not-an-array', 'x'), ['x']);
 });
 
 test('a shot-local position reads as seconds with a safe frame-rate fallback', () => {

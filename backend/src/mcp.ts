@@ -399,6 +399,7 @@ const BACKEND_CANVAS_TOOLS = [
   "canvas_image_input_manifest",
   "canvas_run_generation",
   "canvas_task_status",
+  "canvas_task_cancel",
   "canvas_wait_tasks",
   "canvas_h3_confirmation",
   "generation_get_status",
@@ -592,6 +593,20 @@ async function executeDirectCanvasTool(
     if (name === "generation_get_status") return result;
     if (taskId && !result.tasks.length) throw new Error(`生成任务不存在：${taskId}`);
     return summarizeCanvasTasks(result.tasks, query);
+  }
+  if (name === "canvas_task_cancel") {
+    const taskId = String(input.taskId || "");
+    if (!taskId) throw Object.assign(new Error("缺少 taskId"), { code: "INVALID_INPUT" });
+    const task = await backendApi.cancelTask(taskId);
+    return {
+      ok: true,
+      taskId: task.id,
+      kind: task.kind,
+      status: task.status,
+      projectId: task.projectId,
+      nodeId: task.nodeId,
+      segmentId: task.segmentId,
+    };
   }
   if (name === "mcp_observability_report")
     if (input.traceId && (input.from || input.to || input.tool || input.view)) throw Object.assign(new Error("traceId 不能与聚合筛选同时使用"), { code: "INVALID_INPUT" });
@@ -1878,6 +1893,21 @@ function registerBackendCanvasTools(
       });
     },
   );
+  server.registerTool("production_initialize_from_current_demand", {
+    description: "从已保存的分集 synopsis/fullPlot 原样初始化 Subject Prompt Assembly v2 正式剧本。明确的【镜头...】标记会拆成可编辑剧本段落，但不会被冒充为已定时的正式 Shot；readiness 会显示镜头、资产卡与 Clip 的后续缺口。仅允许无稿或无正文/镜头/Clip/资产/产物/活动工作游标的空壳；已有实际制作内容时拒绝覆盖。",
+    inputSchema: z.object({ episodeId: z.string().trim().min(1).describe("分集 ID"), operationId: z.string().trim().min(1).describe("稳定操作 ID；重试同一请求时复用") }).strict(),
+  }, async (rawInput: Record<string, unknown>) => {
+    const input = z.object({ episodeId: z.string().trim().min(1), operationId: z.string().trim().min(1) }).strict().parse(rawInput);
+    const base = `/drama/episodes/${encodeURIComponent(input.episodeId)}/production`;
+    const prior = await backendApi.get(`${base}/operations/${encodeURIComponent(input.operationId)}/receipt`) as Record<string, unknown>;
+    if (prior.found) return textResult(prior.production);
+    const current = await backendApi.get(base) as { production?: { revision?: number } };
+    const expectedRevision = Number(current.production?.revision || 0);
+    return textResult(await backendApi.post(`${base}/ops`, {
+      operationId: input.operationId, expectedRevision,
+      ops: [{ type: "initialize_director_from_demand" }],
+    }));
+  });
   for (const name of productionWorkspaceToolNames) {
     server.registerTool(name, { description: toolDescriptions[name], inputSchema: toolInputSchemas[name] }, async (raw: Record<string, unknown>) => {
       const request = productionWorkspaceRequest(name, raw)!;
@@ -3480,12 +3510,25 @@ function classifyToolError(
     );
   const missingSegment =
     backendError.code === "SEGMENT_NOT_FOUND" || /找不到片段|片段不存在|clip not found/i.test(message);
+  // 短剧/分集维度的资源不存在。此前这类文案（如 “分集不存在”）不匹配任何分支，
+  // 会一路落到 CANVAS_TOOL_FAILED，把“查了不存在的 ID”伪装成通用工具故障。
+  const missingEpisode =
+    backendError.code === "EPISODE_NOT_FOUND" || /分集不存在|episode not found/i.test(message);
+  // 分块/定向读取没选到合法产物（“分块读取必须选定一个产物”），是入参约束而非后端崩溃。
+  const artifactTargetMissing =
+    backendError.code === "ARTIFACT_NOT_FOUND" || /必须选定一个产物|no artifact was selected|must select an artifact/i.test(message);
   const missingModel =
     backendError.code === "MODEL_REQUIRED" ||
     (/模型/.test(message) && /未配置|没有配置|缺少/.test(message));
   const conflict =
     backendError.code === "REVISION_CONFLICT" || /revision|冲突|基线/.test(message);
-  const invalidInput = error instanceof z.ZodError || backendError.code === "INVALID_INPUT";
+  // Backend 以 HTTP 4xx 返回的 Zod 校验体（形如 [{"code":"invalid_type","expected":"string","received":"undefined"}]）
+  // 不是客户端 z.ZodError，但语义同样是入参缺失/非法，归入 INVALID_INPUT 而不是 CANVAS_TOOL_FAILED。
+  const embeddedValidationIssues =
+    !(error instanceof z.ZodError) &&
+    /"code"\s*:\s*"invalid_/.test(message) &&
+    /"(expected|received)"\s*:/.test(message);
+  const invalidInput = error instanceof z.ZodError || backendError.code === "INVALID_INPUT" || embeddedValidationIssues;
   const productionDiagnostics = Array.isArray(recordOf(error).diagnostics) ? recordOf(error).diagnostics as Array<Record<string, unknown>> : [];
   const productionNextActions = Array.isArray(recordOf(error).nextActions) ? recordOf(error).nextActions as Array<Record<string, unknown>> : [];
   const domainCode = productionDiagnostics.length || ["REFERENCE_INVALID", "MEDIA_IDENTITY_MISMATCH", "IDEMPOTENCY_CONFLICT"].includes(backendError.code || "") ? backendError.code : undefined;
@@ -3528,9 +3571,13 @@ function classifyToolError(
                       ? "BACKEND_NETWORK_ERROR"
                       : invalidResponse
                         ? "BACKEND_INVALID_RESPONSE"
-                        : backendError.status && backendError.status >= 500
-                          ? `BACKEND_HTTP_${backendError.status}`
-                          : "CANVAS_TOOL_FAILED";
+                        : missingEpisode
+                          ? "EPISODE_NOT_FOUND"
+                          : artifactTargetMissing
+                            ? "ARTIFACT_NOT_FOUND"
+                            : backendError.status && backendError.status >= 500
+                              ? `BACKEND_HTTP_${backendError.status}`
+                              : "CANVAS_TOOL_FAILED";
   const taskIds = inputTaskIds(input);
   const projectId = String(mcpInputProjectId(input, state) || "");
   const suggestedAction = productionNextActions.length ? productionNextActions[0] : commandCode === "OPERATION_ID_REUSED" || commandCode === "MCP_COMMAND_MISMATCH" || commandCode === "RECEIPT_UNAVAILABLE"
@@ -3565,15 +3612,19 @@ function classifyToolError(
           },
         }
       : missingSegment
-        ? { tool: "h3_get_node", input: { projectId: String(mcpInputProjectId(input, state) || ""), nodeId: String(input.nodeId || "") } }
-      : missingModel
+        ? { tool: "h3_get_node", input: { projectId: String(mcpInputProjectId(input, state)) || "", nodeId: String(input.nodeId || "") } }
+        : missingEpisode
+          ? { tool: "drama_list_episodes", input: {}, action: "先用分集列表核对有效的 episodeId，再用真实存在的 ID 读取制作稿。" }
+          : artifactTargetMissing
+            ? { tool: "production_get_artifact_index", input: { projectId: String(mcpInputProjectId(input, state)) || undefined }, action: "先用产物索引核对可定向的 targetId，再按合法产物 ID 分块/分页读取。" }
+            : missingModel
         ? { tool: "models_list", input: {} }
         : timeout && taskIds.length
           ? waitTasksAction(taskIds)
           : authFailure
             ? { action: "检查 Backend 地址、Token 和权限后再重试" }
             : { action: "检查 errorContext 后修正输入或连接；不要重复提交完全相同的失败请求" };
-  const recoverable = productionDiagnostics.length > 0 || selectionRequired || missingProject || missingTask || missingNode || missingSegment || missingModel || conflict || timeout || payloadOverflow || cancelled;
+  const recoverable = productionDiagnostics.length > 0 || selectionRequired || missingProject || missingTask || missingNode || missingSegment || missingEpisode || artifactTargetMissing || missingModel || conflict || timeout || payloadOverflow || cancelled;
   const issueSource = error && typeof error === "object" ? (error as Record<string, unknown>).issues || productionDiagnostics : undefined;
   const issues = Array.isArray(issueSource) ? issueSource.map((issue) => {
     const item = recordOf(issue);

@@ -786,7 +786,9 @@ export class CanvasH3Runner {
         const segment = segments.find((item) => String(item.id || "") === plan.segmentId)!;
         const defaults = input.runPlan?.defaults || recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
         const params = extractParams(segment, override, metadata, defaults);
-        const taskMode = normalizeTaskMode(params.mode || params.taskMode || segment.mode || segment.taskMode);
+        // A Clip's authored taskMode is its execution contract. Node-level mode
+        // is only a default and can differ when one H3 node contains mixed modes.
+        const taskMode = normalizeTaskMode(segment.taskMode || segment.mode || params.taskMode || params.mode);
         const { compilation } = compileH3Submission(project, segment, taskMode);
         const scenePrompt = segment.directorEngine ? compilation.compiledPrompt : appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
         const previous = plan.segmentIndex > 0 ? segments[plan.segmentIndex - 1] : undefined;

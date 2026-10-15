@@ -130,7 +130,7 @@ export function normalizeAssetInsertion(db: BackendDatabase, operation: CanvasOp
     operation.metadata = { ...effective.metadata, ...(type === "character" ? { characterAssetId: ref.assetId } : {}), ...(type === "scene" ? { sceneAssetId: ref.assetId } : {}) };
 }
 /** Capture ordinary update_node edits after applying the op, without storing a content replica. */
-export function captureAssetEdits(db: BackendDatabase, project: CanvasProject, operation: CanvasOperation, context?: CanvasCommandContext): CanvasOperation[] {
+export function captureAssetEdits(db: BackendDatabase, project: CanvasProject, operation: CanvasOperation, context?: CanvasCommandContext, previousNode?: AssetNode): CanvasOperation[] {
     const textTarget = operation.target as { nodeId?: string; field?: string; segmentId?: string; textItemId?: string } | undefined;
     const isText = ["text_update", "text_replace"].includes(operation.type) && textTarget?.field === "content" && !textTarget.segmentId && !textTarget.textItemId;
     if (context?.runtimeWrite && context.source?.kind !== "task" || operation.type !== "update_node" && !isText) return [];
@@ -142,6 +142,32 @@ export function captureAssetEdits(db: BackendDatabase, project: CanvasProject, o
     if (!source) throw new Error("共享资产源不存在，保留本地编辑后重试");
     const edits = { ...ref.edits };
     const touched = new Set([...(isText ? ["metadata.content"] : []), ...(Object.keys(operation.patch || {}).includes("title") ? ["title"] : []), ...Object.keys(operation.metadata || {}).map(k => `metadata.${k}`), ...(operation.metadataDelete as string[] || []).map(k => `metadata.${k}`)]);
+    if (ref.writeThrough) {
+        if (context?.source?.kind === "task") {
+            const taskId = String(node.metadata?.generationTaskId || node.metadata?.runtimeTaskId || "");
+            const task = taskId ? db.getTask(taskId) : null;
+            const storageKey = String(node.metadata?.storageKey || "");
+            const outputs = task ? [...task.outputs, ...(Array.isArray(task.result?.media) ? task.result.media as Array<Record<string, unknown>> : [])] : [];
+            if (!task || task.status !== "succeeded" || task.projectId !== project.id || task.nodeId !== node.id || node.metadata?.inputOutdated === true
+                || !storageKey || !outputs.some(output => String(output.storageKey || "") === storageKey)) return [];
+        }
+        const sourceProject = rawProject(db, ref.sourceProjectId);
+        const sourceNode = nodes(sourceProject).find(n => n.id === ref.sourceNodeId);
+        if (!sourceNode) throw new Error("共享资产源不存在，引用修改未提交");
+        const before = previousNode || node;
+        const changes = sharedAssetFields(node.type).filter(field => touched.has(field) && !sameAssetValue(assetField(before, field), assetField(node, field)));
+        const conflicts = changes.filter(field => !sameAssetValue(assetField(sourceNode, field), assetField(before, field)) && !sameAssetValue(assetField(sourceNode, field), assetField(node, field)));
+        if (conflicts.length) throw Object.assign(collaborationError("FIELD_CONFLICT", `共享资产相同字段已变化：${conflicts.join("、")}`), { conflictTargets: conflicts });
+        const patch = changedNodePatch(sourceNode, { ...sourceNode, title: changes.includes("title") ? node.title : sourceNode.title,
+            metadata: { ...sourceNode.metadata, ...Object.fromEntries(changes.filter(field => field !== "title").map(field => [field.slice(9), assetField(node, field)])) } });
+        if (patch) db.applyCanvasProjectOperations(ref.sourceProjectId, undefined, [patch], {
+            operationId: `${context?.operationId || "shared-reference"}:write-through:${node.id}:${changes.join(",")}`,
+            runtimeWrite: true, withinTransaction: true, deferredCommits: context?.deferredCommits,
+            originatingProjectId: project.id,
+            source: { kind: "system", clientId: "system:shared-library", label: "同步共享资产编辑" },
+        });
+        return [];
+    }
     for (const field of sharedAssetFields(node.type).filter(f => touched.has(f))) {
         const value = assetField(node, field), shared = assetField(source, field);
         if (sameAssetValue(value, shared)) delete edits[field];
@@ -162,7 +188,7 @@ function changedNodePatch(previous: AssetNode, node: AssetNode): CanvasOperation
         metadata: Object.fromEntries(changed.filter(f => f !== "title" && assetField(node, f) !== undefined).map(f => [f.slice(9), assetField(node, f)])),
         metadataDelete: changed.filter(f => f !== "title" && assetField(node, f) === undefined).map(f => f.slice(9)) };
 }
-export function propagateAssetChanges(db: BackendDatabase, projectId: string, before: CanvasProject, after: CanvasProject, deferredCommits: CanvasCommit[]) {
+export function propagateAssetChanges(db: BackendDatabase, projectId: string, before: CanvasProject, after: CanvasProject, deferredCommits: CanvasCommit[], originatingProjectId?: string) {
     for (const asset of db.listSharedAssetRecordsForProject(projectId)) {
         const source = sourceOf(asset);
         if (!source || source.sourceProjectId !== projectId) continue;
@@ -174,7 +200,7 @@ export function propagateAssetChanges(db: BackendDatabase, projectId: string, be
         db.db.prepare("UPDATE assets SET title=?, updated_at=? WHERE id=?").run(newNode.title || "", String(after.updatedAt || new Date().toISOString()), asset.id);
         for (const id of new Set(assetConsumers(db, source).map(consumer => consumer.projectId))) {
             const project = db.getCanvasProject(id)!;
-            if (project.id === projectId) continue;
+            if (project.id === projectId || project.id === originatingProjectId) continue;
             const ops = nodes(project).filter(n => n.metadata?.sharedAssetReference?.assetId === asset.id && n.metadata.sharedAssetReference.dramaId === source.dramaId)
                 .map(n => changedNodePatch(oldNode ? resolveSharedAssetNode(n, oldNode) : n, resolveSharedAssetNode(n, newNode))).filter((op): op is CanvasOperation => Boolean(op));
             if (ops.length) db.applyCanvasProjectOperations(project.id, undefined, ops, { runtimeWrite: true, withinTransaction: true, deferredCommits,

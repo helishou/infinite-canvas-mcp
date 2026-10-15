@@ -132,6 +132,11 @@ def content_hash(value):
     return _canvas_authored_content_hash(value)
 ''', encoding="utf-8")
     compiler = root / "scripts/compile_h3.py"
+    replace(compiler, "from contract_core import content_hash, file_hash", '''from contract_core import content_hash as _authored_content_hash, file_hash
+def content_hash(value):
+    if isinstance(value, dict) and "_continuity_report" in value:
+        value = {key: item for key, item in value.items() if key != "_continuity_report"}
+    return _authored_content_hash(value)''')
     binding_call = "        snapshot = resolve_bindings(production, seg, source.parent)"
     replace(compiler, binding_call, binding_call + '''
         # Keep the manifest and binding snapshot on the same frozen source revision.
@@ -224,8 +229,8 @@ def audit(source, target_ids=None):
                 # not a copy of scene metadata that changes the coverage hash.
                 scene["blocks"] = [{"id": scene["id"], "kind": "action", "text": scene["text"]}]
         if (projected.get("prompt_assembly") or {}).get("version") == 2:
-            from canvas_subject_prompt_v2 import project_continuity_source
-            projected = project_continuity_source(projected)
+            from canvas_subject_prompt_v2 import _subject_continuity_audit_projection
+            projected = _subject_continuity_audit_projection(projected)
         result = _canvas_continuity_base_audit_defaults(projected, target_ids)
         result["sourceDigest"] = digest(original)
         return result

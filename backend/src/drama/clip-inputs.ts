@@ -494,5 +494,32 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
             operations.push({ type: "delete_h3_segment", nodeId, segmentId: String(segment.id || "") });
         }
     }
+    // H3 keeps insertion order when a formal Clip changes its stable segment ID.
+    // Reconcile projected rows to the production group order after additions and
+    // orphan cleanup, while leaving any manually created H3 rows untouched.
+    for (const nodeId of managedNodeIds) {
+        if (pendingNodes.has(nodeId)) continue;
+        const node = nodes.find(item => String(item.id) === nodeId);
+        if (!node) continue;
+        const original = Array.isArray(object(node.metadata).segments) ? object(node.metadata).segments as Array<Record<string, any>> : [];
+        const removed = new Set(operations.filter(operation => operation.type === "delete_h3_segment" && String(operation.nodeId) === nodeId)
+            .map(operation => String(operation.segmentId || "")));
+        const simulated = original.filter(segment => !removed.has(String(segment.id || "")));
+        for (const operation of operations) if (operation.type === "add_h3_segment" && String(operation.nodeId) === nodeId) simulated.push(object(operation.segment));
+        const groupOrder = new Map(data.clipGroups.filter(group => nodeForGroup(group) === nodeId).map((group, index) => [group.id, index]));
+        if (simulated.some(segment => !groupOrder.has(String(object(segment.productionClipProjection).targetId || "")))) continue;
+        const ordered = [...simulated].sort((left, right) => groupOrder.get(String(object(left.productionClipProjection).targetId))! - groupOrder.get(String(object(right.productionClipProjection).targetId))!);
+        for (let index = 0; index < ordered.length; index++) {
+            const wantedId = String(ordered[index].id || ""), currentId = String(simulated[index]?.id || "");
+            if (!wantedId || wantedId === currentId) continue;
+            operations.push({ type: "move_h3_segment", nodeId, segmentId: wantedId, beforeSegmentId: currentId });
+            const from = simulated.findIndex(segment => String(segment.id || "") === wantedId);
+            if (from >= 0) {
+                const [moved] = simulated.splice(from, 1);
+                const to = simulated.findIndex(segment => String(segment.id || "") === currentId);
+                if (to >= 0) simulated.splice(to, 0, moved);
+            }
+        }
+    }
     return { operations, referenceSync };
 }

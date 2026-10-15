@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { continuityReadProjection, continuityEventPositionIssues, continuityBlocksForShot, continuitySourceBlocks, continuityEntityKey, continuityLocalFrame, continuityMarkerLanes, continuityPreviewStatus, continuityPriorState, continuityTimelineShots, continuityUsage, continuityWorkbenchSource, orderedContinuityShots, replayContinuityFact, visibleContinuityTrack } from "./continuity-timeline-model";
+import { continuityReadProjection, continuityEventPositionIssues, continuityBlocksForShot, continuityDefaultEvidenceBlockId, continuitySourceBlocks, continuityEntityKey, continuityLocalFrame, continuityMarkerLanes, continuityPreviewStatus, continuityPriorState, continuityTimelineShots, continuityUsage, continuityWorkbenchSource, orderedContinuityShots, replayContinuityFact, visibleContinuityTrack } from "./continuity-timeline-model";
 import { continuityEventAnchor, continuityEventFrame, continuityEventPositionPatch } from "./continuity-event-anchor";
 import { appendContinuityChange } from "./continuity-event-draft";
 
@@ -106,6 +106,8 @@ test("evidence selection respects explicit scene occurrences sharing one environ
     const blocks = continuitySourceBlocks(scenes);
     assert.deepEqual(continuityBlocksForShot(source, blocks, source.shots[0]).map(block => block.id), ["B1"]);
     assert.deepEqual(continuityBlocksForShot(source, blocks, source.shots[1]).map(block => block.id), ["B2"]);
+    assert.equal(continuityDefaultEvidenceBlockId(continuityBlocksForShot(source, blocks, source.shots[0])), "B1");
+    assert.equal(continuityDefaultEvidenceBlockId(blocks), "", "multiple candidate blocks require the user to choose");
     assert.deepEqual(continuitySourceBlocks([{ id: "flat", scene_id: "ROOM", text: "not a nested evidence block" }]), []);
 });
 

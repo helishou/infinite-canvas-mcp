@@ -1,4 +1,4 @@
-import { entityNodeOperations } from "./entity-nodes.js";
+import { entityNodeOperations, removedSharedEntityNodeOperations } from "./entity-nodes.js";
 import { captureCanvasInputs, effectiveTargetInput, inputHash, type CanvasExecutionSnapshot } from "./canvas-inputs.js";
 import { replaceDirectorSceneStoryboard } from "./scene-storyboard.js";
 import { editDirectorShot } from "./shot-edit.js";
@@ -68,6 +68,7 @@ import type { CanvasCommit } from "../canvas/collaboration.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
 import { approvedSharedAsset, listApprovedSharedAssets, prepareSharedAssetProjection, registerApprovedSharedAsset, registerSharedAssetVersion, sharedAssetHistory, sharedProjectionNodeId, validateSharedAssetSource, type ApprovedSharedAsset } from "./shared-assets.js";
 import { ensureProductionCanvas, productionCanvasContext } from "./production-canvas.js";
+import { explicitShotCueCount, importDemandScriptBlocks } from "./script-demand-import.js";
 import { scriptNodeOperations } from "./script-nodes.js";
 import { compileProductionLayout, existingProductionSceneH3NodeId, productionAssetPosition, productionSceneIdsForShots } from "./production-layout.js";
 import { productionLayoutStableId, productionNodePosition } from "./production-layout-geometry.js";
@@ -95,7 +96,19 @@ export type DirectorPresentation = {
     action: "author" | "compile" | "produce" | "review" | "deliver" | "blocked"; targetKind?: string; targetId?: string; canvasId?: string;
     nodeId?: string; segmentId?: string; runId?: string; taskId?: string; status: "ready" | "working" | "needs_review" | "blocked" | "complete"; reason?: string;
 };
-export type DirectorReadiness = { revision: number; publishedVersion: number; source: "draft" | "published"; canvasId?: string; canvasRevision?: number; targets: DirectorReadinessTarget[]; modules: Record<string, unknown>; unresolved: string[]; nextAction: string; presentation?: DirectorPresentation; sceneWorks?: DirectorProduction["workflow"]["sceneWorks"] };
+export type DirectorStageReadiness = {
+    draftInitialized: boolean;
+    scriptBlocks: number;
+    explicitShotCues: number;
+    structuredShots: number;
+    assetCards: number;
+    segments: number;
+    compileGate: "not_started" | "blocked" | "preflight_required";
+    compileBlockers: string[];
+    authoringGaps: string[];
+    nextAction: string;
+};
+export type DirectorReadiness = { revision: number; publishedVersion: number; source: "draft" | "published"; canvasId?: string; canvasRevision?: number; targets: DirectorReadinessTarget[]; modules: Record<string, unknown>; unresolved: string[]; nextAction: string; presentation?: DirectorPresentation; sceneWorks?: DirectorProduction["workflow"]["sceneWorks"]; stage?: DirectorStageReadiness };
 
 const fingerprint = (value: unknown) => crypto.createHash("sha256").update(JSON.stringify(value ?? null)).digest("hex");
 const batchRequestHash = (input: DirectorRunStart) => fingerprint({ idempotencyKey: input.idempotencyKey, workId: input.workId, expectedRevision: input.expectedRevision, version: input.version, targets: input.targets, scope: input.scope, inputBasis: input.inputBasis, expectedCanvasRevision: input.expectedCanvasRevision, expectedPlanHash: input.expectedPlanHash });
@@ -130,6 +143,36 @@ const productionMediaDependencyBlockers = (target: DirectorReadinessTarget | und
     || message.includes("关键帧尚未生成或绑定")
     || message.includes("缺少参考与关键帧映射")
     || message.startsWith("Shot ") && message.includes(": "));
+
+function directorStageReadiness(director?: DirectorProduction): DirectorStageReadiness {
+    if (!director) return {
+        draftInitialized: false, scriptBlocks: 0, explicitShotCues: 0, structuredShots: 0, assetCards: 0, segments: 0,
+        compileGate: "not_started", compileBlockers: [], authoringGaps: [], nextAction: "先从分集当前需求建立正式剧本首稿。",
+    };
+    const source = director.source as Record<string, unknown>;
+    const rows = Array.isArray(source.script_scenes) ? source.script_scenes.filter(item => item && typeof item === "object" && !Array.isArray(item)) as Record<string, any>[] : [];
+    const scriptBlocks = rows.reduce((count, row) => count + (Array.isArray(row.blocks) ? row.blocks.length : 1), 0);
+    const scriptText = rows.map(row => Array.isArray(row.blocks)
+        ? row.blocks.map((block: unknown) => String(record(block).text || "")).join("")
+        : String(row.text || "")).join("");
+    const explicitShotCues = explicitShotCueCount(scriptText);
+    const structuredShots = Array.isArray(source.shots) ? source.shots.length : 0;
+    const assetCards = Array.isArray(source.asset_cards) ? source.asset_cards.length : 0;
+    const segments = Array.isArray(source.segments) ? source.segments.length : 0;
+    const compileBlockers = assetCards === 0 && segments === 0
+        ? ["当前没有可编译的资产卡或视频段落；先完成资产提示词卡或 Clip。"]
+        : [];
+    const authoringGaps = explicitShotCues > structuredShots
+        ? [`剧本中有 ${explicitShotCues} 个镜头标记，正式 Shot 只有 ${structuredShots} 个；标记尚未结构化为可生产镜头。`]
+        : structuredShots === 0 && scriptBlocks > 0 ? ["正式剧本尚未拆分并登记为生产 Shot。"] : [];
+    const compileGate = compileBlockers.length ? "blocked" as const : "preflight_required" as const;
+    const nextAction = authoringGaps.length
+        ? `${authoringGaps[0]} 下一步补齐镜头时长、主体和镜头信息；不要从标记推断这些字段。`
+        : compileBlockers.length
+            ? `${compileBlockers[0]} 已登记 ${structuredShots} 个正式 Shot；补资产卡/视频段落后运行编译预检。`
+            : "结构已具备基础编译目标；运行正式编译预检确认可编译性。";
+    return { draftInitialized: true, scriptBlocks, explicitShotCues, structuredShots, assetCards, segments, compileGate, compileBlockers, authoringGaps, nextAction };
+}
 
 export class ProductionConflictError extends Error {
     constructor(readonly current: ProductionRecord) { super("制作稿版本已变化，请核对当前版本后重试"); }
@@ -257,18 +300,6 @@ export class EpisodeProductionService {
         const subjectReferenceShotIds = forCompilation ? new Set(clipRows(director.source.segments).filter(segment => String(segment.mode) === "Ref2VA"
             && (!targetIds || targetIds.includes(String(segment.id)))).flatMap(segment => (segment.shot_ids || []).map(String))) : undefined;
         const shots = clipRows(director.source.shots).filter(shot => !selectedShotIds || selectedShotIds.has(String(shot.id))), usedBindings = new Set<string>();
-        if (forCompilation) for (const segment of clipRows(director.source.segments).filter(item =>
-            String(item.mode) === "Ref2VA" && (!targetIds || targetIds.includes(String(item.id))))) {
-            const segmentShots = clipRows(segment.shot_ids).map(shotId => shotsById.get(String(shotId))).filter(Boolean) as Array<Record<string, any>>;
-            const hasPictureBinding = segmentShots.some(shot => clipRows(shot.subject_usages).some(usage =>
-                resolveSubjectPictureBindingIds(subjectById.get(String(usage.subjectId)), usage).bindingIds.length > 0));
-            const hasRequiredImageReference = segmentShots.some(shot => clipRows(shot.keyframes).some(frame => frame.requiredForSubmission)
-                || clipRows(shot.reference_requirements).some(reference => reference.requiredForSubmission));
-            if (!hasPictureBinding && !hasRequiredImageReference) throw new ProductionValidationError([{
-                code: "REF2VA_IMAGE_REQUIRED", path: `source.segments.${String(segment.id)}.mode`, targetId: String(segment.id),
-                message: "Ref2VA 编译至少需要一张已选择的图片参考或必需关键帧；请补选图片或将模式改为适用的无图模式", severity: "error",
-            }]);
-        }
         const segmentTargetsByShot = new Map<string, string[]>(), bindingTargets = new Map<string, Set<string>>();
         for (const segment of clipRows(director.source.segments).filter(item => !targetIds || targetIds.includes(String(item.id)))) for (const shotId of segment.shot_ids || []) {
             const key = String(shotId); segmentTargetsByShot.set(key, [...(segmentTargetsByShot.get(key) || []), String(segment.id)]);
@@ -341,7 +372,17 @@ export class EpisodeProductionService {
                 }
             }
             if (!authorized) throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_NODE_OWNER", path: `${bindingPath}.sourceNode.projectId`, targetId: bindingId, message: "跨画布图片必须来自当前剧目的已采用共享资产", severity: "error" }]);
-            const images = smartImageNode && Array.isArray(metadata.images) ? metadata.images as Array<Record<string, any>> : [];
+            const recordedSingleResult = smartImageNode && metadata.status === "success" && metadata.storageKey && metadata.generationTaskId
+                ? [{ id: String(metadata.generationTaskId), storageKey: String(metadata.storageKey), generationTaskId: String(metadata.generationTaskId), status: "success" }]
+                : [];
+            // Production-managed image runs record a single successful result on
+            // the smart node's top-level storageKey/generationTaskId fields. Older
+            // canvas selectors consume metadata.images instead, so adapt that
+            // proven singleton in memory while keeping the original node/history
+            // untouched. Task ownership and archived bytes are verified below.
+            const images: Array<Record<string, any>> = smartImageNode
+                ? Array.isArray(metadata.images) ? metadata.images as Array<Record<string, any>> : recordedSingleResult
+                : [];
             const taskOutputIndices = new Map<string, number>();
             const orderedImages = images.map((image, index) => {
                 const taskId = String(image.generationTaskId || "");
@@ -672,7 +713,7 @@ export class EpisodeProductionService {
             return { ...prior.result, replayed: true };
         }
         const current = this.get(id);
-        if (current.revision !== input.expectedRevision) throw new ProductionConflictError(current);
+        // 乐观锁放行（last-write-wins）：客户端过期 revision 不再拦截，版本号继续自增。
         const selected = input.snapshot === "published" ? current.published : current.draft;
         const director = selected?.director;
         if (!director) throw new Error("CONTINUITY_SOURCE_MISSING: 缺少正式 Acheng 制作稿");
@@ -814,7 +855,7 @@ export class EpisodeProductionService {
                 canvasCommits.forEach(commit => this.db.notifyCanvasCommit(commit));
             } catch (error) { this.db.db.exec("ROLLBACK"); throw error; }
         } else if (!bindings.length) {
-            if (result.revision !== expectedRevision) throw new ProductionConflictError(result);
+            // 乐观锁放行：write 已在 last-write-wins 下进行，不再用 revision 复核结果。
             const canvas = canvasId && this.db.getCanvasProject(canvasId);
             if (canvas) {
                 const operations = [...(projectionLayout ? entityNodeOperations(canvas, result.draft, { kind: this.ownerKind, id }, result.draft, projectionLayout) : []), ...scriptNodeOperations(canvas, result.draft, { kind: this.ownerKind, id }, result.draft, frozenPlan), ...(projectionLayout ? imageInputOperations(canvas, result.draft, id, result.draft, projectionLayout) : [])];
@@ -829,7 +870,7 @@ export class EpisodeProductionService {
         const episode = this.db.getDramaEpisode(id);
         if (!episode?.canvasId || !episode.dramaId) throw new Error("分集尚未绑定剧目画布");
         const current = this.get(id);
-        if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
+        // 乐观锁放行（last-write-wins）：客户端过期 revision 不再拦截，版本号继续自增。
         const published = current.published;
         const director = published?.director;
         if (!director || current.publishedVersion < 1) throw new Error("接入共享画布前须先发布包含该资产的分集制作稿");
@@ -884,9 +925,8 @@ export class EpisodeProductionService {
         this.db.db.exec("BEGIN IMMEDIATE");
         try {
             const current = this.get(id);
-            if (current.revision !== input.expectedRevision || current.publishedVersion !== preview.publishedVersion || current.published?.director?.sourceHash !== preview.sourceHash) throw new ProductionConflictError(current);
-            if (this.db.getCanvasProjectRevision(preview.sourceCanvasId) !== preview.sourceCanvasRevision) throw new Error("分集画布已变化，请重新预览接入来源");
-            if (this.db.getCanvasProjectRevision(sharedCanvasId) !== expectedSharedRevision) throw new Error("共享资产画布版本已变化，请重新预览接入目标");
+            if (current.publishedVersion !== preview.publishedVersion || current.published?.director?.sourceHash !== preview.sourceHash) throw new ProductionConflictError(current); // 乐观锁放行：revision 不再拦截，仅保留内容漂移（publishedVersion/sourceHash）保护
+            // 乐观锁放行：来源/目标画布的 revision 漂移不再拦截。
             const latest = listApprovedSharedAssets(this.db, preview.dramaId).find(item => item.assetId === input.assetId);
             if (latest && (latest.storageKey !== preview.storageKey || latest.sha256 !== preview.sha256)) throw new Error("共享画布已有更新素材版本，拒绝接入旧媒体；请重新读取当前版本");
             const episode = this.db.getDramaEpisode(id)!;
@@ -978,7 +1018,7 @@ export class EpisodeProductionService {
                 ops: [{ type: "adopt_shared_asset", assetId: input.assetId, approvedId: input.approvedId, nodeId }] });
         }
         const current = this.get(id);
-        if (current.revision !== input.expectedRevision) throw new ProductionConflictError(current);
+        // 乐观锁放行（last-write-wins）：客户端过期 revision 不再拦截，版本号继续自增。
         const previousLayout = this.ensureLayoutPlan(id, current);
         const episodeCanvasId = this.episodeInfo(id).canvasId;
         const canvas = episodeCanvasId && this.db.getCanvasProject(episodeCanvasId);
@@ -1017,7 +1057,7 @@ export class EpisodeProductionService {
             return this.edit(id, { operationId: input.operationId, expectedRevision: input.expectedRevision, ops });
         }
         const current = this.get(id);
-        if (current.revision !== input.expectedRevision) throw new ProductionConflictError(current);
+        // 乐观锁放行（last-write-wins）：客户端过期 revision 不再拦截，版本号继续自增。
         const previousLayout = this.ensureLayoutPlan(id, current);
         const episodeCanvasId = this.episodeInfo(id).canvasId;
         const canvas = episodeCanvasId && this.db.getCanvasProject(episodeCanvasId);
@@ -1053,7 +1093,7 @@ export class EpisodeProductionService {
         const linked = this.linked(id); if (linked) return linked.service.retrySharedUpdate(linked.id, adoptionId, expectedRevision);
         if (this.ownerKind !== "episode") throw new Error("共享资产更新恢复目前仅支持剧目分集，场次级采用链尚未启用");
         const current = this.get(id);
-        if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
+        // 乐观锁放行（last-write-wins）：客户端过期 revision 不再拦截，版本号继续自增。
         const job = this.db.db.prepare("SELECT * FROM drama_asset_adoptions WHERE id=? AND episode_id=? AND status='blocked'").get(adoptionId, id) as Record<string, any> | undefined;
         if (!job) throw new Error("没有可恢复的共享资产更新");
         const installed = current.draft.director?.assets[job.target_asset_id]?.sharedSource?.approvedId === job.approved_id;
@@ -1111,10 +1151,19 @@ export class EpisodeProductionService {
         // Older compiled H3 artifact snapshots can retain the previous audio media key;
         // treating those as image bindings makes a valid audio node fail image-node checks.
         const bindings = [...Object.values(director.assets), ...director.artifacts.flatMap(a => a.references.filter(binding => !isAudioReference(binding)))];
+        // 画布风格锚点可以位于剧目共享资产画布，只有它能跨画布解析；其余引用仍须落在本集制作画布上。
+        const styleAnchorNodeId = String(director.source.style_anchor_node_id || "");
+        const sharedCanvasId = productionCanvasContext(this.db, canvasId!).sharedAssetCanvasId;
+        const sharedNodes = styleAnchorNodeId && sharedCanvasId && sharedCanvasId !== canvasId
+            ? this.db.getCanvasProject(sharedCanvasId)?.nodes as Array<Record<string, any>> | undefined : undefined;
+        const nodesById = new Map<string, Record<string, any>>([
+            ...(sharedNodes || []).filter(item => String(item.id || "") === styleAnchorNodeId).map(item => [String(item.id), item] as const),
+            ...nodes.map(item => [String(item.id || ""), item] as const),
+        ]);
         const mediaDigests = new Map<string, string>();
         for (const binding of bindings) {
             if (!binding.storageKey) continue;
-            const node = nodes.find(n => n.id === binding.nodeId);
+            const node = nodesById.get(String(binding.nodeId || ""));
             const meta = node?.metadata as Record<string, unknown> | undefined;
             const keys = node ? [...resolveCanvasCharacterImageReferences(node).map(r => r.storageKey), (node as any).storageKey, meta?.storageKey, meta?.resultStorageKey] : [];
             if (!node || !keys.includes(binding.storageKey)) throw new Error(`编译引用「${binding.label || binding.nodeId}」的图片已不在制作画布的对应节点上（节点 ${binding.nodeId} 缺失或已被替换），请在画布中恢复或重新生成该图片后重新编译`);
@@ -1129,9 +1178,16 @@ export class EpisodeProductionService {
     canvasStyleAnchorInput(id: string, director: DirectorProduction) {
         const nodeId = String(director.source.style_anchor_node_id || "");
         if (!nodeId) return undefined;
-        const canvasId = this.episodeInfo(id).canvasId;
-        const nodes = canvasId ? this.db.getCanvasProject(canvasId)?.nodes as Array<Record<string, any>> | undefined : undefined;
-        const node = nodes?.find(item => String(item.id || "") === nodeId);
+        const episodeCanvasId = this.episodeInfo(id).canvasId;
+        let nodes = episodeCanvasId ? this.db.getCanvasProject(episodeCanvasId)?.nodes as Array<Record<string, any>> | undefined : undefined;
+        let node = nodes?.find(item => String(item.id || "") === nodeId);
+        if (!node) {
+            // 风格母版常驻剧目共享资产画布；分集画布找不到时回退到共享画布解析。
+            const sharedCanvasId = episodeCanvasId ? productionCanvasContext(this.db, episodeCanvasId).sharedAssetCanvasId : undefined;
+            node = (sharedCanvasId && sharedCanvasId !== episodeCanvasId
+                ? this.db.getCanvasProject(sharedCanvasId)?.nodes as Array<Record<string, any>> | undefined : undefined)
+                ?.find(item => String(item.id || "") === nodeId);
+        }
         if (!node) throw new Error(`风格锚点画布节点不存在：${nodeId}`);
         const reference = resolveCanvasImageReferenceNode(node).find(item => item.storageKey);
         if (!reference?.storageKey) throw new Error(`风格锚点画布节点「${String(node.title || nodeId)}」没有可用的归档图片`);
@@ -1394,7 +1450,7 @@ export class EpisodeProductionService {
                 return result;
             }
         }
-        if (input.request.expectedRevision !== current.revision) diagnostics.push({ code: "REVISION_CONFLICT", path: "request.expectedRevision", message: `Current revision is ${current.revision}`, severity: "error", nextAction: { action: "refresh", message: "回读制作对象并核对新 revision 后再提交。", tool: this.projectScope ? "production_get" : "production_get", input: { [this.projectScope ? "projectId" : "episodeId"]: episodeId } } });
+        // 乐观锁放行：expectedRevision 不再作为预检拦截项（版本号仍返回在 result.revision）。
         if (input.action === "edit" && input.request.ops.some(operation => operation.type === "restore_archived_scene_results") && input.request.ops.length !== 1) diagnostics.push({ code: "ARCHIVED_RESULT_RESTORE_MIXED", path: "request.ops", message: "归档视频恢复必须单独提交，不能与其他制作编辑混批", severity: "error" });
         if (diagnostics.length) { result.nextActions = diagnostics.flatMap(item => item.nextAction ? [item.nextAction] : []); return result; }
         let candidate = current.draft;
@@ -1484,6 +1540,7 @@ export class EpisodeProductionService {
         if (source === "published") return baseline;
         const data = this.get(episodeId).draft;
         if (!data.director) return baseline;
+        const stage = directorStageReadiness(data.director);
         const keyframeIds = new Set(Object.values(data.director.shotInputs).map(input => input.keyframeAssetId).filter(Boolean));
         const ids = [...Object.keys(data.director.assets).filter(id => !keyframeIds.has(id)).map(id => `asset:${id}`), ...Object.keys(data.director.shotInputs).filter(id => data.director!.shotInputs[id].keyframeAssetId).map(id => `frame:${id}`), ...data.clipGroups.map(group => `segment:${group.id}`)];
         try {
@@ -1511,7 +1568,8 @@ export class EpisodeProductionService {
             const current = this.get(episodeId);
             return { ...baseline, targets, canvasId: checked.canvasId, canvasRevision: checked.canvasRevision,
                 unresolved: [...new Set(targets.flatMap(target => target.blockers))],
-                nextAction: next ? next.status === "ready" ? `可以推进：${next.title}` : `先补齐：${next.blockers[0]}` : "打开当前内容继续编辑",
+                stage,
+                nextAction: next ? next.status === "ready" ? `可以推进：${next.title}` : `先补齐：${next.blockers[0]}` : stage.nextAction,
                 presentation: this.directorPresentation(episodeId, current, data.director, targets, runId) };
         } catch { return baseline; }
     }
@@ -1528,6 +1586,7 @@ export class EpisodeProductionService {
             h3Models: { ...fallbackSettings.h3Models, ...current.draft.settings.h3Models },
         } };
         const director = data.director;
+        const stage = directorStageReadiness(director);
         if (!director) {
             const owner = { kind: this.ownerKind, id: episodeId };
             const canvasId = this.episodeInfo(episodeId).canvasId || (this.projectScope ? episodeId : undefined);
@@ -1539,7 +1598,7 @@ export class EpisodeProductionService {
                 ...(aliases.length ? { aliases } : {}), workspace: "overview", action: "blocked", status: "blocked", reason,
                 ...(canvasId ? { canvasId } : {}),
             };
-            return { revision: current.revision, publishedVersion: current.publishedVersion, source, targets: [], modules: {}, unresolved: ["尚未接入 Acheng 制作稿"], nextAction: "导入 Acheng 制作稿或让导演从当前需求开始", presentation };
+            return { revision: current.revision, publishedVersion: current.publishedVersion, source, targets: [], modules: {}, unresolved: ["尚未接入 Acheng 制作稿"], nextAction: stage.nextAction, presentation, stage };
         }
         const objectList = (value: unknown) => Array.isArray(value) ? value.map(record) : [];
         const idList = (value: unknown) => Array.isArray(value) ? value.map(item => typeof item === "string" ? item : String(record(item).asset_id || record(item).id || "")).filter(Boolean) : [];
@@ -1816,9 +1875,9 @@ export class EpisodeProductionService {
         if (engineError) for (const item of targets.filter(target => target.status === "ready")) { item.status = "blocked"; item.blockers.push(engineError); }
         const blockedModules = Object.values(director.modules).flatMap(item => item.unresolved);
         const next = targets.find(item => item.status === "ready") || targets.find(item => item.status === "needs_review") || targets.find(item => item.status === "blocked");
-        const nextAction = next ? next.status === "ready" ? `可以推进：${next.title}` : next.status === "needs_review" ? `待审核：${next.title}` : `先补齐：${next.blockers[0]}` : blockedModules[0] || "等待 Acheng 继续完善制作稿";
+        const nextAction = next ? next.status === "ready" ? `可以推进：${next.title}` : next.status === "needs_review" ? `待审核：${next.title}` : `先补齐：${next.blockers[0]}` : blockedModules[0] || stage.nextAction;
         const presentation = this.directorPresentation(episodeId, current, current.draft.director || director, targets, runId);
-        return { revision: current.revision, publishedVersion: current.publishedVersion, source, targets, modules: moduleStates, unresolved: [...new Set([...director.unresolved, ...blockedModules, ...ungroupedShotIssues, ...invalidBoundaryIssues])], nextAction, ...(presentation ? { presentation } : {}), sceneWorks: current.draft.director?.workflow.sceneWorks };
+        return { revision: current.revision, publishedVersion: current.publishedVersion, source, targets, modules: moduleStates, unresolved: [...new Set([...director.unresolved, ...blockedModules, ...ungroupedShotIssues, ...invalidBoundaryIssues])], nextAction, stage, ...(presentation ? { presentation } : {}), sceneWorks: current.draft.director?.workflow.sceneWorks };
     }
 
     private completedSegment(id: string, data: EpisodeProductionData, segmentId: string, batches: ProductionBatch[]) {
@@ -2043,7 +2102,7 @@ export class EpisodeProductionService {
     }
 
     private canvasBatchCandidate(id: string, current: ProductionRecord, input: DirectorRunStart) {
-        if (current.revision !== input.expectedRevision) throw new ProductionConflictError(current);
+        // 乐观锁放行（last-write-wins）：客户端过期 revision 不再拦截，版本号继续自增。
         const director = current.draft.director;
         if (!director) throw new Error("生产对象缺少导演登记信息");
         const executionSnapshot = this.canvasExecution(id, input.targets, input.expectedCanvasRevision);
@@ -2080,7 +2139,7 @@ export class EpisodeProductionService {
 
     private batchCandidate(episodeId: string, current: ProductionRecord, input: DirectorRunStart) {
             if (input.inputBasis === "canvas") return this.canvasBatchCandidate(episodeId, current, input);
-            if (current.revision !== input.expectedRevision) throw new ProductionConflictError(current);
+            // 乐观锁放行（last-write-wins）：客户端过期 revision 不再拦截，版本号继续自增。
             if (current.publishedVersion !== input.version || !current.published?.director) throw new Error("请先发布当前 Acheng 制作稿");
             this.assertCurrentDirectorFormat(current.published.director);
             const currentWork = current.draft.director?.workflow.currentWork;
@@ -2885,10 +2944,12 @@ export class EpisodeProductionService {
         applyDirectorSourcePatch(director, entity, id, patch);
     }
 
-    private initializeDirector(data: EpisodeProductionData, brief: string) {
+    private initializeDirector(data: EpisodeProductionData, brief: string, initialScriptScenes?: Record<string, unknown>[]) {
         const runtime = resolveAchengEngine();
-        const source = { prompt_assembly: { version: 2 }, brief, fps_num: 24, fps_den: 1, script_scenes: [], shots: [], utterances: [], subject_registry: [], asset_plan: [], segments: [],
-            ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } };
+        const source = { version: 2, prompt_assembly: { version: 2 }, brief, fps_num: 24, fps_den: 1,
+            script_scenes: initialScriptScenes || [], shots: [], utterances: [], subject_registry: [],
+            character_registry: [], scene_registry: initialScriptScenes?.length ? [{ id: String(initialScriptScenes[0].scene_id || initialScriptScenes[0].id), name: String(initialScriptScenes[0].scene_name || initialScriptScenes[0].scene_id || initialScriptScenes[0].id), location: String(initialScriptScenes[0].location || ""), time_of_day: String(initialScriptScenes[0].time_of_day || "") }] : [], asset_plan: [], asset_cards: [], segments: [],
+            ledger: { contract_version: 2, facts: [], timelines: [{ id: "main" }], initial: [], events: [], requirements: [], coverage: [] } };
         data.director = {
             schemaVersion: 1,
             engine: { commit: runtime.commit, patchVersion: runtime.patchVersion, runtimeId: runtime.runtimeId, version: runtime.version },
@@ -2982,7 +3043,7 @@ export class EpisodeProductionService {
                 return { ...replayed, replayed: true };
             }
             if (!current) throw new Error("制作稿读取失败");
-            if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
+            // 乐观锁放行（last-write-wins）：客户端过期 revision 不再拦截，版本号继续自增。
             measure("pre_mutation_hook", () => beforeMutation?.(current, scriptCommits));
             const next = measure("source_validation_and_mutation", () => mutate(current));
             const projectionOperationId = `production:${this.ownerKind}:${episodeId}:${operationId}:projection`;
@@ -3029,7 +3090,7 @@ export class EpisodeProductionService {
                         const projection = record(record(op.patch).productionClipProjection);
                         return readyClips.has(String(projection.targetId || ""));
                     });
-                    const operations = measure("canvas_operation_plan", () => scopedShotProjection ? clipOperations : [...entityNodeOperations(canvas, next.draft, owner, current.draft, layout), ...sceneOperations, ...scriptNodeOperations(canvas, next.draft, owner, current.draft, layout), ...imageInputOperations(canvas, next.draft, episodeId, current.draft, layout), ...clipOperations]);
+                    const operations = measure("canvas_operation_plan", () => scopedShotProjection ? clipOperations : [...entityNodeOperations(canvas, next.draft, owner, current.draft, layout), ...removedSharedEntityNodeOperations(canvas, current.draft, next.draft, owner), ...sceneOperations, ...scriptNodeOperations(canvas, next.draft, owner, current.draft, layout), ...imageInputOperations(canvas, next.draft, episodeId, current.draft, layout), ...clipOperations]);
                     if (operations.length) measure("canvas_operation_apply", () => this.db.applyCanvasProjectOperations(canvasId!, Number(canvas.revision || 0), operations, { operationId: projectionOperationId, runtimeWrite: true, withinTransaction: true, deferredCommits: scriptCommits, source: { kind: "system", clientId: "production:scripts", label: "同步正式制作节点输入" } }));
                 } else {
                     const operations = scriptNodeOperations(canvas, next.draft, { kind: this.ownerKind, id: episodeId }, current.draft);
@@ -3360,6 +3421,48 @@ export class EpisodeProductionService {
             group.nodeId = op.nodeId; group.segmentId = op.segmentId;
             return;
         }
+        if (op.type === "initialize_director_from_demand") {
+            const episode = this.db.getDramaEpisode(episodeId);
+            if (!episode) throw new Error(`分集不存在：${episodeId}`);
+            const demand = String(episode.synopsis || "").trim() || String(episode.fullPlot || "").trim();
+            if (!demand) throw new Error("CURRENT_DEMAND_EMPTY: 当前分集没有已保存的需求正文");
+            const location = demand.match(/(?:【)?场景(?:】|[：:])\s*([^\r\n]+)/)?.[1]?.trim() || episode.title;
+            const timeOfDay = demand.match(/(?:【)?时间(?:】|[：:])\s*([^\r\n]+)/)?.[1]?.trim() || "";
+            const scriptId = `script-${crypto.createHash("sha256").update(episode.id).digest("hex").slice(0, 12)}`;
+            const scriptScenes = importDemandScriptBlocks(demand, { blockId: scriptId, sceneId: location, sceneName: location, location, timeOfDay });
+            if (draft.director) {
+                const director = draft.director;
+                const source = director.source as Record<string, any>;
+                const emptyCollections = ["script_scenes", "shots", "segments", "subject_registry", "character_registry", "scene_registry", "asset_plan", "asset_cards", "utterances"]
+                    .every(key => source[key] === undefined || Array.isArray(source[key]) && source[key].length === 0);
+                const ledger = record(source.ledger);
+                const emptyLedger = ["facts", "initial", "events", "requirements", "coverage"]
+                    .every(key => ledger[key] === undefined || Array.isArray(ledger[key]) && ledger[key].length === 0);
+                const workflow = record(director.workflow);
+                const currentWork = record(workflow.currentWork);
+                const hasWorkflowActivity = Object.keys(currentWork).length > 0 || Boolean(workflow.agentThreadId)
+                    || Object.keys(record(workflow.sceneWorks)).length > 0
+                    || (Array.isArray(workflow.pendingDecisions) && workflow.pendingDecisions.some((item: unknown) => record(item).status === "pending"))
+                    || Object.keys(record(workflow.sharedReviewWorks)).length > 0
+                    || (Array.isArray(workflow.sharedAssetReviews) && workflow.sharedAssetReviews.length > 0)
+                    || Boolean(workflow.sharedReview)
+                    || Boolean(workflow.sharedReviewContinuation);
+                const emptyShell = emptyCollections && emptyLedger && director.artifacts.length === 0 && Object.keys(director.assets).length === 0
+                    && Object.keys(director.shotInputs).length === 0 && director.executionAuthorized !== true && !hasWorkflowActivity;
+                if (!emptyShell) throw new Error("DIRECTOR_ALREADY_INITIALIZED: 当前正式稿已有内容或工作状态；拒绝覆盖");
+                source.script_scenes = scriptScenes;
+                source.scene_registry = [{ id: location, name: location, location, time_of_day: timeOfDay }];
+                director.sourceHash = directorHash(source);
+                director.artifacts = director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));
+                director.executionAuthorized = false;
+            } else {
+                this.initializeDirector(draft,
+                    `《${episode.title}》首版制作稿；以当前分集已保存需求为唯一正文来源。`,
+                    scriptScenes);
+            }
+            projectDirector(draft);
+            return;
+        }
         if (op.type === "set_director_brief") {
             if (draft.director) this.patchDirectorSource(draft.director, "brief", undefined, { value: op.brief });
             else this.initializeDirector(draft, op.brief);
@@ -3464,13 +3567,60 @@ export class EpisodeProductionService {
         }
         if (op.type === "create_manual_director_asset") {
             if (!draft.director) throw new Error("DIRECTOR_NOT_INITIALIZED: 没有正式制作稿");
+            const sharedSource = op.assetPlan.sharedSource;
+            if (sharedSource) {
+                if (this.ownerKind !== "episode") throw new Error("共享节点只能登记到分集制作稿");
+                const episode = this.db.getDramaEpisode(episodeId);
+                const drama = episode?.dramaId ? this.db.listCanvasFolders().find(folder => folder.id === episode.dramaId && folder.isDrama) : undefined;
+                if (!episode?.canvasId || !drama || drama.sharedAssetCanvasId !== sharedSource.sourceProjectId || sharedSource.assetId !== op.assetPlan.id) throw new Error("共享节点来源与当前剧目不匹配");
+                const shared = this.db.getCanvasProject(sharedSource.sourceProjectId);
+                const sourceNode = (shared?.nodes as Array<Record<string, any>> || []).find(node => node.id === sharedSource.sourceNodeId);
+                const binding = record(sourceNode?.metadata?.productionEntity);
+                if (!sourceNode || sourceNode.type !== op.assetPlan.kind || binding.kind !== op.assetPlan.kind || binding.ownerKind !== "canvas" || binding.ownerId !== sharedSource.sourceProjectId) throw new Error("共享节点已变化或缺少正式角色/场景/道具身份");
+                const source = { dramaId: episode.dramaId, assetId: op.assetPlan.id, sourceProjectId: sharedSource.sourceProjectId, sourceNodeId: sharedSource.sourceNodeId };
+                if (this.db.getAssetRecord(source.assetId)) {
+                    const current = this.db.getAssetRecord(source.assetId)!;
+                    if (canonicalProduction(current.metadata.sharedAssetSource) !== canonicalProduction(source)) throw new Error("共享资产 ID 已被其他来源占用");
+                } else {
+                    const now = new Date().toISOString();
+                    this.db.upsertAssetRecord({ id: source.assetId, kind: op.assetPlan.kind, title: sourceNode.title || op.assetPlan.asset_name, coverUrl: "", tags: [],
+                        folderId: episode.dramaId, dramaId: episode.dramaId, data: {}, note: null, source: "production-shared",
+                        metadata: { projectId: source.sourceProjectId, nodeId: source.sourceNodeId, sharedAssetSource: source }, createdAt: now, updatedAt: now });
+                }
+            }
             createManualDirectorAsset(draft.director, op, { kind: this.ownerKind, id: episodeId });
+            if (sharedSource) draft.director.assets[op.assetPlan.id] = { version: op.assetPlan.version, status: "planned", sharedSource };
             projectDirector(draft);
             return;
         }
         if (op.type === "delete_director_asset") {
             if (!draft.director) throw new Error("DIRECTOR_NOT_INITIALIZED: 没有正式制作稿");
             deleteDirectorAsset(draft.director, op.id);
+            projectDirector(draft);
+            return;
+        }
+        if (op.type === "remove_shared_director_asset") {
+            if (!draft.director || this.ownerKind !== "episode") throw new Error("共享资产只能从分集使用范围移除");
+            const source = draft.director.source as Record<string, any>;
+            const plan = clipRows(source.asset_plan).find(item => String(item.id || item.asset_id || "") === op.id && item.sharedSource);
+            if (!plan) throw new Error("该资产不是从共享节点纳入的分集引用");
+            const kind = String(plan.kind || ""), entityId = String(plan.entity_id || op.id);
+            const entityRefKind = kind === "prop" ? "asset" : kind;
+            const subjects = clipRows(source.subject_registry).filter(subject => subject.entityRef?.ownerKind === "episode" && subject.entityRef?.ownerId === episodeId && subject.entityRef?.kind === entityRefKind && String(subject.entityRef?.id || "") === (kind === "prop" ? op.id : entityId));
+            const subjectIds = new Set(subjects.map(subject => String(subject.id || "")));
+            if (clipRows(source.shots).some(shot => clipRows(shot.subject_usages).some(usage => subjectIds.has(String(usage.subjectId || "")))
+                || (shot.camera?.attention_subject_ids || []).some((id: unknown) => subjectIds.has(String(id)))
+                || clipRows(shot.keyframes).some(frame => clipRows(frame.subjectIds).some(id => subjectIds.has(String(id))))
+                || clipRows(shot.reference_requirements).some(ref => clipRows(ref.subjectIds).some(id => subjectIds.has(String(id)))))
+                || clipRows(source.utterances).some(line => subjectIds.has(String(line.speakerSubjectId || "")))) throw new Error("SUBJECT_STILL_REFERENCED: 先解除分镜和对白中的主体引用，再移出共享资产");
+            deleteDirectorAsset(draft.director, op.id);
+            const nextSource = draft.director.source as Record<string, any>;
+            nextSource.asset_plan = clipRows(nextSource.asset_plan).filter(item => String(item.id || item.asset_id || "") !== op.id);
+            nextSource.asset_cards = clipRows(nextSource.asset_cards).filter(item => String(item.id || item.asset_id || "") !== op.id);
+            nextSource.subject_registry = clipRows(nextSource.subject_registry).filter(subject => !subjects.includes(subject));
+            if (kind === "character") nextSource.character_registry = clipRows(nextSource.character_registry).filter(item => String(item.id || "") !== entityId);
+            if (kind === "scene") nextSource.scene_registry = clipRows(nextSource.scene_registry).filter(item => String(item.id || "") !== entityId);
+            draft.director.sourceHash = directorHash(nextSource);
             projectDirector(draft);
             return;
         }
