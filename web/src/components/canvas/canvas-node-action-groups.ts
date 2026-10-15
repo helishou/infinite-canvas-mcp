@@ -27,6 +27,12 @@ export function groupCanvasNodeActions<T extends NodeAction>(actions: readonly T
     });
 }
 
+/** Production canvas toolbars have dedicated primary actions, so their More menu must retain every node action. */
+export function canvasNodeDropdownActions<T extends NodeAction>(allActions: readonly T[], moreActions: readonly T[], productionToolbar: boolean): T[] {
+    const source = productionToolbar ? allActions : moreActions;
+    return [...new Map(source.map(action => [action.id, action])).values()];
+}
+
 const nearbyActionIds = new Set(["info", "view", "download", "retry", "edit", "config", "generateImage", "uploadImage", "uploadVideo", "uploadAudio", "decreaseFont", "increaseFont", "arrangeGroup", "groupLock"]);
 
 /** Image customization is retained verbatim; every omitted action remains in the full menu. */

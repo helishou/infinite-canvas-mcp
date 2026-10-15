@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import test from "node:test";
-import { compilationHash, compilationScopeInput, currentCompilationArtifact, preserveCompilationProvenance, scopedCompilerInput } from "./compilation-scope.js";
+import { compilationArtifactFreshness, compilationHash, compilationScopeInput, currentCompilationArtifact, preserveCompilationProvenance, scopedCompilerInput } from "./compilation-scope.js";
 import type { DirectorProduction } from "./production-contract.js";
 import { directorProductionSchema } from "./production-contract.js";
 import { auditAchengContinuity, resolveAchengEngine } from "../skills/acheng.js";
@@ -33,6 +34,7 @@ test("V2 frame-only scope retains replay binding declarations and flat-block cov
     const d = scopedDirector();
     d.source.version = 2;
     d.source.prompt_assembly = { version: 2 };
+    d.source.ledger = { contract_version: 2, facts: [], timelines: [{ id: "T" }], initial: [], events: [], requirements: [], coverage: [] };
     d.source.character_registry = [{ id: "P", name: "人物" }];
     d.source.subject_registry = [{ id: "P", kind: "character", entityRef: { ownerKind: "episode", ownerId: "EP", kind: "character", id: "P" }, pictureBindings: [
         { id: "P_ID", assetId: "ROLE", sourceNode: { projectId: "CANVAS", nodeId: "IMAGE" }, selection: { mode: "node_selection" }, provides: ["identity"], retain: ["identity"], exclude: ["pose"], applicableState: {}, defaultFor: ["identity"] }
@@ -78,6 +80,60 @@ test("V2 Clip scope retains a registered dialogue speaker even without a visual 
     assert.deepEqual((scoped.director.source.subject_registry as any[]).map(subject => subject.id), ["SUB_LIN"]);
     const checked = directorProductionSchema.safeParse(scopedCompilerInput(scoped.director, { targetIds: ["GA"], output: "selected" }));
     assert.equal(checked.success, true, checked.success ? "" : JSON.stringify(checked.error.issues));
+});
+
+test("a bound shared Subject image remains a media dependency without becoming a standalone asset-prompt target", () => {
+    const d = scopedDirector();
+    d.source.version = 2;
+    d.source.prompt_assembly = { version: 2 };
+    d.source.ledger = { contract_version: 2, facts: [], timelines: [{ id: "T" }], initial: [], events: [], requirements: [], coverage: [] };
+    d.source.character_registry = [{ id: "SHARED_CHARACTER", name: "Shared" }];
+    d.source.subject_registry = [{ id: "SUB_SHARED", kind: "character", entityRef: { ownerKind: "episode", ownerId: "EP", kind: "character", id: "SHARED_CHARACTER" }, pictureBindings: [
+        { id: "SHARED_IMAGE", assetId: "SHARED_ASSET", sourceNode: { projectId: "EP_CANVAS", nodeId: "SHARED_REF" }, selection: { mode: "node_selection" }, provides: ["identity"], retain: ["identity"], exclude: ["pose"], applicableState: {}, defaultFor: ["identity"] },
+    ] }];
+    d.source.asset_plan = [
+        { id: "SHARED_ASSET", kind: "character", entity_id: "SHARED_CHARACTER", version: "v1", purpose: "Shared source", status: "planned", depends_on: [], sharedSource: { sourceProjectId: "SHARED_CANVAS", sourceNodeId: "CHAR_NODE" } },
+        { id: "LOCAL_PROP", kind: "prop", version: "v1", purpose: "Local prop", status: "planned", depends_on: [], shot_ids: ["SA"] },
+        { id: "CONTEXT_PROP", kind: "prop", version: "v1", purpose: "Context prop", status: "planned", depends_on: [] },
+    ];
+    d.source.asset_cards = [
+        { id: "SHARED_ASSET", asset_kind: "character", prompt: "", references: [], reference_policy: "none" },
+        { id: "LOCAL_PROP", asset_kind: "prop", prompt: "A complete local prop prompt", references: [], reference_policy: "none" },
+    ];
+    d.source.shots = [{ id: "SA", timeline_id: "T", story_order: 0, duration_frames: 96,
+        camera: { attention_subject_ids: ["SUB_SHARED", "SUB_LOCAL_PROP"] },
+        subject_usages: [{ subjectId: "SUB_SHARED", presentation: "visible", pictureBindingIds: ["SHARED_IMAGE"], referencePurpose: ["identity"], continuityFactIds: [], stateRequirements: [] },
+            { subjectId: "SUB_LOCAL_PROP", presentation: "visible", pictureBindingIds: [], referencePurpose: ["identity"], continuityFactIds: [], stateRequirements: [] }], keyframes: [], utterance_refs: [] }];
+    d.source.subject_registry.push({ id: "SUB_LOCAL_PROP", kind: "prop", entityRef: { ownerKind: "episode", ownerId: "EP", kind: "asset", id: "LOCAL_PROP" }, pictureBindings: [] } as any);
+    d.source.subject_registry.push({ id: "SUB_CONTEXT_PROP", kind: "prop", entityRef: { ownerKind: "episode", ownerId: "EP", kind: "asset", id: "CONTEXT_PROP" }, pictureBindings: [] } as any);
+    (d.source.shots as any[])[0].camera.attention_subject_ids.push("SUB_CONTEXT_PROP");
+    (d.source.shots as any[])[0].subject_usages.push({ subjectId: "SUB_CONTEXT_PROP", presentation: "state_context", pictureBindingIds: [], referencePurpose: [], continuityFactIds: [], stateRequirements: [] });
+    d.source.segments = [{ id: "GA", shot_ids: ["SA"], mode: "Ref2VA" }];
+    d.sourceHash = compilationHash(d.source);
+    d.assets.SHARED_ASSET = { version: "v1", status: "generated", nodeId: "SHARED_REF", storageKey: "image:shared", sha256: "a".repeat(64), sharedSource: { sourceProjectId: "SHARED_CANVAS", sourceNodeId: "CHAR_NODE" } };
+    d.assets.LOCAL_PROP = { version: "v1", status: "generated", storageKey: "image:local-prop", sha256: "b".repeat(64) };
+    d.assets.CONTEXT_PROP = { version: "v1", status: "generated", storageKey: "image:context-prop", sha256: "c".repeat(64) };
+    const before = structuredClone(d);
+
+    const scoped = compilationScopeInput(d, { targetIds: ["GA"] });
+    assert.deepEqual(scoped.targetIds, ["GA", "LOCAL_PROP"]);
+    assert.deepEqual((scoped.director.source.asset_cards as any[]).map(card => card.id), ["LOCAL_PROP"]);
+    const sharedPlan = (scoped.director.source.asset_plan as any[]).find(plan => plan.id === "SHARED_ASSET");
+    assert.equal(sharedPlan.status, "generated");
+    assert.equal(sharedPlan.sha256, "a".repeat(64));
+    assert.equal(sharedPlan.file, "shared-assets/SHARED_ASSET.png");
+    assert.equal(scoped.director.assets.SHARED_ASSET.storageKey, "image:shared");
+    const propAlias = (scoped.director.source.asset_plan as any[]).find(plan => plan.id === "SUB_LOCAL_PROP");
+    assert.equal(propAlias._compiler_subject_alias, true);
+    assert.equal(propAlias.status, "generated");
+    assert.equal(propAlias.file, "compiler-subject-aliases/SUB_LOCAL_PROP.png");
+    assert.equal(propAlias._compiler_source_asset_id, "LOCAL_PROP");
+    const contextPlan = (scoped.director.source.asset_plan as any[]).find(plan => plan.id === "CONTEXT_PROP");
+    assert.equal(contextPlan.status, "generated");
+    assert.equal(contextPlan._compiler_registry_media, true);
+    assert.equal(contextPlan.file, "compiler-registry-assets/CONTEXT_PROP.png");
+    assert.equal(scoped.director.assets.CONTEXT_PROP.storageKey, "image:context-prop");
+    assert.deepEqual(d, before, "compiler projection must not rewrite the authored episode source");
 });
 
 test("continuity replay context does not retain a removed prior-Shot picture as a Clip reference", () => {
@@ -178,7 +234,8 @@ test("scope normalization moves reference windows with the authored shot frames"
 });
 test("scoped receipts preserve original provenance across unrelated edits, but reject changed inputs", () => {
     const d = scopedDirector(), scope = { targetIds: ["KA"] }, input = compilationScopeInput(d, scope);
-    const artifact: DirectorProduction["artifacts"][number] = { id: "image-KA", kind: "image", targetId: "KA", prompt: "authored", sha256: compilationHash("prompt"), sourceHash: d.sourceHash, status: "ready", references: [], receipt: { sourceHash: d.sourceHash, compilationScope: { scope, inputHash: input.inputHash } } };
+    const prompt = "authored", promptHash = crypto.createHash("sha256").update(prompt, "utf8").digest("hex");
+    const artifact: DirectorProduction["artifacts"][number] = { id: "image-KA", kind: "image", targetId: "KA", prompt, sha256: promptHash, sourceHash: d.sourceHash, status: "ready", references: [], receipt: { sourceHash: d.sourceHash, promptHash, compilationScope: { scope, inputHash: input.inputHash } } };
     const changed = structuredClone(d); (changed.source.shots as any[])[1].visual = "other edit"; changed.sourceHash = compilationHash(changed.source);
     assert.equal(currentCompilationArtifact(changed, artifact), true);
     (changed.source.shots as any[])[0].visual = "my edit"; changed.sourceHash = compilationHash(changed.source);
@@ -189,8 +246,9 @@ test("scoped receipts preserve original provenance across unrelated edits, but r
 
 test("engine changes retain legacy scoped receipt validity without accepting changed source or prompt identity", () => {
     const director = scopedDirector(), scope = { targetIds: ["KA"] };
-    const artifact: DirectorProduction["artifacts"][number] = { id: "image-KA", kind: "image", targetId: "KA", prompt: "original", sha256: "a".repeat(64), sourceHash: director.sourceHash, status: "ready", references: [],
-        receipt: { sourceHash: director.sourceHash, engineRuntimeId: director.engine.runtimeId, compilationScope: { scope, inputHash: compilationScopeInput(director, scope).legacyInputHash } } };
+    const prompt = "original", promptHash = crypto.createHash("sha256").update(prompt, "utf8").digest("hex");
+    const artifact: DirectorProduction["artifacts"][number] = { id: "image-KA", kind: "image", targetId: "KA", prompt, sha256: promptHash, sourceHash: director.sourceHash, status: "ready", references: [],
+        receipt: { sourceHash: director.sourceHash, promptHash, engineRuntimeId: director.engine.runtimeId, compilationScope: { scope, inputHash: compilationScopeInput(director, scope).legacyInputHash } } };
     director.artifacts = [artifact];
     preserveCompilationProvenance(director);
     const originalReceipt = structuredClone(artifact.receipt);
@@ -200,4 +258,33 @@ test("engine changes retain legacy scoped receipt validity without accepting cha
     (director.source.shots as any[])[0].visual = "changed relevant action";
     director.sourceHash = compilationHash(director.source);
     assert.equal(currentCompilationArtifact(director, artifact), false);
+});
+
+test("artifact freshness checks scoped external inputs and prompt bytes even when the full source hash matches", () => {
+    const director = scopedDirector();
+    const scope = { targetIds: ["GA"] };
+    const input = compilationScopeInput(director, scope);
+    const prompt = "compiled prompt";
+    const sha256 = crypto.createHash("sha256").update(prompt, "utf8").digest("hex");
+    const artifact = { id: "GA", kind: "h3", targetId: "GA", prompt, sha256, sourceHash: director.sourceHash, status: "ready", references: [],
+        receipt: { sourceHash: director.sourceHash, promptHash: sha256, engineRuntimeId: director.engine.runtimeId, engine: director.engine,
+            compilationScope: { scope, inputHash: input.inputHash, engine: director.engine } } } as DirectorProduction["artifacts"][number];
+    assert.equal(compilationArtifactFreshness(director, artifact).current, true);
+
+    const changedReference = structuredClone(director);
+    changedReference.assets.ROLE.sha256 = "b".repeat(64);
+    const changed = compilationArtifactFreshness(changedReference, artifact);
+    assert.equal(changed.current, false);
+    assert.equal(changed.staleReason, "scope_input_changed");
+
+    const changedPrompt = { ...artifact, prompt: "tampered prompt" };
+    const promptResult = compilationArtifactFreshness(director, changedPrompt);
+    assert.equal(promptResult.current, false);
+    assert.equal(promptResult.staleReason, "prompt_hash_mismatch");
+
+    const changedCompiler = structuredClone(director);
+    changedCompiler.engine.compilerHash = "c".repeat(64);
+    const compilerResult = compilationArtifactFreshness(changedCompiler, artifact);
+    assert.equal(compilerResult.current, false);
+    assert.equal(compilerResult.staleReason, "compiler_changed");
 });

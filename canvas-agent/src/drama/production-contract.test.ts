@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { applyDirectorSourcePatch, productionOperationContract, ref2vaPromptDiagnostics } from "./production-validation.js";
+import { productionEntities } from "./production-entities.js";
 import { diagnosticBlocksAction, dramaProductionPlanSchema, productionEditSchema, productionSettingsSchema, type DirectorProduction, type ProductionDiagnostic } from "./production-contract.js";
 import { toolInputSchemas } from "../canvas/schemas.js";
 
@@ -44,6 +45,23 @@ test("asset canvas scope is a formal, validated source field that invalidates ol
     assert.throws(() => applyDirectorSourcePatch(director, "asset", "ROLE", { canvas_scope: "other" }), /shared 或 episode/);
     director.assets.ROLE = { version: "v1", status: "approved", sharedSource: { dramaId: "drama", assetId: "ROLE", approvedId: "approved-v1", sourceProjectId: "shared", sourceNodeId: "source-role" } };
     assert.throws(() => applyDirectorSourcePatch(director, "asset", "ROLE", { canvas_scope: "episode" }), /必须保留 shared/);
+});
+
+test("script scene occurrences do not become reusable scene asset nodes without stable asset registration", () => {
+    const entities = productionEntities({
+        scene_registry: [
+            { id: "SCRIPT_LOCATION", name: "草庐门前" },
+            { id: "SC_LUWU", name: "草庐" },
+            { id: "SHARED_SCENE", name: "共享场景" },
+        ],
+        script_scenes: [{ id: "script-1", scene_id: "SCRIPT_LOCATION" }],
+        asset_plan: [
+            { id: "asset-scene", entity_id: "SC_LUWU", kind: "scene" },
+            { id: "shared-scene-asset", entity_id: "SHARED_SCENE", kind: "scene", sharedSource: { sourceNodeId: "shared" } },
+        ],
+        subject_registry: [],
+    }, { kind: "episode", id: "EP_1" });
+    assert.deepEqual(entities.filter(entity => entity.kind === "scene").map(entity => entity.entityId), ["SC_LUWU", "SHARED_SCENE"]);
 });
 
 test("environment and asset-card patches update compiler source without changing script or asset plans", () => {

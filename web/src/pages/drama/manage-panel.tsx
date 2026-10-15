@@ -2,11 +2,11 @@ import { ProductionPageHeading } from "./production-page-heading";
 import { dramaWorkbenchPath } from "./workbench-entry";
 import { useWorkbenchCanvas } from "@/lib/canvas/canvas-host";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
-import type { SeriesWorkspaceView } from "./production-workspace";
+import { productionWorkspaceQuery, type SeriesWorkspaceView } from "./production-workspace";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import { App, Button, Input, Modal, Select, Switch, Tag } from "antd";
+import { App, Button, Input, Modal, Select, Switch, Tabs, Tag } from "antd";
 import { ArrowUpRight, Clapperboard, Download, FileArchive, ImagePlus, Images, PencilLine, Plus, Trash2, Upload } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
@@ -57,14 +57,16 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
     const { message, modal } = App.useApp();
     const { t } = useTranslation();
     const navigate = useNavigate();
+    const location = useLocation();
     const canvasHost = useWorkbenchCanvas();
     const projects = useCanvasStore((state) => state.projects);
     const folders = useCanvasStore((state) => state.folders);
     const deleteDramaProject = useCanvasStore((state) => state.deleteDramaProject);
     const [episodes, setEpisodes] = useState<DramaEpisode[]>([]);
     const [openingSharedCanvas, setOpeningSharedCanvas] = useState(false);
-    const [editorOpen, setEditorOpen] = useState(false);
     const [draft, setDraft] = useState<DramaDraft | null>(null);
+    const [planningTab, setPlanningTab] = useState<"info" | "settings">("info");
+    const initializedDraftFor = useRef<string | null>(null);
     const [activeCoverUrl, setActiveCoverUrl] = useState("");
     const [uploadingCover, setUploadingCover] = useState(false);
     const [savingPlan, setSavingPlan] = useState(false);
@@ -101,6 +103,21 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
         void resolveImageUrl(folder.coverStorageKey).then((url) => { if (!disposed) setActiveCoverUrl(url); });
         return () => { disposed = true; };
     }, [folder?.coverStorageKey]);
+    // 内联编辑取代弹窗：进入面板即建立草稿，切换剧目时重建，保存后不覆盖未提交修改。
+    useEffect(() => {
+        if (!folder || initializedDraftFor.current === dramaId) return;
+        initializedDraftFor.current = dramaId;
+        setDraft({
+            productionPlan: dramaProductionPlanSchema.parse(folder.productionPlan || {}),
+            expectedPlanningUpdatedAt: folder.updatedAt || folder.createdAt,
+            name: folder.name,
+            outline: folder.outline || "",
+            description: folder.description || "",
+            tags: (folder.tags || []).join(", "),
+            coverStorageKey: folder.coverStorageKey || null,
+            coverUrl: activeCoverUrl,
+        });
+    }, [folder, dramaId, activeCoverUrl]);
     useEffect(() => {
         if (!folder) return;
         let disposed = false;
@@ -185,9 +202,10 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
             message.error(error instanceof Error ? error.message : String(error));
         } finally { setStyleSaving(false); }
     };
+    const goToPlanning = () => navigate(`${location.pathname}?${productionWorkspaceQuery(new URLSearchParams(location.search), "series", { seriesView: "planning" }).toString()}`);
     const openSharedCanvas = async () => {
         if (openingSharedCanvas) return;
-        if (!folder.sharedAssetCanvasId && !(folder.productionPlan?.confirmedAt && folder.productionPlan.confirmedOutline === folder.outline)) { openFolderEditor(); return; }
+        if (!folder.sharedAssetCanvasId && !(folder.productionPlan?.confirmedAt && folder.productionPlan.confirmedOutline === folder.outline)) { goToPlanning(); return; }
         setOpeningSharedCanvas(true);
         try {
             const { project } = await ensureSharedAssetCanvas(folder.id);
@@ -273,19 +291,6 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
             },
         });
     };
-    const openFolderEditor = () => {
-        setDraft({
-            productionPlan: dramaProductionPlanSchema.parse(folder.productionPlan || {}),
-            expectedPlanningUpdatedAt: folder.updatedAt || folder.createdAt,
-            name: folder.name,
-            outline: folder.outline || "",
-            description: folder.description || "",
-            tags: (folder.tags || []).join(", "),
-            coverStorageKey: folder.coverStorageKey || null,
-            coverUrl: activeCoverUrl,
-        });
-        setEditorOpen(true);
-    };
     const saveFolder = async (confirm = true) => {
         if (!draft) return;
         if (confirm && !draft.productionPlan.storyboardImageMode) {
@@ -305,7 +310,6 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
         try {
             const result = await upsertBackendCanvasFolder({ ...folder, ...patch, expectedPlanningUpdatedAt: draft.expectedPlanningUpdatedAt, updatedAt: new Date().toISOString() });
             useCanvasStore.setState(state => ({ folders: state.folders.map(item => item.id === folder.id ? result.folder as unknown as CanvasFolder : item) }));
-            setEditorOpen(false);
             message.success(t(confirm ? "drama.saved" : "sceneProduction.draftSaved"));
         } catch (error) { message.error(String(error)); }
         finally { setSavingPlan(false); }
@@ -319,7 +323,6 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
             cancelText: t("common.cancel"),
             onOk: () => {
                 deleteDramaProject(folder.id);
-                setEditorOpen(false);
                 setDraft(null);
                 navigate("/production");
                 message.success(t("drama.deleted"));
@@ -374,35 +377,41 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
     return (
         <div>
             {(!view || view === "planning") && <section className="mb-5 space-y-3">
-                <ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t("productionCanvas.dramaPlanning")} summary={t(folder.productionPlan?.confirmedAt && folder.productionPlan.confirmedOutline === folder.outline ? "productionCanvas.planConfirmed" : "productionCanvas.planUnconfirmed")} help={<p>{t("productionCanvas.dramaPlanningHint")}</p>} actions={<Button icon={<PencilLine className="size-4" />} onClick={openFolderEditor}>{t("productionCanvas.dramaPlanning")}</Button>} />
-                <div className="rounded-xl border border-border bg-card p-4 dark:border-stone-800">
-                    <div className="flex gap-4">
-                        {activeCoverUrl && <img src={activeCoverUrl} alt={folder.name} className="h-24 w-20 shrink-0 rounded-lg object-cover" />}
-                        <div className="min-w-0 flex-1 space-y-3">
-                            <div>
-                                <p className="text-xs font-medium text-muted-foreground">{t("productionCanvas.outlineSummary")}</p>
-                                <p className="mt-1 whitespace-pre-line text-sm leading-6">{folder.outline || t("productionCanvas.outlineEmptyHint")}</p>
-                            </div>
-                            {folder.description && (
-                                <div>
-                                    <p className="text-xs font-medium text-muted-foreground">{t("productionCanvas.description")}</p>
-                                    <p className="mt-1 text-sm text-muted-foreground">{folder.description}</p>
-                                </div>
-                            )}
-                            <div className="flex flex-wrap gap-2 text-xs">
-                                <Tag color="blue">{t("productionCanvas.storyboardImageMode")}: {folder.productionPlan?.storyboardImageMode === "generate" ? t("productionCanvas.storyboardImagesGenerate") : folder.productionPlan?.storyboardImageMode === "skip" ? t("productionCanvas.storyboardImagesSkip") : t("productionCanvas.notConfigured")}</Tag>
-                                <Tag>{t("director.workspace.videoAspectRatio")}: {planLabel(t, folder.productionPlan?.videoAspectRatio)}</Tag>
-                                <Tag>{t("productionCanvas.videoModel")}: {planLabel(t, folder.productionPlan?.h3Model)}</Tag>
-                                <Tag>{t("productionCanvas.generalImageModel")}: {planLabel(t, folder.productionPlan?.imageModel)}</Tag>
-                                <Tag>{t("sceneProduction.enable")}: {folder.productionPlan?.parallelScenes ? t(`sceneProduction.mode.${folder.productionPlan.reviewPolicy?.mode || "none"}`) : t("productionCanvas.notConfigured")}</Tag>
-                            </div>
-                            {(folder.tags || []).length > 0 &&
-                                <div className="flex flex-wrap gap-1.5">{(folder.tags || []).map(tag => <Tag key={tag}>{tag}</Tag>)}</div>}
-                        </div>
+                <ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t("productionCanvas.dramaPlanning")} summary={t(folder.productionPlan?.confirmedAt && folder.productionPlan.confirmedOutline === folder.outline ? "productionCanvas.planConfirmed" : "productionCanvas.planUnconfirmed")} help={<p>{t("productionCanvas.dramaPlanningHint")}</p>} actions={<div className="flex flex-wrap justify-end gap-2"><Button disabled={savingPlan || uploadingCover} loading={uploadingCover} onClick={() => void saveFolder(false)}>{t("sceneProduction.saveDraft")}</Button><Button type="primary" loading={savingPlan} disabled={uploadingCover} onClick={() => void saveFolder()}>{t("productionCanvas.confirmPlan")}</Button></div>} />
+                {draft ? <Tabs activeKey={planningTab} onChange={key => setPlanningTab(key as "info" | "settings")} items={[
+                    { key: "info", label: t("productionCanvas.planningOverviewTab"), children: <div className="space-y-5 pt-1">
+                <div className="grid gap-5 sm:grid-cols-[180px_minmax(0,1fr)]">
+                    <button type="button" className="group relative min-h-40 overflow-hidden rounded-xl border border-dashed border-stone-300 bg-stone-100 text-left dark:border-stone-700 dark:bg-stone-900" onClick={() => coverInputRef.current?.click()}>
+                        {draft.coverUrl ? <img src={draft.coverUrl} alt={draft.name} className="h-full min-h-40 w-full object-cover" /> : <div className="grid min-h-40 place-items-center text-center text-xs text-stone-400"><span><ImagePlus className="mx-auto mb-2 size-6" />{t("drama.uploadCover")}</span></div>}
+                        <span className="absolute inset-x-0 bottom-0 bg-black/55 px-3 py-2 text-center text-xs text-white opacity-0 transition group-hover:opacity-100">{t("drama.changeCover")}</span>
+                    </button>
+                    <div className="space-y-4">
+                        <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.projectName")}</span><Input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
+                        <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.tags")}</span><Input placeholder={t("drama.tagsPlaceholder")} value={draft.tags} onChange={(event) => setDraft({ ...draft, tags: event.target.value })} /></label>
                     </div>
                 </div>
+                <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.outline")}</span><Input.TextArea rows={7} placeholder={t("drama.outlinePlaceholder")} value={draft.outline} onChange={(event) => setDraft({ ...draft, outline: event.target.value })} /></label>
+                <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("productionCanvas.planRequirements")}</span><Input.TextArea rows={3} value={draft.productionPlan.requirements} onChange={event => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, requirements: event.target.value } })} /></label>
+                <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.description")}</span><Input.TextArea rows={3} placeholder={t("drama.descriptionPlaceholder")} value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label>
+                    </div> },
+                    { key: "settings", label: t("productionCanvas.planningSettingsTab"), children: <div className="space-y-5 pt-1">
+                        <p className="text-xs text-muted-foreground">{t("productionCanvas.newEpisodeDefaults")}</p>
+                <div className="grid gap-4 sm:grid-cols-2">
+                    <label><p className="mb-2 text-sm">{t("productionCanvas.storyboardImageMode")}</p><Select className="w-full" placeholder={t("productionCanvas.storyboardImageRequired")} value={draft.productionPlan.storyboardImageMode} onChange={storyboardImageMode => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, storyboardImageMode } })} options={[{ value: "generate", label: t("productionCanvas.storyboardImagesGenerate") }, { value: "skip", label: t("productionCanvas.storyboardImagesSkip") }]} />{!draft.productionPlan.storyboardImageMode && <p className="mb-1 mt-2 text-xs text-red-500">{t("productionCanvas.storyboardImageRequired")}</p>}<p className="mt-2 text-xs text-muted-foreground">{t("productionCanvas.storyboardImageModeHint")}</p></label>
+                    <SceneProductionSettings value={draft.productionPlan} onChange={patch => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, ...patch } })} />{draft.productionPlan.parallelScenes && !draft.productionPlan.reviewPolicy && <p className="mt-2 text-xs text-red-500">{t("sceneProduction.reviewRequired")}</p>}
+                    <p className="text-xs text-muted-foreground">{t("sceneProduction.draftHint")}</p>
+                    <div><p className="mb-2 text-sm">{t("productionCanvas.generalImageModel")}</p><ModelPicker config={modelConfig} capability="image" fullWidth value={draft.productionPlan.imageModel} onChange={imageModel => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, imageModel } })} /></div>
+                    {(["character", "scene", "prop", "style", "keyframe"] as const).map(kind => <div key={kind}><p className="mb-2 text-sm">{t(`productionCanvas.assetModel.${kind}`)}</p><ModelPicker config={modelConfig} capability="image" fullWidth placeholder={t("productionCanvas.inheritImageModel")} value={draft.productionPlan.imageModelsByKind[kind]} onChange={model => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, imageModelsByKind: { ...draft.productionPlan.imageModelsByKind, [kind]: model } } })} /><Button type="link" size="small" disabled={!draft.productionPlan.imageModelsByKind[kind]} onClick={() => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, imageModelsByKind: { ...draft.productionPlan.imageModelsByKind, [kind]: undefined } } })}>{t("productionCanvas.inheritImageModel")}</Button></div>)}
+                    <div><p className="mb-2 text-sm">{t("productionCanvas.videoModel")}</p><ModelPicker config={modelConfig} capability="video" fullWidth value={draft.productionPlan.h3Model} onChange={h3Model => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, h3Model } })} /></div>
+                    <label><p className="mb-2 text-sm">{t("director.workspace.videoAspectRatio")}</p><Select className="w-full" allowClear value={draft.productionPlan.videoAspectRatio || undefined} onChange={videoAspectRatio => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, videoAspectRatio: videoAspectRatio || null } })} options={["9:16", "16:9", "1:1", "4:3", "3:4", "2:3", "3:2", "21:9"].map(value => ({ value, label: value }))} /></label>
+                </div>
+                <div className="rounded-xl border border-red-200 p-4 dark:border-red-950">
+                    <p className="text-sm font-medium text-red-600 dark:text-red-400">{t("productionCanvas.dangerZone")}</p>
+                    <Button danger type="text" className="mt-2" icon={<Trash2 className="size-4" />} onClick={deleteDrama}>{t("drama.deleteProject")}</Button>
+                </div>
+                    </div> },
+                ]} /> : null}
             </section>}
-
             {(!view || view === "shared") && <section data-drama-shared-canvas className="mb-5 space-y-4">
                 <ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t("productionCanvas.sharedCanvas")} summary={t(folder.sharedAssetCanvasId ? "productionCanvas.sharedCanvasReady" : "productionCanvas.sharedCanvasEmpty")} help={<p>{t("productionCanvas.sharedCanvasDescription")}</p>} actions={<Button loading={openingSharedCanvas} onClick={() => void openSharedCanvas()}>{t("productionCanvas.openSharedCanvas")}<ArrowUpRight className="ml-1 size-4" /></Button>} />
                 {folder.sharedAssetCanvasId ? (
@@ -547,40 +556,8 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
                     <div className="rounded-lg border border-stone-200 px-3 py-3 text-sm text-stone-500 dark:border-stone-800 dark:text-stone-400">{episodeDraft.canvasId ? t("drama.legacyEpisodeCanvasBound", { name: projects.find(project => project.id === episodeDraft.canvasId)?.title || episodeDraft.canvasId }) : t("drama.sceneCanvasWorkflowHint")}</div>
                 </div> : null}
             </Modal>
-            <Modal title={t("productionCanvas.dramaPlanning")} open={editorOpen} onCancel={() => { if (!savingPlan) setEditorOpen(false); }} onOk={() => void saveFolder()} okText={t("productionCanvas.confirmPlan")} cancelText={t("common.cancel")} confirmLoading={uploadingCover || savingPlan} width={760} styles={{ body: { maxHeight: "70dvh", overflow: "auto" } }} footer={(originNode) => <div className="flex w-full flex-wrap items-center justify-between gap-2"><div className="text-xs text-stone-400">{t("productionCanvas.deleteHint")}</div><div className="flex flex-wrap gap-2"><Button disabled={uploadingCover || savingPlan} onClick={() => void saveFolder(false)}>{t("sceneProduction.saveDraft")}</Button>{originNode}</div></div>}>
-                {draft ? (
-                    <div className="space-y-5">
-                        <div className="grid gap-5 sm:grid-cols-[180px_minmax(0,1fr)]">
-                            <button type="button" className="group relative min-h-40 overflow-hidden rounded-xl border border-dashed border-stone-300 bg-stone-100 text-left dark:border-stone-700 dark:bg-stone-900" onClick={() => coverInputRef.current?.click()}>
-                                {draft.coverUrl ? <img src={draft.coverUrl} alt={draft.name} className="h-full min-h-40 w-full object-cover" /> : <div className="grid min-h-40 place-items-center text-center text-xs text-stone-400"><span><ImagePlus className="mx-auto mb-2 size-6" />{t("drama.uploadCover")}</span></div>}
-                                <span className="absolute inset-x-0 bottom-0 bg-black/55 px-3 py-2 text-center text-xs text-white opacity-0 transition group-hover:opacity-100">{t("drama.changeCover")}</span>
-                            </button>
-                            <div className="space-y-4">
-                                <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.projectName")}</span><Input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
-                                <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.tags")}</span><Input placeholder={t("drama.tagsPlaceholder")} value={draft.tags} onChange={(event) => setDraft({ ...draft, tags: event.target.value })} /></label>
-                            </div>
-                        </div>
-                        <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.outline")}</span><Input.TextArea rows={7} placeholder={t("drama.outlinePlaceholder")} value={draft.outline} onChange={(event) => setDraft({ ...draft, outline: event.target.value })} /></label>
-                        <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("productionCanvas.planRequirements")}</span><Input.TextArea rows={3} value={draft.productionPlan.requirements} onChange={event => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, requirements: event.target.value } })} /></label>
-                        <p className="text-xs text-muted-foreground">{t("productionCanvas.newEpisodeDefaults")}</p>
-                        <div className="grid gap-4 sm:grid-cols-2">
-                            <label><p className="mb-2 text-sm">{t("productionCanvas.storyboardImageMode")}</p><Select className="w-full" placeholder={t("productionCanvas.storyboardImageRequired")} value={draft.productionPlan.storyboardImageMode} onChange={storyboardImageMode => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, storyboardImageMode } })} options={[{ value: "generate", label: t("productionCanvas.storyboardImagesGenerate") }, { value: "skip", label: t("productionCanvas.storyboardImagesSkip") }]} />{!draft.productionPlan.storyboardImageMode && <p className="mb-1 mt-2 text-xs text-red-500">{t("productionCanvas.storyboardImageRequired")}</p>}<p className="mt-2 text-xs text-muted-foreground">{t("productionCanvas.storyboardImageModeHint")}</p></label>
-                            <SceneProductionSettings value={draft.productionPlan} onChange={patch => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, ...patch } })} />{draft.productionPlan.parallelScenes && !draft.productionPlan.reviewPolicy && <p className="mt-2 text-xs text-red-500">{t("sceneProduction.reviewRequired")}</p>}
-                            <p className="text-xs text-muted-foreground">{t("sceneProduction.draftHint")}</p>
-                            <div><p className="mb-2 text-sm">{t("productionCanvas.generalImageModel")}</p><ModelPicker config={modelConfig} capability="image" fullWidth value={draft.productionPlan.imageModel} onChange={imageModel => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, imageModel } })} /></div>
-                            {(["character", "scene", "prop", "style", "keyframe"] as const).map(kind => <div key={kind}><p className="mb-2 text-sm">{t(`productionCanvas.assetModel.${kind}`)}</p><ModelPicker config={modelConfig} capability="image" fullWidth placeholder={t("productionCanvas.inheritImageModel")} value={draft.productionPlan.imageModelsByKind[kind]} onChange={model => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, imageModelsByKind: { ...draft.productionPlan.imageModelsByKind, [kind]: model } } })} /><Button type="link" size="small" disabled={!draft.productionPlan.imageModelsByKind[kind]} onClick={() => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, imageModelsByKind: { ...draft.productionPlan.imageModelsByKind, [kind]: undefined } } })}>{t("productionCanvas.inheritImageModel")}</Button></div>)}
-                            <div><p className="mb-2 text-sm">{t("productionCanvas.videoModel")}</p><ModelPicker config={modelConfig} capability="video" fullWidth value={draft.productionPlan.h3Model} onChange={h3Model => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, h3Model } })} /></div>
-                            <label><p className="mb-2 text-sm">{t("director.workspace.videoAspectRatio")}</p><Select className="w-full" allowClear value={draft.productionPlan.videoAspectRatio || undefined} onChange={videoAspectRatio => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, videoAspectRatio: videoAspectRatio || null } })} options={["9:16", "16:9", "1:1", "4:3", "3:4", "2:3", "3:2", "21:9"].map(value => ({ value, label: value }))} /></label>
-                        </div>
-                        <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.description")}</span><Input.TextArea rows={3} placeholder={t("drama.descriptionPlaceholder")} value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label>
-                        <div className="rounded-xl border border-red-200 p-4 dark:border-red-950">
-                            <p className="text-sm font-medium text-red-600 dark:text-red-400">{t("productionCanvas.dangerZone")}</p>
-                            <Button danger type="text" className="mt-2" icon={<Trash2 className="size-4" />} onClick={deleteDrama}>{t("drama.deleteProject")}</Button>
-                        </div>
-                        <input ref={coverInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => void handleCoverChange(event)} />
-                    </div>
-                ) : null}
-            </Modal>
+            
+            <input ref={coverInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => void handleCoverChange(event)} />
         </div>
     );
 }
@@ -605,12 +582,6 @@ function EpisodeCard({ episode, project, onProduce, onEdit, onDelete, t }: { epi
             <span className="shrink-0">{project ? `${project.summary?.nodeCount ?? project.nodes.length} ${t("drama.nodes")}` : ""}</span>
         </div>
     </article>;
-}
-
-/** 生产规划展示：空值不显示空白，统一标记「未设置」。 */
-function planLabel(t: TFunction, value?: string | null) {
-    if (!value) return t("productionCanvas.notConfigured");
-    return value;
 }
 
 function formatBytes(bytes: number) {

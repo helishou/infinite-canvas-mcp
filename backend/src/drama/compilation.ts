@@ -47,6 +47,28 @@ const hasBlockingArtifactDiagnostics = (value: unknown) => {
     if (Array.isArray(report.blockers)) return report.blockers.length > 0;
     return false;
 };
+function resolveCompilerSourceFiles(source: any, boundFiles: Record<string, string | undefined>) {
+    const walk = (node: any, assetId?: string): any => {
+        if (Array.isArray(node)) return node.map(item => walk(item, assetId));
+        if (node && typeof node === "object") {
+            const out: Record<string, any> = {};
+            const currentAssetId = (typeof node._compiler_source_asset_id === "string" ? node._compiler_source_asset_id : undefined)
+                || (typeof node.id === "string" ? node.id : undefined) || assetId;
+            for (const [key, value] of Object.entries(node)) {
+                if ((key === "file" || key === "approved_file") && typeof value === "string" && !path.isAbsolute(value) && currentAssetId) {
+                    out[key] = boundFiles[`${currentAssetId}\0asset`] ?? value;
+                } else out[key] = walk(value, currentAssetId);
+            }
+            return out;
+        }
+        return node;
+    };
+    return walk(source);
+}
+function resolveCompilerDirectorFiles(director: DirectorProduction, boundFiles: Record<string, string | undefined>): DirectorProduction {
+    const source = resolveCompilerSourceFiles(director.source, boundFiles);
+    return { ...director, source, sourceHash: hash(source) };
+}
 function schedule(work: () => Promise<void>, _createdAt: string) {
     void compilerPool.submit(work).catch(error => console.error("COMPILATION_RECEIPT_WRITE_FAILED", error instanceof Error ? error.name : "Error"));
 }
@@ -222,28 +244,10 @@ export class ProductionCompilationService {
         // Match by asset_id (not basename): the real media file is content-addressed (e.g. a62527ff-....png), so basename
         // never matches the authored "shared/STYLE_MOTHER.png". Walk asset_plan/style_lock and use each entry's id to look
         // up boundFiles[`${id}\0asset`].
-        const resolveSourceFiles = (source: any): any => {
-            const walk = (node: any, assetId?: string): any => {
-                if (Array.isArray(node)) return node.map(item => walk(item, assetId));
-                if (node && typeof node === "object") {
-                    const out: Record<string, any> = {};
-                    const currentAssetId = (typeof node.id === "string" ? node.id : undefined) || assetId;
-                    for (const [key, val] of Object.entries(node)) {
-                        if ((key === "file" || key === "approved_file") && typeof val === "string" && !path.isAbsolute(val) && currentAssetId) {
-                            const real = boundFiles[`${currentAssetId}\0asset`];
-                            out[key] = real ?? val;
-                        } else out[key] = walk(val, currentAssetId);
-                    }
-                    return out;
-                }
-                return node;
-            };
-            return walk(source);
-        };
         // Keep the frozen owner snapshot complete; only the compiler input is scoped.
         // The worker may narrow compilation to pending targets, but apply/reuse still need
         // the full source so existing target receipts can be verified against their scopes.
-        const resolvedSource = resolveSourceFiles(JSON.parse(JSON.stringify(director.source)));
+        const resolvedSource = resolveCompilerSourceFiles(JSON.parse(JSON.stringify(director.source)), boundFiles);
         // DEBUG: verify the fix actually resolves STYLE_MOTHER's relative path
         const debugPlan = (resolvedSource as any).asset_plan?.find((p: any) => p.id === "STYLE_MOTHER");
         if (debugPlan) console.error("[stylefix-debug] STYLE_MOTHER.file =", debugPlan.file);
@@ -280,7 +284,8 @@ export class ProductionCompilationService {
         const director = this.bindCanvasStyleAnchor(id, this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director), scope?.targetIds, true, undefined, compileInputDiagnostics));
         const scoped = scope ? compilationScopeInput(director, scope) : undefined;
         const references = this.service.compilationReferenceFiles(id, scoped?.director || director);
-        const compileInput = scope ? scopedCompilerInput(scoped!.director, scope) : director;
+        const compileInputBase = scope ? scopedCompilerInput(scoped!.director, scope) : director;
+        const compileInput = resolveCompilerDirectorFiles(compileInputBase, references);
         const result = await new Promise<any>((resolve, reject) => {
             const worker = new Worker(`const { parentPort, workerData } = require("node:worker_threads");
                 (async () => { const engine = await import(workerData.module); parentPort.postMessage(engine.preflightCompilationDirector(workerData.director, (id, label) => workerData.references[id + "\\0" + label])); })().catch(error => parentPort.postMessage({ error: error.message }));`, { eval: true, workerData: { module: import.meta.resolve("@basketikun/canvas-agent/skills/acheng"), director: compileInput, references } });
@@ -372,7 +377,8 @@ export class ProductionCompilationService {
                 job.status = "running"; this.saveJob(job);
                 const directory = path.join(this.root, job.preparedId);
                 const projection = job.scope ? compilationScopeInput(job.director, job.scope) : undefined;
-                const { targetIds, reusable, input: compileInput } = this.effectiveInput(job.id, job.director, job.scope);
+                const { targetIds, reusable, input: rawCompileInput } = this.effectiveInput(job.id, job.director, job.scope);
+                const compileInput = resolveCompilerDirectorFiles(rawCompileInput, job.references);
                 const pending = targetIds.filter(id => !reusable.some(artifact => artifact.targetId === id));
                 let compiled: ReturnType<Compiler>;
                 const cached = targetIds.length > 0 && !pending.length;
@@ -495,9 +501,10 @@ export class ProductionCompilationService {
         const preparedId = crypto.randomUUID();
         const directory = path.join(this.root, preparedId);
         const targets = this.compilationTargets(director), reusable = this.reusableArtifacts(id, director, targets);
+        const compileInput = resolveCompilerDirectorFiles(effective.input, references);
         const compiled: ReturnType<Compiler> = targets.length > 0 && targets.every(id => reusable.some(artifact => artifact.targetId === id))
-            ? { director: structuredClone(effective.input), exitCode: 0, diagnostics: reusable.flatMap(artifact => artifact.receipt.diagnostics || []) as ReturnType<Compiler>["diagnostics"], audit: { status: "REUSED", artifactIds: reusable.map(item => item.id) }, sourceAdjustments: [], acceptance: { reused: true } }
-            : this.compiler(effective.input, directory, (targetId, label) => references[`${targetId}\0${label}`], this.compiler === compileAchengDirector ? director.engine.runtimeId : undefined);
+            ? { director: structuredClone(compileInput), exitCode: 0, diagnostics: reusable.flatMap(artifact => artifact.receipt.diagnostics || []) as ReturnType<Compiler>["diagnostics"], audit: { status: "REUSED", artifactIds: reusable.map(item => item.id) }, sourceAdjustments: [], acceptance: { reused: true } }
+            : this.compiler(compileInput, directory, (targetId, label) => references[`${targetId}\0${label}`], this.compiler === compileAchengDirector ? director.engine.runtimeId : undefined);
         compiled.diagnostics = [...compileInputDiagnostics, ...compiled.diagnostics];
         this.applyTargetCompileBlocks(compiled.director, compiled.diagnostics);
         const continuityReceipt = this.applyContinuityGate(id, compiled.director, compiled.diagnostics);

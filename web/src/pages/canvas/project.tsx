@@ -1,5 +1,6 @@
 import "@/components/canvas/canvas-workspace-chrome.css";
 import { libraryAssetNode } from "@/lib/canvas/library-asset-node";
+import { propNodeAssetImage } from "@/lib/canvas/prop-node-asset";
 import type { SharedAssetSource, SharedAssetReference } from "@basketikun/canvas-agent/shared-asset-reference";
 import { CanvasBatchRename } from "@/components/canvas/canvas-batch-rename";
 import { useCanvasProductionContext } from "@/components/production/canvas-production-workspace";
@@ -7,6 +8,7 @@ import { productionObjectForNode, productionObjectPath, productionObjectState, t
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { useMediaPreviewStore } from "@/stores/use-media-preview-store";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
+import { productionSegments } from "@/lib/production-source";
 import { viewportForCanvasNodes } from "@/lib/canvas/canvas-navigation";
 import { abortCanvasGenerationRequestsByRunningId, finishCanvasGenerationRequest as finishCanvasGenerationRequestInRegistry, startCanvasGenerationRequest as startCanvasGenerationRequestInRegistry, type ActiveCanvasGenerationRequest } from "@/lib/canvas/canvas-generation-lifecycle";
 import { CANVAS_CLIPBOARD_FORMAT, findClipboardMediaType, isLegacyCanvasClipboardText, parseCanvasClipboard, serializeCanvasClipboard, type CanvasClipboard } from "@/lib/canvas/canvas-clipboard";
@@ -2216,7 +2218,11 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         const asset = director && Object.entries(director.assets).find(([, value]) => value.nodeId === nodeId);
         const shotId = asset && Object.entries(director!.shotInputs).find(([, value]) => value.keyframeAssetId === asset[0])?.[0];
         const segmentId = getPluginNodeView(projectId, nodeId).getSnapshot().selectedSegmentId;
-        const clip = production?.draft.clipGroups.find(group => group.nodeId === nodeId && (!segmentId || group.segmentId === segmentId));
+        const canvasNode = useCanvasStore.getState().projects.find(item => item.id === projectId)?.nodes.find(item => item.id === nodeId);
+        const canvasSegments = Array.isArray(canvasNode?.metadata?.segments) ? canvasNode!.metadata!.segments as Array<Record<string, any>> : [];
+        const clipMetadata = canvasSegments.find(item => !segmentId || item.id === segmentId);
+        const clipTargetId = String(clipMetadata?.productionClipProjection?.targetId || "");
+        const clip = production ? productionSegments(production).find(item => String(item.id) === clipTargetId) : undefined;
         const target = shotId ? `shot:${shotId}` : asset ? `asset:${asset[0]}` : clip ? `segment:${clip.id}` : "";
         if (!canvasHost && target && searchParams.get("target") !== target) {
             const query = new URLSearchParams(searchParams);
@@ -3600,6 +3606,23 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     source: "Canvas",
                     data: { url: node.metadata.content, storageKey: node.metadata.storageKey, bytes: node.metadata.bytes || 0, mimeType: node.metadata.mimeType || "audio/mpeg", durationMs: node.metadata.durationMs },
                     metadata: { source: "canvas", nodeId: node.id, prompt: node.metadata?.prompt },
+                });
+                message.success(t("common.addedToAssets"));
+                return;
+            }
+            if (node.type === CanvasNodeType.Prop) {
+                const image = propNodeAssetImage(node);
+                if (!image) return message.error(t("canvas.projectPage.noImageToSave"));
+                const dramaId = await getCurrentCanvasDramaId();
+                const existing = useAssetStore.getState().assets.find(asset => asset.kind === "image"
+                    && asset.metadata?.projectId === projectId && asset.metadata?.nodeId === node.id);
+                const dataUrl = image.storageKey ? "" : image.url || "";
+                await saveCanvasAsset(node, {
+                    kind: "image", title: (node.metadata?.propName || node.title || t("canvas.projectPage.canvasImage")).trim(),
+                    coverUrl: image.storageKey ? backendMediaUrl(image.storageKey) : image.url || "", tags: existing?.tags || [], dramaId, source: "Canvas",
+                    data: { dataUrl, storageKey: image.storageKey, width: image.width || node.width, height: image.height || node.height, bytes: image.bytes || getDataUrlByteSize(dataUrl), mimeType: image.mimeType || "image/png" },
+                    note: node.metadata?.propDescription || existing?.note || undefined,
+                    metadata: { source: "canvas", projectId, nodeId: node.id, propDescription: node.metadata?.propDescription || "" }, ...(existing ? { id: existing.id } : {}),
                 });
                 message.success(t("common.addedToAssets"));
                 return;

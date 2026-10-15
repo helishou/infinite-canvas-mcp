@@ -8,6 +8,7 @@ import { subjectShotWindows, subjectStateProjection } from "@basketikun/canvas-a
 import { backendMediaUrl, fetchProductionWorkbench, type EpisodeProduction, type ProductionCompilationDiagnostic, type ProductionTarget } from "@/services/backend-api";
 import { records, formatSeconds } from "./director-display";
 import { productionWorkbenchValue, subjectDisplayName } from "./subject-shot-draft";
+import { productionSegmentRuntimeMatches } from "@/lib/production-source";
 import { continuityPresentation } from "./continuity-presentation";
 import { currentClipRefreshes } from "./production-refresh-display";
 import { ReferenceNodeLink } from "./reference-node-link";
@@ -165,12 +166,12 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const visible = shots.filter(shot => sceneIds.has(String(shot.id)) && `${title(shot)} ${shot.visual || ""} ${people(shot)}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()));
     const referencedNodes = new Set(records(selected?.subject_usages).flatMap(usage => records(subjects.find(subject => subject.id === usage.subjectId)?.pictureBindings).map(binding => String(binding.sourceNode?.nodeId || "")))
         .concat(records(selected?.keyframes).map(frame => String(frame.sourceNode?.nodeId || ""))));
-    const h3ClipGroup = production.draft.clipGroups.find(group => String(group.id) === String(clip?.id || ""));
-    const h3ClipNodeIds = new Set(h3ClipGroup?.nodeId ? [String(h3ClipGroup.nodeId)] : []);
+    const h3ClipMatches = clip ? productionSegmentRuntimeMatches(canvasNodes as any, String(clip.id)) : [];
+    const h3ClipNodeIds = new Set(h3ClipMatches.length === 1 ? [String(h3ClipMatches[0].node.id)] : []);
     const referenceEvents = useReferenceResultVersion(records(selected?.subject_usages).flatMap(usage => records(subjects.find(subject => subject.id === usage.subjectId)?.pictureBindings).map(binding => binding.sourceNode || {})).concat(records(selected?.keyframes).map(frame => frame.sourceNode || {})));
     // Metadata only invalidates this read; Backend still selects and verifies the result.
     const referenceVersion = JSON.stringify(canvasNodes.filter(node => referencedNodes.has(node.id) || h3ClipNodeIds.has(node.id)).map(node => [node.id, node.metadata?.images, node.metadata?.storageKey, node.metadata?.resultStorageKey, node.metadata?.primaryImageId, node.metadata?.smartImageReferenceSelection,
-        h3ClipNodeIds.has(node.id) ? records(node.metadata?.segments).filter(segment => String(segment.id) === String(h3ClipGroup?.segmentId || "")).map(segment => [segment.audioDrive, segment.audioDriveFile, segment.audioDriveStart, segment.audioDriveEnd, segment.referenceBindings]) : null]));
+        h3ClipNodeIds.has(node.id) ? records(node.metadata?.segments).filter(segment => String(segment.id) === String(h3ClipMatches[0]?.segment.id || "")).map(segment => [segment.audioDrive, segment.audioDriveFile, segment.audioDriveStart, segment.audioDriveEnd, segment.referenceBindings]) : null]));
     const readView = subjectAssembly ? "shot_workbench" : "clip_workbench";
     const readId = subjectAssembly ? activeId : String(clip?.id || "");
     const expectedReadKey = `${ownerKey}|${readView}|${readId}|${director.sourceHash}|${referenceVersion}|${referenceEvents}`;
@@ -201,7 +202,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const artifact = director.artifacts.find(item => item.kind === "h3" && item.targetId === clip?.id);
     const currentRefreshes = currentClipRefreshes(production.clipRefreshes || [], clips.map(item => String(item.id)), director.sourceHash);
     const refreshCandidate = currentRefreshes.find(item => item.segmentId === clip?.id);
-    const compiled = Boolean(workbenchReadKey.current === expectedReadKey && artifact && records(subjectAssembly ? workbench?.directorArtifacts : workbench?.directorReferences?.compiled).some(item => item.id === artifact.id && item.sha256 === artifact.sha256 && item.current === true && item.status === "ready"));
+    const compiled = Boolean(workbenchReadKey.current === expectedReadKey && artifact && records(subjectAssembly ? workbench?.runtime?.directorArtifacts : workbench?.directorReferences?.compiled).some(item => item.id === artifact.id && item.sha256 === artifact.sha256 && item.current === true && item.status === "ready"));
     const compileBasisMatches = compileTargets?.sourceHash === director.sourceHash
         && compileTargets.engineRuntimeId === director.engine.runtimeId
         && compileTargets.compilerHash === director.engine.compilerHash;
@@ -209,7 +210,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
         && compileTargets.items.some(item => item.targetId === String(clip?.id) && item.status === "ready");
     const currentCompiled = compiled || compiledByLatestReceipt;
     const refresh = currentCompiled && ["blocked", "failed"].includes(refreshCandidate?.status || "") ? undefined : refreshCandidate;
-    const state = subjectAssembly ? workbench?.continuity || states[activeId] : storyboardReportedState(workbench?.continuity, activeId);
+    const state = subjectAssembly ? workbench?.context?.continuity || states[activeId] : storyboardReportedState(workbench?.continuity, activeId);
     const assetIds = [...new Set([...(selected?.required_assets || []), ...(director.shotInputs[activeId]?.assetIds || [])].map(String))];
     const keyframeAssetIds = new Set(Object.values(director.shotInputs).map(input => String(input.keyframeAssetId || "")).filter(Boolean));
     const assetOptionsById = new Map<string, string>();
@@ -222,9 +223,9 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const assetOptions = [...assetOptionsById].map(([value, label]) => ({ value, label }));
     const ordinaryAssetOptions = assetOptions;
     const selectedKeyframeAssetId = String(director.shotInputs[activeId]?.keyframeAssetId || "");
-    const references: Array<Record<string, any> & { subjectId: string }> = subjectAssembly ? records(workbench?.subjectUsages).flatMap(usage => records(usage.pictureBindings).map(binding => ({ ...binding, subjectId: String(usage.subjectId), presentation: usage.presentation })))
+    const references: Array<Record<string, any> & { subjectId: string }> = subjectAssembly ? records(workbench?.context?.resolvedSubjectUsages).flatMap(usage => records(usage.pictureBindings).map(binding => ({ ...binding, subjectId: String(usage.subjectId) })))
         : assetIds.map(assetId => ({ id: assetId, subjectId: assetId, displayName: records(source.asset_plan).find(asset => String(asset.asset_id || asset.id) === assetId)?.asset_name || assetId, resolved: workbench?.assets?.[assetId] || director.assets[assetId] }));
-    const keyframes = records(workbench?.keyframes), referenceDiagnostics = records(workbench?.resolutionDiagnostics);
+    const keyframes = records(workbench?.context?.keyframeMedia), referenceDiagnostics = records(workbench?.runtime?.resolutionDiagnostics);
     // 左栏「连续性状态」里的动作块（与下一段的边界开关），由 DirectorPanel 注入。
     // Empty sources still pass through this setup before the empty-state branch below.
     // Do not call shot renderers until selection has resolved to an actual shot.
@@ -237,7 +238,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const clipCompileState = (clipId: string) => {
         const job = currentRefreshes.find(item => String(item.segmentId) === clipId);
         const artifact = director.artifacts.find(item => item.kind === "h3" && String(item.targetId) === clipId);
-        const projection = workbenchReadKey.current === expectedReadKey && clipId === String(clip?.id) ? records(subjectAssembly ? workbench?.directorArtifacts : workbench?.directorReferences?.compiled).find(item => item.id === artifact?.id && item.sha256 === artifact?.sha256) : undefined;
+        const projection = workbenchReadKey.current === expectedReadKey && clipId === String(clip?.id) ? records(subjectAssembly ? workbench?.runtime?.directorArtifacts : workbench?.directorReferences?.compiled).find(item => item.id === artifact?.id && item.sha256 === artifact?.sha256) : undefined;
         const status = storyboardArtifactState(artifact, projection);
         const readyByLatestReceipt = compileBasisMatches && compileTargets.items.some(item => item.targetId === clipId && item.status === "ready");
         const notReadyByLatestReceipt = compileBasisMatches && (compileTargets.notReadyTargetIds || compileTargets.items.filter(item => item.status !== "ready").map(item => item.targetId)).includes(clipId);
@@ -425,7 +426,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                     <section className={`storyboard-clip-group ${entry.group.id === clip?.id ? "is-selected" : ""}`}>
                         <div className="storyboard-clip-heading flex items-center justify-between gap-3">
                             <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><strong className="text-sm">{clipLabel(entry.index)}</strong><Tag className="!m-0" title={t("director.atomic.savedSourceStatus")} color={clipCompileState(String(entry.group.id)).color}>{clipCompileState(String(entry.group.id)).label}</Tag></div><p className="mt-1 text-xs text-muted-foreground">{t("director.atomic.clipSummary", { count: entry.members.length, seconds: formatSeconds(entry.members.reduce((sum, shot) => sum + duration(shot), 0)) })} · {String(entry.group.mode || "")}{entry.shown.length !== entry.members.length && <span className="ml-2">{t("director.atomic.filteredMembers", { shown: entry.shown.length, total: entry.members.length })}</span>}</p></div>
-                            <div className="flex shrink-0 items-center gap-1"><Button type="text" size="small" onClick={() => onClip(String(entry.group.id))} aria-label={clipLabel(entry.index) + " · " + t("director.atomic.viewResults")}>{t("director.atomic.viewResults")}</Button>{production.draft.clipGroups.find(group => group.id === String(entry.group.id))?.nodeId && <Button type="text" size="small" icon={<ArrowUpRight className="size-3.5" />} title={t("director.atomic.locateClip")} onClick={() => onLocateClip?.(String(entry.group.id))}>H3</Button>}</div>
+                            <div className="flex shrink-0 items-center gap-1"><Button type="text" size="small" onClick={() => onClip(String(entry.group.id))} aria-label={clipLabel(entry.index) + " · " + t("director.atomic.viewResults")}>{t("director.atomic.viewResults")}</Button>{productionSegmentRuntimeMatches(canvasNodes as any, String(entry.group.id)).length === 1 && <Button type="text" size="small" icon={<ArrowUpRight className="size-3.5" />} title={t("director.atomic.locateClip")} onClick={() => onLocateClip?.(String(entry.group.id))}>H3</Button>}</div>
                         </div>
                         <div className="storyboard-clip-shots">
                             {entry.shown.map((shot, shotIndex) => {

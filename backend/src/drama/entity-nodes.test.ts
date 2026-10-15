@@ -67,6 +67,21 @@ test("prop image resolves into the same generation reference path as scene image
     assert.equal(result[0].storageKey, "archived-prop"); assert.equal(result[0].name, "扳手");
 });
 
+test("a Subject identity picture projects onto its prop node and follows later source image updates", t => {
+    const f = fixture(t), current = f.service.get("ep");
+    f.db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "prop-picture", nodeType: "config", title: "扳手身份图", metadata: {
+        generationMode: "image", status: "success", storageKey: "prop-image-v1", content: "/media/prop-image-v1.png", mimeType: "image/png", naturalWidth: 640, naturalHeight: 640,
+    } }], { runtimeWrite: true });
+    f.service.edit("ep", { operationId: "register-prop-picture-subject", expectedRevision: current.revision, ops: [{ type: "upsert_director_subject", subject: {
+        id: "SUBJECT_P1", kind: "prop", entityRef: { ownerKind: "episode", ownerId: "ep", kind: "asset", id: "P1" },
+        pictureBindings: [{ id: "P1-identity", assetId: "P1", sourceNode: { projectId: "canvas", nodeId: "prop-picture" }, selection: { mode: "node_selection" }, provides: ["identity"], retain: ["扳手身份"], exclude: [], applicableState: {}, defaultFor: ["identity"] }],
+    } }] });
+    assert.equal(entity(f.db, "P1").metadata.propImage.storageKey, "prop-image-v1");
+    f.db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "prop-picture", metadata: { storageKey: "prop-image-v2", content: "/media/prop-image-v2.png" } }], { runtimeWrite: true, source: { kind: "task", clientId: "task:prop-picture" } });
+    assert.equal(entity(f.db, "P1").metadata.propImage.storageKey, "prop-image-v2");
+    assert.equal(entity(f.db, "P1").metadata.propImage.url, "/media/prop-image-v2.png");
+});
+
 test("renaming a typed node title writes its entity name and replays the original unmodified command", t => {
     const f = fixture(t), node = entity(f.db, "P1"), revision = Number(f.db.getCanvasProject("canvas")!.revision);
     const ops = [{ type: "update_node", id: node.id, patch: { title: "新扳手" } }];

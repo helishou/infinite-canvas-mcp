@@ -1,6 +1,7 @@
 import { Zip, ZipPassThrough } from "fflate";
 
 import { backendMediaUrl, type EpisodeProduction, type ProductionReadiness } from "@/services/backend-api";
+import { productionSegments } from "@/lib/production-source";
 
 type RecordValue = Record<string, unknown>;
 type CanvasNode = { id: string; title?: string; type?: string; metadata?: Record<string, unknown> };
@@ -56,7 +57,7 @@ export async function exportAchengDeliveryBundle(options: ExportOptions) {
     const actualMedia: BinaryEntry[] = [];
     for (const [assetId, asset] of Object.entries(d?.assets || {})) if (asset.storageKey) actualMedia.push({ key: asset.storageKey, path: `outputs/assets/${safeName(assetId)}.${extensionOf(asset.storageKey)}`, kind: "asset", targetId: assetId, sha256: asset.sha256 });
     for (const [shotId, frame] of Object.entries(snapshot.keyframes)) if (frame.storageKey) actualMedia.push({ key: frame.storageKey, path: `outputs/keyframes/${safeName(shotId)}.${extensionOf(frame.storageKey)}`, kind: "keyframe", targetId: shotId });
-    for (const group of snapshot.clipGroups) {
+    for (const group of productionSegments({ draft: snapshot as EpisodeProduction["draft"], published: null })) {
         const node = options.canvasNodes.find(item => item.id === group.nodeId);
         const segments = Array.isArray(node?.metadata?.segments) ? node.metadata!.segments.map(record) : [];
         const segment = segments.find(item => String(item.id || "") === String(group.segmentId || ""));

@@ -88,13 +88,15 @@ function detachReferences(value: unknown, assetIds: Set<string>, subjectIds: Set
 export function createManualDirectorAsset(director: DirectorProduction, operation: Extract<ProductionOperation, { type: "create_manual_director_asset" }>, owner: { kind: "episode" | "canvas"; id: string }): void {
     const source = director.source as Record<string, any>;
     const plan = { ...operation.assetPlan, created_by: "manual" } as Row;
-    const card = operation.assetCard as Row;
+    const card = { ...operation.assetCard } as Row;
     const id = String(plan.id || "").trim();
     const kind = String(plan.kind || "");
     if (!id || !["character", "scene", "prop"].includes(kind) || plan.status !== "planned") throw new Error("MANUAL_ASSET_INVALID: assetPlan must be a planned character, scene or prop with a stable ID");
     if (String(card.id || "") !== id || String(card.asset_id || "") !== id || card.asset_kind !== kind) throw new Error(`MANUAL_ASSET_CARD_MISMATCH: ${id}`);
     if (rows(plan.depends_on).length || (Array.isArray(plan.depends_on) && plan.depends_on.length)) throw new Error(`MANUAL_ASSET_DEPENDENCIES_NOT_EMPTY: ${id}`);
     if (Array.isArray(card.references) && card.references.length) throw new Error(`MANUAL_ASSET_REFERENCES_NOT_EMPTY: ${id}`);
+    if (card.reference_policy === undefined) card.reference_policy = "none";
+    if (card.reference_policy !== "none") throw new Error(`MANUAL_ASSET_REFERENCE_POLICY_INVALID: ${id}`);
     if (rows(source.asset_plan).some(row => valueOf(row) === id) || rows(source.asset_cards).some(row => valueOf(row) === id)) throw new Error(`ASSET_ALREADY_EXISTS: ${id}`);
 
     const registryKind = kind === "character" || kind === "scene" ? kind : undefined;

@@ -4,6 +4,7 @@ import type { CanvasCommandContext, CanvasCommit } from "./collaboration.js";
 import { commandFingerprint, collaborationError } from "./collaboration.js";
 import type { CanvasOperation } from "./project-ops.js";
 import { ensureProductionCanvas } from "../drama/production-canvas.js";
+import { directorHash, projectDirector } from "../drama/director.js";
 import { productionNodePosition } from "../drama/production-layout-geometry.js";
 import { selectSmartImageResult } from "@basketikun/canvas-agent/reference-contract";
 import { libraryAssetNode, assetField, sameAssetValue, setAssetField, sharedAssetFields, resolveSharedAssetNode, stripSharedAssetContent, type AssetNode, type SharedAssetReference, type SharedAssetSource } from "@basketikun/canvas-agent/shared-asset-reference";
@@ -144,7 +145,7 @@ export function captureAssetEdits(db: BackendDatabase, project: CanvasProject, o
     const touched = new Set([...(isText ? ["metadata.content"] : []), ...(Object.keys(operation.patch || {}).includes("title") ? ["title"] : []), ...Object.keys(operation.metadata || {}).map(k => `metadata.${k}`), ...(operation.metadataDelete as string[] || []).map(k => `metadata.${k}`)]);
     if (ref.writeThrough) {
         if (context?.source?.kind === "task") {
-            const taskId = String(node.metadata?.generationTaskId || node.metadata?.runtimeTaskId || "");
+            const taskId = String(node.metadata?.generationTaskId || node.metadata?.runtimeTaskId || String(context.source.clientId || "").replace(/^task:/, ""));
             const task = taskId ? db.getTask(taskId) : null;
             const storageKey = String(node.metadata?.storageKey || "");
             const outputs = task ? [...task.outputs, ...(Array.isArray(task.result?.media) ? task.result.media as Array<Record<string, unknown>> : [])] : [];
@@ -188,7 +189,45 @@ function changedNodePatch(previous: AssetNode, node: AssetNode): CanvasOperation
         metadata: Object.fromEntries(changed.filter(f => f !== "title" && assetField(node, f) !== undefined).map(f => [f.slice(9), assetField(node, f)])),
         metadataDelete: changed.filter(f => f !== "title" && assetField(node, f) === undefined).map(f => f.slice(9)) };
 }
+function syncSharedProductionOwners(db: BackendDatabase, source: SharedAssetSource, node: AssetNode) {
+    const updates: Array<{ entityId: string; revision: number }> = [];
+    for (const episode of db.listDramaEpisodes(source.dramaId)) {
+        const row = db.db.prepare("SELECT revision,draft_json FROM episode_productions WHERE episode_id=?").get(episode.id) as { revision: number; draft_json: string } | undefined;
+        if (!row) continue;
+        const draft = JSON.parse(row.draft_json) as Record<string, any>, director = draft.director;
+        if (!director) continue;
+        const plans = Array.isArray(director.source?.asset_plan) ? director.source.asset_plan as Array<Record<string, any>> : [];
+        const plan = plans.find(item => item.sharedSource?.sourceProjectId === source.sourceProjectId && item.sharedSource?.sourceNodeId === source.sourceNodeId);
+        if (!plan) continue;
+        const kind = String(plan.kind || ""), entityId = String(plan.entity_id || plan.id || plan.asset_id || "");
+        const metadata = node.metadata || {};
+        const name = String(node.title || ""), description = String(metadata[`${kind}Description`] || "");
+        let changed = false;
+        if (kind === "character" || kind === "scene") {
+            const registryName = kind === "character" ? "character_registry" : "scene_registry";
+            const entity = (Array.isArray(director.source[registryName]) ? director.source[registryName] : []).find((item: Record<string, any>) => String(item.id || "") === entityId);
+            if (!entity) continue;
+            if (String(entity.name || "") !== name) { entity.name = name; changed = true; }
+            if (kind === "character" && String(entity.appearance || "") !== description) { entity.appearance = description; changed = true; }
+            if (String(entity.description || "") !== description) { entity.description = description; changed = true; }
+        } else if (kind === "prop") {
+            if (String(plan.asset_name || "") !== name) { plan.asset_name = name; changed = true; }
+            if (String(plan.description || "") !== description) { plan.description = description; changed = true; }
+        }
+        if (!changed) continue;
+        director.sourceHash = directorHash(director.source);
+        director.artifacts = director.artifacts.map((artifact: Record<string, any>) => ({ ...artifact, status: "stale" }));
+        director.executionAuthorized = false;
+        if (director.workflow?.currentWork) director.workflow.currentWork = { ...director.workflow.currentWork, sourceHash: director.sourceHash };
+        projectDirector(draft as any);
+        const revision = row.revision + 1, updatedAt = new Date().toISOString();
+        db.db.prepare("UPDATE episode_productions SET revision=?,draft_json=?,updated_at=? WHERE episode_id=?").run(revision, JSON.stringify(draft), updatedAt, episode.id);
+        updates.push({ entityId: episode.id, revision });
+    }
+    return updates;
+}
 export function propagateAssetChanges(db: BackendDatabase, projectId: string, before: CanvasProject, after: CanvasProject, deferredCommits: CanvasCommit[], originatingProjectId?: string) {
+    const productionUpdates: Array<{ entityId: string; revision: number }> = [];
     for (const asset of db.listSharedAssetRecordsForProject(projectId)) {
         const source = sourceOf(asset);
         if (!source || source.sourceProjectId !== projectId) continue;
@@ -198,6 +237,7 @@ export function propagateAssetChanges(db: BackendDatabase, projectId: string, be
         if (oldNode && sharedAssetFields(newNode.type).every(f => sameAssetValue(assetField(oldNode, f), assetField(newNode, f)))) continue;
         // Search/directory labels are derived indexes, never a second editable content source.
         db.db.prepare("UPDATE assets SET title=?, updated_at=? WHERE id=?").run(newNode.title || "", String(after.updatedAt || new Date().toISOString()), asset.id);
+        productionUpdates.push(...syncSharedProductionOwners(db, source, newNode));
         for (const id of new Set(assetConsumers(db, source).map(consumer => consumer.projectId))) {
             const project = db.getCanvasProject(id)!;
             if (project.id === projectId || project.id === originatingProjectId) continue;
@@ -208,6 +248,7 @@ export function propagateAssetChanges(db: BackendDatabase, projectId: string, be
                 source: { kind: "system", clientId: "system:shared-library", label: "同步共享资产" } });
         }
     }
+    return productionUpdates;
 }
 export function writeDramaAsset(db: BackendDatabase, asset: Asset, command: AssetWriteCommand = {}): Asset {
     const requestedAsset = asset;

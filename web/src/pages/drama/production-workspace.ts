@@ -1,4 +1,5 @@
 import { productionSceneEntries } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionShots, shotTitle } from "@/lib/production-source";
 import type { EpisodeProduction } from "@/services/backend-api";
 import type { DirectorWorkspace } from "./director-panel";
 
@@ -62,7 +63,7 @@ export function productionTargetTitle(production: EpisodeProduction, target: str
     }
     if (kind === "shot" || kind === "frame" || kind === "keyframe") {
         const shot = rows("shots").find(item => String(item.id) === id);
-        return String(shot?.title || production.draft.shots.find(item => item.id === id)?.title || id);
+        return shotTitle(shot || productionShots(production).find(item => String(item.id) === id), id);
     }
     if (kind === "segment") {
         const segment = rows("segments").find(item => String(item.id) === id);

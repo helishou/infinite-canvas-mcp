@@ -20,10 +20,13 @@ export function productionReadQuery(raw: unknown) {
 }
 
 /** MCP reads select one complete payload instead of repeating source/prompts/history. */
-export function projectProductionRead(production: any, raw: unknown = {}, digest?: (value: string) => string, fullValue: unknown = production) {
+export function projectProductionRead(production: any, raw: unknown = {}, digest?: (value: string) => string, fullValue: unknown = production, artifactStaleReason?: (artifact: any) => string | undefined) {
     const input = productionReadSchema.parse(raw);
-    const header = { episodeId: production.episodeId, ...(production.sceneId ? { sceneId: production.sceneId } : {}), ...(production.projectId ? { projectId: production.projectId } : {}), revision: production.revision, publishedVersion: production.publishedVersion, updatedAt: production.updatedAt };
+    const header = { episodeId: production.episodeId, ...(production.sceneId ? { sceneId: production.sceneId } : {}), ...(production.projectId ? { projectId: production.projectId } : {}), revision: production.revision, publishedVersion: production.publishedVersion, updatedAt: production.updatedAt,
+        ...(production.storageFormat === "v2-projection-migration-required" ? { storageFormat: production.storageFormat } : {}),
+        ...(production.publishedFormatStatus ? { publishedFormatStatus: production.publishedFormatStatus } : {}) };
     const selected = production[input.snapshot];
+    if (input.snapshot === "published" && selected?.director && !subjectPromptV2(selected.director.source)) throw new Error("UNSUPPORTED_PRODUCTION_FORMAT: 历史发布稿是旧版 Director 格式，只能通过维护命令检查；当前 v2 草稿仍可继续编辑。");
     const d = selected?.director;
     const selection = JSON.stringify({ owner: production.episodeId, snapshot: input.snapshot, revision: production.revision, versionHash: production.versionHash, workbenchVersion: production.workbenchVersion, sourceHash: d?.sourceHash, view: input.view, targetIds: input.targetIds, section: input.sourceSection, chunkBytes: input.chunkBytes });
     let offset = 0;
@@ -37,7 +40,7 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
     if (!["clip_workbench", "shot_workbench", "subject_workbench"].includes(input.view) && !input.cursor && input.ifRevision !== undefined && input.ifRevision === production.revision) {
         return { ...header, snapshot: input.snapshot, view: input.view, sourceHash: d?.sourceHash, unchanged: true };
     }
-    if (input.view === "full" && !input.chunkBytes) return fullValue;
+    if (input.view === "full" && !input.chunkBytes) return withoutDirectorProjection(fullValue);
     const next = (index: number) => encodeURIComponent(JSON.stringify({ selection, offset: index }));
     const paginate = (items: any[]) => {
         if (input.cursor && !input.pageSize && !input.chunkBytes) throw new Error("游标读取必须携带 pageSize 或 chunkBytes");
@@ -53,7 +56,7 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
         if (end === offset && offset < bytes.length) throw new Error("CHUNK_TOO_SMALL: chunkBytes 无法容纳下一个字符");
         return { sha256: digest(value), bytes: bytes.length, offset, text: new TextDecoder("utf-8", { fatal: true }).decode(bytes.slice(offset, end)), nextCursor: end < bytes.length ? next(end) : null };
     };
-    if (input.view === "full") return { ...header, snapshot: input.snapshot, chunk: chunk(JSON.stringify(fullValue)) };
+    if (input.view === "full") return { ...header, snapshot: input.snapshot, chunk: chunk(JSON.stringify(withoutDirectorProjection(fullValue))) };
     if (["clip_workbench", "shot_workbench", "subject_workbench"].includes(input.view)) {
         if (input.targetIds?.length !== 1) throw new Error("CLIP_WORKBENCH_TARGET: select exactly one Segment");
         const workbench = input.view === "subject_workbench" ? production.subjectWorkbench
@@ -66,7 +69,9 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
     if (input.view === "source") {
         if (input.targetIds && !input.sourceSection) throw new Error("定向源稿读取必须指定 sourceSection");
         const source = d?.source || null;
-        const rootSections: Record<string, unknown> = { script: selected?.scenes, production_shots: selected?.shots, clip_groups: selected?.clipGroups, keyframes: selected?.keyframes, keyframe_reviews: selected?.keyframeReviews, settings: selected?.settings };
+        if (subjectPromptV2(source) && (input.sourceSection === "production_shots" || input.sourceSection === "clip_groups")) throw new Error("UNSUPPORTED_PRODUCTION_FORMAT: Acheng v2 的 Shot/Segment 只能从 source.shots/source.segments 读取");
+        const rootSections: Record<string, unknown> = { script: subjectPromptV2(source) ? source.script_scenes : selected?.scenes,
+            production_shots: selected?.shots, clip_groups: selected?.clipGroups, keyframes: selected?.keyframes, keyframe_reviews: selected?.keyframeReviews, settings: selected?.settings };
         const section = input.sourceSection === "context" ? Object.fromEntries(Object.entries(source || {}).filter(([key]) => !["asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "subject_registry", "utterances", "ledger"].includes(key))) : input.sourceSection && Object.hasOwn(rootSections, input.sourceSection) ? rootSections[input.sourceSection] : input.sourceSection?.startsWith("ledger.") ? source?.ledger?.[input.sourceSection.split(".")[1]] : input.sourceSection ? source?.[input.sourceSection] : source;
         const filtered = Array.isArray(section) && input.targetIds ? section.filter((item: any) => input.targetIds!.includes(String(item.id || item.asset_id || item.shot_id || item.segment_id || item.fact_id))) : section;
         if (input.chunkBytes) {
@@ -83,7 +88,14 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
             if (input.view !== "artifacts" || selectedArtifacts.length !== 1) throw new Error("分块读取必须选定一个产物");
             return { ...header, snapshot: input.snapshot, targetId: selectedArtifacts[0].targetId, chunk: chunk(selectedArtifacts[0].prompt) };
         }
-        const artifacts = input.view === "artifact_index" ? selectedArtifacts.map(({ prompt, references = [], ...a }: any) => ({ id: a.id, targetId: a.targetId, kind: a.kind, status: a.status, sha256: a.sha256, sourceHash: a.sourceHash, promptBytes: new TextEncoder().encode(prompt).length, referenceCount: references.length })) : selectedArtifacts;
+        const artifacts = input.view === "artifact_index" ? selectedArtifacts.map((artifact: any) => {
+            const { prompt, references = [], ...a } = artifact;
+            return {
+                id: a.id, targetId: a.targetId, kind: a.kind, status: a.status, sha256: a.sha256, sourceHash: a.sourceHash,
+                promptBytes: new TextEncoder().encode(typeof prompt === "string" ? prompt : "").length, referenceCount: references.length,
+                ...(a.status === "stale" ? { staleReason: artifactStaleReason?.(artifact) || "marked_stale" } : {}),
+            };
+        }) : selectedArtifacts;
         return { ...header, snapshot: input.snapshot, sourceHash: d?.sourceHash, ...(input.pageSize ? { artifacts: paginate(artifacts) } : { artifacts }) };
     }
     const summarize = (data: any) => data ? {
@@ -94,7 +106,9 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
             counts: { modules: count(data.director.modules), assets: count(data.director.assets), artifacts: count(data.director.artifacts), unresolved: count(data.director.unresolved) },
             source: pick(data.director.source, ["production_total_duration", "fps_num", "fps_den"]),
         } : null,
-        counts: { scenes: count(data.scenes), shots: count(data.shots), clipGroups: count(data.clipGroups), keyframes: count(data.keyframes), keyframeReviews: count(data.keyframeReviews) },
+        counts: data.director && subjectPromptV2(data.director.source)
+            ? { scenes: count(data.director.source.script_scenes), shots: count(data.director.source.shots), clipGroups: count(data.director.source.segments), keyframes: count(data.keyframes), keyframeReviews: count(data.keyframeReviews) }
+            : { scenes: count(data.scenes), shots: count(data.shots), clipGroups: count(data.clipGroups), keyframes: count(data.keyframes), keyframeReviews: count(data.keyframeReviews) },
     } : null;
     const owner = production.sceneId ? { tool: "production_get_scene_production", input: { sceneId: production.sceneId } }
         : production.projectId ? { tool: "production_get_artifact_index", input: { kind: "canvas", id: production.projectId } } : { tool: "production_get_artifact_index", input: { kind: "episode", id: production.episodeId } };
@@ -106,6 +120,30 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
 }
 
 function count(value: any): number { return Array.isArray(value) ? value.length : value && typeof value === "object" ? Object.keys(value).length : 0; }
+function subjectPromptV2(source: any) { return source?.version === 2 && source?.prompt_assembly?.version === 2 && source?.ledger?.contract_version === 2; }
+function withoutDirectorProjection(value: any): any {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const result = { ...value };
+    if (result.director && subjectPromptV2(result.director.source)) {
+        delete result.scenes;
+        delete result.shots;
+        delete result.clipGroups;
+    }
+    for (const key of ["draft", "published"]) {
+        const snapshot = result[key];
+        if (!snapshot?.director || !subjectPromptV2(snapshot.director.source)) continue;
+        const canonical = { ...snapshot };
+        delete canonical.scenes;
+        delete canonical.shots;
+        delete canonical.clipGroups;
+        result[key] = canonical;
+    }
+    if (result.draft?.director && subjectPromptV2(result.draft.director.source) && result.published?.director && !subjectPromptV2(result.published.director.source)) {
+        result.published = null;
+        result.publishedFormatStatus = "legacy-maintenance-required";
+    }
+    return result;
+}
 function pick(value: any, keys: string[]): Record<string, unknown> {
     return Object.fromEntries(keys.filter(key => ["string", "number", "boolean"].includes(typeof value?.[key])).map(key => [key, value[key]]));
 }

@@ -8,13 +8,14 @@ import { getProductionContract } from "@basketikun/canvas-agent/skills/acheng";
 import { productionWorkspaceSchemas, productionContractQuerySchema } from "@basketikun/canvas-agent/drama/production-contract";
 import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
 import { productionCompileSchema, productionApplyCompilationSchema, productionReadSchema, projectProductionRead, projectProductionVersion } from "@basketikun/canvas-agent/drama/production-contract";
+import { compilationArtifactFreshness } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { ProductionCompilationService } from "../drama/compilation.js";
 import { ClipRefreshCoordinator } from "../drama/clip-refresh.js";
 import { clipRefreshReceipt } from "../drama/clip-refresh.js";
 import { z } from "zod";
 import { SceneWorkCoordinator } from "../drama/scene-work.js";
 import type { BackendEventBus } from "../events.js";
-import { directorHash } from "../drama/director.js";
+import { directorHash, publicProductionRecord } from "../drama/director.js";
 import type { ProductionAgentPool } from "@basketikun/canvas-agent/agent/production";
 import { createLogger } from "../logger.js";
 
@@ -47,6 +48,10 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
     for (const id of service.sceneWorkOwners()) {
         try { scenes.recover(id); }
         catch (error) {
+            if (error instanceof ProductionValidationError && error.diagnostics.some(item => item.code === "UNSUPPORTED_PRODUCTION_FORMAT")) {
+                logger.warn("Skipped recovery for an unsupported legacy production format; use the explicit maintenance command", { ownerId: id });
+                continue;
+            }
             if (!(error instanceof ZodError) || !error.issues.some(issue => issue.message.startsWith("UNSUPPORTED_PRODUCTION_FORMAT:"))) throw error;
             logger.warn("Skipped recovery for a production record with an unsupported source format; the stored record was left untouched", { ownerId: id });
         }
@@ -78,7 +83,7 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             const current = service.get(req.params.episodeId);
             const { id, coordinator } = sceneOwner(req.params.episodeId);
             const prior = coordinator.commandReceipt(id, input.operationId, { action, input: { ...input, id, kind: current.episodeId !== req.params.episodeId ? "episode" : input.kind } });
-            if (prior) return void res.json({ ok: true, production: prior, replayed: true });
+            if (prior) return void res.json({ ok: true, production: publicProductionRecord(prior), replayed: true });
             // Reviews independently recheck their frozen source/media digest in the coordinator.
             // resume/pause are pure state transitions: the coordinator re-reads the current
             // record inside its own transaction and re-validates every precondition, and the
@@ -90,7 +95,7 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
                 : action === "review" ? await coordinator.review(id, input as Parameters<SceneWorkCoordinator["review"]>[1])
                 : action === "pause" ? coordinator.pause(id, (input as { workId: string }).workId, input.operationId)
                 : coordinator.resume(id, (input as { workId: string }).workId, input.operationId);
-            res.json(action === "start" ? { ok: true, ...production as ReturnType<SceneWorkCoordinator["start"]> } : { ok: true, production });
+            res.json(action === "start" ? { ok: true, ...publicProductionRecord(production as any) } : { ok: true, production: publicProductionRecord(production as any) });
         } catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/scene-work/shared-review`, (req, res) => {
@@ -98,8 +103,8 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             const input = productionWorkspaceSchemas.production_start_shared_review.parse({ ...req.body, kind: base.startsWith("/canvas") ? "canvas" : "episode", id: req.params.episodeId });
             const { id, coordinator } = sceneOwner(req.params.episodeId);
             const prior = coordinator.commandReceipt(id, input.operationId, { action: "shared-review", input: { ...input, id, kind: id !== req.params.episodeId ? "episode" : input.kind } });
-            if (prior) return void res.json({ ok: true, production: prior, replayed: true });
-            res.json({ ok: true, production: coordinator.startSharedReview(id, input) });
+            if (prior) return void res.json({ ok: true, production: publicProductionRecord(prior), replayed: true });
+            res.json({ ok: true, production: publicProductionRecord(coordinator.startSharedReview(id, input) as any) });
         } catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/scene-work`, (req, res) => {
@@ -157,7 +162,7 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             if (!runner) throw new Error("制作执行器不可用");
             const prepared: ReturnType<EpisodeProductionRunner["prepareTargets"]> = runner.prepareTargets(req.params.episodeId, input.expectedRevision, input.targets, input.operationId);
             const { layoutReceipt, ...production } = prepared;
-            res.json({ ok: true, production, ...(layoutReceipt ? { layoutReceipt } : {}), mediaSubmitted: false });
+            res.json({ ok: true, production: publicProductionRecord(production), ...(layoutReceipt ? { layoutReceipt } : {}), mediaSubmitted: false });
         } catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/shared-assets`, (req, res) => {
@@ -180,19 +185,19 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         try {
             const input = z.object({ expectedRevision: z.number().int().nonnegative(), operationId: z.string().min(1), sceneId: z.string().min(1) }).parse(req.body);
             if (!runner) throw new Error("制作执行器不可用");
-            res.json({ ok: true, production: runner.arrangeScene(req.params.episodeId, input.sceneId, input.expectedRevision, input.operationId), mediaSubmitted: false });
+            res.json({ ok: true, production: publicProductionRecord(runner.arrangeScene(req.params.episodeId, input.sceneId, input.expectedRevision, input.operationId)), mediaSubmitted: false });
         } catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/shared-assets/adopt`, (req, res) => {
         try {
             const input = z.object({ assetId: z.string().min(1), approvedId: z.string().min(1), expectedRevision: z.number().int().nonnegative(), operationId: z.string().min(1) }).parse(req.body);
-            res.json({ ok: true, production: service.adoptSharedAsset(req.params.episodeId, input), mediaSubmitted: false });
+            res.json({ ok: true, production: publicProductionRecord(service.adoptSharedAsset(req.params.episodeId, input)), mediaSubmitted: false });
         } catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/shared-assets/adopt-batch`, (req, res) => {
         try {
             const input = z.object({ assets: z.array(z.object({ assetId: z.string().min(1), approvedId: z.string().min(1) }).strict()).min(1), expectedRevision: z.number().int().nonnegative(), operationId: z.string().min(1) }).parse(req.body);
-            res.json({ ok: true, production: service.adoptSharedAssets(req.params.episodeId, input), mediaSubmitted: false });
+            res.json({ ok: true, production: publicProductionRecord(service.adoptSharedAssets(req.params.episodeId, input)), mediaSubmitted: false });
         } catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/shared-assets/updates/:adoptionId/retry`, (req, res) => {
@@ -215,7 +220,14 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
                 production = service.shotWorkbench(req.params.episodeId, query.targetIds[0], query.snapshot);
             }
             const owner = base.startsWith("/canvas") ? { projectId: req.params.episodeId } : base.startsWith("/drama/scenes") ? { sceneId: req.params.episodeId } : {};
-            const selected = projectProductionRead(query.view === "full" ? production : { ...production, ...owner }, query, value => crypto.createHash("sha256").update(value).digest("hex"));
+            const director = production[query.snapshot]?.director;
+            const staleReason = (artifact: any) => {
+                if (!director) return "receipt_missing";
+                const freshness = compilationArtifactFreshness(director, artifact);
+                return freshness.current ? "marked_stale" : freshness.staleReason;
+            };
+            const selected = projectProductionRead(query.view === "full" ? production : { ...production, ...owner }, query,
+                value => crypto.createHash("sha256").update(value).digest("hex"), undefined, staleReason);
             const activeClipRefreshes = service.clipRefreshStore(req.params.episodeId).currentBySegment()
                 .filter(job => job.status !== "succeeded").map(clipRefreshReceipt);
             if (activeClipRefreshes.length && selected && typeof selected === "object") (selected as any).clipRefreshes = activeClipRefreshes;
@@ -275,7 +287,7 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             const serviceStartedAt = performance.now();
             const production = service.edit(req.params.episodeId, req.body, undefined, false, undefined, (name, durationMs) => { stages[name] = (stages[name] || 0) + durationMs; });
             serviceMs = Math.round(performance.now() - serviceStartedAt);
-            res.json({ ok: true, production });
+            res.json({ ok: true, production: publicProductionRecord(production) });
             queueMicrotask(() => refreshes.wake(req.params.episodeId));
         } catch (error) {
             serviceMs = Math.round(performance.now() - startedAt);
@@ -285,20 +297,20 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
     router.get<Record<string, string>>(`${base}/operations/:operationId/receipt`, (req, res) => {
         try {
             const production = service.operationReceipt(req.params.episodeId, req.params.operationId);
-            res.json(production ? { ok: true, found: true, production } : { ok: true, found: false });
+            res.json(production ? { ok: true, found: true, production: publicProductionRecord(production) } : { ok: true, found: false });
         } catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/publish`, (req, res) => {
         try {
             const production = service.publish(req.params.episodeId, req.body);
-            res.json({ ok: true, production });
+            res.json({ ok: true, production: publicProductionRecord(production) });
         } catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/restore`, (req, res) => {
         try {
             const { version, operationId, expectedRevision } = req.body || {};
             if (!Number.isInteger(version) || !Number.isInteger(expectedRevision) || typeof operationId !== "string" || !operationId) throw new Error("缺少有效版本、operationId 或 expectedRevision");
-            res.json({ ok: true, production: service.restore(req.params.episodeId, version, operationId, expectedRevision) });
+            res.json({ ok: true, production: publicProductionRecord(service.restore(req.params.episodeId, version, operationId, expectedRevision)) });
         } catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/runs/:version`, (req, res) => {

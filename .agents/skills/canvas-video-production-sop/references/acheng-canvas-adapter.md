@@ -38,6 +38,8 @@ Acheng 的纯提示词限制适用于创作职责；用户授权实际生成时�
 
 Backend draft 是正式创作编辑源，published 保留显式发布的历史版本，本地 production.json 是带 revision 的工作副本。修改需稳定 operationId 和 expectedRevision；冲突回读，不覆盖他人草稿。默认 inputBasis=canvas 的运行冻结当前有效画布输入，显式 published 才核验指定发布稿。剧本、镜头和 Clip 视图是投影，修改应进入导演源；源变化后沿编译/校验更新回执。模型继承原配置；保存、编译、审核和发布不授权生成。
 
+新格式在画布记录中的唯一源稿落点为 `draft.director.source`；独立 `production.json` 直接保存这个 source 根对象，不包 `production`/`draft`/`director` API 信封。Acheng v2 工作台直接编辑 source 中同形的 Story、Shot、Segment 和连续性字段；Backend 不保存、不返回 `draft.scenes`、`draft.shots`、`draft.clipGroups` 镜像。Canvas 节点、任务和选用结果只作为只读运行上下文，按 owner 与稳定 Segment ID 派生；缺失或重复关联阻塞对应目标，不猜测或补建。不可手工把 `story`、`shots` 或 `clipGroups` 放到 `draft.director` 下与 source 并列；故事、分镜及 Segment 必须写入 `draft.director.source.story`、`script_scenes`、`shots`、`segments`。组装完整源稿或生成写入脚本时，先用当前 `production_get_contract` 的 schema 与 example 核对字段，并验证 source 的必需字段，不能从旧 API 响应布局推测新写入格式。
+
 已有正式稿的导演委派携带 production.kind/id/expectedRevision/scope，由 Backend 构造固定版本、依赖和专业模块的工作包。建议完整且无未决项后，主导演在原授权范围内通过 production_edit 的 ops 与 adoptions:[{taskId,artifactHash}] 原子采纳；partial、unbound 或输入过期不能登记采纳。partial 按已有交付模式沿原任务 continue；recover 只回读原已完成回合，不自动重跑或生成。
 
 交付模式与原创作授权随工作包固定。交互或无模式记录的旧任务，continue 必须携带本轮真实用户续写意图 continuationIntent=explicit；自动模式使用 automatic，不扩大原任务要求。正式稿改换交付模式或原输入变化时拒绝沿旧工作自动推进。场次创作、共同资产审核与场次自动审核共用固定专业合同和不可变产物封套；源稿合并与审核记录分别在原事务登记 workAdoptions，含产物摘要、operationId、revision、sourceHash 和语义 opsHash。审核结果写入不表示所有质量维度已通过。

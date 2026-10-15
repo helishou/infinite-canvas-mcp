@@ -407,11 +407,17 @@ test("multi-shot Segment is preserved, invalid windows remain saved but blocked,
     assert.throws(() => publish(service, invalid), /legacy_fixture/);
 });
 
-test("readiness separates compiled prompts from continuity verification and warns on unanchored same-scene clips", t => {
+test("readiness warns only when a Shot explicitly requests an unbound scene environment reference", t => {
     const { service } = fixture(t), d = doc(2);
     d.modules.continuity = { status: "planned", evidence: [], unresolved: [] };
     d.source.script_scenes = [];
     d.source.scene_registry = [{ id: "scene", name: "Room" }];
+    const sceneSubject = { id: "SUB_SCENE", kind: "scene", entityRef: { ownerKind: "episode", ownerId: "ep", kind: "scene", id: "scene" }, pictureBindings: [
+        { id: "SCENE_ENV", assetId: "SCENE_IMAGE", sourceNode: { projectId: "canvas", nodeId: "scene-image" }, selection: { mode: "node_selection" }, provides: ["environment"], retain: ["layout"], exclude: ["people"], applicableState: {}, defaultFor: ["environment"] },
+    ] };
+    d.source.subject_registry = [sceneSubject];
+    (d.source.shots as any[])[0].subject_usages = [{ subjectId: "SUB_SCENE", presentation: "state_context", referencePurpose: ["environment"], pictureBindingIds: ["SCENE_ENV"], continuityFactIds: [], stateRequirements: [] }];
+    (d.source.shots as any[])[1].subject_usages = [{ subjectId: "SUB_SCENE", presentation: "state_context", referencePurpose: ["environment"], pictureBindingIds: [], continuityFactIds: [], stateRequirements: [] }];
     d.sourceHash = directorHash(d.source);
     d.artifacts.forEach(artifact => { artifact.sourceHash = d.sourceHash; artifact.receipt.sourceHash = d.sourceHash; });
     d.artifacts[0].references = [{ label: "<Picture 1>", nodeId: "scene-image", storageKey: "image:scene", sha256: "b".repeat(64), role: "scene" }];
@@ -419,13 +425,23 @@ test("readiness separates compiled prompts from continuity verification and warn
     service.edit("ep", { operationId: "set-model", expectedRevision: current.revision, ops: [{ type: "set_settings", patch: { h3Model: "test-model" } }] });
     publish(service, d);
     const readiness = service.workflowReadiness("ep", "published");
-    assert.equal((readiness.modules.continuity as Record<string, unknown>).verifiedStatus, "diagnosticOnly", "compiled artifacts do not imply continuity verification");
+    assert.equal((readiness.modules.continuity as Record<string, unknown>).verifiedStatus, "unchecked", "compiled artifacts do not imply continuity verification");
     const targets = readiness.targets.filter(item => item.kind === "segment");
     const first = targets.find(item => item.targetId === "seg0")!;
     const second = targets.find(item => item.targetId === "seg1")!;
     assert.ok(!first.warnings?.some(item => item.includes("此段没有场景参考图")), "a scene reference anchors the first Clip");
-    assert.ok(second.warnings?.some(item => item.includes("此段没有场景参考图")), "the adjacent independent Clip lacks a scene anchor");
-    assert.equal(second.blockers.some(item => item.includes("此段没有场景参考图")), false, "quality warnings do not become blockers");
+    assert.ok(second.warnings?.some(item => item.includes("当前 H3 产物未绑定对应场景图")), "an explicit environment usage without an H3 scene binding remains visible");
+    assert.equal(second.blockers.some(item => item.includes("当前 H3 产物未绑定对应场景图")), false, "quality warnings do not become blockers");
+
+    const noSceneUsage = structuredClone(d);
+    (noSceneUsage.source.shots as any[])[1].subject_usages = [];
+    noSceneUsage.sourceHash = directorHash(noSceneUsage.source);
+    noSceneUsage.artifacts.forEach(artifact => { artifact.sourceHash = noSceneUsage.sourceHash; artifact.receipt.sourceHash = noSceneUsage.sourceHash; });
+    const latest = service.get("ep");
+    publish(service, noSceneUsage, "ep");
+    const withoutDeclaration = service.workflowReadiness("ep", "published").targets.find(item => item.id === "segment:seg1")!;
+    assert.ok(!withoutDeclaration.warnings?.some(item => item.includes("此段没有场景参考图")), "a same-scene ID alone does not infer an environment-image requirement");
+    assert.ok(latest.revision < service.get("ep").revision);
 });
 
 test("structured Segment regrouping preserves Shot content and invalidates only its compile receipt", t => {

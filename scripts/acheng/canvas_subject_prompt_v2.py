@@ -728,9 +728,30 @@ def adapt_production(production, *, draft=False):
             shot_numbers = [shot_ids.index(sid) + 1 for sid in shot_scope]
             retain = list(dict.fromkeys(value for _sid, _label, binding in uses for value in binding.get("retain", [])))
             exclude = list(dict.fromkeys(value for _sid, _label, binding in uses for value in binding.get("exclude", [])))
+            # Normalize legacy Chinese placeholder strings written by older UI/build code.
+            _LEGACY_RETAIN = {
+                "跟随共享主体节点当前图片": "character identity and costume as defined by the reference image",
+                "跟随已绑定主体节点当前图片": "character identity and costume as defined by the reference image",
+                "主体身份与已登记外观": "character identity and registered appearance",
+                "角色身份": "character identity",
+            }
+            _LEGACY_EXCLUDE = {
+                "原图无关姿势与构图": "pose, camera angle, background, and unrelated composition",
+                "原图姿势": "camera pose",
+                "原图构图": "original composition",
+                "无关背景": "unrelated background",
+            }
+            retain = [_LEGACY_RETAIN.get(v, v) for v in retain]
+            exclude = [_LEGACY_EXCLUDE.get(v, v) for v in exclude]
             label = subject_labels[subject_id]
+            # BCF 铁律 7: reference images are the sole visual authority for character subjects.
+            # When picture references exist, no textual appearance descriptor may leak into the definition.
+            if str((subject.get("entityRef") or {}).get("kind") or "") == "character" and labels:
+                _core_def = name + "; appearance follows the reference images exclusively — no textual appearance descriptor overrides them."
+            else:
+                _core_def = description or name
             subject_entries.append({"label": label, "entity_id": str(subject.get("entityRef", {}).get("id") or subject_id),
-                                    "definition": label + " is " + (description or name) + ", represented by " + ", ".join(labels) + ".",
+                                    "definition": label + " is " + _core_def + ", represented by " + ", ".join(labels) + ".",
                                     "retention": label + " (" + ", ".join("[Shot " + str(value) + "]" for value in shot_numbers)
                                     + "): partially_preserved - retain " + (", ".join(retain) or "the registered identity")
                                     + "; exclude " + (", ".join(exclude) or "unregistered appearance changes") + ".",

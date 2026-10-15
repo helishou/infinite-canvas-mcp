@@ -444,20 +444,38 @@ export function resolveAchengEngine(home = process.env.CODEX_HOME || path.join(o
     return liveCompiler ? { ...resolved, liveCompiler, compilerHash: liveCompiler.compilerHash } : resolved;
 }
 
-export function resolveAchengRuntime(runtimeId: string, home = process.env.CODEX_HOME || path.join(os.homedir(), ".codex")) {
+// 运行时完整性校验的指纹缓存：先用微秒级 stat 比对 mtime/size，全部未变才复用上次完整校验结果；
+// 任何文件被升级、替换或篡改（内容改动必然伴随大小或修改时间变化）都会触发重新 sha256 全量复核。
+type ResolvedAchekRuntime = { runtimeId: string; commit: string; patchVersion: string; version: string; path: string; skillPath: string; sourceContract: any };
+const runtimeVerificationCache = new Map<string, { fingerprint: string; result: ResolvedAchekRuntime }>();
+export function resetAchengRuntimeCache() { runtimeVerificationCache.clear(); }
+
+export function resolveAchengRuntime(runtimeId: string, home = process.env.CODEX_HOME || path.join(os.homedir(), ".codex")): ResolvedAchekRuntime {
     const base = path.resolve(home, "skill-runtimes", "acheng-director");
     if (!/^[a-f0-9]{40}-[a-f0-9]{16}$/.test(runtimeId)) throw new Error("Acheng runtimeId 无效");
     const directory = path.join(base, "versions", runtimeId);
     if (!directory.startsWith(`${path.join(base, "versions")}${path.sep}`)) throw new Error("Acheng 运行版本不在受管理目录");
-    const manifest = JSON.parse(fs.readFileSync(path.join(directory, "canvas-engine.json"), "utf8")) as { runtimeId: string; commit: string; patchVersion: string; version: string; files: Record<string, string> };
+    const manifestPath = path.join(directory, "canvas-engine.json");
+    const manifestStat = fs.statSync(manifestPath);
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { runtimeId: string; commit: string; patchVersion: string; version: string; files: Record<string, string> };
     if (manifest.runtimeId !== runtimeId) throw new Error("Acheng 激活记录与运行版本不一致");
+    const fingerprintParts = [`${manifestStat.mtimeMs}:${manifestStat.size}`, ...Object.keys(manifest.files).sort().map(file => {
+        const st = fs.statSync(path.resolve(directory, file));
+        return `${file}:${st.mtimeMs}:${st.size}`;
+    }), `contract:${fs.existsSync(path.join(directory, "canvas-source-contract.json")) ? JSON.stringify(fs.statSync(path.join(directory, "canvas-source-contract.json")).mtimeMs) + ":" + "" : "absent"}`];
+    const cacheKey = `${home}\u0000${runtimeId}`;
+    const cached = runtimeVerificationCache.get(cacheKey);
+    if (cached && cached.fingerprint === fingerprintParts.join("\u0000")) return cached.result;
     for (const [file, hash] of Object.entries(manifest.files)) {
         const target = path.resolve(directory, file);
         if (!target.startsWith(`${directory}${path.sep}`) || crypto.createHash("sha256").update(fs.readFileSync(target)).digest("hex") !== hash) throw new Error(`Acheng 运行版本已改变：${file}`);
     }
     const contractPath = path.join(directory, "canvas-source-contract.json");
     const sourceContract = fs.existsSync(contractPath) ? JSON.parse(fs.readFileSync(contractPath, "utf8")) : null;
-    return { runtimeId, commit: manifest.commit, patchVersion: manifest.patchVersion, version: manifest.version, path: directory, skillPath: path.join(directory, "SKILL.md"), sourceContract };
+    const resolved: ResolvedAchekRuntime = { runtimeId, commit: manifest.commit, patchVersion: manifest.patchVersion, version: manifest.version, path: directory, skillPath: path.join(directory, "SKILL.md"), sourceContract };
+    runtimeVerificationCache.set(cacheKey, { fingerprint: fingerprintParts.join("\u0000"), result: resolved });
+    if (runtimeVerificationCache.size >= 16) { const firstKey = runtimeVerificationCache.keys().next().value; if (firstKey) runtimeVerificationCache.delete(firstKey); }
+    return resolved;
 }
 
 export function getProductionContract(runtimeId?: string, operationType?: string, moduleId?: typeof directorModules[number]) {
@@ -498,14 +516,25 @@ export function auditAchengContinuity(director: DirectorProduction, targetIds?: 
     return { ...JSON.parse(response), validatorRuntimeId: runtime.runtimeId, validatorEngine: achengEngineIdentity(runtime), diagnosticOnly };
 }
 
+// 源稿契约校验的响应缓存（按 runtime+payload 哈希）。运行时升级会换 runtimeId，键自动失效；
+const sourceContractResponseCache = new Map<string, string>();
+export function resetAchengSourceValidationCache() { sourceContractResponseCache.clear(); }
+
 export function validateAchengSource(director: DirectorProduction, stage: "edit" | "publish" | "generate", runtime = resolveAchengEngine(), scope?: AchengSourceValidationScope): ProductionDiagnostic[] {
     if (!runtime.sourceContract) return [...ref2vaPromptDiagnostics(director, 2900), ...(scope ? [] : continuityBoundaryDiagnostics(director, stage)), { code: "SOURCE_CONTRACT_UNAVAILABLE", path: "director.engine", message: "Active runtime has no source contract; final checks remain with the compiler", severity: "unverified" }];
     const source = isSubjectPromptAssembly(director.source) && scope?.shotIds.length
         ? { ...director.source, _canvas_source_validation_scope: { shotIds: scope.shotIds } }
         : director.source;
-    const response = runAchengPython(["-B", "-X", "utf8", path.join(runtime.path, "scripts", "canvas_source_contract.py")], {
-        cwd: runtime.path, windowsHide: true, encoding: "utf8", input: JSON.stringify({ source, artifacts: director.artifacts || [], stage }),
-    });
+    const inputJson = JSON.stringify({ source, artifacts: director.artifacts || [], stage });
+    const scriptPath = path.join(runtime.path, "scripts", "canvas_source_contract.py");
+    // 内容寻址缓存：同 runtime + 同 payload 的重复校验直接复用，不再每次起 Python 子进程。
+    const cacheKey = crypto.createHash("sha256").update(`${runtime.runtimeId}\u0000${scriptPath}\u0000${inputJson}`).digest("hex");
+    let response = sourceContractResponseCache.get(cacheKey);
+    if (response === undefined) {
+        response = runAchengPython(["-B", "-X", "utf8", scriptPath], { cwd: runtime.path, windowsHide: true, encoding: "utf8", input: inputJson });
+        if (sourceContractResponseCache.size >= 256) sourceContractResponseCache.clear();
+        sourceContractResponseCache.set(cacheKey, response);
+    }
     const sourceDiagnostics: ProductionDiagnostic[] = JSON.parse(response).diagnostics;
     for (const item of sourceDiagnostics) {
         if (item.code === "INVALID_SUBJECT_SOURCE" && item.path.includes("subject_usages.pictureBindingIds")

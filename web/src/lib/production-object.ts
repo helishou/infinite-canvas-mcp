@@ -1,4 +1,5 @@
 import { productionSceneEntries } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionSegments, productionShots, productionSegmentRuntimeMatches, shotTitle } from "@/lib/production-source";
 import type { EpisodeProduction, ProductionCanvasContext, ProductionPresentation } from "@/services/backend-api";
 import type { CanvasNodeData } from "@/types/canvas";
 
@@ -29,14 +30,22 @@ export function productionObjectForNode(context: ProductionCanvasContext, produc
         const scene = productionSceneEntries(director.source).find(item => item.id === sceneId);
         if (scene) return { ...base, workspace: "story", targetKind: "scene", targetId: scene.id, title: scene.title || scene.id };
     }
-    const group = production.draft.clipGroups.find(item => item.nodeId === node.id && Boolean(segmentId) && item.segmentId === segmentId);
-    if (group) return { ...base, workspace: "production", targetKind: "segment", targetId: group.id, segmentId: group.segmentId || undefined, clipIndex: production.draft.clipGroups.indexOf(group) + 1, title: node.title || group.id };
+    const targetIds = Array.isArray(node.metadata?.segments) ? (node.metadata!.segments as Array<Record<string, any>>).map(segment => String(segment.productionClipProjection?.targetId || "")).filter(Boolean) : [];
+    const matchingTargets = [...new Set(targetIds)].filter(targetId => productionSegments(production).some(segment => String(segment.id) === targetId));
+    if (segmentId && matchingTargets.length === 1) {
+        const targetId = matchingTargets[0];
+        const runtimeMatches = productionSegmentRuntimeMatches([node as CanvasNodeData], targetId, context.owner);
+        if (runtimeMatches.length === 1 && runtimeMatches[0].segment.id === segmentId) {
+            const segments = productionSegments(production);
+            return { ...base, workspace: "production", targetKind: "segment", targetId, segmentId: String(runtimeMatches[0].segment.id), clipIndex: segments.findIndex(item => String(item.id) === targetId) + 1, title: node.title || targetId };
+        }
+    }
     const frame = Object.entries(production.draft.keyframes).find(([, item]) => item.nodeId === node.id);
-    if (frame) return { ...base, workspace: "shots", targetKind: "shot", targetId: frame[0], title: production.draft.shots.find(shot => shot.id === frame[0])?.title || node.title || frame[0] };
+    if (frame) return { ...base, workspace: "shots", targetKind: "shot", targetId: frame[0], title: shotTitle(productionShots(production).find(shot => String(shot.id) === frame[0]), node.title || frame[0]) };
     const asset = Object.entries(director.assets).find(([, item]) => item.nodeId === node.id);
     if (asset) {
         const shot = Object.entries(director.shotInputs).find(([, input]) => input.keyframeAssetId === asset[0]);
-        if (shot) return { ...base, workspace: "shots", targetKind: "shot", targetId: shot[0], title: production.draft.shots.find(item => item.id === shot[0])?.title || node.title || asset[0] };
+        if (shot) return { ...base, workspace: "shots", targetKind: "shot", targetId: shot[0], title: shotTitle(productionShots(production).find(item => String(item.id) === shot[0]), node.title || asset[0]) };
         const plan = Array.isArray(director.source.asset_plan) ? director.source.asset_plan as Record<string, unknown>[] : [];
         const source = plan.find(item => String(item.asset_id || item.id) === asset[0]);
         return { ...base, workspace: "assets", targetKind: "asset", targetId: asset[0], title: String(source?.asset_name || source?.name || node.title || asset[0]) };
@@ -51,14 +60,14 @@ export function productionObjectForPresentation(presentation: ProductionPresenta
     let title = id || "";
     if (production && id) {
         if (presentation.targetKind === "segment") title = id;
-        else if (presentation.targetKind === "shot" || presentation.targetKind === "keyframe") title = production.draft.shots.find(shot => shot.id === id)?.title || title;
+        else if (presentation.targetKind === "shot" || presentation.targetKind === "keyframe") title = shotTitle(productionShots(production).find(shot => String(shot.id) === id), title);
         else if (presentation.targetKind === "asset") {
             const plan = production.draft.director?.source.asset_plan;
             const item = Array.isArray(plan) ? plan.find(item => String(item?.asset_id || item?.id) === id) : undefined;
             title = String(item?.asset_name || item?.name || title);
         }
     }
-    const clipIndex = presentation.targetKind === "segment" && production ? production.draft.clipGroups.findIndex(group => group.id === id) + 1 : 0;
+    const clipIndex = presentation.targetKind === "segment" && production ? productionSegments(production).findIndex(segment => String(segment.id) === id) + 1 : 0;
     return { owner: presentation.owner, canvasId: presentation.canvasId, workspace: presentation.workspace === "advanced" ? "overview" : presentation.workspace,
         targetKind: presentation.targetKind, targetId: id, nodeId: presentation.nodeId, segmentId: presentation.segmentId, ...(clipIndex > 0 ? { clipIndex } : {}), title };
 }
@@ -78,14 +87,13 @@ export function productionObjectState(production: EpisodeProduction, object: Pro
     const asset = assetId ? director?.assets[assetId] : undefined;
     const frame = object.targetKind === "shot" ? production.draft.keyframes[object.targetId || ""] : undefined;
     const review = object.targetKind === "shot" ? production.draft.keyframeReviews[object.targetId || ""] : undefined;
-    const group = object.targetKind === "segment" ? production.draft.clipGroups.find(group => group.id === object.targetId) : undefined;
     const segments = Array.isArray(node.metadata?.segments) ? node.metadata.segments as Record<string, unknown>[] : [];
     const runtime = object.targetKind === "segment" ? segments.find(segment => segment.id === object.segmentId) : node.metadata;
     const working = ["queued", "loading", "running", "pending", "awaiting_confirmation"].includes(String(runtime?.status));
     const failed = ["error", "failed"].includes(String(runtime?.status));
     const storageKey = object.targetKind === "segment" ? runtime?.resultStorageKey : frame?.storageKey || asset?.storageKey;
     const verdict = review?.verdict;
-    const status = working ? "working" : failed ? "failed" : asset?.inputOutdated || group?.inputOutdated ? "outdated" : verdict === "rejected" || verdict === "needs-redo" ? "rejected" : asset?.status === "rejected" ? "rejected" : verdict === "approved" || verdict === "auto-accepted" || asset?.status === "approved" || Boolean(storageKey && object.targetKind !== "segment") ? "approved" : storageKey ? "complete" : "planned";
+    const status = working ? "working" : failed ? "failed" : asset?.inputOutdated || runtime?.inputOutdated ? "outdated" : verdict === "rejected" || verdict === "needs-redo" ? "rejected" : asset?.status === "rejected" ? "rejected" : verdict === "approved" || verdict === "auto-accepted" || asset?.status === "approved" || Boolean(storageKey && object.targetKind !== "segment") ? "approved" : storageKey ? "complete" : "planned";
     return { status, working, assetId, storageKey };
 }
 

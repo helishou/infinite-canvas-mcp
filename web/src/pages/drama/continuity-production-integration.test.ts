@@ -96,9 +96,8 @@ test("real save emits granular subject ledger changes and treats unchanged input
     ] }]);
     assert.deepEqual(next.requirements, ledger.requirements);
     assert.deepEqual(next.coverage, ledger.coverage);
-    assert.deepEqual(writes[0].pendingCommand.ops, ops);
-    assert.equal(writes[0].pendingCommand.expectedRevision, 17);
-    assert.equal(writes.at(-1).pendingCommand, null);
+    // 制作工作台不再有本地草稿存储：成功保存后零写入，回执以内存 commandNotice 记录。
+    assert.equal(writes.length, 0);
 });
 
 test("requirements and coverage changes survive the real save adapter", async () => {
@@ -118,9 +117,10 @@ test("validation rejection retains ledger input and permits a corrected submissi
     context.sourceDrafts.v2ledger = raw;
     context.backendError = new TestBackendApiError("Invalid state", 400);
     assert.equal(await context.saveContinuity(next), false);
-    assert.equal(writes.at(-1).sourceDrafts.v2ledger, raw);
-    assert.equal(readContinuityLedgerDraft(writes.at(-1).sourceDrafts.v2ledger, ledger).value.initial[0].value, "invalid");
-    assert.equal(writes.at(-1).pendingCommand.status, "rejected");
+    assert.equal(readContinuityLedgerDraft(context.sourceDrafts.v2ledger, ledger).value.initial[0].value, "invalid");
+    // 校验失败：输入留在内存 sourceDrafts、回执留在 commandNotice；不再落任何本机草稿。
+    assert.equal(context.commandNoticeRef.current.status, "rejected");
+    assert.equal(writes.length, 0);
     assert.equal(context.pendingCommandRef.current, null);
     delete context.backendError;
     next.initial[0].value = "inside";
@@ -136,7 +136,9 @@ test("unknown outcome recovers the original operation/revision; version conflict
     context.sourceDrafts.v2ledger = JSON.stringify({ version: 1, base: ledger, value: next });
     context.backendError = new Error("Connection interrupted");
     assert.equal(await context.saveContinuity(next), false);
-    assert.equal(writes.at(-1).pendingCommand.status, "unknown");
+    // 结果未知：回执留在内存 pendingCommand，可恢复重放；不再落本机草稿。
+    assert.equal(context.pendingCommandRef.current.status, "unknown");
+    assert.equal(writes.length, 0);
     next.initial[0].value = "newer unsaved edit";
     context.production.revision = 22;
     delete context.backendError;

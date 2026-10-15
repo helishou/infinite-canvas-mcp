@@ -59,10 +59,13 @@ export function registerProductionStoryboardEditor(projectId: string, handler: S
     return () => { if (storyboardEditors.get(projectId)?.token === token) storyboardEditors.delete(projectId); };
 }
 
-export function sourceSegmentForCanvasClip(groups: Array<{ id: string; nodeId: string | null; segmentId: string | null }>, nodeId: string, segmentId: string) {
-    const group = groups.find(group => group.nodeId === nodeId && group.segmentId === segmentId);
-    if (!group) throw new Error("PROMPT_REVERSE_SYNC_TARGET_MISMATCH");
-    return group.id;
+export function sourceSegmentForCanvasClip(nodes: Array<{ id: string; metadata?: Record<string, any> }>, source: Record<string, any>, nodeId: string, segmentId: string) {
+    const matches = nodes.flatMap(node => (Array.isArray(node.metadata?.segments) ? node.metadata!.segments : [])
+        .filter((segment: Record<string, any>) => String(segment.id || "") === segmentId && String(segment.productionClipProjection?.targetId || "")
+            && Array.isArray(source.segments) && source.segments.some((item: Record<string, any>) => String(item.id || "") === String(segment.productionClipProjection.targetId)))
+        .map((segment: Record<string, any>) => ({ nodeId: node.id, segmentId: String(segment.id), targetId: String(segment.productionClipProjection.targetId) })));
+    if (matches.length !== 1 || matches[0].nodeId !== nodeId) throw new Error("PROMPT_REVERSE_SYNC_TARGET_MISMATCH");
+    return matches[0].targetId;
 }
 
 export function buildDirectorClipStoryboardOperation(director: DirectorProduction, groupId: string, input: CanvasProductionStoryboardEditor): ProductionOperation {
@@ -243,8 +246,9 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
             const refreshed = await fetchProductionWorkbench(target, "clip_workbench", targetId);
             const workbench = (refreshed.production as Record<string, any>).workbench;
             if (String(workbench?.segment?.id || "") !== targetId || status.sourceHash && workbench?.sourceHash !== status.sourceHash) throw new Error("PROMPT_COMPILE_SOURCE_CHANGED: 编译完成后制作源稿已变化，请重新编译");
-            const canvasInput = (Array.isArray(workbench?.canvasInputs) ? workbench.canvasInputs : []).find((item: Record<string, any>) => item.nodeId === input.nodeId && item.segmentId === input.segmentId)
-                || (Array.isArray(workbench?.canvasInputs) ? workbench.canvasInputs[0] : undefined);
+            const canvasInputs = Array.isArray(workbench?.runtime?.canvasInputs) ? workbench.runtime.canvasInputs : [];
+            const canvasInput = canvasInputs.find((item: Record<string, any>) => item.nodeId === input.nodeId && item.segmentId === input.segmentId)
+                || canvasInputs[0];
             const baselinePrompt = canvasInput?.directorBaseline?.prompt;
             const currentPrompt = canvasInput?.current?.prompt;
             const manualPrompt = Array.isArray(canvasInput?.manualFields) && canvasInput.manualFields.includes("prompt");

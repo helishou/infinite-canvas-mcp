@@ -115,10 +115,23 @@ def apply(root):
     hooks.write_text("from asset_plan import check_character_view_layout\n" + text, encoding="utf-8")
     validator = root / "scripts/validate_director_contract.py"
     text = validator.read_text(encoding="utf-8")
-    start = text.index('                require(resolved.get("view_layout", {}).get("type") == "four_view_character_turnaround"')
-    end = text.index('            entry = entries[card["id"]]', start)
-    text = text[:start] + "                check_character_view_layout(resolved, production)\n" + text[end:]
-    validator.write_text("from asset_plan import check_character_view_layout\n" + text, encoding="utf-8")
+    character_check = "                check_character_view_layout(resolved, production)"
+    if character_check not in text:
+        block_end = text.index('            entry = entries[card["id"]]')
+        block_start = text.rfind('            if resolved.get("asset_kind") == "character":', 0, block_end)
+        if block_start < 0:
+            raise RuntimeError("Unsupported character validation block in validate_director_contract.py")
+        replacement = (
+            '            if resolved.get("asset_kind") == "character":\n'
+            '                require(resolved.get("character_name") and resolved.get("state_label"), f"Character asset labels missing: {card[\'id\']}")\n'
+            '                check_character_view_layout(resolved, production)\n'
+            '                if resolved.get("view_layout", {}).get("stage") == "identity_based_turnaround":\n'
+            '                    require(any(ref.get("role") == "identity" and ref.get("asset_id") for ref in resolved.get("references", [])), f"Character four-view identity reference missing: {card[\'id\']}")\n'
+        )
+        text = text[:block_start] + replacement + text[block_end:]
+    if "from asset_plan import check_character_view_layout" not in text:
+        text = "from asset_plan import check_character_view_layout\n" + text
+    validator.write_text(text, encoding="utf-8")
     # The compiler adds a derived continuity report after freezing the authored
     # revision. Binding and delivery hashes must ignore that scratch-only field.
     for name in ("reference_bindings.py", "h3_delivery.py", "asset_delivery.py"):

@@ -5,13 +5,14 @@ import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createStableBackendProxy } from './dev-backend-proxy.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const backend = path.join(root, 'backend');
 const tsx = pathToFileURL(createRequire(path.join(backend, 'package.json')).resolve('tsx')).href;
 
-function backendDataDir(cwd) {
-    if (process.env.INFINITE_CANVAS_DATA_DIR) return path.resolve(cwd, process.env.INFINITE_CANVAS_DATA_DIR);
+function backendDataDir(cwd, env = process.env) {
+    if (env.INFINITE_CANVAS_DATA_DIR) return path.resolve(cwd, env.INFINITE_CANVAS_DATA_DIR);
     try {
         const config = JSON.parse(readFileSync(path.join(os.homedir(), '.infinite-canvas-root.json'), 'utf8'));
         if (config.dataDir) return path.resolve(cwd, config.dataDir);
@@ -43,8 +44,8 @@ function removeLockIfOwned(lockPath, pid) {
     } catch { /* process shutdown or another instance already released it */ }
 }
 
-function clearPreviousBackend(cwd, log) {
-    const lockPath = path.join(backendDataDir(cwd), 'backend.lock');
+function clearPreviousBackend(cwd, log, env = process.env) {
+    const lockPath = path.join(backendDataDir(cwd, env), 'backend.lock');
     let record;
     try { record = JSON.parse(readFileSync(lockPath, 'utf8')); }
     catch { return; }
@@ -71,10 +72,13 @@ function clearPreviousBackend(cwd, log) {
     log.log(`[backend-watch] stopped previous Backend PID=${pid}`);
 }
 
-export function startBackendWatch({ cwd = backend, directories = [path.join(backend, 'src'), path.join(root, 'canvas-agent', 'dist')], log = console } = {}) {
+export function startBackendWatch({ cwd = backend, directories = [path.join(backend, 'src'), path.join(root, 'canvas-agent', 'dist')], log = console, publicPort: configuredPublicPort, backendPort: configuredBackendPort, env = process.env } = {}) {
     let child, ready = false, dirty = false, requested = false, restarting = false, stopped = false, reportedBusy = false;
     let debounce, retry;
     const watchers = [];
+    const publicPort = configuredPublicPort ?? (Number(process.env.PORT) || 17370);
+    const backendPort = configuredBackendPort ?? (Number(process.env.INFINITE_CANVAS_BACKEND_LISTEN_PORT) || 17372);
+    const proxy = createStableBackendProxy({ port: publicPort, targetPort: backendPort });
 
     function requestReload() {
         if (stopped || !dirty || debounce) return;
@@ -85,18 +89,21 @@ export function startBackendWatch({ cwd = backend, directories = [path.join(back
     }
 
     function start() {
+        if (stopped) return;
         dirty = false; ready = false; requested = false; restarting = false; reportedBusy = false;
-        try { clearPreviousBackend(cwd, log); }
+        proxy.setBackendReady(false);
+        try { clearPreviousBackend(cwd, log, env); }
         catch (error) { log.error(`[backend-watch] ${error.message}`); return; }
         child = spawn(process.execPath, ['--import', tsx, 'src/index.ts'], {
-            cwd, env: { ...process.env, INFINITE_CANVAS_DEV_WATCH: '1' }, stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
+            cwd, env: { ...env, PORT: String(publicPort), INFINITE_CANVAS_BACKEND_LISTEN_PORT: String(backendPort), INFINITE_CANVAS_DEV_WATCH: '1' }, stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
         });
         child.on('message', message => {
-            if (message?.type === 'dev:ready') { ready = true; log.log(`[backend-watch] ready PID=${message.pid}`); requestReload(); }
+            if (message?.type === 'dev:ready') { ready = true; proxy.setBackendReady(true); log.log(`[backend-watch] ready PID=${message.pid}`); requestReload(); }
             if (message?.type !== 'dev:reload-status') return;
             requested = false;
             if (message.accepted) {
                 dirty = false; restarting = true;
+                proxy.setBackendReady(false);
                 clearTimeout(retry);
                 log.log('[backend-watch] idle; reloading Backend');
             } else {
@@ -108,7 +115,7 @@ export function startBackendWatch({ cwd = backend, directories = [path.join(back
         child.on('error', error => { log.error(`[backend-watch] ${error.message}`); child = undefined; ready = false; requested = false; });
         child.on('exit', code => {
             const shouldRestart = restarting || dirty;
-            child = undefined; ready = false; requested = false;
+            child = undefined; ready = false; requested = false; proxy.setBackendReady(false);
             if (stopped) return;
             if (shouldRestart) start();
             else log.error(`[backend-watch] Backend exited (${code}); waiting for the next source edit`);
@@ -134,9 +141,14 @@ export function startBackendWatch({ cwd = backend, directories = [path.join(back
             const closing = child;
             await new Promise(resolve => { closing.once('exit', resolve); closing.kill(signal); });
         }
+        proxy.close();
     }
-    start();
-    return { stop };
+    proxy.server.once('listening', () => {
+        log.log(`[backend-watch] stable Backend proxy listening on 127.0.0.1:${publicPort} → 127.0.0.1:${backendPort}`);
+        start();
+    });
+    proxy.server.on('error', error => log.error(`[backend-watch] stable Backend proxy failed: ${error.message}`));
+    return { stop, get proxyPort() { return proxy.server.address()?.port || publicPort; } };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -18,6 +18,7 @@ import { verifyImageInput } from "./image-inputs.js";
 import { productionClipProjection, clipInputHash, CLIP_PROJECTION_FIELDS, type ReferenceSync } from "./clip-inputs.js";
 import { productionSceneIdsForShots, productionSceneLayout } from "./production-layout.js";
 import { productionSceneCreationOperations } from "./production-scene-nodes.js";
+import { sharedSubjectPictureBinding } from "./shared-subject-picture.js";
 
 const stableId = (kind: string, ...parts: string[]) => `${kind}-${crypto.createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24)}`;
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -60,6 +61,7 @@ export class EpisodeProductionRunner {
         let validated = false;
         const validate = () => {
             const fresh = this.service.get(id);
+            this.service.assertSingleSourceStorageReady(fresh);
             if (fresh.revision !== expectedRevision) throw new Error("制作稿版本已变化，请回读后准备节点");
             const director = fresh.draft.director;
             if (!director) throw new Error("缺少正式制作稿");
@@ -88,6 +90,10 @@ export class EpisodeProductionRunner {
                     const group = fresh.draft.clipGroups.find(item => item.id === targetId);
                     const planned = (Array.isArray(director.source.segments) ? director.source.segments : []).map(object).find(item => item.id === targetId);
                     if (!group || !planned) throw new Error("Segment 未登记到正式源稿");
+                    if (isSubjectPromptAssembly(director.source)) {
+                        const association = this.service.resolveDirectorSegmentRuntime(id, targetId);
+                        if (association.status !== "resolved") throw new Error(`DIRECTOR_SEGMENT_CANVAS_${association.status.toUpperCase()}: Segment ${targetId} 的 Canvas 归属${association.status === "missing" ? "缺失" : "重复"}；该目标已阻塞，其他 Segment 不受影响`);
+                    }
                     const scenes = productionSceneEntries(director.source);
                     const sceneIds = productionSceneIdsForShots(scenes, Array.isArray(planned.shot_ids) ? planned.shot_ids.map(String) : group.shotIds);
                     if (sceneIds.length !== 1) throw new Error(sceneIds.length ? `Segment ${targetId} 跨越多个场次；请先按场次拆分` : `Segment ${targetId} 未映射到唯一正式场次，无法准备场次 H3 节点`);
@@ -156,6 +162,25 @@ export class EpisodeProductionRunner {
                 add(unit);
                 if (unit.sceneId) { sceneIds.add(unit.sceneId); add(locate(`scene:${unit.sceneId}`, "scene")); }
             } else throw new Error("准备目标必须为 entity、scene、asset、frame 或 segment");
+        }
+        const owner = this.service.ownerIdentity(id);
+        const sharedPlans = (Array.isArray(director.source.asset_plan) ? director.source.asset_plan : []).map(object).filter(plan => Boolean(plan.sharedSource));
+        const registeredSubjects = Array.isArray(director.source.subject_registry) ? director.source.subject_registry.map(object) : [];
+        for (const target of [...new Set(targetIds)]) {
+            const [kind, ...parts] = target.split(":"), targetId = parts.join(":");
+            if (kind !== "entity") continue;
+            const entity = productionEntities(director.source, owner).find(item => `${item.kind}:${item.entityId}` === targetId);
+            if (!entity) continue;
+            const plan = sharedPlans.find(item => String(item.entity_id || item.id || item.asset_id || "") === entity.entityId);
+            if (!plan) continue;
+            const entityRefKind = entity.kind === "prop" ? "asset" : entity.kind;
+            const subject = registeredSubjects.find(item => {
+                const ref = object(item.entityRef);
+                return ref.ownerKind === owner.kind && ref.ownerId === owner.id && ref.kind === entityRefKind && String(ref.id || "") === entity.entityId;
+            });
+            if (!subject) continue;
+            const pictureBinding = sharedSubjectPictureBinding(subject, plan, id, canvasId);
+            if (pictureBinding) bindings.push({ type: "upsert_director_subject", subject: { ...subject, pictureBindings: [...(Array.isArray(subject.pictureBindings) ? subject.pictureBindings : []), pictureBinding] } });
         }
         for (const sceneId of sceneIds) for (const unit of compiled.units) if (unit.area === "script" && unit.sceneId === sceneId) add(unit);
         const units = frozen?.plan.units || compiled.units;

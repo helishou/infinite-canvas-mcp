@@ -1,7 +1,9 @@
 import { ProductionPageHeading } from "./production-page-heading";
 import { canBindSubjectImage, manualWorkspaceProgress, manualTargetRecovery } from "./manual-production-guide";
 import { productionEntities, productionEntityBinding } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionSegmentRuntimeMatches } from "@/lib/production-source";
 import { ProductionInputDiff } from "./production-input-diff";
+import { matchesProductionAssetNode, subjectProductionKind } from "./production-asset-identity";
 import { currentClipRefreshes, groupedRefreshIssues } from "./production-refresh-display";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Alert, App, Button, Input, InputNumber, Modal, Select, Switch, Tag } from "antd";
@@ -122,7 +124,7 @@ function SubjectPictureBindings({ subject, canvasNodes, canvasId, owner, assets,
     const bindingId = `picture:${subject.id}:${encodeURIComponent(nodeChoice.projectId)}:${encodeURIComponent(nodeChoice.nodeId)}`;
     const binding = { id: bindingId, assetId: nodeChoice.assetId || bindingId,
       sourceNode: { projectId: nodeChoice.projectId, nodeId: nodeChoice.nodeId }, selection: { mode: "node_selection" },
-      provides: ["identity"], retain: ["主体身份与已登记外观"], exclude: ["原图姿势", "无关背景"], applicableState: {}, defaultFor: bindings.some(item => (item.defaultFor || []).includes("identity")) ? [] : ["identity"] };
+      provides: ["identity"], retain: ["character identity and costume"], exclude: ["camera pose", "unrelated background"], applicableState: {}, defaultFor: bindings.some(item => (item.defaultFor || []).includes("identity")) ? [] : ["identity"] };
     if (await onSave({ ...subject, pictureBindings: [...bindings, binding] })) setNodeChoice(undefined);
   };
   const addCharacterImage = async (storageKey: string, referenceId: string) => {
@@ -130,7 +132,7 @@ function SubjectPictureBindings({ subject, canvasNodes, canvasId, owner, assets,
     const bindingId = `picture:${subject.id}:${encodeURIComponent(nodeChoice.projectId)}:${encodeURIComponent(nodeChoice.nodeId)}:${encodeURIComponent(storageKey)}`;
     const binding = { id: bindingId, assetId: nodeChoice.assetId || bindingId,
       sourceNode: { projectId: nodeChoice.projectId, nodeId: nodeChoice.nodeId }, selection: { mode: "selected_result", resultId: referenceId },
-      provides: ["identity"], retain: ["角色身份"], exclude: ["原图构图", "无关背景"], applicableState: {}, defaultFor: bindings.some(item => (item.defaultFor || []).includes("identity")) ? [] : ["identity"] };
+      provides: ["identity"], retain: ["character identity as defined by the reference image"], exclude: ["original composition", "unrelated background"], applicableState: {}, defaultFor: bindings.some(item => (item.defaultFor || []).includes("identity")) ? [] : ["identity"] };
     if (await onSave({ ...subject, pictureBindings: [...bindings, binding] })) setNodeChoice(undefined);
   };
   const remove = async (binding: Record<string, any>) => {
@@ -607,7 +609,7 @@ function SubjectClipPartitionEditor({ shots, segments, fps, busy, shotTitle, onS
 export function DirectorPanel({
   workspace, director, production, readiness, run, batches, runtimeTasks = [], canvasNodes, sharedCanvasNodes, sharedCanvasId, versions, busy, canvasId, canvasRole, focusTarget, embedded = false, continuityReport, continuitySnapshotLoading = false,
   briefDraft, onBriefDraftChange, onOpenSharedAsset, onPromoteExistingSharedAsset,
-  onPrepareEntities, onUpsertSubject, onDeleteSubject, onDeleteScene, onDeleteAsset, onRemoveCanvasAsset, onPatchCanvasAsset, onCreateManualAsset, onIncludeSharedNode, onRemoveSharedAsset, onSaveV2Shot, onRepartitionClips, onEditShot,
+  onPrepareEntities, onUpsertSubject, onSwitchToSharedNode, onDeleteSubject, onDeleteScene, onDeleteAsset, onRemoveCanvasAsset, onPatchCanvasAsset, onCreateManualAsset, onIncludeSharedNode, onRemoveSharedAsset, onSaveV2Shot, onRepartitionClips, onEditShot,
   compact = false, navigationTitleVisible = false, onSaveScript, generationSupported = true, assetScopeHint,
   onBrief, onPatch, onEditCanvasClip, onAdoptDirectorFields, onAdoptClipStyle, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onPublish, onReplace, onAskDirector, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRestore, onRefresh, onSceneCommand, sceneCommandPending, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onCheckContinuity, onContinuitySnapshot,
   onCompile, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets,
@@ -635,6 +637,7 @@ export function DirectorPanel({
   onBrief: (brief: string) => Promise<void> | void;
   onPatch: (entity: "style" | "spec" | "story" | "scene" | "environment" | "character" | "asset" | "asset_card" | "shot" | "segment", id: string | undefined, patch: Record<string, unknown>) => Promise<boolean> | void;
   onPrepareEntities?: () => Promise<void>;
+  onSwitchToSharedNode?: (node: CanvasNodeOption, subject: Extract<ProductionOperation, { type: "upsert_director_subject" }>['subject']) => Promise<boolean>;
   onIncludeSharedNode?: (node: CanvasNodeOption) => Promise<boolean>;
   onRemoveSharedAsset?: (assetId: string) => Promise<boolean>;
   onUpsertSubject?: (subject: Extract<ProductionOperation, { type: "upsert_director_subject" }>["subject"]) => Promise<boolean>;
@@ -727,7 +730,8 @@ export function DirectorPanel({
   const source = d?.source || {};
   const scriptScenes = Array.isArray(source.script_scenes) ? source.script_scenes.map(value => value && typeof value === "object" ? value as Record<string, any> : {}) : [];
   const assetPlan = Array.isArray(source.asset_plan) ? source.asset_plan.map(value => value && typeof value === "object" ? value as Record<string, any> : {}) : [];
-  const hasMissingEntityNode = Boolean(d && productionEntities(source, { kind: typeof subjectOwner === "string" ? "episode" : "canvas", id: typeof subjectOwner === "string" ? subjectOwner : canvasId }).some(entity => !canvasNodes.some(node => matchesProductionEntityTarget(productionEntityBinding(node.metadata?.productionEntity), { ...entity, ownerKind: typeof subjectOwner === "string" ? "episode" : "canvas", ownerId: typeof subjectOwner === "string" ? subjectOwner : canvasId }))));
+  const entityOwner = { kind: typeof subjectOwner === "string" ? "episode" : "canvas", id: typeof subjectOwner === "string" ? subjectOwner : canvasId };
+  const hasMissingEntityNode = Boolean(d && productionEntities(source, entityOwner).some(entity => !canvasNodes.some(node => matchesProductionAssetNode(node, entity.kind, entityOwner, entity.entityId))));
   const styleAnchorNodeReference = String(source.style_anchor_node_id || "");
   const styleAnchorAssetId = styleAnchorNodeReference ? "" : String((source.style_lock as Record<string, unknown> | undefined)?.anchor_asset_id || "");
   const styleAnchorPlan = styleAnchorAssetId ? assetPlan.find(item => String(item.asset_id || item.id || "") === styleAnchorAssetId && (String(item.role || item.asset_type || "").toUpperCase() === "STYLE_MOTHER" || String(item.kind || "").toLowerCase() === "style")) : undefined;
@@ -744,6 +748,10 @@ export function DirectorPanel({
   }) : [];
   if (subjectAssembly) sourceShots.sort((a, b) => Number(a.story_order) - Number(b.story_order));
   const segments = Array.isArray(source.segments) ? source.segments.map(value => value && typeof value === "object" ? value as Record<string, any> : {}) : [];
+  const clipRuntime = (segmentId: string) => {
+    const matches = productionSegmentRuntimeMatches(canvasNodes as any, segmentId);
+    return matches.length === 1 ? matches[0] : undefined;
+  };
   const characters = records(source.character_registry);
   const locations = records(source.scene_registry);
   const story = source.story && typeof source.story === 'object' ? source.story as Record<string, any> : {};
@@ -773,7 +781,7 @@ export function DirectorPanel({
   };
   const segmentTitle = (id: string) => {
     const currentIndex = segments.findIndex(segment => String(segment.id) === id);
-    const index = currentIndex >= 0 ? currentIndex : (production.published?.clipGroups || []).findIndex(group => group.id === id);
+    const index = currentIndex >= 0 ? currentIndex : records(production.published?.director?.source?.segments).findIndex(segment => String(segment.id) === id);
     return index < 0 ? t('director.studio.unlinkedClip') : t('director.studio.clipNumber', { number: index + 1 });
   };
   const sceneTitle = (group: ReturnType<typeof groupScriptScenes>[number], index: number) => humanName(group.title || nameMap[group.sceneId], group.sceneId, t('director.studio.sceneNumber', { number: index + 1 }));
@@ -970,7 +978,7 @@ export function DirectorPanel({
     const node = canvasNodes.find(item => item.id === nodeId);
     return node ? canvasNodeImage(node as unknown as CanvasNodeData)?.storageKey || "" : "";
   };
-  const mediaForAsset = (assetId: string, shotId?: string) => {
+  const mediaForAsset = (assetId: string, shotId?: string, allowDirectSharedEdit = false) => {
     const mapped = d?.assets[assetId] || publishedDirector?.assets[assetId];
     const frame = shotId ? production.draft.keyframes[shotId] || production.published?.keyframes[shotId] : undefined;
     const review = shotId ? production.draft.keyframeReviews[shotId] || production.published?.keyframeReviews[shotId] : undefined;
@@ -978,12 +986,11 @@ export function DirectorPanel({
     const status = shotId
       ? review?.verdict === "rejected" || review?.verdict === "needs-redo" ? "rejected" : frame?.storageKey && frameMatchesBinding ? "approved" : mapped?.status || "planned"
       : mapped?.status === "generated" && mapped.storageKey ? "approved" : mapped?.status || "planned";
-    return { asset: mapped, nodeId: shotId ? frame?.nodeId && frameMatchesBinding ? frame.nodeId : mapped?.nodeId || "" : mapped?.nodeId || "", storageKey: shotId ? frame?.storageKey && frameMatchesBinding ? frame.storageKey : mapped?.storageKey || "" : mapped?.storageKey || "", sha256: mapped?.sha256 || "", status, inputOutdated: mapped?.inputOutdated, evidence: mapped?.evidence || review?.evidence || "" };
+    return { asset: allowDirectSharedEdit && mapped?.sharedSource ? { ...mapped, sharedSource: undefined } : mapped, nodeId: shotId ? frame?.nodeId && frameMatchesBinding ? frame.nodeId : mapped?.nodeId || "" : mapped?.nodeId || "", storageKey: shotId ? frame?.storageKey && frameMatchesBinding ? frame.storageKey : mapped?.storageKey || "" : mapped?.storageKey || "", sha256: mapped?.sha256 || "", status, inputOutdated: mapped?.inputOutdated, evidence: mapped?.evidence || review?.evidence || "" };
   };
-  const deliveredClips = (production.published?.clipGroups || []).flatMap(group => {
-    const node = canvasNodes.find(item => item.id === group.nodeId);
-    const nodeSegments = Array.isArray(node?.metadata?.segments) ? node.metadata!.segments.map(value => value && typeof value === "object" ? value as Record<string, unknown> : {}) : [];
-    const segment = nodeSegments.find(item => String(item.id || "") === String(group.segmentId || ""));
+  const deliveredClips = records(production.published?.director?.source?.segments).flatMap(group => {
+    const runtime = clipRuntime(String(group.id));
+    const segment = runtime?.segment;
     const storageKey = String(segment?.resultStorageKey || "");
     return storageKey ? [{ group, storageKey }] : [];
   });
@@ -1048,6 +1055,10 @@ export function DirectorPanel({
   const canvasAssetRows = canvasNodes.flatMap(node => {
     if (!["character", "scene", "prop"].includes(String(node.type))) return [];
     const metadata = node.metadata || {};
+    if (subjectAssembly) {
+      const binding = productionEntityBinding(metadata.productionEntity);
+      if (!binding || !productionEntities(source, entityOwner).some(entity => entity.kind === node.type && entity.kind === binding.kind && entity.entityId === binding.entityId)) return [];
+    }
     const kind = node.type === "character" ? "characters" : node.type === "scene" ? "locations" : "props";
     const images = Array.isArray(metadata.characterImages) ? metadata.characterImages as Array<Record<string, any>> : [];
     const primaryIndex = Math.min(Math.max(Number(metadata.characterPrimaryIndex) || 0, 0), Math.max(images.length - 1, 0));
@@ -1137,7 +1148,7 @@ export function DirectorPanel({
   };
   const renderAssetCard = (assetId: string, item?: Record<string, any>, keyframeShot?: string, options: { gallery?: boolean } = {}) => {
     const { gallery = false } = options;
-    const media = mediaForAsset(assetId, keyframeShot);
+    const media = mediaForAsset(assetId, keyframeShot, Boolean(item?.sharedSource));
     const imageNode = canvasNodes.find(node => node.id === media.nodeId);
     const nodeImages = imageNode?.type === "character" ? imageNode.metadata?.characterImages : imageNode?.metadata?.images;
     const { images: previewImages, previewKey, browsingHistory } = assetImagePreview(media.storageKey, nodeImages, gallery ? assetPreviewKeys[assetId] : undefined, imageNode?.type === "character");
@@ -1227,7 +1238,7 @@ export function DirectorPanel({
           <p className="text-xs text-muted-foreground">{t(`director.workspace.manual.${recovery.messageKey}`)}</p>
           {[...item.blockers, ...(item.warnings || [])].map((reason, index) => <p key={index} className="whitespace-pre-wrap break-words text-xs text-muted-foreground">{humanMessage(reason)}</p>)}
           <div className="flex flex-wrap gap-2"><Button size="small" disabled={busy} onClick={() => openManualTarget(item)}>{t(`director.workspace.manual.${recovery.actionKey}`)}</Button>
-            {item.kind === "segment" && onLocateTarget && production.draft.clipGroups.some(group => group.id === item.targetId && group.nodeId && group.segmentId) && <Button size="small" disabled={busy} onClick={() => onLocateTarget("segment", item.targetId)}>{t("director.workspace.manual.editCanvasPrompt")}</Button>}
+            {item.kind === "segment" && onLocateTarget && clipRuntime(item.targetId) && <Button size="small" disabled={busy} onClick={() => onLocateTarget("segment", item.targetId)}>{t("director.workspace.manual.editCanvasPrompt")}</Button>}
             <Button size="small" type="text" disabled={busy} onClick={() => onAskDirector({ workspace: item.kind === "segment" ? "production" : item.kind === "keyframe" ? "shots" : "assets", targetId: item.targetId })}>{t("director.workspace.askDirector")}</Button>
           </div>
         </div>
@@ -1394,8 +1405,25 @@ export function DirectorPanel({
       </div>; })}
       {structural && editingScript && <span className="flex flex-wrap gap-2"><Button type="text" size="small" icon={<Plus className="size-3.5" />} disabled={busy} onClick={() => void commitSceneBlocks([...nested, { id: nextBlockId(nested), kind: "action", text: "" }])}>{t("director.workspace.addActionBlock")}</Button><Button type="text" size="small" icon={<Plus className="size-3.5" />} disabled={busy} onClick={() => void commitSceneBlocks([...nested, { id: nextBlockId(nested), kind: "dialogue", speaker: "", text: "" }])}>{t("director.workspace.addDialogueBlock")}</Button></span>}</>;
   };
-  const visibleSubjects = records(source.subject_registry).filter(subject => (assetFilter === "all" || assetFilter === (["character", "animal"].includes(String(subject.kind)) ? "characters" : subject.kind === "scene" ? "locations" : "props")) && matchesAssetSearch(subjectDisplayName(source, String(subject.id)), assetSearch));
+  const allSubjects = records(source.subject_registry);
+  const subjectOwnerIdentity = entityOwner;
+  const isBoundSubject = (subject: Record<string, any>) => {
+    const ref = subject.entityRef;
+    const kind = subjectProductionKind(subject);
+    return Boolean(kind && ref && ref.ownerKind === subjectOwnerIdentity.kind && ref.ownerId === subjectOwnerIdentity.id
+      && typeof ref.id === "string" && ref.id
+      && canvasNodes.some(node => matchesProductionAssetNode(node, kind, subjectOwnerIdentity, ref.id)));
+  };
+  const unboundSubjects = allSubjects.filter(subject => !isBoundSubject(subject));
+  const visibleSubjects = allSubjects.filter(subject => {
+    const kind = subjectProductionKind(subject);
+    const category = kind === "character" ? "characters" : kind === "scene" ? "locations" : "props";
+    return isBoundSubject(subject) && (assetFilter === "all" || assetFilter === category)
+      && matchesAssetSearch(subjectDisplayName(source, String(subject.id)), assetSearch);
+  });
   const activeSubject = visibleSubjects.find(subject => subject.id === selectedSubjectId) || visibleSubjects[0];
+  const sharedEpisodeNodes = (sharedCanvasNodes || []).filter(node => ["character", "scene", "prop"].some(kind =>
+    matchesProductionAssetNode(node, kind as "character" | "scene" | "prop", { kind: "canvas", id: String(sharedCanvasId || "") })));
   const renderAssets = () => <div className="space-y-3">
     <ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t(subjectAssembly ? "director.atomic.subjects" : "director.studio.assets")} summary={assetScopeHint} help={<p>{t(subjectAssembly ? "director.workspace.subjectBindingHint" : "director.studio.assetsHint")}</p>} actions={<> <Button icon={<Plus className="size-4" />} disabled={busy || !d} onClick={() => { setNewAssetKind("prop"); setNewAssetName(""); setNewAssetDescription(""); setNewAssetPrompt(""); setNewAssetPurpose(""); setNewAssetOpen(true); }}>{t("director.crud.addManualAsset")}</Button><Button icon={<WandSparkles className="size-4" />} disabled={busy} onClick={() => onAskDirector({ workspace: "assets" })}>{t("director.studio.collaborate")}</Button> </>} />
     <Modal open={newAssetOpen} title={t("director.crud.addManualAsset")} onCancel={() => setNewAssetOpen(false)} onOk={() => void addManualAsset()} okText={t("common.save")} cancelText={t("common.cancel")} confirmLoading={creatingAsset} okButtonProps={{ disabled: busy || !d || !newAssetName.trim() }}>
@@ -1409,19 +1437,20 @@ export function DirectorPanel({
     </Modal>
     {error && <Alert type="error" showIcon message={error} />}
     {d && canvasRole === "episode" && sharedCanvasId && onIncludeSharedNode && <section className="rounded-lg border border-border bg-card p-4" data-shared-episode-assets>
-      <div className="flex flex-wrap items-start justify-between gap-2"><div><h3 className="text-sm font-semibold">{t("director.workspace.sharedNodesTitle")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("director.workspace.sharedNodesHint")}</p></div><Tag>{(sharedCanvasNodes || []).filter(node => { const binding = node.metadata?.productionEntity as Record<string, unknown> | undefined; return ["character", "scene", "prop"].includes(String(binding?.kind)) && binding?.ownerKind === "canvas" && binding?.ownerId === sharedCanvasId; }).length}</Tag></div>
-      <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">{(sharedCanvasNodes || []).filter(node => { const binding = node.metadata?.productionEntity as Record<string, unknown> | undefined; return ["character", "scene", "prop"].includes(String(binding?.kind)) && binding?.ownerKind === "canvas" && binding?.ownerId === sharedCanvasId && node.type === binding?.kind; }).map(node => {
-        const binding = node.metadata?.productionEntity as Record<string, unknown>;
+      <div className="flex flex-wrap items-start justify-between gap-2"><div><h3 className="text-sm font-semibold">{t("director.workspaceHierarchy.sharedNodesTitle")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("director.workspaceHierarchy.sharedNodesHint")}</p></div><Tag>{sharedEpisodeNodes.length}</Tag></div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">{sharedEpisodeNodes.map(node => {
+        const binding = node.metadata?.productionEntity as Record<string, unknown> | undefined;
         const linked = assetPlan.find(plan => { const ref = plan.sharedSource as Record<string, unknown> | undefined; return ref?.sourceProjectId === sharedCanvasId && ref?.sourceNodeId === node.id; });
-        const kind = String(binding.kind), name = String(node.title || node.metadata?.[`${kind}Name`] || node.id);
+        const kind = String(binding?.kind || node.type), name = String(node.title || node.metadata?.[`${kind}Name`] || node.id);
         return <article key={node.id} className="flex min-w-0 items-center justify-between gap-2 rounded-md border border-border px-3 py-2" data-shared-source-node={node.id}>
           <div className="min-w-0"><p className="truncate text-sm font-medium">{name}</p><p className="text-xs text-muted-foreground">{t(`director.workspace.subjectKind.${kind}`)}</p></div>
-          {linked ? <Button size="small" type="text" disabled={busy || !onRemoveSharedAsset} onClick={() => void onRemoveSharedAsset?.(assetIdOf(linked))}>{t("director.workspace.removeSharedNode")}</Button>
-            : <Button size="small" disabled={busy} onClick={() => void onIncludeSharedNode(node)}>{t("director.workspace.useSharedNode")}</Button>}
+          {linked ? <Button size="small" type="text" disabled={busy || !onRemoveSharedAsset} onClick={() => void onRemoveSharedAsset?.(assetIdOf(linked))}>{t("director.workspaceHierarchy.removeSharedNode")}</Button>
+            : <Button size="small" disabled={busy} onClick={() => void onIncludeSharedNode(node)}>{t("director.workspaceHierarchy.useSharedNode")}</Button>}
         </article>;
       })}</div>
     </section>}
-    {d && onPrepareEntities && (hasMissingEntityNode || hasMissingStyleAnchorNode) && <Button size="small" disabled={busy} onClick={() => void onPrepareEntities()}>{t("director.crud.prepareEntityNodes")}</Button>}
+    {subjectAssembly && unboundSubjects.length > 0 && <Alert type="warning" showIcon message={t("director.workspaceHierarchy.unboundSubjects", { count: unboundSubjects.length })} description={t("director.workspaceHierarchy.unboundSubjectsHint")} action={d && onPrepareEntities && hasMissingEntityNode ? <Button size="small" disabled={busy} onClick={() => void onPrepareEntities()}>{t("director.crud.prepareEntityNodes")}</Button> : undefined} />}
+    {d && onPrepareEntities && !subjectAssembly && (hasMissingEntityNode || hasMissingStyleAnchorNode) && <Button size="small" disabled={busy} onClick={() => void onPrepareEntities()}>{t("director.crud.prepareEntityNodes")}</Button>}
     {/* 分集页不再提供风格锚点设置：全剧统一在剧目管理的「共享资产画布」TAB 或共享画布工作台维护，分集制作稿按需继承。 */}
     {d && canvasRole !== "episode" && <details className="border-b border-border pb-4"><summary className="cursor-pointer text-sm text-muted-foreground">{t("director.studio.styleSettings")}</summary><section className="mt-3 grid gap-3 md:grid-cols-2">
       {(() => {
@@ -1497,7 +1526,7 @@ export function DirectorPanel({
         void onUpsertSubject({ id: subjectId, kind: entity.kind === "character" ? "character" : entity.kind === "scene" ? "scene" : "prop", entityRef: { ownerKind, ownerId, kind: entity.kind, id: entity.id }, pictureBindings: [] }).then(saved => { if (saved) { setSelectedSubjectId(subjectId); setNewSubjectOpen(false); setNewSubjectEntity(undefined); } });
       }}>{t("director.crud.registerSubject")}</Button>}><p className="mb-3 text-sm text-muted-foreground">{t("director.crud.subjectRegisterHint")}</p><Select className="w-full" value={newSubjectEntity} onChange={setNewSubjectEntity} options={[...characters.map(row => ({ kind: "character", row })), ...locations.map(row => ({ kind: "scene", row })), ...assetPlan.map(row => ({ kind: "asset", row }))].filter(({ kind, row }) => !records(source.subject_registry).some(subject => subject.entityRef?.kind === kind && subject.entityRef?.id === String(row.id || row.asset_id))).map(({ kind, row }) => ({ value: JSON.stringify({ kind, id: String(row.id || row.asset_id) }), label: String(row.name || row.asset_name || row.scene_name || row.title || t("director.crud.unnamedEntity")) }))} /></Modal>
       {!visibleSubjects.length && <div className="production-empty-state"><p>{t(records(source.subject_registry).length ? "director.studio.emptySearch" : "director.atomic.noRegisteredSubjects")}</p>{records(source.subject_registry).length > 0 ? <Button onClick={() => { setAssetFilter("all"); setAssetSearch(""); }}>{t("director.atomic.clearFilters")}</Button> : <Button disabled={busy} onClick={() => setNewSubjectOpen(true)}>{t("director.crud.addSubject")}</Button>}</div>}
-      <div className="grid items-start gap-5 lg:grid-cols-[200px_minmax(0,1fr)]"><nav className="max-h-64 overflow-y-auto rounded-xl border border-border lg:max-h-[70dvh]" aria-label={t("director.atomic.subjects")}>{visibleSubjects.map(subject => <button type="button" key={subject.id} aria-current={activeSubject?.id === subject.id ? "true" : undefined} onClick={() => setSelectedSubjectId(subject.id)} className={`block w-full border-b border-border px-3 py-3 text-left last:border-0 ${activeSubject?.id === subject.id ? "bg-muted" : "hover:bg-muted/40"}`}><span className="block truncate text-sm font-medium">{subjectDisplayName(source, String(subject.id))}</span><span className="mt-1 block text-xs text-muted-foreground">{t(`director.workspace.subjectKind.${String(subject.kind || "other")}`)} · {t("director.studio.boundPictures", { count: records(subject.pictureBindings).length })}</span></button>)}</nav><div className="min-w-0">{(activeSubject ? [activeSubject] : []).map(subject => {
+      <div className="grid items-start gap-5 lg:grid-cols-[200px_minmax(0,1fr)]"><nav className="max-h-64 overflow-y-auto rounded-xl border border-border lg:max-h-[70dvh]" aria-label={t("director.atomic.subjects")}>{visibleSubjects.map(subject => <button type="button" key={subject.id} aria-current={activeSubject?.id === subject.id ? "true" : undefined} onClick={() => setSelectedSubjectId(subject.id)} className={`block w-full border-b border-border px-3 py-3 text-left last:border-0 ${activeSubject?.id === subject.id ? "bg-muted" : "hover:bg-muted/40"}`}><span className="block truncate text-sm font-medium">{subjectDisplayName(source, String(subject.id))}</span><span className="mt-1 block text-xs text-muted-foreground">{t(`director.workspace.subjectKind.${subjectProductionKind(subject) || "other"}`)} · {t("director.studio.boundPictures", { count: records(subject.pictureBindings).length })}</span></button>)}</nav><div className="min-w-0">{(activeSubject ? [activeSubject] : []).map(subject => {
         const entity = subject.entityRef || {}, entityId = String(entity.id || ""), character = records(source.character_registry).find(row => row.id === entityId), scene = records(source.scene_registry).find(row => row.id === entityId), asset = assetPlan.find(row => assetIdOf(row) === entityId);
         const title = String(character?.name || scene?.name || asset?.asset_name || asset?.name || entityId || subject.id);
         const usageCount = records(source.shots).filter(shot => records(shot.subject_usages).some(usage => usage.subjectId === subject.id)).length;
@@ -1505,9 +1534,59 @@ export function DirectorPanel({
         const entityNode = canvasNodes.find(node => matchesProductionEntityTarget(productionEntityBinding(node.metadata?.productionEntity), { entityId, kind: entity.kind === "asset" ? "prop" : entity.kind, ownerId: entity.ownerId, ownerKind: entity.ownerKind }));
         const entitySource = entityNode ? { projectId: canvasId, nodeId: entityNode.id } : undefined;
         const entityNavigation = subjectPictureNavigation(records(subject.pictureBindings), entitySource, { id: canvasId, nodeIds: canvasNodes.map(node => node.id) }).entitySource;
+        const subjectKind = subjectProductionKind(subject);
+        type SubjectSwitchTarget = { entityId: string; kind: "character" | "scene" | "prop"; assetId: string; pictureNodeId: string; shared: boolean; included: boolean; title: string; sharedNode?: CanvasNodeOption };
+        const registeredSwitchTargets: SubjectSwitchTarget[] = subjectKind ? productionEntities(source, entityOwner).filter(entity => entity.kind === subjectKind).flatMap(entity => {
+          const plans = assetPlan.filter(plan => String(plan.kind || "") === entity.kind
+            && String(plan.entity_id || (entity.kind === "prop" ? assetIdOf(plan) : "")) === entity.entityId);
+          const sharedPlan = plans.find(plan => plan.sharedSource);
+          const targetPlan = sharedPlan || plans.find(plan => d?.assets[assetIdOf(plan)]?.nodeId) || plans[0];
+          const localEntityNode = canvasNodes.find(node => matchesProductionAssetNode(node, entity.kind, entityOwner, entity.entityId));
+          const sharedSource = sharedPlan?.sharedSource as Record<string, any> | undefined;
+          const sharedSourceNode = sharedSource ? sharedCanvasNodes?.find(node => node.id === sharedSource.sourceNodeId) : undefined;
+          if (!localEntityNode && (!sharedSource || !sharedSourceNode)) return [];
+          const registeredSubject = allSubjects.find(other => other.entityRef?.ownerKind === entityOwner.kind && other.entityRef?.ownerId === entityOwner.id
+            && other.entityRef?.kind === (entity.kind === "prop" ? "asset" : entity.kind) && String(other.entityRef?.id || "") === entity.entityId);
+          const targetAssetId = targetPlan ? assetIdOf(targetPlan) : `subject-node:${localEntityNode!.id}`;
+          const existingPicture = records(registeredSubject?.pictureBindings).find(picture => picture.assetId === targetAssetId && picture.sourceNode?.projectId === canvasId);
+          const targetImageNodeId = sharedSource ? String(existingPicture?.sourceNode?.nodeId || localEntityNode?.id || "") : String(d?.assets[targetAssetId]?.nodeId || existingPicture?.sourceNode?.nodeId || localEntityNode?.id || "");
+          if (!targetImageNodeId) return [];
+          return [{ entityId: entity.entityId, kind: entity.kind, assetId: targetAssetId, pictureNodeId: targetImageNodeId, shared: Boolean(sharedSource), included: true, title: String(sharedSourceNode?.title || localEntityNode?.title || entity.name) }];
+        }) : [];
+        const registeredSharedSources = new Set(assetPlan.flatMap(plan => {
+          const ref = plan.sharedSource as Record<string, unknown> | undefined;
+          if (!ref || ref.sourceProjectId !== sharedCanvasId || typeof ref.sourceNodeId !== "string") return [];
+          return [ref.sourceNodeId];
+        }));
+        const unregisteredSharedTargets: SubjectSwitchTarget[] = subjectKind ? sharedEpisodeNodes.filter(node => node.type === subjectKind && !registeredSharedSources.has(node.id)).map(node => {
+          const sharedIdentity = `${encodeURIComponent(String(sharedCanvasId))}_${encodeURIComponent(node.id)}`;
+          const assetId = `SHARED_${sharedIdentity}`;
+          const entityId = subjectKind === "prop" ? assetId : `${subjectKind === "character" ? "CHAR" : "SCENE"}_${sharedIdentity}`;
+          return { entityId, kind: subjectKind, assetId, pictureNodeId: "", shared: true, included: false, title: String(node.title || node.metadata?.[`${subjectKind}Name`] || node.id), sharedNode: node };
+        }) : [];
+        const switchableEntities = [...registeredSwitchTargets, ...unregisteredSharedTargets];
+        const switchSubjectEntity = async (targetEntityId: string) => {
+          const target = switchableEntities.find(option => option.entityId === targetEntityId);
+          if (!target || (!onUpsertSubject && !(target.sharedNode && onSwitchToSharedNode)) || target.kind !== subjectKind) return;
+          const targetAssetId = target.assetId;
+          const targetImageNodeId = target.pictureNodeId;
+          const currentEntityKind = entity.kind === "asset" ? "prop" : String(entity.kind);
+          const oldAssetIds = new Set(assetPlan.filter(plan => String(plan.kind || "") === currentEntityKind
+            && String(plan.entity_id || (currentEntityKind === "prop" ? assetIdOf(plan) : "")) === entityId).map(assetIdOf));
+          const keptBindings: Array<Record<string, any>> = records(subject.pictureBindings).filter(picture => !oldAssetIds.has(String(picture.assetId || "")))
+            .map(picture => ({ ...picture, defaultFor: (Array.isArray(picture.defaultFor) ? picture.defaultFor : []).filter((value: string) => value !== "identity") }));
+          if (!target.included && target.sharedNode && onSwitchToSharedNode) {
+            await onSwitchToSharedNode(target.sharedNode, { ...subject, entityRef: { ownerKind: "episode", ownerId: entityOwner.id, kind: target.kind === "prop" ? "asset" : target.kind, id: target.entityId }, pictureBindings: keptBindings } as Extract<ProductionOperation, { type: "upsert_director_subject" }>['subject']);
+            return;
+          }
+          const bindingId = `picture:${subject.id}:${encodeURIComponent(canvasId)}:${encodeURIComponent(targetImageNodeId)}`;
+          const nextPictureBinding: Record<string, any> = { id: bindingId, assetId: targetAssetId, sourceNode: { projectId: canvasId, nodeId: targetImageNodeId }, selection: { mode: "node_selection" as const },
+            provides: [target.kind === "scene" ? "environment" : "identity"], retain: target.kind === "scene" ? ["scene layout and environment"] : ["character identity and costume as defined by the reference image"], exclude: ["pose, camera angle, background, and unrelated composition"], applicableState: {}, defaultFor: ["identity"] };
+          await onUpsertSubject?.({ ...subject, entityRef: { ownerKind: "episode", ownerId: entityOwner.id, kind: target.kind === "prop" ? "asset" : target.kind, id: target.entityId }, pictureBindings: [...keptBindings, nextPictureBinding] } as Extract<ProductionOperation, { type: "upsert_director_subject" }>["subject"]);
+        };
         return <article key={String(subject.id)} className="grid min-w-0 gap-4 rounded-lg border border-border bg-card p-4 xl:grid-cols-[minmax(0,1fr)_320px]">
-          <div className="flex flex-wrap items-center justify-between gap-2 xl:col-span-2"><div><h3 className="font-semibold">{title}</h3><p className="text-xs text-muted-foreground">{t("director.workspace.subjectConsumers", { count: usageCount })}</p></div><div className="flex flex-wrap items-center gap-2"><Tag>{t(`director.workspace.subjectKind.${String(subject.kind || "other")}`)}</Tag></div></div>
-          <details open className="min-w-0 border-t border-border pt-3 xl:col-start-2 xl:row-start-2 xl:max-h-[65dvh] xl:overflow-y-auto"><summary className="cursor-pointer text-sm">{t("director.crud.editSubject")}</summary><div className="mt-3 space-y-3">{entityNavigation && <div data-subject-material-actions><ReferenceNodeLink sourceNode={entityNavigation} label={t("director.subjectImages.openSubjectMaterial")} /></div>}{(() => {
+          <div className="flex flex-wrap items-center justify-between gap-2 xl:col-span-2"><div><h3 className="font-semibold">{title}</h3><p className="text-xs text-muted-foreground">{t("director.workspace.subjectConsumers", { count: usageCount })}</p></div><div className="flex flex-wrap items-center gap-2"><Tag>{t(`director.workspace.subjectKind.${subjectProductionKind(subject) || "other"}`)}</Tag></div></div>
+          <details open className="min-w-0 border-t border-border pt-3 xl:col-start-2 xl:row-start-2 xl:max-h-[65dvh] xl:overflow-y-auto"><summary className="cursor-pointer text-sm">{t("director.crud.editSubject")}</summary><div className="mt-3 space-y-3">{entityNavigation && <div data-subject-material-actions><ReferenceNodeLink sourceNode={entityNavigation} label={t("director.subjectImages.openSubjectMaterial")} /></div>}{canvasRole === "episode" && subjectKind && switchableEntities.length > 0 && <label className="grid gap-1 text-xs"><span>{t("director.workspaceHierarchy.subjectCanvasNode")}</span><Select className="w-full" value={entityId} disabled={busy || switchableEntities.length < 2} options={switchableEntities.map(option => ({ value: option.entityId, label: t(option.shared ? "director.workspaceHierarchy.sharedNodeOption" : "director.workspaceHierarchy.episodeNodeOption", { title: option.title }) }))} onChange={value => void switchSubjectEntity(value)} /><span className="text-muted-foreground">{t("director.workspaceHierarchy.subjectCanvasNodeHint")}</span></label>}{(() => {
             const entityType = entity.kind === "character" ? "character" : entity.kind === "scene" ? "environment" : "asset";
             const row = entity.kind === "character" ? character : entity.kind === "scene" ? scene : asset;
             const descriptionField = subjectDescriptionField(entityType, row || {});
@@ -1703,9 +1782,8 @@ export function DirectorPanel({
   /** One shared stage classification for every target view, including the page summary. */
   const productionTargetStage = (target: { id: string; kind: string; targetId: string; status: string }): "preparing" | "ready" | "running" | "results" => {
     if (activeTargetIds.includes(target.id)) return "running";
-    const group = target.kind === "segment" ? production.draft.clipGroups.find(candidate => candidate.id === target.targetId) : undefined;
-    const node = canvasNodes.find(candidate => candidate.id === group?.nodeId);
-    const result = records(node?.metadata?.segments).find(clip => clip.id === group?.segmentId)?.resultStorageKey;
+    const runtime = target.kind === "segment" ? clipRuntime(target.targetId) : undefined;
+    const result = runtime?.segment.resultStorageKey;
     return result ? "results" : target.status === "ready" ? "ready" : "preparing";
   };
   /** Shared attention model: page summary, compact task panel and the target workbench read the same list. */
@@ -1754,9 +1832,8 @@ export function DirectorPanel({
     {mode === "prompt_only" && <Alert type="info" showIcon message={t("director.workspace.promptOnlyHint")} />}
     {readiness?.targets.length ? (() => {
       const selected = readiness.targets.find(target => target.id === selectedGenerationId) || readiness.targets.find(target => target.id === focusTarget) || readiness.targets.find(target => target.kind === "segment") || readiness.targets[0];
-      const group = production.draft.clipGroups.find(group => selected.kind === "segment" && group.id === selected.targetId);
-      const node = canvasNodes.find(node => node.id === group?.nodeId);
-      const clip = records(node?.metadata?.segments).find(clip => clip.id === group?.segmentId);
+      const runtime = selected.kind === "segment" ? clipRuntime(selected.targetId) : undefined;
+      const clip = runtime?.segment;
       const segment = segments.find(segment => selected.kind === "segment" && segment.id === selected.targetId);
       const segmentShots = (segment?.shot_ids || []).map((id: string) => sourceShots.find(shot => String(shot.id) === String(id)));
       const sourceDuration = segmentShots.length && segmentShots.every((shot: Record<string, any> | undefined) => shot && storyboardDurationFrames(shot) > 0)
@@ -1773,7 +1850,7 @@ export function DirectorPanel({
       const editSelected = () => {
         if (recovery.workspace !== "production") { openManualTarget(selected); return; }
         const firstShotId = segment?.shot_ids?.[0];
-        if (selected.kind === "segment" && group?.nodeId && group.segmentId && !firstShotId) { onLocateTarget?.("segment", selected.targetId); return; }
+        if (selected.kind === "segment" && runtime?.node.id && runtime.segment.id && !firstShotId) { onLocateTarget?.("segment", selected.targetId); return; }
         onNavigate(selected.kind === "asset" ? "assets" : "shots", { kind: firstShotId || selected.kind === "keyframe" ? "shot" : selected.kind, id: firstShotId ? String(firstShotId) : selected.targetId });
       };
       return <div className="grid items-start gap-4 lg:grid-cols-[minmax(190px,0.8fr)_minmax(0,2fr)]" data-generation-target-workbench>
@@ -1868,30 +1945,30 @@ export function DirectorPanel({
   </div>;
 
   const renderSegmentStyle = (segment: Record<string, any>) => {
-    const group = production.draft.clipGroups.find(group => group.id === segment.id);
-    const node = canvasNodes.find(node => node.id === group?.nodeId);
-    const clip = (Array.isArray(node?.metadata?.segments) ? node.metadata.segments as Record<string, any>[] : []).find(clip => clip.id === group?.segmentId);
+    const runtime = clipRuntime(String(segment.id));
+    const clip = runtime?.segment;
     const styleDeclared = clip ? clip.productionClipProjection?.styleTemplateDeclared === true || clip.h3ParameterOverrides?.includes("styleTemplateId") : Object.hasOwn(segment, "styleTemplateId");
     const sourceStyle = segment.styleTemplateId ?? null;
     const liveStyle = clip?.styleTemplateId ?? null;
     const disabled = busy;
     const styleName = (value: string | null) => value ? t(`director.workspace.clipStyleNames.${value}`) : t("director.workspace.clipStyleNone");
-    return <div className="mt-3 space-y-2" data-production-clip-style={segment.id}><label className="flex flex-wrap items-center gap-3 text-sm"><span>{t("director.workspace.clipStyle")}</span><Select className="w-56 max-w-full" aria-label={t("director.workspace.clipStyle")} value={styleDeclared ? (clip ? liveStyle : sourceStyle) || "" : "__inherit__"} disabled={disabled} options={[...(!styleDeclared ? [{ value: "__inherit__", label: t("director.workspace.clipStyleInherit"), disabled: true }] : []), { value: "", label: styleName(null) }, ...H3_STYLE_TEMPLATES.map(template => ({ value: template.id, label: styleName(template.id) }))]} onChange={value => { if (value !== "__inherit__") { if (onEditCanvasClip && group?.nodeId && group.segmentId) void onEditCanvasClip(group.nodeId, group.segmentId, { styleTemplateId: value || null }); else void onPatch("segment", segment.id, { styleTemplateId: value || null }); } }} /></label><p className="text-xs text-muted-foreground">{t("director.workspace.clipStyleHint")}</p>{clip && liveStyle !== sourceStyle && onAdoptClipStyle && <Button size="small" disabled={disabled} onClick={() => { void onAdoptClipStyle(segment.id, liveStyle); }}>{t("director.workspace.adoptClipStyle", { style: styleName(liveStyle) })}</Button>}</div>;
+    return <div className="mt-3 space-y-2" data-production-clip-style={segment.id}><label className="flex flex-wrap items-center gap-3 text-sm"><span>{t("director.workspace.clipStyle")}</span><Select className="w-56 max-w-full" aria-label={t("director.workspace.clipStyle")} value={styleDeclared ? (clip ? liveStyle : sourceStyle) || "" : "__inherit__"} disabled={disabled} options={[...(!styleDeclared ? [{ value: "__inherit__", label: t("director.workspace.clipStyleInherit"), disabled: true }] : []), { value: "", label: styleName(null) }, ...H3_STYLE_TEMPLATES.map(template => ({ value: template.id, label: styleName(template.id) }))]} onChange={value => { if (value !== "__inherit__") { if (onEditCanvasClip && runtime?.node.id && runtime.segment.id) void onEditCanvasClip(runtime.node.id, String(runtime.segment.id), { styleTemplateId: value || null }); else void onPatch("segment", segment.id, { styleTemplateId: value || null }); } }} /></label><p className="text-xs text-muted-foreground">{t("director.workspace.clipStyleHint")}</p>{clip && liveStyle !== sourceStyle && onAdoptClipStyle && <Button size="small" disabled={disabled} onClick={() => { void onAdoptClipStyle(segment.id, liveStyle); }}>{t("director.workspace.adoptClipStyle", { style: styleName(liveStyle) })}</Button>}</div>;
   };
   const inputDiff = (target: { id: string; targetId: string; kind: string }) => {
-    const group = target.kind === "segment" ? production.draft.clipGroups.find(group => group.id === target.targetId) : undefined;
+    const runtime = target.kind === "segment" ? clipRuntime(target.targetId) : undefined;
     const assetId = target.kind === "keyframe" ? d?.shotInputs[target.targetId]?.keyframeAssetId : target.targetId;
-    const nodeId = group?.nodeId || (assetId ? d?.assets[assetId]?.nodeId : undefined);
+    const nodeId = runtime?.node.id || (assetId ? d?.assets[assetId]?.nodeId : undefined);
     const node = canvasNodes.find(node => node.id === nodeId);
     if (!node || !onAdoptDirectorFields) return null;
     const sourceId = (node.metadata?.productionImageProjection as any)?.sourceNodeId;
-    const sourceNode = !group && sourceId ? canvasNodes.find(node => node.id === sourceId) : undefined;
-    const targetPromptChanged = !group && node.metadata?.prompt !== (node.metadata?.productionImageProjection as any)?.nextValues?.prompt;
+    const isSegment = target.kind === "segment";
+    const sourceNode = !isSegment && sourceId ? canvasNodes.find(node => node.id === sourceId) : undefined;
+    const targetPromptChanged = !isSegment && node.metadata?.prompt !== (node.metadata?.productionImageProjection as any)?.nextValues?.prompt;
     const chosenNode = sourceNode && !targetPromptChanged ? sourceNode : node;
-    const current = group ? (node.metadata?.segments as Record<string, any>[] || []).find(clip => clip.id === group.segmentId) : { ...chosenNode.metadata, referenceNodeIds: chosenNode.metadata?.canvasReferenceNodeIds };
+    const current = isSegment ? runtime?.segment : { ...chosenNode.metadata, referenceNodeIds: chosenNode.metadata?.canvasReferenceNodeIds };
     if (!current) return null;
-    return <ProductionInputDiff current={current} projection={group ? current.productionClipProjection : current.productionImageProjection} busy={busy}
-      onAdopt={fields => onAdoptDirectorFields(group ? group.id : assetId!, chosenNode.id, group?.segmentId || undefined, fields)} />;
+    return <ProductionInputDiff current={current} projection={isSegment ? current.productionClipProjection : current.productionImageProjection} busy={busy}
+      onAdopt={fields => onAdoptDirectorFields(isSegment ? target.targetId : assetId!, chosenNode.id, isSegment && runtime?.segment.id ? String(runtime.segment.id) : undefined, fields)} />;
   };
   const focusedAsset = focusTarget?.startsWith("asset:") ? focusedId : focusTarget?.startsWith("frame:") ? d?.shotInputs[focusedId]?.keyframeAssetId : undefined;
   const focusedShot = focusTarget?.startsWith("shot:") ? sourceShots.find(shot => String(shot.id) === focusedId) : undefined;
@@ -1914,10 +1991,8 @@ export function DirectorPanel({
     </section>;
   }
   if (compact && workspace === "production" && focusedSegment) {
-    const group = production.draft.clipGroups.find(group => group.id === focusedId);
-    const node = canvasNodes.find(node => node.id === group?.nodeId);
-    const clips = Array.isArray(node?.metadata?.segments) ? node.metadata.segments as Record<string, unknown>[] : [];
-    const clip = clips.find(clip => clip.id === group?.segmentId);
+    const runtime = clipRuntime(focusedId);
+    const clip = runtime?.segment;
     const media = String(clip?.resultStorageKey || "");
     const target = readiness?.targets.find(target => target.id === `segment:${focusedId}`);
     const clipShots = (Array.isArray(focusedSegment.shot_ids) ? focusedSegment.shot_ids : []).flatMap((id: string) => sourceShots.filter(shot => String(shot.id) === String(id)));
@@ -1965,7 +2040,7 @@ export function DirectorPanel({
   if (compact && workspace === "production" && !focusTarget) return <section data-production-tasks-panel className="space-y-6">
     <div className="flex flex-wrap items-center justify-between gap-2"><span /><div className="flex gap-2"><Button size="small" type="text" onClick={onRefresh}>{t("director.workspace.refresh")}</Button><Button size="small" type="text" onClick={() => onNavigate("advanced")}>{t("productionCanvas.advanced")}</Button></div></div>
     {batches.length > 0 && <div className="space-y-3">{batches.map(batch => <article key={batch.runId} className="rounded-lg border border-border p-4"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{t(`director.studio.runStatus.${batch.status}`, { defaultValue: batch.status })}</span><div className="flex gap-2">{["pending", "running"].includes(batch.status) && <Button size="small" onClick={() => onPause(batch.runId)}>{t("director.workspace.pause")}</Button>}{["paused", "awaiting_review"].includes(batch.status) && <Button size="small" onClick={() => onResume(batch.runId)}>{t("director.workspace.resume")}</Button>}</div></div><p className="mt-2 text-xs text-muted-foreground">{t("productionCanvas.taskCount", { count: batch.targets.length, submitted: batch.submitted.length })}</p>{batch.error && <p className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">{humanMessage(batch.error)}</p>}<div className="mt-3 flex flex-wrap gap-2">{batch.targets.map(key => { const [kind, ...ids] = key.split(":"); const id = ids.join(":"); return <Button key={key} size="small" type="text" onClick={() => onLocateTarget?.(kind, id)}>{targetName(kind === "frame" ? "keyframe" : kind, id)}</Button>; })}</div></article>)}</div>}
-    {currentTasks.map(task => { const nodeId = String(task.nodeId || task.input?.nodeId || ""), segmentId = String(task.segmentId || task.input?.segmentId || ""); const group = production.draft.clipGroups.find(group => group.nodeId === nodeId && group.segmentId === segmentId); const frame = Object.entries(production.draft.keyframes).find(([, frame]) => frame.nodeId === nodeId); const asset = Object.entries(d?.assets || {}).find(([, asset]) => asset.nodeId === nodeId); const kind = group ? "segment" : frame ? "keyframe" : "asset", id = group?.id || frame?.[0] || asset?.[0]; return <article key={task.id} className="rounded-lg border border-border p-4"><div className="flex flex-wrap items-center justify-between gap-2"><span>{id ? targetName(kind, id) : t("productionCanvas.videoTarget")}</span><Tag>{t(`productionCanvas.historyStatus.${task.status === "succeeded" ? "success" : task.status === "awaiting_confirmation" ? "confirmation" : task.status}`)}</Tag></div>{task.status === "running" && <p className="mt-2 text-xs text-muted-foreground">{Math.round((task.progress || 0) * 100)}%</p>}{task.error && <p className="mt-2 whitespace-pre-wrap text-sm text-muted-foreground">{humanMessage(task.error)}</p>}{id && <Button className="mt-2" type="text" size="small" onClick={() => onLocateTarget?.(kind, id)}>{t("productionCanvas.locateResult")}</Button>}</article>; })}
+    {currentTasks.map(task => { const nodeId = String(task.nodeId || task.input?.nodeId || ""), segmentId = String(task.segmentId || task.input?.segmentId || ""); const sourceSegment = segments.find(segment => { const runtime = clipRuntime(String(segment.id)); return runtime?.node.id === nodeId && String(runtime.segment.id) === segmentId; }); const frame = Object.entries(production.draft.keyframes).find(([, frame]) => frame.nodeId === nodeId); const asset = Object.entries(d?.assets || {}).find(([, asset]) => asset.nodeId === nodeId); const kind = sourceSegment ? "segment" : frame ? "keyframe" : "asset", id = sourceSegment?.id || frame?.[0] || asset?.[0]; return <article key={task.id} className="rounded-lg border border-border p-4"><div className="flex flex-wrap items-center justify-between gap-2"><span>{id ? targetName(kind, String(id)) : t("productionCanvas.videoTarget")}</span><Tag>{t(`productionCanvas.historyStatus.${task.status === "succeeded" ? "success" : task.status === "awaiting_confirmation" ? "confirmation" : task.status}`)}</Tag></div>{task.status === "running" && <p className="mt-2 text-xs text-muted-foreground">{Math.round((task.progress || 0) * 100)}%</p>}{task.error && <p className="mt-2 whitespace-pre-wrap text-sm text-muted-foreground">{humanMessage(task.error)}</p>}{id && <Button className="mt-2" type="text" size="small" onClick={() => onLocateTarget?.(kind, String(id))}>{t("productionCanvas.locateResult")}</Button>}</article>; })}
     {!batches.length && !currentTasks.length && <p className="text-sm text-muted-foreground">{t("productionCanvas.noTasks")}</p>}
     {attentionTargets.length > 0 && <details className="border-t border-border pt-4" data-production-attention-list><summary className="cursor-pointer text-sm">{t("productionCanvas.needsAttention")}</summary><div className="mt-3 space-y-3">{attentionTargets.map(target => <div key={target.id}><Button size="small" type="text" onClick={() => onLocateTarget?.(target.kind, target.targetId)}>{targetName(target.kind, target.targetId, target.title)}</Button><p className="mt-1 text-sm text-muted-foreground">{humanMessage(target.blockers[0] || target.warnings?.[0] || target.notice || t(`director.workspace.targetStatus.${target.status}`))}</p></div>)}</div></details>}
     <section className="space-y-3 border-t border-border pt-4"><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-medium">{t("productionCanvas.deliveries")}</h3><div className="flex gap-2"><Button size="small" icon={<ArrowDownToLine className="size-3" />} loading={downloadingAllClips} disabled={!deliveredClips.length} onClick={() => void downloadAllDeliveredClips()}>{t("director.workspace.downloadAllClips")}</Button><Button size="small" loading={exporting} disabled={!d || exporting} onClick={() => void onExport(true)}>{t("productionCanvas.downloadPackage")}</Button></div></div>{deliveredClips.length ? deliveredClips.map(({ group, storageKey }) => <article key={`${group.id}:${storageKey}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border p-3"><span>{segmentTitle(group.id)}</span><div className="flex gap-2"><Button size="small" type="text" onClick={() => onLocateTarget?.("segment", group.id)}>{t("productionCanvas.locateResult")}</Button><Button size="small" aria-label={t("common.download")} onClick={() => { void fetch(backendMediaUrl(storageKey)).then(async response => { if (!response.ok) throw new Error(t("director.workspace.mediaReadFailed")); saveAs(await response.blob(), `${segmentTitle(group.id).replace(/[\\/:*?"<>|]/g, "_")}.${response.headers.get("content-type")?.includes("webm") ? "webm" : "mp4"}`); }).catch(error => message.error(String(error))); }}>{t("common.download")}</Button></div></article>) : <p className="text-sm text-muted-foreground">{t("productionCanvas.noDeliveries")}</p>}</section>

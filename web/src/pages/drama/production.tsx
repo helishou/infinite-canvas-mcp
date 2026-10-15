@@ -1,4 +1,5 @@
-import { productionEntities, productionEntityBinding } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionEntities } from "@basketikun/canvas-agent/drama/production-contract";
+import { matchesProductionAssetNode } from "./production-asset-identity";
 import { withH3ParameterEdits } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -24,6 +25,7 @@ import { readShotFormDraft, shotFormChanges, shotDraftSourceChanged } from "./su
 import { startSingleFlightPoller } from "@/lib/single-flight-poll";
 import { productionObjectPath, type ProductionObject } from "@/lib/production-object";
 import { consumeProductionEntryMark } from "@/lib/production-navigation";
+import { productionSegments, productionSegmentRuntimeMatches, segmentShotIds } from "@/lib/production-source";
 import { applyBackendCanvasEvent, ensureCanvasProjectLoaded, flushCanvasProjectBeforeGeneration, useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { SharedAssetsPicker } from "@/components/production/canvas-production-workspace";
 import {
@@ -57,7 +59,6 @@ type PendingCommand = { operationId: string; expectedRevision: number; status: "
 );
 type PendingRunStart = { inputBasis?: "canvas" | "published"; expectedCanvasRevision?: number; expectedPlanHash?: string; runId: string; idempotencyKey: string; workId?: string; expectedRevision: number; version: number; targets: string[]; scope: "selected" | "all_ready" };
 type PendingCompilation = { operationId: string; expectedRevision: number; scope?: { sceneId?: string; targetIds?: string[] } };
-type LocalDraft = { brief?: string; sourceDrafts?: Record<string, string>; remoteRevision: number | null; pendingCommand?: PendingCommand | null; pendingRunStart?: PendingRunStart | null };
 type VersionItem = { version: number; stage: string; createdAt: string };
 function sourceDraftDiffersFromSaved(key: string, value: string, director: NonNullable<EpisodeProduction["draft"]["director"]>) {
   const source = director.source as Record<string, any>;
@@ -101,14 +102,8 @@ function mergeScopedCompilationDiagnostics(previous: ProductionCompilationDiagno
   });
   return [...retained, ...current];
 }
-const localDrafts = localforage.createInstance({ name: "episode-production-drafts", storeName: "unfinished" });
-const pendingCompilationStorageKey = (draftKey: string) => `${draftKey}:pending-compilation`;
-let draftWrites: Promise<unknown> = Promise.resolve();
-function writeLocalDraft(key: string, value: LocalDraft | null) {
-  const write = draftWrites.catch(() => undefined).then(async () => { if (value) await localDrafts.setItem(key, value); else await localDrafts.removeItem(key); });
-  draftWrites = write;
-  return write;
-}
+// 制作工作台以数据库为唯一数据源，不再有本机草稿存储；进入页面时一次性清理旧版本遗留的「unfinished」记录。
+const legacyDraftPurge = (() => { let purged = false; return () => { if (purged) return; purged = true; void localforage.createInstance({ name: "episode-production-drafts", storeName: "unfinished" }).clear().catch(() => undefined); }; })();
 
 export default function ProductionRoute({ dramaId }: { dramaId?: string } = {}) {
   const [query, setQuery] = useSearchParams(), { t } = useTranslation();
@@ -237,6 +232,11 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   // 风格锚点等选择器需要同一剧目的共享资产画布节点；分集页本身只持有分集画布。
   const [sharedCanvasNodes, setSharedCanvasNodes] = useState<ProductionCanvasSnapshot>();
   const [production, setProduction] = useState<EpisodeProduction | null>(null);
+  const sourceSegments = production ? productionSegments(production) : [];
+  const clipRuntime = (segmentId: string, nodes: typeof canvasNodes = canvasNodes) => {
+    const matches = productionSegmentRuntimeMatches(nodes as any, segmentId, productionContext?.owner);
+    return matches.length === 1 ? matches[0] : undefined;
+  };
   const [readiness, setReadiness] = useState<ProductionReadiness | null>(null);
   const [continuityReport, setContinuityReport] = useState<ProductionContinuity | undefined>();
   const [continuitySnapshot, setContinuitySnapshot] = useState<"draft" | "published">("draft");
@@ -349,7 +349,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       fetchProductionReadiness(target), fetchProductionBatches(target), fetchProductionContinuity(target, { snapshot: continuityRead.snapshot }),
     ]).catch(error => { finishContinuityRead(continuityRead); throw error; });
     const resolvedCanvasId = projectId || context.episode?.canvasId || "";
-    const taskNodes = [...new Set([...(prod.production.draft.clipGroups || []).map(group => group.nodeId), ...Object.values(prod.production.draft.director?.assets || {}).map(asset => asset.nodeId)].filter((id): id is string => Boolean(id)))];
+    const sourceSegmentNodes = productionSegments(prod.production).flatMap(segment => productionSegmentRuntimeMatches((context.canvas?.nodes || []) as any, String(segment.id), context.productionContext?.owner).map(match => match.node.id));
+    const taskNodes = [...new Set([...sourceSegmentNodes, ...Object.values(prod.production.draft.director?.assets || {}).map(asset => asset.nodeId)].filter((id): id is string => Boolean(id)))];
     const tasks = resolvedCanvasId && taskNodes.length ? (await fetchBackendTasks({ projectId: resolvedCanvasId, nodeIds: taskNodes }).catch(error => { finishContinuityRead(continuityRead); throw error; })).tasks || [] : [];
     const sharedCanvasId = String(context.productionContext?.sharedAssetCanvasId || "");
     const sharedNodes = sharedCanvasId && sharedCanvasId !== resolvedCanvasId ? (await fetchBackendProject(sharedCanvasId).catch(() => null))?.project : undefined;
@@ -396,35 +397,15 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       const owner = await load(() => active);
       if (!owner || !active) return;
       const key = `${backendConnection().url}:${owner}:${getCanvasDraftSessionId()}`;
-      await draftWrites.catch(() => undefined);
-      const saved = await localDrafts.getItem<LocalDraft>(key);
-      const savedCompilation = await localDrafts.getItem<PendingCompilation>(pendingCompilationStorageKey(key));
+      legacyDraftPurge();
       if (!active) return;
-      if (saved) {
-        const currentBrief = production?.draft.director?.source.brief;
-        if (saved.brief !== undefined && saved.brief !== currentBrief) setBriefDraft(saved.brief);
-        setSourceDrafts(saved.sourceDrafts || {});
-        setRemoteRevision(saved.remoteRevision);
-        pending(saved.pendingCommand || null);
-        setPendingRun(saved.pendingRunStart || null);
-      }
-      pendingCompilationRef.current = savedCompilation || null;
-      setPendingCompilation(savedCompilation || null);
       setDraftKey(key);
     })().catch(error => { if (active) { setLoadError(String(error)); message.error(String(error)); } });
     return () => { active = false; };
-  // The initial route key owns this recoverable local command and brief draft.
+    // Initial route loads the remote formal draft; no local draft is restored or kept anymore.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [episodeId, projectId, load, message]);
 
-  useEffect(() => {
-    if (!draftKey) return;
-    const value: LocalDraft = { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: commandNoticeRef.current, pendingRunStart: pendingRunStartRef.current };
-    void (briefDraft.trim() || Object.keys(sourceDrafts).length || remoteRevision !== null || value.pendingCommand || value.pendingRunStart
-      ? writeLocalDraft(draftKey, value)
-      : writeLocalDraft(draftKey, null))
-      .catch(error => message.error({ key: "episode-local-draft", content: error instanceof Error ? error.message : String(error) }));
-  }, [draftKey, briefDraft, sourceDrafts, remoteRevision, commandNotice, pendingRunStart, message]);
 
   useEffect(() => {
     if (seriesOnly) { if (workspace !== "series") setWorkspace("series"); return; }
@@ -483,7 +464,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     const run = (async () => {
       const sequence = ++remoteSequence.current;
       const continuityRead = beginContinuityRead();
-      const taskNodes = [...new Set([...(production?.draft.clipGroups || []).map(group => group.nodeId), ...Object.values(production?.draft.director?.assets || {}).map(asset => asset.nodeId)].filter((id): id is string => Boolean(id)))];
+      const sourceSegmentNodes = production ? productionSegments(production).flatMap(segment => productionSegmentRuntimeMatches(canvasNodes as any, String(segment.id), productionContext?.owner).map(match => match.node.id)) : [];
+      const taskNodes = [...new Set([...sourceSegmentNodes, ...Object.values(production?.draft.director?.assets || {}).map(asset => asset.nodeId)].filter((id): id is string => Boolean(id)))];
       const [prod, ready, history, runHistory, canvas, tasks, continuity] = await Promise.all([
         fetchEpisodeProduction(target), fetchProductionReadiness(target), fetchEpisodeProductionVersions(target), fetchProductionBatches(target),
         fetchBackendProject(canvasId).then(value => value.project).catch(() => null),
@@ -510,7 +492,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       refreshInFlight.current = null;
       if (refreshQueued.current) { refreshQueued.current = false; void refreshRemote(); }
     }
-  }, [target, canvasId, beginContinuityRead, finishContinuityRead, production?.draft.clipGroups, production?.draft.director?.assets]);
+  }, [target, canvasId, beginContinuityRead, finishContinuityRead, production?.draft.director?.source.segments, production?.draft.director?.assets, canvasNodes, productionContext?.owner]);
 
   const refreshCompilationProjection = useCallback(async () => {
     const [prod, ready] = await Promise.all([fetchEpisodeProduction(target), fetchProductionReadiness(target)]);
@@ -519,12 +501,9 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     return prod.production;
   }, [target]);
 
-  const persistPendingCompilation = async (value: PendingCompilation | null) => {
+  const persistPendingCompilation = (value: PendingCompilation | null) => {
     pendingCompilationRef.current = value;
     setPendingCompilation(value);
-    if (!draftKey) return;
-    if (value) await localDrafts.setItem(pendingCompilationStorageKey(draftKey), value);
-    else await localDrafts.removeItem(pendingCompilationStorageKey(draftKey));
   };
 
   const runProductionCompile = async (sceneId?: string, targetId?: string) => {
@@ -545,18 +524,9 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
           return;
         }
         if (dirtySourceDraftKeys.length || briefDraft !== String(production.draft.director.source.brief || "")) {
-          // 编译使用 Backend 已保存源稿。按用户偏好，编译即放弃纯前端编辑草稿，
-          // 同时保留回执未知/运行中的正式操作元数据，避免清理掉可恢复的提交。
-          const pendingCommand = pendingCommandRef.current;
-          const pendingRunStart = pendingRunStartRef.current;
-          const preserved: LocalDraft = {
-            remoteRevision,
-            ...(pendingCommand ? { pendingCommand } : {}),
-            ...(pendingRunStart ? { pendingRunStart } : {}),
-          };
+          // 编译使用 Backend 已保存源稿；未保存的前端编辑在编译时直接丢弃（无本机草稿兜底）。
           setBriefDraft(String(production.draft.director.source.brief || ""));
           setSourceDrafts({});
-          await writeLocalDraft(draftKey, remoteRevision !== null || Boolean(pendingCommand || pendingRunStart) ? preserved : null);
         }
         // Compile the canvas state the user just saved through this page, not a stale
         // Backend projection. Recovery keeps the original frozen operation unchanged.
@@ -608,7 +578,6 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         if (!failedCompileScopeIds.has(String(segment.id))) continue;
         for (const shotId of Array.isArray(segment.shot_ids) ? segment.shot_ids : []) failedCompileScopeIds.add(String(shotId));
       }
-      for (const group of compileSource.draft.clipGroups) if (touchedCompileScopeIds.has(String(group.id))) for (const shotId of group.shotIds || []) touchedCompileScopeIds.add(String(shotId));
       const diagnosticsForView = mergeScopedCompilationDiagnostics(compileDiagnostics, diagnostics, touchedCompileScopeIds, !pending.scope);
       const orderedDiagnostics = diagnosticsForView.map((item, index) => {
         const relatedToNotReady = [item.targetId, item.shotId, ...(item.affectedTargets || [])].some(id => id && failedCompileScopeIds.has(String(id)));
@@ -636,7 +605,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       };
       const describe = (item: ProductionCompilationDiagnostic) => item.message?.trim() || "";
       const clipContext = (items: ProductionCompilationDiagnostic[]) => [...new Set(items.map(item => item.targetId).filter((id): id is string => Boolean(id)))].map(id => {
-        const index = compileSource.draft.clipGroups.findIndex(group => String(group.id) === id);
+        const index = productionSegments(compileSource).findIndex(segment => String(segment.id) === id);
         return index >= 0 ? t("director.studio.clipNumber", { number: index + 1 }) : id;
       }).join("、");
       const diagnosticContext = (items: ProductionCompilationDiagnostic[]) => [...new Set(items.map(describe).filter(Boolean))].join("；");
@@ -645,7 +614,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         if (!source) return "";
         const fps = Number(source.fps_num || 24) / Number(source.fps_den || 1);
         return continuityDiagnosticLocations(source, items).map(location => {
-          const clipIndex = compileSource.draft.clipGroups.findIndex(group => String(group.id) === location.segmentId);
+          const clipIndex = productionSegments(compileSource).findIndex(segment => String(segment.id) === location.segmentId);
           const clip = clipIndex >= 0 ? `${t("director.studio.clipNumber", { number: clipIndex + 1 })} ${location.segmentId}` : location.segmentId;
           return t("director.atomic.compileFrameLocation", {
             clip, shot: `${location.shotTitle} (${location.shotId})`,
@@ -661,7 +630,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       const continuitySummary = (items: ProductionCompilationDiagnostic[]) => {
         const affectedClipIds = [...new Set(items.flatMap(item => item.affectedTargets || []))];
         const clipNames = affectedClipIds.map(id => {
-          const index = compileSource.draft.clipGroups.findIndex(group => String(group.id) === id);
+          const index = productionSegments(compileSource).findIndex(segment => String(segment.id) === id);
           return index >= 0 ? `${t("director.studio.clipNumber", { number: index + 1 })} ${id}` : id;
         });
         const count = affectedClipIds.length || new Set(items.map(item => item.targetId).filter(Boolean)).size || items.length;
@@ -691,10 +660,10 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       const notReadyTargetReasons = (items: Array<ProductionCompilationDiagnostic & { targetId: string; status: string }>) => items.map(targetItem => {
         const targetId = String(targetItem.targetId), scopeIds = new Set([targetId]);
         const source = compileSource.draft.director?.source as Record<string, any> | undefined;
-        const segment = (Array.isArray(source?.segments) ? source!.segments : []).find((item: Record<string, any>) => String(item.id) === targetId);
-        for (const shotId of segment?.shot_ids || []) scopeIds.add(String(shotId));
-        const group = compileSource.draft.clipGroups.find(item => String(item.id) === targetId || String(item.segmentId || "") === targetId);
-        for (const shotId of group?.shotIds || []) scopeIds.add(String(shotId));
+        const sourceSegment = (Array.isArray(source?.segments) ? source!.segments : []).find((item: Record<string, any>) => String(item.id) === targetId);
+        for (const shotId of sourceSegment?.shot_ids || []) scopeIds.add(String(shotId));
+        const segment = productionSegments(compileSource).find(item => String(item.id) === targetId);
+        for (const shotId of segmentShotIds(segment || {})) scopeIds.add(String(shotId));
         const related = orderedDiagnostics.filter(item => [item.targetId, item.shotId, ...(item.affectedTargets || [])].some(id => id && scopeIds.has(String(id))));
         const blockers = related.filter(blocksCompilationDiagnostic);
         const reasons = [...new Set((blockers.length ? blockers : related).map(item => describe(item)).filter(Boolean))];
@@ -708,7 +677,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         const notReadyTargets = targetItems.filter(item => item.status !== "ready");
         const resultNotice = targetItems.length && notReadyTargets.length
           ? t("director.atomic.compilePartial", { ready: readyTargets.length, total: targetItems.length, notReady: notReadyTargets.length, clips: clipContext(notReadyTargets) })
-          : t("director.atomic.compileDone", { count: targetItems.length ? readyTargets.length : status.targetCount || compileSource.draft.clipGroups.length });
+          : t("director.atomic.compileDone", { count: targetItems.length ? readyTargets.length : status.targetCount || productionSegments(compileSource).length });
         const causeNotice = notReadyTargets.length ? `\n${t("director.atomic.compileTargetCauseTitle")}\n${notReadyTargetReasons(notReadyTargets).join("\n")}` : "";
         return resultNotice
           + causeNotice + warningNotice + (warningDetails.length ? `\n\n${warningDetails.join("\n\n")}` : "");
@@ -789,7 +758,10 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     return () => { active = false; };
   }, [canvasId, liveCanvas?.revision, target, production?.revision]);
 
-  const pollingTaskNodes = useMemo(() => [...new Set([...(production?.draft.clipGroups || []).map(group => group.nodeId), ...Object.values(production?.draft.director?.assets || {}).map(asset => asset.nodeId)].filter((id): id is string => Boolean(id)))], [production?.draft.clipGroups, production?.draft.director?.assets]);
+  const pollingTaskNodes = useMemo(() => {
+    const segmentNodes = production ? productionSegments(production).flatMap(segment => productionSegmentRuntimeMatches(canvasNodes as any, String(segment.id), productionContext?.owner).map(match => match.node.id)) : [];
+    return [...new Set([...segmentNodes, ...Object.values(production?.draft.director?.assets || {}).map(asset => asset.nodeId)].filter((id): id is string => Boolean(id)))];
+  }, [production?.draft.director?.source.segments, production?.draft.director?.assets, canvasNodes, productionContext?.owner]);
   const pollingTaskNodesKey = JSON.stringify(pollingTaskNodes);
   const hasActiveSceneWork = production?.draft.director?.workflow.sharedReviewContinuation?.status === "active" || [...Object.values(production?.draft.director?.workflow.sceneWorks || {}), ...Object.values(production?.draft.director?.workflow.sharedReviewWorks || {})].some(work => ["pending", "running", "awaiting_media"].includes(work.status));
   const hasActiveClipRefresh = production?.clipRefreshes?.some(job => ["queued", "checking", "compiling", "applying"].includes(job.status)) || false;
@@ -933,7 +905,6 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     const previous = pendingCommandRef.current;
     if (previous && (previous.operationId !== command.operationId || previous.status === "rejected")) throw new Error(pendingCommandMessage(previous));
     pendingCommandRef.current = command;
-    await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: command, pendingRunStart } satisfies LocalDraft);
     pending(command);
     try {
       const result = command.kind === "scene" ? await submitProductionSceneAction(target, command.command, command.expectedRevision, command.operationId)
@@ -945,7 +916,6 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         : await restoreEpisodeProduction(target, command.expectedRevision, command.version, command.operationId);
       if (!result.production || !Number.isInteger(result.production.revision)) throw new Error(t("drama.production.receiptMalformed"));
       pendingCommandRef.current = null;
-      await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision: null, pendingCommand: null, pendingRunStart } satisfies LocalDraft);
       pending(null); setProduction(previous => !previous || previous.episodeId !== result.production.episodeId || result.production.revision > previous.revision ? result.production : previous); setRemoteRevision(null);
       return result.production;
     } catch (error) {
@@ -956,7 +926,6 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         errorCode: error instanceof BackendApiError ? String(error.details.code || "") : undefined,
       }, recovering);
       pending(saved);
-      await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: saved, pendingRunStart } satisfies LocalDraft);
       throw error;
     }
   };
@@ -984,7 +953,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   const workspaceCommandInFlight = useRef(false);
   const preparedScriptSource = useRef("");
   useEffect(() => {
-    if (!embedded || !owner || !production || !draftKey) return;
+    if ((!embedded && workspace !== "assets") || !owner || !production || !draftKey) return;
     const receive = (event: Event) => {
       const detail = (event as CustomEvent<{ owner: NonNullable<ProductionCanvasContext["owner"]>; command: { kind: "prepare"; targets: string[] } | { kind: "arrange"; sceneId: string } | { kind: "adopt"; assetId: string; approvedId: string } | { kind: "edit"; ops: ProductionOperation[] } }>).detail;
       if (!detail || detail.owner.kind !== owner.kind || detail.owner.id !== owner.id) return;
@@ -999,17 +968,51 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     };
     window.addEventListener("production-workspace-command", receive);
     return () => window.removeEventListener("production-workspace-command", receive);
-  }, [embedded, owner?.kind, owner?.id, production, draftKey, busy, refreshRemote, message, t]);
+  }, [embedded, workspace, owner?.kind, owner?.id, production, draftKey, busy, refreshRemote, message, t]);
 
   useEffect(() => {
-    if (!embedded || !owner || !production?.draft.director || !draftKey || busy || pendingCommandRef.current || workspaceCommandInFlight.current) return;
-    const key = `${owner.kind}:${owner.id}:${production.draft.director.sourceHash}`;
-    if (preparedScriptSource.current === key) return;
+    if ((!embedded && workspace !== "assets") || !owner || !production?.draft.director || !draftKey || busy || pendingCommandRef.current || workspaceCommandInFlight.current) return;
+    const director = production.draft.director;
+    const entities = productionEntities(director.source, owner);
+    const plans = Array.isArray(director.source.asset_plan) ? director.source.asset_plan.map(value => value && typeof value === "object" ? value as Record<string, any> : {}) : [];
+    const subjects = Array.isArray(director.source.subject_registry) ? director.source.subject_registry.map(value => value && typeof value === "object" ? value as Record<string, any> : {}) : [];
     const targets = productionSceneEntries(production.draft.director.source).filter(scene => !canvasNodes.some(node => node.type === "text" && node.metadata?.productionScriptSceneId === scene.id)).map(scene => `scene:${scene.id}`);
-    targets.push(...productionEntities(production.draft.director.source, owner).filter(entity => !canvasNodes.some(node => productionEntityBinding(node.metadata?.productionEntity)?.entityId === entity.entityId && productionEntityBinding(node.metadata?.productionEntity)?.kind === entity.kind && productionEntityBinding(node.metadata?.productionEntity)?.ownerId === owner.id)).map(entity => `entity:${entity.kind}:${entity.entityId}`));
+    const pictureProjectionTargets = entities.flatMap(entity => {
+      if (entity.kind !== "prop" && entity.kind !== "scene") return [];
+      const subjectKind = entity.kind === "prop" ? "asset" : "scene";
+      const subject = subjects.find(item => item.entityRef?.ownerKind === owner.kind && item.entityRef?.ownerId === owner.id
+        && item.entityRef?.kind === subjectKind && String(item.entityRef?.id || "") === entity.entityId);
+      const bindings = Array.isArray(subject?.pictureBindings) ? subject.pictureBindings as Array<Record<string, any>> : [];
+      const picture = bindings.find(item => Array.isArray(item.defaultFor) && item.defaultFor.includes("identity")) || bindings[0];
+      const image = director.assets[String(picture?.assetId || "")];
+      const storageKey = String(image?.storageKey || "");
+      if (!picture || picture.sourceNode?.projectId !== canvasId || !storageKey) return [];
+      const node = canvasNodes.find(item => matchesProductionAssetNode(item, entity.kind, owner, entity.entityId));
+      const field = entity.kind === "prop" ? "propImage" : "sceneImage";
+      return node && String((node.metadata?.[field] as Record<string, any> | undefined)?.storageKey || "") !== storageKey ? [`entity:${entity.kind}:${entity.entityId}`] : [];
+    });
+    const sharedPictureState = entities.flatMap(entity => {
+      const sharedPlan = plans.find(plan => String(plan.entity_id || plan.id || plan.asset_id || "") === entity.entityId && plan.sharedSource);
+      if (!sharedPlan) return [];
+      const subjectKind = entity.kind === "prop" ? "asset" : entity.kind;
+      const subject = subjects.find(item => item.entityRef?.ownerKind === owner.kind && item.entityRef?.ownerId === owner.id
+        && item.entityRef?.kind === subjectKind && String(item.entityRef?.id || "") === entity.entityId);
+      const node = canvasNodes.find(item => matchesProductionAssetNode(item, entity.kind, owner, entity.entityId));
+      if (!node || !subject) return [];
+      const pictureBound = (Array.isArray(subject.pictureBindings) ? subject.pictureBindings : []).some((picture: Record<string, any>) => picture.sourceNode?.projectId === canvasId && picture.sourceNode?.nodeId === node.id);
+      if (!pictureBound) targets.push(`entity:${entity.kind}:${entity.entityId}`);
+      const metadata = node.metadata || ({ } as { characterImages?: Array<Record<string, any>>; sceneImage?: Record<string, any>; propImage?: Record<string, any>; storageKey?: string });
+      const media = entity.kind === "character" ? (Array.isArray(metadata.characterImages) ? metadata.characterImages as Array<Record<string, any>> : []).map(image => image.storageKey || "")
+        : entity.kind === "scene" ? [((metadata.sceneImage && typeof metadata.sceneImage === "object") ? metadata.sceneImage as Record<string, any> : {}).storageKey || ""]
+          : [((metadata.propImage && typeof metadata.propImage === "object") ? metadata.propImage as Record<string, any> : {}).storageKey || metadata.storageKey || ""];
+      return [[entity.entityId, pictureBound, media]];
+    });
+    targets.push(...entities.filter(entity => !canvasNodes.some(node => matchesProductionAssetNode(node, entity.kind, owner, entity.entityId))).map(entity => `entity:${entity.kind}:${entity.entityId}`), ...pictureProjectionTargets);
+    const key = `${owner.kind}:${owner.id}:${production.revision}:${director.sourceHash}:${JSON.stringify(sharedPictureState)}:${[...new Set(targets)].sort().join(",")}`;
+    if (preparedScriptSource.current === key) return;
     preparedScriptSource.current = key;
-    if (targets.length) window.dispatchEvent(new CustomEvent("production-workspace-command", { detail: { owner, command: { kind: "prepare", targets } } }));
-  }, [embedded, owner?.kind, owner?.id, production, draftKey, busy, canvasNodes]);
+    if (targets.length) window.dispatchEvent(new CustomEvent("production-workspace-command", { detail: { owner, command: { kind: "prepare", targets: [...new Set(targets)] } } }));
+  }, [embedded, workspace, owner?.kind, owner?.id, production, draftKey, busy, canvasNodes]);
 
   const saveBrief = async (brief: string) => {
     if (busy || pendingCommandRef.current) return;
@@ -1069,7 +1072,6 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         pending(null);
         setProduction(current => !current || current.episodeId !== receipt.production!.episodeId || receipt.production!.revision > current.revision ? receipt.production! : current);
         setRemoteRevision(null);
-        if (draftKey) await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision: null, pendingCommand: null, pendingRunStart } satisfies LocalDraft);
         await refreshRemote();
         message.success(t("drama.production.receiptRecovered"));
         return;
@@ -1086,7 +1088,6 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       pendingCommandRef.current = null;
       pending(null);
       setRemoteRevision(null);
-      if (draftKey) await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision: null, pendingCommand: null, pendingRunStart } satisfies LocalDraft);
       await refreshRemote();
       message.info(t("drama.production.receiptNotFound"));
     }
@@ -1121,7 +1122,6 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     try {
       await load(() => true, true);
       pendingCommandRef.current = null;
-      if (draftKey) await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision: null, pendingCommand: null, pendingRunStart } satisfies LocalDraft);
       pending(null); setRemoteRevision(null);
     } catch (error) { fail(error); }
     finally { setBusy(false); }
@@ -1213,7 +1213,6 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     setBatches(current => [run, ...current.filter(item => item.runId !== run.runId)]);
     setPendingRun(null);
     pendingRunStartRef.current = null;
-    if (draftKey) await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: commandNoticeRef.current, pendingRunStart: null } satisfies LocalDraft);
     message.success(t("director.workspace.runStarted"));
     const follow = useProductionFollowStore.getState();
     const owner = productionOwner;
@@ -1268,7 +1267,6 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       const request: PendingRunStart = { inputBasis: "canvas", expectedCanvasRevision: canvasRevision === undefined ? undefined : Number(canvasRevision), runId, idempotencyKey: runId, workId, expectedRevision: production.revision, version: production.publishedVersion, targets: [...targets], scope };
       setPendingRun(request);
       pendingRunStartRef.current = request;
-      await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: commandNoticeRef.current, pendingRunStart: request } satisfies LocalDraft);
       const result = await startProductionRun(target, request);
       await acceptRunStart(result.run);
     } catch (error) {
@@ -1278,7 +1276,6 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       if (!uncertain) {
         setPendingRun(null);
         pendingRunStartRef.current = null;
-        if (draftKey) await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: commandNoticeRef.current, pendingRunStart: null } satisfies LocalDraft);
         if (error instanceof BackendApiError && error.status === 409) void refreshRemote();
       }
       fail(error);
@@ -1299,7 +1296,6 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       if (!uncertain) {
         setPendingRun(null);
         pendingRunStartRef.current = null;
-        if (draftKey) await writeLocalDraft(draftKey, { brief: briefDraft, sourceDrafts, remoteRevision, pendingCommand: commandNoticeRef.current, pendingRunStart: null } satisfies LocalDraft);
       }
       fail(error);
     }
@@ -1391,18 +1387,15 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
           if (pendingCommandRef.current) throw new Error(pendingCommandMessage(pendingCommandRef.current));
           if (busy) throw new Error(t("drama.production.commandInProgress"));
           if (detail.action === "video") {
-            const groups = production.draft.clipGroups.filter(group => group.shotIds.includes(object.targetId || ""));
+            const groups = productionSegments(production).filter(segment => segmentShotIds(segment).includes(String(object.targetId || "")));
             if (groups.length !== 1) { open({ ...object, workspace: "production" }); message.info(t("productionCanvas.chooseClip")); return; }
-            let group = groups[0];
-            if (!group.nodeId || !group.segmentId) {
-              const prepared = await sendCommand({ kind: "prepare", targets: [`segment:${group.id}`], operationId: nanoid(), expectedRevision: production.revision, status: "unknown" });
-              group = prepared.draft.clipGroups.find(item => item.id === group.id)!; await refreshRemote();
-            }
-            if (!group?.nodeId || !group.segmentId) throw new Error(t("productionCanvas.targetUnavailable"));
+            const sourceSegment = groups[0];
+            const runtime = clipRuntime(String(sourceSegment.id));
+            if (!runtime?.node.id || !runtime.segment.id) throw new Error(t("productionCanvas.targetUnavailable"));
             if (useProductionWorkspaceStore.getState().context?.canvasId !== canvasId) return;
-            navigate(productionObjectPath({ ...object, workspace: "production", targetKind: "segment", targetId: group.id, nodeId: group.nodeId, segmentId: group.segmentId }));
+            navigate(productionObjectPath({ ...object, workspace: "production", targetKind: "segment", targetId: String(sourceSegment.id), nodeId: runtime.node.id, segmentId: String(runtime.segment.id) }));
             useAgentStore.getState().closePanel();
-            await startCanvasGeneration({ mode: "video", operation: "h3-run", projectId: canvasId, nodeId: group.nodeId, segmentId: group.segmentId });
+            await startCanvasGeneration({ mode: "video", operation: "h3-run", projectId: canvasId, nodeId: runtime.node.id, segmentId: String(runtime.segment.id) });
             return;
           }
           if (object.targetKind === "segment" && object.segmentId) {
@@ -1480,11 +1473,11 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   };
   const adoptClipStyle = async (targetId: string, styleTemplateId: string | null) => {
     if (!production || busy || pendingCommandRef.current) return false;
-    const group = production.draft.clipGroups.find(group => group.id === targetId);
-    if (!group?.nodeId || !group.segmentId || !canvasId) return false;
+    const runtime = clipRuntime(targetId);
+    if (!runtime?.node.id || !runtime.segment.id || !canvasId) return false;
     try {
       const { project } = await fetchBackendProject(canvasId);
-      return await edit([{ type: "adopt_director_clip_style", targetId, nodeId: group.nodeId, segmentId: group.segmentId, canvasRevision: Number(project.revision), styleTemplateId }]);
+      return await edit([{ type: "adopt_director_clip_style", targetId, nodeId: runtime.node.id, segmentId: String(runtime.segment.id), canvasRevision: Number(project.revision), styleTemplateId }]);
     } catch (error) { fail(error); return false; }
   };
   const saveContinuity = async (ledger: Record<string, unknown>) => {
@@ -1713,7 +1706,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   useEffect(() => {
     if (!production || !canvasId) return;
     return registerProductionPromptEditor(canvasId, async input => {
-      const segmentId = sourceSegmentForCanvasClip(production.draft.clipGroups, input.nodeId, input.segmentId);
+      const segmentId = sourceSegmentForCanvasClip(canvasNodes as any, production.draft.director!.source as Record<string, any>, input.nodeId, input.segmentId);
       const { project } = await fetchBackendProject(canvasId);
       const sourceSaved = await edit([{ type: "reverse_sync_director_prompt", segmentId, artifactId: input.artifactId,
         sourceHash: input.sourceHash, basePromptHash: input.basePromptHash, prompt: input.prompt, canvasRevision: Number(project.revision) }]);
@@ -1725,7 +1718,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   useEffect(() => {
     if (!production?.draft.director || !canvasId) return;
     return registerProductionStoryboardEditor(canvasId, async input => {
-      const groupId = sourceSegmentForCanvasClip(production.draft.clipGroups, input.nodeId, input.segmentId);
+      const groupId = sourceSegmentForCanvasClip(canvasNodes as any, production.draft.director!.source as Record<string, any>, input.nodeId, input.segmentId);
       const operation = buildDirectorClipStoryboardOperation(production.draft.director!, groupId, input);
       const sourceSaved = await edit([operation]);
       return { sourceSaved };
@@ -1805,6 +1798,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         }} />}<span className="text-xs text-muted-foreground">{t(dirtySourceDraftKeys.length ? "director.studio.localDraft" : "director.studio.saved")}</span>{production.publishedVersion > 0 && <Tag>{t("director.studio.published", { number: production.publishedVersion })}</Tag>}{canvasId && <Button icon={<ExternalLink className="size-4" />} onClick={() => canvasHost ? canvasHost.hasCanvas ? canvasHost.restoreCanvas() : canvasHost.openCanvas({ projectId: canvasId }) : navigate(`/canvas/${encodeURIComponent(canvasId)}`)}>{t(canvasHost?.hasCanvas ? "director.canvasOverlay.expand" : "drama.production.openCanvas")}</Button>}</div>
       </div>}
       {agentError && <Alert className="mb-4" type="warning" showIcon message={agentError} closable onClose={() => setAgentError("")} />}
+      {production.storageFormat === "v2-projection-migration-required" && <Alert className="mb-4" type="warning" showIcon message={t("director.generation.sourceStorageMigration")} />}
+      {production.publishedFormatStatus === "legacy-maintenance-required" && <Alert className="mb-4" type="info" showIcon message={t("director.generation.publishedLegacyHidden")} />}
       {(remoteRevision !== null || showCommandNotice) && <div data-production-recovery-notice className="mb-4 text-sm">{remoteRevision !== null && <p>{t("drama.production.conflictDetail", { number: remoteRevision })}</p>}{pendingNotice}</div>}
       {pendingRunNotice}
       <div data-production-workspace-layout className={embedded ? "min-w-0" : "grid min-w-0 items-start gap-5 lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-8"}>
@@ -1844,17 +1839,35 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
                 } catch (cause) { fail(cause); } finally { setBusy(false); }
               }}
               onUpsertSubject={upsertSubject} onDeleteSubject={deleteSubject} onDeleteScene={deleteScene} onDeleteAsset={deleteAsset} onRemoveCanvasAsset={removeCanvasAsset} onPatchCanvasAsset={patchCanvasAsset} onCreateManualAsset={createManualAsset}
-              onIncludeSharedNode={async node => {
+              onSwitchToSharedNode={async (node, subject) => {
                 if (!production?.draft.director || !episode || !sharedCanvasNodes || busy || productionOwner.kind !== "episode") return false;
-                const binding = node.metadata?.productionEntity as Record<string, any> | undefined;
-                const kind = String(binding?.kind || "") as "character" | "scene" | "prop";
-                if (!["character", "scene", "prop"].includes(kind) || binding?.ownerId !== sharedCanvasNodes.id) return false;
-                const assetId = `AST_${nanoid()}`;
-                const entityId = kind === "prop" ? undefined : `${kind === "character" ? "CHAR" : "SCENE"}_${nanoid()}`;
+                const kind = String(node.type || "") as "character" | "scene" | "prop";
+                if (!["character", "scene", "prop"].includes(kind) || !matchesProductionAssetNode(node, kind, { kind: "canvas", id: sharedCanvasNodes.id })) return false;
+                const sharedIdentity = `${encodeURIComponent(sharedCanvasNodes.id)}_${encodeURIComponent(node.id)}`;
+                const assetId = `SHARED_${sharedIdentity}`;
+                const entityId = kind === "prop" ? undefined : `${kind === "character" ? "CHAR" : "SCENE"}_${sharedIdentity}`;
                 const name = String(node.title || node.metadata?.[`${kind}Name`] || node.id);
                 const description = String(node.metadata?.[`${kind}Description`] || "");
                 const source = createManualDirectorAsset(production.draft.director.source as Record<string, any>, {
-                  id: assetId, ...(entityId ? { entityId } : {}), subjectId: `SUBJECT_${nanoid()}`, kind, name, description, prompt: "", purpose: "剧目共享资产",
+                  id: assetId, ...(entityId ? { entityId } : {}), subjectId: `SUBJECT_${sharedIdentity}`, kind, name, description, prompt: "", purpose: "剧目共享资产",
+                  canvasScope: "episode", registerSubject: true, ownerKind: "episode", ownerId: episode.id,
+                  sharedSource: { dramaId: String(episode.dramaId), assetId, sourceProjectId: sharedCanvasNodes.id, sourceNodeId: node.id },
+                });
+                const includeOperation = { type: "create_manual_director_asset" as const, assetPlan: source.assetPlan, assetCard: source.assetCard,
+                  ...(source.registryKind && source.registryEntity ? { registryKind: source.registryKind, registryEntity: source.registryEntity } : {}) } as Extract<ProductionOperation, { type: "create_manual_director_asset" }>;
+                return edit([includeOperation, { type: "upsert_director_subject", subject }]);
+              }}
+              onIncludeSharedNode={async node => {
+                if (!production?.draft.director || !episode || !sharedCanvasNodes || busy || productionOwner.kind !== "episode") return false;
+                const kind = String(node.type || "") as "character" | "scene" | "prop";
+                if (!["character", "scene", "prop"].includes(kind) || !matchesProductionAssetNode(node, kind, { kind: "canvas", id: sharedCanvasNodes.id })) return false;
+                const sharedIdentity = `${encodeURIComponent(sharedCanvasNodes.id)}_${encodeURIComponent(node.id)}`;
+                const assetId = `SHARED_${sharedIdentity}`;
+                const entityId = kind === "prop" ? undefined : `${kind === "character" ? "CHAR" : "SCENE"}_${sharedIdentity}`;
+                const name = String(node.title || node.metadata?.[`${kind}Name`] || node.id);
+                const description = String(node.metadata?.[`${kind}Description`] || "");
+                const source = createManualDirectorAsset(production.draft.director.source as Record<string, any>, {
+                  id: assetId, ...(entityId ? { entityId } : {}), subjectId: `SUBJECT_${sharedIdentity}`, kind, name, description, prompt: "", purpose: "剧目共享资产",
                   canvasScope: "episode", registerSubject: true, ownerKind: "episode", ownerId: episode.id,
                   sharedSource: { dramaId: String(episode.dramaId), assetId, sourceProjectId: sharedCanvasNodes.id, sourceNodeId: node.id },
                 });
@@ -1870,12 +1883,12 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
               onCompile={(sceneId, targetId) => void runProductionCompile(sceneId, targetId)} compileBusy={compiling} compilePending={Boolean(pendingCompilation)} compileError={compileError} compileNotice={compileNotice} compileDiagnostics={compileDiagnostics} compileTargets={compileTargets}
               onLocateTarget={(kind, id) => {
                 if (kind === "shot") { navigateWorkspace("shots", { kind, id }); return; }
-                const group = production.draft.clipGroups.find(group => group.id === id);
+                 const runtime = kind === "segment" ? clipRuntime(id) : undefined;
                 const frame = production.draft.keyframes[id];
                 const assetId = kind === "keyframe" || kind === "frame" ? production.draft.director?.shotInputs[id]?.keyframeAssetId : id;
-                const nodeId = kind === "segment" ? group?.nodeId : (kind === "keyframe" || kind === "frame" ? frame?.nodeId : undefined) || production.draft.director?.assets[assetId || ""]?.nodeId;
+                 const nodeId = kind === "segment" ? runtime?.node.id : (kind === "keyframe" || kind === "frame" ? frame?.nodeId : undefined) || production.draft.director?.assets[assetId || ""]?.nodeId;
                 if (!nodeId) { navigateWorkspace(kind === "segment" ? "production" : kind === "frame" || kind === "keyframe" ? "shots" : "assets", { kind: kind === "keyframe" || kind === "frame" ? "shot" : kind, id }); return; }
-                const object: ProductionObject = { owner: owner || productionOwner, canvasId, workspace: kind === "segment" ? "production" : kind === "frame" || kind === "keyframe" ? "shots" : "assets", targetKind: kind === "frame" || kind === "keyframe" ? "shot" : kind, targetId: id, nodeId, ...(kind === "segment" && group?.segmentId ? { segmentId: group.segmentId } : {}), title: id };
+                 const object: ProductionObject = { owner: owner || productionOwner, canvasId, workspace: kind === "segment" ? "production" : kind === "frame" || kind === "keyframe" ? "shots" : "assets", targetKind: kind === "frame" || kind === "keyframe" ? "shot" : kind, targetId: id, nodeId, ...(kind === "segment" && runtime?.segment.id ? { segmentId: String(runtime.segment.id) } : {}), title: id };
                 useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"));
                 if (canvasHost) canvasHost.openCanvas({ projectId: canvasId, nodeId, segmentId: object.segmentId });
                 else navigate(productionObjectPath(object));

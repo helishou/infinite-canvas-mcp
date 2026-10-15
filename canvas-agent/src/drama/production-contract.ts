@@ -615,11 +615,14 @@ export function productionImageModel(settings: { imageModel?: unknown; imageMode
 
 export const episodeProductionDataSchema = z.object({
     director: directorProductionSchema.optional(),
-    scenes: z.array(productionSceneSchema),
-    shots: z.array(productionShotSchema),
+    // Formal Acheng v2 stores Story/Shot/Segment only in director.source. These
+    // arrays remain available for legacy no-Director productions and are omitted
+    // from v2 storage/API snapshots; Backend may derive an ephemeral internal view.
+    scenes: z.array(productionSceneSchema).default([]),
+    shots: z.array(productionShotSchema).default([]),
     keyframes: z.record(id, z.object({ nodeId: id, storageKey: z.string(), sourceVersion: z.number().int().min(0) })),
     keyframeReviews: z.record(id, z.object({ verdict: z.enum(["auto-accepted", "needs-redo", "approved", "rejected"]), evidence: z.string(), sourceVersion: z.number().int().min(0) })),
-    clipGroups: z.array(clipGroupSchema),
+    clipGroups: z.array(clipGroupSchema).default([]),
     settings: productionSettingsSchema,
     legacyImports: z.array(z.object({ source: z.enum(["fullPlot", "script.md", "storyboard.md"]), sha256: z.string(), text: z.string(), importedAt: z.string() })),
 });
@@ -633,6 +636,7 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("restore_director_scene"), archiveId: id, expectedCanvasRevision: z.number().int().nonnegative() }).strict(),
     z.object({ type: z.literal("delete_director_clip"), segmentId: id, expectedCanvasRevision: z.number().int().nonnegative(), confirmed: z.literal(true) }).strict(),
     z.object({ type: z.literal("upsert_director_subject"), subject: subjectEntrySchema }).strict(),
+    z.object({ type: z.literal("rebind_director_subject"), subjectId: id, sourceProjectId: id, sourceNodeId: id }).strict(),
     z.object({ type: z.literal("repair_director_subject_bindings") }).strict(),
     z.object({ type: z.literal("delete_director_subject"), id }).strict(),
     z.object({ type: z.literal("create_manual_director_asset"), assetPlan: z.object({ id, kind: z.enum(["character", "scene", "prop"]), asset_name: z.string().min(1), entity_id: id.optional(), version: id, description: z.string(), purpose: z.string(), depends_on: z.array(id), status: z.literal("planned"), canvas_scope: z.enum(["episode", "shared"]).optional(), sharedSource: z.object({ dramaId: id, assetId: id, sourceProjectId: id, sourceNodeId: id }).strict().optional() }).strict(), assetCard: z.object({ id, asset_id: id, asset_kind: z.enum(["character", "scene", "prop"]), asset_version: id, prompt: z.string(), references: z.array(z.unknown()) }).passthrough(), registryKind: z.enum(["character", "scene"]).optional(), registryEntity: z.record(z.unknown()).optional(), subject: subjectEntrySchema.optional() }).strict(),

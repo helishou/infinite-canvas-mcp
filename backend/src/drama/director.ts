@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
+import { compilationArtifactFreshness } from "@basketikun/canvas-agent/drama/compilation-scope";
 import fs from "node:fs";
 import { canonicalProduction, type DirectorProduction, type EpisodeProductionData } from "@basketikun/canvas-agent/drama/production-contract";
 import type { BackendDatabase } from "../db.js";
@@ -21,18 +21,17 @@ const obj = (value: unknown): Record<string, any> => value && typeof value === "
 const list = (value: unknown): Array<Record<string, any>> => Array.isArray(value) ? value.map(obj) : [];
 const prose = (value: unknown) => typeof value === "string" ? value : JSON.stringify(value ?? {});
 
-export function projectDirector(data: EpisodeProductionData) {
+export function projectDirector(data: EpisodeProductionData, validate = true) {
     const d = data.director; if (!d) return;
-    if (directorHash(d.source) !== d.sourceHash) throw new Error("Acheng sourceHash 与完整制作稿不一致");
+    if (validate && directorHash(d.source) !== d.sourceHash) throw new Error("Acheng sourceHash 与完整制作稿不一致");
     // Any canonical source or compiler-runtime change invalidates a ready receipt.
     // Retire that derived artifact before projection validates current bindings;
     // otherwise a normal edit is rejected for an artifact that is stale by definition.
-    d.artifacts = d.artifacts.map(artifact => artifact.status === "ready" &&
-        (!currentCompilationArtifact(d, artifact) || artifact.receipt.promptHash !== artifact.sha256)
+    if (validate) d.artifacts = d.artifacts.map(artifact => artifact.status === "ready" && !compilationArtifactFreshness(d, artifact).current
         ? { ...artifact, status: "stale" as const }
         : artifact);
     const source = d.source;
-    if (JSON.stringify(source).includes('"legacy_fixture"')) throw new Error("新制作不能使用 legacy_fixture");
+    if (validate && JSON.stringify(source).includes('"legacy_fixture"')) throw new Error("新制作不能使用 legacy_fixture");
     const fps = Number(source.fps_num || 24) / Number(source.fps_den || 1);
     if (!Number.isFinite(fps) || fps <= 0) throw new Error("Acheng fps 无效");
     const shots = list(source.shots);
@@ -88,15 +87,37 @@ export function projectDirector(data: EpisodeProductionData) {
     data.clipGroups = list(source.segments).filter(s => Array.isArray(s.shot_ids) && s.shot_ids.length && s.shot_ids.every((id: unknown) => shotIds.has(String(id))))
         .map(s => ({ id: String(s.id), shotIds: s.shot_ids.map(String), nodeId: prior.get(String(s.id))?.nodeId || null, segmentId: prior.get(String(s.id))?.segmentId || null, sourceVersion: prior.get(String(s.id))?.sourceVersion || 0,
             ...(prior.get(String(s.id))?.inputOutdated === undefined ? {} : { inputOutdated: prior.get(String(s.id))!.inputOutdated }) }));
+    if (!validate) return;
     if (new Set(d.artifacts.map(a => `${a.kind}:${a.targetId}`)).size !== d.artifacts.length) throw new Error("同一目标只能有一个当前编译产物");
     for (const artifact of d.artifacts) {
         if (artifact.sha256 !== promptHash(artifact.prompt)) throw new Error(`产物 ${artifact.id} 正文字节摘要不一致`);
-        if (artifact.status === "ready" && (!currentCompilationArtifact(d, artifact) || artifact.receipt.promptHash !== artifact.sha256)) throw new Error(`产物 ${artifact.id} 回执版本不一致`);
+        if (artifact.status === "ready" && (!compilationArtifactFreshness(d, artifact).current || artifact.receipt.promptHash !== artifact.sha256)) throw new Error(`产物 ${artifact.id} 回执版本不一致`);
 
     }
     const sourceContract = /^[a-f0-9]{40}-[a-f0-9]{16}$/.test(d.engine.runtimeId) ? resolveAchengEngine().sourceContract : null;
     const promptIssues = ref2vaPromptDiagnostics(d, sourceContract ? sourceContract.ref2vaMaximumWords : 2900);
     if (promptIssues.length) throw new ProductionValidationError(promptIssues);
+}
+
+/** Canonical storage and v2 API payloads never persist the derived legacy storyboard view. */
+export function withoutDirectorProjection<T extends EpisodeProductionData>(value: T): Omit<T, "scenes" | "shots" | "clipGroups"> & Partial<Pick<T, "scenes" | "shots" | "clipGroups">> {
+    const result = structuredClone(value) as Record<string, any>;
+    delete result.storageFormat;
+    if (result.director && isSubjectPromptAssembly(result.director.source)) {
+        delete result.scenes;
+        delete result.shots;
+        delete result.clipGroups;
+    }
+    return result as Omit<T, "scenes" | "shots" | "clipGroups"> & Partial<Pick<T, "scenes" | "shots" | "clipGroups">>;
+}
+
+export function publicProductionRecord<T extends { draft: EpisodeProductionData; published: EpisodeProductionData | null; storageFormat?: unknown }>(value: T) {
+    if (!value || typeof value !== "object" || !("draft" in value) || !("published" in value)) return value;
+    const draft = withoutDirectorProjection(value.draft), published = value.published ? withoutDirectorProjection(value.published) : null;
+    const legacyPublished = Boolean(draft.director && isSubjectPromptAssembly(draft.director.source)
+        && published?.director && !isSubjectPromptAssembly(published.director.source));
+    return { ...value, draft, published: legacyPublished ? null : published,
+        ...(legacyPublished ? { publishedFormatStatus: "legacy-maintenance-required" } : {}) };
 }
 
 /** Verify actual media bytes and project ownership, never a supplied PASS string. */
@@ -167,6 +188,6 @@ export function validateDirectorMedia(db: BackendDatabase, projectId: string, d:
 export function directorArtifact(data: EpisodeProductionData, kind: "image" | "h3", targetId: string) {
     const d = data.director;
     const a = d?.artifacts.find(a => a.kind === kind && a.targetId === targetId && a.status === "ready");
-    if (!d || !a || !currentCompilationArtifact(d, a) || promptHash(a.prompt) !== a.sha256) throw new Error(`${targetId} 缺少当前版本完整 ${kind} 产物；请由 Acheng 编译，不从镜头摘要生成`);
+    if (!d || !a || !compilationArtifactFreshness(d, a).current || promptHash(a.prompt) !== a.sha256) throw new Error(`${targetId} 缺少当前版本完整 ${kind} 产物；请由 Acheng 编译，不从镜头摘要生成`);
     return a;
 }

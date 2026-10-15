@@ -401,18 +401,14 @@ try {
     await page.getByRole('button', { name: '任务与交付', exact: true }).click();
     const recoverLabel = await page.evaluate(async () => (await import('/src/i18n')).default.t('drama.production.recoverReceipt'));
     await page.getByRole('button', { name: recoverLabel, exact: true }).waitFor();
-    const draftBefore = await page.evaluate(async () => { const localforage = (await import('/node_modules/.vite/deps/localforage.js')).default; const drafts = localforage.createInstance({ name: 'episode-production-drafts', storeName: 'unfinished' }); const rows = []; await drafts.iterate((value, key) => { rows.push({ key, pending: value.pendingCommand }); }); return rows; });
-    assert.equal(draftBefore.some(row => row.pending?.operationId === preparationRequests[0]?.operationId), true);
-    await page.reload({ waitUntil: 'domcontentloaded' });
-    await page.getByText('有待恢复的编辑或请求，点击处理', { exact: true }).waitFor();
-    await page.getByRole('button', { name: '任务与交付', exact: true }).click();
-    const draftAfter = await page.evaluate(async () => { const localforage = (await import('/node_modules/.vite/deps/localforage.js')).default; const drafts = localforage.createInstance({ name: 'episode-production-drafts', storeName: 'unfinished' }); const rows = []; await drafts.iterate((value, key) => { rows.push({ key, pending: value.pendingCommand }); }); return rows; });
-    assert.equal(draftAfter.some(row => row.pending?.operationId === preparationRequests[0]?.operationId), true);
     await page.getByRole('button', { name: recoverLabel, exact: true }).click();
     await page.getByRole('button', { name: recoverLabel, exact: true }).waitFor({ state: 'hidden' });
     assert.equal(preparationRequests.length, 2);
     assert.equal(preparationRequests[0].operationId, preparationRequests[1].operationId);
     assert.deepEqual(preparationRequests[0], preparationRequests[1]);
+    // 制作工作台以数据库为唯一数据源：会话内不再有任何本机草稿写入，「unfinished」仓库保持空。
+    const draftRows = await page.evaluate(async () => { const localforage = (await import('/node_modules/.vite/deps/localforage.js')).default; const drafts = localforage.createInstance({ name: 'episode-production-drafts', storeName: 'unfinished' }); const rows = []; await drafts.iterate((_value, key) => { rows.push(key); }); return rows; });
+    assert.equal(draftRows.length, 0);
     assert.equal((db.getCanvasProject(episodeCanvas).nodes || []).filter(node => node.metadata?.productionAssetId === 'PROP').length, 1);
     await page.locator('.ant-modal-wrap:not(.ant-modal-hidden) .ant-modal-close:visible').click();
     await page.evaluate(async () => { window.__productionTest = { follow: (await import('/src/stores/use-production-follow-store.ts')).useProductionFollowStore, view: (await import('/src/stores/canvas/plugin-node-view.ts')).getPluginNodeView, workspace: (await import('/src/stores/use-production-workspace-store.ts')).useProductionWorkspaceStore }; });

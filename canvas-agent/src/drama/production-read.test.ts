@@ -12,6 +12,20 @@ test("28 long prompts can be traversed through a compact index without prompt le
     do { const page: any = projectProductionRead(production, { view: "artifact_index", pageSize: 5, cursor }); found.push(...page.artifacts.items); cursor = page.artifacts.nextCursor || undefined; } while (cursor);
     assert.equal(found.length, 28); assert.ok(found.every(item => !('prompt' in item))); assert.ok(JSON.stringify(found).length < 15000);
 });
+
+test("artifact index exposes only a short stale reason and leaves current statuses unchanged", () => {
+    const production: any = record();
+    production.draft.director.artifacts[0].status = "stale";
+    let validityPrompt: string | undefined;
+    const result: any = projectProductionRead(production, { view: "artifact_index", targetIds: ["seg0"], pageSize: 10 }, digest, undefined,
+        (artifact: any) => { validityPrompt = artifact.prompt; return artifact.targetId === "seg0" ? "scope_input_changed" : undefined; });
+    const artifact = result.artifacts.items[0];
+    assert.equal(result.artifacts.items.length, 1);
+    assert.equal(artifact.status, "stale");
+    assert.equal(artifact.staleReason, "scope_input_changed");
+    assert.equal(validityPrompt, production.draft.director.artifacts[0].prompt);
+    assert.equal("prompt" in artifact, false);
+});
 test("UTF-8 chunks reconstruct a complete prompt and hash; changed revisions reject the cursor", () => {
     const production = record(); let cursor: string | undefined; let text = ""; let hash = "";
     do { const part: any = projectProductionRead(production, { view: "artifacts", targetIds: ["seg0"], chunkBytes: 2049, cursor }, digest); text += part.chunk.text; hash = part.chunk.sha256; cursor = part.chunk.nextCursor || undefined; } while (cursor);

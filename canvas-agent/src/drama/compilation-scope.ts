@@ -21,7 +21,12 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     // down to plan-only "pending targets" after ready H3 artifacts are reused;
     // the resulting scope contains neither cards nor segments and is rejected
     // as though the saved episode had no compilable content.
-    const assetTargetIds = new Set([...(!subjectAssembly ? plans : []), ...cards].map(key).filter(Boolean));
+    const sharedMediaAssetIds = new Set(plans.filter(plan => {
+        const id = key(plan), media = director.assets[id];
+        return Boolean(plan.sharedSource && media?.storageKey && media?.sha256);
+    }).map(key));
+    const standaloneCards = cards.filter(card => !sharedMediaAssetIds.has(key(card)));
+    const assetTargetIds = new Set([...(!subjectAssembly ? plans.filter(plan => !sharedMediaAssetIds.has(key(plan))) : []), ...standaloneCards].map(key).filter(Boolean));
     const compilerTargetIds = new Set([...segmentIds, ...assetTargetIds]);
     const shots = new Set(wanted.size ? [] : scene?.shotIds || []);
     for (const id of wanted) {
@@ -39,11 +44,14 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     const subjectRegistry = rows(source.subject_registry);
     const subjectById = new Map(subjectRegistry.map(subject => [String(subject.id), subject]));
     const subjectReferenceShotIds = new Set(segments.filter(segment => String(segment.mode) === "Ref2VA").flatMap(segment => (segment.shot_ids || []).map(String)));
+    const keyframeOutputShotIds = new Set(Object.entries(director.shotInputs)
+        .filter(([, input]) => wanted.has(String(input.keyframeAssetId || ""))).map(([shotId]) => shotId));
+    const subjectPictureShotIds = new Set([...subjectReferenceShotIds, ...keyframeOutputShotIds]);
     const bindingAssets = new Map<string, string>();
     if (subjectAssembly) for (const subject of subjectRegistry) for (const binding of rows(subject.pictureBindings)) bindingAssets.set(String(binding.id), String(binding.assetId || binding.id));
     const shotAssets = new Set<string>();
     if (subjectAssembly) for (const shot of allShots.filter(item => shots.has(stableId(item)))) {
-        if (!subjectReferenceShotIds.has(stableId(shot))) continue;
+        if (!subjectPictureShotIds.has(stableId(shot))) continue;
         for (const usage of rows(shot.subject_usages)) for (const bindingId of resolveSubjectPictureBindingIds(subjectById.get(String(usage.subjectId)), usage).bindingIds) {
             const assetId = bindingAssets.get(String(bindingId)); if (assetId) shotAssets.add(assetId);
         }
@@ -58,7 +66,7 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     if (scene && !wanted.size && !shots.size) for (const plan of plans) if (plan.canvas_scope === "shared") assets.add(key(plan));
     for (const shot of allShots.filter(item => shots.has(stableId(item)))) {
         if (subjectAssembly) {
-            for (const usage of (subjectReferenceShotIds.has(stableId(shot)) ? rows(shot.subject_usages) : [])) for (const bindingId of resolveSubjectPictureBindingIds(subjectById.get(String(usage.subjectId)), usage).bindingIds) {
+            for (const usage of (subjectPictureShotIds.has(stableId(shot)) ? rows(shot.subject_usages) : [])) for (const bindingId of resolveSubjectPictureBindingIds(subjectById.get(String(usage.subjectId)), usage).bindingIds) {
                 const assetId = bindingAssets.get(String(bindingId)); if (assetId) assets.add(assetId);
             }
             for (const frame of rows(shot.keyframes).filter(item => item.requiredForSubmission && item.anchor !== "composition")) assets.add(String(frame.assetId || frame.id));
@@ -87,7 +95,15 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     const projected = structuredClone(director);
     projected.source.shots = allShots.filter(item => shots.has(stableId(item)));
     projected.source.segments = segments;
-    projected.source.asset_plan = plans.filter(item => assets.has(key(item)));
+    projected.source.asset_plan = plans.filter(item => assets.has(key(item))).map(item => {
+        const id = key(item), media = director.assets[id];
+        if (!sharedMediaAssetIds.has(id) || !media?.sha256) return item;
+        // A live shared reference is a media dependency already produced on the
+        // source canvas, not a new image prompt target in this episode. Mark only
+        // the compiler projection as generated so Acheng validates its frozen
+        // bytes without demanding a second standalone asset card.
+        return { ...item, status: "generated", file: `shared-assets/${encodeURIComponent(id)}.png`, sha256: media.sha256 };
+    });
     // Asset cards are image-generation recipes, not media dependencies. Keep
     // cards only when an image target is part of this compile output; H3 clips
     // consume the already-bound Subject media and must not validate or regenerate
@@ -113,6 +129,14 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
                 if (!entity) continue;
                 const alias = structuredClone(entity);
                 alias.id = subjectId;
+                alias._compiler_subject_alias = true;
+                const sourceAssetId = key(entity), media = registry === "asset_plan" ? director.assets[sourceAssetId] : undefined;
+                if (media?.storageKey && media?.sha256) {
+                    alias.status = "generated";
+                    alias.file = `compiler-subject-aliases/${encodeURIComponent(subjectId)}.png`;
+                    alias.sha256 = media.sha256;
+                    alias._compiler_source_asset_id = sourceAssetId;
+                }
                 delete alias.entity_id;
                 delete alias.asset_id;
                 const entries = aliases.get(registry) || new Map<string, Record<string, any>>();
@@ -204,16 +228,21 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
             const subjectAssetIds = new Set(scopedSubjects
                 .filter(subject => subject.entityRef?.kind === "asset")
                 .map(subject => String(subject.entityRef?.id || "")));
-            const registryOnlyPlans = plans.filter(item => subjectAssetIds.has(key(item)) && !assets.has(key(item)));
+            const registryOnlyPlans = plans.filter(item => subjectAssetIds.has(key(item)) && !assets.has(key(item))).map(item => {
+                const id = key(item), media = director.assets[id];
+                if (!media?.storageKey || !media.sha256) return item;
+                return { ...item, status: "generated", file: `compiler-registry-assets/${encodeURIComponent(id)}.png`, sha256: media.sha256,
+                    _compiler_registry_media: true, _compiler_source_asset_id: id };
+            });
             projected.source.asset_plan = [...rows(projected.source.asset_plan), ...registryOnlyPlans];
             projected.source.subject_registry = scopedSubjects.map(subject => {
                 // Replay context keeps valid identity declarations; its media is
                 // materialized separately only when an output Shot consumes it.
                 // Earlier Shots remain in this projection for continuity replay, so keep
                 // their authored binding identities for source-schema validation too.
-                // Media collection and Prompt assembly still use subjectReferenceShotIds,
-                // which is limited to the selected output Clip.
-                const selectedBindings = new Set(rows(source.shots).filter(shot => contextShots.has(stableId(shot))).flatMap(shot => rows(shot.subject_usages).filter(usage => usage.subjectId === subject.id).flatMap(usage => resolveSubjectPictureBindingIds(subject, usage).bindingIds)));
+                // Keep only Subject image bindings used by selected H3 output shots or the
+                // Shot that owns a selected keyframe output; replay-only earlier Shots stay unbound.
+                const selectedBindings = new Set(rows(source.shots).filter(shot => subjectPictureShotIds.has(stableId(shot))).flatMap(shot => rows(shot.subject_usages).filter(usage => usage.subjectId === subject.id).flatMap(usage => resolveSubjectPictureBindingIds(subject, usage).bindingIds)));
                 return { ...subject, pictureBindings: rows(subject.pictureBindings).filter(binding => selectedBindings.has(String(binding.id))) };
             });
             scopedLedger.facts = facts.filter(fact => usedFacts.has(String(fact.id)));
@@ -226,6 +255,10 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
         }
     }
     projected.assets = Object.fromEntries(Object.entries(director.assets).filter(([id]) => assets.has(id)));
+    for (const plan of rows(projected.source.asset_plan).filter(item => item._compiler_registry_media === true)) {
+        const id = key(plan), media = director.assets[id];
+        if (media) projected.assets[id] = media;
+    }
     projected.shotInputs = Object.fromEntries(Object.entries(director.shotInputs).filter(([id]) => shots.has(id)));
     projected.boundaries = director.boundaries.filter(item => segments.some(s => stableId(s) === item.from) && segments.some(s => stableId(s) === item.to));
     projected.artifacts = director.artifacts.filter(item => targetIds.includes(item.targetId));
@@ -235,9 +268,10 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
         ...rows(projected.source.asset_cards).flatMap(item => rows(item.references).map(ref => String(ref.asset_id || ""))),
         ...(subjectAssembly ? [] : segments.flatMap(item => rows(item.references).map(ref => String(ref.asset_id || "")))),
         ...rows(projected.source.shots).flatMap(item => (item.required_assets || []).map(String)),
-        ...(subjectAssembly ? rows(projected.source.shots).filter(item => subjectReferenceShotIds.has(stableId(item))).flatMap(item => rows(item.subject_usages).flatMap(usage => resolveSubjectPictureBindingIds(subjectById.get(String(usage.subjectId)), usage).bindingIds.map(bindingId => bindingAssets.get(String(bindingId)) || ""))) : []),
+        ...(subjectAssembly ? rows(projected.source.shots).filter(item => subjectPictureShotIds.has(stableId(item))).flatMap(item => rows(item.subject_usages).flatMap(usage => resolveSubjectPictureBindingIds(subjectById.get(String(usage.subjectId)), usage).bindingIds.map(bindingId => bindingAssets.get(String(bindingId)) || ""))) : []),
         ...(subjectAssembly ? rows(projected.source.shots).flatMap(item => rows(item.keyframes).filter(frame => frame.requiredForSubmission && frame.anchor !== "composition").map(frame => String(frame.assetId || frame.id))) : []),
         ...(subjectAssembly ? rows(projected.source.shots).flatMap(item => rows(item.reference_requirements).filter(reference => reference.requiredForSubmission).map(reference => String(reference.asset_id || reference.id))) : []),
+        ...rows(projected.source.asset_plan).filter(item => item._compiler_registry_media === true).map(key),
         ...rows(projected.source.asset_plan).flatMap(item => (item.depends_on || []).map(String)),
     ]);
     const inputAssets = Object.fromEntries(Object.entries(projected.assets).filter(([id]) => referenced.has(id) || Boolean(scene && !shots.size)).map(([id, asset]) => [id, { nodeId: asset.nodeId, assetId: asset.assetId, version: asset.version, storageKey: asset.storageKey, sha256: asset.sha256, sharedSource: asset.sharedSource }]));
@@ -255,25 +289,35 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     return { director: projected, inputHash, legacyInputHash, targetIds };
 }
 
+export type CompilationArtifactStaleReason = "receipt_missing" | "compiler_changed" | "prompt_hash_mismatch" | "source_changed" | "runtime_changed" | "scope_input_changed" | "scope_unavailable";
+export type CompilationArtifactFreshness = { current: true } | { current: false; staleReason: CompilationArtifactStaleReason };
+
+export function compilationArtifactFreshness(director: DirectorProduction, artifact: DirectorProduction["artifacts"][number]): CompilationArtifactFreshness {
+    const receipt = artifact.receipt as (typeof artifact.receipt & Record<string, any>) | undefined;
+    if (!receipt) return { current: false, staleReason: "receipt_missing" };
+    const compiledEngine = receipt.engine as DirectorProduction["engine"] | undefined;
+    if ((compiledEngine?.compilerHash || "") !== (director.engine.compilerHash || "")) return { current: false, staleReason: "compiler_changed" };
+    if (typeof artifact.prompt !== "string" || !artifact.prompt) return { current: false, staleReason: "prompt_hash_mismatch" };
+    const promptHash = crypto.createHash("sha256").update(artifact.prompt, "utf8").digest("hex");
+    if (promptHash !== artifact.sha256 || receipt.promptHash !== artifact.sha256) return { current: false, staleReason: "prompt_hash_mismatch" };
+
+    const scoped = receipt.compilationScope as { scope: CompilationScope; inputHash: string; engine?: DirectorProduction["engine"] } | undefined;
+    if (scoped) {
+        const sourceMatches = receipt.sourceHash === director.sourceHash && artifact.sourceHash === director.sourceHash;
+        if (!sourceMatches && compiledEngine && compiledEngine.runtimeId !== receipt.engineRuntimeId) return { current: false, staleReason: "runtime_changed" };
+        if (!sourceMatches && scoped.engine && receipt.engineRuntimeId && scoped.engine.runtimeId !== receipt.engineRuntimeId) return { current: false, staleReason: "runtime_changed" };
+        try {
+            const input = compilationScopeInput({ ...director, engine: scoped.engine || director.engine }, scoped.scope);
+            if (input.inputHash === scoped.inputHash || input.legacyInputHash === scoped.inputHash) return { current: true };
+            return { current: false, staleReason: "scope_input_changed" };
+        } catch { return { current: false, staleReason: "scope_unavailable" }; }
+    }
+    if (artifact.sourceHash === director.sourceHash && receipt.sourceHash === director.sourceHash) return { current: true };
+    return { current: false, staleReason: "source_changed" };
+}
+
 export function currentCompilationArtifact(director: DirectorProduction, artifact: DirectorProduction["artifacts"][number]) {
-    const compiledEngine = artifact.receipt.engine as DirectorProduction["engine"] | undefined;
-    if ((compiledEngine?.compilerHash || "") !== (director.engine.compilerHash || "")) return false;
-    // A matching full-source SHA256 proves the artifact was compiled from exactly this
-    // director. The engine runtime id may drift after an engine upgrade (the receipt
-    // records the compile-time engine while the live draft engine advances), so accept
-    // on a provenance match instead of rejecting a legitimate receipt on an identity
-    // mismatch. This must run before the engine-identity guard below, which would
-    // otherwise short-circuit and reject a valid artifact.
-    if (artifact.receipt.sourceHash && artifact.receipt.sourceHash === director.sourceHash) return true;
-    const identity = compiledEngine;
-    if (identity && identity.runtimeId !== artifact.receipt.engineRuntimeId) return false;
-    const scoped = artifact.receipt.compilationScope as { scope: CompilationScope; inputHash: string; engine?: DirectorProduction["engine"] } | undefined;
-    if (!scoped) return artifact.sourceHash === director.sourceHash && artifact.receipt.sourceHash === director.sourceHash;
-    if (scoped.engine && artifact.receipt.engineRuntimeId && scoped.engine.runtimeId !== artifact.receipt.engineRuntimeId) return false;
-    try {
-        const input = compilationScopeInput({ ...director, engine: scoped.engine || director.engine }, scoped.scope);
-        return input.inputHash === scoped.inputHash || input.legacyInputHash === scoped.inputHash;
-    } catch { return false; }
+    return compilationArtifactFreshness(director, artifact).current;
 }
 
 /** Record the existing receipt identity before changing a production's last compiler. */

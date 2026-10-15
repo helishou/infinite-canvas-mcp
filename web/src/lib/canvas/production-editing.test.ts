@@ -45,7 +45,7 @@ test("missing editors and changed compiled identities fail visibly without a sou
 test("production storyboard writeback routes only a verified formal Clip and waits for the source editor", async () => {
     const order: string[] = [];
     // replaceStoryboardTrack 会用从 Backend 校验过的完整 projection 覆盖调用方携带的摘要。
-    const request = { nodeId: "H3", segmentId: "canvas-clip", segment: { id: "canvas-clip", productionClipProjection: node().metadata!.segments[0].productionClipProjection }, storyboardShots: [{ id: "s1", duration: 1 }] };
+    const request = { nodeId: "H3", segmentId: "canvas-clip", segment: { id: "canvas-clip", productionClipProjection: node().metadata!.segments![0].productionClipProjection }, storyboardShots: [{ id: "s1", duration: 1 }] };
     const remove = registerProductionStoryboardEditor("canvas", async input => { order.push("edit"); assert.deepEqual(input, request); return { sourceSaved: true }; });
     try {
         const service = createProductionEditing("canvas", () => node(), async () => { order.push("flush"); });
@@ -102,13 +102,14 @@ test("H3 storyboard writeback rescales Subject appearance ranges when a rebuilt 
     });
     if (operation.type !== "replace_director_clip_storyboard") throw new Error("wrong operation");
     const [shotA, shotB] = operation.shots;
+    const typedShotA = shotA as any, typedShotB = shotB as any;
     assert.equal(shotA.duration_frames, 72);
-    assert.deepEqual(shotA.subject_usages[0].localStartFrame, 0);
-    assert.deepEqual(shotA.subject_usages[0].localEndFrame, 72);
+    assert.deepEqual(typedShotA.subject_usages[0].localStartFrame, 0);
+    assert.deepEqual(typedShotA.subject_usages[0].localEndFrame, 72);
     // 关键帧同步缩放且必须小于新时长（48→36，96→71 贴边收敛）
-    assert.deepEqual(shotA.keyframes.map((keyframe: any) => keyframe.localFrame), [36, 71]);
+    assert.deepEqual(typedShotA.keyframes.map((keyframe: any) => keyframe.localFrame), [36, 71]);
     // v2b 时长 24→48 帧同样翻倍：出现范围按比例缩放 (12,20)→(24,40)
-    assert.deepEqual(shotB.subject_usages[0], { subjectId: "SUB:1", localStartFrame: 24, localEndFrame: 40 });
+    assert.deepEqual(typedShotB.subject_usages[0], { subjectId: "SUB:1", localStartFrame: 24, localEndFrame: 40 });
 });
 
 test("a production Clip cannot lose its final formal Shot or silently claim an unadopted H3 image", () => {
@@ -128,6 +129,8 @@ test("an old editor cleanup cannot unregister a newer owner binding", async () =
     finally { newer(); }
 });
 test("canvas node and physical Clip identity resolve to the authoritative source Segment ID", () => {
-    assert.equal(sourceSegmentForCanvasClip([{ id: "SOURCE_C4", nodeId: "H3", segmentId: "canvas-clip" }], "H3", "canvas-clip"), "SOURCE_C4");
-    assert.throws(() => sourceSegmentForCanvasClip([{ id: "SOURCE_C4", nodeId: "OTHER", segmentId: "canvas-clip" }], "H3", "canvas-clip"), /TARGET_MISMATCH/);
+    const source = { segments: [{ id: "SOURCE_C4", shot_ids: ["S1"] }] };
+    const node = { id: "H3", metadata: { segments: [{ id: "canvas-clip", productionClipProjection: { targetId: "SOURCE_C4" } }] } };
+    assert.equal(sourceSegmentForCanvasClip([node], source, "H3", "canvas-clip"), "SOURCE_C4");
+    assert.throws(() => sourceSegmentForCanvasClip([{ ...node, id: "OTHER" }], source, "H3", "canvas-clip"), /TARGET_MISMATCH/);
 });

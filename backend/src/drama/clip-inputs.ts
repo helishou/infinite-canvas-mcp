@@ -119,14 +119,18 @@ function reconcileSubjectImageReferences(segment: Record<string, any>, director:
     }
     const referenceIsUsed = (reference: Record<string, any>): boolean | undefined => {
         const explicitSubjectId = String(reference.subjectId || "");
-        if (explicitSubjectId && !subjectsById.has(explicitSubjectId)) return false;
         const nodeId = String(reference.sourceNodeId || reference.nodeId || "");
         const nodeBindings = bindingsByNodeId.get(nodeId) || [];
+        const knownSubjectId = explicitSubjectId && subjectsById.has(explicitSubjectId) ? explicitSubjectId : "";
+        // Legacy character-group references may carry the stable production entity
+        // node ID as subjectId. Resolve those only through the exact source node and
+        // then the Shot's explicitly selected pictureBindingIds; never by display name.
+        if (explicitSubjectId && !knownSubjectId && !nodeBindings.length) return false;
         const bindingId = String(reference.outfitId || reference.pictureBindingId || "");
         const byId = bindingsById.get(bindingId);
         if (byId) return usedBindingIds.has(bindingId);
-        const subjectId = explicitSubjectId && subjectsById.has(explicitSubjectId)
-            ? explicitSubjectId
+        const subjectId = knownSubjectId
+            ? knownSubjectId
             : new Set(nodeBindings.map(item => item.subjectId)).size === 1 ? nodeBindings[0]?.subjectId || "" : "";
         if (!subjectId) return undefined;
         const pictureBindingIds = nodeBindings.filter(item => item.subjectId === subjectId).map(item => String(item.binding.id || ""));
@@ -174,7 +178,7 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
         const subjectId = ref.role === "keyframe" || ref.role === "storyboard" || subjectIds?.size !== 1 ? undefined : [...subjectIds][0];
         return {
             id: stableId("binding", group.id, ref.label), assetId: stableId("asset", ref.nodeId, ref.storageKey),
-            label: ref.label, role: ref.role, tags: [], enabled: true, usage: "reference",
+            label: ref.label, role: ref.role === "environment" ? "scene" : ref.role, tags: [], enabled: true, usage: "reference",
             mediaType: ref.label.startsWith("<Video") ? "video" : ref.label.startsWith("<Audio") ? "audio" : "image",
             storageKey: ref.storageKey, sourceNodeId: ref.nodeId, order: index,
             ...(ref.subjectId || subjectId ? { subjectId: ref.subjectId || subjectId } : {}),
@@ -313,15 +317,16 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
             const groups = [["referenceBindings", "h3CharacterGroups", "storyboardShots", "duration"], ...CLIP_PROJECTION_FIELDS.filter(key => !["referenceBindings", "h3CharacterGroups", "storyboardShots", "duration"].includes(key)).map(key => [key])];
             const nextValues = Object.fromEntries(CLIP_PROJECTION_FIELDS.filter(key => Object.hasOwn(segment, key)).map(key => [key, segment[key]]));
             const baseline = { ...(existing.productionClipProjection?.fieldHashes || initialProjectionBaseline(existing, segment)) };
-            const referenceGroup = groups[0];
-            const referenceProjectionOnly = referenceGroup.slice(1).every(key => canonicalProduction(existing[key] ?? null) === canonicalProduction(segment[key] ?? null));
             // An older projection can leave a stale referenceBindings array marked
             // as manual even while its saved Prompt is still byte-for-byte the
-            // compiler output. If that array cannot satisfy a Picture/Video/Audio
-            // token, recover the coupled compiler-owned group from this exact
-            // artifact; otherwise keep the normal three-way manual-edit protection.
-            if (existing.prompt === segment.prompt && hasMissingPromptReferenceBindings(existing) && referenceProjectionOnly) {
-                for (const key of referenceGroup) baseline[key] = inputHash(existing[key]);
+            // compiler output. When that exact Prompt has more Picture/Video/Audio
+            // slots than the saved bindings, the array is an incomplete projection.
+            // Rebase only referenceBindings from the same artifact; preserve manual
+            // storyboard, duration, character-group, and all other field edits.
+            if (existing.prompt === segment.prompt && hasMissingPromptReferenceBindings(existing)) {
+                baseline.referenceBindings = inputHash(existing.referenceBindings);
+                groups[0] = ["referenceBindings"];
+                groups.splice(1, 0, ["h3CharacterGroups", "storyboardShots", "duration"]);
             }
             // Older projection receipts may omit a Prompt baseline because the
             // legacy `DRAFT` scaffold was mistaken for authored text. Treat that
@@ -331,6 +336,9 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
             const merged = mergeDirectorInput(existing, segment, baseline, groups);
             const mergedSegment = merged.merged;
             reconcileSubjectImageReferences(mergedSegment, data.director!, group);
+            // Keep the archived result attached; only mark it old when its projected input changes.
+            const inputChanged = clipInputHash(existing) !== clipInputHash(mergedSegment);
+            const inputOutdated = existing.inputOutdated === true || Boolean(existing.resultStorageKey && inputChanged);
             const storyboardDurations = Array.isArray(mergedSegment.storyboardShots)
                 ? mergedSegment.storyboardShots.map((shot: any) => Number(object(shot).duration)) : [];
             const storyboardTotal = storyboardDurations.reduce((sum: number, duration: number) => sum + duration, 0);
@@ -345,7 +353,8 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
             const projection = { ...segment.productionClipProjection,
                 ...(repairDuration ? { fieldHashes: { ...segment.productionClipProjection.fieldHashes, duration: clipFieldHash(storyboardTotal) } } : {}),
                 nextValues, fieldGroups: groups, conflicts, manualFields };
-            segment = { ...mergedSegment, productionClipProjection: projection };
+            segment = { ...mergedSegment, inputOutdated, productionClipProjection: projection };
+            if (inputOutdated) group.inputOutdated = true;
             if (conflicts.length) result.diagnostics.push({ code: "MANUAL_INPUT_CONFLICT", message: `存在人工修改与正式源稿冲突，已保留画布输入：${conflicts.join(",")}` });
         }
         // A same-field manual edit stays on the canvas while independent compiler fields

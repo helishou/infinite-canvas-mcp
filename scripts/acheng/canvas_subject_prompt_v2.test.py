@@ -9,7 +9,7 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 
-from canvas_subject_prompt_v2 import adapt_production, build_source_map, compile_prompt_v2, entity_text, project_continuity_source, write_prompt_text, _state_start_descriptions, _render_state_end, _plain_text, _infer_segment_mode
+from canvas_subject_prompt_v2 import adapt_production, binding_ids, build_source_map, compile_prompt_v2, entity_text, project_continuity_source, write_prompt_text, _state_start_descriptions, _render_state_end, _plain_text, _infer_segment_mode
 
 source_contract_spec = importlib.util.spec_from_file_location("canvas_source_contract", Path(__file__).with_name("source-contract.py"))
 source_contract = importlib.util.module_from_spec(source_contract_spec)
@@ -17,6 +17,12 @@ source_contract_spec.loader.exec_module(source_contract)
 
 
 class SubjectPromptV2ProjectionTest(unittest.TestCase):
+    def test_state_context_scene_image_requires_and_respects_explicit_picture_binding(self):
+        subject = {"id": "SUB_SCENE", "pictureBindings": [{"id": "SCENE_ENV", "provides": ["environment"], "defaultFor": ["environment"]}]}
+        usage = {"subjectId": "SUB_SCENE", "presentation": "state_context", "referencePurpose": ["environment"], "pictureBindingIds": ["SCENE_ENV"]}
+        self.assertEqual(binding_ids(subject, usage), ["SCENE_ENV"])
+        self.assertEqual(binding_ids(subject, {**usage, "pictureBindingIds": []}), [])
+
     def test_entity_descriptions_deduplicate_identical_fields_but_keep_distinct_details(self):
         source = {"character_registry": [{"id": "CHAR_A", "name": "A", "prompt_description": "same appearance",
                                           "appearance": "same appearance", "description": "additional acting detail"}]}
@@ -146,6 +152,12 @@ class SubjectPromptV2ProjectionTest(unittest.TestCase):
             self.assertLess(prompt.index("subject_definitions:"), prompt.index("summary:"))
             self.assertIn("[Shot 1]", prompt)
             self.assertIn("Scene setting: Chicken coop: A mud-brick coop with a straw nest behind a small opening.", prompt)
+            # BCF 铁律 7: character subjects with picture references must strip appearance text.
+            char_entry = next(item for item in segment["subjects"] if item.get("entity_id") == "CHILD")
+            self.assertIn("appearance follows the reference images exclusively", char_entry["definition"])
+            self.assertNotIn("blue cotton shirt", char_entry["definition"])
+            scene_entry = next(item for item in segment["subjects"] if item.get("entity_id") != "CHILD")
+            self.assertIn("A mud-brick coop with a straw nest", scene_entry["definition"])
             source_map = build_source_map(prompt, projected["_canvas_subject_v2_source_maps"]["CLIP_1"])
             self.assertEqual(source_map["sourceHash"], "a" * 64)
             self.assertTrue(any(item["sourceId"] == "SHOT_1" and item["field"] == "visual" for item in source_map["entries"]))

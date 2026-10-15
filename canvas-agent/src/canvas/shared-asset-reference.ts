@@ -7,7 +7,7 @@ export type AssetNode = { id: string; type: string; title?: string; metadata?: R
 const COMMON = ["content", "storageKey", "naturalWidth", "naturalHeight", "bytes", "mimeType", "durationMs"];
 const FIELDS: Record<string, string[]> = {
     text: ["content"], image: COMMON, video: COMMON, audio: COMMON,
-    prop: [...COMMON, "propName", "propDescription", "itemName", "itemDescription"],
+    prop: [...COMMON, "propName", "propDescription", "propImage", "itemName", "itemDescription"],
     character: [...COMMON, "characterName", "characterEnglishName", "characterDescription", "characterImages", "characterPrimaryIndex", "characterVoiceUrl", "characterVoiceName", "characterVoiceDescription", "characterVoiceStorageKey", "characterVoiceAssetId"],
     scene: [...COMMON, "sceneName", "sceneDescription", "sceneImage", "sceneColorCard", "sceneColorPalette", "sceneColorCardPrompt"],
 };

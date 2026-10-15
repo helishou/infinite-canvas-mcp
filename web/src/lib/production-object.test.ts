@@ -25,7 +25,7 @@ test("a keyframe review and runtime state use the exact selected Clip and formal
     const object = productionObjectForNode(context, production, { id: "h3-a", title: "H3" }, "clip-b")!;
     const node = { metadata: { status: "loading", segments: [{ id: "clip-a", status: "loading" }, { id: "clip-b", status: "success", resultStorageKey: "video:b" }] } };
     assert.equal(productionObjectState(production, object, node).status, "complete");
-    const changedInputs = structuredClone(production); changedInputs.draft.clipGroups[1].inputOutdated = true;
+    const changedInputs = structuredClone(production); changedInputs.draft.clipGroups![1].inputOutdated = true;
     assert.equal(productionObjectState(changedInputs, object, node).status, "outdated");
     node.metadata.segments[1].status = "loading";
     assert.equal(productionObjectState(production, object, node).working, true);

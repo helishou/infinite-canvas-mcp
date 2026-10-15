@@ -34,6 +34,8 @@ Agent 负责编译前的创作和结构化源稿。自动刷新已登记时消�
 
 编译输入是已保存的结构化制作源稿、Shot/Segment、资产资料和实际参考绑定。只有资产时运行 `compile_assets.py`；包含视频片段时运行 `compile_h3.py`。脚本按对应 Skill 规则产出独立、完整的图像或 H3 提示词文件、索引、逐目标诊断、参考映射和哈希回执；缺少依赖的目标保留为 draft，不伪造 ready。Backend 再核对当前制作 revision、媒体归属和执行条件。
 
+场景图只有在 Shot 的 `subject_usages` 明确声明对应 Scene Subject 与 `referencePurpose: ["environment"]` 时才参与该 Shot 所属 Clip；对 `state_context` 用途显式填写该 Subject 的 `pictureBindingIds`。不能只按 `scene_id` 或场次包自动推断场景图。应用编译后逐段核对 H3 `referenceBindings` 的源节点、`storageKey`、用途与顺序，并检查 `referenceSync`；画布连线或提示词中的场景文字不证明图片已进入模型输入。输入更新只使旧媒体对应旧输入，不自动重生成。
+
 离线批次可在一次调用中重复指定多个 `--asset <id>` 或 `--segment <id>`，减少重复读取与审计；省略选项仍编译原有全量范围。`interactive_segment` 保持每次一个完整 Segment。批次索引记录选中目标，未选择目标不导出；缺失/未知 ID 明确失败。离线批量与正式在线编译是不同入口，不要对同一目标和输入连续执行两遍。
 
 脚本不调用媒体模型。源稿、提示词、实际参考或镜头边界变化后重算受影响产物，已生成媒体不会自动重做。

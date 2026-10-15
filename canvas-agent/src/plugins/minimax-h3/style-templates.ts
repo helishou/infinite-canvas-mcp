@@ -1,7 +1,7 @@
 /**
  * 视觉风格模板：H3 设置里可选择的固定英文风格词。
  *
- * 模板正文仅在运行时插到对应描述段落的最前面；旧版保存的模板前缀可识别并剥离。
+ * 模板正文仅在运行时注入 summary；旧版保存在描述段落中的模板前缀可识别并迁移。
  */
 
 export type H3StyleTemplate = {
@@ -164,8 +164,7 @@ export function composeStoryboardOpening(styleTemplateId: H3StyleTemplateId | nu
     return [styleTemplateText(styleTemplateId, custom), openingDescription.trim()].filter(Boolean).join("\n\n");
 }
 
-function descriptionSection(prompt: string, mode: string) {
-    const name = mode === "ref2va" ? "detailed_description" : "integrated_multimodal_description";
+function promptSection(prompt: string, name: string) {
     const header = new RegExp(`^${name}\\s*[:：][ \\t]*(?:\\r?\\n)?`, "mi").exec(prompt);
     if (!header) return null;
     const start = header.index + header[0].length;
@@ -174,8 +173,31 @@ function descriptionSection(prompt: string, mode: string) {
     return { start, end: start + (next?.index ?? remainder.length) };
 }
 
+function descriptionSection(prompt: string, mode: string) {
+    return promptSection(prompt, mode === "ref2va" ? "detailed_description" : "integrated_multimodal_description");
+}
+
+function summaryTemplate(summary: string, custom: unknown = []) {
+    const marker = /^(\s*\[[^\]]+\]\s*)([\s\S]*)$/u.exec(summary);
+    const prefix = marker?.[1] || "";
+    const body = marker ? marker[2] : summary;
+    const match = matchStyleTemplatePrefix(body, custom);
+    return match ? { id: match.id, prefix, rest: match.rest } : null;
+}
+
+function summaryWithTemplate(summary: string, style: string, custom: unknown = []) {
+    const existing = summaryTemplate(summary, custom);
+    const marker = /^(\s*\[[^\]]+\]\s*)([\s\S]*)$/u.exec(summary);
+    const prefix = existing?.prefix || marker?.[1] || "";
+    const body = existing?.rest ?? (marker ? marker[2].trim() : summary.trim());
+    return [prefix.trim(), style, body].filter(Boolean).join("\n\n");
+}
+
 export function styleTemplateFromPrompt(prompt: string, mode: string, custom: unknown = []): H3StyleTemplateId | null {
     const section = descriptionSection(prompt, mode);
+    const summary = promptSection(prompt, "summary");
+    const summaryMatch = summary && summaryTemplate(prompt.slice(summary.start, summary.end), custom)?.id;
+    if (summaryMatch) return summaryMatch;
     if (!section) return null;
     const body = prompt.slice(section.start, section.end);
     const firstShot = /^[ \t]*\[Shot[ \t]+\d+\]/mi.exec(body);
@@ -188,14 +210,26 @@ export function applyH3StyleTemplate(prompt: string, mode: string, selectedId: H
     const legacyId = styleTemplateFromPrompt(prompt, mode, custom);
     const effectiveId = selectedId === undefined ? legacyId : selectedId;
     const style = styleTemplateText(effectiveId, custom);
-    if (!section) return style ? `${style}\n\n${prompt}` : prompt;
     if (!style && !legacyId) return prompt;
-    const body = prompt.slice(section.start, section.end);
-    const firstShot = /^[ \t]*\[Shot[ \t]+\d+\]/mi.exec(body);
-    const opening = body.slice(0, firstShot?.index ?? body.length);
-    const rest = body.slice(firstShot?.index ?? body.length).trim();
-    const cleanOpening = matchStyleTemplatePrefix(opening, custom)?.rest ?? opening.trim();
-    const nextBody = [style, cleanOpening, rest].filter(Boolean).join("\n\n");
-    const suffix = prompt.slice(section.end).trimStart();
-    return `${prompt.slice(0, section.start)}${nextBody}${suffix ? `\n\n${suffix}` : ""}`;
+    let result = prompt;
+    if (section) {
+        const body = result.slice(section.start, section.end);
+        const firstShot = /^[ \t]*\[Shot[ \t]+\d+\]/mi.exec(body);
+        const opening = body.slice(0, firstShot?.index ?? body.length);
+        const rest = body.slice(firstShot?.index ?? body.length).trim();
+        const cleanOpening = matchStyleTemplatePrefix(opening, custom)?.rest ?? opening.trim();
+        const nextBody = [cleanOpening, rest].filter(Boolean).join("\n\n");
+        const suffix = result.slice(section.end).trimStart();
+        result = `${result.slice(0, section.start)}${nextBody}${suffix ? `\n\n${suffix}` : ""}`;
+    }
+    const summary = promptSection(result, "summary");
+    if (summary) {
+        const body = result.slice(summary.start, summary.end);
+        const nextBody = summaryWithTemplate(body, style, custom);
+        const suffix = result.slice(summary.end).trimStart();
+        result = `${result.slice(0, summary.start)}${nextBody}${suffix ? `\n\n${suffix}` : ""}`;
+    } else if (style) {
+        result = `summary:\n${style}\n\n${result.trimStart()}`;
+    }
+    return result;
 }

@@ -26,7 +26,7 @@ process.send({ type:'dev:ready', pid:process.pid });
 `;
     const entry = path.join(source, 'index.ts'); await fs.writeFile(entry, program);
     const messages = [];
-    const watcher = startBackendWatch({ cwd: directory, directories: [source], log: { log: text => messages.push(text), error: text => messages.push(text) } });
+    const watcher = startBackendWatch({ cwd: directory, directories: [source], publicPort: 0, backendPort: 0, env: { ...process.env, INFINITE_CANVAS_DATA_DIR: path.join(directory, 'data') }, log: { log: text => messages.push(text), error: text => messages.push(text) } });
     t.after(async () => {
         await watcher.stop();
         assert.ok(path.resolve(directory).startsWith(path.resolve(os.tmpdir()) + path.sep));

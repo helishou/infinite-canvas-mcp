@@ -443,13 +443,16 @@ async function startBackendHttpServer() {
     });
   });
   registerBackendErrorHandler(app);
+  // The dev watcher keeps the public MCP port bound while each child serves on its loopback target port.
+  const internalListenPort = Number(process.env.INFINITE_CANVAS_BACKEND_LISTEN_PORT);
+  const listenHost = internalListenPort ? "127.0.0.1" : config.listenHost || "127.0.0.1";
   const server = app.listen(
-    config.port,
-    config.listenHost || "127.0.0.1",
+    internalListenPort || config.port,
+    listenHost,
     () => {
       markStartupStage("listen");
       logger.info(`总后台已启动 ${config.url}`, {
-        listenHost: config.listenHost || "127.0.0.1",
+        listenHost,
         pid: process.pid,
         version: readVersion(),
         startupTimingsMs,

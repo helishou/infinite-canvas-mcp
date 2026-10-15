@@ -46,14 +46,32 @@ test("an anchor missing from both the episode and shared canvases is still rejec
 test("compilation bindings accept the shared-canvas style anchor and keep rejecting other cross-canvas nodes", t => {
     const { service, filePath } = fixture(t);
     const styleReference = { label: "风格母版", nodeId: "STYLE_NODE", role: "style", storageKey: "style-mother.png", sha256: promptHash(fs.readFileSync(filePath, "utf8")) };
+    const sourceHash = "c".repeat(64), compilerHash = "e".repeat(64), prompt = "current prompt", sha256 = promptHash(prompt);
     const compiled = (nodeId: string) => ({
-        sourceHash: "c".repeat(64), assets: {},
+        sourceHash, engine: { compilerHash }, assets: {},
         source: { style_anchor_node_id: nodeId, segments: [] },
-        artifacts: [{ id: "STYLE_TARGET", targetId: "STYLE_TARGET", kind: "image", status: "stale", sha256: "d".repeat(64), references: [styleReference] }],
+        artifacts: [{ id: "STYLE_TARGET", targetId: "STYLE_TARGET", kind: "h3", status: "ready", prompt, sourceHash, sha256, receipt: { sourceHash, promptHash: sha256, engine: { compilerHash } }, references: [styleReference] }],
     } as any);
     service.verifyCompilationBindings("episode", compiled("STYLE_NODE"));
     assert.throws(() => service.verifyCompilationBindings("episode", {
         ...compiled("STYLE_NODE"),
         artifacts: [{ ...compiled("STYLE_NODE").artifacts[0], references: [{ ...styleReference, nodeId: "EPISODE_MISSING" }] }],
     }), /图片已不在制作画布的对应节点上/);
+});
+
+test("stale artifact references do not block compilation after a source image is replaced", t => {
+    const { service, filePath } = fixture(t);
+    const staleReference = { label: "<Picture 1>", nodeId: "STYLE_NODE", role: "style", storageKey: "superseded-style.png", sha256: "0".repeat(64) };
+    const sourceHash = "c".repeat(64), compilerHash = "e".repeat(64), prompt = "current prompt", sha256 = promptHash(prompt);
+    service.verifyCompilationBindings("episode", {
+        sourceHash, engine: { compilerHash }, assets: {},
+        source: { style_anchor_node_id: "STYLE_NODE", segments: [] },
+        artifacts: [{ id: "OLD_STYLE_TARGET", targetId: "STYLE_TARGET", kind: "image", status: "stale", sha256: "d".repeat(64), references: [staleReference] }],
+    } as any);
+    assert.ok(fs.existsSync(filePath));
+    assert.throws(() => service.verifyCompilationBindings("episode", {
+        sourceHash, engine: { compilerHash }, assets: {},
+        source: { style_anchor_node_id: "STYLE_NODE", segments: [] },
+        artifacts: [{ id: "CURRENT_STYLE_TARGET", targetId: "STYLE_TARGET", kind: "h3", status: "ready", sourceHash, prompt, sha256, receipt: { sourceHash, promptHash: sha256, engine: { compilerHash } }, references: [staleReference] }],
+    } as any), /图片已不在制作画布的对应节点上/);
 });

@@ -2147,7 +2147,7 @@ export class BackendDatabase {
                 connections: (project.connections as Record<string, any>[] || []).filter(edge => formalSourceIds.has(edge.toNodeId)),
             }) : undefined;
             const scriptBaseline = !context?.runtimeWrite && context?.source?.clientId !== "production:scripts" ? { nodes: structuredClone((Array.isArray(project.nodes) ? project.nodes as Record<string, any>[] : []).filter(node => node.metadata?.productionScriptId)) } : undefined;
-            const entityBaseline = !["production:scripts", "production:layout"].includes(String(context?.source?.clientId || "")) ? { nodes: structuredClone((Array.isArray(project.nodes) ? project.nodes as Record<string, any>[] : []).filter(node => node.metadata?.productionEntity)) } : undefined;
+            const entityBaseline = !["production:scripts", "production:layout", "system:shared-library"].includes(String(context?.source?.clientId || "")) ? { nodes: structuredClone((Array.isArray(project.nodes) ? project.nodes as Record<string, any>[] : []).filter(node => node.metadata?.productionEntity)) } : undefined;
             if (!this.db.prepare("SELECT 1 FROM canvas_collaboration_checkpoints WHERE project_id = ?").get(id)) {
                 this.db.prepare("INSERT INTO canvas_collaboration_checkpoints (project_id, revision, data_json) VALUES (?, ?, ?)").run(id, currentRevision, JSON.stringify(current));
             }
@@ -2240,7 +2240,13 @@ export class BackendDatabase {
                 }
                 for (const operation of stale) { const result = applyCanvasProjectOperations(project, [operation]); committedOperations.push(operation); operationResults.push(...result); }
             }
-            const productionUpdates = [...(scriptBaseline ? syncScriptNodeEdits(this, id, scriptBaseline, project) : []), ...(entityBaseline ? syncEntityNodeEdits(this, id, entityBaseline, project) : [])];
+            const entitySync = entityBaseline ? syncEntityNodeEdits(this, id, entityBaseline, project) : { updates: [], operations: [] };
+            for (const operation of entitySync.operations) {
+                const result = applyCanvasProjectOperations(project, [operation]);
+                committedOperations.push(operation);
+                operationResults.push(...result);
+            }
+            const productionUpdates = [...(scriptBaseline ? syncScriptNodeEdits(this, id, scriptBaseline, project) : []), ...entitySync.updates];
             if (imageInputBaseline) {
                 const synced = syncImageReferenceEdits(this, id, imageInputBaseline, project);
                 productionUpdates.push(...synced.updates);
@@ -2254,7 +2260,7 @@ export class BackendDatabase {
             project.updatedAt = new Date().toISOString();
             this.db.prepare("UPDATE canvas_projects SET data_json = ?, updated_at = ? WHERE id = ?")
                 .run(JSON.stringify(stripProjectAssets(project)), String(project.updatedAt), id);
-            propagateAssetChanges(this, id, assetBefore, project, dependentCommits, context?.originatingProjectId);
+            productionUpdates.push(...propagateAssetChanges(this, id, assetBefore, project, dependentCommits, context?.originatingProjectId));
             const source = context?.source || { clientId: "system:backend", kind: "system", label: "后台" };
             this.db.prepare("INSERT INTO canvas_operation_batches (operation_id, project_id, base_revision, revision, source_json, operations_json, results_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
                 .run(operationId, id, currentRevision, revision, JSON.stringify(source), JSON.stringify(committedOperations), JSON.stringify(operationResults), String(project.updatedAt));

@@ -10,6 +10,7 @@ import { BackendEventBus } from "../events.js";
 import { EpisodeProductionService } from "./production.js";
 import { directorHash } from "./director.js";
 import { ClipRefreshCoordinator } from "./clip-refresh.js";
+import { productionLayoutStableId } from "./production-layout-geometry.js";
 
 function fixture(t: test.TestContext, withCanvas = false, setup?: (db: BackendDatabase, directory: string) => void) {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "subject-workbench-"));
@@ -515,6 +516,52 @@ test("first Subject registration binds its canonical entity node, replay and exp
     assert.equal(service.edit("ep", request).revision, saved.revision);
     const unbound = service.edit("ep", { operationId: "auto-unbind", expectedRevision: saved.revision, ops: [{ type: "upsert_director_subject", subject }] });
     assert.deepEqual((unbound.draft.director!.source.subject_registry as any[]).find(row => row.id === subject.id).pictureBindings, []);
+});
+
+test("an episode Subject can switch to another same-type registered canvas entity while Shots retain the Subject ID", t => {
+    const service = fixture(t, true), director = directorV2();
+    (director.source.character_registry as any[]).push({ id: "P2", name: "另一角色" });
+    (director.source.asset_plan as any[]).push({ id: "A2", kind: "character", entity_id: "P2", asset_name: "另一角色", version: "v1", depends_on: [] });
+    director.assets.A2 = { version: "v1", status: "planned" };
+    director.sourceHash = directorHash(director.source);
+    service.edit("ep", { operationId: "switch-subject-source", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
+    const current = service.get("ep"), nodeId = productionLayoutStableId("production-entity", "episode", "ep", "character", "P2");
+    const subject = (current.draft.director!.source.subject_registry as any[]).find(item => item.id === "P")!;
+    const switched = service.edit("ep", { operationId: "switch-subject-entity", expectedRevision: current.revision, ops: [{ type: "upsert_director_subject", subject: {
+        ...subject,
+        entityRef: { ownerKind: "episode", ownerId: "ep", kind: "character", id: "P2" },
+        pictureBindings: [{ id: "P2_ID", assetId: "A2", sourceNode: { projectId: "CANVAS_EP", nodeId }, selection: { mode: "node_selection" }, provides: ["identity"], retain: ["新角色身份"], exclude: [], applicableState: {}, defaultFor: ["identity"] }],
+    } }] });
+    const updated = (switched.draft.director!.source.subject_registry as any[]).find(item => item.id === "P");
+    assert.equal(updated.entityRef.id, "P2");
+    assert.equal((switched.draft.director!.source.ledger as any).facts[0].object_id, "P2");
+    assert.deepEqual((switched.draft.director!.source.shots as any[])[0].subject_usages[0].pictureBindingIds, ["P2_ID"]);
+    assert.deepEqual(service.subjectWorkbench("ep", "P").subjectWorkbench.entityNodeSource, { projectId: "CANVAS_EP", nodeId, kind: "character", entityId: "P2" });
+    assert.throws(() => service.edit("ep", { operationId: "switch-subject-unregistered", expectedRevision: switched.revision, ops: [{ type: "upsert_director_subject", subject: {
+        ...updated, entityRef: { ownerKind: "episode", ownerId: "ep", kind: "character", id: "MISSING" },
+    } }] }), /已登记的同类型画布实体/);
+});
+
+test("switching to an entity used by another Subject swaps bindings and preserves both Subjects' Shot references", t => {
+    const service = fixture(t, true), director = directorV2(), source = director.source as any;
+    source.character_registry.push({ id: "P2", name: "另一角色" });
+    source.asset_plan.push({ id: "A2", kind: "character", entity_id: "P2", asset_name: "另一角色", version: "v1", depends_on: [] });
+    source.subject_registry.push({ id: "OTHER", kind: "character", entityRef: { ownerKind: "episode", ownerId: "ep", kind: "character", id: "P2" }, pictureBindings: [
+        { id: "P2_ID", assetId: "A2", sourceNode: { projectId: "CANVAS_EP", nodeId: productionLayoutStableId("production-entity", "episode", "ep", "character", "P2") }, selection: { mode: "node_selection" }, provides: ["identity"], retain: ["other identity"], exclude: [], applicableState: {}, defaultFor: ["identity"] },
+    ] });
+    source.shots[0].subject_usages.push({ subjectId: "OTHER", presentation: "visible", pictureBindingIds: ["P2_ID"], referencePurpose: ["identity"], continuityFactIds: [], stateRequirements: [] });
+    director.assets.A2 = { version: "v1", status: "planned" };
+    director.sourceHash = directorHash(source);
+    service.edit("ep", { operationId: "swap-subject-source", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
+    const current = service.get("ep"), subject = (current.draft.director!.source.subject_registry as any[]).find(item => item.id === "P")!;
+    const selectedNode = productionLayoutStableId("production-entity", "episode", "ep", "character", "P2");
+    const nextBinding = { id: "P_SELECTED_P2", assetId: "A2", sourceNode: { projectId: "CANVAS_EP", nodeId: selectedNode }, selection: { mode: "node_selection" }, provides: ["identity"], retain: ["selected identity"], exclude: [], applicableState: {}, defaultFor: ["identity"] };
+    const saved = service.edit("ep", { operationId: "swap-subject-bindings", expectedRevision: current.revision, ops: [{ type: "upsert_director_subject", subject: { ...subject, entityRef: { ownerKind: "episode", ownerId: "ep", kind: "character", id: "P2" }, pictureBindings: [nextBinding] } }] });
+    const subjects = saved.draft.director!.source.subject_registry as any[];
+    assert.equal(subjects.find(item => item.id === "P")!.entityRef.id, "P2");
+    assert.equal(subjects.find(item => item.id === "OTHER")!.entityRef.id, "P");
+    assert.deepEqual((saved.draft.director!.source.shots as any[])[0].subject_usages[0].pictureBindingIds, ["P_SELECTED_P2"]);
+    assert.deepEqual((saved.draft.director!.source.shots as any[])[0].subject_usages[1].pictureBindingIds, ["P_ID"]);
 });
 
 test("auto-bound character consumes the canonical node image without copying media into the Subject", t => {

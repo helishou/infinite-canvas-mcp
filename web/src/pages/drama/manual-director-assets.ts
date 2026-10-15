@@ -45,6 +45,7 @@ export function createManualDirectorAsset(source: Source, draft: ManualAssetDraf
         asset_version: "v1",
         prompt: draft.prompt.trim(),
         references: [],
+        reference_policy: "none",
     };
     const nextSource: Source = {
         ...source,
