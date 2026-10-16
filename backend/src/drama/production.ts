@@ -79,6 +79,7 @@ import { productionSceneCreationOperations } from "./production-scene-nodes.js";
 import { archiveDirectorScene, deleteDirectorClip, listArchivedDirectorScenes, restoreDirectorScene } from "./production-scene-archive.js";
 import { continuityTargetBlockers, ProductionContinuityReports } from "./continuity-reports.js";
 import { dedupReceipt, resolveReceiptDedup, assertPublicReceipt } from "./receipt-dedup.js";
+import { decodeReceipt, encodeReceipt, type StoredReceipt } from "./receipt-storage.js";
 import type { NativeProductionTarget } from "./native-generation.js";
 
 type Row = { revision: number; draft_json: string; published_json: string | null; published_version: number; updated_at: string };
@@ -1060,9 +1061,9 @@ export class EpisodeProductionService {
     adoptSharedAsset(id: string, input: { assetId: string; approvedId: string; expectedRevision: number; operationId: string }): ProductionRecord & { replayed?: boolean; impact?: ProductionImpact } {
         const linked = this.linked(id); if (linked) return linked.service.adoptSharedAsset(linked.id, input);
         if (this.ownerKind !== "episode") throw new Error("共享资产采用目前仅支持剧目分集，场次级采用链尚未启用");
-        const prior = this.prepare("SELECT receipt_json FROM episode_production_operations WHERE operation_id=?").get(input.operationId) as { receipt_json: string } | undefined;
+        const prior = this.prepare("SELECT receipt_json FROM episode_production_operations WHERE operation_id=?").get(input.operationId) as { receipt_json: StoredReceipt } | undefined;
         if (prior) {
-            const priorRecord = JSON.parse(prior.receipt_json) as ProductionRecord;
+            const priorRecord = decodeReceipt<ProductionRecord>(prior.receipt_json);
             const nodeId = priorRecord.draft.director?.assets[input.assetId]?.nodeId || sharedProjectionNodeId(id, input.assetId);
             return this.edit(id, { operationId: input.operationId, expectedRevision: input.expectedRevision,
                 ops: [{ type: "adopt_shared_asset", assetId: input.assetId, approvedId: input.approvedId, nodeId }] });
@@ -1099,9 +1100,9 @@ export class EpisodeProductionService {
         if (this.ownerKind !== "episode") throw new Error("共享资产采用目前仅支持剧目分集，场次级采用链尚未启用");
         if (!input.assets.length) throw new Error("批量采用至少需要一个资产");
         if (new Set(input.assets.map(item => item.assetId)).size !== input.assets.length) throw new Error("批量采用资产 ID 不能重复");
-        const prior = this.prepare("SELECT receipt_json FROM episode_production_operations WHERE operation_id=?").get(input.operationId) as { receipt_json: string } | undefined;
+        const prior = this.prepare("SELECT receipt_json FROM episode_production_operations WHERE operation_id=?").get(input.operationId) as { receipt_json: StoredReceipt } | undefined;
         if (prior) {
-            const priorRecord = JSON.parse(prior.receipt_json) as ProductionRecord;
+            const priorRecord = decodeReceipt<ProductionRecord>(prior.receipt_json);
             const ops = input.assets.map(item => ({ type: "adopt_shared_asset" as const, assetId: item.assetId, approvedId: item.approvedId,
                 nodeId: priorRecord.draft.director?.assets[item.assetId]?.nodeId || sharedProjectionNodeId(id, item.assetId) }));
             return this.edit(id, { operationId: input.operationId, expectedRevision: input.expectedRevision, ops });
@@ -1161,9 +1162,13 @@ export class EpisodeProductionService {
 
     operationReceipt(id: string, operationId: string): ProductionRecord | undefined {
         const linked = this.linked(id); if (linked) return linked.service.operationReceipt(linked.id, operationId);
-        const row = this.prepare("SELECT receipt_json FROM episode_production_operations WHERE episode_id=? AND operation_id=?").get(id, operationId) as { receipt_json: string } | undefined;
+        const row = this.prepare("SELECT receipt_json FROM episode_production_operations WHERE episode_id=? AND operation_id=?").get(id, operationId) as { receipt_json: StoredReceipt } | undefined;
         if (!row) return undefined;
-        const record = resolveReceiptDedup(JSON.parse(row.receipt_json) as ProductionRecord);
+        const record = resolveReceiptDedup(decodeReceipt<ProductionRecord>(row.receipt_json));
+        // Stored receipts use source-only v2 snapshots; parse defaults to restore the
+        // in-memory compatibility arrays before projectDirector derives their view.
+        record.draft = episodeProductionHistoryDataSchema.parse(record.draft) as EpisodeProductionData;
+        if (record.published) record.published = episodeProductionHistoryDataSchema.parse(record.published) as EpisodeProductionData;
         if (record.draft.director && !isSubjectPromptAssembly(record.draft.director.source)) throw new ProductionValidationError([{ code: "UNSUPPORTED_PRODUCTION_FORMAT", path: "receipt.draft.director.source", message: "旧版制作回执只能通过生产源稿维护命令检查。", severity: "error" }]);
         if (record.draft.director && isSubjectPromptAssembly(record.draft.director.source)) projectDirector(record.draft, false);
         if (record.published?.director && isSubjectPromptAssembly(record.published.director.source)) projectDirector(record.published, false);
@@ -1489,12 +1494,32 @@ export class EpisodeProductionService {
                 clipGroups: data.clipGroups.map(({ id, shotIds }) => ({ id, shotIds })),
             });
             const storedView = comparable(value), projectedView = comparable(projected);
-            // 镜像与投影判定的是「语义是否一致」：两者字段值相同、仅对象键序不同（例如
-            // 早期写入的 dialogue block 为 {id,kind,text,speaker}，投影产出 {id,kind,speaker,text}）
-            // 不代表镜像含有投影无法派生的信息，去重不会丢数据。用 canonicalProduction 做
-            // 键序无关的稳定比较；fingerprint 的 JSON.stringify 键序敏感，会把这类历史键序
-            // 差异误判为冲突，使显式迁移陷入 impossible-to-satisfy 的死锁。
-            for (const field of ["scenes", "shots", "clipGroups"] as const) if (canonicalProduction(storedView[field]) !== canonicalProduction(projectedView[field])) blockers.push(`${label}: stored ${field} mirror differs from source projection`);
+            // 迁移只做一件事：删掉镜像，保留 source。因此要判断的是「删掉镜像会不会丢信息」，
+            // 而不是「镜像是否与今天的投影逐字节相同」。后者是脆弱命题：投影是 source 的纯函数，
+            // 只要投影逻辑演进（例如新增派生字段 characters/startFrame/stateUnresolved），
+            // 所有历史镜像都会显得「不一致」，迁移因此永久卡死——那不是数据损坏，
+            // 而是闸门问错了问题。实测已遇到两例：键序差异（早期 dialogue block 写
+            // {id,kind,text,speaker}，投影产 {id,kind,speaker,text}）、以及投影新增派生键。
+            //
+            // 正确判据（按 id 对齐逐条比对）：
+            //   - 镜像有、投影无的键  → 真丢信息，阻塞
+            //   - 两侧都有但值不同    → 真冲突，阻塞
+            //   - 投影有、镜像无的键  → 投影新派生的字段，不丢信息，放行
+            for (const field of ["scenes", "shots", "clipGroups"] as const) {
+                const storedRows = storedView[field] as Array<Record<string, any>>;
+                const projectedRows = projectedView[field] as Array<Record<string, any>>;
+                const keyOf = (row: Record<string, any>) => String(row?.id ?? "");
+                const projectedById = new Map(projectedRows.map(row => [keyOf(row), row]));
+                if (storedRows.length !== projectedRows.length) { blockers.push(`${label}: stored ${field} mirror has ${storedRows.length} rows, projection has ${projectedRows.length}`); continue; }
+                for (const storedRow of storedRows) {
+                    const projectedRow = projectedById.get(keyOf(storedRow));
+                    if (!projectedRow) { blockers.push(`${label}: stored ${field} mirror contains ${keyOf(storedRow)} which the projection does not produce`); continue; }
+                    for (const [key, storedValue] of Object.entries(storedRow)) {
+                        if (!Object.hasOwn(projectedRow, key)) { blockers.push(`${label}: stored ${field}.${keyOf(storedRow)}.${key} exists only in the mirror; dropping it would lose data`); continue; }
+                        if (canonicalProduction(storedValue) !== canonicalProduction(projectedRow[key])) blockers.push(`${label}: stored ${field}.${keyOf(storedRow)}.${key} disagrees with the source projection`);
+                    }
+                }
+            }
             for (const group of value.clipGroups) {
                 const association = this.resolveDirectorSegmentRuntime(episodeId, group.id);
                 if (association.status !== "resolved") { blockers.push(`${label}: Canvas association for Segment ${group.id} is ${association.status}`); continue; }
@@ -1527,11 +1552,11 @@ export class EpisodeProductionService {
         const tables = PRODUCTION_TABLES[this.ownerKind];
         this.db.db.exec("BEGIN IMMEDIATE");
         try {
-            const prior = this.prepare(`SELECT request_hash, receipt_json FROM ${tables.operations} WHERE operation_id=?`).get(operationId) as { request_hash: string; receipt_json: string } | undefined;
+            const prior = this.prepare(`SELECT request_hash, receipt_json FROM ${tables.operations} WHERE operation_id=?`).get(operationId) as { request_hash: string; receipt_json: StoredReceipt } | undefined;
             if (prior) {
                 if (prior.request_hash !== requestHash) throw new Error("IDEMPOTENCY_CONFLICT: operationId 已用于不同维护操作");
                 this.db.db.exec("COMMIT");
-                return JSON.parse(prior.receipt_json) as ProductionRecord;
+                return decodeReceipt<ProductionRecord>(prior.receipt_json);
             }
             const current = this.get(episodeId);
             if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
@@ -1551,7 +1576,7 @@ export class EpisodeProductionService {
                     .run(JSON.stringify(withoutDirectorProjection(snapshot)), episodeId, version.version);
             }
             this.prepare(`INSERT INTO ${tables.operations} (operation_id, ${tables.key}, request_hash, receipt_json, created_at) VALUES (?, ?, ?, ?, ?)`)
-                .run(operationId, episodeId, requestHash, JSON.stringify(publicProductionRecord(next)), next.updatedAt);
+                .run(operationId, episodeId, requestHash, encodeReceipt(publicProductionRecord(next)), next.updatedAt);
             this.db.db.exec("COMMIT");
             this.events?.publish({ type: "drama-production.updated", entityId: episodeId, payload: { revision: next.revision, publishedVersion: next.publishedVersion } });
             return next;
@@ -3200,14 +3225,16 @@ export class EpisodeProductionService {
         measure("transaction_begin", () => this.db.db.exec("BEGIN IMMEDIATE"));
         try {
             const { prior, current } = measure("revision_read", () => {
-                const prior = this.prepare("SELECT episode_id AS owner_id, request_hash, receipt_json FROM episode_production_operations WHERE operation_id = ?").get(operationId) as { owner_id: string; request_hash: string; receipt_json: string } | undefined;
+                const prior = this.prepare("SELECT episode_id AS owner_id, request_hash, receipt_json FROM episode_production_operations WHERE operation_id = ?").get(operationId) as { owner_id: string; request_hash: string; receipt_json: StoredReceipt } | undefined;
                 if (prior) return { prior, current: null as ProductionRecord | null };
                 return { prior, current: this.get(episodeId, maintenanceLegacyRead) };
             });
             if (prior) {
                 if (prior.owner_id !== episodeId || prior.request_hash !== requestHash) throw new Error("operationId 已用于不同制作稿操作");
                 this.db.db.exec("COMMIT");
-                const replayed = resolveReceiptDedup(JSON.parse(prior.receipt_json) as ProductionRecord & { impact?: ProductionImpact });
+                const replayed = resolveReceiptDedup(decodeReceipt<ProductionRecord & { impact?: ProductionImpact }>(prior.receipt_json));
+                replayed.draft = episodeProductionHistoryDataSchema.parse(replayed.draft) as EpisodeProductionData;
+                if (replayed.published) replayed.published = episodeProductionHistoryDataSchema.parse(replayed.published) as EpisodeProductionData;
                 if (replayed.draft.director && isSubjectPromptAssembly(replayed.draft.director.source)) projectDirector(replayed.draft, false);
                 if (replayed.published?.director && isSubjectPromptAssembly(replayed.published.director.source)) projectDirector(replayed.published, false);
                 assertPublicReceipt(replayed);
@@ -3275,7 +3302,7 @@ export class EpisodeProductionService {
                 this.prepare("INSERT INTO episode_productions (episode_id, revision, draft_json, published_json, published_version, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(episode_id) DO UPDATE SET revision = excluded.revision, draft_json = excluded.draft_json, published_json = excluded.published_json, published_version = excluded.published_version, updated_at = excluded.updated_at")
                     .run(episodeId, next.revision, JSON.stringify(withoutDirectorProjection(next.draft)), next.published ? JSON.stringify(withoutDirectorProjection(next.published)) : null, next.publishedVersion, next.updatedAt);
                 this.prepare("INSERT INTO episode_production_operations (operation_id, episode_id, request_hash, receipt_json, created_at) VALUES (?, ?, ?, ?, ?)")
-                    .run(operationId, episodeId, requestHash, JSON.stringify(dedupReceipt(publicProductionRecord(next) as ProductionRecord)), next.updatedAt);
+                    .run(operationId, episodeId, requestHash, encodeReceipt(dedupReceipt(publicProductionRecord(next) as ProductionRecord)), next.updatedAt);
             });
             measure("pre_commit_hook", () => beforeCommit?.(next));
             measure("sqlite_commit", () => this.db.db.exec("COMMIT"));

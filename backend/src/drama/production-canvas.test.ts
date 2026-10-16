@@ -17,6 +17,7 @@ import { EpisodeProductionRunner } from "./production-runner.js";
 import { ensureProductionCanvas, productionCanvasContext } from "./production-canvas.js";
 import { SharedAssetCoordinator, listApprovedSharedAssets, sharedProjectionNodeId, validateSharedAssetSource } from "./shared-assets.js";
 import { directorHash, projectDirector, promptHash, publicProductionRecord } from "./director.js";
+import { decodeReceipt } from "./receipt-storage.js";
 import { createManualDirectorAsset as createManualDirectorAssetSource } from "./director-asset-delete.js";
 import { NativeProductionGeneration } from "./native-generation.js";
 import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
@@ -103,6 +104,53 @@ test("Acheng v2 storage keeps source as the only authored storyboard and explici
     const canonical = f.db.db.prepare("SELECT draft_json, published_json FROM episode_productions WHERE episode_id='ep'").get() as any;
     for (const raw of [canonical.draft_json, canonical.published_json]) for (const field of ["scenes", "shots", "clipGroups"]) assert.equal(Object.hasOwn(JSON.parse(raw), field), false);
     assert.throws(() => f.episode.applySingleSourceStorage("ep", before.revision, "stale-v2-source"), /revision|版本/i);
+});
+
+test("v2 mirror migration judges information loss, not byte equality: key order and newly derived fields never block, real conflicts do", t => {
+    const f = fixture(t);
+    ensureProductionCanvas(f.db, "episode", "ep");
+    save(f.episode, "ep", director());
+    publish(f.episode, "ep");
+    const projectedRecord = f.episode.get("ep");
+    // 深拷贝整份草稿：shallow spread 会让 draft.shots 与基线共享引用，
+    // 上一步的改动会渗进下一步的「干净基线」。
+    const dualWrite = (snapshot: any) => structuredClone(snapshot);
+    const writeMirror = (mutate?: (draft: any) => void) => {
+        const draft = dualWrite(projectedRecord.draft);
+        mutate?.(draft);
+        f.db.db.prepare("UPDATE episode_productions SET draft_json=?, published_json=NULL WHERE episode_id='ep'")
+            .run(JSON.stringify(draft));
+    };
+
+    // (1) 仅键序不同：早期 dialogue block 写作 {id,kind,text,speaker}，投影产 {id,kind,speaker,text}。
+    //     值完全一致 → 不得阻塞（JSON.stringify 指纹会误判，这正是迁移死锁的成因）。
+    writeMirror(draft => {
+        const block: any = draft.scenes?.[0]?.blocks?.[0];
+        if (block) draft.scenes[0].blocks[0] = { id: block.id, kind: block.kind, text: block.text, ...(block.speaker ? { speaker: block.speaker } : {}) };
+    });
+    assert.equal(f.episode.inspectSingleSourceStorage("ep").status, "ready", "key-order-only differences must not block migration");
+
+    // (2) 投影新增派生字段（镜像里没有）：删掉镜像不丢信息 → 放行。
+    writeMirror(draft => {
+        for (const shot of draft.shots || []) { delete shot.characters; delete shot.startFrame; delete shot.endFrame; delete shot.stateUnresolved; }
+    });
+    assert.equal(f.episode.inspectSingleSourceStorage("ep").status, "ready", "fields the projection derives must not block migration");
+
+    // (3) 真冲突：镜像里值与 source 投影不一致 → 必须阻塞。
+    writeMirror(draft => { if (draft.shots?.[0]) draft.shots[0].title = "被篡改的标题"; });
+    const conflicted = f.episode.inspectSingleSourceStorage("ep");
+    assert.equal(conflicted.status, "blocked", "a value that disagrees with the source must block");
+    assert.ok(conflicted.blockers.some(b => b.includes("title")), `expected a title conflict, got ${JSON.stringify(conflicted.blockers)}`);
+
+    // (4) 真丢信息：镜像含投影不产出的 Shot（例如 source 已删、镜像还留着）
+    //     → 去重会把这些内容一并抹掉，必须阻塞。
+    writeMirror(draft => {
+        const template = draft.shots?.[0];
+        if (template) draft.shots.push({ ...structuredClone(template), id: "s-mirror-only", sceneId: template.sceneId });
+    });
+    const lossy = f.episode.inspectSingleSourceStorage("ep");
+    assert.equal(lossy.status, "blocked", "a Shot the projection cannot produce must block because dedup would lose it");
+    assert.ok(lossy.blockers.some(b => b.includes("shots")), `expected a shots blocker, got ${JSON.stringify(lossy.blockers)}`);
 });
 
 test("Acheng Segment Canvas lookup requires one owner-bound target and blocks ambiguous runtime association", t => {
@@ -283,6 +331,18 @@ test("Clip storyboard edits replace formal Shots and immediately reproject H3 tr
         shotInputs: { s1: { keyframePolicy: "none", assetIds: [] }, s1b: { keyframePolicy: "none", assetIds: [] } } }] };
     const saved = f.episode.edit("ep", request);
     assert.deepEqual((saved.draft.director!.source.shots as any[]).map(shot => shot.id), ["s1", "s1b", "s2"]);
+    const storedReceipt = f.db.db.prepare("SELECT receipt_json FROM episode_production_operations WHERE operation_id=?").get("clip-track-writeback") as { receipt_json: Uint8Array };
+    assert.ok(storedReceipt.receipt_json instanceof Uint8Array, "new operation receipts are stored as gzip BLOBs");
+    const decodedReceipt = decodeReceipt<any>(storedReceipt.receipt_json);
+    assert.equal(decodedReceipt.revision, saved.revision);
+    assert.deepEqual(decodedReceipt.draft.director, saved.draft.director);
+    const replayed = f.episode.edit("ep", request);
+    assert.equal(replayed.replayed, true, "idempotent edit replay must decode the new gzip BLOB");
+    const legacyText = JSON.stringify(decodedReceipt);
+    f.db.db.prepare("UPDATE episode_production_operations SET receipt_json=? WHERE operation_id=?").run(legacyText, "clip-track-writeback");
+    const replayReceipt = f.episode.operationReceipt("ep", "clip-track-writeback");
+    assert.equal(replayReceipt?.revision, saved.revision);
+    assert.deepEqual(replayReceipt?.draft.director?.source, saved.draft.director?.source);
     const group = saved.draft.clipGroups.find(item => item.id === "seg1")!;
     const canvas = f.db.getCanvasProject(project.id)!;
     const node = (canvas.nodes as any[]).find(item => item.id === group.nodeId);

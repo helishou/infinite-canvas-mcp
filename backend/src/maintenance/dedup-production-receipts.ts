@@ -12,23 +12,37 @@
  */
 import * as path from "node:path";
 import * as fs from "node:fs";
-import { createRequire } from "node:module";
 import { deepStrictEqual } from "node:assert";
 import { BackendDatabase } from "../db.js";
 import { dedupReceipt, resolveReceiptDedup, RECEIPT_DEDUP_MARKER } from "../drama/receipt-dedup.js";
+import { decodeReceipt, encodeReceipt, receiptBytes, type StoredReceipt } from "../drama/receipt-storage.js";
 import type { ProductionRecord } from "../drama/production.js";
+import { DB_FILE } from "../config.js";
 
-const require = createRequire(import.meta.url);
-const { BACKEND_DATABASE_PATH } = require("../config.js") as { BACKEND_DATABASE_PATH: string };
+// 同 director-source-storage：数据目录优先级为 环境变量 > root config > 默认 ~/.infinite-canvas，
+// 由 config.ts 的 DATA_DIR 统一解析。此前这里 require 了一个不存在的导出
+// (BACKEND_DATABASE_PATH)，require 返回 undefined 而不抛错，导致脚本永远停在
+// MISSING_DATABASE: undefined —— 该维护命令实际从未可运行。
+const DEFAULT_DATABASE_PATH = process.env.INFINITE_CANVAS_DATA_DIR
+    ? path.join(process.env.INFINITE_CANVAS_DATA_DIR, "runtime.sqlite")
+    : DB_FILE;
 
-function parseArgs(args: string[]): { apply: boolean } {
+function parseArgs(args: string[]): { apply: boolean; dbPath: string | undefined } {
     let apply = false;
-    for (const arg of args) {
+    let dbPath: string | undefined;
+    for (let index = 0; index < args.length; index++) {
+        const arg = args[index];
         if (arg === "--apply") { if (apply) throw new Error("重复参数 --apply"); apply = true; continue; }
+        if (arg === "--db") {
+            const value = args[++index];
+            if (!value || value.startsWith("--")) throw new Error("--db 缺少值");
+            dbPath = path.resolve(value);
+            continue;
+        }
         if (!arg.startsWith("--")) throw new Error("不支持的位置参数: " + arg);
         throw new Error("未知参数: " + arg);
     }
-    return { apply };
+    return { apply, dbPath };
 }
 
 function tableBytes(db: BackendDatabase, table: string): number {
@@ -37,10 +51,8 @@ function tableBytes(db: BackendDatabase, table: string): number {
 }
 
 function main(): void {
-    const { apply } = parseArgs(process.argv.slice(2));
-    const dbPath = process.env.INFINITE_CANVAS_DATA_DIR
-        ? path.join(process.env.INFINITE_CANVAS_DATA_DIR, "runtime.sqlite")
-        : BACKEND_DATABASE_PATH;
+    const { apply, dbPath: requestedPath } = parseArgs(process.argv.slice(2));
+    const dbPath = requestedPath || DEFAULT_DATABASE_PATH;
     if (!fs.existsSync(dbPath)) {
         console.error(JSON.stringify({ ok: false, code: "MISSING_DATABASE", error: "数据库不存在，拒绝创建: " + dbPath }, null, 2));
         process.exitCode = 1; return;
@@ -49,15 +61,13 @@ function main(): void {
     const db = new BackendDatabase(dbPath);
     const schemaVersion = db.db.prepare("SELECT MAX(version) v FROM schema_migrations").get()!.v as number;
 
-    // 读取所有行
-    const rows = db.db.prepare("SELECT operation_id, receipt_json FROM episode_production_operations").all() as Array<{ operation_id: string; receipt_json: string }>;
+    // Stream rows: the table may be multiple GB; .all() would materialize every receipt at once.
+    const scan = db.db.prepare("SELECT operation_id, receipt_json FROM episode_production_operations");
+    let rowCount = 0, receiptBytesBefore = 0;
+    const beforeScan = scan.iterate() as Iterable<{ operation_id: string; receipt_json: StoredReceipt }>;
 
-    const before = {
-        rowCount: rows.length,
-        totalBytes: rows.reduce((s, r) => s + r.receipt_json.length, 0),
-        tableBytes: tableBytes(db, "episode_production_operations"),
-        file: fs.statSync(dbPath).size,
-    };
+    const beforeFile = fs.statSync(dbPath).size;
+    const beforeTable = tableBytes(db, "episode_production_operations");
 
     // 评估每行
     type Candidate = {
@@ -72,10 +82,12 @@ function main(): void {
     let alreadyDeduped = 0;
     let errors = 0;
 
-    for (const row of rows) {
+    for (const row of beforeScan) {
+        rowCount++;
+        receiptBytesBefore += receiptBytes(row.receipt_json);
         let original: ProductionRecord;
         try {
-            original = JSON.parse(row.receipt_json) as ProductionRecord;
+            original = decodeReceipt<ProductionRecord>(row.receipt_json);
         } catch {
             errors++;
             continue;
@@ -97,17 +109,18 @@ function main(): void {
         } catch {
             verified = false;
         }
-        const compressedJson = JSON.stringify(compressed);
+        const compressedBlob = encodeReceipt(compressed);
         candidates.push({
             operationId: row.operation_id,
-            originalLen: row.receipt_json.length,
-            compressedLen: compressedJson.length,
-            savedBytes: row.receipt_json.length - compressedJson.length,
+            originalLen: receiptBytes(row.receipt_json),
+            compressedLen: compressedBlob.byteLength,
+            savedBytes: receiptBytes(row.receipt_json) - compressedBlob.byteLength,
             fields,
             verified,
         });
     }
 
+    const before = { rowCount, totalBytes: receiptBytesBefore, tableBytes: beforeTable, file: beforeFile };
     const totalSaved = candidates.filter(c => c.verified).reduce((s, c) => s + c.savedBytes, 0);
     const unverified = candidates.filter(c => !c.verified);
 
@@ -143,25 +156,31 @@ function main(): void {
         let updated = 0;
         const updateStmt = db.db.prepare("UPDATE episode_production_operations SET receipt_json = ? WHERE operation_id = ?");
         for (const c of verifiedCandidates) {
-            const row = db.db.prepare("SELECT receipt_json FROM episode_production_operations WHERE operation_id = ?").get(c.operationId) as { receipt_json: string } | undefined;
+            const row = db.db.prepare("SELECT receipt_json FROM episode_production_operations WHERE operation_id = ?").get(c.operationId) as { receipt_json: StoredReceipt } | undefined;
             if (!row) continue;
-            const original = JSON.parse(row.receipt_json) as ProductionRecord;
+            const original = decodeReceipt<ProductionRecord>(row.receipt_json);
             const compressed = dedupReceipt(original);
             if (!(RECEIPT_DEDUP_MARKER in (compressed as Record<string, unknown>))) continue;
-            // 事务内再验证一次
             const expanded = resolveReceiptDedup(compressed);
             deepStrictEqual(expanded, original);
-            updateStmt.run(JSON.stringify(compressed), c.operationId);
+            updateStmt.run(encodeReceipt(compressed), c.operationId);
             updated++;
         }
         db.db.exec("COMMIT");
 
-        const afterRows = db.db.prepare("SELECT operation_id, receipt_json FROM episode_production_operations").all() as Array<{ operation_id: string; receipt_json: string }>;
+        let afterRowsCount = 0, afterBytes = 0, afterDedupedCount = 0;
+        const afterScan = db.db.prepare("SELECT receipt_json FROM episode_production_operations");
+        for (const row of afterScan.iterate() as Iterable<{ receipt_json: StoredReceipt }>) {
+            afterRowsCount++;
+            afterBytes += receiptBytes(row.receipt_json);
+            const value = decodeReceipt(row.receipt_json);
+            if (RECEIPT_DEDUP_MARKER in (value as Record<string, unknown>)) afterDedupedCount++;
+        }
         const after = {
-            rowCount: afterRows.length,
-            totalBytes: afterRows.reduce((s, r) => s + r.receipt_json.length, 0),
+            rowCount: afterRowsCount,
+            totalBytes: afterBytes,
             tableBytes: tableBytes(db, "episode_production_operations"),
-            dedupedCount: afterRows.filter(r => r.receipt_json.includes("__receiptDedupV1")).length,
+            dedupedCount: afterDedupedCount,
             file: fs.statSync(dbPath).size,
         };
         console.log(JSON.stringify({

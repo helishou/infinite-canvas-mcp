@@ -3,7 +3,10 @@
 
 ## Unreleased
 
-- [修复] v2 双写稿的显式去重迁移可能陷入死锁：镜像闸门用 `JSON.stringify` 指纹比较「存储镜像」与「源稿投影」，对对象键序敏感，而早期写入的 dialogue block 为 `{id,kind,text,speaker}`、当前投影产出 `{id,kind,speaker,text}`，值完全相同却判为差异，`director-source-storage --apply` 永远返回 `DIRECTOR_STORAGE_MIGRATION_BLOCKED`。改用键序无关的 `canonicalProduction` 做语义比较；真正的值冲突仍照旧拦下。
+- [优化] `episode_production_operations.receipt_json` 改为无损 gzip BLOB 存储；回执仍保留完整幂等重放快照，TEXT 历史行继续兼容读取。实测 2324 行（压缩前 5.18 GB）压缩到 827 MB，逐行与压缩前备份语义比对 0 差异，VACUUM 后 runtime.sqlite 从约 6.08 GB 收缩至 1.72 GB；运行时与维护工具均按 TEXT/BLOB 类型解码。修复回执读回/幂等重放对 source-only v2 快照直接投影导致缺 `clipGroups` 崩溃：先通过历史快照 schema 补回内存投影默认值。
+- [新增] `compress-production-receipts` 维护命令：默认逐行 dry-run 估算 gzip 收益；`--apply` 以 100 行事务批次、CAS 和解压回读校验写 BLOB，不把多 GB 回执装入内存；迁移完成后需单独执行 VACUUM 回收文件空间。
+- [新增] `sync-episode-demand` 维护命令：把分集需求正文（`drama_episodes.synopsis`，作者意图层）的剧本正文段对齐到制作源稿 `director.source.script_scenes[].text`（导演产出层），保留 synopsis 独有的意图段（预估时长/场景/时间/人物/核心道具）；默认只读，`--apply` 写回。导演改稿后 synopsis 不再静默停留在旧措辞。
+- [修复] v2 双写稿的显式去重迁移可能陷入死锁：镜像闸门用 `JSON.stringify` 指纹比较「存储镜像」与「源稿投影」，把「是否逐字节相同」当成「删掉镜像是否丢信息」，而投影是源稿的纯函数，一旦投影逻辑演进（新增派生字段），或早期写入的对象键序与投影不同（dialogue block 写作 `{id,kind,text,speaker}`、投影产出 `{id,kind,speaker,text}`），值完全一致也会判为差异，`director-source-storage --apply` 永远返回 `DIRECTOR_STORAGE_MIGRATION_BLOCKED`。改为按 id 对齐逐条比对：镜像有而投影无的键、两侧值不一致 → 阻塞；投影新派生的键、键序差异 → 放行。新增回归测试覆盖两类误报与两类真冲突。
 - [调整] Acheng v2 工作台以 `draft.director.source` 为唯一制作源；Story、Shot、Segment 和台账不再双写旧工作台镜像，Canvas/任务状态按稳定身份派生；旧格式与现存双写稿仅支持维护者检查后显式迁移。
 - [优化] 本集资产登记与画布节点按稳定身份双向同步，并可从共享画布纳入实时引用；引用编辑和成功生成结果写回共享源并传播到相关分集。
 - [优化] 主体可直接切换到本集或共享画布的同类型节点；选择尚未纳入本集的共享节点时，同一事务完成纳入、引用创建和主体切换。

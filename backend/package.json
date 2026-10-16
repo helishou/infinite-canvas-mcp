@@ -28,6 +28,9 @@
     "purge-scene-productions": "tsx src/maintenance/purge-scene-productions.ts",
     "repair-dangling-shared-assets": "tsx src/maintenance/repair-dangling-shared-assets.ts",
     "director-source-storage": "tsx src/maintenance/director-source-storage.ts",
+    "prune-production-receipts": "tsx src/maintenance/prune-production-receipts.ts",
+    "compress-production-receipts": "tsx src/maintenance/compress-production-receipts.ts",
+    "sync-episode-demand": "tsx src/maintenance/sync-episode-demand.ts",
     "test": "node ../scripts/test.mjs",
     "start": "node dist/index.js",
     "prepack": "corepack pnpm run build"
