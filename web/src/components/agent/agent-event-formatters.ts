@@ -333,7 +333,7 @@ export function toolName(name: string) {
 const toolTranslationKeys: Record<string, string> = {
     director_subagent: "subagentTasks",
     production_preflight: "productionPreflight", production_get: "productionRead", production_get_source: "productionRead", production_get_version_source: "productionVersion", production_get_artifact_index: "productionRead", production_get_version_artifact_index: "productionVersion", production_get_artifact: "productionRead", production_get_version_artifact: "productionVersion", production_get_workbench: "productionRead", production_get_readiness: "productionReadiness", production_start_run: "productionStart", production_get_batch: "productionBatch", production_pause_run: "productionPause", production_resume_run: "productionResume", production_list_versions: "productionVersions", production_get_version: "productionVersion", production_preview_impact: "productionImpact", production_edit: "productionEdit", production_publish: "productionPublish", production_restore: "productionRestore", production_sync_clips: "productionSync", production_get_run: "productionRun", production_export_markdown: "productionExport",
-    canvas_apply_ops: "canvasOps", canvas_get_state: "readCanvas", canvas_get_selection: "readSelection", canvas_export_snapshot: "exportSnapshot", canvas_create_node: "createNode", canvas_create_attachment_nodes: "addAttachments", canvas_create_text_node: "createText", canvas_create_text_nodes: "createTexts", canvas_create_config_node: "createConfig", canvas_create_image_prompt_flow: "createImageFlow", canvas_create_generation_flow: "createGenerationFlow", canvas_generate_text: "generateText", canvas_generate_image: "generateImage", canvas_generate_video: "generateVideo", canvas_generate_audio: "generateAudio", canvas_update_node: "updateNode", canvas_update_node_text: "updateText", canvas_move_nodes: "moveNodes", canvas_resize_node: "resizeNode", canvas_delete_nodes: "deleteNodes", canvas_connect_nodes: "connectNodes", canvas_set_generation_references: "setGenerationReferences", canvas_select_nodes: "selectNodes", canvas_run_generation: "runGeneration", site_navigate: "openPage",
+    canvas_apply_ops: "canvasOps", canvas_get_state: "readCanvas", canvas_get_selection: "readSelection", canvas_export_snapshot: "exportSnapshot", canvas_create_node: "createSmartNode", canvas_create_config_node: "createSmartNode", canvas_create_image_prompt_flow: "createImageFlow", canvas_create_generation_flow: "createGenerationFlow", canvas_generate_text: "generateText", canvas_generate_image: "generateImage", canvas_generate_video: "generateVideo", canvas_generate_audio: "generateAudio", canvas_update_node: "updateNode", canvas_update_node_text: "updateText", canvas_move_nodes: "moveNodes", canvas_resize_node: "resizeNode", canvas_delete_nodes: "deleteNodes", canvas_connect_nodes: "connectNodes", canvas_set_generation_references: "setGenerationReferences", canvas_select_nodes: "selectNodes", canvas_run_generation: "runGeneration", site_navigate: "openPage",
 };
 
 function siteToolSummary(name: string, result: unknown, input: unknown) {
@@ -372,9 +372,7 @@ function toolInputRows(name: string, input: unknown) {
     input = parseToolArguments(input);
     if (name === "site_navigate") return [detailRow(tr("targetPage"), routeName(stringText(objectField(input, "path")) || "/"))].flatMap((row) => (row ? [row] : []));
     if (name === "prompts_search") return [detailRow(tr("searchContent"), objectField(input, "query"))].flatMap((row) => (row ? [row] : []));
-    if (name === "canvas_create_text_node") return [detailRow(tr("textContent"), objectField(input, "text"))].flatMap((row) => (row ? [row] : []));
     if (name === "canvas_apply_ops") return [detailRow(tr("operationContent"), summarizeCanvasAgentOps((objectField(input, "ops") as CanvasAgentOp[] | undefined) || []))].flatMap((row) => (row ? [row] : []));
-    if (name === "canvas_create_attachment_nodes") return [detailRow(tr("imageCount"), Array.isArray(objectField(input, "attachmentIds")) ? (objectField(input, "attachmentIds") as unknown[]).length : 0)].flatMap((row) => (row ? [row] : []));
     return [];
 }
 
@@ -516,7 +514,7 @@ export function formatBytes(bytes: number) {
 }
 
 export function isCanvasWriteTool(name: string) {
-    return name === "canvas_apply_ops" || name === "canvas_create_attachment_nodes";
+    return name === "canvas_apply_ops";
 }
 
 function parseToolArguments(value: unknown) {

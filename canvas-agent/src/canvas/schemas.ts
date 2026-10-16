@@ -9,6 +9,7 @@ import {
   collaborationDescriptions,
   collaborationSchemas,
   collaborationToolNames,
+  isSmartCanvasNodeType,
 } from "./collaboration-contract.js";
 export {
   textTargetSchema,
@@ -36,9 +37,11 @@ const positionSchema = z.object({
 const nodeTypeSchema = z
   .string()
   .min(1)
+  .refine(isSmartCanvasNodeType, "MCP 仅允许创建 config、loop 或智能插件节点；普通内容与素材节点不能通过 MCP 创建。")
   .describe(
-    "节点类型枚举，常用值：text（文本节点）、image（图片节点）、config（生成配置节点）、video（视频节点）、audio（音频节点）。新类型可由插件自定义。",
+    "智能节点类型。内置智能生成使用 config，H3 使用 minimax-h3:video；普通 text/image/video/audio 节点不能通过 MCP 创建。",
   );
+const smartNodeMetadataSchema = z.object({ smart: z.literal(true) }).passthrough();
 const generationModeSchema = z
   .enum(["text", "image", "video", "audio"])
   .describe(
@@ -56,9 +59,6 @@ export const toolNames = [
   "canvas_export_snapshot",
   "canvas_apply_ops",
   "canvas_create_node",
-  "canvas_create_attachment_nodes",
-  "canvas_create_text_node",
-  "canvas_create_text_nodes",
   "canvas_create_config_node",
   "canvas_create_generation_flow",
   "canvas_generate_text",
@@ -112,6 +112,7 @@ export const toolNames = [
   "production_compile",
   "production_get_compilation",
   "production_apply_compilation",
+  "production_translate_compiled_prompts",
   "production_diagnose_bindings",
   "production_diagnose_clips",
 ] as const;
@@ -129,11 +130,11 @@ export const canvasOpSchema = z.discriminatedUnion("type", [
       width: z.number().optional(),
       height: z.number().optional(),
       position: positionSchema.optional(),
-      metadata: recordSchema.optional(),
+      metadata: smartNodeMetadataSchema,
     })
     .passthrough()
     .describe(
-      "添加一个节点。可省略 id 由后端分配。例：{ type: 'add_node', nodeType: 'text', title: '沈昭宁小传', x: 200, y: 100 }",
+      "添加一个智能节点。可省略 id 由后端分配。例：{ type: 'add_node', nodeType: 'config', title: '图片生成', x: 200, y: 100, metadata: { smart: true, generationMode: 'image', prompt: '古风女主立绘' } }",
     ),
   z
     .object({
@@ -224,15 +225,6 @@ export const canvasOpSchema = z.discriminatedUnion("type", [
     })
     .passthrough(),
 ]);
-
-const textNodeSchema = z.object({
-  text: z.string().describe("节点正文，必填"),
-  title: z.string().optional().describe("节点标题，留空则默认 '文本节点'"),
-  x: z.number().optional(),
-  y: z.number().optional(),
-  width: z.number().optional(),
-  height: z.number().optional(),
-});
 
 const generationOptionsSchema = z.object({
   model: z
@@ -370,43 +362,7 @@ export const toolInputSchemas = {
     y: z.number().optional(),
     width: z.number().optional(),
     height: z.number().optional(),
-    metadata: recordSchema.optional(),
-  }),
-  canvas_create_attachment_nodes: canvasProjectSchema.extend({
-    attachmentIds: z
-      .array(z.string())
-      .min(1)
-      .describe("本轮对话附件 ID 数组，从用户上传消息中获取，至少 1 个"),
-    x: z.number().optional(),
-    y: z.number().optional(),
-    gap: z.number().optional().describe("节点间距，默认 32"),
-    direction: z
-      .enum(["row", "column"])
-      .optional()
-      .describe("排列方向，row=水平、column=垂直；默认 column"),
-  }),
-  canvas_create_text_node: canvasProjectSchema.extend({
-    text: z.string().optional().describe("节点正文；不传则创建空文本节点"),
-    x: z.number().optional(),
-    y: z.number().optional(),
-    title: z.string().optional(),
-    width: z.number().optional(),
-    height: z.number().optional(),
-  }),
-  canvas_create_text_nodes: canvasProjectSchema.extend({
-    items: z
-      .array(textNodeSchema)
-      .min(1)
-      .describe(
-        "要批量创建的文本节点数组，每项含 text 必填，可选 title/x/y/width/height",
-      ),
-    x: z.number().optional().describe("起始坐标 X；items 自带 x 时优先 items"),
-    y: z.number().optional().describe("起始坐标 Y"),
-    gap: z.number().optional().describe("节点间距，默认 24"),
-    direction: z
-      .enum(["row", "column"])
-      .optional()
-      .describe("排列方向，默认 column"),
+    metadata: smartNodeMetadataSchema.default({ smart: true }),
   }),
   canvas_create_config_node: canvasProjectSchema
     .extend({
@@ -813,6 +769,7 @@ export const toolInputSchemas = {
   production_compile: productionCompileSchema.omit({ director: true }).extend({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1), operationId: z.string().min(1) }),
   production_get_compilation: z.object({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1), operationId: z.string().min(1), view: z.enum(["status", "targets", "diagnostics"]).default("status"), offset: z.number().int().nonnegative().default(0), pageSize: z.number().int().positive().optional() }).strict(),
   production_apply_compilation: productionApplyCompilationSchema.extend({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1) }),
+  production_translate_compiled_prompts: z.object({ kind: z.enum(["canvas", "episode"]), id: z.string().min(1), expectedRevision: z.number().int().nonnegative(), operationId: z.string().min(1), targetIds: z.array(z.string().min(1)).min(1) }).strict(),
   production_diagnose_bindings: z.object({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1) }),
   production_diagnose_clips: z.object({
     projectId: z.string().min(1),
@@ -836,19 +793,13 @@ export const toolDescriptions: Record<ToolName, string> = {
   canvas_get_selection: "读取当前网页画布选中的节点。",
   canvas_export_snapshot: "导出 Backend 权威画布固定快照，返回 SHA256、字节数与鉴权下载路径；布局查看使用 canvas_get_state。",
   canvas_apply_ops:
-    "批量操作画布。projectId、operationId、expectedRevision 必填；响应未知时保留原请求，用 mcp_get_command_receipt 查询；版本冲突不自动 rebase。H3 Clip 内容请使用专用工具；运行状态与结果仍由 Backend 管理。",
+    "批量操作画布。projectId、operationId、expectedRevision 必填；响应未知时保留原请求，用 mcp_get_command_receipt 查询；版本冲突不自动 rebase。MCP 的 add_node 只允许智能节点，普通 text/image/video/audio 节点会被拒绝。H3 Clip 内容请使用专用工具；运行状态与结果仍由 Backend 管理。",
   canvas_create_node:
-    "创建任意类型节点：text、image、config、video、audio 或插件节点。创建 H3 视频节点须用 nodeType='minimax-h3:video'；canvas_create_config_node 只创建普通 config 节点。",
-  canvas_create_attachment_nodes:
-    "把当前对话中用户上传的图片附件创建成真实画布图片节点。attachmentIds 使用本轮附件清单中的 ID；返回的节点 ID 可传给 canvas_create_generation_flow.referenceNodeIds 作为生成参考图。",
-  canvas_create_text_node:
-    "创建单个文本节点：text 必填，可选 title/x/y/width/height。例：{ projectId: 'abc', text: '沈昭宁小传：侯府代笔...', title: '人物小传·沈昭宁', x: 200, y: 100 }",
-  canvas_create_text_nodes:
-    "批量创建文本节点。items 是数组，每项含 text 必填，可选 title/x/y/width/height。例：{ projectId: 'abc', items: [{ text: '第1集大纲' }, { text: '第2集大纲' }], gap: 32 }",
+    "创建智能插件节点。内置生成请用 canvas_create_config_node；插件智能节点可用本工具创建，例如 nodeType='minimax-h3:video'。普通 text/image/video/audio 节点由 MCP 禁止创建。",
   canvas_create_config_node:
-    "创建普通 config 生成配置节点：mode + prompt + 生成参数；可选 autoRun=true。此工具不能创建 H3 节点；H3 请用 canvas_create_node(nodeType='minimax-h3:video')。例：{ mode: 'image', prompt: '古风女主立绘', size: '1024x1024', autoRun: false }",
+    "创建智能生成节点：mode + prompt + 生成参数保存在同一个智能 config 节点；可选 autoRun=true。支持 text/image/video/audio 模式，不创建普通媒体或文本节点。例：{ mode: 'image', prompt: '古风女主立绘', size: '1024x1024', autoRun: false }",
   canvas_create_generation_flow:
-    "创建通用生成流程（提示词文本节点 + 生成配置节点 + 参考连线）。mode 不传则默认生图；生图提示词可省略，当前工作流声明必填时除外；autoRun=true 立即触发。",
+    "创建智能生成节点并添加参考连线。提示词、参数和结果保存在智能节点中，不创建普通文本节点；mode 不传则默认生图，autoRun=true 立即触发。",
   canvas_generate_text:
     "创建文本生成流程并立即触发（autoRun=true 强制）。例：{ prompt: '为《婚书未烬》写一段 30 秒短剧开场独白，120 字以内' }",
   canvas_generate_image:
@@ -885,7 +836,7 @@ export const toolDescriptions: Record<ToolName, string> = {
     "查询当前活动网页的生成任务状态。默认返回画布、生图工作台和视频工作台最近任务；可用 scope 过滤来源，用 taskId 查询工作台任务，用 nodeIds 查询画布节点。H3 节点可用 segmentIds 过滤分镜。要看 H3 历史输入快照（prompt/refs/params），用 scope='video' + nodeIds + segmentIds。",
   mcp_observability_report:
     "读取脱敏 MCP 诊断。默认返回聚合摘要，可用 from/to/tool 筛选，view=full 查看逐日和工具转换明细。传 traceId 只读取单次事件链，不能同时传聚合筛选。",
-  mcp_get_command_receipt: "恢复 MCP 写入的确定结果。传原 operationId 查询已冻结、已提交或已拒绝回执。相同 ID 不可修改内容；已提交时返回短摘要和版本，必要时再读取最新对象。",
+  mcp_get_command_receipt: "查询原 operationId 的准备中、已提交或已拒绝回执。用于跟踪后台翻译等异步写入；相同 ID 不可修改内容，已提交时返回短摘要和版本，必要时再读取最新对象。",
   models_list:
     "列出可用于生成的模型及其能力。工作流是模型内部实现，不直接对外暴露。",
   h3_get_node_materials:
@@ -930,6 +881,7 @@ export const toolDescriptions: Record<ToolName, string> = {
   production_compile: "后台编译 Backend 已保存的 Acheng 正式制作稿；不传入或覆盖导演源稿。operationId 必填，可用 scope.targetIds 一次编译多个目标，立即返回持久短回执。通过 production_get_compilation 查询原 operationId，succeeded 后应用 preparedId。blocked 是终态，先读取首条 blockingDiagnostic 并按 targetId/shotId/path 定位；只有确需完整诊断时再分页读取。来源为 compiler 时修编译器，不改创作稿。相同有效输入换 ID 会复用原回执，不重跑；输入或运行条件改变后再编译。超时沿原 ID 查询。不编辑、发布或生成媒体。",
   production_get_compilation: "按 owner 和原 operationId 查询后台编译状态及应用回执；默认返回短状态、首条 blockingDiagnostic 和 nextAction；诊断/目标列表需 view 和 pageSize。queued/running 沿原 ID 查询，blocked/failed 不继续轮询同一终态；reusedFromOperationId 保留原阻塞身份。只读，不重跑编译。",
   production_apply_compilation: "用精确 preparedId 原子接入 Backend 编译产物；沿用冻结的 expectedRevision/operationId，重复调用恢复原回执，源稿或绑定冲突拒绝覆盖。保存草稿，不发布或生成。",
+  production_translate_compiled_prompts: "把指定且当前有效的正式 H3 编译提示词交给已配置翻译模型。调用立即返回 queued；用同一 operationId 调用 mcp_get_command_receipt 查看 translating/applying/committed/retry_required 状态。超时或进程重载后重复提交完全相同的请求可恢复原操作，不创建第二次翻译。跳过 SHA-256 缓存命中项；描述与镜头指令轻度润色为英文，对白、歌词及明确引用的画面文字保留原语言。Backend 核对制作 revision、编译基线、节点归属和 Prompt 并发编辑；目标变化时整批拒绝写入。不改导演源稿、不发布、不生成媒体。",
   production_diagnose_bindings: "只读核对源资产版本、草稿绑定、发布版本绑定、节点活动媒体、归档字节哈希与消费者；明确指出新旧版本或活动媒体不一致，不修改数据。",
   production_diagnose_clips: "只读逐段对照 H3 Clip 现场正文与最新发布编译产物：状态（一致/不同/无法比较）、两侧归一哈希、导演源哈希、任务状态、生产版本与只读下一步。一次调用完成排障；不同为信息级提示，不表示生成不可用。nodeId 与 nodeIds 同时出现时以 nodeIds 为准。默认最多返回 200 行，超出时给出 nextOffset。",
 };

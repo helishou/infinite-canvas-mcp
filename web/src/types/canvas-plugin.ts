@@ -54,6 +54,7 @@ export type CanvasPluginAi = {
     generateImage: (prompt: string, options?: GenerateImageOptions) => Promise<GenerateImageResult>;
     generateVideo: (prompt: string, options?: GenerateVideoOptions) => Promise<GenerateVideoResult>;
     generateText: (prompt: string, options?: GenerateTextOptions) => Promise<GenerateTextResult>;
+    translateH3Prompt: (prompt: string, options?: { signal?: AbortSignal }) => Promise<{ sourceHash: string; translatedText: string; cached: boolean }>;
     runCanvasGeneration: (command: CanvasGenerationCommand) => Promise<CanvasGenerationTask>;
     previewH3Generation: (command: CanvasGenerationCommand) => Promise<import('@basketikun/canvas-agent/generation-contract').H3ExecutionPreview>;
     resolveH3Confirmation: (input: { taskId: string; action: "confirm" | "keep_first_pass" | "discard"; segmentId: string; expectedRevision: number; postpassParams?: Record<string, unknown> }) => Promise<LocalH3Task>;
@@ -145,10 +146,12 @@ export type CanvasTextEditorProps = {
 };
 
 export type CanvasProductionStoryboardEditor = { nodeId: string; segmentId: string; segment: Record<string, unknown> };
+export type CanvasProductionContinuationBoundary = { nodeId: string; segmentId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean };
 export type CanvasProductionEditing = {
     reverseSyncPrompt: (input: { nodeId: string; segmentId: string; prompt: string; artifactId: string; sourceHash: string; basePromptHash: string }) => Promise<{ sourceSaved: boolean }>;
     compilePrompt: (input: { nodeId: string; segmentId: string }) => Promise<{ prompt: string }>;
     replaceStoryboardTrack: (input: CanvasProductionStoryboardEditor) => Promise<{ sourceSaved: boolean }>;
+    setContinuationBoundary: (input: CanvasProductionContinuationBoundary) => Promise<{ sourceSaved: boolean }>;
 };
 export type CanvasNodeContext = {
     mediaUrl: (storageKey: string) => string;

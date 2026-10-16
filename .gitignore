@@ -27,6 +27,12 @@ web/public/plugins
 **/venv/
 **/.venv/
 backend/venv
+
+# python 字节码缓存（import 自动生成，不入库）
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
 artifacts
 tmp
 .codex

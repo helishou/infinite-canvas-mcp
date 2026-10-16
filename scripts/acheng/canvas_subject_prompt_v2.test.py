@@ -98,6 +98,25 @@ class SubjectPromptV2ProjectionTest(unittest.TestCase):
         selected_target_issues = [item for item in issues if "Selected compilation target" in item["message"]]
         self.assertEqual([item["targetId"] for item in selected_target_issues], ["UNKNOWN"])
 
+    def test_scene_compile_checks_output_shots_but_ignores_continuity_context_shots(self):
+        source = {
+            "prompt_assembly": {"version": 2},
+            "_canvas_compilation_scope": {"targetIds": [], "outputShotIds": ["OUTPUT"]},
+            "shots": [{"id": "CONTEXT"}, {"id": "OUTPUT"}],
+            "segments": [{"id": "CLIP_OUTPUT", "shot_ids": ["OUTPUT"]}],
+            "subject_registry": [], "utterances": [],
+            "ledger": {"contract_version": 2, "facts": [], "timelines": [], "initial": [], "events": [], "requirements": [], "coverage": []},
+        }
+        issues = source_contract.validate_subject_prompt_v2(source, "compile")
+        unassigned = [item["targetId"] for item in issues if item["message"] == "Shot is not assigned to a Clip"]
+        self.assertEqual(unassigned, [])
+
+        source["shots"].append({"id": "OUTPUT_UNASSIGNED"})
+        source["_canvas_compilation_scope"]["outputShotIds"].append("OUTPUT_UNASSIGNED")
+        issues = source_contract.validate_subject_prompt_v2(source, "compile")
+        unassigned = [item["targetId"] for item in issues if item["message"] == "Shot is not assigned to a Clip"]
+        self.assertEqual(unassigned, ["OUTPUT_UNASSIGNED"])
+
     def test_clip_compiles_subjects_shots_and_source_map_without_mutating_source(self):
         with tempfile.TemporaryDirectory() as directory:
             image = Path(directory) / "picture.png"

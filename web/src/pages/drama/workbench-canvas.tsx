@@ -2,12 +2,14 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type
 import { createPortal } from "react-dom";
 import { Button, ConfigProvider } from "antd";
 import { PanelBottomClose } from "lucide-react";
-import { useNavigate, type NavigateFunction, type NavigateOptions, type To } from "react-router-dom";
+import { useNavigate, useSearchParams, type NavigateFunction, type NavigateOptions, type To } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { CanvasHostContext, WorkbenchCanvasContext, setWorkbenchCanvasOverlayTarget, type CanvasTarget } from "@/lib/canvas/canvas-host";
+import { CanvasHostContext, WorkbenchCanvasContext, setWorkbenchCanvasOverlayTarget, type CanvasTarget, type ProductionCanvasTarget } from "@/lib/canvas/canvas-host";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
+import { useAgentStore } from "@/stores/use-agent-store";
 import { useMediaPreviewStore } from "@/stores/use-media-preview-store";
 import { canvasHostLocation } from "@/lib/canvas/canvas-host-navigation";
+import { dramaWorkbenchPath } from "./workbench-entry";
 
 const CanvasSurface = lazy(() => import("@/pages/canvas/project").then(module => ({ default: module.CanvasSurface })));
 
@@ -31,6 +33,7 @@ function readStoredCanvasState(storageKey?: string): StoredCanvasState | null {
 
 export function WorkbenchCanvas({ children, storageKey }: { children: ReactNode; storageKey?: string }) {
     const navigate = useNavigate(), { t } = useTranslation();
+    const [parentSearch] = useSearchParams();
     // 画布开合状态会话级持久化：制作台打开的画布在浏览器刷新后保持打开（折叠状态同样保留）。
     const restored = useMemo(() => readStoredCanvasState(storageKey), [storageKey]);
     const [target, setTarget] = useState<CanvasTarget | undefined>(restored?.target);
@@ -52,6 +55,35 @@ export function WorkbenchCanvas({ children, storageKey }: { children: ReactNode;
         setTarget(next); setCanvasSearch(new URLSearchParams({ ...(next.nodeId ? { nodeId: next.nodeId } : {}), ...(next.segmentId ? { segmentId: next.segmentId } : {}) })); setVisible(true); setRequestId(value => value + 1);
     }, [t]);
     const restoreCanvas = useCallback(() => { returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setVisible(true); }, []);
+    const switchProductionCanvas = useCallback((destination: ProductionCanvasTarget) => {
+        useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"));
+        useAgentStore.getState().closePanel();
+        if (destination.episodeId) {
+            const nextStorageKey = `episode:${destination.episodeId}`;
+            try { sessionStorage.setItem(CANVAS_STATE_PREFIX + nextStorageKey, JSON.stringify({ target: { projectId: destination.projectId }, visible: destination.keepCanvasOpen })); } catch { /* The route still switches if session storage is unavailable. */ }
+            if (storageKey === nextStorageKey) {
+                returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+                setTarget({ projectId: destination.projectId });
+                setCanvasSearch(new URLSearchParams());
+                setVisible(destination.keepCanvasOpen);
+                setRequestId(value => value + 1);
+            }
+            const currentWorkspace = parentSearch.get("workspace");
+            const workspace = currentWorkspace && currentWorkspace !== "series" ? currentWorkspace : undefined;
+            navigate(dramaWorkbenchPath(destination.dramaId, destination.episodeId, workspace));
+            return;
+        }
+        returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        setTarget({ projectId: destination.projectId });
+        setCanvasSearch(new URLSearchParams());
+        setVisible(destination.keepCanvasOpen);
+        setRequestId(value => value + 1);
+        const nextSearch = new URLSearchParams(parentSearch);
+        nextSearch.set("workspace", "series");
+        nextSearch.set("seriesView", "planning");
+        nextSearch.delete("target"); nextSearch.delete("nodeId"); nextSearch.delete("segmentId");
+        navigate({ search: `?${nextSearch.toString()}` }, { replace: true });
+    }, [navigate, parentSearch, t]);
     const canvasNavigate = useCallback(((to: To | number, options?: NavigateOptions) => {
         if (typeof to === "number") { collapse(); return; }
         const destination = canvasHostLocation(to, target?.projectId || "");
@@ -87,8 +119,8 @@ export function WorkbenchCanvas({ children, storageKey }: { children: ReactNode;
         setWorkbenchCanvasOverlayTarget(visible ? overlay.current : null);
         return () => { if (visible) setWorkbenchCanvasOverlayTarget(null); };
     }, [target, visible]);
-    const host = useMemo(() => target ? { projectId: target.projectId, active: visible, search, requestId, navigate: canvasNavigate, collapse, popupContainer } : null, [target, visible, search, requestId, canvasNavigate, collapse, popupContainer]);
-    return <WorkbenchCanvasContext.Provider value={{ openCanvas, restoreCanvas, visible, hasCanvas: Boolean(target) }}>
+    const host = useMemo(() => target ? { projectId: target.projectId, active: visible, search, requestId, navigate: canvasNavigate, collapse, popupContainer, switchProductionCanvas } : null, [target, visible, search, requestId, canvasNavigate, collapse, popupContainer, switchProductionCanvas]);
+    return <WorkbenchCanvasContext.Provider value={{ openCanvas, restoreCanvas, switchProductionCanvas, visible, hasCanvas: Boolean(target) }}>
         <div ref={workbench} className="h-full" data-workbench-underlay>{children}</div>
         {host && createPortal(<CanvasHostContext.Provider value={host}>
             <div ref={overlay} hidden={!visible} className="fixed inset-0 z-[900] bg-background/60 p-0 sm:p-3" data-workbench-canvas>

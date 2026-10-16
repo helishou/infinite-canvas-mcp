@@ -129,49 +129,23 @@ try {
         return route.fulfill({ status: request.method() === 'OPTIONS' ? 204 : 200, json: data, headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': '*' } });
     });
     const errors = []; page.on("pageerror", error => { errors.push(error.message); console.error(error.message); });
-    const verifyScriptNodes = async () => {
+    const verifyNoAutomaticScriptNodes = async () => {
     await page.goto(`${url}/drama/episodes/ep/production?workspace=story&target=scene%3Anight&workId=work`, { waitUntil: 'domcontentloaded' });
     await page.waitForURL(`**/canvas/${episodeCanvas}**`);
     await page.getByRole('button', { name: '找画面', exact: true }).waitFor();
     assert.equal(await page.getByRole('button', { name: '本场剧本', exact: true }).count(), 0);
     assert.equal(await page.locator('.ant-modal-wrap:not(.ant-modal-hidden):visible').count(), 0, 'old scene links do not open a script dialog');
-    const scriptNode = db.getCanvasProject(episodeCanvas).nodes.find(node => node.metadata?.productionScriptId === 'night');
-    const openScript = async targetPage => {
-        await targetPage.getByRole('button', { name: '找画面', exact: true }).click();
-        await targetPage.locator('[data-production-directory-target="scene:night"]').getByRole('button', { name: '本场剧本', exact: true }).click();
-        await targetPage.locator(`[data-node-id="${scriptNode.id}"]`).waitFor();
-    };
-    await openScript(page);
-    const textNode = page.locator(`[data-node-id="${scriptNode.id}"]`);
-    await textNode.getByText('她再次回到书房。', { exact: true }).dblclick();
-    const text = textNode.getByRole('textbox', { name: '请输入文本', exact: true }); await text.waitFor();
-    await text.press('ControlOrMeta+A');
-    const saveResponse = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/ops') && response.request().postDataJSON()?.operations?.some(op => op.type === 'text_update'));
-    await page.keyboard.insertText('她在夜晚再次回到书房，停在门口。');
-    assert.equal((await saveResponse).ok(), true);
-    await page.mouse.click(1200, 80);
-    await page.waitForFunction(async ({ canvasId, nodeId }) => { const { getCanvasTextSession } = await import('/src/services/api/canvas-text.ts'); return getCanvasTextSession(canvasId, { nodeId, field: 'content' }).getSnapshot().pending === 0; }, { canvasId: episodeCanvas, nodeId: scriptNode.id });
+    assert.equal(db.getCanvasProject(episodeCanvas).nodes.filter(node => node.metadata?.productionScriptId).length, 0);
+    const current = episodeService.get('ep');
+    episodeService.edit('ep', { operationId: 'no-auto-script-nodes', expectedRevision: current.revision,
+        ops: [{ type: 'patch_director_source', entity: 'scene', id: 'night', patch: { text: '她在夜晚再次回到书房，停在门口。' } }] });
     assert.equal(episodeService.get('ep').draft.director.source.script_scenes.find(scene => scene.id === 'night').text, '她在夜晚再次回到书房，停在门口。');
     assert.equal(episodeService.get('ep').draft.director.source.script_scenes.find(scene => scene.id === 'morning').text, '她第一次进入书房。');
-    await page.reload(); await page.getByRole('button', { name: '找画面', exact: true }).waitFor();
-    await openScript(page);
-    await page.locator(`[data-node-id="${scriptNode.id}"]`).getByText('她在夜晚再次回到书房，停在门口。', { exact: true }).waitFor();
-    assert.equal(db.getCanvasProject(episodeCanvas).nodes.filter(node => node.metadata?.productionScriptId).length, 2);
-    await page.screenshot({ path: path.join(artifacts, 'scene-script-text-node.png'), animations: 'disabled' });
-    const originalOwner = await page.evaluate(async () => (await import('/src/lib/canvas/canvas-draft-session.ts')).getCanvasDraftSessionId());
-    const duplicate = await context.newPage();
-    await duplicate.addInitScript(owner => sessionStorage.setItem('canvas-draft-session', owner), originalOwner);
-    await duplicate.goto(`${url}/canvas/${episodeCanvas}`, { waitUntil: 'domcontentloaded' });
-    await duplicate.getByRole('button', { name: '找画面', exact: true }).waitFor();
-    const copiedOwner = await duplicate.evaluate(async () => { const session = await import('/src/lib/canvas/canvas-draft-session.ts'); await session.ensureCanvasDraftLease(); return session.getCanvasDraftSessionId(); });
-    assert.notEqual(copiedOwner, originalOwner);
-    await openScript(duplicate);
-    await duplicate.locator(`[data-node-id="${scriptNode.id}"]`).getByText('她在夜晚再次回到书房，停在门口。', { exact: true }).waitFor();
-    await duplicate.close();
+    assert.equal(db.getCanvasProject(episodeCanvas).nodes.filter(node => node.metadata?.productionScriptId).length, 0);
     };
     if (process.argv.includes('--script-nodes')) {
-        await verifyScriptNodes(); assert.equal(submissions, 0); assert.deepEqual(errors, []);
-        console.log(JSON.stringify({ passed: true, scope: 'script text nodes, directory focus, ordinary text editing, atomic formal source sync, refresh recovery and isolated copied tab; no model requests', artifacts }));
+        await verifyNoAutomaticScriptNodes(); assert.equal(submissions, 0); assert.deepEqual(errors, []);
+        console.log(JSON.stringify({ passed: true, scope: 'formal scene saves do not create canvas script text nodes; no model requests', artifacts }));
     } else {
     await page.goto(`${url}/production?dramaId=drama`, { waitUntil: "domcontentloaded" });
     await page.locator('[data-drama-shared-canvas]').waitFor();
@@ -337,7 +311,7 @@ try {
     assert.equal(nativeRequests[1].nodeId, h3NodeId);
     assert.equal(nativeRequests[1].segmentId, prepared.draft.clipGroups[0].segmentId);
     assert.equal(await page.getByRole('button', { name: '本场剧本', exact: true }).count(), 0);
-    assert.equal(db.getCanvasProject(episodeCanvas).nodes.filter(node => node.metadata?.productionScriptId).length, 2);
+    assert.equal(db.getCanvasProject(episodeCanvas).nodes.filter(node => node.metadata?.productionScriptId).length, 0);
     const secondClipUrl = new URL(page.url()); secondClipUrl.searchParams.set('target', 'segment:seg2'); secondClipUrl.searchParams.set('segmentId', clip2); secondClipUrl.searchParams.delete('edit');
     await page.goto(secondClipUrl.href, { waitUntil: 'domcontentloaded' });
     await page.evaluate(async () => { window.__productionTest = { follow: (await import('/src/stores/use-production-follow-store.ts')).useProductionFollowStore, view: (await import('/src/stores/canvas/plugin-node-view.ts')).getPluginNodeView, workspace: (await import('/src/stores/use-production-workspace-store.ts')).useProductionWorkspaceStore }; });
@@ -479,7 +453,7 @@ try {
     const bubbleBounds = await page.getByRole('button', { name: '与导演对话', exact: true }).boundingBox();
     assert.ok(zoomBounds && toolsBounds && bubbleBounds && zoomBounds.y + zoomBounds.height <= toolsBounds.y && toolsBounds.y + toolsBounds.height <= bubbleBounds.y, 'phone canvas tools and director bubble do not overlap');
     await page.setViewportSize({ width: 1500, height: 960 });
-    await verifyScriptNodes();
+    await verifyNoAutomaticScriptNodes();
     await page.getByRole('button', { name: '切换制作画布', exact: true }).click();
     await page.getByRole('menuitem', { name: '第 2 集 · 第二集', exact: true }).click();
     const episode2Canvas = ensureProductionCanvas(db, 'episode', 'ep2').project.id;

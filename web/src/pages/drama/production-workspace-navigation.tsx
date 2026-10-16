@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { Button, Drawer, Dropdown } from "antd";
-import { Activity, ChevronDown, Clapperboard, FileText, Images, ListChecks, ListVideo, Menu, PackageOpen, Settings2 } from "lucide-react";
+import { Button, Drawer } from "antd";
+import { Activity, Clapperboard, FileText, Images, ListChecks, ListVideo, Menu, PackageOpen, Settings2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ProductionNavigationGroup, ProductionNavigationItem } from "./production-workspace";
 
@@ -51,25 +51,6 @@ export function ProductionWorkspaceNavigation({ groups, selectedId, onSelect, co
             {navigation}
         </Drawer>
     </>;
-}
-
-/** Production destinations only; AppTopNav owns app preferences on desktop and mobile. */
-export function ProductionWorkspaceMenus({ groups, selectedId, onSelect }: { groups: ProductionNavigationGroup[]; selectedId: string; onSelect: (item: ProductionNavigationItem) => void }) {
-    const { t } = useTranslation();
-    return <div data-production-workspace-menus className="flex shrink-0 items-center gap-1">
-        {groups.filter(group => group.id !== "owner").map(group => {
-            const active = group.items.some(item => item.id === selectedId);
-            const className = active ? "!bg-accent !text-accent-foreground" : "";
-            const label = t(group.id === "series" ? "director.workspaceHierarchy.seriesAndEpisodes" : group.labelKey);
-            if (group.items.length === 1) {
-                const item = group.items[0];
-                return <Button key={group.id} type="text" className={className} aria-current={active ? "page" : undefined} onClick={() => onSelect(item)}>{label}</Button>;
-            }
-            return <Dropdown key={group.id} trigger={["click"]} menu={{ selectedKeys: [selectedId], items: group.items.map(item => ({ key: item.id, label: t(item.labelKey) })), onClick: ({ key }) => { const item = group.items.find(item => item.id === key); if (item) onSelect(item); } }}>
-                <Button type="text" className={className} aria-current={active ? "page" : undefined}>{label}<ChevronDown className="size-3.5" /></Button>
-            </Dropdown>;
-        })}
-    </div>;
 }
 
 export function ProductionWorkspaceBreadcrumb({ items }: { items: Array<{ id: string; label: string; onSelect?: () => void }> }) {

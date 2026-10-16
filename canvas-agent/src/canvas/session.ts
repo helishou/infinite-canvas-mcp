@@ -3,9 +3,9 @@ import type { ServerResponse } from "node:http";
 
 import type { AgentAttachment } from "../agent/types.js";
 import { logger } from "../utils/logger.js";
-import { buildCanvasToolRequest, fitAttachmentNodeSize } from "./operations.js";
+import { buildCanvasToolRequest } from "./operations.js";
 import type { ToolName } from "./schemas.js";
-import { compactNode, isToolName, nextCanvasX, parseToolInput } from "./tools.js";
+import { compactNode, isToolName, parseToolInput } from "./tools.js";
 import { summarizeCanvasState } from "./state-summary.js";
 import type { CanvasSnapshot } from "./types.js";
 
@@ -550,37 +550,9 @@ export class CanvasSession {
             const ids = new Set(this.canvasState?.selectedNodeIds || []);
             return { nodes: (this.canvasState?.nodes || []).filter((node) => ids.has(node.id)).map(compactNode) };
         }
-        if (name === "canvas_create_attachment_nodes") return await this.createAttachmentNodes(input as { attachmentIds: string[]; x?: number; y?: number; gap?: number; direction?: "row" | "column" });
         if (!this.clients.size) throw new Error("当前没有已连接画布");
         const request = buildCanvasToolRequest(name, input, this.canvasState);
         return await this.requestCanvasTool(request.name, request.input);
-    }
-
-    /** 将当前 turn 的附件转换为画布图片节点。 */
-    private async createAttachmentNodes(input: { attachmentIds: string[]; x?: number; y?: number; gap?: number; direction?: "row" | "column" }) {
-        const clientId = this.targetClientId;
-        if (!this.clients.has(clientId)) throw new Error("当前没有已连接画布");
-        const attachments = input.attachmentIds.map((id) => this.getTurnAttachment(clientId, id));
-        const x = Number(input.x ?? nextCanvasX(this.canvasState));
-        const y = Number(input.y ?? 0);
-        const gap = Number(input.gap ?? 40);
-        const direction = input.direction || "row";
-        let offset = 0;
-        const nodes = attachments.map((attachment) => {
-            const size = fitAttachmentNodeSize(attachment.width, attachment.height);
-            const node = {
-                id: `image-${crypto.randomUUID()}`,
-                attachmentId: attachment.id,
-                title: attachment.name,
-                position: { x: direction === "row" ? x + offset : x, y: direction === "column" ? y + offset : y },
-                width: size.width,
-                height: size.height,
-            };
-            offset += (direction === "row" ? size.width : size.height) + gap;
-            return node;
-        });
-        await this.requestCanvasTool("canvas_create_attachment_nodes", { nodes });
-        return { nodes: nodes.map(({ id, attachmentId, title }) => ({ id, attachmentId, title })) };
     }
 
     /** 向目标网页发送工具请求并等待调用结果。 */

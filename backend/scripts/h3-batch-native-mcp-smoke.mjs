@@ -43,7 +43,7 @@ try {
     projectId = created.id;
     assert.equal(typeof projectId, "string");
     report.projectId = projectId;
-    const node = await tool("canvas_create_node", { projectId, nodeType: "minimax-h3:video", title: "Isolated scalar config only", x: 0, y: 0, width: 400, height: 300, metadata: {} });
+    const node = await tool("canvas_create_node", { projectId, nodeType: "minimax-h3:video", title: "Isolated scalar config only", x: 0, y: 0, width: 400, height: 300, metadata: { smart: true } });
     assert.deepEqual(node.directTasks, []);
     const createdIds = node.operationResults.flatMap((entry) => entry.createdNodeIds || []);
     assert.equal(createdIds.length, 1);

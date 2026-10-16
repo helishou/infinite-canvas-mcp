@@ -30,6 +30,22 @@ test("explicitly installed package launches through Node without a shell", (t) =
     const launch = findCodexLaunch("", () => packageFile);
     assert.deepEqual(launch, { command: process.execPath, args: [path.join(directory, "bin", "codex.js")], version: "0.146.0", source: "package" });
 });
+test("Windows prefers an installed native executable over the npm shim", (t) => {
+    const directory = fixture(t);
+    const executable = path.join(directory, "codex.exe");
+    fs.writeFileSync(executable, "fixture");
+    const packageFile = writePackage(fixture(t));
+    assert.deepEqual(findCodexLaunch(directory, () => packageFile, "win32"), {
+        command: executable, args: [], version: "", source: "path",
+    });
+});
+test("Windows still falls back to the installed npm shim when no native executable is on PATH", (t) => {
+    const directory = fixture(t);
+    const packageFile = writePackage(directory);
+    assert.deepEqual(findCodexLaunch("", () => packageFile, "win32"), {
+        command: process.execPath, args: [path.join(directory, "bin", "codex.js")], version: "0.146.0", source: "package",
+    });
+});
 test("global npm installation is found from PATH when the package is absent", (t) => {
     const directory = fixture(t);
     const packageDirectory = path.join(directory, "node_modules", "@openai", "codex");

@@ -443,12 +443,15 @@ export function buildNodeResponseMessages(context: NodeGenerationContext): AiTex
     ];
 }
 
-export async function hydrateNodeGenerationContext(context: NodeGenerationContext) {
+export async function hydrateNodeGenerationContext(context: NodeGenerationContext, options: { preserveStorageKeys?: boolean } = {}) {
     const { imageToDataUrl } = await import("@/services/image-storage");
+    const hydrateImage = (image: ReferenceImage) => options.preserveStorageKeys && image.storageKey
+        ? Promise.resolve({ ...image, dataUrl: "" })
+        : imageToDataUrl(image).then(dataUrl => ({ ...image, dataUrl }));
     return {
         ...context,
-        referenceImages: await Promise.all(context.referenceImages.map(async (image) => ({ ...image, dataUrl: await imageToDataUrl(image) }))),
-        loopInputImages: await Promise.all(context.loopInputImages.map(async (image) => ({ ...image, dataUrl: await imageToDataUrl(image) }))),
+        referenceImages: await Promise.all(context.referenceImages.map(hydrateImage)),
+        loopInputImages: await Promise.all(context.loopInputImages.map(hydrateImage)),
     };
 }
 

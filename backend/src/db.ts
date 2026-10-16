@@ -1,4 +1,4 @@
-import { syncEntityNodeEdits, normalizeEntityNodeOperation } from "./drama/entity-nodes.js";
+import { syncEntityNodeEdits, syncH3SceneImageReferences, normalizeEntityNodeOperation } from "./drama/entity-nodes.js";
 import { resolveSharedAssetNode, type AssetNode } from "@basketikun/canvas-agent/shared-asset-reference";
 import { effectiveTargetInput, inputHash } from "./drama/canvas-inputs.js";
 import crypto from "node:crypto";
@@ -24,7 +24,7 @@ import { H3_RUNTIME_SEGMENT_FIELDS } from "@basketikun/canvas-agent/runtime-fiel
 import { editedTextTargets, loadTextDocument, readText, replaceText, textKey, textOperation, textTargetSchema, type CanvasTextTarget } from "./canvas/collaborative-text.js";
 import type { McpObservabilityReportOptions } from "./stores/types.js";
 import { reconstructCanvasHistory, migrateCanvasReceipts } from "./canvas/history-maintenance.js";
-import { captureAssetEdits, deleteDramaAsset, migrateDramaAssets, normalizeAssetInsertion, projectAsset, propagateAssetChanges, resolveProjectAssets, stripProjectAssets, validateAssetOperation, writeDramaAsset, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
+import { captureAssetEdits, deleteDramaAsset, migrateDramaAssets, normalizeAssetInsertion, projectAsset, propagateAssetChanges, resolveProjectAssets, stripProjectAssets, syncSharedCanvasAssetRecords, validateAssetOperation, writeDramaAsset, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -80,7 +80,7 @@ export type McpObservabilityEvent = McpObservabilityEventInput & { id: string; c
 export type MediaFile = {
     storageKey: string; filePath: string; mimeType: string;
     bytes: number; width: number | null; height: number | null; durationMs: number | null;
-    createdAt: string;
+    createdAt: string; sha256?: string | null;
 };
 export type AssetFolder = { id: string; name: string; parentId: string | null; createdAt: string };
 export type CanvasFolder = {
@@ -1085,6 +1085,65 @@ export class BackendDatabase {
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }
+        if (currentVersion < 42) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                if (!this.hasColumn("media_files", "sha256")) this.db.exec("ALTER TABLE media_files ADD COLUMN sha256 TEXT");
+                this.db.exec(`CREATE TABLE IF NOT EXISTS production_compilation_jobs (
+                    owner TEXT NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    prepared_id TEXT,
+                    status TEXT NOT NULL,
+                    expected_revision INTEGER NOT NULL,
+                    source_hash TEXT,
+                    engine_runtime_id TEXT,
+                    compiler_hash TEXT,
+                    packet_gzip BLOB,
+                    packet_hash TEXT,
+                    job_gzip BLOB NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(owner, operation_id),
+                    UNIQUE(prepared_id)
+                );
+                CREATE INDEX IF NOT EXISTS production_compilation_jobs_status ON production_compilation_jobs(status, updated_at);
+                CREATE TABLE IF NOT EXISTS production_continuity_reports (
+                    owner_kind TEXT NOT NULL CHECK(owner_kind IN ('episode','canvas','scene')),
+                    owner_id TEXT NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    request_hash TEXT NOT NULL,
+                    snapshot TEXT NOT NULL CHECK(snapshot IN ('draft','published')),
+                    source_hash TEXT NOT NULL,
+                    runtime_id TEXT,
+                    checked_at TEXT,
+                    report_gzip BLOB NOT NULL,
+                    result_gzip BLOB NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(owner_kind, owner_id, operation_id)
+                );
+                CREATE INDEX IF NOT EXISTS production_continuity_reports_read ON production_continuity_reports(owner_kind, owner_id, snapshot, checked_at DESC);`);
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (42, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
+        if (currentVersion < 43) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                if (!this.hasColumn("media_files", "sha256")) this.db.exec("ALTER TABLE media_files ADD COLUMN sha256 TEXT");
+                if (!this.hasColumn("production_compilation_jobs", "packet_hash")) this.db.exec("ALTER TABLE production_compilation_jobs ADD COLUMN packet_hash TEXT");
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (43, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
+        if (currentVersion < 44) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                const sharedCanvases = this.db.prepare("SELECT shared_asset_canvas_id FROM drama_projects WHERE shared_asset_canvas_id IS NOT NULL").all() as Array<{ shared_asset_canvas_id: string }>;
+                for (const row of sharedCanvases) syncSharedCanvasAssetRecords(this, row.shared_asset_canvas_id);
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (44, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
     }
 
     /** A rolled-back schema_migrations row leaves its column behind, so every ADD COLUMN must be checked first. */
@@ -1947,6 +2006,16 @@ export class BackendDatabase {
         } catch (error) { this.db.exec("ROLLBACK"); throw error; }
     }
 
+    updatePreparedMcpCommand(input: { operationId: string; tool: string; targetId: string; projectId?: string; request: unknown; payload: Record<string, unknown>; receipt: Record<string, unknown> }): McpCommandReceipt {
+        const requestHash = commandFingerprint({ tool: input.tool, targetId: input.targetId, request: input.request });
+        const result = this.db.prepare("UPDATE mcp_command_receipts SET payload_json = ?, receipt_json = ?, updated_at = ? WHERE operation_id = ? AND tool = ? AND target_id = ? AND project_id IS ? AND request_hash = ? AND status = 'prepared'")
+            .run(JSON.stringify(input.payload), JSON.stringify(input.receipt), new Date().toISOString(), input.operationId, input.tool, input.targetId, input.projectId || null, requestHash);
+        if (Number(result.changes || 0) !== 1) throw collaborationError("MCP_COMMAND_NOT_PREPARED", "MCP 命令不再处于可更新的准备状态");
+        const updated = this.getMcpCommandReceipt(input.operationId, { tool: input.tool, targetId: input.targetId, projectId: input.projectId, request: input.request });
+        if (!updated) throw collaborationError("MCP_COMMAND_NOT_PREPARED", "MCP 命令准备回执已丢失");
+        return updated;
+    }
+
     getMcpCommandReceipt(operationId: string, identity?: { tool: string; targetId: string; request: unknown; projectId?: string }): McpCommandReceipt | null {
         const row = this.db.prepare("SELECT * FROM mcp_command_receipts WHERE operation_id = ?").get(operationId) as Record<string, unknown> | undefined;
         if (!row) {
@@ -1984,7 +2053,7 @@ export class BackendDatabase {
         if (!row) return;
         const preview = row.receipt_json ? JSON.parse(row.receipt_json) as Record<string, unknown> : {};
         const taskIds = operations.filter(operation => operation.type === "run_generation" && operation.idempotencyKey).map(operation => String(operation.idempotencyKey));
-        const receipt = { ...preview, ok: true, committed: true, operationId, replayed: false, ...(row.target_id ? { targetId: row.target_id } : {}), revision, ...(taskIds.length ? { taskIds } : {}), changesHash: commandFingerprint(operations) };
+        const receipt = { ...preview, ...(row.tool === "production_translate_compiled_prompts" ? { translationStatus: "committed" } : {}), ok: true, committed: true, operationId, replayed: false, ...(row.target_id ? { targetId: row.target_id } : {}), revision, ...(taskIds.length ? { taskIds } : {}), changesHash: commandFingerprint(operations) };
         this.db.prepare("UPDATE mcp_command_receipts SET status = 'committed', payload_json = NULL, receipt_json = ?, committed_revision = ?, updated_at = ? WHERE operation_id = ? AND status = 'prepared'")
             .run(JSON.stringify(receipt), revision, new Date().toISOString(), operationId);
     }
@@ -2255,11 +2324,17 @@ export class BackendDatabase {
                     committedOperations.push(operation); operationResults.push(...result);
                 }
             }
+            for (const operation of syncH3SceneImageReferences(assetBefore, project)) {
+                const result = applyCanvasProjectOperations(project, [operation]);
+                committedOperations.push(operation);
+                operationResults.push(...result);
+            }
             const revision = currentRevision + 1;
             project.revision = revision;
             project.updatedAt = new Date().toISOString();
             this.db.prepare("UPDATE canvas_projects SET data_json = ?, updated_at = ? WHERE id = ?")
                 .run(JSON.stringify(stripProjectAssets(project)), String(project.updatedAt), id);
+            syncSharedCanvasAssetRecords(this, id, project as CanvasProject);
             productionUpdates.push(...propagateAssetChanges(this, id, assetBefore, project, dependentCommits, context?.originatingProjectId));
             const source = context?.source || { clientId: "system:backend", kind: "system", label: "后台" };
             this.db.prepare("INSERT INTO canvas_operation_batches (operation_id, project_id, base_revision, revision, source_json, operations_json, results_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
@@ -3050,15 +3125,15 @@ export class BackendDatabase {
 
     upsertMediaFile(media: MediaFile) {
         this.db.prepare(`
-            INSERT INTO media_files (storage_key, file_path, mime_type, file_size, width, height, duration_ms, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO media_files (storage_key, file_path, mime_type, file_size, width, height, duration_ms, created_at, sha256)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(storage_key) DO UPDATE SET
                 file_path = excluded.file_path, mime_type = excluded.mime_type,
                 file_size = excluded.file_size, width = excluded.width,
-                height = excluded.height, duration_ms = excluded.duration_ms
+                height = excluded.height, duration_ms = excluded.duration_ms, sha256 = COALESCE(excluded.sha256, media_files.sha256)
         `).run(
             media.storageKey, media.filePath, media.mimeType, media.bytes,
-            media.width, media.height, media.durationMs, media.createdAt,
+            media.width, media.height, media.durationMs, media.createdAt, media.sha256 ?? null,
         );
     }
 
@@ -4035,6 +4110,7 @@ function mediaFromRow(row: Record<string, unknown>): MediaFile {
         height: row.height != null ? Number(row.height) : null,
         durationMs: row.duration_ms != null ? Number(row.duration_ms) : null,
         createdAt: String(row.created_at),
+        ...(typeof row.sha256 === "string" ? { sha256: row.sha256 } : {}),
     };
 }
 

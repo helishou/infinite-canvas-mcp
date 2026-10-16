@@ -1,4 +1,5 @@
-import { productionEntities, type EpisodeProductionData, type ProductionEntityBinding, type ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/production-contract";
+import crypto from "node:crypto";
+import { canonicalProduction, productionEntities, type EpisodeProductionData, type ProductionEntityBinding, type ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/production-contract";
 import { applyDirectorSourcePatch } from "@basketikun/canvas-agent/drama/production-validation";
 import type { BackendDatabase } from "../db.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
@@ -9,6 +10,13 @@ import { resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
 
 type Owner = { kind: "episode" | "canvas" | "scene"; id: string };
 const nodes = (project: Record<string, any>): Record<string, any>[] => project.nodes || [];
+const h3ProjectionFields = ["sourceShotId", "title", "duration", "taskMode", "prompt", "referenceBindings", "tailFrameContinuation", "motionContextEnabled", "directorEngine", "directorSourceHash", "styleTemplateId", "h3CharacterGroups", "storyboardShots", "aspectRatio", "modelName"];
+const projectionHash = (value: unknown) => crypto.createHash("sha256").update(canonicalProduction(value ?? null)).digest("hex");
+function h3InputHash(segment: Record<string, any>) {
+    const fields: Array<[string, unknown]> = h3ProjectionFields.map(key => [key, segment[key] ?? null]);
+    if (segment.productionClipProjection?.styleTemplateDeclared === true) fields.push(["styleTemplateDeclared", true]);
+    return projectionHash(fields);
+}
 function subjectImageForEntity(project: Record<string, any>, source: Record<string, any>, owner: Owner, entity: { kind: string; entityId: string }) {
     if (entity.kind !== "prop" && entity.kind !== "scene") return undefined;
     const refKind = entity.kind === "prop" ? "asset" : "scene";
@@ -207,4 +215,43 @@ export function syncEntityNodeEdits(db: BackendDatabase, projectId: string, befo
         db.db.prepare(`UPDATE ${table} SET revision=?,draft_json=?,updated_at=? WHERE ${column}=?`).run(row.revision + 1, JSON.stringify(draft), new Date().toISOString(), owner.id);
     }
     return { updates: changed ? [{ entityId: owner.id, revision: row.revision + 1 }] : [], operations: imageOperations };
+}
+
+/** Keep explicit H3 references to scene nodes current in the same canvas transaction. */
+export function syncH3SceneImageReferences(before: Record<string, any>, after: Record<string, any>): CanvasOperation[] {
+    const scenes = new Map<string, Record<string, any>>();
+    for (const oldNode of nodes(before)) {
+        if (oldNode.type !== "scene") continue;
+        const nextNode = nodes(after).find(node => node.id === oldNode.id);
+        if (!nextNode) continue;
+        const oldImage = oldNode.metadata?.sceneImage || {}, image = nextNode.metadata?.sceneImage || {};
+        if (["url", "storageKey", "mimeType"].every(key => String(oldImage[key] || "") === String(image[key] || ""))) continue;
+        scenes.set(oldNode.id, image);
+    }
+    if (!scenes.size) return [];
+    return nodes(after).filter(node => String(node.type || "").startsWith("minimax-h3:")).flatMap(h3 => {
+        let changed = false;
+        const segments = (Array.isArray(h3.metadata?.segments) ? h3.metadata.segments : []).map((segment: Record<string, any>) => {
+            const references = Array.isArray(segment.referenceBindings) ? segment.referenceBindings : [];
+            let referencesChanged = false;
+            const nextReferences = references.map((reference: Record<string, any>) => {
+                const image = scenes.get(String(reference.sourceNodeId || ""));
+                if (!image || reference.role !== "scene" || reference.mediaType !== "image") return reference;
+                const next: Record<string, any> = { ...reference, url: String(image.url || ""), storageKey: String(image.storageKey || ""), mimeType: String(image.mimeType || "image/png") };
+                if (["url", "storageKey", "mimeType"].every(key => String(reference[key] || "") === String(next[key] || ""))) return reference;
+                referencesChanged = true;
+                return next;
+            });
+            if (!referencesChanged) return segment;
+            changed = true;
+            const nextSegment: Record<string, any> = { ...segment, referenceBindings: nextReferences,
+                ...(segment.result || segment.resultStorageKey ? { inputOutdated: true } : {}) };
+            if (segment.productionClipProjection) {
+                const projection = { ...segment.productionClipProjection, fieldHashes: { ...segment.productionClipProjection.fieldHashes, referenceBindings: projectionHash(nextReferences) } };
+                nextSegment.productionClipProjection = { ...projection, inputHash: h3InputHash(nextSegment) };
+            }
+            return nextSegment;
+        });
+        return changed ? [{ type: "update_node", id: h3.id, metadata: { segments } }] : [];
+    });
 }

@@ -45,7 +45,8 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { useAssetStore, saveLibraryAsset, acceptLibraryAsset, libraryErrorText, type Asset, type AudioAsset } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
-import { canvasNodeImage } from "@/lib/canvas/canvas-image-renderability";
+import { canvasNodeImage, canvasNodePrimaryImage } from "@/lib/canvas/canvas-image-renderability";
+import { canvasNodeDownloadPlan } from "@/lib/canvas/canvas-media-download";
 import { convertImageNodeToProp as convertImageToPropNode } from "@/lib/canvas/prop-node-conversion";
 import { arrangeGroupMembers, computeFlowLayout } from "@/lib/canvas/canvas-agent-ops";
 import { fitNodeSize } from "@/lib/canvas/canvas-node-size";
@@ -3295,11 +3296,21 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         if (node.type !== CanvasNodeType.Image && !isSmartGenerationNode && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Audio) return;
         const outputType = isSmartGenerationNode ? node.metadata?.generationMode || "image" : node.type;
         const image = outputType === "image" ? canvasNodeImage(node) : null;
-        const content = image?.content || node.metadata?.content;
-        if (!content && !image?.storageKey) return;
-        const extension = outputType === "video" ? "mp4" : outputType === "audio" ? audioExtension(node.metadata?.mimeType) : outputType === "text" ? "txt" : imageExtension(image?.mimeType || content || "");
-        saveAs(image?.storageKey ? backendMediaUrl(image.storageKey) : content!, `canvas-${outputType}-${node.id}.${extension}`);
-    }, []);
+        const extension = outputType === "video" ? "mp4" : outputType === "audio" ? audioExtension(node.metadata?.mimeType) : outputType === "text" ? "txt" : imageExtension(image?.mimeType || node.metadata?.content || "");
+        const plan = canvasNodeDownloadPlan(node, outputType, extension);
+        if (!plan) return;
+        // 归档媒体按 storageKey 取 Blob 再保存：把原始 URL 交给浏览器下载会依赖代理链路、
+        // 跨域探测和下载策略，失败时只在浏览器里留一条记录；取不到媒体时在页面上明确报错。
+        void (async () => {
+            if (plan.storageKey) {
+                const blob = await getMediaBlob(plan.storageKey);
+                if (!blob) throw new Error("canvas media is unavailable");
+                return saveAs(blob, plan.filename);
+            }
+            if (!plan.url) throw new Error("canvas media is unavailable");
+            saveAs(plan.url, plan.filename);
+        })().catch(() => message.error(t("common.downloadFailed")));
+    }, [message, t]);
 
     const downloadBatchImage = useCallback((node: CanvasNodeData, imageId: string) => {
         const image = node.metadata?.images?.find((item) => item.id === imageId);
@@ -3627,7 +3638,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 message.success(t("common.addedToAssets"));
                 return;
             }
-            const sourceImage = canvasNodeImage(node);
+            const sourceImage = canvasNodePrimaryImage(node);
             if (!sourceImage) return message.error(t("canvas.projectPage.noImageToSave"));
             const dramaId = await getCurrentCanvasDramaId();
             const dataUrl = sourceImage.storageKey ? "" : sourceImage.content;
@@ -4832,7 +4843,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 updateProject(projectId, { nodes: nextNodes });
                 try {
                     const fullPrompt = (builtinPanel.promptPrefix || "") + scene;
-                    const context = await hydrateNodeGenerationContext(buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, fullPrompt, undefined, loopContext));
+                    const context = await hydrateNodeGenerationContext(buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, fullPrompt, undefined, loopContext), { preserveStorageKeys: true });
                     const refs = context.referenceImages;
                     await flushCanvasProjectBeforeGeneration(projectId);
                     const size = resolveComfyImageSize(generationConfig.size);
@@ -4881,7 +4892,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 const activeImageHistory = !loopContext && mode === "image" && sourceNode?.type === CanvasNodeType.Config && sourceNode.metadata?.smart && sourceNode.metadata.activeImageHistoryExplicit === true && sourceNode.metadata.activeImageHistoryId
                     ? sourceNode.metadata.images?.find((image) => image.id === sourceNode.metadata?.activeImageHistoryId)?.generationSnapshot
                     : undefined;
-                const generationContext = activeImageHistory ? rawGenerationContext : await hydrateNodeGenerationContext(rawGenerationContext);
+                const generationContext = activeImageHistory ? rawGenerationContext : await hydrateNodeGenerationContext(rawGenerationContext, { preserveStorageKeys: mode === "image" });
                 const effectivePrompt = (activeImageHistory && activeImageHistory.prompt.trim() === prompt.trim()
                     ? activeImageHistory.effectivePrompt
                     : generationContext.prompt).trim();
@@ -4896,7 +4907,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     const isImageNode = initialNode?.type === CanvasNodeType.Image;
                     const sourceReference =
                         isImageNode && !loopContext && initialNode?.metadata?.content && !productionImageInput(initialNode)
-                            ? [{ id: initialNode.id, name: `${initialNode.title || initialNode.id}.png`, type: initialNode.metadata.mimeType || "image/png", dataUrl: initialNode.metadata.content, storageKey: initialNode.metadata.storageKey }]
+                            ? [{ id: initialNode.id, name: `${initialNode.title || initialNode.id}.png`, type: initialNode.metadata.mimeType || "image/png", dataUrl: initialNode.metadata.storageKey ? "" : initialNode.metadata.content, storageKey: initialNode.metadata.storageKey }]
                             : [];
                     const referenceImages = activeImageHistory
                         ? resolveImageGenerationReferences(activeImageHistory.references)
@@ -5226,14 +5237,15 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             }
 
             const retrySourcePrompt = sourceNode.metadata?.composerContent || sourceNode.metadata?.prompt || node.metadata?.prompt || "";
+            const retryUseCanvasDispatcher = node.type === CanvasNodeType.Image || (node.type === CanvasNodeType.Config && smartMode === "image");
             const context = hasSavedImageMetadata
                 ? null
                 : await (async () => {
-                      const sourceContext = await hydrateNodeGenerationContext(buildNodeGenerationContext(sourceNode.id, nodesRef.current, connectionsRef.current, retrySourcePrompt));
+                      const sourceContext = await hydrateNodeGenerationContext(buildNodeGenerationContext(sourceNode.id, nodesRef.current, connectionsRef.current, retrySourcePrompt), { preserveStorageKeys: retryUseCanvasDispatcher });
                       if (sourceNode.id === node.id) return sourceContext;
                       // 结果节点面板展示的是结果节点自己的参考图。重试时不能只回溯到配置节点，
                       // 否则配置节点没有直接连图时，H3 会收到空的 references。
-                      const targetContext = await hydrateNodeGenerationContext(buildNodeGenerationContext(node.id, nodesRef.current, connectionsRef.current, retrySourcePrompt));
+                      const targetContext = await hydrateNodeGenerationContext(buildNodeGenerationContext(node.id, nodesRef.current, connectionsRef.current, retrySourcePrompt), { preserveStorageKeys: retryUseCanvasDispatcher });
                       return targetContext.referenceImages.length || targetContext.referenceVideos.length || targetContext.referenceAudios.length ? targetContext : sourceContext;
                   })();
             const prompt = (selectedImageHistory?.effectivePrompt || (
@@ -5273,7 +5285,6 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             const retryImages = retryReferenceImages || [];
             // 客户端预生成 taskId 只交给 Backend 调度任务；直连请求刷新后无法续跑。
             const retryClientTaskId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-            const retryUseCanvasDispatcher = node.type === CanvasNodeType.Image || (node.type === CanvasNodeType.Config && smartMode === "image");
             const retryUseVideoDispatcher = node.type === CanvasNodeType.Video || (node.type === CanvasNodeType.Config && smartMode === "video");
             const retryUseTextDispatcher = node.type === CanvasNodeType.Text || (node.type === CanvasNodeType.Config && smartMode === "text");
             const retryUseAudioDispatcher = node.type === CanvasNodeType.Audio || (node.type === CanvasNodeType.Config && smartMode === "audio");
@@ -5642,6 +5653,20 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     width: spec.width,
                     height: spec.height,
                     metadata: { status: NODE_STATUS_SUCCESS, sceneAssetId: payload.assetId, sceneName: payload.title, sceneDescription: payload.description, sceneImage: payload.image, sceneColorCard: payload.colorCard, sceneColorPalette: payload.colorPalette, sceneColorCardPrompt: payload.colorCardPrompt },
+                }]);
+                setSelectedNodeIds(new Set([id]));
+            } else if (payload.kind === "prop") {
+                const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Prop];
+                const center = screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
+                const id = `prop-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+                setNodes((prev) => [...prev, {
+                    id,
+                    type: CanvasNodeType.Prop,
+                    title: payload.title || "道具",
+                    position: { x: center.x - spec.width / 2, y: center.y - spec.height / 2 },
+                    width: spec.width,
+                    height: spec.height,
+                    metadata: { status: NODE_STATUS_SUCCESS, productionAssetId: payload.assetId, propName: payload.title, propDescription: payload.description, propImage: payload.image },
                 }]);
                 setSelectedNodeIds(new Set([id]));
             } else {

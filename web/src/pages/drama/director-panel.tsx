@@ -611,8 +611,9 @@ export function DirectorPanel({
   briefDraft, onBriefDraftChange, onOpenSharedAsset, onPromoteExistingSharedAsset,
   onPrepareEntities, onUpsertSubject, onSwitchToSharedNode, onDeleteSubject, onDeleteScene, onDeleteAsset, onRemoveCanvasAsset, onPatchCanvasAsset, onCreateManualAsset, onIncludeSharedNode, onRemoveSharedAsset, onSaveV2Shot, onRepartitionClips, onEditShot,
   compact = false, navigationTitleVisible = false, onSaveScript, generationSupported = true, assetScopeHint,
-  onBrief, onPatch, onEditCanvasClip, onAdoptDirectorFields, onAdoptClipStyle, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onPublish, onReplace, onAskDirector, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRestore, onRefresh, onSceneCommand, sceneCommandPending, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onCheckContinuity, onContinuitySnapshot,
+  onBrief, onPatch, onEditCanvasClip, onAdoptDirectorFields, onAdoptClipStyle, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onH3Boundary, onPublish, onReplace, onAskDirector, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRestore, onRefresh, onSceneCommand, sceneCommandPending, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onCheckContinuity, onContinuitySnapshot,
   onCompile, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets,
+  onApplyTranslatedPrompts,
 }: {
   workspace: DirectorWorkspace; director?: DirectorProduction; production: EpisodeProduction; readiness?: ProductionReadiness; run?: ProductionBatch | null;
   continuityReport?: import("@/services/backend-api").ProductionContinuity;
@@ -660,7 +661,8 @@ export function DirectorPanel({
   onWorkflow: (patch: Partial<DirectorProduction["workflow"]>) => void;
   onSettings: (patch: Partial<EpisodeProduction['draft']['settings']>) => void;
   onBindAsset: (assetId: string, nodeId: string) => Promise<boolean>;
-  onBoundary: (boundary: DirectorProduction["boundaries"][number]) => void;
+  onBoundary: (boundary: DirectorProduction["boundaries"][number]) => Promise<boolean> | boolean;
+  onH3Boundary?: (boundary: DirectorProduction["boundaries"][number]) => Promise<boolean> | boolean;
   onSaveContinuity?: (ledger: Record<string, unknown>) => Promise<boolean>;
   onCheckContinuity?: () => Promise<void>;
   onContinuitySnapshot?: (value: "draft" | "published") => void;
@@ -680,6 +682,7 @@ export function DirectorPanel({
   onExport: (includeGeneratedMedia: boolean) => Promise<void>;
   exporting: boolean;
   onCompile?: (sceneId?: string, targetId?: string) => void;
+  onApplyTranslatedPrompts?: (items: Array<{ targetId: string; nodeId: string; segmentId: string; sourcePrompt: string; expectedCanvasPrompt: string; translatedPrompt: string }>) => Promise<void>;
   compileBusy?: boolean;
   compilePending?: boolean;
   compileError?: string;
@@ -1747,7 +1750,7 @@ export function DirectorPanel({
 
   const renderShots = () => {
     if (d) return <SubjectStoryboardWorkbench key={JSON.stringify(subjectOwner)} viewMemory={storyboardViews.current[JSON.stringify(subjectOwner)] ||= {}} director={d} production={production} owner={subjectOwner} canvasNodes={canvasNodes} canvasId={canvasId} onLocateClip={id => onLocateTarget?.("segment", id)}
-      initialShotId={focusTarget?.startsWith("shot:") ? focusedId : undefined} renderEditor={(shot, workbench) => renderShotDetails(shot, false, workbench)} onRepartitionClips={subjectAssembly ? onRepartitionClips : undefined} onEditShot={subjectAssembly ? onEditShot : undefined} onSaveShotPatch={subjectAssembly && onSaveV2Shot ? (shotId, patch) => onSaveV2Shot(shotId, patch) : undefined} shotDrafts={sourceDrafts}
+      initialShotId={focusTarget?.startsWith("shot:") ? focusedId : undefined} renderEditor={(shot, workbench) => renderShotDetails(shot, false, workbench)} onRepartitionClips={subjectAssembly ? onRepartitionClips : undefined} onH3Boundary={subjectAssembly ? onH3Boundary : undefined} onEditShot={subjectAssembly ? onEditShot : undefined} onSaveShotPatch={subjectAssembly && onSaveV2Shot ? (shotId, patch) => onSaveV2Shot(shotId, patch) : undefined} shotDrafts={sourceDrafts}
       shotKeyframe={frameForShot}
       renderContinuity={isSubjectPromptAssembly(d.source) ? undefined : shot => renderShotContinuity(shot)}
       renderShotState={shot => renderShotState(shot)}
@@ -1760,6 +1763,7 @@ export function DirectorPanel({
         if (subjectAssembly) return null;
         return <div className="space-y-4">{scopedSegments.map(segment => <section key={segment.id} className="border-b border-border pb-4"><h3 className="text-sm font-medium">{segmentTitle(String(segment.id))}</h3><SegmentGroupEditor segment={segment} shots={scopedShots} segments={scopedSegments} fps={fps} draftValue={sourceDrafts[`segment:${segment.id}:shot_ids`]} onDraftChange={value => onSourceDraftChange(`segment:${segment.id}:shot_ids`, value)} disabled={busy || !scope.editable} onSave={onRegroup} /></section>)}</div>;
       }}
+      onApplyTranslatedPrompts={onApplyTranslatedPrompts}
       onClip={id => onNavigate("production", { kind: "segment", id })}
       busy={busy} compileBusy={compileBusy} compilePending={compilePending} compileError={compileError} compileNotice={compileNotice} compileDiagnostics={compileDiagnostics} compileTargets={compileTargets} onCompile={onCompile}
         onDiscuss={(targetId, instruction) => onAskDirector({ workspace: "overview", targetId, instruction })} onNavigate={onNavigate} />;

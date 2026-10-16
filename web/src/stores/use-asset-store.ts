@@ -10,7 +10,7 @@ import { cleanupUnusedMedia } from "@/services/file-storage";
 import { deleteBackendAsset, deleteBackendAssetFolder, fetchBackendAssets, upsertBackendAsset, upsertBackendAssetFolder, BackendApiError, updateBackendAsset, type SharedAssetWrite } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 
-export type AssetKind = "text" | "image" | "video" | "audio" | "character" | "scene";
+export type AssetKind = "text" | "image" | "video" | "audio" | "character" | "scene" | "prop";
 export type TextAsset = AssetBase<"text"> & { data: { content: string } };
 export type ImageAsset = AssetBase<"image"> & { data: { dataUrl: string; storageKey?: string; width: number; height: number; bytes: number; mimeType: string } };
 export type VideoAsset = AssetBase<"video"> & { data: { url: string; storageKey?: string; width: number; height: number; bytes: number; mimeType: string } };
@@ -64,7 +64,8 @@ export type SceneAsset = AssetBase<"scene"> & {
         colorCardPrompt: string;
     };
 };
-export type Asset = TextAsset | ImageAsset | VideoAsset | AudioAsset | CharacterAsset | SceneAsset;
+export type PropAsset = AssetBase<"prop"> & { data: { name: string; description: string; image: SceneImage } };
+export type Asset = TextAsset | ImageAsset | VideoAsset | AudioAsset | CharacterAsset | SceneAsset | PropAsset;
 
 type AssetBase<T extends AssetKind> = {
     id: string;

@@ -1,4 +1,4 @@
-/** Live library references are distinct from immutable production approved versions. */
+/** Live library references always point to their canonical node in the shared asset canvas. */
 export type SharedAssetSource = { dramaId: string; assetId: string; sourceProjectId: string; sourceNodeId: string };
 export type SharedAssetEdit = { base?: unknown; value?: unknown; deleted?: boolean };
 export type SharedAssetReference = SharedAssetSource & { edits?: Record<string, SharedAssetEdit>; /** Production-selected refs write supported edits through to their canonical shared node. */ writeThrough?: boolean };
@@ -45,7 +45,8 @@ export function libraryAssetNode(asset: { id: string; kind: string; title: strin
     const metadata: Record<string, any> = { content: d.url || d.dataUrl || d.imageUrl || d.content || "", storageKey: d.storageKey, naturalWidth: d.width, naturalHeight: d.height, bytes: d.bytes, mimeType: d.mimeType, durationMs: d.durationMs };
     if (asset.kind === "character") Object.assign(metadata, { characterName: asset.title, characterAssetId: asset.id, characterEnglishName: d.englishName || "", characterDescription: d.description || "", characterImages: d.images || [], characterPrimaryIndex: d.primaryIndex || 0, characterVoiceUrl: d.voice || "", characterVoiceName: d.voiceName || "", characterVoiceDescription: d.voiceDescription || "", characterVoiceStorageKey: d.voiceStorageKey || "", characterVoiceAssetId: d.voiceAssetId || "" });
     if (asset.kind === "scene") Object.assign(metadata, { sceneName: asset.title, sceneDescription: d.description || "", sceneImage: d.image, sceneColorCard: d.colorCard, sceneColorPalette: d.colorPalette, sceneColorCardPrompt: d.colorCardPrompt || "" });
-    if (asset.kind === "character" || asset.kind === "scene") {
+    if (asset.kind === "prop") Object.assign(metadata, { propName: d.name || asset.title, propDescription: d.description || "", propImage: d.image });
+    if (["character", "scene", "prop"].includes(asset.kind)) {
         const image = asset.kind === "character" ? d.images?.[d.primaryIndex || 0] : d.image;
         Object.assign(metadata, { content: image?.url || "", storageKey: image?.storageKey, naturalWidth: image?.width, naturalHeight: image?.height, bytes: image?.bytes, mimeType: image?.mimeType });
     }

@@ -20,6 +20,7 @@ const IMAGE_DECODE_TIMEOUT_MS = 10_000;
 const IMAGE_RESPONSE_ERROR = "ImageResponseError";
 const IMAGE_TIMEOUT_ERROR = "ImageTimeoutError";
 const IMAGE_PREVIEW_VERSION = 1;
+const MAX_CACHED_IMAGE_PREVIEW_URLS = 128;
 const previewStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_previews" });
 const previewUrls = new Map<string, string>();
 const previewListeners = new Set<() => void>();
@@ -191,7 +192,10 @@ export function subscribeImagePreview(storageKey: string | undefined, listener: 
     previewListenersByKey.set(key, listeners);
     return () => {
         listeners.delete(listener);
-        if (!listeners.size) previewListenersByKey.delete(key);
+        if (!listeners.size) {
+            previewListenersByKey.delete(key);
+            evictInactiveImagePreviewUrls();
+        }
     };
 }
 
@@ -245,7 +249,19 @@ function cacheImagePreview(storageKey: string, preview: Blob, cacheKey = preview
     previewRevisionsByKey.set(cacheKey, (previewRevisionsByKey.get(cacheKey) || 0) + 1);
     previewListenersByKey.get(cacheKey)?.forEach((listener) => listener());
     previewListeners.forEach((listener) => listener());
+    evictInactiveImagePreviewUrls();
     return url;
+}
+
+function evictInactiveImagePreviewUrls() {
+    while (previewUrls.size > MAX_CACHED_IMAGE_PREVIEW_URLS) {
+        const oldest = Array.from(previewUrls.keys()).find((key) => !previewListenersByKey.get(key)?.size);
+        if (!oldest) return;
+        const url = previewUrls.get(oldest);
+        if (url) URL.revokeObjectURL(url);
+        previewUrls.delete(oldest);
+        previewRevisionsByKey.delete(oldest);
+    }
 }
 
 async function deleteImagePreview(storageKey: string) {

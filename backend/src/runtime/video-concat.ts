@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -69,10 +70,7 @@ export class VideoConcatBackend {
                 "-t", String(duration), "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "veryfast",
                 "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", output]);
             this.assertActive(task.id);
-            const data = await readFile(output);
-            this.assertActive(task.id);
-            if (!data.length) throw new Error("视频裁剪没有生成有效媒体");
-            const stored = this.media!.store(data, { name: "video-trim.mp4", mimeType: "video/mp4", category: "output",
+            const stored = await this.media!.storeStream(createReadStream(output), { name: "video-trim.mp4", mimeType: "video/mp4", category: "output",
                 width: Math.ceil(info.width / 2) * 2, height: Math.ceil(info.height / 2) * 2, durationMs: Math.round(duration * 1000) });
             const media = { url: this.media!.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType,
                 width: stored.width, height: stored.height, durationMs: stored.durationMs };
@@ -92,9 +90,12 @@ export class VideoConcatBackend {
     private async execute(task: RuntimeTask) {
         this.update(task.id, { status: "running", progress: 0.05 });
         const temporaryFiles: string[] = [];
+        let ownedOutput = "";
         try {
             const inputs = await Promise.all((task.input.videos as string[]).map((value, index) => this.resolveInput(value, task.id, index, temporaryFiles)));
-            const output = String(task.params.output || path.join(MEDIA_DIR, `video-concat-${crypto.randomUUID()}.mp4`));
+            const requestedOutput = String(task.params.output || "");
+            const output = requestedOutput || path.join(MEDIA_DIR, `video-concat-${crypto.randomUUID()}.mp4`);
+            if (!requestedOutput && this.media) ownedOutput = output;
             await mkdir(path.dirname(output), { recursive: true, mode: 0o700 });
             const layout = VideoConcatBackend.layout(task.params.layout);
             if (layout === "hstack") await this.runHstackFfmpeg(task.id, inputs, output, Number(task.params.longEdge) || 0);
@@ -104,13 +105,14 @@ export class VideoConcatBackend {
                 temporaryFiles.push(concatList);
                 await this.runFfmpeg(task.id, concatList, output, Number(task.params.longEdge) || 0);
             }
-            const stored = this.media ? this.media.store(await readFile(output), { name: path.basename(output), mimeType: "video/mp4", category: "output" }) : null;
-            const result = { path: output, longEdge: task.params.longEdge, layout, ...(stored ? { media: { url: this.media!.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType, filename: path.basename(output) } } : {}) };
+            const stored = this.media ? await this.media.storeStream(createReadStream(output), { name: path.basename(output), mimeType: "video/mp4", category: "output" }) : null;
+            const result = { ...(requestedOutput ? { path: output } : {}), longEdge: task.params.longEdge, layout, ...(stored ? { media: { url: this.media!.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType, filename: path.basename(output) } } : {}) };
             this.update(task.id, { status: "succeeded", progress: 1, result });
             this.tasks.addEvent(task.id, "result", result);
         } finally {
             this.processes.delete(task.id);
             await Promise.all(temporaryFiles.map((file) => rm(file, { force: true })));
+            if (ownedOutput) await rm(ownedOutput, { force: true });
         }
     }
     private async resolveInput(value: string, taskId: string, index: number, temporaryFiles: string[]) {

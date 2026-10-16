@@ -446,6 +446,7 @@ const ASSET_GROUPS: { kind: AssetKind; icon: typeof Square }[] = [
     { kind: "text", icon: FileText },
     { kind: "character", icon: User },
     { kind: "scene", icon: MapPinned },
+    { kind: "prop", icon: Package },
 ];
 const ALL_ASSET_DRAMAS = "__all-asset-dramas__";
 const UNASSIGNED_ASSET_DRAMA = "__unassigned-asset-drama__";
@@ -481,6 +482,7 @@ function buildInsertPayload(asset: Asset): InsertAssetPayload {
         };
     }
     if (asset.kind === "scene") return { kind: "scene", assetId: asset.id, title: asset.title, description: asset.data.description, image: asset.data.image, colorCard: asset.data.colorCard, colorPalette: asset.data.colorPalette, colorCardPrompt: asset.data.colorCardPrompt };
+    if (asset.kind === "prop") return { kind: "prop", assetId: asset.id, title: asset.title, description: asset.data.description, image: asset.data.image };
     return { kind: "image", dataUrl: (asset as ImageAsset).data.dataUrl, storageKey: (asset as ImageAsset).data.storageKey, title: asset.title };
 }
 
@@ -522,10 +524,10 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
     }, [projectId]);
     useEffect(() => {
         if (dramaQuery.isSuccess) {
-            setDramaFilter(dramaQuery.data.episode?.dramaId || ALL_ASSET_DRAMAS);
+            setDramaFilter(dramaQuery.data.episode?.dramaId || dramaQuery.data.drama?.id || ALL_ASSET_DRAMAS);
             setTagFilter("all");
         }
-    }, [dramaQuery.data?.episode?.dramaId, dramaQuery.isSuccess]);
+    }, [dramaQuery.data?.drama?.id, dramaQuery.data?.episode?.dramaId, dramaQuery.isSuccess]);
 
     const scopedAssets = useMemo(() => assets.filter((asset) => {
         if (dramaFilter === ALL_ASSET_DRAMAS) return true;
@@ -533,11 +535,11 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
         return asset.dramaId === dramaFilter;
     }), [assets, dramaFilter, dramaIds]);
 
-    const allTags = useMemo(() => Array.from(new Set(scopedAssets.flatMap((asset) => asset.kind === "character" || asset.kind === "scene" ? [] : asset.tags || []))).slice(0, 20), [scopedAssets]);
+    const allTags = useMemo(() => Array.from(new Set(scopedAssets.flatMap((asset) => asset.kind === "character" || asset.kind === "scene" || asset.kind === "prop" ? [] : asset.tags || []))).slice(0, 20), [scopedAssets]);
 
     const filtered = useMemo(() => {
         const query = keyword.trim().toLowerCase();
-        return scopedAssets.filter((asset) => (tagFilter === "all" || (asset.kind !== "character" && asset.kind !== "scene" && (asset.tags || []).includes(tagFilter))) && (!query || [asset.title, ...(asset.kind === "character" || asset.kind === "scene" ? [] : asset.tags || [])].join(" ").toLowerCase().includes(query)));
+        return scopedAssets.filter((asset) => (tagFilter === "all" || (asset.kind !== "character" && asset.kind !== "scene" && asset.kind !== "prop" && (asset.tags || []).includes(tagFilter))) && (!query || [asset.title, ...(asset.kind === "character" || asset.kind === "scene" || asset.kind === "prop" ? [] : asset.tags || [])].join(" ").toLowerCase().includes(query)));
     }, [keyword, scopedAssets, tagFilter]);
 
     const groups = useMemo(() => ASSET_GROUPS.map((group) => ({ ...group, items: filtered.filter((asset) => asset.kind === group.kind) })).filter((group) => group.items.length > 0), [filtered]);
@@ -686,6 +688,15 @@ function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: 
             event.dataTransfer.setData("text/plain", payload);
             return;
         }
+        if (asset.kind === "prop") {
+            const ref = { type: "prop", kind: "prop", name: asset.title, productionAssetId: asset.id, propName: asset.data.name || asset.title, propDescription: asset.data.description, propImage: asset.data.image };
+            const payload = JSON.stringify(ref);
+            event.dataTransfer.effectAllowed = "copy";
+            event.dataTransfer.setData("application/x-infinite-canvas-ref", payload);
+            event.dataTransfer.setData("application/json", payload);
+            event.dataTransfer.setData("text/plain", payload);
+            return;
+        }
         const ref = asset.kind === "image"
             ? { url: asset.data.dataUrl, dataUrl: asset.data.dataUrl, type: "image", kind: "image", name: asset.title, storageKey: asset.data.storageKey }
             : { url: asset.data.url, type: asset.kind, kind: asset.kind, name: asset.title, storageKey: asset.data.storageKey };
@@ -767,6 +778,7 @@ function AssetCover({ asset }: { asset: Asset }) {
     }
     if (asset.kind === "character") return <CharacterCover asset={asset} />;
     if (asset.kind === "scene") return <SceneCover asset={asset} />;
+    if (asset.kind === "prop") return <PropCover asset={asset} />;
     if (asset.kind === "audio") {
         return (
             <div className="size-full flex flex-col items-center justify-center gap-1 bg-stone-100 dark:bg-stone-800">
@@ -779,6 +791,12 @@ function AssetCover({ asset }: { asset: Asset }) {
 }
 
 function SceneCover({ asset }: { asset: Extract<Asset, { kind: "scene" }> }) {
+    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
+    useEffect(() => { void ensureImagePreview(asset.data.image.storageKey); }, [asset.data.image.storageKey]);
+    return <img src={previewUrlFor(asset.data.image.storageKey) || asset.data.image.url || asset.coverUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+}
+
+function PropCover({ asset }: { asset: Extract<Asset, { kind: "prop" }> }) {
     useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
     useEffect(() => { void ensureImagePreview(asset.data.image.storageKey); }, [asset.data.image.storageKey]);
     return <img src={previewUrlFor(asset.data.image.storageKey) || asset.data.image.url || asset.coverUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;

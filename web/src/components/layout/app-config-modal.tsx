@@ -91,7 +91,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     };
 
     const finishConfig = () => {
-        const ready = config.channels.some((channel) => channel.baseUrl.trim() && channel.models.length && (channel.kind === "comfyui" || channel.apiKey.trim()));
+        const ready = config.channels.some((channel) => channel.baseUrl.trim() && channel.models.length && (channel.kind === "codex-cli" || channel.apiKey.trim()));
         setConfigDialogOpen(false);
         if (!ready) return;
         message.success(t(shouldPromptContinue ? "config.savedContinue" : "config.saved"));
@@ -215,7 +215,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                             <div className="min-w-0 flex-1 basis-48">
                                                 <div className="truncate text-sm font-medium">{channel.name || t("config.channels.unnamed")}</div>
                                                 <div className="mt-1 truncate text-xs leading-relaxed text-muted-foreground">
-                                                    {(channel.kind === "codex-cli" ? "Codex CLI" : channel.kind === "comfyui" ? "本地 ComfyUI" : apiFormatLabel(channel.apiFormat))} · {t("config.channels.modelCount", { count: channel.models.length })} · {channel.kind === "codex-cli" ? t("config.channelEditor.codexLocal") : channel.baseUrl || t("config.channels.missingUrl")}
+                                                    {(channel.kind === "codex-cli" ? "Codex CLI" : channel.kind === "local" ? t("config.channelEditor.localKind") : apiFormatLabel(channel.apiFormat))} · {t("config.channels.modelCount", { count: channel.models.length })} · {channel.kind === "codex-cli" ? t("config.channelEditor.codexLocal") : channel.baseUrl || t("config.channels.missingUrl")}
                                                 </div>
                                             </div>
                                             <div className="flex shrink-0 items-center gap-2">

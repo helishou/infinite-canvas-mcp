@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { gzipSync, gunzipSync } from "node:zlib";
+import type { BackendDatabase } from "../db.js";
 
 const hash = (value: unknown) => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
@@ -36,15 +38,22 @@ export function continuityTargetBlockers(result: ContinuityConsumerResult, targe
 }
 
 export class ProductionContinuityReports {
-    constructor(private readonly root: string) {}
+    constructor(private readonly store: string | BackendDatabase) {}
+
+    private database() { return typeof this.store === "string" ? undefined : this.store; }
+    private get root() { return typeof this.store === "string" ? this.store : ""; }
+    private decode<T>(value: unknown): T { return JSON.parse(gunzipSync(Buffer.from(value as Uint8Array)).toString("utf8")) as T; }
 
     private ownerDirectory(owner: { kind: string; id: string }) {
         return path.join(this.root, hash(owner));
     }
 
     get(owner: { kind: string; id: string }, snapshot: "draft" | "published", current: { sourceHash?: string; runtimeId?: string; snapshotVersion?: number }, view: string, targetId?: string, objectId?: string, pageSize = 20, cursor?: string) {
-        const directory = this.ownerDirectory(owner);
-        const reports = fs.existsSync(directory) ? fs.readdirSync(directory).filter(name => name.startsWith("report-") && name.endsWith(".json")).flatMap(name => {
+        const database = this.database();
+        const directory = typeof this.store === "string" ? this.ownerDirectory(owner) : "";
+        const reports = database
+            ? (database.db.prepare("SELECT report_gzip FROM production_continuity_reports WHERE owner_kind=? AND owner_id=? AND snapshot=? ORDER BY checked_at DESC,created_at DESC").all(owner.kind, owner.id, snapshot) as Array<{ report_gzip: Uint8Array }>).flatMap(row => { try { return [this.decode<any>(row.report_gzip)]; } catch { return []; } })
+            : fs.existsSync(directory) ? fs.readdirSync(directory).filter(name => name.startsWith("report-") && name.endsWith(".json")).flatMap(name => {
             try { return [JSON.parse(fs.readFileSync(path.join(directory, name), "utf8"))]; } catch { return []; }
         }).filter(report => report.owner?.kind === owner.kind && report.owner?.id === owner.id && report.snapshot === snapshot).sort((a, b) => String(b.checkedAt).localeCompare(String(a.checkedAt))) : [];
         const prior = (reports.find(report => report.sourceHash === current.sourceHash && (!current.runtimeId || report.runtimeId === current.runtimeId) &&
@@ -75,12 +84,33 @@ export class ProductionContinuityReports {
     }
 
     operation(owner: { kind: string; id: string }, operationId: string) {
+        const database = this.database();
+        if (database) {
+            const row = database.db.prepare("SELECT request_hash,result_gzip FROM production_continuity_reports WHERE owner_kind=? AND owner_id=? AND operation_id=?").get(owner.kind, owner.id, operationId) as { request_hash: string; result_gzip: Uint8Array } | undefined;
+            return row ? { requestHash: row.request_hash, result: this.decode<any>(row.result_gzip) } : undefined;
+        }
         const directory = this.ownerDirectory(owner);
         const file = path.join(directory, `operation-${hash(operationId)}.json`);
         return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : undefined;
     }
 
     persist(owner: { kind: string; id: string }, operationId: string, requestHash: string, report: Record<string, unknown>) {
+        const database = this.database();
+        if (database) {
+            const prior = database.db.prepare("SELECT request_hash,result_gzip FROM production_continuity_reports WHERE owner_kind=? AND owner_id=? AND operation_id=?").get(owner.kind, owner.id, operationId) as { request_hash: string; result_gzip: Uint8Array } | undefined;
+            if (prior) {
+                if (prior.request_hash !== requestHash) throw new Error("IDEMPOTENCY_CONFLICT: 连续性 operationId 已用于不同请求");
+                return this.decode<any>(prior.result_gzip);
+            }
+            const result = { status: "succeeded", verdict: report.verdict, report, mediaSubmitted: false };
+            const checkedAt = String(report.checkedAt || new Date().toISOString());
+            database.db.prepare(`INSERT INTO production_continuity_reports
+                (owner_kind,owner_id,operation_id,request_hash,snapshot,source_hash,runtime_id,checked_at,report_gzip,result_gzip,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(owner.kind, owner.id, operationId, requestHash, report.snapshot === "published" ? "published" : "draft",
+                String(report.sourceHash || ""), report.runtimeId ? String(report.runtimeId) : null, checkedAt,
+                gzipSync(Buffer.from(JSON.stringify(report))), gzipSync(Buffer.from(JSON.stringify(result))), new Date().toISOString());
+            return result;
+        }
         const directory = this.ownerDirectory(owner);
         fs.mkdirSync(directory, { recursive: true });
         const reportFile = path.join(directory, `report-${hash({ sourceHash: report.sourceHash, runtimeId: report.runtimeId, operationId })}.json`);

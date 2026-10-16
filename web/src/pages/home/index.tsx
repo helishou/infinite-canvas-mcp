@@ -97,6 +97,25 @@ function HomeWorkbench() {
         navigate(destination);
     };
     const openProject = (id: string) => openDestination(`/canvas/${encodeURIComponent(id)}`);
+    const continueEditing = async (projectId: string) => {
+        const requestId = ++openDestinationRequest.current;
+        const knownDrama = data.canvasOwners.get(projectId);
+        if (knownDrama || !data.dramaReady && data.connected) {
+            try {
+                const { context } = await fetchProductionCanvasContext(projectId);
+                if (requestId !== openDestinationRequest.current) return;
+                if (["episode", "scene", "shared-assets"].includes(context.role) && (context.dramaId || knownDrama?.id)) {
+                    canvasHost?.switchProductionCanvas({ projectId, dramaId: context.dramaId || knownDrama!.id, episodeId: context.episodeId || undefined, keepCanvasOpen: true });
+                    return;
+                }
+            } catch (error) {
+                if (requestId !== openDestinationRequest.current) return;
+                message.error(error instanceof Error ? error.message : String(error));
+                return;
+            }
+        }
+        if (requestId === openDestinationRequest.current) openProject(projectId);
+    };
     const visibleProjects = (data.dramaReady ? filtered.slice(0, visibleCount) : []).flatMap((entry) => entry.kind === "canvas" ? [entry.project] : []);
     const coverProjects = latest && !visibleProjects.some((p) => p.id === latest.id) ? [latest, ...visibleProjects] : visibleProjects;
     const extraCover = useProjectCoverResults(coverProjects.filter((p) => !projectCover(p, outputs, folderFor(p))).map((p) => [p.id, p.updatedAt]));
@@ -205,7 +224,7 @@ function HomeWorkbench() {
                             <button
                                 type="button"
                                 className={cn("relative shrink-0 overflow-hidden bg-muted/30", latestCover ? "h-40 w-full sm:h-auto sm:w-[28%]" : "w-20 sm:w-36")}
-                                onClick={() => openProject(latest.id)}
+                                onClick={() => void continueEditing(latest.id)}
                                 aria-label={t("landing.openCanvasNamed", { name: latest.title })}
                             >
                                 <div className="absolute inset-0"><WorkbenchMediaPreview media={latestCover} label={latestCover ? latest.title : t("landing.noPreview")} /></div>
@@ -221,7 +240,7 @@ function HomeWorkbench() {
                                     </p>
                                 </div>
                                 <div className="flex shrink-0 flex-col items-start gap-2">
-                                    <Button icon={<ArrowRight className="size-4" />} iconPlacement="end" onClick={() => openProject(latest.id)}>{t("home.workbench.continue")}</Button>
+                                    <Button icon={<ArrowRight className="size-4" />} iconPlacement="end" onClick={() => void continueEditing(latest.id)}>{t("home.workbench.continue")}</Button>
                                     {isDrama(latest) && <Link to={`/production?dramaId=${encodeURIComponent(folderFor(latest)?.id || "")}&workspace=series`} className="ui-caption inline-flex items-center gap-1 text-muted-foreground hover:text-foreground">{t("productionCanvas.backDrama")}<ArrowRight className="size-4" /></Link>}
                                 </div>
                             </div>

@@ -20,6 +20,14 @@ test("same-environment scene occurrences have isolated compiler inputs and real 
     assert.notEqual(compilationScopeInput(b, { sceneId: "A" }).inputHash, a.inputHash);
 });
 
+test("scene compiler scope identifies output Shots separately from retained continuity context", () => {
+    const d = scopedDirector();
+    const scope = { sceneId: "A" };
+    const projection = compilationScopeInput(d, scope);
+    const compilerInput = scopedCompilerInput(projection.director, scope);
+    assert.deepEqual((compilerInput.source._canvas_compilation_scope as any).outputShotIds, ["SA"]);
+});
+
 test("Clip scope skips dormant storyboard frames but retains explicitly requested frames", () => {
     const d = scopedDirector();
     (d.source.asset_plan as any[]).find(item => item.id === "KA").kind = "keyframe";
@@ -136,7 +144,7 @@ test("a bound shared Subject image remains a media dependency without becoming a
     assert.deepEqual(d, before, "compiler projection must not rewrite the authored episode source");
 });
 
-test("continuity replay context does not retain a removed prior-Shot picture as a Clip reference", () => {
+test("continuity replay context keeps the prior Shot's picture binding resolvable without making it a Clip reference", () => {
     const d = scopedDirector();
     d.source.version = 2;
     d.source.prompt_assembly = { version: 2 };
@@ -160,7 +168,12 @@ test("continuity replay context does not retain a removed prior-Shot picture as 
     const scoped = compilationScopeInput(d, { targetIds: ["GB"] });
     assert.deepEqual((scoped.director.source.shots as any[]).map(shot => shot.id), ["SA", "SB"], "prior Shot remains for continuity replay");
     assert.deepEqual((scoped.director.source.shots as any[])[0].subject_usages.map((usage: any) => usage.subjectId), ["P"]);
-    assert.deepEqual((scoped.director.source.subject_registry as any[])[0].pictureBindings, [], "prior Shot picture is not an H3 reference for GB");
+    // The retained replay Shot still declares P_ID, so the projection must keep the
+    // binding resolvable; otherwise the source schema rejects it with
+    // "图片绑定 P_ID 不属于 Subject P" and a single-Clip compile is blocked outright.
+    assert.deepEqual((scoped.director.source.subject_registry as any[])[0].pictureBindings.map((binding: any) => binding.id), ["P_ID"]);
+    const checked = directorProductionSchema.safeParse(scopedCompilerInput(scoped.director, { targetIds: ["GB"] }));
+    assert.equal(checked.success, true, checked.success ? "" : JSON.stringify(checked.error.issues));
     d.source.segments = [{ id: "GAB", shot_ids: ["SA", "SB"], mode: "Ref2VA" }];
     d.sourceHash = compilationHash(d.source);
     const sharedClip = compilationScopeInput(d, { targetIds: ["GAB"] });

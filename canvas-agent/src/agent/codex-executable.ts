@@ -6,7 +6,16 @@ const require = createRequire(import.meta.url);
 export type CodexLaunch = { command: string; args: string[]; version: string; source: "package" | "path" };
 
 /** Codex is optional for the HTTP/MCP server; resolve it only when needed. */
-export function findCodexLaunch(pathValue = process.env.PATH || "", resolvePackage: (name: string) => string = require.resolve): CodexLaunch | undefined {
+export function findCodexLaunch(pathValue = process.env.PATH || "", resolvePackage: (name: string) => string = require.resolve, platform = process.platform): CodexLaunch | undefined {
+    // On Windows, the bundled Codex CLI tries to create temporary PATH aliases
+    // under CODEX_HOME and can fail with access denied. Prefer an installed
+    // native codex.exe from PATH when available.
+    if (platform === "win32") {
+        for (const directory of pathValue.split(path.delimiter).filter(Boolean)) {
+            const executable = path.join(directory, "codex.exe");
+            if (existsSync(executable)) return { command: executable, args: [], version: "", source: "path" };
+        }
+    }
     let packageFile: string | undefined;
     try { packageFile = resolvePackage("@openai/codex/package.json"); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "MODULE_NOT_FOUND") throw error; }

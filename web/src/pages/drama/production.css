@@ -54,13 +54,14 @@
 .storyboard-split { width: 100%; min-height: 32px; border-block: 1px solid var(--border); padding: 4px 8px; }
 .storyboard-split:hover { background: var(--muted); }
 .storyboard-boundary { position: relative; display: flex; align-items: center; justify-content: center; min-height: 44px; width: 100%; gap: 10px; }
+.storyboard-boundary-transition { flex: 0 0 auto; white-space: nowrap; }
 .storyboard-boundary-grip { display: flex; flex: 1 1 auto; min-width: 36px; min-height: 44px; align-items: center; justify-content: center; gap: 10px; color: var(--muted-foreground); cursor: ns-resize; touch-action: none; user-select: none; -webkit-user-select: none; }
 .storyboard-boundary-grip::before,.storyboard-boundary-grip::after { content: ''; flex: 1; height: 1px; background: var(--border); transition: background .15s; }
 .storyboard-boundary-grip:hover::before,.storyboard-boundary-grip:hover::after,.storyboard-boundary-grip.is-dragging::before,.storyboard-boundary-grip.is-dragging::after { background: var(--primary); }
 .storyboard-boundary-grip-icon { display: inline-flex; min-width: 36px; min-height: 28px; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: 6px; background: var(--card); color: var(--muted-foreground); transition: color .15s, border-color .15s, background .15s; }
 .storyboard-boundary-grip:hover .storyboard-boundary-grip-icon,.storyboard-boundary-grip.is-dragging .storyboard-boundary-grip-icon { border-color: var(--primary); background: var(--accent); color: var(--primary); }
 .storyboard-boundary-grip.is-disabled { cursor: default; opacity: .5; }
-.storyboard-boundary-menu { min-height: 28px; border: 1px solid transparent; border-radius: 6px; padding: 0 6px; color: var(--muted-foreground); font-size: 11px; white-space: nowrap; user-select: none; -webkit-user-select: none; }
+.storyboard-boundary-menu { display: inline-flex; min-height: 28px; align-items: center; justify-content: center; gap: 4px; border: 1px solid transparent; border-radius: 6px; padding: 0 6px; color: var(--muted-foreground); font-size: 11px; line-height: 1; white-space: nowrap; user-select: none; -webkit-user-select: none; }
 .storyboard-boundary-menu:hover:not(:disabled),.storyboard-boundary-menu:focus-visible { border-color: var(--border); background: var(--muted); color: var(--foreground); }
 .storyboard-boundary-menu:disabled { cursor: default; opacity: .5; }
 .storyboard-detail-panel { border: 1px solid var(--border); border-radius: 10px; background: var(--card); overflow: hidden; }

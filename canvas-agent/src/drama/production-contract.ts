@@ -44,7 +44,7 @@ export const directorPatchFields = {
     character: ["name", "appearance", "description", "prompt_description", "identity", "voice_description"],
     asset_card: ["prompt", "seven_steps", "references", "reference_policy", "target_skill", "source_repository", "recipe", "mode", "transaction", "character_name", "state_label", "view_layout", "generation_status", "actual_settings", "output_file", "heavy_scene", "structure_lock", "style_anchor_purpose"],
     asset: ["asset_name", "name", "title", "kind", "description", "prompt", "depends_on", "role", "version", "reference_role", "canvas_scope", "status"],
-    shot: ["title", "visual", "camera", "scene_id", "source_scene_id", "start_frame", "end_frame", "duration_frames", "dialogues", "audio", "required_assets", "description", "shot_type", "timeline_id", "story_order", "continuity_facts", "characters", "performance", "combat", "state_description", "continuity_cues", "reference_requirements", "prompt_contract_version", "identity_context", "offscreen_character_ids", "subject_usages", "utterance_refs", "features"],
+    shot: ["title", "visual", "camera", "scene_id", "source_scene_id", "start_frame", "end_frame", "duration_frames", "dialogues", "audio", "required_assets", "description", "shot_type", "timeline_id", "story_order", "continuity_facts", "characters", "performance", "combat", "state_description", "reference_requirements", "prompt_contract_version", "identity_context", "offscreen_character_ids", "subject_usages", "utterance_refs", "features"],
     segment: ["shot_ids", "start_frame", "end_frame", "generation_clip_duration", "mode", "mode_lock", "mode_selection_reason", "audio", "sound", "overall_soundscape", "non_diegetic_music", "references", "subjects", "execution_gate", "styleTemplateId", "motion_profile", "summary", "audio_bindings", "animation_term_ids", "animation_term_evidence"],
 } as const;
 
@@ -696,8 +696,12 @@ export const productionContractQuerySchema = z.object({ runtimeId: id.optional()
 export const productionContinuityReadSchema = z.object({ snapshot: z.enum(["draft", "published"]).default("draft"), view: z.enum(["summary", "issues", "timeline", "shot"]).default("summary"), targetId: id.optional(), objectId: id.optional(), pageSize: z.coerce.number().int().positive().optional(), cursor: z.string().optional() }).strict();
 export const productionContinuityCheckSchema = z.object({ expectedRevision: z.number().int().nonnegative(), operationId: id, snapshot: z.enum(["draft", "published"]).default("draft"), targetIds: z.array(id).optional() }).strict();
 // Keep requests unparsed at this boundary so invalid inputs produce diagnostics,
-// rather than disappearing into a transport-level schema error.
-export const productionPreflightSchema = z.object({ action: z.enum(["edit", "publish", "compile", "generate"]), request: z.record(z.unknown()) }).strict();
+// rather than disappearing into a transport-level schema error. Describe the
+// action-specific required revision so callers can construct a valid request.
+export const productionPreflightSchema = z.object({
+    action: z.enum(["edit", "publish", "compile", "generate"]),
+    request: z.record(z.unknown()).describe("按 action 传完整请求：compile 需 expectedRevision；edit/publish 需 operationId 和 expectedRevision；generate 需 runId、idempotencyKey、expectedRevision 和 targets。后端返回诊断，不要把 request 字段放在 request 外层。"),
+}).strict();
 type ProductionPreflightRequest =
     | { action: "edit"; request: z.infer<typeof productionEditSchema> }
     | { action: "publish"; request: z.infer<typeof productionPublishSchema> }

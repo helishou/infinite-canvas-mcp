@@ -37,6 +37,7 @@ export function createMediaStore(db: BackendDatabase): MediaStore {
                 height: options.height ?? null,
                 durationMs: options.durationMs ?? null,
                 createdAt: new Date().toISOString(),
+                sha256: createHash("sha256").update(data).digest("hex"),
             };
             db.upsertMediaFile(media);
             return media;
@@ -71,6 +72,7 @@ export function createMediaStore(db: BackendDatabase): MediaStore {
                 const extension = path.extname(name).replace(/[^a-z0-9.]/gi, "").slice(0, 12) || extensionForMime(mimeType);
                 filePath = path.join(categoryDir, `${randomUUID()}${extension}`);
                 await fs.promises.rename(tempPath, filePath);
+                const sha256 = digest.digest("hex");
                 const media: MediaFile = {
                     storageKey,
                     filePath,
@@ -80,9 +82,10 @@ export function createMediaStore(db: BackendDatabase): MediaStore {
                     height: options.height ?? null,
                     durationMs: options.durationMs ?? null,
                     createdAt: new Date().toISOString(),
+                    sha256,
                 };
                 db.upsertMediaFile(media);
-                return { ...media, sha256: digest.digest("hex"), prefix };
+                return { ...media, sha256, prefix };
             } catch (error) {
                 try { fs.unlinkSync(tempPath); } catch { /* partial media may not have been created */ }
                 if (filePath) try { fs.unlinkSync(filePath); } catch { /* archived media may not have been committed */ }
@@ -106,13 +109,15 @@ export function createMediaStore(db: BackendDatabase): MediaStore {
             const id = cryptoStableId(`runtime-media:${safeName}`);
             const createdAt = new Date().toISOString();
             const filePath = path.join(MEDIA_DIR, safeName);
-            if (fs.existsSync(filePath) && fs.statSync(filePath).size === data.length) {
-                db.upsertMediaFile({ storageKey: id, filePath, mimeType, bytes: data.length, width: null, height: null, durationMs: null, createdAt });
+            const sha256 = createHash("sha256").update(data).digest("hex");
+            if (fs.existsSync(filePath) && fs.statSync(filePath).size === data.length
+                && createHash("sha256").update(fs.readFileSync(filePath)).digest("hex") === sha256) {
+                db.upsertMediaFile({ storageKey: id, filePath, mimeType, bytes: data.length, width: null, height: null, durationMs: null, createdAt, sha256 });
                 return { id, name: safeName, path: filePath, size: data.length, bytes: data.length, mimeType, url: runtimeMediaUrl(safeName) };
             }
             fs.mkdirSync(MEDIA_DIR, { recursive: true, mode: 0o700 });
             fs.writeFileSync(filePath, data, { mode: 0o600 });
-            db.upsertMediaFile({ storageKey: id, filePath, mimeType, bytes: data.length, width: null, height: null, durationMs: null, createdAt });
+            db.upsertMediaFile({ storageKey: id, filePath, mimeType, bytes: data.length, width: null, height: null, durationMs: null, createdAt, sha256 });
             return { id, name: safeName, path: filePath, size: data.length, bytes: data.length, mimeType, url: runtimeMediaUrl(safeName) };
         },
 

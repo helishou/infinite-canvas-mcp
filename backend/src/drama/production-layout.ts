@@ -94,7 +94,7 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
     const diagnostics: ProductionLayoutPlan["diagnostics"] = [];
     const units = new Map<string, DraftUnit>(), activeIds = new Set<string>();
     const plan = arr(director?.source.asset_plan);
-    const scripts = director ? productionScriptNodes(production, owner) : [];
+    const scripts = director ? productionScriptNodes(production, owner).filter(script => nodeById.has(script.id)) : [];
     const scenes = director ? productionSceneEntries(director.source) : [];
     const sceneByShot = new Map<string, string>();
     for (const scene of scenes) for (const shotId of scene.shotIds) if (!sceneByShot.has(shotId)) sceneByShot.set(shotId, scene.id);
@@ -140,11 +140,30 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
                 if (priorMember && !nodeById.has(member.nodeId)) { member.position = priorMember.position; member.size = priorMember.size; }
             }
         }
+        let repairedDetachedVideo = false;
         for (const member of active.members) {
             const actual = nodeById.get(member.nodeId);
-            if (actual?.position) { member.position = { x: Number(actual.position.x), y: Number(actual.position.y) }; member.size = { width: size(actual.width, member.size.width), height: size(actual.height, member.size.height) }; }
+            if (actual?.position) {
+                const sceneBounds = member.role === "video" && active.sceneId ? sceneGeometry.get(active.sceneId) : undefined;
+                const actualSize = { width: size(actual.width, member.size.width), height: size(actual.height, member.size.height) };
+                const outsideScene = Boolean(sceneBounds && (
+                    Number(actual.position.x) < sceneBounds.position.x
+                    || Number(actual.position.y) < sceneBounds.position.y
+                    || Number(actual.position.x) + actualSize.width > sceneBounds.position.x + sceneBounds.width
+                    || Number(actual.position.y) + actualSize.height > sceneBounds.position.y + sceneBounds.height
+                ));
+                if (outsideScene) repairedDetachedVideo = true;
+                else {
+                    member.position = { x: Number(actual.position.x), y: Number(actual.position.y) };
+                    member.size = actualSize;
+                }
+            }
         }
-        const anchor = active.members.find(member => nodeById.has(member.nodeId));
+        if (repairedDetachedVideo) {
+            const video = active.members.find(member => member.role === "video")!;
+            active.bounds = { position: { ...video.position }, size: { ...video.size } };
+        }
+        const anchor = repairedDetachedVideo ? undefined : active.members.find(member => nodeById.has(member.nodeId));
         const priorAnchor = anchor && old?.members.find(member => member.nodeId === anchor.nodeId);
         const templateAnchor = anchor && templatePositions.get(anchor.nodeId);
         if (anchor && !old && templateAnchor) {
@@ -242,7 +261,11 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
         const sceneVideoIds = sceneId ? videoNodesByScene.get(sceneId) || [] : [];
         const videoIndex = sceneVideoIds.indexOf(nodeId);
         const heightBefore = sceneVideoIds.slice(0, videoIndex).reduce((total, priorNodeId) => total + videoSize(priorNodeId).height + 100, 0);
-        const position = existing?.position || (geometry ? { x: geometry.position.x + 40, y: geometry.position.y + geometry.videoTopOffset + heightBefore } : { x: 0, y: sceneY + videoNodeIds.slice(0, index).reduce((total, priorNodeId) => total + videoSize(priorNodeId).height + 160, 0) });
+        const preferred = geometry ? { x: geometry.position.x + 40, y: geometry.position.y + geometry.videoTopOffset + heightBefore } : { x: 0, y: sceneY + videoNodeIds.slice(0, index).reduce((total, priorNodeId) => total + videoSize(priorNodeId).height + 160, 0) };
+        const position = existing?.position && geometry && Number(existing.position.x) >= geometry.position.x && Number(existing.position.y) >= geometry.position.y
+            && Number(existing.position.x) + videoSize(nodeId).width <= geometry.position.x + geometry.width
+            && Number(existing.position.y) + videoSize(nodeId).height <= geometry.position.y + geometry.height
+            ? existing.position : preferred;
         const { width, height } = videoSize(nodeId);
         const targets = [...videoGroups.filter(item => item.nodeId === nodeId && item.group).map(item => `segment:${item.group!.id}`), ...(sceneId ? [`scene:${sceneId}`] : [])];
         createUnit(`video:${nodeId}`, "video", targets, sceneId, position, { width, height }, [{ role: "video", nodeId, nodeType: "minimax-h3:video", position, size: { width, height } }]);

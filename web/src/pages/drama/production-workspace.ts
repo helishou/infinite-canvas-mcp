@@ -4,6 +4,8 @@ import type { EpisodeProduction } from "@/services/backend-api";
 import type { DirectorWorkspace } from "./director-panel";
 
 export type SeriesWorkspaceView = "planning" | "episodes" | "shared";
+/** Episode selector sentinel: the first option routes back to the series planning view. */
+export const seriesPlanningOption = "series:planning";
 export type ProductionWorkspaceScope = "episode" | "canvas" | "shared-assets";
 export type ProductionNavigationItem = { id: string; workspace: DirectorWorkspace; labelKey: string; seriesView?: SeriesWorkspaceView };
 export type ProductionNavigationGroup = { id: string; labelKey: string; items: ProductionNavigationItem[] };
@@ -16,7 +18,7 @@ export function seriesWorkspaceView(value: string | null): SeriesWorkspaceView |
 
 export function productionNavigationGroups({ hasSeries, scope, setup = false, seriesSubviews = false }: { hasSeries: boolean; scope: ProductionWorkspaceScope; setup?: boolean; seriesSubviews?: boolean }): ProductionNavigationGroup[] {
     const groups: ProductionNavigationGroup[] = [];
-    // 下拉只保留「规划与资产 / 分集管理」；seriesSubviews 在子 Tab 栏里展开共享资产画布，规划项回到「剧目规划」。
+    // 顶部下拉用「规划与资产」代表剧目规划与其内部共享资产画布；seriesSubviews 再单列各剧目视图。
     if (hasSeries) groups.push({ id: "series", labelKey: "director.workspaceHierarchy.fullSeries", items: [
         { id: "series:planning", workspace: "series", seriesView: "planning", labelKey: seriesSubviews ? "director.workspaceHierarchy.planning" : "director.workspaceHierarchy.planningAssets" },
         ...(seriesSubviews ? [{ id: "series:shared", workspace: "series" as const, seriesView: "shared" as const, labelKey: "director.workspaceHierarchy.sharedCanvas" }] : []),

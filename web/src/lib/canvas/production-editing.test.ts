@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildDirectorClipStoryboardOperation, createProductionEditing, registerProductionPromptEditor, registerProductionStoryboardEditor, sourceSegmentForCanvasClip } from "./production-editing";
+import { buildDirectorClipStoryboardOperation, createProductionEditing, registerProductionBoundaryEditor, registerProductionPromptEditor, registerProductionStoryboardEditor, sourceSegmentForCanvasClip } from "./production-editing";
 import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import type { CanvasNodeData } from "@/types/canvas";
 const input = { nodeId: "H3", segmentId: "canvas-clip", prompt: "A changed action.", artifactId: "ART", sourceHash: "source", basePromptHash: "prompt" };
@@ -52,6 +52,17 @@ test("production storyboard writeback routes only a verified formal Clip and wai
         assert.deepEqual(await service.replaceStoryboardTrack(request), { sourceSaved: true });
         assert.deepEqual(order, ["flush", "edit"]);
         await assert.rejects(service.replaceStoryboardTrack({ ...request, segment: { ...request.segment, productionClipProjection: { targetId: "OTHER" } } }), /PROJECTION_MISMATCH/);
+    } finally { remove(); }
+});
+
+test("H3 continuation settings reverse-sync through the production boundary editor", async () => {
+    const order: string[] = [], request = { targetId: "SOURCE_C4", tailFrameContinuation: true, motionContextEnabled: false };
+    const remove = registerProductionBoundaryEditor("canvas", async input => { order.push("edit"); assert.deepEqual(input, request); return { sourceSaved: true }; });
+    try {
+        const service = createProductionEditing("canvas", () => node(), async () => { order.push("flush"); });
+        assert.deepEqual(await service.setContinuationBoundary({ nodeId: "H3", segmentId: "canvas-clip", ...request }), { sourceSaved: true });
+        assert.deepEqual(order, ["flush", "edit"]);
+        await assert.rejects(service.setContinuationBoundary({ nodeId: "H3", segmentId: "missing", ...request }), /CONTINUATION_BOUNDARY_PROJECTION_MISMATCH/);
     } finally { remove(); }
 });
 

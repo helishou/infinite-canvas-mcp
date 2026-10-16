@@ -1,4 +1,4 @@
-import { BackendApiError } from "@/services/backend-api";
+import { BackendApiError, backendMediaUrl } from "@/services/backend-api";
 import { ArrowDownUp, Clapperboard, Copy, Download, FileUp, Folder, FolderPlus, MoreHorizontal, PencilLine, Plus, Search, Trash2, Upload, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { App, Alert, Button, Card, Drawer, Dropdown, Empty, Form, Input, Modal, Pagination, Select, Space, Tag, Typography } from "antd";
@@ -17,7 +17,7 @@ import { SceneColorPaletteEditor } from "@/components/canvas/scene-color-palette
 import { findCharacterVoiceAsset, hasCharacterVoiceSource, resolveCharacterVoiceName } from "@/lib/character-voice";
 import { extractSceneColorPalette, normalizeSceneColorPalette } from "@/lib/canvas/scene-color-palette";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
-import { useAssetStore, libraryErrorText, type Asset, type AssetKind, type CharacterAsset, type CharacterImage, type ImageAsset, type VideoAsset, type AudioAsset, type SceneAsset, type SceneImage } from "@/stores/use-asset-store";
+import { useAssetStore, libraryErrorText, type Asset, type AssetKind, type CharacterAsset, type CharacterImage, type ImageAsset, type VideoAsset, type AudioAsset, type SceneAsset, type PropAsset, type SceneImage } from "@/stores/use-asset-store";
 import { readAssetRemoteBlob } from "./asset-transfer-validation";
 import { exportAssets, exportCharacterImages, readAssetPackage } from "./asset-transfer";
 import { ALL_DRAMAS, ROOT_FOLDER, UNASSIGNED_DRAMA, countByDrama, countByFolder, filterAssets, isTagFolder, type AssetLibraryFilters } from "./asset-facet-counts";
@@ -75,7 +75,7 @@ export default function AssetsPage() {
     const [dramaFilter, setDramaFilter] = useState(ALL_DRAMAS);
     const [folderFilter, setFolderFilter] = useState<string | null>(null);
     const [selection, setSelection] = useState<string[]>([]);
-    const selectionHasTaggableAsset = useMemo(() => selection.some((id) => assets.some((asset) => asset.id === id && asset.kind !== "character" && asset.kind !== "scene")), [assets, selection]);
+    const selectionHasTaggableAsset = useMemo(() => selection.some((id) => assets.some((asset) => asset.id === id && asset.kind !== "character" && asset.kind !== "scene" && asset.kind !== "prop")), [assets, selection]);
     const [page, setPage] = useState(1);
     const [pageSize, setPageSize] = useState(10);
     const [editingAsset, setEditingAsset] = useState<Asset | null>(null);
@@ -116,7 +116,7 @@ export default function AssetsPage() {
             if (extractionId === scenePaletteExtractionIdRef.current) setExtractingScenePalette(false);
         }
     }, [message, t]);
-    const validAssets = useMemo(() => assets.filter((asset) => asset.kind === "text" || asset.kind === "image" || asset.kind === "video" || asset.kind === "audio" || asset.kind === "character" || asset.kind === "scene"), [assets]);
+    const validAssets = useMemo(() => assets.filter((asset) => asset.kind === "text" || asset.kind === "image" || asset.kind === "video" || asset.kind === "audio" || asset.kind === "character" || asset.kind === "scene" || asset.kind === "prop"), [assets]);
     const audioAssets = useMemo(() => assets.filter((asset): asset is AudioAsset => asset.kind === "audio"), [assets]);
     const dramaOptions = useMemo(() => [
         { label: t("assets.drama.all"), value: ALL_DRAMAS },
@@ -142,7 +142,7 @@ export default function AssetsPage() {
     const childFoldersOf = (id: string) => folders.filter((folder) => folder.parentId === id);
     const legacyTagFolders = useMemo(() => {
         const counts = new Map<string, number>();
-        for (const asset of assets) if (asset.kind !== "character" && asset.kind !== "scene") for (const tag of asset.tags || []) counts.set(tag, (counts.get(tag) || 0) + 1);
+        for (const asset of assets) if (asset.kind !== "character" && asset.kind !== "scene" && asset.kind !== "prop") for (const tag of asset.tags || []) counts.set(tag, (counts.get(tag) || 0) + 1);
         return Array.from(counts.entries()).sort((a, b) => a[0].localeCompare(b[0], "zh-Hans-CN"));
     }, [assets]);
     const currentFolderName = useMemo(() => {
@@ -196,7 +196,7 @@ export default function AssetsPage() {
         let count = 0;
         selection.forEach((id) => {
             const asset = useAssetStore.getState().assets.find((a) => a.id === id);
-            if (asset && asset.kind !== "character" && asset.kind !== "scene" && !(asset.tags || []).includes(tag)) {
+            if (asset && asset.kind !== "character" && asset.kind !== "scene" && asset.kind !== "prop" && !(asset.tags || []).includes(tag)) {
                 void updateAsset(id, { tags: [...(asset.tags || []), tag] }).catch(error => message.error(libraryErrorText(error)));
                 count += 1;
             }
@@ -308,7 +308,7 @@ export default function AssetsPage() {
         setImageDraft(asset.kind === "image" ? asset.data as ImageAsset["data"] : null);
         setVideoDraft(asset.kind === "video" ? asset.data as VideoAsset["data"] : null);
         setAudioDraft(asset.kind === "audio" ? asset.data as AudioAsset["data"] : null);
-        setSceneImageDraft(asset.kind === "scene" ? asset.data.image : null);
+        setSceneImageDraft(asset.kind === "scene" || asset.kind === "prop" ? asset.data.image : null);
         setSceneColorCardDraft(asset.kind === "scene" ? asset.data.colorCard || null : null);
         setSceneColorPaletteDraft(asset.kind === "scene" ? asset.data.colorPalette || [] : []);
         scenePaletteExtractionIdRef.current++;
@@ -340,7 +340,7 @@ export default function AssetsPage() {
             tags: asset.tags || [],
             source: asset.source,
             note: asset.note,
-            content: asset.kind === "text" ? asset.data.content : asset.kind === "character" ? asset.data.description : asset.kind === "scene" ? asset.data.description : "",
+            content: asset.kind === "text" ? asset.data.content : asset.kind === "character" ? asset.data.description : asset.kind === "scene" || asset.kind === "prop" ? asset.data.description : "",
             sceneColorCardPrompt: asset.kind === "scene" ? asset.data.colorCardPrompt : "",
             dramaId: asset.dramaId && dramas.some((drama) => drama.id === asset.dramaId) ? asset.dramaId : UNASSIGNED_DRAMA,
         });
@@ -353,7 +353,7 @@ export default function AssetsPage() {
         const base = {
             title: values.title.trim(),
             coverUrl: values.coverUrl?.trim() || (values.kind === "image" && imageDraft ? imageDraft.dataUrl : ""),
-            tags: values.kind === "character" || values.kind === "scene" ? [] : values.tags || [],
+            tags: values.kind === "character" || values.kind === "scene" || values.kind === "prop" ? [] : values.tags || [],
             source: values.source?.trim(),
             note: values.note?.trim(),
             dramaId: values.dramaId && values.dramaId !== UNASSIGNED_DRAMA ? values.dramaId : null,
@@ -407,6 +407,14 @@ export default function AssetsPage() {
                 colorCardPrompt: (values.sceneColorCardPrompt || "").trim(),
             };
             const asset = { ...base, kind: "scene" as const, data: sceneData, coverUrl: sceneImageDraft.url };
+            await (editingAsset ? updateAsset(editingAsset.id, asset, editingAsset, resolveConflicts) : addAsset({ ...asset, id: newAssetId }));
+        } else if (values.kind === "prop") {
+            const propData: PropAsset["data"] = {
+                name: values.title.trim(),
+                description: (values.content || "").trim(),
+                image: sceneImageDraft || { url: "", storageKey: "", name: values.title.trim(), width: 0, height: 0, bytes: 0, mimeType: "" },
+            };
+            const asset = { ...base, kind: "prop" as const, data: propData, coverUrl: propData.image.url };
             await (editingAsset ? updateAsset(editingAsset.id, asset, editingAsset, resolveConflicts) : addAsset({ ...asset, id: newAssetId }));
         } else {
             if (!imageDraft) { message.error(t("assets.selectImage")); return; }
@@ -486,11 +494,12 @@ export default function AssetsPage() {
     const downloadImage = async (asset: Asset) => {
         if (asset.kind === "text" || asset.kind === "character") return;
         try {
-            const blob = asset.kind === "scene"
+            const blob = asset.kind === "scene" || asset.kind === "prop"
                 ? (asset.data.image.storageKey ? await getImageBlob(asset.data.image.storageKey) : asset.data.image.url ? await readAssetRemoteBlob(asset.data.image.url) : null)
                 : await readAssetMediaBlob(asset);
             if (!blob) throw new Error("媒体不可读取");
-            const extension = (asset.kind === "scene" ? asset.data.image.mimeType : asset.data.mimeType).split("/")[1]?.split("+")[0] || (asset.kind === "image" ? "png" : asset.kind === "video" ? "mp4" : "png");
+            const mimeType = asset.kind === "scene" || asset.kind === "prop" ? asset.data.image.mimeType : asset.data.mimeType;
+            const extension = mimeType.split("/")[1]?.split("+")[0] || (asset.kind === "image" ? "png" : asset.kind === "video" ? "mp4" : "png");
             saveAs(blob, `${asset.title || asset.kind}.${extension}`);
         } catch { message.error(t("common.downloadFailed")); }
     };
@@ -884,6 +893,7 @@ export default function AssetsPage() {
                                         { label: t("assets.kinds.audio"), value: "audio" },
                                         { label: t("assets.kinds.character"), value: "character" },
                                         { label: t("assets.kinds.scene"), value: "scene" },
+                                        { label: t("assets.kinds.prop"), value: "prop" },
                                     ]}
                                     onChange={(value) => setFormKind(value)}
                                 />
@@ -1004,6 +1014,18 @@ export default function AssetsPage() {
                                         <Input.TextArea rows={3} placeholder={t("assets.fields.sceneColorCardPromptPlaceholder")} />
                                     </Form.Item>
                                 </>
+                            ) : formKind === "prop" ? (
+                                <>
+                                    <Form.Item name="content" label={t("assets.fields.propDescription")}>
+                                        <Input.TextArea rows={4} placeholder={t("assets.fields.propDescriptionPlaceholder")} />
+                                    </Form.Item>
+                                    <Form.Item label={t("assets.fields.propImage")}>
+                                        <div className="rounded-lg border border-dashed border-border p-4">
+                                            <Button icon={<Upload className="size-4" />} onClick={() => sceneImageInputRef.current?.click()}>{t("assets.selectPropImage")}</Button>
+                                            {sceneImageDraft ? <Typography.Text type="secondary" className="ml-3 text-xs">{sceneImageDraft.width}x{sceneImageDraft.height} · {formatBytes(sceneImageDraft.bytes)}</Typography.Text> : <Typography.Text type="secondary" className="ml-3 text-xs">{t("assets.noPropImageSelected")}</Typography.Text>}
+                                        </div>
+                                    </Form.Item>
+                                </>
                             ) : (
                                 <Form.Item label={t("assets.fields.imageContent")} required>
                                     <div className="rounded-lg border border-dashed border-border p-4">
@@ -1028,7 +1050,7 @@ export default function AssetsPage() {
                             <Form.Item name="dramaId" label={t("assets.drama.field")}>
                                 <Select options={dramaOptions.filter((option) => option.value !== ALL_DRAMAS)} />
                             </Form.Item>
-                            {formKind !== "character" && formKind !== "scene" ? (
+                            {formKind !== "character" && formKind !== "scene" && formKind !== "prop" ? (
                                 <Form.Item name="coverUrl" label={t("assets.fields.coverUrl")}>
                                     <Space.Compact className="w-full">
                                         <Input placeholder={t("assets.fields.coverPlaceholder")} />
@@ -1038,7 +1060,7 @@ export default function AssetsPage() {
                                     </Space.Compact>
                                 </Form.Item>
                             ) : null}
-                            {formKind !== "character" && formKind !== "scene" ? (
+                            {formKind !== "character" && formKind !== "scene" && formKind !== "prop" ? (
                                 <Form.Item name="tags" label={t("assets.fields.tags")}>
                                     <Select mode="tags" tokenSeparators={[",", "，"]} placeholder={t("assets.fields.tagsPlaceholder")} />
                                 </Form.Item>
@@ -1056,8 +1078,8 @@ export default function AssetsPage() {
                     <div className="rounded-xl border border-border bg-muted/40 p-4">
                         <Typography.Text strong>{t("assets.preview")}</Typography.Text>
                         <div className="mt-3 overflow-hidden rounded-lg border border-border bg-background">
-                            {(formKind === "character" ? characterCoverUrl : formKind === "scene" ? sceneCoverUrl : coverUrl || imageDraft?.dataUrl) ? (
-                                <img src={formKind === "character" ? characterCoverUrl : formKind === "scene" ? sceneCoverUrl : coverUrl || imageDraft?.dataUrl} alt="" className="aspect-[4/3] w-full object-cover" />
+                            {(formKind === "character" ? characterCoverUrl : formKind === "scene" || formKind === "prop" ? sceneCoverUrl : coverUrl || imageDraft?.dataUrl) ? (
+                                <img src={formKind === "character" ? characterCoverUrl : formKind === "scene" || formKind === "prop" ? sceneCoverUrl : coverUrl || imageDraft?.dataUrl} alt="" className="aspect-[4/3] w-full object-cover" />
                             ) : (
                                 <div className="flex aspect-[4/3] items-center justify-center bg-muted p-5 text-center text-sm text-muted-foreground">{content || t("assets.noCover")}</div>
                             )}
@@ -1066,13 +1088,13 @@ export default function AssetsPage() {
                                     {title || t("assets.untitled")}
                                 </Typography.Text>
                                 <div className="mt-2 flex flex-wrap gap-1.5">
-                                    {formKind !== "character" && formKind !== "scene" && tags.length ? (
+                                    {formKind !== "character" && formKind !== "scene" && formKind !== "prop" && tags.length ? (
                                         tags.map((tag) => (
                                             <Tag key={tag} className="m-0">
                                                 {tag}
                                             </Tag>
                                         ))
-                                    ) : formKind !== "character" && formKind !== "scene" ? (
+                                    ) : formKind !== "character" && formKind !== "scene" && formKind !== "prop" ? (
                                         <Tag className="m-0">{t("assets.untagged")}</Tag>
                                     ) : null}
                                 </div>
@@ -1167,6 +1189,9 @@ function useResolvedCoverUrl(asset: Asset | null) {
         } else if (asset.kind === "scene") {
             if (asset.data.image.storageKey) lookups.push(resolveImageUrl(asset.data.image.storageKey, asset.data.image.url));
             else if (asset.data.image.url) lookups.push(Promise.resolve(asset.data.image.url));
+        } else if (asset.kind === "prop") {
+            if (asset.data.image.storageKey) lookups.push(resolveImageUrl(asset.data.image.storageKey, asset.data.image.url));
+            else if (asset.data.image.url) lookups.push(Promise.resolve(asset.data.image.url));
         }
         if (!lookups.length) return;
         let cancelled = false;
@@ -1242,12 +1267,12 @@ function AssetCard({ asset, selected, onSelect, onOpen, onEdit, onCopy, onDownlo
                     </Typography.Paragraph>
                     <div className="mt-3 flex flex-wrap gap-1.5">
                         <AssetDramaTag asset={asset} />
-                        {(asset.kind === "character" || asset.kind === "scene" ? [] : asset.tags || []).slice(0, 3).map((tag) => (
+                        {(asset.kind === "character" || asset.kind === "scene" || asset.kind === "prop" ? [] : asset.tags || []).slice(0, 3).map((tag) => (
                             <Tag key={tag} className="m-0 ui-caption">
                                 {tag}
                             </Tag>
                         ))}
-                        {asset.kind !== "character" && asset.kind !== "scene" && !asset.tags?.length ? <Tag className="m-0 ui-caption">{t("assets.noTags")}</Tag> : null}
+                        {asset.kind !== "character" && asset.kind !== "scene" && asset.kind !== "prop" && !asset.tags?.length ? <Tag className="m-0 ui-caption">{t("assets.noTags")}</Tag> : null}
                     </div>
                 </div>
             </button>
@@ -1261,8 +1286,8 @@ function AssetCard({ asset, selected, onSelect, onOpen, onEdit, onCopy, onDownlo
                         {t("common.copy")}
                     </Button>
                 ) : null}
-                {asset.kind === "image" || asset.kind === "video" || asset.kind === "audio" || asset.kind === "scene" ? (
-                    <Button size="small" disabled={missingSource} icon={<Download className="size-4" />} onClick={() => onDownload(asset)}>
+                {asset.kind === "image" || asset.kind === "video" || asset.kind === "audio" || asset.kind === "scene" || asset.kind === "prop" ? (
+                    <Button size="small" disabled={missingSource || asset.kind === "prop" && !asset.data.image.storageKey && !asset.data.image.url} icon={<Download className="size-4" />} onClick={() => onDownload(asset)}>
                         {t("common.download")}
                     </Button>
                 ) : null}
@@ -1302,7 +1327,7 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload, onDownloadCharacter }
                         <Space size={[4, 4]} wrap>
                             <Tag>{t(`assets.kinds.${asset.kind}`)}</Tag>
                             <AssetDramaTag asset={asset} />
-                            {(asset.kind === "character" || asset.kind === "scene" ? [] : asset.tags || []).map((tag) => (
+                            {(asset.kind === "character" || asset.kind === "scene" || asset.kind === "prop" ? [] : asset.tags || []).map((tag) => (
                                 <Tag key={tag}>{tag}</Tag>
                             ))}
                         </Space>
@@ -1347,6 +1372,11 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload, onDownloadCharacter }
                                 {asset.data.colorCard ? <MediaImage src={asset.data.colorCard.url} alt={t("assets.fields.sceneColorCard")} className="!max-h-40 !rounded-md !object-cover" /> : null}
                                 {asset.data.colorCardPrompt ? <Typography.Paragraph type="secondary" className="!mb-0 whitespace-pre-wrap">{asset.data.colorCardPrompt}</Typography.Paragraph> : null}
                             </div>
+                        ) : asset.kind === "prop" ? (
+                            <div className="mt-2 space-y-3">
+                                {asset.data.description ? <Typography.Paragraph className="!mb-0 whitespace-pre-wrap">{asset.data.description}</Typography.Paragraph> : null}
+                                {asset.data.image.url || asset.data.image.storageKey ? <MediaImage src={asset.data.image.storageKey ? backendMediaUrl(asset.data.image.storageKey) : asset.data.image.url} alt={asset.title} name={asset.title} className="!rounded-md" /> : null}
+                            </div>
                         ) : (
                             <Typography.Text className="mt-2 block">
                                 {asset.data.width}x{asset.data.height} · {formatBytes(asset.data.bytes)} · {asset.data.mimeType}
@@ -1365,8 +1395,8 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload, onDownloadCharacter }
                                 {t("assets.copyText")}
                             </Button>
                         ) : null}
-                        {asset.kind === "image" || asset.kind === "video" || asset.kind === "audio" || asset.kind === "scene" ? (
-                            <Button type="primary" icon={<Download className="size-4" />} onClick={() => onDownload(asset)}>
+                        {asset.kind === "image" || asset.kind === "video" || asset.kind === "audio" || asset.kind === "scene" || asset.kind === "prop" ? (
+                            <Button type="primary" disabled={asset.kind === "prop" && !asset.data.image.storageKey && !asset.data.image.url} icon={<Download className="size-4" />} onClick={() => onDownload(asset)}>
                                 {asset.kind === "video" ? t("assets.downloadVideo") : asset.kind === "audio" ? t("assets.downloadAudio") : t("assets.downloadImage")}
                             </Button>
                         ) : null}
@@ -1398,6 +1428,7 @@ function assetSummary(asset: Asset) {
     if (asset.kind === "audio") return `${formatBytes(asset.data.bytes)}${asset.data.durationMs ? ` · ${Math.round(asset.data.durationMs / 1000)}s` : ""}`;
     if (asset.kind === "character") return asset.data.description || `${asset.data.images.length} images`;
     if (asset.kind === "scene") return asset.data.description || asset.data.colorCardPrompt || `${asset.data.image.width}x${asset.data.image.height}`;
+    if (asset.kind === "prop") return asset.data.description || `${asset.data.image.width}x${asset.data.image.height}`;
     return `${asset.data.width}x${asset.data.height} · ${formatBytes(asset.data.bytes)} · ${asset.data.mimeType}`;
 }
 

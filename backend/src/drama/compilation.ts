@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { gzipSync, gunzipSync } from "node:zlib";
 import { Worker } from "node:worker_threads";
 import { compileAchengDirector, resolveAchengEngine, achengEngineIdentity } from "@basketikun/canvas-agent/skills/acheng";
 import { canonicalProduction, diagnosticBlocksAction, directorProductionSchema, isSubjectPromptAssembly, type DirectorProduction, type ProductionBlockingAction, type ProductionDiagnostic } from "@basketikun/canvas-agent/drama/production-contract";
@@ -77,10 +78,69 @@ export const productionCompilationBusy = () => activeJobs.size > 0;
 const hasFatalCompilationError = (diagnostics: DiagnosticLike[]) => diagnostics.some(isGlobalCompilationBlocker);
 type CompilationAlias = { operationId: string; owner: string; id: string; expectedRevision: number; requestHash: string; requestFingerprint?: string; compilerInputFingerprint: string; reusedFromOperationId: string; createdAt: string };
 
-/** Frozen compiler packets are sidecar files; only the existing ops transaction edits production. */
+/** SQLite holds frozen compiler packets; only the existing ops transaction edits production. */
 export class ProductionCompilationService {
     onSettled?: (id: string) => void;
     constructor(private service: EpisodeProductionService, private root: string, private compiler: Compiler = compileAchengDirector) {}
+
+    private database() { return (this.service as any).storageDatabase?.(); }
+    private encode(value: unknown) { return gzipSync(Buffer.from(JSON.stringify(value), "utf8")); }
+    private decode<T>(value: unknown): T {
+        if (!value) throw new Error("编译记录缺少持久化数据");
+        return JSON.parse(gunzipSync(Buffer.from(value as Uint8Array)).toString("utf8")) as T;
+    }
+    private jobKey(owner: string, operationId: string) { return `${owner}\0${operationId}`; }
+    private mapPersistentMediaPaths<T>(value: T, direction: "store" | "load"): T {
+        const service = this.service as any;
+        const visit = (item: any): any => {
+            if (Array.isArray(item)) return item.map(visit);
+            if (!item || typeof item !== "object") {
+                if (typeof item !== "string") return item;
+                if (direction === "store" && path.isAbsolute(item)) {
+                    const storageKey = service.mediaStorageKeyForPath?.(item);
+                    return storageKey ? `storage-key://${storageKey}` : item;
+                }
+                if (direction === "load" && item.startsWith("storage-key://")) return service.mediaPathForStorageKey?.(item.slice("storage-key://".length)) || item;
+                return item;
+            }
+            const out: Record<string, unknown> = {};
+            for (const [key, child] of Object.entries(item)) {
+                if (direction === "store" && key === "references" && child && typeof child === "object" && !Array.isArray(child)) {
+                    out[key] = Object.fromEntries(Object.entries(child as Record<string, unknown>).map(([identity, file]) => {
+                        const storageKey = typeof file === "string" && path.isAbsolute(file) ? service.mediaStorageKeyForPath?.(file) : undefined;
+                        return [identity, storageKey ? `storage-key://${storageKey}` : visit(file)];
+                    }));
+                } else out[key] = visit(child);
+            }
+            return out;
+        };
+        return visit(value);
+    }
+    private stabilizeCompiledDirector(value: DirectorProduction): DirectorProduction {
+        const director = this.mapPersistentMediaPaths(value, "store");
+        const unresolved: string[] = [];
+        const inspect = (item: any, at = "director.source") => {
+            if (Array.isArray(item)) return item.forEach((child, index) => inspect(child, `${at}[${index}]`));
+            if (!item || typeof item !== "object") return;
+            for (const [key, child] of Object.entries(item)) {
+                if (["file", "approved_file"].includes(key) && typeof child === "string" && path.isAbsolute(child)) unresolved.push(`${at}.${key}`);
+                else inspect(child, `${at}.${key}`);
+            }
+        };
+        inspect(director.source);
+        if (this.database() && unresolved.length) throw Object.assign(new Error(`编译产物仍含未登记的绝对媒体路径：${unresolved.join(", ")}`), { code: "COMPILATION_MEDIA_NOT_ARCHIVED" });
+        const sourceChanged = hash(value.source) !== hash(director.source);
+        const sourceHash = sourceChanged ? hash(director.source) : value.sourceHash;
+        director.sourceHash = sourceHash;
+        if (sourceChanged) for (const artifact of director.artifacts) {
+            artifact.sourceHash = sourceHash;
+            artifact.receipt = { ...artifact.receipt, sourceHash,
+                ...(artifact.receipt.sourceMap ? { sourceMap: { ...artifact.receipt.sourceMap, sourceHash } } : {}),
+                ...(artifact.receipt.compilationScope ? { compilationScope: { ...artifact.receipt.compilationScope, projectedSourceHash: sourceHash } } : {}) };
+        }
+        if (sourceChanged && director.workflow.currentWork) director.workflow.currentWork = { ...director.workflow.currentWork, sourceHash };
+        return director;
+    }
 
     private compilationDirector(input: DirectorProduction) {
         const director = directorProductionSchema.parse(structuredClone(input));
@@ -128,7 +188,27 @@ export class ProductionCompilationService {
     }
 
     private jobFile(operationId: string) { return path.join(this.root, "operations", hash(operationId) + ".json"); }
-    private saveJob(job: CompilationJob | CompilationAlias) {
+    private saveJob(job: CompilationJob | CompilationAlias, packet?: unknown, clearPacket = false) {
+        const db = this.database();
+        if (db) {
+            const director = "director" in job ? job.director : undefined;
+            const persistedJob = this.mapPersistentMediaPaths(job, "store");
+            const persistedPacket = packet === undefined ? undefined : this.mapPersistentMediaPaths(packet, "store");
+            const now = new Date().toISOString();
+            db.db.prepare(`INSERT INTO production_compilation_jobs
+                (owner, operation_id, prepared_id, status, expected_revision, source_hash, engine_runtime_id, compiler_hash, packet_gzip, packet_hash, job_gzip, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner, operation_id) DO UPDATE SET prepared_id=excluded.prepared_id,status=excluded.status,
+                expected_revision=excluded.expected_revision,source_hash=excluded.source_hash,engine_runtime_id=excluded.engine_runtime_id,
+                compiler_hash=excluded.compiler_hash,packet_gzip=CASE WHEN ? THEN NULL ELSE COALESCE(excluded.packet_gzip,production_compilation_jobs.packet_gzip) END,
+                packet_hash=CASE WHEN ? THEN NULL ELSE COALESCE(excluded.packet_hash,production_compilation_jobs.packet_hash) END,
+                job_gzip=excluded.job_gzip,updated_at=excluded.updated_at`).run(
+                job.owner, job.operationId, "preparedId" in job ? job.preparedId : null, "status" in job ? job.status : "blocked",
+                job.expectedRevision, director?.sourceHash || ("result" in job ? job.result?.sourceHash : null) || null,
+                director?.engine?.runtimeId || null, director?.engine?.compilerHash || null, persistedPacket === undefined ? null : this.encode(persistedPacket),
+                persistedPacket === undefined ? null : hash(persistedPacket), this.encode(persistedJob), now, now, clearPacket ? 1 : 0, clearPacket ? 1 : 0);
+            return;
+        }
         const file = this.jobFile(job.operationId);
         fs.mkdirSync(path.dirname(file), { recursive: true });
         const temporary = `${file}.${crypto.randomUUID()}.tmp`;
@@ -140,7 +220,22 @@ export class ProductionCompilationService {
             fs.writeFileSync(pending, JSON.stringify({ version: 1, operationId: job.operationId }), "utf8"); fs.renameSync(pending, index);
         }
     }
-    private loadJob(operationId: string): CompilationJob | undefined {
+    private loadJob(operationId: string, owner?: string): CompilationJob | undefined {
+        const db = this.database();
+        if (db) {
+            const rows = (owner
+                ? db.db.prepare("SELECT job_gzip FROM production_compilation_jobs WHERE operation_id=? AND owner=?").all(operationId, owner)
+                : db.db.prepare("SELECT job_gzip FROM production_compilation_jobs WHERE operation_id=? ORDER BY updated_at DESC").all(operationId)) as Array<{ job_gzip: Uint8Array }>;
+            if (rows.length > 1 && !owner) throw new Error("编译 operationId 跨 owner 重复，无法安全解析");
+            if (!rows.length) return undefined;
+            const saved = this.mapPersistentMediaPaths(this.decode<CompilationJob | CompilationAlias>(rows[0].job_gzip), "load");
+            if (!("director" in saved)) {
+                const original = this.loadJob(saved.reusedFromOperationId, saved.owner);
+                if (!original?.director || original.owner !== saved.owner || original.id !== saved.id || original.compilerInputFingerprint !== saved.compilerInputFingerprint || !this.reusableBlock(original)) throw new Error("INVALID_COMPILATION_ALIAS: 原阻塞回执不可恢复");
+                return { ...original, ...saved };
+            }
+            return saved;
+        }
         const file = this.jobFile(operationId);
         if (!fs.existsSync(file)) return undefined;
         const saved = JSON.parse(fs.readFileSync(file, "utf8")) as CompilationJob | CompilationAlias;
@@ -152,17 +247,78 @@ export class ProductionCompilationService {
         }
         return saved;
     }
+    private loadPacket(preparedId: string, owner?: string, id?: string) {
+        const db = this.database();
+        if (db) {
+            const row = db.db.prepare("SELECT owner, operation_id, packet_gzip, packet_hash FROM production_compilation_jobs WHERE prepared_id=?").get(preparedId) as { owner: string; operation_id: string; packet_gzip?: Uint8Array; packet_hash?: string } | undefined;
+            if (!row?.packet_gzip) throw new Error("编译包不存在或已经完成应用归档");
+            if (owner && row.owner !== owner) throw new Error("Compilation belongs to a different production");
+            let storedPacket: any;
+            try { storedPacket = this.decode<any>(row.packet_gzip); } catch { throw new Error("Frozen compilation bytes changed"); }
+            if (!row.packet_hash || hash(storedPacket) !== row.packet_hash) throw new Error("Frozen compilation bytes changed");
+            const packet = this.mapPersistentMediaPaths(storedPacket, "load");
+            if (id && packet.id !== id) throw new Error("编译包不存在或不属于当前制作对象");
+            return packet;
+        }
+        const { packetHash, ...packet } = JSON.parse(fs.readFileSync(this.file(preparedId), "utf8"));
+        if (hash(packet) !== packetHash) throw new Error("Frozen compilation bytes changed");
+        return packet;
+    }
+    private packetJob(preparedId: string) {
+        const db = this.database();
+        if (db) {
+            const row = db.db.prepare("SELECT job_gzip FROM production_compilation_jobs WHERE prepared_id=?").get(preparedId) as { job_gzip: Uint8Array } | undefined;
+            return row ? this.mapPersistentMediaPaths(this.decode<CompilationJob>(row.job_gzip), "load") : undefined;
+        }
+        const directory = path.join(this.root, "operations");
+        if (!fs.existsSync(directory)) return undefined;
+        for (const name of fs.readdirSync(directory).filter(name => name.endsWith(".json"))) {
+            const job = JSON.parse(fs.readFileSync(path.join(directory, name), "utf8")) as CompilationJob;
+            if (job.preparedId === preparedId) return job;
+        }
+        return undefined;
+    }
+    private workingDirectory(preparedId: string) {
+        if (!/^[a-f0-9-]{36}$/i.test(preparedId)) throw new Error("Invalid compilation handle");
+        return path.join(this.root, preparedId);
+    }
+    private savePreparedPacket(packet: any) {
+        const operationId = String(packet.operationId || `compilation:${packet.preparedId}`);
+        const job: CompilationJob = {
+            operationId, owner: packet.owner, id: packet.id, expectedRevision: packet.expectedRevision,
+            requestHash: hash({ preparedId: packet.preparedId }), baselineHash: packet.baselineHash,
+            preparedId: packet.preparedId, director: packet.director, references: {}, scope: packet.scope,
+            scopeHash: packet.scopeHash, status: "succeeded", diagnostics: packet.diagnostics || [],
+            result: this.shortResult(packet.preparedId, packet), continuityReceipt: packet.continuityReceipt,
+            createdAt: new Date().toISOString(),
+        };
+        this.saveJob(job, packet);
+    }
+    private markApplied(job: CompilationJob | undefined, receipt: any) {
+        if (!job) return;
+        const compact = { ...job, application: receipt, references: {}, director: { engine: job.director.engine, sourceHash: job.director.sourceHash, source: {}, artifacts: [] } as unknown as DirectorProduction };
+        this.saveJob(compact, undefined, true);
+    }
     private reusableBlock(job: CompilationJob) {
         const errors = job.diagnostics.filter((item: DiagnosticLike) => diagnosticForAction(item, "compile"));
         return job.status === "blocked" && Boolean(job.compilerInputFingerprint) && errors.length > 0
             && errors.every(item => item.code === "PROMPT_EXTERNAL_CONTEXT" && item.origin === "source" && item.blocksCompilation === true && item.targetId && item.path && item.matchedText);
     }
     private blockedInput(id: string, owner: string, fingerprint: string) {
+        const db = this.database();
+        if (db) {
+            const rows = db.db.prepare("SELECT job_gzip FROM production_compilation_jobs WHERE owner=? AND status='blocked'").all(owner) as Array<{ job_gzip: Uint8Array }>;
+            for (const row of rows) {
+                const job = this.mapPersistentMediaPaths(this.decode<CompilationJob | CompilationAlias>(row.job_gzip), "load");
+                if ("director" in job && job.id === id && job.compilerInputFingerprint === fingerprint && this.reusableBlock(job)) return job;
+            }
+            return undefined;
+        }
         const index = path.join(this.root, "blocked-inputs", fingerprint + ".json");
         if (!fs.existsSync(index)) return undefined;
         const entry = JSON.parse(fs.readFileSync(index, "utf8"));
         if (entry.version !== 1 || typeof entry.operationId !== "string") throw new Error("UNKNOWN_COMPILATION_INDEX: 未知阻塞索引，保留原文件");
-        const job = this.loadJob(entry.operationId);
+        const job = this.loadJob(entry.operationId, owner);
         return job && !job.reusedFromOperationId && job.id === id && job.owner === owner && job.compilerInputFingerprint === fingerprint && this.reusableBlock(job) ? job : undefined;
     }
     private effectiveInput(id: string, director: DirectorProduction, scope?: CompilationScope) {
@@ -175,7 +331,7 @@ export class ProductionCompilationService {
         return { targetIds, reusable, input: compileProjection && compileScope ? scopedCompilerInput(compileProjection.director, compileScope) : director };
     }
     getCompilation(id: string, owner: string, operationId: string, view: "status" | "targets" | "diagnostics" = "status", offset = 0, count?: number) {
-        const job = this.loadJob(operationId);
+        const job = this.loadJob(operationId, owner);
         if (!job || job.id !== id || job.owner !== owner) throw new Error("编译回执不存在或不属于当前制作对象");
         const kind = owner.includes("/canvas/") || owner === "canvas" ? "canvas" : owner.includes("/scenes/") || owner === "scene" ? "scene" : "episode";
         const application = job.application || this.applicationReceipt(job);
@@ -218,7 +374,7 @@ export class ProductionCompilationService {
 
     enqueue(id: string, owner: string, operationId: string, expectedRevision: number, candidate?: DirectorProduction, scope?: CompilationScope) {
         const requestFingerprint = hash({ id, owner, expectedRevision, candidate: candidate ?? null, scope: scope ?? null });
-        const prior = this.loadJob(operationId);
+        const prior = this.loadJob(operationId, owner);
         if (prior) {
             const sameRequest = prior.requestFingerprint
                 ? prior.requestFingerprint === requestFingerprint
@@ -240,7 +396,7 @@ export class ProductionCompilationService {
         const material = this.collectMaterial(boundFiles, effective.input);
         // Resolve relative file references (asset_plan[].file, style_lock.approved_file) to the real media path so the
         // worker preflight can locate them; otherwise a shared STYLE_MOTHER with file="shared/X.png" crashes on
-        // "approved style_lock file missing" because the compiler only sees absolute pool paths.
+        // "approved style_lock file missing" because the compiler needs a resolved Backend media path.
         // Match by asset_id (not basename): the real media file is content-addressed (e.g. a62527ff-....png), so basename
         // never matches the authored "shared/STYLE_MOTHER.png". Walk asset_plan/style_lock and use each entry's id to look
         // up boundFiles[`${id}\0asset`].
@@ -268,7 +424,7 @@ export class ProductionCompilationService {
             return this.getCompilation(id, owner, operationId);
         }
         const preparedId = crypto.randomUUID(), directory = path.join(this.root, preparedId);
-        const references = this.writePool(material);
+        const references = this.resolveArchivedMaterial(material);
         const projection = scope ? compilationScopeInput(director, scope) : undefined;
         const scopeHash = projection?.inputHash;
         // Store the resolved-source director so the worker preflight sees absolute media paths, not relative "shared/X.png".
@@ -296,6 +452,30 @@ export class ProductionCompilationService {
         return { ...result, diagnostics: [...compileInputDiagnostics, ...result.diagnostics], revision: current.revision, scope };
     }
     recover(owner: string) {
+        const db = this.database();
+        if (db) {
+            const rows = db.db.prepare("SELECT job_gzip FROM production_compilation_jobs WHERE owner=? ORDER BY created_at").all(owner) as Array<{ job_gzip: Uint8Array }>;
+            for (const row of rows) {
+                const job = this.mapPersistentMediaPaths(this.decode<CompilationJob | CompilationAlias>(row.job_gzip), "load");
+                if (!("director" in job) || activeJobs.has(this.jobKey(owner, job.operationId))) continue;
+                if (job.status === "queued") this.scheduleJob(job);
+                else if (job.status === "running") {
+                    const packet = this.tryLoadPacket(job.preparedId, owner, job.id);
+                    if (packet) {
+                        job.result = this.shortResult(job.preparedId, packet);
+                        job.diagnostics = packet.diagnostics;
+                        job.continuityReceipt = packet.continuityReceipt;
+                        job.status = hasFatalCompilationError(job.diagnostics) || hasUnusableCompilerResult(packet.exitCode, packet.director?.artifacts) ? "blocked" : "succeeded";
+                    } else {
+                        job.status = "interrupted";
+                        job.diagnostics = [{ code: "COMPILATION_INTERRUPTED", severity: "error", message: "服务重启中断编译；已确认未完成，不自动重跑" }];
+                    }
+                    this.saveJob(job);
+                    fs.rmSync(this.workingDirectory(job.preparedId), { recursive: true, force: true });
+                }
+            }
+            return;
+        }
         const directory = path.join(this.root, "operations");
         if (!fs.existsSync(directory)) return;
         for (const name of fs.readdirSync(directory).filter(name => name.endsWith(".json"))) {
@@ -312,6 +492,9 @@ export class ProductionCompilationService {
                 this.saveJob(job);
             }
         }
+    }
+    private tryLoadPacket(preparedId: string, owner: string, id: string) {
+        try { return this.loadPacket(preparedId, owner, id); } catch { return undefined; }
     }
     private shortResult(preparedId: string, packet: any) {
         return { preparedId, sourceHash: packet.director.sourceHash, targets: packet.director.artifacts.filter((a: any) => !packet.targetIds || packet.targetIds.includes(a.targetId)).map((a: any) => ({ id: a.id, targetId: a.targetId, kind: a.kind, status: a.status, sha256: a.sha256, referenceCount: a.references.length })) };
@@ -335,9 +518,21 @@ export class ProductionCompilationService {
         }
     }
     private applyContinuityGate(id: string, director: DirectorProduction, diagnostics: any[], targetIds?: string[]) {
-        if ((director.source.ledger as any)?.contract_version !== 2) return undefined;
-        const continuity = this.service.continuityForDirector(id, director);
-        for (const artifact of director.artifacts.filter(item => item.kind === "h3" && item.status === "ready" && (!targetIds || targetIds.includes(item.targetId)))) {
+        if ((director.source.ledger as any)?.contract_version !== 2 || typeof (this.service as any).continuityForDirector !== "function") return undefined;
+        const artifacts = director.artifacts.filter(item => item.kind === "h3" && item.status === "ready" && (!targetIds || targetIds.includes(item.targetId)));
+        let continuity = this.service.continuityForDirector(id, director);
+        let autoChecked = false;
+        if (artifacts.length && continuityTargetBlockers(continuity, [artifacts[0].targetId]).some(blocker => blocker.code === "CONTINUITY_REPORT_REQUIRED")) {
+            // 编译前没有有效回执：自动执行一次正式连续性检查生成回执，再用新回执评估门禁；
+            // 检查本身失败时回退为原有告警行为，不阻塞编译。
+            try {
+                continuity = this.service.autoRecordContinuityForDirector(id, director);
+                autoChecked = true;
+            } catch (error) {
+                console.warn("COMPILATION_CONTINUITY_AUTO_CHECK_FAILED", error instanceof Error ? `${error.name}: ${error.message}` : String(error));
+            }
+        }
+        for (const artifact of artifacts) {
             const blockers = continuityTargetBlockers(continuity, [artifact.targetId]);
             if (!blockers.length) continue;
             artifact.receipt = { ...artifact.receipt, continuityDiagnostics: blockers };
@@ -346,7 +541,7 @@ export class ProductionCompilationService {
         }
         return { sourceHash: director.sourceHash, runtimeId: director.engine.runtimeId, reportSourceHash: continuity.report?.sourceHash || null,
             reportRuntimeId: continuity.report?.runtimeId || null, reportOperationId: continuity.report?.operationId || null,
-            checkedAt: continuity.report?.checkedAt || null, status: continuity.status };
+            checkedAt: continuity.report?.checkedAt || null, status: continuity.status, ...(autoChecked ? { autoChecked: true } : {}) };
     }
     private reusableArtifacts(id: string, director: DirectorProduction, targetIds: string[]) {
         const styleAnchor = this.service.canvasStyleAnchorInput(id, director);
@@ -369,13 +564,14 @@ export class ProductionCompilationService {
         }))];
     }
     private scheduleJob(job: CompilationJob) {
-        const key = this.jobFile(job.operationId);
+        const key = this.jobKey(job.owner, job.operationId);
         if (activeJobs.has(key)) return;
         activeJobs.add(key);
         schedule(async () => {
             try {
                 job.status = "running"; this.saveJob(job);
-                const directory = path.join(this.root, job.preparedId);
+                const directory = this.workingDirectory(job.preparedId);
+                if (this.database()) await fs.promises.rm(directory, { recursive: true, force: true });
                 const projection = job.scope ? compilationScopeInput(job.director, job.scope) : undefined;
                 const { targetIds, reusable, input: rawCompileInput } = this.effectiveInput(job.id, job.director, job.scope);
                 const compileInput = resolveCompilerDirectorFiles(rawCompileInput, job.references);
@@ -422,31 +618,38 @@ export class ProductionCompilationService {
                 if (compiled.director.workflow.currentWork) compiled.director.workflow.currentWork = { ...compiled.director.workflow.currentWork, inputRevision: job.expectedRevision, sourceHash: compiled.director.sourceHash };
                 compiled.diagnostics = [...job.diagnostics, ...compiled.diagnostics];
                 this.applyTargetCompileBlocks(compiled.director, compiled.diagnostics);
+                compiled.director = this.stabilizeCompiledDirector(compiled.director);
                 const continuityReceipt = this.applyContinuityGate(job.id, compiled.director, compiled.diagnostics, projection?.targetIds);
                 job.continuityReceipt = continuityReceipt;
                 const packet = { owner: job.owner, id: job.id, expectedRevision: job.expectedRevision, baselineHash: job.baselineHash, scope: job.scope, scopeHash: job.scopeHash, targetIds: projection?.targetIds,
                     assetIds: Object.keys(projection?.director.assets || job.director.assets), operationId: `compilation:${job.preparedId}`, resultHash: hash(compiled.director), ...compiled, continuityReceipt };
                 fs.mkdirSync(directory, { recursive: true });
-                const temporary = this.file(job.preparedId) + ".tmp";
-                fs.writeFileSync(temporary, JSON.stringify({ ...packet, packetHash: hash(packet) }), "utf8"); fs.renameSync(temporary, this.file(job.preparedId));
+                if (this.database()) this.saveJob(job, packet);
+                else {
+                    fs.mkdirSync(directory, { recursive: true });
+                    const temporary = this.file(job.preparedId) + ".tmp";
+                    fs.writeFileSync(temporary, JSON.stringify({ ...packet, packetHash: hash(packet) }), "utf8"); fs.renameSync(temporary, this.file(job.preparedId));
+                }
                 job.result = this.shortResult(job.preparedId, packet); job.diagnostics = compiled.diagnostics;
                 job.status = hasFatalCompilationError(compiled.diagnostics) || hasUnusableCompilerResult(compiled.exitCode, compiled.director?.artifacts) ? "blocked" : "succeeded";
             } catch (error) {
                 job.status = error instanceof ProductionValidationError ? "blocked" : "failed";
                 const diagnostics = error instanceof ProductionValidationError ? error.diagnostics : [{ code: "COMPILATION_FAILED", path: "compile", message: error instanceof Error ? error.message : String(error), severity: "error" }];
                 job.diagnostics = [...job.diagnostics, ...diagnostics];
-            } finally { try { this.saveJob(job); } finally { activeJobs.delete(key); this.onSettled?.(job.id); } }
+            } finally {
+                if (this.database()) await fs.promises.rm(this.workingDirectory(job.preparedId), { recursive: true, force: true }).catch(() => {});
+                try { this.saveJob(job); }
+                finally { activeJobs.delete(key); this.onSettled?.(job.id); }
+            }
         }, job.createdAt);
     }
 
     private file(preparedId: string) {
         if (!/^[a-f0-9-]{36}$/.test(preparedId)) throw new Error("Invalid compilation handle");
-        return path.join(this.root, preparedId, "packet.json");
+        return path.join(this.workingDirectory(preparedId), "packet.json");
     }
 
-    /** Compile inputs are materialized into a content-addressed pool under the compilation root so that
-     *  identical inputs always resolve to identical absolute paths; otherwise the compiler rewrites file
-     *  references per prepared directory and sourceHash drifts on every full compilation. */
+    /** Read indexed media bytes and retain their stable MediaStore paths for this compiler invocation. */
     private collectMaterial(boundFiles: Record<string, string | undefined>, input: DirectorProduction) {
         const material = new Map<string, MaterialItem>();
         const collect = (targetId: string, label: string, original?: string) => {
@@ -462,23 +665,17 @@ export class ProductionCompilationService {
         }
         return material;
     }
-    private writePool(material: Map<string, MaterialItem>) {
-        const pool = path.join(this.root, "inputs");
-        fs.mkdirSync(pool, { recursive: true });
+    private resolveArchivedMaterial(material: Map<string, MaterialItem>) {
         const references: Record<string, string> = {};
         for (const [identity, item] of material) {
-            const destination = path.join(pool, item.digest + item.extension);
-            let intact = false;
-            if (fs.existsSync(destination)) {
-                try { intact = crypto.createHash("sha256").update(fs.readFileSync(destination)).digest("hex") === item.digest; } catch { intact = false; }
+            const archivedPathCheck = (this.service as any).isArchivedMediaPath;
+            if (archivedPathCheck && !archivedPathCheck.call(this.service, item.file)) throw Object.assign(new Error(`编译引用尚未归档到 Backend MediaStore：${identity}`), { code: "COMPILATION_MEDIA_NOT_ARCHIVED" });
+            if (!fs.existsSync(item.file) || crypto.createHash("sha256").update(fs.readFileSync(item.file)).digest("hex") !== item.digest) {
+                throw Object.assign(new Error(`Backend MediaStore 文件缺失或摘要变化：${identity}`), { code: "COMPILATION_MEDIA_INTEGRITY_FAILED" });
             }
-            if (!intact) {
-                // A corrupted or missing pool copy is rewritten atomically; digest-equal bytes make overwrites harmless.
-                const temporary = `${destination}.${crypto.randomUUID()}.tmp`;
-                fs.writeFileSync(temporary, item.bytes);
-                fs.renameSync(temporary, destination);
-            }
-            references[identity] = destination;
+            const indexedDigest = (this.service as any).archivedMediaDigest?.(item.file);
+            if (indexedDigest && indexedDigest !== item.digest) throw Object.assign(new Error(`Backend MediaStore 索引摘要与文件内容不一致：${identity}`), { code: "COMPILATION_MEDIA_INTEGRITY_FAILED" });
+            references[identity] = item.file;
         }
         return references;
     }
@@ -497,16 +694,21 @@ export class ProductionCompilationService {
         compileInputDiagnostics.push(...checked.diagnostics.filter(item => !compileInputDiagnostics.some(existing => existing.code === item.code && existing.targetId === item.targetId && existing.path === item.path)));
         const effective = this.effectiveInput(id, director, scope);
         const boundFiles = this.service.compilationReferenceFiles(id, effective.input);
-        const references = this.writePool(this.collectMaterial(boundFiles, effective.input));
+        const references = this.resolveArchivedMaterial(this.collectMaterial(boundFiles, effective.input));
         const preparedId = crypto.randomUUID();
         const directory = path.join(this.root, preparedId);
         const targets = this.compilationTargets(director), reusable = this.reusableArtifacts(id, director, targets);
         const compileInput = resolveCompilerDirectorFiles(effective.input, references);
-        const compiled: ReturnType<Compiler> = targets.length > 0 && targets.every(id => reusable.some(artifact => artifact.targetId === id))
-            ? { director: structuredClone(compileInput), exitCode: 0, diagnostics: reusable.flatMap(artifact => artifact.receipt.diagnostics || []) as ReturnType<Compiler>["diagnostics"], audit: { status: "REUSED", artifactIds: reusable.map(item => item.id) }, sourceAdjustments: [], acceptance: { reused: true } }
-            : this.compiler(compileInput, directory, (targetId, label) => references[`${targetId}\0${label}`], this.compiler === compileAchengDirector ? director.engine.runtimeId : undefined);
+        let compiled: ReturnType<Compiler>;
+        try {
+            compiled = targets.length > 0 && targets.every(id => reusable.some(artifact => artifact.targetId === id))
+                ? { director: structuredClone(compileInput), exitCode: 0, diagnostics: reusable.flatMap(artifact => artifact.receipt.diagnostics || []) as ReturnType<Compiler>["diagnostics"], audit: { status: "REUSED", artifactIds: reusable.map(item => item.id) }, sourceAdjustments: [], acceptance: { reused: true } }
+                : this.compiler(compileInput, directory, (targetId, label) => references[`${targetId}\0${label}`], this.compiler === compileAchengDirector ? director.engine.runtimeId : undefined);
+        } catch (error) { fs.rmSync(directory, { recursive: true, force: true }); throw error; }
+        fs.rmSync(directory, { recursive: true, force: true });
         compiled.diagnostics = [...compileInputDiagnostics, ...compiled.diagnostics];
         this.applyTargetCompileBlocks(compiled.director, compiled.diagnostics);
+        compiled.director = this.stabilizeCompiledDirector(compiled.director);
         const continuityReceipt = this.applyContinuityGate(id, compiled.director, compiled.diagnostics);
         if (compiled.director.workflow.currentWork) {
             compiled.director.workflow.currentWork = { ...compiled.director.workflow.currentWork, inputRevision: expectedRevision, sourceHash: compiled.director.sourceHash };
@@ -514,22 +716,36 @@ export class ProductionCompilationService {
         if (hash(this.service.get(id).draft.director) !== hash(current.draft.director) || this.service.get(id).revision !== expectedRevision) throw new ProductionConflictError(this.service.get(id));
         const scopeHash = scope ? compilationScopeInput(director, scope).inputHash : undefined;
         const packet = { owner, id, expectedRevision, baselineHash: hash(current.draft.director), assetIds: Object.keys(director.assets), operationId: `compilation:${preparedId}`, resultHash: hash(compiled.director), ...(scope ? { scope, scopeHash, targetIds: effective.targetIds } : {}), ...compiled, continuityReceipt };
-        fs.mkdirSync(directory, { recursive: true });
-        fs.writeFileSync(this.file(preparedId), JSON.stringify({ ...packet, packetHash: hash(packet) }), { encoding: "utf8", flag: "wx" });
+        if (this.database()) this.savePreparedPacket({ ...packet, preparedId });
+        else {
+            fs.mkdirSync(directory, { recursive: true });
+            fs.writeFileSync(this.file(preparedId), JSON.stringify({ ...packet, packetHash: hash(packet) }), { encoding: "utf8", flag: "wx" });
+        }
         return { preparedId, operationId: packet.operationId, expectedRevision, sourceHash: compiled.director.sourceHash, engine: director.engine, continuityReceipt, diagnostics: compiled.diagnostics,
             audit: compiled.audit, sourceAdjustments: compiled.sourceAdjustments, targets: compiled.director.artifacts.map(a => ({ id: a.id, targetId: a.targetId, kind: a.kind, status: a.status, sha256: a.sha256, references: a.references, diagnostics: a.receipt.diagnostics })), mediaSubmitted: false };
     }
 
     apply(id: string, owner: string, preparedId: string) {
-        const { packetHash, ...packet } = JSON.parse(fs.readFileSync(this.file(preparedId), "utf8"));
-        if (hash(packet) !== packetHash) throw new Error("Frozen compilation bytes changed");
-        if (packet.owner !== owner || packet.id !== id) throw new Error("Compilation belongs to a different production");
+        const savedJob = this.packetJob(preparedId);
+        if (savedJob?.application) {
+            if (savedJob.owner !== owner || savedJob.id !== id) throw new Error("Compilation belongs to a different production");
+            return { ...savedJob.application, replayed: true };
+        }
+        const packet = this.loadPacket(preparedId, owner, id);
         if (hash(packet.director) !== packet.resultHash) throw new Error("Frozen compilation bytes changed");
         if (hasFatalCompilationError(packet.diagnostics)) throw new Error("Compilation has unresolved global errors; correct its source and prepare a new packet");
+        const overwriteCompiledPromptTargets = new Set<string>(packet.director.artifacts
+            .filter((artifact: any) => artifact.kind === "h3" && artifact.status === "ready"
+                && (!Array.isArray(packet.targetIds) || packet.targetIds.includes(artifact.targetId)))
+            .map((artifact: any) => String(artifact.targetId)));
         const current = this.service.get(id);
         if (packet.scope) {
             const committed = this.service.operationReceipt(id, packet.operationId);
-            if (committed) return { revision: committed.revision, sourceHash: committed.draft.director?.sourceHash, referenceSync: committed.referenceSync, replayed: true, mediaSubmitted: false };
+            if (committed) {
+                const receipt = { revision: committed.revision, sourceHash: committed.draft.director?.sourceHash, referenceSync: committed.referenceSync, replayed: true, mediaSubmitted: false };
+                this.markApplied(this.packetJob(preparedId), receipt);
+                return receipt;
+            }
             const director = current.draft.director;
             if (!director) throw new ProductionConflictError(current);
             const applyDiagnostics: ProductionDiagnostic[] = [];
@@ -541,8 +757,10 @@ export class ProductionCompilationService {
             for (const assetId of packet.assetIds || []) if (packet.director.assets[assetId]) preserved.assets[assetId] = structuredClone(packet.director.assets[assetId]);
             const merged = { ...preserved, engine: packet.director.engine, artifacts: [...preserved.artifacts.filter(item => !targets.has(item.targetId)), ...packet.director.artifacts.filter((item: any) => targets.has(item.targetId))] };
             this.service.verifyCompilationBindings(id, merged);
-            const result = this.service.edit(id, { operationId: packet.operationId, expectedRevision: current.revision, ops: [{ type: "set_director_production", director: merged }] });
-            return { referenceSync: result.referenceSync, revision: result.revision, sourceHash: result.draft.director?.sourceHash, replayed: result.replayed === true, operationId: packet.operationId, mediaSubmitted: false };
+            const result = this.service.edit(id, { operationId: packet.operationId, expectedRevision: current.revision, ops: [{ type: "set_director_production", director: merged }] }, undefined, false, undefined, undefined, overwriteCompiledPromptTargets);
+            const receipt = { referenceSync: result.referenceSync, revision: result.revision, sourceHash: result.draft.director?.sourceHash, replayed: result.replayed === true, operationId: packet.operationId, mediaSubmitted: false };
+            this.markApplied(this.packetJob(preparedId), receipt);
+            return receipt;
         }
 
         // Let the ops service recover an already committed operation before its revision check.
@@ -550,13 +768,9 @@ export class ProductionCompilationService {
             if (hash(current.draft.director) !== packet.baselineHash) throw new ProductionConflictError(current);
             this.service.verifyCompilationBindings(id, packet.director);
         }
-        const result = this.service.edit(id, { operationId: packet.operationId, expectedRevision: packet.expectedRevision, ops: [{ type: "set_director_production", director: packet.director }] });
+        const result = this.service.edit(id, { operationId: packet.operationId, expectedRevision: packet.expectedRevision, ops: [{ type: "set_director_production", director: packet.director }] }, undefined, false, undefined, undefined, overwriteCompiledPromptTargets);
         const receipt = { referenceSync: result.referenceSync, revision: result.revision, replayed: result.replayed === true, publishedVersion: result.publishedVersion, sourceHash: result.draft.director?.sourceHash, operationId: packet.operationId, mediaSubmitted: false };
-        const operations = path.join(this.root, "operations");
-        if (fs.existsSync(operations)) for (const name of fs.readdirSync(operations).filter(name => name.endsWith(".json"))) {
-            const job: CompilationJob = JSON.parse(fs.readFileSync(path.join(operations, name), "utf8"));
-            if (job.preparedId === preparedId && job.owner === owner && job.id === id) { job.application = receipt; this.saveJob(job); break; }
-        }
+        this.markApplied(this.packetJob(preparedId), receipt);
         return receipt;
     }
 }

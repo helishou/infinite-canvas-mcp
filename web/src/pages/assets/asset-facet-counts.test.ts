@@ -10,6 +10,7 @@ const kindData: Record<Asset["kind"], Record<string, unknown>> = {
     audio: { mimeType: "audio/wav" },
     character: { name: "", description: "", voiceName: "", images: [] },
     scene: { name: "", description: "", colorCardPrompt: "" },
+    prop: { name: "", description: "", image: { url: "", storageKey: "", width: 0, height: 0, bytes: 0, mimeType: "" } },
 };
 const asset = (id: string, kind: Asset["kind"], extra: Partial<Asset> = {}) => ({ id, kind, title: id, coverUrl: "", tags: [], createdAt: "", updatedAt: "", data: kindData[kind], ...extra }) as Asset;
 

@@ -93,8 +93,7 @@ test("initializes explicit shot-marked demand as editable script blocks without 
     assert.equal(source.script_scenes.map((block: any) => block.text).join(""), demand, "block concatenation preserves the saved demand byte-for-byte");
     assert.deepEqual(saved.draft.scenes[0].blocks.map(block => block.text), source.script_scenes.map((block: any) => block.text));
     const projected = (db.getCanvasProject("canvas")!.nodes as any[]).filter(node => node.metadata?.productionScriptId);
-    assert.equal(projected.length, 3);
-    assert.equal(projected.map(node => node.metadata.content).join(""), demand, "canvas script nodes preserve the original slices in order");
+    assert.equal(projected.length, 0, "formal script saves do not create scene text nodes on the canvas");
     assert.equal(source.shots.length, 0, "shot labels are not silently promoted to timed production Shots");
     const readiness = service.workflowReadiness("episode") as any;
     assert.equal(readiness.stage.explicitShotCues, 2);

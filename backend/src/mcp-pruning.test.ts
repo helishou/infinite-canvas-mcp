@@ -21,9 +21,17 @@ test("MCP exposes only current tools and retired names are unavailable", async t
     await client.connect(new StreamableHTTPClientTransport(new URL(url + "/mcp")));
     const catalog = await client.listTools(); const names = new Set(catalog.tools.map(tool => tool.name));
     for (const name of productionToolNames) assert.ok(names.has(name));
-    const retiredNames = ["production_list_legacy", "production_preview_continuity_upgrade", "drama_get_production", "canvas_get_production"];
+    const retiredNames = ["production_list_legacy", "production_preview_continuity_upgrade", "drama_get_production", "canvas_get_production", "canvas_create_text_node", "canvas_create_text_nodes", "canvas_split_image", "canvas_crop_image", "canvas_import_local_images"];
     for (const name of retiredNames) {
         assert.equal(names.has(name), false);
+    }
+    for (const [name, arguments_] of [
+        ["canvas_create_node", { projectId: "p", nodeType: "image" }],
+        ["canvas_apply_ops", { projectId: "p", operationId: "plain-node-op", expectedRevision: 0, ops: [{ type: "add_node", nodeType: "text", metadata: { content: "plain" } }] }],
+        ["canvas_apply_commands", { projectId: "p", operationId: "plain-node-command", baseRevision: 0, operations: [{ type: "add_node", nodeType: "audio", metadata: {} }] }],
+    ] as const) {
+        const result = await client.callTool({ name, arguments: arguments_ });
+        assert.equal(result.isError, true, `${name} must reject ordinary node creation`);
     }
     assert.equal(writes, 0);
     assert.equal(client.getServerVersion()?.version, "0.1.0+mcp3");
@@ -32,6 +40,6 @@ test("MCP exposes only current tools and retired names are unavailable", async t
     const bytes = Buffer.byteLength(JSON.stringify(catalog.tools));
     assert.ok(bytes < 216777, `catalog must shrink from the observed baseline: ${bytes}`);
     console.log(JSON.stringify({ catalogTools: catalog.tools.length, catalogBytes: bytes, unifiedTools: productionToolNames.length }));
-    assert.equal(catalog.tools.length, 158);
+    assert.equal(catalog.tools.length, 155);
     assert.equal(names.size, catalog.tools.length, "catalog names must remain unique");
 });

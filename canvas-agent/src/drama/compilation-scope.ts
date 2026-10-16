@@ -236,13 +236,13 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
             });
             projected.source.asset_plan = [...rows(projected.source.asset_plan), ...registryOnlyPlans];
             projected.source.subject_registry = scopedSubjects.map(subject => {
-                // Replay context keeps valid identity declarations; its media is
-                // materialized separately only when an output Shot consumes it.
-                // Earlier Shots remain in this projection for continuity replay, so keep
-                // their authored binding identities for source-schema validation too.
-                // Keep only Subject image bindings used by selected H3 output shots or the
-                // Shot that owns a selected keyframe output; replay-only earlier Shots stay unbound.
-                const selectedBindings = new Set(rows(source.shots).filter(shot => subjectPictureShotIds.has(stableId(shot))).flatMap(shot => rows(shot.subject_usages).filter(usage => usage.subjectId === subject.id).flatMap(usage => resolveSubjectPictureBindingIds(subject, usage).bindingIds)));
+                // Shots kept only for continuity replay remain in this projection with
+                // their authored Subject usages, and the source schema validates every
+                // retained Shot's pictureBindingIds against this registry. Trim by the
+                // retained shot set so those bindings stay resolvable; media and the Clip
+                // reference closure stay scoped to output Shots through
+                // subjectPictureShotIds, so a replay Shot never pulls in a picture file.
+                const selectedBindings = new Set(rows(source.shots).filter(shot => contextShots.has(stableId(shot))).flatMap(shot => rows(shot.subject_usages).filter(usage => usage.subjectId === subject.id).flatMap(usage => resolveSubjectPictureBindingIds(subject, usage).bindingIds)));
                 return { ...subject, pictureBindings: rows(subject.pictureBindings).filter(binding => selectedBindings.has(String(binding.id))) };
             });
             scopedLedger.facts = facts.filter(fact => usedFacts.has(String(fact.id)));
@@ -338,6 +338,21 @@ export function productionReviewHash(inputHash: string, media: Array<{ targetId:
 /** Normalize an isolated compiler timeline; authored frames and provenance stay unchanged. */
 export function scopedCompilerInput(input: DirectorProduction, scope: CompilationScope) {
     const next = structuredClone(input), shots = rows(next.source.shots);
+    const wanted = new Set(scope.targetIds || []);
+    const outputShotIds = new Set<string>();
+    if (scope.sceneId && !wanted.size) {
+        const scene = productionSceneEntries(next.source).find(item => item.id === scope.sceneId);
+        for (const shotId of scene?.shotIds || []) outputShotIds.add(String(shotId));
+    }
+    for (const targetId of wanted) {
+        const segment = rows(next.source.segments).find(item => stableId(item) === targetId);
+        if (segment) for (const shotId of segment.shot_ids || []) outputShotIds.add(String(shotId));
+        else if (shots.some(shot => stableId(shot) === targetId)) {
+            const containing = rows(next.source.segments).find(item => (item.shot_ids || []).map(String).includes(targetId));
+            if (containing) for (const shotId of containing.shot_ids || []) outputShotIds.add(String(shotId));
+            else outputShotIds.add(targetId);
+        }
+    }
     const shifts = new Map<string, number>(); let cursor = 0;
     for (const shot of shots) {
         const start = Number(shot.start_frame), end = Number(shot.end_frame);
@@ -364,6 +379,10 @@ export function scopedCompilerInput(input: DirectorProduction, scope: Compilatio
         // Active runtime source validation reads targetIds at this marker's
         // top level to distinguish selected output from retained ledger context.
         targetIds: scope.targetIds || [],
+        // Continuity replay may retain earlier Shots that are not outputs of this
+        // scene compile. Keep the expected output set explicit for the Python
+        // source contract so context-only Shots are not mistaken for ungrouped output.
+        outputShotIds: shots.filter(shot => outputShotIds.has(stableId(shot))).map(shot => stableId(shot)),
         authoredInputHash: compilationHash(input.source),
         frameShifts: Object.fromEntries(shifts),
     };

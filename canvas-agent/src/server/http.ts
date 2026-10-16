@@ -791,12 +791,13 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
         if (input.moduleId) query.set("moduleId", String(input.moduleId));
         return void res.json({ ok: true, result: await backend.get(`/production/contract?${query}`) });
       }
-      if (["production_compile", "production_get_compilation", "production_apply_compilation", "production_diagnose_bindings"].includes(name)) {
+      if (["production_compile", "production_get_compilation", "production_apply_compilation", "production_translate_compiled_prompts", "production_diagnose_bindings"].includes(name)) {
         const base = input.kind === "canvas" ? `/canvas/projects/${encodeURIComponent(String(input.id))}/production` : `/drama/episodes/${encodeURIComponent(String(input.id))}/production`;
         const params = new URLSearchParams({ view: String(input.view || "status"), offset: String(input.offset || 0), ...(input.pageSize ? { pageSize: String(input.pageSize) } : {}) });
         const result = name === "production_get_compilation" ? await backend.get(`${base}/compilations/${encodeURIComponent(String(input.operationId))}?${params}`)
           : name === "production_diagnose_bindings" ? await backend.get(`${base}/bindings`)
           : name === "production_apply_compilation" ? await backend.post(`${base}/apply-compilation`, { preparedId: input.preparedId })
+          : name === "production_translate_compiled_prompts" ? await backend.post(`${base}/translate-compiled-prompts`, { expectedRevision: input.expectedRevision, operationId: input.operationId, targetIds: input.targetIds })
           : await backend.post(`${base}/compile`, { operationId: input.operationId, expectedRevision: input.expectedRevision, director: input.director, scope: input.scope });
         return void res.json({ ok: true, result });
       }
@@ -1823,5 +1824,5 @@ function withAttachmentContext(
         `${index + 1}. attachmentId=${item.id}, name=${JSON.stringify(item.name)}`,
     )
     .join("\n");
-  return `${prompt}\n\n本轮可用图片附件（顺序与图片输入一致）：\n${list}\n需要把附件放入画布或作为生成参考图时，先调用 canvas_create_attachment_nodes，再使用返回的画布节点 ID 创建生成流程。`;
+  return `${prompt}\n\n本轮可用图片附件（顺序与图片输入一致）：\n${list}\nMCP 只创建智能生成节点，不要尝试把附件转换成普通图片节点。`;
 }

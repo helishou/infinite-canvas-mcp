@@ -209,27 +209,32 @@ function OverviewImagePreview({ image, label, theme }: { image: OverviewImage; l
     const subscribe = useCallback((listener: () => void) => subscribeImagePreview(image.storageKey, listener), [image.storageKey]);
     const getRevision = useCallback(() => getImagePreviewRevisionFor(image.storageKey), [image.storageKey]);
     useSyncExternalStore(subscribe, getRevision, () => 0);
-    const [source, setSource] = useState(image.content || "");
+    const [source, setSource] = useState(image.storageKey ? "" : image.content || "");
 
     useEffect(() => {
         let cancelled = false;
-        void ensureImagePreview(image.storageKey);
-        void resolveImageUrl(image.storageKey, image.content)
-            .then((url) => {
-                if (!cancelled) setSource(url || image.content || "");
-            })
-            .catch(() => {
-                if (!cancelled) setSource(image.content || "");
-            });
+        if (image.storageKey) {
+            // Keep full-resolution archive media out of overview <img> elements.
+            // A large canvas can mount hundreds of nodes at once; decode only the cached WebP thumbnail.
+            void ensureImagePreview(image.storageKey);
+        } else {
+            void resolveImageUrl(undefined, image.content || "")
+                .then((url) => {
+                    if (!cancelled) setSource(url || image.content || "");
+                })
+                .catch(() => {
+                    if (!cancelled) setSource(image.content || "");
+                });
+        }
         return () => {
             cancelled = true;
         };
     }, [backendConnected, backendToken, image.content, image.storageKey]);
 
-    // 优先使用本地 WebP；缓存尚未生成或读取失败时回退到节点已有图片源，避免缩小后只剩占位图。
-    const src = previewUrlFor(image.storageKey) || source;
+    // Archived images wait for the small local preview instead of decoding the original at overview scale.
+    const src = image.storageKey ? previewUrlFor(image.storageKey) : source;
     return src ? (
-        <img src={src} alt={label} draggable={false} className="pointer-events-none h-full w-full select-none object-cover" />
+        <img src={src} alt={label} draggable={false} loading="lazy" decoding="async" fetchPriority="low" className="pointer-events-none h-full w-full select-none object-cover" />
     ) : (
         <div className="flex h-full w-full items-center justify-center" style={{ background: theme.toolbar.activeBg }}>
             <ImageIcon className="size-5 opacity-35" />

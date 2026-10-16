@@ -105,13 +105,24 @@ def binding_ids(subject, usage, *, allow_missing=False):
     return selected
 
 
-def _used_continuity_fact_ids(shot, subjects, facts):
+def _used_continuity_fact_ids(shot, subjects, facts, ledger=None):
     # Continuity output is opt-in per Shot/fact. Subject presence alone must
     # not expand the prompt to every ledger fact owned by that entity.
     used = {str(value) for value in shot.get("continuity_facts", [])}
     for usage in rows(shot.get("subject_usages")):
         used.update(str(value) for value in usage.get("continuityFactIds", []))
         used.update(str(item.get("factId")) for item in rows(usage.get("stateRequirements")))
+    # In Subject Prompt v2, the shot-scoped ledger requirements are the
+    # authoritative consumption declarations. They are stored separately from
+    # subject_usages, so include only hold/change facts assigned to this Shot.
+    shot_id = str(shot.get("id") or "")
+    used.update(
+        str(item.get("fact_id"))
+        for item in rows((ledger or {}).get("requirements"))
+        if str(item.get("shot_id") or "") == shot_id
+        and item.get("kind") in {"hold", "change"}
+        and item.get("fact_id")
+    )
     return used.intersection(facts)
 
 
@@ -120,7 +131,7 @@ def _state_start_descriptions(source, report, shot, subjects):
     start = trajectory.get("start", {})
     facts = {str(item.get("id")): item for item in rows((source.get("ledger") or {}).get("facts"))}
     subject_by_entity = {(str(item.get("entityRef", {}).get("kind")), str(item.get("entityRef", {}).get("id"))): item for item in subjects}
-    used = _used_continuity_fact_ids(shot, subjects, facts)
+    used = _used_continuity_fact_ids(shot, subjects, facts, source.get("ledger"))
     values = []
     for fact_id in sorted(used):
         fact = facts.get(fact_id)
@@ -142,7 +153,7 @@ def _render_state_end(source, report, shot, subjects):
     facts = {str(item.get("id")): item for item in rows((source.get("ledger") or {}).get("facts"))}
     subjects = list(subjects or [])
     subject_by_entity = {(str(item.get("entityRef", {}).get("kind")), str(item.get("entityRef", {}).get("id"))): item for item in subjects}
-    used = _used_continuity_fact_ids(shot, subjects, facts)
+    used = _used_continuity_fact_ids(shot, subjects, facts, source.get("ledger"))
     chunks = []
     for fact_id, value in sorted(end.items()):
         if str(fact_id) not in used:
@@ -166,7 +177,7 @@ def _state_snapshot(source, report, shot, subjects, edge):
     facts = {str(item.get("id")): item for item in rows((source.get("ledger") or {}).get("facts"))}
     subject_by_entity = {(str(item.get("entityRef", {}).get("kind")), str(item.get("entityRef", {}).get("id"))): item
                          for item in subjects}
-    used_facts = _used_continuity_fact_ids(shot, subjects, facts)
+    used_facts = _used_continuity_fact_ids(shot, subjects, facts, source.get("ledger"))
     opening_event_values = {}
     ending_unknown_values = {}
     shot_id = str(shot.get("id"))

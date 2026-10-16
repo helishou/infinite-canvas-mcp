@@ -47,6 +47,28 @@ export function canvasNodeImage(node: CanvasNodeData) {
     };
 }
 
+/** The image node's visible primary result, for actions that save the image currently shown to the user. */
+export function canvasNodePrimaryImage(node: CanvasNodeData) {
+    const metadata = node.metadata;
+    const isSmartImage = node.type === CanvasNodeType.Config && metadata?.smart === true && (metadata.generationMode || "image") === "image";
+    if (isSmartImage && metadata.images?.length) {
+        // Match ImageContent exactly: a missing or stale primaryImageId displays images[0].
+        const primary = metadata.images.find(image => image.id === metadata.primaryImageId) || metadata.images[0];
+        if (primary && (primary.status === "success" || primary.status === undefined) && (primary.content || primary.storageKey)) {
+            return {
+                content: primary.content || "",
+                storageKey: primary.storageKey,
+                naturalWidth: primary.naturalWidth || 0,
+                naturalHeight: primary.naturalHeight || 0,
+                bytes: primary.bytes || 0,
+                mimeType: primary.mimeType || metadata.mimeType || "image/png",
+            };
+        }
+        return null;
+    }
+    return canvasNodeImage(node);
+}
+
 export function hasRenderableCanvasImage(node: CanvasNodeData) {
     return Boolean(canvasNodeImage(node) || node.metadata?.images?.some((image) => image.content || image.storageKey));
 }

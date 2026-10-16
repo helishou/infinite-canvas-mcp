@@ -76,6 +76,16 @@ export async function exportAssets(assets: Asset[], filename: string) {
                     files.push({ storageKey: image.storageKey, path, mimeType: blob.type || image.mimeType, bytes: blob.size });
                     zipFiles.push({ name: path, data: blob });
                 }
+            } else if (asset.kind === "prop" && asset.data.image.storageKey) {
+                const image = asset.data.image;
+                const storageKey = image.storageKey;
+                if (storageKey && !requestedKeys.has(storageKey)) {
+                    requestedKeys.add(storageKey);
+                    const blob = requireAssetBlob(await getImageBlob(storageKey));
+                    const path = `files/${files.length}-${safeFileName(storageKey)}.${fileExtension(blob.type, "image")}`;
+                    files.push({ storageKey, path, mimeType: blob.type || image.mimeType, bytes: blob.size });
+                    zipFiles.push({ name: path, data: blob });
+                }
             }
         }),
     );

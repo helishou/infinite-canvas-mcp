@@ -7,10 +7,13 @@ import { applyProductionCompilation, BackendApiError, compileProduction, fetchBa
 type Input = Parameters<CanvasProductionEditing["reverseSyncPrompt"]>[0];
 type Handler = CanvasProductionEditing["reverseSyncPrompt"];
 type StoryboardHandler = CanvasProductionEditing["replaceStoryboardTrack"];
+type ContinuationBoundaryInput = Parameters<CanvasProductionEditing["setContinuationBoundary"]>[0];
+type ContinuationBoundaryHandler = (input: Omit<ContinuationBoundaryInput, "nodeId" | "segmentId"> & { targetId: string }) => Promise<{ sourceSaved: boolean }>;
 type CompilePromptInput = Parameters<CanvasProductionEditing["compilePrompt"]>[0];
 // Capability routing only: edits still use the production editor's existing persistent command journal.
 const editors = new Map<string, { token: symbol; handler: Handler }>();
 const storyboardEditors = new Map<string, { token: symbol; handler: StoryboardHandler }>();
+const boundaryEditors = new Map<string, { token: symbol; handler: ContinuationBoundaryHandler }>();
 const pendingPromptCompiles = new Map<string, { expectedRevision: number; operationId: string }>();
 const rows = (value: unknown): Array<Record<string, any>> => Array.isArray(value) ? value : [];
 
@@ -57,6 +60,11 @@ export function registerProductionStoryboardEditor(projectId: string, handler: S
     const token = Symbol(projectId);
     storyboardEditors.set(projectId, { token, handler });
     return () => { if (storyboardEditors.get(projectId)?.token === token) storyboardEditors.delete(projectId); };
+}
+export function registerProductionBoundaryEditor(projectId: string, handler: ContinuationBoundaryHandler) {
+    const token = Symbol(projectId);
+    boundaryEditors.set(projectId, { token, handler });
+    return () => { if (boundaryEditors.get(projectId)?.token === token) boundaryEditors.delete(projectId); };
 }
 
 export function sourceSegmentForCanvasClip(nodes: Array<{ id: string; metadata?: Record<string, any> }>, source: Record<string, any>, nodeId: string, segmentId: string) {
@@ -280,5 +288,15 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
         const editor = storyboardEditors.get(projectId);
         if (!editor) throw new Error("PRODUCTION_EDITOR_NOT_READY");
         return editor.handler({ ...input, segment: { ...input.segment, productionClipProjection: projection } });
+    }, setContinuationBoundary: async (input: ContinuationBoundaryInput) => {
+        await flush();
+        const node = getNode(input.nodeId), segments = node?.metadata?.segments;
+        const clip = Array.isArray(segments) ? segments.find(item => String(item.id || "") === input.segmentId) : undefined;
+        const projection = clip?.productionClipProjection as Record<string, unknown> | undefined;
+        const targetId = typeof projection?.targetId === "string" ? projection.targetId : "";
+        if (!clip || !targetId) throw new Error("CONTINUATION_BOUNDARY_PROJECTION_MISMATCH");
+        const editor = boundaryEditors.get(projectId);
+        if (!editor) throw new Error("PRODUCTION_EDITOR_NOT_READY");
+        return editor.handler({ targetId, tailFrameContinuation: input.tailFrameContinuation, motionContextEnabled: input.motionContextEnabled });
     } };
 }

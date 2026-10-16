@@ -44,6 +44,7 @@ export class WorkflowModelCatalog {
   async syncConfig(
     value: unknown,
   ): Promise<{ config: AiConfig; changed: boolean; added: string[] }> {
+    const originalChannelCount = readChannelCount(value);
     const config = normalizeConfig(value);
     const items = await this.workflows.list();
     const processed = new Set(
@@ -51,7 +52,9 @@ export class WorkflowModelCatalog {
     );
     const channel = ensureLocalChannel(config);
     const added: string[] = [];
-    let changed = false;
+    let changed =
+      config.channels.length !== originalChannelCount ||
+      hasNonCanonicalLocalComfyuiChannel(value);
     for (const item of items) {
       const detail = await this.workflows.get(item.name);
       const rawModels = channel.models.filter(
@@ -212,10 +215,15 @@ function capabilityOf(detail: WorkflowDetail): ModelCapability {
 }
 
 function ensureLocalChannel(config: AiConfig): ModelChannel {
-  const existing = config.channels.find(
-    (channel) => channel.kind === "comfyui",
-  );
-  if (existing) return existing;
+  // The Web store normalizes this legacy provider kind to `local`. Match its
+  // stable id as well, or every catalog sync appends another same-id channel.
+  const existing =
+    config.channels.find((channel) => channel.kind === "comfyui") ||
+    config.channels.find((channel) => channel.id === "local-comfyui");
+  if (existing) {
+    existing.kind = "comfyui";
+    return existing;
+  }
   const channel: ModelChannel = {
     id: "local-comfyui",
     name: "本地 ComfyUI",
@@ -318,7 +326,55 @@ function normalizeConfig(value: unknown): AiConfig {
           : [],
       }))
     : [];
-  return { ...source, channels };
+  return { ...source, channels: dedupeLocalComfyuiChannels(channels) };
+}
+
+function readChannelCount(value: unknown) {
+  const source = isRecord(value) ? value : {};
+  return Array.isArray(source.channels) ? source.channels.length : 0;
+}
+
+function hasNonCanonicalLocalComfyuiChannel(value: unknown) {
+  const source = isRecord(value) ? value : {};
+  return Array.isArray(source.channels) && source.channels.some((channel) =>
+    isRecord(channel) && channel.id === "local-comfyui" && channel.kind !== "comfyui"
+  );
+}
+
+function dedupeLocalComfyuiChannels(channels: ModelChannel[]) {
+  const duplicates = channels.filter((channel) => channel.id === "local-comfyui");
+  if (duplicates.length < 2) return channels;
+
+  const first = duplicates[0];
+  // Same-id records are only safe to merge when their provider settings agree.
+  // If they do not, retain them for manual repair rather than discarding data.
+  const settingsSignature = (channel: ModelChannel) => JSON.stringify(
+    Object.fromEntries(Object.entries(channel).filter(([key]) => key !== "models" && key !== "kind").sort(([a], [b]) => a.localeCompare(b)))
+  );
+  const firstSignature = settingsSignature(first);
+  const compatible = duplicates.every((channel) =>
+    settingsSignature(channel) === firstSignature &&
+    (channel.kind === "local" || channel.kind === "comfyui" || channel.kind === undefined)
+  );
+  if (!compatible) return channels;
+
+  const canonical = duplicates.find((channel) => channel.kind === "comfyui") || first;
+  const seenModels = new Set<string>();
+  canonical.models = duplicates.flatMap((channel) => channel.models).filter((model) => {
+    if (seenModels.has(model.name)) return false;
+    seenModels.add(model.name);
+    return true;
+  });
+  canonical.kind = "comfyui";
+  let kept = false;
+  return channels.filter((channel) => {
+    if (channel.id !== "local-comfyui") return true;
+    if (!kept && channel === canonical) {
+      kept = true;
+      return true;
+    }
+    return false;
+  });
 }
 
 function workflowBaseName(name: string) {

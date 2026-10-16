@@ -19,6 +19,7 @@ import { SharedAssetCoordinator, listApprovedSharedAssets, sharedProjectionNodeI
 import { directorHash, projectDirector, promptHash, publicProductionRecord } from "./director.js";
 import { decodeReceipt } from "./receipt-storage.js";
 import { createManualDirectorAsset as createManualDirectorAssetSource } from "./director-asset-delete.js";
+import { productionScriptNodes } from "./script-nodes.js";
 import { NativeProductionGeneration } from "./native-generation.js";
 import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import type { CanvasGenerationService } from "../canvas/generation-service.js";
@@ -62,6 +63,17 @@ function director(): DirectorProduction {
 function save(service: EpisodeProductionService, id: string, d: DirectorProduction) {
     const current = service.get(id);
     return service.edit(id, { operationId: crypto.randomUUID(), expectedRevision: current.revision, ops: [{ type: "set_director_production", director: d }] });
+}
+function addManualScriptNodes(f: ReturnType<typeof fixture>, canvasId: string) {
+    const owner = { kind: "episode" as const, id: "ep" };
+    const scripts = productionScriptNodes(f.episode.get("ep").draft, owner);
+    const project = f.db.getCanvasProject(canvasId)!;
+    f.db.applyCanvasProjectOperations(canvasId, Number(project.revision || 0), scripts.map((script, index) => ({
+        type: "add_node", id: script.id, nodeType: "text", title: script.title,
+        position: { x: index * 640, y: 0 }, width: 560, height: 320,
+        metadata: { content: script.content, status: "success", productionScriptId: script.scriptId, productionScriptSceneId: script.sceneId },
+    })), { runtimeWrite: true });
+    return (f.db.getCanvasProject(canvasId)!.nodes as any[]).filter(node => node.metadata?.productionScriptId);
 }
 // Old persisted productions can predate automatic canvas materialization during edits.
 // Seed that storage state directly so preparation tests still exercise first binding.
@@ -457,14 +469,15 @@ test("complete draft preparation repairs Clip order without publishing or submit
     assert.equal(f.stores.tasks.list().length, 0);
 });
 
-test("script text nodes persist original blocks, synchronize collaborative edits atomically and replay once", t => {
+test("production saves do not create script text nodes; existing collaborative script nodes still sync atomically", t => {
     const f = fixture(t), canvasId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
     const d = director();
     d.source.script_scenes = [{ id: "action", scene_id: "room", scene_name: "Morning", kind: "action", text: "原动作", beat_ids: ["b1"] }, { id: "dialogue", scene_id: "room", kind: "dialogue", text: "原对白", beat_ids: ["b1"] }];
     d.sourceHash = directorHash(d.source); d.artifacts = d.artifacts.map(item => ({ ...item, status: "stale" }));
     save(f.episode, "ep", d);
+    assert.equal((f.db.getCanvasProject(canvasId)!.nodes as any[]).filter(node => node.metadata?.productionScriptId).length, 0);
+    const scripts = addManualScriptNodes(f, canvasId);
     const project = f.db.getCanvasProject(canvasId)!;
-    const scripts = (project.nodes as any[]).filter(node => node.metadata.productionScriptId);
     assert.equal(scripts.length, 2);
     assert.deepEqual(scripts.map(node => node.metadata.content), ["原动作", "原对白"]);
     const node = scripts[1], target = { nodeId: node.id, field: "content" as const };
@@ -489,7 +502,8 @@ test("script text nodes persist original blocks, synchronize collaborative edits
 test("formal script edits update the same text node and document while preserving user layout and other scenes", t => {
     const f = fixture(t), canvasId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
     save(f.episode, "ep", director());
-    const scripts = (f.db.getCanvasProject(canvasId)!.nodes as any[]).filter(node => node.metadata.productionScriptId);
+    assert.equal((f.db.getCanvasProject(canvasId)!.nodes as any[]).filter(node => node.metadata?.productionScriptId).length, 0);
+    const scripts = addManualScriptNodes(f, canvasId);
     const node = scripts[0], other = scripts[1], target = { nodeId: node.id, field: "content" as const };
     f.db.getCanvasText(canvasId, target);
     f.db.applyCanvasProjectOperations(canvasId, undefined, [{ type: "update_node", id: node.id, patch: { position: { x: 300, y: 800 }, width: 700 } }]);
@@ -1445,7 +1459,7 @@ test("native H3 tracking follows the active Clip while a pending decision keeps 
     assert.equal(decisionPresentation.taskId, undefined, "the active native task must not take focus from a formal decision");
 });
 
-test("each formal scene owns one H3 node and keeps its scripts, frames and clips in the same area", t => {
+test("each formal scene owns one H3 node and keeps its clips and frames in the same area", t => {
     const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
     save(f.episode, "ep", director());
     const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
@@ -1463,9 +1477,6 @@ test("each formal scene owns one H3 node and keeps its scripts, frames and clips
         assert.ok(h3.position.x + h3.width <= group.position.x + group.width);
         assert.ok(h3.position.y + h3.height <= group.position.y + group.height);
         assert.match(h3.title, sceneId === "morning" ? /Morning/ : /Night/);
-        const script = nodes.find(node => node.metadata?.productionScriptId === sceneId);
-        assert.equal(script.metadata.groupId, group.id);
-        assert.ok(script.position.x >= group.position.x && script.position.y >= group.position.y);
     }
     assert.equal(f.stores.tasks.list().length, 0, "scene H3 layout preparation must not generate media");
 });
@@ -1493,9 +1504,6 @@ test("scene H3 preparation inherits saved layout and preserves materialized and 
         assert.ok(h3.position.x + h3.width <= group.position.x + group.width);
         assert.ok(h3.position.y + h3.height <= group.position.y + group.height);
         assert.match(h3.title, sceneId === "morning" ? /Morning/ : /Night/);
-        const script = nodes.find(node => node.metadata?.productionScriptId === sceneId);
-        assert.equal(script.metadata.groupId, group.id);
-        assert.ok(script.position.x >= group.position.x && script.position.y >= group.position.y);
     }
     const recompiled = f.episode.ensureLayoutPlan("ep");
     for (const unit of reserved.units.filter(unit => unit.area === "video")) {
@@ -1632,7 +1640,7 @@ test("whole-plan layout stays stable when formal targets are prepared in differe
     assert.deepEqual(scenarios[0].nodes, scenarios[1].nodes);
 });
 
-test("scene preparation receipts include its projected script units", t => {
+test("scene preparation does not create projected script text nodes", t => {
     const f = fixture(t), projectId = ensureProductionCanvas(f.db, "episode", "ep").project.id;
     const d = director();
     d.source.script_scenes = [{ id: "morning", scene_id: "room", scene_name: "Morning", text: "New script projection", beat_ids: ["b1"] }];
@@ -1642,8 +1650,8 @@ test("scene preparation receipts include its projected script units", t => {
     const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
     const prepared = runner.prepareTargets("ep", f.episode.get("ep").revision, ["scene:morning"], "prepare-scene-receipt");
     const projected = (f.db.getCanvasProject(projectId)!.nodes as any[]).filter(node => node.metadata?.productionScriptId);
-    assert.ok(projected.length > 0);
-    assert.ok([...prepared.layoutReceipt!.created, ...prepared.layoutReceipt!.reused].some(item => item.target === "scene:morning" && projected.some(node => item.nodeIds.includes(node.id))));
+    assert.equal(projected.length, 0);
+    assert.ok([...prepared.layoutReceipt!.created, ...prepared.layoutReceipt!.reused].some(item => item.target === "scene:morning"));
 });
 
 function referenceClipFixture(t: test.TestContext) {
@@ -1911,4 +1919,23 @@ test("formal outgoing flags survive projection and defaults; terminal Clip close
     candidate.boundaries = []; save(f.episode, "ep", candidate);
     const blocked = f.runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1"], "missing-boundary");
     assert.equal(blocked.referenceSync?.[0].status, "ready");
+});
+
+test("saving a formal boundary synchronizes its two outgoing flags onto the scene H3 Clip", t => {
+    const f = referenceClipFixture(t), current = f.episode.get("ep"), group = current.draft.clipGroups[0];
+    const canvas = f.db.getCanvasProject(f.projectId)!;
+    f.stores.projects.applyOperations(f.projectId, Number(canvas.revision), [{
+        type: "update_h3_segment", nodeId: group.nodeId!, segmentId: group.segmentId!, patch: { tailFrameContinuation: true, motionContextEnabled: false },
+    }], { operationId: "manual-boundary-flags" });
+
+    const beforeBoundaryEdit = f.episode.get("ep");
+    f.episode.edit("ep", { operationId: crypto.randomUUID(), expectedRevision: beforeBoundaryEdit.revision, ops: [{ type: "set_director_boundary", boundary: {
+        from: "seg1", to: "seg2", tailFrame: false, motionContext: true, reason: "Keep this boundary continuous.",
+    } }] });
+
+    const updatedCanvas = f.db.getCanvasProject(f.projectId)!;
+    const node = (updatedCanvas.nodes as any[]).find(item => item.id === group.nodeId);
+    const segment = node.metadata.segments.find((item: any) => item.id === group.segmentId);
+    assert.equal(segment.tailFrameContinuation, false);
+    assert.equal(segment.motionContextEnabled, true);
 });

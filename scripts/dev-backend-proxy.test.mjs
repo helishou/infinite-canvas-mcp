@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { createRequire } from 'node:module';
 import { once } from 'node:events';
 import test from 'node:test';
 import { createStableBackendProxy } from './dev-backend-proxy.mjs';
+
+const WebSocket = createRequire(import.meta.url)('ws');
 
 async function listen(server) {
     server.listen(0, '127.0.0.1');
@@ -78,4 +81,38 @@ test('marks a forwarded write unknown and never resubmits it after the socket dr
     assert.equal(response.headers.get('retry-after'), '1');
     assert.deepEqual(await response.json().then(({ code, outcomeUnknown }) => ({ code, outcomeUnknown })), { code: 'BACKEND_OUTCOME_UNKNOWN', outcomeUnknown: true });
     assert.equal(writes, 1);
+});
+
+/** A dropped upgrade never answers, so bound every wait instead of hanging the runner. */
+const within = (promise, label) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} 超时：升级请求没有得到任何响应`)), 3_000))]);
+
+test('forwards a WebSocket upgrade to the Backend instead of answering it as plain HTTP', async t => {
+    const backend = http.createServer();
+    const server = new WebSocket.Server({ server: backend });
+    let upgradePath = '';
+    server.on('connection', (socket, req) => { upgradePath = String(req.url || ''); socket.on('message', data => socket.send(String(data))); });
+    const targetPort = await listen(backend);
+    const proxy = createStableBackendProxy({ port: 0, targetPort, readyWaitMs: 50 });
+    await once(proxy.server, 'listening');
+    proxy.setBackendReady(true);
+    t.after(async () => { proxy.close(); await close(backend); });
+
+    const client = new WebSocket(`ws://127.0.0.1:${proxy.server.address().port}/canvas/realtime?projectId=P`);
+    t.after(() => client.terminate());
+    await within(once(client, 'open'), 'open');
+    assert.equal(upgradePath, '/canvas/realtime?projectId=P', 'a rejected upgrade means the browser can never open a canvas socket');
+    client.send('ping');
+    assert.equal(String((await within(once(client, 'message'), 'echo'))[0]), 'ping', 'the tunnel must stay bidirectional');
+});
+
+test('rejects an upgrade with 503 while the Backend is reloading', async t => {
+    const backend = http.createServer();
+    const targetPort = await listen(backend);
+    const proxy = createStableBackendProxy({ port: 0, targetPort, readyWaitMs: 20 });
+    await once(proxy.server, 'listening');
+    t.after(async () => { proxy.close(); await close(backend); });
+    const client = new WebSocket(`ws://127.0.0.1:${proxy.server.address().port}/canvas/realtime?projectId=P`);
+    t.after(() => client.terminate());
+    const [error] = await within(once(client, 'error'), 'error');
+    assert.match(String(error.message), /503/);
 });

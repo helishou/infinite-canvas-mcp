@@ -3,6 +3,7 @@ import { previewH3Generation, fetchBackendH3Defaults, saveBackendH3Defaults, res
 import { useTranslation } from "react-i18next";
 
 import { storeGeneratedVideo } from "@/services/api/video";
+import { translateCompiledH3Prompt } from "@/services/api/translation";
 import { fetchWorkflowDetail } from "@/services/api/workflows";
 import { getLocalH3Task, resolveBackendAgentEndpoint, runVideoConcatTask } from "@/services/api/comfyui";
 import { fetchComfyModels } from "@/services/api/canvas-agent";
@@ -165,6 +166,7 @@ export function usePluginHost(params: PluginHostParams) {
                     throw error;
                 }
             },
+            translateH3Prompt: (prompt, options) => translateCompiledH3Prompt(prompt, options),
             previewH3Generation,
             runCanvasGeneration: async (command: CanvasGenerationCommand) => {
                 if (command.operation === 'h3-run') {

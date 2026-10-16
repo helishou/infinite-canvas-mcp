@@ -21,6 +21,7 @@ import { stageH3ContinuationSeed, type H3ContinuationIdentity } from "./continua
 import { listLocalLoras } from "./local-lora-catalog.js";
 import { createLogger } from "../logger.js";
 import { watchSlowOperation } from "../slow-operation.js";
+import { freeLlmBeforeGenerate, restoreLlmAfterGenerate } from "./llm-handoff.js";
 
 const slowOperationLogger = createLogger("comfyui");
 
@@ -411,6 +412,9 @@ export class ComfyUiBackend {
         let executionCompleted = false;
         const keepModelCache = task.params.keepModelCache !== false;
         try {
+            // GPU 显存交接：卸掉本地 LLM 引擎（:18080），让出整卡给 ComfyUI。
+            // 条件式+幂等——交接脚本不存在或本地没启动 LLM 时就是 no-op，不影响生成。
+            await freeLlmBeforeGenerate();
             this.updateTask(task.id, { status: "running", progress: 0.05 });
             this.deps.tasks.addEvent(task.id, "status", { status: "running" });
             const result = preset.id === "minimax-h3" && task.params.autoSplit === true && typeof task.input.video === "string"
@@ -425,6 +429,10 @@ export class ComfyUiBackend {
             this.deps.tasks.addEvent(task.id, "result", checked);
             executionCompleted = true;
         } finally {
+            // 结束本次生成：递减引用计数；若本批已结束且 Free 确实卸过引擎，
+            // 就安排一次（防抖的）引擎恢复。这里「不 await」——槽位要等本函数
+            // 返回才释放，等 170s 的重启会把下一段 clip 卡住。
+            restoreLlmAfterGenerate();
             if (preset.id === "minimax-h3" && !executionCacheCleared && (!keepModelCache || !executionCompleted)) {
                 try { await this.clearComfyExecutionCache(comfyUrl); } catch (error) { console.warn("[comfyui] H3 执行缓存清理失败:", error instanceof Error ? error.message : String(error)); }
             }
@@ -465,8 +473,9 @@ export class ComfyUiBackend {
             const actualSubmission = segments.length ? segments[segments.length - 1].actualSubmission : undefined;
             const combined = localResults.length > 1 ? await concatLocalVideos(localResults) : undefined;
             if (!combined) return actualSubmission ? { segments, media: segmentMedia, actualSubmission } : { segments, media: segmentMedia };
-            const stored = await this.deps.media.storeStream(fs.createReadStream(combined), { name: path.basename(combined), mimeType: "video/mp4", category: "output" });
-            await rm(combined, { force: true });
+            let stored;
+            try { stored = await this.deps.media.storeStream(fs.createReadStream(combined), { name: path.basename(combined), mimeType: "video/mp4", category: "output" }); }
+            finally { await rm(combined, { force: true }); }
             const result = { segments, media: [{ url: this.deps.media.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType, filename: path.basename(combined) }, ...segmentMedia] };
             return actualSubmission ? { ...result, actualSubmission } : result;
         } finally { await split.cleanup(); }
@@ -875,14 +884,19 @@ async function concatLocalVideos(files: string[]) {
     const output = path.join(MEDIA_DIR, `h3-combined-${crypto.randomUUID()}.mp4`);
     const concatList = path.join(path.dirname(files[0]), `concat-${crypto.randomUUID()}.txt`);
     await writeFile(concatList, files.map((file) => `file '${file.replace(/'/g, "'\\''")}'`).join("\n"), "utf8");
+    let succeeded = false;
     try {
         try {
             await runProcess(process.env.FFMPEG_PATH || "ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", concatList, "-c", "copy", output]);
         } catch {
             await runProcess(process.env.FFMPEG_PATH || "ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", concatList, "-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart", output]);
         }
+        succeeded = true;
         return output;
-    } finally { await rm(concatList, { force: true }); }
+    } finally {
+        await rm(concatList, { force: true });
+        if (!succeeded) await rm(output, { force: true });
+    }
 }
 
 function runProcess(command: string, args: string[]) {

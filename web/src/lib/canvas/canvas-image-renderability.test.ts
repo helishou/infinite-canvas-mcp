@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
-import { canvasNodeImage, hasRenderableCanvasImage } from "./canvas-image-renderability";
+import { canvasNodeImage, canvasNodePrimaryImage, hasRenderableCanvasImage } from "./canvas-image-renderability";
 
 const imageNode = (metadata: CanvasNodeData["metadata"]): CanvasNodeData => ({
     id: "image",
@@ -56,6 +56,38 @@ test("智能节点引用缺省跟随最新成功归档结果，不被 primaryIma
         },
     };
     assert.equal(canvasNodeImage(smart)?.storageKey, "image:latest");
+});
+
+test("智能节点加入资产时使用当前主图，而非引用默认跟随的最新结果", () => {
+    const smart: CanvasNodeData = {
+        ...imageNode({}),
+        type: CanvasNodeType.Config,
+        metadata: {
+            smart: true,
+            generationMode: "image",
+            primaryImageId: "selected",
+            images: [
+                { id: "selected", status: "success", content: "selected.png", storageKey: "image:selected", naturalWidth: 100, naturalHeight: 100, bytes: 1, mimeType: "image/png" },
+                { id: "first-following", status: "success", content: "first-following.png", storageKey: "image:first-following", naturalWidth: 200, naturalHeight: 200, bytes: 2, mimeType: "image/webp" },
+            ],
+        },
+    };
+    assert.equal(canvasNodeImage(smart)?.storageKey, "image:first-following");
+    assert.equal(canvasNodePrimaryImage(smart)?.storageKey, "image:selected");
+});
+
+test("智能节点没有有效主图 ID 时，加入资产与节点预览一样回退到第一张", () => {
+    const base: CanvasNodeData["metadata"] = {
+        smart: true,
+        generationMode: "image",
+        images: [
+            { id: "first", status: "success", content: "first.png", storageKey: "image:first", naturalWidth: 100, naturalHeight: 100, bytes: 1, mimeType: "image/png" },
+            { id: "latest", status: "success", content: "latest.png", storageKey: "image:latest", naturalWidth: 200, naturalHeight: 200, bytes: 2, mimeType: "image/webp" },
+        ],
+    };
+    const node = (metadata: CanvasNodeData["metadata"]): CanvasNodeData => ({ ...imageNode(metadata), type: CanvasNodeType.Config });
+    assert.equal(canvasNodePrimaryImage(node(base))?.storageKey, "image:first");
+    assert.equal(canvasNodePrimaryImage(node({ ...base, primaryImageId: "deleted-result" }))?.storageKey, "image:first");
 });
 
 test("智能节点显式钉选历史结果时锁定那张，失效选择回落最新", () => {

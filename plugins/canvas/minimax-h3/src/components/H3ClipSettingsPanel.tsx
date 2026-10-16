@@ -49,6 +49,21 @@ function H3RunActionButtons({ ctx, selected, runtimeTaskId, busy, stuck, canCanc
 export function H3ClipSettingsPanel({ ctx, metadata, selected, submitting = false, patchSelected, patchAllSettings }: Props) {
     const globalScope = metadata.h3SettingsScope === "global";
     const patchSettings = globalScope ? patchAllSettings : patchSelected;
+    const patchClipSettings = (patch: Partial<H3Segment>) => {
+        const editsContinuation = Object.hasOwn(patch, "tailFrameContinuation") || Object.hasOwn(patch, "motionContextEnabled");
+        const targetId = String((selected as any)?.productionClipProjection?.targetId || "");
+        if (!globalScope && editsContinuation && targetId) {
+            const setBoundary = ctx.production?.setContinuationBoundary;
+            if (!setBoundary) { message.error("正式制作 Clip 的续段衔接需要制作台连接，未修改参数。"); return; }
+            const tailFrameContinuation = Object.hasOwn(patch, "tailFrameContinuation") ? patch.tailFrameContinuation === true : selected?.tailFrameContinuation === true;
+            const motionContextEnabled = Object.hasOwn(patch, "motionContextEnabled") ? patch.motionContextEnabled === true : selected?.motionContextEnabled === true;
+            void setBoundary({ nodeId: ctx.node.id, segmentId: String(selected?.id || ""), tailFrameContinuation, motionContextEnabled })
+                .then(result => { if (!result.sourceSaved) message.error("制作台未保存续段衔接设置。"); })
+                .catch(error => message.error(error instanceof Error ? error.message : String(error)));
+            return;
+        }
+        patchSettings(patch);
+    };
     const locale = useH3Locale();
     const videoModels = ctx.ai.listModels("video");
     const defaults = useDefaultParams();
@@ -186,7 +201,7 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, submitting = fals
         </div>
         <p className="nfh3-hint">{h3Label(locale, "parameterPolicy")}：{h3Label(locale, resolved?.policy === "defaults" ? "inheritDefaults" : "explicitOverrides")} · {h3Label(locale, "effectiveParameters")}</p>
         {motionGroup ? <p className="nfh3-hint" role="status">{locale === "en-US" ? `Motion group: Clip ${motionGroup.head + 1}–${motionGroup.tail + 1}. Generate current Clip from the group head to run the entire group in order.` : `接续组：Clip ${motionGroup.head + 1}–${motionGroup.tail + 1}。从组首点击「生成当前 Clip」会依次运行全组。`}</p> : null}
-        <ClipSettings key="clip-settings" ctx={ctx} metadata={metadata} segment={selected} audioRefs={effectiveSegment ? refsForSegment(effectiveSegment).filter((ref) => ref.type === "audio") : []} patch={patchSettings} onManageStyleTemplates={() => setStylesOpen(true)} />
+        <ClipSettings key="clip-settings" ctx={ctx} metadata={metadata} segment={selected} audioRefs={effectiveSegment ? refsForSegment(effectiveSegment).filter((ref) => ref.type === "audio") : []} patch={patchClipSettings} onManageStyleTemplates={() => setStylesOpen(true)} />
         <Modal title="管理视觉风格模板" open={stylesOpen} onCancel={() => { setStylesOpen(false); setStyleDraft(null); }} footer={null} width={720}>
             <div style={{ display: "grid", gap: 10, maxHeight: "55vh", overflow: "auto", marginBottom: 16 }}>
                 {styleTemplates.map(template => <div key={template.id} style={{ display: "flex", alignItems: "center", gap: 10 }}><strong style={{ flex: 1 }}>{template.label}</strong><Button size="small" onClick={() => editStyle(template)}>编辑</Button><Button size="small" danger onClick={() => void removeStyle(template.id)}>删除</Button></div>)}

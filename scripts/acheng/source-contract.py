@@ -68,9 +68,6 @@ def contract():
                     "focus": {"type": "string"},
                     "attention_subject_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}},
                     "editorial_reason": prose}},
-                "continuity_cues": {"type": "array", "items": {"type": "object", "properties": {
-                    "fact_id": prose, "phase": {"type": "string", "enum": ["start", "end"]},
-                    "value": prose, "description": prose}, "required": ["fact_id", "phase", "value", "description"]}}
             }}},
             "asset_cards": {"type": "array", "items": {"type": "object", "properties": {
                 "recipe": {"type": "string", "enum": list(RECIPES)},
@@ -87,7 +84,7 @@ def contract():
         "storyboardPolicy": {"version": 1, "defaultForNewProductions": False, "dialogueCoverage": "Temporarily disabled: H3 compilation preserves authored camera design, dialogue text and timing without inserting speaker close-up/reverse/reaction cuts.", "manualOverrideCameraFields": ["framing", "attention_subject_ids", "editorial_reason"], "framingValues": list(FRAMINGS), "explicitManualOverride": "When version 1 is declared, enforce manual framing/attention/reason fields and validate only selected Shot/Segment structure in scoped compilation."},
         "modelPromptContract": {"version": 1,
             "subjects": "Ref2VA identity/character/scene/environment/prop references require one matching entity/source/Shot Subject. Frame and composition anchors may remain Pictures.",
-            "continuity": "Replay snapshots remain report-only. Optional shots[].continuity_cues assert a registered local fact/value at start/end and provide complete model-facing description. Without cues, authored shot state/action remains the prose source.",
+            "continuity": "Replay snapshots remain report-only. Subject Prompt v2 registers consumed facts in subject_usages[].continuityFactIds or shots[].continuity_facts, then declares per-Shot hold/change/unresolved state in ledger.requirements with supporting ledger events. Do not add legacy state_description/state_in/state_out/continuity_cues fields to v2 Shots.",
             "internalIds": "Registered fact/object/Shot/Segment IDs cannot appear in instructions; original dialogue and quoted visible text are preserved.",
             "semanticReview": "Structural acceptance does not verify natural-language agreement or visual quality."},
     }
@@ -172,6 +169,36 @@ def validate_subject_prompt_v2(source, stage="edit", validation_scope=None):
                 issue("shots." + shot_id + ".camera." + field, "Shot camera contract field is required", shot_id)
         if not isinstance(camera.get("attention_subject_ids"), list) or not camera["attention_subject_ids"]:
             issue("shots." + shot_id + ".camera.attention_subject_ids", "At least one registered attention Subject is required", shot_id)
+        else:
+            visible_subject_ids = {
+                str(usage.get("subjectId"))
+                for usage in shot.get("subject_usages", [])
+                if isinstance(usage, dict) and usage.get("presentation") == "visible" and usage.get("subjectId")
+            }
+            attention_subject_ids = {str(value) for value in camera["attention_subject_ids"] if value}
+            shared_attention = visible_subject_ids.intersection(attention_subject_ids)
+            close_framings = {"MCU", "CU", "BSCU", "ECU"}
+            if str(camera.get("framing") or "").upper() in close_framings and len(shared_attention) > 1:
+                interaction_text = " ".join(str(value or "") for value in (
+                    shot.get("visual"), camera.get("description"), camera.get("target"), camera.get("path"),
+                ))
+                has_object = re.search(r"剑尖|刀尖|枪口|箭尖|武器|剑|刀|枪|匕首|手指|指尖|\b(?:sword|blade|knife|weapon|gun|arrow|finger|hand)\b", interaction_text, re.I)
+                body_targets = r"眉心|眉间|眉|额头|太阳穴|眼睛|眼|脸|颈|喉|心口|胸口|腹部|身体|\b(?:brow|forehead|temple|eyes?|face|neck|throat|chest|heart|body)\b"
+                has_relation = re.search(r"指(?:向|着|到|在|于)|对准|抵(?:住|着|到)|刺(?:向|到)|戳(?:向|到)|触碰|接触|停在|顶(?:住|着)?|\b(?:points?\s+at|aims?\s+at|touch(?:es|ing)?|press(?:es|ing)?\s+against|stops?\s+at)\b", interaction_text, re.I)
+                # Bare 指 in nouns such as 手指/指节 is not an interaction; accept 直指 only when a body target follows directly.
+                has_relation = has_relation or re.search(r"(?:直)?指(?:向|着|到|在|于)?(?:.{0,2}(?:" + body_targets + r"))", interaction_text, re.I)
+                has_body_target = re.search(body_targets, interaction_text, re.I)
+                if has_object and has_relation and has_body_target:
+                    issues.append({
+                        "code": "SHOT_CLOSE_MULTI_SUBJECT_INTERACTION_REVIEW",
+                        "path": "director.source.shots." + str(index) + ".camera",
+                        "targetId": shot_id,
+                        "shotId": shot_id,
+                        "severity": "warning",
+                        "blocksCompilation": False,
+                        "blockingActions": [],
+                        "message": "高风险构图复核：此近景中有多个主体同时可见且受关注，并包含道具指向/接触身体部位的表述。请确认主体屏幕位置与主次、道具入画和运动路径、精确落点及停止/接触距离、急停后的构图和遮挡。编译器不会自动补写、改景别或拆镜。",
+                    })
         for usage in shot.get("subject_usages", []) if isinstance(shot.get("subject_usages"), list) else []:
             subject = subject_by_id.get(str(usage.get("subjectId") or ""))
             if not subject:
@@ -214,6 +241,7 @@ def validate_subject_prompt_v2(source, stage="edit", validation_scope=None):
     by_segment = {}
     selected_scope = source.get("_canvas_compilation_scope") if isinstance(source.get("_canvas_compilation_scope"), dict) else {}
     wanted = set(map(str, selected_scope.get("targetIds", [])))
+    scoped_output_shot_ids = selected_scope.get("outputShotIds")
     asset_targets = {
         str(item.get("asset_id") or item.get("id") or "")
         for item in source.get("asset_plan", []) if isinstance(item, dict)
@@ -244,11 +272,16 @@ def validate_subject_prompt_v2(source, stage="edit", validation_scope=None):
             issue("segments." + segment_id + ".mode", "Clip generation mode will be inferred from selected references", segment_id, severity="warning")
         if mode and segment.get("mode_lock") and segment.get("mode_lock") != mode:
             issue("segments." + segment_id + ".mode_lock", "Stored mode lock differs from the selected generation mode", segment_id, severity="warning")
-    if not wanted:
-        for shot_id in (scoped_shot_ids if scoped else shot_by_id):
-            if shot_id not in partitioned:
-                issue("shots." + shot_id, "Shot is not assigned to a Clip", shot_id)
+    if isinstance(scoped_output_shot_ids, list):
+        shots_to_check = set(map(str, scoped_output_shot_ids))
+    elif not wanted:
+        shots_to_check = scoped_shot_ids if scoped else set(shot_by_id)
     else:
+        shots_to_check = set()
+    for shot_id in shots_to_check:
+        if shot_id not in partitioned:
+            issue("shots." + shot_id, "Shot is not assigned to a Clip", shot_id)
+    if wanted:
         for target in wanted:
             # A mixed compilation scope may contain image-asset outputs as well as
             # video Clips. Asset targets are valid compile outputs; only Clip IDs

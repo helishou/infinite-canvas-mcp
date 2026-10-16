@@ -348,5 +348,18 @@ class LocalShotDiagnosticsTests(unittest.TestCase):
         p = {'shots': [{'id': 'Q', 'start_frame': 0, 'end_frame': 24, 'prompt_contract_version': 2, 'characters': [], 'camera': {'framing': 'CU'}, 'dialogues': [{'end': 23}], 'performance': {'tracks': {'gaze': {'visibility': 'Medium framing shows both people'}}, 'events': [{'start': 23, 'end': 25, 'after_dialogue': True}]}}], 'segments': []}
         self.assertEqual({e['code'] for e in diagnostics(p)}, {'SHOT_FRAMING_VISIBILITY_CONFLICT', 'SHOT_ACTION_TIME_MISSING'})
 
+    def test_abstract_inner_state_emits_nonblocking_visualization_warning(self):
+        from canvas_shot_diagnostics import diagnostics
+        p = {'shots': [{'id': 'Q', 'prompt_contract_version': 2, 'visual': '灵台深处空白微弱得如同一张白纸。', 'camera': {'target': '红绡灵台深处'}}], 'segments': []}
+        found = [item for item in diagnostics(p) if item['code'] == 'SHOT_ABSTRACT_VISUALIZATION_NEEDS_CUE']
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]['severity'], 'warning')
+        self.assertEqual(found[0]['targetId'], 'Q')
+
+    def test_concrete_aura_gap_suppresses_abstract_visualization_warning(self):
+        from canvas_shot_diagnostics import diagnostics
+        p = {'shots': [{'id': 'Q', 'prompt_contract_version': 2, 'visual': '黑红血煞在红绡眉心附近分开并持续绕行，形成一处气场缺口。', 'camera': {'target': '红绡眉心气场缺口'}}], 'segments': []}
+        self.assertFalse(any(item['code'] == 'SHOT_ABSTRACT_VISUALIZATION_NEEDS_CUE' for item in diagnostics(p)))
+
 if __name__ == "__main__":
     unittest.main()

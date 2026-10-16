@@ -10,12 +10,13 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
-import { backendMediaUrl, createBackendDramaEpisode, deleteBackendDramaAsset, deleteBackendDramaEpisode, editEpisodeProduction, fetchBackendDramaAssets, fetchBackendDramaEpisodes, fetchBackendProject, fetchEpisodeProduction, fetchProductionSharedAssets, updateBackendDramaEpisode, uploadBackendDramaAsset, ensureSharedAssetCanvas, ensureEpisodeCanvas, upsertBackendCanvasFolder, type ApprovedSharedAsset, type DramaCustomAsset, type DramaEpisode, type EpisodeProduction } from "@/services/backend-api";
+import { backendMediaUrl, createBackendDramaEpisode, deleteBackendDramaAsset, deleteBackendDramaEpisode, editEpisodeProduction, fetchBackendAssets, fetchBackendDramaAssets, fetchBackendDramaEpisodes, fetchBackendProject, fetchEpisodeProduction, updateBackendDramaEpisode, uploadBackendDramaAsset, ensureSharedAssetCanvas, ensureEpisodeCanvas, upsertBackendCanvasFolder, type DramaCustomAsset, type DramaEpisode, type EpisodeProduction } from "@/services/backend-api";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { MediaImage } from "@/components/media/media-image";
 import { nanoid } from "nanoid";
 import { productionCanvasNodes, type ProductionCanvasSnapshot } from "./production-canvas-nodes";
 import { useCanvasStore, type CanvasFolder, type CanvasProject } from "@/stores/canvas/use-canvas-store";
+import type { Asset } from "@/stores/use-asset-store";
 import { dramaProductionPlanSchema, type DramaProductionPlan } from "@basketikun/canvas-agent/drama/production-contract";
 import { ModelPicker } from "@/components/model-picker";
 import { useConfigStore } from "@/stores/use-config-store";
@@ -42,6 +43,13 @@ type EpisodeDraft = {
     canvasId: string | null;
     withCanvas?: boolean;
 };
+
+function sharedAssetImageSource(asset: Asset) {
+    const image = asset.kind === "character"
+        ? asset.data.images[asset.data.primaryIndex || 0]
+        : asset.kind === "scene" || asset.kind === "prop" ? asset.data.image : undefined;
+    return image?.storageKey ? backendMediaUrl(image.storageKey) : image?.url || asset.coverUrl || "";
+}
 
 /**
  * 剧目管理面板：剧目规划、共享资产画布、分集列表与自定义资产。
@@ -76,7 +84,7 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
     const [episodeSaving, setEpisodeSaving] = useState(false);
     const [assets, setAssets] = useState<DramaCustomAsset[]>([]);
     const [uploadingAssets, setUploadingAssets] = useState(false);
-    const [sharedAssets, setSharedAssets] = useState<ApprovedSharedAsset[]>([]);
+    const [sharedAssets, setSharedAssets] = useState<Asset[]>([]);
     const [sharedAssetsError, setSharedAssetsError] = useState(false);
     const [sharedAssetsReload, setSharedAssetsReload] = useState(0);
     const [sharedProduction, setSharedProduction] = useState<EpisodeProduction | null>(null);
@@ -87,6 +95,7 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
     const assetInputRef = useRef<HTMLInputElement>(null);
 
     const folder = folders.find((item) => item.id === dramaId);
+    const sharedCanvasRevision = projects.find(project => project.id === folder?.sharedAssetCanvasId)?.revision;
 
     useEffect(() => {
         let disposed = false;
@@ -131,11 +140,18 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
         let disposed = false;
         setSharedAssetsError(false);
         if (!sharedCanvasId) { setSharedAssets([]); return; }
-        void fetchProductionSharedAssets({ projectId: sharedCanvasId })
-            .then((result) => { if (!disposed) setSharedAssets(result.assets || []); })
+        void fetchBackendAssets({ dramaId })
+            .then((result) => {
+                if (disposed) return;
+                const assets = (result.assets || []) as Asset[];
+                setSharedAssets(assets.filter(asset => {
+                    const source = asset.metadata?.sharedAssetSource as { sourceProjectId?: string } | undefined;
+                    return source?.sourceProjectId === sharedCanvasId && ["character", "scene", "prop"].includes(asset.kind);
+                }));
+            })
             .catch(() => { if (!disposed) setSharedAssetsError(true); });
         return () => { disposed = true; };
-    }, [folder?.sharedAssetCanvasId, sharedAssetsReload]);
+    }, [dramaId, folder?.sharedAssetCanvasId, sharedCanvasRevision, sharedAssetsReload]);
     useEffect(() => {
         const sharedCanvasId = folder?.sharedAssetCanvasId;
         if (!sharedCanvasId) { setSharedProduction(null); setSharedCanvasSnapshot(undefined); return; }
@@ -161,11 +177,11 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
     if (!folder) return <div className="py-12 text-center text-sm text-muted-foreground">{t("canvas.loading")}</div>;
 
     const produceEpisode = onProduceEpisode || ((episode: DramaEpisode) => navigate(dramaWorkbenchPath(dramaId, episode.id)));
-    const orderedSharedAssets = [...sharedAssets].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const orderedSharedAssets = [...sharedAssets].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     const sharedThumbs = orderedSharedAssets.slice(0, 5);
     const sharedCanvasProject = folder.sharedAssetCanvasId ? projects.find((item) => item.id === folder.sharedAssetCanvasId) : undefined;
     const sharedNodeCount = sharedCanvasProject?.summary?.nodeCount ?? sharedCanvasProject?.nodes.length;
-    const sharedLastUpdate = orderedSharedAssets[0]?.createdAt;
+    const sharedLastUpdate = orderedSharedAssets[0]?.updatedAt;
     const styleSource = sharedProduction?.draft.director?.source as Record<string, any> | undefined;
     const styleLock = styleSource?.style_lock as Record<string, unknown> | undefined;
     const styleAnchorAssetId = String(styleLock?.anchor_asset_id || "");
@@ -432,7 +448,7 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
                                 </div>
                             </div>
                             {sharedThumbs.length > 0 && <div className="flex shrink-0 items-center">
-                                {sharedThumbs.map((asset, index) => <MediaImage key={asset.id} src={backendMediaUrl(asset.storageKey)} alt={asset.snapshot.title} name={asset.snapshot.title} className={`size-16 rounded-xl border-2 border-background object-cover shadow-sm ${index ? "-ml-4" : ""}`} preview={false} />)}
+                                {sharedThumbs.map((asset, index) => <MediaImage key={asset.id} src={sharedAssetImageSource(asset)} alt={asset.title} name={asset.title} className={`size-16 rounded-xl border-2 border-background object-cover shadow-sm ${index ? "-ml-4" : ""}`} preview={false} />)}
                                 {orderedSharedAssets.length > sharedThumbs.length && <span className="-ml-4 grid size-16 shrink-0 place-items-center rounded-xl border-2 border-background bg-stone-100 text-xs font-medium text-stone-500 dark:bg-stone-900 dark:text-stone-400">+{orderedSharedAssets.length - sharedThumbs.length}</span>}
                             </div>}
                         </div>
@@ -460,13 +476,12 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
                         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                             {orderedSharedAssets.map((asset) => (
                                 <button key={asset.id} type="button" onClick={() => void openSharedCanvas()} className="group min-w-0 overflow-hidden rounded-xl border border-stone-200 bg-background text-left transition hover:-translate-y-0.5 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-950/5 dark:border-stone-800 dark:hover:border-orange-900">
-                                    <MediaImage src={backendMediaUrl(asset.storageKey)} alt={asset.snapshot.title} name={asset.snapshot.title} className="aspect-[4/3] w-full bg-stone-100 object-cover dark:bg-stone-900" preview={false} />
+                                    <MediaImage src={sharedAssetImageSource(asset)} alt={asset.title} name={asset.title} className="aspect-[4/3] w-full bg-stone-100 object-cover dark:bg-stone-900" preview={false} />
                                     <div className="space-y-1.5 p-3">
-                                        <p className="truncate text-sm font-medium" title={asset.snapshot.title}>{asset.snapshot.title || t("productionCanvas.sharedAssetUntitled")}</p>
+                                        <p className="truncate text-sm font-medium" title={asset.title}>{asset.title || t("productionCanvas.sharedAssetUntitled")}</p>
                                         <div className="flex items-center gap-2 text-xs text-stone-400">
-                                            <span className="shrink-0">v{asset.sourceVersion}</span>
-                                            <span className={`truncate ${asset.reviewStatus === "approved" ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"}`}>{t(`productionCanvas.reviewStatus.${asset.reviewStatus}`)}</span>
-                                            <span className="ml-auto shrink-0">{new Date(asset.createdAt).toLocaleDateString()}</span>
+                                            <span className="truncate">{t(`assets.kinds.${asset.kind}`)}</span>
+                                            <span className="ml-auto shrink-0">{new Date(asset.updatedAt).toLocaleDateString()}</span>
                                         </div>
                                     </div>
                                 </button>

@@ -55,7 +55,7 @@ export const productionWorkspaceDescriptions = {
     production_prepare_targets: "在固定画布按 Backend 持久化布局计划准备正式 entity:<character|scene|prop>:<实体ID> 素材节点、scene 剧本文本节点、asset/frame 节点或 segment Clip；返回布局回执，不发布或生成。",
     production_get_continuity: "只读读取正式连续性检查状态、问题、对象轨迹或单镜状态；不会触发检查或修改制作稿。",
     production_check_continuity: "按正式 owner 和 revision 执行 Acheng 固定 runtime 的连续性检查并持久化回执；检查完成不表示 verdict passed，不发布或生成。",
-    production_get_shared_assets: "读取同剧目最新共享素材版本、真实审核状态及当前集持久更新状态。",
+    production_get_shared_assets: "读取同剧目共享素材版本及当前集持久更新状态；共享画布角色、场景和道具节点无需审核即可进入素材库。",
     production_adopt_shared_asset: "将同剧目批准资产采用到已登记的集内目标；核验来源、媒体和版本，不生成。",
     production_adopt_shared_assets: "一次事务批量采用多项同剧目批准资产；后台自动发布推版本时不会逐项冲突，全部核验来源、媒体和版本，不生成。",
     production_retry_shared_update: "核对当前 revision 后恢复一项被阻塞的共享引用更新；不授权新的生成范围。",

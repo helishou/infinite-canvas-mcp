@@ -117,6 +117,12 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             res.json({ ok: true, compilation: refreshes.inspect(req.params.episodeId, req.params.operationId, query.view, query.offset, query.pageSize) || compilations.getCompilation(req.params.episodeId, base, req.params.operationId, query.view, query.offset, query.pageSize) });
         } catch (error) { handle(res, error); }
     });
+    router.post<Record<string, string>>(`${base}/translate-compiled-prompts`, async (req, res) => {
+        try {
+            const input = z.object({ expectedRevision: z.number().int().nonnegative(), operationId: z.string().min(1), targetIds: z.array(z.string().min(1)).min(1) }).strict().parse(req.body);
+            res.json({ ok: true, receipt: await service.translateCompiledPrompts(req.params.episodeId, input) });
+        } catch (error) { handle(res, error); }
+    });
     router.post<Record<string, string>>(`${base}/apply-compilation`, (req, res) => {
         try {
             const input = productionApplyCompilationSchema.parse(req.body);

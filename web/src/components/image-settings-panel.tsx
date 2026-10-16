@@ -60,6 +60,8 @@ type ImageSettingsPanelProps = {
     workflowParamsBlockedByScenario?: boolean;
     /** 诊断：本次参考图数量与命中的输入场景。 */
     debugScenario?: string;
+    /** Canvas node settings use a denser layout than the full-page image studio. */
+    compact?: boolean;
 };
 
 export function ImageSettingsPanel({
@@ -77,6 +79,7 @@ export function ImageSettingsPanel({
     workflowParamsMissing = false,
     workflowParamsBlockedByScenario = false,
     debugScenario,
+    compact = false,
 }: ImageSettingsPanelProps) {
     const { t } = useTranslation();
     const updateConfig = useConfigStore((state) => state.updateConfig);
@@ -129,14 +132,14 @@ export function ImageSettingsPanel({
                         {debugScenario}
                     </div>
                 ) : null}
-                <SettingsSection title={t("settingsPanels.groups.common")} theme={theme}>
+                <SettingsSection title={t("settingsPanels.groups.common")} theme={theme} compact={compact}>
                     {!hideStandardImageOptions ? (
                         <>
-                            <div className="space-y-2.5">
-                                <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.quality")}</SettingTitle>
-                                <div className="grid grid-cols-3 gap-2.5">
+                            <div className={compact ? "space-y-1.5" : "space-y-2.5"}>
+                                <SettingTitle color={theme.node.muted} compact={compact}>{t("settingsPanels.image.quality")}</SettingTitle>
+                                <div className={`grid grid-cols-3 ${compact ? "gap-1.5" : "gap-2.5"}`}>
                                     {qualityOptions.map((item) => (
-                                        <OptionPill key={item.value} selected={quality === item.value} theme={theme} onClick={() => onConfigChange("quality", item.value)}>
+                                        <OptionPill key={item.value} selected={quality === item.value} theme={theme} compact={compact} onClick={() => onConfigChange("quality", item.value)}>
                                             {t(`settingsPanels.common.${item.labelKey}`)}
                                         </OptionPill>
                                     ))}
@@ -144,15 +147,15 @@ export function ImageSettingsPanel({
                             </div>
                         </>
                     ) : null}
-                    <div className="space-y-2.5">
-                        <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.count")}</SettingTitle>
-                        <div className="grid grid-cols-3 gap-2">
+                    <div className={compact ? "space-y-1.5" : "space-y-2.5"}>
+                        <SettingTitle color={theme.node.muted} compact={compact}>{t("settingsPanels.image.count")}</SettingTitle>
+                        <div className={`grid grid-cols-3 ${compact ? "gap-1.5" : "gap-2"}`}>
                             {Array.from({ length: quickCount }, (_, index) => index + 1).map((value) => (
-                                <OptionPill key={value} selected={count === value} theme={theme} onClick={() => onConfigChange("count", String(value))}>
+                                <OptionPill key={value} selected={count === value} theme={theme} compact={compact} onClick={() => onConfigChange("count", String(value))}>
                                     {t("settingsPanels.image.images", { count: value })}
                                 </OptionPill>
                             ))}
-                            <CountInput value={count} max={maxCount} theme={theme} onChange={(value) => onConfigChange("count", String(value || 1))} />
+                            <CountInput value={count} max={maxCount} theme={theme} compact={compact} onChange={(value) => onConfigChange("count", String(value || 1))} />
                         </div>
                     </div>
                     {!hideStandardImageOptions ? (
@@ -267,12 +270,12 @@ export function imageSizeLabel(size: string) {
     return aspectOptions.find((item) => (item.size || item.value) === size || item.value === size)?.label || size;
 }
 
-function OptionPill({ selected, theme, onClick, children }: { selected: boolean; theme: CanvasTheme; onClick: () => void; children: ReactNode }) {
+function OptionPill({ selected, theme, onClick, children, compact = false }: { selected: boolean; theme: CanvasTheme; onClick: () => void; children: ReactNode; compact?: boolean }) {
     return (
         <button
             type="button"
             aria-pressed={selected}
-            className="min-h-9 min-w-0 cursor-pointer rounded-full border px-2 text-sm transition hover:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+            className={`${compact ? "min-h-7 px-1.5 text-xs" : "min-h-9 px-2 text-sm"} min-w-0 cursor-pointer rounded-full border transition hover:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`}
             style={{ background: "transparent", borderColor: selected ? theme.node.text : theme.node.stroke, color: theme.node.text }}
             onMouseDown={(event) => event.stopPropagation()}
             onClick={onClick}
@@ -311,16 +314,16 @@ function DimensionInput({ prefix, value, disabled, theme, alignToStep, onChange 
     );
 }
 
-function CountInput({ value, max, theme, onChange }: { value: number; max: number; theme: CanvasTheme; onChange: (value: number | null) => void }) {
+function CountInput({ value, max, theme, onChange, compact = false }: { value: number; max: number; theme: CanvasTheme; onChange: (value: number | null) => void; compact?: boolean }) {
     const { t } = useTranslation();
     return (
-        <label className="col-span-2 flex h-9 overflow-hidden rounded-full border text-sm focus-within:ring-2 focus-within:ring-ring" style={{ borderColor: theme.node.stroke, color: theme.node.text }}>
+        <label className={`col-span-2 flex ${compact ? "h-7 text-xs" : "h-9 text-sm"} overflow-hidden rounded-full border focus-within:ring-2 focus-within:ring-ring`} style={{ borderColor: theme.node.stroke, color: theme.node.text }}>
             <input
                 type="number"
                 min={1}
                 max={max}
                 aria-label={t("settingsPanels.image.count")}
-                className="min-w-0 flex-1 bg-transparent px-3 text-center outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                className={`min-w-0 flex-1 bg-transparent ${compact ? "px-2" : "px-3"} text-center outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none`}
                 style={{ color: theme.node.text, WebkitTextFillColor: theme.node.text }}
                 value={value || ""}
                 onChange={(event) => onChange(Number(event.target.value) || null)}
@@ -342,9 +345,9 @@ function AspectIcon({ type, width, height, color }: { type: string; width: numbe
     );
 }
 
-export function SettingTitle({ children, color }: { children: string; color: string }) {
+export function SettingTitle({ children, color, compact = false }: { children: string; color: string; compact?: boolean }) {
     return (
-        <div className="text-xs font-medium" style={{ color }}>
+        <div className={`${compact ? "text-[11px]" : "text-xs"} font-medium`} style={{ color }}>
             {children}
         </div>
     );
@@ -363,10 +366,10 @@ function alignDimension(value: number, enabled: boolean) {
 }
 
 /** Shared semantic groups: parent workspaces own the configuration scope. */
-export function SettingsSection({ title, theme, children }: { title: string; theme: CanvasTheme; children: ReactNode }) {
+export function SettingsSection({ title, theme, children, compact = false }: { title: string; theme: CanvasTheme; children: ReactNode; compact?: boolean }) {
     return (
-        <fieldset className="min-w-0 space-y-3 border-0 p-0">
-            <legend className="mb-2 w-full text-sm font-semibold" style={{ color: theme.node.text }}>
+        <fieldset className={`min-w-0 ${compact ? "space-y-2" : "space-y-3"} border-0 p-0`}>
+            <legend className={`${compact ? "mb-1 text-xs" : "mb-2 text-sm"} w-full font-semibold`} style={{ color: theme.node.text }}>
                 {title}
             </legend>
             {children}

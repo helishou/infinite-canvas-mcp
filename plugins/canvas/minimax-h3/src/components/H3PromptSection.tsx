@@ -785,10 +785,17 @@ export function H3PromptSection({
   const [translating, setTranslating] = useState(false);
   const [isTranslated, setIsTranslated] = useState(false);
   const [translateError, setTranslateError] = useState<string | null>(null);
+  type EnglishPromptToggle = { documentId: string; originalPrompt: string; translatedPrompt: string };
+  const [englishPromptToggles, setEnglishPromptToggles] = useState<Record<string, EnglishPromptToggle>>({});
+  const [englishPromptTranslating, setEnglishPromptTranslating] = useState(false);
+  const [englishPromptError, setEnglishPromptError] = useState<string | null>(null);
+  const activeEnglishPromptToggle = selected?.id ? englishPromptToggles[selected.id] : undefined;
+  const englishPromptApplied = Boolean(activeEnglishPromptToggle && activeEnglishPromptToggle.translatedPrompt === prompt);
   const [copiedError, setCopiedError] = useState(false);
   // 用来在异步翻译返回时校验 prompt 是否已被用户改掉，避免显示错配的中文
-  const promptRef = useRef({ prompt, segmentId: selected?.id });
-  promptRef.current = { prompt, segmentId: selected?.id };
+  const promptRef = useRef({ prompt, segmentId: selected?.id, documentId: textDocument.getDocumentId() });
+  promptRef.current = { prompt, segmentId: selected?.id, documentId: textDocument.getDocumentId() };
+  const englishPromptRequestRef = useRef<{ controller: AbortController; prompt: string; segmentId?: string; documentId: string } | null>(null);
   const translationRequestRef = useRef<{ controller: AbortController; prompt: string; segmentId?: string } | null>(null);
   useEffect(() => {
     const request = translationRequestRef.current;
@@ -797,9 +804,25 @@ export function H3PromptSection({
       translationRequestRef.current = null;
       setTranslating(false);
     }
+    const englishRequest = englishPromptRequestRef.current;
+    if (englishRequest && (englishRequest.prompt !== prompt || englishRequest.segmentId !== selected?.id || englishRequest.documentId !== promptRef.current.documentId)) {
+      englishRequest.controller.abort();
+      englishPromptRequestRef.current = null;
+      setEnglishPromptTranslating(false);
+    }
+    if (selected?.id) {
+      setEnglishPromptToggles(current => {
+        const active = current[selected.id];
+        if (!active || prompt === active.translatedPrompt) return current;
+        const next = { ...current };
+        delete next[selected.id];
+        return next;
+      });
+    }
     setTranslateError(null);
+    setEnglishPromptError(null);
   }, [selected?.id, prompt]);
-  useEffect(() => () => { translationRequestRef.current?.controller.abort(); }, []);
+  useEffect(() => () => { translationRequestRef.current?.controller.abort(); englishPromptRequestRef.current?.controller.abort(); }, []);
   const loadStoryboardPrompt = (sourcePrompt: string) => {
     const summary = promptMode === "ref2va" ? readPromptSection(sourcePrompt, "summary") : "";
     const { openingDescription, shots: parsedShots } = parseStoryboardDescription(readPromptSection(sourcePrompt, storyboardSection), imageRefs, [...imageRefs, ...videoRefs, ...audioRefs]);
@@ -1514,6 +1537,68 @@ export function H3PromptSection({
     }
   };
 
+  const handleEnglishPromptToggle = async () => {
+    const segmentId = selected?.id;
+    if (!segmentId || englishPromptTranslating || enhancing) return;
+    setEnglishPromptTranslating(true);
+    const existing = englishPromptToggles[segmentId];
+    const target = { nodeId: ctx.node.id, segmentId, field: "prompt" as const };
+    const document = ctx.textDocument(target);
+    try {
+      await document.flush();
+      const snapshot = document.getSnapshot();
+      if (!snapshot.ready || snapshot.blocked) throw new Error(snapshot.error || "提示词尚未同步，暂时无法切换翻译。");
+      if (document.getDocumentId() !== promptRef.current.documentId || promptRef.current.segmentId !== segmentId) {
+        throw new Error("当前 Clip 已变化，请重新选择后再翻译。");
+      }
+      if (existing && snapshot.text === existing.translatedPrompt) {
+        if (existing.documentId !== document.getDocumentId()) throw new Error("原提示词与当前文本对象不匹配，保留当前内容，请重新翻译。");
+        const restored = await ctx.replaceText(target, existing.documentId, existing.translatedPrompt, existing.originalPrompt);
+        if (!restored) throw new Error("提示词在切回原文时发生并发修改，当前内容已保留。");
+        setEnglishPromptToggles(current => {
+          const next = { ...current };
+          delete next[segmentId];
+          return next;
+        });
+        setEnglishPromptError(null);
+        return;
+      }
+
+      const promptAtCall = snapshot.text;
+      if (!promptAtCall.trim()) throw new Error("请先输入提示词。");
+      const documentId = document.getDocumentId();
+      const controller = new AbortController();
+      englishPromptRequestRef.current = { controller, prompt: promptAtCall, segmentId, documentId };
+      setEnglishPromptTranslating(true);
+      setEnglishPromptError(null);
+      const result = await ctx.ai.translateH3Prompt(promptAtCall, { signal: controller.signal });
+      if (controller.signal.aborted || promptRef.current.prompt !== promptAtCall || promptRef.current.segmentId !== segmentId || promptRef.current.documentId !== documentId) return;
+      const latestDocument = ctx.textDocument(target);
+      await latestDocument.flush();
+      const latest = latestDocument.getSnapshot();
+      if (latestDocument.getDocumentId() !== documentId || !latest.ready || latest.blocked || latest.text !== promptAtCall) {
+        throw new Error("提示词在翻译期间发生变化，译文未写入。");
+      }
+      const translatedPrompt = result.translatedText.trim();
+      if (!translatedPrompt) throw new Error("翻译模型没有返回提示词，原文已保留。");
+      if (translatedPrompt === promptAtCall) {
+        englishPromptRequestRef.current = null;
+        setEnglishPromptTranslating(false);
+        return;
+      }
+      // Stop the prompt-change watcher from treating our own compare-and-swap as a user edit.
+      englishPromptRequestRef.current = null;
+      const replaced = await ctx.replaceText(target, documentId, promptAtCall, translatedPrompt);
+      if (!replaced) throw new Error("提示词在翻译写回时发生并发修改，原文已保留。");
+      setEnglishPromptToggles(current => ({ ...current, [segmentId]: { documentId, originalPrompt: promptAtCall, translatedPrompt } }));
+    } catch (error) {
+      if (!(error instanceof Error && error.name === "AbortError")) setEnglishPromptError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (englishPromptRequestRef.current?.segmentId === segmentId) englishPromptRequestRef.current = null;
+      setEnglishPromptTranslating(false);
+    }
+  };
+
   const insertAtCursor = (text: string) => editorRef.current?.insert(text, { prefixNewline: true });
 
   const editorReferences = useMemo(() => {
@@ -1685,11 +1770,21 @@ export function H3PromptSection({
             <button
               key="enhance"
               type="button"
-              disabled={enhancing || !textStatus.ready || textStatus.blocked || !prompt.trim()}
+              disabled={enhancing || englishPromptTranslating || !textStatus.ready || textStatus.blocked || !prompt.trim()}
               onClick={() => void enhancePrompt()}
               title={!textStatus.ready ? "等待提示词同步" : textStatus.blocked ? "提示词编辑尚未同步" : !prompt.trim() ? "请先输入提示词" : "调用当前文本模型增强提示词"}
             >
               {enhancing ? "增强中…" : "增强提示词"}
+            </button>
+            <button
+              key="translate-prompt-english"
+              type="button"
+              disabled={englishPromptTranslating || enhancing || !textStatus.ready || textStatus.blocked || !prompt.trim()}
+              onClick={() => void handleEnglishPromptToggle()}
+              aria-pressed={englishPromptApplied}
+              title={englishPromptApplied ? "切回翻译前的原提示词" : "用设置中的翻译模型翻译为英文；再次点击可切回原提示词"}
+            >
+              {englishPromptTranslating ? "翻译中…" : englishPromptApplied ? "切回原文" : "翻译提示词"}
             </button>
             <label
               key="storyboard-toggle"
@@ -1717,6 +1812,7 @@ export function H3PromptSection({
           {storyboardSaving ? "保存中…" : "分镜编辑"}
         </button> : null}
       </span>
+      {englishPromptError ? <div className="minimax-prompt-reference-error" role="alert">翻译提示词失败：{englishPromptError}</div> : null}
       {hasProductionCompileTarget ? <div className="minimax-prompt-help-panel" role="note">
         {promptDiffersFromCompiled
           ? "当前 Prompt 已人工修改并保存。点击“生成编译 Prompt”可按最新制作源稿重新编译并应用到此 Clip。"

@@ -63,7 +63,7 @@ import { registerMcpObservabilityRoutes } from "./server/mcp-observability-route
 import { registerMcpExportRoutes, type McpSnapshotExports } from "./server/mcp-export-routes.js";
 import { CHARACTER_VOICE_COMPRESSION_THRESHOLD_BYTES, prepareCharacterVoiceUpload } from "./server/character-voice-compression.js";
 import { redactInlineMedia } from "./runtime/redact-inline-media.js";
-import { CANVAS_TRANSLATION_TARGETS, translateCanvasText, type CanvasTranslationTarget } from "./canvas/translation.js";
+import { CANVAS_TRANSLATION_TARGETS, translateCanvasText, translateH3PromptBatch, type CanvasTranslationTarget } from "./canvas/translation.js";
 import { safeOperationPath, watchSlowOperation } from "./slow-operation.js";
 
 const logger = createLogger("backend");
@@ -174,9 +174,11 @@ export function startServer(
     if (url === "/mcp" && isLocalConnection(req)) return next();
     // 只读媒体端点免 token：浏览器来源已由上方 CORS 白名单限制，且媒体 URL 内嵌的
     // token 会在 backend 重启后失效，豁免后可避免历史产物在 token 轮换后 401 而“消失”。
-    // 仅豁免 GET 读取类端点，写入类（如 POST /runtime/media）仍受 token 保护。
+    // 仅豁免 GET/HEAD 读取类端点，写入类（如 POST /runtime/media）仍受 token 保护；
+    // HEAD 必须一起豁免：跨域下载方（FileSaver 的 corsEnabled）先用 HEAD 探测可用性，
+    // 401 会让浏览器退化成新标签页打开，视频节点下载因此拿不到文件。
     if (
-      req.method === "GET" &&
+      (req.method === "GET" || req.method === "HEAD") &&
       (url === "/media" ||
         url.startsWith("/media/") ||
         url.startsWith("/runtime/media-file"))
@@ -383,10 +385,17 @@ export function startServer(
   app.post("/translation/text", async (req, res) => {
     const text = typeof req.body?.text === "string" ? req.body.text : "";
     const target = typeof req.body?.target === "string" ? req.body.target.trim() : "";
-    if (!text.trim()) return void res.status(400).json({ ok: false, error: "text 必填" });
     if (!CANVAS_TRANSLATION_TARGETS.includes(target as CanvasTranslationTarget)) return void res.status(400).json({ ok: false, error: "target 仅支持 zh-CN 或 en" });
     try {
-      const translatedText = await translateCanvasText(stores, { text, target: target as CanvasTranslationTarget });
+      const mode = typeof req.body?.mode === "string" ? req.body.mode.trim() : "default";
+      if (Array.isArray(req.body?.items)) {
+        if (mode !== "h3-prompt" || target !== "en") return void res.status(400).json({ ok: false, error: "批量翻译只支持 H3 英文提示词" });
+        const items = req.body.items.map((item: any) => ({ id: String(item?.id || ""), text: String(item?.text || "") }));
+        const translations = await translateH3PromptBatch(stores, items);
+        return void res.json({ ok: true, translations });
+      }
+      if (!text.trim()) return void res.status(400).json({ ok: false, error: "text 必填" });
+      const translatedText = await translateCanvasText(stores, { text, target: target as CanvasTranslationTarget, mode: mode as "default" | "h3-prompt" });
       res.json({ ok: true, translatedText });
     } catch (error) {
       res.status(502).json({ ok: false, error: error instanceof Error ? error.message : "翻译失败" });

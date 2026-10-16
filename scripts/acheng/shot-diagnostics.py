@@ -35,4 +35,12 @@ def diagnostics(production, segment=None):
             issue('SHOT_AMBIGUOUS_DISAPPEARANCE', 'visual', 'Name the object or body swelling that disappears explicitly', True)
         if re.search(r'\b(eventually|later devises|becomes .* after the transformation)\b', prose, re.I):
             issue('SHOT_FUTURE_CONTEXT', 'identity_context', 'Review future story information in model-facing local context', True)
+        camera = shot.get('camera') if isinstance(shot.get('camera'), dict) else {}
+        camera_text = ' '.join(str(camera.get(field) or '') for field in ('description', 'path', 'target', 'focus', 'editorial_reason'))
+        model_prose = str(shot.get('visual') or '') + ' ' + camera_text
+        abstract_inner_state = re.search(r'(?:灵台|识海|神识|灵识|魂魄|灵魂|意识深处|精神世界)', model_prose)
+        literalized_metaphor = re.search(r'(?:如同|宛如|好像|像是|像)\s*(?:一张|一片|一块)?\s*(?:白纸|纸|空洞|深渊|房间|宫殿)', model_prose)
+        visible_manifestation = re.search(r'(?:眉心|额间|眼前|周身|皮肤|面部|画面|视野).{0,24}(?:绕开|避开|分开|断流|缺口|空缺|闪烁|扭曲|脉动|收缩|扩散|涌动|显现)', model_prose)
+        if (abstract_inner_state or literalized_metaphor) and not visible_manifestation:
+            issue('SHOT_ABSTRACT_VISUALIZATION_NEEDS_CUE', 'visual', 'Translate the abstract inner state or metaphor into an observable on-screen cue with a clear location and change; do not render the metaphor as a literal object.', True)
     return result

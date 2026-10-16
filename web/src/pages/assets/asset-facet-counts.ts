@@ -26,8 +26,9 @@ export function assetSearchText(asset: Asset) {
     const extra = asset.kind === "text" ? asset.data.content
         : asset.kind === "character" ? `${asset.data.name} ${asset.data.description} ${asset.data.voiceName} ${asset.data.voiceDescription || ""} ${asset.data.images.length} images`
         : asset.kind === "scene" ? `${asset.data.name} ${asset.data.description} ${asset.data.colorCardPrompt}`
+        : asset.kind === "prop" ? `${asset.data.name} ${asset.data.description}`
         : asset.data.mimeType;
-    return [asset.title, asset.source || "", asset.note || "", asset.kind === "character" || asset.kind === "scene" ? "" : (asset.tags || []).join(" "), extra].join(" ").toLowerCase();
+    return [asset.title, asset.source || "", asset.note || "", asset.kind === "character" || asset.kind === "scene" || asset.kind === "prop" ? "" : (asset.tags || []).join(" "), extra].join(" ").toLowerCase();
 }
 
 export function matchesAssetDrama(asset: Asset, dramaId: string, dramaIds: readonly string[]) {
@@ -39,7 +40,7 @@ export function matchesAssetDrama(asset: Asset, dramaId: string, dramaIds: reado
 export function matchesAssetFolder(asset: Asset, folderId: string | null) {
     if (!folderId) return true;
     if (folderId === ROOT_FOLDER) return !asset.folderId;
-    if (isTagFolder(folderId)) return asset.kind !== "character" && asset.kind !== "scene" && (asset.tags || []).includes(folderId.slice(TAG_FOLDER_PREFIX.length));
+    if (isTagFolder(folderId)) return asset.kind !== "character" && asset.kind !== "scene" && asset.kind !== "prop" && (asset.tags || []).includes(folderId.slice(TAG_FOLDER_PREFIX.length));
     return asset.folderId === folderId;
 }
 

@@ -94,7 +94,7 @@ export class CanvasGenerationService {
             const origin = reference.metadata?.sharedAssetOrigin;
             if (command.inputBasis !== "published" || !origin || !referenceIds.has(reference.id)) continue;
             const latest = this.stores.assets.list({ dramaId: origin.dramaId }).find(asset => asset.source === "production-shared" && asset.metadata.assetId === origin.assetId);
-            if (!latest || latest.metadata.approvedId !== origin.approvedId) throw Object.assign(new Error("共享引用正在等待批准版本更新"), { code: "SHARED_ASSET_UPDATE" });
+            if (!latest || latest.metadata.approvedId !== origin.approvedId) throw Object.assign(new Error("共享引用正在等待素材版本更新"), { code: "SHARED_ASSET_UPDATE" });
         }
         // H3 uses its own runner validation and does not participate in generic loop slots.
         if (operation === "h3-run") return this.startH3(command);

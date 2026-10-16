@@ -239,7 +239,7 @@ test("formal scripts and pinned approved references remain protected from generi
     try {
         for (const metadata of [{ productionScriptId: "script-owner" }, { sharedAssetOrigin: { approvedId: "approved-version" } }]) {
             db.applyCanvasProjectOperations("a", undefined, [{ type: "update_node", id: "character", metadata, metadataDelete: ["productionScriptId", "sharedAssetOrigin"].filter(key => !(key in metadata)) }], { runtimeWrite: true });
-            assert.throws(() => db.upsertAsset(asset, { canvasSource: { projectId: "a", nodeId: "character" } }), /正式剧本|已批准共享引用/);
+            assert.throws(() => db.upsertAsset(asset, { canvasSource: { projectId: "a", nodeId: "character" } }), /正式剧本|共享引用请沿正式采用入口/);
             assert.equal(db.getAsset(asset.id), null);
             assert.equal(db.listCanvasProjects().length, 2);
         }

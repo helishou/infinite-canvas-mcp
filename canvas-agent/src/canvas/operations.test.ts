@@ -32,6 +32,19 @@ test("generation flow keeps prose prompts on the smart image node", () => {
     assert.equal(config?.metadata?.smart, true);
 });
 
+test("text, video, and audio flows create one smart node without a plain text node", () => {
+    for (const mode of ["text", "video", "audio"] as const) {
+        const ops = opsOf(`canvas_generate_${mode}`, { prompt: `prompt for ${mode}`, autoRun: true });
+        const added = ops.filter((op) => op.type === "add_node");
+        assert.equal(added.length, 1, `${mode} creates one node`);
+        assert.equal(added[0].nodeType, "config");
+        assert.equal(added[0].metadata?.smart, true);
+        assert.equal(added[0].metadata?.generationMode, mode);
+        assert.equal(added[0].metadata?.prompt, `prompt for ${mode}`);
+        assert.equal(ops.some((op) => op.type === "add_node" && op.nodeType === "text"), false);
+    }
+});
+
 test("setting generation references removes old media inputs but keeps the prompt connection", () => {
     const state = {
         nodes: [

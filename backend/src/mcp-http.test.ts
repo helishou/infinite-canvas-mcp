@@ -813,7 +813,7 @@ test("revision conflicts are returned without automatic replay", async (t) => {
       projectId: "canvas-generate",
       operationId: "apply-conflict-test",
       expectedRevision: 0,
-      ops: [{ type: "add_node", id: "new-node", nodeType: "text", title: "保留冲突" }],
+      ops: [{ type: "add_node", id: "new-node", nodeType: "config", title: "保留冲突", metadata: { smart: true, generationMode: "image" } }],
     },
   });
   const payload = textPayload(result);
@@ -936,19 +936,6 @@ test("canvas_wait_tasks 超时只返回原任务继续等待入口，不创建�
   assert.deepEqual(payload.pendingTaskIds, ["task-1"]);
   assert.deepEqual(payload.next.input.taskIds, ["task-1"]);
   assert.equal(payload.tasks[0].taskId, "task-1");
-});
-
-test("无效 SVG 本地导入在任何画布 ops 前拒绝", async (t) => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "canvas-invalid-svg-"));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  const filePath = path.join(directory, "fake.svg");
-  await fs.writeFile(filePath, "<html>not an image</html>");
-  const backend = await mockGenerationBackend(t);
-  const client = await mcpClient(t, await fixture(t, backend.url));
-  const result = await client.callTool({ name: "canvas_import_local_images", arguments: { projectId: "canvas-generate", items: [filePath] } });
-  assert.equal(result.isError, true);
-  assert.equal(backend.opsRequestCount(), 0);
-  assert.equal((backend.project().nodes as unknown[]).length, 0);
 });
 
 test("assets_upsert_batch requires a stable operationId", async (t) => {

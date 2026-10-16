@@ -1193,12 +1193,6 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                 result = context.applyOps(appliedOps);
                 // 等待最新快照写回请求完成，再返回工具结果；否则连续 MCP 生成会用到上一轮位置。
                 await postState(endpoint, token, clientIdRef.current, result as CanvasAgentSnapshot);
-            } else if (payload.name === "canvas_create_attachment_nodes") {
-                const context = canvasContextRef.current;
-                if (!context) throw new Error(rt("openCanvasFirst"));
-                appliedOps = await attachmentNodeOps(endpoint, token, clientIdRef.current, payload.input?.nodes);
-                result = context.applyOps(appliedOps);
-                await postState(endpoint, token, clientIdRef.current, result as CanvasAgentSnapshot);
             } else {
                 const snapshot = canvasContextRef.current?.snapshot;
                 if (!snapshot) throw new Error(rt("openCanvasFirst"));
@@ -1940,37 +1934,6 @@ function scopeEventChatItem(event: AgentEventPayload, item: AgentChatItem, itemI
 function approvalActivity(pendingApprovals: AgentPendingApproval[], waiting: boolean, fallback: string) {
     if (pendingApprovals.length) return rt("awaitingApproval");
     return waiting ? rt("codexRunning") : fallback;
-}
-
-async function attachmentNodeOps(endpoint: string, token: string, clientId: string, value: unknown): Promise<CanvasAgentOp[]> {
-    const nodes = Array.isArray(value) ? value : [];
-    if (!nodes.length) throw new Error(rt("noImageAttachments"));
-    return await Promise.all(
-        nodes.map(async (value) => {
-            const item = value as { id?: unknown; attachmentId?: unknown; title?: unknown; position?: unknown };
-            const id = String(item.id || "");
-            const attachmentId = String(item.attachmentId || "");
-            if (!id || !attachmentId) throw new Error(rt("invalidAttachmentNode"));
-            const res = await fetch(`${endpoint}/attachments/${encodeURIComponent(attachmentId)}?token=${encodeURIComponent(token)}&clientId=${encodeURIComponent(clientId)}`);
-            if (!res.ok) {
-                const body = (await res.json().catch(() => null)) as { error?: string } | null;
-                throw new Error(body?.error || rt("attachmentReadFailed"));
-            }
-            const image = await uploadImage(await res.blob());
-            const size = fitNodeSize(image.width, image.height);
-            const position = item.position && typeof item.position === "object" ? (item.position as { x?: unknown; y?: unknown }) : {};
-            return {
-                type: "add_node" as const,
-                id,
-                nodeType: "image" as const,
-                title: String(item.title || rt("referenceImage")),
-                position: { x: Number(position.x) || 0, y: Number(position.y) || 0 },
-                width: size.width,
-                height: size.height,
-                metadata: imageMetadata(image),
-            };
-        }),
-    );
 }
 
 function createId() {

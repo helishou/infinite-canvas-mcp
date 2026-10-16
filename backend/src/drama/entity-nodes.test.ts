@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,7 +10,7 @@ import { createStores } from "../stores/index.js";
 import { EpisodeProductionService } from "./production.js";
 import { EpisodeProductionRunner } from "./production-runner.js";
 import { directorHash } from "./director.js";
-import { directorProductionSchema } from "@basketikun/canvas-agent/drama/production-contract";
+import { canonicalProduction, directorProductionSchema } from "@basketikun/canvas-agent/drama/production-contract";
 import { resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
 import { startServer } from "../server.js";
 import { registerBackendMcpHttpRoutes } from "../mcp.js";
@@ -30,6 +31,12 @@ function fixture(t: test.TestContext, bound = true) {
     return { db, service, saved, runner: new EpisodeProductionRunner(service, createStores(db), {} as any) };
 }
 const entity = (db: BackendDatabase, id: string) => (db.getCanvasProject("canvas")!.nodes as any[]).find(node => node.metadata?.productionEntity?.entityId === id);
+const projectionHash = (value: unknown) => crypto.createHash("sha256").update(canonicalProduction(value ?? null)).digest("hex");
+function clipProjectionInputHash(segment: Record<string, any>) {
+    const fields: Array<[string, unknown]> = ["sourceShotId", "title", "duration", "taskMode", "prompt", "referenceBindings", "tailFrameContinuation", "motionContextEnabled", "directorEngine", "directorSourceHash", "styleTemplateId", "h3CharacterGroups", "storyboardShots", "aspectRatio", "modelName"].map(key => [key, segment[key] ?? null]);
+    if (segment.productionClipProjection?.styleTemplateDeclared === true) fields.push(["styleTemplateDeclared", true]);
+    return projectionHash(fields);
+}
 
 test("source creates one typed node per registry identity, excludes style, and preparation replays without duplication", t => {
     const f = fixture(t);
@@ -80,6 +87,42 @@ test("a Subject identity picture projects onto its prop node and follows later s
     f.db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "prop-picture", metadata: { storageKey: "prop-image-v2", content: "/media/prop-image-v2.png" } }], { runtimeWrite: true, source: { kind: "task", clientId: "task:prop-picture" } });
     assert.equal(entity(f.db, "P1").metadata.propImage.storageKey, "prop-image-v2");
     assert.equal(entity(f.db, "P1").metadata.propImage.url, "/media/prop-image-v2.png");
+});
+
+test("scene image source changes flow into linked H3 scene references and mark prior output outdated", t => {
+    const f = fixture(t), scene = entity(f.db, "S1"), current = f.service.get("ep");
+    f.db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "scene-picture", nodeType: "image", title: "场景图", metadata: {
+        status: "success", storageKey: "scene-image-v1", content: "/media/scene-image-v1.png", mimeType: "image/png",
+    } }], { runtimeWrite: true });
+    f.service.edit("ep", { operationId: "register-scene-picture-subject", expectedRevision: current.revision, ops: [{ type: "upsert_director_subject", subject: {
+        id: "SUBJECT_S1", kind: "scene", entityRef: { ownerKind: "episode", ownerId: "ep", kind: "scene", id: "S1" },
+        pictureBindings: [{ id: "S1-identity", assetId: "S1", sourceNode: { projectId: "canvas", nodeId: "scene-picture" }, selection: { mode: "node_selection" }, provides: ["identity"], retain: ["场景身份"], exclude: [], applicableState: {}, defaultFor: ["identity"] }],
+    } }] });
+    const referenceBindings = [
+        { id: "scene-ref", assetId: "scene-asset", label: "场景", role: "scene", mediaType: "image", sourceNodeId: scene.id, url: "/media/scene-image-v1.png", storageKey: "scene-image-v1", mimeType: "image/png", enabled: true },
+        { id: "manual-ref", assetId: "manual-asset", label: "手动参考", role: "other", mediaType: "image", url: "/media/manual.png", storageKey: "manual-image", mimeType: "image/png", enabled: true },
+    ];
+    const segment: Record<string, any> = { id: "clip", prompt: "雨夜廊下", referenceBindings, result: "/media/old-clip.mp4", resultStorageKey: "video:old-clip", productionClipProjection: { fieldHashes: { referenceBindings: projectionHash(referenceBindings) } } };
+    segment.productionClipProjection.inputHash = clipProjectionInputHash(segment);
+    f.db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "h3", nodeType: "minimax-h3:video", title: "H3", metadata: { segments: [segment] } }], { runtimeWrite: true });
+
+    f.db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "scene-picture", metadata: { storageKey: "scene-image-v2", content: "/media/scene-image-v2.png" } }], { runtimeWrite: true });
+
+    const project = f.db.getCanvasProject("canvas")!, nextScene = (project.nodes as any[]).find(node => node.id === scene.id), h3 = (project.nodes as any[]).find(node => node.id === "h3");
+    const nextSegment = h3.metadata.segments[0];
+    assert.equal(nextScene.metadata.sceneImage.storageKey, "scene-image-v2");
+    assert.equal(nextSegment.referenceBindings[0].storageKey, "scene-image-v2");
+    assert.equal(nextSegment.referenceBindings[0].url, "/media/scene-image-v2.png");
+    assert.equal(nextSegment.referenceBindings[1].storageKey, "manual-image");
+    assert.equal(nextSegment.inputOutdated, true);
+    assert.equal(nextSegment.resultStorageKey, "video:old-clip");
+    assert.equal(nextSegment.productionClipProjection.fieldHashes.referenceBindings, projectionHash(nextSegment.referenceBindings));
+    assert.equal(nextSegment.productionClipProjection.inputHash, clipProjectionInputHash(nextSegment));
+
+    f.db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: scene.id, metadata: { sceneImage: { url: "/media/scene-image-v3.png", storageKey: "scene-image-v3", mimeType: "image/png" } } }], {
+        runtimeWrite: true, source: { kind: "system", clientId: "system:shared-library", label: "同步共享资产" },
+    });
+    assert.equal((f.db.getCanvasProject("canvas")!.nodes as any[]).find(node => node.id === "h3").metadata.segments[0].referenceBindings[0].storageKey, "scene-image-v3");
 });
 
 test("renaming a typed node title writes its entity name and replays the original unmodified command", t => {

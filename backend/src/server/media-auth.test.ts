@@ -6,7 +6,7 @@ import test from "node:test";
 import { BackendDatabase } from "../db.js";
 import { startServer } from "../server.js";
 
-test("媒体 GET 免 token，但上传和删除仍要求 token", async (t) => {
+test("媒体 GET/HEAD 免 token，但上传和删除仍要求 token", async (t) => {
   const db = new BackendDatabase(":memory:");
   const app = startServer(db, { url: "http://127.0.0.1", token: "test-secret", port: 0, origins: [] }).app;
   const server = app.listen(0, "127.0.0.1");
@@ -23,6 +23,12 @@ test("媒体 GET 免 token，但上传和删除仍要求 token", async (t) => {
     const { media } = createdBody;
     const readMedia = await fetch(`${url}${media.url}`);
     assert.equal(readMedia.status, 200);
+    // 跨域下载方（FileSaver）先用 HEAD 探测媒体可用性，401 会让下载退化成新标签页打开。
+    const headMedia = await fetch(`${url}${media.url}`, { method: "HEAD" });
+    assert.equal(headMedia.status, 200);
+    assert.equal(headMedia.headers.get("accept-ranges"), "bytes");
+    assert.equal(await headMedia.text(), "");
+    assert.equal((await fetch(`${url}/media/missing-key`, { method: "HEAD" })).status, 404);
     const svg = await fetch(`${url}/media/upload`, {
       method: "POST",
       headers: { authorization: "Bearer test-secret", "content-type": "application/json" },

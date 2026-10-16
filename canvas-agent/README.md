@@ -114,7 +114,6 @@ default_tools_approval_mode = "approve"
 - `canvas_get_selection`
 - `canvas_export_snapshot`
 - `canvas_apply_ops`
-- `canvas_create_text_node`
 - `canvas_create_generation_flow`（显式 `mode=image`）
 
 `canvas_apply_ops` 示例：
@@ -124,10 +123,10 @@ default_tools_approval_mode = "approve"
   "ops": [
     {
       "type": "add_node",
-      "nodeType": "text",
-      "title": "标题",
+      "nodeType": "config",
+      "title": "图片生成",
       "position": { "x": 0, "y": 0 },
-      "metadata": { "content": "文本内容" }
+      "metadata": { "smart": true, "generationMode": "image", "prompt": "古风女主立绘" }
     }
   ]
 }
