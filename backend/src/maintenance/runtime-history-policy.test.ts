@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 import { BackendDatabase } from "../db.js";
+import { encodeReceipt } from "../drama/receipt-storage.js";
 import { evaluateRetention, type HistoryPolicyConfig } from "./runtime-history-policy.js";
 
 const OLD = "2020-01-01T00:00:00.000Z";
@@ -106,6 +107,25 @@ test("正式制作 receipt_json 中的任务/日志 ID 保留", (t: TestContext)
     const report = evaluateRetention(db.db, baseConfig);
     assert.ok(isProtected(report, "task", "t-prod"), "receipt_json 引用的任务必须保留");
     assert.ok(isProtected(report, "log", "l-prod"), "receipt_json 引用的日志必须保留");
+});
+
+test("压缩成 gzip BLOB 的回执仍参与保护扫描", (t: TestContext) => {
+    const db = makeDb(t);
+    makeTask(db, "t-blob", "succeeded", OLD);
+    makeLog(db, "l-blob", "p1", "success", OLD);
+    db.db.prepare("INSERT INTO canvas_folders (id, name, created_at) VALUES ('f1', 'f', ?)").run(NOW);
+    db.db.prepare("INSERT INTO drama_projects (folder_id, updated_at) VALUES ('f1', ?)").run(NOW);
+    db.db.prepare("INSERT INTO drama_episodes (id, drama_id, episode_number, created_at, updated_at) VALUES ('ep1', 'f1', 1, ?, ?)").run(NOW, NOW);
+    db.db.prepare("INSERT INTO episode_productions (episode_id, revision, draft_json, updated_at) VALUES ('ep1', 1, '{}', ?)").run(NOW);
+    // encodeReceipt 的写入形态是 gzip BLOB；只解析 TEXT 会让这些行从保护扫描里静默消失。
+    db.db.prepare("INSERT INTO episode_production_operations (operation_id, episode_id, request_hash, receipt_json, created_at) VALUES ('op-blob', 'ep1', 'h', ?, ?)")
+        .run(encodeReceipt({ task: "t-blob" }), NOW);
+    db.db.prepare("INSERT INTO production_preparations (operation_id, owner_key, request_hash, receipt_json) VALUES ('prep-blob', 'episode:ep1', 'h', ?)")
+        .run(encodeReceipt({ artifacts: [{ taskId: "t-blob", logId: "l-blob" }] }));
+
+    const report = evaluateRetention(db.db, baseConfig);
+    assert.ok(isProtected(report, "task", "t-blob"), "BLOB 回执引用的任务必须保留");
+    assert.ok(isProtected(report, "log", "l-blob"), "BLOB 回执引用的日志必须保留");
 });
 
 test("多级父子 + 循环关联：保护正确传播且遍历终止", (t: TestContext) => {

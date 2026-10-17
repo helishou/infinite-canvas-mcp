@@ -249,7 +249,14 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
         if (status.status === "succeeded" && status.verdict !== "blocked") {
             if (status.application?.revision === undefined) {
                 if (!status.preparedId) throw new Error("PROMPT_COMPILE_PREPARED_MISSING: 编译成功但没有可应用回执");
-                await applyProductionCompilation(target, status.preparedId);
+                try { await applyProductionCompilation(target, status.preparedId); }
+                catch (error) {
+                    if (error instanceof BackendApiError && error.status === 409) {
+                        pendingPromptCompiles.delete(key);
+                        throw new Error("PROMPT_COMPILE_SOURCE_CHANGED: 制作稿或参考绑定在编译期间已变化；旧编译回执已作废，请重新编译当前版本。");
+                    }
+                    throw error;
+                }
             }
             const refreshed = await fetchProductionWorkbench(target, "clip_workbench", targetId);
             const workbench = (refreshed.production as Record<string, any>).workbench;

@@ -13,6 +13,7 @@ import fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { DB_FILE } from "../config.js";
 import { DATABASE_SCHEMA_VERSION } from "../database-upgrade.js";
+import { createDatabaseSnapshot, pruneDatabaseSnapshots } from "../database-snapshots.js";
 import { previewCanvasHistoryPrune, reconstructCanvasHistory } from "../canvas/history-maintenance.js";
 import { stripCanvasLocalViewState } from "../canvas/operation-authority.js";
 
@@ -233,10 +234,8 @@ export function applyRebalancePlan(db: DatabaseSync, dbFile: string, plan: Rebal
     if (plan.policyVersion !== REBALANCE_POLICY_VERSION) throw new Error("计划策略版本不匹配");
     if (plan.projectId !== db.prepare("SELECT id FROM canvas_projects WHERE id = ?").get(plan.projectId)?.id) throw new Error("项目不存在");
 
-    // 备份（integrity + foreign_key）
-    const backupFile = `${dbFile}.rebaseline-${plan.projectId}-${crypto.randomUUID()}.sqlite`;
-    db.exec(`VACUUM INTO '${backupFile.replaceAll("'", "''")}'`);
-    fs.chmodSync(backupFile, 0o600);
+    // 备份（integrity + foreign_key），同一用途只保留最新若干份
+    const backupFile = createDatabaseSnapshot(db, dbFile, `rebaseline-${plan.projectId}`);
     const copy = new DatabaseSync(backupFile, { readOnly: true });
     try {
         if (copy.prepare("PRAGMA integrity_check").get()?.integrity_check !== "ok"
@@ -245,6 +244,7 @@ export function applyRebalancePlan(db: DatabaseSync, dbFile: string, plan: Rebal
         const backupFingerprint = computeRebalanceFingerprint(copy, plan.projectId);
         if (backupFingerprint.fingerprint !== plan.fingerprint.fingerprint) throw new Error("备份与计划指纹不一致");
     } finally { copy.close(); }
+    pruneDatabaseSnapshots(dbFile, "rebaseline");
 
     db.exec("BEGIN IMMEDIATE");
     try {

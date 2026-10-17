@@ -509,7 +509,7 @@ async function startBackendHttpServer() {
         || productionCompilationBusy() || Boolean(devActiveTask?.get()));
       process.send?.({ type: "dev:reload-status", accepted }, undefined, undefined, () => { if (accepted) shutdown("DEV_RELOAD"); });
     });
-    process.send({ type: "dev:ready", pid: process.pid });
+    process.send({ type: "dev:ready", pid: process.pid, listenHost: config.listenHost });
   }
   // tsx --watch 默认用 SIGINT 重启：Express 5 异步关闭、可能不触发 SIGINT 监听器，
   // 补一个 beforeExit 走同样收尾，避免每次热重载都卡到 10s 兜底才退。

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { WorkflowField } from "@/types/workflow";
 import { fetchWorkflowComboOptions } from "@/services/api/workflows";
-import { WorkflowGraphView, type WorkflowGraphJson } from "./workflow-graph-view";
+import { graphFieldTargetsNode, WorkflowGraphView, type WorkflowGraphJson } from "./workflow-graph-view";
 import { NodeFieldPopupShell } from "./node-field-popup";
 import { FieldEditor } from "./field-editor";
 
@@ -52,20 +52,18 @@ export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange, onW
         return () => { cancelled = true; };
     }, [name]);
 
-    // 孤儿字段：节点名含逗号（复合多节点写法，节点浮窗无法管理）或节点已不在 workflow 中。
-    // 这类字段运行面板会渲染、却无法在节点浮窗里勾选/删除，需在此单独提供清理入口。
+    // 多节点字段是合法配置；只有目标节点已不在图中时才属于孤儿字段。
     const orphanedFields = useMemo(() => {
         const nodeIds = new Set(Object.keys(workflow));
         return fields.filter((f) => {
-            const ids = f.node.split(",");
-            if (ids.length > 1) return true;
-            return !nodeIds.has(f.node);
+            const ids = f.node.split(",").map((id) => id.trim()).filter(Boolean);
+            return ids.length === 0 || ids.some((id) => !nodeIds.has(id));
         });
     }, [fields, workflow]);
 
     // --- 字段操作 ---
     const toggleField = (nodeId: string, inputKey: string, rawValue: unknown) => {
-        const existing = fields.find(f => f.node === nodeId && f.input === inputKey);
+        const existing = fields.find(f => graphFieldTargetsNode(f, nodeId) && f.input === inputKey);
         if (existing) {
             onFieldsChange(fields.filter(f => f !== existing));
         } else {
@@ -122,7 +120,7 @@ export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange, onW
                     <NodeFieldPopup
                         nodeId={nodeId}
                         node={workflow[nodeId]}
-                        fields={fields.filter(f => f.node === nodeId)}
+                        fields={fields.filter(f => graphFieldTargetsNode(f, nodeId))}
                         comboOptions={comboOptions[nodeId] || {}}
                         onToggleField={(inputKey) => toggleField(nodeId, inputKey, workflow[nodeId]?.inputs?.[inputKey])}
                         onUpdateField={updateField}

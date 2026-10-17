@@ -66,3 +66,23 @@ test("snapshot failure prevents migration and preserves source content", (t) => 
     assert.throws(() => prepareDatabaseUpgrade(file), /snapshot destination unavailable/);
     assert.deepEqual(fs.readFileSync(file), original);
 });
+
+test("repeated upgrade attempts keep a bounded number of verified snapshots", (t) => {
+    const { file, directory } = fixture(t, DATABASE_SCHEMA_VERSION - 1);
+    // 假的 mtime 全部取过去时间且单调递增：保留策略按 mtime 排序，这样顺序是确定的。
+    const base = Date.now() - 60_000;
+    const created: string[] = [];
+    for (let attempt = 0; attempt < 4; attempt++) {
+        const backup = prepareDatabaseUpgrade(file);
+        assert.ok(backup, "an older schema must always get its own snapshot");
+        fs.utimesSync(backup, new Date(base + attempt * 1_000), new Date(base + attempt * 1_000));
+        created.push(path.basename(backup));
+    }
+    const snapshots = fs.readdirSync(directory).filter((name) => name.startsWith("runtime.sqlite.pre-schema-")).sort();
+    assert.equal(snapshots.length, 2, "retention caps snapshots per purpose");
+    assert.deepEqual(snapshots, created.slice(-2).sort());
+    for (const name of snapshots) {
+        const copy = new DatabaseSync(path.join(directory, name), { readOnly: true });
+        try { assert.equal(copy.prepare("PRAGMA integrity_check").get()?.integrity_check, "ok"); } finally { copy.close(); }
+    }
+});

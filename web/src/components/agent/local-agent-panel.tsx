@@ -24,7 +24,7 @@ import { useShallow } from "zustand/react/shallow";
 import { flushAgentPromptQueue, hydrateAgentPromptQueue, useAgentStore, type AgentAttachment, type AgentBootstrapStatus, type AgentCanvasContext, type AgentCanvasReference, type AgentChatItem, type AgentConversationState, type AgentCreativeLaunch, type AgentModel, type AgentPendingApproval, type AgentPendingToolCall, type AgentPermissionMode, type AgentQueuedPrompt, type AgentQueuedPromptPayload, type AgentReasoningEffort, type AgentScopedTask, type AgentThreadSummary } from "@/stores/use-agent-store";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { useConfigStore } from "@/stores/use-config-store";
-import { discoverBackendToken, editEpisodeProduction, fetchEpisodeProduction, fetchProductionReadiness } from "@/services/backend-api";
+import { discoverBackendToken, editEpisodeProduction, fetchEpisodeProduction, fetchProductionReadiness, type BackendTokenResponse } from "@/services/backend-api";
 import { markProductionEntry, productionPresentationPath, productionTarget } from "@/lib/production-navigation";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
@@ -85,6 +85,8 @@ const MESSAGE_PREVIEW_LONG_EDGE = 192;
 const MESSAGE_PREVIEW_MAX_LENGTH = 500_000;
 const AGENT_PROTOCOL_VERSION = 6;
 const HISTORY_RETRY_DELAYS_MS = [0, 150, 350, 700, 1200];
+/** Backend 开发重载期间等它回来再判定连接结果的最长时间。 */
+const BACKEND_RELOAD_WAIT_MS = 20_000;
 const rt = (key: string, options?: Record<string, unknown>) => i18n.t(`agent.runtime.${key}`, options);
 
 type AgentWorkspace = { workspacePath: string; activeThreadId?: string };
@@ -1267,7 +1269,19 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
             const urlToken = searchParams.get("agentToken") || "";
             const urlEndpoint = searchParams.get("agentUrl") || "";
             const nextEndpoint = (urlEndpoint || backendAgentUrl).trim().replace(/\/$/, "");
-            const nextToken = (urlToken || current.token.trim() || (await discoverBackendToken()).token || "").trim();
+            const persistedToken = current.token.trim();
+            let discovered: BackendTokenResponse = { ok: false, token: "" };
+            if (!urlToken && !persistedToken) {
+                discovered = await discoverBackendToken();
+                // 开发重载期稳定代理回 503 BACKEND_RELOADING（Backend 只是重启中）。
+                // 这时报「找不到 Agent」是错的：等它就绪再判定。
+                const deadline = Date.now() + BACKEND_RELOAD_WAIT_MS;
+                while (!discovered.token && discovered.reloading && Date.now() < deadline) {
+                    await new Promise(resolve => setTimeout(resolve, 1_000));
+                    discovered = await discoverBackendToken();
+                }
+            }
+            const nextToken = (urlToken || persistedToken || discovered.token || "").trim();
             if (!nextEndpoint) {
                 const text = rt("addressRequired");
                 if (!silent) {

@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -36,8 +35,8 @@ export function applyRuntimeSkillOverlay(directory) {
   }
   const heading = fragment.split('\n', 1)[0];
   if (text.includes(heading)) {
-    if (!text.includes(fragment)) throw new Error('Canvas kickoff overlay exists with different content; review before replacing');
-    fs.writeFileSync(entry, text.replaceAll('\n', newline), 'utf8');
+    // Preserve a project-authored Canvas kickoff that has diverged from the
+    // template; this function only inserts the section when it is absent.
     return;
   }
   const marker = '你是总导演及生产合同的唯一写入者。';
@@ -81,13 +80,14 @@ export function verifyRuntime(directory) {
   return manifest;
 }
 export function runtimePatchVersion(upstream) {
-  const files = ['compat.py', 'canvas_subject_prompt_v2.py', 'character-layout.py', 'h3-prompt-policy.py', 'model-contract.py', 'prompt-diagnostics.py', 'shot-diagnostics.py', 'model-contract.test.py', 'verify.py', 'contracts.json', 'restore-source-bytes.py', 'source-contract.py', 'canvas-kickoff.md'];
+  // Test-only edits do not change the installed runtime or compiler behavior.
+  const files = ['compat.py', 'canvas_subject_prompt_v2.py', 'character-layout.py', 'h3-prompt-policy.py', 'model-contract.py', 'prompt-diagnostics.py', 'shot-diagnostics.py', 'verify.py', 'contracts.json', 'restore-source-bytes.py', 'source-contract.py', 'canvas-kickoff.md'];
   return sha(Buffer.concat([Buffer.from(upstream + '\n'), fs.readFileSync(path.join(scripts, 'acheng-engine.mjs')), ...files.map(file => fs.readFileSync(path.join(scripts, 'acheng', file)))])).slice(0, 16);
 }
 export class AchengEngine {
-  constructor(home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), upstream = UPSTREAM, repository = projectRoot, sourceDirectory = process.env.ACHENG_SOURCE) {
-    this.home = path.resolve(home); this.upstream = upstream;
+  constructor(home, upstream = UPSTREAM, repository = projectRoot, sourceDirectory = process.env.ACHENG_SOURCE) {
     this.repository = path.resolve(repository);
+    this.home = path.resolve(home || process.env.INFINITE_CANVAS_ACHENG_HOME || path.join(this.repository, '.canvas-runtime')); this.upstream = upstream;
     this.projectSkill = path.join(this.repository, '.agents', 'skills', 'acheng-director');
     this.base = path.join(this.home, 'skill-runtimes', 'acheng-director');
     this.source = sourceDirectory ? path.resolve(sourceDirectory) : this.projectSkill;

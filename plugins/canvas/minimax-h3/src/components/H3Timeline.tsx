@@ -383,16 +383,20 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     };
     const focusRequest = Number(ctx.node.metadata?.h3FocusRequest || 0);
     useLayoutEffect(() => {
-        if (!focusRequest || !selected) return;
+        // Focus requests are one-shot. Keep the acknowledgment in this window's local view
+        // so scrolling the canvas away and remounting the H3 node does not replay an old target.
+        const handledRequest = Number(ctx.node.metadata?.h3TimelineFocusHandled || 0);
+        if (!focusRequest || focusRequest <= handledRequest || !selected) return;
         const track = trackScrollRef.current;
         const clip = track && Array.from(track.querySelectorAll<HTMLElement>(".minimax-tl-clip[data-segment-id]")).find(element => element.dataset.segmentId === selected.id);
         if (!track || !clip) return;
+        ctx.updateMetadata({ h3TimelineFocusHandled: focusRequest });
         const left = clip.offsetLeft, right = left + clip.offsetWidth;
         const target = left < track.scrollLeft ? left : right > track.scrollLeft + track.clientWidth ? right - track.clientWidth : track.scrollLeft;
         track.scrollLeft = Math.max(0, target);
         if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${track.scrollLeft}px)`;
         persistScroll(track.scrollLeft);
-    }, [focusRequest, selected?.id, persistScroll]);
+    }, [ctx, focusRequest, selected?.id, persistScroll]);
     // 新增 Clip 后，在 DOM 提交（内容宽度已更新）后确定性地把时间轴滚到该 Clip 最右侧
     useLayoutEffect(() => {
         const id = pendingScrollIdRef.current;

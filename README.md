@@ -59,7 +59,7 @@ Windows PowerShell 用 `Copy-Item .env.example .env` 代替 `cp`。打开 `http:
 docker compose exec backend node -e 'const fs=require("node:fs"); console.log(JSON.parse(fs.readFileSync("/data/backend/backend.json","utf8")).token)'
 ```
 
-默认只绑定本机端口；同源网关代理 API、媒体、SSE、WebSocket 和 MCP。命名卷保存 SQLite、原始媒体、Agent 工作空间与可选 Codex/Acheng 状态。停止或重建容器保留该卷；删除卷会删除数据。部署到局域网/服务器时，在 `.env` 配置 `APP_BIND_ADDRESS`、`APP_PORT` 与完整 `APP_ORIGIN`，详见[Docker 部署](docs/content/docs/overview/docker.zh-CN.mdx)。
+默认只绑定本机端口；同源网关代理 API、媒体、SSE、WebSocket 和 MCP。命名卷保存 SQLite、原始媒体、Agent 工作空间、可选 Codex 状态与项目 Acheng 运行版本。停止或重建容器保留该卷；删除卷会删除数据。部署到局域网/服务器时，在 `.env` 配置 `APP_BIND_ADDRESS`、`APP_PORT` 与完整 `APP_ORIGIN`，详见[Docker 部署](docs/content/docs/overview/docker.zh-CN.mdx)。
 
 ### 本地源码开发
 
@@ -79,7 +79,7 @@ corepack pnpm run dev
 - **API 模型**：在设置中添加渠道地址、Key 与模型。渠道 Key 保存在 Backend SQLite，实际调用位置取决于执行器；自定义浏览器脚本需要网页保持打开。
 - **ComfyUI**：独立安装模型、节点和工作流，再配置 Backend 能访问的服务地址。Docker 中的 `127.0.0.1` 指向容器；宿主服务可使用 `host.docker.internal`，其他机器使用其实际网络地址。
 - **MiniMax H3**：模型、LoRA、VAE、TRT/DLSS 与自定义节点以自己的 ComfyUI 能力为准；本地潜变量续跑需要 Backend 能访问同一安装目录。视频工具与 Motion Context 需要 FFmpeg/FFprobe，Backend 镜像已包含它们。
-- **Acheng Director**：七模块覆盖剧情、资产、表演/动作、视效、镜头、模型提示词与连续性。`.agents/skills/acheng-director` 是指向 `helishou/acheng-director-skill` 的 Git 子模块，可在该目录直接开发、提交和推送。已有克隆先运行 `git submodule update --init -- .agents/skills/acheng-director`；提交修改后运行 `corepack pnpm run acheng:update -- --local` 校验并启用当前提交，`corepack pnpm run acheng:update` 获取远端更新，`corepack pnpm run acheng:rollback` 仅回退运行包。Docker 的对应命令和可选 Codex 镜像见部署说明。
+- **Acheng Director**：七模块覆盖剧情、资产、表演/动作、视效、镜头、模型提示词与连续性。`.agents/skills/acheng-director` 是指向 `helishou/acheng-director-skill` 的 Git 子模块，可在该目录直接开发、提交和推送。运行版本与激活记录由画布项目管理，默认保存在仓库忽略目录 `.canvas-runtime`，不依赖用户级 `CODEX_HOME`；可用 `INFINITE_CANVAS_ACHENG_HOME` 指定项目专属持久目录。已有克隆先运行 `git submodule update --init -- .agents/skills/acheng-director`；提交修改后运行 `corepack pnpm run acheng:update -- --local` 校验并启用当前提交，`corepack pnpm run acheng:update` 获取远端更新，`corepack pnpm run acheng:rollback` 仅回退运行包。Docker 的对应命令和可选 Codex 镜像见部署说明。
 - **插件**：Markdown、SVG、HTML、3D 全景等通过节点插件扩展，开发方式见[插件 SDK](plugins/canvas/README.md)。
 
 ## 数据与部署边界

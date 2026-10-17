@@ -871,9 +871,9 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, nodes, theme
                             sourceId={source.id}
                             sourceName={source.name}
                             keyword={keyword}
-                            open={!!expanded[source.id]}
+                            open={expanded[source.id]}
                             theme={theme}
-                            onToggle={() => setExpanded((prev) => ({ ...prev, [source.id]: !prev[source.id] }))}
+                            onToggle={() => setExpanded((prev) => ({ ...prev, [source.id]: !(prev[source.id] ?? true) }))}
                             onInsert={onInsert}
                             onView={setDetail}
                         />
@@ -909,7 +909,7 @@ function PromptSourceGroup({
     sourceId: string;
     sourceName: string;
     keyword: string;
-    open: boolean;
+    open?: boolean;
     theme: CanvasTheme;
     onToggle: () => void;
     onInsert: (payload: InsertAssetPayload) => void;
@@ -941,7 +941,7 @@ function PromptItemsGroup({
 }: {
     items: Prompt[];
     keyword: string;
-    open: boolean;
+    open?: boolean;
     sourceName: string;
     icon: LucideIcon;
     theme: CanvasTheme;
@@ -955,13 +955,21 @@ function PromptItemsGroup({
     headerAction?: ReactNode;
 }) {
     const { t } = useTranslation();
-    const showResults = open || !!keyword.trim();
+    // 搜索时默认展开全部分组（undefined 视为展开），但保留点击收起的能力；无关键词时按用户显式开关。
+    const hasKeyword = !!keyword.trim();
+    const showResults = hasKeyword ? open !== false : open;
     const filtered = useMemo(() => {
         const q = keyword.trim().toLowerCase();
         if (!q) return items;
         return items.filter((item) => [item.title, item.prompt, item.description, ...item.tags].join(" ").toLowerCase().includes(q));
     }, [items, keyword]);
     const insertPrompt = (item: Prompt) => onInsert({ kind: "text", content: item.prompt, title: item.title });
+    // 长列表直接全量渲染会一次性建几百个带缩略图的 DOM，搜索全展开时尤其卡。
+    // 分组内超过阈值先截断，点击「展开剩余」再补渲染；展开态随搜索词切换自动复位。
+    const COLLAPSE_LIMIT = 30;
+    const [expandedAll, setExpandedAll] = useState(false);
+    useEffect(() => { setExpandedAll(false); }, [keyword]);
+    const visible = filtered.length > COLLAPSE_LIMIT && !expandedAll ? filtered.slice(0, COLLAPSE_LIMIT) : filtered;
     return (
         <div>
             <div className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-xs font-semibold opacity-75 transition hover:opacity-100">
@@ -980,11 +988,18 @@ function PromptItemsGroup({
                     ) : error ? (
                         <button type="button" onClick={onRetry} className="block w-full py-4 text-center text-xs text-red-500 opacity-80 transition hover:opacity-100">{t("canvas.sidePanel.loadFailedRetry")}</button>
                     ) : filtered.length ? (
-                        <div className="space-y-1.5">
-                            {filtered.map((item) => (
-                                <PromptRow key={item.id} item={item} theme={theme} onInsert={() => insertPrompt(item)} onView={() => onView(item)} />
-                            ))}
-                        </div>
+                        <>
+                            <div className="space-y-1.5">
+                                {visible.map((item) => (
+                                    <PromptRow key={item.id} item={item} theme={theme} onInsert={() => insertPrompt(item)} onView={() => onView(item)} />
+                                ))}
+                            </div>
+                            {visible.length < filtered.length ? (
+                                <button type="button" onClick={() => setExpandedAll(true)} className="mt-1.5 w-full rounded-md py-1.5 text-center text-xs opacity-60 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/5">
+                                    {t("canvas.sidePanel.showMore", { count: filtered.length - visible.length })}
+                                </button>
+                            ) : null}
+                        </>
                     ) : (
                         <div className="py-4 text-center text-xs opacity-40">{keyword.trim() ? t("canvas.sidePanel.noMatchingPrompts") : emptyText}</div>
                     )}
@@ -999,7 +1014,7 @@ function PromptRow({ item, theme, onInsert, onView }: { item: Prompt; theme: Can
     return (
         <div className="group relative flex items-center gap-2.5 rounded-lg px-2 py-2 transition hover:bg-black/5 dark:hover:bg-white/5">
             {item.coverUrl ? (
-                <img src={item.coverUrl} alt="" className="size-10 shrink-0 rounded-md object-cover" loading="lazy" />
+                <img src={item.coverUrl} alt="" className="size-10 shrink-0 animate-image-in rounded-md bg-muted object-cover" loading="lazy" />
             ) : (
                 <span className="grid size-10 shrink-0 place-items-center rounded-md" style={{ background: theme.node.panel }}>
                     <FileText className="size-4 opacity-50" />

@@ -3,6 +3,7 @@ import { canonicalProduction, isSubjectPromptAssembly, productionSceneEntries, r
 
 export type CompilationScope = { sceneId?: string; targetIds?: string[]; output?: "selected" };
 const rows = (value: unknown): Record<string, any>[] => Array.isArray(value) ? value : [];
+const values = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
 const key = (item: Record<string, any>) => String(item.asset_id || item.id || "");
 const stableId = (item: Record<string, any>) => String(item.id || "");
 export const compilationHash = (value: unknown) => crypto.createHash("sha256").update(canonicalProduction(value)).digest("hex");
@@ -41,6 +42,12 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     const segments = allSegments.filter(item => wanted.has(stableId(item)) || includeShotSegments && (item.shot_ids || []).some((id: string) => shots.has(id)));
     for (const segment of segments) if ((segment.shot_ids || []).some((id: string) => !shots.has(id))) throw new Error("COMPILATION_SCOPE_CROSS_SCENE: Segment 跨越编译范围");
     const outputShotIds = new Set(shots);
+    const outputContinuityFactIds = new Set<string>();
+    if (subjectAssembly) for (const shot of allShots.filter(item => outputShotIds.has(stableId(item)))) {
+        for (const usage of rows(shot.subject_usages)) for (const factId of values(usage.continuityFactIds)) {
+            if (typeof factId === "string" && factId) outputContinuityFactIds.add(factId);
+        }
+    }
     const subjectRegistry = rows(source.subject_registry);
     const subjectById = new Map(subjectRegistry.map(subject => [String(subject.id), subject]));
     const subjectReferenceShotIds = new Set(segments.filter(segment => String(segment.mode) === "Ref2VA").flatMap(segment => (segment.shot_ids || []).map(String)));
@@ -165,9 +172,17 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
         while (changed) {
             const before = contextShots.size + sceneIds.size;
             const blockIds = new Set(rows(source.script_scenes).filter(item => sceneIds.has(String(item.id || item.scene_id))).flatMap(item => rows(Array.isArray(item.blocks) ? item.blocks : typeof item.text === "string" ? [item] : []).map(block => String(block.id))));
-            const coverage = rows(ledger.coverage).filter(item => blockIds.has(String(item.source_anchor?.block_id || item.block_id)));
-            const eventIds = new Set(coverage.flatMap(item => (item.event_ids || []).map(String)));
-            for (const requirement of rows(ledger.requirements).filter(item => contextShots.has(String(item.shot_id)))) for (const eventId of requirement.event_ids || []) eventIds.add(String(eventId));
+            const blockCoverage = rows(ledger.coverage).filter(item => blockIds.has(String(item.source_anchor?.block_id || item.block_id)));
+            const selectedFactEventIds = new Set(rows(ledger.events).filter(item => outputContinuityFactIds.has(String(item.fact_id))).map(stableId));
+            const coverage = subjectAssembly
+                ? blockCoverage.filter(item => values(item.fact_ids).some(id => outputContinuityFactIds.has(String(id)))
+                    || values(item.event_ids).some(id => selectedFactEventIds.has(String(id)))
+                    || !values(item.fact_ids).length && !values(item.event_ids).length)
+                : blockCoverage;
+            const eventIds = new Set(coverage.flatMap(item => values(item.event_ids).map(String)));
+            const requirements = rows(ledger.requirements).filter(item => contextShots.has(String(item.shot_id))
+                && (!subjectAssembly || outputContinuityFactIds.has(String(item.fact_id))));
+            for (const requirement of requirements) for (const eventId of requirement.event_ids || []) eventIds.add(String(eventId));
             for (const item of coverage) for (const shotId of item.shot_ids || []) if (allShots.some(shot => stableId(shot) === String(shotId))) contextShots.add(String(shotId));
             for (const event of rows(ledger.events)) if (eventIds.has(stableId(event)) && allShots.some(shot => stableId(shot) === String(event.shot_id))) contextShots.add(String(event.shot_id));
             // Replaying only the selected shot would lose earlier changes on its timeline.
@@ -189,15 +204,17 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
             const clipShots = new Set(segments.flatMap(segment => (segment.shot_ids || []).map(String)));
             const allSubjectRows = rows(source.subject_registry), entitySubjects = new Map(allSubjectRows.map(subject => [`${subject.entityRef?.kind}:${subject.entityRef?.id}`, String(subject.id)]));
             const usedSubjects = new Set<string>();
-            const usedFacts = new Set<string>();
+            const usedFacts = new Set<string>(outputContinuityFactIds);
             const outputUtteranceIds = new Set<string>();
             for (const shot of allShots.filter(item => contextShots.has(stableId(item)))) {
                 for (const usage of rows(shot.subject_usages)) {
                     usedSubjects.add(String(usage.subjectId));
-                    for (const factId of usage.continuityFactIds || []) usedFacts.add(String(factId));
+                    if (!subjectAssembly) {
+                        for (const factId of usage.continuityFactIds || []) usedFacts.add(String(factId));
+                    }
                 }
                 for (const frame of rows(shot.keyframes).filter(item => item.requiredForSubmission && item.anchor !== "composition")) for (const subjectId of frame.subjectIds || []) usedSubjects.add(String(subjectId));
-                for (const factId of shot.continuity_facts || []) usedFacts.add(String(factId));
+                if (!subjectAssembly) for (const factId of shot.continuity_facts || []) usedFacts.add(String(factId));
                 if (clipShots.has(stableId(shot))) for (const ref of rows(shot.utterance_refs)) outputUtteranceIds.add(String(ref.utteranceId));
             }
             for (const shot of allShots.filter(item => outputShotIds.has(stableId(item)))) for (const ref of rows(shot.utterance_refs)) outputUtteranceIds.add(String(ref.utteranceId));
@@ -207,12 +224,14 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
             // T2VA and dialogue-focused shots are valid examples).
             for (const utterance of outputUtterances) usedSubjects.add(String(utterance.speakerSubjectId || ""));
             const scopedLedger = projected.source.ledger as Record<string, any>;
-            for (const req of rows(scopedLedger.requirements)) usedFacts.add(String(req.fact_id || ""));
-            for (const event of rows(scopedLedger.events)) usedFacts.add(String(event.fact_id || ""));
-            const coverageEvents = new Set(rows(scopedLedger.coverage).flatMap(item => (item.event_ids || []).map(String)));
-            for (const event of rows(ledger.events).filter(item => coverageEvents.has(stableId(item)))) usedFacts.add(String(event.fact_id || ""));
+            if (!subjectAssembly) {
+                for (const req of rows(scopedLedger.requirements)) usedFacts.add(String(req.fact_id || ""));
+                for (const event of rows(scopedLedger.events)) usedFacts.add(String(event.fact_id || ""));
+                const coverageEvents = new Set(rows(scopedLedger.coverage).flatMap(item => (item.event_ids || []).map(String)));
+                for (const event of rows(ledger.events).filter(item => coverageEvents.has(stableId(item)))) usedFacts.add(String(event.fact_id || ""));
+            }
             const facts = rows(ledger.facts);
-            for (const fact of facts) {
+            if (!subjectAssembly) for (const fact of facts) {
                 const subjectId = entitySubjects.get(`${fact.object_kind}:${fact.object_id}`);
                 if (subjectId && usedSubjects.has(subjectId)) usedFacts.add(String(fact.id));
             }
@@ -250,7 +269,25 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
             scopedLedger.initial = rows(ledger.initial).filter(item => usedFacts.has(String(item.fact_id)) && scopedLedger.timelines.some((timeline: Record<string, any>) => timeline.id === item.timeline_id));
             scopedLedger.events = rows(ledger.events).filter(item => contextShots.has(String(item.shot_id)) && usedFacts.has(String(item.fact_id)));
             scopedLedger.requirements = rows(ledger.requirements).filter(item => contextShots.has(String(item.shot_id)) && usedFacts.has(String(item.fact_id)));
-            scopedLedger.coverage = rows(ledger.coverage).filter(item => blocks.has(String(item.source_anchor?.block_id || item.block_id)));
+            const usedEvents = new Set(scopedLedger.events.map((item: Record<string, any>) => stableId(item)));
+            scopedLedger.coverage = rows(ledger.coverage)
+                .filter(item => blocks.has(String(item.source_anchor?.block_id || item.block_id))
+                    && (!subjectAssembly || values(item.fact_ids).some(id => usedFacts.has(String(id)))
+                        || values(item.event_ids).some(id => usedEvents.has(String(id)))
+                        || !values(item.fact_ids).length && !values(item.event_ids).length))
+                .map(item => subjectAssembly ? { ...item,
+                    fact_ids: values(item.fact_ids).filter(id => usedFacts.has(String(id))),
+                    event_ids: values(item.event_ids).filter(id => usedEvents.has(String(id))),
+                    shot_ids: values(item.shot_ids).filter(id => contextShots.has(String(id))),
+                } : item);
+            if (subjectAssembly) projected.source.shots = rows(projected.source.shots).map(shot => {
+                const { continuity_facts: _legacyFacts, ...retained } = shot;
+                return { ...retained, subject_usages: rows(shot.subject_usages).map(usage => ({
+                    ...usage,
+                    continuityFactIds: values(usage.continuityFactIds).filter(id => usedFacts.has(String(id))),
+                    stateRequirements: rows(usage.stateRequirements).filter(item => usedFacts.has(String(item.factId))),
+                })) };
+            });
             projected.source.utterances = outputUtterances;
         }
     }
@@ -263,7 +300,7 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     projected.boundaries = director.boundaries.filter(item => segments.some(s => stableId(s) === item.from) && segments.some(s => stableId(s) === item.to));
     projected.artifacts = director.artifacts.filter(item => targetIds.includes(item.targetId));
     projected.sourceHash = compilationHash(projected.source);
-    // Authored global facts remain inputs. Run cursors and unrelated artifacts do not.
+    // Run cursors and unrelated artifacts do not enter compiler-input identity.
     const referenced = new Set<string>([
         ...rows(projected.source.asset_cards).flatMap(item => rows(item.references).map(ref => String(ref.asset_id || ""))),
         ...(subjectAssembly ? [] : segments.flatMap(item => rows(item.references).map(ref => String(ref.asset_id || "")))),
@@ -296,7 +333,11 @@ export function compilationArtifactFreshness(director: DirectorProduction, artif
     const receipt = artifact.receipt as (typeof artifact.receipt & Record<string, any>) | undefined;
     if (!receipt) return { current: false, staleReason: "receipt_missing" };
     const compiledEngine = receipt.engine as DirectorProduction["engine"] | undefined;
-    if ((compiledEngine?.compilerHash || "") !== (director.engine.compilerHash || "")) return { current: false, staleReason: "compiler_changed" };
+    const compiledKindHash = compiledEngine?.compilerHashes?.[artifact.kind as "h3" | "image"];
+    const currentKindHash = director.engine.compilerHashes?.[artifact.kind as "h3" | "image"];
+    const compiledCompilerHash = compiledKindHash || compiledEngine?.compilerHash || "";
+    const currentCompilerHash = currentKindHash || director.engine.compilerHash || "";
+    if (compiledCompilerHash !== currentCompilerHash) return { current: false, staleReason: "compiler_changed" };
     if (typeof artifact.prompt !== "string" || !artifact.prompt) return { current: false, staleReason: "prompt_hash_mismatch" };
     const promptHash = crypto.createHash("sha256").update(artifact.prompt, "utf8").digest("hex");
     if (promptHash !== artifact.sha256 || receipt.promptHash !== artifact.sha256) return { current: false, staleReason: "prompt_hash_mismatch" };

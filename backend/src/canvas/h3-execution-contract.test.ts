@@ -148,6 +148,50 @@ test('first-pass and second-pass measured dimensions are checked separately; lan
     assert.equal(compareH3MediaSpecification({ width: 864, height: 480 }, params).status, 'mismatch');
 });
 
+test('展开流合同沿释放屏障核对名字，并且仍然能抓到真实偏差', async () => {
+    const { buildExpandedNanFengV10Workflow } = await import('../comfyui/bridge.js');
+    const expected = {
+        modelName: 'H3/model.safetensors', textEncoder: 'te.safetensors', videoVae: 'H3/video.safetensors', audioVae: 'audio.safetensors',
+        aspectRatio: '16:9', megapixels: 0.4, sampler: 'er_sde', scheduler: 'simple', latentUpscaleEnabled: false,
+        loraSlots: [{ name: 'turbo', strength: 0.75, enabled: true }],
+    };
+    const build = (params: Record<string, unknown> = {}) => buildExpandedNanFengV10Workflow(
+        { prompt: 'a shot', references: ['ref.png'] },
+        { mode: 'ref2va', seed: 1, ...expected, ...params },
+        async (file: string) => file, 'http://comfy.test', new AbortController().signal,
+    );
+    const graph = await build();
+    // 名字是连过来的，不是字面量：契约必须沿这条链路核对，否则每次默认提交都会被误判。
+    assert.equal(typeof graph.nf_model.inputs.unet_name[0], 'string');
+    assert.equal(typeof graph.nf_clip.inputs.clip_name[0], 'string');
+    assert.equal(typeof graph.nf_video_vae.inputs.vae_name[0], 'string');
+    assert.doesNotThrow(() => assertH3WorkflowContract(graph, expected));
+    // 真偏差仍然必须被拦下。
+    const wrongModel = await build({ modelName: 'H3/other.safetensors' });
+    const wrongEncoder = await build({ textEncoder: 'other.safetensors' });
+    const wrongVideoVae = await build({ videoVae: 'H3/other.safetensors' });
+    const wrongAudioVae = await build({ audioVae: 'other.safetensors' });
+    const wrongLora = await build({ loraSlots: [{ name: 'turbo', strength: 0.5, enabled: true }] });
+    assert.throws(() => assertH3WorkflowContract({ ...graph, nf_start: { class_type: graph.nf_start.class_type, inputs: { ...graph.nf_start.inputs, unet_name: 'H3/other.safetensors' } } }, expected), /modelName/);
+    assert.doesNotThrow(() => assertH3WorkflowContract(wrongModel, { ...expected, modelName: 'H3/other.safetensors' }));
+    assert.throws(() => assertH3WorkflowContract(wrongModel, expected), /modelName/);
+    assert.throws(() => assertH3WorkflowContract(wrongEncoder, expected), /textEncoder/);
+    assert.throws(() => assertH3WorkflowContract(wrongVideoVae, expected), /videoVae/);
+    assert.throws(() => assertH3WorkflowContract(wrongAudioVae, expected), /audioVae/);
+    assert.throws(() => assertH3WorkflowContract(wrongLora, expected), /loraSlots/);
+    const withoutFrame = { ...graph }; delete withoutFrame.nf_ref_condition;
+    assert.throws(() => assertH3WorkflowContract(withoutFrame, expected), /frame dimensions/);
+    // 南风 ER 采样器取代 KSamplerSelect，采样器一致性照旧要核。
+    const er = await build({ sampler: '南风采样器', erSolverType: 'ER-SDE' });
+    assert.doesNotThrow(() => assertH3WorkflowContract(er, { ...expected, sampler: '南风采样器' }));
+    assert.throws(() => assertH3WorkflowContract(er, expected), /sampler/);
+    // TRT 视频 VAE 整体取代普通 VAELoader：核对引擎选择，而不是 vae 文件名。
+    const trt = await build({ trtVideoVaeEnabled: true, trtDecoderEngine: 'dec.engine', trtEncoderEngine: 'enc.engine' });
+    assert.doesNotThrow(() => assertH3WorkflowContract(trt, { ...expected, trtVideoVaeEnabled: true, trtDecoderEngine: 'dec.engine', trtEncoderEngine: 'enc.engine' }));
+    assert.throws(() => assertH3WorkflowContract(trt, expected), /videoVae/);
+    assert.throws(() => assertH3WorkflowContract(trt, { ...expected, trtVideoVaeEnabled: true, trtDecoderEngine: 'other.engine', trtEncoderEngine: 'enc.engine' }), /videoVae/);
+});
+
 test('wrong-specification media is preserved in history without replacing the old active result', t => {
     const { db, stores } = fixture(t);
     stores.projects.applyOperations('p', undefined, [{ type: 'update_h3_segment', nodeId: 'n', segmentId: 'a', patch: { result: 'old.mp4', resultStorageKey: 'old', runtimeTaskId: 'child' } }], { runtimeWrite: true });
@@ -206,4 +250,33 @@ test("outgoing motion flags form a complete latent chain including the closing C
     assert.deepEqual(plans.map((plan: any) => plan.continuation?.index), [1, 2, 3]);
     assert.equal(new Set(plans.map((plan: any) => plan.continuation?.group)).size, 1);
     assert.equal(stores.tasks.list().length, 0); assert.equal(JSON.stringify(stores.projects.get("p")), before);
+});
+
+test('确认阶段的展开流合同：快照承载的字段不再误报，sigma 真偏差依旧拦得住', async () => {
+    const { buildExpandedNanFengV10Workflow, splitH3Confirmation } = await import('../comfyui/bridge.js');
+    const sigma = '0.9, 0.85, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0';
+    const expected = {
+        modelName: 'H3/model.safetensors', textEncoder: 'te.safetensors', videoVae: 'H3/video.safetensors', audioVae: 'audio.safetensors',
+        aspectRatio: '16:9', megapixels: 0.4, sampler: 'er_sde', scheduler: 'simple', loraSlots: [],
+        latentUpscaleEnabled: true, latentUpscaleModel: 'h3_upscaler_lms_v0.1.safetensors', latentUpscaleMegapixels: 1,
+        h3FullSigma: sigma, h3FirstSteps: 6, h3SecondSteps: 4,
+    };
+    const checkpoint = 'd'.repeat(64);
+    const build = () => buildExpandedNanFengV10Workflow(
+        { prompt: 'a shot', references: ['ref.png'] },
+        { mode: 'ref2va', seed: 1, ...expected, latentUpscaleAlign: 2 },
+        async (file: string) => file, 'http://comfy.test', new AbortController().signal,
+    );
+    const first = splitH3Confirmation(await build(), 'first', checkpoint, false);
+    const second = splitH3Confirmation(await build(), 'second', checkpoint, false);
+    // 一采：编码器与帧尺寸节点都还在，sigma 边界钉在 SplitSigmas.step = h3FirstSteps。
+    assert.doesNotThrow(() => assertH3WorkflowContract(first, { ...expected, latentConfirmationPhase: 'first' }));
+    // 二采：条件张量/编码器/帧尺寸来自快照，图里没有它们属正常，不能判成偏离。
+    assert.doesNotThrow(() => assertH3WorkflowContract(second, { ...expected, latentConfirmationPhase: 'second' }));
+    // 真偏差仍需拦下：首段步数、sigma 序列、模型、放大器。
+    assert.throws(() => assertH3WorkflowContract(first, { ...expected, latentConfirmationPhase: 'first', h3FirstSteps: 7 }), /h3FirstSteps/);
+    assert.throws(() => assertH3WorkflowContract(first, { ...expected, latentConfirmationPhase: 'first', h3FullSigma: '0.9, 0.1, 0' }), /h3FullSigma/);
+    assert.throws(() => assertH3WorkflowContract(second, { ...expected, latentConfirmationPhase: 'second', modelName: 'H3/other.safetensors' }), /modelName/);
+    assert.throws(() => assertH3WorkflowContract(second, { ...expected, latentConfirmationPhase: 'second', latentUpscaleModel: 'other.safetensors' }), /latentUpscale/);
+    assert.throws(() => assertH3WorkflowContract(second, { ...expected, latentConfirmationPhase: 'second', sampler: 'euler' }), /sampler/);
 });

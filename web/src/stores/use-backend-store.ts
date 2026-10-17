@@ -37,7 +37,7 @@ function stopBackendEvents() {
     backendEventsKey = "";
 }
 
-function startBackendEvents(url: string, token: string) {
+function startBackendEvents(url: string, token: string, announceOnInitialReset = false) {
     if (typeof window === "undefined" || !token) return;
     const baseEventsUrl = shouldUseViteBackendProxy(url)
         ? `/events?token=${encodeURIComponent(token)}`
@@ -68,13 +68,17 @@ function startBackendEvents(url: string, token: string) {
     for (const eventType of ["task.created", "task.updated", "task.completed", "task.failed", "generation-log.updated", "plugin.updated", "canvas.updated", "canvas-folder.updated", "asset.updated", "settings.updated", "drama-production.updated"]) {
         source.addEventListener(eventType, handleMessage);
     }
+    let initialSyncPending = true;
     source.addEventListener("events.sync", (message) => {
         const { cursor, reset } = JSON.parse((message as MessageEvent<string>).data) as { cursor: string; reset: boolean };
         backendEventCursor = cursor;
         if (reset) {
             seenBackendEventIds.clear();
-            window.dispatchEvent(new Event("backend-connected"));
+            // On first connection checkConnection emits backend-connected after config hydration.
+            // Do not launch a second full store hydration for the initial SSE cursor reset.
+            if (!initialSyncPending || announceOnInitialReset) window.dispatchEvent(new Event("backend-connected"));
         }
+        initialSyncPending = false;
     });
     // EventSource 会自行重连；短暂断流不应把 Backend 标记为离线，
     // 否则下一次健康检查会广播 backend-connected，导致画布重新 hydration。
@@ -137,7 +141,7 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
         const business = await probeBackendBusinessApi();
         if (wasConnected && !business.ok && hasBackendWriteInFlight()) { set({ checking: false }); return; }
         set({ connected: true, checking: true, error: "", businessError: business.detail });
-        startBackendEvents(getBackendUrl(), get().token);
+        startBackendEvents(getBackendUrl(), get().token, wasConnected);
         if (!structuredSettingsHydrated) {
             const [{ hydrateConfigFromBackend }, { hydratePromptSourcesFromBackend }] = await Promise.all([
                 import("@/stores/use-config-store"),

@@ -1,8 +1,7 @@
-import crypto from "node:crypto";
-import fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
 import { DATABASE_SCHEMA_VERSION } from "../database-upgrade.js";
+import { createDatabaseSnapshot, pruneDatabaseSnapshots } from "../database-snapshots.js";
 import { collaborationError } from "./collaboration.js";
 import { stripCanvasLocalViewState } from "./operation-authority.js";
 import { applyCanvasProjectOperations } from "./project-ops.js";
@@ -89,13 +88,12 @@ export function applyCanvasHistoryPrune(db: DatabaseSync, file: string, cutoff: 
     const preview = previewCanvasHistoryPrune(db, cutoff);
     if (preview.some((plan) => plan.blockedReason)) throw new Error("History validation failed; no batches were deleted");
     if (!preview.some((plan) => plan.batchCount)) return { plans: preview, removed: 0, backupFile: null };
-    const backupFile = `${file}.before-batch-prune-${crypto.randomUUID()}.sqlite`;
-    db.exec(`VACUUM INTO '${backupFile.replaceAll("'", "''")}'`);
-    fs.chmodSync(backupFile, 0o600);
+    const backupFile = createDatabaseSnapshot(db, file, "before-batch-prune");
     const copy = new DatabaseSync(backupFile, { readOnly: true });
     try {
         if (copy.prepare("PRAGMA integrity_check").get()?.integrity_check !== "ok" || copy.prepare("PRAGMA foreign_key_check").all().length) throw new Error("History backup failed validation");
     } finally { copy.close(); }
+    pruneDatabaseSnapshots(file, "before-batch-prune");
     db.exec("BEGIN IMMEDIATE");
     try {
         const plans = previewCanvasHistoryPrune(db, cutoff);

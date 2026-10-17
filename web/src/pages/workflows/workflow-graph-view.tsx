@@ -7,6 +7,11 @@ export type WorkflowGraphJson = Record<string, { class_type?: string; inputs?: R
 /** 节点图上标「已暴露字段数」用的最小形状，调用方传任何含 node 的字段数组即可。 */
 export type GraphFieldRef = { node: string };
 
+/** A workflow field may target one node or a comma-separated set of nodes. */
+export function graphFieldTargetsNode(field: GraphFieldRef, nodeId: string): boolean {
+    return field.node.split(",").some((id) => id.trim() === nodeId);
+}
+
 type GraphNode = {
     id: string;
     classType: string;
@@ -77,7 +82,11 @@ function topologicalLayers(workflow: WorkflowGraphJson): Map<string, number> {
 export function computeGraphLayout(workflow: WorkflowGraphJson, fields: GraphFieldRef[]): GraphLayout {
     const layers = topologicalLayers(workflow);
     const exposedCounts = new Map<string, number>();
-    for (const f of fields) exposedCounts.set(f.node, (exposedCounts.get(f.node) || 0) + 1);
+    for (const f of fields) {
+        for (const id of f.node.split(",").map((value) => value.trim()).filter(Boolean)) {
+            exposedCounts.set(id, (exposedCounts.get(id) || 0) + 1);
+        }
+    }
 
     const buckets = new Map<number, string[]>();
     for (const [id, layer] of layers) {

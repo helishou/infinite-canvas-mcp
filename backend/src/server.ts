@@ -56,7 +56,7 @@ import {
   isLocalConnection,
   registerConnectionRoutes,
 } from "./server/connection-routes.js";
-import { isLanAuthBypassed } from "./server/lan-access-policy.js";
+import { effectiveClientAddress, isLanAuthBypassed } from "./server/lan-access-policy.js";
 import { registerLocalModelProxyRoutes } from "./server/local-model-proxy.js";
 import { CanvasDraftSessionLeases } from "./canvas/draft-session-leases.js";
 import { registerMcpObservabilityRoutes } from "./server/mcp-observability-routes.js";
@@ -168,7 +168,8 @@ export function startServer(
   app.use((req: Request, res: Response, next: NextFunction) => {
     const url = req.url!.split("?")[0];
     if (url === "/health" || url === "/config") return next();
-    if (isLanAuthBypassed(req.socket.remoteAddress, config.listenHost)) return next();
+    const clientAddress = effectiveClientAddress(req.socket.remoteAddress, req.headers["x-forwarded-for"], process.env.INFINITE_CANVAS_DEV_WATCH === "1");
+    if (isLanAuthBypassed(clientAddress, config.listenHost)) return next();
     // Codex 插件连接本机共享 MCP 时使用 loopback；该豁免只覆盖 MCP 路由，
     // 并同时校验 socket、Host 与 Origin，不能被远端请求或本机代理头伪造。
     if (url === "/mcp" && isLocalConnection(req)) return next();
@@ -219,9 +220,10 @@ export function startServer(
     // 浏览器也丢掉回环自动披露——轮换密钥后旧客户端既过不了业务接口、又打不开 /config
     // 取新值，永久静默卡在 invalid token，无人自愈。远端调用方不受影响（其真实对端非回环）。
     const localDiscoveryAllowed = isLocalConnection(req);
+    const clientAddress = effectiveClientAddress(req.socket.remoteAddress, req.headers["x-forwarded-for"], process.env.INFINITE_CANVAS_DEV_WATCH === "1");
     if (
       !localDiscoveryAllowed &&
-      !isLanAuthBypassed(req.socket.remoteAddress, config.listenHost) &&
+      !isLanAuthBypassed(clientAddress, config.listenHost) &&
       token !== config.token
     )
       return void res

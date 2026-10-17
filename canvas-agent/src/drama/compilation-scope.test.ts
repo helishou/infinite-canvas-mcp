@@ -227,6 +227,70 @@ test("one Clip keeps shared-block coverage, event references and replay context 
     assert.throws(() => compilationScopeInput(d, { targetIds: ["MISSING"] }), /UNKNOWN_TARGET/);
 });
 
+test("Subject Prompt v2 scope ignores continuity facts not selected by its output Shots", () => {
+    const d = scopedDirector();
+    d.source.version = 2;
+    d.source.prompt_assembly = { version: 2 };
+    d.source.script_scenes = [{ id: "A", scene_id: "ROOM", blocks: [{ id: "BLOCK", kind: "action", text: "Alex crosses the room." }] }];
+    d.source.character_registry = [{ id: "CHAR", name: "Alex" }];
+    d.source.subject_registry = [{ id: "P", kind: "character", entityRef: { kind: "character", id: "CHAR" }, pictureBindings: [] }];
+    d.source.shots = ["SA", "SB"].map((id, order) => ({
+        id, source_scene_id: "A", scene_id: "ROOM", timeline_id: "T", story_order: order,
+        start_frame: order * 120, end_frame: (order + 1) * 120, visual: `Shot ${order}`,
+        subject_usages: [{ subjectId: "P", presentation: "state_context", pictureBindingIds: [], referencePurpose: [],
+            continuityFactIds: [id === "SA" ? "G_UNSELECTED" : "F_SELECTED"], stateRequirements: [] }],
+        keyframes: [], utterance_refs: [],
+    }));
+    d.source.ledger = {
+        contract_version: 2,
+        facts: [
+            { id: "F_SELECTED", object_kind: "character", object_id: "CHAR", allowed_values: ["calm", "afraid"] },
+            { id: "G_UNSELECTED", object_kind: "character", object_id: "CHAR", allowed_values: ["dry", "wet"] },
+        ],
+        timelines: [{ id: "T" }],
+        initial: [
+            { timeline_id: "T", fact_id: "F_SELECTED", value: "calm" },
+            { timeline_id: "T", fact_id: "G_UNSELECTED", value: "dry" },
+        ],
+        events: [
+            { id: "EF0", shot_id: "SA", timeline_id: "T", fact_id: "F_SELECTED", frame: 10, before: "calm", after: "afraid", reason: "selected fact changes" },
+            { id: "EF1", shot_id: "SB", timeline_id: "T", fact_id: "F_SELECTED", frame: 130, before: "afraid", after: "calm", reason: "selected fact changes back" },
+            { id: "EG0", shot_id: "SA", timeline_id: "T", fact_id: "G_UNSELECTED", frame: 20, before: "dry", after: "wet", reason: "unselected fact changes" },
+            { id: "EG1", shot_id: "SB", timeline_id: "T", fact_id: "G_UNSELECTED", frame: 140, before: "wet", after: "dry", reason: "unselected fact changes back" },
+        ],
+        requirements: [
+            { id: "RF", shot_id: "SB", timeline_id: "T", fact_id: "F_SELECTED", kind: "change", event_ids: ["EF0", "EF1"] },
+            { id: "RG", shot_id: "SB", timeline_id: "T", fact_id: "G_UNSELECTED", kind: "change", event_ids: ["EG0", "EG1"] },
+        ],
+        coverage: [
+            { id: "CF", source_anchor: { block_id: "BLOCK" }, fact_ids: ["F_SELECTED"], event_ids: ["EF0", "EF1"], shot_ids: ["SA", "SB"] },
+            { id: "CG", source_anchor: { block_id: "BLOCK" }, fact_ids: ["G_UNSELECTED"], event_ids: ["EG0", "EG1"], shot_ids: ["SA", "SB"] },
+        ],
+    };
+    d.sourceHash = compilationHash(d.source);
+
+    const scope = { targetIds: ["GB"], output: "selected" as const };
+    const baseline = compilationScopeInput(d, scope);
+    assert.deepEqual((baseline.director.source.ledger as any).facts.map((fact: any) => fact.id), ["F_SELECTED"]);
+    assert.deepEqual((baseline.director.source.ledger as any).events.map((event: any) => event.id), ["EF0", "EF1"]);
+    assert.deepEqual((baseline.director.source.ledger as any).requirements.map((requirement: any) => requirement.id), ["RF"]);
+    assert.deepEqual((baseline.director.source.ledger as any).coverage.map((item: any) => item.id), ["CF"]);
+
+    const changedUnselectedFact = structuredClone(d);
+    const unselected = (changedUnselectedFact.source.ledger as any).facts.find((fact: any) => fact.id === "G_UNSELECTED");
+    unselected.allowed_values.push("soaked");
+    (changedUnselectedFact.source.ledger as any).initial.find((item: any) => item.fact_id === "G_UNSELECTED").value = "soaked";
+    (changedUnselectedFact.source.ledger as any).events.find((event: any) => event.id === "EG0").after = "soaked";
+    (changedUnselectedFact.source.ledger as any).requirements.find((item: any) => item.id === "RG").kind = "hold";
+    changedUnselectedFact.sourceHash = compilationHash(changedUnselectedFact.source);
+    assert.equal(compilationScopeInput(changedUnselectedFact, scope).inputHash, baseline.inputHash);
+
+    const changedSelectedFact = structuredClone(d);
+    (changedSelectedFact.source.ledger as any).facts.find((fact: any) => fact.id === "F_SELECTED").allowed_values.push("terrified");
+    changedSelectedFact.sourceHash = compilationHash(changedSelectedFact.source);
+    assert.notEqual(compilationScopeInput(changedSelectedFact, scope).inputHash, baseline.inputHash);
+});
+
 test("asset-card references are included in the compiler dependency closure", () => {
     const director = scopedDirector();
     (director.source.asset_plan as any[]).push({ id: "REFERENCE_ONLY", canvas_scope: "shared" });
@@ -300,4 +364,21 @@ test("artifact freshness checks scoped external inputs and prompt bytes even whe
     const compilerResult = compilationArtifactFreshness(changedCompiler, artifact);
     assert.equal(compilerResult.current, false);
     assert.equal(compilerResult.staleReason, "compiler_changed");
+});
+
+test("an H3 compiler change does not stale image artifacts when their compiler hash is unchanged", () => {
+    const director = scopedDirector();
+    director.engine.compilerHash = "a".repeat(64);
+    director.engine.compilerHashes = { h3: "b".repeat(64), image: "c".repeat(64) };
+    const prompt = "approved image prompt";
+    const promptHash = crypto.createHash("sha256").update(prompt, "utf8").digest("hex");
+    const image = { id: "image-KA", kind: "image", targetId: "KA", prompt, sha256: promptHash, sourceHash: director.sourceHash, status: "ready", references: [],
+        receipt: { sourceHash: director.sourceHash, promptHash, engine: structuredClone(director.engine) } } as DirectorProduction["artifacts"][number];
+    const h3 = { ...image, id: "h3-GA", kind: "h3", targetId: "GA" } as DirectorProduction["artifacts"][number];
+
+    const updated = structuredClone(director);
+    updated.engine.compilerHash = "d".repeat(64);
+    updated.engine.compilerHashes = { h3: "e".repeat(64), image: "c".repeat(64) };
+    assert.equal(compilationArtifactFreshness(updated, image).current, true);
+    assert.deepEqual(compilationArtifactFreshness(updated, h3), { current: false, staleReason: "compiler_changed" });
 });

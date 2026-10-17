@@ -42,6 +42,52 @@ test("missing editors and changed compiled identities fail visibly without a sou
     await assert.rejects(service.reverseSyncPrompt(input), /PRODUCTION_EDITOR_NOT_READY/);
     await assert.rejects(service.reverseSyncPrompt({ ...input, basePromptHash: "stale" }), /PROMPT_REVERSE_SYNC_BASELINE_MISMATCH/);
 });
+
+test("a stale apply response clears its prepared compile so the next click uses the current revision", async (t) => {
+    const originalFetch = globalThis.fetch;
+    t.after(() => { globalThis.fetch = originalFetch; });
+    let revision = 7, applyAttempts = 0;
+    const compileRequests: Array<{ expectedRevision: number; operationId: string }> = [];
+    globalThis.fetch = async (input, init) => {
+        const url = new URL(String(input));
+        if (url.pathname.includes("/canvas/draft-sessions/")) {
+            return Response.json({ lease: { owned: true, expiresAt: Date.now() + 60_000 } });
+        }
+        if (url.pathname.endsWith("/production") && url.searchParams.get("view") === "clip_workbench") {
+            const sourceHash = "hash-" + revision;
+            return Response.json({ ok: true, production: { revision, sourceHash, workbench: {
+                segment: { id: "SOURCE_C4" }, sourceHash,
+                runtime: { canvasInputs: [{ nodeId: "H3", segmentId: "canvas-clip", current: { prompt: "compiled-" + revision }, manualFields: [] }] },
+            } } });
+        }
+        if (url.pathname.endsWith("/production/compile")) {
+            const body = JSON.parse(String(init?.body)) as { expectedRevision: number; operationId: string };
+            compileRequests.push(body);
+            return Response.json({ ok: true, compilation: {
+                operationId: body.operationId, status: "succeeded", verdict: "passed",
+                expectedRevision: body.expectedRevision, sourceHash: "hash-" + body.expectedRevision,
+                preparedId: "prepared-" + body.operationId, mediaSubmitted: false,
+            } });
+        }
+        if (url.pathname.endsWith("/production/apply-compilation")) {
+            applyAttempts++;
+            if (applyAttempts === 1) {
+                revision = 8;
+                return Response.json({ ok: false, error: "制作稿版本已变化，请核对当前版本后重试" }, { status: 409 });
+            }
+            return Response.json({ ok: true, receipt: { revision, sourceHash: "hash-" + revision, operationId: "apply-2", mediaSubmitted: false } });
+        }
+        throw new Error("Unexpected request: " + (init?.method || "GET") + " " + url.pathname);
+    };
+    const service = createProductionEditing("stale-apply-canvas", () => node(), async () => {});
+    const compileInput = { nodeId: "H3", segmentId: "canvas-clip" };
+    await assert.rejects(service.compilePrompt(compileInput), /PROMPT_COMPILE_SOURCE_CHANGED/);
+    assert.equal(compileRequests[0]?.expectedRevision, 7);
+    const refreshed = await service.compilePrompt(compileInput);
+    assert.equal(refreshed.prompt, "compiled-8");
+    assert.equal(compileRequests[1]?.expectedRevision, 8);
+    assert.notEqual(compileRequests[0]?.operationId, compileRequests[1]?.operationId);
+});
 test("production storyboard writeback routes only a verified formal Clip and waits for the source editor", async () => {
     const order: string[] = [];
     // replaceStoryboardTrack 会用从 Backend 校验过的完整 projection 覆盖调用方携带的摘要。

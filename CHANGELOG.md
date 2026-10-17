@@ -3,6 +3,7 @@
 
 ## Unreleased
 
+- [调整] Acheng 运行版本与激活状态改由画布项目管理，默认保存在仓库 `.canvas-runtime`，不再读取用户级 `CODEX_HOME`；Docker 使用持久化的 `/data/acheng-runtime`。
 - [调整] MCP 只暴露智能节点创建能力；普通文本、图片、视频、音频节点及附件、导入、裁切、分割工具不再创建普通节点，生成提示词直接保存在智能节点。
 - [调整] 渠道类型移除本地 ComfyUI 选项，新增仅作标识的“本地”类型；旧 ComfyUI 渠道迁移后按普通 API 使用协议、Base URL 与 API Key。
 - [新增] 分镜场次页与 MCP 按每批最多 3 个 Clip 调用 LLM 翻译缓存未命中的编译提示词，按 Clip ID 拆回并原子写回 H3；对白等原文可保留中文，仍按 SHA-256 去重缓存。

@@ -5,6 +5,8 @@ description: 当前版本已实现但仍需人工验证的变更项
 
 # 待测试
 
+- Acheng 运行时安装与激活按项目隔离：在本地仓库中令 `CODEX_HOME` 指向其他目录，验证 status/update/rollback 仍使用仓库 `.canvas-runtime`；在 Docker 验证运行版本持久化于 `/data/acheng-runtime`，Codex 登录和会话仍在 `/data/codex`。
+
 - MCP 仅暴露智能节点创建能力。验证 `tools/list` 不再包含普通文本、图片、视频、音频、附件、导入、裁切或分割节点创建工具；通用 `canvas_create_node`、`canvas_apply_ops` 和 `canvas_apply_commands` 拒绝新增非智能节点；文本、图片、视频、音频生成均只创建一个智能节点，提示词保存在该节点元数据中。
 
 - 渠道类型可选“云端 API”“本地”“Codex CLI”。“本地”与云端 API 使用相同协议、Base URL、API Key 和请求路径，只保留类型标识。读取已有 ComfyUI 渠道后，确认其类型变为“本地”、迁移配置已保存回 Backend，且原模型和凭据保留。

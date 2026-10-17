@@ -3,7 +3,7 @@ import localforage from "localforage";
 
 const h3TranslationCache = localforage.createInstance({ name: "infinite-canvas-h3-translation-cache" });
 const h3TranslationInFlight = new Map<string, Promise<string>>();
-const H3_TRANSLATION_CACHE_VERSION = "h3-en-v2";
+const H3_TRANSLATION_CACHE_VERSION = "h3-en-v3";
 const H3_TRANSLATION_BATCH_SIZE = 3;
 
 /** 画布右键翻译：由 Backend 调用设置里选定的文本模型完成。 */
@@ -11,13 +11,16 @@ export async function translateText(text: string, target: "zh-CN" | "en", mode?:
     return request<{ ok: boolean; translatedText: string }>("POST", "/translation/text", { text, target, ...(mode ? { mode } : {}) });
 }
 
-function protectedH3Markers(text: string) {
-    return text.match(/<(?:Subject|Picture|Video|Audio)\s+\d+>|\[Shot\s+\d+\]|<(?:d|\/d|scenetrans|\/scenetrans|cutoff)>|\b\d{2}:\d{2}(?:\.\d{1,3})?\b|\d+(?:\.\d+)?|^[A-Za-z_][\w .-]*:/gim) || [];
-}
-
 export type H3PromptTranslation = { sourceHash: string; translatedText: string; cached: boolean };
 export type H3PromptBatchItem = { id: string; text: string };
-export type H3PromptBatchProgress = { completed: number; total: number };
+export type H3PromptBatchProgress = {
+    completed: number;
+    total: number;
+    completedIds: string[];
+    cachedIds: string[];
+    inProgressIds: string[];
+    failedIds: string[];
+};
 
 /** Cache by each exact compiled prompt and translate sequential batches of at most three prompts. */
 export async function translateCompiledH3Prompts(items: H3PromptBatchItem[], onProgress?: (progress: H3PromptBatchProgress) => void, options?: { signal?: AbortSignal }): Promise<Array<H3PromptTranslation & { id: string }>> {
@@ -36,49 +39,87 @@ export async function translateCompiledH3Prompts(items: H3PromptBatchItem[], onP
     for (const row of rows) if (!byHash.has(row.sourceHash)) byHash.set(row.sourceHash, row);
     const translated = new Map<string, { text: string; cached: boolean }>();
     const uniqueRows = [...byHash.values()];
+    const cachedHashes = new Set<string>();
+    const inProgressHashes = new Set<string>();
+    const failedHashes = new Set<string>();
+    const reportProgress = () => onProgress?.({
+        completed: rows.filter(row => translated.has(row.sourceHash)).length,
+        total: rows.length,
+        completedIds: rows.filter(row => translated.has(row.sourceHash)).map(row => row.id),
+        cachedIds: rows.filter(row => cachedHashes.has(row.sourceHash)).map(row => row.id),
+        inProgressIds: rows.filter(row => inProgressHashes.has(row.sourceHash)).map(row => row.id),
+        failedIds: rows.filter(row => failedHashes.has(row.sourceHash)).map(row => row.id),
+    });
+    reportProgress();
     while (translated.size < uniqueRows.length) {
-        const waiting: Promise<string>[] = [];
+        const waiting: Promise<void>[] = [];
         const missing: typeof rows = [];
         const cacheRows = await Promise.all(uniqueRows.filter(row => !translated.has(row.sourceHash)).map(async row => ({
             row,
             cached: await h3TranslationCache.getItem<{ sourceHash: string; translatedText: string }>(row.key),
         })));
         for (const { row, cached } of cacheRows) {
-            if (cached?.sourceHash === row.sourceHash && cached.translatedText) translated.set(row.sourceHash, { text: cached.translatedText, cached: true });
+            if (cached?.sourceHash === row.sourceHash && cached.translatedText) {
+                translated.set(row.sourceHash, { text: cached.translatedText, cached: true });
+                cachedHashes.add(row.sourceHash);
+            }
             else {
                 const pending = h3TranslationInFlight.get(row.key);
-                if (pending) waiting.push(pending);
+                if (pending) waiting.push(pending.then(text => {
+                    translated.set(row.sourceHash, { text, cached: true });
+                    cachedHashes.add(row.sourceHash);
+                    inProgressHashes.delete(row.sourceHash);
+                    reportProgress();
+                }));
                 else missing.push(row);
             }
         }
-        onProgress?.({ completed: translated.size, total: uniqueRows.length });
+        reportProgress();
         if (translated.size >= uniqueRows.length) break;
-        if (waiting.length) { await Promise.all(waiting); continue; }
-        if (!missing.length) throw new Error("没有可处理的翻译批次");
+        if (!waiting.length && !missing.length) throw new Error("没有可处理的翻译批次");
 
-        const batch = missing.slice(0, H3_TRANSLATION_BATCH_SIZE);
-        const batchRequest = request<{ ok: boolean; translations: Array<{ id: string; translatedText: string; sourceHash: string; cached: boolean }> }>(
-            "POST", "/translation/text", { items: batch.map(row => ({ id: row.sourceHash, text: row.text })), target: "en", mode: "h3-prompt" }, options);
-        for (const row of batch) {
-            const pending = batchRequest.then(async response => {
-                const item = response.translations.find(result => result.id === row.sourceHash);
-                if (!item || item.sourceHash !== row.sourceHash || !item.translatedText.trim()) throw new Error("翻译模型未完整返回批次中的提示词");
-                const translatedText = item.translatedText.trim();
-                if (JSON.stringify(protectedH3Markers(row.text)) !== JSON.stringify(protectedH3Markers(translatedText))) {
-                    throw new Error(`Clip ${row.id} 的译文改动了提示词结构、引用标签、时间或数字，未写入 H3`);
-                }
-                await h3TranslationCache.setItem(row.key, { sourceHash: row.sourceHash, translatedText });
-                return translatedText;
-            }).finally(() => h3TranslationInFlight.delete(row.key));
-            h3TranslationInFlight.set(row.key, pending);
+        for (let index = 0; index < missing.length; index += H3_TRANSLATION_BATCH_SIZE) {
+            const batch = missing.slice(index, index + H3_TRANSLATION_BATCH_SIZE);
+            batch.forEach(row => inProgressHashes.add(row.sourceHash));
+            const serverCachedById = new Map<string, boolean>();
+            const batchRequest = request<{ ok: boolean; translations: Array<{ id: string; translatedText: string; sourceHash: string; cached: boolean }> }>(
+                "POST", "/translation/text", { items: batch.map(row => ({ id: row.sourceHash, text: row.text })), target: "en", mode: "h3-prompt" }, options);
+            const pendingRows = batch.map(row => {
+                const pending = batchRequest.then(async response => {
+                    const item = response.translations.find(result => result.id === row.sourceHash);
+                    if (!item || item.sourceHash !== row.sourceHash || !item.translatedText.trim()) throw new Error("翻译模型未完整返回批次中的提示词");
+                    const translatedText = item.translatedText.trim();
+                    serverCachedById.set(row.id, item.cached === true);
+                    await h3TranslationCache.setItem(row.key, { sourceHash: row.sourceHash, translatedText });
+                    return translatedText;
+                }).finally(() => h3TranslationInFlight.delete(row.key));
+                h3TranslationInFlight.set(row.key, pending);
+                return { row, pending };
+            });
+            waiting.push(Promise.all(pendingRows.map(({ pending }) => pending)).then(values => {
+                values.forEach((text, offset) => {
+                    const row = batch[offset];
+                    const cached = serverCachedById.get(row.id) === true;
+                    translated.set(row.sourceHash, { text, cached });
+                    inProgressHashes.delete(row.sourceHash);
+                    failedHashes.delete(row.sourceHash);
+                    if (cached) cachedHashes.add(row.sourceHash);
+                });
+                reportProgress();
+            }).catch(error => {
+                batch.forEach(row => {
+                    inProgressHashes.delete(row.sourceHash);
+                    failedHashes.add(row.sourceHash);
+                });
+                reportProgress();
+                throw error;
+            }));
         }
-        await Promise.all(batch.map(row => h3TranslationInFlight.get(row.key)!));
-        const response = await batchRequest;
-        for (const row of batch) {
-            const item = response.translations.find(result => result.id === row.sourceHash)!;
-            translated.set(row.sourceHash, { text: item.translatedText.trim(), cached: item.cached });
-        }
-        onProgress?.({ completed: translated.size, total: uniqueRows.length });
+        reportProgress();
+        const settled = await Promise.allSettled(waiting);
+        const failure = settled.find(result => result.status === "rejected");
+        if (failure?.status === "rejected") throw failure.reason;
+        reportProgress();
     }
     return rows.map(row => {
         const result = translated.get(row.sourceHash);

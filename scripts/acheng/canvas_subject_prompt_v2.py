@@ -4,6 +4,7 @@ from copy import deepcopy
 from fractions import Fraction
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -65,6 +66,65 @@ def entity_text(source, subject):
     return name, description
 
 
+def _subject_retention_attributes(kind, retain, exclude):
+    """Keep generated retention language aligned with the referenced entity type."""
+    defaults = {
+        "character": (
+            "character identity and costume as defined by the reference image",
+            "pose, camera angle, background, and unrelated composition",
+        ),
+        "scene": (
+            "the established environment, architecture, spatial layout, and materials",
+            "character identity, costume, and unrelated foreground subjects",
+        ),
+        "asset": (
+            "the referenced object's identity, shape, material, and registered visual attributes",
+            "unrelated background, staging, and composition",
+        ),
+    }
+    default_retain, default_exclude = defaults.get(kind, defaults["asset"])
+    # These old generic values were written for character references. They must
+    # not leak into scene or prop retention just because they were stored on a binding.
+    character_only = {
+        "character identity and costume as defined by the reference image",
+        "character identity and registered appearance",
+        "character identity",
+    }
+    generic_character_excludes = {
+        "pose, camera angle, background, and unrelated composition",
+        "camera pose",
+        "original composition",
+        "unrelated background",
+    }
+    selected_retain = list(dict.fromkeys(value for value in retain if value and not (kind != "character" and value in character_only)))
+    selected_exclude = list(dict.fromkeys(value for value in exclude if value and not (kind != "character" and value in generic_character_excludes)))
+    return selected_retain or [default_retain], selected_exclude or [default_exclude]
+
+
+def _subject_retention_scope(subject_id, clip_shot_ids, shots):
+    """Report visible appearances separately from off-screen continuity uses."""
+    visible, context, offscreen_voice = [], [], []
+    for shot_number, shot_id in enumerate(clip_shot_ids, 1):
+        shot = next((item for item in shots if str(item.get("id")) == str(shot_id)), {})
+        presentations = [str(usage.get("presentation") or "") for usage in rows(shot.get("subject_usages"))
+                         if str(usage.get("subjectId") or "") == str(subject_id)]
+        number = "[Shot " + str(shot_number) + "]"
+        if "visible" in presentations:
+            visible.append(number)
+        elif "state_context" in presentations:
+            context.append(number)
+        elif "offscreen_voice" in presentations:
+            offscreen_voice.append(number)
+    parts = []
+    if visible:
+        parts.append("appears in " + ", ".join(visible))
+    if context:
+        parts.append("continuity context for " + ", ".join(context) + "; not visible")
+    if offscreen_voice:
+        parts.append("off-screen voice in " + ", ".join(offscreen_voice))
+    return "; ".join(parts), bool(visible)
+
+
 def binding_ids(subject, usage, *, allow_missing=False):
     bindings = rows(subject.get("pictureBindings"))
     explicit = [str(value) for value in usage.get("pictureBindingIds", [])]
@@ -105,25 +165,14 @@ def binding_ids(subject, usage, *, allow_missing=False):
     return selected
 
 
-def _used_continuity_fact_ids(shot, subjects, facts, ledger=None):
-    # Continuity output is opt-in per Shot/fact. Subject presence alone must
-    # not expand the prompt to every ledger fact owned by that entity.
-    used = {str(value) for value in shot.get("continuity_facts", [])}
+def _used_continuity_fact_ids(shot, facts):
+    """Subject Prompt v2 emits only facts explicitly selected on its usages."""
+    selected = set()
     for usage in rows(shot.get("subject_usages")):
-        used.update(str(value) for value in usage.get("continuityFactIds", []))
-        used.update(str(item.get("factId")) for item in rows(usage.get("stateRequirements")))
-    # In Subject Prompt v2, the shot-scoped ledger requirements are the
-    # authoritative consumption declarations. They are stored separately from
-    # subject_usages, so include only hold/change facts assigned to this Shot.
-    shot_id = str(shot.get("id") or "")
-    used.update(
-        str(item.get("fact_id"))
-        for item in rows((ledger or {}).get("requirements"))
-        if str(item.get("shot_id") or "") == shot_id
-        and item.get("kind") in {"hold", "change"}
-        and item.get("fact_id")
-    )
-    return used.intersection(facts)
+        fact_ids = usage.get("continuityFactIds")
+        if isinstance(fact_ids, list):
+            selected.update(str(fact_id) for fact_id in fact_ids if isinstance(fact_id, str) and fact_id)
+    return selected.intersection(facts)
 
 
 def _state_start_descriptions(source, report, shot, subjects):
@@ -131,7 +180,7 @@ def _state_start_descriptions(source, report, shot, subjects):
     start = trajectory.get("start", {})
     facts = {str(item.get("id")): item for item in rows((source.get("ledger") or {}).get("facts"))}
     subject_by_entity = {(str(item.get("entityRef", {}).get("kind")), str(item.get("entityRef", {}).get("id"))): item for item in subjects}
-    used = _used_continuity_fact_ids(shot, subjects, facts, source.get("ledger"))
+    used = _used_continuity_fact_ids(shot, facts)
     values = []
     for fact_id in sorted(used):
         fact = facts.get(fact_id)
@@ -153,7 +202,7 @@ def _render_state_end(source, report, shot, subjects):
     facts = {str(item.get("id")): item for item in rows((source.get("ledger") or {}).get("facts"))}
     subjects = list(subjects or [])
     subject_by_entity = {(str(item.get("entityRef", {}).get("kind")), str(item.get("entityRef", {}).get("id"))): item for item in subjects}
-    used = _used_continuity_fact_ids(shot, subjects, facts, source.get("ledger"))
+    used = _used_continuity_fact_ids(shot, facts)
     chunks = []
     for fact_id, value in sorted(end.items()):
         if str(fact_id) not in used:
@@ -177,7 +226,7 @@ def _state_snapshot(source, report, shot, subjects, edge):
     facts = {str(item.get("id")): item for item in rows((source.get("ledger") or {}).get("facts"))}
     subject_by_entity = {(str(item.get("entityRef", {}).get("kind")), str(item.get("entityRef", {}).get("id"))): item
                          for item in subjects}
-    used_facts = _used_continuity_fact_ids(shot, subjects, facts, source.get("ledger"))
+    used_facts = _used_continuity_fact_ids(shot, facts)
     opening_event_values = {}
     ending_unknown_values = {}
     shot_id = str(shot.get("id"))
@@ -249,7 +298,7 @@ def project_continuity_source(production):
     for shot in rows(source.get("shots")):
         character_rows = list(shot.get("characters")) if isinstance(shot.get("characters"), list) else []
         asset_ids = text_ids(shot.get("required_assets"))
-        continuity_ids = text_ids(shot.get("continuity_facts"))
+        continuity_ids = []
         for usage in rows(shot.get("subject_usages")):
             subject = subjects.get(str(usage.get("subjectId") or ""), {})
             entity_ref = subject.get("entityRef") if isinstance(subject.get("entityRef"), dict) else {}
@@ -318,12 +367,10 @@ def _subject_continuity_audit_projection(production):
         events = rows(ledger.get("events"))
         explicit_by_shot = {}
         for shot_id, authored in authored_shots.items():
-            explicit = {str(value) for value in authored.get("continuity_facts", [])
-                        if isinstance(value, str) and value}
+            explicit = set()
             for usage in rows(authored.get("subject_usages")):
-                # continuityFactIds is a subject-level candidate inventory in
-                # persisted v2 sources, not proof that this Shot consumes each
-                # fact. Only shot-specific state requirements are consumption.
+                explicit.update(str(value) for value in usage.get("continuityFactIds", [])
+                                if isinstance(value, str) and value)
                 explicit.update(str(value.get("factId")) for value in rows(usage.get("stateRequirements"))
                                 if isinstance(value, dict) and value.get("factId"))
             explicit.update(str(event.get("fact_id")) for event in events
@@ -486,6 +533,7 @@ def adapt_production(production, *, draft=False):
                 opening[str(event.get("fact_id"))] = event.get("after", "unknown")
     source["_continuity_report"] = continuity
     assets = {str(item.get("asset_id") or item.get("id")): item for item in rows(source.get("asset_plan"))}
+    ledger_facts_by_id = {str(item.get("id")): item for item in rows((source.get("ledger") or {}).get("facts"))}
     reference_cache = {}
     transformed_segments = []
     all_transformed_shots = []
@@ -736,7 +784,6 @@ def adapt_production(production, *, draft=False):
             name, description = entity_text(source, subject)
             labels = list(dict.fromkeys(label for _shot, label, _binding in uses))
             shot_scope = list(dict.fromkeys(sid for sid, _label, _binding in uses))
-            shot_numbers = [shot_ids.index(sid) + 1 for sid in shot_scope]
             retain = list(dict.fromkeys(value for _sid, _label, binding in uses for value in binding.get("retain", [])))
             exclude = list(dict.fromkeys(value for _sid, _label, binding in uses for value in binding.get("exclude", [])))
             # Normalize legacy Chinese placeholder strings written by older UI/build code.
@@ -754,6 +801,9 @@ def adapt_production(production, *, draft=False):
             }
             retain = [_LEGACY_RETAIN.get(v, v) for v in retain]
             exclude = [_LEGACY_EXCLUDE.get(v, v) for v in exclude]
+            entity_kind = str((subject.get("entityRef") or {}).get("kind") or "asset")
+            retain, exclude = _subject_retention_attributes(entity_kind, retain, exclude)
+            retention_scope, visually_present = _subject_retention_scope(subject_id, shot_ids, shots)
             label = subject_labels[subject_id]
             # BCF 铁律 7: reference images are the sole visual authority for character subjects.
             # When picture references exist, no textual appearance descriptor may leak into the definition.
@@ -761,11 +811,20 @@ def adapt_production(production, *, draft=False):
                 _core_def = name + "; appearance follows the reference images exclusively — no textual appearance descriptor overrides them."
             else:
                 _core_def = description or name
+            if visually_present:
+                retention_level = "partially_preserved"
+                retention_detail = "retain " + ", ".join(retain) + "; exclude " + ", ".join(exclude)
+            else:
+                # A state-context Subject informs the shot without appearing in
+                # frame. It must not be described as appearing or fully retained.
+                retention_level = "weak_reference"
+                retention_detail = "the reference informs continuity without showing the referenced appearance in these Shots"
+            if not retention_scope:
+                retention_scope = "reference context for this Clip"
             subject_entries.append({"label": label, "entity_id": str(subject.get("entityRef", {}).get("id") or subject_id),
                                     "definition": label + " is " + _core_def + ", represented by " + ", ".join(labels) + ".",
-                                    "retention": label + " (" + ", ".join("[Shot " + str(value) + "]" for value in shot_numbers)
-                                    + "): partially_preserved - retain " + (", ".join(retain) or "the registered identity")
-                                    + "; exclude " + (", ".join(exclude) or "unregistered appearance changes") + ".",
+                                    "retention": label + " (" + retention_scope
+                                    + "): " + retention_level + " - " + retention_detail + ".",
                                     "shot_ids": shot_scope, "start_frame": start_frame, "end_frame": end_frame})
 
         transformed_shots = []
@@ -808,7 +867,9 @@ def adapt_production(production, *, draft=False):
                                                "text": part, "language": str(utterance.get("language") or ("Chinese" if any("\u4e00" <= char <= "\u9fff" for char in part) else "English")),
                                                "delivery": str(utterance.get("delivery") or "natural, intelligible delivery"),
                                                "voiceover": bool(utterance.get("voiceover")), "start": int(ref["localStartFrame"]), "end": int(ref["localEndFrame"])})
-            next_shot["_canvas_v2_events"] = [event for event in rows((source.get("ledger") or {}).get("events")) if str(event.get("shot_id")) == shot_id]
+            selected_fact_ids = _used_continuity_fact_ids(shot, ledger_facts_by_id)
+            next_shot["_canvas_v2_events"] = [event for event in rows((source.get("ledger") or {}).get("events"))
+                                               if str(event.get("shot_id")) == shot_id and str(event.get("fact_id")) in selected_fact_ids]
             next_shot["state_description"] = _state_start_descriptions(source, continuity, shot, subjects)
             transformed_shots.append(next_shot)
         all_transformed_shots.extend(transformed_shots)
@@ -949,6 +1010,144 @@ def _audio_prompt_text(value):
 def _time(frame, production):
     milliseconds = round(Fraction(int(frame) * int(production.get("fps_den", 1)) * 1000, int(production.get("fps_num", 24))))
     return f"{milliseconds // 60000:02d}:{milliseconds // 1000 % 60:02d}.{milliseconds % 1000:03d}"
+
+
+# Spoken content may appear only inside <d>[Language] ... </d>. Authored prose is
+# allowed to name the line ("说出已确认台词") but when it also quotes the line
+# verbatim the compiled prompt carries the same words twice and the video model
+# can perform them twice. The compiler therefore replaces a substantial verbatim
+# copy with a language-neutral reference before the dialogue line is appended,
+# and `repeated_spoken_dialogue` is the final gate for anything that bypasses it.
+_QUOTE_PAIRS = (("\u201c", "\u201d"), ('"', '"'), ("\u300c", "\u300d"), ("\u300e", "\u300f"))
+_LINE_NAMES = ("台词", "对白", "台词原文", "对白原文")
+DIALOGUE_REFERENCE_MIN_CHARS = 4
+DIALOGUE_REFERENCE_PHRASE = "该句台词"
+_SENTENCE_PUNCTUATION = "。！？，；、：:.!?,;”\"’'）)]}"
+
+
+def _speech_key(value):
+    """Compare spoken payloads and quoted copies by content, not punctuation."""
+    return re.sub(r"[\W_]+", "", str(value or ""), flags=re.UNICODE)
+
+
+def _quoted_spans(text):
+    """Yield (start, end, inner) for each balanced quoted span in ``text``."""
+    spans = []
+    pending = None
+    for index, char in enumerate(text):
+        if pending is not None:
+            if char == pending[2]:
+                spans.append((pending[0], index + 1, text[pending[0] + 1:index]))
+                pending = None
+            continue
+        for opener, closer in _QUOTE_PAIRS:
+            if char == opener:
+                pending = (index, opener, closer)
+                break
+    return spans
+
+
+def _repeated_dialogue(text, spoken_lines):
+    """Quoted copies of a spoken payload that are long enough to be performed.
+
+    Short quoted fragments ("妖", "吗") are ordinary acting directions and stay
+    untouched; a copy counts only when it keeps both
+    ``DIALOGUE_REFERENCE_MIN_CHARS`` characters and a third of the line.
+    """
+    payloads = [(_speech_key(line), str(line or "")) for line in spoken_lines]
+    payloads = [(key, line) for key, line in payloads if key]
+    if not payloads:
+        return []
+    found = []
+    for start, end, inner in _quoted_spans(str(text or "")):
+        key = _speech_key(inner)
+        if len(key) < DIALOGUE_REFERENCE_MIN_CHARS:
+            continue
+        for payload_key, line in payloads:
+            if key in payload_key and len(key) * 3 >= len(payload_key):
+                found.append({"start": start, "end": end, "key": key, "payload": payload_key, "line": line})
+                break
+    return found
+
+
+def _line_reference(quote_key, payload_key):
+    """Reference wording for a quoted copy of ``payload_key``."""
+    if quote_key == payload_key:
+        return DIALOGUE_REFERENCE_PHRASE
+    if payload_key.startswith(quote_key):
+        return DIALOGUE_REFERENCE_PHRASE + "开头"
+    if payload_key.endswith(quote_key):
+        return DIALOGUE_REFERENCE_PHRASE + "结尾"
+    return DIALOGUE_REFERENCE_PHRASE + "片段"
+
+
+def neutralize_spoken_repetition(text, spoken_lines):
+    """Replace verbatim copies of a Shot's dialogue with a spoken-line reference.
+
+    Prose that already names the line ("说出已确认台词：...") drops the duplicate
+    payload instead of restating it, so the sentence still reads as direction.
+    """
+    text = str(text or "")
+    if not text:
+        return text
+    replacements = []
+    for item in _repeated_dialogue(text, spoken_lines):
+        start, end = item["start"], item["end"]
+        reference = _line_reference(item["key"], item["payload"])
+        prefix = text[:start].rstrip()
+        # "说出已确认台词：" names the line; the colon is not part of the name.
+        name_prefix = prefix[:-1].rstrip() if prefix.endswith(("：", ":")) else prefix
+        replacement = reference
+        drop = start
+        if reference == DIALOGUE_REFERENCE_PHRASE and name_prefix.endswith(_LINE_NAMES):
+            # The line is already named; drop the payload and the colon that
+            # introduced it rather than saying "说出已确认台词：该句台词".
+            while drop > 0 and text[drop - 1] in " \t":
+                drop -= 1
+            if drop > 0 and text[drop - 1] in "：:":
+                drop -= 1
+                while drop > 0 and text[drop - 1] in " \t":
+                    drop -= 1
+            replacement = "" if end < len(text) and text[end] in _SENTENCE_PUNCTUATION else "，"
+        elif reference == DIALOGUE_REFERENCE_PHRASE and name_prefix.endswith(("句", "字")):
+            replacement = "台词"
+        if (drop == start and replacement == DIALOGUE_REFERENCE_PHRASE
+                and end < len(text) and text[end] not in _SENTENCE_PUNCTUATION):
+            # Keep the sentence readable where the quote carried its own boundary.
+            replacement += "，"
+        replacements.append((drop, end, replacement))
+    result, cursor = [], 0
+    for start, end, replacement in replacements:
+        if start < cursor:
+            continue
+        result.append(text[cursor:start])
+        result.append(replacement)
+        cursor = end
+    result.append(text[cursor:])
+    output = "".join(result)
+    for payload in (str(line or "") for line in spoken_lines):
+        # An unquoted verbatim copy cannot be a direction; replace the exact text.
+        if len(_speech_key(payload)) >= DIALOGUE_REFERENCE_MIN_CHARS and payload in output:
+            output = output.replace(payload, DIALOGUE_REFERENCE_PHRASE)
+    return output
+
+
+def repeated_spoken_dialogue(text, speech_expectations):
+    """Spoken payloads that also appear outside their single legal <d> location."""
+    prose = re.sub(r"<d>[\s\S]*?</d>", " ", str(text or ""))
+    prose_key = _speech_key(prose)
+    violations = []
+    for speaker, _language, source_text in speech_expectations or ():
+        payload = re.sub(r"<scenetrans>|<cutoff>", "", str(source_text or ""))
+        payload_key = _speech_key(payload)
+        if len(payload_key) < DIALOGUE_REFERENCE_MIN_CHARS:
+            continue
+        copies = _repeated_dialogue(prose, [payload])
+        if copies:
+            violations.append("speaker " + str(speaker) + " dialogue is quoted again outside <d>: “" + copies[0]["key"] + "”")
+        elif payload_key in prose_key:
+            violations.append("speaker " + str(speaker) + " dialogue is repeated verbatim outside <d>: “" + payload.strip() + "”")
+    return violations
 
 
 def render_shot_text_v2(shot, production, speakers, speech_parts, referenced_subjects=None):
@@ -1131,6 +1330,11 @@ def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, state_l
             parts.append("Use " + str(picture["label"]) + " only for its declared " + str(picture.get("role") or "reference") + " attributes; preserve " + str(picture.get("preserve") or "the registered visual evidence") + ".")
         if picture.get("anchor") and not picture.get("is_keyframe"):
             parts.append(str(picture["anchor"]).capitalize() + " keyframe anchor: " + str(picture["label"]) + ".")
+    # Authored prose above may name the line but must not carry it verbatim; the
+    # <d> lines appended below stay the single spoken payload of this Shot.
+    prose = neutralize_spoken_repetition(" ".join(part for part in parts if part),
+                                         [line.get("text") for line in rows(shot.get("dialogues"))])
+    dialogue_parts = []
     for line in sorted(rows(shot.get("dialogues")), key=lambda item: int(item.get("start", 0))):
         speaker_identity = str(line.get("character_id") or line.get("speaker_name") or "")
         speaker_name = str(line.get("speaker_name") or speaker_identity or "Narrator")
@@ -1146,15 +1350,18 @@ def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, state_l
         start = _time(int(line.get("start", 0)), production)
         end = _time(int(line.get("end", 0)), production)
         verb = "speaks" if line.get("voiceover") else "says"
-        line_text = "During " + start + "–" + end + " within this Shot, " + speaker_name + " (" + speaker_tag + ") " + verb + " with " + str(line.get("delivery") or "natural, intelligible delivery") + ": <d>[" + str(line.get("language") or "Chinese") + "] " + spoken + "</d>."
+        delivery = neutralize_spoken_repetition(
+            str(line.get("delivery") or "natural, intelligible delivery"),
+            [line.get("text") or spoken])
+        line_text = "During " + start + "–" + end + " within this Shot, " + speaker_name + " (" + speaker_tag + ") " + verb + " with " + delivery + ": <d>[" + str(line.get("language") or "Chinese") + "] " + spoken + "</d>."
         if line.get("voiceover"):
             line_text += " The speaker remains offscreen; visible listeners stay silent."
         else:
             line_text += " Preserve the original words and synchronize only the visible speaker's mouth."
         if utterance_id:
             line_text += " The utterance continues seamlessly across the cut."
-        parts.append(line_text)
-    return " ".join(part for part in parts if part)
+        dialogue_parts.append(line_text)
+    return " ".join(part for part in [prose, *dialogue_parts] if part)
 
 
 def _load_runtime_helper(name):
@@ -1250,9 +1457,17 @@ def compile_prompt_v2(production, segment, *, draft=False):
             identity = str(line.get("character_id") or line.get("speaker_name") or "")
             speech_expectations.append((speakers.get(identity, "S1"), line.get("language", "Chinese"), line.get("text", "")))
     if draft:
-        return normalize_h3_prompt(raw)
-    return finalize_h3_prompt(raw, mode=mode, shot_count=len(shots),
-                              reference_labels=[str(item["label"]) for item in references],
-                              subject_labels=[str(item["label"]) for item in segment.get("subjects", [])],
-                              speech_expectations=speech_expectations,
-                              minimum_words=0)
+        final = normalize_h3_prompt(raw)
+    else:
+        final = finalize_h3_prompt(raw, mode=mode, shot_count=len(shots),
+                                   reference_labels=[str(item["label"]) for item in references],
+                                   subject_labels=[str(item["label"]) for item in segment.get("subjects", [])],
+                                   speech_expectations=speech_expectations,
+                                   minimum_words=0)
+    # Spoken content is legal only inside <d>. A Shot whose prose still carries the
+    # line verbatim would make the model perform it twice, so it fails here instead
+    # of shipping: fix the authored field rather than relying on the model.
+    violations = repeated_spoken_dialogue(final, speech_expectations)
+    if violations:
+        raise ValueError("H3 台词重复（台词只能在 <d> 内出现一次）: " + "; ".join(violations))
+    return final

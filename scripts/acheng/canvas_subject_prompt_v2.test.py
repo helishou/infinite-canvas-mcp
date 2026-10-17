@@ -9,7 +9,7 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 
-from canvas_subject_prompt_v2 import adapt_production, binding_ids, build_source_map, compile_prompt_v2, entity_text, project_continuity_source, write_prompt_text, _state_start_descriptions, _render_state_end, _plain_text, _infer_segment_mode
+from canvas_subject_prompt_v2 import adapt_production, binding_ids, build_source_map, compile_prompt_v2, entity_text, project_continuity_source, write_prompt_text, _state_start_descriptions, _render_state_end, _plain_text, _infer_segment_mode, _subject_retention_attributes, neutralize_spoken_repetition, repeated_spoken_dialogue
 
 source_contract_spec = importlib.util.spec_from_file_location("canvas_source_contract", Path(__file__).with_name("source-contract.py"))
 source_contract = importlib.util.module_from_spec(source_contract_spec)
@@ -17,6 +17,15 @@ source_contract_spec.loader.exec_module(source_contract)
 
 
 class SubjectPromptV2ProjectionTest(unittest.TestCase):
+    def test_subject_retention_defaults_follow_entity_kind(self):
+        retain, exclude = _subject_retention_attributes(
+            "scene",
+            ["character identity and costume as defined by the reference image"],
+            ["pose, camera angle, background, and unrelated composition"],
+        )
+        self.assertEqual(retain, ["the established environment, architecture, spatial layout, and materials"])
+        self.assertEqual(exclude, ["character identity, costume, and unrelated foreground subjects"])
+
     def test_state_context_scene_image_requires_and_respects_explicit_picture_binding(self):
         subject = {"id": "SUB_SCENE", "pictureBindings": [{"id": "SCENE_ENV", "provides": ["environment"], "defaultFor": ["environment"]}]}
         usage = {"subjectId": "SUB_SCENE", "presentation": "state_context", "referencePurpose": ["environment"], "pictureBindingIds": ["SCENE_ENV"]}
@@ -177,6 +186,10 @@ class SubjectPromptV2ProjectionTest(unittest.TestCase):
             self.assertNotIn("blue cotton shirt", char_entry["definition"])
             scene_entry = next(item for item in segment["subjects"] if item.get("entity_id") != "CHILD")
             self.assertIn("A mud-brick coop with a straw nest", scene_entry["definition"])
+            self.assertIn("continuity context for [Shot 1]; not visible", scene_entry["retention"])
+            self.assertIn("weak_reference", scene_entry["retention"])
+            self.assertNotIn("character identity and costume", scene_entry["retention"])
+            self.assertIn("<Subject 2> (continuity context for [Shot 1]; not visible): weak_reference", prompt)
             source_map = build_source_map(prompt, projected["_canvas_subject_v2_source_maps"]["CLIP_1"])
             self.assertEqual(source_map["sourceHash"], "a" * 64)
             self.assertTrue(any(item["sourceId"] == "SHOT_1" and item["field"] == "visual" for item in source_map["entries"]))
@@ -412,6 +425,108 @@ class ContinuityProjectionTest(unittest.TestCase):
         self.assertEqual(project_continuity_source(projected), projected)
         from continuity_v2 import digest
         self.assertEqual(audit_subject_continuity(source)["sourceDigest"], digest(source))
+
+
+class SpokenDialogueRepetitionTest(unittest.TestCase):
+    """A Shot may name its line in prose, but the spoken words live only in <d>."""
+
+    line = "道长……妖……生来就该死吗？……"
+
+    def _compile(self, visual, delivery="faint and trembling", dialogue=None):
+        dialogue = dialogue or self.line
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "picture.png"
+            image_bytes = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l1sAAAAASUVORK5CYII=")
+            image.write_bytes(image_bytes)
+            digest = hashlib.sha256(image_bytes).hexdigest()
+            source = {
+                "prompt_assembly": {"version": 2},
+                "_canvas_subject_source_hash": "a" * 64,
+                "_canvas_subject_picture_sources": {
+                    "HARE_IMG": {"assetId": "HARE_ASSET", "subjectId": "SUB_HARE", "kind": "subject", "role": "identity",
+                                 "file": str(image), "sha256": digest, "storageKey": "image:hare", "nodeId": "HARE_NODE",
+                                 "retain": ["face"], "exclude": ["pose"], "defaultFor": ["identity"]},
+                    "ROAD_IMG": {"assetId": "ROAD_ASSET", "subjectId": "SUB_ROAD", "kind": "subject", "role": "scene",
+                                 "file": str(image), "sha256": digest, "storageKey": "image:road", "nodeId": "ROAD_NODE",
+                                 "retain": ["road"], "exclude": ["people"], "defaultFor": ["identity"]},
+                },
+                "fps_num": 24, "fps_den": 1, "brief": "A dying beast asks why it must die.",
+                "character_registry": [{"id": "HARE", "name": "白貉", "prompt_description": "A white hare spirit.",
+                                        "appearance": "A white hare spirit.", "description": "A white hare spirit."}],
+                "scene_registry": [{"id": "ROAD", "name": "Mountain road", "prompt_description": "A rain-soaked mountain road.",
+                                    "description": "A rain-soaked mountain road."}],
+                "subject_registry": [
+                    {"id": "SUB_HARE", "kind": "character", "entityRef": {"kind": "character", "id": "HARE", "ownerKind": "episode", "ownerId": "EP"},
+                     "pictureBindings": [{"id": "HARE_IMG", "assetId": "HARE_ASSET", "provides": ["identity"], "retain": ["face"], "exclude": ["pose"], "defaultFor": ["identity"]}]},
+                    {"id": "SUB_ROAD", "kind": "scene", "entityRef": {"kind": "scene", "id": "ROAD", "ownerKind": "episode", "ownerId": "EP"},
+                     "pictureBindings": [{"id": "ROAD_IMG", "assetId": "ROAD_ASSET", "provides": ["scene"], "retain": ["road"], "exclude": ["people"], "defaultFor": ["identity"]}]},
+                ],
+                "asset_plan": [], "asset_cards": [],
+                "shots": [{
+                    "id": "SHOT_1", "timeline_id": "main", "story_order": 0, "duration_frames": 96,
+                    "visual": visual,
+                    "camera": {"framing": "BSCU", "attention_subject_ids": ["SUB_HARE"], "editorial_reason": "Read the dying question."},
+                    "subject_usages": [
+                        {"subjectId": "SUB_HARE", "presentation": "visible", "pictureBindingIds": [], "referencePurpose": ["identity"], "continuityFactIds": [], "stateRequirements": []},
+                        {"subjectId": "SUB_ROAD", "presentation": "state_context", "pictureBindingIds": ["ROAD_IMG"], "referencePurpose": ["identity"], "continuityFactIds": [], "stateRequirements": []},
+                    ],
+                    "keyframes": [], "utterance_refs": [{"utteranceId": "U1", "role": "speaker", "localStartFrame": 20, "localEndFrame": 60, "textStart": 0, "textEnd": 20}],
+                }],
+                "segments": [{"id": "CLIP_1", "shot_ids": ["SHOT_1"], "mode": "Ref2VA", "mode_lock": "Ref2VA",
+                              "mode_selection_reason": "Use the registered identity and road references."}],
+                "utterances": [{"id": "U1", "speakerSubjectId": "SUB_HARE", "text": dialogue, "language": "Chinese",
+                                "delivery": delivery, "voiceover": False,
+                                "start": {"shotId": "SHOT_1", "localFrame": 20}, "end": {"shotId": "SHOT_1", "localFrame": 60}}],
+                "ledger": {"contract_version": 2, "facts": [], "timelines": [{"id": "main", "start_frame": 0}],
+                           "initial": [], "events": [], "requirements": [], "coverage": []},
+            }
+            projected = adapt_production(source)
+            return compile_prompt_v2(projected, projected["segments"][0])
+
+    def test_quoted_line_in_prose_is_replaced_so_the_payload_appears_once(self):
+        prompt = self._compile("白貉瞳孔涣散，临终泣言如利刃般在脑海深处炸响：“" + self.line + "”小小头颅垂下，跌向泥泞。")
+        self.assertEqual(prompt.count(self.line), 1)
+        self.assertIn("<d>[Chinese] " + self.line + "</d>", prompt)
+        self.assertIn("该句台词，小小头颅垂下", prompt)
+
+    def test_named_line_drops_the_payload_and_keeps_short_clause_directions(self):
+        prompt = self._compile("她带着细弱断续的呼吸说出已确认台词：“" + self.line + "”说到“妖”时她试图看清对方，问到“吗”时眉间松开。")
+        self.assertEqual(prompt.count(self.line), 1)
+        self.assertIn("说出已确认台词，说到“妖”时她试图看清对方，问到“吗”时眉间松开", prompt)
+        self.assertNotIn("该句台词", prompt)
+
+    def test_unquoted_copy_is_replaced_too(self):
+        text = neutralize_spoken_repetition("她临死前问：" + self.line + "然后头颅垂下。", [self.line])
+        self.assertEqual(text.count(self.line), 0)
+        self.assertIn("该句台词", text)
+        demonstrative = neutralize_spoken_repetition("那句“" + self.line + "”在他胸腔中疯狂翻涌。", [self.line])
+        self.assertIn("那句台词在他胸腔中疯狂翻涌。", demonstrative)
+
+    def test_delivery_cues_cannot_repeat_words_reserved_for_the_dialogue_tag(self):
+        spoken = "血煞缠身……灵台却如白纸。"
+        delivery = "沈砚男声画外音，清冷低沉、压低声线；“血煞缠身”后停半拍，再低声说“灵台却如白纸”，克制而带疑惑。"
+        prompt = self._compile("红绡重伤濒死，目光涣散。", delivery, spoken)
+        self.assertEqual(prompt.count(spoken), 1)
+        self.assertEqual(prompt.count("血煞缠身"), 1)
+        self.assertEqual(prompt.count("灵台却如白纸"), 1)
+        self.assertIn("后停半拍", prompt)
+        self.assertIn("克制而带疑惑", prompt)
+
+    def test_gate_reports_quoted_and_verbatim_copies_but_not_short_fragments(self):
+        expectations = [("S1", "Chinese", self.line)]
+        clean = "[Shot 1] She asks: <d>[Chinese] " + self.line + "</d>."
+        self.assertEqual(repeated_spoken_dialogue(clean, expectations), [])
+        short = "[Shot 1] 说到“妖”时她抬头。 <d>[Chinese] " + self.line + "</d>."
+        self.assertEqual(repeated_spoken_dialogue(short, expectations), [])
+        self.assertEqual(len(repeated_spoken_dialogue("[Shot 1] 她问出“" + self.line + "”。 <d>[Chinese] " + self.line + "</d>.", expectations)), 1)
+        self.assertEqual(len(repeated_spoken_dialogue("[Shot 1] " + self.line + " <d>[Chinese] " + self.line + "</d>.", expectations)), 1)
+
+    def test_compile_refuses_a_repeated_line_when_the_rewrite_is_bypassed(self):
+        from unittest.mock import patch
+        with patch("canvas_subject_prompt_v2.neutralize_spoken_repetition", side_effect=lambda text, spoken: text):
+            with self.assertRaises(ValueError) as error:
+                self._compile("白貉临终泣言：“" + self.line + "”")
+        self.assertIn("台词重复", str(error.exception))
 
 
 if __name__ == "__main__":

@@ -2,9 +2,7 @@
 from pathlib import Path
 import re
 import sys
-import subprocess
-
-PATCH_VERSION = "canvas-12"
+PATCH_VERSION = "canvas-14"
 
 
 def replace(path, before, after):
@@ -78,14 +76,10 @@ def apply(root):
     kickoff_heading = kickoff.splitlines()[0]
     text = entry.read_text(encoding="utf-8")
     if kickoff_heading in text:
-        if kickoff not in text:
-            repo = Path(__file__).resolve().parents[2]
-            previous = subprocess.run(["git", "show", "HEAD:scripts/acheng/canvas-kickoff.md"], cwd=repo,
-                                      check=False, capture_output=True).stdout.decode("utf-8").strip()
-            if not previous or previous == kickoff or text.count(previous) != 1:
-                raise RuntimeError("Canvas kickoff overlay exists with different content; review before replacing")
-            text = text.replace(previous, kickoff)
-            entry.write_text(text, encoding="utf-8")
+        # A project source snapshot can contain a deliberately edited Canvas
+        # section. Keep that authored section intact instead of guessing where
+        # its replacement ends; the source tree remains the authority.
+        pass
     else:
         marker = "你是总导演及生产合同的唯一写入者。"
         if text.count(marker) != 1:
@@ -156,6 +150,9 @@ def content_hash(value):
         snapshot["input_revision"] = revision
         snapshot.pop("binding_sha256", None)
         snapshot["binding_sha256"] = content_hash(snapshot)''')
+    replace(compiler,
+            '        body = text.split(body_name + ":\\n", 1)[1].split("\\n\\noverall_soundscape:", 1)[0]',
+            '        body = text.partition(body_name + ":\\n")[2].split("\\n\\noverall_soundscape:", 1)[0]\n        if not body:\n            message = f"compiled prompt is missing required section {body_name}"\n            blockers.append(message)\n            quality.append({"code": "PROMPT_BODY_MISSING", "message": message, "path": f"segments.{seg[\'id\']}.{body_name}", "target_id": seg["id"]})')
     audit = root / "scripts/audit_storyboard_quality.py"
     text = audit.read_text(encoding="utf-8")
     text = text.replace('p.get("ledger", {}).get("initial", {}).get("props", {})', '(p.get("ledger", {}).get("initial", {}) if isinstance(p.get("ledger", {}).get("initial", {}), dict) else {}).get("props", {})')

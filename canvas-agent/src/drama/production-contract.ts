@@ -96,7 +96,11 @@ export const directorSceneReviewSchema = z.object({
     media: z.array(z.object({ targetId: id, storageKey: id, sha256: hash })),
     checkedAt: z.string().datetime(),
 }).strict();
-const directorEngineSchema = z.object({ commit: z.string().regex(/^[a-f0-9]{40}$/), patchVersion: id, runtimeId: id, version: id, compilerHash: hash.optional() });
+const directorEngineSchema = z.object({
+    commit: z.string().regex(/^[a-f0-9]{40}$/), patchVersion: id, runtimeId: id, version: id,
+    compilerHash: hash.optional(),
+    compilerHashes: z.object({ h3: hash.optional(), image: hash.optional() }).strict().optional(),
+});
 export const directorSceneWorkSchema = z.object({
     workId: id, sceneId: id, inputRevision: z.number().int().nonnegative(), sourceHash: hash, inputHash: hash,
     inputEngine: directorEngineSchema.optional(),

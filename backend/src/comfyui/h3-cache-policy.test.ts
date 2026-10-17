@@ -39,7 +39,8 @@ for (const scenario of [
 test("只有原生节点声明 Loader 复用能力时才透传缓存设置", async (t) => {
     let supported = false;
     t.mock.method(globalThis, "fetch", async () => Response.json({ NanFengH3MultiReferenceGeneratorV15: { input: { required: {}, optional: supported ? { 复用加载器缓存: ["BOOLEAN", { default: false }] } : {} } } }));
-    const build = (keepModelCache: boolean) => buildNativeNanFengV15Workflow({ prompt: "test" }, { mode: "t2v", seed: 1, keepModelCache }, async (file) => file, "http://comfy.test", new AbortController().signal);
+    // mergedWorkflow：本用例断言的是合并流（原生单节点）的输入；默认路径是展开流。
+    const build = (keepModelCache: boolean) => buildNativeNanFengV15Workflow({ prompt: "test" }, { mode: "t2v", seed: 1, keepModelCache, mergedWorkflow: true }, async (file) => file, "http://comfy.test", new AbortController().signal);
     assert.equal(Object.hasOwn((await build(true)).nf_v15.inputs, "复用加载器缓存"), false);
     supported = true;
     assert.equal((await build(true)).nf_v15.inputs["复用加载器缓存"], true);

@@ -261,6 +261,8 @@ export type H3Segment = {
     audioDriveStart?: number;
     audioDriveEnd?: number;
     teAccel?: boolean;
+    /** 后路开关：改用老的合并流（单个南风 V15 原生节点）。默认关闭 = 走展开流。 */
+    mergedWorkflow?: boolean;
     noDub?: boolean;
     noCaption?: boolean;
     audioMode?: string;

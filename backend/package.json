@@ -22,6 +22,8 @@
     "check:mcp-payloads": "node --import tsx --test --test-name-pattern=\"large preparation|large MCP exports|HTTP MCP defaults|shared-node Clip ordering\" src/drama/production-canvas.test.ts src/server/mcp-payload-contracts.test.ts src/server/mcp-export-routes.test.ts",
     "audit:mcp-payloads": "tsx src/maintenance/mcp-payload-audit.ts",
     "prune-observability": "tsx src/maintenance/prune-observability.ts",
+    "prune-db-snapshots": "tsx src/maintenance/prune-db-snapshots.ts",
+    "prune-agent-threads": "tsx src/maintenance/prune-agent-threads.ts",
     "rebalance-canvas-history": "tsx src/maintenance/rebalance-canvas-history.ts",
     "prune-runtime-history": "tsx src/maintenance/prune-runtime-history.ts",
     "dedup-production-receipts": "tsx src/maintenance/dedup-production-receipts.ts",

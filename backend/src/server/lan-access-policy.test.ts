@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isLanAuthBypassed } from "./lan-access-policy.js";
+import { effectiveClientAddress, isLanAuthBypassed } from "./lan-access-policy.js";
 
 test("token bypass is enabled only for RFC1918 or link-local clients after LAN binding is enabled", () => {
     const enabled = "0.0.0.0" as const;
@@ -12,4 +12,14 @@ test("token bypass is enabled only for RFC1918 or link-local clients after LAN b
     for (const address of [undefined, "127.0.0.1", "::1", "8.8.8.8", "172.32.0.1", "192.167.1.22", "2001:4860:4860::8888", "not-an-ip"]) {
         assert.equal(isLanAuthBypassed(address, enabled), false, String(address));
     }
+});
+
+test("only a loopback dev proxy may supply the client address used by the LAN bypass", () => {
+    const remote = "127.0.0.1";
+    const forwarded = "192.168.1.44";
+    assert.equal(effectiveClientAddress(remote, forwarded, true), forwarded);
+    assert.equal(isLanAuthBypassed(effectiveClientAddress(remote, forwarded, true), "0.0.0.0"), true);
+    assert.equal(effectiveClientAddress(remote, forwarded, false), remote);
+    assert.equal(effectiveClientAddress("8.8.8.8", forwarded, true), "8.8.8.8");
+    assert.equal(effectiveClientAddress(remote, "not-an-ip", true), remote);
 });

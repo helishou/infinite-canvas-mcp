@@ -73,6 +73,16 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
     };
     const camera = (patch: Record<string, unknown>) => update({ camera: { ...value.camera, ...patch } });
     const usagePatch = (index: number, patch: Record<string, unknown>) => update({ subject_usages: value.subject_usages.map((item, n) => n === index ? { ...item, ...patch } : item) });
+    const removeSubjectUsage = (index: number) => {
+        const subjectId = String(value.subject_usages[index]?.subjectId || "");
+        const remainingUsages = value.subject_usages.filter((_, n) => n !== index);
+        const attentionIds = Array.isArray(value.camera.attention_subject_ids) ? value.camera.attention_subject_ids.map(String) : [];
+        const subjectStillReferenced = remainingUsages.some(usage => String(usage.subjectId) === subjectId);
+        update({
+            subject_usages: remainingUsages,
+            camera: { ...value.camera, attention_subject_ids: subjectStillReferenced ? attentionIds : attentionIds.filter(id => id !== subjectId) },
+        });
+    };
     const framePatch = (index: number, patch: Record<string, unknown>) => update({ keyframes: value.keyframes.map((item, n) => n === index ? { ...item, ...patch } : item) });
     const referencePatch = (index: number, patch: Record<string, unknown>) => update({ reference_requirements: value.reference_requirements.map((item, n) => n === index ? { ...item, ...patch } : item) });
     const utteranceRows = value.utterances || [];
@@ -202,7 +212,7 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
             </label>
             <label className="shot-editor-span-all grid gap-1.5 text-xs text-muted-foreground">
                 <span>{t("director.atomic.attention")}</span>
-                <Select className="w-full" aria-label={t("director.atomic.attention")} mode="multiple" value={Array.isArray(attentionSubjectIds) ? attentionSubjectIds : []} disabled={disabled} options={subjects.map(subject => ({ value: String(subject.id), label: subjectDisplayName(source, String(subject.id)) }))} onChange={attention_subject_ids => camera({ attention_subject_ids })} />
+                <Select className="w-full" aria-label={t("director.atomic.attention")} mode="multiple" value={Array.isArray(attentionSubjectIds) ? attentionSubjectIds : []} disabled={disabled} options={value.subject_usages.map(usage => String(usage.subjectId)).filter((subjectId, index, ids) => subjectId && ids.indexOf(subjectId) === index).map(subjectId => ({ value: subjectId, label: subjectDisplayName(source, subjectId) }))} onChange={attention_subject_ids => camera({ attention_subject_ids })} />
 
                 <Button className="justify-self-start" size="small" type="text" disabled={disabled} onClick={() => {
                     const visibleSubjectIds = value.subject_usages.filter(item => item.presentation === "visible").map(item => String(item.subjectId));
@@ -296,7 +306,7 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
             const subject = subjects.find(item => item.id === usage.subjectId);
             const outfitBindings = records(subject?.pictureBindings).filter(binding => Array.isArray(binding.provides) && binding.provides.map(String).includes("clothing"));
             const selectedOutfits = resolveSubjectPictureBindingIds(subject, usage).bindingIds.filter(bindingId => outfitBindings.some(binding => String(binding.id) === bindingId));
-            return <article key={usage.subjectId} className="space-y-3 rounded-lg border border-border p-4"><div className="flex items-center justify-between gap-3"><h4 className="text-sm font-medium">{subjectDisplayName(source, String(usage.subjectId))}</h4><Button size="small" type="text" disabled={disabled} onClick={() => update({ subject_usages: value.subject_usages.filter((_, n) => n !== index) })}>{t("common.remove")}</Button></div>
+            return <article key={usage.subjectId} className="space-y-3 rounded-lg border border-border p-4"><div className="flex items-center justify-between gap-3"><h4 className="text-sm font-medium">{subjectDisplayName(source, String(usage.subjectId))}</h4><Button size="small" type="text" disabled={disabled} onClick={() => removeSubjectUsage(index)}>{t("common.remove")}</Button></div>
                 <Select className="w-full" value={String(usage.presentation)} disabled={disabled} options={["visible", "offscreen_voice", "state_context"].map(key => ({ value: key, label: t("director.workspace.subjectPresentation." + key) }))} onChange={presentation => usagePatch(index, { presentation })} />
                 <label className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.atomic.shotOutfits")}</span><Select mode="multiple" value={selectedOutfits} disabled={disabled || usage.presentation !== "visible" || !outfitBindings.length} placeholder={outfitBindings.length ? t("director.atomic.chooseShotOutfits") : t("director.atomic.noShotOutfits")} options={outfitBindings.map(binding => ({ value: String(binding.id), label: outfitBindingLabel(subject!, binding) }))} onChange={pictureBindingIds => usagePatch(index, setShotOutfitBindingIds(subject, usage, pictureBindingIds))} /></label>
 

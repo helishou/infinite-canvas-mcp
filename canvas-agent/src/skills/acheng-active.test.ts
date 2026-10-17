@@ -14,9 +14,9 @@ function fixture(t: test.TestContext) {
     const installed = resolveAchengEngine();
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "acheng-active-"));
     const base = path.join(home, "skill-runtimes", "acheng-director");
-    const previousHome = process.env.CODEX_HOME;
+    const previousHome = process.env.INFINITE_CANVAS_ACHENG_HOME;
     t.after(() => {
-        if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+        if (previousHome === undefined) delete process.env.INFINITE_CANVAS_ACHENG_HOME; else process.env.INFINITE_CANVAS_ACHENG_HOME = previousHome;
         fs.rmSync(home, { recursive: true, force: true });
     });
     const make = (letter: string) => {
@@ -41,7 +41,7 @@ function fixture(t: test.TestContext) {
     };
     const old = make("a"), next = make("b");
     const activate = (runtime: typeof old) => fs.writeFileSync(path.join(base, "active.json"), JSON.stringify({ active: runtime }));
-    process.env.CODEX_HOME = home; activate(next);
+    process.env.INFINITE_CANVAS_ACHENG_HOME = home; activate(next);
     const source = JSON.parse(fs.readFileSync(path.join(installed.path, "templates", "style-anchor-stage.json"), "utf8"));
     const director: DirectorProduction = { schemaVersion: 1, engine: { commit: old.commit, patchVersion: old.patchVersion, runtimeId: old.runtimeId, version: old.version },
         source, sourceHash: hash(canonicalProduction(source)), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], workflow: {}, unresolved: [], executionAuthorized: false };

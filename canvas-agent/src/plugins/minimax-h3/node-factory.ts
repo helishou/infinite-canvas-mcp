@@ -24,7 +24,7 @@ export const BASE_H3_NODE_METADATA: Record<string, unknown> = {
     latentUpscalePrecision: "bf16", seed: undefined, noiseSeed: undefined, noiseSeedMode: "random", constantTriggerWord: "",
     noDub: true, noCaption: true, audioMode: "native", audioDenoiseStrength: 1, addSourceAsReference: false,
     strictPromptTags: true, referenceVideoPolicy: "official_2_to_15s", latentUpscaleEnabled: false,
-    slaEnabled: false, uniBlockSwapEnabled: false, rtxEnabled: false, teAccel: false, lockAudio: false, audioDrive: false,
+    slaEnabled: false, uniBlockSwapEnabled: false, rtxEnabled: false, teAccel: false, mergedWorkflow: false, lockAudio: false, audioDrive: false,
     combatLoraWeight: 0, cinematicLoraWeight: 0, runtimeReserveEnabled: false, reservedVramGb: 0.6, faceRefineEnabled: false,
     loraSlots: [{ name: "", strength: 1, enabled: false }], keepModelCache: true,
 };

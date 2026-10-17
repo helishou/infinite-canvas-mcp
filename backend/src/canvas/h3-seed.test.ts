@@ -64,8 +64,12 @@ test("random mode rerolls copied seeds per Clip and per new run, while duplicate
         assert.ok(Number.isSafeInteger(params.seed) && Number(params.seed) > 0);
         assert.equal(params.seed, params.noiseSeed);
         workflowParams = params;
-        const graph = await buildNativeNanFengV15Workflow({ prompt: "A bell." }, params, async (value) => value, "http://comfy.test", new AbortController().signal);
-        assert.equal(graph.nf_v15.inputs["随机种子"], params.seed);
+        // 默认提交路径是展开流：种子落在 RandomNoise；合并流（后路）落在原生节点入参。
+        // 两条流都必须提交同一个已解析的种子。
+        const expanded = await buildNativeNanFengV15Workflow({ prompt: "A bell." }, params, async (value) => value, "http://comfy.test", new AbortController().signal);
+        assert.equal(expanded.nf_noise.inputs.noise_seed, params.seed);
+        const merged = await buildNativeNanFengV15Workflow({ prompt: "A bell." }, { ...params, mergedWorkflow: true }, async (value) => value, "http://comfy.test", new AbortController().signal);
+        assert.equal(merged.nf_v15.inputs["随机种子"], params.seed);
     }
     assert.ok(discoveryRequests.length > 0);
     for (const request of discoveryRequests) {

@@ -12,6 +12,8 @@
 import { DatabaseSync } from "node:sqlite";
 import crypto from "node:crypto";
 
+import { decodeReceipt } from "../drama/receipt-storage.js";
+
 // ─── 类型 ───
 
 export type HistoryPolicyConfig = {
@@ -171,6 +173,23 @@ function jsonColumns(db: DatabaseSync, table: string): string[] {
     return cols.filter(c => c.type === "TEXT" && (c.name.endsWith("_json") || c.name === "data_json")).map(c => c.name);
 }
 
+/**
+ * 回执/快照列可能是 gzip BLOB（`encodeReceipt` 的写入形态）或历史明文 TEXT。
+ * 只认 TEXT 会让压缩后的行从保护扫描里静默消失——实测把 `production_preparations`
+ * 压缩后 `referenced-by-preparation` 直接归零，被这些回执引用的任务于是变成可删。
+ * 因此两种形态都必须解析；解析不出来按「无法证明无引用」处理（调用方保留）。
+ */
+function parseJsonColumn(value: unknown): unknown {
+    if (typeof value === "string") {
+        try { return JSON.parse(value); } catch { return undefined; }
+    }
+    if (value instanceof Uint8Array) {
+        try { return decodeReceipt(value); } catch { /* 不是 gzip，继续按明文试 */ }
+        try { return JSON.parse(Buffer.from(value).toString("utf8")); } catch { return undefined; }
+    }
+    return undefined;
+}
+
 // ─── 核心函数 ───
 
 export function evaluateRetention(db: DatabaseSync, config: HistoryPolicyConfig): RetentionReport {
@@ -291,10 +310,8 @@ export function evaluateRetention(db: DatabaseSync, config: HistoryPolicyConfig)
         const rows = db.prepare(`SELECT * FROM "${table}"`).all() as Array<Record<string, unknown>>;
         for (const row of rows) {
             for (const col of cols) {
-                const val = row[col];
-                if (typeof val !== "string" || !val) continue;
-                let parsed: unknown;
-                try { parsed = JSON.parse(val); } catch { continue; }
+                const parsed = parseJsonColumn(row[col]);
+                if (parsed === undefined) continue;
                 const strings = new Set<string>();
                 extractStringValues(parsed, strings);
                 for (const s of strings) {
@@ -313,10 +330,8 @@ export function evaluateRetention(db: DatabaseSync, config: HistoryPolicyConfig)
         const rows = db.prepare(`SELECT * FROM "${table}"`).all() as Array<Record<string, unknown>>;
         for (const row of rows) {
             for (const col of cols) {
-                const val = row[col];
-                if (typeof val !== "string" || !val) continue;
-                let parsed: unknown;
-                try { parsed = JSON.parse(val); } catch { continue; }
+                const parsed = parseJsonColumn(row[col]);
+                if (parsed === undefined) continue;
                 const strings = new Set<string>();
                 extractStringValues(parsed, strings);
                 for (const s of strings) {

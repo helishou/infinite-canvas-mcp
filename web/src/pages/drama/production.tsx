@@ -351,7 +351,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     const resolvedCanvasId = projectId || context.episode?.canvasId || "";
     const sourceSegmentNodes = productionSegments(prod.production).flatMap(segment => productionSegmentRuntimeMatches((context.canvas?.nodes || []) as any, String(segment.id), context.productionContext?.owner).map(match => match.node.id));
     const taskNodes = [...new Set([...sourceSegmentNodes, ...Object.values(prod.production.draft.director?.assets || {}).map(asset => asset.nodeId)].filter((id): id is string => Boolean(id)))];
-    const tasks = resolvedCanvasId && taskNodes.length ? (await fetchBackendTasks({ projectId: resolvedCanvasId, nodeIds: taskNodes }).catch(error => { finishContinuityRead(continuityRead); throw error; })).tasks || [] : [];
+    const tasks = resolvedCanvasId && taskNodes.length ? (await fetchBackendTasks({ projectId: resolvedCanvasId, nodeIds: taskNodes, summary: true }).catch(error => { finishContinuityRead(continuityRead); throw error; })).tasks || [] : [];
     const sharedCanvasId = String(context.productionContext?.sharedAssetCanvasId || "");
     const sharedNodes = sharedCanvasId && sharedCanvasId !== resolvedCanvasId ? (await fetchBackendProject(sharedCanvasId).catch(() => null))?.project : undefined;
     if (!isActive()) return null;
@@ -473,7 +473,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       const [prod, ready, history, runHistory, canvas, tasks, continuity] = await Promise.all([
         fetchEpisodeProduction(target), fetchProductionReadiness(target), fetchEpisodeProductionVersions(target), fetchProductionBatches(target),
         fetchBackendProject(canvasId).then(value => value.project).catch(() => null),
-        canvasId && taskNodes.length ? fetchBackendTasks({ projectId: canvasId, nodeIds: taskNodes }).then(value => value.tasks || []) : Promise.resolve([]),
+        canvasId && taskNodes.length ? fetchBackendTasks({ projectId: canvasId, nodeIds: taskNodes, summary: true }).then(value => value.tasks || []) : Promise.resolve([]),
         fetchProductionContinuity(target, { snapshot: continuityRead.snapshot }),
       ]).catch(error => { finishContinuityRead(continuityRead); throw error; });
       if (sequence !== remoteSequence.current) return prod.production;
@@ -803,7 +803,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       poll: async () => {
         const [runs, tasks, sceneProduction] = await Promise.all([
           fetchProductionBatches(target),
-          canvasId && pollingTaskNodes.length ? fetchBackendTasks({ projectId: canvasId, nodeIds: pollingTaskNodes }) : Promise.resolve({ tasks: [] as BackendRuntimeTask[] }),
+          canvasId && pollingTaskNodes.length ? fetchBackendTasks({ projectId: canvasId, nodeIds: pollingTaskNodes, summary: true }) : Promise.resolve({ tasks: [] as BackendRuntimeTask[] }),
           hasActiveSceneWork || hasActiveClipRefresh ? fetchEpisodeProduction(target) : Promise.resolve(undefined),
         ]);
         if (!active) return;

@@ -20,3 +20,4 @@ test("archived smart-image slots keep task-batch identity and output order", () 
         ["slot-2", "task-new", 42, 1],
     ]);
 });
+

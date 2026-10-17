@@ -5,6 +5,8 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- Acheng runtime installation and activation are project-scoped: verify status/update/rollback use `.canvas-runtime` in a native checkout even when `CODEX_HOME` points elsewhere; in Docker verify runtime files persist under `/data/acheng-runtime`, while Codex login/session files remain under `/data/codex`.
+
 - MCP exposes smart node creation only. Verify `tools/list` no longer includes ordinary text, image, video, audio, attachment, import, crop, or split node creation tools; verify generic `canvas_create_node`, `canvas_apply_ops`, and `canvas_apply_commands` reject non-smart node additions; verify text, image, video, and audio generation each create one smart node with the prompt stored in its metadata.
 
 - Channel type selection offers Remote API, Local and Codex CLI. Local uses the same protocol, Base URL, API key and request path as Remote API, with Local retained as a label. When an existing ComfyUI channel is loaded, verify its type changes to Local and the migrated config is saved back to Backend; confirm the saved model and credentials remain intact.

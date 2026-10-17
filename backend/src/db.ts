@@ -8,12 +8,13 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import { DB_FILE, MEDIA_DIR, ensureDataDirs } from "./config.js";
 import { prepareDatabaseUpgrade, DATABASE_SCHEMA_VERSION } from "./database-upgrade.js";
+import { createDatabaseSnapshot, pruneDatabaseSnapshots } from "./database-snapshots.js";
 import { syncScriptNodeEdits } from "./drama/script-nodes.js";
 import { syncImageReferenceEdits } from "./drama/image-inputs.js";
 import { productionImageModel, dramaProductionPlanSchema, type DramaProductionPlan } from "@basketikun/canvas-agent/drama/production-contract";
 import { productionLayoutPlanSchema, type ProductionLayoutPlan, type ProductionLayoutReceipt } from "@basketikun/canvas-agent/drama/production-contract";
 import { normalizeSceneAsset } from "./canvas/asset-contract.js";
-import { completedImageSlots, dropImageSlots, imageSourceStatus } from "./canvas/image-result-slots.js";
+import { completedImageSlots, dropImageSlots, imageSourceStatus, linkedCharacterImageUpdates } from "./canvas/image-result-slots.js";
 import { applyCanvasProjectOperations, canonicalizeH3References, isH3CanvasNode, registerH3ReferenceAssets, type CanvasOperation } from "./canvas/project-ops.js";
 import { prepareClientCanvasOperation, stripCanvasLocalViewState } from "./canvas/operation-authority.js";
 import { collaborationError, commandFingerprint, concurrentCommandConflicts, type CanvasCommandContext, type CanvasCommit } from "./canvas/collaboration.js";
@@ -1154,15 +1155,14 @@ export class BackendDatabase {
     private backupBeforeH3Migration(version = "v13") {
         const file = this.filePath;
         if (!file || file === ":memory:") return;
-        // A failed migration must be retryable while every earlier snapshot stays intact.
-        const backup = `${file}.pre-h3-${version}-${crypto.randomUUID()}.sqlite`;
-        this.db.exec(`VACUUM INTO '${backup.replaceAll("'", "''")}'`);
-        if (fs.statSync(backup).size === 0) throw new Error("H3 数据库迁移备份为空");
+        // 迁移可重试，但同一用途的快照不会无上限堆积（保留上限见 database-snapshots.ts）。
+        const backup = createDatabaseSnapshot(this.db, file, `pre-h3-${version}`);
         const copy = new DatabaseSync(backup, { readOnly: true });
         try {
             const check = copy.prepare("PRAGMA integrity_check").get() as { integrity_check?: string };
             if (check.integrity_check !== "ok") throw new Error("H3 数据库迁移备份完整性校验失败");
         } finally { copy.close(); }
+        pruneDatabaseSnapshots(file, "pre-h3");
     }
 
     /**
@@ -2520,7 +2520,7 @@ export class BackendDatabase {
                     status: "success", runProgress: 1, generationTaskId: task.id, inputOutdated: false, generatedImageHistory: [...(Array.isArray(sourceMetadata.generatedImageHistory) ? sourceMetadata.generatedImageHistory : []), ...media.map(output => ({ ...output, taskId: task.id, inputHash: frozenHash }))],
                 };
                 const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId, metadata,
-                    metadataDelete: ["runtimeTaskId", "errorDetails"] }];
+                    metadataDelete: ["runtimeTaskId", "errorDetails"] }, ...linkedCharacterImageUpdates(project, input.nodeId, output)];
                 const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations,
                     { runtimeWrite: true, operationId: `image-task-result:${task.id}`, source: { clientId: `task:${task.id}`, kind: "task", label: "图片生成任务" } });
                 return { project: result.project, operations: result.operations };
@@ -2536,6 +2536,7 @@ export class BackendDatabase {
                     patch: resultSize,
                     metadata: { ...slots, status: "success", runProgress: 1, generationTaskId: task.id },
                     metadataDelete: ["runtimeTaskId", "errorDetails"] },
+                    ...linkedCharacterImageUpdates(project, input.nodeId, media.find(item => item.url) || {}),
                     ...imageSourceStatus(project, input.nodeId, task.input.sourceNodeId as string | undefined, task.id, "success")];
                 const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations,
                     { runtimeWrite: true, operationId: `image-task-result:${task.id}`, source: { clientId: `task:${task.id}`, kind: "task", label: "图片生成任务" } });
@@ -3140,6 +3141,18 @@ export class BackendDatabase {
     getMediaFile(storageKey: string): MediaFile | null {
         const row = this.db.prepare("SELECT * FROM media_files WHERE storage_key = ?").get(storageKey) as Record<string, unknown> | undefined;
         return row ? mediaFromRow(row) : null;
+    }
+
+    /** 内容寻址：按 sha256 找最早归档的那一份，用于复用同一物理文件。 */
+    getMediaFileByDigest(sha256: string): MediaFile | null {
+        const row = this.db.prepare("SELECT * FROM media_files WHERE sha256 = ? ORDER BY created_at ASC, storage_key ASC LIMIT 1").get(sha256) as Record<string, unknown> | undefined;
+        return row ? mediaFromRow(row) : null;
+    }
+
+    /** 同一份文件被多少条其它 storage_key 共享（删除时不能把共享文件删掉）。 */
+    countMediaFileSharers(filePath: string, storageKey: string): number {
+        const row = this.db.prepare("SELECT COUNT(*) AS n FROM media_files WHERE file_path = ? AND storage_key <> ?").get(filePath, storageKey) as { n: number };
+        return Number(row.n);
     }
 
     listMediaFiles(): MediaFile[] {
@@ -3878,15 +3891,17 @@ export class BackendDatabase {
     }
 
     /**
-     * 任务列表「摘要」投影：只保留卡片渲染所需标量 + 输出媒体引用，裁掉多 MB 的 input/params 提示词大列。
-     * 供首页 / 全局任务按钮这类纯展示场景用（summary=1），导出、任务中心、生产工作台等需要完整字段的
-     * 消费者仍走 list()。返回值在结构上就是合法的 RuntimeTask（重字段均为可选），可直接复用前端类型。
+     * 任务列表「摘要」投影：只保留卡片渲染所需标量 + 输出媒体引用，裁掉多 MB 的 input/params 大列。
+     * 供首页、全局任务按钮、制作工作台等纯展示场景用；导出、任务中心和单任务详情仍走 list()。
+     * 返回值在结构上就是合法的 RuntimeTask（重字段均为可选），可直接复用前端类型。
      */
     listTaskSummaries(filter: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; parentThreadId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number } = {}): RuntimeTask[] {
         const { where, values, limit, offset } = this.taskListWhere(filter);
-        // 不取 params_json（第二大 JSON 列，卡片不需要）；input_json/result_json 仅用于抽取
+        // 不把 params_json 原文取回 Node；只由 SQLite 抽取 parentTaskId 标量。input_json/result_json 仅用于抽取
         // 路由标量(input.projectId/scope)与输出媒体引用，不把原文塞回响应体。
-        const rows = this.db.prepare(`SELECT id, kind, status, progress, error, created_at, updated_at, project_id, node_id, segment_id, model, input_json, result_json FROM tasks ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`).all(...values, limit, offset) as Array<Record<string, unknown>>;
+        const rows = this.db.prepare(`SELECT id, kind, status, progress, error, created_at, updated_at, project_id, node_id, segment_id, model,
+            CASE WHEN json_valid(params_json) THEN json_extract(params_json, '$.parentTaskId') END AS parent_task_id,
+            input_json, result_json FROM tasks ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`).all(...values, limit, offset) as Array<Record<string, unknown>>;
         return rows.map((row) => {
             const input = parseJsonObject(row.input_json);
             const inputScope = typeof input.scope === "string" && input.scope ? input.scope : undefined;
@@ -3907,6 +3922,7 @@ export class BackendDatabase {
                 nodeId: String(row.node_id || "") || undefined,
                 segmentId: String(row.segment_id || "") || undefined,
                 model: String(row.model || "") || undefined,
+                parentTaskId: String(row.parent_task_id || "") || undefined,
                 executor: kind.startsWith("comfyui:") ? "comfy" : kind,
                 // 只回传路由所需的两个标量，prompt/params 等大字段不入响应体。
                 // RuntimeTask 的 input/params/result 必填：摘要里是空值占位（不是缺失数据），

@@ -10,12 +10,16 @@ export function ConfigLocalStorage({ active }: { active: boolean }) {
     const { message } = App.useApp();
     const { t } = useTranslation();
     const [dataDir, setDataDir] = useState("");
+    const [effectiveDataDir, setEffectiveDataDir] = useState("");
+    const [dataDirFollowsDefault, setDataDirFollowsDefault] = useState(false);
     const [dataDirLoading, setDataDirLoading] = useState(false);
 
     const loadDataDir = useCallback(async () => {
         try {
             const result = await fetchDataDir();
             setDataDir(result.configuredDataDir ?? "");
+            setEffectiveDataDir(result.dataDir ?? "");
+            setDataDirFollowsDefault(!result.configuredDataDir);
         } catch { /* ignore */ }
     }, []);
 
@@ -66,6 +70,11 @@ export function ConfigLocalStorage({ active }: { active: boolean }) {
                             />
                         }
                     />
+                    <div className="mt-1.5 flex flex-wrap items-center gap-x-1 text-[11px] text-stone-400">
+                        <span>{t("config.localStorage.dataDirEffective")}</span>
+                        <span className="font-mono text-stone-500 dark:text-stone-300">{effectiveDataDir || "—"}</span>
+                        {dataDirFollowsDefault && <span>{t("config.localStorage.dataDirFollowsDefault")}</span>}
+                    </div>
                     <div className="mt-1.5 text-[11px] text-stone-400">{t("config.localStorage.dataDirHint")}</div>
                 </div>
             </section>

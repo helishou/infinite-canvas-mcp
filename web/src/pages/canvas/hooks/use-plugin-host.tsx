@@ -11,7 +11,7 @@ import { applyBackendCanvasOperations, backendMediaUrl, createBackendGenerationL
 import { observeCanvasGenerationTask } from "@/services/api/canvas-generation-task";
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { canvasTaskActionPath, canvasTaskPath } from "@basketikun/canvas-agent/generation-api";
-import { decodeChannelModel, resolveModelWorkflow, resolveModelWorkflowParams, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
+import { decodeChannelModel, modelOptionLabel, resolveModelWorkflow, resolveModelWorkflowParams, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 import { buildGenerationConfig } from "@/lib/canvas/canvas-generation-helpers";
 import { createCanvasReferenceService } from "@/lib/canvas/reference-service";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
@@ -220,8 +220,8 @@ export function usePluginHost(params: PluginHostParams) {
                 const result = await fetchComfyModels(getBackendUrl(), getBackendTokenShared());
                 return { models: result.data?.models || [], loras: result.data?.loras || [], textEncoders: result.data?.textEncoders || [], videoVaes: result.data?.videoVaes || [], audioVaes: result.data?.audioVaes || [], latentUpscaleModels: result.data?.latentUpscaleModels || [], nanfeng: result.data?.nanfeng || {} };
             },
-            // List configured models for a capability; labels use the model name without the channel prefix.
-            listModels: (capability) => selectableModelsByCapability(effectiveConfig, capability as ModelCapability | undefined).map((value) => ({ value, label: decodeChannelModel(value)?.model || value })),
+            // Keep H3 model labels consistent with the rest of the canvas, including their channel or actual workflow provider.
+            listModels: (capability) => selectableModelsByCapability(effectiveConfig, capability as ModelCapability | undefined).map((value) => ({ value, label: modelOptionLabel(effectiveConfig, value) })),
             defaultModel: (capability) => buildGenerationConfig(effectiveConfig, undefined, capability).model,
             describeVideoModel: async (model: string, referenceCount: number): Promise<CanvasVideoModelSchema> => {
                 const resolved = resolveModelWorkflow(effectiveConfig, model, referenceCount);

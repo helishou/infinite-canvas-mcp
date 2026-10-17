@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { DB_FILE } from "../config.js";
 import { BackendDatabase } from "../db.js";
 import { EpisodeProductionService } from "../drama/production.js";
+import { pruneDatabaseSnapshots, createDatabaseSnapshot } from "../database-snapshots.js";
 
 type Args = { apply: boolean; kind?: "episode" | "canvas"; id?: string; expectedRevision?: number; operationId?: string; sourceFile?: string };
 function parseArgs(values: string[]): Args {
@@ -27,11 +28,13 @@ function parseArgs(values: string[]): Args {
 }
 
 function backupDatabase(file: string): string {
-    const target = `${file}.director-source-${new Date().toISOString().replace(/[:.]/g, "-")}.bak`;
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const db = new DatabaseSync(file);
-    try { db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`); }
+    let target: string;
+    try { target = createDatabaseSnapshot(db, file, `director-source-${stamp}`, ".bak"); }
     finally { db.close(); }
     if (!fs.existsSync(target) || fs.statSync(target).size === 0) throw new Error("SQLite 一致性备份未生成，拒绝维护写入");
+    pruneDatabaseSnapshots(file, "director-source");
     return target;
 }
 

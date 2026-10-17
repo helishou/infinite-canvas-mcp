@@ -154,8 +154,8 @@ test("queued and synchronous real compilation retain their captured runtime acro
     const crypto = await import("node:crypto");
     const installed = resolveAchengEngine();
     const f = setup(t, result), home = path.join(f.root, "codex-home"), base = path.join(home, "skill-runtimes", "acheng-director");
-    const originalHome = process.env.CODEX_HOME;
-    t.after(() => { if (originalHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = originalHome; });
+    const originalHome = process.env.INFINITE_CANVAS_ACHENG_HOME;
+    t.after(() => { if (originalHome === undefined) delete process.env.INFINITE_CANVAS_ACHENG_HOME; else process.env.INFINITE_CANVAS_ACHENG_HOME = originalHome; });
     const makeRuntime = (letter: string) => {
         const commit = letter.repeat(40), patchVersion = letter.repeat(16), runtimeId = `${commit}-${patchVersion}`;
         const directory = path.join(base, "versions", runtimeId);
@@ -167,7 +167,7 @@ test("queued and synchronous real compilation retain their captured runtime acro
     };
     const old = makeRuntime("a"), next = makeRuntime("b");
     const activate = (runtime: typeof old) => fs.writeFileSync(path.join(base, "active.json"), JSON.stringify({ active: runtime }));
-    process.env.CODEX_HOME = home; activate(next);
+    process.env.INFINITE_CANVAS_ACHENG_HOME = home; activate(next);
     const candidate = structuredClone(director);
     candidate.engine = { commit: old.commit, patchVersion: old.patchVersion, runtimeId: old.runtimeId, version: old.version };
     candidate.source = JSON.parse(fs.readFileSync(path.join(installed.path, "templates", "style-anchor-stage.json"), "utf8"));

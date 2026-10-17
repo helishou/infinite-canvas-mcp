@@ -900,7 +900,7 @@ export class EpisodeProductionService {
         const row = this.db.db.prepare("SELECT * FROM production_preparations WHERE operation_id=?").get(operationId) as Record<string, any> | undefined;
         if (row) {
             if (row.owner_key !== ownerKey || row.request_hash !== hash) throw new Error("operationId 已用于不同的节点准备请求");
-            return { ...(row.bindings_json ? { bindings: JSON.parse(row.bindings_json) } : {}), ...(row.receipt_json ? { receipt: JSON.parse(row.receipt_json) } : {}) };
+            return { ...(row.bindings_json ? { bindings: JSON.parse(row.bindings_json) } : {}), ...(row.receipt_json ? { receipt: decodeReceipt(row.receipt_json) } : {}) };
         }
         validateFresh?.();
         this.db.db.prepare("INSERT INTO production_preparations (operation_id, owner_key, request_hash) VALUES (?, ?, ?)").run(operationId, ownerKey, hash);
@@ -915,7 +915,7 @@ export class EpisodeProductionService {
         const finishReceipt = (record: ProductionRecord & { replayed?: boolean }) => {
             const completed = frozen && canvasId ? { ...frozen, canvasRevision: this.db.getCanvasProjectRevision(canvasId) || frozen.canvasRevision } : frozen;
             const response = { ...record, ...(completed ? { layoutReceipt: completed } : {}), ...(referenceSync ? { referenceSync } : {}) };
-            this.db.db.prepare("UPDATE production_preparations SET receipt_json=? WHERE operation_id=?").run(JSON.stringify(response), operationId);
+            this.db.db.prepare("UPDATE production_preparations SET receipt_json=? WHERE operation_id=?").run(encodeReceipt(response), operationId);
             completedResponse = response;
             return response;
         };

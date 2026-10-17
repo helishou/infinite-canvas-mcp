@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Alert, App, Button, Dropdown, Input, Modal, Radio, Select, Tag } from "antd";
-import { ArrowLeft, ArrowRight, ArrowUpRight, ChevronDown, Clapperboard, GripHorizontal, Image as ImageIcon, Layers3, Locate, Search, WandSparkles } from "lucide-react";
+import { Alert, App, Button, Dropdown, Input, Modal, Progress, Radio, Select, Tag } from "antd";
+import { ArrowLeft, ArrowRight, ArrowUpRight, CheckCircle2, ChevronDown, Circle, CircleAlert, Clapperboard, Database, GripHorizontal, Image as ImageIcon, Layers3, LoaderCircle, Locate, Search, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { isSubjectPromptAssembly, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import { subjectShotWindows, subjectStateProjection } from "@basketikun/canvas-agent/drama/subject-assembly";
@@ -9,7 +9,7 @@ import { backendMediaUrl, fetchProductionWorkbench, type EpisodeProduction, type
 import { records, formatSeconds } from "./director-display";
 import { productionWorkbenchValue, subjectDisplayName } from "./subject-shot-draft";
 import { productionSegmentRuntimeMatches } from "@/lib/production-source";
-import { translateCompiledH3Prompts } from "@/services/api/translation";
+import { translateCompiledH3Prompts, type H3PromptBatchProgress } from "@/services/api/translation";
 import { continuityPresentation } from "./continuity-presentation";
 import { currentClipRefreshes } from "./production-refresh-display";
 import { ReferenceNodeLink } from "./reference-node-link";
@@ -59,6 +59,8 @@ type Props = {
     onNavigate: (workspace: DirectorWorkspace, target?: { kind: string; id: string }) => void;
 };
 
+type TranslationProgressDetail = H3PromptBatchProgress & { phase: "preparing" | "translating" | "writing" | "complete" | "failed" };
+
 function compileDiagnosticTaskContext(diagnostics: ProductionCompilationDiagnostic[]) {
     type Group = { severity: string; code: string; path: string; message: string; blocksCompilation?: boolean; blockingActions: string[]; count: number; targetIds: Set<string>; shotIds: Set<string> };
     const groups = new Map<string, Group>();
@@ -98,7 +100,7 @@ function compileDiagnosticTaskContext(diagnostics: ProductionCompilationDiagnost
 }
 
 /** The v2 authoring surface: stable Shots, derived Clip packaging, and compiler evidence. */
-export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, viewMemory, canvasNodes, canvasId, onLocateClip, renderEditor, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onH3Boundary, onEditShot, onUpdateLegacyShotReferences, shotKeyframe, shotDrafts = {}, busy, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets, onCompile, onApplyTranslatedPrompts, onClip, onDiscuss, onNavigate }: Props) {
+export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, viewMemory, canvasNodes, canvasId, onLocateClip, renderEditor, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onH3Boundary, onEditShot, onSaveShotPatch, onUpdateLegacyShotReferences, shotKeyframe, shotDrafts = {}, busy, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets, onCompile, onApplyTranslatedPrompts, onClip, onDiscuss, onNavigate }: Props) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const source = director.source as Record<string, any>;
@@ -113,7 +115,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const sceneFilterStorageKey = `drama-storyboard-scene-filter:${ownerKey}`;
     const [selectedId, setSelectedId] = useState(initialShotId || viewMemory?.current?.selectedId || "");
     const [draggingShotId, setDraggingShotId] = useState("");
-    const [translationProgress, setTranslationProgress] = useState("");
+    const [translationProgress, setTranslationProgress] = useState<TranslationProgressDetail | null>(null);
     const [translationError, setTranslationError] = useState("");
     const [translatingPrompts, setTranslatingPrompts] = useState(false);
     const translatingPromptsRef = useRef(false);
@@ -132,6 +134,9 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const [view, setView] = useState<"shots" | "clips">(viewMemory?.current?.view || "shots");
     const [workbench, setWorkbench] = useState<Record<string, any>>();
     const [workbenchId, setWorkbenchId] = useState("");
+    const [continuityFactDrafts, setContinuityFactDrafts] = useState<Record<string, Record<string, string[]>>>({});
+    const [savingContinuityFacts, setSavingContinuityFacts] = useState(false);
+    const [continuityFactModalOpen, setContinuityFactModalOpen] = useState(false);
     const workbenchReadKey = useRef("");
     const [workbenchError, setWorkbenchError] = useState("");
     const [retry, setRetry] = useState(0);
@@ -218,7 +223,44 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
         && compileTargets.items.some(item => item.targetId === String(clip?.id) && item.status === "ready");
     const currentCompiled = compiled || compiledByLatestReceipt;
     const refresh = currentCompiled && ["blocked", "failed"].includes(refreshCandidate?.status || "") ? undefined : refreshCandidate;
-    const state = subjectAssembly ? workbench?.context?.continuity || states[activeId] : storyboardReportedState(workbench?.continuity, activeId);
+    const selectedShotUsages = records(selected?.subject_usages);
+    const factDraftForShot = continuityFactDrafts[activeId] || {};
+    const continuityFacts = records(source.ledger?.facts);
+    const continuityFactIdsForUsage = (usage: Record<string, any>) => {
+        const subjectId = String(usage.subjectId || "");
+        return factDraftForShot[subjectId] ?? (Array.isArray(usage.continuityFactIds) ? usage.continuityFactIds.map(String) : []);
+    };
+    const fullState = subjectAssembly ? workbench?.context?.continuity || states[activeId] : storyboardReportedState(workbench?.continuity, activeId);
+    const selectedFactIds = new Set(selectedShotUsages.flatMap(continuityFactIdsForUsage));
+    const state = subjectAssembly && fullState ? {
+        ...fullState,
+        start: records(fullState.start).filter(item => selectedFactIds.has(String(item.factId))),
+        end: records(fullState.end).filter(item => selectedFactIds.has(String(item.factId))),
+        unresolved: records(fullState.unresolved).filter(item => selectedFactIds.has(String(item.factId))),
+    } : fullState;
+    const continuityFactSelectionChanged = selectedShotUsages.some(usage => {
+        const draftIds = factDraftForShot[String(usage.subjectId || "")];
+        const savedIds = Array.isArray(usage.continuityFactIds) ? usage.continuityFactIds.map(String) : [];
+        return draftIds !== undefined && JSON.stringify([...new Set(draftIds)].sort()) !== JSON.stringify([...new Set(savedIds)].sort());
+    });
+    const saveContinuityFactSelection = async () => {
+        if (!selected || !onSaveShotPatch || !continuityFactSelectionChanged || savingContinuityFacts) return false;
+        const subject_usages = selectedShotUsages.map(usage => {
+            const subjectId = String(usage.subjectId || ""), draftIds = factDraftForShot[subjectId];
+            return draftIds === undefined ? usage : { ...usage, continuityFactIds: [...new Set(draftIds.map(String))] };
+        });
+        setSavingContinuityFacts(true);
+        try {
+            if (await onSaveShotPatch(activeId, { subject_usages })) {
+                setContinuityFactDrafts(current => { const next = { ...current }; delete next[activeId]; return next; });
+                setContinuityFactModalOpen(false);
+                return true;
+            }
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : String(error));
+        } finally { setSavingContinuityFacts(false); }
+        return false;
+    };
     const assetIds = [...new Set([...(selected?.required_assets || []), ...(director.shotInputs[activeId]?.assetIds || [])].map(String))];
     const keyframeAssetIds = new Set(Object.values(director.shotInputs).map(input => String(input.keyframeAssetId || "")).filter(Boolean));
     const assetOptionsById = new Map<string, string>();
@@ -294,7 +336,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
         translatingPromptsRef.current = true;
         setTranslatingPrompts(true);
         setTranslationError("");
-        setTranslationProgress(t("director.atomic.translationPreparing"));
+        setTranslationProgress({ phase: "preparing", completed: 0, total: visibleClipStates.length, completedIds: [], cachedIds: [], inProgressIds: [], failedIds: [] });
         try {
             const sources = visibleClipStates.map(item => {
                 const matches = productionSegmentRuntimeMatches(canvasNodes as any, item.id);
@@ -308,7 +350,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
             });
             const results = await translateCompiledH3Prompts(
                 sources.map((source, index) => ({ id: visibleClipStates[index].id, text: source.sourcePrompt })),
-                progress => setTranslationProgress(t("director.atomic.translationBatchProgress", { current: progress.completed, total: progress.total })),
+                progress => setTranslationProgress({ ...progress, phase: "translating" }),
             );
             const resultById = new Map(results.map(result => [result.id, result]));
             const cachedCount = results.filter(result => result.cached).length;
@@ -317,14 +359,23 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                 if (!result) throw new Error(`Clip ${visibleClipStates[index].id} 缺少翻译结果`);
                 return { ...source, translatedPrompt: result.translatedText };
             });
+            setTranslationProgress(current => current ? { ...current, phase: "writing", completed: translated.length, completedIds: translated.map(item => item.targetId), inProgressIds: [], failedIds: [] } : current);
             await onApplyTranslatedPrompts(translated);
             message.success(t("director.atomic.translationDone", { count: translated.length, cached: cachedCount }));
             setTranslationError("");
-            setTranslationProgress("");
+            setTranslationProgress({
+                phase: "complete",
+                completed: translated.length,
+                total: translated.length,
+                completedIds: translated.map(item => item.targetId),
+                cachedIds: results.filter(result => result.cached).map(result => result.id),
+                inProgressIds: [],
+                failedIds: [],
+            });
         } catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
             setTranslationError(detail || t("director.atomic.translationFailed"));
-            setTranslationProgress("");
+            setTranslationProgress(current => current ? { ...current, phase: "failed" } : current);
             message.error(t("director.atomic.translationFailed"));
         } finally {
             translatingPromptsRef.current = false;
@@ -439,6 +490,19 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
         if (shotIds && !shotIds.includes(activeId) && shotIds[0]) setSelectedId(shotIds[0]);
     };
     const sceneMenuItems = sceneOptions.map(option => ({ key: option.key || "__all__", label: <span className="flex items-center gap-3"><span>{option.label}</span><span className="text-xs tabular-nums text-muted-foreground">{option.count}</span></span> }));
+    const translationPercent = translationProgress?.total ? Math.round(translationProgress.completed / translationProgress.total * 100) : 0;
+    const translationInFlightCount = translationProgress?.inProgressIds.length || 0;
+    const translationFailedCount = translationProgress?.failedIds.length || 0;
+    const translationWaitingCount = Math.max(0, (translationProgress?.total || 0) - (translationProgress?.completed || 0) - translationInFlightCount - translationFailedCount);
+    const translationStatusFor = (id: string) => {
+        if (translationProgress?.failedIds.includes(id)) return "failed";
+        if (translationProgress?.phase === "failed" && translationProgress.failedIds.length === 0 && translationProgress.completedIds.includes(id)) return "writeFailed";
+        if (translationProgress?.phase === "complete" && translationProgress.completedIds.includes(id)) return "complete";
+        if (translationProgress?.phase === "writing" && translationProgress.completedIds.includes(id)) return "writing";
+        if (translationProgress?.inProgressIds.includes(id)) return "translating";
+        if (translationProgress?.completedIds.includes(id)) return translationProgress.cachedIds.includes(id) ? "cached" : "translated";
+        return "waiting";
+    };
     return <div className="space-y-6" data-subject-storyboard-workbench data-storyboard-view={view} data-canvas-id={canvasId} data-mobile-editing={mobileEditing && Boolean(selected) && view === "shots"} data-production-section-root>
         {/* 紧凑头部：标题 + 统计 + 视图页签合一行；「主体与图片 / 连续性台账」与顶部工作区页签重复，已去掉（连续性入口就是顶部工作区页签）。 */}
         <header className="storyboard-toolbar border-b border-border pb-1">
@@ -480,11 +544,55 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                 </span>)}
             </div>}
             {visibleClipStates.length > 0 && <div className="flex flex-wrap items-center justify-end gap-3">
-                {translationProgress && <span role="status" className="text-xs text-muted-foreground">{translationProgress}</span>}
                 <Button size="small" icon={<WandSparkles className="size-3.5" />} loading={translatingPrompts} disabled={!canTranslateCompiledPrompts} title={!visibleClipStates.every(item => item.tone === "ready") ? t("director.atomic.translationRequiresCompile") : undefined} onClick={() => void translateCompiledPrompts()}>
                     {translatingPrompts ? t("director.atomic.translationRunning") : t("director.atomic.translateCompiledPrompts")}
                 </Button>
             </div>}
+            {translationProgress && <section className="space-y-3 rounded-xl border border-border bg-card p-4 shadow-sm" aria-live="polite" data-translation-progress>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="flex min-w-0 items-start gap-3">
+                        <span className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><WandSparkles className="size-4" aria-hidden="true" /></span>
+                        <div className="min-w-0">
+                            <h3 className="m-0 text-sm font-semibold">{t(`director.atomic.translationPhase.${translationProgress.phase}`)}</h3>
+                            <p className="mt-1 mb-0 text-xs text-muted-foreground">{t("director.atomic.translationProgressSummary", { completed: translationProgress.completed, total: translationProgress.total })}</p>
+                        </div>
+                    </div>
+                    <span className="shrink-0 font-mono text-lg font-semibold tabular-nums">{translationPercent}%</span>
+                </div>
+                <Progress percent={translationPercent} showInfo={false} status={translationProgress.phase === "failed" ? "exception" : translationProgress.phase === "complete" ? "success" : "active"} strokeColor={translationProgress.phase === "failed" ? "#ef4444" : undefined} />
+                <div className="flex flex-wrap gap-2 text-xs">
+                    <span className="rounded-full border border-border px-2.5 py-1">{t("director.atomic.translationMetricCompleted", { count: translationProgress.completed })}</span>
+                    {translationInFlightCount > 0 && <span className="rounded-full border border-blue-500/30 bg-blue-500/5 px-2.5 py-1 text-blue-700 dark:text-blue-300">{t("director.atomic.translationMetricActive", { count: translationInFlightCount })}</span>}
+                    {translationWaitingCount > 0 && <span className="rounded-full border border-border px-2.5 py-1 text-muted-foreground">{t("director.atomic.translationMetricWaiting", { count: translationWaitingCount })}</span>}
+                    {translationProgress.cachedIds.length > 0 && <span className="rounded-full border border-border px-2.5 py-1"><Database className="mr-1 inline size-3" aria-hidden="true" />{t("director.atomic.translationMetricCached", { count: translationProgress.cachedIds.length })}</span>}
+                    {translationFailedCount > 0 && <span className="rounded-full border border-red-500/30 bg-red-500/5 px-2.5 py-1 text-red-700 dark:text-red-300">{t("director.atomic.translationMetricFailed", { count: translationFailedCount })}</span>}
+                </div>
+                <div className="grid max-h-72 grid-cols-1 gap-2 overflow-y-auto sm:grid-cols-2 xl:grid-cols-3" aria-label={t("director.atomic.translationClipList")}>
+                    {visibleClipStates.map((item, index) => {
+                        const status = translationStatusFor(item.id);
+                        const clip = clips.find(candidate => String(candidate.id) === item.id);
+                        const artifact = director.artifacts.find(candidate => candidate.kind === "h3" && String(candidate.targetId) === item.id);
+                        const promptLength = Array.from(String(artifact?.prompt || "")).length;
+                        const shotCount = clip ? clipShotIds(clip).length : 0;
+                        const statusLabel = t(`director.atomic.translationClipStatus.${status}`);
+                        return <button key={item.id} type="button" onClick={() => onClip(item.id)} className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-border bg-background/70 px-3 py-2.5 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50">
+                            <span className="flex min-w-0 items-center gap-2.5">
+                                {status === "complete" || status === "cached" ? <CheckCircle2 className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+                                    : status === "failed" ? <CircleAlert className="size-4 shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
+                                    : status === "writeFailed" ? <CircleAlert className="size-4 shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
+                                    : status === "translating" || status === "writing" ? <LoaderCircle className="size-4 shrink-0 animate-spin text-blue-600 dark:text-blue-400" aria-hidden="true" />
+                                    : status === "translated" ? <CheckCircle2 className="size-4 shrink-0 text-sky-600 dark:text-sky-400" aria-hidden="true" />
+                                    : <Circle className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />}
+                                <span className="min-w-0">
+                                    <span className="block truncate text-sm font-medium">{clipLabel(clips.findIndex(candidate => String(candidate.id) === item.id))}</span>
+                                    <span className="mt-0.5 block truncate text-xs text-muted-foreground">{t("director.atomic.translationClipDetail", { shots: shotCount, chars: promptLength })}</span>
+                                </span>
+                            </span>
+                            <span className={`shrink-0 text-xs ${status === "failed" || status === "writeFailed" ? "text-red-600 dark:text-red-400" : status === "complete" || status === "cached" ? "text-emerald-700 dark:text-emerald-300" : status === "translating" || status === "writing" ? "text-blue-700 dark:text-blue-300" : "text-muted-foreground"}`}>{statusLabel}</span>
+                        </button>;
+                    })}
+                </div>
+            </section>}
             {translationError && <Alert type="error" showIcon closable onClose={() => setTranslationError("")} message={t("director.atomic.translationFailed")} description={<pre className="m-0 whitespace-pre-wrap break-words font-sans text-sm">{translationError}</pre>} />}
             {clipsWithCompileErrors.length > 0 && <div className="mt-2 w-full space-y-2" data-previous-clip-compile-errors>
                 {clipsWithCompileErrors.map(item => <Alert key={item.id} type="error" showIcon message={`${t("director.studio.clipNumber", { number: clips.findIndex(clip => String(clip.id) === item.id) + 1 })} · ${t("director.atomic.compileTargetError")}`} description={<div className="space-y-2"><ul className="list-disc space-y-1 pl-5">{(item.messages.length ? item.messages : [t("director.atomic.compileTargetNoReason", { status: item.label })]).map((value, index) => <li key={`${item.id}:${index}`}>{value}</li>)}</ul><Button size="small" type="primary" icon={<WandSparkles className="size-3" />} disabled={busy || compileBusy || compilePending || !onCompile} onClick={() => onCompile?.(undefined, item.id)}>{t("director.atomic.compileOneClip", { clip: t("director.studio.clipNumber", { number: clips.findIndex(clip => String(clip.id) === item.id) + 1 }) })}</Button></div>} />)}
@@ -558,8 +666,20 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                 <aside className="storyboard-context space-y-6" hidden={detailView !== "context"}>
                     <div className="mb-4 flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs text-muted-foreground">{formatSeconds((windows.get(activeId)?.startFrame || 0) / fps)}–{formatSeconds((windows.get(activeId)?.endFrame || 0) / fps)}s</p></div><Tag color={refresh?.blockingDiagnostic ? "orange" : compiled ? "green" : undefined}>{statusLabel}</Tag></div>
 
-                    <section className="border-t border-border pt-4" data-production-section="shot-state" tabIndex={-1}><h3 className="text-sm font-medium">{t("director.atomic.state")}</h3><p className="mt-1 text-xs text-muted-foreground">{t(subjectAssembly ? "director.atomic.derivedState" : "director.atomic.legacyStateHint")}</p>{!subjectAssembly && shotStateFields && <div className="mt-3" data-shot-state>{shotStateFields}</div>}{continuityActions && <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-border pb-3 text-xs text-muted-foreground" data-shot-continuity-actions>{continuityActions}</div>}
+                    <section className="border-t border-border pt-4" data-production-section="shot-state" tabIndex={-1}><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-medium">{t("director.atomic.state")}</h3>{subjectAssembly && selected && <div className="flex items-center gap-2" data-shot-continuity-fact-editor><Button size="small" disabled={busy || !onSaveShotPatch} onClick={() => setContinuityFactModalOpen(true)}>{t("director.atomic.editContinuityFacts")}</Button>{continuityFactSelectionChanged && <Tag color="orange">{t("director.atomic.unsavedContinuityFacts")}</Tag>}</div>}</div><p className="mt-1 text-xs text-muted-foreground">{t(subjectAssembly ? "director.atomic.derivedState" : "director.atomic.legacyStateHint")}</p>{!subjectAssembly && shotStateFields && <div className="mt-3" data-shot-state>{shotStateFields}</div>}{continuityActions && <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-border pb-3 text-xs text-muted-foreground" data-shot-continuity-actions>{continuityActions}</div>}
                         {records(state?.start).length + records(state?.end).length > 0 ? <div className="mt-3 grid gap-4 sm:grid-cols-2">{(["start", "end"] as const).map(phase => <div key={phase} className="min-w-0"><p className="text-[11px] font-medium text-muted-foreground">{t("director.atomic.statePhase." + phase)}</p>{records(state?.[phase]).map(item => <div key={item.factId} className="mt-2"><p className="text-[10px] text-muted-foreground">{item.subjectId ? subjectDisplayName(source, String(item.subjectId)) : item.property}</p><p className="text-xs leading-5">{humanState.value(String(item.factId), item.value)}</p></div>)}{!records(state?.[phase]).length && <p className="mt-1 text-xs text-muted-foreground">{t("director.atomic.noState")}</p>}</div>)}</div> : <p className="mt-3 text-xs text-muted-foreground">{t("director.atomic.noState")}</p>}{records(state?.unresolved).length > 0 && <p className="mt-3 text-xs text-amber-600">{t("director.atomic.stateIssue")} · {records(state?.unresolved).map(item => humanState.fact(String(item.factId))).join(" · ")}</p>}</section>
+                    {subjectAssembly && selected && <Modal title={t("director.atomic.continuityFactSelection")} open={continuityFactModalOpen} width={640} onCancel={() => setContinuityFactModalOpen(false)} footer={<div className="flex items-center justify-between gap-3"><span className="text-xs text-muted-foreground">{continuityFactSelectionChanged ? t("director.atomic.unsavedContinuityFacts") : t("director.atomic.savedContinuityFacts")}</span><div className="flex gap-2"><Button disabled={savingContinuityFacts} onClick={() => setContinuityFactModalOpen(false)}>{t("common.cancel")}</Button><Button type="primary" loading={savingContinuityFacts} disabled={busy || !onSaveShotPatch || !continuityFactSelectionChanged} onClick={() => void saveContinuityFactSelection()}>{t("director.atomic.saveContinuityFacts")}</Button></div></div>}>
+                        <p className="mb-4 text-xs text-muted-foreground">{t("director.atomic.continuityFactSelectionHint")}</p>
+                        {selectedShotUsages.length ? <div className="space-y-4">{selectedShotUsages.map(usage => {
+                            const subject = subjects.find(item => String(item.id) === String(usage.subjectId));
+                            const entityRef = subject?.entityRef || {};
+                            const options = continuityFacts.filter(fact => String(fact.object_kind || "") === String(entityRef.kind || "") && String(fact.object_id || "") === String(entityRef.id || ""))
+                                .map(fact => ({ value: String(fact.id), label: humanState.fact(String(fact.id)) }));
+                            const optionIds = new Set(options.map(option => option.value));
+                            for (const factId of continuityFactIdsForUsage(usage)) if (!optionIds.has(factId)) options.push({ value: factId, label: humanState.fact(factId) || factId });
+                            return <label key={String(usage.subjectId)} className="grid gap-1 text-xs text-muted-foreground"><span>{subjectDisplayName(source, String(usage.subjectId))}</span><Select className="w-full" mode="multiple" value={continuityFactIdsForUsage(usage)} disabled={busy || savingContinuityFacts || !onSaveShotPatch || !options.length} placeholder={t("director.atomic.noContinuityFacts")} options={options} onChange={values => setContinuityFactDrafts(current => ({ ...current, [activeId]: { ...(current[activeId] || {}), [String(usage.subjectId)]: [...new Set(values.map(String))] } }))} /></label>;
+                        })}</div> : <p className="text-xs text-muted-foreground">{t("director.atomic.noContinuityFactSubjects")}</p>}
+                    </Modal>}
 
                     {/* 图片绑定的编辑控件原先在这里和「主体引用」页签各有一份、走两条写入路径；统一收进「主体引用」页签，侧栏只留一行指引和下面的只读解析列表。 */}
                     {subjectAssembly && selected && <section className="border-t border-border pt-4" data-shot-picture-binding-hint><p className="text-xs text-muted-foreground">{t("director.atomic.pictureBindingEditorMoved")}</p></section>}

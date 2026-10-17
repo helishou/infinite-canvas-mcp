@@ -3854,6 +3854,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     height: source.metadata?.naturalHeight || source.height,
                     bytes: source.metadata?.bytes || 0,
                     mimeType: source.metadata?.mimeType || "image/png",
+                    ...(source.type === CanvasNodeType.Config && source.metadata?.smart === true && (source.metadata.generationMode || "image") === "image"
+                        ? { sourceNodeId: source.id } : {}),
                 },
             });
             setCharacterImagePickerActive(false);

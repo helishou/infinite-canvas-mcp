@@ -1,12 +1,14 @@
 import fs from "node:fs";
 import { currentCompilationArtifact } from "../drama/compilation-scope.js";
 import path from "node:path";
-import os from "node:os";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawnSync, type ExecFileSyncOptionsWithStringEncoding, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
 import { directorModules, directorProductionSchema, canonicalProduction, isSubjectPromptAssembly, resolveSubjectPictureBindingIds, productionContractVersion, productionPreflightRequestSchema, diagnosticBlocksAction, type DirectorProduction, type ProductionDiagnostic, type ProductionPreflight } from "../drama/production-contract.js";
 import { productionOperationContract, schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch, ref2vaPromptDiagnostics, continuityBoundaryDiagnostics } from "../drama/production-validation.js";
+
+const canvasRepositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const defaultAchengHome = () => path.resolve(process.env.INFINITE_CANVAS_ACHENG_HOME || path.join(canvasRepositoryRoot, ".canvas-runtime"));
 
 let discoveredPython: string | undefined;
 let discoveredPythonLauncher: string[] | undefined;
@@ -406,8 +408,57 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
     return { director, exitCode, diagnostics, audit, sourceAdjustments, acceptance: JSON.parse(readFile("delivery.acceptance.json").toString("utf8")) };
 }
 
+const H3_COMPILER_FILES = [
+    "scripts/compile_h3.py", "scripts/canvas_subject_prompt_v2.py", "scripts/canvas_source_contract.py",
+    "scripts/canvas_h3_prompt_policy.py", "scripts/h3_contract.py", "scripts/h3_delivery.py", "scripts/h3_final_format.py",
+    "scripts/style_anchor.py", "scripts/reference_bindings.py", "scripts/prompt_delivery.py", "scripts/contract_core.py",
+    "scripts/audit_storyboard_quality.py", "scripts/story_contract.py", "scripts/continuity_v2.py",
+];
+const IMAGE_COMPILER_FILES = [
+    "scripts/compile_assets.py", "scripts/asset_plan.py", "scripts/canvas_model_contract.py", "scripts/asset_delivery.py",
+    "scripts/prompt_delivery.py", "scripts/reference_bindings.py", "scripts/contract_core.py", "scripts/audit_storyboard_quality.py",
+    "scripts/render_delivery_view.py", "scripts/style_anchor.py", "scripts/story_contract.py", "scripts/delivery_integrity.py",
+];
+type AchengCompilerHashes = { h3: string; image: string };
+
+function digestCompilerFiles(files: Array<{ key: string; path: string }>) {
+    const digest = crypto.createHash("sha256");
+    for (const file of files) {
+        digest.update(file.key).update("\0");
+        digest.update(fs.existsSync(file.path) ? fs.readFileSync(file.path) : "<missing>").update("\0");
+    }
+    return digest.digest("hex");
+}
+
+function compilerHashesFor(runtimePath: string, overlayDirectory?: string): AchengCompilerHashes {
+    const runtimeModule = fileURLToPath(import.meta.url);
+    const projectRoot = overlayDirectory ? path.resolve(overlayDirectory, "../..") : "";
+    const projectSkillScripts = projectRoot ? path.join(projectRoot, ".agents/skills/acheng-director/scripts") : "";
+    const runtimeFiles = (files: string[]) => files.map(file => ({ key: `runtime:${file}`, path: path.join(runtimePath, file) }));
+    const overlayFiles = (files: string[]) => overlayDirectory ? files.map(file => ({ key: `overlay:${file}`, path: path.join(overlayDirectory, file) })) : [];
+    const assetFiles = [
+        "compile_assets.py", "asset_plan.py", "post_hooks.py", "asset_delivery.py", "prompt_delivery.py",
+        "reference_bindings.py", "contract_core.py", "audit_storyboard_quality.py", "render_delivery_view.py",
+    ];
+    const projectAssetFiles = projectSkillScripts ? assetFiles.map(file => ({ key: `project:${file}`, path: path.join(projectSkillScripts, file) })) : [];
+    const sharedModule = [{ key: "acheng-runtime-module", path: runtimeModule }];
+    return {
+        h3: digestCompilerFiles([
+            ...runtimeFiles(H3_COMPILER_FILES),
+            ...overlayFiles(["canvas_subject_prompt_v2.py", "source-contract.py", "live-compile.py"]),
+            ...sharedModule,
+        ]),
+        image: digestCompilerFiles([
+            ...runtimeFiles(IMAGE_COMPILER_FILES),
+            ...overlayFiles(["live-compile.py"]),
+            ...projectAssetFiles,
+            ...sharedModule,
+        ]),
+    };
+}
+
 /** Resolve the active engine and, in the dev watcher, the current project-owned compiler overlays. */
-function liveCompilerOverlay() {
+function liveCompilerOverlay(runtimePath: string) {
     if (process.env.INFINITE_CANVAS_DEV_WATCH !== "1") return undefined;
     const candidates = [
         path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../scripts/acheng"),
@@ -432,16 +483,17 @@ function liveCompilerOverlay() {
     }
     const runtimeModule = fileURLToPath(import.meta.url);
     digest.update("acheng-runtime-module").update("\0").update(fs.readFileSync(runtimeModule)).update("\0");
-    return { directory, runnerPath: path.join(directory, "live-compile.py"), compilerHash: digest.digest("hex") };
+    return { directory, runnerPath: path.join(directory, "live-compile.py"), compilerHash: digest.digest("hex"), compilerHashes: compilerHashesFor(runtimePath, directory) };
 }
 
-export function resolveAchengEngine(home = process.env.CODEX_HOME || path.join(os.homedir(), ".codex")): AchengRuntime {
+export function resolveAchengEngine(home = defaultAchengHome()): AchengRuntime {
     const base = path.resolve(home, "skill-runtimes", "acheng-director");
     const state = JSON.parse(fs.readFileSync(path.join(base, "active.json"), "utf8")) as { active: { path: string; runtimeId: string; commit: string; patchVersion: string; version: string } };
     const resolved = resolveAchengRuntime(state.active.runtimeId, home);
     if (path.resolve(state.active.path) !== resolved.path) throw new Error("Acheng 激活路径与运行包不一致");
-    const liveCompiler = liveCompilerOverlay();
-    return liveCompiler ? { ...resolved, liveCompiler, compilerHash: liveCompiler.compilerHash } : resolved;
+    const liveCompiler = liveCompilerOverlay(resolved.path);
+    const compilerHashes = liveCompiler?.compilerHashes || compilerHashesFor(resolved.path);
+    return liveCompiler ? { ...resolved, liveCompiler, compilerHash: liveCompiler.compilerHash, compilerHashes } : { ...resolved, compilerHashes };
 }
 
 // 运行时完整性校验的指纹缓存：先用微秒级 stat 比对 mtime/size，全部未变才复用上次完整校验结果；
@@ -450,7 +502,7 @@ type ResolvedAchekRuntime = { runtimeId: string; commit: string; patchVersion: s
 const runtimeVerificationCache = new Map<string, { fingerprint: string; result: ResolvedAchekRuntime }>();
 export function resetAchengRuntimeCache() { runtimeVerificationCache.clear(); }
 
-export function resolveAchengRuntime(runtimeId: string, home = process.env.CODEX_HOME || path.join(os.homedir(), ".codex")): ResolvedAchekRuntime {
+export function resolveAchengRuntime(runtimeId: string, home = defaultAchengHome()): ResolvedAchekRuntime {
     const base = path.resolve(home, "skill-runtimes", "acheng-director");
     if (!/^[a-f0-9]{40}-[a-f0-9]{16}$/.test(runtimeId)) throw new Error("Acheng runtimeId 无效");
     const directory = path.join(base, "versions", runtimeId);
@@ -499,12 +551,14 @@ export function getProductionContract(runtimeId?: string, operationType?: string
 
 export type AchengRuntime = ReturnType<typeof resolveAchengRuntime> & {
     compilerHash?: string;
-    liveCompiler?: { directory: string; runnerPath: string; compilerHash: string };
+    compilerHashes?: AchengCompilerHashes;
+    liveCompiler?: { directory: string; runnerPath: string; compilerHash: string; compilerHashes: AchengCompilerHashes };
 };
 export type AchengSourceValidationScope = { shotIds: string[] };
 export function achengEngineIdentity(runtime: AchengRuntime): DirectorProduction["engine"] {
     return { runtimeId: runtime.runtimeId, commit: runtime.commit, patchVersion: runtime.patchVersion, version: runtime.version,
-        ...(runtime.compilerHash ? { compilerHash: runtime.compilerHash } : {}) };
+        ...(runtime.compilerHash ? { compilerHash: runtime.compilerHash } : {}),
+        ...(runtime.compilerHashes ? { compilerHashes: runtime.compilerHashes } : {}) };
 }
 
 /** Each new check follows the locally active runtime; its report records the actual validator. */

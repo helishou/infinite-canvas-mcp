@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import path from "node:path";
 import { createLogger } from "../logger.js";
 
 const logger = createLogger("llm-handoff");
@@ -79,6 +80,26 @@ function runHandoff(mode: "Free" | "Restore", timeoutMs: number): Promise<Handof
     });
 }
 
+/**
+ * 持久化「欠一次引擎恢复」标记。dev watch 热重载（tsx --watch）会重置模块内存，
+ * 若恰好在 Free 之后、Restore 之前重载，新进程不知道引擎还被我们关着，引擎就
+ * 一直躺着。写文件让新进程启动时能自愈（见本文件末尾的自愈逻辑）。
+ */
+const OWE_FLAG = process.env.LLM_HANDOFF_OWE_FLAG
+    || path.join(process.env.LOCALAPPDATA || process.env.TEMP || ".", "hermes", "llm-handoff-owe.json");
+
+function writeOweFlag(reason: string) {
+    try { writeFileSync(OWE_FLAG, JSON.stringify({ engine: ENGINE, reason, at: new Date().toISOString() }), "utf8"); }
+    catch (error) { logger.warn(`写欠恢复标记失败：${error instanceof Error ? error.message : String(error)}`); }
+}
+function clearOweFlag() {
+    try { rmSync(OWE_FLAG, { force: true }); } catch { /* ignore */ }
+}
+function readOweFlag(): { engine?: string; reason?: string; at?: string } | null {
+    try { return existsSync(OWE_FLAG) ? JSON.parse(readFileSync(OWE_FLAG, "utf8")) : null; }
+    catch { return null; }
+}
+
 /** 正在执行的 ComfyUI 任务数。>0 期间引擎必须保持关停。 */
 let activeCount = 0;
 /** Free 确实杀掉了引擎，还欠一次 Restore。 */
@@ -105,9 +126,13 @@ function scheduleRestore() {
         if (activeCount > 0) return;      // 窗口内又忙起来了，恢复交给那批任务
         if (!owesRestore) return;
         owesRestore = false;
+        clearOweFlag();
         restoreInFlight = true;
         void runHandoff("Restore", RESTORE_TIMEOUT_MS)
-            .then((res) => { if (!res.ok) logger.warn("引擎恢复未确认成功，下次生成前请检查 18080。"); })
+            .then((res) => {
+                if (res.ok) clearOweFlag();
+                else { writeOweFlag("restore-not-confirmed"); logger.warn("引擎恢复未确认成功，下次生成前请检查 18080。"); }
+            })
             .finally(() => { restoreInFlight = false; });
     }, RESTORE_IDLE_MS);
 }
@@ -124,7 +149,7 @@ export async function freeLlmBeforeGenerate(): Promise<boolean> {
         freeInFlight = null;
         // 只有脚本真的杀了进程，才欠一次恢复；"already drained" / "no engine" 不欠，
         // 所以本地根本没起 KVMem 时不会在生成结束后平白拉起一个引擎。
-        if (/Free:\s*stopping (port holder|worker)/i.test(res.output)) owesRestore = true;
+        if (/Free:\s*stopping (port holder|worker)/i.test(res.output)) { owesRestore = true; writeOweFlag("generation-freed"); }
         else logger.info("Free 未杀掉任何引擎进程（本地 LLM 未运行或显存本就够），本批不安排恢复。");
         return res.ok || !owesRestore;
     });
@@ -141,3 +166,23 @@ export function restoreLlmAfterGenerate(): void {
     if (!owesRestore) return;             // 没杀过引擎，没什么可恢复
     scheduleRestore();
 }
+
+/**
+ * 启动自愈：模块加载（含 dev watch 热重载）时若发现欠恢复标记，说明上一次进程
+ * 在 Free 之后被换掉了，引擎可能仍被我们关着。此时若 18080 确实没有引擎在应答，
+ * 就补一次恢复。正常情况（引擎已在跑 / 本地没起过 KVMem）标记不存在，什么都不做。
+ */
+void (async () => {
+    const flag = readOweFlag();
+    if (!flag) return;
+    const engine = flag.engine || ENGINE;
+    logger.info(`发现欠恢复标记（${flag.reason || "?"}，${flag.at || "?"}），检查 ${engine} 是否需要补恢复。`);
+    try {
+        const res = await fetch(`http://127.0.0.1:18080/v1/models`, { signal: AbortSignal.timeout(4000) });
+        if (res.ok) { clearOweFlag(); logger.info("18080 已有引擎在应答，清除欠恢复标记。"); return; }
+    } catch { /* 18080 无应答 -> 需要补恢复 */ }
+    logger.info(`18080 无引擎应答，启动自愈：恢复 ${engine}。`);
+    const res = await runHandoff("Restore", RESTORE_TIMEOUT_MS);
+    if (res.ok) { clearOweFlag(); logger.info("启动自愈完成，引擎已恢复。"); }
+    else logger.warn("启动自愈未能确认引擎恢复，请检查 18080。");
+})();

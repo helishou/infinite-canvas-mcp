@@ -98,7 +98,17 @@ export function startBackendWatch({ cwd = backend, directories = [path.join(back
             cwd, env: { ...env, PORT: String(publicPort), INFINITE_CANVAS_BACKEND_LISTEN_PORT: String(backendPort), INFINITE_CANVAS_DEV_WATCH: '1' }, stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
         });
         child.on('message', message => {
-            if (message?.type === 'dev:ready') { ready = true; proxy.setBackendReady(true); log.log(`[backend-watch] ready PID=${message.pid}`); requestReload(); }
+            if (message?.type === 'dev:ready') {
+                const readyChild = child;
+                void proxy.setListenHost(message.listenHost).then(() => {
+                    if (stopped || child !== readyChild) return;
+                    ready = true;
+                    proxy.setBackendReady(true);
+                    log.log(`[backend-watch] ready PID=${message.pid} publicHost=${proxy.server.address()?.address}`);
+                    requestReload();
+                }).catch(error => log.error(`[backend-watch] public listener bind failed: ${error.message}`));
+                return;
+            }
             if (message?.type !== 'dev:reload-status') return;
             requested = false;
             if (message.accepted) {
@@ -148,7 +158,7 @@ export function startBackendWatch({ cwd = backend, directories = [path.join(back
         start();
     });
     proxy.server.on('error', error => log.error(`[backend-watch] stable Backend proxy failed: ${error.message}`));
-    return { stop, get proxyPort() { return proxy.server.address()?.port || publicPort; } };
+    return { stop, get proxyPort() { return proxy.server.address()?.port || publicPort; }, get proxyAddress() { return proxy.server.address(); } };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

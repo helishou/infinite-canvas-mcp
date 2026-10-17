@@ -10,6 +10,22 @@ import { extensionForMime, mediaKindForMime, type MediaCategory, type MediaStore
 
 const MAX_MEDIA_BYTES = 200 * 1024 * 1024;
 
+/**
+ * 内容寻址去重：同 sha256、同字节数、且文件仍在盘上时，复用同一份物理文件，
+ * 只登记新的 storageKey（文件不重复落盘）。
+ *
+ * 为什么不能删掉共享文件：`media_files.storage_key` 才是业务身份，
+ * 画布/回执/编译产物引用的是 key，不是路径；同一份内容被多个 key 引用是正常的。
+ * 因此删除（`delete()`）必须先确认没有其它 key 还指向该文件。
+ */
+function reusablePath(db: BackendDatabase, sha256: string, bytes: number): string | null {
+    const existing = db.getMediaFileByDigest(sha256);
+    if (!existing || existing.bytes !== bytes) return null;
+    try { return fs.statSync(existing.filePath).size === bytes ? existing.filePath : null; }
+    catch { return null; // 老文件已丢失，按新内容重新落盘
+    }
+}
+
 /** 媒体 store：media_files 表 + runtime-media/{input,output,library} 文件系统。 */
 export function createMediaStore(db: BackendDatabase): MediaStore {
     const kindFor = (mime: string, fileName = "") => mediaKindForMime(mime, fileName);
@@ -25,9 +41,13 @@ export function createMediaStore(db: BackendDatabase): MediaStore {
             const extension = path.extname(name).replace(/[^a-z0-9.]/gi, "").slice(0, 12) || extensionForMime(mimeType);
             const category = safeCategory(options.category);
             const categoryDir = path.join(MEDIA_DIR, category);
-            const filePath = path.join(categoryDir, `${randomUUID()}${extension}`);
-            fs.mkdirSync(categoryDir, { recursive: true, mode: 0o700 });
-            fs.writeFileSync(filePath, data, { mode: 0o600 });
+            const sha256 = createHash("sha256").update(data).digest("hex");
+            const reuse = reusablePath(db, sha256, data.length);
+            const filePath = reuse ?? path.join(categoryDir, `${randomUUID()}${extension}`);
+            if (!reuse) {
+                fs.mkdirSync(categoryDir, { recursive: true, mode: 0o700 });
+                fs.writeFileSync(filePath, data, { mode: 0o600 });
+            }
             const media: MediaFile = {
                 storageKey,
                 filePath,
@@ -37,7 +57,7 @@ export function createMediaStore(db: BackendDatabase): MediaStore {
                 height: options.height ?? null,
                 durationMs: options.durationMs ?? null,
                 createdAt: new Date().toISOString(),
-                sha256: createHash("sha256").update(data).digest("hex"),
+                sha256,
             };
             db.upsertMediaFile(media);
             return media;
@@ -64,15 +84,24 @@ export function createMediaStore(db: BackendDatabase): MediaStore {
                 },
             });
             let filePath = "";
+            let createdPath = "";
             try {
                 await pipeline(source, limit, fs.createWriteStream(tempPath, { flags: "wx", mode: 0o600 }));
                 if (!bytes) throw new Error("媒体为空");
                 const mimeType = options.resolveMimeType?.(prefix, bytes) || options.mimeType || "application/octet-stream";
                 const storageKey = options.storageKey || `${kindFor(mimeType, name)}:${randomUUID()}`;
                 const extension = path.extname(name).replace(/[^a-z0-9.]/gi, "").slice(0, 12) || extensionForMime(mimeType);
-                filePath = path.join(categoryDir, `${randomUUID()}${extension}`);
-                await fs.promises.rename(tempPath, filePath);
                 const sha256 = digest.digest("hex");
+                const reuse = reusablePath(db, sha256, bytes);
+                if (reuse) {
+                    // 已有同内容文件：丢弃刚落盘的临时文件，登记同一份物理文件。
+                    filePath = reuse;
+                    try { await fs.promises.unlink(tempPath); } catch { /* 临时文件已不在 */ }
+                } else {
+                    filePath = path.join(categoryDir, `${randomUUID()}${extension}`);
+                    createdPath = filePath;
+                    await fs.promises.rename(tempPath, filePath);
+                }
                 const media: MediaFile = {
                     storageKey,
                     filePath,
@@ -88,7 +117,8 @@ export function createMediaStore(db: BackendDatabase): MediaStore {
                 return { ...media, sha256, prefix };
             } catch (error) {
                 try { fs.unlinkSync(tempPath); } catch { /* partial media may not have been created */ }
-                if (filePath) try { fs.unlinkSync(filePath); } catch { /* archived media may not have been committed */ }
+                // 只清理由本次调用真实创建的文件；`filePath` 可能是复用来的共享文件，绝不能删。
+                if (createdPath) try { fs.unlinkSync(createdPath); } catch { /* archived media may not have been committed */ }
                 throw error;
             }
         },
@@ -147,7 +177,10 @@ export function createMediaStore(db: BackendDatabase): MediaStore {
             const media = db.getMediaFile(storageKey);
             if (!media) return 0;
             db.deleteMediaFile(storageKey);
-            try { fs.unlinkSync(media.filePath); } catch { /* 文件可能已不在 */ }
+            // 内容寻址后同一份文件可能被多个 storage_key 共享：最后一个引用消失才删文件。
+            if (db.countMediaFileSharers(media.filePath, storageKey) === 0) {
+                try { fs.unlinkSync(media.filePath); } catch { /* 文件可能已不在 */ }
+            }
             return 1;
         },
     };
