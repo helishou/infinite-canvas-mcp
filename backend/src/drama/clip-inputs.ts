@@ -10,6 +10,7 @@ import { buildCharacterGroupFromExistingNode } from "@basketikun/canvas-agent/pl
 import { assertReferenceCompilation, compileReferenceSubmission } from "@basketikun/canvas-agent/reference-contract";
 import { canonicalProduction, isSubjectPromptAssembly, productionSceneEntries, promptSourceMapSchema, resolveSubjectPictureBindingIds, type EpisodeProductionData, type ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/production-contract";
 import { directorArtifact } from "./director.js";
+import type { SharedSubjectPictureMedia } from "./shared-subject-picture.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
 const stableId = (kind: string, ...parts: string[]) => `${kind}-${crypto.createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24)}`;
 const object = (value: any): Record<string, any> => value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -17,6 +18,7 @@ export type ReferenceSync = { targetId: string; status: "ready" | "blocked"; ref
 export const CLIP_PROJECTION_FIELDS = ["sourceShotId", "title", "duration", "taskMode", "prompt", "referenceBindings", "tailFrameContinuation", "motionContextEnabled", "directorEngine", "directorSourceHash", "styleTemplateId", "h3CharacterGroups", "storyboardShots", "aspectRatio", "modelName"];
 const ACTIVE_H3_SEGMENT_STATUSES = new Set(["pending", "queued", "loading", "running", "generating", "awaiting_confirmation", "awaiting_review", "paused", "cancelling"]);
 const TERMINAL_H3_SEGMENT_STATUSES = new Set(["idle", "success", "succeeded", "failed", "error", "cancelled", "canceled", "complete", "completed"]);
+type SharedClipImage = { storageKey?: string; url?: string; mimeType?: string; name?: string; bindingId?: string };
 function hasActiveH3SegmentTask(segment: Record<string, any>) {
     const status = String(segment.status || "").toLowerCase();
     if (ACTIVE_H3_SEGMENT_STATUSES.has(status)) return true;
@@ -34,6 +36,39 @@ function normalizeProjectedReferenceRoles(value: unknown) {
         return normalized;
     }) : value;
 }
+
+function enabledImageBindings(value: unknown) {
+    return Array.isArray(value) ? value.map(object).filter(binding => binding.enabled !== false
+        && (String(binding.mediaType || "image") === "image")) : [];
+}
+
+function referenceBindingMatch(left: Record<string, any>, right: Record<string, any>) {
+    const leftId = String(left.id || ""), rightId = String(right.id || "");
+    if (leftId && rightId && leftId === rightId) return true;
+    const leftNodeId = String(left.sourceNodeId || ""), rightNodeId = String(right.sourceNodeId || "");
+    const leftMedia = String(left.storageKey || left.url || ""), rightMedia = String(right.storageKey || right.url || "");
+    return Boolean(leftNodeId && leftNodeId === rightNodeId && leftMedia && leftMedia === rightMedia);
+}
+
+/** Rebase Picture ordinals by binding identity when a formal prompt meets a manually reordered reference list. */
+export function remapPromptPicturesByBinding(prompt: string, beforeValue: unknown, afterValue: unknown) {
+    const before = enabledImageBindings(beforeValue), after = enabledImageBindings(afterValue);
+    if (before.length !== after.length) return undefined;
+    const matches = before.map(binding => {
+        const candidates = after.map((candidate, index) => ({ candidate, index })).filter(item => referenceBindingMatch(binding, item.candidate));
+        return candidates.length === 1 ? candidates[0].index + 1 : undefined;
+    });
+    if (matches.some(value => value === undefined) || new Set(matches).size !== after.length) return undefined;
+    const ordinals = new Map(before.map((_, index) => [index + 1, matches[index]!]));
+    let unresolved = false;
+    const remapped = prompt.replace(/<Picture\s+(\d+)>/giu, (tag, number: string) => {
+        const target = ordinals.get(Number(number));
+        if (target === undefined) { unresolved = true; return tag; }
+        return `<Picture ${target}>`;
+    });
+    return unresolved ? undefined : remapped;
+}
+
 /**
  * `h3CharacterGroups` mixes authored selection with generated identity. An outfit
  * row's `id` is a hash of the source character node plus its image key, so
@@ -50,6 +85,30 @@ function normalizeProjectedCharacterGroups(value: unknown) {
             return rest;
         });
         return [id, normalized];
+    }));
+}
+/** Character-group outfits are a derived H3 view of the Subject bindings selected by this Clip. */
+export function reconcileCharacterGroupOutfitSelection(groupsValue: unknown, bindingsValue: unknown) {
+    if (!groupsValue || typeof groupsValue !== "object" || Array.isArray(groupsValue)) return groupsValue;
+    const bindings = Array.isArray(bindingsValue) ? bindingsValue.map(object).filter(binding => binding.enabled !== false
+        && String(binding.mediaType || "image") === "image") : [];
+    return Object.fromEntries(Object.entries(groupsValue as Record<string, unknown>).map(([groupId, raw]) => {
+        const group = object(raw);
+        if (!Array.isArray(group.outfits)) return [groupId, group];
+        const nodeId = String(group.characterNodeId || "");
+        const outfits = group.outfits.map((rawOutfit) => {
+            const outfit = object(rawOutfit), outfitId = String(outfit.id || "");
+            const storageKey = String(outfit.storageKey || ""), url = String(outfit.url || "");
+            const selected = bindings.some(binding => {
+                const sameSlot = String(binding.groupId || "") === groupId && String(binding.outfitId || "") === outfitId;
+                const sameSource = Boolean(nodeId && String(binding.sourceNodeId || "") === nodeId
+                    && ((storageKey && String(binding.storageKey || "") === storageKey)
+                        || (!storageKey && url && String(binding.url || "") === url)));
+                return sameSlot || sameSource;
+            });
+            return { ...outfit, enabled: selected };
+        });
+        return [groupId, { ...group, outfits, outfitEnabled: outfits.some(outfit => object(outfit).enabled === true) }];
     }));
 }
 /** Compare a projected field the way its authored meaning is defined, not its generated bytes. */
@@ -84,6 +143,140 @@ export function clipInputHash(segment: Record<string, any>) {
     if (segment.productionClipProjection?.styleTemplateDeclared === true) fields.push(["styleTemplateDeclared", true]);
     return clipFieldHash(fields);
 }
+
+/** Rebase only H3 media fields that point at the changed shared entity source. */
+export function sharedAssetClipInputOperations(project: Record<string, any>, source: { sourceProjectId: string; sourceNodeId: string },
+    media: SharedSubjectPictureMedia[]): CanvasOperation[] {
+    if (!media.length) return [];
+    const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, any>> : [];
+    const nodeById = new Map(nodes.map(node => [String(node.id || ""), node]));
+    const mediaByBindingId = new Map(media.map(item => [item.bindingId, item]));
+    const linkedNode = (nodeId: string) => {
+        const node = nodeById.get(nodeId), metadata = object(node?.metadata);
+        const ref = object(metadata.sharedAssetReference || metadata.sharedAssetOrigin);
+        return node && ref.sourceProjectId === source.sourceProjectId && ref.sourceNodeId === source.sourceNodeId ? node : undefined;
+    };
+    const roleMatches = (role: string, item: SharedSubjectPictureMedia) => {
+        const aliases: Record<string, string[]> = { character_identity: ["identity", "appearance"], character_turnaround: ["identity", "turnaround", "clothing"], environment: ["environment", "scene"], scene: ["environment", "scene"], prop: ["prop", "identity"] };
+        const values = aliases[role] || [role];
+        return item.provides.some(value => values.includes(value)) || item.defaultFor.some(value => values.includes(value));
+    };
+    const characterImageFor = (reference: Record<string, any>, node: Record<string, any> | undefined): SharedClipImage | undefined => {
+        if (!node || node.type !== "character") return undefined;
+        const images = Array.isArray(node.metadata?.characterImages) ? node.metadata.characterImages as Array<Record<string, any>> : [];
+        if (!images.length) return undefined;
+        // The exact sourceNodeId has already established provenance. Within that node,
+        // use the persisted H3 label to retain which shared look/outfit each slot means.
+        const label = String(reference.label || "").split(/\s+[·•]\s+/).pop()?.trim() || "";
+        const labels = (image: Record<string, any>) => [image.outfit, image.name, image.title].map(value => String(value || "").trim()).filter(Boolean);
+        const matches = label ? images.filter(image => labels(image).some(value => label === value || label.endsWith(value))) : [];
+        const picked = matches.length === 1 ? matches[0] : images.find(image => {
+            const key = String(image.storageKey || image.url || image.content || "");
+            return key && key === String(reference.storageKey || reference.url || "");
+        });
+        if (!picked) return undefined;
+        return { ...picked, storageKey: String(picked.storageKey || ""), url: String(picked.url || picked.content || ""),
+            mimeType: String(picked.mimeType || "image/png"), name: String(picked.outfit || picked.name || picked.title || node.title || "") };
+    };
+    const outfitImageBySlot = new Map<string, Map<string, SharedClipImage>>();
+    for (const h3Node of nodes) {
+        if (!String(h3Node.type || "").startsWith("minimax-h3:")) continue;
+        const clipSegments = Array.isArray(h3Node.metadata?.segments) ? h3Node.metadata.segments as Array<Record<string, any>> : [];
+        for (const segment of clipSegments) {
+            for (const reference of Array.isArray(segment.referenceBindings) ? segment.referenceBindings as Array<Record<string, any>> : []) {
+                const groupId = String(reference.groupId || ""), outfitId = String(reference.outfitId || ""), sourceNodeId = String(reference.sourceNodeId || "");
+                if (!groupId || !outfitId || !linkedNode(sourceNodeId)) continue;
+                const image = characterImageFor(reference, linkedNode(sourceNodeId));
+                if (!image?.storageKey) continue;
+                const slot = `${sourceNodeId}\0${groupId}\0${outfitId}`;
+                const candidates = outfitImageBySlot.get(slot) || new Map<string, SharedClipImage>();
+                candidates.set(image.storageKey, image);
+                outfitImageBySlot.set(slot, candidates);
+            }
+        }
+    }
+    const mediaFor = (reference: Record<string, any>, nodeId: string): SharedClipImage | undefined => {
+        const direct = String(reference.pictureBindingId || "");
+        if (direct && mediaByBindingId.has(direct)) return mediaByBindingId.get(direct);
+        const nodeCandidates = media.filter(item => item.nodeId === nodeId);
+        const subjectCandidates = reference.subjectId ? nodeCandidates.filter(item => item.subjectId === String(reference.subjectId)) : [];
+        // Older Clip snapshots sometimes store the stable production entity ID in
+        // subjectId instead of the Subject registry ID. The exact source node is
+        // still authoritative, so only use it when it yields an unambiguous binding.
+        let candidates = subjectCandidates.length ? subjectCandidates : nodeCandidates;
+        const roleCandidates = candidates.filter(item => roleMatches(String(reference.role || ""), item));
+        if (roleCandidates.length) candidates = roleCandidates;
+        if (candidates.length === 1) return candidates[0];
+        const defaults = candidates.filter(item => item.defaultFor.includes("identity"));
+        return defaults.length === 1 ? defaults[0] : undefined;
+    };
+    const operations: CanvasOperation[] = [];
+    for (const node of nodes) {
+        if (!String(node.type || "").startsWith("minimax-h3:")) continue;
+        const segments = Array.isArray(node.metadata?.segments) ? node.metadata.segments as Array<Record<string, any>> : [];
+        for (const segment of segments) {
+            const priorHash = clipInputHash(segment);
+            const refs = Array.isArray(segment.referenceBindings) ? segment.referenceBindings as Array<Record<string, any>> : [];
+            let changed = false;
+            const referenceBindings: Array<Record<string, any>> = refs.map(reference => {
+                const sourceNodeId = String(reference.sourceNodeId || "");
+                const sourceNode = linkedNode(sourceNodeId);
+                if (!sourceNode) return reference;
+                const selected = characterImageFor(reference, sourceNode) || mediaFor(reference, sourceNodeId);
+                const next = selected
+                    ? { ...reference, storageKey: selected.storageKey, url: selected.url || "", mimeType: selected.mimeType,
+                        sourceNodeId, pictureBindingId: reference.pictureBindingId || selected.bindingId, enabled: true }
+                    : { ...reference, storageKey: "", url: "", sourceNodeId };
+                if (canonicalProduction(reference) !== canonicalProduction(next)) changed = true;
+                return next;
+            });
+            const groups = object(segment.h3CharacterGroups);
+            const h3CharacterGroups = Object.fromEntries(Object.entries(groups).map(([groupId, raw]) => {
+                const group = object(raw), sourceNodeId = String(group.characterNodeId || ""), characterNode = linkedNode(sourceNodeId);
+                if (!characterNode) return [groupId, raw];
+                const metadata = object(characterNode.metadata);
+                const groupEnabled = new Map(referenceBindings.filter(reference => String(reference.groupId || "") === groupId)
+                    .map(reference => [String(reference.outfitId || ""), reference.enabled !== false]));
+                const outfits = (Array.isArray(group.outfits) ? group.outfits : []).map((rawOutfit: unknown) => {
+                    const outfit = object(rawOutfit);
+                    const linkedReference = referenceBindings.find(reference => String(reference.groupId || "") === groupId
+                        && String(reference.outfitId || "") === String(outfit.id || ""));
+                    const siblingImages = outfitImageBySlot.get(`${sourceNodeId}\0${groupId}\0${String(outfit.id || "")}`);
+                    const siblingImage = siblingImages?.size === 1 ? [...siblingImages.values()][0] : undefined;
+                    const selected = (linkedReference ? characterImageFor(linkedReference, characterNode) : undefined)
+                        || siblingImage || characterImageFor(outfit, characterNode)
+                        || mediaFor({ ...outfit, subjectId: group.subjectId, role: outfit.role }, sourceNodeId);
+                    const next = selected
+                        ? { ...outfit, url: selected.url || "", storageKey: selected.storageKey, mimeType: selected.mimeType, name: selected.name,
+                            pictureBindingId: outfit.pictureBindingId || selected.bindingId,
+                            ...(groupEnabled.has(String(outfit.id || "")) ? { enabled: groupEnabled.get(String(outfit.id || "")) } : {}) }
+                        : { ...outfit, url: "", storageKey: "" };
+                    if (canonicalProduction(outfit) !== canonicalProduction(next)) changed = true;
+                    return next;
+                });
+                const voice = metadata.characterVoiceUrl ? { url: metadata.characterVoiceUrl, name: metadata.characterVoiceName || "声线",
+                    description: metadata.characterVoiceDescription || undefined, storageKey: metadata.characterVoiceStorageKey || undefined,
+                    assetId: metadata.characterVoiceAssetId || undefined } : undefined;
+                const nextGroup = { ...group, characterName: metadata.characterName || characterNode.title || group.characterName,
+                    characterAssetId: metadata.characterAssetId || group.characterAssetId, outfits, voice };
+                if (canonicalProduction(group) !== canonicalProduction(nextGroup)) changed = true;
+                return [groupId, nextGroup];
+            }));
+            if (!changed) continue;
+            const nextSegment: Record<string, any> = { ...segment, referenceBindings, h3CharacterGroups };
+            const inputChanged = clipInputHash(nextSegment) !== priorHash;
+            const projection = object(segment.productionClipProjection);
+            const fieldHashes = { ...object(projection.fieldHashes),
+                referenceBindings: clipFieldHash(referenceBindings), h3CharacterGroups: clipFieldHash(h3CharacterGroups) };
+            nextSegment.productionClipProjection = { ...projection,
+                nextValues: { ...object(projection.nextValues), referenceBindings, h3CharacterGroups }, fieldHashes,
+                inputHash: clipInputHash(nextSegment) };
+            if (segment.resultStorageKey && inputChanged) nextSegment.inputOutdated = true;
+            operations.push({ type: "update_h3_segment", nodeId: String(node.id), segmentId: String(segment.id), patch: nextSegment });
+        }
+    }
+    return operations;
+}
 function hasMissingPromptReferenceBindings(segment: Record<string, any>) {
     const bindings = Array.isArray(segment.referenceBindings) ? segment.referenceBindings.filter((binding: any) => binding?.enabled !== false) : [];
     const maximum: Record<string, number> = { Picture: 0, Video: 0, Audio: 0 };
@@ -112,7 +305,7 @@ function referenceMatchesSubjectFrame(director: NonNullable<EpisodeProductionDat
     const storageKey = String(asset?.storageKey || "");
     return Boolean(nodeId && referenceNodeId === nodeId && (!storageKey || String(reference.storageKey || "") === storageKey));
 }
-function reconcileSubjectImageReferences(segment: Record<string, any>, director: NonNullable<EpisodeProductionData["director"]>, group: EpisodeProductionData["clipGroups"][number]) {
+function reconcileSubjectImageReferences(segment: Record<string, any>, director: NonNullable<EpisodeProductionData["director"]>, group: EpisodeProductionData["clipGroups"][number], compiledBindings?: unknown) {
     if (!isSubjectPromptAssembly(director.source)) return;
     const subjects = (Array.isArray(director.source.subject_registry) ? director.source.subject_registry : []).map(object);
     const subjectsById = new Map(subjects.map(subject => [String(subject.id || ""), subject]));
@@ -164,7 +357,8 @@ function reconcileSubjectImageReferences(segment: Record<string, any>, director:
         const used = referenceIsUsed(reference);
         return used === undefined || used;
     });
-    const groups = object(segment.h3CharacterGroups);
+    const groups = reconcileCharacterGroupOutfitSelection(segment.h3CharacterGroups, compiledBindings ?? segment.referenceBindings) as Record<string, any>;
+    segment.h3CharacterGroups = groups;
     for (const [id, value] of Object.entries(groups)) {
         const characterGroup = object(value), subjectId = String(characterGroup.subjectId || "");
         if (subjectId && subjectsById.has(subjectId) && !visuallyUsedSubjectIds.has(subjectId) && characterGroup.outfitEnabled !== false) {
@@ -193,15 +387,26 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
             ids.add(String(subject.id)); subjectIdsByAsset.set(assetId, ids);
         }
     }
+    const pictureBindingIdFor = (ref: Record<string, any>, subjectId: string | undefined) => {
+        if (!subjectId) return undefined;
+        const subject = (Array.isArray(d.source.subject_registry) ? d.source.subject_registry : [])
+            .map(object).find(item => String(item.id || "") === subjectId);
+        const matches = (Array.isArray(subject?.pictureBindings) ? subject.pictureBindings : []).map(object)
+            .filter(binding => String(object(binding.sourceNode).nodeId || "") === String(ref.nodeId || "")
+                && String(binding.assetId || "") === String(ref.assetId || ""));
+        return matches.length === 1 ? String(matches[0].id || "") || undefined : undefined;
+    };
     const bindings: Array<Record<string, unknown>> = authored.references.map((ref, index) => {
         const subjectIds = subjectIdsByAsset.get(String(ref.assetId || ""));
         const subjectId = ref.role === "keyframe" || ref.role === "storyboard" || subjectIds?.size !== 1 ? undefined : [...subjectIds][0];
+        const pictureBindingId = pictureBindingIdFor(ref, subjectId);
         return {
             id: stableId("binding", group.id, ref.label), assetId: stableId("asset", ref.nodeId, ref.storageKey),
             label: ref.label, role: ref.role === "environment" ? "scene" : ref.role, tags: [], enabled: true, usage: "reference",
             mediaType: ref.label.startsWith("<Video") ? "video" : ref.label.startsWith("<Audio") ? "audio" : "image",
             storageKey: ref.storageKey, sourceNodeId: ref.nodeId, order: index,
             ...(ref.subjectId || subjectId ? { subjectId: ref.subjectId || subjectId } : {}),
+            ...(pictureBindingId ? { pictureBindingId } : {}),
         };
     });
     const characterGroups: Record<string, unknown> = {};
@@ -225,10 +430,15 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
         // Keep the exact compiler bindings in that case; the group is optional UI
         // metadata and must not change the compiled image count.
         if (mappedPictureRefs.some(ref => !ref) || new Set(mappedPictureRefs.map(ref => ref!.id)).size !== pictureRefs.length) continue;
-        characterGroups[built.group.id] = built.group;
+        const groupOutfits = built.group.outfits.map(outfit => {
+            const projectedReference = bindings.find(ref => ref.sourceNodeId === characterNodeId && ref.storageKey === outfit.storageKey);
+            const pictureBindingId = String(projectedReference?.pictureBindingId || "") || undefined;
+            return pictureBindingId ? { ...outfit, pictureBindingId } : outfit;
+        });
+        characterGroups[built.group.id] = { ...built.group, outfits: groupOutfits };
         bindings.forEach((binding, index) => {
             const groupRef = built.refs.find(ref => ref.storageKey === binding.storageKey && ref.sourceNodeId === binding.sourceNodeId);
-            if (groupRef) bindings[index] = { ...groupRef, order: index };
+            if (groupRef) bindings[index] = { ...groupRef, order: index, ...(binding.pictureBindingId ? { pictureBindingId: binding.pictureBindingId } : {}) };
         });
     }
     const taskMode = ({ T2VA: "t2v", I2VA: "i2v", FL2VA: "fl2v", L2VA: "l2v", Ref2VA: "ref2va" } as Record<string, string>)[String(planned.mode)];
@@ -365,7 +575,36 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
                 mergedSegment.tailFrameContinuation = segment.tailFrameContinuation;
                 mergedSegment.motionContextEnabled = segment.motionContextEnabled;
             }
-            reconcileSubjectImageReferences(mergedSegment, data.director!, group);
+            reconcileSubjectImageReferences(mergedSegment, data.director!, group, segment.referenceBindings);
+            if (overwriteCompiledPrompt) {
+                // The persisted referenceBindings array may omit character-group rows;
+                // H3 appends the selected group outfits after standalone references.
+                // Compile that effective H3 view before rebasing the formal artifact tags.
+                const hasManualReferences = merged.manualFields.includes("referenceBindings");
+                let alignedPrompt: string | undefined;
+                try {
+                    const effective = compileReferenceSubmission(project, mergedSegment);
+                    alignedPrompt = remapPromptPicturesByBinding(segment.prompt, segment.referenceBindings, effective.references);
+                } catch {
+                    alignedPrompt = undefined;
+                }
+                if (alignedPrompt !== undefined) {
+                    mergedSegment.prompt = alignedPrompt;
+                } else if (hasManualReferences) {
+                    // The saved references were manually changed beyond a pure reorder.
+                    // Keep their paired prompt and reference/group inputs until the user
+                    // adopts the compiled pair from the projection receipt.
+                    mergedSegment.prompt = existing.prompt;
+                    mergedSegment.referenceBindings = existing.referenceBindings;
+                    mergedSegment.h3CharacterGroups = existing.h3CharacterGroups;
+                    if (canonicalProduction(existing.prompt ?? null) !== canonicalProduction(segment.prompt ?? null)) {
+                        if (!merged.conflicts.includes("prompt")) merged.conflicts.push("prompt");
+                        if (!merged.manualFields.includes("prompt")) merged.manualFields.push("prompt");
+                    }
+                } else {
+                    mergedSegment.prompt = segment.prompt;
+                }
+            }
             // Keep the archived result attached; only mark it old when its projected input changes.
             const inputChanged = clipInputHash(existing) !== clipInputHash(mergedSegment);
             const inputOutdated = existing.inputOutdated === true || Boolean(existing.resultStorageKey && inputChanged);
@@ -380,9 +619,12 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
                 .filter(field => canonicalProduction(mergedSegment[field] ?? null) !== canonicalProduction(segment[field] ?? null));
             const manualFields = (repairDuration ? merged.manualFields.filter(field => field !== "duration") : merged.manualFields)
                 .filter(field => canonicalProduction(mergedSegment[field] ?? null) !== canonicalProduction(segment[field] ?? null));
+            const projectionGroups = groups.flatMap(fields => fields.includes("referenceBindings")
+                ? [["referenceBindings", "prompt"], fields.filter(field => field !== "referenceBindings" && field !== "prompt")]
+                : fields.includes("prompt") ? [] : [fields]).filter(fields => fields.length > 0);
             const projection = { ...segment.productionClipProjection,
                 ...(repairDuration ? { fieldHashes: { ...segment.productionClipProjection.fieldHashes, duration: clipFieldHash(storyboardTotal) } } : {}),
-                nextValues, fieldGroups: groups, conflicts, manualFields };
+                nextValues, fieldGroups: projectionGroups, conflicts, manualFields };
             segment = { ...mergedSegment, inputOutdated, productionClipProjection: projection };
             if (inputOutdated) group.inputOutdated = true;
             if (conflicts.length) result.diagnostics.push({ code: "MANUAL_INPUT_CONFLICT", message: `存在人工修改与正式源稿冲突，已保留画布输入：${conflicts.join(",")}` });

@@ -1030,14 +1030,9 @@ function isH3NodeType(type: string): boolean {
     return /^minimax|^smart-minimax/.test(type);
 }
 
-/** 检查 pendingOps 在 remote 上是否仍然合法：每条 op 的目标必须和 remote 一致才视为无冲突。
- *  - add_node        → 远端已存在同 id = 冲突（会被 update 覆盖或重命名丢失）
- *  - update_node     → 节点被删，或同一字段已被远端改动 = 冲突（避免旧快照覆盖 MCP/其它窗口的更新）
- *  - delete_node     → 远端已无此 id = no-op（不算冲突）
- *  - connect_nodes   → 远端已有同 id connection = 冲突（重复 connect）
- *  - delete_connections → 远端已无此 id = no-op
- *  - update_project → 按实际修改字段检查并发 */
-export function detectCanvasConflicts(pendingOps: Array<Record<string, unknown>>, remote: CanvasProject, base?: CanvasProject | CanvasConflictBaseline, options?: { guardLayout?: boolean }): CanvasConflictTarget[] {
+/** 仅拦截结构上无法安全重放的动作；字段竞争交给 Backend 按提交顺序处理。
+ * 删除后可依据请求基线恢复节点/Clip；缺少该基线或结构目标时保留草稿并提示冲突。 */
+export function detectCanvasConflicts(pendingOps: Array<Record<string, unknown>>, remote: CanvasProject, base?: CanvasProject | CanvasConflictBaseline, _options?: { guardLayout?: boolean }): CanvasConflictTarget[] {
     const remoteNodeIds = new Set(remote.nodes.map((node) => node.id));
     const remoteConnectionIds = new Set(remote.connections.map((connection) => connection.id));
     const baseNodes = new Map((base?.nodes || []).map((node) => [node.id, node]));
@@ -1051,25 +1046,13 @@ export function detectCanvasConflicts(pendingOps: Array<Record<string, unknown>>
             if (id && remoteNodeIds.has(id)) targets.push({ id, kind: "add", detail: `节点「${String(op.title || id)}」在远端已存在，重复添加会被覆盖` });
         } else if (type === "update_node") {
             const id = String(op.id || "");
-            if (id && !remoteNodeIds.has(id)) targets.push({ id, kind: "update", detail: `要更新的节点「${id}」在远端已被删除` });
+            if (id && !remoteNodeIds.has(id) && !baseNodes.has(id)) targets.push({ id, kind: "update", detail: `节点「${id}」在请求基线中也不存在，无法安全恢复本地草稿` });
             else if (id && base) {
-                const baseNode = baseNodes.get(id);
-                const remoteNode = remote.nodes.find((node) => node.id === id);
-                const baseMetadata = (baseNode?.metadata || {}) as Record<string, unknown>;
-                const remoteMetadata = (remoteNode?.metadata || {}) as Record<string, unknown>;
                 const opMetadata = (op.metadata || {}) as Record<string, unknown>;
                 // segments 字段在 H3 上由细粒度 op 处理；update_node 上不应再携带 segments。
                 if (Object.prototype.hasOwnProperty.call(opMetadata, "segments")) {
                     targets.push({ id, kind: "update", detail: `节点「${id}」上的 segments 必须走细粒度 op（update/add/delete_h3_segment），不能直接 update_node.metadata.segments` });
                 }
-                const metadataKeys = [
-                    ...Object.keys(opMetadata).filter((key) => key !== "segments"),
-                    ...(Array.isArray(op.metadataDelete) ? op.metadataDelete.map(String).filter((key) => key !== "segments") : []),
-                ];
-                const patchKeys = Object.keys((op.patch || {}) as Record<string, unknown>).filter((key) => options?.guardLayout || !["position", "width", "height"].includes(key));
-                const metadataConflict = metadataKeys.some((key) => JSON.stringify(baseMetadata[key]) !== JSON.stringify(remoteMetadata[key]));
-                const patchConflict = patchKeys.some((key) => JSON.stringify((baseNode as Record<string, unknown> | undefined)?.[key]) !== JSON.stringify((remoteNode as Record<string, unknown> | undefined)?.[key]));
-                if (metadataConflict || patchConflict) targets.push({ id, kind: "update", detail: `节点「${id}」的字段已被远端更新，本地旧快照不会覆盖它` });
             }
         } else if (type === "delete_node") {
             const id = String(op.id || "");
@@ -1080,11 +1063,6 @@ export function detectCanvasConflicts(pendingOps: Array<Record<string, unknown>>
         } else if (type === "delete_connections") {
             const ids = Array.isArray(op.ids) ? op.ids.map(String) : [];
             if (!ids.some((id) => remoteConnectionIds.has(id))) continue; // no-op
-            if (base && ids.some((id) => remoteConnectionIds.has(id) && JSON.stringify(base.connections.find((item) => item.id === id)) !== JSON.stringify(remote.connections.find((item) => item.id === id)))) targets.push({ id: ids.join(","), kind: "disconnect", detail: "连线已被远端修改" });
-        } else if (type === "update_project" && base) {
-            for (const key of Object.keys((op.patch || {}) as object)) {
-                if (JSON.stringify(base[key as keyof CanvasProject]) !== JSON.stringify(remote[key as keyof CanvasProject])) targets.push({ id: key, kind: "update", detail: `画布字段「${key}」已被远端修改` });
-            }
         } else if (type === "add_h3_segment" || type === "update_h3_segment" || type === "delete_h3_segment" || type === "move_h3_segment") {
             // H3 细粒度 op 的冲突检测：节点 + 段 + 字段三元组。
             const nodeId = String(op.nodeId || "");
@@ -1102,11 +1080,8 @@ export function detectCanvasConflicts(pendingOps: Array<Record<string, unknown>>
             if (type === "move_h3_segment") {
                 const anchor = String(op.beforeSegmentId || op.afterSegmentId || "");
                 const addedIds = new Set(pendingOps.filter((item) => item.type === "add_h3_segment" && item.nodeId === nodeId).map((item) => String((item.segment as Record<string, unknown>)?.id)));
-                const order = (items: Array<Record<string, unknown>>) => items.map((item) => String(item.id || ""));
                 if ((!remoteSeg && !addedIds.has(segmentId)) || (anchor && !remoteSegments.some((item) => String(item.id) === anchor) && !addedIds.has(anchor))) {
                     targets.push({ id: `${nodeId}:${segmentId}`, kind: "update", detail: i18n.t("canvasSave.orderTargetMissing") });
-                } else if (base && JSON.stringify(order(baseSegments)) !== JSON.stringify(order(remoteSegments))) {
-                    targets.push({ id: `${nodeId}:${segmentId}`, kind: "update", detail: i18n.t("canvasSave.orderConflict") });
                 }
             } else if (type === "add_h3_segment") {
                 // 自己的增量 SSE 可能先于 POST 回执到达；内容一致说明请求已落库，
@@ -1117,18 +1092,8 @@ export function detectCanvasConflicts(pendingOps: Array<Record<string, unknown>>
             } else if (type === "delete_h3_segment") {
                 if (!remoteSeg) continue; // no-op：远端已删
             } else if (type === "update_h3_segment") {
-                if (!remoteSeg) { targets.push({ id: `${nodeId}:${segmentId}`, kind: "update", detail: `H3 段「${segmentId}」在远端已被删除，本地无法更新` }); continue; }
+                if (!remoteSeg && !baseSeg) { targets.push({ id: `${nodeId}:${segmentId}`, kind: "update", detail: `H3 段「${segmentId}」在请求基线中不存在，无法安全恢复本地草稿` }); continue; }
                 if (!baseSeg) { targets.push({ id: `${nodeId}:${segmentId}`, kind: "update", detail: `H3 段「${segmentId}」本地无基准，疑似新建与并发更新并存` }); continue; }
-                // 字段级冲突：本地 patch 中的字段如果 base==remote（未被远端改）则安全；否则冲突
-                const patch = (op.patch || {}) as Record<string, unknown>;
-                const fields = new Set([...Object.keys(patch), ...(Array.isArray(op.patchDelete) ? op.patchDelete.map(String) : [])]);
-                const conflictFields: string[] = [];
-                for (const field of fields) {
-                    const baseVal = (baseSeg as Record<string, unknown>)[field];
-                    const remoteVal = (remoteSeg as Record<string, unknown>)[field];
-                    if (JSON.stringify(baseVal) !== JSON.stringify(remoteVal)) conflictFields.push(field);
-                }
-                if (conflictFields.length) targets.push({ id: `${nodeId}:${segmentId}`, kind: "update", detail: `H3 段「${segmentId}」的字段 ${conflictFields.slice(0, 3).join("、")}${conflictFields.length > 3 ? " 等" : ""} 在远端已被更新` });
             }
         }
         // update_project / delete_node(no-op) 都不算冲突

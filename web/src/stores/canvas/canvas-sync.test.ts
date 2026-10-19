@@ -24,7 +24,7 @@ const { useBackendStore } = await import("../use-backend-store");
 const { getBackendUrl, getCanvasDraftSessionId } = await import("../../services/backend-api");
 const cacheKey = (id: string) => JSON.stringify([getBackendUrl(), getCanvasDraftSessionId(), id]);
 
-test("独立节点、字段和 Clip 编辑重放保留双方修改，同字段竞争仍报冲突", async () => {
+test("独立节点和字段编辑重放保留双方修改，同字段按本地提交顺序覆盖", async () => {
     const { applyBackendCanvasDelta, detectCanvasConflicts } = await import("./use-canvas-store");
     const base: any = { id: "independent-edits", nodes: [
         { id: "a", type: "image", title: "A", metadata: { prompt: "A prompt" } },
@@ -50,7 +50,9 @@ test("独立节点、字段和 Clip 编辑重放保留双方修改，同字段�
     assert.equal(segments[0].prompt, "Remote clip");
     assert.equal(segments[0].duration, 6);
     assert.equal(segments[1].prompt, "Local clip");
-    assert.equal(detectCanvasConflicts([{ type: "update_h3_segment", nodeId: "h3", segmentId: "s1", patch: { prompt: "Conflicting clip" } }], remote, base).length, 1);
+    const samePath = [{ type: "update_h3_segment", nodeId: "h3", segmentId: "s1", patch: { prompt: "Later local clip" } }];
+    assert.deepEqual(detectCanvasConflicts(samePath, remote, base), []);
+    assert.equal((applyBackendCanvasDelta(remote, samePath, 2).nodes[2].metadata?.segments as any[])[0].prompt, "Later local clip");
 });
 
 test("Clip 派生起点不提交，排序生成移动命令并能通过回放恢复", async () => {
@@ -64,7 +66,7 @@ test("Clip 派生起点不提交，排序生成移动命令并能通过回放恢
     const replayed = applyBackendCanvasDelta(base, operations, 1);
     assert.deepEqual(replayed.nodes[0].metadata?.segments, next.nodes[0].metadata.segments);
     assert.deepEqual(diffCanvasProject(replayed, next), []);
-    assert.equal(detectCanvasConflicts(operations, replayed, base).length, 2);
+    assert.equal(detectCanvasConflicts(operations, replayed, base).length, 0);
 });
 
 test("普通生成节点运行中只提交用户字段，不夹带 Backend 瞬态状态", () => {
@@ -170,10 +172,8 @@ test("列表按需加载、重连保留未提交操作、冲突和远端删除�
         useCanvasStore.getState().updateProject("p", { nodes: [{ ...merged.nodes[0], metadata: { content: "本地内容" } }] });
         remote = { ...remote, revision: 3, nodes: [{ ...remote.nodes[0], metadata: { content: "冲突内容" } }] };
         applyBackendCanvasEvent({ type: "canvas.updated", payload: remote });
-        assert.ok(useCanvasStore.getState().canvasConflicts.p);
+        assert.equal(useCanvasStore.getState().canvasConflicts.p, undefined, "same-path writes are resolved by the later server commit");
         assert.equal(useCanvasStore.getState().projects[0].nodes[0].metadata?.content, "本地内容");
-        await useCanvasStore.getState().adoptRemoteOnCanvasConflict("p");
-        assert.equal(useCanvasStore.getState().projects[0].nodes[0].metadata?.content, "冲突内容");
 
         useCanvasStore.getState().renameProject("p", "删除前未保存的标题");
         applyBackendCanvasEvent({ type: "canvas.updated", entityId: "p", payload: { deleted: 1 } });

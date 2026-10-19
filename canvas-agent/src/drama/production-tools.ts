@@ -66,7 +66,7 @@ export const productionToolDescriptions: Record<ProductionToolName, string> = {
     production_get_version_artifact_index: "分页读取指定历史版本的轻量产物目录，不含提示词和引用。",
     production_get_version_artifact: "按 targetId 分块读取指定历史版本的单个产物提示词；使用 cursor 读完并核对 sha256。",
     production_preview_impact: "按 kind/id/stage 预览发布影响，不提交媒体。",
-    production_edit: "以 operationId/expectedRevision 原子编辑 Subject Prompt Assembly v2 + continuity ledger v2 制作稿。Shot、局部帧事件、Subject 图片绑定、关键帧、对白与 Clip 分区均写入唯一当前格式；Clip 音频引用使用 audio_bindings。人工 Prompt 仅在编译器 SourceMap 可唯一定位时用 reverse_sync_director_prompt 回写，否则保留画布文本并返回诊断。选择正式历史媒体时可传精确 generationLogId 或 canvas_task_status 返回的 taskId。新合同编辑会登记真实受影响 Clip 的后台局部编译同步，不提交媒体或发布。响应丢失恢复原 operationId 回执。",
+    production_edit: "以 operationId/expectedRevision 原子编辑 Subject Prompt Assembly v2 + continuity ledger v2 制作稿。expectedRevision 是基线游标，旧于当前 revision 时 patch 仍按事务顺序应用到 Backend 读取的最新稿；不同字段自动保留，同字段后提交的写入生效。revision 增长本身不要求重读全部分区。set_director_production 将 source 作为整体原子字段，只有基于当前稿重建的完整 source 才可用于替换，不能提交旧快照覆盖后来编辑。patch_director_source 的 patch 字段按 entity 校验，可读取 production_get_contract.patchFields 查看 allowlist。Shot、局部帧事件、Subject 图片绑定、关键帧、对白与 Clip 分区均写入唯一当前格式；Clip 音频引用使用 audio_bindings。人工 Prompt 仅在编译器 SourceMap 可唯一定位时用 reverse_sync_director_prompt 回写，否则保留画布文本并返回诊断。选择正式历史媒体时可传精确 generationLogId 或 canvas_task_status 返回的 taskId。新合同编辑会登记真实受影响 Clip 的后台局部编译同步，不提交媒体或发布；阻塞/冲突目标会在 syncIssues 中返回 targetId 与首条诊断。响应丢失恢复原 operationId 回执。",
     production_publish: "按 kind/id 发布指定制作阶段；保留 operationId、expectedRevision，返回短回执。",
     production_restore: "按 kind/id 恢复历史版本为草稿；保留 operationId 和 expectedRevision，不修改历史快照。",
     production_sync_clips: "同步 kind/id 当前发布 Clip 输入，不提交媒体；相同输入、绑定和顺序不推进版本。",

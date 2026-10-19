@@ -21,7 +21,7 @@ import { h3Label, useH3Locale } from "../h3-locale";
 import { promptEnhanceImagePayload } from "../services/prompt-enhance-references";
 import { captureH3PromptRequest } from "../services/h3-prompt-request";
 import { translateH3Prompt } from "../services/h3-prompt-translation";
-import { literalPromptSubjects } from "../services/prompt-subject-definitions";
+import { bindLiteralSubjectsToReferences, literalPromptSubjects } from "../services/prompt-subject-definitions";
 import type { StoryboardPromptReference } from "../services/storyboard-prompt";
 import { assembleH3Prompt, readH3PromptSection } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
 import { formatShotTimestamp, isReferenceNameEcho, normalizeRef2vaSummary, stripDuplicateTransition, validatePromptReferences, validateShotTimeline, validateStoryboardShotDescriptions, visualReferenceTags } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-rules";
@@ -1618,7 +1618,10 @@ export function H3PromptSection({
       if (group?.[1].subjectId) aliases.add(group[1].subjectId);
       subjects.set(canonicalId, aliases);
     };
-    const definedSubjects = subjectDefinitions.length ? subjectDefinitions : null;
+    const promptOwnedSubjects = structuredPromptV2 && literalSubjects.length
+      ? bindLiteralSubjectsToReferences(literalSubjects)
+      : undefined;
+    const definedSubjects = promptOwnedSubjects?.length ? promptOwnedSubjects : subjectDefinitions.length ? subjectDefinitions : null;
     mentionItems.filter(({ ref }) => ref.type === "image").forEach(({ ref }) => {
       addSubject(subjectIdForRef(ref));
       addSubject(ref.groupId);
@@ -1645,7 +1648,7 @@ export function H3PromptSection({
           (ref.storyboardSubjectIds || []).includes(definition.id) ||
           tags.some((tag) => {
             const match = /^<Picture\s+(\d+)>$/iu.exec(tag);
-            return match ? mentionItems[Number(match[1]) - 1]?.ref === ref : false;
+            return match ? mentionItems.filter((item) => item.ref.type === "image")[Number(match[1]) - 1]?.ref === ref : false;
           })
         ))?.ref;
       };

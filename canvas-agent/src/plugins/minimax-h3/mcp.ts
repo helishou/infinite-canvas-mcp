@@ -150,7 +150,7 @@ const TOOLS: PluginMcpToolWire[] = [
         id: "h3_run_clip",
         version: "1.4.0",
         name: "H3 运行单段",
-        description: "通过 Backend H3 执行器运行指定片段；若上一段当前成片有匹配的完整 AV 潜变量，可直接从连续组中段续跑。",
+        description: "通过 Backend H3 执行器运行指定片段；若目标被原任务占用，先按错误建议查询并等待原任务，不要重复提交。若上一段当前成片有匹配的完整 AV 潜变量，可直接从连续组中段续跑。",
         inputJsonSchema: {
             type: "object",
             properties: {

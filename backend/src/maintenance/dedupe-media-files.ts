@@ -48,6 +48,7 @@ function sha256OfFile(file: string): string | null {
 /** 大表逐列 LIKE 太慢：只扫「可能持有媒体路径」的结构化列，以及足够小的表。 */
 const REFERENCE_COLUMN_ALLOWLIST = ["data_json", "draft_json", "published_json", "cover_url", "url", "preview_json"];
 const MAX_SCANNED_TABLE_BYTES = 16 * 1024 * 1024;
+const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
 function tableBytes(db: BackendDatabase, table: string): number {
     try {
@@ -61,39 +62,49 @@ function fileCountFor(db: BackendDatabase, filePath: string): number {
     return Number(row.n);
 }
 
+function uuidOf(name: string): string | null {
+    const match = UUID_PATTERN.exec(name);
+    return match ? match[0].toLowerCase() : null;
+}
+
 /**
- * 数据库里是否引用过这个文件名。
- * 回执列是 gzip BLOB（引用 storageKey 而不是路径），且大表逐列 LIKE 代价极高，因此这里只扫
- * 允许列与小表；扫不到只说明这一类来源已排除，外部文件系统来源另由 `referencedOnDisk` 负责。
+ * 一次性收集「可能引用媒体文件名」的 UUID：
+ *   来源 = 数据库允许列（与小表）里的所有 UUID + `production-compilations` / `codex-workspaces`
+ *   里出现过的所有 UUID。
+ * 逐文件去扫 16 GB 产物是 O(候选数 × 产物体积)，实测跑不完；反过来只扫一遍产物即可。
+ * `diskScanned=false` 表示 rg 不可用或扫描失败——此时调用方必须保守跳过删除。
  */
-function referencedInPlainColumns(db: BackendDatabase, name: string): string | null {
+function collectReferenceTokens(db: BackendDatabase): { tokens: Set<string>; diskScanned: boolean } {
+    const tokens = new Set<string>();
+    const global = new RegExp(UUID_PATTERN.source, "gi");
     const tables = db.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ name: string }>;
     for (const { name: table } of tables) {
+        // 跳过 media_files 自身：它的 file_path 里就含待判定的 UUID，扫它等于把每个候选都判成「被引用」。
+        // 真正「别的行还指向这份文件」的情况由删除前的 fileCountFor 检查兜底。
+        if (table === "media_files") continue;
         const bytes = tableBytes(db, table);
         const columns = db.db.prepare(`PRAGMA table_info("${table}")`).all() as Array<{ name: string; type: string }>;
         for (const column of columns) {
             if (column.type !== "TEXT") continue;
             if (!REFERENCE_COLUMN_ALLOWLIST.includes(column.name) && bytes > MAX_SCANNED_TABLE_BYTES) continue;
             try {
-                const hit = db.db.prepare(`SELECT 1 FROM "${table}" WHERE "${column.name}" LIKE ? LIMIT 1`).get(`%${name}%`);
-                if (hit) return `${table}.${column.name}`;
-            } catch { /* 该列不可查询（虚拟表/损坏）时跳过 */ }
+                for (const row of db.db.prepare(`SELECT "${column.name}" AS value FROM "${table}" WHERE "${column.name}" IS NOT NULL`).all() as Array<{ value: unknown }>) {
+                    if (typeof row.value !== "string") continue;
+                    for (const match of row.value.matchAll(global)) tokens.add(match[0].toLowerCase());
+                }
+            } catch { /* 虚拟表或异常列，跳过 */ }
         }
     }
-    return null;
-}
 
-/** 编译产物/工作区文件里是否引用了这个文件名；无法判定时返回 "unknown"（调用方保守跳过）。 */
-function referencedOnDisk(name: string): string | null {
     const roots = [path.join(DATA_DIR, "production-compilations"), path.join(DATA_DIR, "codex-workspaces")].filter((root) => fs.existsSync(root));
-    if (!roots.length) return null;
+    if (!roots.length) return { tokens, diskScanned: true };
     try {
-        const found = execFileSync("rg", ["-l", "--fixed-strings", "--no-messages", name, ...roots], { encoding: "utf8", timeout: 120_000, windowsHide: true }).trim();
-        return found ? found.split(/\r?\n/)[0] : null;
+        const out = execFileSync("rg", ["-o", "--no-filename", "--no-messages", "-e", UUID_PATTERN.source, ...roots], { encoding: "utf8", timeout: 300_000, maxBuffer: 1 << 30, windowsHide: true });
+        for (const line of out.split(/\r?\n/)) if (line.trim()) tokens.add(line.trim().toLowerCase());
+        return { tokens, diskScanned: true };
     } catch (error) {
-        const status = (error as { status?: number }).status;
-        if (status === 1) return null; // rg 退出码 1 = 无匹配
-        return "unknown";
+        // rg 退出码 1 = 没有匹配（视为扫描成功）；其它失败 = 无法判定。
+        return { tokens, diskScanned: (error as { status?: number }).status === 1 };
     }
 }
 
@@ -107,11 +118,18 @@ try {
         byDigest.set(media.sha256, group);
     }
 
+    // 引用判定只扫一遍产物/数据库（O(1) 每候选）；扫描失败时整轮不做删除。
+    const { tokens, diskScanned } = collectReferenceTokens(db);
+
     type Plan = { digest: string; canonical: string; repoint: Array<{ storageKey: string; from: string; bytes: number }>; deleteFiles: string[]; skipped: Array<{ file: string; reason: string }>; freedBytes: number };
     const plans: Plan[] = [];
+    // 全量跳过原因单独收集：被跳过的整组也必须能被看见，否则报告只会显示「0 组」，看不出为什么。
+    const allSkipped: Array<{ digest: string; file: string; reason: string }> = [];
+    let duplicateGroups = 0;
     for (const [digest, group] of byDigest) {
         const distinct = [...new Set(group.map((media) => media.filePath))];
         if (distinct.length < 2) continue;
+        duplicateGroups++;
         // 规范文件取组内最早登记那条的路径：确定性，且最早的行通常是被引用最多的那份。
         const ordered = [...group].sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.storageKey < b.storageKey ? -1 : 1));
         const canonical = ordered[0].filePath;
@@ -133,27 +151,30 @@ try {
 
         for (const file of distinct) {
             if (file === canonical) continue;
-            if (plan.repoint.some((item) => item.from === file)) {
-                const outside = referencedInPlainColumns(db, path.basename(file)) ?? referencedOnDisk(path.basename(file));
-                if (outside === "unknown") { plan.skipped.push({ file, reason: "无法判定外部引用（rg 不可用）" }); continue; }
-                if (outside) { plan.skipped.push({ file, reason: `仍被引用: ${outside}` }); continue; }
-            }
+            const stem = uuidOf(path.basename(file));
+            const skip = (reason: string) => { plan.skipped.push({ file, reason }); allSkipped.push({ digest, file, reason }); };
+            if (!stem) { skip("文件名不含 UUID，无法判定引用"); continue; }
+            if (!diskScanned) { skip("产物扫描不可用（rg 缺失/失败），保守跳过"); continue; }
+            if (tokens.has(stem)) { skip("仍被数据库或产物引用"); continue; }
             plan.deleteFiles.push(file);
             plan.freedBytes += fs.existsSync(file) ? fs.statSync(file).size : 0;
         }
-        // 只有真能删文件时才算这份计划有收益；纯 repoint 不回收空间。
-        if (plan.deleteFiles.length) plans.push(plan);
+        if (plan.repoint.length) plans.push(plan);
     }
 
     const report = {
         ok: true, dryRun: !apply, dbPath: DB_FILE, mediaDir: MEDIA_DIR,
-        duplicateGroups: plans.length,
+        duplicateGroups,
+        plansWithChanges: plans.length,
         repointedRows: plans.reduce((sum, plan) => sum + plan.repoint.length, 0),
         filesToDelete: plans.reduce((sum, plan) => sum + plan.deleteFiles.length, 0),
         freedBytes: plans.reduce((sum, plan) => sum + plan.freedBytes, 0),
         freedMb: +(plans.reduce((sum, plan) => sum + plan.freedBytes, 0) / 1048576).toFixed(1),
-        skipped: plans.flatMap((plan) => plan.skipped).slice(0, 20),
-        topGroups: plans.sort((a, b) => b.freedBytes - a.freedBytes).slice(0, 8).map((plan) => ({
+        diskScanned, referenceTokens: tokens.size,
+        skippedCount: allSkipped.length,
+        skippedReasons: allSkipped.reduce<Record<string, number>>((acc, item) => { acc[item.reason] = (acc[item.reason] ?? 0) + 1; return acc; }, {}),
+        skipped: allSkipped.slice(0, 10),
+        topGroups: [...plans].sort((a, b) => b.freedBytes - a.freedBytes).slice(0, 8).map((plan) => ({
             digest: plan.digest.slice(0, 12), canonical: path.basename(plan.canonical), copies: plan.deleteFiles.length + 1, freedMb: +(plan.freedBytes / 1048576).toFixed(1),
         })),
     };

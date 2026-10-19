@@ -8,13 +8,29 @@ type Input = Parameters<CanvasProductionEditing["reverseSyncPrompt"]>[0];
 type Handler = CanvasProductionEditing["reverseSyncPrompt"];
 type StoryboardHandler = CanvasProductionEditing["replaceStoryboardTrack"];
 type ContinuationBoundaryInput = Parameters<CanvasProductionEditing["setContinuationBoundary"]>[0];
-type ContinuationBoundaryHandler = (input: Omit<ContinuationBoundaryInput, "nodeId" | "segmentId"> & { targetId: string }) => Promise<{ sourceSaved: boolean }>;
+type ContinuationBoundariesInput = Parameters<CanvasProductionEditing["setContinuationBoundaries"]>[0];
+type ContinuationBoundaryHandler = (input: { boundaries: Array<{ targetId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean }>; requireNext?: boolean }) => Promise<{ sourceSaved: boolean }>;
 type CompilePromptInput = Parameters<CanvasProductionEditing["compilePrompt"]>[0];
 // Capability routing only: edits still use the production editor's existing persistent command journal.
 const editors = new Map<string, { token: symbol; handler: Handler }>();
 const storyboardEditors = new Map<string, { token: symbol; handler: StoryboardHandler }>();
 const boundaryEditors = new Map<string, { token: symbol; handler: ContinuationBoundaryHandler }>();
-const pendingPromptCompiles = new Map<string, { expectedRevision: number; operationId: string }>();
+const pendingPromptCompiles = new Map<string, PendingPromptCompile>();
+type PendingPromptCompile = { expectedRevision: number; operationId: string; staleRetries?: number; waitedMs?: number };
+// 已发送未确认的编译先用原 operationId 取回执：刷新页面或重新打开浮层后仍能接回同一次编译。
+const PENDING_COMPILE_PREFIX = "prompt-compile-v1:";
+function readPendingCompile(key: string): PendingPromptCompile | undefined {
+    if (typeof window === "undefined") return undefined;
+    try { const raw = sessionStorage.getItem(PENDING_COMPILE_PREFIX + key); return raw ? JSON.parse(raw) as PendingPromptCompile : undefined; } catch { return undefined; }
+}
+function rememberPendingCompile(key: string, value: PendingPromptCompile) {
+    pendingPromptCompiles.set(key, value);
+    try { sessionStorage.setItem(PENDING_COMPILE_PREFIX + key, JSON.stringify(value)); } catch { /* 存储不可用时只在内存里续查 */ }
+}
+function forgetPendingCompile(key: string) {
+    pendingPromptCompiles.delete(key);
+    try { sessionStorage.removeItem(PENDING_COMPILE_PREFIX + key); } catch { /* 忽略存储不可用 */ }
+}
 const rows = (value: unknown): Array<Record<string, any>> => Array.isArray(value) ? value : [];
 
 function storyboardKeyframeForSlot(frame: Record<string, any>, slotId: string) {
@@ -223,8 +239,26 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
         const targetId = typeof projection?.targetId === "string" ? projection.targetId : "";
         if (!clip || !targetId) throw new Error("PROMPT_COMPILE_TARGET_MISMATCH: 当前 Clip 没有有效的正式制作编译基线");
         const target = { projectId };
+        const recompileCurrentRevision = async (key: string, stale: PendingPromptCompile) => {
+            if ((stale.staleRetries || 0) >= 1) {
+                forgetPendingCompile(key);
+                throw new Error("PROMPT_COMPILE_SOURCE_CHANGED: 制作稿连续变化，旧编译回执已作废；请在源稿稳定后重试。");
+            }
+            forgetPendingCompile(key);
+            const loaded = await fetchProductionWorkbench(target, "clip_workbench", targetId);
+            const production = loaded.production as Record<string, any>;
+            if (String(production.workbench?.segment?.id || "") !== targetId) throw new Error("PROMPT_COMPILE_TARGET_MISMATCH: Backend 工作台返回了其他 Clip");
+            const expectedRevision = Number(production.revision);
+            if (!Number.isInteger(expectedRevision) || expectedRevision < 0) throw new Error("PROMPT_COMPILE_REVISION_UNAVAILABLE: 无法读取当前制作版本");
+            rememberPendingCompile(key, {
+                expectedRevision, operationId: "compile-" + nanoid(14),
+                staleRetries: (stale.staleRetries || 0) + 1, waitedMs: stale.waitedMs || 0,
+            });
+            return createProductionEditing(projectId, getNode, flush).compilePrompt(input);
+        };
         const key = `${projectId}:${input.nodeId}:${input.segmentId}`;
-        let pending = pendingPromptCompiles.get(key);
+        let pending = pendingPromptCompiles.get(key) || readPendingCompile(key);
+        if (pending) pendingPromptCompiles.set(key, pending);
         let status: ProductionCompilationStatus;
         if (!pending) {
             const loaded = await fetchProductionWorkbench(target, "clip_workbench", targetId);
@@ -233,16 +267,22 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
             const expectedRevision = Number(production.revision);
             if (!Number.isInteger(expectedRevision) || expectedRevision < 0) throw new Error("PROMPT_COMPILE_REVISION_UNAVAILABLE: 无法读取当前制作版本");
             pending = { expectedRevision, operationId: `compile-${nanoid(14)}` };
-            pendingPromptCompiles.set(key, pending);
+            rememberPendingCompile(key, pending);
         }
         try { status = (await compileProduction(target, pending.expectedRevision, pending.operationId, { targetIds: [targetId] })).compilation; }
-        catch (error) { if (error instanceof BackendApiError && [400, 409, 422].includes(error.status)) pendingPromptCompiles.delete(key); throw error; }
-        let waitedMs = 0, delayMs = 1200;
+        catch (error) {
+            if (error instanceof BackendApiError && error.status === 409) return recompileCurrentRevision(key, pending);
+            if (error instanceof BackendApiError && [400, 422].includes(error.status)) forgetPendingCompile(key);
+            throw error;
+        }
+        let waitedMs = pending.waitedMs || 0, delayMs = 1200;
         const maxWaitMs = 600 * 1200;
         while (["queued", "running"].includes(status.status) && waitedMs < maxWaitMs) {
             await new Promise(resolve => setTimeout(resolve, Math.min(delayMs, maxWaitMs - waitedMs)));
             const waited = Math.min(delayMs, maxWaitMs - waitedMs);
             waitedMs += waited;
+            pending = { ...pending, waitedMs };
+            pendingPromptCompiles.set(key, pending);
             status = (await fetchProductionCompilation(target, pending.operationId)).compilation;
             delayMs = Math.min(5000, Math.ceil(delayMs * 1.6));
         }
@@ -252,15 +292,14 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
                 try { await applyProductionCompilation(target, status.preparedId); }
                 catch (error) {
                     if (error instanceof BackendApiError && error.status === 409) {
-                        pendingPromptCompiles.delete(key);
-                        throw new Error("PROMPT_COMPILE_SOURCE_CHANGED: 制作稿或参考绑定在编译期间已变化；旧编译回执已作废，请重新编译当前版本。");
+                        return recompileCurrentRevision(key, pending);
                     }
                     throw error;
                 }
             }
             const refreshed = await fetchProductionWorkbench(target, "clip_workbench", targetId);
             const workbench = (refreshed.production as Record<string, any>).workbench;
-            if (String(workbench?.segment?.id || "") !== targetId || status.sourceHash && workbench?.sourceHash !== status.sourceHash) throw new Error("PROMPT_COMPILE_SOURCE_CHANGED: 编译完成后制作源稿已变化，请重新编译");
+            if (String(workbench?.segment?.id || "") !== targetId || status.sourceHash && workbench?.sourceHash !== status.sourceHash) return recompileCurrentRevision(key, pending);
             const canvasInputs = Array.isArray(workbench?.runtime?.canvasInputs) ? workbench.runtime.canvasInputs : [];
             const canvasInput = canvasInputs.find((item: Record<string, any>) => item.nodeId === input.nodeId && item.segmentId === input.segmentId)
                 || canvasInputs[0];
@@ -269,11 +308,11 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
             const manualPrompt = Array.isArray(canvasInput?.manualFields) && canvasInput.manualFields.includes("prompt");
             const prompt = manualPrompt ? baselinePrompt : currentPrompt ?? baselinePrompt;
             if (typeof prompt !== "string") throw new Error("PROMPT_COMPILE_RESULT_UNAVAILABLE: 编译已应用，但没有读到该 Clip 的编译 Prompt");
-            pendingPromptCompiles.delete(key);
+            forgetPendingCompile(key);
             return { prompt };
         }
         if (["blocked", "interrupted", "failed", "succeeded"].includes(status.status)) {
-            pendingPromptCompiles.delete(key);
+            forgetPendingCompile(key);
             throw new Error(status.blockingDiagnostic?.message || `PROMPT_COMPILE_${status.status.toUpperCase()}: 编译未能生成可应用 Prompt`);
         }
         throw new Error("PROMPT_COMPILE_STILL_RUNNING: 编译仍在运行；再次点击会继续查询同一编译任务");
@@ -296,14 +335,22 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
         if (!editor) throw new Error("PRODUCTION_EDITOR_NOT_READY");
         return editor.handler({ ...input, segment: { ...input.segment, productionClipProjection: projection } });
     }, setContinuationBoundary: async (input: ContinuationBoundaryInput) => {
+        return setContinuationBoundaries({ nodeId: input.nodeId, boundaries: [{ segmentId: input.segmentId, tailFrameContinuation: input.tailFrameContinuation, motionContextEnabled: input.motionContextEnabled }] }, true);
+    }, setContinuationBoundaries: async (input: ContinuationBoundariesInput) => setContinuationBoundaries(input, false) };
+
+    async function setContinuationBoundaries(input: ContinuationBoundariesInput, requireNext: boolean) {
         await flush();
         const node = getNode(input.nodeId), segments = node?.metadata?.segments;
-        const clip = Array.isArray(segments) ? segments.find(item => String(item.id || "") === input.segmentId) : undefined;
-        const projection = clip?.productionClipProjection as Record<string, unknown> | undefined;
-        const targetId = typeof projection?.targetId === "string" ? projection.targetId : "";
-        if (!clip || !targetId) throw new Error("CONTINUATION_BOUNDARY_PROJECTION_MISMATCH");
+        if (!Array.isArray(segments)) throw new Error("CONTINUATION_BOUNDARY_PROJECTION_MISMATCH");
+        const boundaries = input.boundaries.map(boundary => {
+            const clip = segments.find(item => String(item.id || "") === boundary.segmentId);
+            const projection = clip?.productionClipProjection as Record<string, unknown> | undefined;
+            const targetId = typeof projection?.targetId === "string" ? projection.targetId : "";
+            if (!clip || !targetId || typeof boundary.tailFrameContinuation !== "boolean" || typeof boundary.motionContextEnabled !== "boolean") throw new Error("CONTINUATION_BOUNDARY_PROJECTION_MISMATCH");
+            return { targetId, tailFrameContinuation: boundary.tailFrameContinuation, motionContextEnabled: boundary.motionContextEnabled };
+        });
         const editor = boundaryEditors.get(projectId);
         if (!editor) throw new Error("PRODUCTION_EDITOR_NOT_READY");
-        return editor.handler({ targetId, tailFrameContinuation: input.tailFrameContinuation, motionContextEnabled: input.motionContextEnabled });
-    } };
+        return editor.handler({ boundaries, ...(requireNext ? { requireNext: true } : {}) });
+    }
 }

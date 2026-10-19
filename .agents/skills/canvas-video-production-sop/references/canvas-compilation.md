@@ -50,7 +50,7 @@ Agent 负责编译前的创作和结构化源稿。自动刷新已登记时消�
 
 ## 批次复核与回执复用
 
-每场或本次选定范围定稿后，集中复核时长、逐字对白、镜头与表演、声音、参考职责及连续性，再保存源稿并编译受影响目标。不在每项局部修改后重做整项目复核。连续性复核覆盖相关 timeline 的 facts、initial、events、requirements、逐剧本块 coverage 和相邻 Segment 边界；缺口返回对应字段 owner，不用批量“不变”或补造事件填平。时长与边界仍按适配核心和 Clip 参考执行。
+每场或本次选定范围定稿后，集中复核时长、逐字对白、镜头与表演、声音、参考职责及连续性。不在每项局部修改后重做整项目复核。H3 编译前必须在 Shots 画面/摄影、表演/动作和 Continuity 定稿后，执行[120 镜头画面与连续性事实复核](../../acheng-director/references/120-precompile-shot-visibility-audit.md)，再保存最终源稿并编译受影响目标。该检查逐 Shot 对照画框与动作必需可见证据，并限制 `subject_usages[].continuityFactIds` 为本镜可见且相关的事实；画外事实仍保留在 ledger，不纳入该镜 Prompt。缺口回到对应字段 owner 修正，不用批量“不变”、扩大景别、拆镜或补造事件掩盖。连续性检查仍覆盖相关 timeline 的 facts、initial、events、requirements、逐剧本块 coverage 和相邻 Segment 边界；时长与边界仍按适配核心和 Clip 参考执行。
 
 | 变化 | 复核及编译范围 |
 |---|---|

@@ -10,7 +10,7 @@ export type ProductionWorkspaceScope = "episode" | "canvas" | "shared-assets";
 export type ProductionNavigationItem = { id: string; workspace: DirectorWorkspace; labelKey: string; seriesView?: SeriesWorkspaceView };
 export type ProductionNavigationGroup = { id: string; labelKey: string; items: ProductionNavigationItem[] };
 
-export const productionWorkspaces: readonly DirectorWorkspace[] = ["series", "overview", "story", "assets", "shots", "continuity", "production", "advanced"];
+export const productionWorkspaces: readonly DirectorWorkspace[] = ["series", "overview", "story", "assets", "shots", "continuity", "clips", "production", "advanced"];
 
 export function seriesWorkspaceView(value: string | null): SeriesWorkspaceView | undefined {
     return value === "planning" || value === "episodes" || value === "shared" ? value : undefined;
@@ -26,9 +26,9 @@ export function productionNavigationGroups({ hasSeries, scope, setup = false, se
     ] });
     if (setup) return groups;
     groups.push({ id: "owner", labelKey: `director.workspaceHierarchy.${scope === "episode" ? "currentEpisode" : scope === "shared-assets" ? "sharedProduction" : "currentProject"}`, items:
-        (["overview", "story", "assets", "shots", "continuity", "production"] as const).map(workspace => ({
+        (["overview", "story", "assets", "shots", "continuity", "clips", "production"] as const).map(workspace => ({
             id: workspace, workspace,
-            labelKey: workspace === "assets" ? `director.workspaceHierarchy.${scope === "episode" ? "episodeAssets" : scope === "shared-assets" ? "sharedAssets" : "projectAssets"}` : `director.workspace.tab.${workspace}`,
+            labelKey: workspace === "assets" ? `director.workspaceHierarchy.${scope === "episode" ? "episodeAssets" : scope === "shared-assets" ? "sharedAssets" : "projectAssets"}` : workspace === "clips" ? "director.atomic.view.clips" : `director.workspace.tab.${workspace}`,
         })),
     });
     groups.push({ id: "settings", labelKey: "director.workspaceHierarchy.settings", items: [{ id: "advanced", workspace: "advanced", labelKey: "director.workspace.tab.advanced" }] });

@@ -42,7 +42,9 @@ function setup(t: any, compiler: any) {
             : { valid: true, diagnostics: [] }, edit: (_id: string, input: any) => {
         if (current.revision !== input.expectedRevision) throw new Error("conflict"); current = { ...current, revision: 2, draft: { director: input.ops[0].director } }; return structuredClone(current);
     } };
-    return { root, service, compilations: new ProductionCompilationService(service, root, compiler), change: () => { current.revision++; } };
+    return { root, service, compilations: new ProductionCompilationService(service, root, compiler), change: () => {
+        current = structuredClone(current); current.revision++; current.draft.director.source.brief = "changed while compiling";
+    } };
 }
 const result = (input: any) => ({ director: input, exitCode: 0, diagnostics: [], audit: {}, sourceAdjustments: [], acceptance: {} });
 test("queued and running compilations keep development reload busy until settlement", async t => {
@@ -114,19 +116,23 @@ test("a real background worker keeps reads responsive and diagnoses an incomplet
     const diagnostics: any = worker.getCompilation("e", "owner", "real-worker", "diagnostics", 0, 10);
     assert.ok(diagnostics.items.some((item: any) => item.code === "COMPILE_STAGE_NOT_READY"));
 });
-test("queued compilation reads frozen media even when the original file changes", async t => {
+test("queued compilation reads frozen media but refuses to apply after the indexed media input changes", async t => {
     const f = setup(t, undefined); const original = path.join(f.root, "reference.png"); fs.writeFileSync(original, "approved bytes");
     f.service.compilationReferenceFiles = () => ({ "A\0asset": original });
     const candidate = structuredClone(director); candidate.assets.A = { version: "1", status: "approved", storageKey: "reference.png" };
     const compiler: any = (input: any, _directory: string, resolve: any) => { assert.equal(fs.readFileSync(resolve("A", "asset"), "utf8"), "approved bytes"); return result(input); };
     const jobs = new ProductionCompilationService(f.service, f.root, compiler);
     jobs.enqueue("e", "owner", "frozen", 1, candidate); fs.writeFileSync(original, "changed bytes");
-    assert.equal((await done(jobs, "frozen")).status, "succeeded");
+    const status: any = await done(jobs, "frozen");
+    assert.equal(status.status, "blocked");
+    const details: any = jobs.getCompilation("e", "owner", "frozen", "diagnostics", 0, 10);
+    assert.ok(details.items.some((item: any) => item.code === "COMPILATION_INPUT_CHANGED"));
 });
-test("completed compilation cannot overwrite a concurrently edited source", async t => {
+test("compilation detects a changed target input before publishing its prepared result", async t => {
     const f = setup(t, result); f.compilations.enqueue("e", "owner", "op", 1); f.change();
-    const status: any = await done(f.compilations, "op"); assert.equal(status.status, "succeeded");
-    assert.throws(() => f.compilations.apply("e", "owner", status.preparedId), /conflict/);
+    const status: any = await done(f.compilations, "op"); assert.equal(status.status, "blocked");
+    const details: any = f.compilations.getCompilation("e", "owner", "op", "diagnostics", 0, 10);
+    assert.ok(details.items.some((item: any) => item.code === "COMPILATION_INPUT_CHANGED"));
 });
 
 test("active Python compiler succeeds in the worker and returns only compact program receipts", async t => {

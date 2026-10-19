@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { resolveH3Runtime } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3Ref, H3Segment } from "../types";
+import { orderReferencesForSubmission } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
 
 const REFERENCE_ROLE_LABELS: Record<string, string> = {
     character_identity: "人物形象",
@@ -583,7 +584,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
             ...settings,
             // New content starts a fresh boundary; cloning sampling settings must not clone a chain.
             motionContextEnabled: false,
-            tailFrameContinuation: false,
+            tailFrameContinuation: true,
             id: newClipId(),
             prompt: defaultPrompt,
             duration: Number(basis?.duration || 5),
@@ -625,14 +626,18 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         const mode = String(segment.mode || segment.taskMode || "ref2va");
         const storyboardMode = supportsStoryboardTrack(segment) && isStoryboardModeEnabled(segment);
         const storyboardLaneVisible = supportsStoryboardTrack(segment) && (storyboardMode || !storyboardTrackItems(segment).length);
-        const refs = allRefs.map((ref, index) => ({ ref, index })).filter(({ ref }) => !storyboardMode || ref.type !== "image" || inferReferenceRole(ref) !== "storyboard");
+        const orderedEntries = orderReferencesForSubmission(allRefs.map((ref, index) => ({ ref, index })),
+            (segment.storyboardShots || []).map((shot) => String(shot.referenceBindingId || "")).filter(Boolean),
+            (entry) => entry.ref.bindingId,
+            (entry) => entry.ref.enabled !== false && entry.ref.type === "image" && inferReferenceRole(entry.ref) === "storyboard",
+            (entry) => entry.ref.enabled !== false && entry.ref.type === "image" && inferReferenceRole(entry.ref) !== "storyboard" && Boolean(entry.ref.subjectId || entry.ref.groupId));
+        const typeCounts: Record<H3Ref["type"], number> = { image: 0, video: 0, audio: 0 };
+        const indexedRefs = orderedEntries.map((entry) => ({ ...entry, ordinal: ++typeCounts[entry.ref.type] }));
+        const refs = indexedRefs.filter(({ ref }) => !storyboardMode || ref.type !== "image" || inferReferenceRole(ref) !== "storyboard");
         // 多参考模式（ref2va）槽位不设上限：至少铺 9 格，之后每多一个参考就多一格，
         // 最后一格永远是空槽（点击可在画布上选节点，也仍可拖素材进），用来继续加参考。
         const slotCount = mode === "t2v" ? 0 : mode === "i2v" ? 1 : mode === "fl2v" ? 2 : Math.max(9, refs.length + 1);
         // 同一类型内的序号（图片 1..N / 视频 1..N / 音频 1..N），用于判断是否超出 H3 的运行上限
-        const ordinals = new Array<number>(allRefs.length);
-        const typeCounts: Record<H3Ref["type"], number> = { image: 0, video: 0, audio: 0 };
-        for (let position = 0; position < allRefs.length; position++) ordinals[position] = ++typeCounts[allRefs[position].type];
         // 用 px 定位让 ref grid 跟随实际像素宽度（容器被拉宽时 clip 不会按比例缩成一条线）
         const left = Number(segment.start || 0) * 100;
         const width = Math.max(100, Number(segment.duration || 1) * 100);
@@ -645,7 +650,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
             const label = mode === "i2v" ? "首帧" : mode === "fl2v" ? index === 0 ? "首帧" : "尾帧" : `Ref ${index + 1}`;
             const isGrouped = ref?.groupId;
             const limit = ref ? H3_RUNTIME_REF_LIMITS[ref.type] : 0;
-            const overLimit = Boolean(ref) && ordinals[refIndex] > limit;
+            const overLimit = Boolean(ref) && (entry?.ordinal || 0) > limit;
             // 末尾空槽 = 「继续加参考」入口，点击后在画布上选节点
             const isAddSlot = !ref && index >= refs.length;
             return <div
@@ -670,7 +675,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                 }}
                 className={`minimax-ref-clip ${ref ? "has-ref" : "is-empty"} ${isAddSlot ? "is-add-slot" : ""} ${pickingKey === `${segment.id}:${refIndex}` ? "is-picking" : ""} ${isGrouped ? "is-character-group" : ""} ${ref?.role === "character_voice" ? "is-character-voice" : ""} ${overLimit ? "is-over-limit" : ""} ${dropTargetKey === `${segment.id}:${refIndex}` ? "is-drop-target" : ""}`}
                 title={ref ? `双击编辑参考素材职责${overLimit ? `（已超出 H3 运行上限：图片最多 ${H3_RUNTIME_REF_LIMITS.image} 张、视频/音频最多 ${H3_RUNTIME_REF_LIMITS.video} 个，运行会报错）` : ""}` : pickingKey === `${segment.id}:${refIndex}` ? "在画布上点选节点作为参考（Esc 取消）" : "点击进入画布选节点模式，挑一个节点作为参考（也可直接拖素材进来）"}
-            >{ref ? <><TimelineReferenceMedia ctx={ctx} refItem={ref} compactMedia={compactMedia} /><span className="minimax-ref-role" title="参考职责">{REFERENCE_ROLE_LABELS[ref.role || "other"] || "未分类"}</span><span className="minimax-ref-counts">{displayReferenceName(ref, ordinals[refIndex] || index + 1, label)}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }} onDoubleClick={(event) => event.stopPropagation()}>×</button></> : <><H3Icon name={isAddSlot ? "plus" : "paperclip"} /><span>{pickingKey === `${segment.id}:${index}` ? "选择中…" : label}</span></>}</div>;
+            >{ref ? <><TimelineReferenceMedia ctx={ctx} refItem={ref} compactMedia={compactMedia} /><span className="minimax-ref-role" title="参考职责">{REFERENCE_ROLE_LABELS[ref.role || "other"] || "未分类"}</span><span className="minimax-ref-counts">{displayReferenceName(ref, entry?.ordinal || index + 1, label)}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }} onDoubleClick={(event) => event.stopPropagation()}>×</button></> : <><H3Icon name={isAddSlot ? "plus" : "paperclip"} /><span>{pickingKey === `${segment.id}:${index}` ? "选择中…" : label}</span></>}</div>;
         })}</div>;
     };
     const renderStoryboardTrack = (segment: H3Segment) => {

@@ -147,11 +147,13 @@ export type CanvasTextEditorProps = {
 
 export type CanvasProductionStoryboardEditor = { nodeId: string; segmentId: string; segment: Record<string, unknown> };
 export type CanvasProductionContinuationBoundary = { nodeId: string; segmentId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean };
+export type CanvasProductionContinuationBoundaries = { nodeId: string; boundaries: Array<{ segmentId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean }> };
 export type CanvasProductionEditing = {
     reverseSyncPrompt: (input: { nodeId: string; segmentId: string; prompt: string; artifactId: string; sourceHash: string; basePromptHash: string }) => Promise<{ sourceSaved: boolean }>;
     compilePrompt: (input: { nodeId: string; segmentId: string }) => Promise<{ prompt: string }>;
     replaceStoryboardTrack: (input: CanvasProductionStoryboardEditor) => Promise<{ sourceSaved: boolean }>;
     setContinuationBoundary: (input: CanvasProductionContinuationBoundary) => Promise<{ sourceSaved: boolean }>;
+    setContinuationBoundaries: (input: CanvasProductionContinuationBoundaries) => Promise<{ sourceSaved: boolean }>;
 };
 export type CanvasNodeContext = {
     mediaUrl: (storageKey: string) => string;

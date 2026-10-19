@@ -29,6 +29,7 @@ export class BackendClientError extends Error {
   readonly path: string;
   readonly status?: number;
   readonly code?: string;
+  readonly taskId?: string;
   readonly expectedRevision?: number;
   readonly actualRevision?: number;
   readonly revision?: number;
@@ -46,6 +47,7 @@ export class BackendClientError extends Error {
       path: string;
       status?: number;
       code?: string;
+      taskId?: string;
       expectedRevision?: number;
       actualRevision?: number;
       revision?: number;
@@ -64,6 +66,7 @@ export class BackendClientError extends Error {
     this.path = details.path;
     this.status = details.status;
     this.code = details.code;
+    this.taskId = details.taskId;
     this.expectedRevision = details.expectedRevision;
     this.actualRevision = details.actualRevision;
     this.revision = details.revision;
@@ -97,6 +100,7 @@ function errorPayload(value: unknown) {
   return {
     message,
     code,
+    taskId: typeof body.taskId === "string" ? body.taskId : undefined,
     expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
     actualRevision: typeof body.actualRevision === "number" ? body.actualRevision : typeof body.revision === "number" ? body.revision : undefined,
     revision: typeof body.revision === "number" ? body.revision : undefined,
@@ -172,6 +176,7 @@ export class BackendClient {
           path,
           status: res.status,
           code: details.code,
+          taskId: details.taskId,
           expectedRevision: details.expectedRevision,
           actualRevision: details.actualRevision,
           revision: details.revision,
@@ -295,12 +300,13 @@ export class BackendClient {
     return Array.isArray(data.episodes) ? data.episodes : [];
   }
 
-  async getDramaEpisode(episodeId: string) {
+  async getDramaEpisode(episodeId: string, view?: "summary" | "full") {
+    const query = view ? `?view=${encodeURIComponent(view)}` : "";
     return this.get<{
       ok: boolean;
       episode?: Record<string, unknown>;
       canvas?: Record<string, unknown> | null;
-    }>(`/drama/episodes/${encodeURIComponent(episodeId)}`);
+    }>(`/drama/episodes/${encodeURIComponent(episodeId)}${query}`);
   }
 
   async createDramaEpisode(dramaId: string, input: Record<string, unknown>) {

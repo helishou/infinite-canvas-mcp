@@ -30,15 +30,28 @@ export function productionObjectForNode(context: ProductionCanvasContext, produc
         const scene = productionSceneEntries(director.source).find(item => item.id === sceneId);
         if (scene) return { ...base, workspace: "story", targetKind: "scene", targetId: scene.id, title: scene.title || scene.id };
     }
-    const targetIds = Array.isArray(node.metadata?.segments) ? (node.metadata!.segments as Array<Record<string, any>>).map(segment => String(segment.productionClipProjection?.targetId || "")).filter(Boolean) : [];
-    const matchingTargets = [...new Set(targetIds)].filter(targetId => productionSegments(production).some(segment => String(segment.id) === targetId));
-    if (segmentId && matchingTargets.length === 1) {
-        const targetId = matchingTargets[0];
-        const runtimeMatches = productionSegmentRuntimeMatches([node as CanvasNodeData], targetId, context.owner);
-        if (runtimeMatches.length === 1 && runtimeMatches[0].segment.id === segmentId) {
-            const segments = productionSegments(production);
-            return { ...base, workspace: "production", targetKind: "segment", targetId, segmentId: String(runtimeMatches[0].segment.id), clipIndex: segments.findIndex(item => String(item.id) === targetId) + 1, title: node.title || targetId };
+    const runtimeSegments = Array.isArray(node.metadata?.segments) ? node.metadata!.segments as Array<Record<string, any>> : [];
+    const selectedRuntimeSegments = segmentId ? runtimeSegments.filter(segment => String(segment.id || "") === segmentId) : [];
+    const segments = productionSegments(production);
+    // An H3 node can contain several formally projected Clips. Resolve the selected
+    // runtime segment first; requiring the whole node to map to one production target
+    // incorrectly makes every Clip on a multi-Clip node unavailable.
+    if (selectedRuntimeSegments.length === 1) {
+        const targetId = String(selectedRuntimeSegments[0].productionClipProjection?.targetId || "");
+        if (targetId && segments.some(segment => String(segment.id) === targetId)) {
+            const runtimeMatches = productionSegmentRuntimeMatches([node as CanvasNodeData], targetId, context.owner);
+            if (runtimeMatches.length === 1 && runtimeMatches[0].segment.id === segmentId) {
+                return { ...base, workspace: "production", targetKind: "segment", targetId, segmentId: String(runtimeMatches[0].segment.id), clipIndex: segments.findIndex(item => String(item.id) === targetId) + 1, title: node.title || targetId };
+            }
         }
+    }
+    // Older production records persist the same stable mapping on the source Clip.
+    // Accept it only when both nodeId and segmentId match uniquely; never choose by
+    // title, array position, or the first Clip on the H3 node.
+    const sourceMatches = segmentId ? segments.filter(segment => String(segment.nodeId || "") === node.id && String(segment.segmentId || "") === segmentId) : [];
+    if (sourceMatches.length === 1) {
+        const targetId = String(sourceMatches[0].id || "");
+        return { ...base, workspace: "production", targetKind: "segment", targetId, segmentId, clipIndex: segments.findIndex(item => String(item.id) === targetId) + 1, title: node.title || targetId };
     }
     const frame = Object.entries(production.draft.keyframes).find(([, item]) => item.nodeId === node.id);
     if (frame) return { ...base, workspace: "shots", targetKind: "shot", targetId: frame[0], title: shotTitle(productionShots(production).find(shot => String(shot.id) === frame[0]), node.title || frame[0]) };
@@ -89,11 +102,12 @@ export function productionObjectState(production: EpisodeProduction, object: Pro
     const review = object.targetKind === "shot" ? production.draft.keyframeReviews[object.targetId || ""] : undefined;
     const segments = Array.isArray(node.metadata?.segments) ? node.metadata.segments as Record<string, unknown>[] : [];
     const runtime = object.targetKind === "segment" ? segments.find(segment => segment.id === object.segmentId) : node.metadata;
+    const sourceSegment = object.targetKind === "segment" ? productionSegments(production).find(segment => String(segment.id) === object.targetId) : undefined;
     const working = ["queued", "loading", "running", "pending", "awaiting_confirmation"].includes(String(runtime?.status));
     const failed = ["error", "failed"].includes(String(runtime?.status));
     const storageKey = object.targetKind === "segment" ? runtime?.resultStorageKey : frame?.storageKey || asset?.storageKey;
     const verdict = review?.verdict;
-    const status = working ? "working" : failed ? "failed" : asset?.inputOutdated || runtime?.inputOutdated ? "outdated" : verdict === "rejected" || verdict === "needs-redo" ? "rejected" : asset?.status === "rejected" ? "rejected" : verdict === "approved" || verdict === "auto-accepted" || asset?.status === "approved" || Boolean(storageKey && object.targetKind !== "segment") ? "approved" : storageKey ? "complete" : "planned";
+    const status = working ? "working" : failed ? "failed" : asset?.inputOutdated || sourceSegment?.inputOutdated || runtime?.inputOutdated ? "outdated" : verdict === "rejected" || verdict === "needs-redo" ? "rejected" : asset?.status === "rejected" ? "rejected" : verdict === "approved" || verdict === "auto-accepted" || asset?.status === "approved" || Boolean(storageKey && object.targetKind !== "segment") ? "approved" : storageKey ? "complete" : "planned";
     return { status, working, assetId, storageKey };
 }
 

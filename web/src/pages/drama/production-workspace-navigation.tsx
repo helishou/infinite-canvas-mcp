@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { Button, Drawer } from "antd";
-import { Activity, Clapperboard, FileText, Images, ListChecks, ListVideo, Menu, PackageOpen, Settings2 } from "lucide-react";
+import { Activity, Clapperboard, FileText, Images, Layers3, ListChecks, ListVideo, Menu, PackageOpen, Settings2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ProductionNavigationGroup, ProductionNavigationItem } from "./production-workspace";
 
-const icons = { series: Clapperboard, overview: ListChecks, story: FileText, assets: PackageOpen, shots: Clapperboard, continuity: Activity, production: Images, advanced: Settings2 };
+const icons = { series: Clapperboard, overview: ListChecks, story: FileText, assets: PackageOpen, shots: Clapperboard, continuity: Activity, clips: Layers3, production: Images, advanced: Settings2 };
 
 export function ProductionWorkspaceNavigation({ groups, selectedId, onSelect, compact = false, horizontal = false }: {
     groups: ProductionNavigationGroup[];

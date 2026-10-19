@@ -1,5 +1,5 @@
 import type { CanvasNodeData } from "@/types/canvas";
-import { canvasNodeImage } from "./canvas-image-renderability";
+import { canvasNodePrimaryImage } from "./canvas-image-renderability";
 
 export type CanvasNodeDownloadPlan = { storageKey?: string; url: string; filename: string };
 
@@ -10,7 +10,7 @@ export type CanvasNodeDownloadPlan = { storageKey?: string; url: string; filenam
  * 文件名去掉与节点 id 重复的类型前缀：裁剪结果节点 id 形如 `video-canvas-trim-*`。
  */
 export function canvasNodeDownloadPlan(node: CanvasNodeData, outputType: string, extension: string): CanvasNodeDownloadPlan | null {
-    const image = outputType === "image" ? canvasNodeImage(node) : null;
+    const image = outputType === "image" ? canvasNodePrimaryImage(node) : null;
     const storageKey = image?.storageKey || node.metadata?.storageKey;
     const url = image?.content || node.metadata?.content || "";
     if (!storageKey && !url) return null;

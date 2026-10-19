@@ -13,10 +13,11 @@ import { H3Icon } from "./H3Icon";
 import { requestH3Run, resolveH3PaneSizes } from "./H3WorkbenchPrimitives";
 import { h3Label, useH3Locale } from "../h3-locale";
 import { refsForSegment } from "../services/h3-data";
+import { formalContinuationBoundaryUpdates } from "../services/h3-global-settings";
 import { H3_STYLE_TEMPLATES, type H3StyleTemplate } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
 import { resolveAvailableH3StyleTemplates } from "../services/h3-style-templates";
 
-type Props = { ctx: CanvasNodeContext; metadata: Record<string, unknown>; selected?: H3Segment; submitting?: boolean; patchSelected: (patch: Partial<H3Segment>) => void; patchAllSettings: (patch: Partial<H3Segment>) => void };
+type Props = { ctx: CanvasNodeContext; metadata: Record<string, unknown>; selected?: H3Segment; submitting?: boolean; patchSelected: (patch: Partial<H3Segment>) => void; patchAllSettings: (patch: Partial<H3Segment>, formalBoundaryValues?: Array<{ segmentId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean }>) => void };
 
 function H3RunActionButtons({ ctx, selected, runtimeTaskId, busy, stuck, canCancel, canResetAndRun, locale }: { ctx: CanvasNodeContext; selected?: H3Segment; runtimeTaskId: string; busy: boolean; stuck: boolean; canCancel: boolean; canResetAndRun: boolean; locale: ReturnType<typeof useH3Locale> }) {
     const [cancelBusy, setCancelBusy] = useState(false);
@@ -49,8 +50,31 @@ function H3RunActionButtons({ ctx, selected, runtimeTaskId, busy, stuck, canCanc
 export function H3ClipSettingsPanel({ ctx, metadata, selected, submitting = false, patchSelected, patchAllSettings }: Props) {
     const globalScope = metadata.h3SettingsScope === "global";
     const patchSettings = globalScope ? patchAllSettings : patchSelected;
+    const continuationSaveInFlight = useRef(false);
     const patchClipSettings = (patch: Partial<H3Segment>) => {
         const editsContinuation = Object.hasOwn(patch, "tailFrameContinuation") || Object.hasOwn(patch, "motionContextEnabled");
+        if (globalScope && editsContinuation) {
+            if (continuationSaveInFlight.current) return;
+            const clips = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
+            const { boundaries, projectedValues } = formalContinuationBoundaryUpdates(clips, patch);
+            if (boundaries.length && !ctx.production?.setContinuationBoundaries) {
+                message.error("正式制作 Clip 的全局续段衔接需要制作台连接，未修改参数。");
+                return;
+            }
+            continuationSaveInFlight.current = true;
+            void (async () => {
+                try {
+                    if (boundaries.length) {
+                        const result = await ctx.production!.setContinuationBoundaries({ nodeId: ctx.node.id, boundaries });
+                        if (!result.sourceSaved) throw new Error("制作台未保存全局续段衔接设置。");
+                    }
+                    patchAllSettings(patch, projectedValues);
+                    await ctx.flush();
+                } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
+                finally { continuationSaveInFlight.current = false; }
+            })();
+            return;
+        }
         const targetId = String((selected as any)?.productionClipProjection?.targetId || "");
         if (!globalScope && editsContinuation && targetId) {
             const setBoundary = ctx.production?.setContinuationBoundary;

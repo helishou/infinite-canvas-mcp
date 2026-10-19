@@ -252,7 +252,12 @@ export class CanvasH3Runner {
             const sameInput = stableH3Fingerprint(normalized) === stableH3Fingerprint(originalInput);
             const plan = pending && this.plansForTask(duplicate).find((item) => item.nodeId === pending.nodeId && item.segmentId === pending.segmentId);
             const sameClip = plan && this.clipCacheState(normalized, plan, normalized.params || {}, new Map()).fingerprint === pending.firstPassFingerprint;
-            if (!sameInput || (duplicate.status === "awaiting_confirmation" && !sameClip)) throw new Error(`H3 Clip 正被任务 ${duplicate.id} 占用；请先完成或放弃该任务`);
+            if (!sameInput || (duplicate.status === "awaiting_confirmation" && !sameClip)) {
+                throw Object.assign(
+                    new Error(`H3 Clip 正被任务 ${duplicate.id} 占用；请先完成或放弃该任务`),
+                    { code: "H3_CLIP_OCCUPIED", taskId: duplicate.id },
+                );
+            }
             return duplicate;
         }
         const runPlan = preparedPlan || this.buildRunPlan(normalized, blockedPlans);
@@ -1228,15 +1233,30 @@ export class CanvasH3Runner {
             && String(binding.nodeId || "") === pending.nodeId
             && String(binding.segmentId || "") === pending.segmentId;
         if (boundTaskId && ![task.id, pending.firstPassChildTaskId, confirmationOf(task).inFlight?.childTaskId].includes(boundTaskId) && !ownedChild) return;
-        this.patchSegment(input.projectId, pending.nodeId, pending.segmentId, {
-            status: "awaiting_confirmation", parentTaskId: task.id, runtimeTaskId: task.id, firstPassReady: true,
-            firstPassResult: pending.firstPassResult, firstPassStorageKey: pending.firstPassStorageKey || "", firstPassFingerprint: pending.firstPassFingerprint,
-            result: pending.firstPassResult, resultStorageKey: pending.firstPassStorageKey || "",
-        });
+        const operations = [{
+            type: "update_h3_segment",
+            nodeId: pending.nodeId,
+            segmentId: pending.segmentId,
+            patch: {
+                status: "awaiting_confirmation", parentTaskId: task.id, runtimeTaskId: task.id, firstPassReady: true,
+                firstPassResult: pending.firstPassResult, firstPassStorageKey: pending.firstPassStorageKey || "", firstPassFingerprint: pending.firstPassFingerprint,
+                result: pending.firstPassResult, resultStorageKey: pending.firstPassStorageKey || "",
+            },
+        }];
         // 顶层由 Clip 状态聚合，不能作为单段确认归属；另一任务占据顶层时，
         // 只恢复本段投影，不额外写入该任务的进度与错误。
         const nodeTaskId = String(recordOf(node?.metadata).runtimeTaskId || "");
-        if (!nodeTaskId || nodeTaskId === task.id) this.updateNode(input.projectId, pending.nodeId, { runtimeTaskId: task.id, status: "awaiting_confirmation", runProgress: Math.min(0.99, task.progress), errorDetails: task.error || "" });
+        if (!nodeTaskId || nodeTaskId === task.id) operations.push({
+            type: "update_node",
+            id: pending.nodeId,
+            metadata: { runtimeTaskId: task.id, status: "awaiting_confirmation", runProgress: Math.min(0.99, task.progress), errorDetails: task.error || "" },
+        });
+        const current = this.stores.projects.get(input.projectId);
+        if (!current) return;
+        this.stores.projects.applyOperations(input.projectId, Number(current.revision || 0), operations, {
+            runtimeWrite: true,
+            source: { clientId: `task:${task.id}`, kind: "task", label: "H3 待确认" },
+        });
     }
 
     private finishParentNode(task: RuntimeTask, status: string, error = "") {

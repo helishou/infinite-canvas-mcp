@@ -213,19 +213,46 @@ test("批处理失败同时回滚文档、Yjs 状态、journal 和回执，且�
     assert.equal(db.applyCanvasProjectOperations("canvas", undefined, [{ type: "text_update", target, documentId: original.documentId, update }], { operationId: "rollback" }).revision, 2);
 });
 
-test("旧基线修改不同字段可合并，同字段拒绝；布局最后提交生效", (t) => {
+test("旧基线修改不同字段自动合并，同字段以后提交者获胜", (t) => {
     const db = fixture(t);
     db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "text", metadata: { content: "远端正文" } }], { baseRevision: 1 });
     db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "text", patch: { title: "本地标题" } }], { baseRevision: 1 });
-    assert.throws(() => db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "text", metadata: { content: "旧正文" } }], { baseRevision: 1 }), { code: "FIELD_CONFLICT" });
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "text", metadata: { content: "后提交正文" } }], { baseRevision: 1 });
+    assert.equal(db.getCanvasProject("canvas")?.nodes.find(node => node.id === "text")?.metadata?.content, "后提交正文");
     const move = (x: number) => [{ type: "update_node", id: "text", patch: { position: { x, y: 0 } } }];
     db.applyCanvasProjectOperations("canvas", undefined, move(10), { baseRevision: 1 });
     db.applyCanvasProjectOperations("canvas", undefined, move(20), { baseRevision: 1 });
-    assert.equal(db.getCanvasProject("canvas")?.revision, 5);
+    assert.equal(db.getCanvasProject("canvas")?.revision, 6);
     const history = db.readCanvasChanges("canvas", 1);
     assert.equal(history.reset, false);
-    assert.deepEqual(history.commits.map((item) => item.revision), [2, 3, 4, 5]);
+    assert.deepEqual(history.commits.map((item) => item.revision), [2, 3, 4, 5, 6]);
     assert.equal(db.readCanvasChanges("canvas", 99).reset, true);
+});
+
+test("deleted node edits restore its request-base image, while an old delete cannot remove a recreated node", (t) => {
+    const db = fixture(t);
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "delete_node", id: "text" }], { operationId: "delete-v1", baseRevision: 1 });
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "text", metadata: { content: "restored edit" } }], { operationId: "edit-v1", baseRevision: 1 });
+    let node = db.getCanvasProject("canvas")?.nodes.find(item => item.id === "text");
+    assert.equal(node?.metadata?.content, "restored edit");
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "delete_node", id: "text" }], { operationId: "delete-restored", baseRevision: 3 });
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "text", nodeType: "text", title: "新一代", metadata: { content: "new lifecycle" } }], { operationId: "recreate", baseRevision: 4 });
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "delete_node", id: "text" }], { operationId: "old-delete", baseRevision: 3 });
+    node = db.getCanvasProject("canvas")?.nodes.find(item => item.id === "text");
+    assert.equal(node?.title, "新一代");
+    assert.equal(node?.metadata?.content, "new lifecycle");
+});
+
+test("node resurrection refuses to guess when the base snapshot has been pruned", (t) => {
+    const db = fixture(t);
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "delete_node", id: "text" }], { baseRevision: 1 });
+    const current = db.getCanvasProject("canvas")!;
+    db.db.prepare("UPDATE canvas_collaboration_checkpoints SET revision=?, data_json=? WHERE project_id=?").run(current.revision, JSON.stringify(current), "canvas");
+    db.db.prepare("DELETE FROM canvas_operation_batches WHERE project_id=? AND revision<=?").run("canvas", current.revision);
+    assert.throws(() => db.applyCanvasProjectOperations("canvas", undefined,
+        [{ type: "update_node", id: "text", metadata: { content: "keep this draft" } }], { baseRevision: 1 }),
+        { code: "BASE_HISTORY_UNAVAILABLE" });
+    assert.equal(db.getCanvasProject("canvas")?.nodes.some(node => node.id === "text"), false);
 });
 
 test("两名编辑者从相同基线插入中文，两个 Yjs 增量都保留", (t) => {

@@ -313,7 +313,6 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
             message.warning(t("productionCanvas.storyboardImageRequired"));
             return;
         }
-        if (confirm && draft.productionPlan.parallelScenes && !draft.productionPlan.reviewPolicy) { message.warning(t("sceneProduction.reviewRequired")); return; }
         const patch = {
             name: draft.name.trim() || folder.name,
             outline: draft.outline.trim(),
@@ -414,7 +413,7 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
                         <p className="text-xs text-muted-foreground">{t("productionCanvas.newEpisodeDefaults")}</p>
                 <div className="grid gap-4 sm:grid-cols-2">
                     <label><p className="mb-2 text-sm">{t("productionCanvas.storyboardImageMode")}</p><Select className="w-full" placeholder={t("productionCanvas.storyboardImageRequired")} value={draft.productionPlan.storyboardImageMode} onChange={storyboardImageMode => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, storyboardImageMode } })} options={[{ value: "generate", label: t("productionCanvas.storyboardImagesGenerate") }, { value: "skip", label: t("productionCanvas.storyboardImagesSkip") }]} />{!draft.productionPlan.storyboardImageMode && <p className="mb-1 mt-2 text-xs text-red-500">{t("productionCanvas.storyboardImageRequired")}</p>}<p className="mt-2 text-xs text-muted-foreground">{t("productionCanvas.storyboardImageModeHint")}</p></label>
-                    <SceneProductionSettings value={draft.productionPlan} onChange={patch => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, ...patch } })} />{draft.productionPlan.parallelScenes && !draft.productionPlan.reviewPolicy && <p className="mt-2 text-xs text-red-500">{t("sceneProduction.reviewRequired")}</p>}
+                    <SceneProductionSettings value={draft.productionPlan} onChange={patch => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, ...patch } })} />
                     <p className="text-xs text-muted-foreground">{t("sceneProduction.draftHint")}</p>
                     <div><p className="mb-2 text-sm">{t("productionCanvas.generalImageModel")}</p><ModelPicker config={modelConfig} capability="image" fullWidth value={draft.productionPlan.imageModel} onChange={imageModel => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, imageModel } })} /></div>
                     {(["character", "scene", "prop", "style", "keyframe"] as const).map(kind => <div key={kind}><p className="mb-2 text-sm">{t(`productionCanvas.assetModel.${kind}`)}</p><ModelPicker config={modelConfig} capability="image" fullWidth placeholder={t("productionCanvas.inheritImageModel")} value={draft.productionPlan.imageModelsByKind[kind]} onChange={model => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, imageModelsByKind: { ...draft.productionPlan.imageModelsByKind, [kind]: model } } })} /><Button type="link" size="small" disabled={!draft.productionPlan.imageModelsByKind[kind]} onClick={() => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, imageModelsByKind: { ...draft.productionPlan.imageModelsByKind, [kind]: undefined } } })}>{t("productionCanvas.inheritImageModel")}</Button></div>)}

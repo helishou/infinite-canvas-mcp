@@ -49,7 +49,8 @@ test("located hard blockers reuse across IDs and restart without recompiling or 
     const page = restored.getCompilation("episode", "episode", "blocked-alias", "diagnostics", 0, 1);
     assert.ok("items" in page);
     assert.equal(page.items[0].code, externalBlock.code);
-    assert.throws(() => restored.enqueue("episode", "episode", "stale", 0), ProductionConflictError);
+    const staleBase = restored.enqueue("episode", "episode", "stale", 0);
+    assert.equal(staleBase.expectedRevision, service.get("episode").revision, "a stale global cursor compiles the current saved input");
     assert.throws(() => restored.enqueue("episode", "episode", "blocked-alias", 1, director), /IDEMPOTENCY_CONFLICT/);
     assert.throws(() => restored.getCompilation("another", "episode", "blocked-alias"), /不属于/);
     assert.equal(JSON.stringify(service.get("episode")), before);
@@ -376,7 +377,8 @@ test("scoped asset-only compilation applies with ledger v2 before video continui
 test("three scoped compiler jobs overlap and merge disjoint results without overwriting revisions", async t => {
     const { root, service, director } = fixture(t);
     director.source = { ...director.source, script_scenes: ["A", "B", "C"].map(id => ({ id, scene_id: id, text: "confirmed" })),
-        shots: ["A", "B", "C"].map(id => ({ id: `S${id}`, source_scene_id: id, scene_id: id, visual: id, required_assets: [] })), segments: [],
+        shots: ["A", "B", "C"].map(id => ({ id: `S${id}`, source_scene_id: id, scene_id: id, timeline_id: id, story_order: 0, visual: id, duration_frames: 120, subject_usages: [] })),
+        segments: ["A", "B", "C"].map(id => ({ id: `CLIP${id}`, shot_ids: [`S${id}`] })),
         asset_plan: ["A", "B", "C"].map(id => ({ id: `K${id}`, kind: "keyframe", canvas_scope: "episode", shot_ids: [`S${id}`] })),
         asset_cards: ["A", "B", "C"].map(id => ({ id: `K${id}`, prompt: "authored image" })) };
     director.shotInputs = Object.fromEntries(["A", "B", "C"].map(id => [`S${id}`, { assetIds: [], keyframePolicy: "new", keyframeAssetId: `K${id}` }]));
@@ -387,13 +389,16 @@ test("three scoped compiler jobs overlap and merge disjoint results without over
         concurrent++; peak = Math.max(peak, concurrent);
         await new Promise<void>(resolve => releases.push(resolve)); concurrent--;
         const targetId = String((input.source.asset_plan as any[])[0]?.id || `K${(input.source.shots as any[])[0]?.source_scene_id}`), prompt = `compiled ${targetId}`;
-        return { director: { ...input, artifacts: [{ id: `image-${targetId}`, kind: "image" as const, targetId, prompt, sha256: promptHash(prompt), sourceHash: input.sourceHash, status: "ready" as const, references: [], receipt: { sourceHash: input.sourceHash, promptHash: promptHash(prompt), engineRuntimeId: input.engine.runtimeId, validator: "fixture" } }] }, exitCode: 0, diagnostics: [], audit: {}, sourceAdjustments: [], acceptance: {} };
+        const scope = (input.source as any)._canvas_compilation_scope.scope;
+        const current = service.get("episode").draft.director!;
+        const inputHash = compilationScopeInput({ ...current, engine: input.engine }, scope).inputHash;
+        return { director: { ...input, artifacts: [{ id: `image-${targetId}`, kind: "image" as const, targetId, prompt, sha256: promptHash(prompt), sourceHash: input.sourceHash, status: "ready" as const, references: [], receipt: { sourceHash: input.sourceHash, promptHash: promptHash(prompt), engineRuntimeId: input.engine.runtimeId, engine: input.engine, compilationScope: { scope, inputHash, engine: input.engine }, validator: "fixture" } }] }, exitCode: 0, diagnostics: [], audit: {}, sourceAdjustments: [], acceptance: {} };
     };
     const jobs = new ProductionCompilationService(service, root, compiler as any);
-    for (const sceneId of ["A", "B", "C"]) jobs.enqueue("episode", "episode", `compile-${sceneId}`, 2, undefined, { sceneId });
-    await new Promise(resolve => setImmediate(resolve));
+    for (const sceneId of ["A", "B", "C"]) jobs.enqueue("episode", "episode", `compile-${sceneId}`, 2, undefined, { targetIds: [`K${sceneId}`] });
+    for (let attempt = 0; attempt < 30 && releases.length < 3; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(releases.length, 3); assert.equal(peak, 3); releases.forEach(release => release());
-    await new Promise(resolve => setImmediate(resolve));
+    for (const sceneId of ["A", "B", "C"]) await done(jobs, `compile-${sceneId}`);
     for (const sceneId of ["A", "B", "C"]) {
         const job = jobs.getCompilation("episode", "episode", `compile-${sceneId}`);
         assert.equal(job.status, "succeeded", JSON.stringify(job)); jobs.apply("episode", "episode", job.preparedId!);
@@ -407,15 +412,15 @@ test("three scoped compiler jobs overlap and merge disjoint results without over
     const originalHash = b.sourceHash;
     const next = structuredClone(current.draft.director!);
     next.engine = { commit: "b".repeat(40), patchVersion: "next", runtimeId: "next", version: "next" };
-    jobs.enqueue("episode", "episode", "compile-A-new-engine", current.revision, next, { sceneId: "A" });
-    await new Promise(resolve => setImmediate(resolve));
+    jobs.enqueue("episode", "episode", "compile-A-new-engine", current.revision, next, { targetIds: ["KA"] });
+    for (let attempt = 0; attempt < 30 && releases.length < 4; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(releases.length, 4, "same-source artifacts from an older compiler must not skip the requested new compilation");
-    releases[3](); await new Promise(resolve => setImmediate(resolve));
+    releases[3](); await done(jobs, "compile-A-new-engine");
     const newer = jobs.getCompilation("episode", "episode", "compile-A-new-engine");
-    assert.equal(newer.status, "succeeded"); jobs.apply("episode", "episode", newer.preparedId!);
+    assert.equal(newer.status, "blocked", "a candidate compiled with an engine not present in the current target manifest must not be applied");
     const mixed = service.get("episode");
-    assert.equal(mixed.draft.director!.engine.runtimeId, "next");
-    assert.equal(mixed.draft.director!.artifacts.find(item => item.targetId === "KA")!.receipt.engineRuntimeId, "next");
+    assert.equal(mixed.draft.director!.engine.runtimeId, "fixture");
+    assert.equal(mixed.draft.director!.artifacts.find(item => item.targetId === "KA")!.receipt.engineRuntimeId, "fixture");
     const preservedB = mixed.draft.director!.artifacts.find(item => item.targetId === "KB")!;
     assert.equal(preservedB.prompt, b.prompt);
     assert.equal(preservedB.receipt.engineRuntimeId, b.receipt.engineRuntimeId);
@@ -424,7 +429,7 @@ test("three scoped compiler jobs overlap and merge disjoint results without over
     const changed = service.get("episode").draft.director!;
     assert.equal(currentCompilationArtifact(changed, preservedB), true); assert.equal(preservedB.sourceHash, originalHash);
     assert.throws(() => jobs.apply("episode", "other", job.preparedId!), /different production/);
-    assert.deepEqual(compilationScopeInput(changed, { sceneId: "B" }).targetIds, ["KB"]);
+    assert.deepEqual(compilationScopeInput(changed, { sceneId: "B" }).targetIds, ["CLIPB"]);
 });
 
 test("prepare is read-only; frozen apply is atomic and idempotent", t => {
@@ -445,17 +450,18 @@ test("prepare is read-only; frozen apply is atomic and idempotent", t => {
     assert.equal(service.get("episode").revision, 2);
 });
 
-test("stale snapshot applies under last-write-wins; owner mismatch still rejects; old engine metadata does not lock compilation", t => {
+test("unrelated revision growth does not block compilation, but changed compile input does", t => {
     const { service, compilations, director } = fixture(t);
     const originalBrief = service.get("episode").draft.director?.source.brief;
     const prepared = compilations.prepare("episode", "episode", 1);
-    assert.throws(() => compilations.prepare("episode", "episode", 0), ProductionConflictError);
-    assert.ok(compilations.prepare("episode", "episode", 1, { ...director, engine: { ...director.engine, runtimeId: "other" } }).preparedId);
+    assert.ok(compilations.prepare("episode", "episode", 0).preparedId, "a stale global cursor can compile the current saved input");
+    assert.throws(() => compilations.prepare("episode", "episode", 1, { ...director, engine: { ...director.engine, runtimeId: "other" } }), ProductionConflictError,
+        "the compiler runtime is part of the frozen target manifest");
     assert.throws(() => compilations.apply("episode", "canvas", prepared.preparedId), /different production/);
     service.edit("episode", { operationId: "concurrent", expectedRevision: 1, ops: [{ type: "set_director_brief", brief: "Another window's edit" }] });
-    // 乐观锁放行：过期快照不再被 revision 拦截，后到的 apply 胜出并覆盖并发编辑
-    compilations.apply("episode", "episode", prepared.preparedId);
-    assert.equal(service.get("episode").draft.director?.source.brief, originalBrief, "last-write-wins：过期快照的 apply 覆盖了并发的 brief");
+    assert.throws(() => compilations.apply("episode", "episode", prepared.preparedId), ProductionConflictError);
+    assert.equal(service.get("episode").draft.director?.source.brief, "Another window's edit", "a changed target input blocks the stale prepared packet");
+    assert.notEqual(service.get("episode").draft.director?.source.brief, originalBrief);
 });
 
 test("tampered compiler packet is rejected without a revision change", t => {

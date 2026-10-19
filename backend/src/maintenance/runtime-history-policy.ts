@@ -126,6 +126,8 @@ const SOURCE_MANIFEST = {
     productionTables: [
         "episode_productions", "canvas_productions",
         "episode_production_operations", "canvas_production_operations",
+        "production_operation_keys",
+        "production_source_lifecycle_events",
         "episode_production_versions", "canvas_production_versions",
         "episode_production_runs", "canvas_production_runs",
         "episode_production_batches", "canvas_production_batches",

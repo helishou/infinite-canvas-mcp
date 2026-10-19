@@ -96,6 +96,8 @@ export type CanvasNodeMetadata = {
     sharedAssetReference?: SharedAssetReference;
     sharedLibraryAssetId?: string;
     productionImageInput?: ProductionImageInput;
+    /** Backend-maintained snapshot of the current incoming reference connections. */
+    canvasReferenceNodeIds?: string[];
     productionEntity?: ProductionEntityBinding;
     productionLayoutUnitId?: string;
     productionSceneId?: string;

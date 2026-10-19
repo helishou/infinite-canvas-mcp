@@ -86,6 +86,10 @@ export function createH3NodeMetadata(stored: Record<string, unknown> = {}, metad
         prompt: existing.prompt ?? metadata.prompt ?? defaultPrompt,
         duration: existing.duration ?? BASE_H3_NODE_METADATA.duration,
         taskMode: existing.taskMode ?? "ref2va",
+        // A new boundary carries the preceding Clip's last frame by default.
+        // An authored first storyboard frame already anchors this Clip's opening.
+        tailFrameContinuation: Object.hasOwn(existing, "tailFrameContinuation") ? existing.tailFrameContinuation
+            : !hasExplicitOpeningStoryboard(existing) && existing.motionContextEnabled !== true,
         status: existing.status ?? "idle",
     };
     return {
@@ -96,4 +100,15 @@ export function createH3NodeMetadata(stored: Record<string, unknown> = {}, metad
         ...metadata,
         segments: [initialSegment],
     };
+}
+
+function hasExplicitOpeningStoryboard(segment: Record<string, unknown>) {
+    const shots = Array.isArray(segment.storyboardShots) ? segment.storyboardShots as Array<Record<string, unknown>> : [];
+    const firstBindingId = String(shots[0]?.referenceBindingId || "");
+    const references = Array.isArray(segment.referenceBindings) ? segment.referenceBindings as Array<Record<string, unknown>> : [];
+    const first = references.find(reference => String(reference.id || reference.bindingId || "") === firstBindingId);
+    if (first) return first.enabled !== false && (first.mediaType || first.type || "image") === "image" && first.role === "storyboard";
+    const mode = String(segment.taskMode || segment.mode || "").toLowerCase();
+    return ["i2v", "i2va", "fl2v", "fl2va"].includes(mode)
+        && references.some(reference => reference.enabled !== false && (reference.mediaType || reference.type || "image") === "image");
 }

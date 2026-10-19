@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import test, { type TestContext } from "node:test";
 import path from "node:path";
 
@@ -478,4 +480,33 @@ test("decoded-video confirmation uses the packaged full-frame refiner when face 
     assert.equal(graph.full_frame_refine.inputs.steps, 3);
     assert.equal(graph.full_frame_refine.inputs.target_megapixels, 0.4);
     assert.deepEqual(graph.nf_output.inputs.audio, ["full_frame_refine", 1]);
+});
+
+/** 存量任务里的输入路径可能已被清理：必须在复制/上传之前按房内措辞讲清楚，而不是抛 ENOENT。 */
+test("H3 input missing from disk fails with the house wording before any copy", async t => {
+    const bridge = new ComfyUiBackend({ settings: { get: () => "" } } as unknown as ComfyUiDeps, "http://comfy.test");
+    const localH3Input = (bridge as unknown as { localH3Input: (file: string, signal: AbortSignal, url: string) => Promise<string> }).localH3Input.bind(bridge);
+    // 实测库里确实存在这类陈旧输入（2026-09 的 H3 任务仍指向早已消失的 previousVideo）。
+    const missing = path.join(MEDIA_DIR, "2312e4b6-b782-4c2e-8431-4ae51e8578a5.mp4");
+    assert.equal(fs.existsSync(missing), false, "用例前提：该历史输入确实不在盘上");
+    await assert.rejects(
+        () => localH3Input(missing, new AbortController().signal, "http://comfy.test"),
+        (error: Error) => error.message.startsWith("媒体文件丢失：H3 输入") && error.message.includes(missing),
+    );
+
+    // 存在的文件不能被这条守卫拦下（后续报错属于 ComfyUI 目录/副本问题，与文件丢失无关）。
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "h3-input-guard-"));
+    t.after(() => fs.promises.rm(dir, { recursive: true, force: true }));
+    const present = path.join(dir, "input.png");
+    await fs.promises.writeFile(present, "png");
+    await assert.rejects(
+        () => localH3Input(present, new AbortController().signal, "http://comfy.test"),
+        (error: Error) => { assert.equal(/媒体文件丢失/.test(error.message), false, `存在的文件不得报丢失：${error.message}`); return true; },
+    );
+
+    // 非 H3 preset 走的通用 upload() 同样要先讲清楚（同一类陈旧输入）。
+    await assert.rejects(
+        () => bridge.upload(missing, new AbortController().signal, "http://comfy.test"),
+        (error: Error) => error.message.startsWith("媒体文件丢失：ComfyUI 输入") && error.message.includes(missing),
+    );
 });

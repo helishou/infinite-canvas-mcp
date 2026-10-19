@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyDirectorSourcePatch, productionOperationContract, ref2vaPromptDiagnostics } from "./production-validation.js";
+import { applyDirectorSourcePatch, productionOperationContract, ref2vaPromptDiagnostics, SHOT_FRAME_VALUES, readShotFraming } from "./production-validation.js";
 import { productionEntities } from "./production-entities.js";
 import { diagnosticBlocksAction, dramaProductionPlanSchema, productionEditSchema, productionSettingsSchema, type DirectorProduction, type ProductionDiagnostic } from "./production-contract.js";
 import { toolInputSchemas } from "../canvas/schemas.js";
@@ -32,6 +32,21 @@ test("MCP edit schemas reject formerly opaque invalid operations", () => {
             assert.equal(schema.safeParse({ projectId: "canvas", episodeId: "episode", operationId: "op", expectedRevision: 0, ops: [op] }).success, false);
         }
     }
+});
+
+test("patch_director_source exposes only registered fields and validates fields against the selected entity", () => {
+    const edit = (operation: Record<string, unknown>) => ({ operationId: "patch-contract", expectedRevision: 0, ops: [operation] });
+    const allowed = { type: "patch_director_source", entity: "asset", id: "ASSET1", patch: { description: "A usable reference." } };
+    const unknownField = { type: "patch_director_source", entity: "asset", id: "ASSET1", patch: { purpose: "Not an asset source field" } };
+    const wrongEntityField = { type: "patch_director_source", entity: "asset", id: "ASSET1", patch: { prompt_description: "Environment-only field" } };
+    assert.equal(productionEditSchema.safeParse(edit(allowed)).success, true);
+    assert.equal(productionEditSchema.safeParse(edit(unknownField)).success, false);
+    assert.equal(productionEditSchema.safeParse(edit(wrongEntityField)).success, false);
+    assert.equal(toolInputSchemas.production_edit.safeParse({ ...edit(unknownField), kind: "episode", id: "EP1" }).success, false,
+        "MCP input validation rejects an invalid patch before the Backend request");
+    const patchContract = productionOperationContract("patch_director_source");
+    assert.equal(JSON.stringify(patchContract.jsonSchema).includes('"purpose":'), false);
+    assert.equal(JSON.stringify(patchContract.jsonSchema).includes("additionalProperties"), true);
 });
 
 test("asset canvas scope is a formal, validated source field that invalidates old compile receipts", () => {
@@ -259,4 +274,20 @@ test("shot features, combat, performance, segment motion, summary, audio and ani
     assert.deepEqual((director.source.segments as Array<Record<string, any>>)[0].animation_term_evidence, evidence);
     assert.throws(() => applyDirectorSourcePatch(director, "segment", "SEG1", { animation_term_ids: [""] }), /非空字符串数组/);
     assert.throws(() => applyDirectorSourcePatch(director, "segment", "SEG1", { animation_term_evidence: [{ ...evidence[0], sound_or_qa: "" }] }), /sound_or_qa/);
+});
+test("camera.framing accepts only the seven static framings and steers transition labels to the visual/movement split", () => {
+    const director = productionOperationContract("set_director_production").operations[0].example.director as DirectorProduction;
+    (director.source.shots as any[]).push({ id: "S1" });
+    for (const framing of [...SHOT_FRAME_VALUES]) applyDirectorSourcePatch(director, "shot", "S1", { camera: { framing } });
+    assert.equal((director.source.shots as any[]).find(shot => shot.id === "S1")!.camera.framing, "ECU");
+    // A patch touching other camera fields leaves an untouched framing alone.
+    applyDirectorSourcePatch(director, "shot", "S1", { camera: { movement: "static hold" } });
+    assert.equal((director.source.shots as any[]).find(shot => shot.id === "S1")!.camera.movement, "static hold");
+    assert.equal(readShotFraming({ framing: undefined }), undefined);
+    // Explicit non-vocabulary values — including empty strings that would silently
+    // erase the compiled Framing line — are rejected with the three-field recipe.
+    for (const framing of ["MS转CU", "中景转特写", "BSCU", ""]) {
+        assert.throws(() => applyDirectorSourcePatch(director, "shot", "S1", { camera: { framing } }), /不在有效词表 EWS\/WS\/FS\/MS\/MCU\/CU\/ECU/);
+        assert.throws(() => applyDirectorSourcePatch(director, "shot", "S1", { camera: { framing } }), /落点或主导景别[\s\S]*visual[\s\S]*movement/);
+    }
 });

@@ -23,7 +23,7 @@ export type H3PromptBatchProgress = {
 };
 
 /** Cache by each exact compiled prompt and translate sequential batches of at most three prompts. */
-export async function translateCompiledH3Prompts(items: H3PromptBatchItem[], onProgress?: (progress: H3PromptBatchProgress) => void, options?: { signal?: AbortSignal }): Promise<Array<H3PromptTranslation & { id: string }>> {
+export async function translateCompiledH3Prompts(items: H3PromptBatchItem[], onProgress?: (progress: H3PromptBatchProgress) => void, options?: { signal?: AbortSignal }, onTranslated?: (items: Array<H3PromptTranslation & { id: string }>) => Promise<void>): Promise<Array<H3PromptTranslation & { id: string }>> {
     if (!Array.isArray(items) || !items.length) throw new Error("编译提示词列表为空，无法翻译");
     const ids = new Set<string>();
     const rows = await Promise.all(items.map(async item => {
@@ -42,6 +42,7 @@ export async function translateCompiledH3Prompts(items: H3PromptBatchItem[], onP
     const cachedHashes = new Set<string>();
     const inProgressHashes = new Set<string>();
     const failedHashes = new Set<string>();
+    const deliveredIds = new Set<string>();
     const reportProgress = () => onProgress?.({
         completed: rows.filter(row => translated.has(row.sourceHash)).length,
         total: rows.length,
@@ -50,6 +51,15 @@ export async function translateCompiledH3Prompts(items: H3PromptBatchItem[], onP
         inProgressIds: rows.filter(row => inProgressHashes.has(row.sourceHash)).map(row => row.id),
         failedIds: rows.filter(row => failedHashes.has(row.sourceHash)).map(row => row.id),
     });
+    const deliverResults = async (results: Array<{ sourceHash: string; translatedText: string; cached: boolean }>) => {
+        const ready = results.flatMap(result => rows
+            .filter(row => row.sourceHash === result.sourceHash && !deliveredIds.has(row.id))
+            .map(row => {
+                deliveredIds.add(row.id);
+                return { id: row.id, ...result };
+            }));
+        if (ready.length) await onTranslated?.(ready);
+    };
     reportProgress();
     while (translated.size < uniqueRows.length) {
         const waiting: Promise<void>[] = [];
@@ -58,22 +68,28 @@ export async function translateCompiledH3Prompts(items: H3PromptBatchItem[], onP
             row,
             cached: await h3TranslationCache.getItem<{ sourceHash: string; translatedText: string }>(row.key),
         })));
+        const cachedReady: Array<{ sourceHash: string; translatedText: string; cached: boolean }> = [];
+        const inFlightWaiters: Promise<{ sourceHash: string; translatedText: string; cached: boolean }>[] = [];
         for (const { row, cached } of cacheRows) {
             if (cached?.sourceHash === row.sourceHash && cached.translatedText) {
                 translated.set(row.sourceHash, { text: cached.translatedText, cached: true });
                 cachedHashes.add(row.sourceHash);
+                cachedReady.push({ sourceHash: row.sourceHash, translatedText: cached.translatedText, cached: true });
             }
             else {
                 const pending = h3TranslationInFlight.get(row.key);
-                if (pending) waiting.push(pending.then(text => {
+                if (pending) inFlightWaiters.push(pending.then(text => {
                     translated.set(row.sourceHash, { text, cached: true });
                     cachedHashes.add(row.sourceHash);
                     inProgressHashes.delete(row.sourceHash);
                     reportProgress();
+                    return { sourceHash: row.sourceHash, translatedText: text, cached: true };
                 }));
                 else missing.push(row);
             }
         }
+        await deliverResults(cachedReady);
+        if (inFlightWaiters.length) waiting.push(Promise.all(inFlightWaiters).then(deliverResults));
         reportProgress();
         if (translated.size >= uniqueRows.length) break;
         if (!waiting.length && !missing.length) throw new Error("没有可处理的翻译批次");
@@ -96,23 +112,27 @@ export async function translateCompiledH3Prompts(items: H3PromptBatchItem[], onP
                 h3TranslationInFlight.set(row.key, pending);
                 return { row, pending };
             });
-            waiting.push(Promise.all(pendingRows.map(({ pending }) => pending)).then(values => {
-                values.forEach((text, offset) => {
-                    const row = batch[offset];
-                    const cached = serverCachedById.get(row.id) === true;
-                    translated.set(row.sourceHash, { text, cached });
+            const rowWork = pendingRows.map(({ row, pending }) => pending.then(text => {
+                const cached = serverCachedById.get(row.id) === true;
+                translated.set(row.sourceHash, { text, cached });
+                inProgressHashes.delete(row.sourceHash);
+                failedHashes.delete(row.sourceHash);
+                if (cached) cachedHashes.add(row.sourceHash);
+                reportProgress();
+                return { sourceHash: row.sourceHash, translatedText: text, cached };
+            }));
+            waiting.push(Promise.allSettled(rowWork).then(async settled => {
+                settled.forEach((result, index) => {
+                    const row = batch[index];
                     inProgressHashes.delete(row.sourceHash);
-                    failedHashes.delete(row.sourceHash);
-                    if (cached) cachedHashes.add(row.sourceHash);
+                    if (result.status === "rejected") failedHashes.add(row.sourceHash);
+                    else failedHashes.delete(row.sourceHash);
                 });
                 reportProgress();
-            }).catch(error => {
-                batch.forEach(row => {
-                    inProgressHashes.delete(row.sourceHash);
-                    failedHashes.add(row.sourceHash);
-                });
-                reportProgress();
-                throw error;
+                const ready = settled.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
+                await deliverResults(ready);
+                const failure = settled.find(result => result.status === "rejected");
+                if (failure?.status === "rejected") throw failure.reason;
             }));
         }
         reportProgress();

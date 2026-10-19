@@ -8,6 +8,8 @@ import type { BackendEventBus } from "../events.js";
 import type { EpisodeProductionService } from "./production.js";
 import type { compileAchengDirector } from "@basketikun/canvas-agent/skills/acheng";
 import { ProductionCompilationService } from "./compilation.js";
+import { productionCanvasContext } from "./production-canvas.js";
+import { reconcileSharedAssetConsumers } from "../canvas/drama-asset-library.js";
 
 export type ApprovedSharedAsset = { id: string; dramaId: string; assetId: string; sourceProjectId: string; sourceNodeId: string; sourceVersion: number;
     storageKey: string; sha256: string; evidence: string; reviewStatus: "unreviewed" | "approved"; snapshot: Record<string, any>; createdAt: string };
@@ -38,7 +40,7 @@ export function registerSharedAssetVersion(db: BackendDatabase, projectId: strin
     const drama = db.db.prepare("SELECT folder_id FROM drama_projects WHERE shared_asset_canvas_id=?").get(projectId) as { folder_id: string } | undefined;
     const asset = director.assets[assetId];
     const reviewed = asset?.status === "approved" && Boolean(asset.evidence?.trim());
-    if (!drama || !asset || !["approved", "generated"].includes(asset.status) || !asset.nodeId || !asset.storageKey || !asset.sha256) return;
+    if (!drama || !asset || !["approved", "generated", "planned"].includes(asset.status) || !asset.nodeId || !asset.storageKey || !asset.sha256) return;
     const node = (db.getCanvasProject(projectId)?.nodes as Record<string, any>[] || []).find(item => item.id === asset.nodeId);
     if (!node) throw new Error(`共享素材「${assetId}」的引用节点 ${asset.nodeId} 已不在画布上，请重新绑定素材`);
     const now = new Date().toISOString();
@@ -66,41 +68,65 @@ export function registerSharedAssetVersion(db: BackendDatabase, projectId: strin
         data: {},
         metadata: { ...existingLibrary?.metadata, approvedId: id, versionId: id, reviewStatus: reviewed ? "approved" : "unreviewed", assetId, sourceProjectId: projectId, sourceNodeId: asset.nodeId,
             sharedAssetSource: { dramaId: drama.folder_id, assetId: libraryId, sourceProjectId: projectId, sourceNodeId: asset.nodeId } }, createdAt: existingLibrary?.createdAt || now, updatedAt: now });
+    const regTitle = snapshot.title;
     for (const row of db.db.prepare(`SELECT p.episode_id, p.revision, p.draft_json FROM episode_productions p
         JOIN drama_episodes e ON e.id=p.episode_id WHERE e.drama_id=?`).all(drama.folder_id) as Array<{ episode_id: string; revision: number; draft_json: string }>) {
         const draft = JSON.parse(row.draft_json);
+        // 真正的共享引用信息挂在 source.asset_plan 条目上，投影资产条目往往只是空占位；
+        // 用 asset_plan 作为 sharedSource 的权威来源，两者 id 一致可对齐。
+        const planItems = Array.isArray(draft.source?.asset_plan) ? draft.source.asset_plan : [];
         for (const [targetId, consumer] of Object.entries(draft.director?.assets || {})) {
-            const source = record(consumer).sharedSource;
-            if (!source || source.assetId !== assetId || source.dramaId !== drama.folder_id || source.approvedId === id) continue;
+            const consumerRec = record(consumer);
+            const planItem = record(planItems.find((item: any) => String(item?.id) === String(targetId)));
+            const source = consumerRec.sharedSource || planItem.sharedSource;
+            // 双锚点识别同一共享资产：同源画布(sourceProjectId)且(源实体节点号相等 或 资产名相等)。
+            // 源实体节点号是编码进分集 sharedSource.assetId 里的那段 production-entity-* 节点号；
+            // 资产名(snapshot.title)在共享画布侧与分集 asset_name 保持一致，作为名称级兜底匹配。
+            // assetId 字符串相等仍兼容旧数据。三者满足其一即视为命中。
+            const sid = String(source?.assetId || "");
+            const prefix = `SHARED_${projectId}_`;
+            const entityAnchor = sid.startsWith(prefix) ? sid.slice(prefix.length) : "";
+            const sameProject = Boolean(source?.sourceProjectId) && String(source.sourceProjectId) === projectId;
+            const nodeMatch = Boolean(entityAnchor) && entityAnchor === asset.nodeId;
+            const nameMatch = Boolean(regTitle) && String(planItem.asset_name || planItem.name || "") === regTitle;
+            const sameEntity = sameProject && (nodeMatch || nameMatch);
+            if (!source || !(source.assetId === assetId || sameEntity) || source.dramaId !== drama.folder_id || source.approvedId === id) continue;
             db.db.prepare(`INSERT OR IGNORE INTO drama_asset_adoptions (id, approved_id, episode_id, target_asset_id, expected_revision, status, updated_at)
                 VALUES (?, ?, ?, ?, ?, 'pending', ?)`).run(`adoption-${stable(id, row.episode_id, targetId)}`, id, row.episode_id, targetId, row.revision, now);
         }
     }
 }
 
-/** Compatibility wrapper for callers that additionally record optional review evidence. */
+/**
+ * 兼容包装：共享素材登记不再等待显式审核结论。
+ * 只要本轮发布稿里该资产已经有归档媒体，就登记为可用版本；审核记录退化为可选的历史信息。
+ * 这样分集引用共享图不需要「先审批」这一步。
+ */
 export function registerApprovedSharedAsset(db: BackendDatabase, projectId: string, version: number, assetId: string, director: DirectorProduction) {
-    if (director.assets[assetId]?.status !== "approved" || !director.assets[assetId]?.evidence?.trim()) return;
+    const asset = director.assets[assetId];
+    if (!asset?.storageKey) return;
     return registerSharedAssetVersion(db, projectId, version, assetId, director);
 }
 
-export function validateSharedAssetSource(db: BackendDatabase, projectId: string, asset: DirectorProduction["assets"][string], latest = false) {
+export function validateSharedAssetSource(db: BackendDatabase, projectId: string, asset: DirectorProduction["assets"][string]) {
     if (!asset.sharedSource) return;
     const source = asset.sharedSource;
-    const approved = approvedSharedAsset(db, source.approvedId);
     const episode = db.getDramaEpisodeByCanvasId(projectId);
     const name = source.assetId || asset.nodeId;
-    if (!episode || episode.dramaId !== approved.dramaId || source.dramaId !== approved.dramaId)
-        throw new Error(`共享素材「${name}」的剧目归属与所选版本不一致，请回读同剧目的素材后重新采用`);
-    if (source.assetId !== approved.assetId || source.sourceProjectId !== approved.sourceProjectId || source.sourceNodeId !== approved.sourceNodeId ||
-        asset.storageKey !== approved.storageKey || asset.sha256 !== approved.sha256)
-        throw new Error(`共享素材「${name}」与所选版本不一致（来源画布/节点或图片内容已改变），请回读素材后重新采用`);
-    const node = (db.getCanvasProject(projectId)?.nodes as Record<string, any>[] || []).find(item => item.id === asset.nodeId);
-    if (node?.metadata?.sharedAssetOrigin?.approvedId !== approved.id)
-        throw new Error(`共享素材「${name}」在制作画布上的引用节点已失效（节点 ${asset.nodeId} 缺失或版本不匹配），请在制作画布中重新采用`);
-    if (latest && listApprovedSharedAssets(db, approved.dramaId).find(item => item.assetId === approved.assetId)?.id !== approved.id) {
-        throw Object.assign(new Error("共享素材已有新版本，等待引用更新及提示词重新校验"), { code: "SHARED_ASSET_UPDATE" });
+    const consumer = productionCanvasContext(db, projectId), canonical = productionCanvasContext(db, source.sourceProjectId);
+    if (!episode || episode.dramaId !== source.dramaId || consumer.dramaId !== source.dramaId
+        || canonical.dramaId !== source.dramaId || canonical.role !== "shared-assets") {
+        throw new Error(`共享素材「${name}」的分集或来源画布不属于当前剧目`);
     }
+    const sourceNode = (db.getCanvasProject(source.sourceProjectId)?.nodes as Record<string, any>[] || []).find(item => item.id === source.sourceNodeId);
+    if (!sourceNode) throw new Error(`共享素材「${name}」的当前共享来源节点不存在`);
+    const node = (db.getCanvasProject(projectId)?.nodes as Record<string, any>[] || []).find(item => item.id === asset.nodeId);
+    if (!node) {
+        throw new Error(`共享素材「${name}」在制作画布上的绑定节点 ${asset.nodeId} 不存在`);
+    }
+    const reference = node.metadata?.sharedAssetReference || node.metadata?.sharedAssetOrigin;
+    if (reference?.sourceProjectId !== source.sourceProjectId || reference?.sourceNodeId !== source.sourceNodeId)
+        throw new Error(`共享素材「${name}」的分集节点没有绑定当前共享来源`);
 }
 
 /** Only this path creates the local projection; callers cannot register arbitrary media. */
@@ -132,11 +158,57 @@ export class SharedAssetCoordinator {
     constructor(private db: BackendDatabase, private service: EpisodeProductionService, private events: BackendEventBus,
         private resume?: (episodeId: string, runId: string) => void, private compiler?: typeof compileAchengDirector, private syncInputs?: (episodeId: string) => void) {}
     start() {
+        this.reconcileExistingSharedConsumers();
         const unsubscribe = this.events.subscribe(event => {
-            if (event.type === "drama-production.updated") this.schedule();
+            const payload = record(event.payload);
+            if (event.type === "drama-production.updated" && payload.reason !== "shared_asset_sync") this.schedule();
         });
         this.schedule();
         return unsubscribe;
+    }
+    private reconcileExistingSharedConsumers() {
+        const forceMarker = "maintenance.shared-asset-consumers.v1";
+        const repairMarker = "maintenance.shared-asset-consumers.v2";
+        const h3OutfitRepairMarker = "maintenance.shared-asset-consumers.v3";
+        const h3SiblingOutfitRepairMarker = "maintenance.shared-asset-consumers.v4";
+        if (this.db.getSetting(forceMarker) && this.db.getSetting(repairMarker) && this.db.getSetting(h3OutfitRepairMarker)
+            && this.db.getSetting(h3SiblingOutfitRepairMarker)) return;
+        try {
+            const projectIds = (this.db.db.prepare(`SELECT DISTINCT json_extract(metadata_json, '$.sharedAssetSource.sourceProjectId') AS projectId
+                FROM assets WHERE json_extract(metadata_json, '$.sharedAssetSource.sourceProjectId') IS NOT NULL`).all() as Array<{ projectId: string | null }>)
+                .map(row => String(row.projectId || "")).filter(Boolean);
+            if (!this.db.getSetting(forceMarker)) {
+                const backup = projectIds.length ? this.db.snapshotForMaintenance("pre-shared-asset-rebind") : undefined;
+                const results = projectIds.map(projectId => reconcileSharedAssetConsumers(this.db, projectId, true));
+                this.db.setSetting(forceMarker, { completedAt: new Date().toISOString(), sharedProjects: projectIds.length,
+                    updatedEpisodes: results.reduce((count, result) => count + result.productionUpdates.length, 0), ...(backup ? { backup } : {}) });
+            }
+            if (!this.db.getSetting(repairMarker)) {
+                // Repair blank legacy H3 media slots after the forced identity rebind.
+                // This pass preserves current picture selections while mapping by exact source node.
+                const backup = projectIds.length ? this.db.snapshotForMaintenance("pre-shared-asset-rebind-v2") : undefined;
+                const results = projectIds.map(projectId => reconcileSharedAssetConsumers(this.db, projectId, false));
+                this.db.setSetting(repairMarker, { completedAt: new Date().toISOString(), sharedProjects: projectIds.length,
+                    updatedEpisodes: results.reduce((count, result) => count + result.productionUpdates.length, 0), ...(backup ? { backup } : {}) });
+            }
+            if (!this.db.getSetting(h3OutfitRepairMarker)) {
+                // Correct character outfits by their exact shared source node and persisted H3 labels.
+                const backup = projectIds.length ? this.db.snapshotForMaintenance("pre-shared-asset-h3-outfit-rebind") : undefined;
+                const results = projectIds.map(projectId => reconcileSharedAssetConsumers(this.db, projectId, false));
+                this.db.setSetting(h3OutfitRepairMarker, { completedAt: new Date().toISOString(), sharedProjects: projectIds.length,
+                    updatedEpisodes: results.reduce((count, result) => count + result.productionUpdates.length, 0), ...(backup ? { backup } : {}) });
+            }
+            if (!this.db.getSetting(h3SiblingOutfitRepairMarker)) {
+                // Repair Clips whose role group lacks local reference rows by borrowing only
+                // exact sibling slots backed by the same shared source node and outfit ID.
+                const backup = projectIds.length ? this.db.snapshotForMaintenance("pre-shared-asset-h3-sibling-outfit-rebind") : undefined;
+                const results = projectIds.map(projectId => reconcileSharedAssetConsumers(this.db, projectId, false));
+                this.db.setSetting(h3SiblingOutfitRepairMarker, { completedAt: new Date().toISOString(), sharedProjects: projectIds.length,
+                    updatedEpisodes: results.reduce((count, result) => count + result.productionUpdates.length, 0), ...(backup ? { backup } : {}) });
+            }
+        } catch (error) {
+            console.error("[shared-assets] initial consumer reconciliation failed; it will retry on the next Backend start", error);
+        }
     }
     private schedule() {
         if (this.scheduled || this.processing) return;

@@ -1,9 +1,15 @@
 import { canonicalProduction, directorProductionSchema, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import { currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 import crypto from "node:crypto";
+import { defaultDirectorBoundary } from "./continuity-defaults.js";
 
 type Row = Record<string, any>;
 type Replacement = { sceneId: string; shots: Row[]; segments: Row[]; shotInputs: Record<string, unknown> };
+const AUTO_BOUNDARY_REASONS = new Set([
+    "Separate authored Shot coverage changes camera or viewpoint; carry no latent frames across this edge.",
+    "默认引用前段尾帧承接下一 Clip 的动作与场景状态；Motion Context 保持关闭。",
+    "目标 Clip 已有明确首帧分镜图，沿用该首帧。",
+]);
 export function replaceDirectorSceneStoryboard(director: DirectorProduction, op: Replacement) {
     const rows = (value: unknown): Row[] => Array.isArray(value) ? value : [];
     const oldShots = rows(director.source.shots), oldSegments = rows(director.source.segments);
@@ -51,9 +57,12 @@ export function replaceDirectorSceneStoryboard(director: DirectorProduction, op:
     next.source.segments = [...oldSegments.slice(0, firstSegment), ...op.segments, ...oldSegments.slice(firstSegment).filter(segment => !segmentIds.has(segment.id))];
     const orderedSegments = [...ownedSegments];
     const internalEdges = new Set(orderedSegments.slice(0, -1).map((segment, index) => `${segment.id}\0${orderedSegments[index + 1].id}`));
-    next.boundaries = next.boundaries.map(edge => internalEdges.has(`${edge.from}\0${edge.to}`)
-        ? { ...edge, tailFrame: false, motionContext: false, reason: "Separate authored Shot coverage changes camera or viewpoint; carry no latent frames across this edge." }
-        : edge);
+    next.boundaries = next.boundaries.map(edge => {
+        if (!internalEdges.has(`${edge.from}\0${edge.to}`)) return edge;
+        if (!AUTO_BOUNDARY_REASONS.has(String(edge.reason || ""))) return edge;
+        const authored = defaultDirectorBoundary(next, edge.from, edge.to, { shotInputs: op.shotInputs, shots: op.shots });
+        return { ...edge, tailFrame: authored.tailFrame, motionContext: false, reason: authored.reason };
+    });
     next.shotInputs = { ...Object.fromEntries(Object.entries(next.shotInputs).filter(([id]) => !oldIds.has(id))), ...op.shotInputs } as DirectorProduction["shotInputs"];
     next.sourceHash = crypto.createHash("sha256").update(canonicalProduction(next.source)).digest("hex");
     next.artifacts = next.artifacts.map(artifact => currentCompilationArtifact(next, artifact) ? artifact : { ...artifact, status: "stale" });

@@ -1,10 +1,14 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import type { Asset, BackendDatabase, CanvasProject } from "../db.js";
 import type { CanvasCommandContext, CanvasCommit } from "./collaboration.js";
 import { commandFingerprint, collaborationError } from "./collaboration.js";
 import type { CanvasOperation } from "./project-ops.js";
 import { ensureProductionCanvas } from "../drama/production-canvas.js";
-import { directorHash, projectDirector } from "../drama/director.js";
+import { directorHash, withoutDirectorProjection } from "../drama/director.js";
+import { sharedSubjectPictureMedia } from "../drama/shared-subject-picture.js";
+import { sharedAssetClipInputOperations } from "../drama/clip-inputs.js";
+import type { EpisodeProductionData } from "@basketikun/canvas-agent/drama/production-contract";
 import { productionNodePosition } from "../drama/production-layout-geometry.js";
 import { selectSmartImageResult } from "@basketikun/canvas-agent/reference-contract";
 import { libraryAssetNode, assetField, sameAssetValue, setAssetField, sharedAssetFields, resolveSharedAssetNode, stripSharedAssetContent, type AssetNode, type SharedAssetReference, type SharedAssetSource } from "@basketikun/canvas-agent/shared-asset-reference";
@@ -65,9 +69,20 @@ export function syncSharedCanvasAssetRecords(db: BackendDatabase, projectId: str
 function effectiveSourceNode(node: AssetNode, kind: string): AssetNode {
     if (node.type !== "config" || node.metadata?.smart !== true || kind !== "image") return node;
     const selected = selectSmartImageResult(node.metadata, { mode: "node_selection" });
-    if (selected.error) throw new Error(selected.error);
-    const image = selected.image;
-    return image ? { ...node, type: kind, metadata: { ...node.metadata, content: image.content || image.url || "", storageKey: image.storageKey, naturalWidth: image.naturalWidth || image.width, naturalHeight: image.naturalHeight || image.height, bytes: image.bytes, mimeType: image.mimeType } } : { ...node, type: kind };
+    const metadata = node.metadata || {};
+    // 生产链路只把唯一成功结果记在智能节点顶层的 storageKey/generationTaskId 上，
+    // `images` 可能一直是空数组。这里必须与 validateDirectorMedia 的同类适配保持一致，
+    // 否则只要有一张这样的共享图，整次共享画布写入都会因这一张图失败。
+    const provenSingleton = metadata.status === "success" && metadata.storageKey
+        ? { content: metadata.content || metadata.url || "", storageKey: metadata.storageKey, naturalWidth: metadata.naturalWidth,
+            naturalHeight: metadata.naturalHeight, bytes: metadata.bytes, mimeType: metadata.mimeType }
+        : undefined;
+    const image = (selected.image || provenSingleton) as { content?: string; url?: string; storageKey?: string; naturalWidth?: number; width?: number; naturalHeight?: number; height?: number; bytes?: number; mimeType?: string } | undefined;
+    if (!image) {
+        if (selected.error) throw new Error(selected.error);
+        return { ...node, type: kind };
+    }
+    return { ...node, type: kind, metadata: { ...metadata, content: image.content || image.url || "", storageKey: image.storageKey, naturalWidth: image.naturalWidth || image.width, naturalHeight: image.naturalHeight || image.height, bytes: image.bytes, mimeType: image.mimeType } };
 }
 function missingSharedSourceAsset(asset: Asset, reason: "source_project_missing" | "source_node_missing"): Asset {
     const metadata = { ...asset.metadata, sharedAssetMissing: true, sharedAssetMissingReason: reason };
@@ -123,6 +138,23 @@ export function assetConsumers(db: BackendDatabase, source: SharedAssetSource) {
 function assertUnused(db: BackendDatabase, source: SharedAssetSource) {
     const consumers = assetConsumers(db, source);
     if (consumers.length) throw Object.assign(collaborationError("ASSET_IN_USE", `资产仍被画布引用：${[...new Set(consumers.map(c => c.title))].join("、")}`), { consumers });
+}
+/** 自动清理源画布或源节点已不存在、且没有任何存活画布引用的共享素材记录——与 propagateAssetChanges 删除路径同一条不变量。
+ *  仍被引用（sharedAssetReference/sharedAssetOrigin）的孤儿保留，等引用方移除后下次读取再清。返回被清除的记录标题。 */
+export function purgeOrphanedSharedAssets(db: BackendDatabase): string[] {
+    const purged: string[] = [];
+    const projects = new Map<string, CanvasProject | null>();
+    for (const asset of db.listAssetRecords()) {
+        const source = sourceOf(asset);
+        if (!source) continue;
+        if (!projects.has(source.sourceProjectId)) projects.set(source.sourceProjectId, rawProject(db, source.sourceProjectId));
+        const node = nodes(projects.get(source.sourceProjectId)!).find(n => n.id === source.sourceNodeId);
+        if (node) continue;
+        if (assetConsumers(db, source).length) continue;
+        db.deleteAssetRecord(asset.id);
+        purged.push(asset.title || asset.id);
+    }
+    return purged;
 }
 export function validateAssetOperation(db: BackendDatabase, projectId: string, project: CanvasProject, operation: CanvasOperation, context?: CanvasCommandContext) {
     if (context?.runtimeWrite) return;
@@ -226,13 +258,16 @@ function changedNodePatch(previous: AssetNode, node: AssetNode): CanvasOperation
         metadata: Object.fromEntries(changed.filter(f => f !== "title" && assetField(node, f) !== undefined).map(f => [f.slice(9), assetField(node, f)])),
         metadataDelete: changed.filter(f => f !== "title" && assetField(node, f) === undefined).map(f => f.slice(9)) };
 }
-function syncSharedProductionOwners(db: BackendDatabase, source: SharedAssetSource, node: AssetNode) {
-    const updates: Array<{ entityId: string; revision: number }> = [];
+function syncSharedProductionOwners(db: BackendDatabase, source: SharedAssetSource, node: AssetNode, forceRebind = false) {
+    const updates: Array<{ entityId: string; revision: number; reason?: "shared_asset_sync" }> = [];
+    const clipOperations = new Map<string, CanvasOperation[]>();
+    const version = `shared:${crypto.createHash("sha256").update(JSON.stringify(sharedAssetFields(node.type).map(field => [field, assetField(node, field)]))).digest("hex")}`;
     for (const episode of db.listDramaEpisodes(source.dramaId)) {
         const row = db.db.prepare("SELECT revision,draft_json FROM episode_productions WHERE episode_id=?").get(episode.id) as { revision: number; draft_json: string } | undefined;
         if (!row) continue;
-        const draft = JSON.parse(row.draft_json) as Record<string, any>, director = draft.director;
+        const draft = JSON.parse(row.draft_json) as EpisodeProductionData, director = draft.director;
         if (!director) continue;
+        const sourceHashBefore = directorHash(director.source);
         const plans = Array.isArray(director.source?.asset_plan) ? director.source.asset_plan as Array<Record<string, any>> : [];
         const plan = plans.find(item => item.sharedSource?.sourceProjectId === source.sourceProjectId && item.sharedSource?.sourceNodeId === source.sourceNodeId);
         if (!plan) continue;
@@ -251,41 +286,130 @@ function syncSharedProductionOwners(db: BackendDatabase, source: SharedAssetSour
             if (String(plan.asset_name || "") !== name) { plan.asset_name = name; changed = true; }
             if (String(plan.description || "") !== description) { plan.description = description; changed = true; }
         }
+        const episodeCanvasRaw = episode.canvasId ? db.getCanvasProject(episode.canvasId) : null;
+        const episodeCanvas = episodeCanvasRaw ? { ...episodeCanvasRaw, nodes: nodes(episodeCanvasRaw).map(episodeNode => {
+            const origin = episodeNode.metadata?.sharedAssetOrigin;
+            if (episodeNode.metadata?.sharedAssetReference || origin?.sourceProjectId !== source.sourceProjectId || origin?.sourceNodeId !== source.sourceNodeId) return episodeNode;
+            const reference = { dramaId: source.dramaId, assetId: source.assetId, sourceProjectId: source.sourceProjectId, sourceNodeId: source.sourceNodeId, writeThrough: true };
+            return resolveSharedAssetNode({ ...episodeNode, metadata: { ...episodeNode.metadata, sharedAssetReference: reference } }, node);
+        }) } : null;
+        for (const linkedPlan of plans.filter(item => item.sharedSource?.sourceProjectId === source.sourceProjectId && item.sharedSource?.sourceNodeId === source.sourceNodeId)) {
+            if (String(linkedPlan.version || "") !== version) { linkedPlan.version = version; changed = true; }
+        }
+        const pictures = sharedSubjectPictureMedia(source, String(episode.canvasId || ""), director.source.subject_registry, episodeCanvas, forceRebind);
+        const assets = director.assets && typeof director.assets === "object" ? director.assets as Record<string, Record<string, any>> : (director.assets = {} as any);
+        for (const picture of pictures) {
+            if (!picture.assetId) continue;
+            const priorAsset = assets[picture.assetId] || {};
+            if (!picture.storageKey) {
+                const nextAsset = { ...priorAsset, version, nodeId: picture.nodeId, status: "planned", sharedSource: { ...(priorAsset.sharedSource || {}), ...source } };
+                delete nextAsset.storageKey; delete nextAsset.sha256; delete nextAsset.generationTaskId; delete nextAsset.selectedResult;
+                if (JSON.stringify(priorAsset) !== JSON.stringify(nextAsset)) { assets[picture.assetId] = nextAsset; changed = true; }
+                continue;
+            }
+            const file = db.getMediaFile(picture.storageKey);
+            if (!file || !fs.existsSync(file.filePath)) {
+                const nextAsset = { ...priorAsset, version, nodeId: picture.nodeId, storageKey: picture.storageKey, status: "planned", sharedSource: { ...(priorAsset.sharedSource || {}), ...source } };
+                delete nextAsset.sha256; delete nextAsset.generationTaskId; delete nextAsset.selectedResult;
+                if (JSON.stringify(priorAsset) !== JSON.stringify(nextAsset)) { assets[picture.assetId] = nextAsset; changed = true; }
+                continue;
+            }
+            const sha256 = crypto.createHash("sha256").update(fs.readFileSync(file.filePath)).digest("hex");
+            const nextAsset = { ...priorAsset, version: version, nodeId: picture.nodeId, storageKey: picture.storageKey, sha256,
+                status: priorAsset.status === "approved" && priorAsset.sha256 === sha256 ? "approved" : "generated",
+                sharedSource: { ...(priorAsset.sharedSource || {}), ...source },
+                selectedResult: { imageId: picture.resultId, storageKey: picture.storageKey, sha256, projectId: String(episode.canvasId), nodeId: picture.nodeId } };
+            delete nextAsset.generationTaskId;
+            if (JSON.stringify(nextAsset.selectedResult) !== JSON.stringify(priorAsset.selectedResult)) changed = true;
+            if (JSON.stringify(priorAsset) !== JSON.stringify(nextAsset)) { assets[picture.assetId] = nextAsset; changed = true; }
+        }
+        if (episodeCanvas) {
+            const operations = sharedAssetClipInputOperations(episodeCanvas, source, pictures);
+            if (operations.length) clipOperations.set(String(episode.canvasId), [...(clipOperations.get(String(episode.canvasId)) || []), ...operations]);
+        }
+        if (directorHash(director.source) !== sourceHashBefore) changed = true;
         if (!changed) continue;
         director.sourceHash = directorHash(director.source);
-        director.artifacts = director.artifacts.map((artifact: Record<string, any>) => ({ ...artifact, status: "stale" }));
+        director.artifacts = director.artifacts.map((artifact: Record<string, any>) => ({ ...artifact, status: "stale" })) as typeof director.artifacts;
         director.executionAuthorized = false;
         if (director.workflow?.currentWork) director.workflow.currentWork = { ...director.workflow.currentWork, sourceHash: director.sourceHash };
-        projectDirector(draft as any);
         const revision = row.revision + 1, updatedAt = new Date().toISOString();
-        db.db.prepare("UPDATE episode_productions SET revision=?,draft_json=?,updated_at=? WHERE episode_id=?").run(revision, JSON.stringify(draft), updatedAt, episode.id);
-        updates.push({ entityId: episode.id, revision });
+        db.db.prepare("UPDATE episode_productions SET revision=?,draft_json=?,updated_at=? WHERE episode_id=?").run(revision, JSON.stringify(withoutDirectorProjection(draft)), updatedAt, episode.id);
+        updates.push({ entityId: episode.id, revision, reason: "shared_asset_sync" });
     }
-    return updates;
+    return { updates, clipOperations };
 }
-export function propagateAssetChanges(db: BackendDatabase, projectId: string, before: CanvasProject, after: CanvasProject, deferredCommits: CanvasCommit[], originatingProjectId?: string) {
+export function propagateAssetChanges(db: BackendDatabase, projectId: string, before: CanvasProject, after: CanvasProject, deferredCommits: CanvasCommit[], originatingProjectId?: string, forceSharedRebind = false, refreshConsumers = false) {
     const productionUpdates: Array<{ entityId: string; revision: number }> = [];
     for (const asset of db.listSharedAssetRecordsForProject(projectId)) {
         const source = sourceOf(asset);
         if (!source || source.sourceProjectId !== projectId) continue;
         const oldRaw = nodes(before).find(n => n.id === source.sourceNodeId), newRaw = nodes(after).find(n => n.id === source.sourceNodeId);
         const oldNode = oldRaw ? effectiveSourceNode(oldRaw, asset.kind) : undefined, newNode = newRaw ? effectiveSourceNode(newRaw, asset.kind) : undefined;
-        if (!newNode) { assertUnused(db, source); db.deleteAssetRecord(asset.id); continue; }
-        if (oldNode && sharedAssetFields(newNode.type).every(f => sameAssetValue(assetField(oldNode, f), assetField(newNode, f)))) continue;
+        if (!newNode) { if (forceSharedRebind) continue; assertUnused(db, source); db.deleteAssetRecord(asset.id); continue; }
+        if (!forceSharedRebind && !refreshConsumers && oldNode && sharedAssetFields(newNode.type).every(f => sameAssetValue(assetField(oldNode, f), assetField(newNode, f)))) continue;
         // Search/directory labels are derived indexes, never a second editable content source.
         db.db.prepare("UPDATE assets SET title=?, updated_at=? WHERE id=?").run(newNode.title || "", String(after.updatedAt || new Date().toISOString()), asset.id);
-        productionUpdates.push(...syncSharedProductionOwners(db, source, newNode));
-        for (const id of new Set(assetConsumers(db, source).map(consumer => consumer.projectId))) {
+        const synchronized = syncSharedProductionOwners(db, source, newNode, forceSharedRebind);
+        productionUpdates.push(...synchronized.updates);
+        for (const id of new Set([...assetConsumers(db, source).map(consumer => consumer.projectId), ...synchronized.clipOperations.keys()])) {
             const project = db.getCanvasProject(id)!;
             if (project.id === projectId || project.id === originatingProjectId) continue;
-            const ops = nodes(project).filter(n => n.metadata?.sharedAssetReference?.assetId === asset.id && n.metadata.sharedAssetReference.dramaId === source.dramaId)
-                .map(n => changedNodePatch(oldNode ? resolveSharedAssetNode(n, oldNode) : n, resolveSharedAssetNode(n, newNode))).filter((op): op is CanvasOperation => Boolean(op));
+            const refOps: CanvasOperation[] = nodes(project).filter(n => {
+                const reference = n.metadata?.sharedAssetReference;
+                const origin = n.metadata?.sharedAssetOrigin;
+                return reference?.assetId === asset.id && reference.dramaId === source.dramaId
+                    || origin?.sourceProjectId === source.sourceProjectId && origin?.sourceNodeId === source.sourceNodeId;
+            })
+                .flatMap((n): CanvasOperation[] => {
+                    const reference = (n.metadata?.sharedAssetReference || { dramaId: source.dramaId, assetId: source.assetId,
+                        sourceProjectId: source.sourceProjectId, sourceNodeId: source.sourceNodeId, writeThrough: true }) as SharedAssetReference;
+                    const linked = { ...n, metadata: { ...n.metadata, sharedAssetReference: reference } };
+                    const projected = resolveSharedAssetNode(linked, newNode);
+                    const projectedMetadata: Record<string, any> = { ...(projected.metadata || {}) };
+                    for (const key of ["characterAssetId", "sceneAssetId", "productionAssetId"]) {
+                        if (n.metadata?.[key] !== undefined) projectedMetadata[key] = n.metadata[key];
+                    }
+                    delete projectedMetadata.sharedAssetOrigin;
+                    if (reference.writeThrough && reference.edits) {
+                        projectedMetadata.sharedAssetReference = { ...reference, edits: undefined };
+                        delete projectedMetadata.sharedAssetReference.edits;
+                    }
+                    projected.metadata = projectedMetadata;
+                    const patch = changedNodePatch(oldNode ? resolveSharedAssetNode(linked, oldNode) : n, projected);
+                    const patchMetadata = patch?.metadata && typeof patch.metadata === "object" ? patch.metadata as Record<string, unknown> : {};
+                    const patchDelete = Array.isArray(patch?.metadataDelete) ? patch.metadataDelete.map(String) : [];
+                    const patchFields = patch?.patch && typeof patch.patch === "object" ? patch.patch as Record<string, unknown> : undefined;
+                    const metadata: Record<string, unknown> = { ...patchMetadata, sharedAssetReference: projectedMetadata.sharedAssetReference };
+                    const metadataDelete = [...patchDelete, ...(n.metadata?.sharedAssetOrigin ? ["sharedAssetOrigin"] : [])];
+                    if (!patch && !n.metadata?.sharedAssetOrigin && JSON.stringify(reference) === JSON.stringify(projectedMetadata.sharedAssetReference)) return [];
+                    return [{ type: "update_node", id: String(n.id), ...(patchFields ? { patch: patchFields } : {}), metadata,
+                        ...(metadataDelete.length ? { metadataDelete } : {}) } as CanvasOperation];
+                });
+            const ops = [...refOps, ...(synchronized.clipOperations.get(project.id) || [])];
             if (ops.length) db.applyCanvasProjectOperations(project.id, undefined, ops, { runtimeWrite: true, withinTransaction: true, deferredCommits,
                 ...(oldNode ? { referenceSourceBefore: { sourceProjectId: projectId, sourceNodeId: source.sourceNodeId, node: oldNode } } : {}),
                 source: { kind: "system", clientId: "system:shared-library", label: "同步共享资产" } });
         }
     }
     return productionUpdates;
+}
+
+/** One-time, idempotent rebind of current episode workspaces to exact shared source identities. */
+export function reconcileSharedAssetConsumers(db: BackendDatabase, projectId: string, forceSharedRebind = true) {
+    const current = db.getCanvasProject(projectId);
+    if (!current) throw new Error(`共享资产画布不存在: ${projectId}`);
+    const commits: CanvasCommit[] = [];
+    db.db.exec("BEGIN IMMEDIATE");
+    try {
+        const updates = propagateAssetChanges(db, projectId, { ...current, nodes: [] }, current, commits, undefined, forceSharedRebind, true);
+        db.db.exec("COMMIT");
+        for (const commit of commits) db.notifyCanvasCommit(commit);
+        return { projectId, productionUpdates: updates, synchronizedCanvasRevisions: commits.map(commit => ({ projectId: commit.projectId, revision: commit.revision })) };
+    } catch (error) {
+        db.db.exec("ROLLBACK");
+        throw error;
+    }
 }
 export function writeDramaAsset(db: BackendDatabase, asset: Asset, command: AssetWriteCommand = {}): Asset {
     const requestedAsset = asset;

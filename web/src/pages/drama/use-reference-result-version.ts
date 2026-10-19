@@ -6,7 +6,7 @@ export function useReferenceResultVersion(sources: Array<{ projectId?: string; n
     const [version, setVersion] = useState(0);
     useEffect(() => {
         const bindings = JSON.parse(scope) as typeof sources;
-        const referenceFields = ["images", "storageKey", "smartImageReferenceSelection"];
+        const referenceFields = ["images", "characterImages", "sceneImage", "propImage", "storageKey", "smartImageReferenceSelection"];
         const updated = (event: Event) => {
             const value = (event as CustomEvent).detail;
             if (value?.type !== "canvas.updated") return;

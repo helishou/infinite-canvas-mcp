@@ -112,7 +112,20 @@ export function ref2vaPromptDiagnostics(director: DirectorProduction, maximum: n
 
 const record = (value: unknown): Record<string, any> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {};
 
-export function applyDirectorSourcePatch(director: DirectorProduction, entity: keyof typeof directorPatchFields, id: string | undefined, patch: Record<string, unknown>) {
+/** 静态景别词表，与编译器 FRAMINGS 对齐（acheng storyboard_policy.py）。 */
+export const SHOT_FRAME_VALUES = ["EWS", "WS", "FS", "MS", "MCU", "CU", "ECU"] as const;
+export const SHOT_FRAME_RECIPE = `景别只表达静态观测距离；过渡镜（如中景推成近景）请这样拆写：camera.framing 填落点或主导景别——从 medium 推成 close-up 就填 CU；起幅与推移过程写进 visual（画面动作），例如「起幅中景，随后推近至指尖占满画框的特写」；运镜方式补一句 camera.movement，例如 push-in：medium → close-up。`;
+export function readShotFraming(camera: unknown): string | undefined {
+    if (!camera || typeof camera !== "object" || Array.isArray(camera) || !Object.hasOwn(camera, "framing")) return undefined;
+    const value = (camera as Record<string, unknown>).framing;
+    return value === null || value === undefined ? undefined : String(value).trim();
+}
+export function requireShotFraming(camera: unknown, shotId?: string) {
+    const framing = readShotFraming(camera);
+    if (framing !== undefined && !(SHOT_FRAME_VALUES as readonly string[]).includes(framing)) throw new Error(`景别「${framing}」不在有效词表 ${SHOT_FRAME_VALUES.join("/")}；${SHOT_FRAME_RECIPE}${shotId ? `（镜头 ${shotId}）` : ""}`);
+}
+
+export function applyDirectorSourcePatch(director: DirectorProduction, entity: keyof typeof directorPatchFields, id: string | undefined, patch: Record<string, unknown>, options: { allowCreate?: boolean } = {}) {
         if (!Object.keys(patch).length) throw new Error("源字段修改内容为空");
         if (entity === "continuity") {
             if (id || Object.keys(patch).some(key => key !== "ledger") || !patch.ledger || typeof patch.ledger !== "object" || Array.isArray(patch.ledger)) throw new Error("连续性修改只接受无 ID 的 ledger 对象");
@@ -221,7 +234,14 @@ export function applyDirectorSourcePatch(director: DirectorProduction, entity: k
             const items = Array.isArray(director.source[collection]) ? director.source[collection] as Array<Record<string, unknown>> : [];
             const fieldId = (item: Record<string, unknown>) => String(item.id || item.scene_id || item.asset_id || "");
             const target = items.find(item => fieldId(item) === id);
-            if (!target) throw new Error(`${entity} ${id} 不存在；先由 Acheng 创建稳定对象`);
+            if (!target) {
+                if (options.allowCreate === false) throw Object.assign(new Error(`${entity} ${id} 在旧基线中已存在但当前已删除；历史快照不可用，保留草稿并回读目标`), { code: "BASE_HISTORY_UNAVAILABLE", conflictTargets: [`${entity}:${id}`] });
+                // 允许外部 Agent（如 MCP 调用方）直接创建稳定对象，不再强制要求先由 Acheng 创建。
+                const newItem: Record<string, unknown> = { id };
+                items.push(newItem);
+                director.source[collection] = items;
+            }
+            const resolvedTarget = items.find(item => fieldId(item) === id)!;
             const forbidden = Object.keys(patch).filter(key => !(directorPatchFields[entity] as readonly string[]).includes(key));
             if (forbidden.length) throw new Error(`不允许直接修改字段：${forbidden.join(", ")}`);
             if (entity === "scene" && Object.hasOwn(patch, "blocks")) {
@@ -269,6 +289,7 @@ export function applyDirectorSourcePatch(director: DirectorProduction, entity: k
                     if (typeof track.cue !== "string" || typeof track.visibility !== "string") throw new Error(`表演轨道 ${name} 需要 cue 与 visibility 文本`);
                 }
             }
+            if (entity === "shot" && Object.hasOwn(patch, "camera")) requireShotFraming(patch.camera, id);
             if (entity === "segment" && Object.hasOwn(patch, "animation_term_ids")) {
                 if (!Array.isArray(patch.animation_term_ids) || patch.animation_term_ids.some(item => typeof item !== "string" || !item.trim())) throw new Error("动画术语 ID 必须是非空字符串数组");
             }
@@ -287,20 +308,20 @@ export function applyDirectorSourcePatch(director: DirectorProduction, entity: k
             }
             if (entity === "segment" && Object.hasOwn(patch, "summary")) {
                 if (typeof patch.summary !== "string") throw new Error("段摘要必须是文字");
-                if (!String(patch.summary).trim()) { delete patch.summary; delete target.summary; }
+                if (!String(patch.summary).trim()) { delete patch.summary; delete resolvedTarget.summary; }
             }
             if (entity === "segment" && Object.hasOwn(patch, "audio_bindings")) {
                 const parsed = z.array(shotAudioBindingSchema).safeParse(patch.audio_bindings);
                 if (!parsed.success) throw new Error(`音频绑定不合格：${parsed.error.issues.slice(0, 4).map(issue => issue.path.join(".") || "(根)").join(", ")}`);
                 patch.audio_bindings = parsed.data;
             }
-            const previousDuration = Number(target.duration_frames);
-            Object.assign(target, patch);
+            const previousDuration = Number(resolvedTarget.duration_frames);
+            Object.assign(resolvedTarget, patch);
             // A production asset can point at a character/scene registry row. Keep
             // those display fields together at the source boundary so the normal
             // production projection updates the corresponding canvas entity node.
-            if (entity === "asset" && target.entity_id) {
-                const entityId = String(target.entity_id);
+            if (entity === "asset" && resolvedTarget.entity_id) {
+                const entityId = String(resolvedTarget.entity_id);
                 const registries = [
                     ["character_registry", "character"],
                     ["scene_registry", "scene"],
@@ -328,8 +349,8 @@ export function applyDirectorSourcePatch(director: DirectorProduction, entity: k
                     }
                 }
             }
-            if (entity === "shot" && isSubjectPromptAssembly(director.source) && previousDuration > 0 && Object.hasOwn(patch, "duration_frames") && Number.isInteger(target.duration_frames) && Number(target.duration_frames) > 0 && Number(target.duration_frames) !== previousDuration) {
-                resizeShotAnchors(director.source, target, previousDuration);
+            if (entity === "shot" && isSubjectPromptAssembly(director.source) && previousDuration > 0 && Object.hasOwn(patch, "duration_frames") && Number.isInteger(resolvedTarget.duration_frames) && Number(resolvedTarget.duration_frames) > 0 && Number(resolvedTarget.duration_frames) !== previousDuration) {
+                resizeShotAnchors(director.source, resolvedTarget, previousDuration);
             }
         }
         director.sourceHash = crypto.createHash("sha256").update(canonicalProduction(director.source)).digest("hex");

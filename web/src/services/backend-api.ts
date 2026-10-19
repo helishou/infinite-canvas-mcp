@@ -271,6 +271,8 @@ export type ProductionClipRefreshReceipt = {
     sourceHash?: string;
     sourceSaved: true; operationId: string; status: "queued" | "checking" | "compiling" | "applying" | "succeeded" | "blocked" | "failed" | "superseded" | "interrupted";
     segmentId: string; savedRevision: number; compilationOperationId: string; selectedTargets: string[]; affectedTargets: string[];
+    createdAt?: string; updatedAt?: string;
+    translationOperationId?: string; translationError?: string;
     blockingDiagnostic?: { code: string; message: string; targetId?: string; path?: string };
     application?: { revision?: number; referenceSync?: Array<{ targetId: string; status: string; referenceCount?: number; diagnostics?: Array<{ code: string; message: string }> }> };
     mediaSubmitted: false;

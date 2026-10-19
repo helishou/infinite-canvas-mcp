@@ -35,6 +35,17 @@ test("普通 id 的节点下载保留类型前缀，音频与图片同样带出 
     assert.equal(canvasNodeDownloadPlan(image, "image", "webp")?.storageKey, "image:b");
 });
 
+test("多图图片节点下载屏幕当前显示的主图", () => {
+    const image = node("image-batch", CanvasNodeType.Image, {
+        primaryImageId: "shown",
+        images: [
+            { id: "shown", status: "success", content: "/media/image%3Ashown", storageKey: "image:shown", naturalWidth: 100, naturalHeight: 100, bytes: 1, mimeType: "image/png" },
+            { id: "latest", status: "success", content: "/media/image%3Alatest", storageKey: "image:latest", naturalWidth: 200, naturalHeight: 200, bytes: 2, mimeType: "image/webp" },
+        ],
+    });
+    assert.equal(canvasNodeDownloadPlan(image, "image", "png")?.storageKey, "image:shown");
+});
+
 test("没有归档也没有内容时不产生下载计划，只有内容时仍按原 URL 下载", () => {
     assert.equal(canvasNodeDownloadPlan(node("video-empty", CanvasNodeType.Video, { status: "idle" }), "video", "mp4"), null);
     const remote = node("video-remote", CanvasNodeType.Video, { status: "success", content: "https://example.test/a.mp4" });

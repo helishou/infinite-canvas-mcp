@@ -3,7 +3,7 @@ import { Alert, App, Button, Cascader, Input, InputNumber, Select, Switch } from
 import { Camera, History, Image as ImageIcon, Users, Volume2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { resolveSubjectPictureBindingIds, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
-import { keyframeSubjectSelectionFromPaths, setShotOutfitBindingIds, setShotPictureBindingIds, setShotPictureBindingMode, shotPictureBindingMode, syncKeyframeSubjectsToShotUsages } from "./subject-picture-selection";
+import { keyframeSubjectSelectionFromPaths, setShotPictureBindingIds, setShotPictureBindingMode, shotPictureBindingMode, syncKeyframeSubjectsToShotUsages } from "./subject-picture-selection";
 import { records, readableText } from "./director-display";
 import { backendMediaUrl } from "@/services/backend-api";
 import { canvasNodeImage } from "@/lib/canvas/canvas-image-renderability";
@@ -44,10 +44,11 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
     const latestDraft = useRef(draftValue); latestDraft.current = draftValue;
     const disabled = busy || saving || invalid;
     const subjects = records(source.subject_registry);
-    const framingValues = ["EWS", "WS", "FS", "MS", "MCU", "CU", "BSCU", "ECU"];
+    const framingValues = ["EWS", "WS", "FS", "MS", "MCU", "CU", "ECU"];
     const framingMissing = !framingValues.includes(String(value.camera.framing || ""));
 
     const attentionSubjectIds = value.camera.attention_subject_ids;
+const attentionMissing = !Array.isArray(attentionSubjectIds) || attentionSubjectIds.length === 0;
     const lensField = Object.prototype.hasOwnProperty.call(value.camera, "lens_mm") || !Object.prototype.hasOwnProperty.call(value.camera, "lens") ? "lens_mm" : "lens";
     const lensValue = value.camera[lensField];
 
@@ -57,7 +58,7 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
     const framingErrorId = `shot-editor-framing-error-${id}`;
 
     const editorialReasonErrorId = `shot-editor-editorial-reason-error-${id}`;
-    const cameraFieldsMissing = framingMissing || editorialReasonMissing;
+    const cameraFieldsMissing = framingMissing || editorialReasonMissing || attentionMissing;
     const smartNodes = canvasNodes.filter(node => node.type === "config" && node.metadata?.smart === true && (node.metadata?.generationMode || "image") === "image");
     const keyframeChoiceValid = Boolean(keyframeNode && (keyframeNode.projectId !== canvasId || smartNodes.some(node => node.id === keyframeNode.nodeId)) && !value.keyframes.some(frame => frame.sourceNode?.projectId === keyframeNode.projectId && frame.sourceNode?.nodeId === keyframeNode.nodeId));
     const compositionChoiceValid = Boolean(compositionNode && (compositionNode.projectId !== canvasId || smartNodes.some(node => node.id === compositionNode.nodeId)) && !value.reference_requirements.some(reference => reference.sourceNode?.projectId === compositionNode.projectId && reference.sourceNode?.nodeId === compositionNode.nodeId));
@@ -143,7 +144,7 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
         }] });
         setCompositionNode(undefined);
     };
-    const outfitBindingLabel = (subject: Record<string, any>, binding: Record<string, any>) => {
+    const outfitBindingLabel = (subject: Record<string, any>, binding: Record<string, any>, includeCharacter = true) => {
         const node = canvasNodes.find(item => item.id === binding.sourceNode?.nodeId);
         const asset = assets?.[String(binding.assetId || binding.id)];
         const usageWorkbench = records(workbench?.subjectUsages).find(item => String(item.subjectId) === String(subject.id));
@@ -155,8 +156,8 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
             return [key, String(item.storageKey || ""), `${node?.id}:character-image:${key}`].includes(resultId)
                 || Boolean(resolvedBinding?.resolved?.storageKey && item.storageKey === resolvedBinding.resolved.storageKey);
         }) || (binding.selection?.mode === "node_selection" ? images[Number(node?.metadata?.characterPrimaryIndex || 0)] : undefined);
-        const label = image?.outfit || image?.outfitDescription || image?.name || asset?.title || asset?.label || binding.id;
-        return [label, node?.title].map(value => String(value || "").trim()).filter(Boolean).join(" · ");
+        const label = image?.outfit || image?.name || image?.outfitDescription || asset?.title || asset?.label || binding.id;
+        return [label, includeCharacter ? node?.title : undefined].map(value => String(value || "").trim()).filter(Boolean).join(" · ");
     };
     const save = async () => {
         if (framingMissing) return void message.error(t("director.atomic.framingRequired"));
@@ -185,7 +186,7 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
                 changes.patch.subject_usages = syncKeyframeSubjectsToShotUsages(draft.value.subject_usages, draft.value.keyframes, subjects);
             }
             // 提交前滤掉编辑期保留的空白拟音槽位（空串不进源稿契约），只影响即将发出的补丁。
-            if (changes.patch.audio && typeof changes.patch.audio === "object" && Array.isArray((changes.patch.audio as Record<string, unknown>).foley)) changes.patch.audio = { ...(changes.patch.audio as Record<string, unknown>), foley: records((changes.patch.audio as Record<string, unknown>).foley).map(String).filter(text => text.trim()) };
+            if (changes.patch.audio && typeof changes.patch.audio === "object" && Array.isArray((changes.patch.audio as Record<string, unknown>).foley)) changes.patch.audio = { ...(changes.patch.audio as Record<string, unknown>), foley: ((changes.patch.audio as Record<string, unknown>).foley as unknown[]).filter((item): item is string => typeof item === "string").map(text => text.trim()).filter(Boolean) };
             if (await onSave(id, changes.patch, changes.keyframes as Keyframes | undefined, changes.utterances as Utterances | undefined)) {
                 void recordProductionShotFieldChanges(changedFields);
                 if (latestDraft.current === submittedDraft) onDraftChange(undefined);
@@ -211,8 +212,9 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
                 {framingMissing && <span id={framingErrorId} role="alert" className="text-destructive">{t("director.atomic.framingRequired")}</span>}
             </label>
             <label className="shot-editor-span-all grid gap-1.5 text-xs text-muted-foreground">
-                <span>{t("director.atomic.attention")}</span>
+                <span>{t("director.atomic.attention")} <span className="text-destructive" aria-hidden="true">*</span></span>
                 <Select className="w-full" aria-label={t("director.atomic.attention")} mode="multiple" value={Array.isArray(attentionSubjectIds) ? attentionSubjectIds : []} disabled={disabled} options={value.subject_usages.map(usage => String(usage.subjectId)).filter((subjectId, index, ids) => subjectId && ids.indexOf(subjectId) === index).map(subjectId => ({ value: subjectId, label: subjectDisplayName(source, subjectId) }))} onChange={attention_subject_ids => camera({ attention_subject_ids })} />
+                {attentionMissing && <span role="alert" className="text-destructive">{t("director.atomic.attentionRequired", { defaultValue: "请至少选择一个画面主体" })}</span>}
 
                 <Button className="justify-self-start" size="small" type="text" disabled={disabled} onClick={() => {
                     const visibleSubjectIds = value.subject_usages.filter(item => item.presentation === "visible").map(item => String(item.subjectId));
@@ -304,14 +306,23 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
             <div className="shot-editor-span-all flex gap-2"><Select className="min-w-0 flex-1" value={subjectChoice} disabled={disabled} placeholder={t("director.workspace.chooseSubject")} options={subjects.filter(subject => !value.subject_usages.some(usage => usage.subjectId === subject.id)).map(subject => ({ value: String(subject.id), label: subjectDisplayName(source, String(subject.id)) }))} onChange={setSubjectChoice} /><Button disabled={disabled || !subjectChoice} onClick={addSubject}>{t("director.workspace.addSubject")}</Button></div>
             {value.subject_usages.map((usage, index) => {
             const subject = subjects.find(item => item.id === usage.subjectId);
-            const outfitBindings = records(subject?.pictureBindings).filter(binding => Array.isArray(binding.provides) && binding.provides.map(String).includes("clothing"));
-            const selectedOutfits = resolveSubjectPictureBindingIds(subject, usage).bindingIds.filter(bindingId => outfitBindings.some(binding => String(binding.id) === bindingId));
+            const subjectBindings = records(subject?.pictureBindings);
+            const pictureBindingOptions = [{
+                value: String(subject?.id || usage.subjectId),
+                label: subjectDisplayName(source, String(usage.subjectId)),
+                children: subjectBindings.map(binding => ({
+                    value: String(binding.id || ""),
+                    label: outfitBindingLabel(subject!, binding, false),
+                })),
+            }];
+            const pictureBindingValues = resolveSubjectPictureBindingIds(subject, usage).bindingIds.map(bindingId => [String(usage.subjectId), bindingId]);
             return <article key={usage.subjectId} className="space-y-3 rounded-lg border border-border p-4"><div className="flex items-center justify-between gap-3"><h4 className="text-sm font-medium">{subjectDisplayName(source, String(usage.subjectId))}</h4><Button size="small" type="text" disabled={disabled} onClick={() => removeSubjectUsage(index)}>{t("common.remove")}</Button></div>
                 <Select className="w-full" value={String(usage.presentation)} disabled={disabled} options={["visible", "offscreen_voice", "state_context"].map(key => ({ value: key, label: t("director.workspace.subjectPresentation." + key) }))} onChange={presentation => usagePatch(index, { presentation })} />
-                <label className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.atomic.shotOutfits")}</span><Select mode="multiple" value={selectedOutfits} disabled={disabled || usage.presentation !== "visible" || !outfitBindings.length} placeholder={outfitBindings.length ? t("director.atomic.chooseShotOutfits") : t("director.atomic.noShotOutfits")} options={outfitBindings.map(binding => ({ value: String(binding.id), label: outfitBindingLabel(subject!, binding) }))} onChange={pictureBindingIds => usagePatch(index, setShotOutfitBindingIds(subject, usage, pictureBindingIds))} /></label>
-
                 <label className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.workspace.pictureBindingMode")}</span><Select value={shotPictureBindingMode(usage)} disabled={disabled} options={["default", "explicit"].map(mode => ({ value: mode, label: t(`director.workspace.pictureBindingMode${mode === "default" ? "Default" : "Explicit"}`) }))} onChange={mode => usagePatch(index, setShotPictureBindingMode(subject, usage, mode as "default" | "explicit"))} /></label>
-                <label className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.workspace.pictureBindingsForShot")}</span><Select mode="multiple" value={resolveSubjectPictureBindingIds(subject, usage).bindingIds} disabled={disabled || shotPictureBindingMode(usage) === "default"} options={records(subject?.pictureBindings).map(binding => { const isClothing = outfitBindings.some(item => String(item.id) === String(binding.id)); return { value: String(binding.id), label: ((binding.sourceNode?.projectId === canvasId ? canvasNodes.find(node => node.id === binding.sourceNode?.nodeId)?.title : undefined) || t("director.crud.boundImage")) + (isClothing ? ` · ${t("director.atomic.clothingManagedByOutfits")}` : ""), disabled: isClothing }; })} onChange={pictureBindingIds => { const retainedClothes = resolveSubjectPictureBindingIds(subject, usage).bindingIds.filter(id => outfitBindings.some(binding => String(binding.id) === id)); usagePatch(index, setShotPictureBindingIds(usage, [...new Set([...pictureBindingIds, ...retainedClothes])])); }} /></label>
+                <label className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.workspace.pictureBindingsForShot")}</span><Cascader className="w-full" multiple showCheckedStrategy={Cascader.SHOW_CHILD} value={pictureBindingValues} disabled={disabled || shotPictureBindingMode(usage) === "default" || usage.presentation !== "visible"} placeholder={subjectBindings.length ? t("director.atomic.chooseShotOutfits") : t("director.atomic.noShotOutfits")} options={pictureBindingOptions} displayRender={labels => labels.slice(-1).join("")} onChange={paths => {
+                    const pictureBindingIds = (paths as Array<Array<string | number>>).flatMap(path => path.length > 1 ? [String(path[1])] : []);
+                    usagePatch(index, setShotPictureBindingIds(usage, pictureBindingIds));
+                }} /></label>
                 {shotPictureBindingMode(usage) === "default" ? <p className="text-xs text-muted-foreground">{t("director.workspace.pictureBindingDefaultHint")}</p> : !resolveSubjectPictureBindingIds(subject, usage).bindingIds.length && <p className="text-xs text-muted-foreground">{t("director.workspace.pictureBindingExplicitEmptyHint")}</p>}
                 <label className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.crud.provides")}</span><Select mode="multiple" value={usage.referencePurpose || []} disabled={disabled} options={[...new Set(["identity", "geometry", "material", "clothing", "composition", "pose", "prop", "style", ...(usage.referencePurpose || [])])].map(purpose => ({ value: purpose, label: t(`director.crud.purpose.${purpose}`, { defaultValue: t("director.crud.otherPurpose") }) }))} onChange={referencePurpose => usagePatch(index, { referencePurpose })} /></label>
                 <div className="shot-editor-pair grid grid-cols-2 gap-3"><label className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.atomic.appearFrom")}</span><InputNumber className="w-full" min={0} max={value.duration_frames - 1} value={usage.localStartFrame} disabled={disabled} onChange={localStartFrame => usagePatch(index, { localStartFrame: localStartFrame ?? undefined })} /></label><label className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.atomic.appearUntil")}</span><InputNumber className="w-full" min={1} max={value.duration_frames} value={usage.localEndFrame} disabled={disabled} onChange={localEndFrame => usagePatch(index, { localEndFrame: localEndFrame ?? undefined })} /></label></div>

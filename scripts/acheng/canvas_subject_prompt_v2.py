@@ -832,7 +832,8 @@ def adapt_production(production, *, draft=False):
             shot = next(item for item in shots if str(item.get("id")) == shot_id)
             shot_start, shot_end = windows[shot_id]
             next_shot = deepcopy(shot)
-            next_shot.update({"start_frame": shot_start, "end_frame": shot_end, "features": {"core_emotion": bool(shot.get("performance")), "combat": False, "supernatural_vfx": False, "colossal": False},
+            source_features = shot.get("features") if isinstance(shot.get("features"), dict) else {}
+            next_shot.update({"start_frame": shot_start, "end_frame": shot_end, "features": {"core_emotion": bool(shot.get("performance")), "combat": bool(source_features.get("combat")), "supernatural_vfx": False, "colossal": False},
                               "audio": shot.get("audio") if isinstance(shot.get("audio"), dict) else {"foley": []},
                               "performance": shot.get("performance") if isinstance(shot.get("performance"), dict) else {},
                               "characters": [], "identity_context": {}, "dialogues": [], "reference_requirements": reference_requirements[shot_id]})
@@ -982,8 +983,8 @@ def _performance_text(value):
 
 
 def _camera_prompt_lines(camera):
-    fields = (("angle", "Angle"), ("movement", "Movement"), ("path", "Path"),
-              ("target", "Target"), ("focus", "Focus"))
+    fields = (("description", "Camera description"), ("angle", "Angle"), ("movement", "Movement"),
+              ("path", "Path"), ("target", "Target"), ("focus", "Focus"))
     rendered = []
     for key, label in fields:
         text = _plain_text(camera.get(key))
@@ -999,6 +1000,36 @@ def _camera_prompt_lines(camera):
     if lens_text and lens_text.casefold() != "per shot description":
         rendered.insert(1, "Lens: " + lens_text + ".")
     return rendered
+
+
+def _combat_prompt_lines(shot, production):
+    """Render the authored combat contract into the model-facing Shot body."""
+    combat = shot.get("combat")
+    if not isinstance(combat, dict) or not combat:
+        return []
+    labels = (
+        ("force_source", "Force source"), ("trajectory", "Trajectory"),
+        ("contact", "Contact"), ("resistance", "Resistance"),
+        ("impact_hold", "Impact read"), ("transfer", "Force transfer"),
+        ("recoil", "Recoil"),
+    )
+    lines = []
+    for key, label in labels:
+        text = _plain_text(combat.get(key))
+        if text:
+            lines.append(label + ": " + text)
+    chain = combat.get("chain") if isinstance(combat.get("chain"), dict) else {}
+    for key, label in (("attack", "Attack"), ("response", "Defender response"),
+                       ("result", "Exchange result"), ("continuation", "Continuation")):
+        text = _plain_text(chain.get(key))
+        if text:
+            lines.append(label + ": " + text)
+    timing = combat.get("timing")
+    if isinstance(timing, dict) and timing:
+        timing_renderer = _load_runtime_helper("combat_timing").render_combat_timing
+        factor = Fraction(int(production.get("fps_den", 1)), int(production.get("fps_num", 24)))
+        lines.extend(timing_renderer(timing, factor))
+    return ["Combat choreography:\n" + "\n".join(lines)] if lines else []
 
 
 def _audio_prompt_text(value):
@@ -1176,6 +1207,7 @@ def render_shot_text_v2(shot, production, speakers, speech_parts, referenced_sub
     action = str(shot.get("action") or shot.get("action_description") or "").strip()
     if action and action != visual:
         parts.append("Action: " + action)
+    parts.extend(_combat_prompt_lines(shot, production))
     performance = _performance_text(shot.get("performance"))
     if performance:
         parts.append("Performance: " + performance)
@@ -1296,6 +1328,7 @@ def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, state_l
     action = str(shot.get("action") or shot.get("action_description") or "").strip()
     if action and action != visual:
         parts.append("Action: " + action)
+    parts.extend(_combat_prompt_lines(shot, production))
     performance = _performance_text(shot.get("performance"))
     if performance:
         parts.append("Performance: " + performance)

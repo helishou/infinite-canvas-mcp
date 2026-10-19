@@ -212,9 +212,9 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
     });
     router.get<Record<string, string>>(`${base}`, (req, res) => {
         try {
-            let production: any = service.get(req.params.episodeId);
-            // Existing Web consumers still receive the full record unless selecting a view.
             const query = productionReadSchema.parse({ ...req.query, view: req.query.view || "full", targetIds: typeof req.query.targetIds === "string" ? req.query.targetIds.split(",") : req.query.targetIds });
+            let production: any;
+            // Canonical reads use the saved source directly; legacy runtime projections are opt-in for execution paths.
             if (query.view === "clip_workbench") {
                 if (query.targetIds?.length !== 1) throw new Error("CLIP_WORKBENCH_TARGET: select exactly one Segment");
                 production = service.clipWorkbench(req.params.episodeId, query.targetIds[0], query.snapshot);
@@ -224,7 +224,7 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             } else if (query.view === "shot_workbench") {
                 if (query.targetIds?.length !== 1) throw new Error("SHOT_WORKBENCH_TARGET: select exactly one Shot");
                 production = service.shotWorkbench(req.params.episodeId, query.targetIds[0], query.snapshot);
-            }
+            } else production = service.getForRead(req.params.episodeId);
             const owner = base.startsWith("/canvas") ? { projectId: req.params.episodeId } : base.startsWith("/drama/scenes") ? { sceneId: req.params.episodeId } : {};
             const director = production[query.snapshot]?.director;
             const staleReason = (artifact: any) => {

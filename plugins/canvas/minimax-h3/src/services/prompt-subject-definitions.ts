@@ -24,3 +24,25 @@ export function literalPromptSubjects(prompt: string): LiteralPromptSubject[] {
     }
     return [...subjects.values()];
 }
+
+/**
+ * Formal v2 prompt definitions own the Subject ordinal and display name.
+ * Picture ordinals remain independent and never decide Subject identity.
+ */
+export function bindLiteralSubjectsToReferences(
+    subjects: LiteralPromptSubject[],
+) {
+    return subjects.map((subject) => {
+        // Subject and Picture ordinals are independent. A cited Picture can be
+        // an environment, a character image, or another kind of visual source;
+        // it does not determine the identity or type of the Subject token.
+        const id = `prompt-subject-${subject.ordinal}`;
+        const name = subject.description.replace(/^is\s+/iu, "").split(/[;,，。]/u, 1)[0]?.trim() || id;
+        return {
+            id,
+            name,
+            pictures: [],
+            ...(/appearance follows the reference images exclusively/iu.test(subject.description) ? { role: "character_identity" } : {}),
+        };
+    });
+}

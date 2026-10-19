@@ -27,7 +27,7 @@ export function resolveSharedAssetNode(node: AssetNode, source: AssetNode): Asse
     if (node.type === "scene") result.metadata.sceneAssetId = ref.assetId;
     if (node.type === "prop") result.metadata.productionAssetId = ref.assetId;
     for (const field of sharedAssetFields(node.type)) {
-        const edit = ref?.edits?.[field];
+        const edit = ref?.writeThrough ? undefined : ref?.edits?.[field];
         setAssetField(result, field, edit ? edit.deleted ? undefined : edit.value : assetField(source, field));
     }
     return result;

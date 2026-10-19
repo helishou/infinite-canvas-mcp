@@ -157,6 +157,11 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
                 syncOrderedGroupMembership(nodes, id, previousGroupId || undefined, Boolean((operation.patch as Record<string, unknown> | undefined)?.position));
             }
             if (!options.committedReplay) {
+                for (const update of linkedCharacterPrimaryUpdate(previousNode, node, nodes)) {
+                    const target = nodes.find((item) => String(item.id) === String(update.id || ""))!;
+                    target.metadata = { ...recordOf(target.metadata), ...recordOf(update.metadata) };
+                    derived.push(update);
+                }
                 for (const update of characterReferenceUpdates(previousNode, node, nodes)) {
                     const target = nodes.find((item) => String(item.id) === update.id)!;
                     target.metadata = { ...recordOf(target.metadata), ...update.metadata };
@@ -248,7 +253,15 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             }
             // A newly inserted Clip has no authored outgoing continuity decision yet.
             // Preserve explicit choices; do not inherit a legacy node-wide chain switch.
-            segments.splice(insertIndex, 0, { motionContextEnabled: false, tailFrameContinuation: false, ...incoming });
+            const firstShotId = Array.isArray(incoming.storyboardShots) ? String((incoming.storyboardShots[0] as Record<string, unknown> | undefined)?.referenceBindingId || "") : "";
+            const firstFrameRef = (Array.isArray(incoming.referenceBindings) ? incoming.referenceBindings as Array<Record<string, unknown>> : [])
+                .find(reference => String(reference.bindingId || reference.id || "") === firstShotId);
+            const imageRefs = (Array.isArray(incoming.referenceBindings) ? incoming.referenceBindings as Array<Record<string, unknown>> : [])
+                .filter(reference => reference.enabled !== false && !["video", "audio"].includes(String(reference.mediaType || "image")));
+            const mode = String(incoming.taskMode || incoming.mode || "").toLowerCase();
+            const explicitFirstFrame = firstFrameRef?.enabled !== false && !["video", "audio"].includes(String(firstFrameRef?.mediaType || "image")) && firstFrameRef?.role === "storyboard"
+                || ["i2v", "i2va", "fl2v", "fl2va"].includes(mode) && imageRefs.length > 0;
+            segments.splice(insertIndex, 0, { motionContextEnabled: false, tailFrameContinuation: !explicitFirstFrame && incoming.motionContextEnabled !== true, ...incoming });
             const metadata = recordOf(node.metadata);
             metadata.segments = segments;
             node.metadata = metadata;
@@ -572,6 +585,39 @@ export function registerH3ReferenceAssets(project: Record<string, unknown>, node
 function nodesOf(project: Record<string, unknown>) {
     if (!Array.isArray(project.nodes)) project.nodes = [];
     return project.nodes as Array<Record<string, unknown>>;
+}
+
+function smartImagePrimary(node: Record<string, unknown>) {
+    const metadata = recordOf(node.metadata);
+    if (node.type !== "config" || metadata.smart !== true || (metadata.generationMode || "image") !== "image") return null;
+    const images = Array.isArray(metadata.images) ? metadata.images as Array<Record<string, unknown>> : [];
+    const primaryId = String(metadata.primaryImageId || "");
+    const image = images.find((item) => String(item.id || "") === primaryId) || images[0];
+    if (!image || (!image.content && !image.url && !image.storageKey)) return null;
+    return { id: String(image.id || ""), image };
+}
+
+function linkedCharacterPrimaryUpdate(previous: Record<string, unknown>, current: Record<string, unknown>, nodes: Array<Record<string, unknown>>) {
+    const before = smartImagePrimary(previous);
+    const after = smartImagePrimary(current);
+    if (!before || !after || !after.id || before.id === after.id) return [] as CanvasOperation[];
+    const media = after.image;
+    return nodes.flatMap((node): CanvasOperation[] => {
+        const metadata = recordOf(node.metadata);
+        if (node.type !== "character" || !Array.isArray(metadata.characterImages)) return [];
+        const images = metadata.characterImages as Array<Record<string, unknown>>;
+        const index = images.findIndex((image) => String(image.sourceNodeId || "") === String(current.id || ""));
+        if (index < 0) return [];
+        const url = media.content || media.url || "";
+        const storageKey = media.storageKey || "";
+        const characterImages = images.map((image) => String(image.sourceNodeId || "") === String(current.id || "")
+            ? { ...image, url, storageKey, width: media.naturalWidth || media.width || image.width,
+                height: media.naturalHeight || media.height || image.height, bytes: media.bytes || 0, mimeType: media.mimeType || "image/png" }
+            : image);
+        const primary = characterImages[index];
+        return [{ type: "update_node", id: String(node.id), metadata: { characterImages, characterPrimaryIndex: index, content: url, storageKey,
+            naturalWidth: primary.width, naturalHeight: primary.height, bytes: primary.bytes, mimeType: primary.mimeType } }];
+    });
 }
 
 function connectionsOf(project: Record<string, unknown>) {

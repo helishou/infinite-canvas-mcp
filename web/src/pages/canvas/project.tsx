@@ -28,7 +28,8 @@ import { fetchWorkflowDetail, isWorkflowImageField } from "@/services/api/workfl
 import { resolveComfyImageSize } from "@/services/api/comfyui";
 import { uploadImage, resolveImageUrl, isImageFile, isSvgFile, type UploadedImage } from "@/services/image-storage";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
-import { BackendApiError, updateBackendAsset, backendMediaUrl, createBackendGenerationLog, createBackendTask, fetchBackendCanvasDrama, fetchProductionCanvasContext, prepareCanvasLoop, request, resolveComfyMediaUrl, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
+import { BackendApiError, updateBackendAsset, backendMediaUrl, createBackendGenerationLog, createBackendTask, editEpisodeProduction, fetchBackendCanvasDrama, fetchEpisodeProduction, fetchProductionCanvasContext, prepareCanvasLoop, request, resolveComfyMediaUrl, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
+import { bindEntityPictureToNode } from "@/lib/production/subject-picture-binding";
 import { runCanvasImageTask } from "@/services/api/canvas-image";
 import { runCanvasVideoTask } from "@/services/api/canvas-video";
 import { runCanvasAudioTask } from "@/services/api/canvas-audio";
@@ -185,13 +186,13 @@ function getCanvasClipboardContent(node: CanvasNodeData): CanvasClipboardContent
     const smartMode = node.type === CanvasNodeType.Config && metadata?.smart ? metadata.generationMode || "image" : null;
     const kind = smartMode || (node.type === CanvasNodeType.Image ? "image" : node.type === CanvasNodeType.Video || node.type === "minimax-h3:video" ? "video" : node.type === CanvasNodeType.Audio ? "audio" : node.type === CanvasNodeType.Text ? "text" : null);
     if (!kind) return null;
-    const image = kind === "image" ? canvasNodeImage(node) : null;
+    const image = kind === "image" ? canvasNodePrimaryImage(node) : null;
     const value = kind === "image" ? (image?.content?.trim() || (image?.storageKey ? backendMediaUrl(image.storageKey) : "")) : metadata?.content?.trim();
     return value ? { kind, value } : null;
 }
 
 async function readCanvasClipboardBlob(node: CanvasNodeData) {
-    const image = canvasNodeImage(node);
+    const image = canvasNodePrimaryImage(node);
     const storageKey = image?.storageKey || node.metadata?.storageKey;
     if (storageKey) {
         const stored = await getMediaBlob(storageKey);
@@ -203,8 +204,7 @@ async function readCanvasClipboardBlob(node: CanvasNodeData) {
     return response.ok ? response.blob() : null;
 }
 
-async function localCanvasImageUrl(node: CanvasNodeData) {
-    const image = canvasNodeImage(node);
+async function localCanvasImageUrl(node: CanvasNodeData, image = canvasNodePrimaryImage(node)) {
     if (!image) return null;
     if (!image.storageKey) return { url: image.content, revoke: () => undefined };
     const blob = await getMediaBlob(image.storageKey);
@@ -710,8 +710,10 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const stopGenerationByRunningId = useCallback(
         (runningId: string) => {
             const affectedNodeIds = abortCanvasGenerationRequestsByRunningId(generationRequestsRef.current, runningId);
-            setRunningNodeId((current) => (current === runningId ? null : current));
-            if (!affectedNodeIds.size) return;
+            if (!affectedNodeIds.size) {
+                setRunningNodeId((current) => (current === runningId ? null : current));
+                return;
+            }
             setNodes((prev) =>
                 prev.map((node) =>
                     affectedNodeIds.has(node.id) &&
@@ -1133,14 +1135,14 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const superResolveNode = superResolveNodeId ? nodeById.get(superResolveNodeId) || null : null;
     const angleNode = angleNodeId ? nodeById.get(angleNodeId) || null : null;
     const activeImageToolNode = cropNode || maskEditNode || splitNode || upscaleNode || angleNode;
-    const activeImageToolSource = activeImageToolNode ? canvasNodeImage(activeImageToolNode) : null;
+    const activeImageToolSource = activeImageToolNode ? canvasNodePrimaryImage(activeImageToolNode) : null;
     const [imageToolUrl, setImageToolUrl] = useState<{ nodeId: string; url: string } | null>(null);
     useEffect(() => {
         let cancelled = false;
         let revoke: () => void = () => undefined;
         setImageToolUrl(null);
         if (activeImageToolNode && activeImageToolSource) {
-            void localCanvasImageUrl(activeImageToolNode).then((source) => {
+            void localCanvasImageUrl(activeImageToolNode, activeImageToolSource).then((source) => {
                 if (!source) return;
                 if (cancelled) source.revoke();
                 else {
@@ -1899,7 +1901,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 if (!(await copyToClipboard(content.value))) throw new Error("clipboard write failed");
                 return;
             }
-            if (!(await writeCanvasClipboardBlob(readCanvasClipboardBlob(copiedNodes[0]), content.kind, (content.kind === "image" ? canvasNodeImage(copiedNodes[0])?.mimeType : copiedNodes[0].metadata?.mimeType), serialized))) throw new Error("clipboard write failed");
+            if (!(await writeCanvasClipboardBlob(readCanvasClipboardBlob(copiedNodes[0]), content.kind, (content.kind === "image" ? canvasNodePrimaryImage(copiedNodes[0])?.mimeType : copiedNodes[0].metadata?.mimeType), serialized))) throw new Error("clipboard write failed");
         } catch {
             if (await writeSystemTextFallback()) return;
             void message.error(t("canvas.projectPage.clipboardCopyFailed"));
@@ -2227,7 +2229,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         const target = shotId ? `shot:${shotId}` : asset ? `asset:${asset[0]}` : clip ? `segment:${clip.id}` : "";
         if (!canvasHost && target && searchParams.get("target") !== target) {
             const query = new URLSearchParams(searchParams);
-            query.set("target", target); query.set("workspace", clip && !asset ? "production" : shotId ? "shots" : "assets");
+            query.set("target", target);
             query.delete("nodeId"); query.delete("segmentId");
             navigate({ search: query.toString() }, { replace: true });
         }
@@ -3295,7 +3297,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         const isSmartGenerationNode = node.type === CanvasNodeType.Config && node.metadata?.smart === true;
         if (node.type !== CanvasNodeType.Image && !isSmartGenerationNode && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Audio) return;
         const outputType = isSmartGenerationNode ? node.metadata?.generationMode || "image" : node.type;
-        const image = outputType === "image" ? canvasNodeImage(node) : null;
+        const image = outputType === "image" ? canvasNodePrimaryImage(node) : null;
         const extension = outputType === "video" ? "mp4" : outputType === "audio" ? audioExtension(node.metadata?.mimeType) : outputType === "text" ? "txt" : imageExtension(image?.mimeType || node.metadata?.content || "");
         const plan = canvasNodeDownloadPlan(node, outputType, extension);
         if (!plan) return;
@@ -3668,7 +3670,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     // character.images 的第一张 outfit（主图），原 metadata 里的 prompt 当作 description。
     const convertImageNodeToCharacter = useCallback(
         (node: CanvasNodeData) => {
-            if (!isImageConversionSource(node) || !canvasNodeImage(node)) {
+            if (!isImageConversionSource(node) || !canvasNodePrimaryImage(node)) {
                 message.warning(t("canvas.character.convertNoImage"));
                 return;
             }
@@ -3677,7 +3679,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 prev.map((item) => {
                     if (item.id !== node.id) return item;
                     const itemMetadata = item.metadata;
-                    const sourceImage = canvasNodeImage(item);
+                    const sourceImage = canvasNodePrimaryImage(item);
                     if (!isImageConversionSource(item) || !itemMetadata || !sourceImage) return item;
                     const convertedMetadata = { ...itemMetadata };
                     delete convertedMetadata.smart;
@@ -3719,7 +3721,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
 
     const convertImageNodeToScene = useCallback(
         (node: CanvasNodeData) => {
-            if (!isImageConversionSource(node) || !canvasNodeImage(node)) {
+            if (!isImageConversionSource(node) || !canvasNodePrimaryImage(node)) {
                 message.warning(t("canvas.scene.convertNoImage"));
                 return;
             }
@@ -3728,7 +3730,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 prev.map((item) => {
                     if (item.id !== node.id) return item;
                     const itemMetadata = item.metadata;
-                    const sourceImage = canvasNodeImage(item);
+                    const sourceImage = canvasNodePrimaryImage(item);
                     if (!isImageConversionSource(item) || !itemMetadata || !sourceImage) return item;
                     const convertedMetadata = { ...itemMetadata };
                     delete convertedMetadata.smart;
@@ -4135,14 +4137,27 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         setDialogNodeId(null);
     }, [sceneEditNodeId]);
 
-    const saveSceneEdit = useCallback((patch: { title: string; sceneName: string; sceneDescription: string; sceneImage?: NonNullable<CanvasNodeMetadata["sceneImage"]>; sceneColorCard?: NonNullable<CanvasNodeMetadata["sceneColorCard"]>; sceneColorPalette?: string[]; sceneColorCardPrompt: string }) => {
+    const saveSceneEdit = useCallback(async (patch: { title: string; sceneName: string; sceneDescription: string; sceneImage?: NonNullable<CanvasNodeMetadata["sceneImage"]>; sceneColorCard?: NonNullable<CanvasNodeMetadata["sceneColorCard"]>; sceneColorPalette?: string[]; sceneColorCardPrompt: string }) => {
         if (!sceneEditNodeId) return;
+        const currentNode = useCanvasStore.getState().projects.find(project => project.id === projectId)?.nodes.find(node => node.id === sceneEditNodeId);
+        const entity = currentNode?.metadata?.productionEntity;
+        const currentImage = currentNode?.metadata?.sceneImage;
+        const mediaKey = (image: typeof currentImage) => String(image?.storageKey || image?.url || "");
+        const formalEpisodeEntity = entity?.ownerKind === "episode" && Boolean(entity.ownerId) && entity.kind === "scene" && Boolean(entity.entityId);
+        if (formalEpisodeEntity && mediaKey(currentImage) !== mediaKey(patch.sceneImage)) {
+            if (!entity?.ownerId || !entity.entityId || !projectId) throw new Error("正式场景图片缺少制作归属，无法同步引用绑定");
+            const current = (await fetchEpisodeProduction(entity.ownerId)).production;
+            const operation = bindEntityPictureToNode(current.draft.director?.source as Record<string, unknown> | undefined,
+                entity.ownerKind, entity.ownerId, "scene", entity.entityId, projectId, sceneEditNodeId);
+            if (operation) await editEpisodeProduction(entity.ownerId, current.revision, [operation], nanoid());
+        }
         setNodes((prev) => prev.map((item) => item.id === sceneEditNodeId ? {
             ...item,
             title: patch.title,
             metadata: { ...item.metadata, sceneName: patch.sceneName, sceneDescription: patch.sceneDescription, sceneImage: patch.sceneImage, sceneColorCard: patch.sceneColorCard, sceneColorPalette: patch.sceneColorPalette, sceneColorCardPrompt: patch.sceneColorCardPrompt },
         } : item));
-    }, [sceneEditNodeId]);
+        if (formalEpisodeEntity && projectId) await flushCanvasProjectBeforeGeneration(projectId);
+    }, [flushCanvasProjectBeforeGeneration, projectId, sceneEditNodeId, setNodes]);
 
     const saveSceneNodeToAsset = useCallback(async (node: CanvasNodeData) => {
         if (node.type !== CanvasNodeType.Scene) return;
@@ -4292,7 +4307,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
 
     const maskEditImageNode = useCallback(
         async (node: CanvasNodeData, payload: CanvasImageMaskEditPayload) => {
-            const sourceImage = canvasNodeImage(node);
+            const sourceImage = canvasNodePrimaryImage(node);
             if (!sourceImage) return;
             const generationConfig = { ...buildGenerationConfig(effectiveConfig, node, "image"), count: "1", size: node.metadata?.size || "auto" };
             if (payload.generate && !isAiConfigReady(generationConfig, generationConfig.model)) {
@@ -4406,12 +4421,12 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     }, [imageToolUrl]);
 
     const autoLevelsImageNode = useCallback(async (node: CanvasNodeData) => {
-        const sourceImage = canvasNodeImage(node);
+        const sourceImage = canvasNodePrimaryImage(node);
         const content = sourceImage?.content || "";
         const storageKey = sourceImage?.storageKey || "";
         if (!content && !storageKey) return;
         const activeRequest = generationRequestsRef.current.get(node.id);
-        if (activeRequest && !activeRequest.controller.signal.aborted) return;
+        if (activeRequest) return;
         const reference = {
             id: node.id,
             name: `${node.title || node.id}.png`,
@@ -4483,7 +4498,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
 
     const generateAngleNode = useCallback(
         async (node: CanvasNodeData, params: CanvasImageAngleParams) => {
-            const sourceImage = canvasNodeImage(node);
+            const sourceImage = canvasNodePrimaryImage(node);
             if (!sourceImage) return;
             const generationConfig = { ...buildGenerationConfig(effectiveConfig, node, "image"), count: "1" };
             if (!isAiConfigReady(generationConfig, generationConfig.model)) {
@@ -4795,8 +4810,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             // 不再新建结果节点，也不向 Backend 再提交一次模型任务。
             const requestKey = loopContext ? `${nodeId}:loop:${loopContext.nodeId}:${loopContext.index}` : nodeId;
             const activeRequest = generationRequestsRef.current.get(requestKey)
-                || (!loopContext ? [...generationRequestsRef.current.values()].find((request) => request.originNodeId === nodeId && !request.controller.signal.aborted) : undefined);
-            if (activeRequest && !activeRequest.controller.signal.aborted) {
+                || (!loopContext ? [...generationRequestsRef.current.values()].find((request) => request.originNodeId === nodeId) : undefined);
+            if (activeRequest) {
                 if (loopContext) throw new Error("下游节点已有生成任务，循环无法继续");
                 return;
             }
@@ -5188,7 +5203,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             let node = initialNode;
             let projectFlushed = false;
             const activeRequest = generationRequestsRef.current.get(node.id);
-            if (activeRequest && !activeRequest.controller.signal.aborted) return;
+            if (activeRequest) return;
             if (node.metadata?.maskEdit) {
                 try {
                     await flushCanvasProjectBeforeGeneration(projectId);
@@ -6396,7 +6411,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                         <CanvasNodeUpscaleDialog key="upscale" dataUrl={imageToolUrl.url} open onClose={() => setUpscaleNodeId(null)} onConfirm={(params) => void upscaleImageNode(upscaleNode, params)} />
                     ) : null}
 
-                    <Modal key="super-resolve" title={t("canvas.projectPage.superResolve")} open={Boolean(superResolveNode && canvasNodeImage(superResolveNode))} centered footer={null} onCancel={() => setSuperResolveNodeId(null)}>
+                    <Modal key="super-resolve" title={t("canvas.projectPage.superResolve")} open={Boolean(superResolveNode && canvasNodePrimaryImage(superResolveNode))} centered footer={null} onCancel={() => setSuperResolveNodeId(null)}>
                         <div className="py-8 text-center text-base font-medium">{t("canvas.projectPage.notImplemented")}</div>
                     </Modal>
 

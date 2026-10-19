@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { BackendDatabase, type Asset } from "../db.js";
-import { rawProject, sourceOf } from "./drama-asset-library.js";
+import { rawProject, reconcileSharedAssetConsumers, sourceOf } from "./drama-asset-library.js";
 import { ensureProductionCanvas } from "../drama/production-canvas.js";
 import { DATABASE_SCHEMA_VERSION } from "../database-upgrade.js";
 import { startServer } from "../server.js";
@@ -92,6 +92,34 @@ test("production-selected write-through refs update the shared source and siblin
         assert.equal((db.getCanvasProject(shared.project.id)!.nodes as any[]).find(node => node.id === source.sourceNodeId).metadata.storageKey, "shared-result");
     } finally { db.close(); }
 });
+
+test("shared consumer reconciliation force-clears old local projections and is idempotent", () => {
+    const { db, asset } = fixture();
+    try {
+        const saved = db.upsertAsset(asset, { canvasSource: { projectId: "a", nodeId: "character" } });
+        const source = sourceOf(saved)!;
+        db.applyCanvasProjectOperations("b", undefined, [{ type: "add_node", id: "episode-reference", nodeType: "character", title: "旧投影", metadata: {
+            sharedAssetReference: { ...source, writeThrough: true, edits: { "metadata.characterDescription": { base: "原始", value: "旧本地差异" } } },
+        } }, { type: "add_node", id: "versioned-reference", nodeType: "character", title: "旧版本引用", metadata: {
+            sharedAssetOrigin: { dramaId: "drama", assetId: source.assetId, approvedId: "approved-old", sourceProjectId: source.sourceProjectId, sourceNodeId: source.sourceNodeId },
+            characterImages: [{ storageKey: "image:old", url: "/media/old.png" }],
+        } }], { runtimeWrite: true });
+
+        const first = reconcileSharedAssetConsumers(db, source.sourceProjectId);
+        const synced = (db.getCanvasProject("b")!.nodes as any[]).find(node => node.id === "episode-reference");
+        assert.equal(synced.metadata.characterDescription, "原始");
+        assert.equal(synced.metadata.sharedAssetReference.edits, undefined);
+        const versioned = (db.getCanvasProject("b")!.nodes as any[]).find(node => node.id === "versioned-reference");
+        assert.equal(versioned.metadata.sharedAssetReference.sourceNodeId, source.sourceNodeId);
+        assert.equal(versioned.metadata.sharedAssetOrigin, undefined);
+        assert.equal(versioned.metadata.characterImages[0].storageKey, "a");
+        const revision = Number(db.getCanvasProject("b")!.revision);
+        const second = reconcileSharedAssetConsumers(db, source.sourceProjectId);
+        assert.equal(Number(db.getCanvasProject("b")!.revision), revision);
+        assert.ok(first.synchronizedCanvasRevisions.length > 0);
+        assert.equal(second.synchronizedCanvasRevisions.length, 0);
+    } finally { db.close(); }
+});
 test("saving a prop node to the library stores its propImage as a reusable image asset", () => {
     const { db, asset } = fixture();
     try {
@@ -126,27 +154,39 @@ test("shared prop references project and refresh their canonical prop image", ()
         assert.equal((db.getCanvasProject("a")!.nodes as any[]).find(node => node.id === "episode-umbrella").metadata.propImage.storageKey, "umbrella-v2");
     } finally { db.close(); }
 });
-test("orphaned shared-asset sources are surfaced as placeholders without failing the library read", () => {
+test("orphaned shared-asset records auto-purge when unreferenced, stay while referenced, and surface as placeholders until swept", () => {
     const { db, asset } = fixture();
     try {
         db.upsertAssetRecord(asset);
         const orphan = (id: string, sourceProjectId: string, sourceNodeId: string): Asset => ({
             ...asset, id, data: {}, metadata: { sharedAssetSource: { dramaId: "drama", assetId: id, sourceProjectId, sourceNodeId } },
         });
+        // missing-project: source canvas hard-deleted, nobody references it -> auto-purged on read.
         db.upsertAssetRecord(orphan("missing-project", "deleted-project", "deleted-node"));
-        db.upsertAssetRecord(orphan("missing-node", "a", "deleted-node"));
+        // missing-node: built the real way — valid source first, live reference added, then the
+        // whole source canvas disappears (the path that leaves dangling consumers behind).
+        const shared = ensureProductionCanvas(db, "shared-assets", "drama");
+        db.applyCanvasProjectOperations(shared.project.id, undefined, [{ type: "add_node", id: "shared-character", nodeType: "character", title: "共享角色", position: { x: 20, y: 30 }, width: 240, height: 320, metadata: { characterName: "共享角色" } }], { runtimeWrite: true });
+        db.upsertAssetRecord(orphan("missing-node", shared.project.id, "shared-character"));
+        db.applyCanvasProjectOperations("b", undefined, [{ type: "add_node", id: "live-ref", nodeType: "character", title: "共享角色", position: { x: 400, y: 30 }, width: 240, height: 320, metadata: { sharedAssetReference: sourceOf(db.getAssetRecord("missing-node"))! } }]);
+        // Simulate the production accident that leaves dangling consumers behind: a hard project
+        // deletion with no cascade cleanup, which is exactly how records go orphaned.
+        db.db.exec("PRAGMA foreign_keys=OFF");
+        try { db.db.prepare("DELETE FROM canvas_projects WHERE id = ?").run(shared.project.id); } finally { db.db.exec("PRAGMA foreign_keys=ON"); }
 
         const listed = db.listAssets();
-        const missingProject = listed.find(item => item.id === "missing-project")!;
-        const missingNode = db.getAsset("missing-node")!;
-        assert.ok(missingProject);
-        assert.equal(missingProject.metadata.sharedAssetMissing, true);
-        assert.equal(missingProject.metadata.sharedAssetMissingReason, "source_project_missing");
-        assert.equal(missingProject.data.images instanceof Array, true);
-        assert.equal(missingNode.metadata.sharedAssetMissing, true);
-        assert.equal(missingNode.metadata.sharedAssetMissingReason, "source_node_missing");
+        assert.equal(listed.some(item => item.id === "missing-project"), false, "unreferenced orphan is purged automatically");
+        assert.equal(db.getAssetRecord("missing-project"), null);
+        const kept = listed.find(item => item.id === "missing-node")!;
+        assert.ok(kept, "referenced orphan survives the sweep");
+        assert.equal(kept.metadata.sharedAssetMissing, true);
+        assert.equal(kept.metadata.sharedAssetMissingReason, "source_project_missing");
         assert.ok(listed.some(item => item.id === "asset"), "unrelated assets remain readable");
-        assert.equal(db.getAssetRecord("missing-project")!.metadata.sharedAssetMissing, undefined, "projection does not rewrite the stored record");
+        assert.equal(db.getAssetRecord("missing-node")!.metadata.sharedAssetMissing, undefined, "projection does not rewrite the stored record");
+
+        db.applyCanvasProjectOperations("b", undefined, [{ type: "delete_node", id: "live-ref" }]);
+        assert.equal(db.listAssets().some(item => item.id === "missing-node"), false, "next read purges once the last reference is gone");
+        assert.ok(db.getAssetRecord("asset"), "surviving records are untouched");
     } finally { db.close(); }
 });
 test("independent source fields merge, same fields conflict and discard restores current source", () => {

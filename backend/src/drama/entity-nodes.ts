@@ -3,7 +3,7 @@ import { canonicalProduction, productionEntities, type EpisodeProductionData, ty
 import { applyDirectorSourcePatch } from "@basketikun/canvas-agent/drama/production-validation";
 import type { BackendDatabase } from "../db.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
-import { directorHash, projectDirector } from "./director.js";
+import { directorHash, projectDirector, withoutDirectorProjection } from "./director.js";
 import { deleteDirectorAsset } from "./director-asset-delete.js";
 import { productionLayoutStableId } from "./production-layout-geometry.js";
 import { resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
@@ -90,7 +90,7 @@ export function entityNodeOperations(project: Record<string, any>, data: Episode
             const actual = String(node.metadata?.[field] || "");
             if (actual === value) continue;
             // Only a changed source field can conflict; leave unrelated local fields untouched.
-            if (node.metadata?.productionEntity && actual !== baseline) throw new Error("制作实体的同一字段已变化，请回读后再编辑");
+            if (old && node.metadata?.productionEntity && actual !== baseline) throw new Error("制作实体的同一字段已变化，请回读后再编辑");
             metadata[field] = value;
         }
         const reference = node.metadata?.sharedAssetReference;
@@ -212,7 +212,7 @@ export function syncEntityNodeEdits(db: BackendDatabase, projectId: string, befo
     if (!changed && !imageOperations.length) return empty;
     if (changed) {
         projectDirector(draft);
-        db.db.prepare(`UPDATE ${table} SET revision=?,draft_json=?,updated_at=? WHERE ${column}=?`).run(row.revision + 1, JSON.stringify(draft), new Date().toISOString(), owner.id);
+        db.db.prepare(`UPDATE ${table} SET revision=?,draft_json=?,updated_at=? WHERE ${column}=?`).run(row.revision + 1, JSON.stringify(withoutDirectorProjection(draft)), new Date().toISOString(), owner.id);
     }
     return { updates: changed ? [{ entityId: owner.id, revision: row.revision + 1 }] : [], operations: imageOperations };
 }

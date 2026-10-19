@@ -14,7 +14,9 @@ import { dramaWorkbenchPath } from "./workbench-entry";
 const CanvasSurface = lazy(() => import("@/pages/canvas/project").then(module => ({ default: module.CanvasSurface })));
 
 const CANVAS_STATE_PREFIX = "workbench-canvas-v1:";
-type StoredCanvasState = { target: CanvasTarget; visible: boolean };
+// 每次页面加载生成一个标识：刷新后不自动弹开画布，同一页面内切换分集仍沿用原打开状态。
+const PAGE_LOAD_ID = Math.random().toString(36).slice(2);
+type StoredCanvasState = { target: CanvasTarget; visible: boolean; loadId?: string };
 function readStoredCanvasState(storageKey?: string): StoredCanvasState | null {
     if (!storageKey || typeof window === "undefined") return null;
     try {
@@ -26,7 +28,7 @@ function readStoredCanvasState(storageKey?: string): StoredCanvasState | null {
                 ...(parsed.target.nodeId ? { nodeId: String(parsed.target.nodeId) } : {}),
                 ...(parsed.target.segmentId ? { segmentId: String(parsed.target.segmentId) } : {}),
             },
-            visible: parsed.visible === true,
+            visible: parsed.visible === true && parsed.loadId === PAGE_LOAD_ID,
         };
     } catch { return null; }
 }
@@ -34,7 +36,7 @@ function readStoredCanvasState(storageKey?: string): StoredCanvasState | null {
 export function WorkbenchCanvas({ children, storageKey }: { children: ReactNode; storageKey?: string }) {
     const navigate = useNavigate(), { t } = useTranslation();
     const [parentSearch] = useSearchParams();
-    // 画布开合状态会话级持久化：制作台打开的画布在浏览器刷新后保持打开（折叠状态同样保留）。
+    // 画布位置会话级持久化：刷新后仍记得上次定位的节点，但不会自动把浮层重新盖到工作台上。
     const restored = useMemo(() => readStoredCanvasState(storageKey), [storageKey]);
     const [target, setTarget] = useState<CanvasTarget | undefined>(restored?.target);
     const [search, setCanvasSearch] = useState(() => new URLSearchParams({
@@ -44,7 +46,7 @@ export function WorkbenchCanvas({ children, storageKey }: { children: ReactNode;
     const [visible, setVisible] = useState(Boolean(restored?.visible)), [requestId, setRequestId] = useState(restored ? 1 : 0);
     useEffect(() => {
         if (!storageKey || !target) return;
-        try { sessionStorage.setItem(CANVAS_STATE_PREFIX + storageKey, JSON.stringify({ target, visible })); } catch { /* 存储不可用时只是刷新后不恢复 */ }
+        try { sessionStorage.setItem(CANVAS_STATE_PREFIX + storageKey, JSON.stringify({ target, visible, loadId: PAGE_LOAD_ID })); } catch { /* 存储不可用时只是刷新后不恢复 */ }
     }, [storageKey, target, visible]);
     const returnFocus = useRef<HTMLElement | null>(null), panel = useRef<HTMLDivElement>(null), overlay = useRef<HTMLDivElement>(null), workbench = useRef<HTMLDivElement>(null);
     const popupContainer = useCallback(() => panel.current || document.body, []);
@@ -60,7 +62,7 @@ export function WorkbenchCanvas({ children, storageKey }: { children: ReactNode;
         useAgentStore.getState().closePanel();
         if (destination.episodeId) {
             const nextStorageKey = `episode:${destination.episodeId}`;
-            try { sessionStorage.setItem(CANVAS_STATE_PREFIX + nextStorageKey, JSON.stringify({ target: { projectId: destination.projectId }, visible: destination.keepCanvasOpen })); } catch { /* The route still switches if session storage is unavailable. */ }
+            try { sessionStorage.setItem(CANVAS_STATE_PREFIX + nextStorageKey, JSON.stringify({ target: { projectId: destination.projectId }, visible: destination.keepCanvasOpen, loadId: PAGE_LOAD_ID })); } catch { /* The route still switches if session storage is unavailable. */ }
             if (storageKey === nextStorageKey) {
                 returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
                 setTarget({ projectId: destination.projectId });

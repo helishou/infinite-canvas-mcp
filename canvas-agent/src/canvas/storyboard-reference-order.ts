@@ -31,6 +31,24 @@ export function orderStoryboardReferencesFirst<T extends object>(
     return [...storyboards, ...references.filter((reference) => !isStoryboardImage(reference))];
 }
 
+/** Match the H3 submission slot order in every editor and runtime consumer. */
+export function orderReferencesForSubmission<T extends object>(
+    references: T[],
+    shotBindingIds: string[],
+    bindingIdOf: (reference: T) => string | undefined,
+    isEnabledStoryboardImage: (reference: T) => boolean,
+    isEnabledSubjectImage: (reference: T) => boolean,
+): T[] {
+    const storyboardFirst = orderStoryboardReferencesFirst(references, shotBindingIds, bindingIdOf, isEnabledStoryboardImage);
+    const subjects = storyboardFirst.filter(isEnabledSubjectImage);
+    const subjectIds = new Set(subjects.map(bindingIdOf));
+    return [
+        ...storyboardFirst.filter(isEnabledStoryboardImage),
+        ...subjects,
+        ...storyboardFirst.filter((reference) => !subjectIds.has(bindingIdOf(reference)) && !isEnabledStoryboardImage(reference)),
+    ];
+}
+
 /** Rebase numeric Picture tags when image bindings move to different slots. */
 export function remapPictureTags<T>(
     text: string,

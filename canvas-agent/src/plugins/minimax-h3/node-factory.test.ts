@@ -28,7 +28,7 @@ test("new H3 nodes do not inherit continuation from saved defaults; explicit Cli
     const created = createH3NodeMetadata(defaults);
     assert.equal(created.motionContextEnabled, false);
     assert.equal(created.segments[0].motionContextEnabled, false);
-    assert.equal(created.segments[0].tailFrameContinuation, false);
+    assert.equal(created.segments[0].tailFrameContinuation, true);
     const explicit = createH3NodeMetadata(defaults, { segments: [{ id: "A", motionContextEnabled: true, tailFrameContinuation: false }] });
     assert.equal(explicit.segments[0].motionContextEnabled, true);
     assert.equal(explicit.segments[0].tailFrameContinuation, false);

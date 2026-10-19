@@ -10,7 +10,7 @@ import { useCopyText } from "@/hooks/use-copy-text";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useImageQuickToolsStore } from "@/stores/use-image-quick-tools-store";
 import { CanvasNodeType, type CanvasNodeData, type ViewportTransform } from "@/types/canvas";
-import { canvasNodeImage } from "@/lib/canvas/canvas-image-renderability";
+import { canvasNodePrimaryImage } from "@/lib/canvas/canvas-image-renderability";
 import { propNodeAssetImage } from "@/lib/canvas/prop-node-asset";
 import type { CanvasNodeToolbarItem } from "@/types/canvas-plugin";
 import { isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
@@ -173,7 +173,7 @@ export function CanvasNodeHoverToolbar({
     const isCharacter = node.type === CanvasNodeType.Character;
     const isScene = node.type === CanvasNodeType.Scene;
     const hasPropImage = Boolean(propNodeAssetImage(node));
-    const hasImage = isImage && Boolean(canvasNodeImage(node));
+    const hasImage = isImage && Boolean(canvasNodePrimaryImage(node));
     const hasVideo = isVideo && Boolean(node.metadata?.content);
     const hasAudio = isAudio && Boolean(node.metadata?.content);
     const isText = node.type === CanvasNodeType.Text || (isSmartGenerationNode && smartMode === "text");

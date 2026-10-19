@@ -1399,15 +1399,13 @@ function registerBackendCanvasTools(
   server.registerTool(
     "drama_get_episode",
     {
-      description:
-        "读取单个分集的完整字段，并返回其绑定画布的完整数据；未绑定画布时 canvas 为 null。",
-      inputSchema: z.object({
-        episodeId: z.string().trim().min(1).describe("分集 ID"),
-      }),
+      description: toolDescriptions.drama_get_episode,
+      inputSchema: toolInputSchemas.drama_get_episode,
     },
     async (rawInput: Record<string, unknown>) => {
+      const input = toolInputSchemas.drama_get_episode.parse(rawInput);
       return textResult(
-        await backendApi.getDramaEpisode(String(rawInput.episodeId).trim()),
+        await backendApi.getDramaEpisode(input.episodeId.trim(), input.view),
       );
     },
   );
@@ -2923,7 +2921,8 @@ function backendErrorInfo(error: unknown) {
   const status = typeof value.status === "number" ? value.status : undefined;
   const kind = typeof value.kind === "string" ? value.kind : undefined;
   const code = typeof value.code === "string" ? value.code : undefined;
-  return { status, kind, code };
+  const taskId = typeof value.taskId === "string" ? value.taskId : undefined;
+  return { status, kind, code, taskId };
 }
 
 function structuredErrorMetadata(error: unknown) {
@@ -2934,6 +2933,7 @@ function structuredErrorMetadata(error: unknown) {
     if (typeof item === "number" || typeof item === "boolean") result[key] = item;
   }
   if (Array.isArray(value.conflictTargets)) result.conflictTargets = value.conflictTargets.map(String);
+  if (typeof value.taskId === "string") result.taskId = value.taskId;
   return result;
 }
 
@@ -2988,9 +2988,9 @@ function errorTaskIds(error: unknown) {
   const value = error && typeof error === "object"
     ? error as Record<string, unknown>
     : {};
-  return Array.isArray(value.taskIds)
-    ? [...new Set(value.taskIds.map(String).filter(Boolean))]
-    : [];
+  const taskIds = Array.isArray(value.taskIds) ? value.taskIds.map(String).filter(Boolean) : [];
+  if (typeof value.taskId === "string" && value.taskId) taskIds.unshift(value.taskId);
+  return [...new Set(taskIds)];
 }
 
 function errorOperationId(error: unknown, input: Record<string, unknown>) {
@@ -3084,6 +3084,7 @@ function classifyToolError(
   // 会一路落到 CANVAS_TOOL_FAILED，把“查了不存在的 ID”伪装成通用工具故障。
   const missingEpisode =
     backendError.code === "EPISODE_NOT_FOUND" || /分集不存在|episode not found/i.test(message);
+  const h3ClipOccupied = backendError.code === "H3_CLIP_OCCUPIED";
   // 分块/定向读取没选到合法产物（“分块读取必须选定一个产物”），是入参约束而非后端崩溃。
   const artifactTargetMissing =
     backendError.code === "ARTIFACT_NOT_FOUND" || /必须选定一个产物|no artifact was selected|must select an artifact/i.test(message);
@@ -3101,7 +3102,7 @@ function classifyToolError(
   const invalidInput = error instanceof z.ZodError || backendError.code === "INVALID_INPUT" || embeddedValidationIssues;
   const productionDiagnostics = Array.isArray(recordOf(error).diagnostics) ? recordOf(error).diagnostics as Array<Record<string, unknown>> : [];
   const productionNextActions = Array.isArray(recordOf(error).nextActions) ? recordOf(error).nextActions as Array<Record<string, unknown>> : [];
-  const domainCode = productionDiagnostics.length || ["REFERENCE_INVALID", "MEDIA_IDENTITY_MISMATCH", "IDEMPOTENCY_CONFLICT"].includes(backendError.code || "") ? backendError.code : undefined;
+  const domainCode = productionDiagnostics.length || ["REFERENCE_INVALID", "MEDIA_IDENTITY_MISMATCH", "IDEMPOTENCY_CONFLICT", "H3_CLIP_OCCUPIED"].includes(backendError.code || "") ? backendError.code : undefined;
   const commandCode = ["OPERATION_ID_REUSED", "MCP_COMMAND_MISMATCH", "MCP_COMMAND_REJECTED", "RECEIPT_UNAVAILABLE", "MCP_CALL_CANCELLED", "ASSET_NOT_FOUND", "EDIT_TARGET_MISMATCH"].includes(backendError.code || "") ? backendError.code : undefined;
   const authFailure = backendError.status === 401 || backendError.status === 403;
   const timeout = backendError.kind === "timeout";
@@ -3162,6 +3163,10 @@ function classifyToolError(
       ? (typeof input.idempotencyKey === "string" && input.idempotencyKey
           ? { tool: "canvas_task_status", input: { taskId: input.idempotencyKey } }
           : { action: "原幂等键属于另一份生成输入；先查原任务，不能把它当作本次任务或重复排队" })
+    : h3ClipOccupied
+      ? (backendError.taskId
+          ? { tool: "h3_get_task", input: { taskId: backendError.taskId }, action: "先查询占用该 Clip 的原任务；不要重复提交，待原任务结束后再运行。" }
+          : { action: "目标 Clip 正被其他任务占用；先查询原任务，待其结束后再运行。" })
     : payloadOverflow
     ? {
         action: error instanceof McpPayloadOverflowError && ["production_get", "production_get_version"].includes(error.tool)
@@ -3194,7 +3199,7 @@ function classifyToolError(
           : authFailure
             ? { action: "检查 Backend 地址、Token 和权限后再重试" }
             : { action: "检查 errorContext 后修正输入或连接；不要重复提交完全相同的失败请求" };
-  const recoverable = productionDiagnostics.length > 0 || selectionRequired || missingProject || missingTask || missingNode || missingSegment || missingEpisode || artifactTargetMissing || missingModel || conflict || timeout || payloadOverflow || cancelled;
+  const recoverable = productionDiagnostics.length > 0 || h3ClipOccupied || selectionRequired || missingProject || missingTask || missingNode || missingSegment || missingEpisode || artifactTargetMissing || missingModel || conflict || timeout || payloadOverflow || cancelled;
   const issueSource = error && typeof error === "object" ? (error as Record<string, unknown>).issues || productionDiagnostics : undefined;
   const issues = Array.isArray(issueSource) ? issueSource.map((issue) => {
     const item = recordOf(issue);

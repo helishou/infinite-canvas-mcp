@@ -182,6 +182,14 @@ export function productionWriteReceipt(result: any, context: { tool?: string; in
         referenceSync: Array.isArray(job.application?.referenceSync) ? job.application.referenceSync.map((item: any) => ({ targetId: item.targetId, status: item.status, diagnostics: item.diagnostics })) : [],
         mediaSubmitted: false,
     }));
+    const syncIssues = sync.flatMap((item: any) => {
+        const diagnostics = Array.isArray(item.diagnostics) ? item.diagnostics : [];
+        const relevant = item.status === "blocked" ? diagnostics : diagnostics.filter((diagnostic: any) => String(diagnostic.code || "").includes("CONFLICT"));
+        if (item.status !== "blocked" && !relevant.length) return [];
+        return [{ targetId: item.targetId, status: item.status, diagnostics: relevant.slice(0, 1).map((diagnostic: any) => ({
+            code: String(diagnostic.code || "UNKNOWN"), message: String(diagnostic.message || ""),
+        })) }];
+    });
     const diagnosticCodes = [...new Set([...sync.flatMap((item: any) => item.diagnostics || []), ...(layout.diagnostics || [])].map((item: any) => String(item.code || "UNKNOWN")))];
     const ownerId = input.id || input.projectId || input.sceneId || input.episodeId || p.episodeId;
     const kind = input.kind || (input.sceneId && !input.episodeId && !input.projectId ? "scene" : input.projectId || context.tool?.startsWith("canvas_") ? "canvas" : "episode");
@@ -201,6 +209,7 @@ export function productionWriteReceipt(result: any, context: { tool?: string; in
             ...(syncReceipt ? pick(syncReceipt, ["bound", "reordered"]) : {}),
             blocked: sync.filter((item: any) => item.status === "blocked").length,
             conflicts: sync.filter((item: any) => (item.diagnostics || []).some((d: any) => String(d.code).includes("CONFLICT"))).length, referenceSync: sync.length },
+        ...(syncIssues.length ? { syncIssues } : {}),
         warnings: { count: sync.reduce((n: number, item: any) => n + count(item.diagnostics), 0) + count(layout.diagnostics), codes: diagnosticCodes },
         ...(["production_edit", "production_publish", "production_restore", "production_sync_clips"].includes(context.tool || "") ? { readPolicy: { nextReadRequired: false, guidance: "成功回执已给出 revision/sourceHash；复用已知输入。仅缺少任务所需字段或遇到冲突时定向读取，不整稿回读或对已保存源稿重复计算哈希。" } } : {}),
         ...(result.project ? { nextRead: { tool: "production_get_canvas_context", input: { projectId: result.project.id } } } : ownerId ? { nextRead: { tool: context.tool?.includes("scene_work") || context.tool === "production_start_shared_review" ? "production_get_scene_work" : tool,

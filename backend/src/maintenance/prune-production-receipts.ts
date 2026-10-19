@@ -1,5 +1,5 @@
 /**
- * 制作回执收据清理 CLI（人工执行，默认只读）。
+ * 制作回执与生命周期历史整理 CLI（人工执行，默认只读）。
  *
  * 为什么需要它：`episode_production_operations.receipt_json` 是幂等重放缓存，
  * 每条都保存整份 ProductionRecord 快照（含 draft.director.artifacts，占 90%+）。
@@ -7,9 +7,10 @@
  * 该表此前没有任何保留策略，是纯增长。
  *
  * 安全性：
- * - 只删「可安全重建」的行——draft.director 为 null 或无 source 的（非制作稿事务）。
+ * - 只删「可安全重建」的回执行——draft.director 为 null 或无 source 的（非制作稿事务）。
  * - 保留每个 episode 最近 N 条（默认 200），确保近期重放仍命中缓存。
  * - 保留所有带 published 或含编译产物的行（发布/编译回执可能有审计价值）。
+ * - 生命周期历史只压缩过期的中间事件，每个源实体的最新 alive/tombstone 快照永久保留；早于保留事件的基线会安全冲突。
  * - 删除前打印候选清单；--apply 才写库，并在事务内逐条复核。
  *
  * 用法：
@@ -63,6 +64,12 @@ function reasonToKeep(stored: StoredReceipt): string | null {
 try {
     const total = db.prepare("SELECT COUNT(*) AS n FROM episode_production_operations").get() as { n: number };
     const totalBytes = db.prepare("SELECT COALESCE(SUM(LENGTH(receipt_json)),0) AS b FROM episode_production_operations").get() as { b: number };
+    const hasLifecycleEvents = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='production_source_lifecycle_events'").get());
+    const lifecycleTotal = hasLifecycleEvents ? Number((db.prepare("SELECT COUNT(*) AS n FROM production_source_lifecycle_events").get() as { n: number }).n) : 0;
+    const lifecycleVictims = hasLifecycleEvents ? Number((db.prepare(`SELECT COUNT(*) AS n FROM production_source_lifecycle_events
+        WHERE created_at < ? AND revision < (SELECT MAX(latest.revision) FROM production_source_lifecycle_events AS latest
+            WHERE latest.owner_kind=production_source_lifecycle_events.owner_kind AND latest.owner_id=production_source_lifecycle_events.owner_id
+                AND latest.entity_type=production_source_lifecycle_events.entity_type AND latest.entity_id=production_source_lifecycle_events.entity_id)`).get(cutoff) as { n: number }).n) : 0;
     const fileBefore = fs.statSync(DB_FILE).size;
 
     // 按 episode 分组，按 created_at 倒序。用 prepared statement 逐行迭代（iterate），
@@ -88,19 +95,20 @@ try {
             ok: true, dryRun: true, keepDays, cutoff, dbPath: DB_FILE,
             before: { rows: total.n, receiptBytes: totalBytes.b, fileBytes: fileBefore },
             agedRows: aged,
+            lifecycleEvents: { rows: lifecycleTotal, wouldPrune: lifecycleVictims, retainedLatestPerEntity: true },
             keepReasons: Object.fromEntries(keepReasons),
             wouldDelete: victims.length,
             wouldFreeBytes: victimBytes,
             wouldFreeMB: (victimBytes / 1e6).toFixed(1),
             top10: victims.slice(0, 10).map(v => ({ id: v.operationId, MB: (v.bytes / 1e6).toFixed(2) })),
-            note: "只删可安全重建的幂等缓存行；--apply 执行，之后需 VACUUM 才能回收文件空间",
+            note: "只删可安全重建的幂等缓存并压缩过期的中间生命周期事件；最新 tombstone 保留；--apply 执行，之后需 VACUUM 才能回收文件空间",
         }, null, 2));
         db.close();
         process.exit(0);
     }
 
     db.exec("BEGIN IMMEDIATE");
-    let deleted = 0;
+    let deleted = 0, lifecycleDeleted = 0;
     try {
         const del = db.prepare("DELETE FROM episode_production_operations WHERE operation_id = ? AND receipt_json = ?");
         // 事务内复核：内容未变且仍判定可删
@@ -110,6 +118,10 @@ try {
             if (reasonToKeep(fresh.receipt_json)) continue;
             deleted += Number(del.run(victim.operationId, fresh.receipt_json).changes);
         }
+        lifecycleDeleted = hasLifecycleEvents ? Number(db.prepare(`DELETE FROM production_source_lifecycle_events
+            WHERE created_at < ? AND revision < (SELECT MAX(latest.revision) FROM production_source_lifecycle_events AS latest
+                WHERE latest.owner_kind=production_source_lifecycle_events.owner_kind AND latest.owner_id=production_source_lifecycle_events.owner_id
+                    AND latest.entity_type=production_source_lifecycle_events.entity_type AND latest.entity_id=production_source_lifecycle_events.entity_id)`).run(cutoff).changes) : 0;
         db.exec("COMMIT");
     } catch (error) {
         db.exec("ROLLBACK");
@@ -120,6 +132,7 @@ try {
     console.log(JSON.stringify({
         ok: true, dryRun: false, keepDays, cutoff, dbPath: DB_FILE,
         deleted,
+        lifecycleEvents: { rowsBefore: lifecycleTotal, deleted: lifecycleDeleted, retainedLatestPerEntity: true },
         measurement: {
             rowsBefore: total.n, rowsAfter: after.n,
             receiptBytesBefore: totalBytes.b, receiptBytesAfter: after.b,

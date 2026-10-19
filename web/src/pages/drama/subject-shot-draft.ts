@@ -214,10 +214,13 @@ export function rebaseShotFormDraft(draft: ShotFormDraft, shot: Record<string, a
 
 export function subjectDisplayName(source: Record<string, any>, subjectId: string) {
     const subject = rows(source.subject_registry).find(item => String(item.id) === subjectId), entity = subject?.entityRef;
-    if (typeof subject?.display_name === "string" && subject.display_name.trim()) return subject.display_name;
     const registry = entity?.kind === "character" ? rows(source.character_registry) : entity?.kind === "scene" ? rows(source.scene_registry) : rows(source.asset_plan);
     const item = registry.find(item => String(item.id || item.asset_id) === String(entity?.id));
-    return String(item?.name || item?.asset_name || item?.scene_name || item?.title || subjectId);
+    const entityName = String(item?.name || item?.asset_name || item?.scene_name || item?.title || "");
+    if (entityName.trim()) return entityName;
+    // Fall back to stored display_name only when entity lookup fails (legacy/unregistered subjects).
+    if (typeof subject?.display_name === "string" && subject.display_name.trim()) return subject.display_name;
+    return subjectId;
 }
 
 export function productionWorkbenchValue(production: Record<string, any>, view: "subject" | "shot" | "clip") {

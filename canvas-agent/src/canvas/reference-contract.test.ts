@@ -39,6 +39,21 @@ test("单张分镜图也排在人物图之前", () => {
     assert.equal(result.compiledPrompt, "<Picture 2> <Picture 3> <Picture 1>");
 });
 
+test("主体绑定图片排在普通场景图前并同步重映射提示词编号", () => {
+    const binding = (id: string, role: "scene" | "character_identity", subjectId?: string) => ({
+        id, assetId: id, label: id, role, subjectId, tags: [], enabled: true, usage: "reference", mediaType: "image", url: `https://example.test/${id}.png`,
+    });
+    const result = compileReferenceSubmission({}, {
+        taskMode: "ref2va",
+        prompt: "subject_definitions:\n<Subject 1> is Shen Yan, represented by <Picture 2>.\n<Subject 2> is Hong Xiao, represented by <Picture 3>.\n<Subject 3> is the cottage interior board, represented by <Picture 1>.\nsummary:\nUse all three references.",
+        referenceBindings: [binding("cottage", "scene"), binding("shen-yan", "character_identity", "shen-yan"), binding("hong-xiao", "character_identity", "hong-xiao")],
+    });
+    assert.deepEqual(result.references.map((reference) => reference.id), ["shen-yan", "hong-xiao", "cottage"]);
+    assert.match(result.compiledPrompt, /<Subject 1> is Shen Yan, represented by <Picture 1>/);
+    assert.match(result.compiledPrompt, /<Subject 2> is Hong Xiao, represented by <Picture 2>/);
+    assert.match(result.compiledPrompt, /<Subject 3> is the cottage interior board, represented by <Picture 3>/);
+});
+
 test("提示词使用公开编号标签，主体定义补入对应图片引用", () => {
     const project = { referenceCatalog: [
         { id: "a", label: "人物", mediaType: "image", role: "character_identity", tags: [], storageKey: "image:a" },

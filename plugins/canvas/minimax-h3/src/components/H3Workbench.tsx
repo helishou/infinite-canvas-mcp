@@ -348,7 +348,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         }
         patchSelectedSegment(ctx, { ...metadata, selectedSegmentId: selected.id }, patch);
     }, [commitSegmentChange, ctx, metadata, selected]);
-    const patchAllSettings = useCallback((patch: Partial<H3Segment>) => {
+    const patchAllSettings = useCallback((patch: Partial<H3Segment>, formalBoundaryValues?: Array<{ segmentId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean }>) => {
         const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata;
         const current = Array.isArray(liveMetadata.segments) && liveMetadata.segments.length ? liveMetadata.segments as H3Segment[] : segmentsFor(liveMetadata);
         const next = current.map((segment) => {
@@ -360,7 +360,15 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             }
             return updated;
         });
-        ctx.updateMetadata(patchAllH3Clips(liveMetadata, next, patch));
+        const update = patchAllH3Clips(liveMetadata, next, patch);
+        if (formalBoundaryValues?.length) {
+            const bySegmentId = new Map(formalBoundaryValues.map(value => [value.segmentId, value]));
+            update.segments = update.segments.map(segment => {
+                const boundary = bySegmentId.get(segment.id);
+                return boundary ? { ...segment, tailFrameContinuation: boundary.tailFrameContinuation, motionContextEnabled: boundary.motionContextEnabled } : segment;
+            });
+        }
+        ctx.updateMetadata(update);
     }, [ctx, metadata]);
     const removeTimelineRef = (segmentId: string, ref: H3Ref) => {
         const segment = segments.find((item) => item.id === segmentId);

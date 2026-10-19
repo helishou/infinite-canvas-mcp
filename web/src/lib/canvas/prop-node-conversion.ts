@@ -1,11 +1,11 @@
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
-import { canvasNodeImage } from "./canvas-image-renderability";
+import { canvasNodePrimaryImage } from "./canvas-image-renderability";
 
 export function convertImageNodeToProp(node: CanvasNodeData): CanvasNodeData | null {
     const convertible = node.type === CanvasNodeType.Image
         || (node.type === CanvasNodeType.Config && node.metadata?.smart === true && (node.metadata.generationMode || "image") === "image");
     if (!convertible) return null;
-    const sourceImage = canvasNodeImage(node);
+    const sourceImage = canvasNodePrimaryImage(node);
     if (!sourceImage) return null;
 
     const metadata = { ...(node.metadata || {}) };

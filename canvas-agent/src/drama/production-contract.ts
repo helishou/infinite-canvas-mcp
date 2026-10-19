@@ -48,10 +48,15 @@ export const directorPatchFields = {
     segment: ["shot_ids", "start_frame", "end_frame", "generation_clip_duration", "mode", "mode_lock", "mode_selection_reason", "audio", "sound", "overall_soundscape", "non_diegetic_music", "references", "subjects", "execution_gate", "styleTemplateId", "motion_profile", "summary", "audio_bindings", "animation_term_ids", "animation_term_evidence"],
 } as const;
 
+const directorPatchSourceEntities = Object.keys(directorPatchFields).filter((entity): entity is Exclude<keyof typeof directorPatchFields, "continuity"> => entity !== "continuity") as [Exclude<keyof typeof directorPatchFields, "continuity">, ...Exclude<keyof typeof directorPatchFields, "continuity">[]];
+const directorPatchObjectSchema = z.object(Object.fromEntries(
+    [...new Set(Object.values(directorPatchFields).flat())].map(field => [field, z.unknown()]),
+)).strict();
+
 export const directorModules = ["story", "assets", "shots", "performance", "effects", "model", "continuity"] as const;
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 export const directorBoundarySchema = z.object({ from: id, to: id, tailFrame: z.boolean(), motionContext: z.boolean(), reason: z.string() });
-export const sharedAssetSourceSchema = z.object({ dramaId: id, assetId: id, approvedId: id, sourceProjectId: id, sourceNodeId: id });
+export const sharedAssetSourceSchema = z.object({ dramaId: id, assetId: id, approvedId: id.optional(), sourceProjectId: id, sourceNodeId: id });
 export const directorCurrentWorkSchema = z.object({
     workId: id,
     module: z.enum(directorModules),
@@ -229,7 +234,7 @@ export function resolveSubjectPictureBindingIds(subjectValue: unknown, usageValu
 export const productionCompilationScopeSchema = z.object({ sceneId: id.optional(), targetIds: z.array(id).min(1).optional(), output: z.literal("selected").optional() }).strict().refine(scope => Boolean(scope.sceneId || scope.targetIds?.length), "编译范围不能为空");
 export const productionCompileSchema = z.object({
     operationId: id.optional(),
-    expectedRevision: z.number().int().nonnegative(),
+    expectedRevision: z.number().int().nonnegative().describe("读取制作稿的基线 revision；编译使用 Backend 当前已保存源稿，并在完成/应用时校验目标输入 manifest"),
     // Kept for compatibility with older HTTP clients. Backend compilation must
     // use its saved draft; a caller-provided snapshot is never authoritative.
     director: directorProductionSchema.optional().describe("已废弃并忽略；编译始终使用 Backend 已保存的正式制作稿。"),
@@ -359,7 +364,8 @@ export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
         const entityKey = `${subject.entityRef.ownerKind}:${subject.entityRef.ownerId}:${subject.entityRef.kind}:${subject.entityRef.id}`;
         if (entityOwners.has(entityKey)) add(["subject_registry", subjectIndex, "entityRef"], "同一已登记实体只能对应一个稳定 Subject");
         entityOwners.add(entityKey);
-        if (!entityIds.get(subject.entityRef.kind)?.has(subject.entityRef.id)) add(["subject_registry", subjectIndex, "entityRef"], "Subject 必须引用已登记的人物、场景或资产");
+// 允许外部 Agent 注册 Subject，不再强制要求 entity 已预先登记。
+        // if (!entityIds.get(subject.entityRef.kind)?.has(subject.entityRef.id)) add(["subject_registry", subjectIndex, "entityRef"], "Subject 必须引用已登记的人物、场景或资产");
         for (const [bindingIndex, binding] of subject.pictureBindings.entries()) {
             const path = ["subject_registry", subjectIndex, "pictureBindings", bindingIndex];
             if (bindingIds.has(binding.id)) add([...path, "id"], `重复图片绑定 ID：${binding.id}`);
@@ -663,7 +669,7 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("request_director_clip_refresh"), segmentId: id }).strict(),
     z.object({ type: z.literal("set_director_brief"), brief: z.string() }).strict(),
     z.object({ type: z.literal("initialize_director_from_demand") }).strict(),
-    z.object({ type: z.literal("patch_director_source"), entity: z.enum(["brief", "spec", "story", "style", "scene", "environment", "character", "asset", "asset_card", "shot", "segment"]), id: id.optional(), patch: z.record(z.unknown()) }).strict(),
+    z.object({ type: z.literal("patch_director_source"), entity: z.enum(directorPatchSourceEntities), id: id.optional(), patch: directorPatchObjectSchema }).strict(),
     z.object({ type: z.literal("set_director_scene_environment"), sceneId: id, environmentId: id }).strict(),
     z.object({ type: z.literal("adopt_director_fields"), targetId: id, nodeId: id, segmentId: id.optional(), canvasRevision: z.number().int().nonnegative(), fields: z.array(id).min(1) }).strict(),
     z.object({ type: z.literal("adopt_director_clip_style"), targetId: id, nodeId: id, segmentId: id, canvasRevision: z.number().int().nonnegative(), styleTemplateId: z.string().nullable() }).strict(),
@@ -692,9 +698,17 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("review_keyframe"), shotId: id, verdict: z.enum(["auto-accepted", "needs-redo"]), evidence: z.string().min(1) }).strict(),
 ]);
 
-export const productionEditSchema = z.object({ operationId: id, expectedRevision: z.number().int().min(0), ops: z.array(productionOperationSchema).min(1), adoptions: z.array(z.object({ taskId: id, artifactHash: hash }).strict()).min(1).optional() }).strict();
-export const productionPublishSchema = z.object({ operationId: id, expectedRevision: z.number().int().min(0), stage: z.enum(["script", "shots", "director"]), scope: productionCompilationScopeSchema.optional() }).strict();
-export const directorRunStartSchema = z.object({ runId: id, idempotencyKey: id, workId: id.optional(), expectedRevision: z.number().int().min(0), version: z.number().int().min(0).default(0), inputBasis: z.enum(["canvas", "published"]).default("canvas"), expectedCanvasRevision: z.number().int().nonnegative().optional(), expectedPlanHash: hash.optional(), targets: z.array(id).min(1), scope: z.enum(["selected", "all_ready"]).default("selected") }).strict();
+const productionOperationInputSchema = productionOperationSchema.superRefine((operation, context) => {
+    if (operation.type !== "patch_director_source") return;
+    const allowed = new Set<string>(directorPatchFields[operation.entity as keyof typeof directorPatchFields] as readonly string[]);
+    for (const field of Object.keys(operation.patch)) if (!allowed.has(field)) {
+        context.addIssue({ code: z.ZodIssueCode.custom, path: ["patch", field], message: `实体 ${operation.entity} 不允许修改字段 ${field}` });
+    }
+});
+
+export const productionEditSchema = z.object({ operationId: id, expectedRevision: z.number().int().min(0).describe("读取制作稿的基线 revision；同字段写入按 Backend 成功提交顺序以后写入者为准；set_director_production 将 source 作为原子字段"), ops: z.array(productionOperationInputSchema).min(1), adoptions: z.array(z.object({ taskId: id, artifactHash: hash }).strict()).min(1).optional() }).strict();
+export const productionPublishSchema = z.object({ operationId: id, expectedRevision: z.number().int().min(0).describe("读取制作稿的基线 revision；发布按当前目标输入与发布版本检查，不因无关 revision 增长拒绝"), stage: z.enum(["script", "shots", "director"]), scope: productionCompilationScopeSchema.optional() }).strict();
+export const directorRunStartSchema = z.object({ runId: id, idempotencyKey: id, workId: id.optional(), expectedRevision: z.number().int().min(0).describe("读取制作稿的基线 revision；运行按所选目标的冻结输入校验"), version: z.number().int().min(0).default(0), inputBasis: z.enum(["canvas", "published"]).default("canvas"), expectedCanvasRevision: z.number().int().nonnegative().optional().describe("读取画布输入的基线 revision；不作为全局写锁"), expectedPlanHash: hash.optional().describe("生成预检返回的目标输入 manifest；传入时用于拒绝目标输入已变化的提交"), targets: z.array(id).min(1), scope: z.enum(["selected", "all_ready"]).default("selected") }).strict();
 export const directorRunControlSchema = z.object({ runId: id }).strict();
 export const productionContractQuerySchema = z.object({ runtimeId: id.optional().describe("Deprecated: accepted for compatibility; the contract always uses the locally active Acheng runtime."), operationType: id.optional().describe("只接受 contract.operations[].type 中的精确操作标识；edit/publish/compile/generate 属于 contract.requests，不是 operationType。省略时返回完整操作目录。"), moduleId: z.enum(directorModules).optional() }).strict();
 export const productionContinuityReadSchema = z.object({ snapshot: z.enum(["draft", "published"]).default("draft"), view: z.enum(["summary", "issues", "timeline", "shot"]).default("summary"), targetId: id.optional(), objectId: id.optional(), pageSize: z.coerce.number().int().positive().optional(), cursor: z.string().optional() }).strict();

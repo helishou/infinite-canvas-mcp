@@ -1,30 +1,32 @@
 type Row = Record<string, any>;
 type Workspace = "story" | "assets" | "shots" | "continuity" | "production" | "advanced";
-type Target = { kind: "asset" | "keyframe" | "segment"; targetId: string; status: string; blockers: string[] };
+type Target = { kind: "asset" | "keyframe" | "segment"; targetId: string; title?: string; status: string; blockers: string[] };
 const rows = (value: unknown): Row[] => Array.isArray(value) ? value : [];
 
 /** Source module notes describe past director work; only current target checks are blockers. */
 export function manualWorkspaceProgress(workspace: Workspace, source: Row, targets: Target[], continuityStatus?: string) {
     const scoped = targets.filter(target => workspace === "assets" ? target.kind === "asset" : workspace === "production" ? target.kind === "segment" : workspace === "shots" ? target.kind === "keyframe" : false);
     const blocked = scoped.filter(target => target.status === "blocked" && target.blockers.length);
+    const firstBlockedTarget = blocked[0];
+    const issue = firstBlockedTarget ? `${firstBlockedTarget.title || firstBlockedTarget.targetId}：${firstBlockedTarget.blockers[0]}` : "";
     if (workspace === "story") {
         const scripts = rows(source.script_scenes).filter(scene => String(scene.text || "").trim());
-        return { status: scripts.length ? "saved" : "waiting", summaryKey: scripts.length ? "storySaved" : "storyEmpty", values: { count: scripts.length }, actionKey: "editScript" };
+        return { status: scripts.length ? "saved" : "waiting", summaryKey: scripts.length ? "storySaved" : "storyEmpty", values: { count: scripts.length }, actionKey: "editScript", firstBlockedTarget };
     }
     if (workspace === "assets") {
         const count = rows(source.subject_registry).length || rows(source.character_registry).length + rows(source.scene_registry).length + rows(source.asset_plan).filter(asset => String(asset.kind) === "prop").length;
-        return { status: blocked.length ? "blocked" : count ? "saved" : "waiting", summaryKey: blocked.length ? "targetsBlocked" : count ? "assetsSaved" : "assetsEmpty", values: { count: blocked.length || count }, actionKey: "editAssets" };
+        return { status: blocked.length ? "blocked" : count ? "saved" : "waiting", summaryKey: blocked.length ? "targetsBlocked" : count ? "assetsSaved" : "assetsEmpty", values: { count: blocked.length || count, issue }, actionKey: "editAssets", firstBlockedTarget };
     }
     if (workspace === "shots") {
         const count = rows(source.shots).length;
-        return { status: blocked.length ? "blocked" : count ? "saved" : "waiting", summaryKey: blocked.length ? "targetsBlocked" : count ? "shotsSaved" : "shotsEmpty", values: { count: blocked.length || count, clips: rows(source.segments).length }, actionKey: "editShots" };
+        return { status: blocked.length ? "blocked" : count ? "saved" : "waiting", summaryKey: blocked.length ? "targetsBlocked" : count ? "shotsSaved" : "shotsEmpty", values: { count: blocked.length || count, clips: rows(source.segments).length, issue }, actionKey: "editShots", firstBlockedTarget };
     }
     if (workspace === "continuity") {
         const blocking = targets.some(target => target.blockers.some(reason => /CONTINUITY_|连续性/.test(reason)));
-        return { status: blocking ? "blocked" : continuityStatus === "passed" ? "done" : "optional", summaryKey: blocking ? "continuityBlocked" : continuityStatus === "passed" ? "continuityPassed" : "continuityOptional", values: {}, actionKey: "checkContinuity" };
+        return { status: blocking ? "blocked" : continuityStatus === "passed" ? "done" : "optional", summaryKey: blocking ? "continuityBlocked" : continuityStatus === "passed" ? "continuityPassed" : "continuityOptional", values: {}, actionKey: "checkContinuity", firstBlockedTarget };
     }
     const count = scoped.length, complete = scoped.filter(target => target.status === "complete").length;
-    return { status: blocked.length ? "blocked" : count && complete === count ? "done" : count ? "working" : "waiting", summaryKey: blocked.length ? "productionBlocked" : count ? "productionProgress" : "productionEmpty", values: { count, blocked: blocked.length, complete }, actionKey: "editProduction" };
+    return { status: blocked.length ? "blocked" : count && complete === count ? "done" : count ? "working" : "waiting", summaryKey: blocked.length ? "productionBlocked" : count ? "productionProgress" : "productionEmpty", values: { count, blocked: blocked.length, complete, issue }, actionKey: "editProduction", firstBlockedTarget };
 }
 
 export function manualTargetRecovery(target: Target, source: Row) {

@@ -22,7 +22,7 @@ export type CanvasCommandContext = {
 
 export type CanvasCommit = {
     deletedAssetIds?: string[];
-    productionUpdates?: Array<{ entityId: string; revision: number }>;
+    productionUpdates?: Array<{ entityId: string; revision: number; reason?: "shared_asset_sync" }>;
     projectId: string;
     operationId: string;
     baseRevision: number;

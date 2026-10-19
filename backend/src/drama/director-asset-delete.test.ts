@@ -141,3 +141,28 @@ test("character and scene asset deletion preserves scene/character structure whi
     assert.equal(scene.source.script_scenes[0].scene_id, "SCENE_1");
     assert.equal(scene.source.scene_registry[0].id, "SCENE_1");
 });
+
+test("character asset deletion clears the picture bindings that Shots and keyframes selected", () => {
+    // A retained character Subject whose only binding pointed at the removed asset used to keep a
+    // dangling id in `subject_usages.pictureBindingIds`, which made the whole production contract
+    // unreadable and blocked every later edit (including removing a shared node from an episode).
+    const director = makeDirector({
+        asset_plan: [{ id: "ASSET_CHAR", kind: "character", created_by: "manual", entity_id: "CHAR_1", status: "planned", depends_on: [] }],
+        asset_cards: [{ id: "ASSET_CHAR", asset_id: "ASSET_CHAR", prompt: "character" }],
+        character_registry: [{ id: "CHAR_1", name: "A" }],
+        subject_registry: [{ id: "SUB_CHAR", kind: "character", entityRef: { ownerKind: "drama", ownerId: "DRAMA_1", kind: "character", id: "CHAR_1" },
+            pictureBindings: [{ id: "PB_CHAR", assetId: "ASSET_CHAR", sourceNode: { projectId: "P", nodeId: "N" } }] }],
+        shots: [{
+            id: "SHOT_1",
+            subject_usages: [{ subjectId: "SUB_CHAR", presentation: "visible", pictureBindingIds: ["PB_CHAR"] }],
+            keyframes: [{ id: "KF_1", assetId: "FRAME", sourceNode: { projectId: "P", nodeId: "N" }, selection: { mode: "node_selection" }, subjectIds: ["SUB_CHAR"], subjectPictureBindingIds: { SUB_CHAR: ["PB_CHAR"] } }],
+        }],
+    });
+
+    deleteDirectorAsset(director, "ASSET_CHAR");
+
+    assert.equal(director.source.subject_registry.length, 1);
+    assert.deepEqual(director.source.subject_registry[0].pictureBindings, []);
+    assert.deepEqual(director.source.shots[0].subject_usages, [{ subjectId: "SUB_CHAR", presentation: "visible", pictureBindingIds: [] }]);
+    assert.deepEqual(director.source.shots[0].keyframes[0].subjectPictureBindingIds, {});
+});

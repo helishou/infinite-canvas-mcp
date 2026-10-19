@@ -25,7 +25,11 @@ export function CanvasNodeReferenceBar({ nodeId, nodes, connectedNodes, historyR
     const targetNode = nodes.find((node) => node.id === nodeId);
     const characterSelections = targetNode?.metadata?.characterReferences || {};
     const formal = productionImageInput(targetNode);
-    const references: ReferenceEntry[] = formal ? formal.references.map((ref, index) => ({
+    // Formal references are the compiler baseline. Once Backend has recorded the
+    // live canvas reference list, render those current connections instead: the
+    // compiler baseline can be stale after a manual canvas reference edit.
+    const hasLiveReferenceList = Array.isArray(targetNode?.metadata?.canvasReferenceNodeIds);
+    const references: ReferenceEntry[] = formal && !hasLiveReferenceList ? formal.references.map((ref, index) => ({
         node: { ...(nodes.find(node => node.id === ref.nodeId) || { id: ref.nodeId, position: { x: 0, y: 0 }, width: 48, height: 48 }), type: CanvasNodeType.Image, metadata: {},
             title: `${ref.label} · ${ref.assetId} · ${ref.assetVersion} · ${ref.role}` }, sourceNodeId: ref.nodeId, index,
         resource: { kind: "image", storageKey: ref.storageKey },

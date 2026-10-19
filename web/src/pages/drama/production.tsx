@@ -26,6 +26,8 @@ import { startSingleFlightPoller } from "@/lib/single-flight-poll";
 import { productionObjectPath, type ProductionObject } from "@/lib/production-object";
 import { consumeProductionEntryMark } from "@/lib/production-navigation";
 import { productionSegments, productionSegmentRuntimeMatches, segmentShotIds } from "@/lib/production-source";
+import { bindEntityPictureToNode } from "@/lib/production/subject-picture-binding";
+import { watchSlowBrowserOperation } from "@/lib/slow-operation-monitor";
 import { applyBackendCanvasEvent, ensureCanvasProjectLoaded, flushCanvasProjectBeforeGeneration, useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { SharedAssetsPicker } from "@/components/production/canvas-production-workspace";
 import {
@@ -312,6 +314,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   const [compileNotice, setCompileNotice] = useState("");
   const [compileDiagnostics, setCompileDiagnostics] = useState<ProductionCompilationDiagnostic[]>([]);
   const [compileTargets, setCompileTargets] = useState<{ sourceHash: string; engineRuntimeId?: string; compilerHash?: string; items: Array<{ targetId: string; status: string }>; notReadyTargetIds?: string[] }>();
+  const [autoTranslateCompilation, setAutoTranslateCompilation] = useState<{ id: string; targetIds: string[] } | null>(null);
   const startingRunRef = useRef(false);
   const handledAgentResultRef = useRef("");
   const setAgentState = useAgentStore(state => state.setAgentState);
@@ -392,14 +395,16 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   useEffect(() => {
     if (seriesOnly) return;
     let active = true;
+    setDraftKey(null);
     void (async () => {
       await ensureCanvasDraftLease();
-      const owner = await load(() => active);
-      if (!owner || !active) return;
-      const key = `${backendConnection().url}:${owner}:${getCanvasDraftSessionId()}`;
-      legacyDraftPurge();
       if (!active) return;
+      const ownerId = projectId ? `canvas:${projectId}` : episodeId;
+      const key = `${backendConnection().url}:${ownerId}:${getCanvasDraftSessionId()}`;
       setDraftKey(key);
+      const loadedOwner = await load(() => active);
+      if (!loadedOwner || !active) return;
+      legacyDraftPurge();
     })().catch(error => { if (active) { setLoadError(String(error)); message.error(String(error)); } });
     return () => { active = false; };
     // Initial route loads the remote formal draft; no local draft is restored or kept anymore.
@@ -465,6 +470,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     // 一次编辑常触发两次刷新（显式调用 + drama-production.updated 事件）。合并成一次全量拉取，
     // in-flight 期间的后续调用只挂起一次尾随刷新，避免 7 个请求 × 2 的重复耗时。
     if (refreshInFlight.current) { refreshQueued.current = true; return refreshInFlight.current; }
+    // 复用现有慢操作埋点：单请求各自记录，这里补一条整次扇出的总耗时，便于区分是哪个读取慢。
+    const finishRefreshTelemetry = watchSlowBrowserOperation("production.refreshRemote");
     const run = (async () => {
       const sequence = ++remoteSequence.current;
       const continuityRead = beginContinuityRead();
@@ -491,7 +498,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       return prod.production;
     })();
     refreshInFlight.current = run;
-    try { return await run; }
+    try { const value = await run; finishRefreshTelemetry("ok"); return value; }
+    catch (error) { finishRefreshTelemetry(error instanceof Error ? `error:${error.name}` : "error"); throw error; }
     finally {
       refreshInFlight.current = null;
       if (refreshQueued.current) { refreshQueued.current = false; void refreshRemote(); }
@@ -512,14 +520,15 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
 
   const runProductionCompile = async (sceneId?: string, targetId?: string) => {
     if (compiling || !production?.draft.director) return;
-    if (!draftKey) {
-      setCompileError(t("drama.production.draftNotReady"));
-      return;
-    }
     setCompiling(true);
     setCompileError("");
     setCompileNotice("");
+    let compileRequestStarted = false;
     try {
+      // The page can receive the production snapshot before its initial load
+      // finishes. Verify the real session lease here instead of treating the
+      // later UI draftKey state update as compile readiness.
+      await ensureCanvasDraftLease();
       let compileSource = production;
       let pending = pendingCompilationRef.current;
       if (!pending) {
@@ -540,6 +549,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         pending = { operationId: `compile-${nanoid(14)}`, expectedRevision: compileSource.revision, ...(targetId ? { scope: { targetIds: [targetId] } } : sceneId ? { scope: { sceneId } } : {}) };
         await persistPendingCompilation(pending);
       }
+      compileRequestStarted = true;
       const started = await compileProduction(target, pending.expectedRevision, pending.operationId, pending.scope);
       let status: ProductionCompilationStatus = started.compilation;
       let waitedMs = 0;
@@ -567,6 +577,11 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         ? await fetchProductionCompilation(target, pending.operationId, "targets", { pageSize: 100 }) : undefined;
       const compilationTargets = (targetResponse?.compilation.items || []) as Array<ProductionCompilationDiagnostic & { status?: string }>;
       const targetItems = compilationTargets.filter((item): item is ProductionCompilationDiagnostic & { targetId: string; status: string } => Boolean(item.targetId && item.status));
+      const queueCompiledPromptTranslation = () => {
+        const clipIds = new Set(productionSegments(compileSource).map(segment => String(segment.id || "")));
+        const targetIds = targetItems.filter(item => item.status === "ready" && clipIds.has(String(item.targetId))).map(item => String(item.targetId));
+        if (targetIds.length) setAutoTranslateCompilation({ id: nanoid(), targetIds });
+      };
       const notReadyTargetIds = targetItems.filter(item => item.status !== "ready").map(item => item.targetId);
       const touchedCompileScopeIds = new Set([...(pending.scope?.targetIds || []).map(String), ...targetItems.map(item => String(item.targetId))]);
       const engineRuntimeId = status.engineRuntimeId ?? compileSource.draft.director?.engine.runtimeId;
@@ -701,7 +716,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         await persistPendingCompilation(null);
         skipProductionRefreshRevision.current = status.application.revision;
         setCompileNotice(completionNotice());
-        void refreshCompilationProjection().catch(() => undefined);
+        await refreshCompilationProjection();
+        queueCompiledPromptTranslation();
         return;
       }
       if (status.status === "succeeded" && status.verdict !== "blocked" && status.preparedId) {
@@ -711,7 +727,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         skipProductionRefreshRevision.current = applied.receipt.revision ?? skipProductionRefreshRevision.current;
         await persistPendingCompilation(null);
         setCompileNotice(completionNotice());
-        void refreshCompilationProjection().catch(() => undefined);
+        await refreshCompilationProjection();
+        queueCompiledPromptTranslation();
         return;
       }
       if (["succeeded", "blocked", "interrupted", "failed"].includes(status.status)) await persistPendingCompilation(null);
@@ -734,7 +751,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       // 终局失败（连不上服务器 status 0、4xx 除 408）清掉待编译标记；只有可能已送达的
       // 408/5xx 保留标记以便幂等续编。
       const uncertain = error instanceof BackendApiError && (error.status === 408 || error.status >= 500);
-      if (!uncertain) await persistPendingCompilation(null);
+      if (compileRequestStarted && !uncertain) await persistPendingCompilation(null);
       setCompileError(error instanceof Error ? error.message : String(error));
     } finally {
       setCompiling(false);
@@ -840,6 +857,9 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   }, [hasActiveProductionWork, hasActiveSceneWork, target, canvasId, pollingTaskNodesKey]);
 
   const fail = (error: unknown) => {
+    // 同一失败已经进入顶部回执卡（当前工作区可见）时不再重复弹 toast。
+    const recorded = commandNoticeRef.current;
+    if ((error as { commandRecorded?: boolean })?.commandRecorded && recorded && (recorded.workspace === workspace || !recorded.workspace)) return;
     if (error instanceof BackendApiError && error.status === 409) {
       const current = error.details.current as EpisodeProduction | undefined;
       setRemoteRevision(current?.revision ?? null);
@@ -940,6 +960,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         errorCode: error instanceof BackendApiError ? String(error.details.code || "") : undefined,
       }, recovering);
       pending(saved);
+      // 顶部回执卡已经记录了这次失败；标记后由 fail() 跳过重复 toast。
+      if (error instanceof Error) (error as Error & { commandRecorded?: boolean }).commandRecorded = true;
       throw error;
     }
   };
@@ -1002,8 +1024,9 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       const storageKey = String(image?.storageKey || "");
       if (!picture || picture.sourceNode?.projectId !== canvasId || !storageKey) return [];
       const node = canvasNodes.find(item => matchesProductionAssetNode(item, entity.kind, owner, entity.entityId));
+      if (!node || picture.sourceNode?.nodeId === node.id) return [];
       const field = entity.kind === "prop" ? "propImage" : "sceneImage";
-      return node && String((node.metadata?.[field] as Record<string, any> | undefined)?.storageKey || "") !== storageKey ? [`entity:${entity.kind}:${entity.entityId}`] : [];
+      return String((node.metadata?.[field] as Record<string, any> | undefined)?.storageKey || "") !== storageKey ? [`entity:${entity.kind}:${entity.entityId}`] : [];
     });
     const sharedPictureState = entities.flatMap(entity => {
       const sharedPlan = plans.find(plan => String(plan.entity_id || plan.id || plan.asset_id || "") === entity.entityId && plan.sharedSource);
@@ -1297,6 +1320,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     finally { startingRunRef.current = false; }
   };
 
+  const generateClip = (clipId: string) => { void startRun([`segment:${clipId}`]); };
+
   const recoverRunStart = async () => {
     const request = pendingRunStartRef.current;
     if (!request || startingRunRef.current) return;
@@ -1455,12 +1480,34 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   };
   const upsertSubject = async (subject: Extract<ProductionOperation, { type: "upsert_director_subject" }>["subject"]) => edit([{ type: "upsert_director_subject", subject }]);
   const deleteSubject = async (id: string) => edit([{ type: "delete_director_subject", id }]);
+  // 局部保存统一追加 Clip 刷新：Backend 只对输入真正变化的 Clip 跑「校验 → 编译 → 应用」，
+  // 进度回到 production.clipRefreshes，由 Clip 状态展示，不再让界面自己假装在编译。
+  // 单批只允许一个刷新目标（Backend 对局部编辑有 CLIP_REFRESH_SCOPE 限制），取第一个命中项；
+  // 还没投影到画布的 Clip 不刷新，避免准备阶段出现无意义的返修阻塞。
+  const clipRefreshTarget = (segment: Record<string, any>) => Boolean(segment.id) && Array.isArray(canvasNodes)
+    && productionSegmentRuntimeMatches(canvasNodes as any, String(segment.id), productionContext?.owner).length > 0;
+  const clipRefreshOps = (segmentIds: readonly string[]): ProductionOperation[] => {
+    const current = production;
+    if (!current?.draft.director || !isSubjectPromptAssembly(current.draft.director.source)) return [];
+    const ids = new Set(segmentIds.map(String));
+    return productionSegments(current).filter(segment => ids.has(String(segment.id)) && clipRefreshTarget(segment)).slice(0, 1)
+      .map(segment => ({ type: "request_director_clip_refresh" as const, segmentId: String(segment.id) }));
+  };
+  const shotClipRefreshOps = (shotIds: readonly string[]): ProductionOperation[] => {
+    const current = production;
+    if (!current?.draft.director || !isSubjectPromptAssembly(current.draft.director.source)) return [];
+    const ids = new Set(shotIds.map(String));
+    return productionSegments(current).filter(segment => segmentShotIds(segment).some(id => ids.has(id)) && clipRefreshTarget(segment)).slice(0, 1)
+      .map(segment => ({ type: "request_director_clip_refresh" as const, segmentId: String(segment.id) }));
+  };
   const saveV2Shot = async (shotId: string, patch: Record<string, unknown>, keyframes?: Extract<ProductionOperation, { type: "set_director_shot_keyframes" }>["keyframes"], utterances?: Extract<ProductionOperation, { type: "set_director_shot_utterances" }>["utterances"]) => {
     const ops: ProductionOperation[] = [];
     if (Object.keys(patch).length) ops.push({ type: "patch_director_source", entity: "shot", id: shotId, patch });
     if (keyframes !== undefined) ops.push({ type: "set_director_shot_keyframes", shotId, keyframes });
     if (utterances !== undefined) ops.push({ type: "set_director_shot_utterances", shotId, utterances });
-    return ops.length ? edit(ops) : true;
+    if (!ops.length) return true;
+    ops.push(...shotClipRefreshOps([shotId]));
+    return edit(ops);
   };
   const patchSource = async (entity: "style" | "spec" | "story" | "scene" | "environment" | "character" | "asset" | "asset_card" | "shot" | "segment", id: string | undefined, patch: Record<string, unknown>) => {
     if (entity === "scene" && id && typeof patch.scene_id === "string") return edit([{ type: "set_director_scene_environment", sceneId: id, environmentId: patch.scene_id }]);
@@ -1604,11 +1651,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     return saved;
   };
   const setBoundary = async (boundary: NonNullable<EpisodeProduction["draft"]["director"]>["boundaries"][number]) => edit([{ type: "set_director_boundary", boundary }]);
-  const setH3Boundary = async (boundary: NonNullable<EpisodeProduction["draft"]["director"]>["boundaries"][number]) => {
-    if (!await setBoundary(boundary)) return false;
-    await runProductionCompile(undefined, boundary.from);
-    return true;
-  };
+  const setH3Boundary = async (boundary: NonNullable<EpisodeProduction["draft"]["director"]>["boundaries"][number]) =>
+    edit([{ type: "set_director_boundary", boundary }, ...clipRefreshOps([String(boundary.from)])]);
   const setWorkflow = async (patch: Partial<NonNullable<EpisodeProduction["draft"]["director"]>["workflow"]>) => edit([{ type: "set_director_workflow", patch }]);
   const answerDecision = async (decisionId: string, answer: string) => {
     const latest = await fetchEpisodeProduction(target).then(value => value.production);
@@ -1672,6 +1716,22 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       applyBackendCanvasEvent({ type: "canvas.updated", entityId: canvasId, revision: Number(latest.revision || 0), payload: latest }, true);
       const authoritative = latest.nodes.find(node => node.id === target.id);
       if (!authoritative || !["character", "scene", "prop"].includes(authoritative.type)) throw new Error("素材节点已不存在或类型已变化，请刷新本集素材列表");
+      const entityBinding = authoritative.metadata?.productionEntity as { ownerKind?: string; ownerId?: string; entityId?: string } | undefined;
+      const imageField = authoritative.type === "scene" ? "sceneImage" : "propImage";
+      const imageKey = (image: unknown) => {
+        const value = image && typeof image === "object" && !Array.isArray(image) ? image as Record<string, unknown> : {};
+        return String(value.storageKey || value.url || "");
+      };
+      const requestedImage = authoritative.type === "scene" ? payload.sceneImage : authoritative.type === "prop" ? payload.propImage : undefined;
+      if (entityBinding?.ownerKind === "episode" && entityBinding.ownerId === production.episodeId && (authoritative.type === "scene" || authoritative.type === "prop")
+        && imageKey(authoritative.metadata?.[imageField]) !== imageKey(requestedImage)) {
+        const current = (await fetchEpisodeProduction(production.episodeId)).production;
+        const operation = bindEntityPictureToNode(current.draft.director?.source as Record<string, unknown> | undefined,
+          entityBinding.ownerKind, entityBinding.ownerId, authoritative.type === "scene" ? "scene" : "prop", entityBinding.entityId || "", canvasId, authoritative.id);
+        if (operation) await sendCommand({ kind: "edit", operationId: nanoid(), expectedRevision: current.revision, ops: [operation], status: "unknown" });
+      }
+      const freshCanvas = (await fetchBackendProject(canvasId)).project as unknown as CanvasProject;
+      applyBackendCanvasEvent({ type: "canvas.updated", entityId: canvasId, revision: Number(freshCanvas.revision || 0), payload: freshCanvas }, true);
       const project = await ensureCanvasProjectLoaded(canvasId);
       // 按节点类型构造 metadata 补丁：只写 payload 提供的字段，未提供的字段保持原值。
       const metadataPatch: Record<string, unknown> =
@@ -1702,7 +1762,10 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       await flushCanvasProjectBeforeGeneration(canvasId);
       const saved = (await fetchBackendProject(canvasId)).project as unknown as CanvasProject;
       const savedNode = saved.nodes.find(node => node.id === target.id);
-      if (savedNode?.title !== payload.title.trim()) throw new Error("Backend 尚未确认素材信息更新，请刷新后重试");
+      if (!savedNode || savedNode.title !== payload.title.trim()) throw new Error("Backend 尚未确认素材信息更新，请刷新后重试");
+      if ((authoritative.type === "scene" || authoritative.type === "prop") && imageKey(savedNode.metadata?.[imageField]) !== imageKey(requestedImage)) {
+        throw new Error("Backend 尚未确认场景/道具主图更新，请刷新后重试");
+      }
       applyBackendCanvasEvent({ type: "canvas.updated", entityId: canvasId, revision: Number(saved.revision || 0), payload: saved }, true);
       await refreshRemote();
       return true;
@@ -1761,7 +1824,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     return registerProductionStoryboardEditor(canvasId, async input => {
       const groupId = sourceSegmentForCanvasClip(canvasNodes as any, production.draft.director!.source as Record<string, any>, input.nodeId, input.segmentId);
       const operation = buildDirectorClipStoryboardOperation(production.draft.director!, groupId, input);
-      const sourceSaved = await edit([operation]);
+      const sourceSaved = await edit([operation, ...clipRefreshOps([groupId])]);
       return { sourceSaved };
     });
   }, [production, canvasId, edit]);
@@ -1771,17 +1834,28 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     return registerProductionBoundaryEditor(canvasId, async input => {
       const director = production.draft.director!;
       const segments = Array.isArray(director.source.segments) ? director.source.segments as Array<Record<string, any>> : [];
-      const index = segments.findIndex(segment => String(segment.id || "") === input.targetId);
-      const next = segments[index + 1];
-      if (index < 0 || !next) throw new Error("当前 H3 Clip 没有相邻的下一段，无法登记续段衔接");
-      const to = String(next.id || "");
-      if (!to) throw new Error("下一段缺少正式 Clip 标识，无法保存续段衔接");
-      const previous = director.boundaries.find(boundary => boundary.from === input.targetId && boundary.to === to);
-      const sourceSaved = await setH3Boundary({ from: input.targetId, to, tailFrame: input.tailFrameContinuation, motionContext: input.motionContextEnabled,
-        reason: previous?.reason || "由场次 H3 节点的续段衔接开关设置" });
-      return { sourceSaved };
+      const ops: ProductionOperation[] = [];
+      for (const boundary of input.boundaries) {
+        const index = segments.findIndex(segment => String(segment.id || "") === boundary.targetId);
+        if (index < 0) throw new Error(`正式制作 Clip 不存在：${boundary.targetId}`);
+        const next = segments[index + 1];
+        if (!next) {
+          if (input.requireNext) throw new Error("当前 H3 Clip 没有相邻的下一段，无法登记续段衔接");
+          continue;
+        }
+        const to = String(next.id || "");
+        if (!to) throw new Error("下一段缺少正式 Clip 标识，无法保存续段衔接");
+        const previous = director.boundaries.find(edge => edge.from === boundary.targetId && edge.to === to);
+        if (previous?.tailFrame === boundary.tailFrameContinuation && previous?.motionContext === boundary.motionContextEnabled && previous.reason?.trim()) continue;
+        ops.push({ type: "set_director_boundary", boundary: {
+          from: boundary.targetId, to, tailFrame: boundary.tailFrameContinuation, motionContext: boundary.motionContextEnabled,
+          reason: "由场次 H3 节点续段衔接设置",
+        } });
+      }
+      if (!ops.length) return { sourceSaved: true };
+      return { sourceSaved: await edit(ops) };
     });
-  }, [production, canvasId, setH3Boundary]);
+  }, [production, canvasId, setH3Boundary, edit]);
 
   useEffect(() => {
     if (agentTaskResult?.status === "failed") setAgentError(agentTaskResult.error || t("director.workspace.agentTaskFailed"));
@@ -1812,6 +1886,14 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   }
 
   const showCommandNotice = commandNotice && (pendingCommand || commandNotice.workspace === workspace || (!commandNotice.workspace && workspace === "advanced"));
+  // 保存状态只给一个结论：现在会不会丢内容。明细留在回执卡和镜头草稿定位里。
+  const saveState = pendingCommand
+    ? pendingCommand.status === "unknown" ? "unknown" as const : "rejected" as const
+    : dirtySourceDraftKeys.length || briefDraft !== String(production.draft.director?.source.brief || "")
+      ? "dirty" as const : "saved" as const;
+  const saveStateDetail = saveState === "saved" ? undefined
+    : saveState === "dirty" ? t("drama.production.saveStateDirtyDetail", { count: dirtySourceDraftKeys.length })
+      : pendingCommand ? pendingCommandDescription(pendingCommand) : undefined;
   const pendingNotice = showCommandNotice && commandNotice && <details className="mb-4 border-b border-border pb-3 text-sm">
     <summary className="cursor-pointer text-muted-foreground">{t(commandNotice.status === "rejected" && commandNotice.httpStatus === 501 ? "drama.production.commandUnsupported" : workspace === "shots" ? commandNotice.status === "unknown" ? "director.atomic.shotReceiptUnknown" : "director.atomic.shotReceiptRejected" : commandNotice.status === "unknown" ? "drama.production.receiptUnknown" : pendingCommand ? "drama.production.commandRejected" : "drama.production.commandRejectedEditable")}</summary>
     <div className="mt-2 space-y-1">
@@ -1888,7 +1970,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
             navigate(`${next.pathname}${next.search}`);
           } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
         }} />}</div>
-        <div className="flex w-full flex-wrap items-center gap-3 sm:w-auto"><span className="text-xs text-muted-foreground">{t(dirtySourceDraftKeys.length ? "director.studio.localDraft" : "director.studio.saved")}</span>{production.publishedVersion > 0 && <Tag>{t("director.studio.published", { number: production.publishedVersion })}</Tag>}{canvasId && <Button icon={<ExternalLink className="size-4" />} onClick={() => void openWorkspaceCanvas()}>{t(canvasHost?.hasCanvas ? "director.canvasOverlay.expand" : "drama.production.openCanvas")}</Button>}</div>
+        <div className="flex w-full flex-wrap items-center gap-3 sm:w-auto"><Tag data-production-save-state={saveState} color={saveState === "saved" ? undefined : saveState === "dirty" ? "orange" : "red"} title={saveStateDetail}>{t(`drama.production.saveState.${saveState}`)}</Tag>{production.publishedVersion > 0 && <Tag>{t("director.studio.published", { number: production.publishedVersion })}</Tag>}{canvasId && <Button icon={<ExternalLink className="size-4" />} onClick={() => void openWorkspaceCanvas()}>{t(canvasHost?.hasCanvas ? "director.canvasOverlay.expand" : "drama.production.openCanvas")}</Button>}</div>
       </div>}
       {agentError && <Alert className="mb-4" type="warning" showIcon message={agentError} closable onClose={() => setAgentError("")} />}
       {production.storageFormat === "v2-projection-migration-required" && <Alert className="mb-4" type="warning" showIcon message={t("director.generation.sourceStorageMigration")} />}
@@ -1973,7 +2055,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
               onOpenSharedAsset={(assetId, title) => void openSharedAsset(assetId, title).catch(fail)} onPromoteExistingSharedAsset={(assetId, title) => void promoteExistingSharedAsset(assetId, title).catch(fail)}
               onBoundary={setBoundary} onH3Boundary={setH3Boundary} onPublish={() => void publish()} onSaveContinuity={saveContinuity} onCheckContinuity={checkContinuity} onContinuitySnapshot={changeContinuitySnapshot}
               onReplace={value => void replaceDirector(value)} onAskDirector={scope => void askDirector(scope)} onNavigate={navigateWorkspace}
-              onCompile={(sceneId, targetId) => void runProductionCompile(sceneId, targetId)} onApplyTranslatedPrompts={applyTranslatedCompiledPrompts} compileBusy={compiling} compilePending={Boolean(pendingCompilation)} compileError={compileError} compileNotice={compileNotice} compileDiagnostics={compileDiagnostics} compileTargets={compileTargets}
+              onCompile={(sceneId, targetId) => void runProductionCompile(sceneId, targetId)} onApplyTranslatedPrompts={applyTranslatedCompiledPrompts} autoTranslateCompilation={autoTranslateCompilation} compileBusy={compiling} compilePending={Boolean(pendingCompilation)} compileError={compileError} compileNotice={compileNotice} compileDiagnostics={compileDiagnostics} compileTargets={compileTargets}
               onLocateTarget={(kind, id) => {
                 if (kind === "shot") { navigateWorkspace("shots", { kind, id }); return; }
                  const runtime = kind === "segment" ? clipRuntime(id) : undefined;
@@ -1989,7 +2071,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
               }}
               onAnswerDecision={answerDecision}
               onExport={exportBundle} exporting={exporting}
-              onStart={(targets, scope) => void startRun(targets, scope)} onPause={runId => void pauseRun(runId)} onResume={runId => void resumeRun(runId)}
+              onStart={(targets, scope) => void startRun(targets, scope)} onGenerateClip={productionOwner.kind === "scene" ? undefined : generateClip} onPause={runId => void pauseRun(runId)} onResume={runId => void resumeRun(runId)}
               runStartPending={Boolean(pendingRunStart)} activeTargetIds={activeTargetIds}
               onRestore={restoreVersion} onSceneCommand={sendSceneCommand} sceneCommandPending={Boolean(pendingCommand || pendingRunStart)} onRefresh={() => void load(() => true, true).catch(fail)}
             />

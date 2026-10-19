@@ -171,6 +171,53 @@ test("check targets the saved snapshot without silently saving or discarding loc
     }
 });
 
+test("compilation confirms the draft lease instead of rejecting a page-load race", async () => {
+    let leaseChecks = 0, compileCalls = 0, compileError = "", compiling = false;
+    const context: Record<string, any> = {
+        compiling: false,
+        production: { episodeId: "fixture", revision: 17, draft: { director: { source: {}, engine: {} } } },
+        target: { kind: "episode", id: "fixture" },
+        // The production snapshot may render before the page's draftKey state update.
+        draftKey: null,
+        pendingCompilationRef: { current: { operationId: "compile-original", expectedRevision: 17 } },
+        ensureCanvasDraftLease: async () => { leaseChecks++; },
+        setCompiling: (value: boolean) => { compiling = value; },
+        setCompileError: (value: string) => { compileError = value; },
+        setCompileNotice: () => undefined,
+        persistPendingCompilation: async (value: unknown) => { context.pendingCompilationRef.current = value; },
+        compileProduction: async () => { compileCalls++; throw new Error("compile path reached"); },
+        BackendApiError: TestBackendApiError,
+    };
+    await handler("runProductionCompile", context)();
+    assert.equal(leaseChecks, 1);
+    assert.equal(compileCalls, 1, "the compile request is reached after the actual lease check");
+    assert.equal(compileError, "compile path reached");
+    assert.equal(compiling, false);
+});
+
+test("a lease failure before compile submission preserves the original pending receipt", async () => {
+    const original = { operationId: "compile-original", expectedRevision: 17 };
+    let compileCalls = 0, compileError = "";
+    const context: Record<string, any> = {
+        compiling: false,
+        production: { episodeId: "fixture", revision: 17, draft: { director: { source: {}, engine: {} } } },
+        target: { kind: "episode", id: "fixture" },
+        draftKey: null,
+        pendingCompilationRef: { current: original },
+        ensureCanvasDraftLease: async () => { throw new Error("lease unavailable"); },
+        setCompiling: () => undefined,
+        setCompileError: (value: string) => { compileError = value; },
+        setCompileNotice: () => undefined,
+        persistPendingCompilation: async (value: unknown) => { context.pendingCompilationRef.current = value; },
+        compileProduction: async () => { compileCalls++; throw new Error("must not submit"); },
+        BackendApiError: TestBackendApiError,
+    };
+    await handler("runProductionCompile", context)();
+    assert.equal(compileCalls, 0);
+    assert.equal(compileError, "lease unavailable");
+    assert.equal(context.pendingCompilationRef.current, original);
+});
+
 test("real DirectorPanel routes formal data and disables published draft writes", () => {
     const panel = readFileSync(new URL("./director-panel.tsx", import.meta.url), "utf8");
     const tree = ts.createSourceFile("director-panel.tsx", panel, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);

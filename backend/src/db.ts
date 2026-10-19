@@ -15,9 +15,9 @@ import { productionImageModel, dramaProductionPlanSchema, type DramaProductionPl
 import { productionLayoutPlanSchema, type ProductionLayoutPlan, type ProductionLayoutReceipt } from "@basketikun/canvas-agent/drama/production-contract";
 import { normalizeSceneAsset } from "./canvas/asset-contract.js";
 import { completedImageSlots, dropImageSlots, imageSourceStatus, linkedCharacterImageUpdates } from "./canvas/image-result-slots.js";
-import { applyCanvasProjectOperations, canonicalizeH3References, isH3CanvasNode, registerH3ReferenceAssets, type CanvasOperation } from "./canvas/project-ops.js";
+import { applyCanvasProjectOperations, canonicalizeH3References, isH3CanvasNode, registerH3ReferenceAssets, type CanvasOperation, type CanvasOperationResult } from "./canvas/project-ops.js";
 import { prepareClientCanvasOperation, stripCanvasLocalViewState } from "./canvas/operation-authority.js";
-import { collaborationError, commandFingerprint, concurrentCommandConflicts, type CanvasCommandContext, type CanvasCommit } from "./canvas/collaboration.js";
+import { collaborationError, commandFingerprint, type CanvasCommandContext, type CanvasCommit } from "./canvas/collaboration.js";
 import { redactInlineMedia } from "./runtime/redact-inline-media.js";
 import * as Y from "yjs";
 import { textSuggestionInputSchema, type CanvasTextSuggestion } from "@basketikun/canvas-agent/schemas";
@@ -25,7 +25,7 @@ import { H3_RUNTIME_SEGMENT_FIELDS } from "@basketikun/canvas-agent/runtime-fiel
 import { editedTextTargets, loadTextDocument, readText, replaceText, textKey, textOperation, textTargetSchema, type CanvasTextTarget } from "./canvas/collaborative-text.js";
 import type { McpObservabilityReportOptions } from "./stores/types.js";
 import { reconstructCanvasHistory, migrateCanvasReceipts } from "./canvas/history-maintenance.js";
-import { captureAssetEdits, deleteDramaAsset, migrateDramaAssets, normalizeAssetInsertion, projectAsset, propagateAssetChanges, resolveProjectAssets, stripProjectAssets, syncSharedCanvasAssetRecords, validateAssetOperation, writeDramaAsset, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
+import { captureAssetEdits, deleteDramaAsset, migrateDramaAssets, normalizeAssetInsertion, projectAsset, propagateAssetChanges, purgeOrphanedSharedAssets, resolveProjectAssets, stripProjectAssets, syncSharedCanvasAssetRecords, validateAssetOperation, writeDramaAsset, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -178,6 +178,17 @@ export class BackendDatabase {
     private canvasCommitListener?: (commit: CanvasCommit) => void;
 
     onCanvasCommit(listener: (commit: CanvasCommit) => void) { this.canvasCommitListener = listener; }
+
+    snapshotForMaintenance(family: string) {
+        if (this.filePath === ":memory:" || this.filePath.includes("mode=memory")) return undefined;
+        const snapshot = createDatabaseSnapshot(this.db, this.filePath, family);
+        const verify = new DatabaseSync(snapshot, { readOnly: true });
+        try {
+            if (verify.prepare("PRAGMA integrity_check").get()?.integrity_check !== "ok") throw new Error("数据库快照完整性检查失败");
+            if (verify.prepare("PRAGMA foreign_key_check").get()) throw new Error("数据库快照外键检查失败");
+        } finally { verify.close(); }
+        return snapshot;
+    }
 
     constructor(file: string = DB_FILE) {
         this.filePath = file;
@@ -1145,6 +1156,72 @@ export class BackendDatabase {
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }
+        if (currentVersion < 45) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                this.db.exec(`CREATE TABLE IF NOT EXISTS production_operation_keys (
+                    owner_kind TEXT NOT NULL CHECK(owner_kind IN ('episode','canvas')),
+                    owner_id TEXT NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    request_hash TEXT NOT NULL,
+                    committed_revision INTEGER,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(owner_kind, owner_id, operation_id)
+                );
+                CREATE INDEX IF NOT EXISTS production_operation_keys_lookup ON production_operation_keys(operation_id);`);
+                const now = new Date().toISOString();
+                this.db.prepare(`INSERT OR IGNORE INTO production_operation_keys(owner_kind,owner_id,operation_id,request_hash,committed_revision,created_at)
+                    SELECT 'episode', episode_id, operation_id, request_hash, NULL, created_at FROM episode_production_operations`).run();
+                if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='canvas_production_operations'").get()) {
+                    this.db.prepare(`INSERT OR IGNORE INTO production_operation_keys(owner_kind,owner_id,operation_id,request_hash,committed_revision,created_at)
+                        SELECT 'canvas', project_id, operation_id, request_hash, NULL, created_at FROM canvas_production_operations`).run();
+                }
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (45, ?)").run(now);
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
+        if (currentVersion < 46) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                this.db.exec(`CREATE TABLE IF NOT EXISTS production_source_lifecycle_floors (
+                    owner_kind TEXT NOT NULL CHECK(owner_kind IN ('episode','canvas')),
+                    owner_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    PRIMARY KEY(owner_kind, owner_id)
+                );
+                CREATE TABLE IF NOT EXISTS production_source_lifecycle_events (
+                    owner_kind TEXT NOT NULL CHECK(owner_kind IN ('episode','canvas')),
+                    owner_id TEXT NOT NULL,
+                    entity_type TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    generation INTEGER NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('alive','deleted')),
+                    snapshot_json TEXT,
+                    operation_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(owner_kind, owner_id, entity_type, entity_id, revision)
+                );
+                CREATE INDEX IF NOT EXISTS production_source_lifecycle_revision ON production_source_lifecycle_events(owner_kind, owner_id, revision);`);
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (46, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
+        if (currentVersion < 47) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                // Hot-reload race: an older compiled copy may have applied 46 without
+                // the created_at column. Add it idempotently and backfill the epoch
+                // floor so every reader/writer sees a valid value.
+                const columns = this.db.prepare("PRAGMA table_info(production_source_lifecycle_events)").all() as Array<{ name: string }>;
+                if (!columns.some(column => column.name === "created_at")) {
+                    this.db.exec(`ALTER TABLE production_source_lifecycle_events ADD COLUMN created_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z';
+                        UPDATE production_source_lifecycle_events SET created_at='1970-01-01T00:00:00.000Z' WHERE created_at IS NULL OR created_at='';`);
+                }
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (47, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
     }
 
     /** A rolled-back schema_migrations row leaves its column behind, so every ADD COLUMN must be checked first. */
@@ -2059,6 +2136,7 @@ export class BackendDatabase {
     }
 
     listAssetsPage(options: { kind?: string; keyword?: string; page?: number; pageSize?: number } = {}) {
+        purgeOrphanedSharedAssets(this);
         const clauses: string[] = [];
         const values: Array<string | number> = [];
         if (options.kind && options.kind !== "all") { clauses.push("kind = ?"); values.push(options.kind); }
@@ -2195,10 +2273,20 @@ export class BackendDatabase {
                 if (this.db.prepare("SELECT 1 FROM canvas_operation_batches WHERE operation_id = ?").get(operationId)) throw collaborationError("OPERATION_ID_REUSED", "历史 operationId 缺少可核验的请求指纹，拒绝重新执行");
             }
             if (!operations.length || operations.some((operation) => !operation || typeof operation.type !== "string")) throw new Error("operations 必须为非空有效操作数组");
+            // baseRevision is a cursor for recovering the caller's intended base, not a
+            // global lock. Patch operations are applied to the transaction's latest snapshot
+            // so independent paths merge and same-path writes resolve by commit order.
+            let intervening: CanvasCommit[] = [];
+            let baseProject: CanvasProject | undefined;
+            let baseHistoryUnavailable = false;
             if (context?.baseRevision !== undefined) {
+                if (context.baseRevision > currentRevision) throw collaborationError("BASE_REVISION_AHEAD", "请求基线版本晚于当前画布版本");
                 const history = this.readCanvasChanges(id, context.baseRevision);
-                const conflicts = history.reset ? ["history"] : concurrentCommandConflicts(operations, history.commits.flatMap((entry) => entry.operations));
-                if (conflicts.length) throw Object.assign(collaborationError("FIELD_CONFLICT", "目标字段已被其他协作者修改"), { project: current, revision: currentRevision, conflictTargets: conflicts });
+                if (!history.reset) {
+                    intervening = history.commits;
+                    try { baseProject = this.canvasProjectAt(id, context.baseRevision); }
+                    catch { /* Only operations that need a historical object image require this snapshot. */ }
+                } else baseHistoryUnavailable = context.baseRevision < currentRevision;
             }
             // 乐观锁放行（last-write-wins）：客户端传的 expectedRevision 不再与 currentRevision 比对拦截，
             // 画布版本号仍照常自增；事务内读到的快照即本次写入基线（SQLite 单写者保证一致性）。
@@ -2221,8 +2309,90 @@ export class BackendDatabase {
                 this.db.prepare("INSERT INTO canvas_collaboration_checkpoints (project_id, revision, data_json) VALUES (?, ?, ?)").run(id, currentRevision, JSON.stringify(current));
             }
             const committedOperations: CanvasOperation[] = [];
+            const lifecycleResults: CanvasOperationResult[] = [];
+            const historicalNodes = Array.isArray(baseProject?.nodes) ? baseProject!.nodes as AssetNode[] : [];
             const operationResults = operations.flatMap((operation, index) => {
                 if (!context?.runtimeWrite) operations[index] = operation = normalizeEntityNodeOperation(project, operation);
+                if (operation.type === "update_node" && !(project.nodes as AssetNode[]).some(node => node.id === operation.id)) {
+                    const historical = historicalNodes.find(node => node.id === operation.id);
+                    if (!historical) throw Object.assign(collaborationError("BASE_HISTORY_UNAVAILABLE", `节点 ${operation.id} 已删除，且无法从请求基线恢复；本地草稿已保留`), { project: current, revision: currentRevision, conflictTargets: [String(operation.id)] });
+                    // A stale edit after a delete is an explicit later write. Restore only
+                    // the deleted object image; its former connections remain separately deleted.
+                    const restore: CanvasOperation = { type: "add_node", id: historical.id, nodeType: historical.type, title: historical.title,
+                        position: structuredClone(historical.position), width: historical.width, height: historical.height,
+                        metadata: structuredClone(historical.metadata || {}) };
+                    const restored = applyCanvasProjectOperations(project, [restore]);
+                    committedOperations.push(restore);
+                    lifecycleResults.push(...restored);
+                }
+                if (operation.type === "update_h3_segment") {
+                    const nodeId = String(operation.nodeId || ""), segmentId = String(operation.segmentId || "");
+                    let liveNode = (project.nodes as AssetNode[]).find(node => node.id === nodeId);
+                    if (!liveNode) {
+                        const historicalNode = historicalNodes.find(node => node.id === nodeId);
+                        if (!historicalNode) throw Object.assign(collaborationError("BASE_HISTORY_UNAVAILABLE", `H3 节点 ${nodeId} 已删除，且无法从请求基线恢复；本地草稿已保留`), { project: current, revision: currentRevision, conflictTargets: [nodeId] });
+                        const restore: CanvasOperation = { type: "add_node", id: historicalNode.id, nodeType: historicalNode.type, title: historicalNode.title,
+                            position: structuredClone(historicalNode.position), width: historicalNode.width, height: historicalNode.height,
+                            metadata: structuredClone(historicalNode.metadata || {}) };
+                        lifecycleResults.push(...applyCanvasProjectOperations(project, [restore]));
+                        committedOperations.push(restore);
+                        liveNode = (project.nodes as AssetNode[]).find(node => node.id === nodeId);
+                    }
+                    const liveSegments = Array.isArray(liveNode?.metadata?.segments) ? liveNode!.metadata!.segments as Array<Record<string, unknown>> : [];
+                    if (!liveSegments.some(segment => String(segment.id || "") === segmentId)) {
+                        const oldNode = historicalNodes.find(node => node.id === nodeId);
+                        const oldSegments = Array.isArray(oldNode?.metadata?.segments) ? oldNode!.metadata!.segments as Array<Record<string, unknown>> : [];
+                        const historicalIndex = oldSegments.findIndex(segment => String(segment.id || "") === segmentId);
+                        const historical = oldSegments[historicalIndex];
+                        if (!historical) throw Object.assign(collaborationError("BASE_HISTORY_UNAVAILABLE", `Clip ${segmentId} 已删除，且无法从请求基线恢复；本地草稿已保留`), { project: current, revision: currentRevision, conflictTargets: [`${nodeId}:${segmentId}`] });
+                        let insertAt = -1;
+                        for (let index = historicalIndex - 1; index >= 0 && insertAt < 0; index--) {
+                            const preceding = liveSegments.findIndex(segment => String(segment.id || "") === String(oldSegments[index].id || ""));
+                            if (preceding >= 0) insertAt = preceding + 1;
+                        }
+                        if (insertAt < 0) for (let index = historicalIndex + 1; index < oldSegments.length; index++) {
+                            const following = liveSegments.findIndex(segment => String(segment.id || "") === String(oldSegments[index].id || ""));
+                            if (following >= 0) { insertAt = following; break; }
+                        }
+                        const restoredSegments = [...liveSegments];
+                        restoredSegments.splice(insertAt < 0 ? restoredSegments.length : insertAt, 0, structuredClone(historical));
+                        const restore: CanvasOperation = { type: "replace_h3_segments", nodeId, segments: restoredSegments };
+                        lifecycleResults.push(...applyCanvasProjectOperations(project, [restore]));
+                        committedOperations.push(restore);
+                    }
+                }
+                if (operation.type === "delete_node" && context?.baseRevision !== undefined) {
+                    if (baseHistoryUnavailable) throw Object.assign(collaborationError("BASE_HISTORY_UNAVAILABLE", "删除目标的生命周期历史已压缩；请保留草稿并读取当前目标后重试"), { project: current, revision: currentRevision });
+                    const ids = Array.isArray(operation.ids) ? operation.ids.map(String) : [String(operation.id || "")];
+                    const staleDelete = ids.some(nodeId => {
+                        if (!historicalNodes.some(node => node.id === nodeId)) return false;
+                        let deleted = false;
+                        for (const commit of intervening) for (const prior of commit.operations) {
+                            if (prior.type === "delete_node" && ((prior.ids as unknown[] | undefined) || [prior.id]).map(String).includes(nodeId)) deleted = true;
+                            if (prior.type === "add_node" && String(prior.id || "") === nodeId && deleted) return true;
+                        }
+                        return false;
+                    });
+                    if (staleDelete) {
+                        // This delete belongs to an older lifecycle generation. It must not
+                        // remove an object recreated after the caller's base revision.
+                        return [];
+                    }
+                }
+                if (operation.type === "delete_h3_segment" && context?.baseRevision !== undefined) {
+                    if (baseHistoryUnavailable) throw Object.assign(collaborationError("BASE_HISTORY_UNAVAILABLE", "Clip 生命周期历史已压缩；请保留草稿并读取当前目标后重试"), { project: current, revision: currentRevision });
+                    const nodeId = String(operation.nodeId || ""), segmentId = String(operation.segmentId || "");
+                    let deleted = false, recreated = false;
+                    for (const entry of intervening) for (const prior of entry.operations) {
+                        if (prior.type === "delete_h3_segment" && prior.nodeId === nodeId && prior.segmentId === segmentId) deleted = true;
+                        if (prior.type === "add_h3_segment" && prior.nodeId === nodeId && String((prior.segment as Record<string, unknown> | undefined)?.id || "") === segmentId && deleted) recreated = true;
+                        if (prior.type === "replace_h3_segments" && prior.nodeId === nodeId) {
+                            const includes = Array.isArray(prior.segments) && prior.segments.some(item => String((item as Record<string, unknown>).id || "") === segmentId);
+                            if (deleted && includes) recreated = true;
+                        }
+                    }
+                    if (recreated) return [];
+                }
                 const previousNode = (project.nodes as AssetNode[]).find(node => node.id === String(operation.id || operation.nodeId || ""));
                 const previousNodeSnapshot = previousNode ? structuredClone(previousNode) : undefined;
                 validateAssetOperation(this, id, project, operation, context);
@@ -2289,6 +2459,7 @@ export class BackendDatabase {
                 }
                 return result;
             });
+            operationResults.unshift(...lifecycleResults);
             if (editorialBefore) {
                 const defaults = this.canvasEditorDefaults(id);
                 const oldNodes = editorialBefore.nodes as any[];
@@ -2520,7 +2691,7 @@ export class BackendDatabase {
                     status: "success", runProgress: 1, generationTaskId: task.id, inputOutdated: false, generatedImageHistory: [...(Array.isArray(sourceMetadata.generatedImageHistory) ? sourceMetadata.generatedImageHistory : []), ...media.map(output => ({ ...output, taskId: task.id, inputHash: frozenHash }))],
                 };
                 const operations: CanvasOperation[] = [{ type: "update_node", id: input.nodeId, metadata,
-                    metadataDelete: ["runtimeTaskId", "errorDetails"] }, ...linkedCharacterImageUpdates(project, input.nodeId, output)];
+                    metadataDelete: ["runtimeTaskId", "errorDetails"] }, ...linkedCharacterImageUpdates(project, input.nodeId, media)];
                 const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations,
                     { runtimeWrite: true, operationId: `image-task-result:${task.id}`, source: { clientId: `task:${task.id}`, kind: "task", label: "图片生成任务" } });
                 return { project: result.project, operations: result.operations };
@@ -2536,7 +2707,7 @@ export class BackendDatabase {
                     patch: resultSize,
                     metadata: { ...slots, status: "success", runProgress: 1, generationTaskId: task.id },
                     metadataDelete: ["runtimeTaskId", "errorDetails"] },
-                    ...linkedCharacterImageUpdates(project, input.nodeId, media.find(item => item.url) || {}),
+                    ...linkedCharacterImageUpdates(project, input.nodeId, media),
                     ...imageSourceStatus(project, input.nodeId, task.input.sourceNodeId as string | undefined, task.id, "success")];
                 const result = this.applyCanvasProjectOperations(input.projectId, Number(project.revision || 0), operations,
                     { runtimeWrite: true, operationId: `image-task-result:${task.id}`, source: { clientId: `task:${task.id}`, kind: "task", label: "图片生成任务" } });
@@ -3026,6 +3197,7 @@ export class BackendDatabase {
     }
 
     listAssets(options: { kind?: string; folderId?: string; dramaId?: string } = {}): Asset[] {
+        purgeOrphanedSharedAssets(this);
         const clauses: string[] = [];
         const values: Array<string | null> = [];
         if (options.kind) { clauses.push("kind = ?"); values.push(options.kind); }

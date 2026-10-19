@@ -8,6 +8,22 @@ test("same node IDs in different canvases stay distinct and shared choices retai
     assert.equal(result.length, 2); assert.notEqual(imageChoiceKey(result[0]), imageChoiceKey(result[1])); assert.equal(result[1].assetId, "adopted");
     assert.equal(result.some(choice => choice.nodeId === "unadopted"), false);
 });
+test("episode projection nodes backed by a shared source are labeled as projections, not ordinary current-canvas nodes", () => {
+    const sharedSource = { sourceProjectId: "shared", sourceNodeId: "shenyan" };
+    const localProjection = { id: "episode-shenyan", type: "image", title: "沈砚", metadata: {
+        storageKey: "image:projection",
+        productionAssetId: "adopted", sharedAssetOrigin: { dramaId: "drama", assetId: "asset-shenyan-v1", sourceProjectId: "shared", sourceNodeId: "legacy-shenyan-node" },
+    } };
+    const assets = { adopted: { sharedSource } };
+    const assetPlan = [{ id: "adopted", asset_name: "沈砚", sharedSource }];
+    const result = smartImageChoices("episode", [localProjection], assets, [{ id: "shared", nodes: [{ id: "shenyan", type: "character", title: "沈砚" }] }], assetPlan);
+
+    assert.equal(result[0].sharedProjection, true);
+    assert.equal(result[0].shared, undefined);
+    assert.equal(result[0].assetId, "adopted");
+    assert.equal(result[1].shared, true);
+    assert.equal(result[1].sharedProjection, undefined);
+});
 test("plain result slots, non-image smart nodes and missing adopted nodes are excluded", () => {
     const result = smartImageChoices("episode", [{ id: "slot", type: "image" }, { ...node("video", "视频"), metadata: { smart: true, generationMode: "video" } }], { broken: { sharedSource: { sourceProjectId: "shared", sourceNodeId: "missing" } } }, [{ id: "shared", nodes: [] }]);
     assert.deepEqual(result, []);

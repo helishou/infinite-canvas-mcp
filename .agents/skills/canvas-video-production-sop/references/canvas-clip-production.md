@@ -16,9 +16,9 @@
 
 ## 连续性边界
 
-对每一对相邻 Segment 写 from、to、tailFrame、motionContext、reason。两项分别评估但互斥：允许都关闭、仅尾帧或仅 Motion Context，禁止同时开启；不能因同人物/同场景自动开启。
+对每一对相邻 Segment 写 from、to、tailFrame、motionContext、reason。两项分别评估但互斥：允许都关闭、仅尾帧或仅 Motion Context，禁止同时开启。新建连续边界默认启用尾帧参考；目标 Clip 有明确首帧分镜图时关闭尾帧参考并沿用该图。已有边界继续遵循已保存的导演决定；Motion Context 仍只用于必须保持同一个摄影镜头的拆段。
 
-编译前按 Acheng shots 的[Segment 边界判定](../../acheng-director/references/decisions/shots.md#segment-边界切镜尾帧与-motion-context)逐边界登记需求。默认允许切镜，两项关闭；只有明确不能切镜的同一连续摄影镜头拆段才开启 Motion Context，不能因同人物、同场景、对白或声音需要承接而自动开启。尾帧另行决定；已有明确用户决定直接沿用。
+编译前按 Acheng shots 的[Segment 边界判定](../../acheng-director/references/decisions/shots.md#segment-边界切镜尾帧与-motion-context)逐边界登记需求。新建边界默认以尾帧图片承接动作和场景状态；目标 Clip 有明确首帧分镜图时由该图锚定状态，尾帧关闭。只有明确不能切镜的同一连续摄影镜头拆段才开启 Motion Context；同人物、同场景、对白或声音需要承接不会自动启用 Motion Context。已有明确用户决定直接沿用。
 
 缺少边界、非相邻或重复边界、空理由返回诊断。允许整场所有边界都选择切镜，不因重复的切镜理由要求开启续写。开关属于前段向后段的出边，实际作用在下一段的生成输入；末段两项关闭。准备/同步将正式决定投影到 Clip，默认参数不能覆盖；连续组按组首到组尾提交，旧独立成片不等于已有可续写 latent。
 

@@ -206,7 +206,7 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
             {selectedVideoModelSchema?.error ? <div className="nfh3-hint" role="alert">{h3Label(locale, "selectedVideoModelModeWarning")} {selectedVideoModelSchema.error}</div> : null}
             <div className="nfh3-control-grid">
                 {control("视觉风格模板", <H3Dropdown values={styleTemplateOptions} value={styleTemplateValue} onChange={selectStyleTemplate} format={styleTemplateLabel} placeholder="选择模板" searchable />, true)}
-                {control("尾帧参考（传给下一段）", <Switch checked={segment.tailFrameContinuation === true} onChange={(checked) => patch({ tailFrameContinuation: checked, ...(checked ? { motionContextEnabled: false } : {}) })} />, false, "下一段运行时截取本段尾帧，追加到已有图片参考最后，作为下一段的首帧状态基准。" )}
+                {control("尾帧参考（传给下一段）", <Switch checked={segment.tailFrameContinuation === true} onChange={(checked) => patch({ tailFrameContinuation: checked, ...(checked ? { motionContextEnabled: false } : {}) })} />, false, "新建边界默认开启。目标 Clip 有明确首帧分镜图时关闭；否则下一段运行时截取本段尾帧并追加到图片参考末尾，作为下一段状态基准。" )}
             </div>
             {!selectedVideoModelLoading && !selectedVideoModelError && selectedVideoModelSchema && !selectedModelFields.length ? <div className="nfh3-hint">{h3Label(locale, "selectedVideoModelNoFields")}</div> : null}
             {selectedModelFields.length ? <div className="nfh3-control-grid">{selectedModelFields.map((item) => <div key={item.id} className="nfh3-dynamic-model-field">{renderSelectedModelField(item)}</div>)}</div> : null}
@@ -299,7 +299,7 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
             {mode !== "t2v" ? choice("参考图最长边", refLongEdgeChoices, segment.referenceLongEdge ?? 1920, (value) => patch({ referenceLongEdge: Number(value) })) : null}
         </div>)}
         {section("continuation", "续段衔接", continuationSummary, <div className="nfh3-control-grid">
-            {control("尾帧参考（传给下一段）", <Switch checked={segment.tailFrameContinuation === true} onChange={(checked) => patch({ tailFrameContinuation: checked, ...(checked ? { motionContextEnabled: false } : {}) })} />, false, "下一段运行时截取本段尾帧，自动追加到已有图片参考的最后一张，作为下一段首帧状态基准，继承姿态、持物、动作进度和场景状态；机位、景别可改变，不能把动作重置。保留素材和引用编号；运行时使用多参考模式接收尾帧，保存的模式不改写。") }
+            {control("尾帧参考（传给下一段）", <Switch checked={segment.tailFrameContinuation === true} onChange={(checked) => patch({ tailFrameContinuation: checked, ...(checked ? { motionContextEnabled: false } : {}) })} />, false, "新建边界默认开启。目标 Clip 有明确首帧分镜图时关闭；否则下一段运行时截取本段尾帧，自动追加到已有图片参考末尾，作为下一段状态基准，继承姿态、持物、动作进度和场景状态。下一段可改变机位、景别，但不能重置动作；运行时使用多参考模式接收尾帧，保存的模式不改写。与 Motion Context 互斥。") }
             {control("潜空间续写到下一段 Motion Context（V15）", <Switch checked={segment.motionContextEnabled === true} onChange={(checked) => patch({ motionContextEnabled: checked, ...(checked ? { tailFrameContinuation: false } : {}) })} />, false, "默认关闭。只有两段必须保持同一个不能切镜的摄影镜头时开启；同人物、同场景、对白或声音承接不自动开启。本段开关登记到下一段的衔接，实际由下一段消费本段的 AV latent 与上下文，本段自身输入不受影响。从组首生成会依次重跑全组，到第一个关闭的边界停止。")}
             {segment.motionContextEnabled ? <>
                 {choice("传给下一段的视频上下文帧数", ["22", "5", "39", "56"], segment.contextLength || "22", (value) => patch({ contextLength: String(value) }))}

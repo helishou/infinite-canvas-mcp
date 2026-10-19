@@ -57,6 +57,7 @@ export function CanvasAssetEditModal({ open, item, busy, onCancel, onSave }: Pro
     const { t } = useTranslation();
     const nodeType = String(item.node.type || "");
     const metadata = (item.node.metadata || {}) as Record<string, unknown>;
+    const imageProjectedFromSubjectBinding = Boolean(metadata.productionEntity) && (nodeType === "scene" || nodeType === "prop");
 
     const [title, setTitle] = useState("");
     const [name, setName] = useState("");
@@ -277,6 +278,7 @@ export function CanvasAssetEditModal({ open, item, busy, onCancel, onSave }: Pro
                         {(sceneImage || propImage) ? <Button size="small" icon={<X className="size-3.5" />} onClick={() => { nodeType === "scene" ? setSceneImage(undefined) : setPropImage(undefined); }} /> : null}
                     </div>
                 </div>
+                {imageProjectedFromSubjectBinding && <p className="text-xs text-muted-foreground">{t("director.crud.projectedEntityImageHint")}</p>}
                 {(() => {
                     const image = nodeType === "scene" ? sceneImage : propImage;
                     if (!image) return <div className="flex h-24 items-center justify-center rounded-lg border border-dashed border-stone-300 text-xs text-stone-400 dark:border-stone-700">{t("director.crud.noImage")}</div>;

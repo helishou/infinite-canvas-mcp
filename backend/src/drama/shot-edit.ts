@@ -1,8 +1,9 @@
 import crypto from "node:crypto";
 import { canonicalProduction, directorProductionSchema, isSubjectPromptAssembly, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
-import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
+import { ProductionValidationError, requireShotFraming } from "@basketikun/canvas-agent/drama/production-validation";
 import { subjectShotWindows } from "@basketikun/canvas-agent/drama/subject-assembly";
 import { currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
+import { defaultDirectorBoundary } from "./continuity-defaults.js";
 
 type Row = Record<string, any>;
 type Edit = Extract<ProductionOperation, { type: "edit_director_shot" }>;
@@ -13,6 +14,7 @@ const patchFields = new Set(["title", "visual", "camera", "audio", "performance"
 function patch(shot: Row, value?: Row) {
     if (!value) return;
     for (const key of Object.keys(value)) if (!patchFields.has(key)) reject("SHOT_PATCH_FIELD", `shots.${shot.id}.${key}`, "拆镜补丁只接受名称、画面、摄影、声音和表演字段");
+    requireShotFraming(value.camera, String(shot.id));
     Object.assign(shot, value);
 }
 function sound(source: Row) {
@@ -149,7 +151,7 @@ export function reconcileShotClipBoundaries(director: DirectorProduction, previo
         const to = ids[index + 1], existing = edges.filter(edge => edge.from === from && edge.to === to);
         if (existing.length) return existing;
         if (previousIds.some((id, oldIndex) => id === from && previousIds[oldIndex + 1] === to)) return [];
-        return [{ from, to, tailFrame: false, motionContext: false, reason: "镜头结构修改后形成的新剪辑边界；不继承旧片段的尾帧或运动上下文。" }];
+        return [defaultDirectorBoundary(director, from, to)];
     });
 }
 
@@ -182,6 +184,7 @@ export function editDirectorShot(director: DirectorProduction, operation: Edit) 
             segment.shot_ids = [authored.id]; source.segments = [...rows(source.segments), segment]; shots.push(authored);
         }
         if (!Number.isInteger(authored.duration_frames) || authored.duration_frames <= 0) reject("SHOT_DURATION", `shots.${authored.id}.duration_frames`, "镜头时长必须为正整数帧");
+        requireShotFraming(authored.camera, String(authored.id));
         next.shotInputs[authored.id] = { assetIds: [], keyframePolicy: "none" };
     } else if (operation.action === "delete") {
         const shot = requireSelected();

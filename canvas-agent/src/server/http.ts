@@ -749,7 +749,7 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
       if (name === "drama_get_episode")
         return void res.json({
           ok: true,
-          result: await backend.getDramaEpisode(String(input.episodeId || "")),
+          result: await backend.getDramaEpisode(String(input.episodeId || ""), input.view === "full" ? "full" : "summary"),
         });
       if (name === "drama_create_episode") {
         const { dramaId, ...episode } = input;

@@ -804,6 +804,9 @@ export class ComfyUiBackend {
 
     public async upload(file: string, signal: AbortSignal, comfyUrl = this.url) {
         const { readFile } = await import("node:fs/promises");
+        // 同 localH3Input：输入路径可能来自存量任务，文件早已被清理；直接 readFile 只会抛 ENOENT。
+        if (!fs.existsSync(file))
+            throw new Error(`媒体文件丢失：ComfyUI 输入 ${file} 已不在磁盘上（该素材可能已被清理）。请重新选择参考素材，或重新提交本段。`);
         const data = await readFile(file);
         const form = new FormData();
         form.set("image", new Blob([data]), path.basename(file));
@@ -817,6 +820,13 @@ export class ComfyUiBackend {
 
     /** H3 从独立媒体库复制本次输入，ComfyUI 目录只保存执行副本。 */
     private async localH3Input(file: string, signal: AbortSignal, comfyUrl: string) {
+        signal.throwIfAborted();
+        // 输入可能是存量任务里记下来的路径（回放/重试/历史记录），对应文件可能早被清理——
+        // 媒体被删、或一次性输入从未登记进 media_files。交给 copyComfyInput 只会抛出
+        // ENOENT/复制失败，失败信息里看不出是哪张图、哪段视频不见了，所以在这里按房内
+        // 措辞（"媒体文件丢失"）先讲清楚，并给出可执行的下一步。
+        if (!fs.existsSync(file))
+            throw new Error(`媒体文件丢失：H3 输入 ${file} 已不在磁盘上（该素材可能已被清理）。请重新选择参考素材，或重新提交本段。`);
         const direct = this.localH3DirectConfig();
         if (!direct.ready) throw new Error("H3 本地输入未就绪；请检查 ComfyUI 根目录，并确保画布媒体库独立于 ComfyUI 安装目录。");
         signal.throwIfAborted();

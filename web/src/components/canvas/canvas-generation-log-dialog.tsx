@@ -3,7 +3,6 @@ import { Button, Empty, Modal, Segmented, Tag, message } from "antd";
 import { ChevronDown, ChevronUp, Copy, Maximize2, Trash2 } from "lucide-react";
 
 import { deleteBackendGenerationLogs, fetchBackendGenerationLogs, backendMediaUrl, type BackendGenerationLog as GenerationLog } from "@/services/backend-api";
-import { useBackendStore } from "@/stores/use-backend-store";
 import { useTranslation } from "react-i18next";
 
 const PAGE_SIZE = 30;
@@ -54,28 +53,28 @@ type SelectHistoryResult = (log: GenerationLog, output: Record<string, unknown>)
 export function CanvasGenerationLogDialog({ open, projectId, nodeId, segmentId, objectTitle, currentStorageKey, onSelectResult, onClose }: { open: boolean; projectId: string; nodeId?: string; segmentId?: string; objectTitle?: string; currentStorageKey?: string; onSelectResult?: SelectHistoryResult; onClose: () => void }) {
     const { t } = useTranslation();
     const scoped = Boolean(nodeId);
-    const connected = useBackendStore((state) => state.connected);
     const [logs, setLogs] = useState<GenerationLog[]>([]);
     const [loading, setLoading] = useState(false);
     const [loadingMore, setLoadingMore] = useState(false);
     const [hasMore, setHasMore] = useState(false);
+    const [loadError, setLoadError] = useState("");
     const [kind, setKind] = useState<LogFilterKind>("all");
     const loadSequence = useRef(0);
     const load = useCallback(async () => {
-        if (!connected || !projectId) return;
+        if (!projectId) return;
         const sequence = ++loadSequence.current;
-        setLogs([]); setHasMore(false); setLoadingMore(false);
+        setLogs([]); setHasMore(false); setLoadingMore(false); setLoadError("");
         setLoading(true);
         try {
             const page = (await fetchBackendGenerationLogs({ projectId, nodeId, segmentId, limit: PAGE_SIZE, offset: 0 })).logs || [];
             if (sequence !== loadSequence.current) return;
             setLogs(page);
             setHasMore(page.length === PAGE_SIZE);
-        } catch (error) { if (sequence === loadSequence.current) message.error(String(error)); }
+        } catch (error) { if (sequence === loadSequence.current) setLoadError(String(error)); }
         finally { if (sequence === loadSequence.current) setLoading(false); }
-    }, [connected, projectId, nodeId, segmentId]);
+    }, [projectId, nodeId, segmentId]);
     const loadMore = useCallback(async () => {
-        if (!connected || !projectId || loading || loadingMore || !hasMore) return;
+        if (!projectId || loading || loadingMore || !hasMore) return;
         const sequence = loadSequence.current;
         setLoadingMore(true);
         try {
@@ -85,12 +84,13 @@ export function CanvasGenerationLogDialog({ open, projectId, nodeId, segmentId, 
             setHasMore(page.length === PAGE_SIZE);
         } catch (error) { if (sequence === loadSequence.current) message.error(String(error)); }
         finally { if (sequence === loadSequence.current) setLoadingMore(false); }
-    }, [connected, hasMore, loading, loadingMore, logs.length, projectId, nodeId, segmentId]);
+    }, [hasMore, loading, loadingMore, logs.length, projectId, nodeId, segmentId]);
     useEffect(() => { if (open) void load(); return () => { loadSequence.current++; }; }, [load, open]);
     const remove = async (id?: string) => {
-        if (!connected) return;
-        await deleteBackendGenerationLogs(id ? { id } : { projectId });
-        await load();
+        try {
+            await deleteBackendGenerationLogs(id ? { id } : { projectId });
+            await load();
+        } catch (error) { message.error(String(error)); }
     };
     // 筛选只作用于视图：logs 始终保留后端已拉取的全量，分页 offset 不受筛选影响
     const visible = useMemo(() => kind === "all" ? logs : logs.filter((log) => logKind(log) === kind), [kind, logs]);
@@ -104,7 +104,7 @@ export function CanvasGenerationLogDialog({ open, projectId, nodeId, segmentId, 
             {!scoped && <><Segmented size="small" value={kind} options={kindOptions} onChange={(value) => setKind(value as LogFilterKind)} /><Button danger size="small" icon={<Trash2 className="size-3.5" />} disabled={!logs.length} onClick={() => void remove()}>清空日志</Button></>}
             {scoped && <p className="text-sm text-muted-foreground">{t("productionCanvas.objectHistoryHint")}</p>}
         </div>
-        {!connected ? <Empty description="Canvas Agent 未连接" /> : !logs.length ? <Empty description={loading ? t("productionCanvas.historyLoading") : scoped ? t("productionCanvas.noObjectHistory") : "暂无生成日志"} /> : visible.length ? <LogList logs={visible} compact={scoped} currentStorageKey={currentStorageKey} onSelectResult={onSelectResult} hasMore={hasMore} loadingMore={loadingMore} onLoadMore={() => void loadMore()} onDelete={scoped ? undefined : (id) => void remove(id)} /> : <Empty description="当前筛选下暂无日志">{hasMore ? <Button size="small" loading={loadingMore} onClick={() => void loadMore()}>继续加载更多</Button> : null}</Empty>}
+        {loadError ? <Empty description={`读取生成日志失败：${loadError}`}><Button size="small" onClick={() => void load()}>重试</Button></Empty> : !logs.length ? <Empty description={loading ? t("productionCanvas.historyLoading") : scoped ? t("productionCanvas.noObjectHistory") : "暂无生成日志"} /> : visible.length ? <LogList logs={visible} compact={scoped} currentStorageKey={currentStorageKey} onSelectResult={onSelectResult} hasMore={hasMore} loadingMore={loadingMore} onLoadMore={() => void loadMore()} onDelete={scoped ? undefined : (id) => void remove(id)} /> : <Empty description="当前筛选下暂无日志">{hasMore ? <Button size="small" loading={loadingMore} onClick={() => void loadMore()}>继续加载更多</Button> : null}</Empty>}
     </Modal>;
 }
 

@@ -347,7 +347,7 @@ export const toolInputSchemas = {
   canvas_apply_ops: canvasProjectSchema.extend({
     projectId: z.string().min(1).describe("必填目标画布 ID"),
     operationId: z.string().min(1).describe("本次编辑的稳定 UUID；响应未知时用同一 ID 和完全相同请求恢复回执"),
-    expectedRevision: z.number().int().min(0).describe("读取编辑基线的项目 revision；冲突时整批拒绝，不自动 rebase"),
+    expectedRevision: z.number().int().min(0).describe("读取编辑基线的项目 revision；无关字段自动合并，同字段按服务端提交顺序以后写入者为准"),
     ops: z
       .array(canvasOpSchema)
       .min(1)
@@ -724,6 +724,7 @@ export const toolInputSchemas = {
   }),
   drama_get_episode: z.object({
     episodeId: z.string().min(1).describe("分集 ID"),
+    view: z.enum(["summary", "full"]).default("summary").describe("summary 返回分集身份、标题、梗概和画布 ID；full 额外返回完整剧情与绑定画布数据"),
   }),
   drama_create_episode: z.object({
     dramaId: z
@@ -793,7 +794,7 @@ export const toolDescriptions: Record<ToolName, string> = {
   canvas_get_selection: "读取当前网页画布选中的节点。",
   canvas_export_snapshot: "导出 Backend 权威画布固定快照，返回 SHA256、字节数与鉴权下载路径；布局查看使用 canvas_get_state。",
   canvas_apply_ops:
-    "批量操作画布。projectId、operationId、expectedRevision 必填；响应未知时保留原请求，用 mcp_get_command_receipt 查询；版本冲突不自动 rebase。MCP 的 add_node 只允许智能节点，普通 text/image/video/audio 节点会被拒绝。H3 Clip 内容请使用专用工具；运行状态与结果仍由 Backend 管理。",
+    "批量操作画布。projectId、operationId、expectedRevision 必填；expectedRevision 是请求基线，不是全局写锁。无关字段自动合并，同字段按服务端提交顺序以后写入者为准。响应未知时保留原请求，用 mcp_get_command_receipt 查询。MCP 的 add_node 只允许智能节点，普通 text/image/video/audio 节点会被拒绝。H3 Clip 内容请使用专用工具；运行状态与结果仍由 Backend 管理。",
   canvas_create_node:
     "创建智能插件节点。内置生成请用 canvas_create_config_node；插件智能节点可用本工具创建，例如 nodeType='minimax-h3:video'。普通 text/image/video/audio 节点由 MCP 禁止创建。",
   canvas_create_config_node:
@@ -867,7 +868,7 @@ export const toolDescriptions: Record<ToolName, string> = {
   drama_set_active_project:
     "设置当前活动剧目。传 dramaId 会固定本 MCP 会话的剧目；不传则解除固定并跟随网页当前活动画布所属剧目。",
   drama_get_episode:
-    "读取单个分集的完整字段，并返回其绑定画布；未绑定画布时 canvas 为 null。",
+    "默认读取单个分集摘要（身份、标题、梗概和画布 ID）；只有需要完整剧情和绑定画布数据时才传 view='full'。",
   drama_create_episode:
     "创建剧目下的一集。synopsis 和 fullPlot 分别保存梗概与完整剧情；可选绑定一个已有画布。",
   drama_update_episode:

@@ -3,7 +3,7 @@ import { productionScriptGroups, type EpisodeProductionData } from "@basketikun/
 import { applyDirectorSourcePatch } from "@basketikun/canvas-agent/drama/production-validation";
 import type { BackendDatabase } from "../db.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
-import { projectDirector } from "./director.js";
+import { projectDirector, withoutDirectorProjection } from "./director.js";
 import { productionLayoutStableId } from "./production-layout-geometry.js";
 
 type Owner = { kind: "canvas" | "episode" | "scene"; id: string };
@@ -67,6 +67,6 @@ export function syncScriptNodeEdits(db: BackendDatabase, projectId: string, befo
     if (!changed) return [];
     projectDirector(draft);
     const revision = row.revision + 1;
-    db.db.prepare(`UPDATE ${table} SET revision=?, draft_json=?, updated_at=? WHERE ${column}=?`).run(revision, JSON.stringify(draft), new Date().toISOString(), owner.id);
+    db.db.prepare(`UPDATE ${table} SET revision=?, draft_json=?, updated_at=? WHERE ${column}=?`).run(revision, JSON.stringify(withoutDirectorProjection(draft)), new Date().toISOString(), owner.id);
     return [{ entityId: owner.id, revision }];
 }

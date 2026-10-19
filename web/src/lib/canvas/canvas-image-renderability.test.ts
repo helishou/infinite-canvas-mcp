@@ -19,6 +19,18 @@ test("图片节点仅有 storageKey 时仍应进入图片渲染而不是空图�
     assert.equal(hasRenderableCanvasImage(imageNode({ status: "success" })), false);
 });
 
+test("多图图片节点的面向画面工具读取 primaryImageId 指定的主图", () => {
+    const node = imageNode({
+        primaryImageId: "shown",
+        images: [
+            { id: "shown", status: "success", content: "shown.png", storageKey: "image:shown", naturalWidth: 100, naturalHeight: 100, bytes: 1, mimeType: "image/png" },
+            { id: "latest", status: "success", content: "latest.png", storageKey: "image:latest", naturalWidth: 200, naturalHeight: 200, bytes: 2, mimeType: "image/webp" },
+        ],
+    });
+    assert.equal(canvasNodePrimaryImage(node)?.storageKey, "image:shown");
+    assert.equal(canvasNodeImage(node)?.storageKey, "image:latest");
+});
+
 test("图片工具读取智能图片当前引用的结果，包含只有 storageKey 的结果", () => {
     const smart: CanvasNodeData = {
         ...imageNode({}),

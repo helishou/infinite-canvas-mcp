@@ -161,6 +161,17 @@ test("insert and reorder keep Clip and existing Shot IDs stable", () => {
     editDirectorShot(d, { type: "edit_director_shot", action: "move", shotId: "N", targetShotId: "S2", position: "before" });
     assert.deepEqual((d.source as any).segments[0].shot_ids, ["S1", "N", "S2"]); assert.deepEqual((d.source as any).shots.map((shot: any) => shot.story_order), [0, 1, 2]);
 });
+test("insert and split reject transition labels in camera.framing and leave the source untouched", () => {
+    const insert = fixture();
+    assert.throws(() => editDirectorShot(insert, { type: "edit_director_shot", action: "insert", shotId: "S1", shot: { id: "N", duration_frames: 24, title: "推近", visual: "起幅中景，随后推近至指尖占满画框的特写。", camera: { framing: "MS转CU" }, subject_usages: [], utterance_refs: [], keyframes: [] } }), /不在有效词表/);
+    assert.equal((insert.source as any).shots.length, 2, "失败的插入不得改写源稿");
+    const split = fixture();
+    assert.throws(() => editDirectorShot(split, { type: "edit_director_shot", action: "split", shotId: "S1", newShotId: "N", splitFrame: 24, textOffsets: { U: 2 }, firstShotPatch: { camera: { framing: "中景转特写" } } }), /不在有效词表/);
+    assert.equal((split.source as any).shots.length, 2, "失败的拆分不得改写源稿");
+    const valid = fixture();
+    editDirectorShot(valid, { type: "edit_director_shot", action: "insert", shotId: "S2", shot: { id: "N", duration_frames: 24, title: "新镜头", visual: "听者反应", camera: { framing: "MCU" }, subject_usages: [], utterance_refs: [], keyframes: [] } });
+    assert.equal((valid.source as any).shots.find((shot: any) => shot.id === "N").camera.framing, "MCU");
+});
 test("production transaction replays structural edits once, keeps other episodes and rejects stale revisions", t => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "shot-edit-")), db = new BackendDatabase(path.join(directory, "db.sqlite"));
     t.after(() => { db.close(); for (const entry of fs.readdirSync(directory)) fs.unlinkSync(path.join(directory, entry)); fs.rmdirSync(directory); });

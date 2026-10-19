@@ -268,7 +268,7 @@ test("H3：本地不能删除 Backend 所有的运行字段", () => {
     assert.deepEqual(diffCanvasProject(base, next), []);
 });
 
-test("冲突检测：远端改了同段同字段 → 报冲突；远端改了同段不同字段 → 不报", () => {
+test("冲突检测：同段同字段按后提交者获胜，不同字段自然合并", () => {
     const base = makeProject([makeH3Node("h3-1", [
         { id: "s1", prompt: "A", status: "idle" },
     ])]);
@@ -278,13 +278,12 @@ test("冲突检测：远端改了同段同字段 → 报冲突；远端改了同
     const pendingOps = [{ type: "update_h3_segment", nodeId: "h3-1", segmentId: "s1", patch: { prompt: "A-new" } }];
     // 远端改了 status，本地改 prompt：字段不同，不应冲突
     assert.deepEqual(detectCanvasConflicts(pendingOps, remote, base), []);
-    // 远端也改了 prompt：同字段冲突
+    // 远端也改了 prompt：留给服务端按事务提交顺序解决
     const remote2 = makeProject([makeH3Node("h3-1", [
         { id: "s1", prompt: "A-from-remote", status: "idle" },
     ])]);
     const conflicts = detectCanvasConflicts(pendingOps, remote2, base);
-    assert.equal(conflicts.length, 1);
-    assert.match(conflicts[0].detail, /prompt/);
+    assert.deepEqual(conflicts, []);
 });
 
 test("冲突检测：远端改了别的段，本地改本段：不应误报本段冲突", () => {

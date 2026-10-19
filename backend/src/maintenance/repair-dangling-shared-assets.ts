@@ -5,17 +5,17 @@ import { DatabaseSync } from "node:sqlite";
 import { DB_FILE } from "../config.js";
 
 // 共享素材库的资产记录（assets 表，带 metadata.sharedAssetSource）如果其源画布
-// （sharedAssetSource.sourceProjectId）或源节点（sourceNodeId）已不存在，则记录悬空：
-// 业务数据仍保留，但已不能作为有效素材使用。
+// （sharedAssetSource.sourceProjectId）或源节点（sourceNodeId）已不存在，则记录悬空。
 //
-// 这里把它们持久标记为 sharedAssetMissing，与 drama-asset-library.ts 里
-// missingSharedSourceAsset 的产出保持一致，web 资产库会据此显示「源已失效」警告并
-// 将它们排除为有效素材。记录本身不删除（删除保护）。
-//
-// 脚本幂等：悬空 → 标记；曾标记但源已恢复 → 解除标记。可反复运行、可接入定时任务。
-// 默认只打印将要修改的行（dry-run）；确认后加 --apply 才写入，并在同目录留一份改动前快照。
-// 建议在 Backend 停止时执行，避免与应用写请求交错。
+// 运行时时 Backend 的读取入口（listAssets / listAssetsPage）会自动清除「悬空且无存活画布引用」
+// 的记录（drama-asset-library.ts 的 purgeOrphanedSharedAssets），本脚本是同样的不变量在
+// 后端停止时的离线版本：
+//   默认          — dry-run，打印计划；仍被引用的孤儿标记 missing（与 runtime 占位投影一致）。
+//   --apply       — 执行标记/解除标记，留改动前快照。
+//   --purge       — 额外删除「悬空且无任何 sharedAssetReference/sharedAssetOrigin 引用」的记录行。
+// 脚本幂等：可反复运行、可接入定时任务。建议在后端停止时执行，避免与应用写请求交错。
 const apply = process.argv.includes("--apply");
+const purge = process.argv.includes("--purge");
 
 interface PlanRow {
     id: string;
@@ -23,7 +23,7 @@ interface PlanRow {
     title: string;
     sourceProjectId: string;
     sourceNodeId: string;
-    action: "mark_missing" | "clear_missing";
+    action: "mark_missing" | "clear_missing" | "purge";
     reason?: "source_project_missing" | "source_node_missing";
 }
 
@@ -50,28 +50,41 @@ try {
 }
 
 const plan: PlanRow[] = [];
-const stats = { total: candidates.length, markMissing: 0, clearMissing: 0, valid: 0, invalidMeta: 0 };
+const stats = { total: candidates.length, markMissing: 0, clearMissing: 0, purge: 0, valid: 0, invalidMeta: 0 };
+const reader = new DatabaseSync(DB_FILE, { readOnly: true });
+try {
+    for (const row of candidates) {
+        let meta: Record<string, unknown> = {};
+        try { meta = JSON.parse(row.metadata_json || "{}"); } catch { stats.invalidMeta++; continue; }
+        const source = meta.sharedAssetSource as { dramaId?: string; assetId?: string; sourceProjectId?: string; sourceNodeId?: string } | undefined;
+        if (!source?.sourceProjectId || !source?.sourceNodeId) { stats.invalidMeta++; continue; }
+        const nodes = projectNodes(reader, source.sourceProjectId);
+        const projectExists = nodes !== null;
+        const nodeExists = projectExists && nodes!.some((n) => n.id === source.sourceNodeId);
+        const dangling = !projectExists || !nodeExists;
+        const alreadyMissing = meta.sharedAssetMissing === true;
+        // 与 runtime 的 assetConsumers 同一口径：sharedAssetReference（assetId+dramaId）或 sharedAssetOrigin（源画布+节点）。
+        const consumers = dangling ? Number((reader.prepare(
+            `SELECT COUNT(*) AS c FROM canvas_projects p, json_each(p.data_json,'$.nodes') n
+             WHERE (json_extract(n.value,'$.metadata.sharedAssetReference.assetId')=? AND json_extract(n.value,'$.metadata.sharedAssetReference.dramaId')=?)
+                OR (json_extract(n.value,'$.metadata.sharedAssetOrigin.sourceProjectId')=? AND json_extract(n.value,'$.metadata.sharedAssetOrigin.sourceNodeId')=?)`,
+        ).get(source.assetId || "", source.dramaId || "", source.sourceProjectId, source.sourceNodeId) as { c: number }).c) : 0;
 
-for (const row of candidates) {
-    let meta: Record<string, unknown> = {};
-    try { meta = JSON.parse(row.metadata_json || "{}"); } catch { stats.invalidMeta++; continue; }
-    const source = meta.sharedAssetSource as { sourceProjectId?: string; sourceNodeId?: string } | undefined;
-    if (!source?.sourceProjectId || !source?.sourceNodeId) { stats.invalidMeta++; continue; }
-    const nodes = projectNodes(new DatabaseSync(DB_FILE, { readOnly: true }), source.sourceProjectId);
-    const projectExists = nodes !== null;
-    const nodeExists = projectExists && nodes!.some((n) => n.id === source.sourceNodeId);
-    const dangling = !projectExists || !nodeExists;
-    const alreadyMissing = meta.sharedAssetMissing === true;
-
-    if (dangling && !alreadyMissing) {
-        plan.push({ id: row.id, kind: row.kind, title: row.title, sourceProjectId: source.sourceProjectId, sourceNodeId: source.sourceNodeId, action: "mark_missing", reason: projectExists ? "source_node_missing" : "source_project_missing" });
-        stats.markMissing++;
-    } else if (!dangling && alreadyMissing) {
-        plan.push({ id: row.id, kind: row.kind, title: row.title, sourceProjectId: source.sourceProjectId, sourceNodeId: source.sourceNodeId, action: "clear_missing" });
-        stats.clearMissing++;
-    } else {
-        stats.valid++;
+        if (dangling && purge && !consumers) {
+            plan.push({ id: row.id, kind: row.kind, title: row.title, sourceProjectId: source.sourceProjectId, sourceNodeId: source.sourceNodeId, action: "purge", reason: projectExists ? "source_node_missing" : "source_project_missing" });
+            stats.purge++;
+        } else if (dangling && !alreadyMissing) {
+            plan.push({ id: row.id, kind: row.kind, title: row.title, sourceProjectId: source.sourceProjectId, sourceNodeId: source.sourceNodeId, action: "mark_missing", reason: projectExists ? "source_node_missing" : "source_project_missing" });
+            stats.markMissing++;
+        } else if (!dangling && alreadyMissing) {
+            plan.push({ id: row.id, kind: row.kind, title: row.title, sourceProjectId: source.sourceProjectId, sourceNodeId: source.sourceNodeId, action: "clear_missing" });
+            stats.clearMissing++;
+        } else {
+            stats.valid++;
+        }
     }
+} finally {
+    reader.close();
 }
 
 const summary = { ...stats, planned: plan.length };
@@ -99,6 +112,7 @@ try {
     try {
         const update = writer.prepare("UPDATE assets SET metadata_json = ?, updated_at = ? WHERE id = ?");
         for (const p of plan) {
+            if (p.action === "purge") { changed += Number(writer.prepare("DELETE FROM assets WHERE id = ?").run(p.id).changes); continue; }
             const row = writer.prepare("SELECT metadata_json FROM assets WHERE id = ?").get(p.id) as { metadata_json: string };
             const meta = JSON.parse(row.metadata_json || "{}") as Record<string, unknown>;
             if (p.action === "mark_missing") {

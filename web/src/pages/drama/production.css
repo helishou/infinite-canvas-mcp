@@ -315,6 +315,10 @@ body:has([data-production-workspace-shell]) [data-workspace-header] > div:first-
 
 /* Ordinary workspaces scroll only their content; the shared navigation never moves. */
 [data-production-workspace-shell]:not([data-shot-workspace-shell]) [data-production-workspace-content] { overflow: auto; overscroll-behavior: contain; padding: 18px 4px 88px; }
+/* 本集使用资产是纯文档流内容，交给页面外层滚动，避免出现第二条竖向滚动条。 */
+[data-production-workspace-shell]:not([data-shot-workspace-shell]):has([data-director-panel="assets"]) { height: auto; overflow: visible; }
+[data-production-workspace-shell]:not([data-shot-workspace-shell]):has([data-director-panel="assets"]) > div { height: auto; }
+[data-production-workspace-shell]:not([data-shot-workspace-shell]) [data-production-workspace-content]:has([data-director-panel="assets"]) { overflow: visible; overscroll-behavior: auto; padding-bottom: 24px; }
 [data-production-workspace-shell]:not([data-shot-workspace-shell]) [data-production-workspace-content] > [data-director-panel] { height: auto; overflow: visible; }
 [data-production-workspace-shell] [data-production-workspace-content] { min-width: 0; }
 

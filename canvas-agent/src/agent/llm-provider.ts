@@ -2,11 +2,32 @@ import crypto from "node:crypto";
 
 export type Json = Record<string, any>;
 export type LlmProvider = { id: string; model: string; name: string; baseUrl: string; apiKey: string; apiFormat: "openai" | "openai-chat" | "gemini"; systemPrompt: string; kind?: "codex-cli" };
-export type LlmPart = { text: string } | { image: string };
+export type LlmPart = { text: string } | { image: string } | { imageRef: string };
 export type LlmCall = { id: string; name: string; arguments: string };
 export type LlmMessage = { role: "user" | "assistant" | "tool"; parts: LlmPart[]; calls?: LlmCall[]; callId?: string; callName?: string; providerId?: string; providerFormat?: LlmProvider["apiFormat"]; native?: Json[] };
 export type LlmTool = { name: string; description?: string; inputSchema: Json };
+
+/** 图片数据必须已在历史展开阶段解析好；编码阶段还遇到 `imageRef` 说明展开被绕过，宁可报错也不静默丢图。 */
+function imageDataOf(part: LlmPart): string {
+    if ("image" in part) return part.image;
+    if ("imageRef" in part) throw new Error(`历史图片引用未展开（${part.imageRef}），已中止请求而不是丢失图片`);
+    throw new Error("图片部件类型不受支持");
+}
 export type LlmReply = { message: LlmMessage; usage?: { input_tokens: number; output_tokens: number; cached_input_tokens: number } };
+
+/**
+ * 展开历史里的 `imageRef` 为真实图片数据，仅用于本次请求，不写回存储。
+ *
+ * 历史里存的是媒体 storageKey：附件与工具图片以前把整段 base64 写进线程 JSON，
+ * 单线程可涨到 31 MB，而同一份字节早已由媒体库持有（实测 sha256 全部能对上）。
+ */
+export async function expandImageRefs(messages: LlmMessage[], resolve: (storageKey: string) => Promise<string>): Promise<LlmMessage[]> {
+    if (!messages.some(message => message.parts.some(part => "imageRef" in part))) return messages;
+    return await Promise.all(messages.map(async message => ({
+        ...message,
+        parts: await Promise.all(message.parts.map(async part => ("imageRef" in part ? { image: await resolve(part.imageRef) } : part))),
+    })));
+}
 const record = (value: unknown): Json => value && typeof value === "object" && !Array.isArray(value) ? value : {};
 const rows = (value: unknown): Json[] => Array.isArray(value) ? value.map(record) : [];
 
@@ -54,20 +75,20 @@ export async function requestLlm(provider: LlmProvider, instructions: string, me
         body = { systemInstruction: { parts: [{ text: system }] }, contents: messages.map(message => {
             if (message.native && message.providerId === provider.id && message.providerFormat === provider.apiFormat) return { role: "model", parts: message.native };
             if (message.role === "tool") return { role: "user", parts: [{ functionResponse: { id: message.callId, name: message.callName, response: { result: textOf(message) } } }] };
-            return { role: message.role === "assistant" ? "model" : "user", parts: [...message.parts.map(part => "text" in part ? part : geminiImage(part.image)), ...(message.calls || []).map(call => ({ functionCall: { id: call.id, name: call.name, args: JSON.parse(call.arguments) } }))] };
+            return { role: message.role === "assistant" ? "model" : "user", parts: [...message.parts.map(part => "text" in part ? part : geminiImage(imageDataOf(part))), ...(message.calls || []).map(call => ({ functionCall: { id: call.id, name: call.name, args: JSON.parse(call.arguments) } }))] };
         }), ...(tools.length ? { tools: [{ functionDeclarations: tools.map(tool => ({ name: tool.name, description: tool.description, parametersJsonSchema: tool.inputSchema })) }] } : {}) };
         headers = { "content-type": "application/json", ...(provider.apiKey ? { "x-goog-api-key": provider.apiKey } : {}) };
     } else {
         headers = { "content-type": "application/json", ...(provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {}) };
         if (provider.apiFormat === "openai-chat") {
             url = `${openAiBase(provider.baseUrl)}/chat/completions`;
-            body = { model: provider.model, stream: true, messages: [{ role: "system", content: system }, ...messages.map(message => ({ role: message.role, content: message.role === "tool" || message.parts.every(part => "text" in part) && message.parts.length ? textOf(message) : message.parts.length ? message.parts.map(part => "text" in part ? { type: "text", text: part.text } : { type: "image_url", image_url: { url: part.image } }) : null, ...(message.calls?.length ? { tool_calls: message.calls.map(call => ({ id: call.id, type: "function", function: { name: call.name, arguments: call.arguments } })) } : {}), ...(message.callId ? { tool_call_id: message.callId } : {}) }))], ...(tools.length ? { tools: tools.map(tool => ({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } })) } : {}) };
+            body = { model: provider.model, stream: true, messages: [{ role: "system", content: system }, ...messages.map(message => ({ role: message.role, content: message.role === "tool" || message.parts.every(part => "text" in part) && message.parts.length ? textOf(message) : message.parts.length ? message.parts.map(part => "text" in part ? { type: "text", text: part.text } : { type: "image_url", image_url: { url: imageDataOf(part) } }) : null, ...(message.calls?.length ? { tool_calls: message.calls.map(call => ({ id: call.id, type: "function", function: { name: call.name, arguments: call.arguments } })) } : {}), ...(message.callId ? { tool_call_id: message.callId } : {}) }))], ...(tools.length ? { tools: tools.map(tool => ({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } })) } : {}) };
         } else {
             url = `${openAiBase(provider.baseUrl)}/responses`;
             body = { model: provider.model, stream: true, store: false, instructions: system, input: messages.flatMap(message => {
                 if (message.native && message.providerId === provider.id && message.providerFormat === provider.apiFormat) return message.native;
                 if (message.role === "tool") return [{ type: "function_call_output", call_id: message.callId, output: textOf(message) }];
-                return [...(message.parts.length ? [{ role: message.role, content: message.parts.map(part => "text" in part ? { type: message.role === "assistant" ? "output_text" : "input_text", text: part.text } : { type: "input_image", image_url: part.image }) }] : []), ...(message.calls || []).map(call => ({ type: "function_call", call_id: call.id, name: call.name, arguments: call.arguments }))];
+                return [...(message.parts.length ? [{ role: message.role, content: message.parts.map(part => "text" in part ? { type: message.role === "assistant" ? "output_text" : "input_text", text: part.text } : { type: "input_image", image_url: imageDataOf(part) }) }] : []), ...(message.calls || []).map(call => ({ type: "function_call", call_id: call.id, name: call.name, arguments: call.arguments }))];
             }), include: ["reasoning.encrypted_content"], ...(tools.length ? { tools: tools.map(tool => ({ type: "function", name: tool.name, description: tool.description, parameters: tool.inputSchema, strict: false })) } : {}), ...(effort && effort !== "auto" ? { reasoning: { effort } } : {}) };
         }
     }

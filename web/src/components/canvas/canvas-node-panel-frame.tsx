@@ -59,7 +59,7 @@ export function CanvasNodePanelFrame({ children, isSmartGenerationNode, screenSi
     const frameRef = useRef<HTMLDivElement>(null);
     const useViewportLayout = isSmartGenerationNode || screenSized;
     const style: CSSProperties | undefined = useViewportLayout
-        ? { marginLeft: -180, transform: "scale(calc(1 / var(--canvas-zoom, 1)))", transformOrigin: "top center", maxHeight: "min(42dvh, calc(100dvh - 24px))", overflowY: "auto", overscrollBehavior: "contain" }
+        ? { marginLeft: -180, transform: "scale(calc(1 / var(--canvas-zoom, 1)))", transformOrigin: "top center", maxHeight: "calc(100dvh - 24px)", overflowY: "auto", overscrollBehavior: "contain" }
         : undefined;
 
     useIsomorphicLayoutEffect(() => {
@@ -81,7 +81,7 @@ export function CanvasNodePanelFrame({ children, isSmartGenerationNode, screenSi
                 const viewportRect = surface.getBoundingClientRect();
                 const layout = canvasNodePanelLayout(
                     { x: nodeRect.left + nodeRect.width / 2, y: nodeRect.bottom, top: nodeRect.top },
-                    { left: frameRect.left, top: frameRect.top, right: frameRect.right, bottom: frameRect.bottom, width: frameRect.width, height: Math.min(frame.scrollHeight, viewportRect.height * 0.42) },
+                    { left: frameRect.left, top: frameRect.top, right: frameRect.right, bottom: frameRect.bottom, width: frameRect.width, height: frame.scrollHeight },
                     { left: viewportRect.left, top: viewportRect.top, right: viewportRect.right, bottom: viewportRect.bottom, width: viewportRect.width, height: viewportRect.height },
                 );
                 frame.style.width = `${layout.width}px`;

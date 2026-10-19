@@ -1,4 +1,5 @@
-import crypto from "node:crypto";
+import { sha256 } from "@noble/hashes/sha256";
+import { bytesToHex } from "@noble/hashes/utils";
 import { canonicalProduction, isSubjectPromptAssembly, productionSceneEntries, resolveSubjectPictureBindingIds, type DirectorProduction } from "./production-contract.js";
 
 export type CompilationScope = { sceneId?: string; targetIds?: string[]; output?: "selected" };
@@ -6,7 +7,8 @@ const rows = (value: unknown): Record<string, any>[] => Array.isArray(value) ? v
 const values = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
 const key = (item: Record<string, any>) => String(item.asset_id || item.id || "");
 const stableId = (item: Record<string, any>) => String(item.id || "");
-export const compilationHash = (value: unknown) => crypto.createHash("sha256").update(canonicalProduction(value)).digest("hex");
+const sha256Hex = (value: string) => bytesToHex(sha256(new TextEncoder().encode(value)));
+export const compilationHash = (value: unknown) => sha256Hex(canonicalProduction(value));
 
 /** A compiler input projection, never a second authored source or an authorization. */
 export function compilationScopeInput(director: DirectorProduction, scope: CompilationScope) {
@@ -339,7 +341,7 @@ export function compilationArtifactFreshness(director: DirectorProduction, artif
     const currentCompilerHash = currentKindHash || director.engine.compilerHash || "";
     if (compiledCompilerHash !== currentCompilerHash) return { current: false, staleReason: "compiler_changed" };
     if (typeof artifact.prompt !== "string" || !artifact.prompt) return { current: false, staleReason: "prompt_hash_mismatch" };
-    const promptHash = crypto.createHash("sha256").update(artifact.prompt, "utf8").digest("hex");
+    const promptHash = sha256Hex(artifact.prompt);
     if (promptHash !== artifact.sha256 || receipt.promptHash !== artifact.sha256) return { current: false, staleReason: "prompt_hash_mismatch" };
 
     const scoped = receipt.compilationScope as { scope: CompilationScope; inputHash: string; engine?: DirectorProduction["engine"] } | undefined;

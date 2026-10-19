@@ -104,7 +104,7 @@ export function startServer(
       if (source?.sourceProjectId === commit.projectId) events.publish({ type: "asset.updated", entityId: asset.id, payload: db.getAsset(asset.id) });
     }
     for (const assetId of commit.deletedAssetIds || []) events.publish({ type: "asset.updated", entityId: assetId, payload: { deleted: 1 } });
-    for (const update of commit.productionUpdates || []) events.publish({ type: "drama-production.updated", entityId: update.entityId, payload: { revision: update.revision } });
+    for (const update of commit.productionUpdates || []) events.publish({ type: "drama-production.updated", entityId: update.entityId, payload: { revision: update.revision, ...(update.reason ? { reason: update.reason } : {}) } });
   });
   const app = express();
   if (deps.devReloadMiddleware) app.use(deps.devReloadMiddleware);
@@ -1089,9 +1089,16 @@ export function startServer(
     }
   });
   app.get("/drama/episodes/:episodeId", (req, res) => {
+    const view = req.query.view === undefined ? "full" : String(req.query.view);
+    if (view !== "summary" && view !== "full")
+      return void res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "view 必须是 summary 或 full" });
     const episode = db.getDramaEpisode(req.params.episodeId);
     if (!episode)
       return void res.status(404).json({ ok: false, error: "分集不存在" });
+    if (view === "summary") {
+      const { fullPlot: _fullPlot, ...summary } = episode;
+      return void res.json({ ok: true, episode: summary });
+    }
     res.json({
       ok: true,
       episode,

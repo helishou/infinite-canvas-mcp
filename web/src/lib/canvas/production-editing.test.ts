@@ -43,7 +43,7 @@ test("missing editors and changed compiled identities fail visibly without a sou
     await assert.rejects(service.reverseSyncPrompt({ ...input, basePromptHash: "stale" }), /PROMPT_REVERSE_SYNC_BASELINE_MISMATCH/);
 });
 
-test("a stale apply response clears its prepared compile so the next click uses the current revision", async (t) => {
+test("a stale apply response recompiles once against the current revision", async (t) => {
     const originalFetch = globalThis.fetch;
     t.after(() => { globalThis.fetch = originalFetch; });
     let revision = 7, applyAttempts = 0;
@@ -81,10 +81,10 @@ test("a stale apply response clears its prepared compile so the next click uses 
     };
     const service = createProductionEditing("stale-apply-canvas", () => node(), async () => {});
     const compileInput = { nodeId: "H3", segmentId: "canvas-clip" };
-    await assert.rejects(service.compilePrompt(compileInput), /PROMPT_COMPILE_SOURCE_CHANGED/);
-    assert.equal(compileRequests[0]?.expectedRevision, 7);
     const refreshed = await service.compilePrompt(compileInput);
     assert.equal(refreshed.prompt, "compiled-8");
+    assert.equal(applyAttempts, 2);
+    assert.equal(compileRequests[0]?.expectedRevision, 7);
     assert.equal(compileRequests[1]?.expectedRevision, 8);
     assert.notEqual(compileRequests[0]?.operationId, compileRequests[1]?.operationId);
 });
@@ -102,13 +102,34 @@ test("production storyboard writeback routes only a verified formal Clip and wai
 });
 
 test("H3 continuation settings reverse-sync through the production boundary editor", async () => {
-    const order: string[] = [], request = { targetId: "SOURCE_C4", tailFrameContinuation: true, motionContextEnabled: false };
+    const order: string[] = [], request = { boundaries: [{ targetId: "SOURCE_C4", tailFrameContinuation: true, motionContextEnabled: false }], requireNext: true };
     const remove = registerProductionBoundaryEditor("canvas", async input => { order.push("edit"); assert.deepEqual(input, request); return { sourceSaved: true }; });
     try {
         const service = createProductionEditing("canvas", () => node(), async () => { order.push("flush"); });
-        assert.deepEqual(await service.setContinuationBoundary({ nodeId: "H3", segmentId: "canvas-clip", ...request }), { sourceSaved: true });
+        assert.deepEqual(await service.setContinuationBoundary({ nodeId: "H3", segmentId: "canvas-clip", tailFrameContinuation: true, motionContextEnabled: false }), { sourceSaved: true });
         assert.deepEqual(order, ["flush", "edit"]);
-        await assert.rejects(service.setContinuationBoundary({ nodeId: "H3", segmentId: "missing", ...request }), /CONTINUATION_BOUNDARY_PROJECTION_MISMATCH/);
+        await assert.rejects(service.setContinuationBoundary({ nodeId: "H3", segmentId: "missing", tailFrameContinuation: true, motionContextEnabled: false }), /CONTINUATION_BOUNDARY_PROJECTION_MISMATCH/);
+    } finally { remove(); }
+});
+
+test("global H3 continuation settings resolve every formal Clip and submit one boundary batch", async () => {
+    const order: string[] = [], current = node();
+    current.metadata!.segments!.push({ id: "canvas-clip-next", productionClipProjection: { targetId: "SOURCE_C5" } });
+    const request = { boundaries: [
+        { targetId: "SOURCE_C4", tailFrameContinuation: true, motionContextEnabled: false },
+        { targetId: "SOURCE_C5", tailFrameContinuation: false, motionContextEnabled: false },
+    ] };
+    const remove = registerProductionBoundaryEditor("canvas", async input => { order.push("edit"); assert.deepEqual(input, request); return { sourceSaved: true }; });
+    try {
+        const service = createProductionEditing("canvas", () => current, async () => { order.push("flush"); });
+        assert.deepEqual(await service.setContinuationBoundaries({ nodeId: "H3", boundaries: [
+            { segmentId: "canvas-clip", tailFrameContinuation: true, motionContextEnabled: false },
+            { segmentId: "canvas-clip-next", tailFrameContinuation: false, motionContextEnabled: false },
+        ] }), { sourceSaved: true });
+        assert.deepEqual(order, ["flush", "edit"]);
+        await assert.rejects(service.setContinuationBoundaries({ nodeId: "H3", boundaries: [
+            { segmentId: "missing", tailFrameContinuation: true, motionContextEnabled: false },
+        ] }), /CONTINUATION_BOUNDARY_PROJECTION_MISMATCH/);
     } finally { remove(); }
 });
 

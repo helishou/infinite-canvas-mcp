@@ -82,7 +82,11 @@ export function projectDirector(data: EpisodeProductionData, validate = true) {
             ...(subjectAssembly && window ? { startFrame: window.startFrame, endFrame: window.endFrame, stateUnresolved: projectedState?.unresolved || [] } : {}),
             keyframePolicy: data.settings.storyboardImageMode === "skip" || subjectAssembly && !keyframeAssetIds.length ? "none" : input?.keyframePolicy || (keyframeAssetIds.length ? "reuse" : "none") };
     });
-    const prior = new Map(data.clipGroups.map(g => [g.id, g]));
+    // Stored Subject Prompt v2 drafts keep only the authored source: the legacy
+    // `clipGroups`/`shots`/`scenes` projection is derived and never persisted, so a
+    // projection rebuilt from storage (shared-asset propagation, recovery) must not
+    // assume the previous projection exists.
+    const prior = new Map(list(data.clipGroups).map(g => [g.id, g]));
     const shotIds = new Set(shots.map(s => String(s.id)));
     data.clipGroups = list(source.segments).filter(s => Array.isArray(s.shot_ids) && s.shot_ids.length && s.shot_ids.every((id: unknown) => shotIds.has(String(id))))
         .map(s => ({ id: String(s.id), shotIds: s.shot_ids.map(String), nodeId: prior.get(String(s.id))?.nodeId || null, segmentId: prior.get(String(s.id))?.segmentId || null, sourceVersion: prior.get(String(s.id))?.sourceVersion || 0,
@@ -153,8 +157,7 @@ export function validateDirectorMedia(db: BackendDatabase, projectId: string, d:
         }
         for (const id of dependencies) {
             const asset = d.assets[String(id)];
-            if (!asset || !["approved", "generated"].includes(asset.status) || asset.status === "approved" && !asset.evidence?.trim()
-                || !asset.storageKey || !asset.sha256 || (plan.get(String(id))?.version && plan.get(String(id))?.version !== asset.version)) throw new Error(`产物 ${artifact.id} 依赖媒体未就绪或版本不一致：${id}`);
+            if (!asset || !asset.storageKey || !asset.sha256 || (plan.get(String(id))?.version && plan.get(String(id))?.version !== asset.version)) throw new Error(`产物 ${artifact.id} 依赖媒体未就绪或版本不一致：${id}`);
         }
         if (d.source.style_policy === "waived" && !String(d.source.style_policy_reason || "").trim()) throw new Error("风格豁免缺少用户决定与理由");
         const styleRequired = d.source.style_policy === "required";
@@ -168,7 +171,7 @@ export function validateDirectorMedia(db: BackendDatabase, projectId: string, d:
         if (artifact.kind === "image" && styleRequired && !isStyleAsset && !styleAnchorNodeId && artifact.targetId !== obj(d.source.style_lock).anchor_asset_id) {
             const styleId = String(obj(d.source.style_lock).anchor_asset_id || "");
             const style = d.assets[styleId];
-            if (!style || !["approved", "generated"].includes(style.status) || artifact.references.at(-1)?.storageKey !== style.storageKey || !dependencies.includes(styleId)) throw new Error("缺少有效的末槽 STYLE_MOTHER 引用");
+            if (!style || !style.storageKey || !style.sha256 || artifact.references.at(-1)?.storageKey !== style.storageKey || !dependencies.includes(styleId)) throw new Error("缺少有效的末槽 STYLE_MOTHER 引用");
         }
         for (const ref of artifact.references) {
             const node = nodes.find(n => n.id === ref.nodeId);
@@ -178,8 +181,7 @@ export function validateDirectorMedia(db: BackendDatabase, projectId: string, d:
             const media = db.getMediaFile(ref.storageKey);
             if (!media || !fs.existsSync(media.filePath) || crypto.createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex") !== ref.sha256) throw new Error(`参考媒体字节或版本不一致：${ref.label}`);
             const selectedCanvasStyleAnchor = ref.role === "style" && ref.nodeId === styleAnchorNodeId;
-            const registeredAssetBinding = Object.values(d.assets).some(a => a.nodeId === ref.nodeId && a.storageKey === ref.storageKey && a.sha256 === ref.sha256
-                && ["approved", "generated"].includes(a.status) && (a.status === "generated" || Boolean(a.evidence?.trim())));
+            const registeredAssetBinding = Object.values(d.assets).some(a => a.nodeId === ref.nodeId && a.storageKey === ref.storageKey && a.sha256 === ref.sha256);
             if (!selectedCanvasStyleAnchor && !registeredAssetBinding) throw new Error(`参考媒体未就绪或缺少可验证归属：${ref.label}`);
         }
     }

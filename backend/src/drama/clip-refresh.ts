@@ -11,6 +11,7 @@ export type ClipRefreshJob = {
     segmentId: string; savedRevision: number; sourceHash: string; inputHash: string; status: Status;
     snapshot: DirectorProduction; affectedTargets: string[]; diagnostics: any[]; timings: Record<string, number>;
     createdAt: string; updatedAt: string; preparedId?: string; application?: any; compileRevision?: number; continuityRevision?: number;
+    translationOperationId?: string; translationExpectedRevision?: number; translationError?: string;
 };
 const activeStatuses = ["queued", "checking", "compiling", "applying"];
 /** Terminal jobs never resume, so their embedded DirectorProduction snapshot is dead weight (multi-MB rows made currentBySegment scan seconds). */
@@ -68,8 +69,11 @@ export class ClipRefreshStore {
 export function clipRefreshReceipt(job: ClipRefreshJob) {
     return { sourceSaved: true, operationId: job.operationId, status: job.status, segmentId: job.segmentId, savedRevision: job.savedRevision,
         sourceHash: job.sourceHash, compilationOperationId: job.compilationOperationId, selectedTargets: [job.segmentId],
+        createdAt: job.createdAt, updatedAt: job.updatedAt,
         affectedTargets: job.affectedTargets, affectedReason: "Registered target inputs changed", blockingDiagnostic: job.diagnostics[0],
-        timings: job.timings, ...(job.application ? { application: { revision: job.application.revision, sourceHash: job.application.sourceHash,
+        timings: job.timings, ...(job.translationOperationId ? { translationOperationId: job.translationOperationId } : {}),
+        ...(job.translationError ? { translationError: job.translationError } : {}),
+        ...(job.application ? { application: { revision: job.application.revision, sourceHash: job.application.sourceHash,
             referenceSync: (job.application.referenceSync || []).map((item: any) => ({ targetId: item.targetId, status: item.status,
                 referenceCount: item.referenceCount, ...(item.diagnostics?.length ? { diagnostics: item.diagnostics } : {}) })) } } : {}), mediaSubmitted: false };
 }
@@ -130,7 +134,9 @@ export class ClipRefreshCoordinator {
             if (job.compileRevision !== undefined) compilation = this.compilations.getCompilation(id, this.owner, key);
             if (compilation?.application) {
                 job.application = compilation.application;
-                job.status = this.syncStatus(job); store.save(job); return;
+                job.status = this.syncStatus(job); store.save(job);
+                if (job.status === "succeeded") await this.queueCompiledPromptTranslation(id, job, store);
+                return;
             }
             const current = this.service.get(id), stored = current.draft.director;
             if (!stored) { step("superseded"); return; }
@@ -155,6 +161,7 @@ export class ClipRefreshCoordinator {
             job.application = measure("applyMs", () => this.compilations.apply(id, this.owner, job.preparedId!));
             job.status = this.syncStatus(job);
             job.timings.totalMs = Date.now() - Date.parse(job.createdAt); store.save(job);
+            if (job.status === "succeeded") await this.queueCompiledPromptTranslation(id, job, store);
         } catch (error) {
             const code = String((error as any)?.code || "CLIP_REFRESH_FAILED");
             job.diagnostics = (error as any)?.diagnostics || [{ code, targetId: job.segmentId, message: error instanceof Error ? error.message : String(error) }];
@@ -168,5 +175,24 @@ export class ClipRefreshCoordinator {
             return "blocked";
         }
         return "succeeded";
+    }
+    private async queueCompiledPromptTranslation(id: string, job: ClipRefreshJob, store: ClipRefreshStore) {
+        job.translationOperationId ||= `clip-refresh-translation:${crypto.createHash("sha256").update(job.operationId).digest("hex")}`;
+        store.save(job);
+        try {
+            const production = this.service.get(id);
+            job.translationExpectedRevision ??= production.revision;
+            store.save(job);
+            await this.service.translateCompiledPrompts(id, {
+                expectedRevision: job.translationExpectedRevision,
+                operationId: job.translationOperationId,
+                targetIds: [job.segmentId],
+            });
+            delete job.translationError;
+            store.save(job);
+        } catch (error) {
+            job.translationError = error instanceof Error ? error.message : String(error);
+            store.save(job);
+        }
     }
 }

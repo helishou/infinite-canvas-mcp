@@ -207,17 +207,31 @@
       "title": "[VAR]Scheduler"
     }
   },
-  "70": {
+  "71": {
     "inputs": {
-      "images": [
+      "image": [
         "17",
         0
       ],
-      "filename_prefix": "H3_T2I/candidates"
+      "batch_index": 0,
+      "length": 1
+    },
+    "class_type": "ImageFromBatch",
+    "_meta": {
+      "title": "Select First Frame"
+    }
+  },
+  "70": {
+    "inputs": {
+      "images": [
+        "71",
+        0
+      ],
+      "filename_prefix": "H3_T2I/first_frame"
     },
     "class_type": "SaveImage",
     "_meta": {
-      "title": "[OUTPUT:image] H3 T2I Candidates"
+      "title": "[OUTPUT:image] H3 T2I First Frame"
     }
   },
   "20": {

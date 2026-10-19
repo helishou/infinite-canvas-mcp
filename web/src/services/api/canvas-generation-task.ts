@@ -13,9 +13,12 @@ export async function observeCanvasGenerationTask(input: CanvasGenerationCommand
         await cancelBackendTask(started.taskId);
         signal.throwIfAborted();
     }
+    let cancellation: Promise<unknown> | undefined;
     const cancel = () => {
         abortCanvasBrowserTask(started.taskId);
-        void cancelBackendTask(started.taskId).catch(() => { /* 断网时保留 Backend 权威状态。 */ });
+        // Keep the local request alive until Backend confirms cancellation. Otherwise
+        // the UI can submit again while the original task still occupies its target.
+        cancellation = cancelBackendTask(started.taskId);
     };
     signal.addEventListener("abort", cancel, { once: true });
     try {
@@ -26,7 +29,10 @@ export async function observeCanvasGenerationTask(input: CanvasGenerationCommand
             if (task.status === "failed" || task.status === "cancelled") throw new Error(task.error || `画布${label}任务${task.status}`);
             await wait(pollMs, signal);
         }
-    } finally { signal.removeEventListener("abort", cancel); }
+    } finally {
+        signal.removeEventListener("abort", cancel);
+        if (cancellation) await cancellation;
+    }
 }
 
 function wait(ms: number, signal: AbortSignal) {

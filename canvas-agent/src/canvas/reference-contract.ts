@@ -2,7 +2,7 @@ import { validateH3CharacterGroups } from "./character-reference-contract.js";
 export { productionImageInput, type ProductionImageInput, type ProductionImageReference } from "./production-image-input.js";
 export { characterImageKey, resolveCharacterImageKeys, characterReferenceUpdates, h3CharacterSourceFromNode, syncH3CharacterGroupSource, type CharacterImageSelection, type H3CharacterSource } from "./character-image-selection.js";
 
-import { orderStoryboardReferencesFirst, remapPictureTags } from "./storyboard-reference-order.js";
+import { orderReferencesForSubmission, remapPictureTags } from "./storyboard-reference-order.js";
 
 export const REFERENCE_ROLES = [
     "character_identity", "character_turnaround", "scene", "blocking", "storyboard",
@@ -52,6 +52,8 @@ export type ReferenceBinding = {
     storageKey?: string;
     mimeType?: string;
     sourceNodeId?: string;
+    /** Stable link to the formal Subject picture binding that produced this H3 reference. */
+    pictureBindingId?: string;
     groupId?: string;
     outfitId?: string;
     resultSelectionPolicy?: NodeImageSelectionPolicy;
@@ -224,9 +226,13 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
     const originalBindings = resolveCharacterGroupBindings(rawBindings, segment);
     const shotIds = (Array.isArray(segment.storyboardShots) ? segment.storyboardShots : [])
         .map((shot) => String(recordOf(shot).referenceBindingId || "")).filter(Boolean);
-    const bindings = orderStoryboardReferencesFirst(originalBindings, shotIds,
+    const bindings = orderReferencesForSubmission(originalBindings, shotIds,
         (binding) => binding.id,
-        (binding) => binding.enabled && binding.role === "storyboard" && (binding.mediaType || inferReferenceMediaType(binding)) === "image");
+        (binding) => binding.enabled && binding.role === "storyboard" && (binding.mediaType || inferReferenceMediaType(binding)) === "image",
+        (binding) => binding.enabled
+        && binding.role !== "storyboard"
+        && (binding.mediaType || inferReferenceMediaType(binding)) === "image"
+        && Boolean(binding.subjectId || binding.groupId));
     const issues: ReferenceIssue[] = [...validateH3CharacterGroups(project, { ...segment, referenceBindings: bindings })];
     const counters: Record<ReferenceMediaType, number> = { image: 0, video: 0, audio: 0 };
     const references = bindings.filter((binding) => binding.enabled).flatMap((binding): CompiledReference[] => {

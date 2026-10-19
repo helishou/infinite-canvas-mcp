@@ -8,7 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { AGENT_PROMPT } from "../config.js";
 import type { AgentAttachment, AgentEmit } from "./types.js";
-import { configuredLlmProviders, resolveLlmProvider, requestLlm, textOf, llmHistoryForProvider, type Json, type LlmMessage, type LlmTool } from "./llm-provider.js";
+import { configuredLlmProviders, resolveLlmProvider, requestLlm, textOf, llmHistoryForProvider, expandImageRefs, type Json, type LlmMessage, type LlmPart, type LlmTool } from "./llm-provider.js";
 
 export type LlmSettings = { get(key: string): unknown; set(key: string, value: unknown): void };
 type ChatMessage = { id: string; itemId: string; threadId: string; turnId: string; role: "user" | "assistant" | "tool" | "error"; title?: string; text: string; detail?: unknown };
@@ -76,6 +76,59 @@ export class LlmAgent {
         return structuredClone(value);
     }
     private save(thread: LlmThread) { thread.updatedAt = Date.now() / 1000; this.settings.set(threadKey(thread.id), thread); }
+
+    /** storageKey → 数据 URL 的进程内缓存：同一轮里模型多次回看同一张图不再重复下载。 */
+    private mediaDataUrls = new Map<string, string>();
+
+    /** 取回归档媒体为数据 URL（历史里只存 storageKey，不存 base64）。 */
+    private async dataUrlFor(storageKey: string, signal?: AbortSignal): Promise<string> {
+        const cached = this.mediaDataUrls.get(storageKey);
+        if (cached) return cached;
+        const response = await fetch(new URL(`/media/${encodeURIComponent(storageKey)}`, this.backendUrl), { headers: { authorization: `Bearer ${this.backendToken}` }, signal });
+        if (!response.ok) { await response.body?.cancel(); throw new Error(`归档媒体不可读：${storageKey}`); }
+        const mimeType = response.headers.get("content-type")?.split(";")[0] || "application/octet-stream";
+        const dataUrl = `data:${mimeType};base64,${Buffer.from(await response.arrayBuffer()).toString("base64")}`;
+        this.mediaDataUrls.set(storageKey, dataUrl);
+        return dataUrl;
+    }
+
+    /**
+     * 附件入库一次，历史里只留 storageKey。
+     * 落库失败退回内联 base64：宁可历史大一点，也不能让模型看不到用户附件。
+     */
+    private async attachmentParts(attachments: AgentAttachment[]): Promise<LlmPart[]> {
+        const parts: LlmPart[] = [];
+        for (const item of attachments) {
+            if (!item.dataUrl) continue;
+            try {
+                const response = await fetch(new URL("/media/upload", this.backendUrl), {
+                    method: "POST",
+                    headers: { authorization: `Bearer ${this.backendToken}`, "content-type": "application/json" },
+                    body: JSON.stringify({ dataUrl: item.dataUrl, name: item.name || "attachment.png", category: "input", width: item.width ?? null, height: item.height ?? null }),
+                });
+                const payload = response.ok ? await response.json() as { media?: { storageKey?: string } } : undefined;
+                if (!response.ok) await response.body?.cancel();
+                const storageKey = payload?.media?.storageKey;
+                if (storageKey) { this.mediaDataUrls.set(storageKey, item.dataUrl); parts.push({ imageRef: storageKey }); continue; }
+            } catch { /* 落库失败按内联处理 */ }
+            parts.push({ image: item.dataUrl });
+        }
+        return parts;
+    }
+    /**
+     * 工具返回的图片：能对上 storageKey 就只留引用（字节已在媒体库里），否则退回内联 base64。
+     */
+    private toolImageParts(callName: string, input: Json, images: Json[]): LlmPart[] {
+        const parts: LlmPart[] = [];
+        for (const image of images) {
+            const dataUrl = `data:${image.mimeType};base64,${image.data}`;
+            const storageKey = callName === imageTool.name ? String(input.storageKey || "") : "";
+            if (storageKey) { this.mediaDataUrls.set(storageKey, dataUrl); parts.push({ imageRef: storageKey }); }
+            else parts.push({ image: dataUrl });
+        }
+        return parts;
+    }
+
     private summary(thread: LlmThread) { return { id: thread.id, cwd: thread.cwd, model: thread.model, preview: thread.preview, createdAt: thread.createdAt, updatedAt: thread.updatedAt, status: thread.turns.at(-1)?.status || "idle", source: "llm" }; }
     list(cwd: string, searchTerm = "") {
         return { data: this.index().map(id => this.load(id)).filter(thread => !thread.silent && !thread.archived && path.resolve(thread.cwd).toLowerCase() === path.resolve(cwd).toLowerCase() && thread.preview.toLowerCase().includes(searchTerm.toLowerCase())).sort((a, b) => b.updatedAt - a.updatedAt).map(thread => this.summary(thread)), nextCursor: null };
@@ -160,7 +213,7 @@ export class LlmAgent {
             thread = this.load(threadId, cwd);
             const provider = resolveLlmProvider(this.settings.get("ai.config"), options.model || thread.model);
             thread.model = provider.id;
-            turn = { id: crypto.randomUUID(), status: "running", messages: [{ role: "user", parts: [{ text: prompt }, ...attachments.filter(item => item.dataUrl).map(item => ({ image: item.dataUrl! }))] }], display: [] };
+            turn = { id: crypto.randomUUID(), status: "running", messages: [{ role: "user", parts: [{ text: prompt }, ...await this.attachmentParts(attachments)] }], display: [] };
             turn.display.push(this.display(thread.id, turn.id, "synthetic:user", "user", options.messageText || prompt));
             thread.turns.push(turn); thread.preview ||= options.messageText || prompt;
             this.save(thread); options.onThread?.(thread.id); options.onTurn?.(turn.id); event("turn.started");
@@ -176,7 +229,7 @@ export class LlmAgent {
             while (true) {
                 controller.signal.throwIfAborted();
                 const itemId = crypto.randomUUID();
-                const reply = await requestLlm(provider, instructions, llmHistoryForProvider(thread.turns.flatMap(turn => turn.messages), provider), tools, controller.signal, delta => event("item.updated", { item: { id: itemId, type: "agent_message", delta, model: provider.name } }), options.effort);
+                const reply = await requestLlm(provider, instructions, llmHistoryForProvider(await expandImageRefs(thread.turns.flatMap(turn => turn.messages), key => this.dataUrlFor(key, controller.signal)), provider), tools, controller.signal, delta => event("item.updated", { item: { id: itemId, type: "agent_message", delta, model: provider.name } }), options.effort);
                 controller.signal.throwIfAborted();
                 const message = reply.message;
                 turn.messages.push(message);
@@ -185,14 +238,16 @@ export class LlmAgent {
                 if (text) { turn.display.push(this.display(thread.id, turn.id, itemId, "assistant", text, provider.name)); event("item.completed", { item: { id: itemId, type: "agent_message", text, model: provider.name } }); }
                 this.save(thread); // Persist intent before executing any tool, including paid generation.
                 if (!message.calls?.length) break;
-                const toolImages: Array<{ image: string }> = [];
+                const toolImages: LlmPart[] = [];
                 for (const call of message.calls) {
                     controller.signal.throwIfAborted();
                     const item: Json = { id: call.id, type: "mcp_tool_call", server: "infinite-canvas", tool: call.name, arguments: call.arguments, status: "in_progress" };
                     event("item.started", { item });
                     let result: unknown;
+                    // `input` 提到 try 之外：工具图片要按它的 storageKey 决定「只留引用」还是内联 base64。
+                    let input: Json = {};
                     try {
-                        const input = JSON.parse(call.arguments);
+                        input = JSON.parse(call.arguments);
                         if (call.name === "director_subagent") {
                             input.parentThreadId = thread.id;
                             if (input.action === "spawn") { input.parentTurnId = turn.id; input.model ||= thread.model; input.effort ||= options.effort; }
@@ -222,7 +277,7 @@ export class LlmAgent {
                     const images = content.filter(item => item.type === "image" && item.data && item.mimeType);
                     const modelResult = images.length ? { ...toolResult, content: content.map(item => item.type === "image" ? { type: "text", text: "工具图片已作为下一条视觉输入传入" } : item) } : result;
                     turn.messages.push({ role: "tool", callId: call.id, callName: call.name, parts: [{ text: JSON.stringify(modelResult) }] });
-                    toolImages.push(...images.map(item => ({ image: `data:${item.mimeType};base64,${item.data}` })));
+                    toolImages.push(...this.toolImageParts(call.name, input, images));
                     const completed = { ...item, status: toolResult?.isError ? "failed" : "completed", result: modelResult };
                     turn.display.push(this.display(thread.id, turn.id, call.id, "tool", call.name, call.name, completed));
                     this.save(thread); event("item.completed", { item: completed });
@@ -273,7 +328,7 @@ export class LlmAgent {
         try {
             this.save(thread); request.onTurn?.(turn.id);
             while (true) {
-                const reply = await requestLlm(provider, `按用户提供的正式合同返回结构化结果；需要先读取 Skill 文件。只读文件，不执行命令，不提交媒体、不写业务数据。最终回复必须是严格 JSON，不使用代码块。结果必须符合 JSON Schema：\n${JSON.stringify(request.schema)}`, llmHistoryForProvider(thread.turns.flatMap(turn => turn.messages), provider), [readTool], controller.signal, undefined, request.effort);
+                const reply = await requestLlm(provider, `按用户提供的正式合同返回结构化结果；需要先读取 Skill 文件。只读文件，不执行命令，不提交媒体、不写业务数据。最终回复必须是严格 JSON，不使用代码块。结果必须符合 JSON Schema：\n${JSON.stringify(request.schema)}`, llmHistoryForProvider(await expandImageRefs(thread.turns.flatMap(turn => turn.messages), key => this.dataUrlFor(key)), provider), [readTool], controller.signal, undefined, request.effort);
                 controller.signal.throwIfAborted(); turn.messages.push(reply.message); this.save(thread);
                 if (!reply.message.calls?.length) {
                     const output = parseOutput(textOf(reply.message));

@@ -85,6 +85,20 @@ function detachReferences(value: unknown, assetIds: Set<string>, subjectIds: Set
     return result;
 }
 
+/** Keyframe subject→binding maps are records of id arrays, not reference fields; drop orphaned ids. */
+function stripRemovedPictureBindingIds(source: Record<string, any>, removed: Set<string>) {
+    if (!removed.size) return;
+    for (const shot of rows(source.shots)) for (const frame of rows(shot.keyframes)) {
+        const map = frame.subjectPictureBindingIds;
+        if (!map || typeof map !== "object" || Array.isArray(map)) continue;
+        for (const [subjectId, ids] of Object.entries(map as Record<string, unknown>)) {
+            if (!Array.isArray(ids)) continue;
+            const kept = ids.filter(id => !removed.has(String(id)));
+            if (kept.length) map[subjectId] = kept; else delete map[subjectId];
+        }
+    }
+}
+
 export function createManualDirectorAsset(director: DirectorProduction, operation: Extract<ProductionOperation, { type: "create_manual_director_asset" }>, owner: { kind: "episode" | "canvas"; id: string }): void {
     const source = director.source as Record<string, any>;
     const plan = { ...operation.assetPlan, created_by: "manual" } as Row;
@@ -149,7 +163,13 @@ export function deleteDirectorAsset(director: DirectorProduction, assetId: strin
         ? allSubjects.filter(subject => subject.entityRef?.kind === "asset" && String(subject.entityRef?.id || "") === id)
         : [];
     const subjectIds = new Set(relatedSubjects.map(subject => String(subject.id || "")));
-    const bindingIds = new Set(relatedSubjects.flatMap(subject => rows(subject.pictureBindings).map(binding => String(binding.id || ""))));
+    // Character and scene subjects stay registered on purpose, but the picture bindings that point
+    // at this asset must disappear from the Subject *and* from every Shot/keyframe that selected
+    // them: a binding id left in `pictureBindingIds` has no owner any more and blocks the whole
+    // production contract, which makes every later edit (including "移出本集") fail validation.
+    const bindingIds = new Set(allSubjects.flatMap(subject => rows(subject.pictureBindings)
+        .filter(binding => String(binding.assetId || binding.asset_id || "") === id)
+        .map(binding => String(binding.id || ""))).filter(Boolean));
     const subjectAndBindingIds = new Set([...subjectIds, ...bindingIds]);
     const assetIds = new Set([id]);
     const noEntityIds = new Set<string>();
@@ -185,6 +205,7 @@ export function deleteDirectorAsset(director: DirectorProduction, assetId: strin
         sourceWithoutAsset.ledger = nextLedger;
     }
     const nextSource = detachReferences(sourceWithoutAsset, assetIds, subjectAndBindingIds, noEntityIds, removedFacts) as Record<string, any>;
+    stripRemovedPictureBindingIds(nextSource, bindingIds);
     director.source = nextSource as DirectorProduction["source"];
     const nextAssets = Object.fromEntries(Object.entries(director.assets || {})
         .filter(([key]) => key !== id)

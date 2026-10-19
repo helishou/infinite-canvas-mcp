@@ -10,8 +10,9 @@ export function imageSourceStatus(project: CanvasProject, nodeId: string, source
 }
 
 /** Keep character images explicitly linked to a smart image node on its latest successful output. */
-export function linkedCharacterImageUpdates(project: CanvasProject, sourceNodeId: string, media: Record<string, unknown>) {
-    if (!media.url) return [] as CanvasOperation[];
+export function linkedCharacterImageUpdates(project: CanvasProject, sourceNodeId: string, outputs: Record<string, unknown>[]) {
+    const media = outputs.filter(output => output.url).at(-1);
+    if (!media) return [] as CanvasOperation[];
     const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, any>> : [];
     return nodes.flatMap((node): CanvasOperation[] => {
         if (node.type !== "character" || !Array.isArray(node.metadata?.characterImages)) return [];

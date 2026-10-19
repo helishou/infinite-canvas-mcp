@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { clipInputOperations } from "./clip-inputs.js";
+import { clipInputOperations, reconcileCharacterGroupOutfitSelection, remapPromptPicturesByBinding } from "./clip-inputs.js";
 
 const OWNER = { kind: "episode" as const, id: "EP" };
 
@@ -48,6 +48,51 @@ const project = (...nodes: Array<Record<string, any>>) => ({ id: "CANVAS", revis
 const kinds = (operations: Array<Record<string, any>>, type: string) => operations.filter(operation => operation.type === type);
 const deletes = (operations: Array<Record<string, any>>) => kinds(operations, "delete_h3_segment").map(operation => String(operation.segmentId));
 const adds = (operations: Array<Record<string, any>>) => kinds(operations, "add_h3_segment").map(operation => `${operation.nodeId}:${operation.segment.id}`);
+
+test("formal prompt Picture ordinals rebase by binding identity and reject changed reference sets", () => {
+    const binding = (id: string, sourceNodeId: string, storageKey: string) => ({
+        id, sourceNodeId, storageKey, mediaType: "image", enabled: true,
+    });
+    const compiled = [binding("scene", "scene-node", "image:room"), binding("shenyan", "shenyan-node", "image:shenyan")];
+    const reordered = [...compiled].reverse();
+    const prompt = "<Subject 1> Shenyan <Picture 2>; <Subject 3> room <Picture 1>.";
+    assert.equal(remapPromptPicturesByBinding(prompt, compiled, reordered),
+        "<Subject 1> Shenyan <Picture 1>; <Subject 3> room <Picture 2>.");
+    assert.equal(remapPromptPicturesByBinding(prompt, compiled, compiled.slice(1)), undefined,
+        "a deleted reference must not produce a partially rebound Prompt");
+    const formalOrder = [binding("shenyan-source", "shenyan-node", "image:shenyan"), binding("hongxiao-source", "hongxiao-node", "image:hongxiao"), binding("scene-source", "scene-node", "image:room")];
+    const effectiveH3Order = [
+        binding("scene-binding", "scene-node", "image:room"),
+        binding("shenyan-group-binding", "shenyan-node", "image:shenyan"),
+        binding("hongxiao-group-binding", "hongxiao-node", "image:hongxiao"),
+    ];
+    assert.equal(remapPromptPicturesByBinding("Shenyan <Picture 1>; Hongxiao <Picture 2>; scene <Picture 3>.", formalOrder, effectiveH3Order),
+        "Shenyan <Picture 2>; Hongxiao <Picture 3>; scene <Picture 1>.",
+        "the final H3 input order includes standalone references before derived character-group images");
+});
+
+test("legacy bindings only match by source node plus media identity when unique", () => {
+    const legacy = [{ sourceNodeId: "person", storageKey: "image:portrait", mediaType: "image" }];
+    const current = [{ id: "new-id", sourceNodeId: "person", storageKey: "image:portrait", mediaType: "image" }];
+    assert.equal(remapPromptPicturesByBinding("<Picture 1>", legacy, current), "<Picture 1>");
+    assert.equal(remapPromptPicturesByBinding("<Picture 1>", legacy, [
+        ...current, { id: "duplicate", sourceNodeId: "person", storageKey: "image:portrait", mediaType: "image" },
+    ]), undefined);
+    assert.equal(remapPromptPicturesByBinding("<Picture 1>", legacy, [{ ...current[0], sourceNodeId: "other" }]), undefined);
+});
+
+test("formal Subject picture selection disables every unselected derived character outfit", () => {
+    const groups = {
+        red: { id: "red", characterNodeId: "red-node", subjectId: "SUB-RED", outfitEnabled: true, outfits: [
+            { id: "white", name: "white", storageKey: "image:white", enabled: true },
+            { id: "nude", name: "nude", storageKey: "image:nude", enabled: true },
+        ] },
+    };
+    const bindings = [{ id: "white-binding", assetId: "white-asset", groupId: "red", outfitId: "white", sourceNodeId: "red-node", storageKey: "image:white", mediaType: "image", enabled: true }];
+    const projected = reconcileCharacterGroupOutfitSelection(groups, bindings) as typeof groups;
+    assert.deepEqual(projected.red.outfits.map(outfit => [outfit.id, outfit.enabled]), [["white", true], ["nude", false]]);
+    assert.equal(projected.red.outfitEnabled, true);
+});
 
 test("a full projection inserts every current Clip, including rows lost earlier", () => {
     const missing = project(h3Node("H3-A", "SC-A", []), h3Node("H3-B", "SC-B", [projectedClip("clip-b", "CLIP_B")]));

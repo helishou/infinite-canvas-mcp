@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { canonicalProduction, directorProductionSchema, productionSceneEntries, type DirectorProduction, type ProductionEdit } from "@basketikun/canvas-agent/drama/production-contract";
 import { currentCompilationArtifact, compilationHash } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
+import { defaultDirectorBoundary } from "./continuity-defaults.js";
 
 export const rows = (value: unknown): Record<string, any>[] => Array.isArray(value) ? value : [];
 function reject(code: string, path: string, message: string): never {
@@ -115,7 +116,7 @@ export function repartitionDirectorClips(d: DirectorProduction, op: { shotIds: s
     const oldEdges = new Map(d.boundaries.map(edge => [`${edge.from}\0${edge.to}`, edge]));
     const newBoundaries = replacement.slice(0, -1).map((segment, index) => {
         const from = String(segment.id), to = String(replacement[index + 1].id), old = oldEdges.get(`${from}\0${to}`);
-        return old || { from, to, tailFrame: false, motionContext: false, reason: "New Clip partition boundary; continuity mode requires explicit review." };
+        return old || defaultDirectorBoundary(d, from, to, { destination: replacement[index + 1] });
     });
     const next = structuredClone(d);
     next.source.segments = replacement;

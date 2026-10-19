@@ -12,7 +12,7 @@ import { EpisodeProductionRunner } from "./production-runner.js";
 import { NativeProductionGeneration } from "./native-generation.js";
 import { BackendEventBus } from "../events.js";
 import { resolveH3Runtime } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
-import { directorHash, promptHash } from "./director.js";
+import { directorHash, projectDirector, promptHash } from "./director.js";
 import { emptyEpisodeProduction, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import { compilationScopeInput, currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { effectiveTargetInput, inputHash } from "./canvas-inputs.js";
@@ -343,6 +343,36 @@ test("changing a script scene environment updates its shots atomically and rejec
     assert.throws(() => service.edit("ep", { operationId: "reject-cross-scene-move", expectedRevision: withCrossScene.revision, ops: [{ type: "set_director_scene_environment", sceneId: "scene-block", environmentId: "scene" }] }), /会让 Clip .*跨场景/);
 });
 
+test("environment source patches persist an existing scene-registry row in a v2 production", t => {
+    const { service } = fixture(t);
+    const director = doc(2) as any;
+    director.source.scene_registry = [];
+    director.sourceHash = directorHash(director.source);
+    const seeded = service.edit("ep", { operationId: "seed-environment-source", expectedRevision: service.get("ep").revision, ops: [{ type: "set_director_production", director }] });
+
+    const updated = service.edit("ep", { operationId: "patch-existing-environment", expectedRevision: seeded.revision, ops: [{
+        type: "patch_director_source", entity: "environment", id: "SCENE_HUT",
+        patch: { description: "室内空间图和方位关系。", prompt_description: "南侧柴门，西侧药桌，中央承重柱，东侧草席和药架。" },
+    }] });
+
+    assert.deepEqual((updated.draft.director!.source.scene_registry as any[])[0], {
+        id: "SCENE_HUT", description: "室内空间图和方位关系。",
+        prompt_description: "南侧柴门，西侧药桌，中央承重柱，东侧草席和药架。",
+    });
+    assert.equal(updated.draft.director!.sourceHash, directorHash(updated.draft.director!.source));
+});
+
+test("projectDirector rebuilds v2 Clips when the stored projection is absent", t => {
+    const data = emptyEpisodeProduction() as any;
+    data.director = doc(2);
+    delete data.clipGroups;
+
+    projectDirector(data, false);
+
+    assert.deepEqual(data.clipGroups.map((group: any) => group.id), ["seg0", "seg1"]);
+    assert.deepEqual(data.clipGroups.map((group: any) => group.nodeId), [null, null]);
+});
+
 test("scene script-block patches replace the structured blocks with full-array semantics", t => {
     const { service } = fixture(t);
     const d = doc(0);
@@ -374,9 +404,10 @@ test("scene script-block patches replace the structured blocks with full-array s
     assert.equal((empty.draft.director!.source.script_scenes as any[])[0].blocks.length, 0);
 });
 
-test("source revisions retire stale receipts, preserve drafts and prohibit projection-only edits", t => {
+test("source revisions retire stale receipts, preserve drafts and enforce Clip integrity", t => {
     const { service } = fixture(t); const d = doc(); publish(service, d);
     const rev = service.get("ep").revision;
+    const publishedSourceHash = service.get("ep").published!.director!.sourceHash;
     const acceptedStale = service.edit("ep", { operationId: "bad", expectedRevision: rev - 1, ops: [{ type: "set_director_production", director: d }] }); // 乐观锁放行：过期 revision 不再拦截，写入落地并推进版本
     assert.equal(acceptedStale.revision, rev + 1);
     const changed = structuredClone(d); changed.source.newFact = "changed"; changed.sourceHash = directorHash(changed.source);
@@ -385,12 +416,55 @@ test("source revisions retire stale receipts, preserve drafts and prohibit proje
     assert.ok(saved.draft.director!.artifacts.every(artifact => artifact.status === "stale"));
     assert.deepEqual(saved.draft.director!.artifacts.map(artifact => artifact.receipt), d.artifacts.map(artifact => artifact.receipt), "old receipts remain historical evidence, never rewritten to approve new input");
     assert.ok(saved.draft.director!.artifacts.every(artifact => !currentCompilationArtifact(saved.draft.director!, artifact)));
-    assert.equal(saved.published!.director!.sourceHash, d.sourceHash, "saving a new source never rewrites the published version");
+    assert.equal(saved.published!.director!.sourceHash, publishedSourceHash, "saving a new source never rewrites the published version");
     changed.artifacts.forEach(a => a.status = "stale"); changed.modules.story = { status: "partial", cursor: "paragraph-2", evidence: [], unresolved: ["continue"] };
     const input = { operationId: "partial", expectedRevision: saved.revision, ops: [{ type: "set_director_production", director: changed }] };
     service.edit("ep", input); assert.equal(service.edit("ep", input).replayed, true);
-    assert.equal(service.get("ep").draft.director!.modules.story?.cursor, "paragraph-2");
-    assert.throws(() => service.edit("ep", { operationId: "projection", expectedRevision: service.get("ep").revision, ops: [{ type: "delete_shot", id: "s0" }] }), /正式源/);
+    assert.notEqual(service.get("ep").draft.director!.modules.story?.cursor, "paragraph-2", "a source replacement must not import caller-owned runtime module state");
+    assert.throws(() => service.edit("ep", { operationId: "projection", expectedRevision: service.get("ep").revision, ops: [{ type: "delete_shot", id: "s0" }] }), /SHOT_LAST_IN_CLIP/);
+});
+
+test("production operation identity survives pruning its heavyweight replay receipt", t => {
+    const { service, db } = fixture(t);
+    const initial = publish(service, doc());
+    const request = { operationId: "durable-operation-key", expectedRevision: initial.revision,
+        ops: [{ type: "set_director_brief" as const, brief: "Durable edit" }] };
+    const committed = service.edit("ep", request);
+    const key = db.db.prepare("SELECT request_hash, committed_revision FROM production_operation_keys WHERE owner_kind='episode' AND owner_id='ep' AND operation_id=?")
+        .get(request.operationId) as { request_hash: string; committed_revision: number } | undefined;
+    assert.equal(key?.committed_revision, committed.revision);
+    db.db.prepare("DELETE FROM episode_production_operations WHERE operation_id=?").run(request.operationId);
+    assert.throws(() => service.edit("ep", request), { code: "OPERATION_RECEIPT_UNAVAILABLE" });
+    assert.equal(service.get("ep").revision, committed.revision, "a pruned receipt must not allow the source mutation to run twice");
+});
+
+test("production source tombstones restore stale edits and protect a revived generation from an old delete", t => {
+    const { service, db } = fixture(t);
+    const source = doc();
+    source.source.asset_plan = [{ id: "PROP_LIFE", asset_id: "PROP_LIFE", asset_name: "遗物", name: "遗物", kind: "prop", description: "original", depends_on: [] }];
+    source.sourceHash = directorHash(source.source);
+    publish(service, source);
+    const baseRevision = service.get("ep").revision;
+    service.edit("ep", { operationId: "delete-lifecycle-asset", expectedRevision: baseRevision,
+        ops: [{ type: "delete_director_asset", id: "PROP_LIFE", confirmed: true }] });
+    service.edit("ep", { operationId: "revive-lifecycle-asset", expectedRevision: baseRevision,
+        ops: [{ type: "patch_director_source", entity: "asset", id: "PROP_LIFE", patch: { description: "edited after delete" } }] });
+    const current = service.get("ep");
+    let plan = (current.draft.director!.source.asset_plan as Array<Record<string, unknown>>).find(item => item.id === "PROP_LIFE");
+    assert.equal(plan?.description, "edited after delete");
+    assert.equal(plan?.asset_name, "遗物", "resurrection preserves the deletion snapshot before applying the late patch");
+    service.edit("ep", { operationId: "old-generation-delete", expectedRevision: baseRevision,
+        ops: [{ type: "delete_director_asset", id: "PROP_LIFE", confirmed: true }] });
+    plan = (service.get("ep").draft.director!.source.asset_plan as Array<Record<string, unknown>>).find(item => item.id === "PROP_LIFE");
+    assert.equal(plan?.description, "edited after delete", "the old delete cannot remove the revived generation");
+    const pruneBase = service.get("ep").revision;
+    service.edit("ep", { operationId: "delete-before-prune", expectedRevision: pruneBase,
+        ops: [{ type: "delete_director_asset", id: "PROP_LIFE", confirmed: true }] });
+    db.db.prepare("DELETE FROM production_source_lifecycle_events WHERE owner_kind='episode' AND owner_id='ep' AND revision<=?").run(pruneBase);
+    assert.throws(() => service.edit("ep", { operationId: "edit-after-prune", expectedRevision: pruneBase,
+        ops: [{ type: "patch_director_source", entity: "asset", id: "PROP_LIFE", patch: { description: "must stay local" } }] }),
+        { code: "BASE_HISTORY_UNAVAILABLE" });
+    assert.equal((service.get("ep").draft.director!.source.asset_plan as Array<Record<string, unknown>>).some(item => item.id === "PROP_LIFE"), false);
 });
 
 test("multi-shot Segment is preserved, invalid windows remain saved but blocked, and legacy fixtures are rejected", t => {

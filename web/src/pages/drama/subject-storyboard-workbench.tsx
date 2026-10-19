@@ -1,9 +1,10 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Alert, App, Button, Dropdown, Input, Modal, Progress, Radio, Select, Tag } from "antd";
-import { ArrowLeft, ArrowRight, ArrowUpRight, CheckCircle2, ChevronDown, Circle, CircleAlert, Clapperboard, Database, GripHorizontal, Image as ImageIcon, Layers3, LoaderCircle, Locate, Search, WandSparkles } from "lucide-react";
+import { ArrowLeft, ArrowRight, ArrowUpRight, CheckCircle2, ChevronDown, Circle, CircleAlert, Database, GripHorizontal, Image as ImageIcon, LoaderCircle, Locate, Play, Search, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { isSubjectPromptAssembly, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
+import { currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { subjectShotWindows, subjectStateProjection } from "@basketikun/canvas-agent/drama/subject-assembly";
 import { backendMediaUrl, fetchProductionWorkbench, type EpisodeProduction, type ProductionCompilationDiagnostic, type ProductionTarget } from "@/services/backend-api";
 import { records, formatSeconds } from "./director-display";
@@ -12,6 +13,7 @@ import { productionSegmentRuntimeMatches } from "@/lib/production-source";
 import { translateCompiledH3Prompts, type H3PromptBatchProgress } from "@/services/api/translation";
 import { continuityPresentation } from "./continuity-presentation";
 import { currentClipRefreshes } from "./production-refresh-display";
+import { compileElapsedSeconds, isCompileActive, useCompileClock } from "./compile-progress";
 import { ReferenceNodeLink } from "./reference-node-link";
 import { useReferenceResultVersion } from "./use-reference-result-version";
 import { ShotOperations, type ShotOperation } from "./shot-operations";
@@ -20,6 +22,13 @@ import type { DirectorWorkspace } from "./director-panel";
 import { storyboardArtifactState, storyboardDurationFrames, storyboardPeople, storyboardReportedState, storyboardScenes, storyboardSceneShotIds } from "./storyboard-display";
 import { boundaryCounts, clipBoundaryAutoScrollDelta, clipBoundaryPositions, clipDurationSeconds, clipProfileKey, clipShotIds, createClipBoundaryPointerHandlers, materializeClipPartition, nearestBoundaryCount, outsideClipWindow, partitionAt } from "./clip-boundary";
 
+/** 单独计时的最小节点：只有它每秒重渲染，避免把整条时间线一起带动。 */
+function CompileElapsed({ createdAt }: { createdAt?: string }) {
+    const now = useCompileClock(Boolean(createdAt));
+    const seconds = compileElapsedSeconds(createdAt, now);
+    return seconds === undefined ? null : <span className="text-muted-foreground"> · {seconds}s</span>;
+}
+
 /** 工作包读取缓存（LRU）：同一镜头、同一源稿版本、同一参考结果版本直接命中，避免反复「正在读取镜头工作包」。 */
 const workbenchCache = new Map<string, Record<string, any>>();
 
@@ -27,6 +36,7 @@ export type StoryboardViewMemory = { current?: { selectedId: string; sceneFilter
 
 type Props = {
     director: DirectorProduction; production: EpisodeProduction; owner: ProductionTarget; initialShotId?: string;
+    activeView: "shots" | "clips";
     viewMemory?: StoryboardViewMemory;
     canvasId: string; onLocateClip?: (id: string) => void;
     canvasNodes: Array<{ id: string; title?: string; type?: string; metadata?: Record<string, unknown> }>;
@@ -53,13 +63,17 @@ type Props = {
     busy?: boolean; compileBusy?: boolean; compilePending?: boolean; compileError?: string; compileNotice?: string; compileDiagnostics?: ProductionCompilationDiagnostic[];
     compileTargets?: { sourceHash: string; engineRuntimeId?: string; compilerHash?: string; items: Array<{ targetId: string; status: string }>; notReadyTargetIds?: string[] }; onCompile?: (sceneId?: string, targetId?: string) => void;
     onApplyTranslatedPrompts?: (items: Array<{ targetId: string; nodeId: string; segmentId: string; sourcePrompt: string; expectedCanvasPrompt: string; translatedPrompt: string }>) => Promise<void>;
+    autoTranslateCompilation?: { id: string; targetIds: string[] } | null;
     onClip: (id: string) => void;
+    /** 编译就绪后直接提交该 Clip 的生成，不再要求切到「生成」工作区。 */
+    onGenerateClip?: (clipId: string) => void;
+    runStartPending?: boolean;
     onDiscuss: (shotId?: string, instruction?: string) => void;
     /** 跳转到指定工作区（参考素材点开进素材库）。 */
     onNavigate: (workspace: DirectorWorkspace, target?: { kind: string; id: string }) => void;
 };
 
-type TranslationProgressDetail = H3PromptBatchProgress & { phase: "preparing" | "translating" | "writing" | "complete" | "failed" };
+type TranslationProgressDetail = H3PromptBatchProgress & { phase: "preparing" | "translating" | "writing" | "complete" | "failed"; writingIds: string[]; writtenIds: string[] };
 
 function compileDiagnosticTaskContext(diagnostics: ProductionCompilationDiagnostic[]) {
     type Group = { severity: string; code: string; path: string; message: string; blocksCompilation?: boolean; blockingActions: string[]; count: number; targetIds: Set<string>; shotIds: Set<string> };
@@ -100,7 +114,7 @@ function compileDiagnosticTaskContext(diagnostics: ProductionCompilationDiagnost
 }
 
 /** The v2 authoring surface: stable Shots, derived Clip packaging, and compiler evidence. */
-export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, viewMemory, canvasNodes, canvasId, onLocateClip, renderEditor, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onH3Boundary, onEditShot, onSaveShotPatch, onUpdateLegacyShotReferences, shotKeyframe, shotDrafts = {}, busy, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets, onCompile, onApplyTranslatedPrompts, onClip, onDiscuss, onNavigate }: Props) {
+export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, activeView, viewMemory, canvasNodes, canvasId, onLocateClip, renderEditor, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onH3Boundary, onEditShot, onSaveShotPatch, onUpdateLegacyShotReferences, shotKeyframe, shotDrafts = {}, busy, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets, onCompile, onApplyTranslatedPrompts, autoTranslateCompilation, onClip, onGenerateClip, runStartPending = false, onDiscuss, onNavigate }: Props) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const source = director.source as Record<string, any>;
@@ -119,6 +133,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const [translationError, setTranslationError] = useState("");
     const [translatingPrompts, setTranslatingPrompts] = useState(false);
     const translatingPromptsRef = useRef(false);
+    const autoTranslateHandledRef = useRef("");
     const [search, setSearch] = useState(viewMemory?.current?.search || "");
     const [sceneFilter, setSceneFilter] = useState(() => {
         if (initialShotId) return "";
@@ -131,7 +146,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const selectShot = (id: string) => { setSelectedId(id); setMobileEditing(true); };
     const sceneDirectory = useMemo(() => storyboardScenes(source), [source, director.sourceHash]);
     const sceneIds = storyboardSceneShotIds(source, sceneFilter);
-    const [view, setView] = useState<"shots" | "clips">(viewMemory?.current?.view || "shots");
+    const view = activeView;
     const [workbench, setWorkbench] = useState<Record<string, any>>();
     const [workbenchId, setWorkbenchId] = useState("");
     const [continuityFactDrafts, setContinuityFactDrafts] = useState<Record<string, Record<string, string[]>>>({});
@@ -156,7 +171,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const clipIndex = clips.findIndex(item => item.id === clip?.id);
     const number = shots.findIndex(item => String(item.id) === activeId) + 1;
     const title = (shot: Record<string, any>) => String(operationShots.find(item => item.id === shot.id)?.title || shot.title || t("director.studio.shotNumber", { number: shots.findIndex(item => item.id === shot.id) + 1 }));
-    const framing = (shot: Record<string, any>) => ["EWS", "WS", "FS", "MS", "MCU", "CU", "BSCU", "ECU"].includes(shot.camera?.framing) ? t("director.atomic.framingName." + shot.camera.framing) : shot.camera?.framing || "—";
+    const framing = (shot: Record<string, any>) => ["EWS", "WS", "FS", "MS", "MCU", "CU", "ECU"].includes(shot.camera?.framing) ? t("director.atomic.framingName." + shot.camera.framing) : shot.camera?.framing || "—";
     const duration = (shot: Record<string, any>) => storyboardDurationFrames(shot) / fps;
     // 全片时间轴：该镜头在全片成片中的起止秒（前面所有镜头时长累加，按 story_order 顺序）。
     const filmRanges = (() => { const ranges = new Map<string, { start: number; end: number }>(); let running = 0; for (const shot of shots) { const frames = storyboardDurationFrames(shot); ranges.set(String(shot.id), { start: running / fps, end: (running + frames) / fps }); running += frames; } return ranges; })();
@@ -214,6 +229,10 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     }, [readId, readView, ownerKey, director.sourceHash, production.revision, referenceVersion, referenceEvents, retry, t]);
     const artifact = director.artifacts.find(item => item.kind === "h3" && item.targetId === clip?.id);
     const currentRefreshes = currentClipRefreshes(production.clipRefreshes || [], clips.map(item => String(item.id)), director.sourceHash);
+    const activeRefreshJob = (clipId: string) => {
+        const job = currentRefreshes.find(item => String(item.segmentId) === clipId);
+        return job && isCompileActive(job.status) ? job : undefined;
+    };
     const refreshCandidate = currentRefreshes.find(item => item.segmentId === clip?.id);
     const compiled = Boolean(workbenchReadKey.current === expectedReadKey && artifact && records(subjectAssembly ? workbench?.runtime?.directorArtifacts : workbench?.directorReferences?.compiled).some(item => item.id === artifact.id && item.sha256 === artifact.sha256 && item.current === true && item.status === "ready"));
     const compileBasisMatches = compileTargets?.sourceHash === director.sourceHash
@@ -283,14 +302,10 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     // 起止状态（镜头开始时 / 镜头结束时）：从「画面与摄影」挪进来，与台账状态、边界开关同区展示。
     const shotStateFields = selected ? renderShotState?.(selected) : undefined;
     const statusLabel = refresh ? t("director.workspace.clipRefreshStatus." + refresh.status, { segment: t("director.studio.clipNumber", { number: clipIndex + 1 }) })
-        : t(currentCompiled ? "director.atomic.compiled" : "director.atomic.pendingCompile");
+        : t(currentCompiled ? "director.atomic.stateReady" : "director.atomic.statePending");
     const compiledArtifactMatchesCanvas = (clipId: string, artifact: DirectorProduction["artifacts"][number] | undefined) => {
-        const receipt = artifact?.receipt as Record<string, any> | undefined;
-        const compiledEngine = receipt?.engine as Record<string, unknown> | undefined;
         if (!artifact || artifact.kind !== "h3" || artifact.status !== "ready"
-            || artifact.sourceHash !== director.sourceHash || receipt?.sourceHash !== director.sourceHash
-            || String(compiledEngine?.compilerHash || "") !== String(director.engine.compilerHash || "")
-            || receipt.promptHash !== artifact.sha256) return false;
+            || !currentCompilationArtifact(director, artifact)) return false;
         const matches = productionSegmentRuntimeMatches(canvasNodes as any, clipId);
         return matches.length === 1 && /^minimax|^smart-minimax/i.test(String(matches[0].node.type || ""));
     };
@@ -318,27 +333,37 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
         const readyByPromptMatch = compiledArtifactMatchesCanvas(clipId, artifact);
         const artifactDiagnostics = artifact?.receipt?.diagnostics as Record<string, unknown> | undefined;
         const hasPersistedBlockers = Array.isArray(artifactDiagnostics?.blockers) && artifactDiagnostics.blockers.length > 0;
-        if (job && !(readyByLatestReceipt || status === "ready" || readyByPromptMatch) ) return { label: t("director.atomic.clipRefreshPhase." + job.status), color: ["failed", "blocked"].includes(job.status) ? "red" : "processing", tone: ["failed", "blocked"].includes(job.status) ? "blocked" as const : "live" as const };
-        if ((notReadyByLatestReceipt || hasPersistedBlockers) && !readyByPromptMatch) return { label: t("director.atomic.compileTargetError"), color: "red", tone: "blocked" as const, reason: compileStaleReason(artifact, projection) };
-        if (status === "pending") return { label: t("director.atomic.pendingCompile"), color: undefined, tone: "pending" as const };
-        if (status === "recorded" && !readyByPromptMatch) return { label: t("director.atomic.recordedCompile"), color: undefined, tone: "recorded" as const };
+        if (job && !(readyByLatestReceipt || status === "ready" || readyByPromptMatch) ) {
+            const active = isCompileActive(job.status);
+            return { label: t(active ? "director.atomic.stateCompiling" : "director.atomic.stateBlocked"), color: active ? "processing" : "red",
+                tone: active ? "live" as const : "blocked" as const, reason: t("director.atomic.clipRefreshPhase." + job.status) };
+        }
+        if ((notReadyByLatestReceipt || hasPersistedBlockers) && !readyByPromptMatch) return { label: t("director.atomic.stateBlocked"), color: "red", tone: "blocked" as const, reason: compileStaleReason(artifact, projection) };
+        if (status === "pending") return { label: t("director.atomic.statePending"), color: undefined, tone: "pending" as const };
+        if (status === "recorded" && !readyByPromptMatch) return { label: t("director.atomic.stateBlocked"), color: undefined, tone: "recorded" as const };
         return status === "ready" || readyByLatestReceipt || readyByPromptMatch
-            ? { label: t("director.atomic.compiled"), color: "green", tone: "ready" as const }
-            : { label: t("director.atomic.compileStale"), color: "orange", tone: "stale" as const, reason: compileStaleReason(artifact, projection) };
+            ? { label: t("director.atomic.stateReady"), color: "green", tone: "ready" as const }
+            : { label: t("director.atomic.stateBlocked"), color: "orange", tone: "stale" as const, reason: compileStaleReason(artifact, projection) };
     };
     const clipStates = clips.map(clip => ({ id: String(clip.id), ...clipCompileState(String(clip.id)) }));
     const visibleClipStates = !sceneFilter ? clipStates : clipStates.filter(item => clips.find(clip => String(clip.id) === item.id)?.shot_ids?.some((id: string) => directSceneShotIds.has(String(id))));
     const sceneCompileAvailable = !sceneFilter || sceneDirectory.scenes.some(scene => scene.id === sceneFilter);
     const compileCounts = { ready: visibleClipStates.filter(item => item.tone === "ready").length, pending: visibleClipStates.filter(item => item.tone === "pending").length, stale: visibleClipStates.filter(item => item.tone === "stale").length, running: visibleClipStates.filter(item => item.tone === "live").length, recorded: visibleClipStates.filter(item => item.tone === "recorded").length, blocked: visibleClipStates.filter(item => item.tone === "blocked").length };
     const canTranslateCompiledPrompts = Boolean(onApplyTranslatedPrompts && visibleClipStates.length && visibleClipStates.every(item => item.tone === "ready") && !busy && !compileBusy && !compilePending && !translatingPrompts);
-    const translateCompiledPrompts = async () => {
-        if (translatingPromptsRef.current || !canTranslateCompiledPrompts || !onApplyTranslatedPrompts) return;
+    const translateCompiledPrompts = async (requestedTargetIds?: string[]) => {
+        const translationClipStates = requestedTargetIds
+            ? clipStates.filter(item => requestedTargetIds.includes(item.id))
+            : visibleClipStates;
+        if (translatingPromptsRef.current || !onApplyTranslatedPrompts || !translationClipStates.length
+            || requestedTargetIds && translationClipStates.length !== new Set(requestedTargetIds).size
+            || translationClipStates.some(item => item.tone !== "ready")
+            || busy || compileBusy || compilePending) return;
         translatingPromptsRef.current = true;
         setTranslatingPrompts(true);
         setTranslationError("");
-        setTranslationProgress({ phase: "preparing", completed: 0, total: visibleClipStates.length, completedIds: [], cachedIds: [], inProgressIds: [], failedIds: [] });
+        setTranslationProgress({ phase: "preparing", completed: 0, total: translationClipStates.length, completedIds: [], cachedIds: [], inProgressIds: [], failedIds: [], writingIds: [], writtenIds: [] });
         try {
-            const sources = visibleClipStates.map(item => {
+            const sources = translationClipStates.map(item => {
                 const matches = productionSegmentRuntimeMatches(canvasNodes as any, item.id);
                 if (matches.length !== 1) throw new Error(`${t("director.studio.clipNumber", { number: clips.findIndex(clip => String(clip.id) === item.id) + 1 })}：无法唯一定位已编译的 H3 Clip`);
                 const match = matches[0];
@@ -348,32 +373,67 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                 if (!sourcePrompt.trim()) throw new Error(`${t("director.studio.clipNumber", { number: clips.findIndex(clip => String(clip.id) === item.id) + 1 })}：没有可翻译的编译提示词`);
                 return { targetId: item.id, nodeId: match.node.id, segmentId: String(match.segment.id), sourcePrompt, expectedCanvasPrompt: String(match.segment.prompt || "") };
             });
+            const writtenIds: string[] = [];
+            const writeFailures: string[] = [];
+            let writeQueue = Promise.resolve();
             const results = await translateCompiledH3Prompts(
-                sources.map((source, index) => ({ id: visibleClipStates[index].id, text: source.sourcePrompt })),
-                progress => setTranslationProgress({ ...progress, phase: "translating" }),
+                sources.map((source, index) => ({ id: translationClipStates[index].id, text: source.sourcePrompt })),
+                progress => setTranslationProgress(current => ({ ...progress, completed: writtenIds.length, phase: writeFailures.length ? "failed" : current?.phase === "writing" ? "writing" : "translating", writingIds: current?.writingIds || [], writtenIds: [...writtenIds] })),
+                undefined,
+                results => {
+                    const write = writeQueue.then(async () => {
+                        const translated = results.map(result => {
+                            const source = sources.find(item => item.targetId === result.id);
+                            if (!source) throw new Error(`Clip ${result.id} 缺少写入目标`);
+                            return { ...source, translatedPrompt: result.translatedText };
+                        });
+                        const targetIds = translated.map(item => item.targetId);
+                        setTranslationProgress(current => current ? { ...current, phase: "writing", writingIds: [...new Set([...current.writingIds, ...targetIds])] } : current);
+                        try {
+                            await onApplyTranslatedPrompts(translated);
+                            writtenIds.push(...targetIds);
+                            setTranslationProgress(current => current ? {
+                                ...current,
+                                phase: writeFailures.length ? "failed" : "translating",
+                                completed: writtenIds.length,
+                                writingIds: current.writingIds.filter(id => !targetIds.includes(id)),
+                                writtenIds: [...writtenIds],
+                            } : current);
+                        } catch (error) {
+                            const detail = error instanceof Error ? error.message : String(error);
+                            writeFailures.push(...targetIds);
+                            setTranslationProgress(current => current ? {
+                                ...current,
+                                phase: "failed",
+                                writingIds: current.writingIds.filter(id => !targetIds.includes(id)),
+                            } : current);
+                            setTranslationError(detail);
+                        }
+                    });
+                    writeQueue = write.catch(() => undefined);
+                    return write;
+                },
             );
-            const resultById = new Map(results.map(result => [result.id, result]));
             const cachedCount = results.filter(result => result.cached).length;
-            const translated = sources.map((source, index) => {
-                const result = resultById.get(visibleClipStates[index].id);
-                if (!result) throw new Error(`Clip ${visibleClipStates[index].id} 缺少翻译结果`);
-                return { ...source, translatedPrompt: result.translatedText };
-            });
-            setTranslationProgress(current => current ? { ...current, phase: "writing", completed: translated.length, completedIds: translated.map(item => item.targetId), inProgressIds: [], failedIds: [] } : current);
-            await onApplyTranslatedPrompts(translated);
-            message.success(t("director.atomic.translationDone", { count: translated.length, cached: cachedCount }));
+            if (writeFailures.length) throw new Error(`${writeFailures.length} 个 Clip 的译文未能写入画布`);
+            message.success(t("director.atomic.translationDone", { count: writtenIds.length, cached: cachedCount }));
             setTranslationError("");
             setTranslationProgress({
                 phase: "complete",
-                completed: translated.length,
-                total: translated.length,
-                completedIds: translated.map(item => item.targetId),
+                completed: writtenIds.length,
+                total: translationClipStates.length,
+                completedIds: writtenIds,
                 cachedIds: results.filter(result => result.cached).map(result => result.id),
                 inProgressIds: [],
                 failedIds: [],
+                writingIds: [],
+                writtenIds,
             });
         } catch (error) {
-            const detail = error instanceof Error ? error.message : String(error);
+            const detail = clips.reduce((message, clip, index) => message.replaceAll(
+                `Clip ${clip.id}`,
+                t("director.atomic.clipHeading", { number: index + 1 }),
+            ), error instanceof Error ? error.message : String(error));
             setTranslationError(detail || t("director.atomic.translationFailed"));
             setTranslationProgress(current => current ? { ...current, phase: "failed" } : current);
             message.error(t("director.atomic.translationFailed"));
@@ -382,6 +442,12 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
             setTranslatingPrompts(false);
         }
     };
+    useEffect(() => {
+        const request = autoTranslateCompilation;
+        if (!request?.id || autoTranslateHandledRef.current === request.id || compileBusy || compilePending || busy) return;
+        autoTranslateHandledRef.current = request.id;
+        void translateCompiledPrompts(request.targetIds);
+    }, [autoTranslateCompilation, compileBusy, compilePending, busy, clipStates, onApplyTranslatedPrompts]);
     const failedCompileTargetIds = new Set<string>();
     if (compileBasisMatches) for (const targetId of staleReceiptTargets) {
         failedCompileTargetIds.add(String(targetId));
@@ -491,14 +557,15 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     };
     const sceneMenuItems = sceneOptions.map(option => ({ key: option.key || "__all__", label: <span className="flex items-center gap-3"><span>{option.label}</span><span className="text-xs tabular-nums text-muted-foreground">{option.count}</span></span> }));
     const translationPercent = translationProgress?.total ? Math.round(translationProgress.completed / translationProgress.total * 100) : 0;
-    const translationInFlightCount = translationProgress?.inProgressIds.length || 0;
+    const translationInFlightCount = (translationProgress?.inProgressIds.length || 0) + (translationProgress?.writingIds.length || 0);
     const translationFailedCount = translationProgress?.failedIds.length || 0;
     const translationWaitingCount = Math.max(0, (translationProgress?.total || 0) - (translationProgress?.completed || 0) - translationInFlightCount - translationFailedCount);
     const translationStatusFor = (id: string) => {
         if (translationProgress?.failedIds.includes(id)) return "failed";
-        if (translationProgress?.phase === "failed" && translationProgress.failedIds.length === 0 && translationProgress.completedIds.includes(id)) return "writeFailed";
+        if (translationProgress?.writtenIds.includes(id)) return "complete";
+        if (translationProgress?.writingIds.includes(id)) return "writing";
+        if (translationProgress?.phase === "failed" && translationProgress.completedIds.includes(id)) return "writeFailed";
         if (translationProgress?.phase === "complete" && translationProgress.completedIds.includes(id)) return "complete";
-        if (translationProgress?.phase === "writing" && translationProgress.completedIds.includes(id)) return "writing";
         if (translationProgress?.inProgressIds.includes(id)) return "translating";
         if (translationProgress?.completedIds.includes(id)) return translationProgress.cachedIds.includes(id) ? "cached" : "translated";
         return "waiting";
@@ -520,7 +587,6 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
             </div>
             <div className="storyboard-toolbar-actions">
                 <Button type="text" size="small" icon={<Locate className="size-3.5" />} aria-label={t("director.atomic.locateSelectedShot")} title={t("director.atomic.locateSelectedShot")} onClick={locateSelectedShot} />
-                <div className="storyboard-view-tabs" role="tablist" aria-label={t("director.atomic.views")}>{(["shots", "clips"] as const).map(key => <button key={key} type="button" role="tab" aria-selected={view === key} onClick={() => setView(key)}>{key === "shots" ? <Clapperboard className="size-4" /> : <Layers3 className="size-4" />}{t("director.atomic.view." + key)}</button>)}</div>
                 <Button type="text" size="small" icon={<WandSparkles className="size-3.5" />} onClick={() => onDiscuss(activeId || undefined)}>{t("director.studio.collaborate")}</Button>
             </div>
         </header>
@@ -530,18 +596,23 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                 <p className="text-sm text-muted-foreground">{t(subjectAssembly ? "director.atomic.packagingHint" : "director.atomic.legacyPackagingHint")}</p>
                 <div className="flex shrink-0 items-center gap-3">
                     {visibleClipStates.length > 0 && <span className="text-xs text-muted-foreground">{compileBusy ? t("director.atomic.compileInFlight") : t("director.atomic.compileSummary", compileCounts) + (compileCounts.blocked ? " · " + t("director.atomic.blockedCompileCount", { count: compileCounts.blocked }) : "") + (compileCounts.recorded ? " · " + t("director.atomic.recordedCompileCount", { count: compileCounts.recorded }) : "") + (compileCounts.running > 0 ? " · " + t("director.atomic.compileRunning", { running: compileCounts.running }) : "")}</span>}
-                    <Button size="small" type="primary" icon={<WandSparkles className="size-3.5" />} loading={compileBusy} disabled={busy || compileBusy || !visibleClipStates.length || !onCompile || sceneFilter === "__unassigned__" || !sceneCompileAvailable} title={sceneFilter === "__unassigned__" ? t("director.atomic.compileUnassignedHint") : undefined} onClick={() => onCompile?.(sceneFilter && sceneFilter !== "__unassigned__" ? sceneFilter : undefined)}>{compilePending ? t("drama.production.recoverReceipt") : sceneFilter ? sceneFilter === "__unassigned__" ? t("director.atomic.compileAction") : t("director.atomic.compileSceneAction") : t("director.atomic.compileAction")}</Button>
+                    <Button size="small" type="primary" icon={<WandSparkles className="size-3.5" />} loading={compileBusy} disabled={busy || compileBusy || translatingPrompts || !visibleClipStates.length || !onCompile || sceneFilter === "__unassigned__" || !sceneCompileAvailable} title={sceneFilter === "__unassigned__" ? t("director.atomic.compileUnassignedHint") : undefined} onClick={() => onCompile?.(sceneFilter && sceneFilter !== "__unassigned__" ? sceneFilter : undefined)}>{compilePending ? t("drama.production.recoverReceipt") : sceneFilter ? sceneFilter === "__unassigned__" ? t("director.atomic.compileAction") : t("director.atomic.compileSceneAction") : t("director.atomic.compileAction")}</Button>
                 </div>
             </div>
             {compileError && <Alert type="error" showIcon message={t("director.atomic.compileFailed")} description={compileError} style={{ whiteSpace: "pre-line" }} />}
             {compileNotice && <Alert type="success" showIcon message={<div className="flex flex-wrap items-center justify-between gap-2"><span>{compileNotice}</span>{orderedCompileDiagnostics.length > 0 && <Button type="link" size="small" className="px-0" icon={<WandSparkles className="size-3.5" />} disabled={busy || compileBusy} onClick={() => { const task = compileDiagnosticTaskContext(orderedCompileDiagnostics); onDiscuss(task.targetId, task.instruction); }}>{t("director.atomic.compileAskDirector")}</Button>}</div>} description={orderedCompileDiagnostics.length > 0 ? <details className="text-sm"><summary className="cursor-pointer underline underline-offset-2">{t("director.atomic.compileViewDiagnostics", { count: orderedCompileDiagnostics.length })}</summary><ul className="mt-2 max-h-72 list-disc space-y-2 overflow-auto pl-5">{orderedCompileDiagnostics.map((item, index) => <li key={`${item.code || "diagnostic"}:${item.path || ""}:${item.targetId || ""}:${index}`}><p>{item.message || item.code || t("director.atomic.compileHintOther")}</p><p className="mt-0.5 text-xs text-muted-foreground">{[item.code, item.path, item.targetId, item.shotId].filter(Boolean).join(" · ")}</p></li>)}</ul></details> : undefined} style={{ whiteSpace: "pre-line" }} />}
             {visibleClipStates.length > 0 && <div className="flex flex-wrap items-center gap-1.5" aria-label={t("director.atomic.compileStatus")}>
                 <span className="mr-1 text-xs text-muted-foreground">{t("director.atomic.compileStatus")}</span>
-                {visibleClipStates.map(item => <span key={item.id} className="flex items-center gap-1.5 rounded-md border border-border px-2 py-0.5 text-xs">
-                    <button type="button" onClick={() => onClip(item.id)} className="text-muted-foreground hover:text-foreground">{t("director.studio.clipNumber", { number: clips.findIndex(clip => String(clip.id) === item.id) + 1 })}</button>
-                    <Tag className="!mr-0 !text-[11px] !leading-4" color={item.color} title={item.reason || t("director.atomic.savedSourceStatus")}>{item.label}</Tag>
-                    <Button type="text" size="small" className="!h-5 !px-1" icon={<WandSparkles className="size-3" />} aria-label={t("director.atomic.compileOneClip", { clip: t("director.studio.clipNumber", { number: clips.findIndex(clip => String(clip.id) === item.id) + 1 }) })} title={t("director.atomic.compileOneClip", { clip: t("director.studio.clipNumber", { number: clips.findIndex(clip => String(clip.id) === item.id) + 1 }) })} disabled={busy || compileBusy || compilePending || !onCompile} onClick={() => onCompile?.(undefined, item.id)} />
-                </span>)}
+                {visibleClipStates.map(item => {
+                    const clipNumber = t("director.studio.clipNumber", { number: clips.findIndex(clip => String(clip.id) === item.id) + 1 });
+                    const refreshJob = activeRefreshJob(item.id);
+                    return <span key={item.id} className="flex items-center gap-1.5 rounded-md border border-border px-2 py-0.5 text-xs">
+                    <button type="button" onClick={() => onClip(item.id)} className="text-muted-foreground hover:text-foreground">{clipNumber}</button>
+                    <Tag className="!mr-0 !text-[11px] !leading-4" color={item.color} title={item.reason || t("director.atomic.savedSourceStatus")}>{item.label}<CompileElapsed createdAt={refreshJob?.createdAt} /></Tag>
+                    {onGenerateClip && item.tone === "ready" && <Button type="text" size="small" className="!h-5 !px-1" icon={<Play className="size-3" />} loading={runStartPending} disabled={busy || compileBusy || compilePending || runStartPending} aria-label={t("director.atomic.generateOneClip", { clip: clipNumber })} title={t("director.atomic.generateOneClip", { clip: clipNumber })} onClick={() => onGenerateClip?.(item.id)} />}
+                    <Button type="text" size="small" className="!h-5 !px-1" icon={<WandSparkles className="size-3" />} aria-label={t("director.atomic.compileOneClip", { clip: clipNumber })} title={t("director.atomic.compileOneClip", { clip: clipNumber })} disabled={busy || compileBusy || compilePending || translatingPrompts || !onCompile} onClick={() => onCompile?.(undefined, item.id)} />
+                </span>;
+                })}
             </div>}
             {visibleClipStates.length > 0 && <div className="flex flex-wrap items-center justify-end gap-3">
                 <Button size="small" icon={<WandSparkles className="size-3.5" />} loading={translatingPrompts} disabled={!canTranslateCompiledPrompts} title={!visibleClipStates.every(item => item.tone === "ready") ? t("director.atomic.translationRequiresCompile") : undefined} onClick={() => void translateCompiledPrompts()}>
@@ -612,11 +683,12 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
             {search.trim() && <div className="storyboard-search-status"><span>{t("director.atomic.searchCount", { count: visible.length })}</span><button type="button" onClick={() => setSearch("")}>{t("director.atomic.clearSearch")}</button>{selected && !visible.some(shot => shot.id === selected.id) && <><span>{t("director.atomic.currentOutsideFilter")}</span><button type="button" onClick={() => revealShot(activeId)}>{t("director.atomic.revealCurrent")}</button></>}</div>}
             <div ref={trackRef} onScroll={event => { if (viewMemory?.current) viewMemory.current.scrollTop = event.currentTarget.scrollTop; }} data-clip-track className="storyboard-shot-list relative" aria-label={t("director.atomic.timeline")}>
                 {clipEntries.map((entry, position) => { const next = clipEntries[position + 1]; const boundary = next && next.index === entry.index + 1 ? next : undefined;
-                                        return <Fragment key={String(entry.group.id)}>
+                                        const clipId = String(entry.group.id), compileState = clipCompileState(clipId), refreshJob = activeRefreshJob(clipId);
+                                        return <Fragment key={clipId}>
                     <section className={`storyboard-clip-group ${entry.group.id === clip?.id ? "is-selected" : ""}`}>
                         <div className="storyboard-clip-heading flex items-center justify-between gap-3">
-                            <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><strong className="text-sm">{clipLabel(entry.index)}</strong><Tag className="!m-0" title={t("director.atomic.savedSourceStatus")} color={clipCompileState(String(entry.group.id)).color}>{clipCompileState(String(entry.group.id)).label}</Tag></div><p className="mt-1 text-xs text-muted-foreground">{t("director.atomic.clipSummary", { count: entry.members.length, seconds: formatSeconds(entry.members.reduce((sum, shot) => sum + duration(shot), 0)) })} · {String(entry.group.mode || "")}{entry.shown.length !== entry.members.length && <span className="ml-2">{t("director.atomic.filteredMembers", { shown: entry.shown.length, total: entry.members.length })}</span>}</p></div>
-                            <div className="flex shrink-0 items-center gap-1"><Button type="text" size="small" onClick={() => onClip(String(entry.group.id))} aria-label={clipLabel(entry.index) + " · " + t("director.atomic.viewResults")}>{t("director.atomic.viewResults")}</Button>{productionSegmentRuntimeMatches(canvasNodes as any, String(entry.group.id)).length === 1 && <Button type="text" size="small" icon={<ArrowUpRight className="size-3.5" />} title={t("director.atomic.locateClip")} onClick={() => onLocateClip?.(String(entry.group.id))}>H3</Button>}</div>
+                            <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><strong className="text-sm">{clipLabel(entry.index)}</strong><Tag className="!m-0" title={compileState.reason || t("director.atomic.savedSourceStatus")} color={compileState.color}>{compileState.label}<CompileElapsed createdAt={refreshJob?.createdAt} /></Tag></div><p className="mt-1 text-xs text-muted-foreground">{t("director.atomic.clipSummary", { count: entry.members.length, seconds: formatSeconds(entry.members.reduce((sum, shot) => sum + duration(shot), 0)) })} · {String(entry.group.mode || "")}{entry.shown.length !== entry.members.length && <span className="ml-2">{t("director.atomic.filteredMembers", { shown: entry.shown.length, total: entry.members.length })}</span>}</p></div>
+                            <div className="flex shrink-0 items-center gap-1">{onGenerateClip && compileState.tone === "ready" && <Button type="text" size="small" icon={<Play className="size-3.5" />} loading={runStartPending} disabled={busy || compileBusy || compilePending || runStartPending} title={t("director.atomic.generateOneClip", { clip: clipLabel(entry.index) })} onClick={() => onGenerateClip?.(clipId)}>{t("director.workspace.generateClip")}</Button>}<Button type="text" size="small" onClick={() => onClip(clipId)} aria-label={clipLabel(entry.index) + " · " + t("director.atomic.viewResults")}>{t("director.atomic.viewResults")}</Button>{productionSegmentRuntimeMatches(canvasNodes as any, clipId).length === 1 && <Button type="text" size="small" icon={<ArrowUpRight className="size-3.5" />} title={t("director.atomic.locateClip")} onClick={() => onLocateClip?.(clipId)}>H3</Button>}</div>
                         </div>
                         <div className="storyboard-clip-shots">
                             {entry.shown.map((shot, shotIndex) => {
@@ -698,7 +770,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                     </section>}                    <section data-production-section="shot-references" tabIndex={-1} hidden={subjectAssembly}><h3 className="flex items-center gap-2 text-sm font-medium"><ImageIcon className="size-4" />{t("director.atomic.references")}</h3><p className="mt-1 text-xs text-muted-foreground">{t(subjectAssembly ? "director.atomic.referencesHint" : "director.atomic.legacyReferencesHint")}</p>{reading ? <p className="mt-3 text-xs text-muted-foreground">{t("director.atomic.loading")}</p> : workbenchError ? <div className="mt-3 text-xs"><p className="text-muted-foreground">{workbenchError}</p><Button size="small" type="text" onClick={() => setRetry(value => value + 1)}>{t("director.atomic.retry")}</Button></div> : <div className="mt-3 space-y-3">{references.map(reference => <div key={`${reference.subjectId}:${reference.id}`} className="flex gap-3">{reference.resolved?.storageKey ? <img src={backendMediaUrl(reference.resolved.storageKey)} alt={reference.displayName || subjectDisplayName(source, reference.subjectId)} className="h-16 w-16 shrink-0 rounded object-contain" loading="lazy" /> : <span className="flex h-16 w-16 shrink-0 items-center justify-center text-muted-foreground"><ImageIcon className="size-5" /></span>}<div className="min-w-0"><p className="text-xs font-medium">{reference.displayName || subjectDisplayName(source, reference.subjectId)}</p><p className="mt-1 text-[11px] text-muted-foreground">{(reference.provides || []).map((purpose: string) => t(`director.crud.purpose.${purpose}`, { defaultValue: /[\u4e00-\u9fff]/.test(purpose) ? purpose : t("director.crud.otherPurpose") })).join(" · ")}</p><p className="mt-1 text-[11px] text-muted-foreground">{t(!subjectAssembly ? "director.atomic.legacyReferenceBinding" : reference.selection?.mode === "node_selection" ? "director.atomic.followNodeReference" : reference.selection?.mode === "selected_result" ? "director.workspace.selectedHistory" : "director.workspace.followLatest")}</p><ReferenceNodeLink sourceNode={reference.sourceNode} /><button type="button" onClick={() => onNavigate("assets", { kind: "asset", id: subjectAssembly ? reference.subjectId : reference.id })} className="mt-1 inline-flex items-center gap-0.5 text-[11px] text-primary hover:underline">{t("director.atomic.viewReference")}<ArrowRight className="size-3" /></button></div></div>)}{!references.length && <p className="text-xs text-muted-foreground">{t("director.atomic.noResolvedReferences")}</p>}</div>}</section>
                     {/* 关键帧只读概览：v2 有专门的「关键帧」页签，此处仅 legacy 源稿保留（那边没有对应编辑面）。 */}
                     {keyframes.length > 0 && !subjectAssembly && <section className="border-t border-border pt-4"><h3 className="text-sm font-medium">{t("director.atomic.keyframeReferences")}</h3><div className="mt-3 space-y-3">{keyframes.map(frame => <div key={frame.id} className="flex gap-3">{frame.resolved?.storageKey ? <img src={backendMediaUrl(frame.resolved.storageKey)} alt={t("director.atomic.anchor." + frame.anchor)} className="h-16 w-16 shrink-0 rounded object-contain" loading="lazy" /> : <span className="flex h-16 w-16 shrink-0 items-center justify-center text-muted-foreground"><ImageIcon className="size-5" /></span>}<div className="min-w-0"><p className="text-xs font-medium">{t("director.atomic.anchor." + frame.anchor)}</p><p className="mt-1 text-[11px] text-muted-foreground">{frame.requiredForSubmission ? t("director.atomic.requiredAnchor") : t("director.atomic.designAnchor")}</p>{frame.anchor === "at_frame" && <p className="mt-1 text-[11px] text-muted-foreground">{frame.localFrame}f</p>}<ReferenceNodeLink sourceNode={frame.sourceNode} /></div></div>)}</div></section>}
-                    <details className="border-t border-border pt-4"><summary className="cursor-pointer text-sm font-medium">{t("director.atomic.compiledOutput")}</summary><p className="mt-2 text-xs text-muted-foreground">{t(compiled ? "director.atomic.outputHint" : "director.atomic.previousOutput")}</p>{artifact ? <pre className="mt-3 max-h-80 overflow-auto whitespace-pre-wrap break-words text-xs leading-5">{artifact.prompt}</pre> : <p className="mt-3 text-xs text-muted-foreground">{t("director.atomic.pendingCompile")}</p>}<Button className="mt-2" size="small" type="text" disabled={!clip} onClick={() => clip && onClip(String(clip.id))}>{t("director.atomic.openClip")}<ArrowRight className="size-3" /></Button></details>
+                    <details className="border-t border-border pt-4"><summary className="cursor-pointer text-sm font-medium">{t("director.atomic.compiledOutput")}</summary><p className="mt-2 text-xs text-muted-foreground">{t(compiled ? "director.atomic.outputHint" : "director.atomic.previousOutput")}</p>{artifact ? <pre className="mt-3 max-h-80 overflow-auto whitespace-pre-wrap break-words text-xs leading-5">{artifact.prompt}</pre> : <p className="mt-3 text-xs text-muted-foreground">{t("director.atomic.statePending")}</p>}<Button className="mt-2" size="small" type="text" disabled={!clip} onClick={() => clip && onClip(String(clip.id))}>{t("director.atomic.openClip")}<ArrowRight className="size-3" /></Button></details>
                 </aside>
             </div>
             </div>

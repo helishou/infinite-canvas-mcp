@@ -35,7 +35,6 @@ export function abortCanvasGenerationRequestsByRunningId(
     requests.forEach((request) => {
         if (request.runningNodeId !== runningNodeId) return;
         request.controller.abort();
-        requests.delete(request.targetNodeId);
         affectedNodeIds.add(request.targetNodeId);
         affectedNodeIds.add(request.originNodeId);
     });

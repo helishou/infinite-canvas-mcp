@@ -225,3 +225,62 @@ test("stopping a response restores idle state and cannot execute an unfinished t
     assert.equal(finished, true); assert.equal(agent.read(thread.id).thread.status, "interrupted");
     assert.equal(agent.interrupt(thread.id), false);
 });
+
+test("用户附件入库一次、历史只留 media 引用，发模型前再展开成真实图片", async t => {
+    let uploaded = 0, mediaHits = 0, requests = 0;
+    const bodies: Json[] = [];
+    const server = http.createServer(async (request, response) => {
+        let raw = ""; for await (const chunk of request) raw += chunk;
+        if (request.url === "/media/upload") {
+            uploaded++;
+            response.writeHead(201, { "content-type": "application/json" });
+            response.end(JSON.stringify({ ok: true, media: { storageKey: "image:stored-1" } }));
+            return;
+        }
+        if (request.url?.startsWith("/media/")) {
+            mediaHits++;
+            response.writeHead(200, { "content-type": "image/png" });
+            response.end(Buffer.from("png"));
+            return;
+        }
+        requests++; bodies.push(JSON.parse(raw));
+        sse(response, [{ choices: [{ delta: { content: "看到了这张图" }, finish_reason: "stop" }] }]);
+    }).listen(0, "127.0.0.1");
+    await once(server, "listening");
+    t.after(() => new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); }));
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+
+    const { store, data } = settings(config(url));
+    const connect = async () => {
+        const fixture = new McpServer({ name: "fixture", version: "1" });
+        // 空 tools 目录会让 fixture 不声明 tools/list（-32601），注册一个占位工具保证协议完整。
+        fixture.registerTool("fixture_read", { inputSchema: {} }, async () => ({ content: [{ type: "text", text: "fixture" }] }));
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        await fixture.connect(serverTransport);
+        const client = new Client({ name: "fixture", version: "1" });
+        await client.connect(clientTransport);
+        return client;
+    };
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "canvas-llm-media-"));
+    t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+    const agent = new LlmAgent(store, url, "", connect);
+    const thread = agent.startThread(cwd);
+    const events: Json[] = [];
+    await agent.run("看这张图", (type, payload) => events.push({ type, payload }), [{ name: "shot.png", type: "image/png", dataUrl: "data:image/png;base64,cG5n" }], { threadId: thread.id, cwd });
+
+    assert.equal(uploaded, 1, "附件只入库一次");
+    assert.equal(requests, 1, `必须发出一次模型请求（events=${JSON.stringify(events.filter(event => event.type === "agent_error"))}）`);
+    const parts = bodies[0].messages.flatMap((message: Json) => Array.isArray(message.content) ? message.content : []);
+    const image = parts.find((part: Json) => part.type === "image_url");
+    assert.equal(Buffer.from(String(image.image_url.url).split(",")[1], "base64").toString(), "png", "模型看到的是附件原始字节");
+    const saved = JSON.stringify(data.get(`agent.llm.thread:${thread.id}`));
+    assert.ok(saved.includes('"imageRef":"image:stored-1"'), "历史必须只存 media 引用");
+    assert.equal(saved.includes("cG5n"), false, "历史里不应再出现附件 base64");
+
+    // 新进程/新实例打开同一线程：缓存为空，必须回媒体库取图（这才是重启后的真实路径）。
+    const reopened = new LlmAgent(store, url, "", connect);
+    await reopened.run("再看一次", () => {}, [], { threadId: thread.id, cwd });
+    assert.ok(mediaHits >= 1, "重开线程后必须从 /media 取回图片");
+    const second = bodies[1].messages.flatMap((message: Json) => Array.isArray(message.content) ? message.content : []);
+    assert.equal(Buffer.from(String(second.find((part: Json) => part.type === "image_url").image_url.url).split(",")[1], "base64").toString(), "png");
+});

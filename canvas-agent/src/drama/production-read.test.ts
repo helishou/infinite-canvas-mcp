@@ -88,13 +88,32 @@ test("repeated full checks preserve content while reducing total UTF-8 response 
 
 test("workspace write receipts retain layout, identity and conflicts without repeating source or prompt data", () => {
     const production = record();
-    const result: any = productionWriteReceipt({ ok: true, production: { ...production, referenceSync: [{ targetId: "seg2", status: "blocked", diagnostics: [{ code: "CLIP_EDIT_CONFLICT" }] }] }, layoutReceipt: { planHash: "layout", created: [{ nodeIds: ["node"] }] }, mediaSubmitted: false });
+    const result: any = productionWriteReceipt({ ok: true, production: { ...production, referenceSync: [{ targetId: "seg2", status: "blocked", diagnostics: [{ code: "CLIP_EDIT_CONFLICT", message: "Keep the authored prompt" }] }] }, layoutReceipt: { planHash: "layout", created: [{ nodeIds: ["node"] }] }, mediaSubmitted: false });
     assert.equal(result.production.revision, 3);
     assert.equal(result.layoutReceipt.planHash, "layout");
     assert.equal(result.warnings.codes[0], "CLIP_EDIT_CONFLICT");
+    assert.deepEqual(result.syncIssues, [{ targetId: "seg2", status: "blocked", diagnostics: [{ code: "CLIP_EDIT_CONFLICT", message: "Keep the authored prompt" }] }]);
     assert.equal(result.mediaSubmitted, false);
     assert.equal(result.production.draft, undefined);
     assert.ok(!JSON.stringify(result).includes("长提示词"));
+});
+
+test("write receipts include ready Clip conflicts but omit healthy targets and extra diagnostics", () => {
+    const production = record();
+    const result: any = productionWriteReceipt({ ok: true, production: { ...production, referenceSync: [
+        { targetId: "seg-ready", status: "ready", diagnostics: [] },
+        { targetId: "seg-conflict", status: "ready", diagnostics: [
+            { code: "MANUAL_INPUT_CONFLICT", message: "Preserve the manual binding", path: "referenceBindings" },
+            { code: "NON_BLOCKING_NOTICE", message: "Not an issue target" },
+        ] },
+        { targetId: "seg-blocked", status: "blocked", diagnostics: [{ code: "CLIP_INPUT_BLOCKED", message: "Current compilation artifact missing" }] },
+    ] } }, { tool: "production_edit", input: { kind: "episode", id: "e", operationId: "sync-issues" } });
+    assert.deepEqual(result.syncIssues, [
+        { targetId: "seg-conflict", status: "ready", diagnostics: [{ code: "MANUAL_INPUT_CONFLICT", message: "Preserve the manual binding" }] },
+        { targetId: "seg-blocked", status: "blocked", diagnostics: [{ code: "CLIP_INPUT_BLOCKED", message: "Current compilation artifact missing" }] },
+    ]);
+    assert.ok(!JSON.stringify(result.syncIssues).includes("referenceBindings"));
+    assert.ok(!JSON.stringify(result).includes("long authored prompt"));
 });
 
 test("ledger entries can be read by stable identity without pulling the complete context", () => {
