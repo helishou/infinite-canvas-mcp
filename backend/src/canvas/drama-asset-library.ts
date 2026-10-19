@@ -263,8 +263,8 @@ function syncSharedProductionOwners(db: BackendDatabase, source: SharedAssetSour
     const clipOperations = new Map<string, CanvasOperation[]>();
     const version = `shared:${crypto.createHash("sha256").update(JSON.stringify(sharedAssetFields(node.type).map(field => [field, assetField(node, field)]))).digest("hex")}`;
     for (const episode of db.listDramaEpisodes(source.dramaId)) {
-        const row = db.db.prepare("SELECT revision,draft_json FROM episode_productions WHERE episode_id=?").get(episode.id) as { revision: number; draft_json: string } | undefined;
-        if (!row) continue;
+        const row = db.db.prepare("SELECT revision,draft_json,archived_at FROM episode_productions WHERE episode_id=?").get(episode.id) as { revision: number; draft_json: string; archived_at: string | null } | undefined;
+        if (!row || row.archived_at) continue; // Archived episodes are frozen: shared-library updates no longer flow into them.
         const draft = JSON.parse(row.draft_json) as EpisodeProductionData, director = draft.director;
         if (!director) continue;
         const sourceHashBefore = directorHash(director.source);
@@ -355,6 +355,7 @@ export function propagateAssetChanges(db: BackendDatabase, projectId: string, be
         for (const id of new Set([...assetConsumers(db, source).map(consumer => consumer.projectId), ...synchronized.clipOperations.keys()])) {
             const project = db.getCanvasProject(id)!;
             if (project.id === projectId || project.id === originatingProjectId) continue;
+            if (db.archivedEpisodeForCanvas(project.id)) continue; // Archived episodes keep their frozen canvas; no shared-library projection.
             const refOps: CanvasOperation[] = nodes(project).filter(n => {
                 const reference = n.metadata?.sharedAssetReference;
                 const origin = n.metadata?.sharedAssetOrigin;

@@ -612,6 +612,8 @@ export const toolInputSchemas = {
       .enum(["image", "video", "text", "audio"])
       .optional()
       .describe("按模型能力过滤；不传返回全部"),
+    page: z.number().int().min(1).default(1),
+    pageSize: z.number().int().min(1).max(100).default(20).describe("每页最多返回 100 个模型"),
   }),
   h3_get_node_materials: canvasProjectSchema.extend({
     nodeId: z.string().describe("H3 视频节点 ID，必填"),
@@ -624,6 +626,7 @@ export const toolInputSchemas = {
   comfyui_status: z.object({}).passthrough(),
   comfyui_get_task: z.object({
     taskId: z.string().describe("ComfyUI 任务 ID"),
+    view: z.enum(["summary", "full"]).default("summary").describe("summary 只返回状态摘要；full 返回完整任务与事件历史"),
   }),
   comfyui_cancel_task: z.object({
     taskId: z.string().describe("ComfyUI 任务 ID"),
@@ -711,13 +714,18 @@ export const toolInputSchemas = {
       .max(100)
       .describe("要幂等写入的完整资产数组；传稳定 id 可更新已有资产"),
   }),
-  drama_get_project: z.object({ dramaId: z.string().min(1).optional().describe("剧目 ID；省略时读取当前网页活动画布所属剧目") }),
+  drama_get_project: z.object({
+    dramaId: z.string().min(1).optional().describe("剧目 ID；省略时读取当前网页活动画布所属剧目"),
+    view: z.enum(["summary", "full"]).default("summary").describe("summary 返回项目身份、标签和大纲/简介预览；full 返回完整项目资料"),
+  }),
   drama_list_episodes: z.object({
     dramaId: z
       .string()
       .min(1)
       .optional()
       .describe("剧目 ID；省略时列出当前网页活动画布所属剧目的分集"),
+    page: z.number().int().min(1).default(1),
+    pageSize: z.number().int().min(1).max(100).default(20).describe("每页最多返回 100 集；只含身份、标题、梗概和画布 ID"),
   }),
   drama_set_active_project: z.object({
     dramaId: z.string().min(1).optional().describe("要固定的剧目 ID；省略时恢复跟随网页当前活动画布所属剧目"),
@@ -837,13 +845,13 @@ export const toolDescriptions: Record<ToolName, string> = {
     "查询当前活动网页的生成任务状态。默认返回画布、生图工作台和视频工作台最近任务；可用 scope 过滤来源，用 taskId 查询工作台任务，用 nodeIds 查询画布节点。H3 节点可用 segmentIds 过滤分镜。要看 H3 历史输入快照（prompt/refs/params），用 scope='video' + nodeIds + segmentIds。",
   mcp_observability_report:
     "读取脱敏 MCP 诊断。默认返回聚合摘要，可用 from/to/tool 筛选，view=full 查看逐日和工具转换明细。传 traceId 只读取单次事件链，不能同时传聚合筛选。",
-  mcp_get_command_receipt: "查询原 operationId 的准备中、已提交或已拒绝回执。用于跟踪后台翻译等异步写入；相同 ID 不可修改内容，已提交时返回短摘要和版本，必要时再读取最新对象。",
+  mcp_get_command_receipt: "按原 operationId 查询简短状态（found/status）；后台翻译会返回 queued、translating、applying、committed 或 retry_required。拒绝时附 errorCode。",
   models_list:
-    "列出可用于生成的模型及其能力。工作流是模型内部实现，不直接对外暴露。",
+    "分页列出可用于生成的模型及其能力；默认每页 20 项，支持按能力筛选。工作流是模型内部实现，不直接对外暴露。",
   h3_get_node_materials:
     "读取 H3 视频节点的历史运行产物（视频 url/storageKey/segmentId/createdAt），按时间倒序去重。可选 segmentId 仅返回该片段的历史。替代老的 metadata.materials 与 segments[i].results[].params 字段——这两类从画布 schema 迁出（v4/v5）后不再随 canvas_get_state 返回，模型要看历史需要主动调用本工具。需要 prompt / refs / comfy params 等输入快照用 generation_get_status({scope: 'video', nodeIds, segmentIds})。",
   comfyui_status: "检查本地 ComfyUI 连接和系统状态。",
-  comfyui_get_task: "读取本地 ComfyUI 任务状态、事件和结果。",
+  comfyui_get_task: "默认只读取本地 ComfyUI 任务状态摘要；需要完整任务和事件历史时传 view='full'。",
   comfyui_cancel_task: "取消本地 ComfyUI 任务。",
   workbench_image_get_config:
     "读取生图工作台的当前参数和可选项（可用模型、质量、尺寸/宽高比、张数范围），在调用 workbench_image_generate 前先了解可选值。",
@@ -862,9 +870,9 @@ export const toolDescriptions: Record<ToolName, string> = {
     "向「我的素材」新增素材。必填 operationId；响应未知时用原 ID 和相同内容恢复回执。kind=text 用 content，kind=image 用 imageUrl。成功只返回 assetId 和哈希摘要；详情用 assets_get 按 ID 读取。",
   assets_upsert_batch:
     "使用稳定 operationId 原子写入一批素材，失败时整批回滚。重试必须使用相同 ID 和相同内容；成功只返回资产 ID、数量和哈希摘要，不重复返回素材正文。",
-  drama_get_project: "读取剧目本体、规划、大纲和已保存决定；省略 dramaId 时读取网页当前活动画布所属剧目。分集为空不代表剧目不存在；剧目 ID 不能传给 production_get 的 episode/canvas。",
+  drama_get_project: "默认读取剧目摘要（身份、标签、简介和大纲预览）；需要完整资料时传 view='full'。省略 dramaId 时读取网页当前活动画布所属剧目。分集为空不代表剧目不存在；剧目 ID 不能传给 production_get 的 episode/canvas。",
   drama_list_episodes:
-    "列出一个剧目的全部分集，按 episodeNumber 升序返回；每项含标题、剧情和绑定画布 ID。省略 dramaId 时使用网页当前活动画布所属剧目。",
+    "分页列出剧集摘要，按 episodeNumber 升序；不返回旧版 fullPlot。默认每页 20 集，使用 drama_get_episode 按 ID 读取单集；省略 dramaId 时使用网页当前活动画布所属剧目。",
   drama_set_active_project:
     "设置当前活动剧目。传 dramaId 会固定本 MCP 会话的剧目；不传则解除固定并跟随网页当前活动画布所属剧目。",
   drama_get_episode:
@@ -875,14 +883,14 @@ export const toolDescriptions: Record<ToolName, string> = {
     "更新分集梗概、完整剧情或画布绑定。传 canvasId=null 可解除绑定，不会删除画布或分集剧情。",
   drama_delete_episode:
     "删除分集记录；不会删除其绑定的画布，画布会变成独立资产。",
-  production_get_contract: "查询完整制作操作 schema、合法示例、前置条件和本机当前激活引擎的源稿模板；runtimeId 已弃用，保留参数兼容但不选择执行版本。",
+  production_get_contract: "查询本机当前激活引擎的制作合同。提供 operationType 时默认只返回该操作 schema、示例、前置条件和引擎身份；仅在需要时用 includeRequests/includePatchFields/includeSourceContract 追加完整信息。moduleId 仅读取指定模块。省略 operationType 返回完整合同；runtimeId 已弃用且不选择执行版本。",
   ...productionWorkspaceDescriptions,
   ...productionToolDescriptions,
   director_subagent: directorSubagentDescription,
   production_compile: "后台编译 Backend 已保存的 Acheng 正式制作稿；不传入或覆盖导演源稿。operationId 必填，可用 scope.targetIds 一次编译多个目标，立即返回持久短回执。通过 production_get_compilation 查询原 operationId，succeeded 后应用 preparedId。blocked 是终态，先读取首条 blockingDiagnostic 并按 targetId/shotId/path 定位；只有确需完整诊断时再分页读取。来源为 compiler 时修编译器，不改创作稿。相同有效输入换 ID 会复用原回执，不重跑；输入或运行条件改变后再编译。超时沿原 ID 查询。不编辑、发布或生成媒体。",
   production_get_compilation: "按 owner 和原 operationId 查询后台编译状态及应用回执；默认返回短状态、首条 blockingDiagnostic 和 nextAction；诊断/目标列表需 view 和 pageSize。queued/running 沿原 ID 查询，blocked/failed 不继续轮询同一终态；reusedFromOperationId 保留原阻塞身份。只读，不重跑编译。",
   production_apply_compilation: "用精确 preparedId 原子接入 Backend 编译产物；沿用冻结的 expectedRevision/operationId，重复调用恢复原回执，源稿或绑定冲突拒绝覆盖。保存草稿，不发布或生成。",
-  production_translate_compiled_prompts: "把指定且当前有效的正式 H3 编译提示词交给已配置翻译模型。调用立即返回 queued；用同一 operationId 调用 mcp_get_command_receipt 查看 translating/applying/committed/retry_required 状态。超时或进程重载后重复提交完全相同的请求可恢复原操作，不创建第二次翻译。跳过 SHA-256 缓存命中项；画面描述、镜头/表演指令和发声指导（声线、情绪、语速、音量、停顿、画外音等）都翻成英文并轻度润色；只保留实际对白、歌词及明确引用的画面文字原文。对白标记外的中文发声指导即使复述对白片段也必须翻译，不能因为邻接对白而保留。Backend 核对制作 revision、编译基线、节点归属和 Prompt 并发编辑；目标变化时整批拒绝写入。不改导演源稿、不发布、不生成媒体。",
+  production_translate_compiled_prompts: "把指定且当前有效的正式 H3 编译提示词交给已配置翻译模型。expectedRevision 是读取基线；只要目标的编译提示词哈希、节点归属和当前 H3 提示词快照未变，无关制作稿修订不会阻断翻译写回。调用立即返回 queued；用同一 operationId 调用 mcp_get_command_receipt 查看 translating/applying/committed/retry_required 状态。超时或进程重载后重复提交完全相同的请求可恢复原操作，不创建第二次翻译。跳过 SHA-256 缓存命中项；画面描述、镜头/表演指令和发声指导（声线、情绪、语速、音量、停顿、画外音等）都翻成英文并轻度润色；只保留实际对白、歌词及明确引用的画面文字原文。对白标记外的中文发声指导即使复述对白片段也必须翻译，不能因为邻接对白而保留。目标输入实际变化时整批拒绝写入。不改导演源稿、不发布、不生成媒体。",
   production_diagnose_bindings: "只读核对源资产版本、草稿绑定、发布版本绑定、节点活动媒体、归档字节哈希与消费者；明确指出新旧版本或活动媒体不一致，不修改数据。",
   production_diagnose_clips: "只读逐段对照 H3 Clip 现场正文与最新发布编译产物：状态（一致/不同/无法比较）、两侧归一哈希、导演源哈希、任务状态、生产版本与只读下一步。一次调用完成排障；不同为信息级提示，不表示生成不可用。nodeId 与 nodeIds 同时出现时以 nodeIds 为准。默认最多返回 200 行，超出时给出 nextOffset。",
 };

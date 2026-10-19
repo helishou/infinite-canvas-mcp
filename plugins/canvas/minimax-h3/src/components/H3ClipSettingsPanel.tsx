@@ -2,6 +2,7 @@ import { useRef, useState } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { Button, Input, message, Modal, Select, Switch } from "antd";
 import type { H3Segment } from "../types";
+import { createH3Id } from "../services/h3-id";
 import { exportH3Settings, importH3Settings } from "../services/h3-segment-utils";
 import { useDefaultParams, writeDefaultParams } from "../services/h3-defaults";
 import { h3MotionGroup, resolveH3Runtime } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
@@ -230,7 +231,7 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, submitting = fals
             <div style={{ display: "grid", gap: 10, maxHeight: "55vh", overflow: "auto", marginBottom: 16 }}>
                 {styleTemplates.map(template => <div key={template.id} style={{ display: "flex", alignItems: "center", gap: 10 }}><strong style={{ flex: 1 }}>{template.label}</strong><Button size="small" onClick={() => editStyle(template)}>编辑</Button><Button size="small" danger onClick={() => void removeStyle(template.id)}>删除</Button></div>)}
             </div>
-            <Button type="dashed" block onClick={() => setStyleDraft({ id: `custom-${crypto.randomUUID()}`, label: "", text: "" })}>添加模板</Button>
+            <Button type="dashed" block onClick={() => setStyleDraft({ id: `custom-${createH3Id()}`, label: "", text: "" })}>添加模板</Button>
             {styleDraft ? <div style={{ display: "grid", gap: 10, marginTop: 16 }}><Input value={styleDraft.label} placeholder="模板名称" onChange={event => setStyleDraft({ ...styleDraft, label: event.target.value })} /><Input.TextArea value={styleDraft.text} placeholder="风格提示词（运行时加入视频描述段开头）" autoSize={{ minRows: 5, maxRows: 12 }} onChange={event => setStyleDraft({ ...styleDraft, text: event.target.value })} /><div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}><Button onClick={() => setStyleDraft(null)}>取消</Button><Button type="primary" onClick={() => void commitStyle()}>保存模板</Button></div></div> : null}
         </Modal>
         <div key="panel-actions" className="nfh3-panel-actions">{awaitingConfirmation ? <><button type="button" className="minimax-run" disabled={decisionBusy || !confirmationEnabled} onClick={() => void resolveConfirmation("confirm")}><H3Icon name="sparkles" /> {selected?.latentUpscaleEnabled ? "确认一采并继续二采" : "确认并精修"}</button><button type="button" disabled={decisionBusy} onClick={() => void resolveConfirmation("keep_first_pass")}>保留一采</button><button type="button" disabled={decisionBusy} onClick={() => void resolveConfirmation("discard")}>放弃任务</button></> : status === "awaiting_confirmation" ? <span>请选中待确认的 Clip</span> : <H3RunActionButtons ctx={ctx} selected={selected} runtimeTaskId={runtimeTaskId} busy={busy} stuck={stuck} canCancel={canCancel} canResetAndRun={canResetAndRun} locale={locale} />}</div>

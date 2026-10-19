@@ -1,10 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Alert, Button, Empty, Modal, Progress, Spin, Tag, Tooltip } from "antd";
 import { ListChecks, RefreshCw } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { fetchBackendTasks } from "@/services/backend-api";
+import { fetchBackendTasks, isBackendAvailabilityError } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { groupRecentTasks } from "./task-groups";
@@ -27,12 +27,17 @@ function GlobalTaskDialog({ onClose }: { onClose: () => void }) {
     const backendUrl = useBackendStore(state => state.url);
     const projects = useCanvasStore(state => state.projects);
     const tasks = useQuery({ queryKey: ["global-task-dialog", backendUrl], enabled: connected, queryFn: async () => (await fetchBackendTasks({ limit: 30 })).tasks || [], refetchOnMount: "always" });
+    useEffect(() => {
+        const retry = () => { if (connected) void tasks.refetch(); };
+        window.addEventListener("backend-retry", retry);
+        return () => window.removeEventListener("backend-retry", retry);
+    }, [connected, tasks.refetch]);
     const projectIds = new Set(projects.map(project => project.id));
     const date = (value: string) => Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString(i18n.resolvedLanguage, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
     return <Modal rootClassName="canvas-blocking-overlay" open title={t("home.workbench.recentTasks")} onCancel={onClose} width={720} footer={<Button disabled={!connected} loading={tasks.isFetching} icon={<RefreshCw className="size-4" />} onClick={() => void tasks.refetch()}>{t("home.workbench.refresh")}</Button>}>
         <p className="mb-3 text-xs text-muted-foreground">{t("microTools.tasks.scope")}</p>
         <div className="max-h-[65vh] overflow-y-auto">
-            {!connected ? <Empty description={t("home.workbench.offline")} /> : tasks.isError ? <Alert type="error" showIcon message={tasks.error instanceof Error ? tasks.error.message : String(tasks.error)} /> : tasks.isPending ? <div className="grid min-h-32 place-items-center"><Spin /></div> : tasks.data.length ? groupRecentTasks(tasks.data).map(group => <section key={group.key} aria-label={t(`microTools.tasks.${group.key}`)}><h3 className="sticky top-0 bg-background py-2 text-sm font-medium">{t(`microTools.tasks.${group.key}`)} · {group.tasks.length}</h3>{group.tasks.map(task => {
+            {!connected ? null : tasks.isError ? isBackendAvailabilityError(tasks.error) ? null : <Alert type="error" showIcon message={tasks.error instanceof Error ? tasks.error.message : String(tasks.error)} /> : tasks.isPending ? <div className="grid min-h-32 place-items-center"><Spin /></div> : tasks.data.length ? groupRecentTasks(tasks.data).map(group => <section key={group.key} aria-label={t(`microTools.tasks.${group.key}`)}><h3 className="sticky top-0 bg-background py-2 text-sm font-medium">{t(`microTools.tasks.${group.key}`)} · {group.tasks.length}</h3>{group.tasks.map(task => {
                 const destination = taskDestination(task, projectIds);
                 return <div key={task.id} className="border-b border-border py-4 last:border-0">
                     <div className="flex flex-wrap items-start gap-2">

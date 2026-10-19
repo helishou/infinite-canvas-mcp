@@ -617,9 +617,15 @@ async function executeDirectCanvasTool(
   if (name === "mcp_get_command_receipt") {
     const result = await backendApi.getMcpCommandReceipt(String(input.operationId || ""));
     const command = recordOf(result.command);
-    if (!result.command) return { found: false, operationId: String(input.operationId || "") };
-    const { requestHash: _requestHash, payload: _payload, ...visible } = command;
-    return { found: true, ...visible };
+    if (!result.command) return { found: false, status: "not_found" };
+    const translationStatus = recordOf(command.receipt).translationStatus;
+    return {
+      found: true,
+      status: typeof translationStatus === "string" ? translationStatus : String(command.status || "unknown"),
+      ...(command.status === "rejected" && typeof recordOf(command.error).code === "string"
+        ? { errorCode: recordOf(command.error).code }
+        : {}),
+    };
   }
   if (name === "models_list") {
     const config = await backendApi.getAiConfig();
@@ -649,7 +655,9 @@ async function executeDirectCanvasTool(
           capability: String(model.capability || "text"),
         }));
     });
-    return { models };
+    const page = Math.max(1, Math.floor(Number(input.page || 1)));
+    const pageSize = Math.max(1, Math.min(100, Math.floor(Number(input.pageSize || 20))));
+    return { total: models.length, page, pageSize, models: models.slice((page - 1) * pageSize, page * pageSize) };
   }
   if (name === "canvas_generate_image_batch") {
     const projectId = (await resolveMcpProjectIdWithUniqueFallback(config, state, input.projectId, getBrowserActiveProjectId)).projectId;
@@ -1152,7 +1160,7 @@ function registerBackendCanvasTools(
             inputSummary,
             ...context,
           });
-          return textResult(withTraceId(value, traceId));
+          return textResult(name === "mcp_get_command_receipt" ? value : withTraceId(value, traceId));
         } catch (error) {
           const details = classifyToolError(error, rawInput, state);
           const errorContext = mcpToolErrorContext(error, rawInput, state);
@@ -1204,7 +1212,7 @@ function registerBackendCanvasTools(
       const materials = await backendApi.getH3NodeMaterials(
         project.id,
         String(input.nodeId),
-        Number(input.limit || 200),
+        Number(input.limit || 50),
         input.segmentId ? String(input.segmentId) : undefined,
       );
       const result = { ok: true, projectId: project.id, nodeId: String(input.nodeId), materials };
@@ -1363,7 +1371,8 @@ function registerBackendCanvasTools(
     const active = input.dramaId ? undefined : await resolveMcpDramaId(state, backendApi, getBrowserActiveProjectId);
     const dramaId = String(input.dramaId || active?.dramaId || "").trim();
     if (!dramaId) throw new Error("当前网页活动画布没有所属剧目；请打开剧目画布或调用 drama_set_active_project 显式选择");
-    return textResult({ drama: await backendApi.getDramaProject(dramaId), activeDramaId: dramaId });
+    const drama = await backendApi.getDramaProject(dramaId, input.view);
+    return textResult({ drama, activeDramaId: dramaId });
   });
   server.registerTool("drama_set_active_project", {
     description: toolDescriptions.drama_set_active_project,
@@ -1393,7 +1402,7 @@ function registerBackendCanvasTools(
       const active = input.dramaId ? undefined : await resolveMcpDramaId(state, backendApi, getBrowserActiveProjectId);
       const dramaId = String(input.dramaId || active?.dramaId || "").trim();
       if (!dramaId) throw new Error("当前网页活动画布没有所属剧目；请打开剧目画布或调用 drama_set_active_project 显式选择");
-      return textResult(await backendApi.listDramaEpisodes(dramaId));
+      return textResult(await backendApi.listDramaEpisodeSummaries(dramaId, input.page, input.pageSize));
     },
   );
   server.registerTool(
@@ -1517,7 +1526,13 @@ function registerBackendCanvasTools(
     const query = new URLSearchParams();
     if (input.runtimeId) query.set("runtimeId", input.runtimeId);
     if (input.operationType) query.set("operationType", input.operationType);
-    return textResult(await backendApi.get(`/production/contract?${query}`));
+    if (input.moduleId) query.set("moduleId", input.moduleId);
+    if (input.includeRequests) query.set("includeRequests", "true");
+    if (input.includePatchFields) query.set("includePatchFields", "true");
+    if (input.includeSourceContract) query.set("includeSourceContract", "true");
+    const contract = await backendApi.get(`/production/contract?${query}`);
+    enforceToolOutputLimit("production_get_contract", contract);
+    return textResult(contract);
   });
   server.registerTool("director_subagent", { description: toolDescriptions.director_subagent, inputSchema: toolInputSchemas.director_subagent }, async raw => { const value = await executeDirectorSubagentTool(backendApi, raw); enforceToolOutputLimit("director_subagent", value); return textResult(value); });
   for (const name of productionToolNames) {
@@ -3169,7 +3184,9 @@ function classifyToolError(
           : { action: "目标 Clip 正被其他任务占用；先查询原任务，待其结束后再运行。" })
     : payloadOverflow
     ? {
-        action: error instanceof McpPayloadOverflowError && ["production_get", "production_get_version"].includes(error.tool)
+        action: error instanceof McpPayloadOverflowError && error.tool === "production_get_contract"
+          ? "传精确 operationType 获取单操作合同；省略不需要的 moduleId 和完整合同附加项。"
+          : error instanceof McpPayloadOverflowError && ["production_get", "production_get_version"].includes(error.tool)
           ? "不要重读完整制作稿；改用摘要工具、指定 sourceSection 的源稿工具、分页产物索引或指定 targetId 的提示词分块工具。"
           : "缩小返回体后重试：为查询类工具传更小的 limit / nodeIds，或用 canvas_inspect 代替整图快照工具。",
       }
@@ -3713,13 +3730,15 @@ function registerDirectComfyTools(
   server.registerTool(
     "comfyui_get_task",
     {
-      description: "查询 ComfyUI 任务。",
-      inputSchema: z.object({ taskId: z.string() }).shape,
+      description: toolDescriptions.comfyui_get_task,
+      inputSchema: toolInputSchemas.comfyui_get_task,
     },
-    async ({ taskId }) => {
-      const result = await backend.comfyGetTask(taskId);
-      enforceToolOutputLimit("comfyui_get_task", result);
-      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    async (rawInput) => {
+      const { taskId, view } = toolInputSchemas.comfyui_get_task.parse(rawInput);
+      const result = await backend.comfyGetTask(taskId, 0, view);
+      const response = view === "summary" ? { task: result.task } : result;
+      enforceToolOutputLimit("comfyui_get_task", response);
+      return { content: [{ type: "text", text: JSON.stringify(response) }] };
     },
   );
   server.registerTool(

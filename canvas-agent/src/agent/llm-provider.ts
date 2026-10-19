@@ -7,6 +7,8 @@ export type LlmCall = { id: string; name: string; arguments: string };
 export type LlmMessage = { role: "user" | "assistant" | "tool"; parts: LlmPart[]; calls?: LlmCall[]; callId?: string; callName?: string; providerId?: string; providerFormat?: LlmProvider["apiFormat"]; native?: Json[] };
 export type LlmTool = { name: string; description?: string; inputSchema: Json };
 
+const LLM_REQUEST_TIMEOUT_MS = 3 * 60_000;
+
 /** 图片数据必须已在历史展开阶段解析好；编码阶段还遇到 `imageRef` 说明展开被绕过，宁可报错也不静默丢图。 */
 function imageDataOf(part: LlmPart): string {
     if ("image" in part) return part.image;
@@ -92,24 +94,41 @@ export async function requestLlm(provider: LlmProvider, instructions: string, me
             }), include: ["reasoning.encrypted_content"], ...(tools.length ? { tools: tools.map(tool => ({ type: "function", name: tool.name, description: tool.description, parameters: tool.inputSchema, strict: false })) } : {}), ...(effort && effort !== "auto" ? { reasoning: { effort } } : {}) };
         }
     }
-    const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal });
-    if (!response.ok) {
-        // Never reflect upstream bodies, which may include credentials or the full request.
-        await response.body?.cancel();
-        throw new Error(`模型「${provider.name}」请求失败（HTTP ${response.status}），请检查渠道协议、模型能力和凭证`);
+    const requestController = new AbortController();
+    const abortWithTurn = () => requestController.abort(signal.reason);
+    if (signal.aborted) abortWithTurn();
+    else signal.addEventListener("abort", abortWithTurn, { once: true });
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+        timedOut = true;
+        requestController.abort();
+    }, LLM_REQUEST_TIMEOUT_MS);
+    try {
+        const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: requestController.signal });
+        if (!response.ok) {
+            // Never reflect upstream bodies, which may include credentials or the full request.
+            await response.body?.cancel();
+            throw new Error(`模型「${provider.name}」请求失败（HTTP ${response.status}），请检查渠道协议、模型能力和凭证`);
+        }
+        const chunks: Json[] = [];
+        if (response.headers.get("content-type")?.includes("text/event-stream")) {
+            await readSse(response, value => {
+                chunks.push(value);
+                const delta = provider.apiFormat === "openai-chat" ? String(value.choices?.[0]?.delta?.content || "") : provider.apiFormat === "openai" && value.type === "response.output_text.delta" ? String(value.delta || "") : provider.apiFormat === "gemini" ? rows(value.candidates?.[0]?.content?.parts).filter(part => !part.thought).map(part => part.text || "").join("") : "";
+                if (delta) onText(delta);
+            });
+        } else chunks.push(await response.json() as Json);
+        requestController.signal.throwIfAborted();
+        const reply = parseLlmReply(provider, chunks);
+        if (!reply.message.parts.length && !reply.message.calls?.length) throw new Error(`模型「${provider.name}」没有返回文本或工具调用`);
+        return reply;
+    } catch (error) {
+        if (timedOut) throw new Error(`模型「${provider.name}」超过 3 分钟仍未完成本次响应，本轮已结束；请检查渠道地址、协议、模型和网络后再手动重试`);
+        throw error;
+    } finally {
+        clearTimeout(timeout);
+        signal.removeEventListener("abort", abortWithTurn);
     }
-    const chunks: Json[] = [];
-    if (response.headers.get("content-type")?.includes("text/event-stream")) {
-        await readSse(response, value => {
-            chunks.push(value);
-            const delta = provider.apiFormat === "openai-chat" ? String(value.choices?.[0]?.delta?.content || "") : provider.apiFormat === "openai" && value.type === "response.output_text.delta" ? String(value.delta || "") : provider.apiFormat === "gemini" ? rows(value.candidates?.[0]?.content?.parts).filter(part => !part.thought).map(part => part.text || "").join("") : "";
-            if (delta) onText(delta);
-        });
-    } else chunks.push(await response.json() as Json);
-    signal.throwIfAborted();
-    const reply = parseLlmReply(provider, chunks);
-    if (!reply.message.parts.length && !reply.message.calls?.length) throw new Error(`模型「${provider.name}」没有返回文本或工具调用`);
-    return reply;
 }
 
 export function textOf(message: LlmMessage) { return message.parts.map(part => "text" in part ? part.text : "").join(""); }

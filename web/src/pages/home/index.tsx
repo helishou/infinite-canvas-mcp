@@ -192,20 +192,7 @@ function HomeWorkbench() {
                     </div>
                 </div>
                 {!hasWork && creationActions}
-                {!data.connected && (
-                    <Alert
-                        className="mb-5"
-                        type="warning"
-                        showIcon
-                        title={t("home.workbench.offline")}
-                        action={
-                            <Button size="small" onClick={() => navigate("/config")}>
-                                {t("home.workbench.settings")}
-                            </Button>
-                        }
-                    />
-                )}
-                {(data.errors.length > 0 || data.dramaError) && (
+                {data.connected && (data.errors.length > 0 || data.dramaError) && (
                     <Alert
                         className="mb-5"
                         type="warning"
@@ -482,9 +469,7 @@ function HomeWorkbench() {
                 destroyOnHidden
             >
                 <div className="max-h-[65vh] overflow-y-auto">
-                    {!data.connected ? (
-                        <Empty description={t("home.workbench.offline")} />
-                    ) : data.tasks.length ? (
+                    {!data.connected ? null : data.tasks.length ? (
                         data.tasks.map((task) => {
                             const destination = taskDestination(task, projectIds);
                             return (

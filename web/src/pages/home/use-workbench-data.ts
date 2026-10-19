@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useQueries, useQueryClient } from "@tanstack/react-query";
-import { fetchBackendDramaEpisodes, fetchBackendGenerationLogs, fetchBackendTasks, request, type BackendGenerationLog, type BackendRuntimeTask } from "@/services/backend-api";
+import { fetchBackendDramaEpisodes, fetchBackendGenerationLogs, fetchBackendTasks, isBackendAvailabilityError, request, type BackendGenerationLog, type BackendRuntimeTask } from "@/services/backend-api";
 import { saveSettings, type FrontendSettings } from "@/services/settings-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
@@ -62,7 +62,7 @@ export function useWorkbenchData() {
     ownershipQueries.forEach((result, index) => { episodesByDrama[dramas[index].id] = result.data?.map(canvasId => ({ canvasId })); });
     const canvasOwners = dramaCanvasOwners(folders, episodesByDrama);
     const dramaReady = ownershipQueries.every((result) => result.data !== undefined);
-    const dramaError = ownershipQueries.some((result) => result.isError);
+    const dramaError = ownershipQueries.some((result) => result.isError && !isBackendAvailabilityError(result.error));
     const [pinning, setPinning] = useState(false);
     const refresh = useCallback(() => {
         setRefreshKey((value) => value + 1);
@@ -105,9 +105,9 @@ export function useWorkbenchData() {
                 if (logResult.status === "fulfilled") {
                     setLogs(logResult.value.logs || []);
                     setHasMore((logResult.value.logs || []).length === logCount);
-                } else failed.push("logs");
+                } else if (!isBackendAvailabilityError(logResult.reason)) failed.push("logs");
                 if (taskResult.status === "fulfilled") setTasks(taskResult.value.tasks || []);
-                else failed.push("tasks");
+                else if (!isBackendAvailabilityError(taskResult.reason)) failed.push("tasks");
                 if (settingsResult.status === "fulfilled" && settingsResult.value) {
                     setSettings(settingsResult.value.settings || {});
                     setSettingsReady(true);
@@ -115,7 +115,7 @@ export function useWorkbenchData() {
                 if (settingsResult.status === "rejected") {
                     setSettingsReady(false);
                     needsSettings = true;
-                    failed.push("settings");
+                    if (!isBackendAvailabilityError(settingsResult.reason)) failed.push("settings");
                 }
                 setErrors(failed);
                 setLoading(false);
@@ -134,10 +134,12 @@ export function useWorkbenchData() {
         void load();
         window.addEventListener("backend-event", onEvent);
         window.addEventListener("backend-connected", onReconnect);
+        window.addEventListener("backend-retry", onReconnect);
         return () => {
             disposed = true;
             window.removeEventListener("backend-event", onEvent);
             window.removeEventListener("backend-connected", onReconnect);
+            window.removeEventListener("backend-retry", onReconnect);
         };
     }, [connected, backendUrl, logCount, refreshKey]);
     const togglePin = async (projectId: string) => {

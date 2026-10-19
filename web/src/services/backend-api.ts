@@ -54,6 +54,20 @@ export class BackendApiError extends Error {
     constructor(message: string, readonly status: number, readonly details: Record<string, unknown> = {}) { super(message); this.name = "BackendApiError"; }
 }
 
+/** Read-only backend availability failures are shown by the global connection banner. */
+export function isBackendAvailabilityError(error: unknown): error is BackendApiError {
+    return error instanceof BackendApiError
+        && (error.status === 0 && String(error.details.method || "").toUpperCase() === "GET"
+            || error.status === 503 && error.details.code === "BACKEND_RELOADING");
+}
+
+function reportBackendAvailabilityError(error: BackendApiError) {
+    if (typeof window === "undefined" || !isBackendAvailabilityError(error)) return;
+    window.dispatchEvent(new CustomEvent("backend-unavailable", {
+        detail: { message: error.message, code: error.details.code || "", method: error.details.method || "", path: error.details.path || "" },
+    }));
+}
+
 export async function request<T = unknown>(method: string, path: string, body?: unknown, options?: { signal?: AbortSignal }): Promise<T> {
     const finishSlowOperation = watchSlowBrowserOperation(browserOperationName(method, path));
     let outcome = "failed";
@@ -75,7 +89,9 @@ export async function request<T = unknown>(method: string, path: string, body?: 
         } catch (error) {
             if (error instanceof DOMException && error.name === "AbortError") throw error;
             const reason = error instanceof Error ? `${error.name ? `${error.name}: ` : ""}${error.message}` : String(error);
-            throw new BackendApiError(`无法连接 Backend：${method} ${path} → ${backendUrl}（${reason}）。请确认 Backend 已启动且端口可访问。`, 0, { method, path, backendUrl, cause: reason });
+            const apiError = new BackendApiError(`无法连接 Backend：${method} ${path} → ${backendUrl}（${reason}）。请确认 Backend 已启动且端口可访问。`, 0, { method, path, backendUrl, cause: reason });
+            reportBackendAvailabilityError(apiError);
+            throw apiError;
         } finally {
             if (tracksWrite) backendWritesInFlight = Math.max(0, backendWritesInFlight - 1);
         }
@@ -86,7 +102,9 @@ export async function request<T = unknown>(method: string, path: string, body?: 
             const errText = (data && typeof data === "object" && "error" in data && typeof data.error === "string") ? data.error : "";
             const extra = errText || (res.headers.get("content-type")?.includes("application/json") ? "" : (await res.text().catch(() => "")));
             outcome = `http-${res.status}`;
-            throw new BackendApiError(`Backend ${method} ${path} failed: HTTP ${res.status} ${extra}`.trim(), res.status, data && typeof data === "object" ? data as Record<string, unknown> : {});
+            const apiError = new BackendApiError(`Backend ${method} ${path} failed: HTTP ${res.status} ${extra}`.trim(), res.status, { ...(data && typeof data === "object" ? data as Record<string, unknown> : {}), method, path });
+            reportBackendAvailabilityError(apiError);
+            throw apiError;
         }
         outcome = `http-${res.status}`;
         return data;
@@ -278,7 +296,7 @@ export type ProductionClipRefreshReceipt = {
     mediaSubmitted: false;
 };
 export type EpisodeProductionSnapshot = Omit<EpisodeProductionData, "scenes" | "shots" | "clipGroups"> & Partial<Pick<EpisodeProductionData, "scenes" | "shots" | "clipGroups">>;
-export type EpisodeProduction = { episodeId: string; revision: number; draft: EpisodeProductionSnapshot; published: EpisodeProductionSnapshot | null; publishedVersion: number; updatedAt: string; storageFormat?: "v2-single-source" | "v2-projection-migration-required"; publishedFormatStatus?: "legacy-maintenance-required"; impact?: { changedSceneIds: string[]; affectedShotIds: string[]; imageShotIds: string[]; clipGroupIds: string[]; missingAssetNodeIds: string[]; assetIds?: string[] }; clipRefreshes?: ProductionClipRefreshReceipt[]; replayed?: boolean };
+export type EpisodeProduction = { episodeId: string; revision: number; draft: EpisodeProductionSnapshot; published: EpisodeProductionSnapshot | null; publishedVersion: number; updatedAt: string; archivedAt?: string | null; storageFormat?: "v2-single-source" | "v2-projection-migration-required"; publishedFormatStatus?: "legacy-maintenance-required"; impact?: { changedSceneIds: string[]; affectedShotIds: string[]; imageShotIds: string[]; clipGroupIds: string[]; missingAssetNodeIds: string[]; assetIds?: string[] }; clipRefreshes?: ProductionClipRefreshReceipt[]; replayed?: boolean };
 export type ProductionTarget = string | { projectId: string } | { sceneId: string };
 export type ProductionCanvasContext = { role: "ordinary" | "episode" | "scene" | "shared-assets" | "standalone"; canvasId: string; dramaId?: string; episodeId?: string; sceneId?: string; owner?: { kind: "episode" | "canvas" | "scene"; id: string }; sharedAssetCanvasId?: string | null };
 export function fetchProductionCanvasContext(id: string) { return sharedGet<{ ok: boolean; context: ProductionCanvasContext }>(`/canvas/projects/${encodeURIComponent(id)}/production-context`); }

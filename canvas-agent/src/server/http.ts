@@ -734,7 +734,7 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
         const active = requestedId ? undefined : await resolveActiveDramaId();
         const dramaId = requestedId || active?.dramaId || "";
         if (!dramaId) throw new Error("当前网页活动画布没有所属剧目；请打开剧目画布或调用 drama_set_active_project 显式选择");
-        return void res.json({ ok: true, result: await backend.getDramaProject(dramaId) });
+        return void res.json({ ok: true, result: await backend.getDramaProject(dramaId, input.view === "full" ? "full" : "summary") });
       }
       if (name === "drama_list_episodes") {
         const requestedId = String(input.dramaId || "").trim();
@@ -743,7 +743,7 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
         if (!dramaId) throw new Error("当前网页活动画布没有所属剧目；请打开剧目画布或调用 drama_set_active_project 显式选择");
         return void res.json({
           ok: true,
-          result: await backend.listDramaEpisodes(dramaId),
+          result: await backend.listDramaEpisodeSummaries(dramaId, Number(input.page || 1), Number(input.pageSize || 20)),
         });
       }
       if (name === "drama_get_episode")

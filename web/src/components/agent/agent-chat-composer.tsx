@@ -10,6 +10,7 @@ import type { AgentChatAttachment } from "./agent-chat-message";
 import { AgentChatPromptInput } from "./agent-chat-prompt-input";
 
 export function AgentChatComposer({
+    className,
     prompt,
     attachments = [],
     disabled,
@@ -35,6 +36,7 @@ export function AgentChatComposer({
     onReasoningEffortChange,
     left,
 }: {
+    className?: string;
     prompt: string;
     attachments?: AgentChatAttachment[];
     disabled?: boolean;
@@ -75,7 +77,7 @@ export function AgentChatComposer({
         }
     };
     return (
-        <div className="px-2 pb-2 pt-2" onWheelCapture={(event) => event.stopPropagation()}>
+        <div className={`px-2 pb-2 pt-2 ${className || ""}`} onWheelCapture={(event) => event.stopPropagation()}>
             <div className="rounded-[24px] border px-3 pb-3 pt-3 shadow-lg" style={{ background: theme.toolbar.panel, borderColor: theme.node.stroke }}>
                 {attachments.length ? (
                     <div className="thin-scrollbar mb-2 flex gap-2 overflow-x-auto pb-1">

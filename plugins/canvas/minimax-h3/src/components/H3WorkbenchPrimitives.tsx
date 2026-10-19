@@ -347,11 +347,10 @@ export function H3RulerScrubber({ ctx, segments, total, previewH }: { ctx: Canva
         const rect = el.getBoundingClientRect();
         // 画布节点带 zoom transform：屏幕距离 / 缩放系数 才等于本地 CSS px 距离。
         const host = scrubRef.current?.parentElement;
-        const rulerInner = host?.querySelector<HTMLElement>(".minimax-ruler-row > div");
-        // 指针跟随滚动：ruler 内容用 translateX(-scrollLeft) 同步轨道滚动，
-        // 点击时要把这个偏移加回去，否则点击位置会偏移已滚动的距离。
-        const transformMatch = rulerInner?.style.transform?.match(/translateX\(([-\d.]+)px\)/);
-        const scroll = transformMatch ? Math.abs(parseFloat(transformMatch[1])) : 0;
+        const track = host?.querySelector<HTMLElement>(".minimax-tracks-scroll");
+        // 轨道是真实滚动容器；不要从 ruler 的 transform 反推滚动值，
+        // 因为浏览器会把越界 scrollLeft 夹到边界，transform 可能还保留请求值。
+        const scroll = track?.scrollLeft || 0;
         const scale = el.offsetWidth > 0 ? rect.width / el.offsetWidth : 1;
         const px = Math.max(0, (event.clientX - rect.left) / scale + scroll);
         const playhead = Math.max(0, Math.min(total, px / 100));

@@ -150,7 +150,11 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         } catch (error) { handle(res, error); }
     });
     if (base === "/drama/episodes/:episodeId/production") router.get("/production/contract", (req, res) => {
-        try { const input = productionContractQuerySchema.parse(queryWithoutToken(req.query)); res.json({ ok: true, contract: getProductionContract(input.runtimeId, input.operationType, input.moduleId) }); }
+        try {
+            const input = productionContractQuerySchema.parse({ ...queryWithoutToken(req.query),
+                includeRequests: req.query.includeRequests === "true", includePatchFields: req.query.includePatchFields === "true", includeSourceContract: req.query.includeSourceContract === "true" });
+            res.json({ ok: true, contract: getProductionContract(input.runtimeId, input.operationType, input.moduleId, { requests: input.includeRequests, patchFields: input.includePatchFields, sourceContract: input.includeSourceContract }) });
+        }
         catch (error) { handle(res, error); }
     });
     router.post<Record<string, string>>(`${base}/preflight`, async (req, res) => {

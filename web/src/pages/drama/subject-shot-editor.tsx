@@ -54,6 +54,7 @@ const attentionMissing = !Array.isArray(attentionSubjectIds) || attentionSubject
 
 
     const editorialReasonText = String(value.camera.editorial_reason || "").trim();
+    const cameraDescription = String(value.camera.description ?? "");
     const editorialReasonMissing = editorialReasonText.length < 3 || /^(TBD|TODO|unknown|待填|示例|N\/A|\.+|…)$/.test(editorialReasonText);
     const framingErrorId = `shot-editor-framing-error-${id}`;
 
@@ -232,6 +233,10 @@ const attentionMissing = !Array.isArray(attentionSubjectIds) || attentionSubject
             <label className="grid gap-1.5 text-xs text-muted-foreground"><span>{t("director.atomic.lensMm")}</span><InputNumber className="w-full" min={1} step={1} value={Number.isFinite(Number(lensValue)) && lensValue !== null && lensValue !== "" ? Number(lensValue) : null} disabled={disabled} onChange={lens => camera({ [lensField]: lens })} /></label>
             <label className="grid gap-1.5 text-xs text-muted-foreground"><span>{t("director.atomic.cameraTarget")}</span><Input.TextArea value={String(value.camera.target || "")} autoSize={{ minRows: 2, maxRows: 5 }} disabled={disabled} onChange={event => camera({ target: event.target.value })} /></label>
             <label className="grid gap-1.5 text-xs text-muted-foreground"><span>{t("director.atomic.cameraFocus")}</span><Input value={String(value.camera.focus || "")} disabled={disabled} onChange={event => camera({ focus: event.target.value })} /></label>
+            <label className="shot-editor-span-all grid gap-1.5 text-xs text-muted-foreground" data-camera-description>
+                <span>{t("director.atomic.cameraDescription")}</span>
+                <Input.TextArea value={cameraDescription} placeholder={t("director.atomic.cameraDescriptionPlaceholder")} autoSize={{ minRows: 3, maxRows: 8 }} disabled={disabled} onChange={event => camera({ description: event.target.value })} />
+            </label>
         </div>}
         {section === "sound" && <div className="shot-editor-form-grid">
             {utteranceRows.map((item, index) => <article key={item.utteranceId || `new:${index}`} className="space-y-2 rounded-lg border border-border p-3">

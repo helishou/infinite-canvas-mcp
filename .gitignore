@@ -48,3 +48,5 @@ Tencent/
 handoff
 # MJ 资产提示词库缩略图（42MB，由 scripts/import-mj-asset-prompts.mjs 从码图对照 HTML 重建，不入库）
 web/public/prompt-sources/mj-assets/
+.agentproblem
+node-compile-cache/

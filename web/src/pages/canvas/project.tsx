@@ -28,7 +28,7 @@ import { fetchWorkflowDetail, isWorkflowImageField } from "@/services/api/workfl
 import { resolveComfyImageSize } from "@/services/api/comfyui";
 import { uploadImage, resolveImageUrl, isImageFile, isSvgFile, type UploadedImage } from "@/services/image-storage";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
-import { BackendApiError, updateBackendAsset, backendMediaUrl, createBackendGenerationLog, createBackendTask, editEpisodeProduction, fetchBackendCanvasDrama, fetchEpisodeProduction, fetchProductionCanvasContext, prepareCanvasLoop, request, resolveComfyMediaUrl, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
+import { BackendApiError, isBackendAvailabilityError, updateBackendAsset, backendMediaUrl, createBackendGenerationLog, createBackendTask, editEpisodeProduction, fetchBackendCanvasDrama, fetchEpisodeProduction, fetchProductionCanvasContext, prepareCanvasLoop, request, resolveComfyMediaUrl, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
 import { bindEntityPictureToNode } from "@/lib/production/subject-picture-binding";
 import { runCanvasImageTask } from "@/services/api/canvas-image";
 import { runCanvasVideoTask } from "@/services/api/canvas-video";
@@ -356,10 +356,20 @@ export default function CanvasPage() {
             setEntry({ key, destination: { pathname: "/production", search: `?${query.toString()}`, hash: location.hash } });
         }).catch(error => {
             // status 0 是「后端不可达」（网络/跨域失败），与 404/401 这类确定性错误分开记录。
-            if (active) setEntry({ key, error: error instanceof Error ? error.message : String(error), unreachable: error instanceof BackendApiError && error.status === 0 });
+            if (active) setEntry({ key, error: error instanceof Error ? error.message : String(error), unreachable: isBackendAvailabilityError(error) });
         });
         return () => { active = false; };
     }, [id, location.hash, location.search, retry]);
+
+    useEffect(() => {
+        const retryEntry = () => setRetry(value => value + 1);
+        window.addEventListener("backend-retry", retryEntry);
+        window.addEventListener("backend-connected", retryEntry);
+        return () => {
+            window.removeEventListener("backend-retry", retryEntry);
+            window.removeEventListener("backend-connected", retryEntry);
+        };
+    }, []);
 
     const entryKey = JSON.stringify([id, location.search, location.hash, retry]);
     if (!entry || entry.key !== entryKey) return <CanvasRefreshShell />;
@@ -2106,10 +2116,21 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             focusEpochRef.current++; follow.pause(t("productionCanvas.manualPause"));
             if (focusAnimRef.current) { cancelAnimationFrame(focusAnimRef.current); focusAnimRef.current = null; }
         };
+        const onProductionSelectClip = (event: Event) => {
+            const detail = (event as CustomEvent<{ projectId?: string; nodeId?: string; segmentId?: string }>).detail;
+            if (detail?.projectId !== projectId || !detail.nodeId || !detail.segmentId) return;
+            const node = nodesRef.current.find(item => item.id === detail.nodeId && item.type.includes("minimax-h3"));
+            const segments = Array.isArray(node?.metadata?.segments) ? node.metadata.segments as Array<{ id?: string }> : [];
+            if (!segments.some(segment => String(segment.id || "") === detail.segmentId)) return;
+            const view = getPluginNodeView(projectId, detail.nodeId);
+            const snapshot = view.getSnapshot();
+            view.update({ selectedSegmentId: detail.segmentId, h3TimelineFocusRequest: Number(snapshot.h3TimelineFocusRequest || 0) + 1 });
+        };
         window.addEventListener("production-focus", onFocus);
         window.addEventListener("minimax-h3-focus-preview", onPreview);
         window.addEventListener("minimax-h3-select-clip", onSelectClip);
-        return () => { window.removeEventListener("production-focus", onFocus); window.removeEventListener("minimax-h3-focus-preview", onPreview); window.removeEventListener("minimax-h3-select-clip", onSelectClip); };
+        window.addEventListener("production-select-clip", onProductionSelectClip);
+        return () => { window.removeEventListener("production-focus", onFocus); window.removeEventListener("minimax-h3-focus-preview", onPreview); window.removeEventListener("minimax-h3-select-clip", onSelectClip); window.removeEventListener("production-select-clip", onProductionSelectClip); };
     }, [projectId, projectLoaded, focusNode, animateFocus, t]);
 
     const setZoomScale = useCallback(

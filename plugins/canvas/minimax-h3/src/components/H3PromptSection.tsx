@@ -13,7 +13,7 @@ import { storyboardTrackItems } from "../services/h3-storyboard-track";
 import { alignStoryboardShotsToReferences } from "../services/storyboard-shot-alignment";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { persistPromptCandidate, promptJobs, setPromptJob } from "../services/h3-prompt-jobs";
-import { buildPromptEnhancementInput, buildStoryboardPromptSections, ensureCharacterGroupSubjectDefinitions, ensureCharacterGroupSubjects, mergeSubjectDefinitions, storyboardPromptFingerprint, toSubjectDefinitions } from "../services/storyboard-prompt";
+import { buildPromptEnhancementInput, buildStoryboardPromptSections, ensureCharacterGroupSubjectDefinitions, ensureCharacterGroupSubjects, mergeSubjectDefinitions, sha256Text, storyboardPromptFingerprint, toSubjectDefinitions } from "../services/storyboard-prompt";
 import { matchStyleTemplatePrefix } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
 import { extractDialogues, stripDialogueSpeakers, injectDialogueSpeakers, parseSubjectSpeakerMap, collectSpeakerIds } from "../services/storyboard-dialogue";
 import { h3ThemeVars } from "../h3-theme";
@@ -23,6 +23,7 @@ import { captureH3PromptRequest } from "../services/h3-prompt-request";
 import { translateH3Prompt } from "../services/h3-prompt-translation";
 import { bindLiteralSubjectsToReferences, literalPromptSubjects } from "../services/prompt-subject-definitions";
 import type { StoryboardPromptReference } from "../services/storyboard-prompt";
+import { createH3Id } from "../services/h3-id";
 import { assembleH3Prompt, readH3PromptSection } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
 import { formatShotTimestamp, isReferenceNameEcho, normalizeRef2vaSummary, stripDuplicateTransition, validatePromptReferences, validateShotTimeline, validateStoryboardShotDescriptions, visualReferenceTags } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-rules";
 import { orderStoryboardImageReferences, orderStoryboardReferencesFirst, remapPictureTags } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
@@ -443,7 +444,7 @@ function parseStoryboardDescription(description: string, imageRefs: H3Ref[], all
   const markers = storyboardShotMarkers(normalizedDescription);
   if (!markers.length) return {
     openingDescription: normalizedDescription.trim(),
-    shots: [{ id: crypto.randomUUID(), description: "", switchTime: "", transitionType: "cut" as const }],
+    shots: [{ id: createH3Id(), description: "", switchTime: "", transitionType: "cut" as const }],
   };
   return {
     openingDescription: normalizedDescription.slice(0, markers[0].index!).trim(),
@@ -542,7 +543,7 @@ function parseStoryboardDescription(description: string, imageRefs: H3Ref[], all
         break;
       }
       return {
-        id: crypto.randomUUID(),
+        id: createH3Id(),
         description: stripDialogueSpeakers(body),
         switchTime: index > 0 ? switchTime : "",
         preciseCut: index > 0 && Boolean(switchTime),
@@ -669,9 +670,8 @@ export function H3PromptSection({
       setPromptDiffersFromCompiled(false);
       return () => { current = false; };
     }
-    void crypto.subtle.digest("SHA-256", new TextEncoder().encode(prompt)).then((digest) => {
-      const hash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-      if (current) setPromptDiffersFromCompiled(hash !== compilerPromptHash);
+    void sha256Text(prompt).then((hash) => {
+      if (current) setPromptDiffersFromCompiled(hash !== null && hash !== compilerPromptHash);
     }).catch(() => { if (current) setPromptDiffersFromCompiled(false); });
     return () => { current = false; };
   }, [hasProductionCompileTarget, textStatus.ready, prompt, compilerPromptHash]);
@@ -783,9 +783,10 @@ export function H3PromptSection({
   type Translation = { segmentId: string; prompt: string; text: string };
   const [translation, setTranslation] = useState<Translation | null>(null);
   const [translating, setTranslating] = useState(false);
+  const [productionTranslating, setProductionTranslating] = useState(false);
   const [isTranslated, setIsTranslated] = useState(false);
   const [translateError, setTranslateError] = useState<string | null>(null);
-  type EnglishPromptToggle = { documentId: string; originalPrompt: string; translatedPrompt: string };
+  type EnglishPromptToggle = { documentId: string; originalPrompt: string; translatedPrompt: string; cached: boolean };
   const [englishPromptToggles, setEnglishPromptToggles] = useState<Record<string, EnglishPromptToggle>>({});
   const [englishPromptTranslating, setEnglishPromptTranslating] = useState(false);
   const [englishPromptError, setEnglishPromptError] = useState<string | null>(null);
@@ -797,6 +798,21 @@ export function H3PromptSection({
   promptRef.current = { prompt, segmentId: selected?.id, documentId: textDocument.getDocumentId() };
   const englishPromptRequestRef = useRef<{ controller: AbortController; prompt: string; segmentId?: string; documentId: string } | null>(null);
   const translationRequestRef = useRef<{ controller: AbortController; prompt: string; segmentId?: string } | null>(null);
+  useEffect(() => {
+    setProductionTranslating(false);
+    const applyProductionTranslation = (detail?: { projectId?: string; nodeId?: string; segmentId?: string; translating?: boolean }) => {
+      if (detail?.projectId !== ctx.projectId || detail.nodeId !== ctx.node.id || detail.segmentId !== selected?.id) return;
+      setProductionTranslating(detail.translating === true);
+    };
+    const onProductionTranslation = (event: Event) => applyProductionTranslation((event as CustomEvent<{ projectId?: string; nodeId?: string; segmentId?: string; translating?: boolean }>).detail);
+    const channel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("production-h3-prompt-translation") : null;
+    if (channel) channel.onmessage = event => applyProductionTranslation(event.data);
+    window.addEventListener("production-h3-prompt-translation", onProductionTranslation);
+    return () => {
+      window.removeEventListener("production-h3-prompt-translation", onProductionTranslation);
+      channel?.close();
+    };
+  }, [ctx.projectId, ctx.node.id, selected?.id]);
   useEffect(() => {
     const request = translationRequestRef.current;
     if (request && (request.prompt !== prompt || request.segmentId !== selected?.id)) {
@@ -980,7 +996,7 @@ export function H3PromptSection({
       const index = shots.findIndex((shot) => shot.id === shotId);
       if (index < 0) return shots;
       const first = { ...shots[index], pictureBindingId: bindingIds[0] };
-      const added = bindingIds.slice(1).map((pictureBindingId) => ({ id: crypto.randomUUID(), description: "", switchTime: "", preciseCut: false, transitionType: "cut" as const, pictureBindingId }));
+      const added = bindingIds.slice(1).map((pictureBindingId) => ({ id: createH3Id(), description: "", switchTime: "", preciseCut: false, transitionType: "cut" as const, pictureBindingId }));
       return [...shots.slice(0, index), first, ...added, ...shots.slice(index + 1)];
     });
   };
@@ -1032,7 +1048,7 @@ export function H3PromptSection({
   };
   const addSubjectDefinition = () => {
     commitSubjectDefinitions([...subjectDefinitionsRef.current, {
-      id: `subject-${crypto.randomUUID()}`,
+      id: `subject-${createH3Id()}`,
       name: "",
       profile: "",
       pictures: [],
@@ -1337,7 +1353,7 @@ export function H3PromptSection({
     if (enhancing) return;
     const targetSegmentId = selected?.id;
     if (!targetSegmentId || promptJobs(ctx)[targetSegmentId]?.status === "running") return;
-    const requestId = crypto.randomUUID();
+    const requestId = createH3Id();
     let job = { requestId, base: "", documentId: "" };
     try {
       const request = captureH3PromptRequest(ctx, targetSegmentId);
@@ -1590,7 +1606,7 @@ export function H3PromptSection({
       englishPromptRequestRef.current = null;
       const replaced = await ctx.replaceText(target, documentId, promptAtCall, translatedPrompt);
       if (!replaced) throw new Error("提示词在翻译写回时发生并发修改，原文已保留。");
-      setEnglishPromptToggles(current => ({ ...current, [segmentId]: { documentId, originalPrompt: promptAtCall, translatedPrompt } }));
+      setEnglishPromptToggles(current => ({ ...current, [segmentId]: { documentId, originalPrompt: promptAtCall, translatedPrompt, cached: result.cached } }));
     } catch (error) {
       if (!(error instanceof Error && error.name === "AbortError")) setEnglishPromptError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1789,6 +1805,9 @@ export function H3PromptSection({
             >
               {englishPromptTranslating ? "翻译中…" : englishPromptApplied ? "切回原文" : "翻译提示词"}
             </button>
+            {englishPromptApplied && activeEnglishPromptToggle ? <span role="status" aria-live="polite" style={{ fontSize: 12, opacity: 0.75 }}>
+              {activeEnglishPromptToggle.cached ? "已复用翻译缓存" : "译文已写回当前 Clip"}
+            </span> : null}
             <label
               key="storyboard-toggle"
               style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 22, marginLeft: 6, opacity: imageRefs.length >= 2 ? 1 : 0.45, cursor: imageRefs.length >= 2 ? "pointer" : "not-allowed" }}
@@ -1966,14 +1985,14 @@ export function H3PromptSection({
           key="prompt-translate"
           type="button"
           onClick={() => void handleTranslateToggle()}
-          disabled={translating || (!isTranslated && !prompt.trim())}
-          className={`minimax-prompt-translate${isTranslated ? " is-translated" : ""}`}
-          aria-label={isTranslated ? "切换回原提示词" : translating ? "正在翻译" : "查看中文翻译"}
-          title={isTranslated ? "切换回原提示词" : translating ? "正在翻译" : !prompt.trim() ? "请先输入提示词" : "查看中文翻译"}
+          disabled={translating || productionTranslating || (!isTranslated && !prompt.trim())}
+          className={`minimax-prompt-translate${isTranslated ? " is-translated" : ""}${productionTranslating ? " is-translating" : ""}`}
+          aria-label={productionTranslating || translating ? "正在翻译" : isTranslated ? "切换回原提示词" : "查看中文翻译"}
+          title={productionTranslating || translating ? "正在翻译" : isTranslated ? "切换回原提示词" : !prompt.trim() ? "请先输入提示词" : "查看中文翻译"}
         >
-          {translating ? "…" : isTranslated ? "EN" : "译"}
+          {productionTranslating ? "翻译中" : translating ? "…" : isTranslated ? "EN" : "译"}
         </button>
-        {translating ? <div className="minimax-prompt-translate-status" role="status">正在翻译…</div> : null}
+        {translating || productionTranslating ? <div className="minimax-prompt-translate-status" role="status">正在翻译…</div> : null}
         {translateError ? <div key="prompt-translate-error" className="minimax-prompt-translate-error" role="alert">翻译失败：{translateError}</div> : null}
       </div>
       <Modal
@@ -2010,7 +2029,7 @@ export function H3PromptSection({
             </label>
             <span className="nfh3-storyboard-composite-hint">{boundStoryboardImageCount < 2 ? "绑定至少两张分镜图后可用" : "未绑定到镜头的分镜图仍单独提交"}</span>
             <button type="button" onClick={() => {
-              updateStoryboardShots((shots) => [...shots, { id: crypto.randomUUID(), description: "", switchTime: "", preciseCut: false, transitionType: "cut" }]);
+              updateStoryboardShots((shots) => [...shots, { id: createH3Id(), description: "", switchTime: "", preciseCut: false, transitionType: "cut" }]);
             }}>添加分镜</button>
           </div>
           <div className="nfh3-storyboard-fields">

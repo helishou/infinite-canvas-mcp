@@ -9,11 +9,10 @@ import localforage from "localforage";
 import { nanoid } from "nanoid";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams, useSearchParams, createSearchParams } from "react-router-dom";
-import { diagnosticBlocksAction, directorModules, isSubjectPromptAssembly, productionSceneEntries, type ProductionBlockingAction, type ProductionDiagnostic, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
+import { diagnosticBlocksAction, isSubjectPromptAssembly, productionSceneEntries, type ProductionBlockingAction, type ProductionDiagnostic, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 import { backendConnection } from "@/lib/backend-connection";
 import { ensureCanvasDraftLease, getCanvasDraftSessionId } from "@/lib/canvas/canvas-draft-session";
 import { exportAchengDeliveryBundle } from "@/lib/acheng-delivery-export";
-import { ACHENG_CANVAS_LANGUAGE_RULE } from "@/lib/agent/creative-launch";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
@@ -24,7 +23,6 @@ import { productionCanvasNodes, type ProductionCanvasSnapshot } from "./producti
 import { readShotFormDraft, shotFormChanges, shotDraftSourceChanged } from "./subject-shot-draft";
 import { startSingleFlightPoller } from "@/lib/single-flight-poll";
 import { productionObjectPath, type ProductionObject } from "@/lib/production-object";
-import { consumeProductionEntryMark } from "@/lib/production-navigation";
 import { productionSegments, productionSegmentRuntimeMatches, segmentShotIds } from "@/lib/production-source";
 import { bindEntityPictureToNode } from "@/lib/production/subject-picture-binding";
 import { watchSlowBrowserOperation } from "@/lib/slow-operation-monitor";
@@ -41,7 +39,7 @@ import {
   compileProduction, fetchProductionCompilation, applyProductionCompilation, type ProductionCompilationStatus, type ProductionCompilationDiagnostic,
   prepareProductionTargets, arrangeProductionScene, adoptProductionSharedAsset, ensureEpisodeCanvas, ensureSharedAssetCanvas, fetchProductionCanvasContext,
   previewProductionSharedAssetPromotion, promoteExistingProductionSharedAsset,
-  backendMediaUrl, startCanvasGeneration, fetchBackendTasks, type BackendRuntimeTask,
+  backendMediaUrl, startCanvasGeneration, fetchBackendTasks, isBackendAvailabilityError, type BackendRuntimeTask,
 } from "@/services/backend-api";
 import { DirectorPanel, type DirectorWorkspace } from "./director-panel";
 import { type CanvasAssetEditPayload } from "./canvas-asset-edit-modal";
@@ -121,14 +119,22 @@ export default function ProductionRoute({ dramaId }: { dramaId?: string } = {}) 
     if (!dramaId) return;
     void episodeQuery.refetch();
   }, [dramaId, episodeQuery.refetch]);
+  useEffect(() => {
+    window.addEventListener("backend-retry", refreshEpisodes);
+    window.addEventListener("backend-connected", refreshEpisodes);
+    return () => {
+      window.removeEventListener("backend-retry", refreshEpisodes);
+      window.removeEventListener("backend-connected", refreshEpisodes);
+    };
+  }, [refreshEpisodes]);
   const requestedEpisodeId = query.get("episodeId");
   const episodeReadError = episodeQuery.error instanceof Error ? episodeQuery.error.message : String(episodeQuery.error || "");
-  const episodesNotice = episodeQuery.isError ? <Alert
+  const episodesNotice = episodeQuery.isError && !isBackendAvailabilityError(episodeQuery.error) ? <Alert
     className="mb-5"
     type="warning"
     showIcon
     message={t("director.loadFailed")}
-    description={<div className="flex flex-wrap items-center gap-x-3 gap-y-1"><span>{episodeReadError}</span><Button type="link" size="small" className="p-0" onClick={refreshEpisodes}>{t("director.refresh")}</Button></div>}
+    description={episodeReadError}
   /> : undefined;
   // URL 指向的分集已不存在（如在「剧目」页签中被删除）时清理地址，避免刷新后一直带回退逻辑。
   useEffect(() => {
@@ -138,15 +144,6 @@ export default function ProductionRoute({ dramaId }: { dramaId?: string } = {}) 
     next.delete("episodeId");
     setQuery(next, { replace: true });
   }, [dramaId, episodes, episodeQuery.isFetching, episodeQuery.isError, requestedEpisodeId, query, setQuery]);
-  const navigate = useNavigate();
-  // 后端不可达（status 0，非 404/401 这类确定性错误）且是从应用内点进来的：退回点击前的页面，不留在空壳错误页；
-  // 已有缓存分集数据时页面仍可读，不回退；直接深链 / F5 没有跳转标记，保留下方的错误展示与刷新入口。
-  useEffect(() => {
-    if (!dramaId || episodes || !episodeQuery.isError) return;
-    const unreachable = episodeQuery.error instanceof BackendApiError && episodeQuery.error.status === 0;
-    if (!unreachable || !consumeProductionEntryMark()) return;
-    void navigate(-1);
-  }, [dramaId, episodes, episodeQuery.isError, episodeQuery.error, navigate]);
   if (!dramaId) return <ProductionEditor />;
   const seriesContext = { id: dramaId, episodes: episodes || [] };
   if (!episodes && !episodeQuery.isError) return <div className="p-6">{t("drama.production.loading")}</div>;
@@ -294,6 +291,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   const [busy, setBusy] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const backendReadFailed = useRef(false);
   const [agentError, setAgentError] = useState("");
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null);
   const [draftKey, setDraftKey] = useState<string | null>(null);
@@ -371,6 +369,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     setBatches(runHistory.runs);
     setRuntimeTasks(tasks);
     if (!preserveBrief) setBriefDraft(String(prod.production.draft.director?.source.brief || ""));
+    backendReadFailed.current = false;
     setLoadError("");
     return context.episode?.id || (projectId ? `canvas:${projectId}` : episodeId);
   }, [target, projectId, contextProjectId, episodeId, t, beginContinuityRead, finishContinuityRead]);
@@ -405,11 +404,38 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       const loadedOwner = await load(() => active);
       if (!loadedOwner || !active) return;
       legacyDraftPurge();
-    })().catch(error => { if (active) { setLoadError(String(error)); message.error(String(error)); } });
+    })().catch(error => {
+      if (!active) return;
+      if (isBackendAvailabilityError(error)) {
+        backendReadFailed.current = true;
+        setLoadError("");
+      } else {
+        setLoadError(String(error));
+        message.error(String(error));
+      }
+    });
     return () => { active = false; };
     // Initial route loads the remote formal draft; no local draft is restored or kept anymore.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [episodeId, projectId, load, message]);
+
+  useEffect(() => {
+    if (seriesOnly) return;
+    const retry = () => {
+      if (!backendReadFailed.current) return;
+      backendReadFailed.current = false;
+      void load(() => true, true).catch(error => {
+        if (isBackendAvailabilityError(error)) backendReadFailed.current = true;
+        else setLoadError(String(error));
+      });
+    };
+    window.addEventListener("backend-retry", retry);
+    window.addEventListener("backend-connected", retry);
+    return () => {
+      window.removeEventListener("backend-retry", retry);
+      window.removeEventListener("backend-connected", retry);
+    };
+  }, [load, seriesOnly]);
 
 
   useEffect(() => {
@@ -518,7 +544,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     setPendingCompilation(value);
   };
 
-  const runProductionCompile = async (sceneId?: string, targetId?: string) => {
+  const runProductionCompile = async (sceneId?: string, targetId?: string, requestedTargetIds?: string[]) => {
     if (compiling || !production?.draft.director) return;
     setCompiling(true);
     setCompileError("");
@@ -546,7 +572,23 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         if (canvasId) await flushCanvasProjectBeforeGeneration(canvasId);
         compileSource = (await fetchEpisodeProduction(target)).production;
         setProduction(previous => !previous || previous.episodeId !== compileSource.episodeId || compileSource.revision > previous.revision ? compileSource : previous);
-        pending = { operationId: `compile-${nanoid(14)}`, expectedRevision: compileSource.revision, ...(targetId ? { scope: { targetIds: [targetId] } } : sceneId ? { scope: { sceneId } } : {}) };
+        const sourceSegments = productionSegments(compileSource);
+        if (targetId && sourceSegments.some(segment => String(segment.id) === targetId && segment.locked === true)) {
+          setCompileNotice(t("director.atomic.clipLocked"));
+          return;
+        }
+        const sourceShots = compileSource.draft.director?.source.shots as Array<Record<string, any>> | undefined;
+        const sceneShotIds = sceneId ? new Set((sourceShots || []).filter(shot => String(shot.scene_id || "") === sceneId).map(shot => String(shot.id))) : undefined;
+        const eligibleClipIds = sourceSegments.filter(segment => segment.locked !== true
+          && (!targetId || String(segment.id) === targetId)
+          && (!requestedTargetIds || requestedTargetIds.includes(String(segment.id)))
+          && (!sceneShotIds || (segment.shot_ids || []).some((id: string) => sceneShotIds.has(String(id)))))
+          .map(segment => String(segment.id));
+        if (!eligibleClipIds.length) {
+          setCompileNotice(t("director.atomic.noUnlockedClips"));
+          return;
+        }
+        pending = { operationId: `compile-${nanoid(14)}`, expectedRevision: compileSource.revision, scope: { targetIds: eligibleClipIds } };
         await persistPendingCompilation(pending);
       }
       compileRequestStarted = true;
@@ -625,7 +667,11 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       const describe = (item: ProductionCompilationDiagnostic) => item.message?.trim() || "";
       const clipContext = (items: ProductionCompilationDiagnostic[]) => [...new Set(items.map(item => item.targetId).filter((id): id is string => Boolean(id)))].map(id => {
         const index = productionSegments(compileSource).findIndex(segment => String(segment.id) === id);
-        return index >= 0 ? t("director.studio.clipNumber", { number: index + 1 }) : id;
+        if (index >= 0) return t("director.studio.clipNumber", { number: index + 1 });
+        const source = compileSource.draft.director?.source as Record<string, any> | undefined;
+        const asset = (Array.isArray(source?.asset_plan) ? source!.asset_plan : []).find((item: Record<string, any>) => String(item.id) === id);
+        const assetName = String(asset?.asset_name || asset?.name || asset?.title || "").trim();
+        return assetName ? `素材「${assetName}」` : id;
       }).join("、");
       const diagnosticContext = (items: ProductionCompilationDiagnostic[]) => [...new Set(items.map(describe).filter(Boolean))].join("；");
       const continuityLocationContext = (items: ProductionCompilationDiagnostic[]) => {
@@ -634,7 +680,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         const fps = Number(source.fps_num || 24) / Number(source.fps_den || 1);
         return continuityDiagnosticLocations(source, items).map(location => {
           const clipIndex = productionSegments(compileSource).findIndex(segment => String(segment.id) === location.segmentId);
-          const clip = clipIndex >= 0 ? `${t("director.studio.clipNumber", { number: clipIndex + 1 })} ${location.segmentId}` : location.segmentId;
+          const clip = clipIndex >= 0 ? `${t("director.studio.clipNumber", { number: clipIndex + 1 })}（${location.segmentId}）` : location.segmentId;
           return t("director.atomic.compileFrameLocation", {
             clip, shot: `${location.shotTitle} (${location.shotId})`,
             start: frameTimecode(location.startFrame, fps), end: frameTimecode(location.endFrameExclusive, fps),
@@ -650,7 +696,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         const affectedClipIds = [...new Set(items.flatMap(item => item.affectedTargets || []))];
         const clipNames = affectedClipIds.map(id => {
           const index = productionSegments(compileSource).findIndex(segment => String(segment.id) === id);
-          return index >= 0 ? `${t("director.studio.clipNumber", { number: index + 1 })} ${id}` : id;
+          return index >= 0 ? `${t("director.studio.clipNumber", { number: index + 1 })}（${id}）` : id;
         });
         const count = affectedClipIds.length || new Set(items.map(item => item.targetId).filter(Boolean)).size || items.length;
         const clips = clipNames.length ? `（${clipNames.join("、")}）` : "";
@@ -1174,19 +1220,18 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     } });
   };
 
-  const askDirector = async (scope: { workspace: DirectorWorkspace; targetId?: string; instruction?: string; brief?: string; workId?: string }) => {
+  const askDirector = async (scope: { workspace: DirectorWorkspace; targetId?: string; targetKind?: "scene"; instruction?: string; brief?: string; workId?: string; clipContext?: boolean }) => {
     if (pendingCommandRef.current) return warnPendingCommand();
-    const requestedBrief = scope.brief ?? briefDraft;
+    const requestedBrief = scope.brief;
     let currentProduction = await fetchEpisodeProduction(target).then(result => result.production);
-    if (requestedBrief !== String(currentProduction.draft.director?.source.brief || "")) {
-      await saveBrief(requestedBrief);
+    if (requestedBrief !== undefined && requestedBrief !== String(currentProduction.draft.director?.source.brief || "")) {
+      await saveBrief(requestedBrief || "");
       currentProduction = await fetchEpisodeProduction(target).then(result => result.production);
     }
     setProduction(currentProduction);
     const director = currentProduction.draft.director;
     if (!director) return message.error(t("director.workspace.engineUnavailable"));
-    const storyboardImageMode = currentProduction.draft.settings.storyboardImageMode;
-    if (String(director.source.brief || "") !== requestedBrief) return message.error(t("director.workspace.briefSaveFailed"));
+    if (requestedBrief !== undefined && String(director.source.brief || "") !== requestedBrief) return message.error(t("director.workspace.briefSaveFailed"));
     const agent = useAgentStore.getState();
     if (!agent.enabled || !agent.connected || !["ready", "warning"].includes(agent.conversation.status)) {
       useProductionWorkspaceStore.getState().setPanelTab("director");
@@ -1194,55 +1239,56 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       return message.warning(t("director.workspace.agentDisconnected"));
     }
     if (agent.sending || agent.waiting || agent.loadingThreads || ["preparing", "running"].includes(agent.conversation.status)) return message.warning(t("director.workspace.agentBusy"));
-    const moduleForWorkspace: Record<DirectorWorkspace, Array<(typeof directorModules)[number]>> = {
-      series: [],
-      overview: ["story", "assets", "shots", "performance", "effects", "model", "continuity"],
-      story: ["story"], assets: ["assets"], shots: ["shots", "performance", "effects"], continuity: ["continuity"], production: ["model"], advanced: ["continuity"],
-    };
     const readinessNow = await fetchProductionReadiness(target).then(result => result.readiness);
     setReadiness(readinessNow);
     const targetObject = scope.targetId ? readinessNow.targets.find(item => item.targetId === scope.targetId || item.id === scope.targetId) : undefined;
-    const cursors = Object.fromEntries(moduleForWorkspace[scope.workspace].map(module => [module, director.modules[module]?.cursor ?? null]));
-    const selectedModules = moduleForWorkspace[scope.workspace].join(", ");
-    const drama = useCanvasStore.getState().folders.find(folder => folder.id === episode?.dramaId || folder.sharedAssetCanvasId === canvasId);
     const key = productionOwner.id;
     const id = nanoid();
     const ownerKind = productionOwner.kind;
     const followTarget = useProductionFollowStore.getState().target;
     const workId = scope.workId || (followTarget?.kind === ownerKind && followTarget.id === key ? followTarget.workId : nanoid());
+    const targetId = scope.targetId || "";
+    const readInstruction = (() => {
+      const episodeArgs = `kind:"${ownerKind}", id:"${key}", snapshot:"draft"`;
+      const targetList = targetId ? `, targetIds:["${targetId}"]` : "";
+      const workbench = (view: "subject_workbench" | "shot_workbench" | "clip_workbench") => `mcp__infinite_canvas__production_get_workbench({${episodeArgs}, targetId:"${targetId}", view:"${view}"})`;
+      const source = (section: string) => `mcp__infinite_canvas__production_get_source({${episodeArgs}, sourceSection:"${section}"${targetList}})`;
+      if (scope.workspace === "series") return `mcp__infinite_canvas__drama_get_project({dramaId:"${episode?.dramaId || ""}"})`;
+      if (scope.targetKind === "scene" && targetId) return `mcp__infinite_canvas__production_get_scene_production({sceneId:"${targetId}", snapshot:"draft"})`;
+      if (scope.workspace === "continuity" || scope.workspace === "advanced") return `mcp__infinite_canvas__production_get_continuity({${episodeArgs}, view:"${targetId ? "issues" : "summary"}"${targetId ? `, targetId:"${targetId}"` : ""}})`;
+      if (targetObject?.kind === "segment" || scope.clipContext) return workbench("clip_workbench");
+      if (targetObject?.kind === "keyframe" || scope.workspace === "shots" && targetId) return workbench("shot_workbench");
+      if (scope.workspace === "story") return source(targetId ? "script_scenes" : "script");
+      if (scope.workspace === "assets") return source(targetId ? "asset_cards" : "asset_plan");
+      if (scope.workspace === "shots") return source("shots");
+      if (scope.workspace === "clips") return source("clip_groups");
+      if (scope.workspace === "production") return targetId ? `mcp__infinite_canvas__production_get_artifact_index({kind:"${ownerKind}", id:"${key}", snapshot:"draft", targetIds:["${targetId}"]})` : `mcp__infinite_canvas__production_get({kind:"${ownerKind}", id:"${key}", snapshot:"draft"})`;
+      if (scope.workspace === "overview" && targetObject?.kind === "asset") return source("asset_cards");
+      if (scope.workspace === "overview" && targetId) return `mcp__infinite_canvas__production_get_artifact_index({kind:"${ownerKind}", id:"${key}", snapshot:"draft", targetIds:["${targetId}"]})`;
+      if (scope.workspace === "overview") return `mcp__infinite_canvas__production_get({kind:"${ownerKind}", id:"${key}", snapshot:"draft"})`;
+      return source("context");
+    })();
+    const contractModule = scope.targetKind === "scene" ? "shots"
+      : targetObject?.kind === "segment" ? "shots"
+      : targetObject?.kind === "keyframe" ? "shots"
+      : targetObject?.kind === "asset" ? "assets"
+      : ({ series: "story", overview: undefined, story: "story", assets: "assets", shots: "shots", continuity: "continuity", clips: "model", production: "model", advanced: "continuity" } as const)[scope.workspace];
     const text = [
       "$acheng-director",
-      "这是导演工作台发起的独立阶段任务。按 Acheng 七模块规范完成本次范围，不把七个模块当成顺序关卡，不启动其他代理。涉及画布数据或媒体时，先读取项目 Skill canvas-video-production-sop 作为 Backend 与原生 MCP 适配；适配层不替代 Acheng 创作权属。",
-      ACHENG_CANVAS_LANGUAGE_RULE,
-      `制作对象：${key}；对象类型：${ownerKind}`,
-      `Backend 正式 revision：${currentProduction.revision}；已发布版本：${currentProduction.publishedVersion}`,
-      "本次创作、编译和校验使用本机当前激活的 Acheng 版本。先调用 production_get_contract 读取当前合同，不用制作记录中的历史引擎身份选择执行版本。",
-      `本次工作区：${scope.workspace}；调用模块：${selectedModules}`,
-      ...(scope.workspace === "continuity" ? ["开始 continuity 写入前，调用 production_get_contract({moduleId: \"continuity\"})，实际读取当前激活版本返回的模块入口与必读合同，再按该回执的 owner 规则修改源稿。当前 scope 必须有源哈希匹配的连续性覆盖及重放回执；诊断旧版只读，不自动迁移。"] : []),
-      `分镜图模式：${storyboardImageMode || "尚未设置"}`,
-      "若本对象尚未开始镜头设计且分镜图模式尚未设置，先通过正式 workflow.pendingDecisions 询问用户生成分镜图或跳过图片、只保留文字分镜；将答复写入正式 settings.storyboardImageMode（generate/skip）后再继续。skip 时保留文字 Shot、Segment 和 H3 提示词，所有 shotInputs.keyframePolicy 设为 none，不登记、准备或生成关键帧图片；角色、场景、道具等其他资产仍按制作需要处理。",
-      `内容交付模式：${director.workflow.contentDeliveryMode || "auto_file_batch"}；媒体生产模式：${director.workflow.mediaProductionMode || "per_item"}`,
-      `选中目标：${targetObject ? `${targetObject.kind}:${targetObject.targetId}` : scope.targetId || "当前工作区缺项"}`,
-      `当前就绪回执：${targetObject ? `${targetObject.status}；${targetObject.blockers.join("；")}` : readinessNow.nextAction}`,
-      `恢复游标：${JSON.stringify(cursors)}`,
-      `持续制作 workId：${workId}。每次确认新工作目标后，通过 set_director_workflow 写入正式 currentWork，保持此 workId，并调用结构化 site_navigate({production:{kind:"${ownerKind}",id:"${key}",workId:"${workId}"}}) 呈现 Backend 当前阶段。不要凭聊天文本切页。`,
-      "如需用户裁定创作选项，先回读当前 sourceHash，把问题、至少两个明确选项、目标、workId 和 sourceHash 写入 workflow.pendingDecisions；不要把问题只留在聊天中，也不要预选或自动批准。用户答复保存后，再从答复绑定的源稿继续。",
-      `用户需求：${String(director.source.brief || requestedBrief)}`,
-      scope.instruction ? `本次补充要求：${scope.instruction}` : "",
-      drama ? `所属剧目：${drama.name}。全剧大纲：${drama.outline || "尚未填写"}。全剧制作要求：${drama.productionPlan?.requirements || "尚未填写"}。本集沿用其已保存的制作设置；不要因全剧默认值变更改写已有分集、共享素材版本或在途任务输入。` : "",
-      "人工协作：定向读取目标时同时查看 canvasInputs 的当前画布内容、人工差异和导演基线。重新编译保留人工修改；只有用户明确指定的目标和字段可以采用导演更新。生成默认采用当前已保存内容，不要求为了手改重新发布。",
-      "保留项：不覆盖已确认的源稿和未编辑字段；完整保存对白、参考职责、资产版本与工作流游标。只提交本次模块产物和编译证据，使用 Backend expectedRevision/operationId 处理写入冲突。",
-      "媒体权限：本请求只授权创作、修订和编译，不授权图片或视频生成。只有用户在工作台点击生成目标时，才使用对应生产 runId；前段 MP4 不得自动加入输入。",
-      "新合同局部修改固定走：读取 subject_workbench/shot_workbench/clip_workbench 并核对 targetStatus → 一次合并结构化源操作 → 消费 Backend 自动校验、编译和同步回执；不另手动重复编译或发布。旧合同走其兼容流程。发布和媒体生成独立执行，均不因自动刷新而推进。工具短回执不代表字段缺失，context 的 omittedSourceSections 和 ledgerSummary 指向需要另读的源条目；失败按诊断处理，源稿与状态未变不换键重提，未知响应恢复原 operationId 的回执。",
-      "请先读取 Backend 正式制作稿、缺项与运行记录，再从此游标继续。聊天中说已完成不算提交；完成后回读 Backend 版本回执。",
+      `请用中文围绕“${scope.workspace}${targetId ? ` · ${targetObject?.kind || scope.targetKind || "目标"} ${targetId}` : ""}”与用户讨论。`,
+      `先调用 ${readInstruction} 读取当前正式内容，只看与本次讨论有关的信息。`,
+      requestedBrief !== undefined ? `用户需求：${requestedBrief}` : "",
+      scope.instruction ? `补充要求：${scope.instruction}` : "",
+      "先讨论；只有用户明确要求修改时，才读取对应生产合同并按合同局部编辑。不要自动生成媒体或发布。",
+      contractModule ? `需要修改时调用 mcp__infinite_canvas__production_get_contract({moduleId:"${contractModule}"})。` : "",
     ].filter(Boolean).join("\n");
     handledAgentResultRef.current = "";
     setAgentError("");
-    useProductionFollowStore.getState().setTarget({ kind: ownerKind, id: key, workId, threadId: director.workflow.agentThreadId || agent.activeThreadId || undefined });
+    useProductionFollowStore.getState().setTarget({ kind: ownerKind, id: key, workId });
     useProductionWorkspaceStore.getState().setPanelTab("director");
     setAgentState({
       panelOpen: true, panelMounted: true, activeTab: "chat", scopedTaskResult: null,
-      scopedTask: { id, text, threadId: director.workflow.agentThreadId || agent.activeThreadId || undefined, productionId: key, revision: currentProduction.revision },
+      scopedTask: { id, text, newThread: true, draftOnly: true, productionId: key, revision: currentProduction.revision },
     });
   };
 
@@ -1511,9 +1557,14 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   };
   const patchSource = async (entity: "style" | "spec" | "story" | "scene" | "environment" | "character" | "asset" | "asset_card" | "shot" | "segment", id: string | undefined, patch: Record<string, unknown>) => {
     if (entity === "scene" && id && typeof patch.scene_id === "string") return edit([{ type: "set_director_scene_environment", sceneId: id, environmentId: patch.scene_id }]);
-    return edit([{ type: "patch_director_source", entity, ...(id ? { id } : {}), patch }]);
+    const lockOnly = entity === "segment" && Object.keys(patch).length > 0 && Object.keys(patch).every(key => key === "locked" || key === "preLockNoiseSeedMode");
+    const expectedRefreshRevision = production ? production.revision + 1 : null;
+    if (lockOnly && expectedRefreshRevision !== null) skipProductionRefreshRevision.current = expectedRefreshRevision;
+    const saved = await edit([{ type: "patch_director_source", entity, ...(id ? { id } : {}), patch }]);
+    if (!saved && lockOnly && skipProductionRefreshRevision.current === expectedRefreshRevision) skipProductionRefreshRevision.current = null;
+    return saved;
   };
-  const editCanvasClip = async (nodeId: string, segmentId: string, patch: Record<string, unknown>) => {
+  const editCanvasClip = async (nodeId: string, segmentId: string, patch: Record<string, unknown>, refreshProduction = true) => {
     if (!canvasId) return false;
     try {
       const project = await ensureCanvasProjectLoaded(canvasId);
@@ -1524,7 +1575,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         return { ...node, metadata: { ...metadata, segments } as typeof node.metadata };
       }) });
       await flushCanvasProjectBeforeGeneration(canvasId);
-      await refreshRemote(); return true;
+      if (refreshProduction) await refreshRemote(); return true;
     } catch (error) { fail(error); return false; }
   };
   const applyTranslatedCompiledPrompts = async (items: Array<{ targetId: string; nodeId: string; segmentId: string; sourcePrompt: string; expectedCanvasPrompt: string; translatedPrompt: string }>) => {
@@ -1861,9 +1912,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     if (agentTaskResult?.status === "failed") setAgentError(agentTaskResult.error || t("director.workspace.agentTaskFailed"));
   }, [agentTaskResult, t]);
 
-  const retryLoad = () => { setLoadError(""); void load(() => true, true).catch(error => setLoadError(String(error))); };
   // 断联时保留已经加载的工作区：只有确实没有内容可显示时才用整页错误替换。
-  if (loadError && !production) return <main className="p-8"><Alert type="error" message={t("director.loadFailed")} description={loadError} /><Button className="mt-4" onClick={retryLoad}>{t("director.refresh")}</Button><Button onClick={() => navigate(backPath)}>{t("director.back")}</Button></main>;
+  if (loadError && !production) return <main className="p-8"><Alert type="error" message={t("director.loadFailed")} description={loadError} /></main>;
   if (!production) {
     if (series && !projectId && !episodeId) {
       // 无分集剧目：跳过逐集工作区，只保留全剧规划、分集与共享画布入口。
@@ -1906,6 +1956,9 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   const pendingRunNotice = pendingRunStart && <div className="mb-4 rounded-lg border border-border bg-muted p-4 text-sm text-foreground"><p>{t("director.workspace.runReceiptUnknown")} · {pendingRunStart.runId}</p><Button className="mt-2" size="small" disabled={busy} onClick={() => void recoverRunStart()}>{t("drama.production.recoverReceipt")}</Button></div>;
   const run = batches[0] || null;
   const activeTargetIds = [...new Set(batches.filter(item => ["pending", "running", "paused", "awaiting_review"].includes(item.status)).flatMap(item => item.targets))];
+  const readOnly = Boolean(production.archivedAt);
+  // 归档是记录级开关，单独提交 set_archived；不与其他编辑混批，也不触发重编译或画布重投影。
+  const archiveProduction = (archived: boolean) => edit([{ type: "set_archived", archived }]);
   const scope: ProductionWorkspaceScope = productionContext?.role === "shared-assets" ? "shared-assets" : productionOwner.kind === "episode" ? "episode" : "canvas";
   const navigationGroups = productionNavigationGroups({ hasSeries: Boolean(series), scope, setup: seriesOnly });
   // 剧目工作区的子 Tab 栏展开「剧目规划 / 共享资产画布 / 分集管理」；顶部下拉保持「规划与资产 / 分集管理」。
@@ -1942,7 +1995,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   ];
 
   return <main ref={editorRootRef} data-production-inspector={embedded && !dialog || undefined} data-production-dialog={dialog || undefined} data-director-workspace data-production-workspace-shell={!embedded || undefined} data-shot-workspace-shell={!embedded && workspace === "shots" || undefined} className={embedded ? "min-h-full bg-background p-3 text-foreground" : "min-h-full bg-background px-4 py-5 text-foreground sm:px-6 lg:px-10 lg:py-7"}>
-      {loadError && <div className="mx-auto w-full max-w-[1440px]"><Alert className="mb-5" type="warning" showIcon message={t("director.loadFailed")} description={<div className="flex flex-wrap items-center gap-x-3 gap-y-1"><span>{loadError}</span><Button type="link" size="small" className="p-0" onClick={retryLoad}>{t("director.refresh")}</Button></div>} /></div>}
+      {loadError && <div className="mx-auto w-full max-w-[1440px]"><Alert className="mb-5" type="warning" showIcon message={t("director.loadFailed")} description={loadError} /></div>}
       {notice && <div className="mx-auto w-full max-w-[1440px]">{notice}</div>}
     <div className="mx-auto max-w-[1440px]">
       <ProductionWorkspaceBreadcrumb items={breadcrumbs} />
@@ -1975,6 +2028,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       {agentError && <Alert className="mb-4" type="warning" showIcon message={agentError} closable onClose={() => setAgentError("")} />}
       {production.storageFormat === "v2-projection-migration-required" && <Alert className="mb-4" type="warning" showIcon message={t("director.generation.sourceStorageMigration")} />}
       {production.publishedFormatStatus === "legacy-maintenance-required" && <Alert className="mb-4" type="info" showIcon message={t("director.generation.publishedLegacyHidden")} />}
+      {readOnly && <Alert className="mb-4" type="info" showIcon message={t("drama.production.archivedNotice")} />}
       {(remoteRevision !== null || showCommandNotice) && <div data-production-recovery-notice className="mb-4 text-sm">{remoteRevision !== null && <p>{t("drama.production.conflictDetail", { number: remoteRevision })}</p>}{pendingNotice}</div>}
       {pendingRunNotice}
       <div data-production-workspace-layout className={embedded ? "min-w-0" : "grid min-w-0 items-start gap-5 lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-8"}>
@@ -1987,7 +2041,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
               assetScopeHint={!embedded ? t(`director.workspaceHierarchy.${scope === "episode" ? "episodeAssetsHint" : scope === "shared-assets" ? "sharedAssetsHint" : "projectAssetsHint"}`) : undefined}
               navigationTitleVisible={!embedded} embedded={embedded} compact={dialog} generationSupported={productionOwner.kind !== "scene"} onSaveScript={saveSceneDrafts}
               workspace={workspace} director={production.draft.director} production={production} readiness={readiness || undefined} continuityReport={continuityReport} continuitySnapshotLoading={continuitySnapshotLoading} run={run} batches={batches} runtimeTasks={runtimeTasks}
-              canvasNodes={canvasNodes} sharedCanvasNodes={sharedCanvasNodes?.nodes} sharedCanvasId={sharedCanvasNodes?.id} versions={versions} busy={busy} canvasId={canvasId} canvasRole={productionContext?.role || (projectId ? "ordinary" : "episode")} focusTarget={routeTarget}
+              canvasNodes={canvasNodes} sharedCanvasNodes={sharedCanvasNodes?.nodes} sharedCanvasId={sharedCanvasNodes?.id} versions={versions} busy={busy || readOnly} readOnly={readOnly} onArchive={productionOwner.kind === "episode" ? archiveProduction : undefined} canvasId={canvasId} canvasRole={productionContext?.role || (projectId ? "ordinary" : "episode")} focusTarget={routeTarget}
               sourceDrafts={sourceDrafts} onSourceDraftChange={setSourceDraft}
               briefDraft={briefDraft} onBriefDraftChange={setBriefDraft}
               onBrief={saveBrief} onEditCanvasClip={editCanvasClip} onAdoptDirectorFields={adoptDirectorFields} onPatch={patchSource} onAdoptClipStyle={adoptClipStyle} onRegroup={regroupSegment} onWorkflow={setWorkflow} onSettings={patch => void edit([{ type: 'set_settings', patch }])} onBindAsset={bindAsset}
@@ -2055,7 +2109,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
               onOpenSharedAsset={(assetId, title) => void openSharedAsset(assetId, title).catch(fail)} onPromoteExistingSharedAsset={(assetId, title) => void promoteExistingSharedAsset(assetId, title).catch(fail)}
               onBoundary={setBoundary} onH3Boundary={setH3Boundary} onPublish={() => void publish()} onSaveContinuity={saveContinuity} onCheckContinuity={checkContinuity} onContinuitySnapshot={changeContinuitySnapshot}
               onReplace={value => void replaceDirector(value)} onAskDirector={scope => void askDirector(scope)} onNavigate={navigateWorkspace}
-              onCompile={(sceneId, targetId) => void runProductionCompile(sceneId, targetId)} onApplyTranslatedPrompts={applyTranslatedCompiledPrompts} autoTranslateCompilation={autoTranslateCompilation} compileBusy={compiling} compilePending={Boolean(pendingCompilation)} compileError={compileError} compileNotice={compileNotice} compileDiagnostics={compileDiagnostics} compileTargets={compileTargets}
+              onCompile={(sceneId, targetId, targetIds) => void runProductionCompile(sceneId, targetId, targetIds)} onApplyTranslatedPrompts={applyTranslatedCompiledPrompts} autoTranslateCompilation={autoTranslateCompilation} compileBusy={compiling} compilePending={Boolean(pendingCompilation)} compileError={compileError} compileNotice={compileNotice} compileDiagnostics={compileDiagnostics} compileTargets={compileTargets}
               onLocateTarget={(kind, id) => {
                 if (kind === "shot") { navigateWorkspace("shots", { kind, id }); return; }
                  const runtime = kind === "segment" ? clipRuntime(id) : undefined;

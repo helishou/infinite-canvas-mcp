@@ -142,9 +142,19 @@ export type StoryboardPromptReference = {
 
 export type StoryboardPromptShot = { description: string; referenceIds?: string[] };
 
-export async function storyboardPromptFingerprint(input: unknown) {
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(input)));
-    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+export async function sha256Text(value: string, subtle: Pick<SubtleCrypto, "digest"> | null = globalThis.crypto?.subtle ?? null): Promise<string | null> {
+    if (!subtle || typeof subtle.digest !== "function") return null;
+    try {
+        const digest = await subtle.digest("SHA-256", new TextEncoder().encode(value));
+        return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    } catch {
+        return null;
+    }
+}
+
+export async function storyboardPromptFingerprint(input: unknown, subtle: Pick<SubtleCrypto, "digest"> | null = globalThis.crypto?.subtle ?? null) {
+    const serialized = JSON.stringify(input) ?? "undefined";
+    return await sha256Text(serialized, subtle) ?? `raw:${serialized}`;
 }
 
 function subjectAppearsInShot(subject: StoryboardPromptSubject, shot: StoryboardPromptShot, subjectOrdinal: number) {

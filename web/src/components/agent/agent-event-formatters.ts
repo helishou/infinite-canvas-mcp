@@ -73,7 +73,7 @@ export function formatAgentEvent(event: AgentEventPayload): Omit<AgentChatItem, 
     return null;
 }
 
-export function formatAgentActivity(event: AgentEventPayload): Omit<AgentChatItem, "id"> | null {
+export function formatAgentActivity(event: AgentEventPayload, usage?: AgentTokenUsage | null): Omit<AgentChatItem, "id"> | null {
     const item = event.item;
     if (!item || (event.type !== "item.started" && event.type !== "item.completed")) return null;
     const completed = event.type === "item.completed";
@@ -110,7 +110,7 @@ export function formatAgentActivity(event: AgentEventPayload): Omit<AgentChatIte
     if (isMcpToolItem(item)) {
         const name = String(item.tool || "");
         const failure = toolResultFailure(item);
-        return { role: "tool", title: compilationToolView(item) ? tr(compilationToolView(item)!.titleKey) : toolName(name), text: completed ? toolSummary(item) : tr("toolRunning", { action: toolAction(name) }), detail: toolDetail(item, failure.failed ? "failed" : itemStatus) };
+        return { role: "tool", title: compilationToolView(item) ? tr(compilationToolView(item)!.titleKey) : toolName(name), text: completed ? toolSummary(item) : tr("toolRunning", { action: toolAction(name) }), detail: { ...toolDetail(item, failure.failed ? "failed" : itemStatus), ...(usage ? { usage } : {}) } };
     }
     if (item.type === "dynamic_tool_call") {
         const name = String(item.tool || "");

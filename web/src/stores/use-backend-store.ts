@@ -163,6 +163,12 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
 export function initBackendConnection() {
     if (typeof window === "undefined" || backendMonitorStarted) return;
     backendMonitorStarted = true;
+    window.addEventListener("backend-unavailable", (event) => {
+        const code = (event as CustomEvent<{ code?: string }>).detail?.code;
+        if (code !== "BACKEND_RELOADING") return;
+        stopBackendEvents();
+        useBackendStore.setState({ connected: false, checking: false, error: "", businessError: "" });
+    });
     void useBackendStore.getState().checkConnection();
 
     let forceFullCheck = false;

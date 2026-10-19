@@ -375,14 +375,17 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         const rightPx = (Number(segment.start || 0) + Math.max(0.5, Number(segment.duration || 1))) * 100;
         const target = Math.max(0, rightPx - track.clientWidth);
         track.scrollLeft = target;
-        if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${target}px)`;
-        persistScroll(target);
+        const actual = track.scrollLeft;
+        if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${actual}px)`;
+        persistScroll(actual);
     }, [persistScroll]);
     const selectTimelineClip = (segment: H3Segment) => {
         window.dispatchEvent(new CustomEvent("minimax-h3-select-clip", { detail: { projectId: ctx.projectId, nodeId: ctx.node.id, segmentId: segment.id } }));
         ctx.updateMetadata({ selectedSegmentId: segment.id, playhead: Number(segment.start || 0) });
+        scrollTimelineToSegment(segment);
     };
     const focusRequest = Number(ctx.node.metadata?.h3FocusRequest || 0);
+    const timelineFocusRequest = Number(ctx.node.metadata?.h3TimelineFocusRequest || 0);
     useLayoutEffect(() => {
         // Focus requests are one-shot. Keep the acknowledgment in this window's local view
         // so scrolling the canvas away and remounting the H3 node does not replay an old target.
@@ -398,6 +401,14 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${track.scrollLeft}px)`;
         persistScroll(track.scrollLeft);
     }, [ctx, focusRequest, selected?.id, persistScroll]);
+    useLayoutEffect(() => {
+        const handledRequest = Number(ctx.node.metadata?.h3TimelineFocusHandled || 0);
+        if (!timelineFocusRequest || timelineFocusRequest <= handledRequest || !selected) return;
+        const segment = segments.find(item => item.id === selected.id);
+        if (!segment || !trackScrollRef.current) return;
+        ctx.updateMetadata({ h3TimelineFocusHandled: timelineFocusRequest });
+        scrollTimelineToSegment(segment);
+    }, [ctx, segments, timelineFocusRequest, selected?.id, scrollTimelineToSegment]);
     // 新增 Clip 后，在 DOM 提交（内容宽度已更新）后确定性地把时间轴滚到该 Clip 最右侧
     useLayoutEffect(() => {
         const id = pendingScrollIdRef.current;
@@ -415,7 +426,8 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         const left = Number(ctx.node.metadata?.timelineScrollLeft || 0);
         if (left > 0 && trackScrollRef.current) {
             trackScrollRef.current.scrollLeft = left;
-            if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${left}px)`;
+            const actual = trackScrollRef.current.scrollLeft;
+            if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${actual}px)`;
         }
     });
     // 卸载时清理 rAF，避免内存泄漏或已卸载组件的状态更新
@@ -896,7 +908,11 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         </div>
         <div ref={trackScrollRef} className="minimax-tracks-scroll" style={{ overflowX: hasHorizontalOverflow ? "auto" : "hidden" }} onScroll={(event) => { const left = event.currentTarget.scrollLeft; persistScroll(left); if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${left}px)`; updateThumb(); }}>
             <div className="minimax-track-body" style={{ minWidth: timelineMinWidth, width: "100%" }}>
-                <div className="minimax-video-row" onContextMenu={onVideoRowContextMenu}>
+                <div className="minimax-video-row" onClick={(event) => {
+                    const clipElement = (event.target as Element | null)?.closest<HTMLElement>(".minimax-tl-clip[data-segment-id]");
+                    const segment = segments.find(item => item.id === clipElement?.dataset.segmentId);
+                    if (segment) scrollTimelineToSegment(segment);
+                }} onContextMenu={onVideoRowContextMenu}>
                     <div className="minimax-track-content" style={{ minWidth: timelineMinWidth, width: "100%" }}>
                         {/* 视频行底部波形装饰条：只占总时长宽度（按 px），
                             避免 video-row 拉满后 ::after 跟着拉满铺满整行。 */}

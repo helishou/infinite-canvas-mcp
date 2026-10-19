@@ -70,7 +70,7 @@ export function registerSharedAssetVersion(db: BackendDatabase, projectId: strin
             sharedAssetSource: { dramaId: drama.folder_id, assetId: libraryId, sourceProjectId: projectId, sourceNodeId: asset.nodeId } }, createdAt: existingLibrary?.createdAt || now, updatedAt: now });
     const regTitle = snapshot.title;
     for (const row of db.db.prepare(`SELECT p.episode_id, p.revision, p.draft_json FROM episode_productions p
-        JOIN drama_episodes e ON e.id=p.episode_id WHERE e.drama_id=?`).all(drama.folder_id) as Array<{ episode_id: string; revision: number; draft_json: string }>) {
+        JOIN drama_episodes e ON e.id=p.episode_id WHERE e.drama_id=? AND p.archived_at IS NULL`).all(drama.folder_id) as Array<{ episode_id: string; revision: number; draft_json: string }>) {
         const draft = JSON.parse(row.draft_json);
         // 真正的共享引用信息挂在 source.asset_plan 条目上，投影资产条目往往只是空占位；
         // 用 asset_plan 作为 sharedSource 的权威来源，两者 id 一致可对齐。
@@ -223,6 +223,9 @@ export class SharedAssetCoordinator {
             const revised = new Map<string, { initial: number; current: number }>();
             for (const job of jobs) {
                 try {
+                    // Archived episodes stay frozen: leave the adoption queued instead of
+                    // applying it, so un-archiving can resume the shared update later.
+                    if (this.service.get(job.episode_id).archivedAt) continue;
                     const approved = approvedSharedAsset(this.db, job.approved_id);
                     if (listApprovedSharedAssets(this.db, approved.dramaId).find(asset => asset.assetId === approved.assetId)?.id !== approved.id) {
                         this.db.db.prepare("UPDATE drama_asset_adoptions SET status='superseded', error=NULL, updated_at=? WHERE id=?").run(new Date().toISOString(), job.id);

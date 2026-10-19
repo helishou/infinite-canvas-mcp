@@ -100,6 +100,8 @@ type CompilationAlias = { operationId: string; owner: string; id: string; expect
 /** SQLite holds frozen compiler packets; only the existing ops transaction edits production. */
 export class ProductionCompilationService {
     onSettled?: (id: string) => void;
+    private readonly cancelledJobs = new Set<string>();
+    private readonly workers = new Map<string, Worker>();
     constructor(private service: EpisodeProductionService, private root: string, private compiler: Compiler = compileAchengDirector) {}
 
     private database() { return (this.service as any).storageDatabase?.(); }
@@ -475,6 +477,19 @@ export class ProductionCompilationService {
         this.saveJob(job); this.scheduleJob(job);
         return this.getCompilation(id, owner, operationId);
     }
+
+    /** Stop an obsolete queued or running compile while preserving its durable receipt. */
+    cancel(id: string, owner: string, operationId: string) {
+        const job = this.loadJob(operationId, owner);
+        if (!job || job.id !== id || !["queued", "running"].includes(job.status)) return false;
+        const key = this.jobKey(owner, operationId);
+        this.cancelledJobs.add(key);
+        this.workers.get(key)?.terminate();
+        job.status = "interrupted";
+        job.diagnostics = [...job.diagnostics, { code: "COMPILATION_SUPERSEDED", path: "compile", message: "目标输入已更新，旧编译已替代。", severity: "warning" }];
+        this.saveJob(job);
+        return true;
+    }
     async preflight(id: string, expectedRevision: number, candidate?: DirectorProduction, scope?: CompilationScope) {
         const current = this.service.get(id);
         if (expectedRevision > current.revision) throw new ProductionConflictError(current);
@@ -619,9 +634,11 @@ export class ProductionCompilationService {
         activeJobs.add(key);
         schedule(async () => {
             try {
+                if (this.cancelledJobs.has(key)) throw Object.assign(new Error("编译已被较新的目标输入替代"), { code: "COMPILATION_SUPERSEDED" });
                 job.status = "running"; this.saveJob(job);
                 const directory = this.workingDirectory(job.preparedId);
                 if (this.database()) await fs.promises.rm(directory, { recursive: true, force: true });
+                if (this.cancelledJobs.has(key)) throw Object.assign(new Error("编译已被较新的目标输入替代"), { code: "COMPILATION_SUPERSEDED" });
                 const projection = job.scope ? compilationScopeInput(job.director, job.scope) : undefined;
                 const { targetIds, reusable, input: rawCompileInput } = this.effectiveInput(job.id, job.director, job.scope);
                 const compileInput = resolveCompilerDirectorFiles(rawCompileInput, job.references);
@@ -647,10 +664,12 @@ export class ProductionCompilationService {
                           parentPort.postMessage({ compiled });
                         })().catch(error => parentPort.postMessage({ error: error.message }));`, { eval: true, workerData: { module: import.meta.resolve("@basketikun/canvas-agent/skills/acheng"), contractModule: import.meta.resolve("@basketikun/canvas-agent/drama/production-contract"), globalCompileBlockerCodes: GLOBAL_COMPILE_BLOCKER_CODES, director: compileInput, references: job.references, directory } });
                     let delivered = false;
+                    this.workers.set(key, worker);
                     worker.once("message", message => { delivered = true; if (message.error) reject(new Error(message.error)); else if (message.blocked) reject(new ProductionValidationError(message.blocked)); else resolve(message.compiled); });
                     worker.once("error", reject);
                     worker.once("exit", code => { if (!delivered) reject(new Error(`编译执行单元退出 (${code})`)); });
                 });
+                if (this.cancelledJobs.has(key)) throw Object.assign(new Error("编译已被较新的目标输入替代"), { code: "COMPILATION_SUPERSEDED" });
                 if (projection && job.scope) {
                     // Reused targets may be absent from the narrowed compiler output.
                     compiled.director.artifacts = [...compiled.director.artifacts.filter(artifact => !reusable.some(prior => prior.targetId === artifact.targetId)), ...structuredClone(reusable)];
@@ -699,13 +718,16 @@ export class ProductionCompilationService {
                 job.result = this.shortResult(job.preparedId, packet); job.diagnostics = compiled.diagnostics;
                 job.status = hasFatalCompilationError(compiled.diagnostics) || hasUnusableCompilerResult(compiled.exitCode, compiled.director?.artifacts) ? "blocked" : "succeeded";
             } catch (error) {
-                job.status = error instanceof ProductionValidationError ? "blocked" : "failed";
-                const diagnostics = error instanceof ProductionValidationError ? error.diagnostics : [{ code: "COMPILATION_FAILED", path: "compile", message: error instanceof Error ? error.message : String(error), severity: "error" }];
+                const superseded = this.cancelledJobs.has(key) || (error as any)?.code === "COMPILATION_SUPERSEDED";
+                job.status = superseded ? "interrupted" : error instanceof ProductionValidationError ? "blocked" : "failed";
+                const diagnostics = superseded ? [{ code: "COMPILATION_SUPERSEDED", path: "compile", message: "目标输入已更新，旧编译已替代。", severity: "warning" }]
+                    : error instanceof ProductionValidationError ? error.diagnostics : [{ code: "COMPILATION_FAILED", path: "compile", message: error instanceof Error ? error.message : String(error), severity: "error" }];
                 job.diagnostics = [...job.diagnostics, ...diagnostics];
             } finally {
+                this.workers.delete(key);
                 if (this.database()) await fs.promises.rm(this.workingDirectory(job.preparedId), { recursive: true, force: true }).catch(() => {});
                 try { this.saveJob(job); }
-                finally { activeJobs.delete(key); this.onSettled?.(job.id); }
+                finally { activeJobs.delete(key); this.cancelledJobs.delete(key); this.onSettled?.(job.id); }
             }
         }, job.createdAt);
     }

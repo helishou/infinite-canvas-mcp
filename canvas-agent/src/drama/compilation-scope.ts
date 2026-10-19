@@ -41,7 +41,11 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     }
     if (scene && [...shots].some(id => !scene.shotIds.includes(id))) throw new Error("COMPILATION_SCOPE_CROSS_SCENE: 目标不属于指定编译场次");
     const includeShotSegments = Boolean(scene && !wanted.size) || [...wanted].some(id => allShots.some(item => stableId(item) === id));
-    const segments = allSegments.filter(item => wanted.has(stableId(item)) || includeShotSegments && (item.shot_ids || []).some((id: string) => shots.has(id)));
+    const segments = allSegments.filter(item => wanted.has(stableId(item)) || includeShotSegments && (item.shot_ids || []).some((id: string) => shots.has(id)))
+        .map(item => {
+            const { locked: _locked, preLockNoiseSeedMode: _preLockNoiseSeedMode, ...compilerSegment } = item;
+            return compilerSegment;
+        });
     for (const segment of segments) if ((segment.shot_ids || []).some((id: string) => !shots.has(id))) throw new Error("COMPILATION_SCOPE_CROSS_SCENE: Segment 跨越编译范围");
     const outputShotIds = new Set(shots);
     const outputContinuityFactIds = new Set<string>();

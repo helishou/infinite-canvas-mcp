@@ -7,14 +7,10 @@ export function isCompileActive(status: string | undefined): boolean {
     return Boolean(status) && (activeCompileStatuses as readonly string[]).includes(String(status));
 }
 
-/**
- * Elapsed seconds since the Backend created the refresh job. The compiler itself is a
- * single blocking call with no percentage, so the UI reports real elapsed time instead
- * of inventing progress.
- */
-export function compileElapsedSeconds(createdAt: string | undefined, now: number): number | undefined {
-    if (!createdAt) return undefined;
-    const started = Date.parse(createdAt);
+/** Elapsed seconds since the backend last changed the active refresh phase. */
+export function compileElapsedSeconds(phaseUpdatedAt: string | undefined, now: number): number | undefined {
+    if (!phaseUpdatedAt) return undefined;
+    const started = Date.parse(phaseUpdatedAt);
     if (!Number.isFinite(started)) return undefined;
     return Math.max(0, Math.floor((now - started) / 1000));
 }

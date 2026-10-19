@@ -74,13 +74,14 @@ export const H3_DISCARD_CLIP_UPDATES_TOOL = {
 } as const;
 
 export const H3_GET_CLIP_TOOL = {
-    id: "h3_get_clip", version: "1.5.0", name: "H3 读取片段总览",
-    description: "按稳定 segmentId 和 revision 读取 H3 Clip 轻量状态。默认只读保存字段摘要，不编译提示词或参考；需要编译结果/引用校验时显式 include:prompt 或 include:references。fields 只读指定叙事字段；include 可合并读取提示词、参考、运行参数或结果。",
+    id: "h3_get_clip", version: "1.6.0", name: "H3 读取片段总览",
+    description: "按稳定 segmentId 读取 H3 Clip 轻量状态。默认只读保存字段摘要，不编译提示词或参考；需要编译结果/引用校验时显式 include:prompt 或 include:references。fields 只读指定叙事字段；include 可合并读取提示词、参考、运行参数或结果。已读正文可传 ifRevision；版本相同返回 unchanged 短回执并复用此前正文。include:result 始终读取动态结果。",
     inputJsonSchema: {
         type: "object",
         properties: {
             projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" },
             include: { type: "array", items: { type: "string", enum: ["prompt", "references", "runtime", "result"] }, uniqueItems: true },
+            ifRevision: { type: "integer", minimum: 0, description: "正文已完整读取时传入其画布 revision；未变化时只返回当前状态摘要和 unchanged:true，不重复返回正文。include:result 时忽略此条件。" },
             taskId: { type: "string", minLength: 1, description: "include:result 时核对的精确历史/当前任务 ID；省略从 Clip 的结果记录解析" },
             storageKey: { type: "string", minLength: 1, description: "include:result 时核对的精确归档视频；必须属于此 Clip 和任务，不按目录最新文件猜测" },
             fields: { type: "array", minItems: 1, maxItems: H3_NARRATIVE_FIELDS.length, items: { type: "string", enum: H3_NARRATIVE_FIELDS }, uniqueItems: true },

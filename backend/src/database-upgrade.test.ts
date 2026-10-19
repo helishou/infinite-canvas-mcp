@@ -5,6 +5,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { DATABASE_SCHEMA_VERSION, prepareDatabaseUpgrade } from "./database-upgrade.js";
+import { BackendDatabase } from "./db.js";
 
 function fixture(t: TestContext, version: number) {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "canvas-upgrade-"));
@@ -53,6 +54,16 @@ test("current schema and a fresh database do not create migration snapshots", (t
     assert.equal(prepareDatabaseUpgrade(path.join(directory, "new.sqlite")), undefined);
     assert.equal(fs.readdirSync(directory).length, 1);
     assert.equal(prepareDatabaseUpgrade(":memory:"), undefined);
+});
+
+test("supported schema version matches the latest migration applied by BackendDatabase", () => {
+    const db = new BackendDatabase(":memory:");
+    try {
+        const row = db.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number };
+        assert.equal(row.version, DATABASE_SCHEMA_VERSION, "update DATABASE_SCHEMA_VERSION whenever a migration is added, and add a migration when it is raised");
+    } finally {
+        db.close();
+    }
 });
 
 test("snapshot failure prevents migration and preserves source content", (t) => {

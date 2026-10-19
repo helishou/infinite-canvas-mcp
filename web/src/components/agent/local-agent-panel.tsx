@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { App, Button, Tooltip } from "antd";
 import dayjs from "dayjs";
-import { Bot, History, LocateFixed, MessageSquare, Minus, PanelRightClose, PlugZap, Plus, Sparkles, Terminal } from "lucide-react";
+import { Bot, History, LocateFixed, MessageSquare, PlugZap, Plus, Sparkles, Terminal } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
@@ -1409,9 +1409,11 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         setAgentState({ loadingThreads: false });
     };
 
-    const startNewThread = async () => {
+    const startNewThread = async (): Promise<boolean> => {
         const current = useAgentStore.getState();
-        if (!current.connected || current.sending || current.waiting || current.loadingThreads || ["preparing", "running"].includes(current.conversation.status)) return;
+        if (!current.connected || current.sending || current.waiting || current.loadingThreads || ["preparing", "running"].includes(current.conversation.status)) return false;
+        const previousThreadId = current.activeThreadId;
+        const previousConversationId = current.conversation.conversationId;
         const operation = beginThreadOperation();
         clearSkillSelection();
         setAgentState({ activeTab: "chat", activity: rt("creatingConversation") });
@@ -1419,15 +1421,30 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
             legacyHistoryRef.current = false;
             setLegacyHistory(false);
             const result = await fetchAgentJson<AgentWorkspaceResponse>(endpoint, token, "/codex/threads/reset", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientId: clientIdRef.current, permissionMode, model: useAgentStore.getState().model }) });
-            if (threadOperationRef.current !== operation) return;
-            if (result.conversation) applyConversationState(result.conversation);
+            if (threadOperationRef.current !== operation) return false;
+            const returned = result.conversation;
+            if (!returned?.threadId || !returned.conversationId
+                || returned.threadId === previousThreadId && returned.conversationId === previousConversationId) return false;
+            const latest = useAgentStore.getState();
+            const alreadySynced = latest.conversation.conversationId === returned.conversationId && latest.activeThreadId === returned.threadId;
+            if (!alreadySynced) {
+                if (latest.conversation.conversationId !== previousConversationId && latest.conversation.conversationId !== returned.conversationId) return false;
+                // A backend runtime restart can reset its revision counter. The
+                // successful reset response is authoritative for this explicit operation.
+                applyConversationState(returned, true);
+            }
             setAgentState({ activeTab: "chat", activity: rt("newConversation") });
+            const next = useAgentStore.getState();
+            return next.activeThreadId === returned.threadId
+                && next.conversation.conversationId === returned.conversationId
+                && ["ready", "warning"].includes(next.conversation.status);
         } catch (error) {
             const state = agentErrorState(error);
             if (state) applyConversationState(state);
             addEventLog(rt("newConversationFailed"), error);
             message.error(error instanceof Error ? error.message : rt("newConversationFailed"));
             await loadThreads();
+            return false;
         } finally {
             finishThreadOperation(operation);
         }
@@ -1461,9 +1478,17 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         if (!current.enabled || !current.connected) { reject(current.connectError || rt("connectionRequired")); return; }
         if (!clientReady || !useAgentSkillStore.getState().loaded) return;
         if (!findProjectAchengDirectorSkill(useAgentSkillStore.getState().skills)) { reject(i18n.t("productionHub.creative.skillUnavailable")); return; }
+        if (scopedTask.newThread && current.loadingThreads) return;
         if (current.sending || current.waiting || current.loadingThreads || !["ready", "warning"].includes(current.conversation.status)) { reject(rt("codexRunning")); return; }
         scopedTaskOperationRef.current = scopedTask.id;
         void (async () => {
+            if (scopedTask.newThread) {
+                const created = await startNewThread();
+                if (!created) {
+                    if (useAgentStore.getState().loadingThreads) { scopedTaskOperationRef.current = ""; return; }
+                    reject(rt("newConversationFailed")); return;
+                }
+            }
             if (scopedTask.threadId && scopedTask.threadId !== useAgentStore.getState().activeThreadId) {
                 await resumeThread(scopedTask.threadId);
                 const afterResume = useAgentStore.getState();
@@ -1471,6 +1496,17 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                     reject(afterResume.connectError || rt("conversationSynced"));
                     return;
                 }
+            }
+            if (scopedTask.draftOnly) {
+                const existingDraft = useAgentStore.getState().prompt.trim();
+                setAgentState({
+                    prompt: existingDraft ? `${scopedTask.text}\n\n${existingDraft}` : scopedTask.text,
+                    scopedTask: null,
+                    scopedTaskResult: null,
+                    activeTab: "chat",
+                    activity: "",
+                });
+                return;
             }
             const sent = await sendPrompt(undefined, scopedTask);
             if (!sent && useAgentStore.getState().scopedTask?.id === scopedTask.id) reject(rt("sendFailed"));
@@ -1625,7 +1661,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
     const handleAgentEvent = async (event: AgentEventPayload) => {
         if (event.type === "usage.updated") setAgentState({ tokenUsage: eventUsage(event) });
         const log = event.replayed ? null : formatAgentEventLog(event);
-        const activity = formatAgentActivity(event);
+        const activity = formatAgentActivity(event, useAgentStore.getState().tokenUsage);
         if (log) addEventLog(log.title, log.text);
         if (event.type === "turn.started" && (event.turnId || event.turn_id)) {
             const scope = eventScope(event);
@@ -1745,14 +1781,11 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                 theme={theme}
                 leading={
                     <div className="flex min-w-0 items-center gap-1">
-                        <div className="mr-1 shrink-0 text-sm font-semibold leading-5">{compact ? t("productionCanvas.director") : "Agent"}</div>
                         {headerAction || <span className="grid size-8 place-items-center">
                             <Bot className="size-4" />
                         </span>}
                         <Tooltip title={t("agent.panel.connectionSettings", { status: connectionStatus })} placement="bottom">
-                            <Button size="small" type="text" className="!h-8 !w-8 !min-w-8 !px-0 @min-[560px]:!w-auto @min-[560px]:!min-w-0 @min-[560px]:!px-[7px]" aria-label={t("agent.panel.connectionSettingsLabel", { status: connectionStatus })} icon={<PlugZap className="size-3.5" style={{ color: connectionStatusColor }} />} onClick={() => setAgentState({ activeTab: "setup" })}>
-                                <span className="hidden @min-[560px]:inline">{connectionStatus}</span>
-                            </Button>
+                            <Button size="small" type="text" className="!h-8 !w-8 !min-w-8 !px-0" aria-label={t("agent.panel.connectionSettingsLabel", { status: connectionStatus })} icon={<PlugZap className="size-3.5" style={{ color: connectionStatusColor }} />} onClick={() => setAgentState({ activeTab: "setup" })} />
                         </Tooltip>
                     </div>
                 }
@@ -1769,12 +1802,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                 right={
                     <>
                         <Tooltip title={t("agent.history.newThread")} placement="bottom">
-                            <Button size="small" type="text" className="!h-8 !w-8 !min-w-8 !px-0 @min-[560px]:!w-auto @min-[560px]:!min-w-0 @min-[560px]:!px-[7px]" aria-label={t("agent.history.newThread")} disabled={!connected || loadingThreads || sending || waiting || conversationBusy || Boolean(creativeLaunch)} icon={<Plus className="size-3.5" />} onClick={startNewThread}>
-                                <span className="hidden @min-[560px]:inline">{t("agent.history.newThread")}</span>
-                            </Button>
-                        </Tooltip>
-                        <Tooltip title={t("agent.panel.collapse")}>
-                            <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" aria-label={t("agent.panel.collapseLabel")} style={{ color: theme.node.muted }} icon={compact ? <Minus className="size-4" /> : <PanelRightClose className="size-4" />} onClick={closePanel} />
+                            <Button size="small" type="text" className="!h-8 !w-8 !min-w-8 !px-0" aria-label={t("agent.history.newThread")} disabled={!connected || loadingThreads || sending || waiting || conversationBusy || Boolean(creativeLaunch)} icon={<Plus className="size-3.5" />} onClick={startNewThread} />
                         </Tooltip>
                     </>
                 }
@@ -1834,6 +1862,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                     {tokenUsage ? <AgentUsageBar usage={tokenUsage} theme={theme} /> : null}
                     <AgentChatQueue items={promptQueue.items} paused={promptQueue.paused} canInsert={promptQueue.canInsert} theme={theme} onRemove={promptQueue.remove} onInsert={(id) => void promptQueue.insert(id)} onRetry={promptQueue.retry} onResume={promptQueue.resume} />
                     <AgentChatComposer
+                        className="mr-20 shrink-0"
                         prompt={prompt}
                         attachments={attachments.map((attachment) => agentAttachmentToChatAttachment(attachment, endpoint, token))}
                         disabled={!connected || !conversationCanAcceptInput || loadingThreads || Boolean(creativeLaunch)}

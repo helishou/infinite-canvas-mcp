@@ -50,17 +50,19 @@ const examples: Record<string, unknown> = {
     delete_shot: { id: "shot-1" }, reorder_shots: { sceneId: scene.id, ids: ["shot-1"] }, set_keyframe: { shotId: "shot-1", nodeId: "image-1" },
     set_clip_group: { group: { id: "SEG001", shotIds: ["shot-1"], nodeId: null, segmentId: null, sourceVersion: 0 } }, delete_clip_group: { id: "SEG001" },
     set_settings: { patch: { mode: "manual" } },
+    set_archived: { archived: true },
     review_keyframe: { shotId: "shot-1", verdict: "needs-redo", evidence: "The authored costume is missing." },
 };
 
-export function productionOperationContract(operationType?: string) {
+export function productionOperationContract(operationType?: string, includeDetails: { requests?: boolean; patchFields?: boolean } = {}) {
     const options = productionOperationSchema.options.filter(option => !operationType || option.shape.type.value === operationType);
     if (!options.length) throw new Error(`Unknown production operation: ${operationType}`);
+    const full = !operationType;
     return {
         contractVersion: productionContractVersion,
         jsonSchema: toJsonSchemaCompat(operationType ? options[0] : productionOperationSchema),
-        requests: { edit: toJsonSchemaCompat(productionEditSchema), publish: toJsonSchemaCompat(productionPublishSchema), compile: toJsonSchemaCompat(productionCompileSchema.extend({ operationId: z.string().min(1) })), generate: toJsonSchemaCompat(directorRunStartSchema) },
-        patchFields: directorPatchFields,
+        ...(full || includeDetails.requests ? { requests: { edit: toJsonSchemaCompat(productionEditSchema), publish: toJsonSchemaCompat(productionPublishSchema), compile: toJsonSchemaCompat(productionCompileSchema.extend({ operationId: z.string().min(1) })), generate: toJsonSchemaCompat(directorRunStartSchema) } } : {}),
+        ...(full || includeDetails.patchFields ? { patchFields: directorPatchFields } : {}),
         operations: options.map(option => {
             const type = option.shape.type.value;
             return { type, example: option.parse({ type, ...examples[type] as object }), preconditions: type === "patch_director_source"
@@ -71,6 +73,7 @@ export function productionOperationContract(operationType?: string) {
                 : type === "delete_director_asset" ? ["Requires explicit user confirmation. Removes the asset definition and its structured links from the current draft. Archived canvas media and production artifacts remain in history; affected compilation artifacts are marked stale. Canvas nodes/media are not deleted, and published versions remain immutable."]
                 : type === "restore_director_scene" ? ["Archive must belong to this production, remain within its 30-day retention window, and have no ID conflicts; both production and canvas revisions must match."]
                 : type === "delete_director_clip" ? ["Requires explicit confirmation; deletes the Clip and its owned Shots as one source transaction. A single Shot cannot be deleted while leaving an empty Clip."]
+                : type === "set_archived" ? ["Episode only. Archived episodes are read-only: every other edit, publish, restore, generation run and shared-asset adoption is rejected, and shared-canvas updates stop syncing into the episode. The archive flag is record-level state, not part of the draft; send only this operation, without adoptions, and pass archived=false to unarchive."]
                 : type === "select_director_result" ? ["Successful archived output must belong to the original formal task and exact node/Clip; pass generationLogId or its exact taskId; both revisions must match; active generation and shared reference replacement are rejected. Images require review after selection. No media generation or prompt/timeline replacement occurs."]
                 : type === "restore_archived_scene_results" ? ["Episode draft only. Verifies the archive node, exact Clip identity, succeeded task, generation log and media bytes before restoring outputs to matching scene H3 nodes. Preserves the original archive and provenance; creates no task and does not modify the published version."]
                 : type === "edit_director_shot" ? ["Prompt v2 only. Insert/duplicate/delete/move maintain stable Shot and Clip identities. Split/merge rebase local ledger events, timed performance, keyframes and utterance coverage without changing dialogue text or duration. Crossing dialogue text is allocated from the existing audio window by default; textOffsets is an optional override; supply cameraShotId when merging different cameras. Delete removes the Shot and its exclusive dialogue/events, retaining other Shots and remaining cross-Shot dialogue slices; dependent ledger references are cleaned atomically. Shot duration edits synchronize inherited appearances, keyframe anchors, timed actions/sounds and ledger anchors while leaving dialogue speed unchanged. Deleting the last Shot removes its Clip atomically; no separate command is required. Move stays within a Clip; Clip partition changes use repartition_director_clips."]

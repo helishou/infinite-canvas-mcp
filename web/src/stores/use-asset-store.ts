@@ -1,7 +1,7 @@
 import localforage from "localforage";
 import i18n from "@/i18n";
 import { writeAssetIntent } from "@/services/asset-write-intent";
-import { request, getBackendUrl, getCanvasDraftSessionId } from "@/services/backend-api";
+import { request, getBackendUrl, getCanvasDraftSessionId, isBackendAvailabilityError } from "@/services/backend-api";
 import { create } from "zustand";
 
 import { nanoid } from "nanoid";
@@ -279,7 +279,8 @@ function migrateAssetsInPlace(assets: Asset[]): Asset[] {
 
 async function hydrateAssetsFromBackend() {
     if (!useBackendStore.getState().connected) {
-        useAssetStore.setState({ hydrateError: "总后台未连接，素材列表读不到" });
+        // 全局 BackendBanner 统一说明断连，素材页避免重复显示同一原因。
+        useAssetStore.setState({ hydrateError: "" });
         return false;
     }
     try {
@@ -297,6 +298,10 @@ async function hydrateAssetsFromBackend() {
         }
         return true;
     } catch (error) {
+        if (isBackendAvailabilityError(error)) {
+            useAssetStore.setState({ hydrateError: "" });
+            return false;
+        }
         // 之前这里静默吞错，把"连错后台/接口 404"伪装成"素材库是空的"。保留真实原因，
         // 由 BackendBanner 与素材页空状态显示；不写回任何数据，避免用空列表覆盖后台。
         const reason = error instanceof BackendApiError ? error.message : (error instanceof Error ? error.message : String(error));
@@ -397,6 +402,9 @@ function scheduleAssetSync() {
 if (typeof window !== "undefined") {
     window.addEventListener("backend-connected", () => {
         void hydrateAssets();
+    });
+    window.addEventListener("backend-retry", () => {
+        if (useBackendStore.getState().connected) void hydrateAssets();
     });
     window.addEventListener("backend-event", (event) => {
         const detail = (event as CustomEvent<{ type?: string; entityId?: string; payload?: { deleted?: number } }>).detail;

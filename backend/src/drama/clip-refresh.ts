@@ -42,6 +42,10 @@ export class ClipRefreshStore {
     byEditAll(operationId: string): ClipRefreshJob[] {
         return this.db.prepare("SELECT job_json FROM production_clip_refresh_jobs WHERE owner_kind=? AND owner_id=? AND parent_operation_id=? ORDER BY operation_id").all(this.owner.kind, this.owner.id, operationId).map(r => JSON.parse(String(r.job_json)));
     }
+    bySegment(segmentId: string): ClipRefreshJob[] {
+        return this.db.prepare("SELECT job_json FROM production_clip_refresh_jobs WHERE owner_kind=? AND owner_id=? AND json_extract(job_json,'$.segmentId')=? ORDER BY json_extract(job_json,'$.savedRevision') DESC, json_extract(job_json,'$.updatedAt') DESC")
+            .all(this.owner.kind, this.owner.id, segmentId).map(r => JSON.parse(String(r.job_json)));
+    }
     pending(): ClipRefreshJob[] {
         return this.db.prepare("SELECT job_json FROM production_clip_refresh_jobs WHERE owner_kind=? AND owner_id=? AND status IN ('queued','checking','compiling','applying')").all(this.owner.kind, this.owner.id).map(r => JSON.parse(String(r.job_json)));
     }
@@ -86,7 +90,27 @@ export class ClipRefreshCoordinator {
     wake(id: string) {
         let store: ClipRefreshStore;
         try { store = this.service.clipRefreshStore(id); } catch { return; }
-        for (const job of store.pending()) void this.advance(id, job, store);
+        const pending = store.pending();
+        const latestBySegment = new Map<string, ClipRefreshJob>();
+        for (const job of pending) {
+            const latest = latestBySegment.get(job.segmentId);
+            if (!latest || job.savedRevision > latest.savedRevision || job.savedRevision === latest.savedRevision && job.createdAt > latest.createdAt) latestBySegment.set(job.segmentId, job);
+        }
+        for (const job of pending) {
+            if (latestBySegment.get(job.segmentId) === job) continue;
+            if (job.compileRevision !== undefined) this.compilations.cancel(id, this.owner, job.compilationOperationId);
+            job.status = "superseded";
+            job.diagnostics = [...job.diagnostics, { code: "CLIP_REFRESH_SUPERSEDED", targetId: job.segmentId, message: "同一 Clip 已保存更新版本，旧刷新已替代。" }];
+            store.save(job);
+        }
+        for (const job of latestBySegment.values()) {
+            for (const prior of store.bySegment(job.segmentId)) {
+                if (prior.operationId !== job.operationId && prior.savedRevision <= job.savedRevision && prior.translationOperationId) {
+                    this.service.cancelCompiledPromptTranslation(id, prior.translationOperationId);
+                }
+            }
+            void this.advance(id, job, store);
+        }
     }
     wakeSourceCanvas(projectId: string, nodeIds: string[], revision: number, eventId: string) {
         const consumers = this.service.subjectClipConsumers(projectId, nodeIds);

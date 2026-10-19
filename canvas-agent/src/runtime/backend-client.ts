@@ -286,8 +286,8 @@ export class BackendClient {
     return data.project;
   }
 
-  async getDramaProject(dramaId: string) {
-    const data = await this.get<{ ok: boolean; drama: Record<string, unknown> }>(`/drama/projects/${encodeURIComponent(dramaId)}`);
+  async getDramaProject(dramaId: string, view: "summary" | "full" = "full") {
+    const data = await this.get<{ ok: boolean; drama: Record<string, unknown> }>(`/drama/projects/${encodeURIComponent(dramaId)}?view=${view}`);
     return data.drama;
   }
 
@@ -298,6 +298,13 @@ export class BackendClient {
       episodes?: Record<string, unknown>[];
     }>(`/drama/projects/${encodeURIComponent(dramaId)}/episodes`);
     return Array.isArray(data.episodes) ? data.episodes : [];
+  }
+
+  async listDramaEpisodeSummaries(dramaId: string, page: number, pageSize: number) {
+    return this.get<{
+      ok: boolean; dramaId: string; total: number; page: number; pageSize: number;
+      episodes?: Array<Record<string, unknown>>;
+    }>(`/drama/projects/${encodeURIComponent(dramaId)}/episodes?view=summary&page=${page}&pageSize=${pageSize}`);
   }
 
   async getDramaEpisode(episodeId: string, view?: "summary" | "full") {
@@ -876,13 +883,14 @@ export class BackendClient {
   async comfyGetTask(
     id: string,
     after = 0,
+    view: "summary" | "full" = "full",
   ): Promise<{ task: RuntimeTask; events: RuntimeTaskEvent[] }> {
     const data = await this.get<{
       ok: boolean;
       task?: RuntimeTask;
       events?: RuntimeTaskEvent[];
     }>(
-      `/comfy/tasks/${encodeURIComponent(id)}${after ? `?after=${after}` : ""}`,
+      `/comfy/tasks/${encodeURIComponent(id)}?${new URLSearchParams({ ...(after ? { after: String(after) } : {}), view })}`,
     );
     if (!data.task)
       throw new BackendClientError(

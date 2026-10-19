@@ -102,7 +102,8 @@ export function WorkbenchCanvas({ children, storageKey }: { children: ReactNode;
         const keydown = (event: KeyboardEvent) => {
             if (event.key === "Tab" && panel.current && !document.querySelector(".ant-modal-wrap:not([style*='display: none'])")) {
                 const items = Array.from(panel.current.querySelectorAll<HTMLElement>("button:not([disabled]), a[href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex='0']")).filter(item => item.getClientRects().length > 0);
-                items.push(...Array.from(overlay.current?.querySelectorAll<HTMLElement>("[data-agent-launcher] button:not([disabled])") || []).filter(item => item.getClientRects().length > 0));
+                const overlayFocusables = overlay.current?.querySelectorAll<HTMLElement>("#canvas-director-dialog[aria-hidden='false'] button:not([disabled]), #canvas-director-dialog[aria-hidden='false'] a[href], #canvas-director-dialog[aria-hidden='false'] input:not([disabled]), #canvas-director-dialog[aria-hidden='false'] textarea:not([disabled]), #canvas-director-dialog[aria-hidden='false'] select:not([disabled]), #canvas-director-dialog[aria-hidden='false'] [tabindex='0'], [data-agent-launcher] button:not([disabled])") || [];
+                items.push(...Array.from(overlayFocusables).filter(item => item.getClientRects().length > 0));
                 const first = items[0], last = items.at(-1);
                 if (event.shiftKey && (document.activeElement === first || document.activeElement === panel.current)) { event.preventDefault(); last?.focus(); }
                 else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }

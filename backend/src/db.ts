@@ -1222,6 +1222,28 @@ export class BackendDatabase {
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }
+        if (currentVersion < 48) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                // Episode/canvas archiving is record-level state on the production row, so both
+                // owner tables carry the same nullable column; NULL means editable.
+                for (const table of ["episode_productions", "canvas_productions"]) {
+                    if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table) && !this.hasColumn(table, "archived_at")) {
+                        this.db.exec(`ALTER TABLE ${table} ADD COLUMN archived_at TEXT`);
+                    }
+                }
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (48, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
+    }
+
+    /** The production row that owns this canvas, when it is an archived episode's canvas. */
+    archivedEpisodeForCanvas(projectId: string): { episodeId: string; archivedAt: string } | undefined {
+        const row = this.db.prepare(`SELECT e.id AS episodeId, p.archived_at AS archivedAt
+            FROM drama_episodes e JOIN episode_productions p ON p.episode_id = e.id
+            WHERE e.canvas_id = ? AND p.archived_at IS NOT NULL`).get(projectId) as { episodeId: string; archivedAt: string } | undefined;
+        return row;
     }
 
     /** A rolled-back schema_migrations row leaves its column behind, so every ADD COLUMN must be checked first. */
@@ -2272,6 +2294,12 @@ export class BackendDatabase {
                 // Legacy batches without a request hash must never be executed again.
                 if (this.db.prepare("SELECT 1 FROM canvas_operation_batches WHERE operation_id = ?").get(operationId)) throw collaborationError("OPERATION_ID_REUSED", "历史 operationId 缺少可核验的请求指纹，拒绝重新执行");
             }
+            // Archiving freezes the episode's canvas for user-facing编辑; runtime write-backs
+            // (task results, production projections) still land so in-flight work can finish.
+            if (!context?.runtimeWrite) {
+                const archived = this.archivedEpisodeForCanvas(id);
+                if (archived) throw collaborationError("PRODUCTION_ARCHIVED", "该分集已归档，画布为只读；请先取消归档再编辑");
+            }
             if (!operations.length || operations.some((operation) => !operation || typeof operation.type !== "string")) throw new Error("operations 必须为非空有效操作数组");
             // baseRevision is a cursor for recovering the caller's intended base, not a
             // global lock. Patch operations are applied to the transaction's latest snapshot
@@ -2985,6 +3013,24 @@ export class BackendDatabase {
     listDramaEpisodes(dramaId: string): DramaEpisode[] {
         const rows = this.db.prepare("SELECT * FROM drama_episodes WHERE drama_id = ? ORDER BY episode_number ASC").all(dramaId) as Array<Record<string, unknown>>;
         return rows.map((row) => this.mapDramaEpisodeRow(row));
+    }
+
+    listDramaEpisodeSummaries(dramaId: string, page = 1, pageSize = 20) {
+        const total = Number((this.db.prepare("SELECT COUNT(*) AS count FROM drama_episodes WHERE drama_id = ?").get(dramaId) as { count: number }).count);
+        const normalizedPage = Math.max(1, Math.floor(page));
+        const normalizedPageSize = Math.max(1, Math.min(100, Math.floor(pageSize)));
+        const rows = this.db.prepare(`SELECT id, drama_id, episode_number, title, synopsis, canvas_id, created_at, updated_at
+            FROM drama_episodes WHERE drama_id = ? ORDER BY episode_number ASC LIMIT ? OFFSET ?`)
+            .all(dramaId, normalizedPageSize, (normalizedPage - 1) * normalizedPageSize) as Array<Record<string, unknown>>;
+        return {
+            total, page: normalizedPage, pageSize: normalizedPageSize,
+            episodes: rows.map((row) => ({
+                id: String(row.id), dramaId: String(row.drama_id), episodeNumber: Number(row.episode_number),
+                title: String(row.title || ""), synopsis: String(row.synopsis || ""),
+                canvasId: row.canvas_id ? String(row.canvas_id) : null,
+                createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+            })),
+        };
     }
 
     deleteDramaEpisode(id: string): number {

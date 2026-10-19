@@ -48,7 +48,7 @@ export type AgentConversationState = {
 };
 export type AgentPanelTab = "chat" | "setup" | "history" | "skills" | "log";
 export type AgentCreativeLaunch = { id: string; mode: "asset" | "drama"; text: string; phase: "reset" | "resetting" | "send" | "sending" };
-export type AgentScopedTask = { id: string; text: string; threadId?: string; productionId: string; revision: number };
+export type AgentScopedTask = { id: string; text: string; threadId?: string; newThread?: boolean; draftOnly?: boolean; productionId: string; revision: number };
 export type AgentScopedTaskResult = { id: string; status: "sent" | "failed"; threadId?: string; error?: string };
 export type AgentQueuedPromptPayload = {
     text: string;

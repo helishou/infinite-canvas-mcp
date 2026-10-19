@@ -530,7 +530,12 @@ export function resolveAchengRuntime(runtimeId: string, home = defaultAchengHome
     return resolved;
 }
 
-export function getProductionContract(runtimeId?: string, operationType?: string, moduleId?: typeof directorModules[number]) {
+export function getProductionContract(
+    runtimeId?: string,
+    operationType?: string,
+    moduleId?: typeof directorModules[number],
+    includeDetails: { requests?: boolean; patchFields?: boolean; sourceContract?: boolean } = {},
+) {
     const runtime = resolveAchengEngine();
     const moduleRegistryPath = path.join(runtime.path, "data", "module-registry.json");
     const moduleRegistry = JSON.parse(fs.readFileSync(moduleRegistryPath, "utf8"));
@@ -542,11 +547,13 @@ export function getProductionContract(runtimeId?: string, operationType?: string
         const bytes = fs.readFileSync(file);
         return { path: relative, sha256: crypto.createHash("sha256").update(bytes).digest("hex"), content: bytes.toString("utf8") };
     }) : undefined;
-    return { ...productionOperationContract(operationType), engine: { runtimeId: runtime.runtimeId, commit: runtime.commit, patchVersion: runtime.patchVersion, version: runtime.version },
-        sourceContract: runtime.sourceContract, ref2vaMaximumWords: runtime.sourceContract ? runtime.sourceContract.ref2vaMaximumWords : 2900,
+    const full = !operationType;
+    const includeSourceContract = full || includeDetails.sourceContract;
+    return { ...productionOperationContract(operationType, includeDetails), engine: { runtimeId: runtime.runtimeId, commit: runtime.commit, patchVersion: runtime.patchVersion, version: runtime.version },
+        ...(includeSourceContract ? { sourceContract: runtime.sourceContract, sourceContractNotice: runtime.sourceContract ? undefined : "The active runtime has no machine-readable Canvas source contract; compiler validation remains authoritative." } : {}),
+        ...(includeSourceContract ? { ref2vaMaximumWords: runtime.sourceContract ? runtime.sourceContract.ref2vaMaximumWords : 2900 } : {}),
         ...(moduleRow ? { module: { id: moduleRow.id, owns: moduleRow.owns, checks_with: moduleRow.checks_with, check_focus: moduleRow.check_focus, files: moduleFiles } } : {}),
-        ...(runtimeId ? { notice: "runtimeId is deprecated and does not select a compiler; this contract uses the locally active Acheng runtime." } : {}),
-        ...(runtime.sourceContract ? {} : { sourceContractNotice: "The active runtime has no machine-readable Canvas source contract; compiler validation remains authoritative." }) };
+        ...(runtimeId ? { notice: "runtimeId is deprecated and does not select a compiler; this contract uses the locally active Acheng runtime." } : {}) };
 }
 
 export type AchengRuntime = ReturnType<typeof resolveAchengRuntime> & {

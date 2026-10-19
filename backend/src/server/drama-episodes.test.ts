@@ -32,11 +32,16 @@ test("drama episode REST：剧目、分集、画布三层关系可读写", async
         return { status: response.status, body: await response.json() as Record<string, unknown> };
     };
 
-    const drama = await request("POST", "/canvas/folders", { id: "drama-1", name: "剧目一", createdAt: "2026-01-01T00:00:00.000Z" });
+    const drama = await request("POST", "/canvas/folders", { id: "drama-1", name: "剧目一", description: "简介正文".repeat(100), outline: "大纲正文".repeat(200), createdAt: "2026-01-01T00:00:00.000Z" });
     assert.equal(drama.status, 201);
     const plannedDrama = await request("GET", "/drama/projects/drama-1");
     assert.equal(plannedDrama.status, 200);
     assert.equal((plannedDrama.body.drama as Record<string, unknown>).name, "剧目一");
+    const dramaSummary = (await request("GET", "/drama/projects/drama-1?view=summary")).body.drama as Record<string, unknown>;
+    assert.equal(dramaSummary.descriptionLength, "简介正文".repeat(100).length);
+    assert.equal(dramaSummary.outlineLength, "大纲正文".repeat(200).length);
+    assert.equal(String(dramaSummary.outlinePreview).length, 360);
+    assert.equal("outline" in dramaSummary, false);
     assert.equal((await request("GET", "/drama/projects/missing")).status, 404);
     assert.deepEqual((await request("GET", "/drama/projects/drama-1/episodes")).body.episodes, []);
 
@@ -57,9 +62,20 @@ test("drama episode REST：剧目、分集、画布三层关系可读写", async
     assert.equal((canvasDrama.body.episode as Record<string, unknown>).dramaId, "drama-1");
     assert.equal((canvasDrama.body.drama as Record<string, unknown>).name, "剧目一");
 
+    const secondEpisode = await request("POST", "/drama/projects/drama-1/episodes", { episodeNumber: 2, title: "第二集", synopsis: "追查密令", fullPlot: "旧版冗长剧情".repeat(100) });
+    assert.equal(secondEpisode.status, 201);
+
     const listed = await request("GET", "/drama/projects/drama-1/episodes");
     assert.equal(listed.status, 200);
-    assert.deepEqual((listed.body.episodes as Array<Record<string, unknown>>).map((item) => item.episodeNumber), [1]);
+    assert.deepEqual((listed.body.episodes as Array<Record<string, unknown>>).map((item) => item.episodeNumber), [1, 2]);
+    assert.ok("fullPlot" in (listed.body.episodes as Array<Record<string, unknown>>)[1], "legacy REST response remains complete");
+    const pageOne = await request("GET", "/drama/projects/drama-1/episodes?view=summary&page=1&pageSize=1");
+    const pageTwo = await request("GET", "/drama/projects/drama-1/episodes?view=summary&page=2&pageSize=1");
+    assert.equal(pageOne.body.total, 2);
+    assert.equal(pageOne.body.pageSize, 1);
+    assert.deepEqual((pageOne.body.episodes as Array<Record<string, unknown>>).map((item) => item.episodeNumber), [1]);
+    assert.deepEqual((pageTwo.body.episodes as Array<Record<string, unknown>>).map((item) => item.episodeNumber), [2]);
+    assert.equal("fullPlot" in (pageTwo.body.episodes as Array<Record<string, unknown>>)[0], false);
 
     const read = await request("GET", `/drama/episodes/${episode.id}`);
     assert.equal(read.status, 200);

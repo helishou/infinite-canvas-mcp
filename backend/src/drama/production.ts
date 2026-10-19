@@ -83,12 +83,13 @@ import { dedupReceipt, resolveReceiptDedup, assertPublicReceipt } from "./receip
 import { decodeReceipt, encodeReceipt, type StoredReceipt } from "./receipt-storage.js";
 import type { NativeProductionTarget } from "./native-generation.js";
 
-type Row = { revision: number; draft_json: string; published_json: string | null; published_version: number; updated_at: string };
+type Row = { revision: number; draft_json: string; published_json: string | null; published_version: number; updated_at: string; archived_at: string | null };
 export type ProductionImpact = { changedSceneIds: string[]; affectedShotIds: string[]; imageShotIds: string[]; clipGroupIds: string[]; missingAssetNodeIds: string[]; assetIds?: string[] };
-export type ProductionRecord = { episodeId: string; revision: number; draft: EpisodeProductionData; published: EpisodeProductionData | null; publishedVersion: number; updatedAt: string; referenceSync?: ReferenceSync[]; storageFormat?: "v2-single-source" | "v2-projection-migration-required"; publishedFormatStatus?: "legacy-maintenance-required" };
+export type ProductionRecord = { episodeId: string; revision: number; draft: EpisodeProductionData; published: EpisodeProductionData | null; publishedVersion: number; updatedAt: string; archivedAt: string | null; referenceSync?: ReferenceSync[]; storageFormat?: "v2-single-source" | "v2-projection-migration-required"; publishedFormatStatus?: "legacy-maintenance-required" };
 export type CompiledPromptTranslationRequest = { expectedRevision: number; operationId: string; targetIds: string[] };
 export type ProductionTargetOccupancy = { targetId: string; status: string; runId?: string; taskIds: string[]; tasks: Array<{ taskId: string; status: string }>; nextAction: NonNullable<ProductionDiagnostic["nextAction"]> };
 const activePromptTranslations = new Map<string, Promise<void>>();
+const activePromptTranslationControllers = new Map<string, AbortController>();
 export type ProductionRun = { episodeId: string; version: number; runId?: string; targets?: string[]; engine?: Record<string, unknown> | null; settings?: Record<string, unknown>; executionSnapshot?: CanvasExecutionSnapshot | null; status: string; plan: ProductionImpact; submitted: Array<{ kind: "image" | "h3"; id: string; taskId: string; projectId?: string; nodeId?: string; segmentId?: string; status?: "running" | "succeeded" | "failed" }>; error: string | null; updatedAt: string };
 export type ProductionBatch = {
     runId: string; episodeId: string; version: number; sourceRevision: number; idempotencyKey: string; status: string;
@@ -246,6 +247,12 @@ function directorStageReadiness(director?: DirectorProduction): DirectorStageRea
 
 export class ProductionConflictError extends Error {
     constructor(readonly current: ProductionRecord) { super("制作稿版本已变化，请核对当前版本后重试"); }
+}
+
+/** Archived episodes are read-only: user edits, publishing, generation and shared-asset adoption are refused. */
+export class ProductionArchivedError extends Error {
+    readonly code = "PRODUCTION_ARCHIVED";
+    constructor(readonly episodeId: string) { super("该分集已归档，只能查看；如需继续制作请先取消归档"); }
 }
 
 /**
@@ -874,7 +881,7 @@ export class EpisodeProductionService {
                 }
             }
             return { ...record, draft, revision: record.revision + 1, updatedAt: new Date().toISOString() };
-        });
+        }, { allowArchived: true });
     }
 
     registerNativeTask(id: string, taskId: string, target: NativeProductionTarget): ProductionRecord {
@@ -893,7 +900,7 @@ export class EpisodeProductionService {
                     action: "produce", targetKind: target.kind, targetId: target.targetId, inputRevision: record.revision + 1, sourceHash: target.sourceHash, taskId };
             }
             return { ...record, draft, revision: record.revision + 1, updatedAt: new Date().toISOString() };
-        });
+        }, { allowArchived: true });
     }
 
     layoutPlan(id: string): ProductionLayoutPlan | null {
@@ -1039,6 +1046,7 @@ export class EpisodeProductionService {
         this.db.db.exec("BEGIN IMMEDIATE");
         try {
             const current = this.get(id);
+            if (current.archivedAt) throw new ProductionArchivedError(id);
             if (current.publishedVersion !== preview.publishedVersion || current.published?.director?.sourceHash !== preview.sourceHash) throw new ProductionConflictError(current); // 乐观锁放行：revision 不再拦截，仅保留内容漂移（publishedVersion/sourceHash）保护
             // 乐观锁放行：来源/目标画布的 revision 漂移不再拦截。
             const latest = listApprovedSharedAssets(this.db, preview.dramaId).find(item => item.assetId === input.assetId);
@@ -1131,6 +1139,7 @@ export class EpisodeProductionService {
                 ops: [{ type: "adopt_shared_asset", assetId: input.assetId, approvedId: input.approvedId, nodeId }] });
         }
         const current = this.get(id);
+        if (current.archivedAt) throw new ProductionArchivedError(id);
         // 乐观锁放行（last-write-wins）：客户端过期 revision 不再拦截，版本号继续自增。
         const previousLayout = this.ensureLayoutPlan(id, current);
         const episodeCanvasId = this.episodeInfo(id).canvasId;
@@ -1171,6 +1180,7 @@ export class EpisodeProductionService {
             return this.edit(id, { operationId: input.operationId, expectedRevision: input.expectedRevision, ops });
         }
         const current = this.get(id);
+        if (current.archivedAt) throw new ProductionArchivedError(id);
         // 乐观锁放行（last-write-wins）：客户端过期 revision 不再拦截，版本号继续自增。
         const previousLayout = this.ensureLayoutPlan(id, current);
         const episodeCanvasId = this.episodeInfo(id).canvasId;
@@ -1207,6 +1217,7 @@ export class EpisodeProductionService {
         const linked = this.linked(id); if (linked) return linked.service.retrySharedUpdate(linked.id, adoptionId, expectedRevision);
         if (this.ownerKind !== "episode") throw new Error("共享资产更新恢复目前仅支持剧目分集，场次级采用链尚未启用");
         const current = this.get(id);
+        if (current.archivedAt) throw new ProductionArchivedError(id);
         // 乐观锁放行（last-write-wins）：客户端过期 revision 不再拦截，版本号继续自增。
         const job = this.db.db.prepare("SELECT * FROM drama_asset_adoptions WHERE id=? AND episode_id=? AND status='blocked'").get(adoptionId, id) as Record<string, any> | undefined;
         if (!job) throw new Error("没有可恢复的共享资产更新");
@@ -1524,7 +1535,7 @@ export class EpisodeProductionService {
             ...(plan.storyboardImageMode ? { storyboardImageMode: plan.storyboardImageMode } : {}),
             ...(plan.videoAspectRatio !== undefined ? { videoAspectRatio: plan.videoAspectRatio, videoAspectRatioConfirmed: true } : {}),
         });
-        return { episodeId, revision: 0, draft, published: null, publishedVersion: 0, updatedAt: "" };
+        return { episodeId, revision: 0, draft, published: null, publishedVersion: 0, updatedAt: "", archivedAt: null };
     }
 
     async translateCompiledPrompts(id: string, input: CompiledPromptTranslationRequest): Promise<Record<string, unknown>> {
@@ -1543,7 +1554,11 @@ export class EpisodeProductionService {
         if (command?.status === "rejected") throw new Error(command.error?.message || "该翻译操作已拒绝；核对输入后使用新的 operationId");
         if (!command) {
             const production = this.get(id);
-            if (production.revision !== input.expectedRevision) throw new ProductionConflictError(production);
+            if (production.archivedAt) throw new ProductionArchivedError(id);
+            // expectedRevision is a caller baseline, not a lock on unrelated production state.
+            // The frozen target artifact hashes, H3 bindings and prompt hashes below provide
+            // the compare-and-write boundary for this operation.
+            if (input.expectedRevision > production.revision) throw new ProductionConflictError(production);
             const director = production.draft.director;
             if (!director) throw new Error("制作稿缺少导演源稿");
             const project = this.db.getCanvasProject(canvasId);
@@ -1591,6 +1606,16 @@ export class EpisodeProductionService {
         };
     }
 
+    cancelCompiledPromptTranslation(id: string, operationId: string): boolean {
+        const linked = this.linked(id);
+        if (linked) return linked.service.cancelCompiledPromptTranslation(linked.id, operationId);
+        const key = `${this.ownerKind}:${id}:${operationId}`;
+        const controller = activePromptTranslationControllers.get(key);
+        if (!controller) return false;
+        controller.abort();
+        return true;
+    }
+
     private scheduleCompiledPromptTranslation(
         id: string,
         canvasId: string,
@@ -1599,13 +1624,18 @@ export class EpisodeProductionService {
     ) {
         const key = `${this.ownerKind}:${id}:${input.operationId}`;
         if (activePromptTranslations.has(key)) return;
-        const job = Promise.resolve().then(() => this.runCompiledPromptTranslation(id, canvasId, input, identity)).catch(error => {
+        const controller = new AbortController();
+        activePromptTranslationControllers.set(key, controller);
+        const job = Promise.resolve().then(() => this.runCompiledPromptTranslation(id, canvasId, input, identity, controller.signal)).catch(error => {
             const command = this.db.getMcpCommandReceipt(input.operationId, identity);
-            if (command?.status === "prepared") {
+            if (command?.status === "prepared" && controller.signal.aborted) {
+                try { this.db.rejectMcpCommand(input.operationId, "TRANSLATION_SUPERSEDED", "更新后的编译已替代这次翻译"); }
+                catch { /* Another worker may have completed the frozen command. */ }
+            } else if (command?.status === "prepared") {
                 try { this.db.rejectMcpCommand(input.operationId, "TRANSLATION_FAILED", error instanceof Error ? error.message : String(error)); }
                 catch { /* Another worker may have completed the frozen command. */ }
             }
-        }).finally(() => activePromptTranslations.delete(key));
+        }).finally(() => { activePromptTranslations.delete(key); activePromptTranslationControllers.delete(key); });
         activePromptTranslations.set(key, job);
     }
 
@@ -1614,7 +1644,9 @@ export class EpisodeProductionService {
         canvasId: string,
         input: CompiledPromptTranslationRequest,
         identity: { tool: string; targetId: string; projectId: string; request: unknown },
+        signal: AbortSignal,
     ) {
+        if (signal.aborted) throw new Error("翻译已被更新的编译替代");
         let command = this.db.getMcpCommandReceipt(input.operationId, identity);
         if (!command || command.status !== "prepared" || !command.payload) return;
         let payload = command.payload;
@@ -1652,8 +1684,10 @@ export class EpisodeProductionService {
             const settings = { get: (key: string) => this.db.getSetting(key), set: (key: string, value: unknown) => this.db.setSetting(key, value), delete: (key: string) => this.db.deleteSetting(key) };
             let translations;
             try {
-                translations = await translateH3PromptBatch({ settings }, targets.map(target => ({ id: target.targetId, text: target.sourcePrompt })));
-            } catch {
+                translations = await translateH3PromptBatch({ settings }, targets.map(target => ({ id: target.targetId, text: target.sourcePrompt })), signal);
+                if (signal.aborted) throw new Error("翻译已被更新的编译替代");
+            } catch (error) {
+                if (signal.aborted) throw error;
                 const current = this.db.getMcpCommandReceipt(input.operationId, identity);
                 if (current?.status === "prepared" && current.payload) this.db.updatePreparedMcpCommand({
                     operationId: input.operationId,
@@ -1672,7 +1706,8 @@ export class EpisodeProductionService {
             const latestProduction = this.get(id);
             const latestDirector = latestProduction.draft.director;
             const latestProject = this.db.getCanvasProject(canvasId);
-            if (latestProduction.revision !== input.expectedRevision || !latestDirector || !latestProject) throw new ProductionConflictError(latestProduction);
+            if (signal.aborted) throw new Error("翻译已被更新的编译替代");
+            if (!latestDirector || !latestProject) throw new ProductionConflictError(latestProduction);
             const operations: CanvasOperation[] = translated.map(item => {
                 const artifact = latestDirector.artifacts.find(candidate => candidate.kind === "h3" && candidate.targetId === item.targetId);
                 if (!artifact || artifact.status !== "ready" || !currentCompilationArtifact(latestDirector, artifact) || artifact.sha256 !== item.sourceHash) throw new Error(`Clip ${item.targetId} 的编译状态在翻译期间已变化；未写入任何译文`);
@@ -2707,6 +2742,7 @@ export class EpisodeProductionService {
                 return this.batchFromRow(prior);
             }
             const current = this.get(episodeId);
+            if (current.archivedAt) throw new ProductionArchivedError(episodeId);
             assertSingleSourceStorage(current);
             const { selectedTargets, plan, workflow, runSettings, nextDraft, director, executionSnapshot } = this.batchCandidate(episodeId, current, input);
             const now = new Date().toISOString();
@@ -2844,6 +2880,7 @@ export class EpisodeProductionService {
             return this.getBatch(episodeId, runId)!;
         }
         if (!["paused", "pending", "awaiting_review"].includes(batch.status)) throw new Error(`该生产运行不能继续：${batch.status}`);
+        if (this.get(episodeId).archivedAt) throw new ProductionArchivedError(episodeId);
         const settings = batch.settings;
         if (batch.executionSnapshot) {
             this.prepare("UPDATE episode_production_batches SET status='pending', pause_requested=0, settings_json=?, updated_at=? WHERE episode_id=? AND run_id=?").run(JSON.stringify(settings), new Date().toISOString(), episodeId, runId);
@@ -3190,7 +3227,7 @@ export class EpisodeProductionService {
             projectDirector(draft);
             this.validateGraph(draft);
             return { ...current, revision: current.revision + 1, draft, updatedAt: new Date().toISOString() };
-        }, undefined, undefined, undefined, undefined, false, true);
+        }, { maintenanceLegacyRead: true, allowArchived: true });
     }
 
     edit(episodeId: string, raw: unknown, canvasPreparation?: { projectId: string; expectedCanvasRevision: number; operationId: string; operations: CanvasOperation[] }, sceneRuntime = false, beforeCommit?: (record: ProductionRecord) => void, onStage?: (name: string, durationMs: number) => void, overwriteCompiledPromptTargets?: ReadonlySet<string>): ProductionRecord & { replayed?: boolean; impact?: ProductionImpact } {
@@ -3212,6 +3249,9 @@ export class EpisodeProductionService {
         const refreshes = input.ops.filter(op => op.type === "request_director_clip_refresh");
         if (refreshes.length > 1 && !input.ops.some(op => op.type === "set_director_production" && isSubjectPromptAssembly(op.director.source))) throw new ProductionValidationError([{ code: "CLIP_REFRESH_SCOPE", path: "request.ops", message: "旧稿局部刷新单批仅允许一个 Clip", severity: "error" }]);
         if (input.ops.some(operation => operation.type === "restore_archived_scene_results") && input.ops.length !== 1) throw new Error("归档视频恢复必须单独提交，不能与其他制作编辑混批");
+        // 归档状态是记录级开关：必须单独提交，不能与其他编辑或采纳混批，也不触发重编译或画布重投影。
+        const archiveOp = input.ops.length === 1 && input.ops[0].type === "set_archived" ? input.ops[0] : undefined;
+        if (input.ops.some(operation => operation.type === "set_archived") && (!archiveOp || input.adoptions)) throw new Error("归档状态必须单独提交，不能与其他制作编辑或采纳混批");
         const forceBoundaryTargets = new Set(input.ops.filter((operation): operation is Extract<ProductionOperation, { type: "set_director_boundary" }> => operation.type === "set_director_boundary").map(operation => operation.boundary.from));
         const measure = <T>(name: string, action: () => T): T => {
             const startedAt = performance.now();
@@ -3223,6 +3263,7 @@ export class EpisodeProductionService {
         const requestHash = overwriteCompiledPromptTargets?.size
             ? fingerprint({ input, overwriteCompiledPromptTargets: [...overwriteCompiledPromptTargets].sort() }) : fingerprint(input);
         const result = this.commit(episodeId, input.operationId, input.expectedRevision, requestHash, (record) => {
+            if (archiveOp) return { ...record, revision: record.revision + 1, archivedAt: archiveOp.archived ? record.archivedAt || new Date().toISOString() : null, updatedAt: new Date().toISOString() };
             const packets: DirectorWorkPackage[] = [];
             if (input.adoptions) {
                 if (new Set(input.adoptions.map(item => item.taskId)).size !== input.adoptions.length) throw new Error("ADOPTION_DUPLICATE");
@@ -3281,19 +3322,24 @@ export class EpisodeProductionService {
             }
             if (published && input.ops.some((operation) => operation.type === "review_keyframe" || operation.type === "review_director_asset")) this.prepare("UPDATE episode_production_versions SET snapshot_json=? WHERE episode_id=? AND version=?").run(JSON.stringify(withoutDirectorProjection(published)), episodeId, record.publishedVersion);
             return { ...record, revision: record.revision + 1, draft, published, updatedAt: new Date().toISOString() };
-        }, canvasPreparation ? (record, commits) => {
-            if (canvasPreparation) {
-                const ownerCanvasId = this.episodeInfo(episodeId).canvasId;
-                if (ownerCanvasId !== canvasPreparation.projectId) throw new Error("布局准备画布不属于当前制作对象");
-                if (this.db.getCanvasProjectRevision(canvasPreparation.projectId) !== canvasPreparation.expectedCanvasRevision) throw new Error("画布版本已变化，按同一 operationId 回读并恢复布局准备");
-                if (canvasPreparation.operations.length) this.db.applyCanvasProjectOperations(canvasPreparation.projectId, canvasPreparation.expectedCanvasRevision, canvasPreparation.operations, {
-                    operationId: canvasPreparation.operationId, runtimeWrite: true, withinTransaction: true, deferredCommits: commits, source: { kind: "system", clientId: "production:layout", label: "准备制作布局" },
-                });
-            }
-        } : undefined, record => {
-            for (const task of adoptedTasks) this.db.updateTask(task.taskId, { result: { ...task.result, adoption: directorAdoption(input.operationId, record.revision, record.draft.director!.sourceHash, input.ops, String(task.result.artifactHash)) } });
-            beforeCommit?.(record);
-        }, onStage, shotProjectionIds, shotDependencyFreeEdit, false, overwriteCompiledPromptTargets, forceBoundaryTargets);
+        }, {
+            beforeMutation: canvasPreparation ? (record, commits) => {
+                if (canvasPreparation) {
+                    const ownerCanvasId = this.episodeInfo(episodeId).canvasId;
+                    if (ownerCanvasId !== canvasPreparation.projectId) throw new Error("布局准备画布不属于当前制作对象");
+                    if (this.db.getCanvasProjectRevision(canvasPreparation.projectId) !== canvasPreparation.expectedCanvasRevision) throw new Error("画布版本已变化，按同一 operationId 回读并恢复布局准备");
+                    if (canvasPreparation.operations.length) this.db.applyCanvasProjectOperations(canvasPreparation.projectId, canvasPreparation.expectedCanvasRevision, canvasPreparation.operations, {
+                        operationId: canvasPreparation.operationId, runtimeWrite: true, withinTransaction: true, deferredCommits: commits, source: { kind: "system", clientId: "production:layout", label: "准备制作布局" },
+                    });
+                }
+            } : undefined,
+            beforeCommit: record => {
+                for (const task of adoptedTasks) this.db.updateTask(task.taskId, { result: { ...task.result, adoption: directorAdoption(input.operationId, record.revision, record.draft.director!.sourceHash, input.ops, String(task.result.artifactHash)) } });
+                beforeCommit?.(record);
+            },
+            onStage, shotProjectionIds, shotDependencyFreeEdit: shotDependencyFreeEdit || Boolean(archiveOp), maintenanceLegacyRead: false,
+            overwriteCompiledPromptTargets, forceBoundaryTargets, allowArchived: Boolean(archiveOp), skipCanvasProjection: Boolean(archiveOp),
+        });
         canvasCommits.forEach(commit => this.db.notifyCanvasCommit(commit));
         if (refreshes.length) {
             const editRefreshes = this.clipRefreshStore(episodeId).byEditAll(input.operationId);
@@ -3503,11 +3549,24 @@ export class EpisodeProductionService {
             .flatMap((row) => { const item = row as { owner_id: string; version: number }; const run = this.run(item.owner_id, item.version); return run ? [run] : []; });
     }
 
-    private commit(episodeId: string, operationId: string, expectedRevision: number, requestHash: string, mutate: (record: ProductionRecord) => ProductionRecord & { impact?: ProductionImpact }, beforeMutation?: (record: ProductionRecord, canvasCommits: CanvasCommit[]) => void, beforeCommit?: (record: ProductionRecord) => void, onStage?: (name: string, durationMs: number) => void, shotProjectionIds?: ReadonlySet<string>, shotDependencyFreeEdit = false, maintenanceLegacyRead = false, overwriteCompiledPromptTargets?: ReadonlySet<string>, forceBoundaryTargets?: ReadonlySet<string>) {
+    private commit(episodeId: string, operationId: string, expectedRevision: number, requestHash: string, mutate: (record: ProductionRecord) => ProductionRecord & { impact?: ProductionImpact }, options: {
+        beforeMutation?: (record: ProductionRecord, canvasCommits: CanvasCommit[]) => void;
+        beforeCommit?: (record: ProductionRecord) => void;
+        onStage?: (name: string, durationMs: number) => void;
+        shotProjectionIds?: ReadonlySet<string>;
+        shotDependencyFreeEdit?: boolean;
+        maintenanceLegacyRead?: boolean;
+        overwriteCompiledPromptTargets?: ReadonlySet<string>;
+        forceBoundaryTargets?: ReadonlySet<string>;
+        /** Permit writing an archived production: un-archive edits plus runtime/maintenance write-backs. */
+        allowArchived?: boolean;
+        /** Record-level edits (archiving) must not recompile and re-project the canvas. */
+        skipCanvasProjection?: boolean;
+    } = {}) {
         const measure = <T>(name: string, action: () => T): T => {
             const startedAt = performance.now();
             try { return action(); }
-            finally { onStage?.(name, Math.round(performance.now() - startedAt)); }
+            finally { options.onStage?.(name, Math.round(performance.now() - startedAt)); }
         };
         const scriptCommits: CanvasCommit[] = [];
         measure("transaction_begin", () => this.db.db.exec("BEGIN IMMEDIATE"));
@@ -3515,7 +3574,7 @@ export class EpisodeProductionService {
             const { prior, current } = measure("revision_read", () => {
                 const prior = this.prepare("SELECT episode_id AS owner_id, request_hash, receipt_json FROM episode_production_operations WHERE operation_id = ?").get(operationId) as { owner_id: string; request_hash: string; receipt_json: StoredReceipt } | undefined;
                 if (prior) return { prior, current: null as ProductionRecord | null };
-                return { prior, current: this.get(episodeId, maintenanceLegacyRead) };
+                return { prior, current: this.get(episodeId, Boolean(options.maintenanceLegacyRead)) };
             });
             if (prior) {
                 if (prior.owner_id !== episodeId || prior.request_hash !== requestHash) throw new Error("operationId 已用于不同制作稿操作");
@@ -3535,11 +3594,12 @@ export class EpisodeProductionService {
                 throw Object.assign(new Error("OPERATION_RECEIPT_UNAVAILABLE: 操作已提交但完整回执已清理；请读取当前制作稿核对，不要重放"), { code: "OPERATION_RECEIPT_UNAVAILABLE", committed: true });
             }
             if (!current) throw new Error("制作稿读取失败");
+            if (current.archivedAt && !options.allowArchived) throw new ProductionArchivedError(episodeId);
             if (expectedRevision > current.revision) throw new ProductionConflictError(current);
             assertSingleSourceStorage(current);
             this.ensureSourceLifecycleBaseline(episodeId, current);
             // 乐观锁放行（last-write-wins）：客户端过期 revision 不再拦截，版本号继续自增。
-            measure("pre_mutation_hook", () => beforeMutation?.(current, scriptCommits));
+            measure("pre_mutation_hook", () => options.beforeMutation?.(current, scriptCommits));
             const next = measure("source_validation_and_mutation", () => mutate(current));
             // BEGIN IMMEDIATE is the write-order linearization point. Always derive the
             // committed revision from the row read under this transaction, never from a
@@ -3547,8 +3607,8 @@ export class EpisodeProductionService {
             next.revision = current.revision + 1;
             this.recordSourceLifecycleChanges(episodeId, current.draft.director?.source, next.draft.director?.source, next.revision, operationId);
             const projectionOperationId = `production:${this.ownerKind}:${episodeId}:${operationId}:projection`;
-            let canvasId = this.episode(episodeId).canvasId;
-            if (!canvasId && this.ownerKind === "episode" && next.draft.director && productionEntities(next.draft.director.source, { kind: this.ownerKind, id: episodeId }).length) {
+            let canvasId = options.skipCanvasProjection ? null : this.episode(episodeId).canvasId;
+            if (!canvasId && !options.skipCanvasProjection && this.ownerKind === "episode" && next.draft.director && productionEntities(next.draft.director.source, { kind: this.ownerKind, id: episodeId }).length) {
                 canvasId = ensureProductionCanvas(this.db, "episode", episodeId, undefined, true).project.id;
             }
             const canvas = canvasId && this.db.getCanvasProject(canvasId);
@@ -3574,19 +3634,19 @@ export class EpisodeProductionService {
                     }
                     const h3Defaults = record(this.db.getSetting("plugin:minimax-h3:defaults:v1"));
                     const previousLayout = this.db.getProductionLayoutPlan(canvas.id);
-                    const shotTargets = shotProjectionIds && new Set(next.draft.clipGroups
-                        .filter(group => group.shotIds.some(shotId => shotProjectionIds.has(shotId)))
+                    const shotTargets = options.shotProjectionIds && new Set(next.draft.clipGroups
+                        .filter(group => group.shotIds.some(shotId => options.shotProjectionIds!.has(shotId)))
                         .map(group => group.id));
                     const scopedShotProjection = Boolean(previousLayout && shotTargets?.size);
                     const layout = scopedShotProjection ? previousLayout! : measure("layout_compile", () => compileProductionLayout({ h3Defaults, canvasId: canvas.id, owner, production: next.draft, project: canvas, previous: previousLayout }));
                     if (!scopedShotProjection) this.db.saveProductionLayoutPlan(canvas.id, layout);
                     const { sceneOperations, clips } = measure("clip_and_scene_projection", () => ({
                         sceneOperations: scopedShotProjection ? [] : productionSceneCreationOperations(canvas, next.draft, layout, owner, createdSceneIds, h3Defaults),
-                        clips: clipInputOperations(canvas, next.draft, layout, h3Defaults, materializeClipIds, scopedShotProjection ? shotTargets : undefined, overwriteCompiledPromptTargets, forceBoundaryTargets),
+                        clips: clipInputOperations(canvas, next.draft, layout, h3Defaults, materializeClipIds, scopedShotProjection ? shotTargets : undefined, options.overwriteCompiledPromptTargets, options.forceBoundaryTargets),
                     }));
                     next.referenceSync = clips.referenceSync;
                     const readyClips = new Set(clips.referenceSync.filter(item => item.status === "ready").map(item => item.targetId));
-                    const forcedBoundarySegments = new Set(next.draft.clipGroups.filter(group => forceBoundaryTargets?.has(group.id)).map(group => String(group.segmentId || "")));
+                    const forcedBoundarySegments = new Set(next.draft.clipGroups.filter(group => options.forceBoundaryTargets?.has(group.id)).map(group => String(group.segmentId || "")));
                     const clipOperations = clips.operations.filter(op => {
                         if (op.type !== "update_h3_segment") return true;
                         const projection = record(record(op.patch).productionClipProjection);
@@ -3600,15 +3660,15 @@ export class EpisodeProductionService {
                 }
             }
             measure("dependency_and_receipt_persist", () => {
-                if (!shotDependencyFreeEdit) this.syncSubjectClipDependencies(episodeId, next.draft.director);
-                this.prepare("INSERT INTO episode_productions (episode_id, revision, draft_json, published_json, published_version, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(episode_id) DO UPDATE SET revision = excluded.revision, draft_json = excluded.draft_json, published_json = excluded.published_json, published_version = excluded.published_version, updated_at = excluded.updated_at")
-                    .run(episodeId, next.revision, JSON.stringify(withoutDirectorProjection(next.draft)), next.published ? JSON.stringify(withoutDirectorProjection(next.published)) : null, next.publishedVersion, next.updatedAt);
+                if (!options.shotDependencyFreeEdit) this.syncSubjectClipDependencies(episodeId, next.draft.director);
+                this.prepare("INSERT INTO episode_productions (episode_id, revision, draft_json, published_json, published_version, updated_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(episode_id) DO UPDATE SET revision = excluded.revision, draft_json = excluded.draft_json, published_json = excluded.published_json, published_version = excluded.published_version, updated_at = excluded.updated_at, archived_at = excluded.archived_at")
+                    .run(episodeId, next.revision, JSON.stringify(withoutDirectorProjection(next.draft)), next.published ? JSON.stringify(withoutDirectorProjection(next.published)) : null, next.publishedVersion, next.updatedAt, next.archivedAt ?? null);
                 this.prepare("INSERT INTO episode_production_operations (operation_id, episode_id, request_hash, receipt_json, created_at) VALUES (?, ?, ?, ?, ?)")
                     .run(operationId, episodeId, requestHash, encodeReceipt(dedupReceipt(publicProductionRecord(next) as ProductionRecord)), next.updatedAt);
                 this.db.db.prepare("INSERT INTO production_operation_keys(owner_kind,owner_id,operation_id,request_hash,committed_revision,created_at) VALUES(?,?,?,?,?,?)")
                     .run(this.ownerKind, episodeId, operationId, requestHash, next.revision, next.updatedAt);
             });
-            measure("pre_commit_hook", () => beforeCommit?.(next));
+            measure("pre_commit_hook", () => options.beforeCommit?.(next));
             measure("sqlite_commit", () => this.db.db.exec("COMMIT"));
             this.events?.publish({ type: "drama-production.updated", entityId: episodeId, payload: { revision: next.revision, publishedVersion: next.publishedVersion } });
             scriptCommits.forEach(commit => this.db.notifyCanvasCommit(commit));
@@ -3646,7 +3706,7 @@ export class EpisodeProductionService {
             projectDirector(published, false);
             this.hydrateDirectorRuntimeView(episodeId, published, row.published_version);
         }
-        return { episodeId, revision: row.revision, draft, published, publishedVersion: row.published_version, updatedAt: row.updated_at,
+        return { episodeId, revision: row.revision, draft, published, publishedVersion: row.published_version, updatedAt: row.updated_at, archivedAt: row.archived_at || null,
             ...(draft.director && isSubjectPromptAssembly(draft.director.source) ? { storageFormat: draftSourceOnly && publishedSourceOnly ? "v2-single-source" : "v2-projection-migration-required" } : {}),
             ...(draft.director && isSubjectPromptAssembly(draft.director.source) && published?.director && !isSubjectPromptAssembly(published.director.source) ? { publishedFormatStatus: "legacy-maintenance-required" as const } : {}) };
     }

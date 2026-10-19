@@ -2036,6 +2036,76 @@ test("removing a shared asset still used by Shots is rejected when its Subject i
         ops: [{ type: "remove_shared_director_asset", id: "SHARED_ROLE" }] }), /SUBJECT_STILL_REFERENCED/);
 });
 
+test("archiving an episode makes it read-only and rejects every non-archive write", t => {
+    const f = fixture(t);
+    ensureProductionCanvas(f.db, "episode", "ep");
+    const saved = save(f.episode, "ep", director());
+    publish(f.episode, "ep");
+    assert.equal(f.episode.get("ep").archivedAt, null);
+
+    const beforeArchive = f.episode.get("ep");
+    const archived = f.episode.edit("ep", { operationId: "archive-episode", expectedRevision: beforeArchive.revision, ops: [{ type: "set_archived", archived: true }] });
+    assert.ok(archived.archivedAt, "archiving records a timestamp");
+    assert.ok(f.episode.get("ep").archivedAt, "archived state persists");
+    const archivedRevision = f.episode.get("ep").revision;
+
+    assert.throws(() => f.episode.edit("ep", { operationId: "archived-settings", expectedRevision: archivedRevision, ops: [{ type: "set_settings", patch: { h3Model: "blocked" } }] }), /归档/);
+    assert.throws(() => publish(f.episode, "ep"), /归档/);
+    assert.throws(() => f.episode.restore("ep", 1, "archived-restore", archivedRevision), /归档/);
+    assert.throws(() => f.episode.startBatch("ep", { runId: "archived-run", idempotencyKey: "archived-key", expectedRevision: archivedRevision, targets: ["segment:seg1"] }), /归档/);
+    // The record-level toggle must be the only op; unarchive mixed with an edit is refused up front.
+    assert.throws(() => f.episode.edit("ep", { operationId: "archived-mixed", expectedRevision: archivedRevision, ops: [{ type: "set_archived", archived: false }, { type: "set_settings", patch: {} }] }), /单独提交/);
+
+    // Replaying the archive receipt stays valid and never rewrites the row again.
+    const replayed = f.episode.edit("ep", { operationId: "archive-episode", expectedRevision: beforeArchive.revision, ops: [{ type: "set_archived", archived: true }] });
+    assert.equal(replayed.replayed, true);
+    assert.equal(f.episode.get("ep").revision, archivedRevision);
+
+    const unarchived = f.episode.edit("ep", { operationId: "unarchive-episode", expectedRevision: archivedRevision, ops: [{ type: "set_archived", archived: false }] });
+    assert.equal(unarchived.archivedAt, null);
+    assert.equal(f.episode.get("ep").archivedAt, null);
+    f.episode.edit("ep", { operationId: "post-unarchive-settings", expectedRevision: f.episode.get("ep").revision, ops: [{ type: "set_settings", patch: { h3Model: "allowed" } }] });
+    assert.equal(f.episode.get("ep").draft.settings.h3Model, "allowed");
+    assert.equal(saved.revision > 0, true);
+});
+
+test("shared-canvas updates stop syncing into an archived episode and resume after unarchiving", t => {
+    const f = fixture(t), shared = ensureProductionCanvas(f.db, "shared-assets", "drama");
+    const episodeCanvas = ensureProductionCanvas(f.db, "episode", "ep").project.id;
+    f.db.applyCanvasProjectOperations(shared.project.id, undefined, [{ type: "add_node", id: "shared-character", nodeType: "character", title: "共享人物", position: { x: 0, y: 0 }, width: 240, height: 320,
+        metadata: { productionEntity: { ownerKind: "canvas", ownerId: shared.project.id, kind: "character", entityId: "CANON_CHARACTER" }, characterName: "共享人物", characterImages: [{ id: "old-image", storageKey: "image:old", url: "/media/old.png", name: "身份图" }], characterPrimaryIndex: 0 } }], { runtimeWrite: true });
+    save(f.episode, "ep", director());
+    const current = f.episode.get("ep");
+    const sharedSource = { dramaId: "drama", assetId: "SHARED_CHARACTER", sourceProjectId: shared.project.id, sourceNodeId: "shared-character" };
+    const createAsset: any = { type: "create_manual_director_asset", assetPlan: { id: "SHARED_CHARACTER", kind: "character", asset_name: "共享人物", entity_id: "CHAR_SHARED", version: "v1", description: "角色身份", purpose: "共享角色", depends_on: [], status: "planned", canvas_scope: "episode", sharedSource },
+        assetCard: { id: "SHARED_CHARACTER", asset_id: "SHARED_CHARACTER", asset_kind: "character", asset_version: "v1", prompt: "", references: [] }, registryKind: "character",
+        registryEntity: { id: "CHAR_SHARED", name: "共享人物", description: "角色身份", appearance: "角色身份" },
+        subject: { id: "SUB_SHARED", kind: "character", entityRef: { ownerKind: "episode", ownerId: "ep", kind: "character", id: "CHAR_SHARED" }, pictureBindings: [] } };
+    const added = f.episode.edit("ep", { operationId: "add-shared-character-for-archive-sync", expectedRevision: current.revision, ops: [createAsset] });
+    const entityNode = (f.db.getCanvasProject(episodeCanvas)!.nodes as any[]).find(node => node.metadata?.productionEntity?.entityId === "CHAR_SHARED");
+    const pictureBinding = added.draft.director!.source.subject_registry.find((subject: any) => subject.id === "SUB_SHARED")!.pictureBindings[0];
+    const clip = { id: "shared-clip", prompt: "Keep <Picture 1> as the identity reference.", duration: 5, taskMode: "ref2va", status: "success", resultStorageKey: "video:old",
+        referenceBindings: [{ id: "shared-ref", assetId: "shared-ref", label: "<Picture 1>", role: "character_identity", tags: [], enabled: false, usage: "reference", mediaType: "image", sourceNodeId: entityNode.id, subjectId: "SUB_SHARED", pictureBindingId: pictureBinding.id, storageKey: "image:old" }],
+        h3CharacterGroups: { character: { id: "character", characterNodeId: entityNode.id, subjectId: "SUB_SHARED", characterName: "共享人物", characterAssetId: "SHARED_CHARACTER", outfits: [{ id: "outfit", name: "身份图", role: "character_identity", enabled: true, sourceNodeId: entityNode.id, subjectId: "SUB_SHARED", pictureBindingId: pictureBinding.id, storageKey: "image:old", url: "/media/old.png" }] } },
+        productionClipProjection: { fieldHashes: {} } };
+    f.db.applyCanvasProjectOperations(episodeCanvas, undefined, [{ type: "add_node", id: "h3-shared", nodeType: "minimax-h3:video", title: "H3", position: { x: 600, y: 0 }, width: 620, height: 500,
+        metadata: { ...createH3NodeMetadata({}, { segments: [clip] }), productionOwnerKind: "episode", productionOwnerId: "ep" } }]);
+    const segment = () => ((f.db.getCanvasProject(episodeCanvas)!.nodes as any[]).find(node => node.id === "h3-shared").metadata.segments as any[])[0];
+    assert.equal(segment().referenceBindings[0].storageKey, "image:old");
+
+    f.episode.edit("ep", { operationId: "archive-shared-episode", expectedRevision: f.episode.get("ep").revision, ops: [{ type: "set_archived", archived: true }] });
+    f.db.applyCanvasProjectOperations(shared.project.id, undefined, [{ type: "update_node", id: "shared-character", metadata: { characterImages: [{ id: "blocked-image", storageKey: "image:blocked", url: "/media/blocked.png", name: "被拦截" }], characterPrimaryIndex: 0 } }]);
+    assert.equal(segment().referenceBindings[0].storageKey, "image:old", "archived episodes keep their frozen shared references");
+    assert.equal(segment().h3CharacterGroups.character.outfits[0].storageKey, "image:old");
+
+    // Direct user canvas edits on the archived episode are refused too.
+    assert.throws(() => f.db.applyCanvasProjectOperations(episodeCanvas, undefined, [{ type: "update_node", id: "h3-shared", patch: { title: "blocked" } }]), /归档/);
+
+    f.episode.edit("ep", { operationId: "unarchive-shared-episode", expectedRevision: f.episode.get("ep").revision, ops: [{ type: "set_archived", archived: false }] });
+    f.db.applyCanvasProjectOperations(shared.project.id, undefined, [{ type: "update_node", id: "shared-character", metadata: { characterImages: [{ id: "new-image", storageKey: "image:new", url: "/media/new.png", name: "新版身份图" }], characterPrimaryIndex: 0 } }]);
+    assert.equal(segment().referenceBindings[0].storageKey, "image:new", "unarchiving resumes shared-canvas synchronization");
+});
+
 test("applying a scoped H3 compilation keeps an unchanged out-of-scope Clip ready", async t => {
     const f = referenceClipFixture(t);
     const seeded = f.episode.get("ep").draft.director!;

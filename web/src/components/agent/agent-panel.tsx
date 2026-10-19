@@ -81,9 +81,10 @@ export function AgentPanel() {
             aria-label={t("confirmationReminders.button")} aria-pressed={reminders.enabled}
             icon={reminders.enabled ? <Bell className="size-3.5" /> : <BellOff className="size-3.5" />} onClick={() => void reminders.toggle()} />
     </Tooltip>;
-    const progressControl = <Tooltip title={t(followTarget?.kind && followTarget.id ? "productionCanvas.returnToAgentNodeHint" : "productionCanvas.noAgentTarget")} placement="bottom">
-        <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8"
-            aria-label={t("productionCanvas.returnToAgentNode")} disabled={!followTarget?.kind || !followTarget.id}
+    const hasFollowTarget = Boolean(followTarget?.kind && followTarget.id);
+    const progressLabel = t(!following || pending ? "productionHub.follow.return" : "productionCanvas.returnToAgentNodeHint");
+    const progressControl = hasFollowTarget && <Tooltip title={progressLabel} placement="bottom">
+        <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" aria-label={progressLabel}
             icon={<LocateFixed className="size-3.5" />} onClick={() => {
                 closePanel();
                 useProductionFollowStore.getState().resume();
@@ -94,40 +95,40 @@ export function AgentPanel() {
         <Button type={panelTab === "object" ? "primary" : "text"} size="small" aria-pressed={panelTab === "object"} onClick={() => { useProductionWorkspaceStore.getState().setPanelTab("object"); useAgentStore.getState().openPanel(); }}>{t("productionCanvas.object")}</Button>
         <Button type={panelTab === "director" ? "primary" : "text"} size="small" aria-pressed={panelTab === "director"} onClick={() => { useProductionWorkspaceStore.getState().setPanelTab("director"); useAgentStore.getState().openPanel(); }}>Agent</Button>
     </div> : null;
-    const launcher = <div className={`fixed bottom-4 right-3 flex max-w-[calc(100vw-24px)] flex-col items-end gap-3 ${workbenchCanvasOverlay ? "z-[1000]" : "z-[80]"} sm:bottom-5 sm:right-6`} data-agent-launcher data-chat-open={chatOpen} data-canvas-shortcuts-ignore>
+    const launcher = <div className={`fixed bottom-4 right-0 flex max-w-[calc(100vw-12px)] flex-col items-end gap-3 ${workbenchCanvasOverlay ? "z-[1000]" : "z-[80]"} sm:bottom-5`} data-agent-launcher data-chat-open={chatOpen} data-canvas-shortcuts-ignore>
         {homePage && !chatOpen && !welcomeDismissed && <div data-director-welcome-bubble className="relative flex max-w-[calc(100vw-24px)] items-center gap-1 rounded-xl border border-border bg-card px-2 py-2 text-foreground shadow-sm">
             <span aria-hidden="true" data-director-welcome-tail className="pointer-events-none absolute -bottom-1.5 right-8 size-3 rotate-45 border-b border-r border-border bg-card" />
             <button type="button" className="rounded-lg px-2 py-1.5 text-sm leading-relaxed transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring" onClick={() => { setWelcomeDismissed(true); setCreativeEntryOpen(true); useProductionWorkspaceStore.getState().setPanelTab("director"); useAgentStore.getState().openPanel(); }}>{t("landing.ideaTitle")}</button>
             <button type="button" className="grid size-7 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring" aria-label={t("productionCanvas.dismissWelcome")} onClick={() => setWelcomeDismissed(true)}><X className="size-3.5" /></button>
         </div>}
         <Badge count={reminders.count} size="small">
-            <Button type={chatOpen ? "default" : "primary"} shape="round" className="!h-11 !rounded-xl !px-4 !text-sm !font-medium !shadow-none" aria-label={t("productionCanvas.openChat")} aria-expanded={chatOpen} aria-controls="canvas-director-dialog" icon={busy ? <LoaderCircle className="size-4 animate-spin" /> : <MessageSquare className="size-4" />} onClick={openChat}>{t("productionCanvas.director")}</Button>
+            <Button type={chatOpen ? "default" : "primary"} shape="round" className="!h-11 !rounded-l-xl !rounded-r-none !px-4 !text-sm !font-medium !shadow-none" aria-label={t("productionCanvas.openChat")} aria-expanded={chatOpen} aria-controls="canvas-director-dialog" icon={busy ? <LoaderCircle className="size-4 animate-spin" /> : <MessageSquare className="size-4" />} onClick={openChat}>{t("productionCanvas.director")}</Button>
         </Badge>
     </div>;
+    const chatDialog = <section id="canvas-director-dialog" role="dialog" aria-label={t("productionCanvas.chatDialog")} aria-hidden={!chatOpen} inert={!chatOpen}
+        data-canvas-shortcuts-ignore data-canvas-no-zoom
+        className="fixed inset-y-0 right-0 z-[75] flex w-[min(760px,100vw)] flex-col overflow-hidden rounded-l-xl border border-border bg-card text-foreground shadow-xl transition-transform duration-300 ease-out motion-reduce:transition-none"
+        style={{ zIndex: workbenchCanvasOverlay ? 950 : undefined, transform: chatOpen ? "translateX(0)" : "translateX(100%)", pointerEvents: chatOpen ? "auto" : "none" }}>
+        {owner && <div className="shrink-0 border-b border-border px-3 py-2">{objectAgentSwitch}</div>}
+        {canvasPage && owner && (current || recoveryPending) && <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-muted/30 px-4 py-2.5" data-director-production-controls>
+            <button type="button" className="min-w-0 flex-1 truncate rounded-md px-1.5 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground" onClick={() => {
+                const query = new URLSearchParams(search); query.set("workspace", "production"); query.delete("target"); query.delete("nodeId"); query.delete("segmentId");
+                navigate({ search: query.toString() }, { replace: true });
+                useProductionWorkspaceStore.getState().setSelectedObject(null);
+                useProductionWorkspaceStore.getState().setPanelTab("object");
+                useAgentStore.getState().openPanel();
+            }} aria-label={t("productionCanvas.tasks")}>
+                {recoveryPending ? t("productionCanvas.recovery") : <>{label ? `${label} · ` : ""}{t(`productionCanvas.progress.${current!.status}`)}</>}
+            </button>
+        </div>}
+        <div className="flex min-h-0 flex-1 flex-col">
+            <AgentCreativeWelcome active={welcomeOpen} onShowChat={() => setCreativeEntryOpen(false)} onClose={closePanel} headerAction={headerControls} />
+            <LocalAgentPanel embedded compact headless={!panelMounted || welcomeOpen} autoConnect headerAction={headerControls} />
+        </div>
+    </section>;
     return <>
         {workbenchCanvasOverlay ? createPortal(launcher, workbenchCanvasOverlay) : launcher}
-        <section id="canvas-director-dialog" role="dialog" aria-label={t("productionCanvas.chatDialog")} aria-hidden={!chatOpen} inert={!chatOpen}
-            data-canvas-shortcuts-ignore data-canvas-no-zoom
-            className="fixed bottom-20 right-3 z-[75] flex w-[min(460px,calc(100vw-24px))] flex-col overflow-hidden rounded-xl border border-border bg-card text-foreground shadow-xl sm:bottom-[84px] sm:right-6"
-            style={{ height: "min(640px, calc(100dvh - 112px))", zIndex: workbenchCanvasOverlay ? 950 : undefined, visibility: chatOpen ? "visible" : "hidden", pointerEvents: chatOpen ? "auto" : "none" }}>
-            {owner && <div className="shrink-0 border-b border-border px-3 py-2">{objectAgentSwitch}</div>}
-            {(canvasPage && owner && (current || recoveryPending) || followTarget?.kind && followTarget.id && (!following || pending)) && <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-muted/30 px-4 py-2.5" data-director-production-controls>
-                {canvasPage && owner && (current || recoveryPending) && <button type="button" className="min-w-0 flex-1 truncate rounded-md px-1.5 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground" onClick={() => {
-                    const query = new URLSearchParams(search); query.set("workspace", "production"); query.delete("target"); query.delete("nodeId"); query.delete("segmentId");
-                    navigate({ search: query.toString() }, { replace: true });
-                    useProductionWorkspaceStore.getState().setSelectedObject(null);
-                    useProductionWorkspaceStore.getState().setPanelTab("object");
-                    useAgentStore.getState().openPanel();
-                }} aria-label={t("productionCanvas.tasks")}>
-                    {recoveryPending ? t("productionCanvas.recovery") : <>{label ? `${label} · ` : ""}{t(`productionCanvas.progress.${current!.status}`)}</>}
-                </button>}
-                {followTarget?.kind && followTarget.id && (!following || pending) && <Button type="text" size="small" onClick={() => useProductionFollowStore.getState().resume()}>{t("productionHub.follow.return")}</Button>}
-            </div>}
-            <div className="flex min-h-0 flex-1 flex-col">
-                <AgentCreativeWelcome active={welcomeOpen} onShowChat={() => setCreativeEntryOpen(false)} onClose={closePanel} headerAction={headerControls} />
-                <LocalAgentPanel embedded compact headless={!panelMounted || welcomeOpen} autoConnect headerAction={headerControls} />
-            </div>
-        </section>
+        {workbenchCanvasOverlay ? createPortal(chatDialog, workbenchCanvasOverlay) : chatDialog}
         {owner && <Drawer rootClassName="canvas-blocking-overlay" open={objectOpen} forceRender title={objectAgentSwitch} onClose={closePanel} placement="right" size="min(1120px, calc(100vw - 24px))" styles={{ body: { overflow: "auto", padding: 16 } }}>
             <div data-canvas-shortcuts-ignore data-canvas-no-zoom><Suspense fallback={null}><ProductionEditor key={`${owner.kind}:${owner.id}`} owner={owner} embedded dialog /></Suspense></div>
         </Drawer>}

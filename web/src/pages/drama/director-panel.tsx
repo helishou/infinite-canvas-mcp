@@ -634,7 +634,7 @@ export function DirectorPanel({
   compact = false, navigationTitleVisible = false, onSaveScript, generationSupported = true, assetScopeHint,
   onBrief, onPatch, onEditCanvasClip, onAdoptDirectorFields, onAdoptClipStyle, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onH3Boundary, onPublish, onReplace, onAskDirector, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRestore, onRefresh, onSceneCommand, sceneCommandPending, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onCheckContinuity, onContinuitySnapshot,
   onCompile, onGenerateClip, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets,
-  onApplyTranslatedPrompts, autoTranslateCompilation,
+  onApplyTranslatedPrompts, autoTranslateCompilation, readOnly = false, onArchive,
 }: {
   workspace: DirectorWorkspace; director?: DirectorProduction; production: EpisodeProduction; readiness?: ProductionReadiness; run?: ProductionBatch | null;
   continuityReport?: import("@/services/backend-api").ProductionContinuity;
@@ -673,7 +673,7 @@ export function DirectorPanel({
   onRepartitionClips?: (shotIds: string[], segments: Array<Record<string, unknown>>) => Promise<boolean>;
   onEditShot?: (operation: Extract<ProductionOperation, { type: "edit_director_shot" }>) => Promise<boolean>;
 
-  onEditCanvasClip?: (nodeId: string, segmentId: string, patch: Record<string, unknown>) => Promise<boolean>;
+  onEditCanvasClip?: (nodeId: string, segmentId: string, patch: Record<string, unknown>, refreshProduction?: boolean) => Promise<boolean>;
   onAdoptDirectorFields?: (targetId: string, nodeId: string, segmentId: string | undefined, fields: string[]) => Promise<boolean>;
   onAdoptClipStyle?: (targetId: string, styleTemplateId: string | null) => Promise<boolean>;
   onRegroup: (segmentId: string, shotIds: string[], removeSegmentIds: string[]) => Promise<boolean> | void;
@@ -689,7 +689,7 @@ export function DirectorPanel({
   onContinuitySnapshot?: (value: "draft" | "published") => void;
   onPublish: () => void;
   onReplace: (value: DirectorProduction) => Promise<boolean> | void;
-  onAskDirector: (scope: { workspace: DirectorWorkspace; targetId?: string; instruction?: string; brief?: string; workId?: string }) => void;
+  onAskDirector: (scope: { workspace: DirectorWorkspace; targetId?: string; targetKind?: "scene"; instruction?: string; brief?: string; workId?: string; clipContext?: boolean }) => void;
   onAnswerDecision: (decisionId: string, answer: string) => Promise<boolean> | boolean;
   onNavigate: (workspace: DirectorWorkspace, target?: { kind: string; id: string }) => void;
   onLocateTarget?: (kind: string, id: string) => void;
@@ -702,11 +702,14 @@ export function DirectorPanel({
   onSceneCommand: (action: ProductionSceneAction, revision: number) => Promise<unknown>;
   onExport: (includeGeneratedMedia: boolean) => Promise<void>;
   exporting: boolean;
-  onCompile?: (sceneId?: string, targetId?: string) => void;
+  onCompile?: (sceneId?: string, targetId?: string, targetIds?: string[]) => void;
   /** 编译就绪的 Clip 直接提交生成，复用生成页同一条 startRun。 */
   onGenerateClip?: (clipId: string) => void;
   onApplyTranslatedPrompts?: (items: Array<{ targetId: string; nodeId: string; segmentId: string; sourcePrompt: string; expectedCanvasPrompt: string; translatedPrompt: string }>) => Promise<void>;
   autoTranslateCompilation?: { id: string; targetIds: string[] } | null;
+  /** Archived episodes are read-only: refuse to submit any edit and free the archive toggle to un-archive. */
+  readOnly?: boolean;
+  onArchive?: (archived: boolean) => Promise<boolean>;
   compileBusy?: boolean;
   compilePending?: boolean;
   compileError?: string;
@@ -742,6 +745,7 @@ export function DirectorPanel({
   const [videoPreviewErrors, setVideoPreviewErrors] = useState<Record<string, string>>({});
   const [assetPreviewKeys, setAssetPreviewKeys] = useState<Record<string, string>>({});
   const [json, setJson] = useState<string | null>(null);
+  const [archivePending, setArchivePending] = useState(false);
   const [error, setError] = useState("");
   const storyboardViews = useRef<Record<string, StoryboardViewMemory>>({});
   const [decisionReplies, setDecisionReplies] = useState<Record<string, string>>({});
@@ -1272,7 +1276,7 @@ export function DirectorPanel({
       </details>;
     };
     return <div className="space-y-3" data-production-overview="compact">
-      {production.draft.settings.parallelScenes && canvasRole !== "scene" && <SceneProductionPanel key={JSON.stringify({ canvasId, episodeId: production.episodeId })} disabled={busy} commandPending={sceneCommandPending} onCommand={onSceneCommand} onAskDirector={scope => onAskDirector({ workspace: "overview", ...scope })} production={production} owner={canvasRole === "episode" ? production.episodeId : { projectId: canvasId }} onRefresh={onRefresh} />}
+      {production.draft.settings.parallelScenes && canvasRole !== "scene" && <SceneProductionPanel key={JSON.stringify({ canvasId, episodeId: production.episodeId })} disabled={busy} commandPending={sceneCommandPending} onCommand={onSceneCommand} onAskDirector={scope => onAskDirector({ workspace: "overview", ...scope, targetKind: "scene" })} production={production} owner={canvasRole === "episode" ? production.episodeId : { projectId: canvasId }} onRefresh={onRefresh} />}
       <section className="flex flex-wrap items-start justify-between gap-3 border-b border-border pb-3" aria-label={t("director.workspace.overview.currentTask")}>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2"><h2 className="text-sm font-medium">{humanMessage(d && presentation?.action === "author" ? t("director.workspace.manual.currentWorkspace", { workspace: t(`director.workspace.tab.${presentationWorkspace}`) }) : taskTitle)}</h2>{presentation?.status && <Tag color={presentation.status === "needs_review" ? "orange" : presentation.status === "blocked" ? "red" : presentation.status === "complete" ? "green" : undefined}>{t(`director.workspace.presentationStatus.${presentation.status}`)}</Tag>}</div>
@@ -1804,9 +1808,36 @@ export function DirectorPanel({
     </div>;
   };
 
+  const toggleClipLock = async (clipId: string, locked: boolean) => {
+    const sourceSegment = segments.find(item => String(item.id) === clipId);
+    if (!sourceSegment || !onPatch) return false;
+    const runtime = clipRuntime(clipId);
+    const runtimeSegment = runtime?.segment;
+    const seedValue = Number(runtimeSegment?.seed ?? runtimeSegment?.noiseSeed);
+    const hasSeed = Number.isFinite(seedValue) && seedValue >= 0;
+    const currentMode = runtimeSegment?.noiseSeedMode === "fixed" ? "fixed" : "random";
+    const restoreMode = sourceSegment.preLockNoiseSeedMode === "fixed" ? "fixed" : sourceSegment.preLockNoiseSeedMode === "random" ? "random" : currentMode;
+    const seed = hasSeed ? seedValue : Math.max(1, Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
+    if (runtime && onEditCanvasClip) {
+      const changed = await onEditCanvasClip(runtime.node.id, String(runtime.segment.id), locked
+        ? { noiseSeedMode: "fixed", seed, noiseSeed: seed }
+        : { noiseSeedMode: restoreMode }, false);
+      if (!changed) return false;
+    }
+    const saved = await onPatch("segment", clipId, locked
+      ? { locked: true, preLockNoiseSeedMode: currentMode }
+      : { locked: false, preLockNoiseSeedMode: null });
+    if (saved === false && runtime && onEditCanvasClip) {
+      await onEditCanvasClip(runtime.node.id, String(runtime.segment.id), locked
+        ? { noiseSeedMode: currentMode }
+        : { noiseSeedMode: "fixed" }, false);
+    }
+    return saved !== false;
+  };
+
   const renderShots = (activeView: "shots" | "clips" = "shots") => {
     if (d) return <SubjectStoryboardWorkbench key={JSON.stringify(subjectOwner)} viewMemory={storyboardViews.current[JSON.stringify(subjectOwner)] ||= {}} activeView={activeView} director={d} production={production} owner={subjectOwner} canvasNodes={canvasNodes} canvasId={canvasId} onLocateClip={id => onLocateTarget?.("segment", id)}
-      initialShotId={focusTarget?.startsWith("shot:") ? focusedId : undefined} renderEditor={(shot, workbench) => renderShotDetails(shot, false, workbench)} onRepartitionClips={subjectAssembly ? onRepartitionClips : undefined} onH3Boundary={subjectAssembly ? onH3Boundary : undefined} onEditShot={subjectAssembly ? onEditShot : undefined} onSaveShotPatch={subjectAssembly && onSaveV2Shot ? (shotId, patch) => onSaveV2Shot(shotId, patch) : undefined} shotDrafts={sourceDrafts}
+      initialShotId={focusTarget?.startsWith("shot:") ? focusedId : undefined} renderEditor={(shot, workbench) => renderShotDetails(shot, false, workbench)} onRepartitionClips={subjectAssembly ? onRepartitionClips : undefined} onH3Boundary={subjectAssembly ? onH3Boundary : undefined} onEditShot={subjectAssembly ? onEditShot : undefined} onSaveShotPatch={subjectAssembly && onSaveV2Shot ? (shotId, patch) => onSaveV2Shot(shotId, patch) : undefined} onToggleClipLock={toggleClipLock} shotDrafts={sourceDrafts}
       shotKeyframe={frameForShot}
       renderContinuity={isSubjectPromptAssembly(d.source) ? undefined : shot => renderShotContinuity(shot)}
       renderShotState={shot => renderShotState(shot)}
@@ -1824,7 +1855,7 @@ export function DirectorPanel({
       onClip={id => onNavigate("production", { kind: "segment", id })}
       busy={busy} compileBusy={compileBusy} compilePending={compilePending} compileError={compileError} compileNotice={compileNotice} compileDiagnostics={compileDiagnostics} compileTargets={compileTargets} onCompile={onCompile}
       onGenerateClip={subjectAssembly ? onGenerateClip : undefined} runStartPending={runStartPending}
-        onDiscuss={(targetId, instruction) => onAskDirector({ workspace: "overview", targetId, instruction })} onNavigate={onNavigate} />;
+        onDiscuss={(targetId, instruction, discussionWorkspace, clipContext) => onAskDirector({ workspace: discussionWorkspace || "overview", targetId, instruction, clipContext })} onNavigate={onNavigate} />;
     return <div className="space-y-3"><Alert type="info" message={t("director.workspace.noShots")} /><Button type="text" disabled={busy} icon={<WandSparkles className="size-3.5" />} onClick={() => onAskDirector({ workspace: "shots" })}>{t("director.studio.collaborate")}</Button></div>;
   };
 
@@ -1864,6 +1895,13 @@ export function DirectorPanel({
       { id: "tasks", label: t("director.generation.chooseTarget") },
       { id: "delivery", label: t("director.micro.resultsDelivery") },
     ]} />} />
+    {canvasRole === "episode" && onArchive && <section className="rounded-lg border border-border bg-card p-4" data-production-archive>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div><h3 className="font-semibold">{t("director.workspace.archive.title")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("director.workspace.archive.hint")}</p></div>
+        <label className="flex items-center gap-2 text-sm"><Switch size="small" data-production-archive-toggle checked={readOnly} loading={archivePending} disabled={busy && !readOnly} onChange={async next => { setArchivePending(true); try { await onArchive?.(next); } finally { setArchivePending(false); } }} />{t(readOnly ? "director.workspace.archive.archived" : "director.workspace.archive.active")}</label>
+      </div>
+      {readOnly && <Alert className="mt-3" type="info" showIcon message={t("director.workspace.archive.notice")} />}
+    </section>}
     {productionSummary}
     {compileError && <Alert type="error" showIcon message={t("director.atomic.compileFailed")} description={compileError} style={{ whiteSpace: "pre-line" }} />}
     {compileNotice && <Alert type="success" showIcon message={compileNotice} style={{ whiteSpace: "pre-line" }} />}
@@ -1983,7 +2021,7 @@ export function DirectorPanel({
     <section className="space-y-3 border-t border-border pt-5" data-production-section="management" data-production-danger="source" tabIndex={-1}>
       <h3 className="font-semibold">{t("director.micro.advancedManagement")}</h3>
       <p className="text-xs text-muted-foreground">{t("director.micro.advancedManagementHint")}</p>
-      <Button className="mt-2" disabled={!d} onClick={() => { setJson(JSON.stringify(d || {}, null, 2)); setError(""); }}>{t("director.workspace.editJson")}</Button>
+      <Button className="mt-2" disabled={!d || readOnly} onClick={() => { setJson(JSON.stringify(d || {}, null, 2)); setError(""); }}>{t("director.workspace.editJson")}</Button>
     </section>
     <Modal open={json !== null} width={920} title={t("director.workspace.editJson")} onCancel={() => setJson(null)} onOk={() => {
       try { onReplace(directorProductionSchema.parse(JSON.parse(json || "{}"))); setJson(null); setError(""); }

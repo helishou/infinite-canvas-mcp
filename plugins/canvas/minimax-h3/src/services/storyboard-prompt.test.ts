@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildStoryboardPromptSections, ensureCharacterGroupSubjectDefinitions, ensureCharacterGroupSubjects, mergeSubjectDefinitions, toSubjectDefinitions } from "./storyboard-prompt";
+import { buildStoryboardPromptSections, ensureCharacterGroupSubjectDefinitions, ensureCharacterGroupSubjects, mergeSubjectDefinitions, sha256Text, storyboardPromptFingerprint, toSubjectDefinitions } from "./storyboard-prompt";
 
 test("旧实体数据缺少名称或别名时也不会在增强初始化阶段崩溃", () => {
     const malformed = [{ id: "legacy", aliases: [undefined, "旧别名"], name: undefined, profile: "", pictures: [], outfits: [] }] as unknown as Parameters<typeof ensureCharacterGroupSubjectDefinitions>[0];
@@ -108,4 +108,13 @@ test("已保存的旧实体清单会补回启用中的纯声线角色", () => {
     });
     assert.deepEqual(definitions.map((definition) => definition.name), ["婚书", "沈昭宁"]);
     assert.equal(definitions[1]?.role, "character_identity");
+});
+
+test("insecure-browser storyboard fingerprints fall back to exact serialized input", async () => {
+    const input = { shots: [{ description: "雪院里，沈昭宁抬头。" }] };
+    const expected = `raw:${JSON.stringify(input)}`;
+    assert.equal(await sha256Text("prompt", null), null);
+    assert.equal(await storyboardPromptFingerprint(input, null), expected);
+    assert.equal(await storyboardPromptFingerprint(structuredClone(input), null), expected);
+    assert.notEqual(await storyboardPromptFingerprint({ shots: [{ description: "雪院里，沈昭宁转身。" }] }, null), expected);
 });

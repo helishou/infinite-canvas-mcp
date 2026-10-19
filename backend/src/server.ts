@@ -385,6 +385,8 @@ export function startServer(
 
   // 画布右键翻译：走设置里选定的文本模型（ai.config.translationModel），不再依赖第三方翻译 API。
   app.post("/translation/text", async (req, res) => {
+    const controller = new AbortController();
+    res.on("close", () => { if (!res.writableEnded) controller.abort(); });
     const text = typeof req.body?.text === "string" ? req.body.text : "";
     const target = typeof req.body?.target === "string" ? req.body.target.trim() : "";
     if (!CANVAS_TRANSLATION_TARGETS.includes(target as CanvasTranslationTarget)) return void res.status(400).json({ ok: false, error: "target 仅支持 zh-CN 或 en" });
@@ -393,13 +395,14 @@ export function startServer(
       if (Array.isArray(req.body?.items)) {
         if (mode !== "h3-prompt" || target !== "en") return void res.status(400).json({ ok: false, error: "批量翻译只支持 H3 英文提示词" });
         const items = req.body.items.map((item: any) => ({ id: String(item?.id || ""), text: String(item?.text || "") }));
-        const translations = await translateH3PromptBatch(stores, items);
+        const translations = await translateH3PromptBatch(stores, items, controller.signal);
         return void res.json({ ok: true, translations });
       }
       if (!text.trim()) return void res.status(400).json({ ok: false, error: "text 必填" });
-      const translatedText = await translateCanvasText(stores, { text, target: target as CanvasTranslationTarget, mode: mode as "default" | "h3-prompt" });
+      const translatedText = await translateCanvasText(stores, { text, target: target as CanvasTranslationTarget, mode: mode as "default" | "h3-prompt", signal: controller.signal });
       res.json({ ok: true, translatedText });
     } catch (error) {
+      if (controller.signal.aborted) return;
       res.status(502).json({ ok: false, error: error instanceof Error ? error.message : "翻译失败" });
     }
   });
@@ -941,6 +944,15 @@ export function startServer(
   app.get("/drama/projects/:dramaId", (req, res) => {
     const drama = db.listCanvasFolders(String(req.params.dramaId))[0];
     if (!drama?.isDrama) return void res.status(404).json({ ok: false, code: "DRAMA_NOT_FOUND", error: "剧目不存在" });
+    if (req.query.view === "summary") {
+      const description = String(drama.description || ""), outline = String(drama.outline || "");
+      return void res.json({ ok: true, drama: {
+        id: drama.id, name: drama.name, updatedAt: drama.updatedAt,
+        ...(Array.isArray(drama.tags) ? { tags: drama.tags } : {}),
+        descriptionPreview: description.slice(0, 240), descriptionLength: description.length,
+        outlinePreview: outline.slice(0, 360), outlineLength: outline.length,
+      } });
+    }
     res.json({ ok: true, drama });
   });
   app.get("/drama/projects/:dramaId/episodes", (req, res) => {
@@ -950,6 +962,11 @@ export function startServer(
       .find((item) => item.id === dramaId);
     if (!drama)
       return void res.status(404).json({ ok: false, error: "剧目不存在" });
+    if (req.query.view === "summary") {
+      const page = Math.max(1, Math.floor(Number(req.query.page) || 1));
+      const pageSize = Math.max(1, Math.min(100, Math.floor(Number(req.query.pageSize) || 20)));
+      return void res.json({ ok: true, dramaId, ...db.listDramaEpisodeSummaries(dramaId, page, pageSize) });
+    }
     const episodes = db.listDramaEpisodes(dramaId);
     res.json({ ok: true, dramaId, episodes });
   });

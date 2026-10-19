@@ -274,6 +274,7 @@ export function AgentToolCard({ title, text, detail, theme }: { title: string; t
                 <span className="shrink-0" style={{ color: state.color }}>{toolIcon(kind, state.icon)}</span>
                 <span className="min-w-0 truncate font-medium">{title}</span>
                 <span className="shrink-0 text-[11px]" style={{ color: state.color }}>{state.label}</span>
+                {toolUsage(detail) ? <span className="ml-auto shrink-0 text-[10px] tabular-nums" style={{ color: theme.node.muted }}>{tr("agent.chat.turnUsage", { input: toolUsage(detail)!.input.toLocaleString(), output: toolUsage(detail)!.output.toLocaleString() })}</span> : null}
                 {view ? <ChevronDown className="ml-auto size-3.5 shrink-0 transition-transform group-open:rotate-180" style={{ color: theme.node.muted }} /> : null}
             </div>
             {showText ? (
@@ -290,6 +291,13 @@ export function AgentToolCard({ title, text, detail, theme }: { title: string; t
             <div className="ml-6"><AgentDetailBlock detail={view} theme={theme} /></div>
         </details>
     );
+}
+
+function toolUsage(detail: unknown): { input: number; output: number } | null {
+    const usage = objectField(detail, "usage");
+    const input = objectField(usage, "input");
+    const output = objectField(usage, "output");
+    return typeof input === "number" && typeof output === "number" ? { input, output } : null;
 }
 
 function AgentReasoningSummary({ text, detail, theme }: { text: string; detail?: unknown; theme: (typeof canvasThemes)[keyof typeof canvasThemes] }) {

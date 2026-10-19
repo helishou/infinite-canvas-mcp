@@ -45,7 +45,7 @@ export const directorPatchFields = {
     asset_card: ["prompt", "seven_steps", "references", "reference_policy", "target_skill", "source_repository", "recipe", "mode", "transaction", "character_name", "state_label", "view_layout", "generation_status", "actual_settings", "output_file", "heavy_scene", "structure_lock", "style_anchor_purpose"],
     asset: ["asset_name", "name", "title", "kind", "description", "prompt", "depends_on", "role", "version", "reference_role", "canvas_scope", "status"],
     shot: ["title", "visual", "camera", "scene_id", "source_scene_id", "start_frame", "end_frame", "duration_frames", "dialogues", "audio", "required_assets", "description", "shot_type", "timeline_id", "story_order", "continuity_facts", "characters", "performance", "combat", "state_description", "reference_requirements", "prompt_contract_version", "identity_context", "offscreen_character_ids", "subject_usages", "utterance_refs", "features"],
-    segment: ["shot_ids", "start_frame", "end_frame", "generation_clip_duration", "mode", "mode_lock", "mode_selection_reason", "audio", "sound", "overall_soundscape", "non_diegetic_music", "references", "subjects", "execution_gate", "styleTemplateId", "motion_profile", "summary", "audio_bindings", "animation_term_ids", "animation_term_evidence"],
+    segment: ["shot_ids", "start_frame", "end_frame", "generation_clip_duration", "mode", "mode_lock", "mode_selection_reason", "audio", "sound", "overall_soundscape", "non_diegetic_music", "references", "subjects", "execution_gate", "styleTemplateId", "motion_profile", "summary", "audio_bindings", "animation_term_ids", "animation_term_evidence", "locked", "preLockNoiseSeedMode"],
 } as const;
 
 const directorPatchSourceEntities = Object.keys(directorPatchFields).filter((entity): entity is Exclude<keyof typeof directorPatchFields, "continuity"> => entity !== "continuity") as [Exclude<keyof typeof directorPatchFields, "continuity">, ...Exclude<keyof typeof directorPatchFields, "continuity">[]];
@@ -695,6 +695,7 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("set_clip_group"), group: clipGroupSchema }).strict(),
     z.object({ type: z.literal("delete_clip_group"), id }).strict(),
     z.object({ type: z.literal("set_settings"), patch: productionSettingsSchema.partial() }).strict(),
+    z.object({ type: z.literal("set_archived"), archived: z.boolean() }).strict(),
     z.object({ type: z.literal("review_keyframe"), shotId: id, verdict: z.enum(["auto-accepted", "needs-redo"]), evidence: z.string().min(1) }).strict(),
 ]);
 
@@ -710,7 +711,14 @@ export const productionEditSchema = z.object({ operationId: id, expectedRevision
 export const productionPublishSchema = z.object({ operationId: id, expectedRevision: z.number().int().min(0).describe("读取制作稿的基线 revision；发布按当前目标输入与发布版本检查，不因无关 revision 增长拒绝"), stage: z.enum(["script", "shots", "director"]), scope: productionCompilationScopeSchema.optional() }).strict();
 export const directorRunStartSchema = z.object({ runId: id, idempotencyKey: id, workId: id.optional(), expectedRevision: z.number().int().min(0).describe("读取制作稿的基线 revision；运行按所选目标的冻结输入校验"), version: z.number().int().min(0).default(0), inputBasis: z.enum(["canvas", "published"]).default("canvas"), expectedCanvasRevision: z.number().int().nonnegative().optional().describe("读取画布输入的基线 revision；不作为全局写锁"), expectedPlanHash: hash.optional().describe("生成预检返回的目标输入 manifest；传入时用于拒绝目标输入已变化的提交"), targets: z.array(id).min(1), scope: z.enum(["selected", "all_ready"]).default("selected") }).strict();
 export const directorRunControlSchema = z.object({ runId: id }).strict();
-export const productionContractQuerySchema = z.object({ runtimeId: id.optional().describe("Deprecated: accepted for compatibility; the contract always uses the locally active Acheng runtime."), operationType: id.optional().describe("只接受 contract.operations[].type 中的精确操作标识；edit/publish/compile/generate 属于 contract.requests，不是 operationType。省略时返回完整操作目录。"), moduleId: z.enum(directorModules).optional() }).strict();
+export const productionContractQuerySchema = z.object({
+    runtimeId: id.optional().describe("Deprecated: accepted for compatibility; the contract always uses the locally active Acheng runtime."),
+    operationType: id.optional().describe("只接受 contract.operations[].type 中的精确操作标识；edit/publish/compile/generate 属于 contract.requests，不是 operationType。提供时默认只返回该操作的 schema、示例、前置条件和引擎身份。"),
+    moduleId: z.enum(directorModules).optional().describe("按需读取单个模块的专属说明文件。"),
+    includeRequests: z.boolean().optional().describe("operationType 已提供时，额外包含 edit/publish/compile/generate 请求 schema。"),
+    includePatchFields: z.boolean().optional().describe("operationType 已提供时，额外包含完整 patchFields allowlist。"),
+    includeSourceContract: z.boolean().optional().describe("operationType 已提供时，额外包含激活引擎的完整源稿校验合同。"),
+}).strict();
 export const productionContinuityReadSchema = z.object({ snapshot: z.enum(["draft", "published"]).default("draft"), view: z.enum(["summary", "issues", "timeline", "shot"]).default("summary"), targetId: id.optional(), objectId: id.optional(), pageSize: z.coerce.number().int().positive().optional(), cursor: z.string().optional() }).strict();
 export const productionContinuityCheckSchema = z.object({ expectedRevision: z.number().int().nonnegative(), operationId: id, snapshot: z.enum(["draft", "published"]).default("draft"), targetIds: z.array(id).optional() }).strict();
 // Keep requests unparsed at this boundary so invalid inputs produce diagnostics,

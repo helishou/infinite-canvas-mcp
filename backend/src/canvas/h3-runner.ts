@@ -1233,7 +1233,7 @@ export class CanvasH3Runner {
             && String(binding.nodeId || "") === pending.nodeId
             && String(binding.segmentId || "") === pending.segmentId;
         if (boundTaskId && ![task.id, pending.firstPassChildTaskId, confirmationOf(task).inFlight?.childTaskId].includes(boundTaskId) && !ownedChild) return;
-        const operations = [{
+        const operations: CanvasOperation[] = [{
             type: "update_h3_segment",
             nodeId: pending.nodeId,
             segmentId: pending.segmentId,

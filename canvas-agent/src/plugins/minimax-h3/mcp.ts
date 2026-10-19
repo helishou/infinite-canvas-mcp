@@ -455,10 +455,15 @@ async function readH3Clip(context: PluginMcpContext, input: Record<string, unkno
         const ids = segmentsOf(node).map((item) => String(item.id || "")).filter(Boolean);
         throw new Error(`找不到片段:${segmentId}；当前 Clip ID：${ids.slice(0, 50).join("、")}${ids.length > 50 ? `（另有 ${ids.length - 50} 个）` : ""}；请先调用 h3_get_node 核对当前时间线`);
     }
-    if (!compile) return { projectId, nodeId, segmentId, segment, revision: Number(project.revision || 0), timings: { projectReadMs }, snapshot: undefined };
+    const revision = Number(project.revision || 0);
+    if (input.ifRevision !== undefined && Number(input.ifRevision) === revision
+        && !(Array.isArray(input.include) && input.include.includes("result"))) {
+        return { projectId, nodeId, segmentId, segment, revision, unchanged: true, timings: { projectReadMs }, snapshot: undefined };
+    }
+    if (!compile) return { projectId, nodeId, segmentId, segment, revision, timings: { projectReadMs }, snapshot: undefined };
     const compileStarted = Date.now();
     const compilation = compileReferenceSubmission(project, segment);
-    return { projectId, nodeId, segmentId, segment, revision: Number(project.revision || 0), timings: { projectReadMs, compileMs: Date.now() - compileStarted }, snapshot: buildH3ClipSnapshot(segment, compilation) };
+    return { projectId, nodeId, segmentId, segment, revision, timings: { projectReadMs, compileMs: Date.now() - compileStarted }, snapshot: buildH3ClipSnapshot(segment, compilation) };
 }
 
 function runtimeValuesOf(segment: H3Segment) {
@@ -926,15 +931,16 @@ export const pluginMcp: PluginMcpModule = {
             },
             h3_get_clip: async (input) => {
                 const include = new Set(Array.isArray(input.include) ? input.include.map(String) : []);
-                const { projectId, nodeId, segmentId, segment, revision, timings, snapshot } = await readH3Clip(context, input, undefined, include.has("prompt") || include.has("references"));
+                const { projectId, nodeId, segmentId, segment, revision, timings, snapshot, unchanged } = await readH3Clip(context, input, undefined, include.has("prompt") || include.has("references"));
                 if ((input.taskId !== undefined || input.storageKey !== undefined) && !include.has("result")) throw Object.assign(new Error("taskId/storageKey 必须与 include:result 一起使用，不能被总览查询忽略"), { code: "INVALID_INPUT" });
                 const result = include.has("result") ? await readClipResult(context, input, segment) : undefined;
-                const projected = input.fields === undefined ? {} : projectNarrativeFields(segment, input.fields);
+                const projected = unchanged || input.fields === undefined ? {} : projectNarrativeFields(segment, input.fields);
                 const bindings = resolveCharacterGroupBindings(referenceBindingsOf(segment).bindings, segment);
                 const runtime = runtimeValuesOf(segment);
                 const groups = recordOf(segment.h3CharacterGroups);
                 return {
                     ok: true,
+                    ...(unchanged ? { unchanged: true } : {}),
                     projectId,
                     nodeId,
                     segmentId,
@@ -947,16 +953,16 @@ export const pluginMcp: PluginMcpModule = {
                         resultStorageKey: segment.resultStorageKey,
                         hasResult: Boolean(segment.result || segment.resultStorageKey),
                     },
-                    prompt: { semanticLength: String(segment.prompt || "").length, compiledLength: snapshot ? snapshot.prompt.compiled.length : null, compiledAvailable: Boolean(snapshot) },
+                    prompt: unchanged ? { unchanged: true } : { semanticLength: String(segment.prompt || "").length, compiledLength: snapshot ? snapshot.prompt.compiled.length : null, compiledAvailable: Boolean(snapshot) },
                     runtimeFieldCount: Object.keys(runtime).length,
                     referenceCount: snapshot ? snapshot.references.length : bindings.filter(binding => binding.enabled).length,
                     characterGroupCount: Object.keys(groups).length,
-                    ...(snapshot ? { issueCounts: issueCountsOf(snapshot.issues) } : { validationDeferred: true }),
+                    ...(unchanged ? {} : snapshot ? { issueCounts: issueCountsOf(snapshot.issues) } : { validationDeferred: true }),
                     timings,
                     ...projected,
                     ...(include.has("prompt") && snapshot ? { prompt: snapshot.prompt } : {}),
                     ...(include.has("references") && snapshot ? { references: snapshot.references, characterGroups: snapshot.characterGroups } : {}),
-                    ...(include.has("runtime") ? { runtime } : {}),
+                    ...(include.has("runtime") && !unchanged ? { runtime } : {}),
                     ...(result ? { result } : {}),
                 };
             },
