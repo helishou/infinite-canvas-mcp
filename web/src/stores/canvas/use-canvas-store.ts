@@ -1421,10 +1421,13 @@ if (typeof window !== "undefined") {
     });
     void hydrateCanvasProjects();
     window.addEventListener("backend-connected", () => {
-        void hydrateCanvasProjects();
+        // 连接状态恢复时 SSE 会补放断线期间的增量；已完成首次对账后不再扫全局项目列表。
+        if (!backendCanvasHydrated) void hydrateCanvasProjects();
         // 治本:重连后若有尚未落后端的删除标记,强制补删(双保险)。
         if (pendingDeletedProjectIds.size) scheduleCanvasSync();
     });
+    // 事件游标失效表示 Backend 无法补放缺失区间，此时才做一次版本对账恢复。
+    window.addEventListener("backend-events-reset", () => { void hydrateCanvasProjects(); });
     window.addEventListener("backend-event", (event) => applyBackendCanvasEvent((event as CustomEvent).detail));
     const flushCanvasPersistence = () => {
         if (localSnapshotTimer) {

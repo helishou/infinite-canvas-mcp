@@ -4,7 +4,11 @@
 
 分集与独立画布统一调用 `production_get/production_edit/production_publish`，显式传 `kind:episode/canvas` 与 `id`。通过 `set_director_production` 提交完整导演稿：schemaVersion、engine、source、sourceHash、modules、artifacts、assets、shotInputs、boundaries、workflow、unresolved、executionAuthorized。
 
-新合同局部返修先通过 `production_get` 的 `subject_workbench`、`shot_workbench` 或 `clip_workbench` 读取一个实际目标工作包，再用一次 `production_edit` 合并修改。Subject 索引和图片绑定用 `upsert_director_subject`，解除无引用主体登记用 `delete_director_subject`；原角色登记用 `patch_director_source` 的 `character`，场景用 `environment`，道具用 `asset`。镜头摄影、动作、时长与对象使用修改 Shot，分镜图绑定用 `set_director_shot_keyframes`；连续性用 `edit_director_continuity` 修改唯一台账条目，Clip 重组用 `repartition_director_clips`。Backend 默认登记新合同真实消费者的校验、编译和同步，不再由 Agent 重复手动编译、应用。沿写回执给出的原流程身份查询状态；阻塞只读定位字段，不换 ID 重跑。
+新合同单镜头字段返修默认用 `production_get_source({sourceSection:"shots", targetIds:[shotId]})` 定向读取；该读取还回传目标的 `targetStatus` 与 `canvasInputs`。不要为了修改单个 Shot 读取 `clip_workbench`：完整工作包可能同时包含当前 Prompt 与导演基线，造成大段重复上下文。只有本次确实依赖工作台独有信息时才读取对应 `shot_workbench` 或 `clip_workbench`。修改仍通过一次 `production_edit` 提交。Subject 索引和图片绑定用 `upsert_director_subject`，解除无引用主体登记用 `delete_director_subject`；原角色登记用 `patch_director_source` 的 `character`，场景用 `environment`，道具用 `asset`。镜头摄影、动作、时长与对象使用修改 Shot，分镜图绑定用 `set_director_shot_keyframes`；连续性用 `edit_director_continuity` 修改唯一台账条目，Clip 重组用 `repartition_director_clips`。Backend 默认登记新合同真实消费者的校验、编译和同步，不再由 Agent 重复手动编译、应用。沿写回执给出的原流程身份查询状态；阻塞只读定位字段，不换 ID 重跑。
+
+只在操作类型、字段或字段约束未知时读取制作合同。查询具体操作时传 `operationType`；只有需要确认可写字段时加 `includePatchFields:true`，需要请求体时才加 `includeRequests:true`。不要用 `moduleId` 代替操作合同查询；它会额外读取模块说明文件，只有本次确实需要该模块方法说明时才读取。写对白前逐字对照正式源稿的 `utterances[].text`，不润色、不替换同义词；独立术语以其所属的正式源字段为准。
+
+修改 Shot 视觉时，在同一 `production_edit` 事务里复核该 Shot 的 `subject_usages[].continuityFactIds`：每条已选且与本镜画面／动作相关的事实，都要有符合本镜状态的 `hold/change` 要求；缺项且可由已登记事实、初态和事件确定时，把 Shot 修改和 continuity 修改一起提交。若事实对本镜不可见或不相关，应修正事实勾选；若状态依据不足，标为未决，不批量补“保持”或猜测变化。
 
 新合同镜头增删、复制、排序、拆分和合并使用 `edit_director_shot`，与本镜未保存字段修改合并为一次提交。新增镜头分配稳定 ID；复制只复用摄影与对象设计，不复制对白、事件或关键帧。排序限定当前 Clip，跨 Clip 包装调整用 `repartition_director_clips`。拆镜指定局部整数帧；对白跨切点时默认按已有声音窗分配原文片段，保留逐字内容和声音总时长；textOffsets 仅用于明确调整默认切字位置。听者反应镜头显式选择反应安排，不能把画外说话者变成可见人物。合镜有不同摄影时明确选择摄影来源，有不同主要表演节拍时先设计承接，不能静默丢弃。删除镜头同时删除本镜独占的对白与台账事件，跨镜对白保留其他镜头部分并更新原文覆盖；依赖引用在同一事务清理，历史媒体保留。不要要求用户手动移交每条记录才能删除；删除后的上下游事实矛盾由连续性检查定位，不伪造补全。镜头时长修改同步裁剪既有 Subject 出现范围，完全位于删去时段的出现条目移除；关键帧、定时动作／声音与台账事件局部锚点同步适配时长，稳定 ID 不变。声音窗保留原速度，缩短到对白所需时长以下属于创作冲突，不能用加速或删字掩盖。删除唯一镜头自动删除其空 Clip，清理引用和新相邻边界；不要求再执行另一条删除命令。合镜保留两镜输入资产并集，拆镜和复制不留下错误的结果事件关联。
 
@@ -24,7 +28,7 @@ source 原样保存 Acheng production 数据。sourceHash 是递归键排序、�
 
 ### 编译后由程序承接
 
-Agent 负责编译前的创作和结构化源稿。自动刷新已登记时消费其短回执，不再另发 `production_compile` 或重复应用。明确独立编译或旧兼容流程才调用 `production_compile`，使用稳定 `operationId` 和 `production_get_compilation` 恢复原状态；只有成功后应用 `preparedId`，中断不自动重跑。
+Agent 负责编译前的创作和结构化源稿。自动刷新已登记时消费其短回执，不再另发 `production_compile` 或重复应用。明确独立编译或旧兼容流程才调用 `production_compile`，使用稳定 `operationId` 和 `production_get_compilation` 恢复原状态。只有 `status:"succeeded"` 且回执含 `preparedId` 才应用；其中 `verdict:"passed_with_warnings"` 表示编译可应用，直接应用该 `preparedId`，不为查看非阻塞提示再拉整页诊断。应用后从该次 apply 回执检查目标 `referenceSync`。`status:"blocked"` 才先读取 `view:"diagnostics", offset:0, pageSize:1`，按需继续分页定位阻塞。`failed` 或 `interrupted` 不得应用；沿原 `operationId` 和回执 `nextAction`／首条诊断恢复，不换 ID 重跑。
 
 编译器与 Backend 的校验回执是编译结果的技术依据。Agent 不独立审阅或创作性改写编译正文；本项目新增的唯一固定后处理是 LLM 批量翻译：正式编译已应用后，对当前范围内所有编译状态为 ready 的 Clip 调用 `production_translate_compiled_prompts`。Backend 使用已配置翻译模型，跳过 SHA-256 缓存命中的 Prompt，其余按顺序每批最多 3 条请求模型，再按 Clip ID 拆分结果并原子写回 H3 Clip。镜头描述和指令译成英文并轻度优化；对白、歌词和明确引用的画面文字保留原语言（可含中文）。保留事实、动作、时间、镜头结构、引用标签及约束，不添加或删减内容。手工工作台对应“翻译已编译提示词（英文）”按钮；两种入口共用 Backend 的 SHA-256 译文缓存，相同源内容不会再请求 LLM。任一目标未 ready、编译基线失效、翻译返回缺项或提示词在翻译期间被并发修改时，整批不写入，也不生成该批 Clip。
 
@@ -44,7 +48,7 @@ Agent 负责编译前的创作和结构化源稿。自动刷新已登记时消�
 
 ## 编译受阻的定位与恢复
 
-`production_compile` 的请求完成不代表编译成功；消费 `compilation.status`。`queued/running` 沿原 operationId 查询；`blocked/failed/interrupted` 是终态，读取首条 `blockingDiagnostic`，需要全集时分页读取 diagnostics，不继续轮询同一终态。`PROMPT_EXTERNAL_CONTEXT` 表示模型提示词含“同上／沿用前段”等外部文字依赖，不表示缺少前段视频或连续性事实。按 targetId、shotId、path 和 matchedText 定向展开原字段；origin=compiler 时修编译器，不要求导演改创作稿。
+`production_compile` 的请求完成不代表编译成功；消费 `compilation.status`。`queued/running` 沿原 operationId 查询。`succeeded` 包括 `passed` 与 `passed_with_warnings`，按上文应用精确 `preparedId`；`blocked` 先读一条诊断，再按需分页。`failed/interrupted` 不应用，按原 operationId 的 `nextAction` 与首条诊断恢复，不继续轮询同一终态。`PROMPT_EXTERNAL_CONTEXT` 表示模型提示词含“同上／沿用前段”等外部文字依赖，不表示缺少前段视频或连续性事实。按 targetId、shotId、path 和 matchedText 定向展开原字段；origin=compiler 时修编译器，不要求导演改创作稿。
 
 相同有效编译输入、范围、参考内容身份和 runtime 的可定位源稿独立性阻塞，可跨操作 ID 返回原阻塞回执。`reused=true` 与 `reusedFromOperationId` 表示本次没有重跑编译器；同 operationId 的 `replayed` 仍表示原命令重放。改变确实影响编译的输入后再提交，不靠换 ID 或扩大范围试错。旧回执没有定位信息时不猜字段，不把单独的 revision 或 sourceHash 变化作为问题已解决的证据。
 
@@ -64,7 +68,7 @@ Agent 负责编译前的创作和结构化源稿。自动刷新已登记时消�
 
 复用核对哈希关联，不要求不同对象的哈希数值相等：产物登记的 sourceHash 对应其有效源稿，Clip 正文哈希及有序参考映射对应有效产物，任务冻结输入对应本轮有效目标。同时核对回执适用范围、revision、编译版本和实际参考媒体版本。sourceHash 未变不是单独的复用依据；revision 改变也不由 Agent 自行判定全部失效或手工改回执，以 Backend 的目标有效性和诊断为准。历史产物保留原编译版本，新编译请求使用当前激活版本。
 
-未登记自动刷新的兼容流程沿“保存源稿 → 编译成功 → 应用编译包并检查 referenceSync → 预览发布影响 → 发布”推进，制作写入按 revision 顺序串行执行。消费正式短回执，不再额外逐 Clip 手工同步正文和参考；referenceSync 阻塞时按诊断修依赖。已有有效发布与同步结果直接复用。媒体提交另沿运行参考处理。
+未登记自动刷新的兼容流程沿“保存源稿 → 编译成功 → 应用编译包并检查 referenceSync → 预览发布影响 → 发布”推进，制作写入按 revision 顺序串行执行。消费正式短回执，不再额外逐 Clip 手工同步正文和参考；referenceSync 阻塞时按诊断修依赖。单目标应用后直接使用 apply 回执中的该目标 `referenceSync`，不要为确认这一个目标调用 `production_get_readiness`；readiness 会返回整份制作对象的所有目标，只有确实需要整体就绪视图时才读取。已有有效发布与同步结果直接复用。媒体提交另沿运行参考处理。
 
 ## 预检与发布
 

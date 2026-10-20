@@ -163,7 +163,7 @@ export async function runVideoConcatTask(endpoint: string, token: string, videos
     if (options.layout === "hstack" && inputs.length < 2) throw new Error("横向拼接至少需要两个视频");
     const body: Record<string, unknown> = { videos: inputs };
     if (options.layout) body.layout = options.layout;
-    // sequence 用 longEdge 限制单片长边；hstack 下后端把它当每格高度，所以直接给目标像素高。
+    // sequence 用 longEdge 限制单片长边；hstack 的 auto 会按最大源视频高度统一各格，较小视频按比例放大。
     if (options.longEdge !== undefined) body.longEdge = options.longEdge;
     const created = await fetchAgentJson<{ task: VideoConcatTask }>(endpoint, token, "/video-concat/tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     const cancel = () => { void fetchAgentJson(endpoint, token, `/video-concat/tasks/${created.task.id}/cancel`, { method: "POST" }).catch(() => undefined); };

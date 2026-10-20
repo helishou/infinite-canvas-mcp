@@ -250,6 +250,7 @@ async function startBackendHttpServer() {
   const productionAgents = new ProductionAgentPool(undefined, {
     canRun: request => request.threadId ? isLlmThread(request.threadId) : Boolean(request.model?.includes("::")),
     run: request => productionLlm.structured(request),
+    retainHistory: (threadId, title) => productionLlm.retainHistory(threadId, title, process.cwd()),
   }, (model, threadId) => productionLlm.nativeWorkerModel(model, threadId));
   process.once("exit", () => productionAgents.stop());
   app.get("/production/worker-status", (_req, res) => res.json({ ok: true, busy: productionAgents.busy }));

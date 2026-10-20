@@ -1,0 +1,228 @@
+{
+  "projectId": null,
+  "groupId": null,
+  "revision": null,
+  "referenceNodeId": "Clip-2",
+  "referenceSkinLab": [
+    56.08,
+    7.45,
+    2.66
+  ],
+  "clips": [
+    {
+      "slot": 1,
+      "nodeId": "Clip-1",
+      "title": "Clip 1",
+      "sourceFile": "source/01-Clip-1-8d7ecebd.mp4",
+      "gradedFile": "graded/01-Clip-1-8d7ecebd-graded.mp4",
+      "method": "skin-weighted CIELAB 3D LUT",
+      "skinLabBefore": [
+        40.88,
+        8.84,
+        8.57
+      ],
+      "appliedLabDelta": [
+        2.5,
+        -1.047,
+        -2.8
+      ],
+      "lutFile": "luts/Clip-1-8d7ecebd.cube",
+      "gradedSha256": "fcd0c060f6511b413477e5e219dcfebdacccbd1678a2495495dc1467a81dd6cd",
+      "skinLabAfterSamePixels": [
+        42.46,
+        8.3,
+        6.57
+      ]
+    },
+    {
+      "slot": 2,
+      "nodeId": "Clip-2",
+      "title": "Clip 2",
+      "sourceFile": "source/02-Clip-2-1aeb26f4.mp4",
+      "gradedFile": "graded/02-Clip-2-1aeb26f4-graded.mp4",
+      "method": "unchanged reference",
+      "gradedSha256": "fd7d4a36c54217e0be1d93ff3c42a031b5d7e854a6a08c43ca363a31cfd0b6d1",
+      "skinLabAfterSamePixels": [
+        56.08,
+        7.45,
+        2.66
+      ]
+    },
+    {
+      "slot": 3,
+      "nodeId": "Clip-3",
+      "title": "Clip 3",
+      "sourceFile": "source/03-Clip-3-bdde0c3f.mp4",
+      "gradedFile": "graded/03-Clip-3-bdde0c3f-graded.mp4",
+      "method": "skin-weighted CIELAB 3D LUT",
+      "skinLabBefore": [
+        44.66,
+        10.23,
+        6.59
+      ],
+      "appliedLabDelta": [
+        2.5,
+        -2.087,
+        -2.8
+      ],
+      "lutFile": "luts/Clip-3-bdde0c3f.cube",
+      "gradedSha256": "eaf3e3fa2be490ad788e53cb0238a9ace59af1f33913a97bd0193c1b935f4572",
+      "skinLabAfterSamePixels": [
+        46.23,
+        8.42,
+        2.98
+      ]
+    },
+    {
+      "slot": 4,
+      "nodeId": "Clip-4",
+      "title": "Clip 4",
+      "sourceFile": "source/04-Clip-4-226cbdaf.mp4",
+      "gradedFile": "graded/04-Clip-4-226cbdaf-graded.mp4",
+      "method": "skin-weighted CIELAB 3D LUT",
+      "skinLabBefore": [
+        55.65,
+        7.43,
+        -1.11
+      ],
+      "appliedLabDelta": [
+        0.094,
+        0.015,
+        2.8
+      ],
+      "lutFile": "luts/Clip-4-226cbdaf.cube",
+      "gradedSha256": "5ffd35e197f8c8c6d26500da5cba254b1b3c5b4e82b4430fde54656168cb98d5",
+      "skinLabAfterSamePixels": [
+        55.32,
+        7.57,
+        -0.21
+      ]
+    },
+    {
+      "slot": 5,
+      "nodeId": "Clip-5",
+      "title": "Clip 5",
+      "sourceFile": "source/05-Clip-5-e5dcfe74.mp4",
+      "gradedFile": "graded/05-Clip-5-e5dcfe74-graded.mp4",
+      "method": "skin-weighted CIELAB 3D LUT",
+      "skinLabBefore": [
+        43.71,
+        7.74,
+        4.63
+      ],
+      "appliedLabDelta": [
+        2.5,
+        -0.218,
+        -1.483
+      ],
+      "lutFile": "luts/Clip-5-e5dcfe74.cube",
+      "gradedSha256": "3d68f7d4a600490f175b7590520abe4be5d1061f80a380688e92b734087b3e67",
+      "skinLabAfterSamePixels": [
+        44.28,
+        8.06,
+        2.79
+      ]
+    },
+    {
+      "slot": 6,
+      "nodeId": "Clip-6",
+      "title": "Clip 6",
+      "sourceFile": "source/06-Clip-6-74e469f0.mp4",
+      "gradedFile": "graded/06-Clip-6-74e469f0-graded.mp4",
+      "method": "skin-weighted CIELAB 3D LUT",
+      "skinLabBefore": [
+        39.97,
+        12.42,
+        10.3
+      ],
+      "appliedLabDelta": [
+        2.5,
+        -2.8,
+        -2.8
+      ],
+      "lutFile": "luts/Clip-6-74e469f0.cube",
+      "gradedSha256": "b46fe283ac62538365c3b7fbb7f78cb262e31ac63766ddc49779349b09814ef4",
+      "skinLabAfterSamePixels": [
+        41.08,
+        10.77,
+        8.11
+      ]
+    },
+    {
+      "slot": 7,
+      "nodeId": "Clip-7",
+      "title": "Clip 7",
+      "sourceFile": "source/07-Clip-7-4c9ee9d7.mp4",
+      "gradedFile": "graded/07-Clip-7-4c9ee9d7-graded.mp4",
+      "method": "skin-weighted CIELAB 3D LUT",
+      "skinLabBefore": [
+        58.06,
+        11.68,
+        9.07
+      ],
+      "appliedLabDelta": [
+        -0.437,
+        -2.8,
+        -2.8
+      ],
+      "lutFile": "luts/Clip-7-4c9ee9d7.cube",
+      "gradedSha256": "bcb922f2c2b888c7bef6c79714ee7eea53afa2b94b6c277a4fd30f7ef2234e3d",
+      "skinLabAfterSamePixels": [
+        56.94,
+        9.5,
+        6.28
+      ]
+    },
+    {
+      "slot": 8,
+      "nodeId": "Clip-8",
+      "title": "Clip 8",
+      "sourceFile": "source/08-Clip-8-10940a9a.mp4",
+      "gradedFile": "graded/08-Clip-8-10940a9a-graded.mp4",
+      "method": "skin-weighted CIELAB 3D LUT",
+      "skinLabBefore": [
+        64.6,
+        14.89,
+        5.53
+      ],
+      "appliedLabDelta": [
+        -1.876,
+        -2.8,
+        -2.16
+      ],
+      "lutFile": "luts/Clip-8-10940a9a.cube",
+      "gradedSha256": "403a1c75075a3e03a871ed84b33fce1772252c1c5c6221b69f4358fe9c8e7b5d",
+      "skinLabAfterSamePixels": [
+        62.31,
+        12.57,
+        2.93
+      ]
+    },
+    {
+      "slot": 9,
+      "nodeId": "Clip-9",
+      "title": "Clip 9",
+      "sourceFile": "source/09-Clip-9-50f6cb39.mp4",
+      "gradedFile": "graded/09-Clip-9-50f6cb39-graded.mp4",
+      "method": "skin-weighted CIELAB 3D LUT",
+      "skinLabBefore": [
+        58.75,
+        9.18,
+        5.87
+      ],
+      "appliedLabDelta": [
+        -0.588,
+        -1.297,
+        -2.41
+      ],
+      "lutFile": "luts/Clip-9-50f6cb39.cube",
+      "gradedSha256": "89b7846aab0fbecb26d05ed0dd169596a21d27da64c7e8d54f19b552333d8955",
+      "skinLabAfterSamePixels": [
+        57.52,
+        8.28,
+        2.8
+      ]
+    }
+  ],
+  "totalDurationSec": 81.208
+}

@@ -54,13 +54,19 @@ export function useWorkbenchData() {
             {
                 queryKey: ["canvas-library-episodes", backendUrl, folder.id],
                 enabled: connected,
-                queryFn: async () => ((await fetchBackendDramaEpisodes(folder.id)).episodes || []).map((episode) => episode.canvasId || ""),
+                queryFn: async () => ((await fetchBackendDramaEpisodes(folder.id)).episodes || [])
+                    .filter((episode) => episode.canvasId)
+                    .map((episode) => ({ id: episode.id, canvasId: episode.canvasId! })),
             },
         ]),
     });
-    const episodesByDrama: Record<string, { canvasId: string }[] | undefined> = {};
-    ownershipQueries.forEach((result, index) => { episodesByDrama[dramas[index].id] = result.data?.map(canvasId => ({ canvasId })); });
+    const episodesByDrama: Record<string, { id: string; canvasId: string }[] | undefined> = {};
+    ownershipQueries.forEach((result, index) => { episodesByDrama[dramas[index].id] = result.data; });
     const canvasOwners = dramaCanvasOwners(folders, episodesByDrama);
+    const canvasEpisodes = new Map<string, { dramaId: string; episodeId: string }>();
+    for (const drama of dramas) {
+        for (const episode of episodesByDrama[drama.id] || []) canvasEpisodes.set(episode.canvasId, { dramaId: drama.id, episodeId: episode.id });
+    }
     const dramaReady = ownershipQueries.every((result) => result.data !== undefined);
     const dramaError = ownershipQueries.some((result) => result.isError && !isBackendAvailabilityError(result.error));
     const [pinning, setPinning] = useState(false);
@@ -154,5 +160,5 @@ export function useWorkbenchData() {
             setPinning(false);
         }
     };
-    return { connected, backendUrl, logs, tasks, settings, settingsReady, loading, errors, hasMore, refresh, canvasOwners, dramaReady, dramaError, pinning, togglePin, loadMore: () => setLogCount((count) => count + 30) };
+    return { connected, backendUrl, logs, tasks, settings, settingsReady, loading, errors, hasMore, refresh, canvasOwners, canvasEpisodes, dramaReady, dramaError, pinning, togglePin, loadMore: () => setLogCount((count) => count + 30) };
 }

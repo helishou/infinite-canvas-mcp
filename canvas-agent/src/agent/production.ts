@@ -23,8 +23,8 @@ export class WorkPool {
 }
 
 /** images always contains verified local file paths; channel adapters perform encoding. */
-export type ProductionAgentRequest = { workId: string; prompt: string; cwd: string; schema: Record<string, unknown>; threadId?: string; model?: string; effort?: CodexReasoningEffort; review?: boolean; recoverOutput?: boolean; turnId?: string; onTurn?: (turnId: string) => void; images?: string[]; readRoots?: string[]; onThread: (threadId: string) => void; emit?: AgentEmit };
-type ApiWorker = { canRun(request: ProductionAgentRequest): boolean; run(request: ProductionAgentRequest): Promise<{ threadId: string; output: unknown }> };
+export type ProductionAgentRequest = { workId: string; prompt: string; cwd: string; schema: Record<string, unknown>; threadId?: string; model?: string; effort?: CodexReasoningEffort; review?: boolean; recoverOutput?: boolean; historyVisible?: boolean; historyTitle?: string; turnId?: string; onTurn?: (turnId: string) => void; images?: string[]; readRoots?: string[]; onThread: (threadId: string) => void; emit?: AgentEmit };
+type ApiWorker = { canRun(request: ProductionAgentRequest): boolean; run(request: ProductionAgentRequest): Promise<{ threadId: string; output: unknown }>; retainHistory?(threadId: string, title: string): void };
 type ProductionClient = Pick<CodexAppClient, "resumeProductionThread" | "startProductionThread" | "generateProductionOutput" | "stopProductionClient"> & Partial<Pick<CodexAppClient, "recoverProductionOutput">>;
 type Slot = { busy: boolean; client?: ProductionClient; emit?: AgentEmit };
 export class ProductionAgentPool {
@@ -33,6 +33,7 @@ export class ProductionAgentPool {
     private slots: Slot[] = Array.from({ length: 3 }, () => ({ busy: false }));
     private active = new Map<string, Promise<{ threadId: string; output: unknown }>>();
     get busy() { return this.active.size > 0; }
+    retainHistory(threadId: string, title: string) { this.apiWorker?.retainHistory?.(threadId, title); }
     run(request: ProductionAgentRequest) {
         const prior = this.active.get(request.workId); if (prior) return prior;
         try { if (this.resolveWorkerModel) request = { ...request, model: this.resolveWorkerModel(request.model, request.threadId) }; }

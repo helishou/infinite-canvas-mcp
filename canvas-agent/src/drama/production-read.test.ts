@@ -98,6 +98,31 @@ test("workspace write receipts retain layout, identity and conflicts without rep
     assert.ok(!JSON.stringify(result).includes("长提示词"));
 });
 
+test("production edit receipts verify submitted shared utterance delivery against the persisted source", () => {
+    const production: any = record();
+    production.draft.director.source.utterances = [{ id: "UTT1", delivery: "先说完半句再起跑。" }];
+    const receipt: any = productionWriteReceipt({ ok: true, production }, { tool: "production_edit", input: {
+        kind: "episode", id: "e", operationId: "edit-utterance",
+        ops: [{ type: "set_director_shot_utterances", shotId: "S1", utterances: [{ utteranceId: "UTT1", delivery: "先说完半句再起跑。" }] }],
+    } });
+    assert.deepEqual(receipt.writeVerification, { status: "verified", fields: [{ path: "utterances.UTT1.delivery", status: "verified" }] });
+    production.draft.director.source.utterances[0].delivery = "旧指导";
+    const mismatch: any = productionWriteReceipt({ ok: true, production }, { tool: "production_edit", input: {
+        kind: "episode", id: "e", operationId: "edit-utterance", ops: [{ type: "set_director_shot_utterances", shotId: "S1", utterances: [{ utteranceId: "UTT1", delivery: "先说完半句再起跑。" }] }],
+    } });
+    assert.equal(mismatch.writeVerification.status, "mismatch");
+});
+
+test("multi-Clip edit receipts give one summary and one aggregate status read", () => {
+    const production = record();
+    const result: any = productionWriteReceipt({ ok: true, production: { ...production, clipRefreshes: [
+        { operationId: "edit:clip:A", status: "queued", segmentId: "A", selectedTargets: ["A"], savedRevision: 4, compilationOperationId: "compile:A" },
+        { operationId: "edit:clip:B", status: "queued", segmentId: "B", selectedTargets: ["B"], savedRevision: 4, compilationOperationId: "compile:B" },
+    ] } }, { tool: "production_edit", input: { kind: "episode", id: "e", operationId: "edit" } });
+    assert.deepEqual(result.clipRefreshSummary, { sourceSaved: true, targetCount: 2, targetIds: ["A", "B"], ready: 0, running: 2, blocked: 0, failed: 0, mediaSubmitted: false });
+    assert.deepEqual(result.nextAction, { tool: "production_get_compilation", input: { kind: "episode", id: "e", operationId: "edit" } });
+});
+
 test("write receipts include ready Clip conflicts but omit healthy targets and extra diagnostics", () => {
     const production = record();
     const result: any = productionWriteReceipt({ ok: true, production: { ...production, referenceSync: [

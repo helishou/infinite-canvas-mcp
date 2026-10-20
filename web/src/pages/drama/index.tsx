@@ -29,7 +29,9 @@ export default function DramaPage({ searchQuery, compactEmpty = false }: { searc
         }
         navigate(dramaProjectDestination(id, query.toString()));
     };
-    const shownDramaFolders = dramaFolders.filter(folder => matchesProjectQuery(folder.name, libraryQuery));
+    const shownDramaFolders = [...dramaFolders]
+        .sort((a, b) => (Date.parse(b.updatedAt || b.createdAt) || 0) - (Date.parse(a.updatedAt || a.createdAt) || 0))
+        .filter(folder => matchesProjectQuery(folder.name, libraryQuery));
     const [createOpen, setCreateOpen] = useState(false);
     const [newDramaName, setNewDramaName] = useState("");
     const openCreateDrama = () => {

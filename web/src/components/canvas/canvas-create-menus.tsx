@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { ImageIcon, List, ListRestart, Music2, Package, Settings2, Video, X } from "lucide-react";
+import { Group, ImageIcon, List, ListRestart, Music2, Package, Settings2, Video, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -20,7 +20,7 @@ export function ConnectionCreateMenu({
     onClose,
 }: {
     pending: PendingConnectionCreate;
-    onCreate: (type: CanvasNodeType.Image | CanvasNodeType.Text | CanvasNodeType.Config | CanvasNodeType.Video | CanvasNodeType.Audio | CanvasNodeType.Loop | CanvasNodeType.Prop) => void;
+    onCreate: (type: CanvasNodeType.Image | CanvasNodeType.Text | CanvasNodeType.Config | CanvasNodeType.Video | CanvasNodeType.Audio | CanvasNodeType.Loop | CanvasNodeType.Prop | CanvasNodeType.Group) => void;
     onClose: () => void;
 }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -49,6 +49,7 @@ export function ConnectionCreateMenu({
                 <ConnectionCreateOption theme={theme} icon={<Video className="size-4" />} title={t("canvas.createMenu.video")} onClick={() => onCreate(CanvasNodeType.Video)} />
                 <ConnectionCreateOption theme={theme} icon={<Music2 className="size-4" />} title={t("canvas.createMenu.audio")} onClick={() => onCreate(CanvasNodeType.Audio)} />
                 <ConnectionCreateOption theme={theme} icon={<Package className="size-4" />} title={t("canvas.createMenu.prop")} onClick={() => onCreate(CanvasNodeType.Prop)} />
+                <ConnectionCreateOption theme={theme} icon={<Group className="size-4" />} title={t("canvas.createMenu.group")} description={t(pending.connection ? "canvas.createMenu.groupDescription" : "canvas.createMenu.groupEmptyDescription")} onClick={() => onCreate(CanvasNodeType.Group)} />
             </div>
         </div>
     );

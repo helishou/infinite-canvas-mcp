@@ -1101,6 +1101,28 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         }
     };
 
+    const editQueuedPrompt = (id: string) => {
+        const current = useAgentStore.getState();
+        const item = current.queuedPrompts.find((candidate) => candidate.id === id);
+        if (!item || !["queued", "failed"].includes(item.status) || item.threadId !== current.activeThreadId || item.conversationId !== current.conversation.conversationId) return;
+
+        const payload = item.payload;
+        const skill = payload.skill
+            ? useAgentSkillStore.getState().skills.find((candidate) => candidate.name === payload.skill?.name && candidate.path === payload.skill?.path && candidate.enabled) || null
+            : null;
+        useAgentSkillStore.getState().selectSkill(skill, payload.text);
+        current.setAgentState({
+            prompt: payload.text,
+            attachments: payload.attachments.map((attachment) => ({ ...attachment, url: attachment.dataUrl || attachment.url })),
+            canvasReferences: payload.canvasReferences,
+            model: payload.model,
+            reasoningEffort: payload.reasoningEffort,
+            permissionMode: payload.permissionMode,
+            productionDraftObject: payload.productionObject,
+        });
+        current.updatePromptQueue((items) => items.filter((candidate) => candidate.id !== id));
+    };
+
     const promptQueue = useAgentPromptQueue({
         endpoint,
         token,
@@ -1661,7 +1683,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
     const handleAgentEvent = async (event: AgentEventPayload) => {
         if (event.type === "usage.updated") setAgentState({ tokenUsage: eventUsage(event) });
         const log = event.replayed ? null : formatAgentEventLog(event);
-        const activity = formatAgentActivity(event, useAgentStore.getState().tokenUsage);
+        const activity = formatAgentActivity(event);
         if (log) addEventLog(log.title, log.text);
         if (event.type === "turn.started" && (event.turnId || event.turn_id)) {
             const scope = eventScope(event);
@@ -1860,7 +1882,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                     <AgentChatTimeline theme={theme} pendingTool={pendingTool} pendingApprovals={pendingApprovals} sending={sending} waiting={waiting} onRejectTool={rejectPendingTool} onApproveTool={approvePendingTool} onApprovalDecision={decideApproval} />
                     <AgentTaskProgress theme={theme} busy={sending || waiting} />
                     {tokenUsage ? <AgentUsageBar usage={tokenUsage} theme={theme} /> : null}
-                    <AgentChatQueue items={promptQueue.items} paused={promptQueue.paused} canInsert={promptQueue.canInsert} theme={theme} onRemove={promptQueue.remove} onInsert={(id) => void promptQueue.insert(id)} onRetry={promptQueue.retry} onResume={promptQueue.resume} />
+                    <AgentChatQueue items={promptQueue.items} paused={promptQueue.paused} canInsert={promptQueue.canInsert} theme={theme} onRemove={promptQueue.remove} onInsert={(id) => void promptQueue.insert(id)} onRetry={promptQueue.retry} onEdit={editQueuedPrompt} onResume={promptQueue.resume} />
                     <AgentChatComposer
                         className="mr-20 shrink-0"
                         prompt={prompt}

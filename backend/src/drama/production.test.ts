@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { BackendDatabase } from "../db.js";
 import { EpisodeProductionService, ProductionConflictError } from "./production.js";
-import { directorHash } from "./director.js";
+import { directorHash, promptHash } from "./director.js";
 import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
 import { emptyEpisodeProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import { EpisodeProductionRunner } from "./production-runner.js";
@@ -223,10 +223,39 @@ test("saving a shot's dialogue edits its shared text slice and keeps the other s
     assert.deepEqual(after.shots[0].utterance_refs, before.shots[0].utterance_refs, "text slice must survive the resave");
     assert.deepEqual(after.shots[1].utterance_refs, before.shots[1].utterance_refs, "the other shot's ref must be untouched");
 
+    // Updating only delivery on a shared utterance must persist without changing
+    // its canonical text or either Shot's timing/text slice.
+    const delivery = "先在反打镜头原地说出前半句；切镜后再开始移动并说完后半句。";
+    const deliveryEdit = service.edit("episode", { operationId: "edit-shared-delivery", expectedRevision: base(), ops: [{ type: "set_director_shot_utterances", shotId: "SH_A", utterances: [{
+        utteranceId: "UTT_SH_A_8", speakerSubjectId: "SUB_P", text: sharedLine, textMode: "partition", textCuts: [5], delivery,
+        voiceover: true, localStartFrame: 0, localEndFrame: 96,
+    }] }] });
+    const deliverySource = deliveryEdit.draft.director!.source as Record<string, any>;
+    assert.equal(deliverySource.utterances[0].delivery, delivery, "delivery-only changes must persist on the shared utterance");
+    assert.equal(deliverySource.utterances[0].text, sharedLine, "delivery-only changes must preserve authored dialogue");
+    assert.deepEqual(deliverySource.shots[0].utterance_refs, before.shots[0].utterance_refs, "delivery-only changes must preserve the first text/timing slice");
+    assert.deepEqual(deliverySource.shots[1].utterance_refs, before.shots[1].utterance_refs, "delivery-only changes must preserve the continuation slice");
+    const mutableService = service as any, originalEditedCandidate = mutableService.editedCandidate;
+    mutableService.editedCandidate = function (...args: any[]) {
+        const candidate = originalEditedCandidate.apply(this, args);
+        candidate.draft.director.source.utterances[0].delivery = "模拟漏写";
+        return candidate;
+    };
+    try {
+        const revision = base();
+        assert.throws(() => service.edit("episode", { operationId: "edit-delivery-rollback", expectedRevision: revision, ops: [{ type: "set_director_shot_utterances", shotId: "SH_A", utterances: [{
+            utteranceId: "UTT_SH_A_8", speakerSubjectId: "SUB_P", text: sharedLine, textMode: "partition", textCuts: [5], delivery: "应保存的指导",
+            voiceover: true, localStartFrame: 0, localEndFrame: 96,
+        }] }] }), (error: any) => error.diagnostics?.some((item: any) => item.code === "WRITE_VERIFICATION_FAILED"));
+        assert.equal(service.get("episode").revision, revision, "a failed field verification rolls back the entire edit");
+        assert.equal((service.get("episode").draft.director!.source.utterances as any[])[0].delivery, delivery);
+    } finally { mutableService.editedCandidate = originalEditedCandidate; }
+
     // 2) Each Shot edits only its own text slice; the shared canonical utterance stays concatenated without duplication.
-    const editedPart = service.edit("episode", { operationId: "edit-first-part", expectedRevision: base(), ops: [{ type: "set_director_shot_utterances", shotId: "SH_A", utterances: [{ utteranceId: "UTT_SH_A_8", speakerSubjectId: "SUB_P", text: "她抱紧信封", textMode: "segment", voiceover: true, localStartFrame: 0, localEndFrame: 96 }] }] });
+    const editedPart = service.edit("episode", { operationId: "edit-first-part", expectedRevision: base(), ops: [{ type: "set_director_shot_utterances", shotId: "SH_A", utterances: [{ utteranceId: "UTT_SH_A_8", speakerSubjectId: "SUB_P", text: "她抱紧信封", textMode: "segment", delivery, voiceover: true, localStartFrame: 0, localEndFrame: 96 }] }] });
     const editedSource = editedPart.draft.director!.source as Record<string, any>;
     assert.equal(editedSource.utterances[0].text, "她抱紧信封不走。", "the edited slice is stored once with the untouched continuation");
+    assert.equal(editedSource.utterances[0].delivery, delivery, "editing a text slice must preserve the submitted delivery guidance");
     assert.deepEqual(editedSource.shots[1].utterance_refs[0], before.shots[1].utterance_refs[0], "the continuation window and text range stay intact");
     // 3) Removing the shared line from one shot stays blocked; other shots still speak it.
     assert.throws(() => service.edit("episode", { operationId: "remove-shared", expectedRevision: base(), ops: [{ type: "set_director_shot_utterances", shotId: "SH_A", utterances: [] }] }), /不能从本镜删除/);
@@ -236,4 +265,57 @@ test("saving a shot's dialogue edits its shared text slice and keeps the other s
     assert.equal(nextSource.utterances.length, 2, "the exclusive line is added without touching the shared record");
     assert.equal(nextSource.utterances.find((line: any) => String(line.id) === "UTT_SH_A_8").text, "她抱紧信封不走。");
     assert.deepEqual(nextSource.shots[1].utterance_refs, before.shots[1].utterance_refs);
+});
+
+test("one production edit can register precise refreshes for multiple changed Clips", (t) => {
+    const { service } = fixture(t);
+    const camera = { framing: "MS", movement: "static", attention_subject_ids: ["SUB_P"] };
+    const usages = [{ subjectId: "SUB_P", presentation: "visible", referencePurpose: ["identity"] }];
+    const source: any = { version: 2, prompt_assembly: { version: 2 }, brief: "双 Clip 刷新范围测试", fps_num: 24, fps_den: 1,
+        subject_registry: [{ id: "SUB_P", kind: "character", entityRef: { ownerKind: "episode", ownerId: "episode", kind: "character", id: "P" }, pictureBindings: [] }],
+        character_registry: [{ id: "P", name: "角色" }], scene_registry: [{ id: "SC1", name: "场景" }], script_scenes: [{ id: "SCENE1", scene_id: "SC1", text: "测试。" }],
+        shots: ["SH1", "SH2", "SH3", "SH4"].map((id, index) => ({ id, scene_id: "SC1", timeline_id: "main", story_order: index, duration_frames: 96, visual: "初始画面。", camera, subject_usages: usages, keyframes: [], utterance_refs: [] })),
+        segments: [{ id: "CLIP_A", shot_ids: ["SH1"], mode: "T2VA" }, { id: "CLIP_B", shot_ids: ["SH2"], mode: "T2VA" },
+            { id: "CLIP_C", shot_ids: ["SH3"], mode: "T2VA" }, { id: "CLIP_D", shot_ids: ["SH4"], mode: "T2VA" }], utterances: [], asset_plan: [], asset_cards: [],
+        ledger: { contract_version: 2, facts: [], timelines: [{ id: "main" }], initial: [], events: [], requirements: [], coverage: [] } };
+    const director = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "p", runtimeId: "r", version: "4.3.9" }, source,
+        sourceHash: directorHash(source), modules: {}, artifacts: [], assets: {}, shotInputs: Object.fromEntries(["SH1", "SH2", "SH3", "SH4"].map(id => [id, { keyframePolicy: "none", assetIds: [] }])), boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
+    const seeded = service.edit("episode", { operationId: "seed-multi-clip-refresh", expectedRevision: service.get("episode").revision, ops: [{ type: "set_director_production", director }] });
+    const edited = service.edit("episode", { operationId: "edit-two-clips", expectedRevision: seeded.revision, ops: [
+        { type: "patch_director_source", entity: "shot", id: "SH1", patch: { visual: "第一镜更新。", camera: { movement: "push-in" } } },
+        { type: "patch_director_source", entity: "shot", id: "SH2", patch: { visual: "第二镜更新。" } },
+        { type: "patch_director_source", entity: "shot", id: "SH3", patch: { visual: "第三镜更新。" } },
+        { type: "patch_director_source", entity: "shot", id: "SH4", patch: { visual: "第四镜更新。" } },
+        { type: "request_director_clip_refresh", segmentId: "CLIP_A" },
+        { type: "request_director_clip_refresh", segmentId: "CLIP_B" },
+        { type: "request_director_clip_refresh", segmentId: "CLIP_C" },
+        { type: "request_director_clip_refresh", segmentId: "CLIP_D" },
+    ] });
+    assert.deepEqual((edited as any).clipRefreshes.map((item: any) => item.selectedTargets), [["CLIP_A"], ["CLIP_B"], ["CLIP_C"], ["CLIP_D"]]);
+    assert.deepEqual((edited as any).clipRefreshes.map((item: any) => item.sourceSaved), [true, true, true, true]);
+    assert.deepEqual((edited as any).referenceSync.map((item: any) => item.targetId), ["CLIP_A", "CLIP_B", "CLIP_C", "CLIP_D"], "source projection and compile refresh share the explicit four-target scope");
+    assert.deepEqual((edited.draft.director!.source.shots as any[])[0].camera, { framing: "MS", movement: "push-in", attention_subject_ids: ["SUB_P"] });
+    const current = service.get("episode");
+    const scopedApply = service.edit("episode", { operationId: "apply-scoped-compiled-fields", expectedRevision: current.revision,
+        ops: [{ type: "set_director_production", director: structuredClone(current.draft.director!) }] }, undefined, false, undefined, undefined, new Set(["CLIP_A"]));
+    assert.deepEqual((scopedApply as any).referenceSync.map((item: any) => item.targetId), ["CLIP_A"], "applying one scoped compilation does not reproject unrelated Clips");
+});
+
+test("Backend recovery resumes prepared translations by their persisted operation identity", (t) => {
+    const { db, service } = fixture(t);
+    const request = { kind: "episode", id: "episode", expectedRevision: 3, targetIds: ["SEG1", "SEG2"] };
+    db.prepareMcpCommand({ operationId: "recover-translation", tool: "production_translate_compiled_prompts", targetId: "episode", projectId: "canvas",
+        request, payload: { stage: "translate", resumeRequest: request }, receipt: { translationStatus: "applying" } });
+    db.prepareMcpCommand({ operationId: "legacy-translation", tool: "production_translate_compiled_prompts", targetId: "episode", projectId: "canvas",
+        request: { ...request, expectedRevision: 2 }, payload: { stage: "translate" }, receipt: { translationStatus: "translating" } });
+    let scheduled: any;
+    (service as any).scheduleCompiledPromptTranslation = (...args: unknown[]) => { scheduled = args; };
+
+    assert.equal(service.recoverCompiledPromptTranslations(), 1);
+    assert.equal(scheduled[0], "episode");
+    assert.equal(scheduled[1], "canvas");
+    assert.deepEqual(scheduled[2], { expectedRevision: 3, operationId: "recover-translation", targetIds: ["SEG1", "SEG2"] });
+    assert.deepEqual(scheduled[3].request, request);
+    assert.equal(db.getMcpCommandReceipt("legacy-translation")?.receipt?.translationStatus, "retry_required");
+    assert.equal(db.getMcpCommandReceipt("legacy-translation")?.status, "prepared", "recoverable request remains on the original receipt");
 });

@@ -9,7 +9,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
-import { directorSubagentSchema } from "./delegation.js";
+import { directorSubagentDescription, directorSubagentSchema } from "./delegation.js";
 import { LlmAgent, readAgentFile, type LlmSettings } from "./llm.js";
 import { configuredLlmProviders, llmHistoryForProvider, parseLlmReply, requestLlm, type Json, type LlmProvider } from "./llm-provider.js";
 
@@ -70,6 +70,8 @@ test("Codex channel uses native model identity and effort catalog without HTTP c
     const catalog = agent.models([{ model: "native", defaultReasoningEffort: "high", supportedReasoningEfforts: [{ reasoningEffort: "high" }] }]);
     assert.equal(catalog.data[0].model, "cli::native"); assert.equal(catalog.data[0].runtime, "codex"); assert.equal(catalog.data[0].defaultReasoningEffort, "high");
     agent.rememberCodexThread("codex-thread", "cli::native"); assert.equal(agent.codexThreadModel("codex-thread"), "cli::native");
+    assert.equal(agent.delegationModel("codex-thread", "other-channel::model"), "cli::native", "the selected parent model takes precedence over a model proposed by the tool caller");
+    assert.equal(agent.delegationModel("unknown-thread", "requested-channel::model"), "requested-channel::model", "explicit model remains a fallback when the parent selection is unavailable");
     assert.throws(() => agent.startThread(process.cwd()), /原生 Codex/);
 });
 
@@ -111,18 +113,22 @@ test("streamed tool arguments execute exactly once through MCP and persist for r
     assert.throws(() => agent.read(thread.id, path.join(cwd, "other")), /工作空间/);
 });
 
-test("API delegation binds the actual parent/channel and preserves an explicit canvas over the active canvas", async t => {
+test("API delegation binds the actual parent/channel and preserves the frontend model over a tool override", async t => {
     let requests = 0, delegated: Json | undefined;
+    const bodies: Json[] = [];
     const url = await modelServer(t, (_body, response) => {
+        bodies.push(_body);
         requests++;
-        if (requests === 1) sse(response, [{ choices: [{ delta: { tool_calls: [{ index: 0, id: "delegate-1", function: { name: "director_subagent", arguments: JSON.stringify({ action: "spawn", projectId: "requested-canvas", parentThreadId: "wrong-director", operationId: "one", title: "核对分镜", role: "shots", prompt: "确认覆盖范围" }) } }] }, finish_reason: "tool_calls" }] }]);
+        if (requests === 1) sse(response, [{ choices: [{ delta: { tool_calls: [{ index: 0, id: "delegate-1", function: { name: "director_subagent", arguments: JSON.stringify({ action: "spawn", projectId: "requested-canvas", parentThreadId: "wrong-director", operationId: "one", title: "核对分镜", role: "shots", prompt: "确认覆盖范围", model: "forged::model", effort: "low" }) } }] }, finish_reason: "tool_calls" }] }]);
         else sse(response, [{ choices: [{ delta: { content: "已派发，等待结果" }, finish_reason: "stop" }] }]);
     });
-    const { store } = settings(config(url));
+    const selectedConfig = config(url);
+    selectedConfig.channels.push({ ...selectedConfig.channels[0], id: "b", name: "B", models: [{ name: "selected", capability: "text" }] });
+    const { store } = settings(selectedConfig);
     const connect = async () => {
         const server = new McpServer({ name: "fixture", version: "1" });
         server.registerTool("canvas_set_active_project", { inputSchema: { id: z.string() } }, async () => ({ content: [{ type: "text", text: "bound" }] }));
-        server.registerTool("director_subagent", { inputSchema: directorSubagentSchema }, async input => { delegated = input; return { content: [{ type: "text", text: JSON.stringify({ taskId: "child-1", status: "queued" }) }] }; });
+        server.registerTool("director_subagent", { description: directorSubagentDescription, inputSchema: directorSubagentSchema }, async input => { delegated = input; return { content: [{ type: "text", text: JSON.stringify({ taskId: "child-1", status: "queued" }) }] }; });
         const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
         await server.connect(serverTransport);
         const client = new Client({ name: "fixture", version: "1" }); await client.connect(clientTransport); return client;
@@ -130,11 +136,18 @@ test("API delegation binds the actual parent/channel and preserves an explicit c
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "director-delegate-api-"));
     t.after(() => fs.rm(cwd, { recursive: true, force: true }));
     const agent = new LlmAgent(store, url, "", connect), thread = agent.startThread(cwd);
-    await agent.run("派一个分镜子代理", () => {}, [], { threadId: thread.id, cwd }, "real-canvas");
+    await agent.run("并行审阅整集的剧情和连续性", () => {}, [], { threadId: thread.id, cwd, model: "b::selected", effort: "high" }, "real-canvas");
     assert.equal(delegated?.projectId, "requested-canvas", "explicit project identity is never silently replaced by the active canvas");
     assert.equal(delegated?.parentThreadId, thread.id);
     assert.ok(delegated?.parentTurnId);
-    assert.equal(delegated?.model, thread.model);
+    assert.equal(delegated?.model, "b::selected", "the frontend-selected model is propagated to the worker");
+    assert.equal(delegated?.effort, "high", "the selected frontend reasoning effort is inherited");
+    assert.equal(bodies[0].model, "selected", "the main model request uses the selected channel model");
+    assert.ok(bodies[0].tools.some((tool: Json) => tool.function?.name === "director_subagent"), "custom model receives the subagent tool definition");
+    assert.match(String(bodies[0].tools.find((tool: Json) => tool.function?.name === "director_subagent")?.function?.description), /不得指定子代理模型/);
+    assert.match(String(bodies[0].messages.find((message: Json) => message.role === "system")?.content), /两个以上可独立审阅的专业面/);
+    assert.match(String(bodies[0].messages.find((message: Json) => message.role === "system")?.content), /单字段修改/);
+    assert.match(String(bodies[0].messages.find((message: Json) => message.role === "system")?.content), /收到真实 spawn 回执/);
     assert.equal(requests, 2);
 });
 

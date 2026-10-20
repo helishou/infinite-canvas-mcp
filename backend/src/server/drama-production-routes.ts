@@ -57,6 +57,7 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         }
     }
     refreshes.recover();
+    service.recoverCompiledPromptTranslations();
     const handle = (res: { status: (code: number) => { json: (body: unknown) => void } }, error: unknown) => {
         if (error instanceof ProductionValidationError) return res.status(400).json({ ok: false, code: error.diagnostics[0]?.code || "PRODUCTION_BLOCKED", error: error.message, diagnostics: error.diagnostics, nextActions: error.diagnostics.flatMap(item => item.nextAction ? [item.nextAction] : []) });
         if (error instanceof ZodError) {

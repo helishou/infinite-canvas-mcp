@@ -138,9 +138,66 @@ export class ClipRefreshCoordinator {
         }
     }
     inspect(id: string, operationId: string, view: "status" | "targets" | "diagnostics" = "status", offset = 0, pageSize?: number) {
-        const job = this.service.clipRefreshStore(id).get(operationId);
-        if (!job) return undefined;
-        const base = { ...clipRefreshReceipt(job), operationId, nextAction: { action: activeStatuses.includes(job.status) ? "wait" : job.status === "succeeded" ? "done" : "review_diagnostic", message: activeStatuses.includes(job.status) ? "沿原 operationId 查询" : "按目标诊断处理；不自动重新提交" } };
+        const store = this.service.clipRefreshStore(id);
+        const exact = store.get(operationId);
+        const jobs = exact ? [exact] : store.byEditAll(operationId);
+        if (!jobs.length) return undefined;
+        const targetReceipt = (job: ClipRefreshJob) => {
+            const receipt = clipRefreshReceipt(job);
+            const referenceSync = job.application?.referenceSync?.filter((sync: any) => sync.targetId === job.segmentId) || [];
+            let compiler: Record<string, unknown> | undefined;
+            if (job.compileRevision !== undefined) {
+                try {
+                    const status = this.compilations.getCompilation(id, this.owner, job.compilationOperationId);
+                    const targets: any = this.compilations.getCompilation(id, this.owner, job.compilationOperationId, "targets", 0, 1);
+                    compiler = { status: status.status, verdict: status.verdict, preparedId: status.preparedId, blockingDiagnostic: status.blockingDiagnostic,
+                        targets: (targets.items || []).map((item: any) => ({ targetId: item.targetId, status: item.status, diagnostics: item.diagnostics?.slice(0, 2) || [] })) };
+                } catch { /* Keep the durable refresh receipt readable if its compiler packet was pruned. */ }
+            }
+            return { ...receipt, referenceSync, ...(receipt.application ? { application: { ...receipt.application, referenceSync } } : {}), ...(compiler ? { compiler } : {}),
+                ...(job.translationOperationId ? { translation: this.service.compiledPromptTranslationStatus(id, job.translationOperationId, job.translationExpectedRevision ?? job.savedRevision, [job.segmentId]) } : {}),
+            };
+        };
+        if (jobs.length > 1) {
+            const targets = jobs.map(targetReceipt);
+            const statuses = targets.map(item => String(item.status));
+            const status = statuses.every(item => item === "succeeded") ? "succeeded"
+                : statuses.some(item => activeStatuses.includes(item as Status)) ? "running"
+                : statuses.some(item => item === "blocked") ? "blocked"
+                : statuses.some(item => item === "failed") ? "failed"
+                : statuses.some(item => item === "interrupted") ? "interrupted" : "superseded";
+            const translations = targets.flatMap(item => item.translation ? [String(item.translation.status)] : []);
+            const translationStatus = translations.length === 0 ? "not_started"
+                : translations.every(item => item === "committed") ? "committed"
+                : translations.some(item => ["queued", "translating", "applying"].includes(item)) ? "translating"
+                : translations.some(item => item === "retry_required") ? "retry_required"
+                : translations.some(item => item === "rejected_stale") ? "rejected_stale" : "pending";
+            const summary = { sourceSaved: true, operationId, status, targetCount: targets.length, targetIds: targets.map(item => item.segmentId),
+                counts: { ready: statuses.filter(item => item === "succeeded").length, running: statuses.filter(item => activeStatuses.includes(item as Status)).length,
+                    blocked: statuses.filter(item => item === "blocked").length, failed: statuses.filter(item => item === "failed").length,
+                    translated: translations.filter(item => item === "committed").length, translating: translations.filter(item => ["queued", "translating", "applying"].includes(item)).length,
+                    translationRetryRequired: translations.filter(item => item === "retry_required").length, translationRejectedStale: translations.filter(item => item === "rejected_stale").length },
+                phases: { source: "saved", compilation: statuses.every(item => item === "succeeded") ? "succeeded" : status,
+                application: targets.every(item => item.referenceSync.some((sync: any) => sync.status === "ready")) ? "ready" : "pending",
+                    translation: translationStatus, mediaSubmitted: false },
+                mediaSubmitted: false, targets: targets.map(item => ({ segmentId: item.segmentId, status: item.status, compilationOperationId: item.compilationOperationId,
+                    referenceSync: item.referenceSync, ...(item.compiler ? { compiler: item.compiler } : {}),
+                    ...(item.translation ? { translation: item.translation } : {}), ...(item.blockingDiagnostic ? { blockingDiagnostic: item.blockingDiagnostic } : {}) })),
+                nextAction: status === "running" ? { action: "wait", tool: "production_get_compilation", input: { id, kind: this.owner.startsWith("/canvas/") ? "canvas" : this.owner.startsWith("/drama/scenes/") ? "scene" : "episode", operationId } }
+                    : status === "succeeded" ? { action: "done" } : { action: "review_targets", message: "先处理阻塞目标的诊断；已就绪目标无需重复编译。" } };
+            if (view === "status") return summary;
+            if (!pageSize) throw new Error("查询编译列表必须指定 pageSize");
+            const items = view === "diagnostics" ? targets.flatMap(item => item.blockingDiagnostic ? [{ targetId: item.segmentId, ...item.blockingDiagnostic }] : []) : summary.targets;
+            return { ...summary, items: items.slice(offset, offset + pageSize), total: items.length, nextOffset: offset + pageSize < items.length ? offset + pageSize : null };
+        }
+        const job = jobs[0];
+        const target = targetReceipt(job);
+        const targetSync = job.application?.referenceSync?.find((sync: any) => sync.targetId === job.segmentId);
+        const base = { ...target, operationId,
+            phases: { source: "saved", compilation: target.compiler?.status || job.status,
+                application: targetSync?.status === "ready" ? "ready" : job.application ? "blocked" : "pending",
+                translation: target.translation?.status || "not_started", mediaSubmitted: false },
+            nextAction: { action: activeStatuses.includes(job.status) ? "wait" : job.status === "succeeded" ? "done" : "review_diagnostic", message: activeStatuses.includes(job.status) ? "沿原 operationId 查询" : "按目标诊断处理；不自动重新提交" } };
         if (view === "status") return base;
         if (!pageSize) throw new Error("查询编译列表必须指定 pageSize");
         const items = view === "diagnostics" ? job.diagnostics : [{ targetId: job.segmentId, status: job.status }];
@@ -180,7 +237,11 @@ export class ClipRefreshCoordinator {
                 step(compilation.status === "interrupted" ? "interrupted" : compilation.status === "blocked" ? "blocked" : "failed"); return;
             }
             const targets: any = this.compilations.getCompilation(id, this.owner, key, "targets", 0, 1);
-            if (targets.items?.[0]?.status !== "ready" || targets.total !== 1) { job.diagnostics = [{ code: "CLIP_COMPILATION_NOT_READY", targetId: job.segmentId, message: "目标产物未就绪" }]; step("blocked"); return; }
+            if (targets.items?.[0]?.status !== "ready" || targets.total !== 1) {
+                const diagnostics = (targets.items || []).flatMap((item: any) => Array.isArray(item.diagnostics) ? item.diagnostics : []);
+                job.diagnostics = diagnostics.length ? diagnostics.slice(0, 4) : [{ code: "CLIP_COMPILATION_NOT_READY", targetId: job.segmentId, message: "目标产物未就绪" }];
+                step("blocked"); return;
+            }
             job.preparedId = compilation.preparedId; step("applying");
             job.application = measure("applyMs", () => this.compilations.apply(id, this.owner, job.preparedId!));
             job.status = this.syncStatus(job);

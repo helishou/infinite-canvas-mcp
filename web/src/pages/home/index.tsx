@@ -10,6 +10,7 @@ import { useWorkbenchCanvas } from "@/lib/canvas/canvas-host";
 import { canvasHostLocation } from "@/lib/canvas/canvas-host-navigation";
 import { CanvasDeleteProjectsDialog } from "@/components/canvas/canvas-delete-projects-dialog";
 import { WorkbenchCanvas } from "@/pages/drama/workbench-canvas";
+import { dramaWorkbenchPath } from "@/pages/drama/workbench-entry";
 import { cn } from "@/lib/utils";
 import { collectOutputs, projectCover, taskDestination, type WorkbenchOutput } from "./workbench-data";
 import { WorkbenchMediaPreview } from "./workbench-media";
@@ -53,6 +54,10 @@ function HomeWorkbench() {
     const outputs = useMemo(() => collectOutputs(data.logs), [data.logs]);
     const folderFor = (p: CanvasProject) => data.canvasOwners.get(p.id);
     const isDrama = (p: CanvasProject) => data.canvasOwners.has(p.id);
+    const dramaDestination = (p: CanvasProject) => {
+        const episode = data.canvasEpisodes.get(p.id);
+        return episode ? dramaWorkbenchPath(episode.dramaId, episode.episodeId) : `/production?dramaId=${encodeURIComponent(folderFor(p)?.id || "")}&workspace=series`;
+    };
     const sorted = [...projects].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
     const ordinaryProjects = sorted.filter((p) => !isDrama(p));
     const entries = [
@@ -228,7 +233,7 @@ function HomeWorkbench() {
                                 </div>
                                 <div className="flex shrink-0 flex-col items-start gap-2">
                                     <Button icon={<ArrowRight className="size-4" />} iconPlacement="end" onClick={() => void continueEditing(latest.id)}>{t("home.workbench.continue")}</Button>
-                                    {isDrama(latest) && <Link to={`/production?dramaId=${encodeURIComponent(folderFor(latest)?.id || "")}&workspace=series`} className="ui-caption inline-flex items-center gap-1 text-muted-foreground hover:text-foreground">{t("productionCanvas.backDrama")}<ArrowRight className="size-4" /></Link>}
+                                    {isDrama(latest) && <Link to={dramaDestination(latest)} className="ui-caption inline-flex items-center gap-1 text-muted-foreground hover:text-foreground">{t("productionCanvas.backDrama")}<ArrowRight className="size-4" /></Link>}
                                 </div>
                             </div>
                         </> : <div className="flex items-start gap-4 p-5"><Workflow className="mt-0.5 size-6 shrink-0 text-muted-foreground" /><div><h2 className="ui-panel-title">{t("home.workbench.firstProject")}</h2><p className="ui-body mt-1 text-muted-foreground">{t("home.workbench.firstProjectHint")}</p></div></div>}
@@ -345,7 +350,7 @@ function HomeWorkbench() {
                                                 />
                                             </Tooltip>
                                         </div>
-                                        <div className={cn("flex items-center justify-between gap-2 border-t border-border px-3.5 py-2.5", view === "list" && "w-full")}>{isDrama(p) && <Link className="ui-caption inline-flex items-center gap-1.5 text-muted-foreground hover:text-foreground" to={`/production?dramaId=${encodeURIComponent(folderFor(p)?.id || "")}&workspace=series`}>{t("productionCanvas.backDrama")}<ArrowRight className="size-3" /></Link>}<Button type="text" size="small" icon={<Eye className="size-4" />} aria-label={t("home.workbench.previewNamed", { name: p.title })} onClick={() => setPreviewProject(p)}>{t("landing.preview")}</Button></div>
+                                        <div className={cn("flex items-center justify-between gap-2 border-t border-border px-3.5 py-2.5", view === "list" && "w-full")}>{isDrama(p) && <Link className="ui-caption inline-flex items-center gap-1.5 text-muted-foreground hover:text-foreground" to={dramaDestination(p)}>{t("productionCanvas.backDrama")}<ArrowRight className="size-3" /></Link>}<Button type="text" size="small" icon={<Eye className="size-4" />} aria-label={t("home.workbench.previewNamed", { name: p.title })} onClick={() => setPreviewProject(p)}>{t("landing.preview")}</Button></div>
                                     </article>
                                 );
                             })}

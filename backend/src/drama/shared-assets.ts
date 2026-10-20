@@ -68,7 +68,6 @@ export function registerSharedAssetVersion(db: BackendDatabase, projectId: strin
         data: {},
         metadata: { ...existingLibrary?.metadata, approvedId: id, versionId: id, reviewStatus: reviewed ? "approved" : "unreviewed", assetId, sourceProjectId: projectId, sourceNodeId: asset.nodeId,
             sharedAssetSource: { dramaId: drama.folder_id, assetId: libraryId, sourceProjectId: projectId, sourceNodeId: asset.nodeId } }, createdAt: existingLibrary?.createdAt || now, updatedAt: now });
-    const regTitle = snapshot.title;
     for (const row of db.db.prepare(`SELECT p.episode_id, p.revision, p.draft_json FROM episode_productions p
         JOIN drama_episodes e ON e.id=p.episode_id WHERE e.drama_id=? AND p.archived_at IS NULL`).all(drama.folder_id) as Array<{ episode_id: string; revision: number; draft_json: string }>) {
         const draft = JSON.parse(row.draft_json);
@@ -79,18 +78,12 @@ export function registerSharedAssetVersion(db: BackendDatabase, projectId: strin
             const consumerRec = record(consumer);
             const planItem = record(planItems.find((item: any) => String(item?.id) === String(targetId)));
             const source = consumerRec.sharedSource || planItem.sharedSource;
-            // 双锚点识别同一共享资产：同源画布(sourceProjectId)且(源实体节点号相等 或 资产名相等)。
-            // 源实体节点号是编码进分集 sharedSource.assetId 里的那段 production-entity-* 节点号；
-            // 资产名(snapshot.title)在共享画布侧与分集 asset_name 保持一致，作为名称级兜底匹配。
-            // assetId 字符串相等仍兼容旧数据。三者满足其一即视为命中。
-            const sid = String(source?.assetId || "");
-            const prefix = `SHARED_${projectId}_`;
-            const entityAnchor = sid.startsWith(prefix) ? sid.slice(prefix.length) : "";
-            const sameProject = Boolean(source?.sourceProjectId) && String(source.sourceProjectId) === projectId;
-            const nodeMatch = Boolean(entityAnchor) && entityAnchor === asset.nodeId;
-            const nameMatch = Boolean(regTitle) && String(planItem.asset_name || planItem.name || "") === regTitle;
-            const sameEntity = sameProject && (nodeMatch || nameMatch);
-            if (!source || !(source.assetId === assetId || sameEntity) || source.dramaId !== drama.folder_id || source.approvedId === id) continue;
+            // Adoption follows the stable canonical identity only. Asset names and
+            // locally derived node IDs are not evidence that two records are related.
+            const exactSource = source?.dramaId === drama.folder_id
+                && source.sourceProjectId === projectId
+                && source.sourceNodeId === asset.nodeId;
+            if (!exactSource || source.approvedId === id) continue;
             db.db.prepare(`INSERT OR IGNORE INTO drama_asset_adoptions (id, approved_id, episode_id, target_asset_id, expected_revision, status, updated_at)
                 VALUES (?, ?, ?, ?, ?, 'pending', ?)`).run(`adoption-${stable(id, row.episode_id, targetId)}`, id, row.episode_id, targetId, row.revision, now);
         }
@@ -108,25 +101,40 @@ export function registerApprovedSharedAsset(db: BackendDatabase, projectId: stri
     return registerSharedAssetVersion(db, projectId, version, assetId, director);
 }
 
-export function validateSharedAssetSource(db: BackendDatabase, projectId: string, asset: DirectorProduction["assets"][string]) {
-    if (!asset.sharedSource) return;
-    const source = asset.sharedSource;
+type SharedAssetIdentity = { dramaId: string; assetId: string; sourceProjectId: string; sourceNodeId: string };
+
+/** A local or canonical source node must carry an explicit link to the same shared source. */
+export function sharedAssetNodeMatchesSource(node: Record<string, any> | null | undefined, source: SharedAssetIdentity) {
+    if (!node) return false;
+    const metadata = record(node.metadata);
+    const references = [metadata.sharedAssetReference, metadata.sharedAssetOrigin]
+        .filter((value): value is Record<string, any> => Boolean(value && typeof value === "object" && !Array.isArray(value)));
+    return references.length > 0 && references.every(reference =>
+        reference.sourceProjectId === source.sourceProjectId
+        && reference.sourceNodeId === source.sourceNodeId);
+}
+
+/** Validate a particular node's identity without requiring its ID to equal another projection's ID. */
+export function validateSharedAssetNodeSource(db: BackendDatabase, projectId: string, source: SharedAssetIdentity, nodeId: string) {
     const episode = db.getDramaEpisodeByCanvasId(projectId);
-    const name = source.assetId || asset.nodeId;
     const consumer = productionCanvasContext(db, projectId), canonical = productionCanvasContext(db, source.sourceProjectId);
+    const name = source.assetId || nodeId;
     if (!episode || episode.dramaId !== source.dramaId || consumer.dramaId !== source.dramaId
         || canonical.dramaId !== source.dramaId || canonical.role !== "shared-assets") {
         throw new Error(`共享素材「${name}」的分集或来源画布不属于当前剧目`);
     }
     const sourceNode = (db.getCanvasProject(source.sourceProjectId)?.nodes as Record<string, any>[] || []).find(item => item.id === source.sourceNodeId);
     if (!sourceNode) throw new Error(`共享素材「${name}」的当前共享来源节点不存在`);
-    const node = (db.getCanvasProject(projectId)?.nodes as Record<string, any>[] || []).find(item => item.id === asset.nodeId);
-    if (!node) {
-        throw new Error(`共享素材「${name}」在制作画布上的绑定节点 ${asset.nodeId} 不存在`);
-    }
-    const reference = node.metadata?.sharedAssetReference || node.metadata?.sharedAssetOrigin;
-    if (reference?.sourceProjectId !== source.sourceProjectId || reference?.sourceNodeId !== source.sourceNodeId)
-        throw new Error(`共享素材「${name}」的分集节点没有绑定当前共享来源`);
+    const node = (db.getCanvasProject(projectId)?.nodes as Record<string, any>[] || []).find(item => item.id === nodeId);
+    if (!node) throw new Error(`共享素材「${name}」在制作画布上的绑定节点 ${nodeId} 不存在`);
+    if (!sharedAssetNodeMatchesSource(node, source)) throw new Error(`共享素材「${name}」的分集节点没有绑定当前共享来源`);
+    return node;
+}
+
+export function validateSharedAssetSource(db: BackendDatabase, projectId: string, asset: DirectorProduction["assets"][string]) {
+    if (!asset.sharedSource) return;
+    const source = asset.sharedSource;
+    validateSharedAssetNodeSource(db, projectId, source, String(asset.nodeId || ""));
 }
 
 /** Only this path creates the local projection; callers cannot register arbitrary media. */

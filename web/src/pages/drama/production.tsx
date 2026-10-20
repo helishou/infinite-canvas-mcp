@@ -1220,7 +1220,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     } });
   };
 
-  const askDirector = async (scope: { workspace: DirectorWorkspace; targetId?: string; targetKind?: "scene"; instruction?: string; brief?: string; workId?: string; clipContext?: boolean }) => {
+  const askDirector = async (scope: { workspace: DirectorWorkspace; targetId?: string; targetKind?: "scene"; instruction?: string; brief?: string; workId?: string; clipContext?: boolean; autoSend?: boolean }) => {
     if (pendingCommandRef.current) return warnPendingCommand();
     const requestedBrief = scope.brief;
     let currentProduction = await fetchEpisodeProduction(target).then(result => result.production);
@@ -1275,11 +1275,15 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       : ({ series: "story", overview: undefined, story: "story", assets: "assets", shots: "shots", continuity: "continuity", clips: "model", production: "model", advanced: "continuity" } as const)[scope.workspace];
     const text = [
       "$acheng-director",
-      `请用中文围绕“${scope.workspace}${targetId ? ` · ${targetObject?.kind || scope.targetKind || "目标"} ${targetId}` : ""}”与用户讨论。`,
-      `先调用 ${readInstruction} 读取当前正式内容，只看与本次讨论有关的信息。`,
+      scope.autoSend
+        ? `请直接修复“${scope.workspace}${targetId ? ` · ${targetObject?.kind || scope.targetKind || "目标"} ${targetId}` : ""}”的当前问题，并用中文报告结果。`
+        : `请用中文围绕“${scope.workspace}${targetId ? ` · ${targetObject?.kind || scope.targetKind || "目标"} ${targetId}` : ""}”与用户讨论。`,
+      `先调用 ${readInstruction} 读取当前正式内容，只看与本次${scope.autoSend ? "修复" : "讨论"}有关的信息。`,
       requestedBrief !== undefined ? `用户需求：${requestedBrief}` : "",
-      scope.instruction ? `补充要求：${scope.instruction}` : "",
-      "先讨论；只有用户明确要求修改时，才读取对应生产合同并按合同局部编辑。不要自动生成媒体或发布。",
+      scope.instruction ? `${scope.autoSend ? "修复任务" : "补充要求"}：${scope.instruction}` : "",
+      scope.autoSend
+        ? "这是用户明确发起的修复任务。直接按上述诊断修复当前问题的正式源字段，保存后复核；不要只给建议或再次询问确认。未能确认修复的项目保留为 partial；不生成媒体或发布。"
+        : "这是讨论草稿。发送后先围绕当前范围讨论；只有用户明确要求修改时，才读取对应生产合同并按合同局部编辑。不要生成媒体或发布。",
       contractModule ? `需要修改时调用 mcp__infinite_canvas__production_get_contract({moduleId:"${contractModule}"})。` : "",
     ].filter(Boolean).join("\n");
     handledAgentResultRef.current = "";
@@ -1288,7 +1292,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     useProductionWorkspaceStore.getState().setPanelTab("director");
     setAgentState({
       panelOpen: true, panelMounted: true, activeTab: "chat", scopedTaskResult: null,
-      scopedTask: { id, text, newThread: true, draftOnly: true, productionId: key, revision: currentProduction.revision },
+      scopedTask: { id, text, newThread: true, draftOnly: !scope.autoSend, productionId: key, revision: currentProduction.revision },
     });
   };
 
@@ -1548,7 +1552,15 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   };
   const saveV2Shot = async (shotId: string, patch: Record<string, unknown>, keyframes?: Extract<ProductionOperation, { type: "set_director_shot_keyframes" }>["keyframes"], utterances?: Extract<ProductionOperation, { type: "set_director_shot_utterances" }>["utterances"]) => {
     const ops: ProductionOperation[] = [];
-    if (Object.keys(patch).length) ops.push({ type: "patch_director_source", entity: "shot", id: shotId, patch });
+    if (Object.hasOwn(patch, "performance") && patch.performance !== null) {
+      // The structured JSON editor submits the complete performance object. The shared
+      // source patch contract merges nested objects, so first clear the old object in
+      // the same transaction; the following patch then stores this exact authored value.
+      const { performance, ...otherFields } = patch;
+      if (Object.keys(otherFields).length) ops.push({ type: "patch_director_source", entity: "shot", id: shotId, patch: otherFields });
+      ops.push({ type: "patch_director_source", entity: "shot", id: shotId, patch: { performance: null } });
+      ops.push({ type: "patch_director_source", entity: "shot", id: shotId, patch: { performance } });
+    } else if (Object.keys(patch).length) ops.push({ type: "patch_director_source", entity: "shot", id: shotId, patch });
     if (keyframes !== undefined) ops.push({ type: "set_director_shot_keyframes", shotId, keyframes });
     if (utterances !== undefined) ops.push({ type: "set_director_shot_utterances", shotId, utterances });
     if (!ops.length) return true;
@@ -1722,6 +1734,75 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   };
   const replaceDirector = async (director: NonNullable<EpisodeProduction["draft"]["director"]>) => edit([{ type: "set_director_production", director }]);
   const createManualAsset = async (operation: Extract<ProductionOperation, { type: "create_manual_director_asset" }>) => edit([operation]);
+  const autoRegisteredCanvasAssetIds = useRef(new Set<string>());
+  const autoRegistrationInFlight = useRef(false);
+  useEffect(() => {
+    if (productionOwner.kind !== "episode" || busy || pendingCommandRef.current || autoRegistrationInFlight.current || !production?.draft.director || !canvasId) return;
+    const director = production.draft.director;
+    const source = director.source as Record<string, any>;
+    const registeredPlanIds = new Set((Array.isArray(source.asset_plan) ? source.asset_plan : []).map((item: Record<string, any>) => String(item.id || item.asset_id || "")));
+    const candidate = canvasNodes.find(node => {
+      if (!["character", "scene", "prop"].includes(String(node.type))) return false;
+      const metadata = node.metadata && typeof node.metadata === "object" ? node.metadata as Record<string, any> : {};
+      if (metadata.productionEntity || metadata.sharedAssetReference || metadata.sharedAssetOrigin) return false;
+      const assetId = `AUTO_ASSET_${String(node.type).toUpperCase()}_${encodeURIComponent(canvasId)}_${encodeURIComponent(node.id)}`;
+      if (registeredPlanIds.has(assetId) || autoRegisteredCanvasAssetIds.current.has(node.id)) return false;
+      return true;
+    });
+    if (!candidate) return;
+
+    const kind = candidate.type as "character" | "scene" | "prop";
+    const metadata = candidate.metadata && typeof candidate.metadata === "object" ? candidate.metadata as Record<string, any> : {};
+    const entityId = kind === "prop" ? undefined : `AUTO_${kind.toUpperCase()}_${encodeURIComponent(canvasId)}_${encodeURIComponent(candidate.id)}`;
+    const assetId = `AUTO_ASSET_${kind.toUpperCase()}_${encodeURIComponent(canvasId)}_${encodeURIComponent(candidate.id)}`;
+    const subjectId = `AUTO_SUBJECT_${kind.toUpperCase()}_${encodeURIComponent(canvasId)}_${encodeURIComponent(candidate.id)}`;
+    const name = String(metadata[`${kind}Name`] || candidate.title || `${kind === "character" ? "角色" : kind === "scene" ? "场景" : "道具"}`).trim();
+    const description = String(metadata[`${kind}Description`] || "").trim();
+    try {
+      const planned = createManualDirectorAsset(source, {
+        id: assetId, ...(entityId ? { entityId } : {}), subjectId, kind, name, description,
+        prompt: String(metadata.sceneColorCardPrompt || description || name), purpose: description || name,
+        canvasScope: "episode", registerSubject: isSubjectPromptAssembly(source), ownerKind: "episode", ownerId: productionOwner.id,
+      });
+      const operations: ProductionOperation[] = [{
+        type: "create_manual_director_asset",
+        assetPlan: planned.assetPlan,
+        assetCard: planned.assetCard,
+        ...(planned.registryKind && planned.registryEntity ? { registryKind: planned.registryKind, registryEntity: planned.registryEntity } : {}),
+        ...(planned.subject ? { subject: planned.subject } : {}),
+      } as Extract<ProductionOperation, { type: "create_manual_director_asset" }>];
+      if (planned.subject && isSubjectPromptAssembly(source)) {
+        const purpose = kind === "scene" ? "environment" : kind === "prop" ? "prop" : "identity";
+        const bindingId = `picture:${subjectId}:${encodeURIComponent(canvasId)}:${encodeURIComponent(candidate.id)}`;
+        operations.push({ type: "upsert_director_subject", subject: {
+          ...planned.subject,
+          pictureBindings: [{ id: bindingId, assetId: bindingId, sourceNode: { projectId: canvasId, nodeId: candidate.id },
+            selection: { mode: "node_selection" }, provides: [purpose], retain: [description || name], exclude: [], applicableState: {}, defaultFor: [purpose] }],
+        } } as Extract<ProductionOperation, { type: "upsert_director_subject" }>);
+      }
+      autoRegisteredCanvasAssetIds.current.add(candidate.id);
+      autoRegistrationInFlight.current = true;
+      void (async () => {
+        try {
+          await flushCanvasProjectBeforeGeneration(canvasId);
+          const latestCanvas = (await fetchBackendProject(canvasId)).project as unknown as CanvasProject;
+          const latestNode = latestCanvas.nodes.find(node => node.id === candidate.id);
+          if (!latestNode || latestNode.type !== kind) {
+            autoRegisteredCanvasAssetIds.current.delete(candidate.id);
+            return;
+          }
+          await edit(operations);
+        } catch (error) {
+          fail(error);
+        } finally {
+          autoRegistrationInFlight.current = false;
+        }
+      })();
+    } catch (error) {
+      autoRegisteredCanvasAssetIds.current.add(candidate.id);
+      fail(error);
+    }
+  }, [productionOwner, production, busy, canvasId, canvasNodes, edit, fail]);
   const deleteScene = async (sceneId: string) => {
     if (!production || busy || !sceneId || !canvasId) return false;
     const { project } = await fetchBackendProject(canvasId);

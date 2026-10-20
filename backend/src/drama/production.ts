@@ -56,7 +56,7 @@ import { H3_DEFAULTS_KEY } from "@basketikun/canvas-agent/plugins/minimax-h3/run
 import { H3_RUNTIME_NODE_FIELDS, H3_RUNTIME_SEGMENT_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
 import { resolveAchengEngine } from "@basketikun/canvas-agent/skills/acheng";
 import { assertAchengSource, auditAchengContinuity, validateAchengSource, preflightCompilationDirector, type AchengRuntime } from "@basketikun/canvas-agent/skills/acheng";
-import { schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch } from "@basketikun/canvas-agent/drama/production-validation";
+import { schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch, changedModelTextIdDiagnostics } from "@basketikun/canvas-agent/drama/production-validation";
 import { selectSmartImageResult } from "@basketikun/canvas-agent/reference-contract";
 
 import { directorHash, projectDirector, validateDirectorMedia, assertDirectorEngine, withoutDirectorProjection, publicProductionRecord } from "./director.js";
@@ -66,7 +66,7 @@ import type { BackendDatabase } from "../db.js";
 import type { BackendEventBus } from "../events.js";
 import type { CanvasCommit } from "../canvas/collaboration.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
-import { approvedSharedAsset, listApprovedSharedAssets, prepareSharedAssetProjection, registerSharedAssetVersion, sharedAssetHistory, sharedProjectionNodeId, validateSharedAssetSource, type ApprovedSharedAsset } from "./shared-assets.js";
+import { approvedSharedAsset, listApprovedSharedAssets, prepareSharedAssetProjection, registerSharedAssetVersion, sharedAssetHistory, sharedProjectionNodeId, sharedAssetNodeMatchesSource, validateSharedAssetSource, type ApprovedSharedAsset } from "./shared-assets.js";
 import { ensureProductionCanvas, productionCanvasContext } from "./production-canvas.js";
 import { explicitShotCueCount, importDemandScriptBlocks } from "./script-demand-import.js";
 import { scriptNodeOperations } from "./script-nodes.js";
@@ -146,7 +146,9 @@ function remapSubjectEntityReferences(source: Record<string, any>, kind: string,
 }
 function ensureSharedSubjectPictureBinding(director: DirectorProduction, episodeId: string, canvasId: string, assetPlan: Record<string, any>, subjectId: string): boolean {
     const kind = String(assetPlan.kind || "");
-    const entityId = String(assetPlan.entity_id || assetPlan.id || "");
+    const assetId = String(assetPlan.id || assetPlan.asset_id || "");
+    const entityId = String(assetPlan.entity_id || assetPlan.id || assetPlan.asset_id || "");
+    if (!assetId) return false;
     const entityRefKind = kind === "prop" ? "asset" : kind;
     const subject = clipRows(director.source.subject_registry).find(row => String(row.id || "") === subjectId
         || row.entityRef?.ownerKind === "episode" && row.entityRef?.ownerId === episodeId && row.entityRef?.kind === entityRefKind && String(row.entityRef?.id || "") === entityId);
@@ -158,7 +160,7 @@ function ensureSharedSubjectPictureBinding(director: DirectorProduction, episode
     // Replace it and remap the Shots/keyframes that selected it, instead of leaving two entries
     // for one picture (which reads as a duplicate "same image" reference in the Subject panel).
     // Costume variants stay untouched: they are explicit `selected_result` bindings.
-    const legacyIds = new Set(bindings.filter(item => String(item.assetId || "") === String(assetPlan.id)
+    const legacyIds = new Set(bindings.filter(item => String(item.assetId || "") === assetId
         && item.selection?.mode === "node_selection"
         && String(item.sourceNode?.nodeId || "") !== binding.sourceNode.nodeId).map(item => String(item.id || "")).filter(Boolean));
     if (legacyIds.size) {
@@ -452,6 +454,21 @@ export class EpisodeProductionService {
             if (projectId && !projectCache.has(projectId)) projectCache.set(projectId, project);
             const node = (project?.nodes as Array<Record<string, any>> | undefined)?.find(item => item.id === nodeId);
             const old = director.assets[assetId], metadata = node?.metadata || {};
+            const planSharedSource = plan?.sharedSource && typeof plan.sharedSource === "object" ? plan.sharedSource as Record<string, any> : undefined;
+            const adoptedSharedSource = old?.sharedSource && typeof old.sharedSource === "object" ? old.sharedSource as Record<string, any> : undefined;
+            const sharedIdentityFields = ["dramaId", "assetId", "sourceProjectId", "sourceNodeId"] as const;
+            const sameSharedIdentity = (left?: Record<string, any>, right?: Record<string, any>) =>
+                Boolean(left && right && sharedIdentityFields.every(field => String(left[field] || "") === String(right[field] || "")));
+            const sharedSource = adoptedSharedSource || planSharedSource;
+            const isSharedAsset = Boolean(sharedSource || String(plan?.canvas_scope || "episode") === "shared");
+            const sharedBindingError = (stage: NonNullable<ProductionDiagnostic["details"]>["stage"], reason: string, message: string): never => {
+                throw new ProductionValidationError([{
+                    code: "SHARED_ASSET_BINDING_INVALID", path: `${bindingPath}.sourceNode`, targetId: bindingId, message, severity: "error",
+                    details: { stage, reason, sourceProjectId: projectId || undefined, sourceNodeId: nodeId || undefined,
+                        productionProjectId: productionCanvasId, productionNodeId: old?.nodeId,
+                        expectedSourceProjectId: sharedSource?.sourceProjectId, expectedSourceNodeId: sharedSource?.sourceNodeId },
+                }]);
+            };
             const smartImageNode = node?.type === "config" && metadata.smart === true && (metadata.generationMode || "image") === "image";
             // Generated media can remain in a typed asset/reference node after its canvas node
             // changes. Resolve a matching formal projection directly; otherwise use the canvas
@@ -461,16 +478,34 @@ export class EpisodeProductionService {
                 && metadata.productionAssetId === assetId && old?.nodeId === nodeId
                 && old?.storageKey && old?.sha256 && old?.generationTaskId
                 && binding.selection?.mode === "node_selection");
-            if (!project || !node) throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_SOURCE_MISSING", path: `${bindingPath}.sourceNode`, targetId: bindingId, message: "图片参考来源画布或节点不存在", severity: "error" }]);
-            let authorized = projectId === productionCanvasId;
-            if (!authorized) {
-                const consumer = productionCanvasContext(this.db, productionCanvasId), source = productionCanvasContext(this.db, projectId), adopted = director.assets[assetId];
-                if (consumer.dramaId && consumer.dramaId === source.dramaId && source.role === "shared-assets" && adopted?.sharedSource?.sourceProjectId === projectId) {
-                    validateSharedAssetSource(this.db, productionCanvasId, adopted);
-                    authorized = true;
-                }
+            if (!project || !node) {
+                if (isSharedAsset) sharedBindingError("source_resolution", "binding_source_missing", "共享素材图片来源画布或节点不存在");
+                throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_SOURCE_MISSING", path: `${bindingPath}.sourceNode`, targetId: bindingId, message: "图片参考来源画布或节点不存在", severity: "error" }]);
             }
-            if (!authorized) throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_NODE_OWNER", path: `${bindingPath}.sourceNode.projectId`, targetId: bindingId, message: "跨画布图片必须来自当前剧目的已采用共享资产", severity: "error" }]);
+            if (isSharedAsset) {
+                if (planSharedSource && adoptedSharedSource && !sameSharedIdentity(planSharedSource, adoptedSharedSource)) {
+                    sharedBindingError("adoption_validation", "shared_source_conflict", "共享资产计划来源与已采用来源不一致");
+                }
+                if (!adoptedSharedSource) sharedBindingError("adoption_validation", "shared_asset_adoption_missing", "共享素材尚未通过正式采用流程登记到当前分集");
+                if (!sharedSource) sharedBindingError("adoption_validation", "shared_source_missing", "共享素材缺少正式来源身份");
+                const expectedSharedSource = sharedSource!;
+                try {
+                    validateSharedAssetSource(this.db, productionCanvasId, { ...old!, nodeId: String(old!.nodeId || ""), sharedSource: expectedSharedSource } as DirectorProduction["assets"][string]);
+                } catch (error) {
+                    sharedBindingError("projection_validation", "production_projection_invalid", error instanceof Error ? error.message : String(error));
+                }
+                if (projectId === productionCanvasId) {
+                    if (!sharedAssetNodeMatchesSource(node, expectedSharedSource as any)) {
+                        sharedBindingError("projection_validation", "binding_projection_identity_mismatch", "图片绑定指向的本地节点没有声明当前共享来源身份");
+                    }
+                } else if (projectId !== expectedSharedSource.sourceProjectId || nodeId !== expectedSharedSource.sourceNodeId) {
+                    sharedBindingError("source_resolution", "canonical_source_mismatch", "共享图片绑定必须指向正式共享来源节点或其有效分集投影");
+                }
+                // Both nodes are validated independently: the binding source supplies media,
+                // while the adopted local projection remains the compiler-facing asset node.
+            } else if (projectId !== productionCanvasId) {
+                throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_NODE_OWNER", path: `${bindingPath}.sourceNode.projectId`, targetId: bindingId, message: "跨画布图片必须来自当前剧目的已采用共享资产", severity: "error" }]);
+            }
             const recordedSingleResult = smartImageNode && metadata.status === "success" && metadata.storageKey && metadata.generationTaskId
                 ? [{ id: String(metadata.generationTaskId), storageKey: String(metadata.storageKey), generationTaskId: String(metadata.generationTaskId), status: "success" }]
                 : [];
@@ -551,7 +586,7 @@ export class EpisodeProductionService {
             // Cross-canvas adopted shared assets must keep the local projection node: compilation
             // binding checks resolve nodes against the production canvas, and the local projection
             // carries the same approved media. The source canvas node stays in selectedResult.
-            const boundNodeId = projectId === productionCanvasId ? nodeId : (old?.nodeId || nodeId);
+            const boundNodeId = isSharedAsset ? String(old!.nodeId) : projectId === productionCanvasId ? nodeId : (old?.nodeId || nodeId);
             director.assets[assetId] = { ...(old || { version: String(plan?.version || `node:${nodeId}`), status: "planned" as const }), nodeId: boundNodeId, storageKey,
                 generationTaskId: generationTaskId || undefined, sha256: digest, status: old?.status === "approved" && old.sha256 === digest ? "approved" : "generated",
                 ...(old?.evidence && old.sha256 === digest ? { evidence: old.evidence } : {}), selectedResult: { imageId: String(slot.id || ""), taskId: generationTaskId || undefined, storageKey, sha256: digest, projectId, nodeId } };
@@ -1588,7 +1623,8 @@ export class EpisodeProductionService {
             command = this.db.prepareMcpCommand({
                 operationId: input.operationId,
                 ...identity,
-                payload: { stage: "translate", baseRevision: Number(project.revision || 0), targets },
+                payload: { stage: "translate", baseRevision: Number(project.revision || 0), targets,
+                    resumeRequest: { kind: this.ownerKind, id, expectedRevision: input.expectedRevision, targetIds } },
                 receipt: { canvasId, targetIds, translationStatus: "queued", translatedCount: 0 },
             });
         }
@@ -1616,6 +1652,53 @@ export class EpisodeProductionService {
         return true;
     }
 
+    compiledPromptTranslationStatus(id: string, operationId: string, expectedRevision: number, targetIds: string[]): {
+        operationId: string; status: string; targetCount?: number; translatedCount?: number; cachedCount?: number; error?: string; nextAction: Record<string, string>;
+    } {
+        const linked = this.linked(id);
+        if (linked) return linked.service.compiledPromptTranslationStatus(linked.id, operationId, expectedRevision, targetIds);
+        const canvasId = this.ownerKind === "canvas" ? id : this.episodeInfo(id).canvasId;
+        const identity = { tool: "production_translate_compiled_prompts", targetId: id, projectId: canvasId || undefined,
+            request: { kind: this.ownerKind, id, expectedRevision, targetIds } };
+        const command = this.db.getMcpCommandReceipt(operationId, identity);
+        if (!command) return { operationId, status: "not_found", nextAction: { action: "retry_same_operation", message: "使用原 operationId 与原参数恢复翻译。" } };
+        const receipt = command.receipt || {};
+        const receiptStatus = String(receipt.translationStatus || "");
+        const status = command.status === "rejected" ? receiptStatus.startsWith("rejected_") ? receiptStatus : "rejected" : String(receiptStatus || command.status);
+        return { operationId, status, targetCount: targetIds.length,
+            ...(typeof receipt.translatedCount === "number" ? { translatedCount: receipt.translatedCount } : {}),
+            ...(typeof receipt.cachedCount === "number" ? { cachedCount: receipt.cachedCount } : {}),
+            ...(typeof receipt.lastError === "string" ? { error: receipt.lastError } : command.error ? { error: command.error.message } : {}),
+            nextAction: status === "committed" ? { action: "done", message: "翻译已写回。" }
+                : status === "rejected_stale" ? { action: "recompile", message: "目标输入已变化；重新编译后再发起翻译。" }
+                : command.status === "rejected" ? { action: "review_failure", message: "命令已拒绝，查看 errorCode 后修复输入。" }
+                : { action: "retry_same_operation", message: "沿原 operationId 查询或重提相同请求。" } };
+    }
+
+    recoverCompiledPromptTranslations() {
+        let resumed = 0;
+        for (const command of this.db.listPreparedMcpCommands("production_translate_compiled_prompts")) {
+            const payload = record(command.payload), receipt = record(command.receipt);
+            if (!["queued", "translating", "applying"].includes(String(receipt.translationStatus || "queued"))) continue;
+            const request = record(payload.resumeRequest);
+            if (request.kind && String(request.kind) !== this.ownerKind) continue;
+            const legacyBelongsToOwner = this.ownerKind === "canvas" ? command.targetId === command.projectId : command.targetId !== command.projectId;
+            if (!request.kind && !legacyBelongsToOwner) continue;
+            const id = String(request.id || command.targetId || "");
+            const targetIds = Array.isArray(request.targetIds) ? request.targetIds.map(String) : [];
+            const expectedRevision = Number(request.expectedRevision);
+            if (!id || !Number.isInteger(expectedRevision) || expectedRevision < 0 || !targetIds.length || command.projectId == null) {
+                this.db.updatePreparedMcpCommandReceipt(command.operationId, { ...receipt, translationStatus: "retry_required", lastError: "后台翻译已恢复为可重试；沿原 operationId 与原参数重提可继续，不能新建重复翻译。" });
+                continue;
+            }
+            const input = { expectedRevision, operationId: command.operationId, targetIds };
+            const identity = { tool: "production_translate_compiled_prompts", targetId: id, projectId: command.projectId, request: { kind: this.ownerKind, id, expectedRevision, targetIds } };
+            this.scheduleCompiledPromptTranslation(id, command.projectId, input, identity);
+            resumed++;
+        }
+        return resumed;
+    }
+
     private scheduleCompiledPromptTranslation(
         id: string,
         canvasId: string,
@@ -1628,12 +1711,15 @@ export class EpisodeProductionService {
         activePromptTranslationControllers.set(key, controller);
         const job = Promise.resolve().then(() => this.runCompiledPromptTranslation(id, canvasId, input, identity, controller.signal)).catch(error => {
             const command = this.db.getMcpCommandReceipt(input.operationId, identity);
-            if (command?.status === "prepared" && controller.signal.aborted) {
-                try { this.db.rejectMcpCommand(input.operationId, "TRANSLATION_SUPERSEDED", "更新后的编译已替代这次翻译"); }
-                catch { /* Another worker may have completed the frozen command. */ }
-            } else if (command?.status === "prepared") {
-                try { this.db.rejectMcpCommand(input.operationId, "TRANSLATION_FAILED", error instanceof Error ? error.message : String(error)); }
-                catch { /* Another worker may have completed the frozen command. */ }
+            if (command?.status === "prepared" && command.payload) {
+                const message = error instanceof Error ? error.message : String(error);
+                const stale = controller.signal.aborted || /已变化|已被更新的编译替代|绑定已变化|节点映射已变化/.test(message);
+                const translationStatus = stale ? "rejected_stale" : "retry_required";
+                try {
+                    this.db.updatePreparedMcpCommand({ operationId: input.operationId, ...identity, payload: command.payload,
+                        receipt: { ...(command.receipt || {}), translationStatus, lastError: message } });
+                    if (stale) this.db.rejectMcpCommand(input.operationId, "TRANSLATION_STALE", message);
+                } catch { /* Another worker may have completed the frozen command. */ }
             }
         }).finally(() => { activePromptTranslations.delete(key); activePromptTranslationControllers.delete(key); });
         activePromptTranslations.set(key, job);
@@ -1654,7 +1740,9 @@ export class EpisodeProductionService {
         if (payload.stage === undefined && Array.isArray(payload.operations)) payload = { ...payload, stage: "apply" };
         if (payload.stage === "translate") {
             const production = this.get(id);
-            if (production.revision !== input.expectedRevision) throw new ProductionConflictError(production);
+            // `expectedRevision` is the caller's read baseline, not a lock. The
+            // frozen artifact, binding, and H3 prompt hashes below guard the
+            // translation inputs while allowing unrelated source edits.
             const director = production.draft.director;
             const project = this.db.getCanvasProject(canvasId);
             if (!director || !project) throw new Error("制作稿或画布不存在");
@@ -1718,7 +1806,7 @@ export class EpisodeProductionService {
                 if (crypto.createHash("sha256").update(String(segment?.prompt || ""), "utf8").digest("hex") !== item.canvasPromptHash) throw new Error(`Clip ${item.targetId} 的 H3 提示词在翻译期间已变化；未写入任何译文`);
                 return { type: "update_h3_segment", nodeId: item.nodeId, segmentId: item.segmentId, patch: { prompt: item.prompt } };
             });
-            payload = { stage: "apply", baseRevision: Number(latestProject.revision || 0), operations };
+            payload = { ...payload, stage: "apply", baseRevision: Number(latestProject.revision || 0), operations };
             command = this.db.updatePreparedMcpCommand({
                 operationId: input.operationId,
                 ...identity,
@@ -1733,7 +1821,6 @@ export class EpisodeProductionService {
             });
         }
         if (payload.stage !== "apply" || !Array.isArray(payload.operations)) throw new Error("翻译操作回执缺少冻结写入内容");
-        if (this.get(id).revision !== input.expectedRevision) throw new ProductionConflictError(this.get(id));
         const baseRevision = Number(payload.baseRevision);
         if (!Number.isFinite(baseRevision)) throw new Error("翻译操作回执缺少有效的画布基线");
         const committed = this.db.applyCanvasProjectOperations(canvasId, undefined, payload.operations as CanvasOperation[], {
@@ -3126,6 +3213,11 @@ export class EpisodeProductionService {
                 published!.keyframeReviews[operation.shotId] = draft.keyframeReviews[operation.shotId];
             }
            if (draft.director) {
+                if (record.draft.director && isSubjectPromptAssembly(draft.director.source)) {
+                    const diagnostics = measure("model_prompt_text_validation", () =>
+                        changedModelTextIdDiagnostics(record.draft.director!.source, draft.director!.source));
+                    if (diagnostics.length) throw new ProductionValidationError(diagnostics);
+                }
                measure("acheng_source_validation", () => this.validateSource(draft.director!, "edit", this.sourceShotValidationScope(input.ops)));
                 measure("subject_entity_ownership", () => this.validateSubjectEntityOwnership(episodeId, draft.director!));
                const projectId = this.episodeInfo(episodeId).canvasId;
@@ -3242,12 +3334,14 @@ export class EpisodeProductionService {
             for (const operation of input.ops) {
                 if (operation.type === "patch_director_source" && operation.entity === "shot" && operation.id) ids.add(operation.id);
                 else if (operation.type === "set_director_shot_keyframes" || operation.type === "set_director_shot_utterances") ids.add(operation.shotId);
+                else if (operation.type === "request_director_clip_refresh") continue;
                 else return undefined;
             }
             return ids.size ? ids : undefined;
         })();
         const refreshes = input.ops.filter(op => op.type === "request_director_clip_refresh");
-        if (refreshes.length > 1 && !input.ops.some(op => op.type === "set_director_production" && isSubjectPromptAssembly(op.director.source))) throw new ProductionValidationError([{ code: "CLIP_REFRESH_SCOPE", path: "request.ops", message: "旧稿局部刷新单批仅允许一个 Clip", severity: "error" }]);
+        const refreshTargetIds = refreshes.map(op => op.type === "request_director_clip_refresh" ? op.segmentId : "");
+        if (new Set(refreshTargetIds).size !== refreshTargetIds.length) throw new ProductionValidationError([{ code: "CLIP_REFRESH_SCOPE", path: "request.ops", message: "同一批返修不能重复登记同一个 Clip", severity: "error" }]);
         if (input.ops.some(operation => operation.type === "restore_archived_scene_results") && input.ops.length !== 1) throw new Error("归档视频恢复必须单独提交，不能与其他制作编辑混批");
         // 归档状态是记录级开关：必须单独提交，不能与其他编辑或采纳混批，也不触发重编译或画布重投影。
         const archiveOp = input.ops.length === 1 && input.ops[0].type === "set_archived" ? input.ops[0] : undefined;
@@ -3285,6 +3379,13 @@ export class EpisodeProductionService {
                 }
             }
             const { draft, published } = this.editedCandidate(episodeId, record, input, canvasCommits, sceneRuntime, onStage, overwriteCompiledPromptTargets);
+            for (const operation of input.ops) if (operation.type === "set_director_shot_utterances") {
+                for (const utterance of operation.utterances) {
+                    if (!utterance.utteranceId || utterance.delivery === undefined) continue;
+                    const saved = clipRows(draft.director?.source.utterances).find(row => String(row.id || "") === utterance.utteranceId);
+                    if (!saved || saved.delivery !== utterance.delivery) throw new ProductionValidationError([{ code: "WRITE_VERIFICATION_FAILED", path: `utterances.${utterance.utteranceId}.delivery`, targetId: utterance.utteranceId, message: "对白指导未能按请求写入；本次制作编辑已回滚", severity: "error" }]);
+                }
+            }
             if (refreshes.length && record.draft.director && draft.director && isSubjectPromptAssembly(draft.director.source)) {
                 const before = record.draft.director, after = draft.director;
                 const explicitTargets = refreshes.filter(op => op.type === "request_director_clip_refresh").map(op => op.segmentId);
@@ -3601,6 +3702,15 @@ export class EpisodeProductionService {
             // 乐观锁放行（last-write-wins）：客户端过期 revision 不再拦截，版本号继续自增。
             measure("pre_mutation_hook", () => options.beforeMutation?.(current, scriptCommits));
             const next = measure("source_validation_and_mutation", () => mutate(current));
+            const candidateSource = next.draft.director?.source;
+            if (candidateSource && isSubjectPromptAssembly(candidateSource)) {
+                const previousSource = current.draft.director?.source;
+                const diagnostics = changedModelTextIdDiagnostics(
+                    previousSource && isSubjectPromptAssembly(previousSource) ? previousSource : {},
+                    candidateSource,
+                );
+                if (diagnostics.length) throw new ProductionValidationError(diagnostics);
+            }
             // BEGIN IMMEDIATE is the write-order linearization point. Always derive the
             // committed revision from the row read under this transaction, never from a
             // caller cursor or a mutation's captured revision.
@@ -3634,9 +3744,11 @@ export class EpisodeProductionService {
                     }
                     const h3Defaults = record(this.db.getSetting("plugin:minimax-h3:defaults:v1"));
                     const previousLayout = this.db.getProductionLayoutPlan(canvas.id);
-                    const shotTargets = options.shotProjectionIds && new Set(next.draft.clipGroups
-                        .filter(group => group.shotIds.some(shotId => options.shotProjectionIds!.has(shotId)))
-                        .map(group => group.id));
+                    const shotTargets = options.shotProjectionIds
+                        ? new Set(next.draft.clipGroups.filter(group => group.shotIds.some(shotId => options.shotProjectionIds!.has(shotId))).map(group => group.id))
+                        : options.overwriteCompiledPromptTargets?.size
+                            ? new Set(next.draft.clipGroups.filter(group => options.overwriteCompiledPromptTargets!.has(group.id)).map(group => group.id))
+                            : undefined;
                     const scopedShotProjection = Boolean(previousLayout && shotTargets?.size);
                     const layout = scopedShotProjection ? previousLayout! : measure("layout_compile", () => compileProductionLayout({ h3Defaults, canvasId: canvas.id, owner, production: next.draft, project: canvas, previous: previousLayout }));
                     if (!scopedShotProjection) this.db.saveProductionLayoutPlan(canvas.id, layout);
@@ -3993,6 +4105,15 @@ export class EpisodeProductionService {
             if (Object.values(draft.director.shotInputs).some(input => input.keyframeAssetId === op.assetId)) throw new Error("关键帧属于本集，不能采用为剧目共享资产");
             const entry = (Array.isArray(draft.director.source.asset_plan) ? draft.director.source.asset_plan : []).map(record).find(item => String(item.asset_id || item.id || "") === op.assetId);
             if (!entry) throw new Error("共享资产目标未登记到制作源稿");
+            const sharedSource = { dramaId: approved.dramaId, assetId: approved.assetId, sourceProjectId: approved.sourceProjectId, sourceNodeId: approved.sourceNodeId };
+            const existingPlanSource = record(entry.sharedSource);
+            if (entry.sharedSource && ["dramaId", "assetId", "sourceProjectId", "sourceNodeId"].some(field => String(existingPlanSource[field] || "") !== String(sharedSource[field as keyof typeof sharedSource] || ""))) {
+                throw new Error("共享资产计划与待采用来源身份冲突，不能覆盖已有关系");
+            }
+            // Keep the canonical shared identity in the existing source field as well as
+            // the adopted asset record. Entity-node projection and picture binding then
+            // consume the same Backend-owned relationship in this edit transaction.
+            entry.sharedSource = sharedSource;
             entry.canvas_scope = "shared";
             const assetStatus = "generated" as const;
             // Keep the source and frozen media identity aligned; the file is only a
@@ -4004,9 +4125,17 @@ export class EpisodeProductionService {
             if (String(record(draft.director.source.style_lock).anchor_asset_id || "") === op.assetId) draft.director.source.style_lock = { ...record(draft.director.source.style_lock), status: assetStatus };
             const prior = draft.director.assets[op.assetId];
             const next = { nodeId: op.nodeId, version: String(entry.version || prior?.version || approved.snapshot.version), storageKey: approved.storageKey, sha256: approved.sha256,
-                status: assetStatus, ...(approved.evidence ? { evidence: approved.evidence } : {}), sharedSource: { dramaId: approved.dramaId, assetId: approved.assetId, approvedId: approved.id, sourceProjectId: approved.sourceProjectId, sourceNodeId: approved.sourceNodeId } };
+                status: assetStatus, ...(approved.evidence ? { evidence: approved.evidence } : {}), sharedSource: { ...sharedSource, approvedId: approved.id } };
             validateSharedAssetSource(this.db, episode!.canvasId!, next);
             draft.director.assets[op.assetId] = next;
+            const entityRefKind = String(entry.kind || "") === "prop" ? "asset" : String(entry.kind || "");
+            const entityId = String(entry.entity_id || entry.id || entry.asset_id || op.assetId);
+            for (const subject of clipRows(draft.director.source.subject_registry)) {
+                if (subject.entityRef?.ownerKind === "episode" && subject.entityRef?.ownerId === episodeId
+                    && subject.entityRef?.kind === entityRefKind && String(subject.entityRef?.id || "") === entityId) {
+                    ensureSharedSubjectPictureBinding(draft.director, episodeId, episode!.canvasId!, entry, String(subject.id || ""));
+                }
+            }
             draft.director.sourceHash = directorHash(draft.director.source);
             draft.director.executionAuthorized = false;
             const inputChanged = prior?.storageKey !== approved.storageKey || prior?.sha256 !== approved.sha256;
@@ -4201,9 +4330,10 @@ export class EpisodeProductionService {
                 if (projectId) {
                     const nodeId = productionLayoutStableId("production-entity", this.ownerKind, episodeId, entityKind, ref.id);
                     const bindingId = `picture:${incoming.id}:${encodeURIComponent(projectId)}:${encodeURIComponent(nodeId)}`;
+                    const purpose = entityKind === "scene" ? "environment" : entityKind === "prop" ? "prop" : "identity";
                     incoming.pictureBindings = [{ id: bindingId, assetId: bindingId, sourceNode: { projectId, nodeId },
-                        selection: { mode: "node_selection" }, provides: ["identity"], retain: ["主体身份与已登记外观"],
-                        exclude: ["原图姿势", "无关背景"], applicableState: {}, defaultFor: ["identity"] }];
+                        selection: { mode: "node_selection" }, provides: [purpose], retain: [entityKind === "prop" ? "道具身份、形状与材质" : entityKind === "scene" ? "场景环境与布局" : "主体身份与已登记外观"],
+                        exclude: ["原图姿势", "无关背景"], applicableState: {}, defaultFor: [purpose] }];
                 }
             }
             if (previousSubject && rebindIdentityChanged && ref.ownerKind === this.ownerKind && ref.ownerId === episodeId) {
@@ -4412,6 +4542,10 @@ export class EpisodeProductionService {
             if (!shot) throw new Error(`Shot ${op.shotId} 不存在`);
             const subjects = new Set(clipRows(source.subject_registry).map((item: any) => String(item.id)));
             const utterances = clipRows(source.utterances).map((item: any) => ({ ...item }));
+            // `next` filters this array without cloning its rows. Shared-utterance
+            // edits mutate those rows in place, so keep an immutable baseline for
+            // the no-op check or delivery-only edits compare equal to themselves.
+            const originalUtterancesJson = JSON.stringify(utterances);
             const referencesByUtterance = new Map<string, Array<{ shot: Record<string, any>; ref: Record<string, any> }>>();
             const orderedShots = clipRows(source.shots);
             for (const other of orderedShots) for (const ref of clipRows(other.utterance_refs)) {
@@ -4528,7 +4662,7 @@ export class EpisodeProductionService {
                 if (existing >= 0) next[existing] = record; else next.push(record);
                 refs.push({ utteranceId, role: "speaker", localStartFrame: item.localStartFrame, localEndFrame: item.localEndFrame, textStart: 0, textEnd: textLength });
             }
-            if (JSON.stringify(next) === JSON.stringify(utterances) && JSON.stringify(refs) === JSON.stringify(priorRefs)) return; // 整单都是原样重放：不动草稿，也不撤销执行授权
+            if (JSON.stringify(next) === originalUtterancesJson && JSON.stringify(refs) === JSON.stringify(priorRefs)) return; // 整单都是原样重放：不动草稿，也不撤销执行授权
             source.utterances = next;
             shot.utterance_refs = refs;
             draft.director.sourceHash = directorHash(draft.director.source);

@@ -110,6 +110,13 @@ export function repartitionDirectorClips(d: DirectorProduction, op: { shotIds: s
             ...profileFields });
     }
     if (cursor !== op.shotIds.length) reject("CLIP_PARTITION_COVERAGE", "segments", "新分组没有覆盖到所选范围末端");
+    const fps = Number(d.source.fps_num || 24) / Number(d.source.fps_den || 1);
+    for (const [index, group] of groups.entries()) {
+        const duration = group.shot_ids.reduce((sum: number, shotId: string) => sum + Number(allShots.find(shot => String(shot.id) === shotId)?.duration_frames || 0), 0) / fps;
+        if (!Number.isFinite(duration) || duration < 4 || duration > 15) {
+            reject("CLIP_DURATION_OUT_OF_RANGE", `segments.${index}.shot_ids`, `Clip ${group.id} 时长 ${duration.toFixed(2)} 秒，必须在 4–15 秒范围内`);
+        }
+    }
     const firstSegment = Math.min(...oldGroups.map(segment => allSegments.findIndex(candidate => candidate.id === segment.id)));
     const replacement = [...allSegments.slice(0, firstSegment), ...groups, ...allSegments.slice(firstSegment).filter(segment => !oldIds.has(String(segment.id)))];
     const orderedSegmentIds = replacement.map(segment => String(segment.id));

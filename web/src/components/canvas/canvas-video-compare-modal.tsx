@@ -8,8 +8,6 @@ import { resolveBackendAgentEndpoint, runVideoConcatTask, type LocalReference } 
 export type CanvasVideoCompareItem = { id: string; title: string; url: string; durationMs?: number; storageKey?: string };
 export type CanvasVideoComparison = { source: CanvasVideoCompareItem; candidates: CanvasVideoCompareItem[]; initialSelectedIds?: string[] };
 
-/** 横向拼接时每格的目标高度（像素）。720 = 两路 16:9 拼成 2560x720，够看清又不至于太大。 */
-const HSTACK_CELL_HEIGHT = 720;
 const HSTACK_MESSAGE_KEY = "video-compare-hstack";
 
 function formatTime(seconds: number) {
@@ -33,8 +31,10 @@ export function CanvasVideoCompareModal({ comparison, onClose }: { comparison: C
     const videosRef = useRef(new Map<string, HTMLVideoElement>());
     const refCallbacks = useRef(new Map<string, (video: HTMLVideoElement | null) => void>());
     const items = useMemo(() => [comparison.source, ...comparison.candidates.filter((item) => selectedIds.includes(item.id))], [comparison, selectedIds]);
+    const mediaSignature = items.map((item) => `${item.id}:${item.url}`).join("\n");
     const candidateOptions = useMemo(() => comparison.candidates.map((item) => ({ value: item.id, label: item.title })), [comparison.candidates]);
     const totalDuration = Math.max(0, ...items.map((item) => durations[item.id] || (item.durationMs || 0) / 1000));
+    useEffect(() => setErrors({}), [mediaSignature]);
     const videoRefFor = (id: string) => {
         let callback = refCallbacks.current.get(id);
         if (!callback) {
@@ -129,7 +129,7 @@ export function CanvasVideoCompareModal({ comparison, onClose }: { comparison: C
         try {
             const { endpoint, token } = resolveBackendAgentEndpoint();
             const references: LocalReference[] = items.map((item, index) => ({ name: `${index + 1}-${item.title || "video"}`, storageKey: item.storageKey, url: item.storageKey ? undefined : item.url }));
-            const result = await runVideoConcatTask(endpoint, token, references, controller.signal, { layout: "hstack", longEdge: HSTACK_CELL_HEIGHT });
+            const result = await runVideoConcatTask(endpoint, token, references, controller.signal, { layout: "hstack", longEdge: "auto" });
             const fileName = `video-compare-hstack-${items.length}-${Date.now()}.mp4`;
             saveAs(result.url, fileName);
             message.success({ key: HSTACK_MESSAGE_KEY, content: t("canvas.videoCompare.hstackDone", { name: fileName }), duration: 4 });

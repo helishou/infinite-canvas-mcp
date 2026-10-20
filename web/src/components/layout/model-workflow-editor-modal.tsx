@@ -142,13 +142,19 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
             else if (bound) next[scenario] = bound.provider === "runninghub" ? runningHubKey(bound.profileId) : localKey(bound.workflow);
             else next[scenario] = routed ? localKey(routed) : "";
         }
+        if (capability === "video") {
+            const implementation = selected[0] || "";
+            for (const scenario of MODEL_INPUT_SCENARIOS) next[scenario] = implementation;
+        }
         return next;
-    }, [bindings, routing, model?.workflows]);
+    }, [bindings, capability, routing, model?.workflows, selected]);
     const effectiveRouting = effectiveKeys;
     const labels = MODEL_SCENARIO_LABELS[capability];
 
     const toggle = (key: string, checked: boolean) => {
-        const next = checked ? [...selected, key] : selected.filter((item) => item !== key);
+        // 视频工作流可能接收视频、图片等不同参考类型，按图片张数路由会把不同输入
+        // 错误拆成多个实现；视频模型固定选择一个内部实现。
+        const next = checked ? (capability === "video" ? [key] : [...selected, key]) : selected.filter((item) => item !== key);
         setSelected(next);
         // 取消勾选实现时，同时清掉指向它的场景绑定与旧路由，避免留下悬空引用。
         const parsed = parseImplementationKey(key);
@@ -191,8 +197,9 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
         const cloudSelected = new Set(selected.map((key) => parseImplementationKey(key)).filter((item) => item?.provider === "runninghub").map((item) => (item as { id: string }).id));
         // 只挂了云端实现的场景不需要本地工作流列表；两者都挂时保留本地列表供回落。
         const finalBindings: ModelWorkflowBindings = {};
+        const videoImplementation = capability === "video" ? selected[0] : undefined;
         for (const scenario of MODEL_INPUT_SCENARIOS) {
-            const key = effectiveRouting[scenario];
+            const key = videoImplementation || effectiveRouting[scenario];
             if (!key || key === WORKFLOW_ROUTE_UNSUPPORTED) continue;
             const parsed = parseImplementationKey(key);
             const binding = toBinding(key);
@@ -200,7 +207,11 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
             if (binding.provider === "runninghub" && !cloudSelected.has(binding.profileId)) continue;
             finalBindings[scenario] = binding;
         }
-        const finalRouting = localSelected.length ? effectiveWorkflowRouting(localSelected, routing) : undefined;
+        const finalRouting = localSelected.length
+            ? capability === "video"
+                ? Object.fromEntries(MODEL_INPUT_SCENARIOS.map((scenario) => [scenario, localSelected[0]])) as ModelWorkflowRouting
+                : effectiveWorkflowRouting(localSelected, routing)
+            : undefined;
         const workflowParams = selected.length ? normalizeModelWorkflowParams(params, localSelected.length ? localSelected : [effectiveRouting.text || ""].filter(Boolean), finalRouting) : undefined;
         onSave({
             name: trimmed,
@@ -239,7 +250,11 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
                 </label>
                 <label className="block">
                     <span className="mb-1 block text-sm font-medium">能力</span>
-                    <Segmented className="w-full" value={capability} options={CAPABILITIES.map((value) => ({ label: CAPABILITY_LABELS[value], value }))} onChange={(value) => setCapability(value as ModelCapability)} />
+                    <Segmented className="w-full" value={capability} options={CAPABILITIES.map((value) => ({ label: CAPABILITY_LABELS[value], value }))} onChange={(value) => {
+                        const nextCapability = value as ModelCapability;
+                        setCapability(nextCapability);
+                        if (nextCapability === "video") setSelected((current) => current.slice(0, 1));
+                    }} />
                 </label>
             </div>
 
@@ -271,9 +286,11 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
                 )}
             </div>
 
-            <div className="mt-5 text-sm font-semibold">输入场景路由与参数</div>
+            <div className="mt-5 text-sm font-semibold">{capability === "video" ? "视频工作流与参数" : "输入场景路由与参数"}</div>
             <div className="mt-0.5 text-xs text-stone-500">
-                单图 / 多图指本次携带 1 张 / 多张参考（视频、文本、音频同理按参考数量区分）；一个内部实现支持全部场景时三个场景选同一个即可。某个场景不需要对外可用，就选「{UNSUPPORTED_LABEL}」。每个场景还能单独配置参数。
+                {capability === "video"
+                    ? "视频模型固定使用上方选定的一个内部工作流，不按图片参考数量切换；参数仍可按图片参考场景分别配置。"
+                    : `单图 / 多图指本次携带 1 张 / 多张参考（文本、音频同理按参考数量区分）；一个内部实现支持全部场景时三个场景选同一个即可。某个场景不需要对外可用，就选「${UNSUPPORTED_LABEL}」。每个场景还能单独配置参数。`}
             </div>
             <div className="mt-2 space-y-2">
                 {MODEL_INPUT_SCENARIOS.map((scenario) => {
@@ -283,7 +300,7 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
                     return (
                         <div key={scenario} className="flex flex-wrap items-center gap-2">
                             <span className="w-20 shrink-0 text-xs font-medium text-stone-500">{labels[scenario]}</span>
-                            <Select
+                            {capability !== "video" && <Select
                                 className="min-w-0 flex-1"
                                 disabled={!selected.length}
                                 value={routed || undefined}
@@ -335,7 +352,7 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
                                         return next;
                                     });
                                 }}
-                            />
+                            />}
                             <Button size="small" disabled={!usable} onClick={() => setParamScenario(scenario)}>
                                 参数{count ? ` ${count}` : ""}
                             </Button>

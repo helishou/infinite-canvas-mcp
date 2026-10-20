@@ -30,6 +30,7 @@ import { productionWorkbenchValue, subjectDisplayName, subjectDescriptionField }
 import { AudioDesignEditor, SevenStepsReferencesEditor, SegmentAudioBindingEditor, type AudioSourceEntry } from "./audio-design-editor";
 import { ReferenceNodeLink } from "./reference-node-link";
 import { SourceJsonEditor } from "./source-json-editor";
+import { PerformanceDesignEditor } from "./performance-design-editor";
 import { matchesProductionEntityTarget, subjectPictureNavigation } from "./subject-picture-navigation";
 import { PictureBindingEditor } from "./picture-binding-editor";
 import { SmartImageNodePicker } from "./smart-image-node-picker";
@@ -65,16 +66,6 @@ const COMBAT_JSON_NESTED_FIELD_ORDER: Record<string, string[]> = {
   camera: ["framing", "movement", "motion_vector", "action_anchor"],
   slow_motion: ["enabled", "start", "end", "rate", "trigger", "reason", "exit"],
 };
-const PERFORMANCE_JSON_FIELD_ORDER = ["beat_id", "beat_ids", "dominant_track", "tracks", "acting_design", "strategy"];
-const PERFORMANCE_JSON_NESTED_FIELD_ORDER: Record<string, string[]> = {
-  tracks: ["gaze", "body_hands", "breath", "shoulder", "dialogue"],
-  acting_design: ["objective", "tactic", "subtext", "trigger", "personality_signature", "action_units", "motion_arc", "speech_delivery", "cut_behavior", "continuity_in", "continuity_out", "exclusions"],
-  gaze: ["start", "end", "cue", "visibility"], body_hands: ["start", "end", "cue", "visibility"], breath: ["start", "end", "cue", "visibility"], shoulder: ["start", "end", "cue", "visibility"], dialogue: ["start", "end", "cue", "visibility"],
-  action_units: ["start", "end", "cause", "action", "gaze", "face", "follow_through", "speech_anchor", "delivery", "prop", "camera", "sound"],
-  motion_arc: ["anticipation", "accent", "follow_through", "settle"],
-  speech_delivery: ["voice_timbre", "pace", "pitch", "volume", "pauses", "emphasis"],
-};
-
 function Image({ src, alt, className }: { src: string; alt: string; className?: string }) {
   if (alt.startsWith("<Video")) return <video className="max-h-24 max-w-48 rounded object-contain" controls preload="metadata" src={src} aria-label={alt} />;
   if (alt.startsWith("<Audio")) return <audio className="max-w-64" controls preload="metadata" src={src} aria-label={alt} />;
@@ -123,9 +114,10 @@ function SubjectPictureBindings({ subject, canvasNodes, canvasId, owner, assets,
   const add = async () => {
     if (!nodeChoice || !nodeChoiceValid || selectedSourceNode?.type === "character") return;
     const bindingId = `picture:${subject.id}:${encodeURIComponent(nodeChoice.projectId)}:${encodeURIComponent(nodeChoice.nodeId)}`;
+    const purpose = subject.kind === "scene" ? "environment" : subject.kind === "prop" ? "prop" : "identity";
     const binding = { id: bindingId, assetId: nodeChoice.assetId || bindingId,
       sourceNode: { projectId: nodeChoice.projectId, nodeId: nodeChoice.nodeId }, selection: { mode: "node_selection" },
-      provides: ["identity"], retain: ["character identity and costume"], exclude: ["camera pose", "unrelated background"], applicableState: {}, defaultFor: bindings.some(item => (item.defaultFor || []).includes("identity")) ? [] : ["identity"] };
+      provides: [purpose], retain: [purpose === "prop" ? "prop identity, shape, and material" : purpose === "environment" ? "scene environment and layout" : "character identity and costume"], exclude: ["camera pose", "unrelated background"], applicableState: {}, defaultFor: bindings.some(item => (item.defaultFor || []).includes(purpose)) ? [] : [purpose] };
     if (await onSave({ ...subject, pictureBindings: [...bindings, binding] })) setNodeChoice(undefined);
   };
   const addCharacterImage = async (storageKey: string, referenceId: string) => {
@@ -375,12 +367,13 @@ function ShotSourceFields({ shot, busy, names, characters, fps, onSave, keyframe
   const [keyframeNodeDraft, setKeyframeNodeDraft] = useState<string>();
   const [keyframeUnbound, setKeyframeUnbound] = useState(false);
   const [secondsDraft, setSecondsDraft] = useState("");
+  const [performanceDraft, setPerformanceDraft] = useState<Record<string, any>>({});
   const [saving, setSaving] = useState(false);
   const originalCharacters = Array.isArray(shot.characters) ? shot.characters : [];
   const visibleCharacterIds = originalCharacters.map(character => String(typeof character === "string" ? character : character?.id || character?.character_id || "")).filter(Boolean);
   const characterOptions = characters.map(character => ({ value: String(character.id), label: String(character.name || character.display_name || character.id) }));
   const characterValues = editing || saving ? characterDraft : visibleCharacterIds;
-  useEffect(() => { setEditing(false); setDraft({}); setCharacterDraft([]); setSecondsDraft(""); }, [id]);
+  useEffect(() => { setEditing(false); setDraft({}); setCharacterDraft([]); setSecondsDraft(""); setPerformanceDraft({}); }, [id]);
   const save = async () => {
     const patch: Record<string, unknown> = {};
     SHOT_SOURCE_FIELDS.forEach(field => { if ((draft[field] ?? "") !== values[field]) patch[field] = patchProse(shot[field], draft[field] ?? ""); });
@@ -392,6 +385,7 @@ function ShotSourceFields({ shot, busy, names, characters, fps, onSave, keyframe
     }
     if (JSON.stringify(characterDraft) !== JSON.stringify(visibleCharacterIds)) patch.characters = characterDraft.map(characterId => originalCharacters.find(character => String(typeof character === "string" ? character : character?.id || character?.character_id || "") === characterId)
       ?? { id: characterId, name: characters.find(character => String(character.id) === characterId)?.name || characterId });
+    if (JSON.stringify(performanceDraft) !== JSON.stringify(shot.performance ?? {})) patch.performance = Object.keys(performanceDraft).length ? performanceDraft : null;
     const keyframeChange = keyframeUnbound
       ? { type: "unbind" as const, shotId: id }
       : keyframeNodeDraft && keyframeAssetId ? { type: "bind" as const, assetId: keyframeAssetId, nodeId: keyframeNodeDraft } : undefined;
@@ -399,15 +393,15 @@ function ShotSourceFields({ shot, busy, names, characters, fps, onSave, keyframe
     setSaving(true);
     const saved = await onSave(patch, keyframeChange);
     setSaving(false);
-    if (saved !== false) { setEditing(false); setDraft({}); setCharacterDraft([]); setSecondsDraft(""); setKeyframeNodeDraft(undefined); setKeyframeUnbound(false); }
+    if (saved !== false) { setEditing(false); setDraft({}); setCharacterDraft([]); setSecondsDraft(""); setPerformanceDraft({}); setKeyframeNodeDraft(undefined); setKeyframeUnbound(false); }
   };
   return <section className="space-y-4" data-shot-source-fields={id}>
     <div className="flex flex-wrap items-center justify-between gap-2">
       <h3 className="text-sm font-medium">{t("director.studio.shotSource")}</h3>
       {editing ? <div className="flex items-center gap-2" data-shot-source-actions>
         <Button size="small" type="primary" icon={<Check className="size-3.5" />} loading={saving} disabled={busy || saving} onClick={() => void save()}>{t("common.save")}</Button>
-        <Button size="small" disabled={saving} onClick={() => { setDraft({}); setCharacterDraft([]); setSecondsDraft(""); setKeyframeNodeDraft(undefined); setKeyframeUnbound(false); setEditing(false); }}>{t("common.cancel")}</Button>
-      </div> : <Button size="small" type="text" data-shot-source-edit icon={<Pencil className="size-3.5" />} disabled={busy} onClick={() => { setDraft({ ...values }); setCharacterDraft((Array.isArray(shot.characters) ? shot.characters : []).map((character: any) => String(typeof character === "string" ? character : character?.id || character?.character_id || "")).filter(Boolean)); setSecondsDraft(String(Number(seconds.toFixed(3)))); setKeyframeNodeDraft(undefined); setKeyframeUnbound(false); setEditing(true); }}>{t("director.studio.editShotFields")}</Button>}
+        <Button size="small" disabled={saving} onClick={() => { setDraft({}); setCharacterDraft([]); setSecondsDraft(""); setPerformanceDraft({}); setKeyframeNodeDraft(undefined); setKeyframeUnbound(false); setEditing(false); }}>{t("common.cancel")}</Button>
+      </div> : <Button size="small" type="text" data-shot-source-edit icon={<Pencil className="size-3.5" />} disabled={busy} onClick={() => { setDraft({ ...values }); setCharacterDraft((Array.isArray(shot.characters) ? shot.characters : []).map((character: any) => String(typeof character === "string" ? character : character?.id || character?.character_id || "")).filter(Boolean)); setSecondsDraft(String(Number(seconds.toFixed(3)))); setPerformanceDraft(shot.performance && typeof shot.performance === "object" && !Array.isArray(shot.performance) ? structuredClone(shot.performance) : {}); setKeyframeNodeDraft(undefined); setKeyframeUnbound(false); setEditing(true); }}>{t("director.studio.editShotFields")}</Button>}
     </div>
     <div className="space-y-4">
       {keyframeEditor?.({ editing, nodeId: keyframeNodeDraft, onNodeChange: nodeId => { setKeyframeNodeDraft(nodeId); setKeyframeUnbound(false); }, onUnbind: () => { setKeyframeNodeDraft(undefined); setKeyframeUnbound(true); } })}
@@ -430,7 +424,7 @@ function ShotSourceFields({ shot, busy, names, characters, fps, onSave, keyframe
     <details className="rounded-lg border border-border" data-shot-audio-design open={Boolean((shot.audio as Record<string, any> | undefined)?.foley?.length)}><summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-muted-foreground"><span className="flex items-center gap-1.5"><Volume2 className="size-3.5" />{t("director.atomic.soundDesign")}</span></summary>{shot.audio && typeof shot.audio === "object" && !Array.isArray(shot.audio) ? <div className="p-3 pt-2"><AudioDesignEditor value={shot.audio} disabled={busy || saving} onPersist={async nextAudio => { if (saving) return false; setSaving(true); const saved = await onSave({ audio: nextAudio }); setSaving(false); return saved !== false; }} /></div> : <p className="px-3 pb-3 text-xs text-muted-foreground">{t("director.atomic.noStructuredAudio")}</p>}</details>
  {/* B 类补齐：镜头特性即时保存，兼容尚未初始化 features 的旧源稿。 */}
  {(() => { const current = shot.features && typeof shot.features === "object" && !Array.isArray(shot.features) ? shot.features as Record<string, unknown> : {}; const features = { core_emotion: false, combat: false, supernatural_vfx: false, colossal: false, ...current }; return <><div className="flex flex-wrap gap-x-4 gap-y-2 rounded-lg border border-border px-3 py-2" data-shot-features aria-label={t("director.studio.shotFeatures")}>{Object.entries(features).map(([key, value]) => <label key={key} className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground"><Switch size="small" checked={Boolean(value)} disabled={busy || saving} onChange={next => { const updated = { ...features, [key]: next }; void onSave({ features: updated, ...(key === "combat" ? next ? (!shot.combat ? { combat: {} } : {}) : { combat: null } : {}) }); }} />{t(`director.studio.shotFeature.${key}`, key)}</label>)}</div>
- <details className="rounded-lg border border-border p-3" data-shot-performance-editor><summary className="cursor-pointer text-xs font-medium">{t("director.studio.performancePayload")}</summary><div className="mt-2"><SourceJsonEditor title={t("director.studio.performancePayload")} hint={t("director.studio.performancePayloadHint")} value={shot.performance} fieldOrder={PERFORMANCE_JSON_FIELD_ORDER} nestedFieldOrder={PERFORMANCE_JSON_NESTED_FIELD_ORDER} disabled={busy || saving} onSave={next => onSave({ performance: next })} /></div></details>
+ <PerformanceDesignEditor value={editing ? performanceDraft : shot.performance} disabled={!editing || busy || saving} durationFrames={frameCount} onChange={setPerformanceDraft} />
  {Boolean(features.combat || shot.combat) && <details className="rounded-lg border border-border p-3" data-shot-combat-editor><summary className="cursor-pointer text-xs font-medium">{t("director.studio.combatPayload")}</summary><div className="mt-2"><SourceJsonEditor title={t("director.studio.combatPayload")} hint={t("director.studio.combatPayloadHint")} value={shot.combat} fieldOrder={COMBAT_JSON_FIELD_ORDER} nestedFieldOrder={COMBAT_JSON_NESTED_FIELD_ORDER} disabled={busy || saving} onSave={next => onSave({ combat: next })} /></div></details>}</>; })()}
     {includeCompleteSource && <details className="text-xs text-muted-foreground" data-shot-complete-source-details><summary className="cursor-pointer">{t("director.studio.shotCompleteSource")}</summary><div className="mt-3" data-shot-complete-source><SourceData value={shot} names={names} /></div></details>}
   </section>;
@@ -689,7 +683,7 @@ export function DirectorPanel({
   onContinuitySnapshot?: (value: "draft" | "published") => void;
   onPublish: () => void;
   onReplace: (value: DirectorProduction) => Promise<boolean> | void;
-  onAskDirector: (scope: { workspace: DirectorWorkspace; targetId?: string; targetKind?: "scene"; instruction?: string; brief?: string; workId?: string; clipContext?: boolean }) => void;
+  onAskDirector: (scope: { workspace: DirectorWorkspace; targetId?: string; targetKind?: "scene"; instruction?: string; brief?: string; workId?: string; clipContext?: boolean; autoSend?: boolean }) => void;
   onAnswerDecision: (decisionId: string, answer: string) => Promise<boolean> | boolean;
   onNavigate: (workspace: DirectorWorkspace, target?: { kind: string; id: string }) => void;
   onLocateTarget?: (kind: string, id: string) => void;
@@ -1638,8 +1632,9 @@ export function DirectorPanel({
             return;
           }
           const bindingId = `picture:${subject.id}:${encodeURIComponent(canvasId)}:${encodeURIComponent(targetImageNodeId)}`;
+          const purpose = target.kind === "scene" ? "environment" : target.kind === "prop" ? "prop" : "identity";
           const nextPictureBinding: Record<string, any> = { id: bindingId, assetId: targetAssetId, sourceNode: { projectId: canvasId, nodeId: targetImageNodeId }, selection: { mode: "node_selection" as const },
-            provides: [target.kind === "scene" ? "environment" : "identity"], retain: target.kind === "scene" ? ["scene layout and environment"] : ["character identity and costume as defined by the reference image"], exclude: ["pose, camera angle, background, and unrelated composition"], applicableState: {}, defaultFor: ["identity"] };
+            provides: [purpose], retain: target.kind === "scene" ? ["scene layout and environment"] : target.kind === "prop" ? ["prop identity, shape, and material"] : ["character identity and costume as defined by the reference image"], exclude: ["pose, camera angle, background, and unrelated composition"], applicableState: {}, defaultFor: records(keptBindings).some(binding => Array.isArray(binding.defaultFor) && binding.defaultFor.includes(purpose)) ? [] : [purpose] };
           await onUpsertSubject?.({ ...subject, entityRef: { ownerKind: "episode", ownerId: entityOwner.id, kind: target.kind === "prop" ? "asset" : target.kind, id: target.entityId }, pictureBindings: [...keptBindings, nextPictureBinding] } as Extract<ProductionOperation, { type: "upsert_director_subject" }>["subject"]);
         };
         return <article key={String(subject.id)} className="grid min-w-0 gap-4 rounded-lg border border-border bg-card p-4 xl:grid-cols-[minmax(0,1fr)_320px]">

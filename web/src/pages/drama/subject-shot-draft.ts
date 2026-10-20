@@ -9,6 +9,7 @@ export type ShotUtteranceValue = {
 export type ShotFormValue = {
     title: string; visual: string; camera: Record<string, any>; duration_frames: number;
     subject_usages: Array<Record<string, any>>; keyframes: Array<Record<string, any>>; reference_requirements: Array<Record<string, any>>; audio: unknown;
+    performance?: Record<string, any> | null;
     utterances?: Array<ShotUtteranceValue>;
 };
 export type ShotFormDraft = { version: 1 | 2; shotId: string; base: ShotFormValue; value: ShotFormValue };
@@ -23,6 +24,7 @@ const validUtterances = (value: unknown) => value === undefined || (Array.isArra
 function validFormValue(value: unknown): value is ShotFormValue {
     if (!object(value) || typeof value.title !== "string" || typeof value.visual !== "string"
         || !Number.isFinite(value.duration_frames) || !object(value.camera)
+        || (value.performance !== undefined && value.performance !== null && !object(value.performance))
         || !optionalStrings(value.camera.attention_subject_ids) || !validUtterances(value.utterances)) return false;
     return Array.isArray(value.subject_usages) && value.subject_usages.every(usage => object(usage)
         && typeof usage.subjectId === "string" && (usage.pictureBindingMode === undefined || ["default", "explicit"].includes(usage.pictureBindingMode))
@@ -80,7 +82,8 @@ export function shotFormValue(shot: Record<string, any>, source?: Record<string,
         camera: shot.camera && typeof shot.camera === "object" && !Array.isArray(shot.camera) ? shot.camera : { path: String(shot.camera || "") },
         duration_frames: Number(shot.duration_frames || 1), subject_usages: rows(shot.subject_usages),
         keyframes: rows(shot.keyframes).filter(frame => frame.anchor !== "composition"),
-        reference_requirements: [...referenceById.values()], audio: shot.audio ?? "" });
+        reference_requirements: [...referenceById.values()], audio: shot.audio ?? "",
+        ...(shot.performance !== undefined ? { performance: shot.performance } : {}) });
     if (source) formal.utterances = shotUtteranceRows(shot, source, textMode);
     return formal;
 }
@@ -143,7 +146,7 @@ export const shotDraftSourceChanged = (draft: ShotFormDraft, shot: Record<string
 
 export function shotFormChanges(draft: ShotFormDraft) {
     const patch: Record<string, unknown> = {};
-    for (const key of ["title", "visual", "camera", "duration_frames", "subject_usages", "reference_requirements", "audio"] as const) {
+    for (const key of ["title", "visual", "camera", "duration_frames", "subject_usages", "reference_requirements", "audio", "performance"] as const) {
         if (canonicalProduction(draft.base[key]) !== canonicalProduction(draft.value[key])) patch[key] = draft.value[key];
     }
     const baseUtterances = draft.base.utterances || [];

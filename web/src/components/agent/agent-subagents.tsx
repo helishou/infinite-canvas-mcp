@@ -181,6 +181,7 @@ export function AgentSubagents({ theme }: { theme: (typeof canvasThemes)[keyof t
                     <section className="mt-4 space-y-2 border-t pt-4" style={{ borderColor: theme.node.stroke }} data-testid="agent-subagent-result">
                         <h2 className="text-sm font-semibold">{t("agent.subagents.result")}</h2>
                 {detail.error && <p className="whitespace-pre-wrap break-words">{detail.error}</p>}
+                <p>{t("agent.subagents.model")}: <code className="break-all">{detail.model || t("agent.subagents.modelUnknown")}</code></p>
                 {!detail.binding || detail.binding === "unbound" ? <p>{t("agent.subagents.unbound")}</p> : null}
                 {detail.artifactHash && <p className="break-all">{t("agent.subagents.artifact", { hash: detail.artifactHash })}</p>}
                 {detail.adoption && <p>{t("agent.subagents.adoptedRevision", { revision: detail.adoption.revision })}</p>}

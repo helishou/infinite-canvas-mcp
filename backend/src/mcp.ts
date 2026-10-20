@@ -618,10 +618,24 @@ async function executeDirectCanvasTool(
     const result = await backendApi.getMcpCommandReceipt(String(input.operationId || ""));
     const command = recordOf(result.command);
     if (!result.command) return { found: false, status: "not_found" };
-    const translationStatus = recordOf(command.receipt).translationStatus;
+    const receipt = recordOf(command.receipt);
+    const translationStatus = receipt.translationStatus;
+    const status = command.status === "rejected"
+      ? typeof translationStatus === "string" && translationStatus.startsWith("rejected_") ? translationStatus : "rejected"
+      : typeof translationStatus === "string" ? translationStatus : String(command.status || "unknown");
+    const translation = command.tool === "production_translate_compiled_prompts";
+    const targetIds = Array.isArray(receipt.targetIds) ? receipt.targetIds.map(String) : [];
     return {
       found: true,
-      status: typeof translationStatus === "string" ? translationStatus : String(command.status || "unknown"),
+      status,
+      ...(translation ? { targetCount: targetIds.length, ...(targetIds.length ? { targetIds } : {}),
+        ...(typeof receipt.translatedCount === "number" ? { translatedCount: receipt.translatedCount } : {}),
+        ...(typeof receipt.cachedCount === "number" ? { cachedCount: receipt.cachedCount } : {}),
+        nextAction: status === "committed" ? { action: "done" }
+          : status === "rejected_stale" ? { action: "recompile" }
+          : command.status === "rejected" ? { action: "review_failure" }
+          : status === "retry_required" ? { action: "retry_same_operation", operationId: String(command.operationId || "") }
+          : { action: "wait", operationId: String(command.operationId || "") } } : {}),
       ...(command.status === "rejected" && typeof recordOf(command.error).code === "string"
         ? { errorCode: recordOf(command.error).code }
         : {}),

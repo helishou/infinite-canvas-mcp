@@ -4,7 +4,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawnSync, type ExecFileSyncOptionsWithStringEncoding, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
-import { directorModules, directorProductionSchema, canonicalProduction, isSubjectPromptAssembly, resolveSubjectPictureBindingIds, productionContractVersion, productionPreflightRequestSchema, diagnosticBlocksAction, type DirectorProduction, type ProductionDiagnostic, type ProductionPreflight } from "../drama/production-contract.js";
+import { directorModules, directorProductionSchema, productionOperationSchema, canonicalProduction, isSubjectPromptAssembly, resolveSubjectPictureBindingIds, productionContractVersion, productionPreflightRequestSchema, diagnosticBlocksAction, type DirectorProduction, type ProductionDiagnostic, type ProductionPreflight } from "../drama/production-contract.js";
 import { productionOperationContract, schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch, ref2vaPromptDiagnostics, continuityBoundaryDiagnostics } from "../drama/production-validation.js";
 
 const canvasRepositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -536,6 +536,31 @@ export function getProductionContract(
     moduleId?: typeof directorModules[number],
     includeDetails: { requests?: boolean; patchFields?: boolean; sourceContract?: boolean } = {},
 ) {
+    if (!operationType && !moduleId && !includeDetails.requests && !includeDetails.patchFields && !includeDetails.sourceContract) {
+        const operationTypes = productionOperationSchema.options.map(option => option.shape.type.value);
+        const runtime = resolveAchengEngine();
+        return {
+            queryGuide: {
+                purpose: "按需读取当前激活 Acheng 引擎的制作合同。省略查询范围时只返回本指南。",
+                operationType: "传 contract.operations[].type 中的精确值，读取单个操作的 schema、示例和前置条件。",
+                moduleId: "传 story、assets、shots、performance、effects、model 或 continuity，读取该模块说明。",
+                optionalDetails: {
+                    includeRequests: "与 operationType 一起传入，读取 edit/publish/compile/generate 请求 schema。",
+                    includePatchFields: "与 operationType 一起传入，读取完整 patch_director_source 字段 allowlist。",
+                    includeSourceContract: "与 operationType 一起传入，读取完整源稿校验合同。",
+                },
+                examples: [
+                    { operationType: "set_director_brief" },
+                    { moduleId: "shots" },
+                    { operationType: "patch_director_source", includePatchFields: true },
+                ],
+                availableOperationTypes: operationTypes,
+                availableModuleIds: directorModules,
+            },
+            engine: { runtimeId: runtime.runtimeId, commit: runtime.commit, patchVersion: runtime.patchVersion, version: runtime.version },
+            ...(runtimeId ? { notice: "runtimeId is deprecated and does not select a compiler; this contract uses the locally active Acheng runtime." } : {}),
+        };
+    }
     const runtime = resolveAchengEngine();
     const moduleRegistryPath = path.join(runtime.path, "data", "module-registry.json");
     const moduleRegistry = JSON.parse(fs.readFileSync(moduleRegistryPath, "utf8"));

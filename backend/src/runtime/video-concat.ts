@@ -131,11 +131,13 @@ export class VideoConcatBackend {
     /**
      * 横向并排（hstack）多路视频：所有格子等高、保持各自宽高比，短片用末帧补齐到最长时长，
      * 音轨取第一路（对比弹窗里第一路才是有声的源视频）。
-     * `longEdge` 在此布局下表示**每格的目标高度**（调用方一般传 720 / 1080），0 = 用第一路的原始高度。
+     * `longEdge` 在此布局下表示**每格的目标高度**；自动模式按输入视频中的最大高度，较小视频等比放大。
      */
     private async runHstackFfmpeg(taskId: string, inputs: string[], output: string, cellHeight: number) {
         const probes = await Promise.all(inputs.map((file) => this.probe(file)));
-        const height = Math.max(2, Math.round(cellHeight > 0 ? cellHeight : probes[0]?.height || 720));
+        const maxInputHeight = Math.max(...probes.map((probe) => probe.height), 0);
+        const targetHeight = cellHeight > 0 ? cellHeight : maxInputHeight || 720;
+        const height = Math.max(2, Math.ceil(targetHeight / 2) * 2);
         const total = Math.max(...probes.map((probe) => probe.duration), 0);
         const parts = inputs.map((_, index) => {
             // hstack 要求各格尺寸/帧率/时基一致，因此每路统一到 fps=30 + AVTB 时基；

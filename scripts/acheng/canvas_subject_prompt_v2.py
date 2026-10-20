@@ -134,6 +134,10 @@ def binding_ids(subject, usage, *, allow_missing=False):
         return []
     requirements = {str(item.get("factId")): str(item.get("value")) for item in rows(usage.get("stateRequirements"))}
     purposes = usage.get("referencePurpose") or ["identity"]
+    # Visible scene Subjects inherit a purpose-matched environment default.
+    # State-context usages remain explicit-only via the visibility check above.
+    if (subject.get("entityRef") or {}).get("kind") == "scene" and "environment" not in [str(value) for value in purposes]:
+        return []
     selected = []
     for purpose in dict.fromkeys(map(str, purposes)):
         eligible = [item for item in bindings
@@ -976,29 +980,32 @@ def _plain_text(value):
 
 
 def _performance_text(value):
-    # These fields classify the performance block; they are not acting cues.
+    # Classification and persistence identifiers are not acting cues.
     if isinstance(value, dict):
         value = {key: item for key, item in value.items() if key not in {"beat_id", "beat_ids", "dominant_track"}}
     return _plain_text(value)
 
 
-def _camera_prompt_lines(camera):
+def _camera_prompt_lines(camera, suppressed_keys=None):
     fields = (("description", "Camera description"), ("angle", "Angle"), ("movement", "Movement"),
               ("path", "Path"), ("target", "Target"), ("focus", "Focus"))
     rendered = []
     for key, label in fields:
+        if key in (suppressed_keys or set()):
+            continue
         text = _plain_text(camera.get(key))
         if text and text.casefold() != "per shot description":
             rendered.append(label + ": " + text + ".")
-    lens = camera.get("lens_mm") if "lens_mm" in camera else camera.get("lens")
-    if isinstance(lens, (int, float)) and not isinstance(lens, bool):
-        lens_text = f"{lens:g} mm"
-    else:
-        lens_text = _plain_text(lens)
-        if lens_text and not lens_text.casefold().endswith("mm"):
-            lens_text += " mm"
-    if lens_text and lens_text.casefold() != "per shot description":
-        rendered.insert(1, "Lens: " + lens_text + ".")
+    if "lens" not in (suppressed_keys or set()):
+        lens = camera.get("lens_mm") if "lens_mm" in camera else camera.get("lens")
+        if isinstance(lens, (int, float)) and not isinstance(lens, bool):
+            lens_text = f"{lens:g} mm"
+        else:
+            lens_text = _plain_text(lens)
+            if lens_text and not lens_text.casefold().endswith("mm"):
+                lens_text += " mm"
+        if lens_text and lens_text.casefold() != "per shot description":
+            rendered.insert(1, "Lens: " + lens_text + ".")
     return rendered
 
 
@@ -1268,7 +1275,164 @@ def _referenced_scene_ids(production, shot):
     return referenced
 
 
-def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, state_lines=None, scene_ids_to_render=None):
+def _subject_presence_index(production, segment, shots):
+    """Compact repeated, explicit Subject presentation into one scoped index.
+
+    Missing usages are deliberately omitted: absence of a declaration is not
+    evidence that a Subject is offscreen. Ambiguous duplicate usages within a
+    Shot are left in the local Shot prose rather than normalized here.
+    """
+    subjects = {str(item.get("id")): item for item in rows(production.get("subject_registry"))}
+    labels_by_entity = {str(item.get("entity_id") or ""): str(item.get("label") or "")
+                        for item in rows(segment.get("subjects"))}
+    by_subject = {}
+    local_lines = {}
+    covered = set()
+    ambiguous_subjects = set()
+    for shot_number, shot in enumerate(shots, 1):
+        shot_id = str(shot.get("id") or "")
+        seen_in_shot = set()
+        for usage in rows(shot.get("subject_usages")):
+            subject_id = str(usage.get("subjectId") or "")
+            subject = subjects.get(subject_id)
+            entity_id = str((subject or {}).get("entityRef", {}).get("id") or "")
+            label = labels_by_entity.get(entity_id)
+            if not subject_id or not label:
+                continue
+            raw_presentation = str(usage.get("presentation") or "")
+            status = raw_presentation if raw_presentation in {"visible", "offscreen_voice"} else "state_context"
+            if subject_id in ambiguous_subjects:
+                continue
+            if subject_id in seen_in_shot:
+                # A duplicate or conflicting declaration must remain explicit.
+                ambiguous_subjects.add(subject_id)
+                by_subject.pop(subject_id, None)
+                covered = {item for item in covered if item[1] != subject_id}
+                local_lines = {key: line for key, line in local_lines.items() if key[1] != subject_id}
+                continue
+            seen_in_shot.add(subject_id)
+            by_subject.setdefault(subject_id, {"label": label, "records": []})["records"].append(
+                (shot_number, shot_id, status))
+            if status == "visible":
+                local_line = label + " is visible in this Shot."
+            elif status == "offscreen_voice":
+                local_line = label + " is an offscreen voice and has no visible body in this Shot."
+            else:
+                local_line = label + " supplies continuity context only and is not visible in this Shot."
+            covered.add((shot_id, subject_id, status))
+            local_lines[(shot_id, subject_id, status)] = local_line
+
+    groups = []
+    for subject_id, value in by_subject.items():
+        records = value["records"]
+        if not records or subject_id in ambiguous_subjects:
+            continue
+        spans = []
+        for shot_number, _shot_id, status in records:
+            if spans and spans[-1][0] == status and spans[-1][1][-1] == shot_number - 1:
+                spans[-1][1].append(shot_number)
+            else:
+                spans.append([status, [shot_number]])
+        clauses = []
+        for status, numbers in spans:
+            scope = ("Shot " + str(numbers[0]) if len(numbers) == 1
+                     else "Shots " + str(numbers[0]) + "–" + str(numbers[-1]))
+            if status == "visible":
+                description = "visible in " + scope
+            elif status == "offscreen_voice":
+                description = "offscreen voice with no visible body in " + scope
+            else:
+                description = "continuity context only, not visible in " + scope
+            clauses.append(description)
+        groups.append(value["label"] + ": " + "; ".join(clauses))
+
+    if not groups:
+        return "", set()
+    candidate = "Subject presence by Shot: " + "; ".join(groups) + "."
+    # Use the index only when it actually shortens the repeated local lines.
+    if len(candidate) >= sum(len(local_lines[key]) for key in covered):
+        return "", set()
+    return candidate, covered
+
+
+def _shot_camera_facts(production, segment, shot):
+    camera = shot.get("camera") if isinstance(shot.get("camera"), dict) else {}
+    facts = {}
+    framing = _plain_text(camera.get("framing"))
+    if framing:
+        facts["framing"] = ("Framing", framing, "Framing: " + framing + ".")
+    for key, label in (("description", "Camera description"), ("angle", "Angle"), ("movement", "Movement"),
+                       ("path", "Path"), ("target", "Target"), ("focus", "Focus")):
+        value = _plain_text(camera.get(key))
+        if value and value.casefold() != "per shot description":
+            facts[key] = (label, value, label + ": " + value + ".")
+    lens = camera.get("lens_mm") if "lens_mm" in camera else camera.get("lens")
+    if isinstance(lens, (int, float)) and not isinstance(lens, bool):
+        lens_text = f"{lens:g} mm"
+    else:
+        lens_text = _plain_text(lens)
+        if lens_text and not lens_text.casefold().endswith("mm"):
+            lens_text += " mm"
+    if lens_text and lens_text.casefold() != "per shot description":
+        facts["lens"] = ("Lens", lens_text, "Lens: " + lens_text + ".")
+
+    subjects = {str(item.get("id")): item for item in rows(production.get("subject_registry"))}
+    subject_labels = {str(item.get("entity_id") or ""): str(item.get("label") or "")
+                      for item in rows(segment.get("subjects"))}
+    attention = []
+    for subject_id in camera.get("attention_subject_ids", []):
+        subject = subjects.get(str(subject_id))
+        if subject:
+            entity_id = str(subject.get("entityRef", {}).get("id") or "")
+            label = subject_labels.get(entity_id)
+            name = entity_text(production, subject)[0]
+            attention.append((label + " (" + name + ")") if label else name)
+    if attention:
+        value = ", ".join(attention)
+        facts["attention"] = ("Visual attention", value, "The camera gives visual attention to " + value + ".")
+    return facts
+
+
+def _shot_camera_index(production, segment, shots):
+    """Move only repeated, identical camera facts to an explicit Shot index."""
+    by_key = {}
+    for shot_number, shot in enumerate(shots, 1):
+        for key, (label, value, local_line) in _shot_camera_facts(production, segment, shot).items():
+            by_key.setdefault(key, []).append((shot_number, str(shot.get("id") or ""), label, value, local_line))
+
+    clauses = []
+    suppressed = {}
+    original_size = 0
+    for key, records in by_key.items():
+        spans = []
+        for record in records:
+            shot_number, _shot_id, label, value, local_line = record
+            if spans and spans[-1]["value"] == value and spans[-1]["records"][-1][0] == shot_number - 1:
+                spans[-1]["records"].append(record)
+            else:
+                spans.append({"value": value, "records": [record]})
+        for span in spans:
+            if len(span["records"]) < 2:
+                continue
+            first = span["records"][0][0]
+            last = span["records"][-1][0]
+            scope = "Shot " + str(first) if first == last else "Shots " + str(first) + "–" + str(last)
+            label = span["records"][0][2]
+            clauses.append(label + ": " + span["value"] + " in " + scope)
+            for shot_number, shot_id, _label, _value, local_line in span["records"]:
+                suppressed.setdefault(shot_id, set()).add(key)
+                original_size += len(local_line)
+
+    if not clauses:
+        return "", {}
+    candidate = "Camera facts by Shot: " + "; ".join(clauses) + "."
+    if len(candidate) >= original_size:
+        return "", {}
+    return candidate, suppressed
+
+
+def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, state_lines=None, scene_ids_to_render=None,
+                    suppressed_presence=None, suppressed_camera=None):
     camera = shot.get("camera") if isinstance(shot.get("camera"), dict) else {}
     fps_num, fps_den = int(production.get("fps_num", 24)), int(production.get("fps_den", 1))
     clip_start = int(segment["start_frame"])
@@ -1292,7 +1456,8 @@ def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, state_l
     for state_line in state_lines or []:
         parts.append(state_line)
     framing = str(camera.get("framing") or "").strip()
-    if framing:
+    camera_suppressed = (suppressed_camera or {}).get(str(shot.get("id") or ""), set())
+    if framing and "framing" not in camera_suppressed:
         parts.append("Framing: " + framing + ".")
     attention = []
     for subject_id in camera.get("attention_subject_ids", []):
@@ -1300,7 +1465,7 @@ def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, state_l
         if subject:
             label = next((entry.get("label") for entry in segment.get("subjects", []) if entry.get("entity_id") == subject.get("entityRef", {}).get("id")), "")
             attention.append((str(label) + " (" + entity_text(production, subject)[0] + ")") if label else entity_text(production, subject)[0])
-    if attention:
+    if attention and "attention" not in camera_suppressed:
         parts.append("The camera gives visual attention to " + ", ".join(attention) + ".")
     subject_labels = {}
     for entry in segment.get("subjects", []):
@@ -1312,6 +1477,9 @@ def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, state_l
         if not label:
             continue
         presentation = str(usage.get("presentation") or "")
+        status = presentation if presentation in {"visible", "offscreen_voice"} else "state_context"
+        if (str(shot.get("id") or ""), str(usage.get("subjectId") or ""), status) in (suppressed_presence or set()):
+            continue
         if presentation == "visible":
             parts.append(label + " is visible in this Shot.")
         elif presentation == "offscreen_voice":
@@ -1321,7 +1489,7 @@ def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, state_l
     editorial_reason = str(camera.get("editorial_reason") or "").strip()
     if editorial_reason:
         parts.append("Editorial reason for this shot and cut: " + editorial_reason)
-    parts.extend(_camera_prompt_lines(camera))
+    parts.extend(_camera_prompt_lines(camera, camera_suppressed))
     visual = str(shot.get("visual") or "").strip()
     if visual:
         parts.append(visual)
@@ -1433,6 +1601,8 @@ def compile_prompt_v2(production, segment, *, draft=False):
     detail_rows = []
     carried_state = {}
     previous_scene_ids = []
+    presence_index, suppressed_presence = _subject_presence_index(production, segment, shots)
+    camera_index, suppressed_camera = _shot_camera_index(production, segment, shots)
     for index, shot in enumerate(shots):
         shot_id = str(shot.get("id"))
         current_scene_ids = _referenced_scene_ids(production, shot)
@@ -1453,10 +1623,12 @@ def compile_prompt_v2(production, segment, *, draft=False):
         if changes_by_end:
             state_lines.append("State changes by shot end: " + "; ".join(changes_by_end))
         detail_rows.append(_shot_prompt_v2(production, segment, shot, index + 1, speakers,
-                                           state_lines=state_lines, scene_ids_to_render=scene_ids_to_render))
+                                           state_lines=state_lines, scene_ids_to_render=scene_ids_to_render,
+                                           suppressed_presence=suppressed_presence, suppressed_camera=suppressed_camera))
         carried_state.update(start_state)
         carried_state.update(end_state)
-    detail = "\n".join(detail_rows)
+    scoped_indexes = [line for line in (presence_index, camera_index) if line]
+    detail = "\n".join(scoped_indexes + detail_rows)
     soundscape = str(segment.get("overall_soundscape") or "Synchronized dialogue, ambience and action sounds follow the authored shots.")
     music = str(segment.get("non_diegetic_music") or "N/A")
     if mode == "Ref2VA":

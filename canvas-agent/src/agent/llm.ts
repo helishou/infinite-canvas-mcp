@@ -29,8 +29,8 @@ export class LlmAgent {
     rememberCodexThread(id: string, model: string) { this.settings.set(`agent.codex.channel-model:${id}`, model); }
     codexThreadModel(id: string) { const model = this.settings.get(`agent.codex.channel-model:${id}`); return typeof model === "string" && this.providers().some(provider => provider.id === model && provider.kind === "codex-cli") ? model : undefined; }
     delegationModel(parentThreadId: string, requested?: string) {
-        if (requested) return requested;
-        return isLlmThread(parentThreadId) ? this.load(parentThreadId).model : this.codexThreadModel(parentThreadId) || this.defaultModel();
+        const parentModel = isLlmThread(parentThreadId) ? this.load(parentThreadId).model : this.codexThreadModel(parentThreadId);
+        return parentModel || requested || this.defaultModel();
     }
     nativeWorkerModel(model?: string, threadId?: string) {
         if (threadId && !isLlmThread(threadId) && !model) return undefined;
@@ -132,6 +132,25 @@ export class LlmAgent {
     private summary(thread: LlmThread) { return { id: thread.id, cwd: thread.cwd, model: thread.model, preview: thread.preview, createdAt: thread.createdAt, updatedAt: thread.updatedAt, status: thread.turns.at(-1)?.status || "idle", source: "llm" }; }
     list(cwd: string, searchTerm = "") {
         return { data: this.index().map(id => this.load(id)).filter(thread => !thread.silent && !thread.archived && path.resolve(thread.cwd).toLowerCase() === path.resolve(cwd).toLowerCase() && thread.preview.toLowerCase().includes(searchTerm.toLowerCase())).sort((a, b) => b.updatedAt - a.updatedAt).map(thread => this.summary(thread)), nextCursor: null };
+    }
+    retainHistory(id: string, title: string, cwd?: string) {
+        if (!isLlmThread(id)) return;
+        let thread: LlmThread;
+        try { thread = this.load(id, cwd); } catch { return; }
+        let changed = false;
+        if (thread.silent) { thread.silent = false; changed = true; }
+        if (!thread.preview && title) { thread.preview = title; changed = true; }
+        for (const turn of thread.turns) if (!turn.display.length) {
+            turn.display = turn.messages.flatMap((message, index) => {
+                const role = message.role === "user" || message.role === "assistant" || message.role === "tool" || message.role === "error" ? message.role : null;
+                if (!role) return [];
+                const text = textOf(message);
+                if (!text) return [];
+                return [this.display(thread.id, turn.id, `history:${index}`, role, text, message.callName)];
+            });
+            changed = true;
+        }
+        if (changed) this.save(thread);
     }
     read(id: string, cwd?: string) {
         const thread = this.load(id, cwd);
@@ -241,7 +260,7 @@ export class LlmAgent {
                 const toolImages: LlmPart[] = [];
                 for (const call of message.calls) {
                     controller.signal.throwIfAborted();
-                    const item: Json = { id: call.id, type: "mcp_tool_call", server: "infinite-canvas", tool: call.name, arguments: call.arguments, status: "in_progress" };
+                    const item: Json = { id: call.id, type: "mcp_tool_call", server: "infinite-canvas", tool: call.name, arguments: call.arguments, status: "in_progress", toolCharacters: { input: countCharacters(call.arguments) } };
                     event("item.started", { item });
                     let result: unknown;
                     // `input` 提到 try 之外：工具图片要按它的 storageKey 决定「只留引用」还是内联 base64。
@@ -250,7 +269,11 @@ export class LlmAgent {
                         input = JSON.parse(call.arguments);
                         if (call.name === "director_subagent") {
                             input.parentThreadId = thread.id;
-                            if (input.action === "spawn") { input.parentTurnId = turn.id; input.model ||= thread.model; input.effort ||= options.effort; }
+                            if (input.action === "spawn") {
+                                input.parentTurnId = turn.id;
+                                input.model = thread.model;
+                                if (options.effort) input.effort = options.effort;
+                            }
                             if (projectId && !input.projectId) input.projectId = projectId;
                         }
                         const previous = turn.messages.find(message => message.role === "tool" && message.callId === call.id);
@@ -278,7 +301,7 @@ export class LlmAgent {
                     const modelResult = images.length ? { ...toolResult, content: content.map(item => item.type === "image" ? { type: "text", text: "工具图片已作为下一条视觉输入传入" } : item) } : result;
                     turn.messages.push({ role: "tool", callId: call.id, callName: call.name, parts: [{ text: JSON.stringify(modelResult) }] });
                     toolImages.push(...this.toolImageParts(call.name, input, images));
-                    const completed = { ...item, status: toolResult?.isError ? "failed" : "completed", result: modelResult };
+                    const completed = { ...item, status: toolResult?.isError ? "failed" : "completed", result: modelResult, toolCharacters: { input: countCharacters(call.arguments), output: countCharacters(serializeToolValue(modelResult)) } };
                     turn.display.push(this.display(thread.id, turn.id, call.id, "tool", call.name, call.name, completed));
                     this.save(thread); event("item.completed", { item: completed });
                 }
@@ -300,8 +323,9 @@ export class LlmAgent {
             }
         }
     }
+
     /** Structured workers have read-only file access and never get generation or canvas-write tools. */
-    async structured(request: { cwd: string; prompt: string; schema: Json; model?: string; effort?: string; threadId?: string; turnId?: string; recoverOutput?: boolean; images?: string[]; readRoots?: string[]; onThread: (id: string) => void; onTurn?: (id: string) => void }) {
+    async structured(request: { cwd: string; prompt: string; schema: Json; model?: string; effort?: string; threadId?: string; turnId?: string; recoverOutput?: boolean; historyVisible?: boolean; historyTitle?: string; images?: string[]; readRoots?: string[]; onThread: (id: string) => void; onTurn?: (id: string) => void }) {
         if (request.recoverOutput && !request.threadId) throw new Error("AGENT_RECOVERY_REQUIRED: 缺少原 API 线程身份，未创建或重跑工作者");
         const validate = new Ajv({ strict: false, allErrors: true }).compile(request.schema);
         const parseOutput = (text: string): unknown => {
@@ -309,9 +333,15 @@ export class LlmAgent {
             if (!validate(output)) throw new Error(`Agent 结构化结果不符合合同：${validate.errors?.map(error => `${error.instancePath || "/"} ${error.message}`).join("；")}`);
             return output;
         };
-        const threadId = request.threadId || this.startThread(request.cwd, request.model, true).id;
+        const threadId = request.threadId || this.startThread(request.cwd, request.model, !request.historyVisible).id;
         this.read(threadId, request.cwd);
         const thread = this.load(threadId, request.cwd);
+        if (request.historyVisible) {
+            let changed = false;
+            if (thread.silent) { thread.silent = false; changed = true; }
+            if (request.historyTitle && !thread.preview) { thread.preview = request.historyTitle; changed = true; }
+            if (changed) this.save(thread);
+        }
         if (!request.threadId) request.onThread(threadId);
         if (request.recoverOutput) {
             const turn = thread.turns.at(-1);
@@ -324,6 +354,7 @@ export class LlmAgent {
         if (this.controllers.has(threadId)) throw new Error("当前 Agent 对话已有运行中的任务");
         this.controllers.set(threadId, controller);
         const turn: LlmTurn = { id: crypto.randomUUID(), status: "running", messages: [{ role: "user", parts: [{ text: request.prompt }, ...images] }], display: [] };
+        turn.display.push(this.display(thread.id, turn.id, "synthetic:user", "user", request.prompt));
         thread.turns.push(turn);
         try {
             this.save(thread); request.onTurn?.(turn.id);
@@ -332,6 +363,7 @@ export class LlmAgent {
                 controller.signal.throwIfAborted(); turn.messages.push(reply.message); this.save(thread);
                 if (!reply.message.calls?.length) {
                     const output = parseOutput(textOf(reply.message));
+                    turn.display.push(this.display(thread.id, turn.id, "synthetic:assistant", "assistant", textOf(reply.message)));
                     turn.status = "completed"; this.save(thread); return { threadId, output };
                 }
                 for (const call of reply.message.calls) {
@@ -351,6 +383,14 @@ export class LlmAgent {
         }
     }
     private display(threadId: string, turnId: string, itemId: string, role: ChatMessage["role"], text: string, title?: string, detail?: unknown): ChatMessage { return { id: `${threadId}:${turnId}:${itemId}`, itemId, threadId, turnId, role, text, title, detail }; }
+}
+
+function countCharacters(value: string) {
+    return Array.from(value).length;
+}
+
+function serializeToolValue(value: unknown) {
+    return JSON.stringify(value) ?? String(value ?? "");
 }
 
 /** Read-only local access for Skills; all business writes stay in Backend MCP. */

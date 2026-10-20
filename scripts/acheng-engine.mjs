@@ -180,7 +180,7 @@ export class AchengEngine {
       // by the upstream code-contract byte hashes.
       const changedCodeContracts = changedContracts.filter(file => file !== 'SKILL.md' && file !== 'data/module-registry.json');
       if (changedCodeContracts.length) {
-        const fixes = ['SKILL.md', 'references/90-production-contract.md', 'scripts/reference_bindings.py', 'scripts/h3_contract.py', 'scripts/h3_final_format.py', 'scripts/style_anchor.py', 'scripts/asset_plan.py', 'scripts/compile_h3.py', 'scripts/compile_assets.py', 'scripts/post_hooks.py'];
+        const fixes = ['SKILL.md', 'references/90-production-contract.md', 'scripts/reference_bindings.py', 'scripts/h3_contract.py', 'scripts/h3_final_format.py', 'scripts/style_anchor.py', 'scripts/asset_plan.py', 'scripts/compile_h3.py', 'scripts/compile_assets.py', 'scripts/post_hooks.py', 'scripts/orchestrator_plan.py'];
         if (changedCodeContracts.some(file => !fixes.includes(file))) throw new Error(`Upstream contract changed: ${changedContracts.join(', ')}. Review compatibility before activation. Candidate retained: ${candidate}`);
         // The Canvas contract probe imports the compatibility source schema, so
         // it cannot run against the raw archive. Apply the reviewed overlay and

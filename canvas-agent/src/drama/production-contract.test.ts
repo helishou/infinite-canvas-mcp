@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { applyDirectorSourcePatch, productionOperationContract, ref2vaPromptDiagnostics, SHOT_FRAME_VALUES, readShotFraming } from "./production-validation.js";
 import { productionEntities } from "./production-entities.js";
-import { diagnosticBlocksAction, dramaProductionPlanSchema, productionEditSchema, productionSettingsSchema, type DirectorProduction, type ProductionDiagnostic } from "./production-contract.js";
+import { diagnosticBlocksAction, dramaProductionPlanSchema, productionEditSchema, productionSettingsSchema, resolveSubjectPictureBindingIds, type DirectorProduction, type ProductionDiagnostic } from "./production-contract.js";
 import { toolInputSchemas } from "../canvas/schemas.js";
 
 test("all published operation examples use the actual edit contract", () => {
@@ -49,6 +49,22 @@ test("patch_director_source exposes only registered fields and validates fields 
     assert.equal(JSON.stringify(patchContract.jsonSchema).includes("additionalProperties"), true);
 });
 
+test("shot camera and performance patches preserve nested fields that were not submitted", () => {
+    const director = productionOperationContract("set_director_production").operations[0].example.director as DirectorProduction;
+    const priorHash = director.sourceHash;
+    director.source.shots = [{ id: "SHOT1", camera: { framing: "MS", movement: "pan", attention_subject_ids: ["SUB1"], lens: "50mm" },
+        performance: { tracks: { shenyan: { start: 0, end: 24, cue: "停步", visibility: "visible" }, hongxiao: { start: 0, end: 24, cue: "倒地", visibility: "visible" } } } }];
+    applyDirectorSourcePatch(director, "shot", "SHOT1", {
+        camera: { movement: "push-in" },
+        performance: { tracks: { shenyan: { cue: "起跑" } } },
+    });
+    const shot = (director.source.shots as Array<Record<string, any>>)[0];
+    assert.deepEqual(shot.camera, { framing: "MS", movement: "push-in", attention_subject_ids: ["SUB1"], lens: "50mm" });
+    assert.deepEqual(shot.performance.tracks.shenyan, { start: 0, end: 24, cue: "起跑", visibility: "visible" });
+    assert.deepEqual(shot.performance.tracks.hongxiao, { start: 0, end: 24, cue: "倒地", visibility: "visible" });
+    assert.notEqual(director.sourceHash, priorHash, "source hash is refreshed from the patched source");
+});
+
 test("asset canvas scope is a formal, validated source field that invalidates old compile receipts", () => {
     const director = productionOperationContract("set_director_production").operations[0].example.director as DirectorProduction;
     director.source.asset_plan = [{ asset_id: "ROLE", canvas_scope: "episode" }];
@@ -77,6 +93,16 @@ test("script scene occurrences do not become reusable scene asset nodes without 
         subject_registry: [],
     }, { kind: "episode", id: "EP_1" });
     assert.deepEqual(entities.filter(entity => entity.kind === "scene").map(entity => entity.entityId), ["SC_LUWU", "SHARED_SCENE"]);
+});
+
+test("visible Scene Subjects use an environment default while context usages require explicit pictures", () => {
+    const subject = { id: "SUB_SCENE", kind: "scene", entityRef: { kind: "scene", id: "SCENE" }, pictureBindings: [
+        { id: "SCENE_ENV", provides: ["environment"], defaultFor: ["environment"], applicableState: {} },
+    ] };
+    assert.deepEqual(resolveSubjectPictureBindingIds(subject, { subjectId: "SUB_SCENE", presentation: "visible", referencePurpose: ["environment"] }).bindingIds, ["SCENE_ENV"]);
+    assert.deepEqual(resolveSubjectPictureBindingIds(subject, { subjectId: "SUB_SCENE", presentation: "visible", referencePurpose: ["identity"] }).bindingIds, []);
+    assert.deepEqual(resolveSubjectPictureBindingIds(subject, { subjectId: "SUB_SCENE", presentation: "state_context", referencePurpose: ["environment"] }).bindingIds, []);
+    assert.deepEqual(resolveSubjectPictureBindingIds(subject, { subjectId: "SUB_SCENE", presentation: "state_context", referencePurpose: ["environment"], pictureBindingIds: ["SCENE_ENV"] }).bindingIds, ["SCENE_ENV"]);
 });
 
 test("environment and asset-card patches update compiler source without changing script or asset plans", () => {

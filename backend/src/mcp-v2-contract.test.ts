@@ -19,7 +19,7 @@ test("HTTP MCP v3 exposes the new contracts, compact asset reads, idempotent wri
   backend.use(express.json());
   const largePrompt = "保留完整正文\r\n".repeat(100000);
   const largeProduction = { episodeId: "large", revision: 1, publishedVersion: 1, draft: { director: { engine: { runtimeId: "pinned" }, sourceHash: "full-source-hash", modules: {}, workflow: {}, assets: {}, source: { brief: "sample", script: largePrompt }, artifacts: [{ id: "h3-segment", targetId: "segment", prompt: largePrompt, sha256: "prompt-hash" }] }, scenes: [], shots: [], clipGroups: [] } };
-  let requestedEpisodePage = "", requestedComfyView = "", requestedMaterialsLimit = "";
+  let requestedEpisodePage = "", requestedComfyView = "", requestedMaterialsLimit = "", requestedCompilationId = "";
   backend.get("/settings/ai-config", (_req, res) => res.json({ ok: true, config: { channels: [
     { id: "alpha", models: [{ name: "text-1", capability: "text" }, { name: "image-1", capability: "image" }] },
     { id: "beta", models: [{ name: "text-2", capability: "text" }, { name: "text-3", capability: "text" }] },
@@ -36,6 +36,12 @@ test("HTTP MCP v3 exposes the new contracts, compact asset reads, idempotent wri
   backend.get("/canvas/projects/material-project/nodes/material-node/materials", (req, res) => {
     requestedMaterialsLimit = String(req.query.limit || "");
     res.json({ ok: true, projectId: "material-project", nodeId: "material-node", materials: [] });
+  });
+  backend.get("/drama/episodes/multi/production/compilations/:operationId", (req, res) => {
+    requestedCompilationId = req.params.operationId;
+    res.json({ ok: true, compilation: { sourceSaved: true, operationId: requestedCompilationId, status: "running", targetCount: 2, targetIds: ["SEG1", "SEG2"],
+      counts: { ready: 1, running: 1, blocked: 0, failed: 0, translated: 0, translating: 1 },
+      phases: { source: "saved", compilation: "running", application: "pending", translation: "translating", mediaSubmitted: false }, mediaSubmitted: false } });
   });
   backend.get("/comfy/tasks/comfy-summary-task", (req, res) => {
     requestedComfyView = String(req.query.view || "");
@@ -86,6 +92,7 @@ test("HTTP MCP v3 exposes the new contracts, compact asset reads, idempotent wri
   assert.ok(secondCatalog.tools.some(entry => entry.name === "mcp_get_command_receipt"));
   const tool = (name: string) => catalog.tools.find(entry => entry.name === name)!;
   assert.ok(tool("mcp_get_command_receipt"));
+  assert.match(tool("production_get_compilation").description, /production_edit 的 operationId/);
   assert.ok(tool("assets_get"));
   const modelPageResult = await client.callTool({ name: "models_list", arguments: { capability: "text", page: 2, pageSize: 1 } });
   const modelPage = JSON.parse(textOf(modelPageResult));
@@ -102,6 +109,13 @@ test("HTTP MCP v3 exposes the new contracts, compact asset reads, idempotent wri
   const episodePageResult = await client.callTool({ name: "drama_list_episodes", arguments: { dramaId: "drama-large", page: 3, pageSize: 2 } });
   assert.equal(requestedEpisodePage, "3:2:summary");
   assert.equal(JSON.parse(textOf(episodePageResult)).total, 45);
+  const combinedStatusResult = await client.callTool({ name: "production_get_compilation", arguments: { kind: "episode", id: "multi", operationId: "parent-edit" } });
+  const combinedStatus = JSON.parse(textOf(combinedStatusResult));
+  assert.equal(requestedCompilationId, "parent-edit");
+  assert.equal(combinedStatus.compilation.targetCount, 2);
+  assert.equal(combinedStatus.compilation.phases.translation, "translating");
+  assert.equal(combinedStatus.compilation.mediaSubmitted, false);
+  assert.ok(Buffer.byteLength(textOf(combinedStatusResult), "utf8") < 1500, "one aggregate status read stays compact for the two-target task");
   const materialsResult = await client.callTool({ name: "h3_get_node_materials", arguments: { projectId: "material-project", nodeId: "material-node" } });
   assert.equal(requestedMaterialsLimit, "50");
   assert.deepEqual(JSON.parse(textOf(materialsResult)).materials, []);
@@ -181,9 +195,16 @@ test("HTTP MCP v3 exposes the new contracts, compact asset reads, idempotent wri
   assert.deepEqual(commandReceiptOf(crossSessionReceipt), { found: true, status: "committed" });
 
   const translatingOperationId = "translation-status-only";
-  db.prepareMcpCommand({ operationId: translatingOperationId, tool: "production_translate_compiled_prompts", targetId: "episode-1", request: { operationId: translatingOperationId }, payload: { stage: "translate" }, receipt: { translationStatus: "translating" } });
+  db.prepareMcpCommand({ operationId: translatingOperationId, tool: "production_translate_compiled_prompts", targetId: "episode-1", request: { operationId: translatingOperationId }, payload: { stage: "translate" }, receipt: { translationStatus: "translating", targetIds: ["SEG1", "SEG2"], translatedCount: 1, cachedCount: 0 } });
   const translationReceipt = await client.callTool({ name: "mcp_get_command_receipt", arguments: { operationId: translatingOperationId } });
-  assert.deepEqual(commandReceiptOf(translationReceipt), { found: true, status: "translating" });
+  assert.deepEqual(commandReceiptOf(translationReceipt), { found: true, status: "translating", targetCount: 2, targetIds: ["SEG1", "SEG2"], translatedCount: 1, cachedCount: 0, nextAction: { action: "wait", operationId: translatingOperationId } });
+
+  const rejectedTranslationId = "translation-rejected-status";
+  db.prepareMcpCommand({ operationId: rejectedTranslationId, tool: "production_translate_compiled_prompts", targetId: "episode-1", request: { operationId: rejectedTranslationId }, payload: { stage: "translate" }, receipt: { translationStatus: "applying" } });
+  db.rejectMcpCommand(rejectedTranslationId, "TRANSLATION_FAILED", "failed before commit");
+  const rejectedTranslation = await client.callTool({ name: "mcp_get_command_receipt", arguments: { operationId: rejectedTranslationId } });
+  assert.deepEqual(commandReceiptOf(rejectedTranslation), { found: true, status: "rejected", targetCount: 0, nextAction: { action: "review_failure" }, errorCode: "TRANSLATION_FAILED" },
+    "a rejected command must not keep advertising its last in-flight phase");
 
   const rejectedOperationId = "rejected-status-only";
   db.prepareMcpCommand({ operationId: rejectedOperationId, tool: "assets_upsert_batch", targetId: "asset-library", request: { operationId: rejectedOperationId }, payload: {}, receipt: {} });

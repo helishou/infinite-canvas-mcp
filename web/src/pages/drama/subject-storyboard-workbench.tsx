@@ -7,7 +7,7 @@ import { isSubjectPromptAssembly, type DirectorProduction } from "@basketikun/ca
 import { currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { subjectShotWindows, subjectStateProjection } from "@basketikun/canvas-agent/drama/subject-assembly";
 import { backendMediaUrl, fetchProductionWorkbench, type EpisodeProduction, type ProductionCompilationDiagnostic, type ProductionTarget } from "@/services/backend-api";
-import { records, formatSeconds } from "./director-display";
+import { records, formatSeconds, readableText } from "./director-display";
 import { productionWorkbenchValue, subjectDisplayName } from "./subject-shot-draft";
 import { productionSegmentRuntimeMatches } from "@/lib/production-source";
 import { translateCompiledH3Prompts, type H3PromptBatchProgress } from "@/services/api/translation";
@@ -33,6 +33,11 @@ function CompileElapsed({ updatedAt, status }: { updatedAt?: string; status?: st
 const workbenchCache = new Map<string, Record<string, any>>();
 
 export type StoryboardViewMemory = { current?: { selectedId: string; sceneFilter: string; search: string; view: "shots" | "clips"; mobileEditing: boolean; detailView: "editing" | "context"; shotSection?: "direction" | "sound" | "subjects" | "anchors"; scrollTop: number } };
+
+function readSavedStoryboardSelection(storageKey: string) {
+    try { return typeof window === "undefined" ? "" : window.localStorage.getItem(storageKey) || ""; }
+    catch { return ""; }
+}
 
 type Props = {
     director: DirectorProduction; production: EpisodeProduction; owner: ProductionTarget; initialShotId?: string;
@@ -137,11 +142,16 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const unsavedIds = new Set(unsavedShots.map(shot => String(shot.id)));
     const ownerKey = JSON.stringify(owner);
     const sceneFilterStorageKey = `drama-storyboard-scene-filter:${ownerKey}`;
-    const [selectedId, setSelectedId] = useState(initialShotId || viewMemory?.current?.selectedId || "");
+    const storyboardSelectionStorageKey = `director-storyboard-selection-v1:${ownerKey}`;
+    const [selectedId, setSelectedId] = useState(() => initialShotId || viewMemory?.current?.selectedId || readSavedStoryboardSelection(storyboardSelectionStorageKey));
     const clipCardRefs = useRef(new Map<string, HTMLElement>());
-    const clipSelectionInitialized = useRef(false);
     const observedSelectionOwner = useRef("");
     const observedProductionClip = useRef("");
+    const initialViewMemory = useRef(viewMemory?.current);
+    const pendingClipScrollShotId = useRef("");
+    const pendingScrollTop = useRef<number | null>(null);
+    const scrollSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const storyboardScrollStorageKey = `director-storyboard-scroll-v1:${ownerKey}`;
     const [draggingShotId, setDraggingShotId] = useState("");
     const [translationProgress, setTranslationProgress] = useState<TranslationProgressDetail | null>(null);
     const [translationError, setTranslationError] = useState("");
@@ -158,7 +168,12 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const [mobileEditing, setMobileEditing] = useState(Boolean(initialShotId) || Boolean(viewMemory?.current?.mobileEditing));
     const [detailView, setDetailView] = useState<"editing" | "context">(viewMemory?.current?.detailView || "editing");
     const [shotSection, setShotSection] = useState<"direction" | "sound" | "subjects" | "anchors">(viewMemory?.current?.shotSection || "direction");
-    const selectShot = (id: string) => { setSelectedId(id); setMobileEditing(true); };
+    const selectShot = (id: string) => {
+        setSelectedId(id);
+        pendingClipScrollShotId.current = id === activeId ? "" : id;
+        try { localStorage.setItem(storyboardSelectionStorageKey, id); } catch { /* Selection restoration is an optional view preference. */ }
+        setMobileEditing(true);
+    };
     const sceneDirectory = useMemo(() => storyboardScenes(source), [source, director.sourceHash]);
     const sceneIds = storyboardSceneShotIds(source, sceneFilter);
     const view = activeView;
@@ -184,6 +199,10 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const activeId = String(selected?.id || "");
     const clip = clips.find(item => (item.shot_ids || []).includes(activeId));
     const clipIndex = clips.findIndex(item => item.id === clip?.id);
+    useEffect(() => {
+        if (!activeId) return;
+        try { localStorage.setItem(storyboardSelectionStorageKey, activeId); } catch { /* Selection restoration is an optional view preference. */ }
+    }, [activeId, storyboardSelectionStorageKey]);
     useEffect(() => {
         const clipId = String(clip?.id || "");
         if (!clipId) return;
@@ -214,15 +233,22 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
             if (!firstShotId) return;
             observedProductionClip.current = targetId;
             setSelectedId(firstShotId);
+            if (firstShotId === activeId && activeView === "shots") {
+                pendingClipScrollShotId.current = "";
+                requestAnimationFrame(() => clipCardRefs.current.get(targetId)?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
+            } else pendingClipScrollShotId.current = firstShotId;
+            try { localStorage.setItem(storyboardSelectionStorageKey, firstShotId); } catch { /* Selection restoration is an optional view preference. */ }
         };
         window.addEventListener("minimax-h3-select-clip", onH3SelectClip);
         return () => window.removeEventListener("minimax-h3-select-clip", onH3SelectClip);
-    }, [canvasId, canvasNodes, clips]);
+    }, [activeId, activeView, canvasId, canvasNodes, clips, storyboardSelectionStorageKey]);
     useLayoutEffect(() => {
-        if (!clipSelectionInitialized.current) { clipSelectionInitialized.current = true; return; }
-        if (activeView !== "shots" || !clip?.id) return;
-        clipCardRefs.current.get(String(clip.id))?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-    }, [activeView, clip?.id]);
+        const shotId = pendingClipScrollShotId.current;
+        if (!shotId || activeView !== "shots") return;
+        pendingClipScrollShotId.current = "";
+        const targetClip = clips.find(item => clipShotIds(item).includes(shotId));
+        if (targetClip) clipCardRefs.current.get(String(targetClip.id))?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }, [activeView, activeId, clips]);
     const number = shots.findIndex(item => String(item.id) === activeId) + 1;
     const title = (shot: Record<string, any>) => String(operationShots.find(item => item.id === shot.id)?.title || shot.title || t("director.studio.shotNumber", { number: shots.findIndex(item => item.id === shot.id) + 1 }));
     const framing = (shot: Record<string, any>) => ["EWS", "WS", "FS", "MS", "MCU", "CU", "ECU"].includes(shot.camera?.framing) ? t("director.atomic.framingName." + shot.camera.framing) : shot.camera?.framing || "—";
@@ -245,7 +271,18 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const clipEditorSceneLocal = !sceneFilter || clipEditorShotIds.every(id => directSceneShotIds.has(id));
     const clipEditorGroupsLocal = clipEditorSegments.every(item => (item.shot_ids || []).every((id: string) => sceneIds.has(String(id))));
     const clipEditorScope = { sceneId: sceneFilter || undefined, shotIds: clipEditorShotIds, editable: clipEditorContiguous && clipEditorSceneLocal && clipEditorGroupsLocal && clipEditorSegments.every(item => item.locked !== true) };
-    const visible = shots.filter(shot => sceneIds.has(String(shot.id)) && `${title(shot)} ${shot.visual || ""} ${people(shot)}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()));
+    const searchTerm = search.trim().toLocaleLowerCase();
+    const visible = shots.filter((shot, index) => {
+        const id = String(shot.id);
+        if (!searchTerm) return sceneIds.has(id);
+        const number = index + 1;
+        if (/^\d+$/.test(searchTerm)) {
+            const titleNumbers: string[] = String(title(shot)).match(/\d+/g) || [];
+            return number === Number(searchTerm) || titleNumbers.includes(searchTerm);
+        }
+        const fields = `${title(shot)} ${id} 镜头${number} shot ${number} ${readableText(shot.visual)} ${people(shot)}`.toLocaleLowerCase();
+        return fields.includes(searchTerm);
+    });
     const referencedNodes = new Set(records(selected?.subject_usages).flatMap(usage => records(subjects.find(subject => subject.id === usage.subjectId)?.pictureBindings).map(binding => String(binding.sourceNode?.nodeId || "")))
         .concat(records(selected?.keyframes).map(frame => String(frame.sourceNode?.nodeId || ""))));
     const h3ClipMatches = clip ? productionSegmentRuntimeMatches(canvasNodes as any, String(clip.id)) : [];
@@ -574,8 +611,53 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     // 分割块：拖动或右键调整相邻片段之间的分镜归属。芯片按 id 登记，拖动时按实际布局吸附到镜头边界。
     const chipRefs = useRef(new Map<string, HTMLElement>());
     const trackRef = useRef<HTMLDivElement | null>(null);
+    const recordStoryboardScroll = (scrollTop: number) => {
+        if (viewMemory?.current) viewMemory.current.scrollTop = scrollTop;
+        pendingScrollTop.current = scrollTop;
+        if (scrollSaveTimer.current) clearTimeout(scrollSaveTimer.current);
+        scrollSaveTimer.current = setTimeout(() => {
+            scrollSaveTimer.current = null;
+            const value = pendingScrollTop.current;
+            if (value === null) return;
+            pendingScrollTop.current = null;
+            try { localStorage.setItem(storyboardScrollStorageKey, String(value)); } catch { /* Scroll restoration is an optional view preference. */ }
+        }, 120);
+    };
+    useEffect(() => {
+        const flushScroll = () => {
+            if (scrollSaveTimer.current) clearTimeout(scrollSaveTimer.current);
+            scrollSaveTimer.current = null;
+            const value = pendingScrollTop.current;
+            if (value === null) return;
+            pendingScrollTop.current = null;
+            try { localStorage.setItem(storyboardScrollStorageKey, String(value)); } catch { /* Scroll restoration is an optional view preference. */ }
+        };
+        window.addEventListener("pagehide", flushScroll);
+        return () => { window.removeEventListener("pagehide", flushScroll); flushScroll(); };
+    }, [storyboardScrollStorageKey]);
     if (viewMemory) viewMemory.current = { selectedId: activeId, sceneFilter, search, view, mobileEditing, detailView, shotSection, scrollTop: viewMemory.current?.scrollTop || 0 };
-    useLayoutEffect(() => { if (trackRef.current && viewMemory?.current) trackRef.current.scrollTop = viewMemory.current.scrollTop; }, [ownerKey, view]);
+    const hasRestoredScroll = useRef(false);
+    useLayoutEffect(() => {
+        const track = trackRef.current;
+        if (!track) return;
+        let scrollTop: number | undefined;
+        if (hasRestoredScroll.current) scrollTop = viewMemory?.current?.scrollTop;
+        else {
+            try {
+                const raw = localStorage.getItem(storyboardScrollStorageKey);
+                if (raw !== null) {
+                    const saved = Number(raw);
+                    if (Number.isFinite(saved)) scrollTop = saved;
+                }
+            } catch { /* Scroll restoration is an optional view preference. */ }
+            if (scrollTop === undefined) scrollTop = initialViewMemory.current?.scrollTop;
+        }
+        hasRestoredScroll.current = true;
+        if (scrollTop === undefined || scrollTop === null) {
+            scrollTop = 0;
+        }
+        if (scrollTop !== undefined && scrollTop !== null && Number.isFinite(scrollTop)) track.scrollTop = Math.max(0, scrollTop);
+    }, [ownerKey, view, storyboardScrollStorageKey]);
     const revealShot = (id: string) => {
         setView("shots"); setSearch(""); setSceneFilter(sceneDirectory.scenes.find(scene => scene.shotIds.includes(id))?.id || "__unassigned__"); selectShot(id);
         requestAnimationFrame(() => { const row = chipRefs.current.get(id), track = trackRef.current; if (row && track?.clientHeight) track.scrollTop += row.getBoundingClientRect().top - track.getBoundingClientRect().top - track.clientHeight / 2 + row.clientHeight / 2; row?.focus({ preventScroll: true }); });
@@ -595,14 +677,17 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const clipLabel = (index: number) => t("director.atomic.clipHeading", { number: index + 1 });
     const saveClipPartition = async (shotIds: string[], groups: Array<Record<string, unknown>>) => {
         if (!onRepartitionClips) return false;
+        const invalid = groups.map((group, index) => {
+            const ids = (Array.isArray(group.shot_ids) ? group.shot_ids : []).map(String);
+            return { index, seconds: clipDurationSeconds(ids, shots, fps) };
+        }).filter(item => !Number.isFinite(item.seconds) || item.seconds < 4 || item.seconds > 15);
+        if (invalid.length) {
+            message.error(invalid.map(item => t("director.atomic.clipBoundaryWindow", { clip: item.index + 1, duration: formatSeconds(item.seconds) })).join(" "));
+            return false;
+        }
         try {
             if (await onRepartitionClips(shotIds, groups) === false) return false;
             message.success(t("director.atomic.clipBoundarySaved"));
-            for (const group of groups) {
-                const ids = (Array.isArray(group.shot_ids) ? group.shot_ids : []).map(String), seconds = clipDurationSeconds(ids, shots, fps);
-                const owner = clips.findIndex(item => clipShotIds(item).includes(ids[0]));
-                if (outsideClipWindow(seconds)) message.warning(t("director.atomic.clipBoundaryWindow", { clip: clipLabel(Math.max(0, owner)), duration: formatSeconds(seconds) }));
-            }
             return true;
         } catch (error) { message.error(error instanceof Error ? error.message : String(error)); return false; }
     };
@@ -788,7 +873,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                 {subjectAssembly && onEditShot && <ShotOperations source={{ ...source, shots: operationShots }} busy={busy} onEdit={onEditShot} onSelect={selectShot} />}
             </div>
             {search.trim() && <div className="storyboard-search-status"><span>{t("director.atomic.searchCount", { count: visible.length })}</span><button type="button" onClick={() => setSearch("")}>{t("director.atomic.clearSearch")}</button>{selected && !visible.some(shot => shot.id === selected.id) && <><span>{t("director.atomic.currentOutsideFilter")}</span><button type="button" onClick={() => revealShot(activeId)}>{t("director.atomic.revealCurrent")}</button></>}</div>}
-            <div ref={trackRef} onScroll={event => { if (viewMemory?.current) viewMemory.current.scrollTop = event.currentTarget.scrollTop; }} data-clip-track className="storyboard-shot-list relative" aria-label={t("director.atomic.timeline")}>
+            <div ref={trackRef} onScroll={event => recordStoryboardScroll(event.currentTarget.scrollTop)} data-clip-track className="storyboard-shot-list relative" aria-label={t("director.atomic.timeline")}>
                 {clipEntries.map((entry, position) => { const next = clipEntries[position + 1]; const boundary = next && next.index === entry.index + 1 ? next : undefined;
                                         const clipId = String(entry.group.id), compileState = clipCompileState(clipId), refreshJob = activeRefreshJob(clipId), translationStatus = translationStatusFor(clipId);
                                         const translationColor = translationStatus === "failed" || translationStatus === "writeFailed" ? "red"

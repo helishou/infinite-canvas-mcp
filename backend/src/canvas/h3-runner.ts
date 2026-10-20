@@ -331,6 +331,7 @@ export class CanvasH3Runner {
 
     resume(task: RuntimeTask) {
         if (task.kind === "canvas-h3-run" && task.status === "awaiting_confirmation") {
+            this.runningHub.queue.holdForConfirmation?.(task.id);
             this.projectAwaiting(task);
             return task;
         }
@@ -392,9 +393,13 @@ export class CanvasH3Runner {
         if (!updated) throw new Error("H3 决议已被其他请求处理，请刷新任务");
         this.publish(updated, "task.updated");
         if (request.action === "discard") {
+            this.runningHub.queue.releaseConfirmationHold?.(id);
             this.restorePrevious(input.projectId, pending, true);
             this.finishParentNode(updated, "cancelled");
-        } else void this.execute(updated).catch((error) => this.fail(id, error));
+        } else {
+            if (request.action === "keep_first_pass") this.runningHub.queue.releaseConfirmationHold?.(id);
+            void this.execute(updated).catch((error) => this.fail(id, error));
+        }
         return this.stores.tasks.get(id)!;
     }
 
@@ -731,6 +736,7 @@ export class CanvasH3Runner {
                 if (secondPass && child.status !== "succeeded") {
                     const restored = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "awaiting_confirmation", error: child.error || "二采失败，可以重试或保留一采", result: { ...recordOf(task.result), phase: "awaiting_confirmation", confirmation: { ...confirmation, inFlight: undefined, revision: confirmation.revision + 1 } } }, { type: "h3_second_pass_failed", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: child.id, error: child.error || "" } });
                     if (!restored) throw new Error("H3 二采失败状态冲突");
+                    this.runningHub.queue.holdForConfirmation?.(task.id);
                     this.projectAwaiting(restored);
                     this.publish(restored, "task.updated");
                     return;
@@ -754,6 +760,7 @@ export class CanvasH3Runner {
                     const waiting: PendingH3 = { nodeId: plan.nodeId, segmentId: plan.segmentId, firstPassFingerprint: cache.fingerprint, firstPassResult: String(output.url || ""), firstPassStorageKey: String(output.storageKey || ""), firstPassChildTaskId: child.id, previousOutput: snapshot };
                     task = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "awaiting_confirmation", progress: Math.min(0.99, (planIndex + 0.5) / plans.length), result: { ...recordOf(task.result), phase: "awaiting_confirmation", confirmation: { ...confirmation, pending: [waiting], cursor: planIndex, prepared: undefined, revision: confirmation.revision + 1 }, media: completedOutput() } }, { type: "first_pass_ready", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: child.id, fingerprint: cache.fingerprint, output } })!;
                     if (!task) throw new Error("H3 一采暂停状态冲突");
+                    this.runningHub.queue.holdForConfirmation?.(task.id);
                     this.projectAwaiting(task);
                     this.publish(task, "task.updated");
                     return;
@@ -774,6 +781,7 @@ export class CanvasH3Runner {
             this.currentChildren.delete(initial.id);
             this.executing.delete(initial.id);
             const latest = this.stores.tasks.get(initial.id);
+            if (latest?.status !== "awaiting_confirmation") this.runningHub.queue.releaseConfirmationHold?.(initial.id);
             if (latest?.status === "running" && ["second_pass", "remaining"].includes(String(latest.result?.phase || "")) && latest.updatedAt !== initial.updatedAt && confirmationOf(latest).pending.length) {
                 // 决议与上一轮执行退出竞态：上一轮释放互斥后再次唤醒。
                 queueMicrotask(() => void this.execute(latest).catch((error) => this.fail(latest.id, error)));

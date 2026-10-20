@@ -210,13 +210,22 @@ export function resolveSubjectPictureBindingIds(subjectValue: unknown, usageValu
             ...mismatched.map(binding => "图片绑定 " + String(binding.id) + " 的适用状态与本镜状态要求冲突"),
         ] };
     }
-    if (usage.presentation !== "visible") return { bindingIds: [] as string[], issues: [] as string[] };
-    if (subject.entityRef?.kind === "scene") return { bindingIds: [] as string[], issues: [] as string[] };
     const purposes = [...new Set((Array.isArray(usage.referencePurpose) && usage.referencePurpose.length ? usage.referencePurpose : ["identity"]).map(String))];
+    if (usage.presentation !== "visible") return { bindingIds: [] as string[], issues: [] as string[] };
+    // Visible scene Subjects may inherit their matching environment default.
+    // State-context usages remain explicit-only via the visibility check above.
+    if (subject.entityRef?.kind === "scene" && !purposes.includes("environment")) return { bindingIds: [] as string[], issues: [] as string[] };
+    // Older prop bindings were authored as identity. Keep them usable until a Subject has
+    // purpose-specific prop bindings, while new prop bindings use the explicit prop purpose.
+    const isPropSubject = subject.kind === "prop" || subject.entityRef?.kind === "asset";
+    const legacyPropBindings = isPropSubject && !bindings.some(binding => Array.isArray(binding.provides) && binding.provides.map(String).includes("prop"));
     const selected: string[] = [], issues: string[] = [];
     for (const purpose of purposes) {
-        const eligible = bindings.filter(binding => Array.isArray(binding.provides) && binding.provides.map(String).includes(purpose) && applicable(binding));
-        const matches = eligible.filter(binding => Array.isArray(binding.defaultFor) && binding.defaultFor.map(String).includes(purpose));
+        const eligible = bindings.filter(binding => Array.isArray(binding.provides)
+            && (binding.provides.map(String).includes(purpose) || purpose === "prop" && legacyPropBindings && binding.provides.map(String).includes("identity"))
+            && applicable(binding));
+        const matches = eligible.filter(binding => Array.isArray(binding.defaultFor)
+            && (binding.defaultFor.map(String).includes(purpose) || purpose === "prop" && legacyPropBindings && binding.defaultFor.map(String).includes("identity")));
         const fixedResults = eligible.filter(binding => binding.selection?.mode === "selected_result");
         if (matches.length === 1) selected.push(String(matches[0].id));
         else if (matches.length > 1) issues.push(purpose + " 默认图片绑定有歧义：" + matches.map(binding => binding.id).join(", "));
@@ -713,7 +722,7 @@ export const directorRunStartSchema = z.object({ runId: id, idempotencyKey: id, 
 export const directorRunControlSchema = z.object({ runId: id }).strict();
 export const productionContractQuerySchema = z.object({
     runtimeId: id.optional().describe("Deprecated: accepted for compatibility; the contract always uses the locally active Acheng runtime."),
-    operationType: id.optional().describe("只接受 contract.operations[].type 中的精确操作标识；edit/publish/compile/generate 属于 contract.requests，不是 operationType。提供时默认只返回该操作的 schema、示例、前置条件和引擎身份。"),
+    operationType: id.optional().describe("只接受 contract.operations[].type 中的精确操作标识；edit/publish/compile/generate 属于 contract.requests，不是 operationType。提供时默认只返回该操作的 schema、示例、前置条件和引擎身份；省略所有范围参数时仅返回查询指南。"),
     moduleId: z.enum(directorModules).optional().describe("按需读取单个模块的专属说明文件。"),
     includeRequests: z.boolean().optional().describe("operationType 已提供时，额外包含 edit/publish/compile/generate 请求 schema。"),
     includePatchFields: z.boolean().optional().describe("operationType 已提供时，额外包含完整 patchFields allowlist。"),
@@ -741,7 +750,17 @@ export const productionPreflightRequestSchema: z.ZodType<ProductionPreflightRequ
 ]);
 export type ProductionNextAction = { action: "correct_source" | "refresh" | "configure" | "read_run" | "review" | "wait"; message: string; tool?: string; input?: Record<string, unknown> };
 export type ProductionBlockingAction = "edit" | "compile" | "apply" | "publish" | "generate";
-export type ProductionDiagnostic = { code: string; path: string; targetId?: string; shotId?: string; origin?: "source" | "compiler"; matchedText?: string; blockingActions?: ProductionBlockingAction[]; blocksCompilation?: boolean; message: string; severity: "error" | "warning" | "unverified"; example?: unknown; blockingRun?: { runId: string; status: string; taskIds: string[] }; nextAction?: ProductionNextAction };
+export type ProductionDiagnosticDetails = {
+    stage?: "source_resolution" | "adoption_validation" | "projection_validation" | "media_validation";
+    reason?: string;
+    sourceProjectId?: string;
+    sourceNodeId?: string;
+    productionProjectId?: string;
+    productionNodeId?: string;
+    expectedSourceProjectId?: string;
+    expectedSourceNodeId?: string;
+};
+export type ProductionDiagnostic = { code: string; path: string; targetId?: string; shotId?: string; origin?: "source" | "compiler"; matchedText?: string; blockingActions?: ProductionBlockingAction[]; blocksCompilation?: boolean; message: string; severity: "error" | "warning" | "unverified"; example?: unknown; details?: ProductionDiagnosticDetails; blockingRun?: { runId: string; status: string; taskIds: string[] }; nextAction?: ProductionNextAction };
 export const diagnosticBlocksAction = (diagnostic: ProductionDiagnostic, action: ProductionBlockingAction) =>
     diagnostic.blockingActions ? diagnostic.blockingActions.includes(action) : diagnostic.severity === "error" && (action !== "compile" || diagnostic.blocksCompilation !== false);
 export type ProductionPreflight = { readyTargets?: string[]; blockedTargets?: Array<{ targetId: string; code: string; message: string }>; warnings?: Array<{ targetId: string; code: string; message: string }>; planHash?: string; canvasRevision?: number; valid: boolean; contractVersion: string; engine: DirectorProduction["engine"] | null; revision: number | null; diagnostics: ProductionDiagnostic[]; generationReady: boolean; compileReady?: boolean; replayed?: boolean; nextActions?: ProductionNextAction[] };

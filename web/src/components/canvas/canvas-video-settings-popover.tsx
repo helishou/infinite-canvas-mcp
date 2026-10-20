@@ -4,11 +4,13 @@ import { CanvasSettingsContext } from "./canvas-settings-context";
 import { canvasSettingsPosition } from "./canvas-settings-position";
 import { Settings2 } from "lucide-react";
 import { Button } from "antd";
+import { fetchWorkflowDetail, isWorkflowAudioField, isWorkflowImageField, isWorkflowVideoField, type WorkflowDetail } from "@/services/api/workflows";
 
 import { VideoSettingsPanel, videoResolutionLabel, videoSecondsLabel, videoSizeLabel } from "@/components/video-settings-panel";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
-import type { AiConfig } from "@/stores/use-config-store";
+import { reconcileWorkflowParams } from "@/lib/canvas/canvas-workflow-params";
+import { resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, type AiConfig } from "@/stores/use-config-store";
 
 type CanvasVideoSettingsPopoverProps = {
     config: AiConfig;
@@ -16,15 +18,26 @@ type CanvasVideoSettingsPopoverProps = {
     onConfigChange: (key: keyof AiConfig, value: string) => void;
     buttonClassName?: string;
     placement?: "topLeft" | "top" | "topRight" | "bottomLeft" | "bottom" | "bottomRight";
+    comfyParams?: Record<string, unknown>;
+    onComfyParamsChange?: (value: Record<string, unknown>) => void;
+    referenceCount?: number;
 };
 
-export function CanvasVideoSettingsPopover({ config, targetLabel, onConfigChange, buttonClassName, placement = "topLeft" }: CanvasVideoSettingsPopoverProps) {
+export function CanvasVideoSettingsPopover({ config, targetLabel, onConfigChange, buttonClassName, placement = "topLeft", comfyParams, onComfyParamsChange, referenceCount = 0 }: CanvasVideoSettingsPopoverProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const buttonRef = useRef<HTMLSpanElement>(null);
     const panelRef = useRef<HTMLDivElement>(null);
     const [open, setOpen] = useState(false);
     useCanvasTransientEscape(open, () => setOpen(false));
     const [buttonRect, setButtonRect] = useState<DOMRect | null>(null);
+    const [workflowDetail, setWorkflowDetail] = useState<WorkflowDetail | null>(null);
+    const comfyParamsRef = useRef(comfyParams);
+    const onComfyParamsChangeRef = useRef(onComfyParamsChange);
+    const appliedWorkflowRef = useRef("");
+    comfyParamsRef.current = comfyParams;
+    onComfyParamsChangeRef.current = onComfyParamsChange;
+    const channel = resolveModelChannel(config, config.model);
+    const workflowName = channel.kind === "comfyui" ? resolveModelWorkflow(config, config.model, referenceCount) : "";
 
     useEffect(() => {
         if (!open) return;
@@ -48,7 +61,50 @@ export function CanvasVideoSettingsPopover({ config, targetLabel, onConfigChange
         };
     }, [open]);
 
-    const panel = open && buttonRect ? <VideoSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} targetLabel={targetLabel} config={config} onConfigChange={onConfigChange} /> : null;
+    useEffect(() => {
+        if (!workflowName) {
+            setWorkflowDetail(null);
+            return;
+        }
+        let cancelled = false;
+        fetchWorkflowDetail(workflowName).then((detail) => {
+            if (!cancelled) setWorkflowDetail(detail);
+        }).catch(() => {
+            if (!cancelled) setWorkflowDetail(null);
+        });
+        return () => { cancelled = true; };
+    }, [workflowName]);
+
+    const customFields = (workflowDetail?.config?.fields || []).filter((field) =>
+        !isWorkflowImageField(field, workflowDetail?.workflow)
+        && !isWorkflowVideoField(field, workflowDetail?.workflow)
+        && !isWorkflowAudioField(field, workflowDetail?.workflow)
+        && !field.isPrompt,
+    );
+
+    useEffect(() => {
+        if (!workflowDetail || workflowDetail.name !== workflowName || !onComfyParamsChange) return;
+        const signature = `${config.model}::${workflowName}`;
+        const workflowChanged = Boolean(appliedWorkflowRef.current && appliedWorkflowRef.current !== signature);
+        appliedWorkflowRef.current = signature;
+        const routedParams = resolveModelWorkflowParams(config, config.model, referenceCount);
+        const currentParams = comfyParamsRef.current;
+        const next = reconcileWorkflowParams(currentParams, customFields, routedParams, workflowChanged);
+        if (next && next !== currentParams) {
+            comfyParamsRef.current = next;
+            onComfyParamsChange(next);
+        }
+    }, [comfyParams, config, customFields, onComfyParamsChange, referenceCount, workflowDetail, workflowName]);
+
+    const panel = open && buttonRect ? <VideoSettingsPortal
+        buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} targetLabel={targetLabel}
+        config={config} onConfigChange={onConfigChange} customFields={customFields} customFieldValues={comfyParams}
+        onCustomFieldChange={onComfyParamsChange ? (id, value) => {
+            const next = { ...(comfyParamsRef.current || {}), [id]: value };
+            comfyParamsRef.current = next;
+            onComfyParamsChange(next);
+        } : undefined}
+    /> : null;
 
     return (
         <>
@@ -72,6 +128,9 @@ function VideoSettingsPortal({
     targetLabel,
     config,
     onConfigChange,
+    customFields,
+    customFieldValues,
+    onCustomFieldChange,
 }: {
     buttonRect: DOMRect;
     panelRef: RefObject<HTMLDivElement | null>;
@@ -80,6 +139,9 @@ function VideoSettingsPortal({
     config: AiConfig;
     targetLabel?: string;
     onConfigChange: (key: keyof AiConfig, value: string) => void;
+    customFields: NonNullable<Parameters<typeof VideoSettingsPanel>[0]["customFields"]>;
+    customFieldValues?: Record<string, unknown>;
+    onCustomFieldChange?: (id: string, value: unknown) => void;
 }) {
     const style = {
         position: "fixed",
@@ -106,6 +168,6 @@ function VideoSettingsPortal({
             onClick={(event) => event.stopPropagation()}
         >
             <CanvasSettingsContext targetLabel={targetLabel} />
-            <VideoSettingsPanel config={config} onConfigChange={(key, value) => onConfigChange(key, value)} theme={theme} className="space-y-4" />
+            <VideoSettingsPanel config={config} onConfigChange={(key, value) => onConfigChange(key, value)} theme={theme} className="space-y-4" customFields={customFields} customFieldValues={customFieldValues} onCustomFieldChange={onCustomFieldChange} />
         </div></CanvasPortal>;
 }

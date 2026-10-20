@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { compilationArtifactFreshness } from "@basketikun/canvas-agent/drama/compilation-scope";
 import fs from "node:fs";
-import { canonicalProduction, type DirectorProduction, type EpisodeProductionData } from "@basketikun/canvas-agent/drama/production-contract";
+import { canonicalProduction, productionSceneEntries, type DirectorProduction, type EpisodeProductionData } from "@basketikun/canvas-agent/drama/production-contract";
 import type { BackendDatabase } from "../db.js";
 import { resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
 import { resolveAchengEngine } from "@basketikun/canvas-agent/skills/acheng";
@@ -86,11 +86,42 @@ export function projectDirector(data: EpisodeProductionData, validate = true) {
     // `clipGroups`/`shots`/`scenes` projection is derived and never persisted, so a
     // projection rebuilt from storage (shared-asset propagation, recovery) must not
     // assume the previous projection exists.
-    const prior = new Map(list(data.clipGroups).map(g => [g.id, g]));
+    const priorGroups = list(data.clipGroups);
+    const prior = new Map(priorGroups.map(g => [g.id, g]));
     const shotIds = new Set(shots.map(s => String(s.id)));
-    data.clipGroups = list(source.segments).filter(s => Array.isArray(s.shot_ids) && s.shot_ids.length && s.shot_ids.every((id: unknown) => shotIds.has(String(id))))
-        .map(s => ({ id: String(s.id), shotIds: s.shot_ids.map(String), nodeId: prior.get(String(s.id))?.nodeId || null, segmentId: prior.get(String(s.id))?.segmentId || null, sourceVersion: prior.get(String(s.id))?.sourceVersion || 0,
-            ...(prior.get(String(s.id))?.inputOutdated === undefined ? {} : { inputOutdated: prior.get(String(s.id))!.inputOutdated }) }));
+    const sceneForShot = new Map(productionSceneEntries(source).flatMap(scene => scene.shotIds.map(id => [String(id), scene.id] as const)));
+    const sceneScope = (ids: unknown) => [...new Set((Array.isArray(ids) ? ids : []).map(String).map(id => sceneForShot.get(id) || ""))].sort();
+    const validSegments = list(source.segments).filter(s => Array.isArray(s.shot_ids) && s.shot_ids.length && s.shot_ids.every((id: unknown) => shotIds.has(String(id))));
+    // A boundary adjustment changes source segment IDs. Keep each prior runtime
+    // H3 row attached to the new group with the largest shot overlap so compile
+    // updates that row in place instead of appending a replacement beside a
+    // manually edited orphan. One-to-one matching means a split still creates
+    // the genuinely new H3 row, while a two-Clip repartition stays two rows.
+    const claimedPrior = new Set<string>();
+    for (const segment of validSegments) if (prior.has(String(segment.id))) claimedPrior.add(String(segment.id));
+    const overlapCandidates = validSegments.flatMap(segment => {
+        const nextId = String(segment.id), nextShots = new Set(segment.shot_ids.map(String));
+        if (prior.has(nextId)) return [];
+        const nextScenes = sceneScope(segment.shot_ids);
+        return priorGroups.flatMap(old => {
+            const oldId = String(old.id);
+            if (!old.nodeId || !old.segmentId || claimedPrior.has(oldId)) return [];
+            if (canonicalProduction(sceneScope(old.shotIds)) !== canonicalProduction(nextScenes)) return [];
+            const overlap = Array.isArray(old.shotIds) ? old.shotIds.filter((id: unknown) => nextShots.has(String(id))).length : 0;
+            return overlap ? [{ nextId, oldId, overlap }] : [];
+        });
+    }).sort((a, b) => b.overlap - a.overlap || a.oldId.localeCompare(b.oldId) || a.nextId.localeCompare(b.nextId));
+    const runtimeSourceBySegment = new Map<string, Record<string, any>>();
+    for (const candidate of overlapCandidates) {
+        if (runtimeSourceBySegment.has(candidate.nextId) || claimedPrior.has(candidate.oldId)) continue;
+        runtimeSourceBySegment.set(candidate.nextId, prior.get(candidate.oldId)!);
+        claimedPrior.add(candidate.oldId);
+    }
+    data.clipGroups = validSegments.map(s => {
+        const id = String(s.id), old = prior.get(id) || runtimeSourceBySegment.get(id);
+        return { id, shotIds: s.shot_ids.map(String), nodeId: old?.nodeId || null, segmentId: old?.segmentId || null, sourceVersion: old?.sourceVersion || 0,
+            ...(old?.inputOutdated === undefined ? {} : { inputOutdated: old.inputOutdated }) };
+    });
     if (!validate) return;
     if (new Set(d.artifacts.map(a => `${a.kind}:${a.targetId}`)).size !== d.artifacts.length) throw new Error("同一目标只能有一个当前编译产物");
     for (const artifact of d.artifacts) {

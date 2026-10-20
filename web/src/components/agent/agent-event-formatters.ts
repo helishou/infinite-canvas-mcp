@@ -54,6 +54,7 @@ export type AgentEventItem = {
     path?: unknown;
     savedPath?: unknown;
     revisedPrompt?: unknown;
+    toolCharacters?: { input?: number; output?: number };
 };
 export type AgentUserDetail = { kind: string; status: string; compilationStatus?: string; rows?: Array<{ label: string; value: string }>; output?: string; files?: Array<{ path: string; action?: string }>; tasks?: Array<{ step: string; status: string }>; explanation?: string };
 
@@ -73,7 +74,7 @@ export function formatAgentEvent(event: AgentEventPayload): Omit<AgentChatItem, 
     return null;
 }
 
-export function formatAgentActivity(event: AgentEventPayload, usage?: AgentTokenUsage | null): Omit<AgentChatItem, "id"> | null {
+export function formatAgentActivity(event: AgentEventPayload): Omit<AgentChatItem, "id"> | null {
     const item = event.item;
     if (!item || (event.type !== "item.started" && event.type !== "item.completed")) return null;
     const completed = event.type === "item.completed";
@@ -110,7 +111,7 @@ export function formatAgentActivity(event: AgentEventPayload, usage?: AgentToken
     if (isMcpToolItem(item)) {
         const name = String(item.tool || "");
         const failure = toolResultFailure(item);
-        return { role: "tool", title: compilationToolView(item) ? tr(compilationToolView(item)!.titleKey) : toolName(name), text: completed ? toolSummary(item) : tr("toolRunning", { action: toolAction(name) }), detail: { ...toolDetail(item, failure.failed ? "failed" : itemStatus), ...(usage ? { usage } : {}) } };
+        return { role: "tool", title: compilationToolView(item) ? tr(compilationToolView(item)!.titleKey) : toolName(name), text: completed ? toolSummary(item) : tr("toolRunning", { action: toolAction(name) }), detail: { ...toolDetail(item, failure.failed ? "failed" : itemStatus), ...(item.toolCharacters ? { toolCharacters: item.toolCharacters } : {}) } };
     }
     if (item.type === "dynamic_tool_call") {
         const name = String(item.tool || "");
@@ -333,7 +334,7 @@ export function toolName(name: string) {
 const toolTranslationKeys: Record<string, string> = {
     director_subagent: "subagentTasks",
     production_preflight: "productionPreflight", production_get: "productionRead", production_get_source: "productionRead", production_get_version_source: "productionVersion", production_get_artifact_index: "productionRead", production_get_version_artifact_index: "productionVersion", production_get_artifact: "productionRead", production_get_version_artifact: "productionVersion", production_get_workbench: "productionRead", production_get_readiness: "productionReadiness", production_start_run: "productionStart", production_get_batch: "productionBatch", production_pause_run: "productionPause", production_resume_run: "productionResume", production_list_versions: "productionVersions", production_get_version: "productionVersion", production_preview_impact: "productionImpact", production_edit: "productionEdit", production_publish: "productionPublish", production_restore: "productionRestore", production_sync_clips: "productionSync", production_get_run: "productionRun", production_export_markdown: "productionExport",
-    canvas_apply_ops: "canvasOps", canvas_get_state: "readCanvas", canvas_get_selection: "readSelection", canvas_export_snapshot: "exportSnapshot", canvas_create_node: "createSmartNode", canvas_create_config_node: "createSmartNode", canvas_create_image_prompt_flow: "createImageFlow", canvas_create_generation_flow: "createGenerationFlow", canvas_generate_text: "generateText", canvas_generate_image: "generateImage", canvas_generate_video: "generateVideo", canvas_generate_audio: "generateAudio", canvas_update_node: "updateNode", canvas_update_node_text: "updateText", canvas_move_nodes: "moveNodes", canvas_resize_node: "resizeNode", canvas_delete_nodes: "deleteNodes", canvas_connect_nodes: "connectNodes", canvas_set_generation_references: "setGenerationReferences", canvas_select_nodes: "selectNodes", canvas_run_generation: "runGeneration", site_navigate: "openPage",
+    canvas_apply_ops: "canvasOps", canvas_get_state: "readCanvas", canvas_get_selection: "readSelection", canvas_export_snapshot: "exportSnapshot", canvas_create_node: "createSmartNode", canvas_create_config_node: "createSmartNode", canvas_create_image_prompt_flow: "createImageFlow", canvas_create_generation_flow: "createGenerationFlow", canvas_generate_text: "generateText", canvas_generate_image: "generateImage", canvas_generate_video: "generateVideo", canvas_generate_audio: "generateAudio", canvas_update_node: "updateNode", canvas_update_node_text: "updateText", canvas_move_nodes: "moveNodes", canvas_resize_node: "resizeNode", canvas_delete_nodes: "deleteNodes", canvas_connect_nodes: "connectNodes", canvas_set_generation_references: "setGenerationReferences", canvas_select_nodes: "selectNodes", canvas_run_generation: "runGeneration", mcp_get_command_receipt: "getCommandReceipt", site_navigate: "openPage",
 };
 
 function siteToolSummary(name: string, result: unknown, input: unknown) {

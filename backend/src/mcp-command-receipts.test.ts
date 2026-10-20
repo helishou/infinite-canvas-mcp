@@ -75,6 +75,22 @@ test("prepared and committed MCP receipt survives Backend database reopen", () =
   }
 });
 
+test("prepared translation commands retain restart state and can be selected without scanning committed receipts", () => {
+  const db = new BackendDatabase(":memory:");
+  try {
+    db.createCanvasProject({ id: "canvas-1", title: "Translation fixture", nodes: [], connections: [], revision: 0, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" });
+    const request = { kind: "episode", id: "episode-1", expectedRevision: 4, targetIds: ["SEG1"] };
+    db.prepareMcpCommand({ operationId: "translation-pending", tool: "production_translate_compiled_prompts", targetId: "episode-1", projectId: "canvas-1",
+      request, payload: { stage: "translate", resumeRequest: request }, receipt: { translationStatus: "translating" } });
+    db.prepareMcpCommand({ operationId: "other-pending", tool: "assets_upsert_batch", targetId: "asset-library", request: {}, payload: {}, receipt: {} });
+    assert.deepEqual(db.listPreparedMcpCommands("production_translate_compiled_prompts").map(command => command.operationId), ["translation-pending"]);
+    assert.equal(db.listPreparedMcpCommands("production_translate_compiled_prompts")[0].projectId, "canvas-1");
+    db.updatePreparedMcpCommandReceipt("translation-pending", { translationStatus: "retry_required", lastError: "resume after restart" });
+    assert.deepEqual(db.getMcpCommandReceipt("translation-pending")?.receipt, { translationStatus: "retry_required", lastError: "resume after restart" });
+    assert.deepEqual(db.getMcpCommandReceipt("translation-pending")?.payload?.resumeRequest, request);
+  } finally { db.close(); }
+});
+
 test("v20 database applies MCP receipts and subsequent migrations with one verified backup", t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-command-migration-"));
   const file = path.join(directory, "runtime.sqlite");

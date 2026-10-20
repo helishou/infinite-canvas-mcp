@@ -9,13 +9,15 @@ export const productionReadSchema = z.object({
     pageSize: z.coerce.number().int().positive().optional(),
     cursor: z.string().optional(),
     chunkBytes: z.coerce.number().int().positive().optional(),
+    includeContext: z.preprocess(value => value === "true" ? true : value === "false" ? false : value, z.boolean().optional()),
+    includeRuntime: z.preprocess(value => value === "true" ? true : value === "false" ? false : value, z.boolean().optional()),
     ifRevision: z.coerce.number().int().nonnegative().optional().describe("仅当已完整持有同一对象、snapshot、view 和筛选范围的数据时传其读取 revision；相同则返回 unchanged 短确认。分页续读 cursor 不使用此参数。写回执 revision 不能替代已读内容的版本。"),
 });
 export function productionReadQuery(raw: unknown) {
     const input = productionReadSchema.parse(raw);
     const query = new URLSearchParams({ view: input.view, snapshot: input.snapshot });
     if (input.targetIds) query.set("targetIds", input.targetIds.join(","));
-    for (const key of ["sourceSection", "pageSize", "cursor", "chunkBytes", "ifRevision"] as const) if (input[key] !== undefined) query.set(key, String(input[key]));
+    for (const key of ["sourceSection", "pageSize", "cursor", "chunkBytes", "includeContext", "includeRuntime", "ifRevision"] as const) if (input[key] !== undefined) query.set(key, String(input[key]));
     return `?${query}`;
 }
 
@@ -28,7 +30,7 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
     const selected = production[input.snapshot];
     if (input.snapshot === "published" && selected?.director && !subjectPromptV2(selected.director.source)) throw new Error("UNSUPPORTED_PRODUCTION_FORMAT: 历史发布稿是旧版 Director 格式，只能通过维护命令检查；当前 v2 草稿仍可继续编辑。");
     const d = selected?.director;
-    const selection = JSON.stringify({ owner: production.episodeId, snapshot: input.snapshot, revision: production.revision, versionHash: production.versionHash, workbenchVersion: production.workbenchVersion, sourceHash: d?.sourceHash, view: input.view, targetIds: input.targetIds, section: input.sourceSection, chunkBytes: input.chunkBytes });
+    const selection = JSON.stringify({ owner: production.episodeId, snapshot: input.snapshot, revision: production.revision, versionHash: production.versionHash, workbenchVersion: production.workbenchVersion, sourceHash: d?.sourceHash, view: input.view, targetIds: input.targetIds, section: input.sourceSection, chunkBytes: input.chunkBytes, includeContext: input.includeContext, includeRuntime: input.includeRuntime });
     let offset = 0;
     if (input.cursor) {
         let cursor: any;
@@ -62,8 +64,15 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
         const workbench = input.view === "subject_workbench" ? production.subjectWorkbench
             : input.view === "shot_workbench" ? production.shotWorkbench : production.clipWorkbench;
         if (!workbench) throw new Error("CLIP_WORKBENCH_UNAVAILABLE: use the live production read endpoint");
+        const selectedWorkbench = input.view === "subject_workbench" || (input.includeContext && input.includeRuntime)
+            ? workbench
+            : Object.fromEntries(Object.entries(workbench).filter(([key]) => {
+                if (key === "context") return input.includeContext === true;
+                if (key === "runtime") return input.includeRuntime === true;
+                return true;
+            }));
         return { ...header, snapshot: input.snapshot, sourceHash: d?.sourceHash, workbenchVersion: production.workbenchVersion,
-            ...(input.chunkBytes ? { chunk: chunk(JSON.stringify(workbench)) } : { workbench }) };
+            ...(input.chunkBytes ? { chunk: chunk(JSON.stringify(selectedWorkbench)) } : { workbench: selectedWorkbench }) };
     }
     const selectedArtifacts = (d?.artifacts || []).filter((a: any) => !input.targetIds || input.targetIds.includes(a.targetId));
     if (input.view === "source") {
@@ -175,6 +184,14 @@ export function productionWriteReceipt(result: any, context: { tool?: string; in
     const syncReceipt = p.syncReceipt || result.syncReceipt;
     const sync = Array.isArray(p.referenceSync) ? p.referenceSync : [];
     const clipRefreshJobs = Array.isArray(p.clipRefreshes) ? p.clipRefreshes : p.clipRefresh ? [p.clipRefresh] : [];
+    const utteranceWriteChecks = (Array.isArray(input.ops) ? input.ops : []).flatMap((operation: any) => operation?.type === "set_director_shot_utterances"
+        ? (Array.isArray(operation.utterances) ? operation.utterances : []).flatMap((utterance: any) => {
+            if (!utterance?.utteranceId || !Object.hasOwn(utterance, "delivery")) return [];
+            const saved = (Array.isArray(p.draft?.director?.source?.utterances) ? p.draft.director.source.utterances : [])
+                .find((row: any) => String(row.id || "") === String(utterance.utteranceId));
+            return [{ path: `utterances.${utterance.utteranceId}.delivery`, status: saved && saved.delivery === utterance.delivery ? "verified" : "mismatch" }];
+        })
+        : []);
     const clipRefreshes = clipRefreshJobs.map((job: any) => ({
         operationId: job.operationId, status: job.status, segmentId: job.segmentId, savedRevision: job.savedRevision,
         compilationOperationId: job.compilationOperationId, selectedTargets: job.selectedTargets, affectedTargets: job.affectedTargets,
@@ -182,6 +199,14 @@ export function productionWriteReceipt(result: any, context: { tool?: string; in
         referenceSync: Array.isArray(job.application?.referenceSync) ? job.application.referenceSync.map((item: any) => ({ targetId: item.targetId, status: item.status, diagnostics: item.diagnostics })) : [],
         mediaSubmitted: false,
     }));
+    const clipRefreshSummary = clipRefreshes.length ? {
+        sourceSaved: true, targetCount: clipRefreshes.length, targetIds: clipRefreshes.map((job: any) => job.segmentId),
+        ready: clipRefreshes.filter((job: any) => job.status === "succeeded").length,
+        running: clipRefreshes.filter((job: any) => ["queued", "checking", "compiling", "applying"].includes(job.status)).length,
+        blocked: clipRefreshes.filter((job: any) => job.status === "blocked").length,
+        failed: clipRefreshes.filter((job: any) => ["failed", "interrupted"].includes(job.status)).length,
+        mediaSubmitted: false,
+    } : undefined;
     const syncIssues = sync.flatMap((item: any) => {
         const diagnostics = Array.isArray(item.diagnostics) ? item.diagnostics : [];
         const relevant = item.status === "blocked" ? diagnostics : diagnostics.filter((diagnostic: any) => String(diagnostic.code || "").includes("CONFLICT"));
@@ -197,8 +222,10 @@ export function productionWriteReceipt(result: any, context: { tool?: string; in
     const readInput = kind === "scene" ? { sceneId: ownerId, view: "summary" } : { kind, id: ownerId };
     return { ...pick(result, ["ok", "replayed", "mediaSubmitted", "mediaAuthorized", "operationId", "workId", "runId", "status", "updated", "created", "reused", "skipped"]),
         ...(clipRefreshes.length ? { sourceSaved: true, clipRefreshes, ...(clipRefreshes.length === 1 ? { clipRefresh: clipRefreshes[0] } : {}), mediaSubmitted: false } : {}),
+        ...(clipRefreshSummary ? { clipRefreshSummary, ...(input.operationId ? { nextAction: { tool: "production_get_compilation", input: { kind, id: ownerId, operationId: input.operationId } } } : {}) } : {}),
         ...pick(input, ["operationId", "sceneId", "projectId", "episodeId"]),
         production: { ...pick(p, ["episodeId", "revision", "publishedVersion", "updatedAt", "replayed"]), sourceHash: p.draft?.director?.sourceHash, engine: p.draft?.director?.engine },
+        ...(utteranceWriteChecks.length ? { writeVerification: { status: utteranceWriteChecks.every((item: any) => item.status === "verified") ? "verified" : "mismatch", fields: utteranceWriteChecks } } : {}),
         ...(result.canvas ? { canvas: { ...pick(result.canvas, ["id", "projectId", "revision"]), nodeCount: count(result.canvas.nodes), connectionCount: count(result.canvas.connections) } } : {}),
         ...(result.project ? { project: { ...pick(result.project, ["id", "revision", "title"]), nodeCount: count(result.project.nodes), connectionCount: count(result.project.connections) }, context: pick(result.context, ["role", "canvasId", "episodeId", "dramaId", "sceneId", "sharedAssetCanvasId"]) } : {}),
         ...(result.sharedReview ? { sharedReview: { ...pick(result.sharedReview, ["inputHash"]), mediaCount: count(result.sharedReview.media) } } : {}),

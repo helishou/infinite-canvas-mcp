@@ -20,7 +20,7 @@ const cases: Record<string, { input?: Record<string, unknown>; method: string; s
     production_get_source: { input: { sourceSection: "shots" }, method: "GET", suffix: "?view=source&snapshot=draft&sourceSection=shots&pageSize=50" },
     production_get_artifact_index: { method: "GET", suffix: "?view=artifact_index&snapshot=draft&pageSize=50" },
     production_get_artifact: { input: { targetId: "seg/1" }, method: "GET", suffix: "?view=artifacts&snapshot=draft&targetIds=seg%2F1&chunkBytes=32768" },
-    production_get_workbench: { input: { targetId: "seg/1", view: "clip_workbench" }, method: "GET", suffix: "?view=clip_workbench&snapshot=draft&targetIds=seg%2F1" },
+    production_get_workbench: { input: { targetId: "seg/1", view: "clip_workbench" }, method: "GET", suffix: "?view=clip_workbench&snapshot=draft&targetIds=seg%2F1&includeContext=false&includeRuntime=false" },
     production_get_readiness: { method: "GET", suffix: "/readiness" },
     production_start_run: { input: { runId: "r", idempotencyKey: "original", expectedRevision: 2, targets: ["segment:s"], inputBasis: "canvas", expectedCanvasRevision: 7 }, method: "POST", suffix: "/runs" },
     production_get_batch: { input: { runId: "r" }, method: "GET", suffix: "/batches/r" },
@@ -77,4 +77,16 @@ test("current MCP reads preserve Backend nextRead values without alias rewriting
     const result = await executeProductionTool({ get: async () => payload, post: async () => { throw new Error("Unexpected POST"); } }, "production_get", { kind: "episode", id: "e" });
     assert.equal(result, payload);
     assert.deepEqual((result as any).nextRead, { tool: "drama_get_production", input: { episodeId: "e" } });
+});
+
+test("production preflight preserves structured shared-asset binding diagnostics from Backend", async () => {
+    const payload = { ok: true, preflight: { valid: false, diagnostics: [{ code: "SHARED_ASSET_BINDING_INVALID", path: "subject_registry.SUBJECT_ROLE.pictureBindings.binding.sourceNode",
+        message: "图片绑定指向的本地节点没有声明当前共享来源身份", severity: "error", details: { stage: "projection_validation", reason: "binding_projection_identity_mismatch",
+            sourceProjectId: "episode-canvas", sourceNodeId: "wrong-node", productionProjectId: "episode-canvas", productionNodeId: "asset-projection",
+            expectedSourceProjectId: "shared-canvas", expectedSourceNodeId: "shared-role" } }] } };
+    const result = await executeProductionTool({ get: async () => { throw new Error("Unexpected GET"); }, post: async (path) => {
+        assert.equal(path, "/drama/episodes/ep/production/preflight");
+        return payload;
+    } }, "production_preflight", { kind: "episode", id: "ep", action: "compile", request: { expectedRevision: 3 } });
+    assert.equal(result, payload, "the production tool forwards Backend diagnostics without stripping their details");
 });

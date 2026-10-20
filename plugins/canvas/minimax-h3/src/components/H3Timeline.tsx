@@ -109,8 +109,6 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     const rulerInnerRef = useRef<HTMLDivElement | null>(null);
     const pendingScrollIdRef = useRef<string | null>(null);
     const restoredRef = useRef(false);
-    const scrollPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const pendingScrollLeftRef = useRef(0);
     const [storyboardResize, setStoryboardResize] = useState<{ segmentId: string; index: number; leftDuration: number } | null>(null);
     const storyboardResizeRef = useRef<{ segmentId: string; index: number; leftDuration: number; startX: number; startDuration: number; pairDuration: number } | null>(null);
     // 时间轴右键菜单（两种 kind）：
@@ -358,14 +356,9 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         tickPositions.push(Math.round(containerSeconds * 10) / 10);
     }
     const majorTicks = tickPositions.map((t) => ({ time: t, left: t * 100 }));
-    // DOM 滚动实时发生；只在停下后保存个人视图，避免逐帧重渲染整个工作台。
+    // H3LocalView 忽略 timelineScrollLeft 的订阅重渲染；同步记录滚动位置，确保刷新前立刻进入本地视图快照。
     const persistScroll = useCallback((left: number) => {
-        pendingScrollLeftRef.current = left;
-        if (scrollPersistTimerRef.current) clearTimeout(scrollPersistTimerRef.current);
-        scrollPersistTimerRef.current = setTimeout(() => {
-            scrollPersistTimerRef.current = null;
-            ctx.updateMetadata({ timelineScrollLeft: Math.round(pendingScrollLeftRef.current) });
-        }, 180);
+        ctx.updateMetadata({ timelineScrollLeft: Math.round(left) });
     }, [ctx]);
     // 把时间轴滚动到指定 clip：使其右边缘与可见区最右侧对齐（右侧对齐该 clip 最右侧）
     // 整个时间线（Ruler+Video+Refs）共用单一滚动容器，无需跨容器同步
@@ -389,12 +382,12 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     useLayoutEffect(() => {
         // Focus requests are one-shot. Keep the acknowledgment in this window's local view
         // so scrolling the canvas away and remounting the H3 node does not replay an old target.
-        const handledRequest = Number(ctx.node.metadata?.h3TimelineFocusHandled || 0);
+        const handledRequest = Number(ctx.node.metadata?.h3FocusHandled || 0);
         if (!focusRequest || focusRequest <= handledRequest || !selected) return;
         const track = trackScrollRef.current;
         const clip = track && Array.from(track.querySelectorAll<HTMLElement>(".minimax-tl-clip[data-segment-id]")).find(element => element.dataset.segmentId === selected.id);
         if (!track || !clip) return;
-        ctx.updateMetadata({ h3TimelineFocusHandled: focusRequest });
+        ctx.updateMetadata({ h3FocusHandled: focusRequest });
         const left = clip.offsetLeft, right = left + clip.offsetWidth;
         const target = left < track.scrollLeft ? left : right > track.scrollLeft + track.clientWidth ? right - track.clientWidth : track.scrollLeft;
         track.scrollLeft = Math.max(0, target);
@@ -422,7 +415,8 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     useLayoutEffect(() => {
         if (restoredRef.current) return;
         restoredRef.current = true;
-        if (Number(ctx.node.metadata?.h3FocusRequest || 0) > 0) return;
+        if (Number(ctx.node.metadata?.h3FocusRequest || 0) > 0
+            || timelineFocusRequest > Number(ctx.node.metadata?.h3TimelineFocusHandled || 0)) return;
         const left = Number(ctx.node.metadata?.timelineScrollLeft || 0);
         if (left > 0 && trackScrollRef.current) {
             trackScrollRef.current.scrollLeft = left;
@@ -430,12 +424,6 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
             if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${actual}px)`;
         }
     });
-    // 卸载时清理 rAF，避免内存泄漏或已卸载组件的状态更新
-    useEffect(() => {
-        return () => {
-            if (scrollPersistTimerRef.current) clearTimeout(scrollPersistTimerRef.current);
-        };
-    }, []);
     const startRefDrag = (event: React.DragEvent<HTMLDivElement>) => {
         const clip = (event.target as HTMLElement).closest<HTMLElement>(".minimax-ref-clip");
         const grid = clip?.parentElement;

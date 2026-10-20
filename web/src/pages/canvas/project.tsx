@@ -1596,6 +1596,22 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         else createNode(CanvasNodeType.Group);
     }, [createNode, groupSelectedNodes, groupableSelectedCount]);
 
+    const createGroupFromConnection = useCallback((pending: PendingConnectionCreate) => {
+        if (!pending.connection) {
+            const group = createCanvasNode(CanvasNodeType.Group, pending.position);
+            setNodes((prev) => [...prev, group]);
+            setSelectedNodeIds(new Set([group.id]));
+        } else {
+            const sourceNodeId = pending.connection.nodeId;
+            const references = connectionsRef.current.filter((connection) => connection.toNodeId === sourceNodeId).map((connection) => connection.fromNodeId);
+            const memberIds = references.length ? references : [sourceNodeId];
+            applyAgentOps([{ type: "create_group", memberIds }]);
+        }
+        setSelectedConnectionId(null);
+        setPendingConnectionCreate(null);
+        setConnecting(null);
+    }, [applyAgentOps, setConnecting, setNodes, setPendingConnectionCreate, setSelectedConnectionId, setSelectedNodeIds]);
+
     const toggleOrderedGroup = useCallback((groupId: string) => {
         setNodes((prev) => {
             const group = prev.find((item) => item.id === groupId && item.type === CanvasNodeType.Group);
@@ -5760,7 +5776,11 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             if (node.type !== CanvasNodeType.Video && !smartVideo) return null;
             const latest = node.metadata?.loopOutputHistory?.at(-1);
             const storageKey = node.metadata?.storageKey || latest?.storageKey;
-            const url = displayedVideos.get(node.id) || (storageKey ? backendMediaUrl(storageKey) : node.metadata?.content || node.metadata?.url || latest?.content || latest?.url || "");
+            const storedUrl = storageKey ? backendMediaUrl(storageKey) : "";
+            const storedContent = node.metadata?.content || node.metadata?.url || latest?.content || latest?.url || "";
+            // Prefer archived media over the canvas element's currentSrc: that URL may
+            // be a temporary ComfyUI/blob address and can fail in the new compare player.
+            const url = storedUrl || resolveComfyMediaUrl(storedContent || displayedVideos.get(node.id) || "");
             return url ? { id: node.id, title: node.title || t("assets.kinds.video"), url, durationMs: node.metadata?.durationMs || latest?.durationMs, storageKey: storageKey || undefined } : null;
         };
         const source = videoItem(sourceNode);
@@ -6226,7 +6246,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
 
 
 
-                    {pendingConnectionCreate ? <ConnectionCreateMenu pending={pendingConnectionCreate} onCreate={(type) => createConnectedNode(type, pendingConnectionCreate)} onClose={cancelPendingConnectionCreate} /> : null}
+                    {pendingConnectionCreate ? <ConnectionCreateMenu pending={pendingConnectionCreate} onCreate={(type) => type === CanvasNodeType.Group ? createGroupFromConnection(pendingConnectionCreate) : createConnectedNode(type, pendingConnectionCreate)} onClose={cancelPendingConnectionCreate} /> : null}
                     {nodeCreatePosition ? (
                         <NodeCreateMenu
                             position={nodeCreatePosition}

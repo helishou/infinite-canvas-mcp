@@ -265,6 +265,7 @@ export function AgentToolCard({ title, text, detail, theme }: { title: string; t
     if (kind === "command") return <AgentCommandGroup items={[{ id: title, text, detail }]} theme={theme} />;
     const state = toolCardState(title, text, detail);
     const view = userDetail(detail);
+    const characters = toolCharacters(detail);
     const showText = title !== "读取画布" || text !== "已读取当前画布内容";
     const className = "group min-w-0 rounded-xl border px-3 py-2.5 text-left";
     const style = { borderColor: theme.node.stroke, background: "transparent", color: theme.node.text };
@@ -274,7 +275,10 @@ export function AgentToolCard({ title, text, detail, theme }: { title: string; t
                 <span className="shrink-0" style={{ color: state.color }}>{toolIcon(kind, state.icon)}</span>
                 <span className="min-w-0 truncate font-medium">{title}</span>
                 <span className="shrink-0 text-[11px]" style={{ color: state.color }}>{state.label}</span>
-                {toolUsage(detail) ? <span className="ml-auto shrink-0 text-[10px] tabular-nums" style={{ color: theme.node.muted }}>{tr("agent.chat.turnUsage", { input: toolUsage(detail)!.input.toLocaleString(), output: toolUsage(detail)!.output.toLocaleString() })}</span> : null}
+                {characters ? <span className="ml-auto shrink-0 text-[10px] tabular-nums" style={{ color: theme.node.muted }}>{[
+                    typeof characters.input === "number" ? i18n.t("agent.chat.toolInputCharacters", { count: characters.input.toLocaleString() }) : "",
+                    typeof characters.output === "number" ? i18n.t("agent.chat.toolOutputCharacters", { count: characters.output.toLocaleString() }) : "",
+                ].filter(Boolean).join(" · ")}</span> : null}
                 {view ? <ChevronDown className="ml-auto size-3.5 shrink-0 transition-transform group-open:rotate-180" style={{ color: theme.node.muted }} /> : null}
             </div>
             {showText ? (
@@ -293,11 +297,12 @@ export function AgentToolCard({ title, text, detail, theme }: { title: string; t
     );
 }
 
-function toolUsage(detail: unknown): { input: number; output: number } | null {
-    const usage = objectField(detail, "usage");
-    const input = objectField(usage, "input");
-    const output = objectField(usage, "output");
-    return typeof input === "number" && typeof output === "number" ? { input, output } : null;
+function toolCharacters(detail: unknown): { input?: number; output?: number } | null {
+    const counts = objectField(detail, "toolCharacters");
+    const input = objectField(counts, "input");
+    const output = objectField(counts, "output");
+    if (typeof input !== "number" && typeof output !== "number") return null;
+    return { ...(typeof input === "number" ? { input } : {}), ...(typeof output === "number" ? { output } : {}) };
 }
 
 function AgentReasoningSummary({ text, detail, theme }: { text: string; detail?: unknown; theme: (typeof canvasThemes)[keyof typeof canvasThemes] }) {

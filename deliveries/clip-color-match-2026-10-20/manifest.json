@@ -1,0 +1,49 @@
+{
+  "clips": [
+    {
+      "sourceFile": "D:\\Download\\Clip-1 (4).mp4",
+      "title": "Clip 1",
+      "nodeId": "Clip-1"
+    },
+    {
+      "sourceFile": "D:\\Download\\Clip-2 (1).mp4",
+      "title": "Clip 2",
+      "nodeId": "Clip-2"
+    },
+    {
+      "sourceFile": "D:\\Download\\Clip-3.mp4",
+      "title": "Clip 3",
+      "nodeId": "Clip-3"
+    },
+    {
+      "sourceFile": "D:\\Download\\Clip-4.mp4",
+      "title": "Clip 4",
+      "nodeId": "Clip-4"
+    },
+    {
+      "sourceFile": "D:\\Download\\Clip-5 (1).mp4",
+      "title": "Clip 5",
+      "nodeId": "Clip-5"
+    },
+    {
+      "sourceFile": "D:\\Download\\Clip-6.mp4",
+      "title": "Clip 6",
+      "nodeId": "Clip-6"
+    },
+    {
+      "sourceFile": "D:\\Download\\Clip-7.mp4",
+      "title": "Clip 7",
+      "nodeId": "Clip-7"
+    },
+    {
+      "sourceFile": "D:\\Download\\Clip-8.mp4",
+      "title": "Clip 8",
+      "nodeId": "Clip-8"
+    },
+    {
+      "sourceFile": "D:\\Download\\Clip-9.mp4",
+      "title": "Clip 9",
+      "nodeId": "Clip-9"
+    }
+  ]
+}

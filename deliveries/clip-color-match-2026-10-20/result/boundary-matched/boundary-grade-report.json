@@ -1,0 +1,110 @@
+[
+  {
+    "clip": 1,
+    "source": "E:\\无限画布\\Infinite-Canvas-MCP\\deliveries\\clip-color-match-2026-10-20\\result\\source\\01-Clip-1-8d7ecebd.mp4",
+    "output": "E:\\无限画布\\Infinite-Canvas-MCP\\deliveries\\clip-color-match-2026-10-20\\result\\boundary-matched\\Clip-1-boundary-graded.mp4",
+    "reference": "unchanged first clip",
+    "rgbOffset": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "bytes": 7495936
+  },
+  {
+    "clip": 2,
+    "source": "E:\\无限画布\\Infinite-Canvas-MCP\\deliveries\\clip-color-match-2026-10-20\\result\\source\\02-Clip-2-1aeb26f4.mp4",
+    "output": "E:\\无限画布\\Infinite-Canvas-MCP\\deliveries\\clip-color-match-2026-10-20\\result\\boundary-matched\\Clip-2-boundary-graded.mp4",
+    "reference": "previous clip tail",
+    "rgbOffset": [
+      6.66735340852442,
+      6.807434142883849,
+      4.757441055739022
+    ],
+    "bytes": 8687004
+  },
+  {
+    "clip": 3,
+    "source": "E:\\无限画布\\Infinite-Canvas-MCP\\deliveries\\clip-color-match-2026-10-20\\result\\source\\03-Clip-3-bdde0c3f.mp4",
+    "output": "E:\\无限画布\\Infinite-Canvas-MCP\\deliveries\\clip-color-match-2026-10-20\\result\\boundary-matched\\Clip-3-boundary-graded.mp4",
+    "reference": "previous clip tail",
+    "rgbOffset": [
+      3.4472471258100796,
+      2.4065143436876895,
+      1.154908321909275
+    ],
+    "bytes": 6100166
+  },
+  {
+    "clip": 4,
+    "source": "E:\\无限画布\\Infinite-Canvas-MCP\\deliveries\\clip-color-match-2026-10-20\\result\\source\\04-Clip-4-226cbdaf.mp4",
+    "output": "E:\\无限画布\\Infinite-Canvas-MCP\\deliveries\\clip-color-match-2026-10-20\\result\\boundary-matched\\Clip-4-boundary-graded.mp4",
+    "reference": "previous clip tail",
+    "rgbOffset": [
+      3.151411488191677,
+      2.497731415129614,
+      1.3488387376931712
+    ],
+    "bytes": 4406185
+  },
+  {
+    "clip": 5,
+    "source": "E:\\无限画布\\Infinite-Canvas-MCP\\deliveries\\clip-color-match-2026-10-20\\result\\source\\05-Clip-5-e5dcfe74.mp4",
+    "output": "E:\\无限画布\\Infinite-Canvas-MCP\\deliveries\\clip-color-match-2026-10-20\\result\\boundary-matched\\Clip-5-boundary-graded.mp4",
+    "reference": "previous clip tail",
+    "rgbOffset": [
+      5.3923746339107765,
+      4.169531444728321,
+      1.1827135780159637
+    ],
+    "bytes": 9367953
+  },
+  {
+    "clip": 6,
+    "source": "E:\\无限画布\\Infinite-Canvas-MCP\\deliveries\\clip-color-match-2026-10-20\\result\\source\\06-Clip-6-74e469f0.mp4",
+    "output": "E:\\无限画布\\Infinite-Canvas-MCP\\deliveries\\clip-color-match-2026-10-20\\result\\boundary-matched\\Clip-6-boundary-graded.mp4",
+    "reference": "previous clip tail",
+    "rgbOffset": [
+      13.571536367460126,
+      9.482620984702137,
+      8.012263989282147
+    ],
+    "bytes": 7822771
+  },
+  {
+    "clip": 7,
+    "source": "E:\\无限画布\\Infinite-Canvas-MCP\\deliveries\\clip-color-match-2026-10-20\\result\\source\\07-Clip-7-4c9ee9d7.mp4",
+    "output": "E:\\无限画布\\Infinite-Canvas-MCP\\deliveries\\clip-color-match-2026-10-20\\result\\boundary-matched\\Clip-7-boundary-graded.mp4",
+    "reference": "previous clip tail",
+    "rgbOffset": [
+      4.307540269815547,
+      -0.46402637789755374,
+      -3.0195492623691393
+    ],
+    "bytes": 8721852
+  },
+  {
+    "clip": 8,
+    "source": "E:\\无限画布\\Infinite-Canvas-MCP\\deliveries\\clip-color-match-2026-10-20\\result\\source\\08-Clip-8-10940a9a.mp4",
+    "output": "E:\\无限画布\\Infinite-Canvas-MCP\\deliveries\\clip-color-match-2026-10-20\\result\\boundary-matched\\Clip-8-boundary-graded.mp4",
+    "reference": "previous clip tail",
+    "rgbOffset": [
+      -7.41556142120514,
+      -2.009551910674219,
+      1.7880854506792048
+    ],
+    "bytes": 8468040
+  },
+  {
+    "clip": 9,
+    "source": "E:\\无限画布\\Infinite-Canvas-MCP\\deliveries\\clip-color-match-2026-10-20\\result\\source\\09-Clip-9-50f6cb39.mp4",
+    "output": "E:\\无限画布\\Infinite-Canvas-MCP\\deliveries\\clip-color-match-2026-10-20\\result\\boundary-matched\\Clip-9-boundary-graded.mp4",
+    "reference": "previous clip tail",
+    "rgbOffset": [
+      22.554041872247225,
+      22.50592430777536,
+      24.96918792867583
+    ],
+    "bytes": 6548402
+  }
+]

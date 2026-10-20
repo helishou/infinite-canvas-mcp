@@ -13,7 +13,7 @@ const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(valu
 const outputSchema = { type: "object", additionalProperties: false, properties: { status: { type: "string", enum: ["complete", "partial", "needs_human"] }, summary: { type: "string" }, content: { type: "string" }, unresolved: { type: "array", items: { type: "string" } }, cursor: { type: "string" } }, required: ["status", "summary", "content", "unresolved", "cursor"] };
 export class DirectorSubagents {
     private active = new Set<string>();
-    constructor(private stores: Stores, private agents: Pick<ProductionAgentPool, "run">, private events: BackendEventBus, private cwd = process.cwd(), private resolveModel?: (parentThreadId: string, requested?: string) => string | undefined,
+    constructor(private stores: Stores, private agents: Pick<ProductionAgentPool, "run"> & Partial<Pick<ProductionAgentPool, "retainHistory">>, private events: BackendEventBus, private cwd = process.cwd(), private resolveModel?: (parentThreadId: string, requested?: string) => string | undefined,
         private production?: (kind: "episode" | "canvas") => EpisodeProductionService) {}
     private validity(task: RuntimeTask): "current" | "stale" {
         const packet = task.input.workPackage as DirectorWorkPackage | undefined;
@@ -44,6 +44,10 @@ export class DirectorSubagents {
         if (input.action === "list") {
             const limit = Math.min(500, input.limit || 500), offset = input.offset || 0;
             const tasks = this.stores.tasks.list({ kind: DIRECTOR_SUBAGENT_KIND, projectId: input.projectId, parentThreadId: input.parentThreadId, limit, offset });
+            for (const task of tasks) {
+                const threadId = task.result?.workerThreadId;
+                if (typeof threadId === "string") this.agents.retainHistory?.(threadId, String(task.input.title || ""));
+            }
             return { ok: true, tasks: tasks.map(task => this.summary(task)), nextOffset: tasks.length === limit ? offset + tasks.length : null };
         }
         if (input.action === "get") {
@@ -149,7 +153,7 @@ export class DirectorSubagents {
             const loaded = professional ? loadWorkContract(professional) : undefined;
             const runtime = loaded?.runtime;
             this.update(task.id, { status: "running" });
-            const response = await this.agents.run({ workId: `${task.id}:${command}`, cwd: this.cwd, model: input.model as string | undefined, effort: input.effort as ProductionAgentRequest["effort"], review: input.role === "review", schema: outputSchema,
+            const response = await this.agents.run({ workId: `${task.id}:${command}`, cwd: this.cwd, model: input.model as string | undefined, effort: input.effort as ProductionAgentRequest["effort"], review: input.role === "review", historyVisible: true, historyTitle: String(input.title), schema: outputSchema,
                 threadId: task.result?.workerThreadId as string | undefined, turnId: task.result?.workerTurnId as string | undefined, recoverOutput,
                 readRoots: runtime ? [runtime.path] : undefined,
                 prompt: `你是主导演的${input.role}子代理。返回严格 JSON（status、summary、content、unresolved、cursor）。只读专业文件，不写文件、业务数据，不生成、不再委派。必载专业文件已在下文预载，不重复读取；按固定合同执行，其他引用仅按需读取。正式工作包事实与冻结交付模式优先于补充说明和旧入口选择题。complete 返回完整建议，partial 必须给非空 cursor；证据不足返回 needs_human。不猜测审核通过。\n任务：${input.title}\n要求：${input.prompt}\n专业合同：${JSON.stringify(professional || {})}\n正式冻结工作包：${packet ? JSON.stringify(packet) : "unbound；只提供自由建议"}\n补充说明：${input.context}\n续写游标：${task.result?.cursor || "首次"}\n${loaded?.text || ""}`,

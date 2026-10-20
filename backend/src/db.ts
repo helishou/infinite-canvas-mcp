@@ -103,6 +103,7 @@ export type McpCommandReceipt = {
     operationId: string;
     tool: string;
     targetId: string | null;
+    projectId?: string | null;
     status: "prepared" | "committed" | "rejected";
     requestHash: string;
     committedRevision?: number;
@@ -2130,6 +2131,19 @@ export class BackendDatabase {
         return this.mapMcpCommandReceipt(row);
     }
 
+    listPreparedMcpCommands(tool?: string): McpCommandReceipt[] {
+        const rows = tool
+            ? this.db.prepare("SELECT * FROM mcp_command_receipts WHERE status='prepared' AND payload_json IS NOT NULL AND tool=? ORDER BY created_at, operation_id").all(tool)
+            : this.db.prepare("SELECT * FROM mcp_command_receipts WHERE status='prepared' AND payload_json IS NOT NULL ORDER BY created_at, operation_id").all();
+        return rows.map(row => this.mapMcpCommandReceipt(row as Record<string, unknown>));
+    }
+
+    updatePreparedMcpCommandReceipt(operationId: string, receipt: Record<string, unknown>) {
+        this.db.prepare("UPDATE mcp_command_receipts SET receipt_json=?, updated_at=? WHERE operation_id=? AND status='prepared'")
+            .run(JSON.stringify(receipt), new Date().toISOString(), operationId);
+        return this.getMcpCommandReceipt(operationId);
+    }
+
     rejectMcpCommand(operationId: string, code: string, message: string) {
         this.db.prepare("UPDATE mcp_command_receipts SET status = 'rejected', payload_json = NULL, error_json = ?, updated_at = ? WHERE operation_id = ? AND status = 'prepared'")
             .run(JSON.stringify({ code, message }), new Date().toISOString(), operationId);
@@ -2139,6 +2153,7 @@ export class BackendDatabase {
     private mapMcpCommandReceipt(row: Record<string, unknown>): McpCommandReceipt {
         return {
             operationId: String(row.operation_id), tool: String(row.tool), targetId: row.target_id == null ? null : String(row.target_id),
+            projectId: row.project_id == null ? null : String(row.project_id),
             status: String(row.status) as McpCommandReceipt["status"], requestHash: String(row.request_hash),
             ...(row.committed_revision == null ? {} : { committedRevision: Number(row.committed_revision), snapshotAvailable: this.getCanvasOperationReceipt(String(row.project_id || ""), String(row.operation_id)).snapshotAvailable }),
             ...(typeof row.receipt_json === "string" ? { receipt: JSON.parse(row.receipt_json) as Record<string, unknown> } : {}),

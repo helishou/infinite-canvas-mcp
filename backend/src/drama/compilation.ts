@@ -415,6 +415,18 @@ export class ProductionCompilationService {
         return targetIds.length ? { targetIds } : undefined;
     }
 
+    private assertUnlockedTargets(director: DirectorProduction, scope?: CompilationScope) {
+        const requested = scope?.targetIds ? new Set(scope.targetIds.map(String)) : undefined;
+        const locked = (Array.isArray(director.source.segments) ? director.source.segments : [])
+            .filter(segment => segment.locked === true && (!requested || requested.has(String(segment.id || ""))));
+        if (!locked.length) return;
+        throw new ProductionValidationError(locked.map(segment => {
+            const targetId = String(segment.id || "");
+            return { code: "CLIP_LOCKED", path: `director.source.segments.${targetId}.locked`, targetId,
+                message: `Clip ${targetId} 已锁定，Backend 拒绝编译。`, severity: "error" };
+        }));
+    }
+
     enqueue(id: string, owner: string, operationId: string, expectedRevision: number, candidate?: DirectorProduction, scope?: CompilationScope) {
         const requestFingerprint = hash({ id, owner, expectedRevision, candidate: candidate ?? null, scope: scope ?? null });
         const prior = this.loadJob(operationId, owner);
@@ -432,9 +444,11 @@ export class ProductionCompilationService {
         if (candidate && current.revision !== expectedRevision && hash(candidate) !== hash(current.draft.director)) throw new ProductionConflictError(current);
         const snapshotRevision = current.revision;
         scope = this.authoredScope(candidate || current.draft.director, scope);
+        this.assertUnlockedTargets(candidate || current.draft.director, scope);
         const requestHash = requestFingerprint;
         const compileInputDiagnostics: ProductionDiagnostic[] = [];
         const director = this.bindCanvasStyleAnchor(id, this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director), scope?.targetIds, true, undefined, compileInputDiagnostics));
+        this.assertUnlockedTargets(director, scope);
         if (scope && this.compiler === compileAchengDirector && !resolveAchengEngine().sourceContract?.scopedCompilation) throw new Error("SCOPED_COMPILATION_UNSUPPORTED: 当前激活引擎不支持按场次编译，请更新本机引擎");
         const effective = this.effectiveInput(id, director, scope);
         const boundFiles = this.service.compilationReferenceFiles(id, effective.input);
@@ -498,6 +512,7 @@ export class ProductionCompilationService {
         const snapshotRevision = current.revision;
         const compileInputDiagnostics: ProductionDiagnostic[] = [];
         const director = this.bindCanvasStyleAnchor(id, this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director), scope?.targetIds, true, undefined, compileInputDiagnostics));
+        this.assertUnlockedTargets(director, scope);
         const scoped = scope ? compilationScopeInput(director, scope) : undefined;
         const references = this.service.compilationReferenceFiles(id, scoped?.director || director);
         const compileInputBase = scope ? scopedCompilerInput(scoped!.director, scope) : director;
@@ -635,6 +650,8 @@ export class ProductionCompilationService {
         schedule(async () => {
             try {
                 if (this.cancelledJobs.has(key)) throw Object.assign(new Error("编译已被较新的目标输入替代"), { code: "COMPILATION_SUPERSEDED" });
+                const latestSource = this.service.get(job.id).draft.director;
+                if (latestSource) this.assertUnlockedTargets(latestSource, job.scope);
                 job.status = "running"; this.saveJob(job);
                 const directory = this.workingDirectory(job.preparedId);
                 if (this.database()) await fs.promises.rm(directory, { recursive: true, force: true });
@@ -701,6 +718,7 @@ export class ProductionCompilationService {
                     engineRuntimeId: job.director.engine.runtimeId, compilerInputFingerprint: job.compilerInputFingerprint ?? "",
                     baselineHash: job.baselineHash, scope: job.scope, scopeHash: job.scopeHash,
                 }, { director: latestDirector, input: latestInput, manifestHash: latestManifestHash });
+                if (latestDirector) this.assertUnlockedTargets(latestDirector, job.scope);
                 if (!inputsUnchanged) {
                     job.status = "blocked";
                     job.diagnostics = [...job.diagnostics, { code: "COMPILATION_INPUT_CHANGED", path: "compile.inputManifest", message: "编译期间目标输入或引擎版本已变化；旧结果未应用，请对当前目标重新发起编译。", severity: "error" }];
@@ -775,6 +793,7 @@ export class ProductionCompilationService {
         if (candidate && current.revision !== expectedRevision && hash(candidate) !== hash(current.draft.director)) throw new ProductionConflictError(current);
         const snapshotRevision = current.revision;
         const scope = this.authoredScope(candidate || current.draft.director);
+        this.assertUnlockedTargets(candidate || current.draft.director, scope);
         const compileInputDiagnostics: ProductionDiagnostic[] = [];
         const director = this.bindCanvasStyleAnchor(id, this.service.resolveSubjectPictureInputs(id, this.compilationDirector(candidate || current.draft.director), scope?.targetIds, true, undefined, compileInputDiagnostics));
         const checked = this.service.preflight(id, { action: "compile", request: { expectedRevision: snapshotRevision, director } });
@@ -841,6 +860,7 @@ export class ProductionCompilationService {
             this.markApplied(this.packetJob(preparedId), receipt);
             return receipt;
         }
+        this.assertUnlockedTargets(current.draft.director || packet.director, packet.scope);
         if (packet.inputManifestHash && current.draft.director) {
             const diagnostics: ProductionDiagnostic[] = [];
             const currentInput = this.bindCanvasStyleAnchor(id, this.service.resolveSubjectPictureInputs(id,

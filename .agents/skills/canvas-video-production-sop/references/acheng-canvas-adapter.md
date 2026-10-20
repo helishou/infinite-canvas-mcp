@@ -34,7 +34,7 @@ Ref2VA 最低细节要求按本机当前激活的编译脚本版本计算；新�
 
 Acheng 的纯提示词限制适用于创作职责；用户授权实际生成时，由本适配层通过原生 Canvas MCP 提交 Backend 任务。不得绕过画布调用 ComfyUI、直接写库或先生成后补记录。按本轮 schema 使用工具，不沿用旧字段猜测。
 
-进入制作前调用 `production_get_contract`，恢复旧稿也读取当前激活版本，`runtimeId` 已弃用且不选择执行版本；可用 `operationType` 查询单项操作。返回共享 JSON Schema、合法示例、patch 字段及本机当前激活版本的制作源稿模板。示例中的 ID、引擎标识与哈希必须替换成当前真实数据，不把示例视为发布或生成依据。
+只在操作类型、字段或字段约束未知时调用 `production_get_contract`，并始终以当前激活版本为准；`runtimeId` 已弃用且不选择执行版本。单项查询用 `operationType`，需要确认可写字段时才加 `includePatchFields:true`，需要请求体时才加 `includeRequests:true`。不要为查普通字段使用 `moduleId`；该参数会读取模块文件，仅在需要模块专属方法说明时使用。读取的合同和示例不是发布或生成依据，示例中的 ID、引擎标识与哈希必须替换成当前真实数据。
 
 Backend draft 是正式创作编辑源，published 保留显式发布的历史版本，本地 production.json 是带 revision 的工作副本。修改需稳定 operationId 和 expectedRevision；expectedRevision 是基线游标，旧基线的 patch 仍由 Backend 在事务中应用到最新稿，不因无关 revision 增长要求全量回读。不同字段自动保留，同字段按提交顺序后写覆盖。set_director_production 将 source 作为整体原子字段，不能从旧快照替换；需要整稿替换时先基于当前稿重建。默认 inputBasis=canvas 的运行冻结当前有效画布输入，显式 published 才核验指定发布稿。剧本、镜头和 Clip 视图是投影，修改应进入导演源；源变化后沿编译/校验更新回执。模型继承原配置；保存、编译、审核和发布不授权生成。
 

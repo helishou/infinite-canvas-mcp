@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
-import { canonicalProduction, productionEntities, type EpisodeProductionData, type ProductionEntityBinding, type ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/production-contract";
-import { applyDirectorSourcePatch } from "@basketikun/canvas-agent/drama/production-validation";
+import { canonicalProduction, isSubjectPromptAssembly, productionEntities, type EpisodeProductionData, type ProductionEntityBinding, type ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/production-contract";
+import { applyDirectorSourcePatch, changedModelTextIdDiagnostics, ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
 import type { BackendDatabase } from "../db.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
 import { directorHash, projectDirector, withoutDirectorProjection } from "./director.js";
@@ -143,6 +143,7 @@ export function syncEntityNodeEdits(db: BackendDatabase, projectId: string, befo
     if (!row) return empty;
     const draft = JSON.parse(row.draft_json) as EpisodeProductionData;
     if (!draft.director) return empty;
+    const previousSource = structuredClone(draft.director.source);
     let changed = false;
     for (const entity of productionEntities(draft.director.source, owner)) {
         const old = nodes(before).find(node => node.metadata?.productionEntity?.kind === entity.kind && node.metadata.productionEntity.entityId === entity.entityId);
@@ -211,6 +212,10 @@ export function syncEntityNodeEdits(db: BackendDatabase, projectId: string, befo
     }
     if (!changed && !imageOperations.length) return empty;
     if (changed) {
+        if (isSubjectPromptAssembly(draft.director.source)) {
+            const diagnostics = changedModelTextIdDiagnostics(previousSource, draft.director.source);
+            if (diagnostics.length) throw new ProductionValidationError(diagnostics);
+        }
         projectDirector(draft);
         db.db.prepare(`UPDATE ${table} SET revision=?,draft_json=?,updated_at=? WHERE ${column}=?`).run(row.revision + 1, JSON.stringify(withoutDirectorProjection(draft)), new Date().toISOString(), owner.id);
     }

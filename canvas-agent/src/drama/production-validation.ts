@@ -114,6 +114,92 @@ export function ref2vaPromptDiagnostics(director: DirectorProduction, maximum: n
 }
 
 const record = (value: unknown): Record<string, any> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {};
+const modelTextFields = new Set([
+    "action", "action_description", "accent", "anchor", "angle", "appearance", "anticipation", "attack", "camera",
+    "camera_principle", "cause", "contact", "content", "continuation", "combat", "cue", "definition",
+    "description", "delivery", "editorial_reason", "exclude", "exclude_scope", "focus", "foley", "framing",
+    "face", "follow_through", "force_source", "gaze", "impact_hold", "label", "lens", "mode_selection_reason", "movement",
+    "name", "non_diegetic_music", "overall_soundscape", "pace", "pauses", "path", "pitch",
+    "performance", "preserve", "preserve_scope", "prompt", "prompt_description", "purpose", "references", "retention",
+    "recoil", "resistance", "response", "result", "role", "settle", "selection_reason", "sound", "sound_principle",
+    "speaker_name", "speech_anchor", "staging_principle", "summary", "target", "timing_principle", "trajectory", "transfer",
+    "value_descriptions", "visibility", "visual", "voice_timbre", "volume", "audio",
+]);
+
+const nonPromptTextFields = new Set([
+    "anchor_shot_ids", "asset_id", "asset_ids", "beat_id", "beat_ids", "binding_id", "bindingId", "dominant_track",
+    "entity_id", "entity_ids", "factId", "fact_id", "id", "no_low_frequency_reason", "ownerId", "owner_id", "segment_id",
+    "segmentId", "shot_id", "shot_ids", "shotId", "start", "end", "story_order", "subject_id", "subjectId", "timeline_id",
+]);
+type ModelTextEntry = { text: string; path: string; targetId?: string };
+function modelTextValues(value: unknown, path: Array<string | number> = [], identityPath: Array<string | number> = [], targetId?: string, output = new Map<string, ModelTextEntry>()) {
+    if (typeof value === "string") {
+        if (path.some(part => typeof part === "string" && modelTextFields.has(part))
+            && !path.some(part => typeof part === "string" && nonPromptTextFields.has(part))) {
+            output.set(identityPath.join("."), { text: value, path: path.join("."), targetId });
+        }
+    } else if (Array.isArray(value)) {
+        value.forEach((item, index) => {
+            const stableId = item && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string"
+                ? String((item as Record<string, unknown>).id) : String(index);
+            const collection = String(path.at(-1) || "");
+            const itemTargetId = ["shots", "segments"].includes(collection) && typeof (item as Record<string, unknown> | null)?.id === "string"
+                ? String((item as Record<string, unknown>).id) : targetId;
+            modelTextValues(item, [...path, index], [...identityPath, `@${stableId}`], itemTargetId, output);
+        });
+    } else if (value && typeof value === "object") {
+        for (const [key, item] of Object.entries(value)) modelTextValues(item, [...path, key], [...identityPath, key], targetId, output);
+    }
+    return output;
+}
+
+function sourceInternalIds(source: Record<string, unknown>) {
+    const ids = new Set<string>();
+    const publicNames = new Set(Object.values(record(source.prompt_bindings)).filter((value): value is string => typeof value === "string"));
+    for (const field of ["character_registry", "scene_registry", "asset_plan", "asset_cards", "shots", "segments"]) {
+        for (const item of Array.isArray(source[field]) ? source[field] as Array<Record<string, unknown>> : []) {
+            const id = item?.id || item?.asset_id;
+            if (typeof id === "string" && id !== item?.name && !publicNames.has(id)) ids.add(id);
+        }
+    }
+    const ledger = record(source.ledger);
+    for (const field of ["facts", "events", "requirements", "coverage"]) {
+        for (const item of Array.isArray(ledger[field]) ? ledger[field] as Array<Record<string, unknown>> : []) {
+            if (typeof item?.id === "string") ids.add(item.id);
+        }
+    }
+    return [...ids].filter(id => id.length >= 3).sort((a, b) => b.length - a.length);
+}
+
+/** Reject newly written model-facing prose that contains registered production IDs. */
+export function changedModelTextIdDiagnostics(before: Record<string, unknown>, after: Record<string, unknown>): ProductionDiagnostic[] {
+    const previousText = modelTextValues(before);
+    const nextText = modelTextValues(after);
+    const ids = sourceInternalIds(after);
+    const diagnostics: ProductionDiagnostic[] = [];
+    for (const [identityPath, entry] of nextText) {
+        if (previousText.get(identityPath)?.text === entry.text) continue;
+        const instructions = entry.text.replace(/<d>[\s\S]*?<\/d>/g, "").replace(/"[^"\n]*"|“[^”\n]*”/g, "");
+        for (const id of ids) {
+            if (!new RegExp(`(?<![\\w])${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w])`).test(instructions)) continue;
+            diagnostics.push({ code: "INTERNAL_ID_IN_PROMPT", path: `director.source.${entry.path}`, targetId: entry.targetId, matchedText: id,
+                message: `模型指令文本包含内部 ID「${id}」；请改用自然语言描述，不要把稳定标识写进画面指令。`,
+                severity: "error", blockingActions: ["edit", "compile"] });
+        }
+    }
+    return diagnostics;
+}
+
+const mergeSourcePatchObject = (current: unknown, patch: unknown): unknown => {
+    const before = record(current), incoming = record(patch);
+    if (!current || typeof current !== "object" || Array.isArray(current) || !patch || typeof patch !== "object" || Array.isArray(patch)) return structuredClone(patch);
+    const merged: Record<string, unknown> = structuredClone(before);
+    for (const [key, value] of Object.entries(incoming)) merged[key] = value && typeof value === "object" && !Array.isArray(value)
+        && before[key] && typeof before[key] === "object" && !Array.isArray(before[key])
+        ? mergeSourcePatchObject(before[key], value)
+        : structuredClone(value);
+    return merged;
+};
 
 /** 静态景别词表，与编译器 FRAMINGS 对齐（acheng storyboard_policy.py）。 */
 export const SHOT_FRAME_VALUES = ["EWS", "WS", "FS", "MS", "MCU", "CU", "ECU"] as const;
@@ -247,6 +333,9 @@ export function applyDirectorSourcePatch(director: DirectorProduction, entity: k
             const resolvedTarget = items.find(item => fieldId(item) === id)!;
             const forbidden = Object.keys(patch).filter(key => !(directorPatchFields[entity] as readonly string[]).includes(key));
             if (forbidden.length) throw new Error(`不允许直接修改字段：${forbidden.join(", ")}`);
+            if (entity === "shot") for (const field of ["camera", "performance"] as const) {
+                if (patch[field] && typeof patch[field] === "object" && !Array.isArray(patch[field])) patch[field] = mergeSourcePatchObject(resolvedTarget[field], patch[field]);
+            }
             if (entity === "scene" && Object.hasOwn(patch, "blocks")) {
                 // 结构化剧本场次以整段数组替换 blocks（增段/删段/重排/换说话人都走这里）。
                 // passthrough 保留编译期可能附加的段落扩展字段，不替作者删数据。

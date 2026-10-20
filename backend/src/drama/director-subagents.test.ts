@@ -104,12 +104,14 @@ test("adoption refuses changed dependencies, foreign edits, incomplete and unbou
 
 test("partial continuation retains original thread, cursor and immutable history without duplicate turns", async t => {
     const { service, calls, settles } = fixture(t);
-    const taskId = (service.execute(spawn) as any).task.taskId;
+    const taskId = (service.execute({ ...spawn, model: "selected-channel::model", effort: "high" }) as any).task.taskId;
+    assert.equal(calls[0].model, "selected-channel::model");
+    assert.equal(calls[0].effort, "high");
     calls[0].onThread("worker"); calls[0].onTurn?.("turn-1");
     settles[0]({ ...complete, status: "partial", cursor: "scene-2" }); await tick();
     const artifactHash = (service.execute(read(taskId)) as any).task.artifactHash;
     const command = { ...read(taskId), action: "continue", operationId: "next" };
-    service.execute(command); assert.equal(calls.length, 2); assert.equal(calls[1].threadId, "worker"); assert.match(calls[1].prompt, /scene-2/);
+    service.execute(command); assert.equal(calls.length, 2); assert.equal(calls[1].threadId, "worker"); assert.equal(calls[1].model, "selected-channel::model"); assert.equal(calls[1].effort, "high"); assert.match(calls[1].prompt, /scene-2/);
     assert.equal(service.execute(command).replayed, true); assert.equal(calls.length, 2);
     settles[1](complete); await tick();
     const old = service.execute({ ...read(taskId), view: "result", artifactHash }) as any;
@@ -118,14 +120,14 @@ test("partial continuation retains original thread, cursor and immutable history
     assert.throws(() => service.execute({ ...command, operationId: "extra" }), /NOT_PARTIAL/);
 });
 
-test("startup reconciles more than ten tasks and recover reads the exact original turn without spawning", async t => {
+test("startup reconciles more than ten tasks and recover reads the exact original turn and model without spawning", async t => {
     const { stores, events } = fixture(t);
     for (let index = 0; index < 13; index++) {
-        const task = stores.tasks.create(`orphan-${index}`, "director-subagent", { projectId: "canvas", parentThreadId: "director", title: "lost", role: "story", sourceRevision: 0 }, {});
+        const task = stores.tasks.create(`orphan-${index}`, "director-subagent", { projectId: "canvas", parentThreadId: "director", title: "lost", role: "story", sourceRevision: 0, model: "selected-channel::model", effort: "high" }, { model: "selected-channel::model" });
         stores.tasks.update(task.id, { status: "running", result: { workerThreadId: `worker-${index}`, workerTurnId: `turn-${index}` } });
     }
     let reads = 0;
-    const service = new DirectorSubagents(stores, { run: async request => { reads++; assert.equal(request.recoverOutput, true); assert.equal(request.threadId, "worker-0"); assert.equal(request.turnId, "turn-0"); return { threadId: "worker-0", output: complete }; } }, events);
+    const service = new DirectorSubagents(stores, { run: async request => { reads++; assert.equal(request.recoverOutput, true); assert.equal(request.threadId, "worker-0"); assert.equal(request.turnId, "turn-0"); assert.equal(request.model, "selected-channel::model"); assert.equal(request.effort, "high"); return { threadId: "worker-0", output: complete }; } }, events);
     service.reconcileStartup(); assert.equal(reads, 0);
     assert.equal(stores.tasks.list({ kind: "director-subagent" }).filter(task => task.status === "failed").length, 13);
     const command = { ...read("orphan-0"), action: "recover", operationId: "recover-original" };

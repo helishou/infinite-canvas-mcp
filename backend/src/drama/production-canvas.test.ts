@@ -16,11 +16,12 @@ import { EpisodeProductionService } from "./production.js";
 import { EpisodeProductionRunner } from "./production-runner.js";
 import { ProductionCompilationService } from "./compilation.js";
 import { ensureProductionCanvas, productionCanvasContext } from "./production-canvas.js";
-import { SharedAssetCoordinator, listApprovedSharedAssets, sharedProjectionNodeId, validateSharedAssetSource } from "./shared-assets.js";
+import { SharedAssetCoordinator, listApprovedSharedAssets, registerSharedAssetVersion, sharedProjectionNodeId, validateSharedAssetSource } from "./shared-assets.js";
 import { directorHash, projectDirector, promptHash, publicProductionRecord } from "./director.js";
 import { decodeReceipt } from "./receipt-storage.js";
 import { createManualDirectorAsset as createManualDirectorAssetSource } from "./director-asset-delete.js";
 import { productionScriptNodes } from "./script-nodes.js";
+import { adoptedDirectorFields } from "./input-merge.js";
 import { NativeProductionGeneration } from "./native-generation.js";
 import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import { compilationScopeInput, currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
@@ -1268,6 +1269,110 @@ test("approved shared versions propagate without a browser and retain historical
     assert.doesNotThrow(() => validateSharedAssetSource(f.db, episodeCanvas, current.draft.director!.assets.ROLE), "draft validation follows the stable shared source; media hashes are checked at the material boundary");
 });
 
+test("shared subject resolution validates source and compiler projections independently and reports a bad local source read-only", async t => {
+    const f = fixture(t), sharedCanvas = ensureProductionCanvas(f.db, "shared-assets", "drama").project.id;
+    const storageKey = "image:shared-role", filePath = path.join(f.directory, "shared-role.png"), bytes = Buffer.from("shared character picture");
+    fs.writeFileSync(filePath, bytes);
+    const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+    f.db.upsertMediaFile({ storageKey, filePath, bytes: bytes.length, mimeType: "image/png", width: 32, height: 32, durationMs: null, createdAt: new Date().toISOString() });
+    f.db.applyCanvasProjectOperations(sharedCanvas, Number(f.db.getCanvasProject(sharedCanvas)!.revision), [{ type: "add_node", id: "shared-role", nodeType: "image", title: "Shared role",
+        position: { x: 0, y: 0 }, width: 300, height: 300, metadata: { storageKey } }]);
+    const sharedDirector = director();
+    (sharedDirector.source.asset_plan as any[])[0].kind = "character";
+    (sharedDirector.source.asset_plan as any[])[0].entity_id = "ROLE";
+    sharedDirector.assets.ROLE = { nodeId: "shared-role", version: "v1", storageKey, sha256, status: "generated" };
+    save(f.shared, sharedCanvas, sharedDirector);
+    const decoyDraft = emptyEpisodeProduction();
+    const decoyDirector = director();
+    decoyDirector.source.asset_plan = [{ id: "OTHER_ROLE", kind: "character", entity_id: "ROLE_OTHER", asset_name: "Shared role", version: "v1", depends_on: [], canvas_scope: "shared",
+        sharedSource: { dramaId: "drama", assetId: "OTHER_ROLE", sourceProjectId: sharedCanvas, sourceNodeId: "different-canonical-node" } }];
+    decoyDirector.source.character_registry = [{ id: "ROLE_OTHER", name: "Shared role", description: "", appearance: "" }];
+    decoyDirector.assets.OTHER_ROLE = { version: "v1", status: "planned", sharedSource: { dramaId: "drama", assetId: "OTHER_ROLE", approvedId: "", sourceProjectId: sharedCanvas, sourceNodeId: "different-canonical-node" } };
+    decoyDirector.sourceHash = directorHash(decoyDirector.source);
+    decoyDraft.director = decoyDirector;
+    projectDirector(decoyDraft);
+    f.db.db.prepare("INSERT INTO episode_productions (episode_id, revision, draft_json, published_json, published_version, updated_at) VALUES (?, 1, ?, NULL, 0, ?)")
+        .run("ep2", JSON.stringify(decoyDraft), new Date().toISOString());
+    registerSharedAssetVersion(f.db, sharedCanvas, 1, "ROLE", f.shared.get(sharedCanvas).draft.director!);
+    const sharedVersion = listApprovedSharedAssets(f.db, "drama").find(item => item.assetId === "ROLE")!;
+    assert.equal(f.db.db.prepare("SELECT COUNT(*) AS count FROM drama_asset_adoptions WHERE approved_id=? AND episode_id='ep2'").get(sharedVersion.id)?.count, 0,
+        "a same-name asset with a different canonical source node is not auto-adopted");
+
+    const episodeCanvas = ensureProductionCanvas(f.db, "episode", "ep").project.id;
+    f.db.applyCanvasProjectOperations(episodeCanvas, Number(f.db.getCanvasProject(episodeCanvas)!.revision), [{ type: "add_node", id: "wrong-local-role", nodeType: "image", title: "Unrelated local image",
+        position: { x: 0, y: 0 }, width: 300, height: 300, metadata: { storageKey } }]);
+    const episodeDirector = director();
+    const plan = (episodeDirector.source.asset_plan as any[])[0];
+    Object.assign(plan, { kind: "character", entity_id: "ROLE", canvas_scope: "shared" });
+    episodeDirector.source.character_registry = [{ id: "ROLE", name: "Role", description: "", appearance: "" }];
+    episodeDirector.source.subject_registry = [{ id: "SUBJECT_ROLE", kind: "character", entityRef: { ownerKind: "episode", ownerId: "ep", kind: "character", id: "ROLE" },
+        pictureBindings: [{ id: "legacy-role-binding", assetId: "ROLE", sourceNode: { projectId: episodeCanvas, nodeId: "wrong-local-role" }, selection: { mode: "node_selection" },
+            provides: ["identity"], retain: ["character identity"], exclude: [], applicableState: {}, defaultFor: ["identity"] }] }];
+    (episodeDirector.source.shots as any[])[0].subject_usages = [{ subjectId: "SUBJECT_ROLE", presentation: "visible" }];
+    episodeDirector.assets.ROLE = { nodeId: "wrong-local-role", version: "v1", storageKey, sha256, status: "generated" };
+    episodeDirector.sourceHash = directorHash(episodeDirector.source);
+    save(f.episode, "ep", episodeDirector);
+
+    const adopted = f.episode.adoptSharedAsset("ep", { assetId: "ROLE", approvedId: sharedVersion.id, expectedRevision: f.episode.get("ep").revision, operationId: "adopt-shared-role" });
+    const adoptedNodeId = adopted.draft.director!.assets.ROLE.nodeId!;
+    const batchAdopted = f.episode.adoptSharedAssets("ep", { assets: [{ assetId: "ROLE", approvedId: sharedVersion.id }],
+        expectedRevision: adopted.revision, operationId: "batch-adopt-shared-role" });
+    const batchSubjectBeforeResolution = (batchAdopted.draft.director!.source.subject_registry as Array<Record<string, any>>).find(item => item.id === "SUBJECT_ROLE")!;
+    assert.equal(batchSubjectBeforeResolution.pictureBindings.filter((item: any) => item.assetId === "ROLE").length, 1, "batch adoption reuses the same binding guarantee without duplication");
+    const adoptedPlan = (batchAdopted.draft.director!.source.asset_plan as Array<Record<string, any>>).find(item => item.asset_id === "ROLE")!;
+    assert.deepEqual(adoptedPlan.sharedSource, { dramaId: "drama", assetId: "ROLE", sourceProjectId: sharedCanvas, sourceNodeId: "shared-role" });
+    const adoptedSubject = batchSubjectBeforeResolution;
+    const canonicalBinding = adoptedSubject.pictureBindings.find((item: any) => item.assetId === "ROLE")!;
+    const canonicalEntityNode = (f.db.getCanvasProject(episodeCanvas)!.nodes as any[]).find(node => node.id === canonicalBinding.sourceNode.nodeId);
+    assert.deepEqual(canonicalBinding.sourceNode, { projectId: episodeCanvas, nodeId: canonicalEntityNode.id });
+    assert.equal(canonicalEntityNode.metadata.sharedAssetReference?.sourceProjectId, sharedCanvas, JSON.stringify({ binding: canonicalBinding, node: canonicalEntityNode }));
+    assert.equal(canonicalEntityNode.metadata.sharedAssetReference.sourceNodeId, "shared-role");
+
+    const alternateNodeId = "alternate-role-projection";
+    const canvas = f.db.getCanvasProject(episodeCanvas)!;
+    f.db.applyCanvasProjectOperations(episodeCanvas, Number(canvas.revision), [{ type: "add_node", id: alternateNodeId, nodeType: "image", title: "Equivalent local reference",
+        position: { x: 900, y: 0 }, width: 240, height: 240,
+        metadata: { storageKey, sharedAssetReference: { dramaId: "drama", assetId: "ROLE", sourceProjectId: sharedCanvas, sourceNodeId: "shared-role" } } }], { runtimeWrite: true });
+    const resolutionInput = structuredClone(batchAdopted.draft.director!);
+    const resolutionSubject = (resolutionInput.source.subject_registry as Array<Record<string, any>>).find(item => item.id === "SUBJECT_ROLE")!;
+    resolutionSubject.pictureBindings.find((item: any) => item.assetId === "ROLE").sourceNode = { projectId: episodeCanvas, nodeId: alternateNodeId };
+    resolutionInput.sourceHash = directorHash(resolutionInput.source);
+    const beforeProduction = f.episode.get("ep"), beforeCanvas = f.db.getCanvasProject(episodeCanvas);
+    const resolved = f.episode.resolveSubjectPictureInputs("ep", resolutionInput, undefined, true);
+    assert.equal(resolved.assets.ROLE.nodeId, adoptedNodeId, "the compiler node remains the adopted projection even when media comes from another valid local projection");
+    assert.deepEqual(f.episode.get("ep"), beforeProduction, "binding resolution does not rewrite the saved production");
+    assert.deepEqual(f.db.getCanvasProject(episodeCanvas), beforeCanvas, "binding resolution does not create or rewrite canvas nodes");
+
+    const canonicalSourceInput = structuredClone(resolutionInput);
+    const canonicalSourceSubject = (canonicalSourceInput.source.subject_registry as Array<Record<string, any>>).find(item => item.id === "SUBJECT_ROLE")!;
+    canonicalSourceSubject.pictureBindings.find((item: any) => item.assetId === "ROLE").sourceNode = { projectId: sharedCanvas, nodeId: "shared-role" };
+    canonicalSourceInput.sourceHash = directorHash(canonicalSourceInput.source);
+    const canonicalResolved = f.episode.resolveSubjectPictureInputs("ep", canonicalSourceInput, undefined, true);
+    assert.equal(canonicalResolved.assets.ROLE.nodeId, adoptedNodeId, "a canonical shared source also resolves to the local compiler projection");
+    assert.equal(canonicalResolved.assets.ROLE.selectedResult?.projectId, sharedCanvas);
+    assert.equal(canonicalResolved.assets.ROLE.selectedResult?.nodeId, "shared-role");
+
+    const invalidResolution = structuredClone(resolutionInput);
+    const invalidSubject = (invalidResolution.source.subject_registry as Array<Record<string, any>>).find(item => item.id === "SUBJECT_ROLE")!;
+    invalidSubject.pictureBindings.find((item: any) => item.assetId === "ROLE").sourceNode = { projectId: episodeCanvas, nodeId: "wrong-local-role" };
+    invalidResolution.sourceHash = directorHash(invalidResolution.source);
+    assert.throws(() => f.episode.resolveSubjectPictureInputs("ep", invalidResolution, undefined, true), (error: any) => {
+        const diagnostic = error.diagnostics?.[0];
+        assert.equal(diagnostic?.code, "SHARED_ASSET_BINDING_INVALID");
+        assert.equal(diagnostic?.details?.stage, "projection_validation");
+        assert.equal(diagnostic?.details?.reason, "binding_projection_identity_mismatch");
+        assert.equal(diagnostic?.details?.sourceNodeId, "wrong-local-role");
+        assert.equal(diagnostic?.details?.productionNodeId, adoptedNodeId);
+        return true;
+    });
+    const compilation = new ProductionCompilationService(f.episode, f.episode.compilationRoot());
+    await assert.rejects(compilation.preflight("ep", batchAdopted.revision, invalidResolution), (error: any) => {
+        assert.equal(error.diagnostics?.[0]?.code, "SHARED_ASSET_BINDING_INVALID");
+        assert.equal(error.diagnostics?.[0]?.details?.reason, "binding_projection_identity_mismatch");
+        return true;
+    }, "compile preflight uses the same binding resolver and returns its structured diagnostic");
+});
+
 test("promoting an already reviewed episode asset preserves its source and adds a provenance-backed shared approval", t => {
     const f = fixture(t), sourceCanvas = ensureProductionCanvas(f.db, "episode", "ep").project.id;
     const filePath = path.join(f.directory, "promoted-role.png"), bytes = Buffer.from("previously reviewed role image");
@@ -1743,6 +1848,32 @@ test("the first successful compilation fills a blank legacy Clip Prompt without 
     assert.equal(manual.result.status, "ready", JSON.stringify(manual.result));
     assert.equal(manual.segment?.prompt, "Manual canvas Prompt stays in use.");
     assert.ok(manual.result.diagnostics.some(item => item.code === "MANUAL_INPUT_CONFLICT"));
+});
+test("adopting updated storyboard fields preserves manual H3 character groups", t => {
+    const data = emptyEpisodeProduction() as any;
+    const source: any = { version: 2, prompt_assembly: { version: 2 }, brief: "manual H3 projection fixture", fps_num: 24, fps_den: 1,
+        subject_registry: [], character_registry: [], scene_registry: [{ id: "ROOM", name: "Room" }], script_scenes: [{ id: "SCENE", scene_id: "ROOM", text: "A scene" }],
+        shots: [{ id: "S1", scene_id: "ROOM", timeline_id: "main", story_order: 0, duration_frames: 120, visual: "A person enters.", camera: { framing: "MS", attention_subject_ids: [] }, subject_usages: [], keyframes: [], utterance_refs: [] }],
+        segments: [{ id: "G", shot_ids: ["S1"], mode: "T2VA" }], utterances: [], asset_plan: [], asset_cards: [],
+        ledger: { contract_version: 2, facts: [], timelines: [{ id: "main" }], initial: [], events: [], requirements: [], coverage: [] } };
+    const sourceHash = directorHash(source), prompt = "integrated_multimodal_description:\n[Shot 1] A person enters.\n\noverall_soundscape:\nN/A\n\nnon_diegetic_music:\nN/A";
+    data.director = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "4.3.9" }, source, sourceHash,
+        artifacts: [{ id: "h3-G", targetId: "G", kind: "h3", prompt, sha256: promptHash(prompt), sourceHash, status: "ready", references: [], receipt: { sourceHash, promptHash: promptHash(prompt) } }],
+        assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], modules: {}, workflow: {} };
+    projectDirector(data);
+    const group = data.clipGroups.find((item: any) => item.id === "G");
+    const project = { nodes: [] } as any;
+    const baseline = productionClipProjection(project, data, group, "clip-G");
+    assert.equal(baseline.result.status, "ready", JSON.stringify(baseline.result));
+    const manualGroups = { retained: { subjectId: "MANUAL_SUBJECT", outfits: [{ id: "manual-outfit" }] } };
+    const existing = { ...baseline.segment!, h3CharacterGroups: manualGroups };
+    const projected = productionClipProjection(project, data, group, "clip-G", existing);
+    assert.equal(projected.result.status, "ready", JSON.stringify(projected.result));
+    assert.deepEqual(projected.segment?.h3CharacterGroups, manualGroups);
+    const adoption = adoptedDirectorFields(existing, projected.segment!.productionClipProjection, ["storyboardShots"]);
+    assert.ok(Object.hasOwn(adoption.patch, "storyboardShots"));
+    assert.ok(Object.hasOwn(adoption.patch, "duration"), "storyboard frame durations stay in sync");
+    assert.equal(Object.hasOwn(adoption.patch, "h3CharacterGroups"), false, "manual character groups are an independent field");
 });
 test("an exact compiler Prompt repairs incomplete references without replacing other manual Clip fields", t => {
     const f = referenceClipFixture(t);

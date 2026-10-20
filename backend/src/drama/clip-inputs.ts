@@ -544,7 +544,8 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
     try {
         let segment = buildProductionClip(project, data, group, segmentId);
         if (existing) {
-            const groups = [["referenceBindings", "h3CharacterGroups", "storyboardShots", "duration"], ...CLIP_PROJECTION_FIELDS.filter(key => !["referenceBindings", "h3CharacterGroups", "storyboardShots", "duration"].includes(key)).map(key => [key])];
+            const groups = [["referenceBindings", "storyboardShots", "duration"], ["h3CharacterGroups"],
+                ...CLIP_PROJECTION_FIELDS.filter(key => !["referenceBindings", "h3CharacterGroups", "storyboardShots", "duration"].includes(key)).map(key => [key])];
             const nextValues = Object.fromEntries(CLIP_PROJECTION_FIELDS.filter(key => Object.hasOwn(segment, key)).map(key => [key, segment[key]]));
             const baseline = { ...(existing.productionClipProjection?.fieldHashes || initialProjectionBaseline(existing, segment)) };
             // An older projection can leave a stale referenceBindings array marked
@@ -556,7 +557,6 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
             if (existing.prompt === segment.prompt && hasMissingPromptReferenceBindings(existing)) {
                 baseline.referenceBindings = inputHash(existing.referenceBindings);
                 groups[0] = ["referenceBindings"];
-                groups.splice(1, 0, ["h3CharacterGroups", "storyboardShots", "duration"]);
             }
             // Older projection receipts may omit a Prompt baseline because the
             // legacy `DRAFT` scaffold was mistaken for authored text. Treat that
@@ -565,6 +565,9 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
             if (!hasExecutableH3Prompt(existing.prompt)) baseline.prompt = inputHash(existing.prompt);
             const merged = mergeDirectorInput(existing, segment, baseline, groups);
             const mergedSegment = merged.merged;
+            const preserveManualCharacterGroups = merged.manualFields.includes("h3CharacterGroups");
+            const hasManualCharacterGroups = Object.hasOwn(mergedSegment, "h3CharacterGroups");
+            const manualCharacterGroups = preserveManualCharacterGroups && hasManualCharacterGroups ? structuredClone(mergedSegment.h3CharacterGroups) : undefined;
             // A successfully applied fresh H3 compilation owns the Prompt field.
             // Other Clip inputs still use the normal three-way merge, but an old
             // translated or hand-edited canvas Prompt must not block the new artifact.
@@ -576,6 +579,10 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
                 mergedSegment.motionContextEnabled = segment.motionContextEnabled;
             }
             reconcileSubjectImageReferences(mergedSegment, data.director!, group, segment.referenceBindings);
+            if (preserveManualCharacterGroups) {
+                if (hasManualCharacterGroups) mergedSegment.h3CharacterGroups = manualCharacterGroups;
+                else delete mergedSegment.h3CharacterGroups;
+            }
             if (overwriteCompiledPrompt) {
                 // The persisted referenceBindings array may omit character-group rows;
                 // H3 appends the selected group outfits after standalone references.
@@ -684,6 +691,44 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
     const retainedProjectedSegments = new Map<string, Set<string>>();
     const unitForGroup = (group: EpisodeProductionData["clipGroups"][number]) => layout.units.find(unit => unit.targets.includes(`segment:${group.id}`) && unit.members.some(member => member.role === "video"));
     const nodeForGroup = (group: EpisodeProductionData["clipGroups"][number]) => group.nodeId || unitForGroup(group)?.members.find(member => member.role === "video")?.nodeId;
+    // A source repartition can reach compilation after the new Clip IDs were
+    // saved but before their H3 projection was updated. Rebind same-node orphan
+    // rows by Shot overlap before additions are planned, so a two-Clip boundary
+    // adjustment updates the existing two rows instead of appending two more.
+    const groupsByNode = new Map<string, EpisodeProductionData["clipGroups"]>();
+    for (const group of data.clipGroups) {
+        const nodeId = nodeForGroup(group);
+        if (!nodeId) continue;
+        const groups = groupsByNode.get(nodeId) || [];
+        groups.push(group);
+        groupsByNode.set(nodeId, groups);
+    }
+    for (const [nodeId, groups] of groupsByNode) {
+        const node = nodes.find(item => String(item.id) === nodeId);
+        const segments = Array.isArray(object(node?.metadata).segments) ? object(node?.metadata).segments as Array<Record<string, any>> : [];
+        const activeTargetIds = new Set(groups.map(group => group.id));
+        const candidates = groups.flatMap(group => {
+            const bound = segments.some(segment => String(segment.id) === String(group.segmentId || "")
+                || String(object(segment.productionClipProjection).targetId || "") === group.id);
+            if (bound) return [];
+            const shotSet = new Set(group.shotIds.map(String));
+            return segments.flatMap(segment => {
+                const projection = object(segment.productionClipProjection), targetId = String(projection.targetId || "");
+                if (!targetId || activeTargetIds.has(targetId) || hasActiveH3SegmentTask(segment)) return [];
+                const overlap = String(segment.sourceShotId || object(projection.nextValues).sourceShotId || "").split("~").filter(id => shotSet.has(id)).length;
+                return overlap ? [{ group, segment, overlap }] : [];
+            });
+        }).sort((a, b) => b.overlap - a.overlap || String(a.segment.id).localeCompare(String(b.segment.id)) || a.group.id.localeCompare(b.group.id));
+        const claimedGroups = new Set<string>(), claimedSegments = new Set<string>();
+        for (const candidate of candidates) {
+            const segmentId = String(candidate.segment.id || "");
+            if (!segmentId || claimedGroups.has(candidate.group.id) || claimedSegments.has(segmentId)) continue;
+            candidate.group.nodeId ||= nodeId;
+            candidate.group.segmentId = segmentId;
+            claimedGroups.add(candidate.group.id);
+            claimedSegments.add(segmentId);
+        }
+    }
     for (const group of data.clipGroups) {
         if (onlyTargets && !onlyTargets.has(group.id)) continue;
         const unit = unitForGroup(group);
@@ -775,6 +820,7 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
     // moved to another node; they then appeared as extra timeline segments. Reconcile
     // only compiler-owned segments, leaving manual H3 segments and their authored work intact.
     const managedNodeIds = new Set([...retainedProjectedSegments.keys()]);
+    const currentProductionShotIds = new Set(data.clipGroups.flatMap(group => group.shotIds.map(String)));
     for (const node of nodes) {
         const nodeId = String(node.id || "");
         const metadata = object(node.metadata);
@@ -795,10 +841,15 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
             const projection = object(segment.productionClipProjection);
             if (!Object.keys(projection).length || retained.has(String(segment.id || ""))) continue;
             const manuallyChanged = hasManualProjectionEdits(segment);
+            const supersededByCurrentProduction = String(segment.sourceShotId || object(projection.nextValues).sourceShotId || "")
+                .split("~").some(shotId => currentProductionShotIds.has(shotId));
             // The segment is no longer part of the active production timeline.
-            // Deleting its node entry leaves completed media/task history intact;
-            // only an active task or a manually edited Clip keeps the stale row.
-            if (manuallyChanged || hasActiveH3SegmentTask(segment)) continue;
+            // Deleting its node entry leaves completed media/task history intact.
+            // A completed manual row is still retired when its Shot range has
+            // been repartitioned into current formal Clips; otherwise it would
+            // remain as a duplicate active Clip after the new rows are applied.
+            // Rows without a current replacement, plus active tasks, stay put.
+            if (manuallyChanged && !supersededByCurrentProduction || hasActiveH3SegmentTask(segment)) continue;
             operations.push({ type: "delete_h3_segment", nodeId, segmentId: String(segment.id || "") });
         }
     }

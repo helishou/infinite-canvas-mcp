@@ -97,6 +97,9 @@ export function CanvasGenerationControls({
                     placement={placement}
                     buttonClassName={buttonClassName}
                     onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))}
+                    comfyParams={comfyParams}
+                    onComfyParamsChange={onComfyParamsChange}
+                    referenceCount={referenceCounts.image}
                 />
             );
         }
