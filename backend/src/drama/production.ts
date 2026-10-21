@@ -2258,7 +2258,7 @@ export class EpisodeProductionService {
                 continuityWarnings.push("Segment 使用了正式场景，但 Shot 未声明 scene/environment Subject；场景空间不会进入 H3 图片参考。需要环境锚点时，先生成并绑定场景图，再编译当前 Segment。");
             }
             if (declaresEnvironmentUsage && artifact && !hasSceneReference) {
-                continuityWarnings.push("Shot 已声明场景环境参考，但当前 H3 产物未绑定对应场景图；独立生成时环境布局缺少图像锚点");
+                blockers.push("Shot 已声明 scene/environment 图片参考，但当前 H3 产物未绑定场景图；请修复场景 Subject 图片绑定并重编、应用此 Segment");
             }
             if (!h3ModelFor(segmentId, group?.nodeId ?? undefined)) blockers.push("缺少 H3 模型；请在现有模型设置中选择模型");
             if (!shotIds.length) blockers.push("Segment 尚未编入 Shot");

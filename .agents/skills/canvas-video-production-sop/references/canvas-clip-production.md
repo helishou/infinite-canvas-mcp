@@ -16,6 +16,8 @@
 
 ## 连续性边界
 
+新建 CLIP（Segment）时，只在既有 Shot 之间选择分段边界，并优先选择使 Segment 末镜为中景或更远景别的边界：MS 中景、WS 远景、FS 全景、EWS 大远景。该规则只影响分段，不得修改 Shot 的景别、构图、顺序或内容，也不得增删镜头；若没有符合该偏好的可用边界，按原镜头设计与叙事连续性分段。只用于新建分段，不回溯修改已有 Segment 或冻结镜头。完整规则见 Acheng shots 的[摄影与 Segment 边界规则](../../acheng-director/references/decisions/shots.md#segment-边界切镜尾帧与-motion-context)。
+
 对每一对相邻 Segment 写 from、to、tailFrame、motionContext、reason。两项分别评估但互斥：允许都关闭、仅尾帧或仅 Motion Context，禁止同时开启。新建连续边界默认启用尾帧参考；目标 Clip 有明确首帧分镜图时关闭尾帧参考并沿用该图。已有边界继续遵循已保存的导演决定；Motion Context 仍只用于必须保持同一个摄影镜头的拆段。
 
 编译前按 Acheng shots 的[Segment 边界判定](../../acheng-director/references/decisions/shots.md#segment-边界切镜尾帧与-motion-context)逐边界登记需求。新建边界默认以尾帧图片承接动作和场景状态；目标 Clip 有明确首帧分镜图时由该图锚定状态，尾帧关闭。只有明确不能切镜的同一连续摄影镜头拆段才开启 Motion Context；同人物、同场景、对白或声音需要承接不会自动启用 Motion Context。已有明确用户决定直接沿用。

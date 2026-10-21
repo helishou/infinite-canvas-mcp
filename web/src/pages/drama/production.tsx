@@ -241,6 +241,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   const [continuitySnapshot, setContinuitySnapshot] = useState<"draft" | "published">("draft");
   const [continuitySnapshotLoading, setContinuitySnapshotLoading] = useState(false);
   const continuityOwnerKey = `${productionOwner.kind}:${productionOwner.id}`;
+  const currentOwnerKey = useRef(continuityOwnerKey);
+  currentOwnerKey.current = continuityOwnerKey;
   const continuityCheckRef = useRef<{ scope: object; operationId: string } | null>(null);
   const continuityReadRef = useRef({ ownerKey: continuityOwnerKey, snapshot: continuitySnapshot, displayedSnapshot: continuitySnapshot, loading: false, selection: 0, sequence: 0, active: true });
   if (continuityReadRef.current.ownerKey !== continuityOwnerKey) {
@@ -279,7 +281,9 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   }, []);
   const [versions, setVersions] = useState<VersionItem[]>([]);
   const [batches, setBatches] = useState<ProductionBatch[]>([]);
+  const [batchesLoadedFor, setBatchesLoadedFor] = useState("");
   const [runtimeTasks, setRuntimeTasks] = useState<BackendRuntimeTask[]>([]);
+  const supplementalReads = useRef(new Map<string, Promise<void>>());
   const [workspace, setWorkspace] = useState<DirectorWorkspace>("overview");
   const [briefDraft, setBriefDraft] = useState("");
   const priorFormalBrief = useRef<string | null>(null);
@@ -345,34 +349,92 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
           const ownership = episode.canvasId ? await fetchProductionCanvasContext(episode.canvasId).catch(() => null) : null;
           return { ...result, scene: null, productionContext: { role: "episode" as const, canvasId: episode.canvasId || "", episodeId: episode.id, dramaId: episode.dramaId, owner: { kind: "episode" as const, id: episode.id }, sharedAssetCanvasId: ownership?.context?.sharedAssetCanvasId || null } };
         });
-    const [context, prod, history, ready, runHistory, continuity] = await Promise.all([
-      contextRequest, fetchEpisodeProduction(target), fetchEpisodeProductionVersions(target),
-      fetchProductionReadiness(target), fetchProductionBatches(target), fetchProductionContinuity(target, { snapshot: continuityRead.snapshot }),
-    ]).catch(error => { finishContinuityRead(continuityRead); throw error; });
+    const [context, prod] = await Promise.all([contextRequest, fetchEpisodeProduction(target)])
+      .catch(error => { finishContinuityRead(continuityRead); throw error; });
     const resolvedCanvasId = projectId || context.episode?.canvasId || "";
     const sourceSegmentNodes = productionSegments(prod.production).flatMap(segment => productionSegmentRuntimeMatches((context.canvas?.nodes || []) as any, String(segment.id), context.productionContext?.owner).map(match => match.node.id));
     const taskNodes = [...new Set([...sourceSegmentNodes, ...Object.values(prod.production.draft.director?.assets || {}).map(asset => asset.nodeId)].filter((id): id is string => Boolean(id)))];
-    const tasks = resolvedCanvasId && taskNodes.length ? (await fetchBackendTasks({ projectId: resolvedCanvasId, nodeIds: taskNodes, summary: true }).catch(error => { finishContinuityRead(continuityRead); throw error; })).tasks || [] : [];
-    const sharedCanvasId = String(context.productionContext?.sharedAssetCanvasId || "");
-    const sharedNodes = sharedCanvasId && sharedCanvasId !== resolvedCanvasId ? (await fetchBackendProject(sharedCanvasId).catch(() => null))?.project : undefined;
     if (!isActive()) return null;
     setEpisode(context.episode || null);
     setProductionContext(context.productionContext);
     setTitle(context.episode?.title || String(context.canvas?.title || ""));
     setCanvasId(resolvedCanvasId);
     setCanvasRead(context.canvas && Array.isArray(context.canvas.nodes) ? { id: resolvedCanvasId, revision: Number(context.canvas.revision || 0), nodes: context.canvas.nodes as ProductionCanvasSnapshot["nodes"] } : undefined);
-    setSharedCanvasNodes(sharedNodes && Array.isArray(sharedNodes.nodes) ? { id: sharedCanvasId, revision: Number(sharedNodes.revision || 0), nodes: sharedNodes.nodes as ProductionCanvasSnapshot["nodes"] } : undefined);
+    setSharedCanvasNodes(undefined);
     setProduction(prod.production);
-    setReadiness(ready.readiness);
-    finishContinuityRead(continuityRead, continuity.continuity);
-    setVersions(history.versions);
-    setBatches(runHistory.runs);
-    setRuntimeTasks(tasks);
+    setReadiness(null);
+    setVersions([]);
+    setBatches([]);
+    setBatchesLoadedFor("");
+    setRuntimeTasks([]);
+    // The source and owner are enough to render the selected workspace. Readiness
+    // and task summaries remain useful globally, but should not hold the first paint.
+    finishContinuityRead(continuityRead);
     if (!preserveBrief) setBriefDraft(String(prod.production.draft.director?.source.brief || ""));
     backendReadFailed.current = false;
     setLoadError("");
+    const ownerKey = `${productionOwner.kind}:${productionOwner.id}`;
+    const supplementKey = `${ownerKey}:startup:${prod.production.revision}`;
+    if (!supplementalReads.current.has(supplementKey)) {
+      const supplemental = Promise.all([
+        fetchProductionReadiness(target).then(value => { if (isActive()) setReadiness(value.readiness); }),
+        fetchProductionBatches(target).then(value => { if (isActive()) { setBatches(value.runs); setBatchesLoadedFor(ownerKey); } }),
+        resolvedCanvasId && taskNodes.length
+          ? fetchBackendTasks({ projectId: resolvedCanvasId, nodeIds: taskNodes, summary: true }).then(value => { if (isActive()) setRuntimeTasks(value.tasks || []); })
+          : Promise.resolve(),
+      ]).then(() => undefined).catch(error => {
+        if (isActive()) setLoadError(String(error));
+      }).finally(() => supplementalReads.current.delete(supplementKey));
+      supplementalReads.current.set(supplementKey, supplemental);
+    }
     return context.episode?.id || (projectId ? `canvas:${projectId}` : episodeId);
-  }, [target, projectId, contextProjectId, episodeId, t, beginContinuityRead, finishContinuityRead]);
+  }, [target, projectId, contextProjectId, episodeId, productionOwner.kind, productionOwner.id, t, beginContinuityRead, finishContinuityRead]);
+
+  useEffect(() => {
+    if (seriesOnly || !production?.draft.director || workspace !== "continuity") return;
+    const key = `${productionOwner.kind}:${productionOwner.id}:continuity:${continuitySnapshot}:${production.revision}`;
+    if (supplementalReads.current.has(key)) return;
+    const read = beginContinuityRead(continuitySnapshot);
+    continuityReadRef.current.loading = true;
+    setContinuitySnapshotLoading(true);
+    const pendingRead = fetchProductionContinuity(target, { snapshot: continuitySnapshot }).then(value => {
+      finishContinuityRead(read, value.continuity);
+    }).catch(error => {
+      if (finishContinuityRead(read)) setLoadError(String(error));
+    }).finally(() => supplementalReads.current.delete(key));
+    supplementalReads.current.set(key, pendingRead.then(() => undefined));
+  }, [seriesOnly, workspace, production?.revision, production?.draft.director?.sourceHash, productionOwner.kind, productionOwner.id, continuitySnapshot, target, beginContinuityRead, finishContinuityRead]);
+
+  useEffect(() => {
+    if (seriesOnly || !production || workspace !== "advanced") return;
+    const key = `${productionOwner.kind}:${productionOwner.id}:versions:${production.revision}`;
+    if (supplementalReads.current.has(key)) return;
+    let active = true;
+    const pendingRead = fetchEpisodeProductionVersions(target).then(value => {
+      if (active && currentOwnerKey.current === continuityOwnerKey) setVersions(value.versions);
+    }).catch(error => {
+      if (active && currentOwnerKey.current === continuityOwnerKey) setLoadError(String(error));
+    }).finally(() => supplementalReads.current.delete(key));
+    supplementalReads.current.set(key, pendingRead.then(() => undefined));
+    return () => { active = false; };
+  }, [seriesOnly, workspace, production?.revision, productionOwner.kind, productionOwner.id, continuityOwnerKey, target]);
+
+  useEffect(() => {
+    if (seriesOnly || workspace !== "assets" || !productionContext || !canvasId
+      || productionContext.owner?.kind !== productionOwner.kind || productionContext.owner?.id !== productionOwner.id) return;
+    const sharedCanvasId = String(productionContext.sharedAssetCanvasId || "");
+    if (!sharedCanvasId || sharedCanvasId === canvasId || sharedCanvasNodes?.id === sharedCanvasId) return;
+    const key = `${productionOwner.kind}:${productionOwner.id}:shared-canvas:${sharedCanvasId}`;
+    if (supplementalReads.current.has(key)) return;
+    let active = true;
+    const pendingRead = fetchBackendProject(sharedCanvasId).then(({ project }) => {
+      if (active && currentOwnerKey.current === continuityOwnerKey && Array.isArray(project.nodes)) setSharedCanvasNodes({ id: sharedCanvasId, revision: Number(project.revision || 0), nodes: project.nodes as ProductionCanvasSnapshot["nodes"] });
+    }).catch(error => {
+      if (active && currentOwnerKey.current === continuityOwnerKey) setLoadError(String(error));
+    }).finally(() => supplementalReads.current.delete(key));
+    supplementalReads.current.set(key, pendingRead.then(() => undefined));
+    return () => { active = false; };
+  }, [seriesOnly, workspace, productionContext, canvasId, sharedCanvasNodes?.id, productionOwner.kind, productionOwner.id, continuityOwnerKey]);
 
   useEffect(() => {
     if (embedded && production) useProductionWorkspaceStore.getState().setSnapshot(productionOwner.id, production, readiness);
@@ -500,15 +562,15 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     const finishRefreshTelemetry = watchSlowBrowserOperation("production.refreshRemote");
     const run = (async () => {
       const sequence = ++remoteSequence.current;
-      const continuityRead = beginContinuityRead();
+      const continuityRead = workspace === "continuity" ? beginContinuityRead() : undefined;
       const sourceSegmentNodes = production ? productionSegments(production).flatMap(segment => productionSegmentRuntimeMatches(canvasNodes as any, String(segment.id), productionContext?.owner).map(match => match.node.id)) : [];
       const taskNodes = [...new Set([...sourceSegmentNodes, ...Object.values(production?.draft.director?.assets || {}).map(asset => asset.nodeId)].filter((id): id is string => Boolean(id)))];
       const [prod, ready, history, runHistory, canvas, tasks, continuity] = await Promise.all([
-        fetchEpisodeProduction(target), fetchProductionReadiness(target), fetchEpisodeProductionVersions(target), fetchProductionBatches(target),
+        fetchEpisodeProduction(target), fetchProductionReadiness(target), workspace === "advanced" ? fetchEpisodeProductionVersions(target) : Promise.resolve(null), fetchProductionBatches(target),
         fetchBackendProject(canvasId).then(value => value.project).catch(() => null),
         canvasId && taskNodes.length ? fetchBackendTasks({ projectId: canvasId, nodeIds: taskNodes, summary: true }).then(value => value.tasks || []) : Promise.resolve([]),
-        fetchProductionContinuity(target, { snapshot: continuityRead.snapshot }),
-      ]).catch(error => { finishContinuityRead(continuityRead); throw error; });
+        continuityRead ? fetchProductionContinuity(target, { snapshot: continuityRead.snapshot }) : Promise.resolve(null),
+      ]).catch(error => { if (continuityRead) finishContinuityRead(continuityRead); throw error; });
       if (sequence !== remoteSequence.current) return prod.production;
       const observed = observedProductionRevision.current;
       if (!observed || observed.episodeId !== prod.production.episodeId || prod.production.revision > observed.revision) {
@@ -518,7 +580,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         setCompileNotice("");
       }
       observedProductionRevision.current = { episodeId: prod.production.episodeId, revision: prod.production.revision };
-      setProduction(previous => !previous || previous.episodeId !== prod.production.episodeId || prod.production.revision > previous.revision ? prod.production : previous); setReadiness(previous => previous && previous.revision === ready.readiness.revision && previous.canvasRevision !== undefined && ready.readiness.canvasRevision !== undefined && previous.canvasRevision > ready.readiness.canvasRevision ? previous : ready.readiness); finishContinuityRead(continuityRead, continuity.continuity); setVersions(history.versions); setBatches(runHistory.runs);
+      setProduction(previous => !previous || previous.episodeId !== prod.production.episodeId || prod.production.revision > previous.revision ? prod.production : previous); setReadiness(previous => previous && previous.revision === ready.readiness.revision && previous.canvasRevision !== undefined && ready.readiness.canvasRevision !== undefined && previous.canvasRevision > ready.readiness.canvasRevision ? previous : ready.readiness); if (continuityRead && continuity) finishContinuityRead(continuityRead, continuity.continuity); if (history) setVersions(history.versions); setBatches(runHistory.runs); setBatchesLoadedFor(continuityOwnerKey);
       setRuntimeTasks(tasks);
       if (canvas) setCanvasRead({ id: canvasId, revision: Number(canvas.revision || 0), nodes: (canvas.nodes || []) as ProductionCanvasSnapshot["nodes"] });
       return prod.production;
@@ -530,7 +592,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       refreshInFlight.current = null;
       if (refreshQueued.current) { refreshQueued.current = false; void refreshRemote(); }
     }
-  }, [target, canvasId, beginContinuityRead, finishContinuityRead, production?.draft.director?.source.segments, production?.draft.director?.assets, canvasNodes, productionContext?.owner]);
+  }, [target, canvasId, workspace, beginContinuityRead, finishContinuityRead, production?.draft.director?.source.segments, production?.draft.director?.assets, canvasNodes, productionContext?.owner]);
 
   const refreshCompilationProjection = useCallback(async () => {
     const [prod, ready] = await Promise.all([fetchEpisodeProduction(target), fetchProductionReadiness(target)]);
@@ -876,6 +938,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         if (sceneProduction) setProduction(previous => !previous || sceneProduction.production.episodeId !== previous.episodeId || sceneProduction.production.revision > previous.revision
           || sceneProduction.production.revision === previous.revision && JSON.stringify(sceneProduction.production.clipRefreshes) !== JSON.stringify(previous.clipRefreshes) ? sceneProduction.production : previous);
         setBatches(runs.runs);
+        setBatchesLoadedFor(continuityOwnerKey);
         setRuntimeTasks(currentTasks);
         if (!document.hidden && Date.now() - lastReadinessPollAt >= 15_000) await refreshReadiness();
       },
@@ -900,7 +963,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       window.removeEventListener("backend-event", onBackendEvent);
       poller.stop();
     };
-  }, [hasActiveProductionWork, hasActiveSceneWork, target, canvasId, pollingTaskNodesKey]);
+  }, [hasActiveProductionWork, hasActiveSceneWork, target, canvasId, continuityOwnerKey, pollingTaskNodesKey]);
 
   const fail = (error: unknown) => {
     // 同一失败已经进入顶部回执卡（当前工作区可见）时不再重复弹 toast。
@@ -1320,7 +1383,17 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     if (!production || !targets.length) return;
     if (startingRunRef.current) return;
     if (pendingRunStartRef.current) return void message.warning(t("director.workspace.runReceiptUnknown"));
-    const active = batches.find(run => ["pending", "running", "paused", "awaiting_review"].includes(run.status) && run.targets.some(id => targets.includes(id)));
+    let currentBatches = batches;
+    if (batchesLoadedFor !== continuityOwnerKey) {
+      try {
+        currentBatches = (await fetchProductionBatches(target)).runs;
+        if (currentOwnerKey.current === continuityOwnerKey) { setBatches(currentBatches); setBatchesLoadedFor(continuityOwnerKey); }
+      } catch (error) {
+        message.error(error instanceof Error ? error.message : String(error));
+        return;
+      }
+    }
+    const active = currentBatches.find(run => ["pending", "running", "paused", "awaiting_review"].includes(run.status) && run.targets.some(id => targets.includes(id)));
     if (active) return void message.warning(t("director.workspace.runTargetActive", { runId: active.runId }));
     if (!draftKey) return void message.warning(t("drama.production.draftNotReady"));
     if (!production.draft.director) return void message.warning(t("director.workspace.engineUnavailable"));
@@ -1928,7 +2001,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     setExporting(true);
     try {
       const owner = productionOwner;
-      const bundle = await exportAchengDeliveryBundle({ owner, title, production, readiness, canvasNodes, includeGeneratedMedia });
+      const bundle = await exportAchengDeliveryBundle({ owner, title, projectId: canvasId, production, readiness, canvasNodes, includeGeneratedMedia });
       const url = URL.createObjectURL(bundle);
       const anchor = document.createElement("a");
       anchor.href = url;

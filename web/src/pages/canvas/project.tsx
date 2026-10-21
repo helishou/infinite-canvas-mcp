@@ -28,7 +28,7 @@ import { fetchWorkflowDetail, isWorkflowImageField } from "@/services/api/workfl
 import { resolveComfyImageSize } from "@/services/api/comfyui";
 import { uploadImage, resolveImageUrl, isImageFile, isSvgFile, type UploadedImage } from "@/services/image-storage";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
-import { BackendApiError, isBackendAvailabilityError, updateBackendAsset, backendMediaUrl, createBackendGenerationLog, createBackendTask, editEpisodeProduction, fetchBackendCanvasDrama, fetchEpisodeProduction, fetchProductionCanvasContext, prepareCanvasLoop, request, resolveComfyMediaUrl, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
+import { BackendApiError, isBackendAvailabilityError, updateBackendAsset, backendMediaUrl, cancelBackendTask, createBackendGenerationLog, createBackendTask, editEpisodeProduction, fetchBackendCanvasDrama, fetchEpisodeProduction, fetchProductionCanvasContext, prepareCanvasLoop, request, resolveComfyMediaUrl, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
 import { bindEntityPictureToNode } from "@/lib/production/subject-picture-binding";
 import { runCanvasImageTask } from "@/services/api/canvas-image";
 import { runCanvasVideoTask } from "@/services/api/canvas-video";
@@ -718,10 +718,19 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     }, []);
 
     const stopGenerationByRunningId = useCallback(
-        (runningId: string) => {
+        async (runningId: string) => {
             const affectedNodeIds = abortCanvasGenerationRequestsByRunningId(generationRequestsRef.current, runningId);
             if (!affectedNodeIds.size) {
                 setRunningNodeId((current) => (current === runningId ? null : current));
+                const node = nodesRef.current.find((item) => item.id === runningId);
+                const taskId = String(node?.metadata?.runtimeTaskId || "");
+                if (taskId && (node?.metadata?.status === NODE_STATUS_LOADING || node?.metadata?.status === "queued")) {
+                    try {
+                        await cancelBackendTask(taskId);
+                    } catch (error) {
+                        message.error(error instanceof Error ? error.message : String(error));
+                    }
+                }
                 return;
             }
             setNodes((prev) =>
@@ -744,7 +753,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 ),
             );
         },
-        [t],
+        [message, t],
     );
 
     const confirmStopGeneration = useCallback(
@@ -5257,7 +5266,12 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             const retryConfigSource = node.metadata?.model ? { ...sourceNode, metadata: { ...sourceNode.metadata, model: node.metadata.model } } : sourceNode;
             const smartMode = node.type === CanvasNodeType.Config && node.metadata?.smart ? node.metadata.generationMode || "image" : undefined;
             const baseSavedImageMetadata = node.type === CanvasNodeType.Image || (node.type === CanvasNodeType.Config && smartMode === "image") ? node.metadata : undefined;
-            const selectedImageHistoryId = imageId || (node.type === CanvasNodeType.Config ? node.metadata?.activeImageHistoryId || node.metadata?.primaryImageId : undefined);
+            // A smart image node follows its current incoming references by default.
+            // Only an explicit history selection (or retrying a specific history slot)
+            // should freeze the old reference snapshot, matching handleGenerateNode.
+            const selectedImageHistoryId = imageId || (node.type === CanvasNodeType.Config
+                ? node.metadata?.activeImageHistoryExplicit === true ? node.metadata?.activeImageHistoryId || node.metadata?.primaryImageId : undefined
+                : node.metadata?.primaryImageId);
             const selectedImageHistory = selectedImageHistoryId ? baseSavedImageMetadata?.images?.find((image) => image.id === selectedImageHistoryId)?.generationSnapshot : undefined;
             const savedImageMetadata = selectedImageHistory && baseSavedImageMetadata ? {
                 ...baseSavedImageMetadata,
@@ -5292,7 +5306,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
 
             const retrySourcePrompt = sourceNode.metadata?.composerContent || sourceNode.metadata?.prompt || node.metadata?.prompt || "";
             const retryUseCanvasDispatcher = node.type === CanvasNodeType.Image || (node.type === CanvasNodeType.Config && smartMode === "image");
-            const context = hasSavedImageMetadata
+            const context = selectedImageHistory
                 ? null
                 : await (async () => {
                       const sourceContext = await hydrateNodeGenerationContext(buildNodeGenerationContext(sourceNode.id, nodesRef.current, connectionsRef.current, retrySourcePrompt), { preserveStorageKeys: retryUseCanvasDispatcher });
@@ -5311,12 +5325,21 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 message.warning(t("canvas.projectPage.retryPromptMissing"));
                 return;
             }
-            const generationType = savedImageMetadata?.generationType;
-            const useReferenceImages = generationType ? generationType === "edit" : Boolean(context?.referenceImages.length);
-            const retryReferenceImages =
-                selectedImageHistory ? resolveImageGenerationReferences(selectedImageHistory.references)
-                    : hasSavedImageMetadata && savedImageMetadata ? await resolveMetadataReferences(savedImageMetadata)
-                    : useReferenceImages ? (context?.referenceImages.length ? context.referenceImages : sourceNodeReferenceImages(sourceNode)) : [];
+            const useReferenceImages = selectedImageHistory
+                ? Boolean(selectedImageHistory.maskEdit || selectedImageHistory.references.length)
+                : Boolean(context?.referenceImages.length || savedImageMetadata?.maskEdit || savedImageMetadata?.generationType === "edit");
+            let retryReferenceImages: ReferenceImage[] | null;
+            if (selectedImageHistory) {
+                retryReferenceImages = resolveImageGenerationReferences(selectedImageHistory.references);
+            } else if (context?.referenceImages.length) {
+                // Live links are the default source for smart-node retries, same as a new run.
+                retryReferenceImages = context.referenceImages;
+            } else {
+                const savedReferences = hasSavedImageMetadata && savedImageMetadata
+                    ? await resolveMetadataReferences(savedImageMetadata)
+                    : null;
+                retryReferenceImages = savedReferences?.length ? savedReferences : sourceNodeReferenceImages(sourceNode);
+            }
             if (useReferenceImages && !retryReferenceImages?.length) {
                 message.error(t("canvas.projectPage.referenceMissing"));
                 setNodes((prev) =>
@@ -5866,7 +5889,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             if (!target) return null;
             if (target.metadata?.loopOutputSlot === true) return null;
             const activeLoop = upstreamLoopForGeneration(target.id, nodes, connections);
-            const isRunning = runningNodeId === target.id || Boolean(activeLoop && runningLoopId === activeLoop.id);
+            const hasBackendTask = Boolean(target.metadata?.runtimeTaskId && (target.metadata.status === NODE_STATUS_LOADING || target.metadata.status === "queued"));
+            const isRunning = runningNodeId === target.id || hasBackendTask || Boolean(activeLoop && runningLoopId === activeLoop.id);
             const stop = (nodeId: string) => activeLoop && runningLoopId === activeLoop.id ? stopLoop() : confirmStopGeneration(nodeId);
             const disconnectReference = (fromNodeId: string, toNodeId: string) => {
                 const throughLoop = activeLoop && !connections.some((connection) => connection.fromNodeId === fromNodeId && connection.toNodeId === toNodeId)
