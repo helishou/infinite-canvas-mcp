@@ -11,6 +11,7 @@
     "./agent/tool-result": "./dist/agent/tool-result.js",
     "./agent/codex-text": "./dist/agent/codex-text.js",
     "./drama/compilation-scope": "./dist/drama/compilation-scope.js",
+    "./drama/clip-freshness": "./dist/drama/clip-freshness.js",
     "./drama/subject-assembly": "./dist/drama/subject-assembly.js",
     "./agent/delegation": "./dist/agent/delegation.js",
     "./agent/production": "./dist/agent/production.js",

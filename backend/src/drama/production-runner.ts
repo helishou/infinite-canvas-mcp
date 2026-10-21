@@ -17,6 +17,7 @@ import { EpisodeProductionService, type ProductionRecord, type ProductionRun } f
 import { verifyImageInput } from "./image-inputs.js";
 import { productionClipProjection, clipInputHash, CLIP_PROJECTION_FIELDS, type ReferenceSync } from "./clip-inputs.js";
 import { productionSceneIdsForShots, productionSceneLayout } from "./production-layout.js";
+import { entityNodeOperations } from "./entity-nodes.js";
 import { productionSceneCreationOperations } from "./production-scene-nodes.js";
 import { sharedSubjectPictureBinding } from "./shared-subject-picture.js";
 
@@ -83,8 +84,8 @@ export class EpisodeProductionRunner {
                 } else if (kind === "asset") {
                     const plan = plannedAsset;
                     if (!plan) throw new Error(`正式源稿中不存在资产 ${targetId}`);
-                    const scope = String(plan.canvas_scope || (director.assets[targetId]?.sharedSource || sharedOwner ? "shared" : "episode"));
-                    if (scope !== (sharedOwner ? "shared" : "episode")) throw new Error(sharedOwner ? `资产 ${targetId} 属于本集专用，不能在共享素材画布准备` : `共享资产 ${targetId} 尚未采用；请从剧目共享素材库选择版本`);
+                    const scope = String(plan.canvas_scope || (plan.sharedSource || sharedOwner ? "shared" : "episode"));
+                    if (scope !== (sharedOwner ? "shared" : "episode")) throw new Error(sharedOwner ? `资产 ${targetId} 属于本集专用，不能在共享素材画布准备` : `共享资产 ${targetId} 尚未选择共享画布节点`);
                 } else if (kind === "segment") {
                     if (sharedOwner) throw new Error("剧目共享资产画布只准备可复用资产；关键帧和视频 Clip 应在分集画布准备");
                     const group = fresh.draft.clipGroups.find(item => item.id === targetId);
@@ -92,7 +93,7 @@ export class EpisodeProductionRunner {
                     if (!group || !planned) throw new Error("Segment 未登记到正式源稿");
                     if (isSubjectPromptAssembly(director.source)) {
                         const association = this.service.resolveDirectorSegmentRuntime(id, targetId);
-                        if (association.status !== "resolved") throw new Error(`DIRECTOR_SEGMENT_CANVAS_${association.status.toUpperCase()}: Segment ${targetId} 的 Canvas 归属${association.status === "missing" ? "缺失" : "重复"}；该目标已阻塞，其他 Segment 不受影响`);
+                        if (association.status === "ambiguous") throw new Error(`DIRECTOR_SEGMENT_CANVAS_${association.status.toUpperCase()}: Segment ${targetId} 的 Canvas 归属重复；该目标已阻塞，其他 Segment 不受影响`);
                     }
                     const scenes = productionSceneEntries(director.source);
                     const sceneIds = productionSceneIdsForShots(scenes, Array.isArray(planned.shot_ids) ? planned.shot_ids.map(String) : group.shotIds);
@@ -187,37 +188,9 @@ export class EpisodeProductionRunner {
         const plan = frozen?.plan || compiled;
         const canvasOps: CanvasOperation[] = [];
         const plannedNodeIds = new Set(nodesOf(project).map(node => node.id));
-        const sceneById = new Map(productionSceneEntries(director.source).map(scene => [scene.id, scene]));
         const selectedUnits = [...requested.keys()].map(unitId => units.find(unit => unit.id === unitId)).filter((unit): unit is ProductionLayoutUnit => Boolean(unit));
-        for (const unit of selectedUnits) {
-            for (const member of unit.members) {
-                if (member.role !== "scene") continue;
-                const existing = nodesOf(project).find(node => node.id === member.nodeId);
-                if (existing) {
-                    const metadata = { productionLayoutUnitId: unit.id, productionLayoutBounds: unit.bounds.size };
-                    if (existing.width !== member.size.width || existing.height !== member.size.height || object(existing.metadata).productionLayoutUnitId !== unit.id) {
-                        canvasOps.push({ type: "update_node", id: member.nodeId, patch: { width: Math.max(Number(existing.width || 0), member.size.width), height: Math.max(Number(existing.height || 0), member.size.height) }, metadata });
-                    }
-                    plannedNodeIds.add(member.nodeId);
-                    continue;
-                }
-                const scene = sceneById.get(unit.sceneId || "");
-                canvasOps.push({ type: "add_node", id: member.nodeId, nodeType: "group", title: scene?.title || unit.sceneId || "制作场次", position: member.position, width: member.size.width, height: member.size.height, metadata: { productionSceneId: unit.sceneId, productionLayoutUnitId: unit.id, productionLayoutBounds: unit.bounds.size } });
-                plannedNodeIds.add(member.nodeId);
-            }
-        }
-        const plannedSceneProject = {
-            ...project,
-            nodes: [
-                ...nodesOf(project),
-                ...canvasOps.flatMap(operation => operation.type === "add_node" ? [{
-                    id: operation.id, type: operation.nodeType, position: operation.position,
-                    width: operation.width, height: operation.height, metadata: operation.metadata,
-                }] : []),
-            ],
-        };
         canvasOps.push(...productionSceneCreationOperations(
-            plannedSceneProject, current.draft, plan, this.service.ownerIdentity(id), [...sceneIds],
+            project, current.draft, plan, this.service.ownerIdentity(id), [...sceneIds],
             object(this.stores.settings.get(H3_DEFAULTS_KEY)),
         ));
         const assetTitleFor = (assetId: string) => assetTitle(director.source, assetId);
@@ -227,6 +200,18 @@ export class EpisodeProductionRunner {
             if (kind === "asset" || kind === "frame") {
                 const assetId = kind === "frame" ? director.shotInputs[targetId]?.keyframeAssetId : targetId;
                 if (!assetId) throw new Error(`布局目标 ${target} 缺少正式资产映射`);
+                const sharedPlan = kind === "asset" ? (Array.isArray(director.source.asset_plan) ? director.source.asset_plan : []).map(object).find(item => String(item.asset_id || item.id || "") === assetId) : undefined;
+                if (sharedPlan?.sharedSource && ["character", "scene", "prop"].includes(String(sharedPlan.kind || ""))) {
+                    const entityKind = String(sharedPlan.kind), entityId = String(sharedPlan.entity_id || sharedPlan.id || sharedPlan.asset_id || "");
+                    const entityUnit = selectedUnits.find(item => item.id === `entity:${entityKind}:${entityId}`);
+                    const entityMember = entityUnit?.members.find(item => item.role === "asset");
+                    if (!entityUnit || !entityMember) throw new Error(`共享主体 ${assetId} 缺少正式实体布局`);
+                    canvasOps.push(...entityNodeOperations(project, current.draft, owner, current.draft, plan)
+                        .filter(operation => String((operation as Record<string, any>).id || "") === entityMember.nodeId));
+                    plannedNodeIds.add(entityMember.nodeId);
+                    if (director.assets[assetId]?.nodeId !== entityMember.nodeId) bindings.push({ type: "bind_director_asset", assetId, nodeId: entityMember.nodeId });
+                    continue;
+                }
                 const unit = selectedUnits.find(item => item.targets.includes(`asset:${assetId}`) || item.targets.includes(`frame:${targetId}`));
                 const member = unit?.members.find(item => item.role === "asset" || item.role === "keyframe");
                 if (!unit || !member) throw new Error(`布局目标 ${target} 没有对应图片节点`);
@@ -242,7 +227,7 @@ export class EpisodeProductionRunner {
                     const artifact = director.artifacts.find(item => item.kind === "image" && item.targetId === assetId);
                     const scene = kind === "frame" ? productionSceneEntries(director.source).find(item => item.id === unit.sceneId) : undefined;
                     canvasOps.push({ type: "add_node", id: member.nodeId, nodeType: smartImage ? "config" : member.nodeType, title: kind === "frame" ? current.draft.shots.find(shot => shot.id === targetId)?.title || assetTitleFor(assetId!) : assetTitleFor(assetId!), position: member.position, width: member.size.width, height: member.size.height,
-                        metadata: { ...(smartImage ? { smart: true, generationMode: "image", composerContent: artifact?.prompt || "" } : {}), productionAssetId: assetId, ...(kind === "frame" && !unit.targets.includes(`asset:${assetId}`) ? { productionShotId: targetId } : {}), ...(scene ? { groupId: stableId("production-scene", id, scene.id) } : {}), prompt: artifact?.prompt || "", model: productionImageModel(current.draft.settings, director.source, assetId!, kind === "frame" ? "keyframe" : undefined), status: "idle", productionLayoutUnitId: unit.id, productionLayoutBounds: member.size } });
+                        metadata: { ...(smartImage ? { smart: true, generationMode: "image", composerContent: artifact?.prompt || "" } : {}), productionAssetId: assetId, ...(kind === "frame" && !unit.targets.includes(`asset:${assetId}`) ? { productionShotId: targetId } : {}), ...(scene ? { productionSceneId: scene.id } : {}), prompt: artifact?.prompt || "", model: productionImageModel(current.draft.settings, director.source, assetId!, kind === "frame" ? "keyframe" : undefined), status: "idle", productionLayoutUnitId: unit.id, productionLayoutBounds: member.size } });
                     plannedNodeIds.add(member.nodeId);
                 }
                 if (director.assets[assetId]?.nodeId !== member.nodeId) bindings.push({ type: "bind_director_asset", assetId, nodeId: member.nodeId });
@@ -254,7 +239,7 @@ export class EpisodeProductionRunner {
                         const artifact = director.artifacts.find(item => item.kind === "image" && item.targetId === assetId);
                         const scene = productionSceneEntries(director.source).find(item => item.id === promptUnit.sceneId);
                         canvasOps.push({ type: "add_node", id: promptMember.nodeId, nodeType: promptMember.nodeType, title: current.draft.shots.find(shot => shot.id === targetId)?.title || "关键帧提示词", position: promptMember.position, width: promptMember.size.width, height: promptMember.size.height,
-                            metadata: { prompt: artifact?.prompt || "", model: productionImageModel(current.draft.settings, director.source, assetId!, "keyframe"), generationMode: "image", productionShotId: targetId, ...(scene ? { groupId: stableId("production-scene", id, scene.id) } : {}), productionLayoutUnitId: promptUnit.id, productionLayoutBounds: promptUnit.bounds.size } });
+                            metadata: { prompt: artifact?.prompt || "", model: productionImageModel(current.draft.settings, director.source, assetId!, "keyframe"), generationMode: "image", productionShotId: targetId, ...(scene ? { productionSceneId: scene.id } : {}), productionLayoutUnitId: promptUnit.id, productionLayoutBounds: promptUnit.bounds.size } });
                         plannedNodeIds.add(promptMember.nodeId);
                     }
                 }
@@ -291,7 +276,7 @@ export class EpisodeProductionRunner {
                 } else if (existingNode || plannedNodeIds.has(member.nodeId)) canvasOps.push({ type: "add_h3_segment", nodeId: member.nodeId, segment });
                 else {
                     const scene = unit.sceneId ? productionSceneEntries(director.source).find(item => item.id === unit.sceneId) : undefined;
-                    canvasOps.push({ type: "add_node", id: member.nodeId, nodeType: member.nodeType, title: `${scene?.title || "场次"} · H3 Clips`, position: member.position, width: member.size.width, height: member.size.height, metadata: { ...createH3NodeMetadata(object(this.stores.settings.get(H3_DEFAULTS_KEY)), { segments: [segment] }), ...(scene ? { productionSceneId: scene.id, productionOwnerKind: "episode", productionOwnerId: id, groupId: stableId("production-scene", id, scene.id) } : {}), productionLayoutUnitId: unit.id, productionLayoutBounds: unit.bounds.size } });
+                    canvasOps.push({ type: "add_node", id: member.nodeId, nodeType: member.nodeType, title: `${scene?.title || "场次"} · H3 Clips`, position: member.position, width: member.size.width, height: member.size.height, metadata: { ...createH3NodeMetadata(object(this.stores.settings.get(H3_DEFAULTS_KEY)), { segments: [segment] }), ...(scene ? { productionSceneId: scene.id, productionOwnerKind: "episode", productionOwnerId: id } : {}), productionLayoutUnitId: unit.id, productionLayoutBounds: unit.bounds.size } });
                 }
                 plannedNodeIds.add(member.nodeId);
                 if (group.nodeId !== member.nodeId || group.segmentId !== (group.segmentId || stableId("clip", id, group.id))) bindings.push({ type: "bind_director_segment", targetId: group.id, nodeId: member.nodeId, segmentId });
@@ -452,7 +437,7 @@ export class EpisodeProductionRunner {
                 ? clipInputHash(existingClip!) === clipInputHash(segment) && canonicalProduction(existingClip!.productionClipProjection) === canonicalProduction(segment.productionClipProjection)
                     ? [] : [{ type: "update_h3_segment", nodeId, segmentId, patch: { ...segment } }]
                 : node ? [{ type: "add_h3_segment", nodeId, segment }]
-                : [{ type: "add_node", id: nodeId, nodeType: "minimax-h3:video", title: `${scene?.title || "场次"} · H3 Clips`, position: layoutMember.position, width: layoutMember.size.width, height: layoutMember.size.height, metadata: { ...createH3NodeMetadata(object(this.stores.settings.get(H3_DEFAULTS_KEY)), { segments: [segment] }), ...(scene ? { productionSceneId: scene.id, productionOwnerKind: "episode", productionOwnerId: episodeId, groupId: stableId("production-scene", episodeId, scene.id) } : {}), productionLayoutUnitId: layoutUnit.id, productionLayoutBounds: layoutUnit.bounds.size } }];
+                : [{ type: "add_node", id: nodeId, nodeType: "minimax-h3:video", title: `${scene?.title || "场次"} · H3 Clips`, position: layoutMember.position, width: layoutMember.size.width, height: layoutMember.size.height, metadata: { ...createH3NodeMetadata(object(this.stores.settings.get(H3_DEFAULTS_KEY)), { segments: [segment] }), ...(scene ? { productionSceneId: scene.id, productionOwnerKind: "episode", productionOwnerId: episodeId } : {}), productionLayoutUnitId: layoutUnit.id, productionLayoutBounds: layoutUnit.bounds.size } }];
             if (operations.length) {
                 this.stores.projects.applyOperations(episode.canvasId, Number(project.revision || 0), operations, { operationId: stableId("production-sync", episodeId, String(version), group.id, String(project.revision || 0), crypto.createHash("sha256").update(prompt + JSON.stringify(bindings)).digest("hex")), runtimeWrite: true, source: { clientId: "episode-production", kind: "system", label: "同步单集 Clip" } });
                 syncReceipt.updated++;
@@ -661,8 +646,8 @@ export class EpisodeProductionRunner {
                     width: sceneMember.size.width, height: sceneMember.size.height, metadata: { productionSceneId: frameScene, productionLayoutUnitId: sceneUnit!.id, productionLayoutBounds: sceneUnit!.bounds.size } });
                 operations.push(...(nodesOf(project).some((node) => node.id === sourceNodeId)
                     ? [{ type: "update_node", id: sourceNodeId, metadata: { prompt, model: imageModel } }]
-                    : [{ type: "add_node", id: sourceNodeId, nodeType: promptMember.nodeType, title: shot.title || "关键帧提示词", position: promptMember.position, width: promptMember.size.width, height: promptMember.size.height, metadata: { prompt, model: imageModel, generationMode: "image", productionShotId: shotId, ...(frameScene ? { groupId: stableId("production-scene", episodeId, frameScene) } : {}), productionLayoutUnitId: promptUnit.id, productionLayoutBounds: promptUnit.bounds.size } }]));
-                if (!nodesOf(project).some((node) => node.id === nodeId)) operations.push({ type: "add_node", id: nodeId, nodeType: frameMember.nodeType, title: shot.title || shot.visual.slice(0, 24), position: frameMember.position, width: frameMember.size.width, height: frameMember.size.height, metadata: { prompt: shot.visual, status: "idle", productionShotId: shotId, ...(frameScene ? { groupId: stableId("production-scene", episodeId, frameScene) } : {}), productionLayoutUnitId: frameUnit.id, productionLayoutBounds: frameUnit.bounds.size } });
+                    : [{ type: "add_node", id: sourceNodeId, nodeType: promptMember.nodeType, title: shot.title || "关键帧提示词", position: promptMember.position, width: promptMember.size.width, height: promptMember.size.height, metadata: { prompt, model: imageModel, generationMode: "image", productionShotId: shotId, ...(frameScene ? { productionSceneId: frameScene } : {}), productionLayoutUnitId: promptUnit.id, productionLayoutBounds: promptUnit.bounds.size } }]));
+                if (!nodesOf(project).some((node) => node.id === nodeId)) operations.push({ type: "add_node", id: nodeId, nodeType: frameMember.nodeType, title: shot.title || shot.visual.slice(0, 24), position: frameMember.position, width: frameMember.size.width, height: frameMember.size.height, metadata: { prompt: shot.visual, status: "idle", productionShotId: shotId, ...(frameScene ? { productionSceneId: frameScene } : {}), productionLayoutUnitId: frameUnit.id, productionLayoutBounds: frameUnit.bounds.size } });
                 this.stores.projects.applyOperations(episode.canvasId, Number(project.revision || 0), operations, { operationId: stableId("production-frame-prepare", episodeId, String(version), shotId), runtimeWrite: true, source: { clientId: "episode-production", kind: "system" } });
                 this.service.validateExecution(episodeId, version, [keyframeAsset]);
                 const input = verifyImageInput(this.stores.projects.get(episode.canvasId!)!, snapshot.director, imageArtifact, nodeId, sourceNodeId);

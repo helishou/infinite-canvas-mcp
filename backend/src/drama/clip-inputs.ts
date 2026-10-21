@@ -50,15 +50,17 @@ function referenceBindingMatch(left: Record<string, any>, right: Record<string, 
     return Boolean(leftNodeId && leftNodeId === rightNodeId && leftMedia && leftMedia === rightMedia);
 }
 
-/** Rebase Picture ordinals by binding identity when a formal prompt meets a manually reordered reference list. */
+/** Rebase Picture ordinals by binding identity after H3 references are reordered or extended. */
 export function remapPromptPicturesByBinding(prompt: string, beforeValue: unknown, afterValue: unknown) {
     const before = enabledImageBindings(beforeValue), after = enabledImageBindings(afterValue);
-    if (before.length !== after.length) return undefined;
+    // A fresh compilation can add keyframes while the Clip still carries extra
+    // manual references. Keep the compiler's Picture identities stable across
+    // that larger effective list instead of skipping the rebase on count alone.
     const matches = before.map(binding => {
         const candidates = after.map((candidate, index) => ({ candidate, index })).filter(item => referenceBindingMatch(binding, item.candidate));
         return candidates.length === 1 ? candidates[0].index + 1 : undefined;
     });
-    if (matches.some(value => value === undefined) || new Set(matches).size !== after.length) return undefined;
+    if (matches.some(value => value === undefined) || new Set(matches).size !== before.length) return undefined;
     const ordinals = new Map(before.map((_, index) => [index + 1, matches[index]!]));
     let unresolved = false;
     const remapped = prompt.replace(/<Picture\s+(\d+)>/giu, (tag, number: string) => {
@@ -443,7 +445,7 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
     }
     const taskMode = ({ T2VA: "t2v", I2VA: "i2v", FL2VA: "fl2v", L2VA: "l2v", Ref2VA: "ref2va" } as Record<string, string>)[String(planned.mode)];
     if (!taskMode) throw new Error(`未知 Acheng 模式 ${planned.mode}`);
-    const prompt = authored.prompt;
+    let prompt = authored.prompt;
     const boundary = outgoingDirectorBoundary(d, group.id);
     const subjectAssembly = isSubjectPromptAssembly(d.source);
     // Production Shot identity must survive independently of generated/approved keyframe media.
@@ -459,7 +461,7 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
             const frame = requiredSubjectStoryboardFrame(d, String(shot.id));
             if (!frame) return { id: shot.id, duration };
             const binding = bindings.find(ref => (ref.role === "keyframe" || ref.role === "storyboard") && referenceMatchesSubjectFrame(d, frame, ref));
-            if (!binding) throw new Error(`镜头 ${shot.id} 的正式关键帧未进入本段参考绑定`);
+            if (!binding) throw new Error(`镜头 ${shot.id} 绑定的关键帧图片未进入当前分段引用`);
             binding.role = "storyboard";
             return { id: shot.id, referenceBindingId: String(binding.id), duration };
         }
@@ -468,7 +470,7 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
         const asset = d.assets[input.keyframeAssetId];
         const sourceNodeId = asset?.nodeId || input.keyframeAssetId;
         const binding = bindings.find(ref => ref.sourceNodeId === sourceNodeId);
-        if (!binding) throw new Error(`镜头 ${shot.id} 的正式关键帧未进入本段参考绑定`);
+        if (!binding) throw new Error(`镜头 ${shot.id} 绑定的关键帧图片未进入当前分段引用`);
         binding.role = "storyboard";
         return { id: shot.id, referenceBindingId: String(binding.id), duration };
     });
@@ -482,8 +484,20 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
     const preflight = compileReferenceSubmission(project, segment);
     assertReferenceCompilation(preflight);
     if (preflight.compiledPrompt !== prompt) {
-        const tokens = (value: string) => [...value.matchAll(/<(?:Picture|Subject|Video|Audio)\s+\d+>/g)].map(match => match[0]).join(" → ") || "无引用标记";
-        throw new Error(`Segment ${group.id} 的提示词引用映射与画布绑定不一致；源稿顺序：${tokens(prompt)}；画布编译顺序：${tokens(preflight.compiledPrompt)}。请按该映射重绑后重新编译，Backend 未改写提示词。`);
+        // The authored prompt labels pictures in artifact-reference order, while
+        // H3 submits storyboard images before the remaining references. Preserve
+        // each image's meaning by rebasing Picture ordinals to the actual H3
+        // submission order. Reject only when a reference cannot be matched
+        // uniquely or when compilation changed more than those ordinals.
+        const remappedPrompt = remapPromptPicturesByBinding(prompt, bindings, preflight.references);
+        if (remappedPrompt !== undefined && remappedPrompt === preflight.compiledPrompt) {
+            prompt = remappedPrompt;
+            segment.prompt = remappedPrompt;
+            segment.referenceBindings = preflight.bindings;
+        } else {
+            const tokens = (value: string) => [...value.matchAll(/<(?:Picture|Subject|Video|Audio)\s+\d+>/g)].map(match => match[0]).join(" → ") || "无引用标记";
+            throw new Error(`Segment ${group.id} 的提示词引用映射与画布绑定不一致；源稿顺序：${tokens(prompt)}；画布编译顺序：${tokens(preflight.compiledPrompt)}。请按该映射重绑后重新编译，Backend 未改写提示词。`);
+        }
     }
     const promptSourceMap = promptSourceMapSchema.safeParse((authored.receipt as Record<string, any>).sourceMap);
     segment.productionClipProjection = { targetId: group.id, sourceHash: authored.sourceHash, artifactId: authored.id, promptHash: authored.sha256,
@@ -533,7 +547,7 @@ export function formalStoryboardTrack(data: EpisodeProductionData, group: Episod
         const binding = subjectAssembly
             ? frame && refs.find(ref => ref.role === "storyboard" && ref.mediaType === "image" && referenceMatchesSubjectFrame(director, frame, ref))
             : asset && refs.find(ref => ref.role === "storyboard" && ref.mediaType === "image" && ref.storageKey === asset.storageKey
-                && (!asset.nodeId || ref.sourceNodeId === asset.nodeId));
+                && (!asset.nodeId || !ref.sourceNodeId || ref.sourceNodeId === asset.nodeId));
         return { id: String(shot.id), duration, ...(binding?.id ? { referenceBindingId: String(binding.id) } : {}) };
     });
     return { storyboardModeEnabled: true, storyboardShots, duration: storyboardShots.reduce((sum, shot) => sum + shot.duration, 0) };
@@ -543,11 +557,64 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
     const result: ReferenceSync = { targetId: group.id, status: "blocked", referenceCount: 0, diagnostics: [] };
     try {
         let segment = buildProductionClip(project, data, group, segmentId);
+        const compiledReferenceBindings = structuredClone(segment.referenceBindings);
         if (existing) {
             const groups = [["referenceBindings", "storyboardShots", "duration"], ["h3CharacterGroups"],
                 ...CLIP_PROJECTION_FIELDS.filter(key => !["referenceBindings", "h3CharacterGroups", "storyboardShots", "duration"].includes(key)).map(key => [key])];
             const nextValues = Object.fromEntries(CLIP_PROJECTION_FIELDS.filter(key => Object.hasOwn(segment, key)).map(key => [key, segment[key]]));
             const baseline = { ...(existing.productionClipProjection?.fieldHashes || initialProjectionBaseline(existing, segment)) };
+            // Character image bindings are a projection of the Subject picture choice.
+            // A stale H3 reference must not outrank the image selected in the production UI.
+            const subjectRegistry = object(data.director?.source).subject_registry;
+            const formalSubjects: Array<Record<string, any>> = Array.isArray(subjectRegistry) ? subjectRegistry.map(value => object(value)) : [];
+            const formalSubjectIds = new Set(formalSubjects.flatMap(subject => [String(subject.id || ""), String(object(subject.entityRef).id || "")]).filter(Boolean));
+            const formalBindingIds = new Set<string>();
+            const formalCharacterNodeIds = new Set<string>();
+            for (const subject of formalSubjects) {
+                for (const binding of (Array.isArray(subject.pictureBindings) ? subject.pictureBindings : []).map(object)) {
+                    if (binding.id) formalBindingIds.add(String(binding.id));
+                    const sourceNode = object(binding.sourceNode);
+                    if (sourceNode.nodeId) formalCharacterNodeIds.add(String(sourceNode.nodeId));
+                }
+                const entityRef = object(subject.entityRef);
+                if (entityRef.id) formalCharacterNodeIds.add(String(entityRef.id));
+            }
+            const isFormalCharacterReference = (value: unknown) => {
+                const reference = object(value), role = String(reference.role || "");
+                return formalBindingIds.has(String(reference.pictureBindingId || reference.outfitId || ""))
+                    || role.startsWith("character_") && (formalSubjectIds.has(String(reference.subjectId || ""))
+                        || formalCharacterNodeIds.has(String(reference.sourceNodeId || reference.nodeId || "")));
+            };
+            const isFormalCharacterGroup = (value: unknown) => {
+                const character = object(value), outfits = Array.isArray(character.outfits) ? character.outfits.map(object) : [];
+                return formalSubjectIds.has(String(character.subjectId || ""))
+                    || formalCharacterNodeIds.has(String(character.characterNodeId || ""))
+                    || outfits.some(outfit => formalBindingIds.has(String(outfit.pictureBindingId || outfit.id || ""))
+                        || formalCharacterNodeIds.has(String(outfit.sourceNodeId || "")));
+            };
+            const groupShotIds = new Set(group.shotIds.map(String));
+            const formalShotReferenceNodeIds = new Set((Array.isArray(object(data.director?.source).shots) ? object(data.director?.source).shots as Array<Record<string, any>> : [])
+                .filter(shot => groupShotIds.has(String(object(shot).id || "")))
+                .flatMap(shot => (Array.isArray(object(shot).reference_requirements) ? object(shot).reference_requirements as Array<Record<string, any>> : [])
+                    .filter(reference => object(reference).requiredForSubmission === true)
+                    .map(reference => String(object(object(reference).sourceNode).nodeId || "")))
+                .filter(Boolean));
+            const isFormalShotReference = (value: unknown) => formalShotReferenceNodeIds.has(String(object(value).sourceNodeId || object(value).nodeId || ""));
+            const compiledCharacterReferences = segment.referenceBindings.filter(isFormalCharacterReference);
+            const compiledShotReferences = segment.referenceBindings.filter(isFormalShotReference);
+            if (compiledCharacterReferences.length || compiledShotReferences.length) {
+                const currentReferences = Array.isArray(existing.referenceBindings) ? existing.referenceBindings : [];
+                const preservedReferences = currentReferences.filter(reference => !isFormalCharacterReference(reference) && !isFormalShotReference(reference));
+                segment.referenceBindings = [...compiledCharacterReferences, ...compiledShotReferences, ...preservedReferences];
+                baseline.referenceBindings = inputHash(existing.referenceBindings);
+            }
+            const compiledCharacterGroups = Object.entries(segment.h3CharacterGroups || {}).filter(([, value]) => isFormalCharacterGroup(value));
+            if (compiledCharacterGroups.length) {
+                const currentGroups = object(existing.h3CharacterGroups);
+                const preservedGroups = Object.fromEntries(Object.entries(currentGroups).filter(([, value]) => !isFormalCharacterGroup(value)));
+                segment.h3CharacterGroups = { ...preservedGroups, ...Object.fromEntries(compiledCharacterGroups) };
+                baseline.h3CharacterGroups = inputHash(existing.h3CharacterGroups);
+            }
             // An older projection can leave a stale referenceBindings array marked
             // as manual even while its saved Prompt is still byte-for-byte the
             // compiler output. When that exact Prompt has more Picture/Video/Audio
@@ -591,7 +658,7 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
                 let alignedPrompt: string | undefined;
                 try {
                     const effective = compileReferenceSubmission(project, mergedSegment);
-                    alignedPrompt = remapPromptPicturesByBinding(segment.prompt, segment.referenceBindings, effective.references);
+                    alignedPrompt = remapPromptPicturesByBinding(segment.prompt, compiledReferenceBindings, effective.references);
                 } catch {
                     alignedPrompt = undefined;
                 }
@@ -790,8 +857,7 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
             if (!member || !unit) continue;
             const sceneId = unit.sceneId || layoutSceneForClip(data, group);
             const scene = sceneId && data.director ? productionSceneEntries(data.director.source).find(item => item.id === sceneId) : undefined;
-            const groupId = sceneId ? stableId("production-scene", layout.owner.id, sceneId) : undefined;
-            const metadata = { ...createH3NodeMetadata(defaults, { segments: [segment] }), ...(sceneId ? { productionSceneId: sceneId, productionOwnerKind: layout.owner.kind, productionOwnerId: layout.owner.id, groupId } : {}), productionLayoutUnitId: unit.id, productionLayoutBounds: unit.bounds.size };
+            const metadata = { ...createH3NodeMetadata(defaults, { segments: [segment] }), ...(sceneId ? { productionSceneId: sceneId, productionOwnerKind: layout.owner.kind, productionOwnerId: layout.owner.id } : {}), productionLayoutUnitId: unit.id, productionLayoutBounds: unit.bounds.size };
             const operation = { type: "add_node", id: nodeId, nodeType: member.nodeType, title: `${scene?.title || sceneId || "场次"} · H3`, position: member.position, width: member.size.width, height: member.size.height, metadata } as Extract<CanvasOperation, { type: "add_node" }>;
             pendingNodes.set(nodeId, operation);
             operations.push(operation);

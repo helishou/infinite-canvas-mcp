@@ -2,12 +2,6 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import type { BackendDatabase } from "../db.js";
-import type { ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/production-contract";
-import { productionSharedProjectionNodeId } from "./production-layout-geometry.js";
-import type { BackendEventBus } from "../events.js";
-import type { EpisodeProductionService } from "./production.js";
-import type { compileAchengDirector } from "@basketikun/canvas-agent/skills/acheng";
-import { ProductionCompilationService } from "./compilation.js";
 import { productionCanvasContext } from "./production-canvas.js";
 import { reconcileSharedAssetConsumers } from "../canvas/drama-asset-library.js";
 
@@ -18,14 +12,6 @@ const record = (value: unknown): Record<string, any> => value && typeof value ==
 function fromRow(row: Record<string, any>): ApprovedSharedAsset {
     return { id: row.id, dramaId: row.drama_id, assetId: row.asset_id, sourceProjectId: row.source_project_id, sourceNodeId: row.source_node_id,
         sourceVersion: row.source_version, storageKey: row.storage_key, sha256: row.sha256, evidence: row.evidence || "", reviewStatus: row.evidence ? "approved" : "unreviewed", snapshot: JSON.parse(row.snapshot_json), createdAt: row.created_at };
-}
-export function approvedSharedAsset(db: BackendDatabase, id: string): ApprovedSharedAsset {
-    const row = db.db.prepare("SELECT * FROM drama_asset_versions WHERE id=?").get(id) as Record<string, any> | undefined;
-    if (!row) throw new Error("共享素材版本不存在");
-    const asset = fromRow(row);
-    const media = db.getMediaFile(asset.storageKey);
-    if (!media || !fs.existsSync(media.filePath) || crypto.createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex") !== asset.sha256) throw new Error("共享资产媒体摘要不一致或归档文件不可访问");
-    return asset;
 }
 export function listApprovedSharedAssets(db: BackendDatabase, dramaId: string) {
     return (db.db.prepare(`SELECT a.* FROM drama_asset_versions a WHERE drama_id=? AND rowid=(
@@ -66,28 +52,8 @@ export function registerSharedAssetVersion(db: BackendDatabase, projectId: strin
     db.upsertAssetRecord({ id: libraryId, kind: roleNode ? node.type : "image", title: String(snapshot.title), coverUrl: "", tags: existingLibrary?.tags || ["shared"],
         folderId: existingLibrary?.folderId || null, dramaId: drama.folder_id, source: existingLibrary?.source || "production-shared", note: existingLibrary?.note || null,
         data: {},
-        metadata: { ...existingLibrary?.metadata, approvedId: id, versionId: id, reviewStatus: reviewed ? "approved" : "unreviewed", assetId, sourceProjectId: projectId, sourceNodeId: asset.nodeId,
+        metadata: { ...existingLibrary?.metadata, versionId: id, reviewStatus: reviewed ? "approved" : "unreviewed", assetId, sourceProjectId: projectId, sourceNodeId: asset.nodeId,
             sharedAssetSource: { dramaId: drama.folder_id, assetId: libraryId, sourceProjectId: projectId, sourceNodeId: asset.nodeId } }, createdAt: existingLibrary?.createdAt || now, updatedAt: now });
-    for (const row of db.db.prepare(`SELECT p.episode_id, p.revision, p.draft_json FROM episode_productions p
-        JOIN drama_episodes e ON e.id=p.episode_id WHERE e.drama_id=? AND p.archived_at IS NULL`).all(drama.folder_id) as Array<{ episode_id: string; revision: number; draft_json: string }>) {
-        const draft = JSON.parse(row.draft_json);
-        // 真正的共享引用信息挂在 source.asset_plan 条目上，投影资产条目往往只是空占位；
-        // 用 asset_plan 作为 sharedSource 的权威来源，两者 id 一致可对齐。
-        const planItems = Array.isArray(draft.source?.asset_plan) ? draft.source.asset_plan : [];
-        for (const [targetId, consumer] of Object.entries(draft.director?.assets || {})) {
-            const consumerRec = record(consumer);
-            const planItem = record(planItems.find((item: any) => String(item?.id) === String(targetId)));
-            const source = consumerRec.sharedSource || planItem.sharedSource;
-            // Adoption follows the stable canonical identity only. Asset names and
-            // locally derived node IDs are not evidence that two records are related.
-            const exactSource = source?.dramaId === drama.folder_id
-                && source.sourceProjectId === projectId
-                && source.sourceNodeId === asset.nodeId;
-            if (!exactSource || source.approvedId === id) continue;
-            db.db.prepare(`INSERT OR IGNORE INTO drama_asset_adoptions (id, approved_id, episode_id, target_asset_id, expected_revision, status, updated_at)
-                VALUES (?, ?, ?, ?, ?, 'pending', ?)`).run(`adoption-${stable(id, row.episode_id, targetId)}`, id, row.episode_id, targetId, row.revision, now);
-        }
-    }
 }
 
 /**
@@ -101,7 +67,7 @@ export function registerApprovedSharedAsset(db: BackendDatabase, projectId: stri
     return registerSharedAssetVersion(db, projectId, version, assetId, director);
 }
 
-type SharedAssetIdentity = { dramaId: string; assetId: string; sourceProjectId: string; sourceNodeId: string };
+export type SharedAssetIdentity = { dramaId: string; assetId: string; sourceProjectId: string; sourceNodeId: string };
 
 /** A local or canonical source node must carry an explicit link to the same shared source. */
 export function sharedAssetNodeMatchesSource(node: Record<string, any> | null | undefined, source: SharedAssetIdentity) {
@@ -110,69 +76,41 @@ export function sharedAssetNodeMatchesSource(node: Record<string, any> | null | 
     const references = [metadata.sharedAssetReference, metadata.sharedAssetOrigin]
         .filter((value): value is Record<string, any> => Boolean(value && typeof value === "object" && !Array.isArray(value)));
     return references.length > 0 && references.every(reference =>
-        reference.sourceProjectId === source.sourceProjectId
+        reference.dramaId === source.dramaId
+        && reference.assetId === source.assetId
+        && reference.sourceProjectId === source.sourceProjectId
         && reference.sourceNodeId === source.sourceNodeId);
 }
 
 /** Validate a particular node's identity without requiring its ID to equal another projection's ID. */
 export function validateSharedAssetNodeSource(db: BackendDatabase, projectId: string, source: SharedAssetIdentity, nodeId: string) {
+    const sourceNode = validateSharedAssetSourceIdentity(db, projectId, source);
+    const node = (db.getCanvasProject(projectId)?.nodes as Record<string, any>[] || []).find(item => item.id === nodeId);
+    if (!node) throw new Error(`共享素材「${source.assetId || nodeId}」在制作画布上的绑定节点 ${nodeId} 不存在`);
+    if (!sharedAssetNodeMatchesSource(node, source)) throw new Error(`共享素材「${source.assetId || nodeId}」的分集节点没有绑定当前共享来源`);
+    return { sourceNode, node };
+}
+
+/** Check the one authoritative source pointer without requiring a copied or adopted media node. */
+export function validateSharedAssetSourceIdentity(db: BackendDatabase, projectId: string, source: SharedAssetIdentity) {
     const episode = db.getDramaEpisodeByCanvasId(projectId);
     const consumer = productionCanvasContext(db, projectId), canonical = productionCanvasContext(db, source.sourceProjectId);
-    const name = source.assetId || nodeId;
+    const name = source.assetId || source.sourceNodeId;
     if (!episode || episode.dramaId !== source.dramaId || consumer.dramaId !== source.dramaId
         || canonical.dramaId !== source.dramaId || canonical.role !== "shared-assets") {
         throw new Error(`共享素材「${name}」的分集或来源画布不属于当前剧目`);
     }
     const sourceNode = (db.getCanvasProject(source.sourceProjectId)?.nodes as Record<string, any>[] || []).find(item => item.id === source.sourceNodeId);
     if (!sourceNode) throw new Error(`共享素材「${name}」的当前共享来源节点不存在`);
-    const node = (db.getCanvasProject(projectId)?.nodes as Record<string, any>[] || []).find(item => item.id === nodeId);
-    if (!node) throw new Error(`共享素材「${name}」在制作画布上的绑定节点 ${nodeId} 不存在`);
-    if (!sharedAssetNodeMatchesSource(node, source)) throw new Error(`共享素材「${name}」的分集节点没有绑定当前共享来源`);
-    return node;
+    if (!["character", "scene", "prop"].includes(String(sourceNode.type || ""))) throw new Error(`共享素材「${name}」当前来源节点类型不支持`);
+    return sourceNode;
 }
-
-export function validateSharedAssetSource(db: BackendDatabase, projectId: string, asset: DirectorProduction["assets"][string]) {
-    if (!asset.sharedSource) return;
-    const source = asset.sharedSource;
-    validateSharedAssetNodeSource(db, projectId, source, String(asset.nodeId || ""));
-}
-
-/** Only this path creates the local projection; callers cannot register arbitrary media. */
-export function prepareSharedAssetProjection(db: BackendDatabase, episodeId: string, targetId: string, approvedId: string, layout: ProductionLayoutPlan) {
-    const approved = approvedSharedAsset(db, approvedId);
-    const episode = db.getDramaEpisode(episodeId);
-    if (!episode?.canvasId || episode.dramaId !== approved.dramaId) throw new Error("只能采用同剧目的共享资产");
-    const unit = layout.units.find(item => item.targets.includes(`asset:${targetId}`) && item.members.some(member => member.role === "asset"));
-    const member = unit?.members.find(item => item.role === "asset");
-    const nodeId = member?.nodeId;
-    if (!unit || !member || !nodeId || layout.canvasId !== episode.canvasId) throw new Error(`共享资产 ${targetId} 缺少正式布局预留`);
-    const project = db.getCanvasProject(episode.canvasId)!;
-    const node = (project.nodes as Record<string, any>[] || []).find(item => item.id === nodeId);
-    if (node && node.metadata?.sharedAssetOrigin?.assetId !== approved.assetId) throw new Error("共享引用身份冲突，不能替换已有资产");
-    const origin = { dramaId: approved.dramaId, assetId: approved.assetId, approvedId, sourceProjectId: approved.sourceProjectId, sourceNodeId: approved.sourceNodeId };
-    const metadata = { ...approved.snapshot.metadata, productionAssetId: targetId, sharedAssetOrigin: origin };
-    const layoutMetadata = { ...metadata, productionLayoutUnitId: unit.id, productionLayoutBounds: member.size };
-    const operations = node ? [{ type: "update_node", id: nodeId, patch: { content: approved.storageKey }, metadata: layoutMetadata }]
-        : [{ type: "add_node", id: nodeId, nodeType: approved.snapshot.type, title: approved.snapshot.title, position: member.position, width: member.size.width, height: member.size.height, content: approved.storageKey, metadata: layoutMetadata }];
-    const same = node?.metadata?.sharedAssetOrigin?.approvedId === approvedId && node?.metadata?.storageKey === approved.storageKey;
-    if (!same) db.applyCanvasProjectOperations(episode.canvasId, Number(project.revision || 0), operations, { runtimeWrite: true, source: { kind: "system", clientId: "production:shared-assets", label: "采用共享素材版本" } });
-    return { nodeId, approved, origin };
-}
-export const sharedProjectionNodeId = productionSharedProjectionNodeId;
 
 export class SharedAssetCoordinator {
-    private processing = false;
-    private scheduled = false;
-    constructor(private db: BackendDatabase, private service: EpisodeProductionService, private events: BackendEventBus,
-        private resume?: (episodeId: string, runId: string) => void, private compiler?: typeof compileAchengDirector, private syncInputs?: (episodeId: string) => void) {}
+    constructor(private db: BackendDatabase) {}
     start() {
         this.reconcileExistingSharedConsumers();
-        const unsubscribe = this.events.subscribe(event => {
-            const payload = record(event.payload);
-            if (event.type === "drama-production.updated" && payload.reason !== "shared_asset_sync") this.schedule();
-        });
-        this.schedule();
-        return unsubscribe;
+        return () => {};
     }
     private reconcileExistingSharedConsumers() {
         const forceMarker = "maintenance.shared-asset-consumers.v1";
@@ -216,69 +154,6 @@ export class SharedAssetCoordinator {
             }
         } catch (error) {
             console.error("[shared-assets] initial consumer reconciliation failed; it will retry on the next Backend start", error);
-        }
-    }
-    private schedule() {
-        if (this.scheduled || this.processing) return;
-        this.scheduled = true;
-        queueMicrotask(() => { this.scheduled = false; this.drain(); });
-    }
-    drain() {
-        if (this.processing) return;
-        this.processing = true;
-        try {
-            const jobs = this.db.db.prepare("SELECT * FROM drama_asset_adoptions WHERE status IN ('pending','compiling') ORDER BY rowid").all() as Record<string, any>[];
-            const revised = new Map<string, { initial: number; current: number }>();
-            for (const job of jobs) {
-                try {
-                    // Archived episodes stay frozen: leave the adoption queued instead of
-                    // applying it, so un-archiving can resume the shared update later.
-                    if (this.service.get(job.episode_id).archivedAt) continue;
-                    const approved = approvedSharedAsset(this.db, job.approved_id);
-                    if (listApprovedSharedAssets(this.db, approved.dramaId).find(asset => asset.assetId === approved.assetId)?.id !== approved.id) {
-                        this.db.db.prepare("UPDATE drama_asset_adoptions SET status='superseded', error=NULL, updated_at=? WHERE id=?").run(new Date().toISOString(), job.id);
-                        continue;
-                    }
-                    if (job.status === "compiling" && this.service.get(job.episode_id).revision !== job.expected_revision) throw new Error("制作源稿发生并发编辑，需核对后重新编译共享引用");
-                    if (job.status === "pending") {
-                        const current = this.service.get(job.episode_id);
-                        const prior = revised.get(job.episode_id);
-                        if (current.revision !== job.expected_revision && !(prior && prior.initial === job.expected_revision && prior.current === current.revision)) throw new Error("制作源稿发生并发编辑，共享资产更新需核对当前草稿");
-                        const currentPlan = this.service.get(job.episode_id);
-                        const layout = this.service.ensureLayoutPlan(job.episode_id, currentPlan);
-                        const projection = prepareSharedAssetProjection(this.db, job.episode_id, job.target_asset_id, job.approved_id, layout);
-                        this.service.edit(job.episode_id, { operationId: job.id, expectedRevision: current.revision,
-                            ops: [{ type: "adopt_shared_asset", assetId: job.target_asset_id, approvedId: job.approved_id, nodeId: projection.nodeId }] });
-                        this.db.db.prepare("UPDATE drama_asset_adoptions SET status='compiling', expected_revision=?, updated_at=? WHERE id=?")
-                            .run(this.service.get(job.episode_id).revision, new Date().toISOString(), job.id);
-                    }
-                    this.compile(job.episode_id);
-                    revised.set(job.episode_id, { initial: revised.get(job.episode_id)?.initial ?? job.expected_revision, current: this.service.get(job.episode_id).revision });
-                    this.db.db.prepare("UPDATE drama_asset_adoptions SET status='applied', error=NULL, updated_at=? WHERE id=?").run(new Date().toISOString(), job.id);
-                } catch (error) {
-                    this.db.db.prepare("UPDATE drama_asset_adoptions SET status='blocked', error=?, updated_at=? WHERE id=?").run(error instanceof Error ? error.message : String(error), new Date().toISOString(), job.id);
-                    this.events.publish({ type: "drama-production.updated", entityId: job.episode_id, payload: { sharedAssetUpdate: "blocked", adoptionId: job.id } });
-                }
-            }
-        } finally { this.processing = false; }
-    }
-    private compile(episodeId: string) {
-        const current = this.service.get(episodeId);
-        const compilations = new ProductionCompilationService(this.service, this.service.compilationRoot(), this.compiler);
-        const owner = "/drama/episodes/:episodeId/production";
-        const packet = compilations.prepare(episodeId, owner, current.revision);
-        compilations.apply(episodeId, owner, packet.preparedId);
-        const next = this.service.get(episodeId);
-        // Publication freezes valid inputs, never authorizes or submits media.
-        const preflight = this.service.preflight(episodeId, { action: "publish", request: { operationId: `shared-publish:${packet.preparedId}`, expectedRevision: next.revision, stage: "director" } });
-        if (!preflight.valid) throw new Error(preflight.diagnostics.map(item => item.message).join("；"));
-        this.service.publish(episodeId, { operationId: `shared-publish:${packet.preparedId}`, expectedRevision: next.revision, stage: "director" });
-        this.syncInputs?.(episodeId);
-        for (const batch of this.service.listBatches(episodeId)) {
-            const workflow = record(batch.settings.workflow);
-            if (batch.status !== "awaiting_review" || workflow.mediaProductionMode !== "automatic") continue;
-            try { this.service.resumeBatch(episodeId, batch.runId); this.resume?.(episodeId, batch.runId); }
-            catch { /* The valid adoption remains applied; unrelated dependencies stay visible in readiness. */ }
         }
     }
 }

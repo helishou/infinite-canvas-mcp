@@ -187,14 +187,16 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
     };
 
     const frameAssetIds = new Set(shotsByKeyframeAsset.keys());
-    const standaloneAssets = explicitAssets.filter(item => !frameAssetIds.has(item.id));
+    const sharedEntityAssets = new Set(explicitAssets.filter(({ item }) => Boolean(item.sharedSource)
+        && ["character", "scene", "prop"].includes(String(item.kind || ""))).map(item => item.id));
+    const standaloneAssets = explicitAssets.filter(item => !frameAssetIds.has(item.id) && !sharedEntityAssets.has(item.id));
     const multiSceneFrames = explicitAssets.filter(item => frameAssetIds.has(item.id) && new Set((shotsByKeyframeAsset.get(item.id) || []).map(shotId => sceneByShot.get(shotId)).filter(Boolean)).size > 1).map(item => item.id);
     const assetOrder = [...new Set([...standaloneAssets.map(item => item.id), ...multiSceneFrames])];
     // Keep the first asset row below the fixed canvas toolbar and review actions.
     const assetAreaTop = 280;
     for (let index = 0; index < standaloneAssets.length; index++) {
         const { id, item } = standaloneAssets[index];
-        const shared = String(item.canvas_scope || "") === "shared" || Boolean(director?.assets[id]?.sharedSource);
+        const shared = String(item.canvas_scope || "") === "shared" || Boolean(item.sharedSource);
         const boundId = String(director?.assets[id]?.nodeId || ""), bound = boundId ? nodeById.get(boundId) : undefined;
         const sharedProjectionId = shared && owner.kind === "episode" ? productionSharedProjectionNodeId(owner.id, id) : "";
         const existingId = String(sharedProjectionId && bound?.metadata?.sharedAssetOrigin?.assetId !== id ? sharedProjectionId : boundId || sharedProjectionId || productionLayoutStableId("production-asset", owner.id, id));
@@ -276,7 +278,11 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
         if (explicit.length > 1) throw new Error("制作实体重复绑定到多个节点");
         const nodeId = explicit[0]?.id || entityNodeId(owner, entity.kind, entity.entityId);
         const position = { x: -1260, y: 280 + index * 580 };
-        createUnit(`entity:${entity.kind}:${entity.entityId}`, "asset", [`entity:${entity.kind}:${entity.entityId}`], undefined, position, { width: 460, height: 480 }, [{ role: "asset", nodeId, nodeType: entity.kind, position, size: { width: 460, height: 480 } }]);
+        const sharedAssetId = explicitAssets.find(({ item }) => Boolean(item.sharedSource)
+            && String(item.kind || "") === entity.kind
+            && String(item.entity_id || item.id || item.asset_id || "") === entity.entityId)?.id;
+        createUnit(`entity:${entity.kind}:${entity.entityId}`, "asset", [`entity:${entity.kind}:${entity.entityId}`,
+            ...(sharedAssetId ? [`asset:${sharedAssetId}`] : [])], undefined, position, { width: 460, height: 480 }, [{ role: "asset", nodeId, nodeType: entity.kind, position, size: { width: 460, height: 480 } }]);
     }
 
     // Old materialized nodes remain layout anchors even if their source object was later removed.

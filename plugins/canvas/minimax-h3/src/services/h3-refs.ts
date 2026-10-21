@@ -214,6 +214,7 @@ export function normalizeDroppedH3Ref(event: React.DragEvent<HTMLElement>): H3Re
     const url = String(value.url || value.dataUrl || value.localUrl || value.originalLocalUrl || value.sourceUrl || value.path || "").trim();
     if (!url) return null;
     const kind = String(value.kind || value.type || "image").toLowerCase();
+    if (value.origin === "h3-output" && kind.startsWith("video")) return null;
     const role = referenceRoleOf(value.role);
     return {
         url,
@@ -225,6 +226,17 @@ export function normalizeDroppedH3Ref(event: React.DragEvent<HTMLElement>): H3Re
         ...(value.subjectId ? { subjectId: String(value.subjectId) } : {}),
         ...(Number.isFinite(Number(value.order)) ? { order: Number(value.order) } : {}),
     };
+}
+
+export function isH3OutputVideoDrop(event: { dataTransfer: { getData: (mime: string) => string; types?: ArrayLike<string> } }): boolean {
+    if (event.dataTransfer.types && Array.from(event.dataTransfer.types).includes("application/x-h3-output-video")) return true;
+    const encoded = event.dataTransfer.getData("application/x-infinite-canvas-ref") || event.dataTransfer.getData("text/plain");
+    if (!encoded) return false;
+    try {
+        const value = JSON.parse(encoded) as Record<string, unknown>;
+        const kind = String(value.kind || value.type || "").toLowerCase();
+        return value.origin === "h3-output" && kind.startsWith("video");
+    } catch { return false; }
 }
 
 function referenceRoleOf(value: unknown): H3Ref["role"] | undefined {

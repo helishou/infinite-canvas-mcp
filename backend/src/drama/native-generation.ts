@@ -45,7 +45,8 @@ export class NativeProductionGeneration {
             const projected = productionImageInput(node);
             const match = Object.entries(director.assets).find(([id, asset]) => (asset.nodeId === command.nodeId || projected?.targetId === id && projected.sourceNodeId === command.nodeId) && (!node?.metadata?.productionAssetId || node.metadata.productionAssetId === id));
             if (!match) return { command };
-            if (match[1].sharedSource) throw new Error("共享引用只能在源资产画布编辑");
+            const assetPlan = (Array.isArray(director.source.asset_plan) ? director.source.asset_plan as Array<Record<string, any>> : []).find(item => String(item.asset_id || item.id || "") === String(match[0]));
+            if (assetPlan?.sharedSource) throw new Error("共享引用只能在源资产画布编辑");
             const shotId = Object.entries(director.shotInputs).find(([, input]) => input.keyframeAssetId === match[0])?.[0];
             kind = shotId ? "keyframe" : "asset"; targetId = shotId || match[0]; targets = [{ targetId }];
             const artifact = current.published?.director?.artifacts.find(artifact => artifact.kind === "image" && artifact.targetId === match[0]);

@@ -31,8 +31,10 @@ export function H3MaterialCard({ ctx, ref, locale, compact = false, removable = 
     const cardClass = isOutput ? "minimax-material-card minimax-output-item" : compact ? "minimax-material-card minimax-asset-item" : "minimax-material-card";
     const dragStart = (event: React.DragEvent<HTMLDivElement>) => {
         event.dataTransfer.effectAllowed = "copy";
-        event.dataTransfer.setData("application/x-infinite-canvas-ref", JSON.stringify(ref));
-        event.dataTransfer.setData("text/plain", JSON.stringify(ref));
+        const payload = JSON.stringify({ ...ref, ...(isOutput && ref.type === "video" ? { origin: "h3-output" } : {}) });
+        event.dataTransfer.setData("application/x-infinite-canvas-ref", payload);
+        event.dataTransfer.setData("text/plain", payload);
+        if (isOutput && ref.type === "video") event.dataTransfer.setData("application/x-h3-output-video", "1");
     };
     return <div ref={cardRef} className={cardClass} draggable onDragStart={dragStart} onDoubleClick={(event) => { event.stopPropagation(); onOpenPreview?.(); }} title={onOpenPreview ? "双击放大预览" : undefined} style={{ position: "relative", flex: `0 0 ${compact ? 82 : 118}px`, height: compact ? (isOutput ? 78 : 58) : 64, overflow: "hidden", border: `1px solid ${ctx.theme.node.stroke}`, borderRadius: 5, background: ctx.theme.node.fill, cursor: "grab" }}>
         {ref.type === "video" ? compactMedia || isOutput && !previewReady ? <H3Icon name="clapperboard" /> : <video src={mediaUrl} muted playsInline preload="metadata" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : ref.type === "image" ? <img src={mediaUrl} alt={ref.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ padding: 16, fontSize: 22 }}>♫ {ref.name}</span>}

@@ -28,7 +28,7 @@ test("多图图片节点的面向画面工具读取 primaryImageId 指定的主�
         ],
     });
     assert.equal(canvasNodePrimaryImage(node)?.storageKey, "image:shown");
-    assert.equal(canvasNodeImage(node)?.storageKey, "image:latest");
+    assert.equal(canvasNodeImage(node)?.storageKey, "image:shown");
 });
 
 test("图片工具读取智能图片当前引用的结果，包含只有 storageKey 的结果", () => {
@@ -52,14 +52,14 @@ test("图片工具读取智能图片当前引用的结果，包含只有 storage
     assert.equal(canvasNodeImage(imageNode({ storageKey: "image:plain" }))?.storageKey, "image:plain");
 });
 
-test("智能节点引用缺省跟随最新成功归档结果，不被 primaryImageId 冻结", () => {
+test("智能节点缺省向下游传递 primaryImageId 指定的主图", () => {
     const smart: CanvasNodeData = {
         ...imageNode({}),
         type: CanvasNodeType.Config,
         metadata: {
             smart: true,
             generationMode: "image",
-            // 新结果归档后 primaryImageId 可能仍停留在旧主图（批量结果保持折叠）。
+            // 下游必须与节点上显示的主图一致。
             primaryImageId: "first",
             images: [
                 { id: "first", status: "success", content: "first.png", storageKey: "image:first", naturalWidth: 100, naturalHeight: 100, bytes: 1, mimeType: "image/png" },
@@ -67,10 +67,10 @@ test("智能节点引用缺省跟随最新成功归档结果，不被 primaryIma
             ],
         },
     };
-    assert.equal(canvasNodeImage(smart)?.storageKey, "image:latest");
+    assert.equal(canvasNodeImage(smart)?.storageKey, "image:first");
 });
 
-test("智能节点加入资产时使用当前主图，而非引用默认跟随的最新结果", () => {
+test("智能节点加入资产与下游引用都使用当前主图", () => {
     const smart: CanvasNodeData = {
         ...imageNode({}),
         type: CanvasNodeType.Config,
@@ -84,7 +84,7 @@ test("智能节点加入资产时使用当前主图，而非引用默认跟随�
             ],
         },
     };
-    assert.equal(canvasNodeImage(smart)?.storageKey, "image:first-following");
+    assert.equal(canvasNodeImage(smart)?.storageKey, "image:selected");
     assert.equal(canvasNodePrimaryImage(smart)?.storageKey, "image:selected");
 });
 

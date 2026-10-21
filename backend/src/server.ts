@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { assetConsumers, sourceOf, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
 import { ensureProductionCanvas, productionCanvasContext } from "./drama/production-canvas.js";
+import { episodeCanvasRead } from "./drama/episode-read.js";
 
 import {
   type ResolvedConfig,
@@ -1109,6 +1110,10 @@ export function startServer(
     const view = req.query.view === undefined ? "full" : String(req.query.view);
     if (view !== "summary" && view !== "full")
       return void res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "view 必须是 summary 或 full" });
+    // 网页不传 canvasView，保持整张画布的既有行为；Agent/MCP 显式传 ref 只取引用。
+    const canvasView = req.query.canvasView === undefined ? "full" : String(req.query.canvasView);
+    if (canvasView !== "ref" && canvasView !== "full")
+      return void res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "canvasView 必须是 ref 或 full" });
     const episode = db.getDramaEpisode(req.params.episodeId);
     if (!episode)
       return void res.status(404).json({ ok: false, error: "分集不存在" });
@@ -1119,7 +1124,7 @@ export function startServer(
     res.json({
       ok: true,
       episode,
-      canvas: episode.canvasId ? db.getCanvasProject(episode.canvasId) : null,
+      ...episodeCanvasRead(episode.canvasId ? db.getCanvasProject(episode.canvasId) : null, canvasView),
     });
   });
   app.patch("/drama/episodes/:episodeId", (req, res) => {

@@ -69,6 +69,7 @@ type Props = {
     compileTargets?: { sourceHash: string; engineRuntimeId?: string; compilerHash?: string; items: Array<{ targetId: string; status: string }>; notReadyTargetIds?: string[] }; onCompile?: (sceneId?: string, targetId?: string, targetIds?: string[]) => void;
     onApplyTranslatedPrompts?: (items: Array<{ targetId: string; nodeId: string; segmentId: string; sourcePrompt: string; expectedCanvasPrompt: string; translatedPrompt: string }>) => Promise<void>;
     onToggleClipLock?: (clipId: string, locked: boolean) => Promise<boolean>;
+    lockReadOnly?: boolean;
     autoTranslateCompilation?: { id: string; targetIds: string[] } | null;
     onClip: (id: string) => void;
     /** 编译就绪后直接提交该 Clip 的生成，不再要求切到「生成」工作区。 */
@@ -120,7 +121,7 @@ function compileDiagnosticTaskContext(diagnostics: ProductionCompilationDiagnost
 }
 
 /** The v2 authoring surface: stable Shots, derived Clip packaging, and compiler evidence. */
-export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, activeView, viewMemory, canvasNodes, canvasId, onLocateClip, renderEditor, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onH3Boundary, onEditShot, onSaveShotPatch, onUpdateLegacyShotReferences, shotKeyframe, shotDrafts = {}, busy, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets, onCompile, onApplyTranslatedPrompts, onToggleClipLock, autoTranslateCompilation, onClip, onGenerateClip, runStartPending = false, onDiscuss, onNavigate }: Props) {
+export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, activeView, viewMemory, canvasNodes, canvasId, onLocateClip, renderEditor, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onH3Boundary, onEditShot, onSaveShotPatch, onUpdateLegacyShotReferences, shotKeyframe, shotDrafts = {}, busy, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets, onCompile, onApplyTranslatedPrompts, onToggleClipLock, lockReadOnly = false, autoTranslateCompilation, onClip, onGenerateClip, runStartPending = false, onDiscuss, onNavigate }: Props) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const source = director.source as Record<string, any>;
@@ -129,6 +130,16 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const fps = Number(source.fps_num || 24) / Number(source.fps_den || 1);
     const shots = records(source.shots).sort((a, b) => Number(a.story_order) - Number(b.story_order)), clips = records(source.segments), subjects = records(source.subject_registry);
     const [clipLockOverrides, setClipLockOverrides] = useState<Record<string, boolean>>({});
+    const [clipLockPending, setClipLockPending] = useState<Record<string, boolean>>({});
+    const clipLockQueueRef = useRef<Promise<void>>(Promise.resolve());
+    const onToggleClipLockRef = useRef(onToggleClipLock);
+    const lockBusyRef = useRef(Boolean(busy));
+    const lockRenderWaitersRef = useRef<Array<() => void>>([]);
+    onToggleClipLockRef.current = onToggleClipLock;
+    lockBusyRef.current = Boolean(busy);
+    useEffect(() => {
+        lockRenderWaitersRef.current.splice(0).forEach(resolve => resolve());
+    });
     useEffect(() => {
         const savedLocks = new Map(clips.map(item => [String(item.id), item.locked === true]));
         setClipLockOverrides(current => {
@@ -154,6 +165,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const storyboardScrollStorageKey = `director-storyboard-scroll-v1:${ownerKey}`;
     const [draggingShotId, setDraggingShotId] = useState("");
     const [translationProgress, setTranslationProgress] = useState<TranslationProgressDetail | null>(null);
+    const [writtenTranslationStatuses, setWrittenTranslationStatuses] = useState<Record<string, { sourceHash: string; status: "complete" | "cached" }>>({});
     const [translationError, setTranslationError] = useState("");
     const [translatingPrompts, setTranslatingPrompts] = useState(false);
     const translatingPromptsRef = useRef(false);
@@ -509,6 +521,11 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                             await onApplyTranslatedPrompts(translated);
                             publishNodeTranslationState(translated, false);
                             writtenIds.push(...targetIds);
+                            setWrittenTranslationStatuses(current => {
+                                const next = { ...current };
+                                for (const result of results) if (targetIds.includes(result.id)) next[result.id] = { sourceHash, status: result.cached ? "cached" : "complete" };
+                                return next;
+                            });
                             if (isCurrent()) setTranslationProgress(current => current ? {
                                 ...current,
                                 phase: writeFailures.length ? "failed" : "translating",
@@ -577,6 +594,11 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
         setTranslatingPrompts(false);
         setTranslationProgress(null);
     }, [director.sourceHash, compileBusy, compilePending, busy]);
+    useEffect(() => {
+        setTranslationProgress(null);
+        setWrittenTranslationStatuses({});
+        setTranslationError("");
+    }, [director.sourceHash]);
     useEffect(() => {
         const request = autoTranslateCompilation;
         if (!request?.id || autoTranslateHandledRef.current === request.id || compileBusy || compilePending || busy) return;
@@ -744,7 +766,10 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const translationFailedCount = translationProgress?.failedIds.length || 0;
     const translationWaitingCount = Math.max(0, (translationProgress?.total || 0) - (translationProgress?.completed || 0) - translationInFlightCount - translationFailedCount);
     const translationStatusFor = (id: string) => {
-        if (!translationProgress?.targetIds.includes(id)) return undefined;
+        if (!translationProgress?.targetIds.includes(id)) {
+            const written = writtenTranslationStatuses[id];
+            return written?.sourceHash === director.sourceHash ? written.status : "waiting";
+        }
         if (translationProgress?.failedIds.includes(id)) return "failed";
         if (translationProgress?.writtenIds.includes(id)) return "complete";
         if (translationProgress?.writingIds.includes(id)) return "writing";
@@ -795,10 +820,25 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                     const clipNumber = t("director.studio.clipNumber", { number: clips.findIndex(clip => String(clip.id) === item.id) + 1 });
                     const refreshJob = activeRefreshJob(item.id);
                     const locked = lockedClipIds.has(item.id);
+                    const translationStatus = translationStatusFor(item.id);
+                    const translationColor = translationStatus === "failed" || translationStatus === "writeFailed" ? "red"
+                        : translationStatus === "complete" || translationStatus === "cached" ? "green"
+                            : translationStatus === "translating" || translationStatus === "writing" ? "blue"
+                                : translationStatus === "translated" ? "cyan" : undefined;
                     return <span key={item.id} className="flex items-center gap-1.5 rounded-md border border-border px-2 py-0.5 text-xs">
                     <button type="button" onClick={() => onClip(item.id)} className="text-muted-foreground hover:text-foreground">{clipNumber}</button>
-                    <Tag className="!mr-0 !text-[11px] !leading-4" color={locked ? "default" : item.color} title={locked ? t("director.atomic.clipLocked") : item.reason || t("director.atomic.savedSourceStatus")}>{locked ? t("director.atomic.clipLocked") : item.label}<CompileElapsed updatedAt={refreshJob?.updatedAt} status={refreshJob?.status} /></Tag>
-                    {onToggleClipLock && <Button type="text" size="small" className="!h-5 !px-1" icon={locked ? <Lock className="size-3" /> : <LockOpen className="size-3" />} aria-pressed={locked} aria-label={locked ? t("director.atomic.unlockClip", { clip: clipNumber }) : t("director.atomic.lockClip", { clip: clipNumber })} title={locked ? t("director.atomic.unlockClip", { clip: clipNumber }) : t("director.atomic.lockClip", { clip: clipNumber })} disabled={busy || compileBusy || compilePending || clipLockOverrides[item.id] !== undefined} onClick={() => { const next = !locked; setClipLockOverrides(current => ({ ...current, [item.id]: next })); void onToggleClipLock(item.id, next).then(saved => { if (!saved) setClipLockOverrides(current => { const value = { ...current }; delete value[item.id]; return value; }); }).catch(() => setClipLockOverrides(current => { const value = { ...current }; delete value[item.id]; return value; })); }} />}
+                    <Tag className="!mr-0 !text-[11px] !leading-4" color={locked ? "default" : item.color} title={locked ? t("director.atomic.clipLocked") : item.reason || t("director.atomic.savedSourceStatus")}><span className="grid"><span className={`col-start-1 row-start-1 ${locked ? "invisible" : ""}`} aria-hidden={locked}>{item.label}</span><span className={`col-start-1 row-start-1 ${locked ? "" : "invisible"}`} aria-hidden={!locked}>{t("director.atomic.clipLocked")}</span></span><CompileElapsed updatedAt={refreshJob?.updatedAt} status={refreshJob?.status} /></Tag>
+                    {translationStatus && <Tag className="!mr-0 !text-[11px] !leading-4" color={translationColor} data-clip-translation-status={translationStatus}>{t(`director.atomic.translationClipStatus.${translationStatus}`)}</Tag>}
+                    {onToggleClipLock && <Button type="text" size="small" className="!h-5 !px-1" icon={locked ? <Lock className="size-3" /> : <LockOpen className="size-3" />} aria-pressed={locked} aria-label={locked ? t("director.atomic.unlockClip", { clip: clipNumber }) : t("director.atomic.lockClip", { clip: clipNumber })} title={locked ? t("director.atomic.unlockClip", { clip: clipNumber }) : t("director.atomic.lockClip", { clip: clipNumber })} disabled={lockReadOnly || compileBusy || compilePending || clipLockPending[item.id] === true} onClick={() => { const next = !locked; setClipLockOverrides(current => ({ ...current, [item.id]: next })); setClipLockPending(current => ({ ...current, [item.id]: true })); const action = clipLockQueueRef.current.then(async () => {
+                        while (lockBusyRef.current) await new Promise<void>(resolve => lockRenderWaitersRef.current.push(resolve));
+                        const callback = onToggleClipLockRef.current;
+                        const saved = await callback?.(item.id, next);
+                        if (!saved) setClipLockOverrides(current => { const value = { ...current }; delete value[item.id]; return value; });
+                        else {
+                            if (onToggleClipLockRef.current === callback) await new Promise<void>(resolve => lockRenderWaitersRef.current.push(resolve));
+                            while (lockBusyRef.current) await new Promise<void>(resolve => lockRenderWaitersRef.current.push(resolve));
+                        }
+                    }).catch(() => { setClipLockOverrides(current => { const value = { ...current }; delete value[item.id]; return value; }); }).finally(() => setClipLockPending(current => { const value = { ...current }; delete value[item.id]; return value; })); clipLockQueueRef.current = action; }} />}
                     {!locked && onGenerateClip && item.tone === "ready" && <Button type="text" size="small" className="!h-5 !px-1" icon={<Play className="size-3" />} loading={runStartPending} disabled={busy || compileBusy || compilePending || runStartPending} aria-label={t("director.atomic.generateOneClip", { clip: clipNumber })} title={t("director.atomic.generateOneClip", { clip: clipNumber })} onClick={() => onGenerateClip?.(item.id)} />}
                     {!locked && <Button type="text" size="small" className="!h-5 !px-1" icon={<WandSparkles className="size-3" />} aria-label={t("director.atomic.compileOneClip", { clip: clipNumber })} title={t("director.atomic.compileOneClip", { clip: clipNumber })} disabled={busy || compileBusy || compilePending || translatingPrompts || !onCompile} onClick={() => onCompile?.(undefined, item.id)} />}
                 </span>;
@@ -809,29 +849,27 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                     {translatingPrompts ? t("director.atomic.translationRunning") : t("director.atomic.translateCompiledPrompts")}
                 </Button>
             </div>}
-            {translationProgress && <section className="space-y-3 rounded-xl border border-border bg-card p-4 shadow-sm" aria-live="polite" data-translation-progress>
+            {visibleClipStates.length > 0 && <section className="space-y-3 rounded-xl border border-border bg-card p-4 shadow-sm" aria-live={translationProgress ? "polite" : undefined} data-translation-progress>
                 <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="flex min-w-0 items-start gap-3">
                         <span className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><WandSparkles className="size-4" aria-hidden="true" /></span>
                         <div className="min-w-0">
-                            <h3 className="m-0 text-sm font-semibold">{t(`director.atomic.translationPhase.${translationProgress.phase}`)}</h3>
-                            <p className="mt-1 mb-0 text-xs text-muted-foreground">{t("director.atomic.translationProgressSummary", { completed: translationProgress.completed, total: translationProgress.total })}</p>
+                            <h3 className="m-0 text-sm font-semibold">{translationProgress ? t(`director.atomic.translationPhase.${translationProgress.phase}`) : t("director.atomic.translationClipList")}</h3>
+                            {translationProgress && <p className="mt-1 mb-0 text-xs text-muted-foreground">{t("director.atomic.translationProgressSummary", { completed: translationProgress.completed, total: translationProgress.total })}</p>}
                         </div>
                     </div>
-                    <span className="shrink-0 font-mono text-lg font-semibold tabular-nums">{translationPercent}%</span>
+                    {translationProgress && <span className="shrink-0 font-mono text-lg font-semibold tabular-nums">{translationPercent}%</span>}
                 </div>
-                <Progress percent={translationPercent} showInfo={false} status={translationProgress.phase === "failed" ? "exception" : translationProgress.phase === "complete" ? "success" : "active"} strokeColor={translationProgress.phase === "failed" ? "#ef4444" : undefined} />
-                <div className="flex flex-wrap gap-2 text-xs">
+                {translationProgress && <Progress percent={translationPercent} showInfo={false} status={translationProgress.phase === "failed" ? "exception" : translationProgress.phase === "complete" ? "success" : "active"} strokeColor={translationProgress.phase === "failed" ? "#ef4444" : undefined} />}
+                {translationProgress && <div className="flex flex-wrap gap-2 text-xs">
                     <span className="rounded-full border border-border px-2.5 py-1">{t("director.atomic.translationMetricCompleted", { count: translationProgress.completed })}</span>
                     {translationInFlightCount > 0 && <span className="rounded-full border border-blue-500/30 bg-blue-500/5 px-2.5 py-1 text-blue-700 dark:text-blue-300">{t("director.atomic.translationMetricActive", { count: translationInFlightCount })}</span>}
                     {translationWaitingCount > 0 && <span className="rounded-full border border-border px-2.5 py-1 text-muted-foreground">{t("director.atomic.translationMetricWaiting", { count: translationWaitingCount })}</span>}
                     {translationProgress.cachedIds.length > 0 && <span className="rounded-full border border-border px-2.5 py-1"><Database className="mr-1 inline size-3" aria-hidden="true" />{t("director.atomic.translationMetricCached", { count: translationProgress.cachedIds.length })}</span>}
                     {translationFailedCount > 0 && <span className="rounded-full border border-red-500/30 bg-red-500/5 px-2.5 py-1 text-red-700 dark:text-red-300">{t("director.atomic.translationMetricFailed", { count: translationFailedCount })}</span>}
-                </div>
+                </div>}
                 <div className="grid max-h-72 grid-cols-1 gap-2 overflow-y-auto sm:grid-cols-2 xl:grid-cols-3" aria-label={t("director.atomic.translationClipList")}>
-                    {translationProgress.targetIds.map(targetId => {
-                        const item = clipStates.find(candidate => candidate.id === targetId);
-                        if (!item) return null;
+                    {visibleClipStates.map(item => {
                         const status = translationStatusFor(item.id);
                         const clip = clips.find(candidate => String(candidate.id) === item.id);
                         const artifact = director.artifacts.find(candidate => candidate.kind === "h3" && String(candidate.targetId) === item.id);

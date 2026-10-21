@@ -1237,6 +1237,25 @@ export class BackendDatabase {
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }
+        if (currentVersion < 49) {
+            this.db.exec("BEGIN IMMEDIATE");
+            try {
+                const adoptionTable = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='drama_asset_adoptions'").get();
+                if (adoptionTable) {
+                    this.db.exec(`CREATE TABLE IF NOT EXISTS drama_asset_adoptions_legacy_archive (
+                        id TEXT PRIMARY KEY, approved_id TEXT NOT NULL, episode_id TEXT NOT NULL, scene_id TEXT,
+                        target_asset_id TEXT NOT NULL, expected_revision INTEGER NOT NULL, status TEXT NOT NULL,
+                        error TEXT, updated_at TEXT NOT NULL
+                    );
+                    INSERT OR IGNORE INTO drama_asset_adoptions_legacy_archive
+                    SELECT id, approved_id, episode_id, scene_id, target_asset_id, expected_revision, status, error, updated_at
+                    FROM drama_asset_adoptions;
+                    DROP TABLE drama_asset_adoptions;`);
+                }
+                this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (49, ?)").run(new Date().toISOString());
+                this.db.exec("COMMIT");
+            } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }
     }
 
     /** The production row that owns this canvas, when it is an archived episode's canvas. */
@@ -2028,13 +2047,9 @@ export class BackendDatabase {
         return { ...canonical, textSuggestion: suggestion };
     }
 
-    private restoreH3OutputOperation(projectId: string, project: Record<string, unknown>, operation: CanvasOperation, formalSelection = false): CanvasOperation {
+    private restoreH3OutputOperation(projectId: string, project: Record<string, unknown>, operation: CanvasOperation): CanvasOperation {
         const nodeId = String(operation.nodeId || "");
         const segmentId = String(operation.segmentId || "");
-        if (!formalSelection) {
-            const owners = [...this.db.prepare("SELECT p.draft_json FROM episode_productions p JOIN drama_episodes e ON e.id=p.episode_id WHERE e.canvas_id=?").all(projectId), ...this.db.prepare("SELECT draft_json FROM canvas_productions WHERE project_id=?").all(projectId)] as Array<{ draft_json: string }>;
-            if (owners.some(owner => { const draft = JSON.parse(owner.draft_json); return draft.director && draft.clipGroups?.some((group: Record<string, unknown>) => group.nodeId === nodeId && group.segmentId === segmentId); })) throw new Error("正式制作片段请通过节点的历史版本选用结果，以同步核验制作记录");
-        }
         const log = this.getGenerationLog(String(operation.generationLogId || ""));
         if (!log || log.projectId !== projectId || log.nodeId !== nodeId) throw new Error("历史输出不属于当前 H3 节点");
         const node = (Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : []).find((item) => String(item.id) === nodeId);
@@ -2469,7 +2484,7 @@ export class BackendDatabase {
                     const nodeIds = Array.isArray(operation.ids) ? operation.ids.map(String) : [String(operation.id || "")];
                     for (const nodeId of nodeIds) this.assertEmptySceneH3NodeCanBeDeleted(id, project, nodeId);
                 }
-                if (operation.type === "restore_h3_output") operations[index] = this.restoreH3OutputOperation(id, project, operation, context?.withinTransaction === true && context.runtimeWrite === true);
+                if (operation.type === "restore_h3_output") operations[index] = this.restoreH3OutputOperation(id, project, operation);
                 if (isSuggestion) operations[index] = this.applyTextSuggestion(id, project, operation);
                 else if (isText) operations[index] = this.applyCanvasTextOperation(id, project, operation);
                 if (!context?.runtimeWrite && operation.type !== "restore_h3_output") prepareClientCanvasOperation(project, operations[index]);

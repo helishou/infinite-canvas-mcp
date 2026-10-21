@@ -52,6 +52,27 @@ export class CanvasVideoDispatcher {
         /** 可选注入：未配置 RunningHub 时该能力整体不可用，不影响本地执行器。 */
         private readonly runningHub?: RunningHubBackend) {}
 
+    /** H3 父日志记录自选模型实际工作流输入，沿用执行器字段过滤和显示名映射。 */
+    generationSettings(input: CanvasVideoGenerationInput) {
+        const plan = this.plan(this.prepare(input));
+        const params = { ...(plan.input.params || {}) };
+        const workflowFields = plan.workflow ? this.workflows.getConfig(plan.workflow)?.fields || [] : [];
+        if (plan.workflow) {
+            const configured = recordOf(params.selectedVideoModelFieldValues);
+            const selected = recordOf(configured[`${plan.input.model}::${plan.workflow}`] ?? configured[plan.workflow]);
+            Object.assign(params, selected);
+        } else if (plan.kind === "direct") {
+            const configured = recordOf(params.selectedVideoModelFieldValues);
+            Object.assign(params, recordOf(configured[`direct:${plan.input.model}`]));
+        }
+        delete params.selectedVideoModelFieldValues;
+        return generationSettingsSnapshot(params, {
+            ...(plan.workflow ? { workflow: plan.workflow } : {}),
+            executor: plan.kind,
+            ...(plan.input.workflowReferenceCount !== undefined ? { workflowReferenceCount: plan.input.workflowReferenceCount } : {}),
+        }, workflowFields);
+    }
+
     start(raw: CanvasVideoGenerationInput, onCreated?: (task: RuntimeTask) => void) {
         let input = this.prepare(raw);
         let plan = this.plan(input);

@@ -56,7 +56,7 @@ const directorPatchObjectSchema = z.object(Object.fromEntries(
 export const directorModules = ["story", "assets", "shots", "performance", "effects", "model", "continuity"] as const;
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 export const directorBoundarySchema = z.object({ from: id, to: id, tailFrame: z.boolean(), motionContext: z.boolean(), reason: z.string() });
-export const sharedAssetSourceSchema = z.object({ dramaId: id, assetId: id, approvedId: id.optional(), sourceProjectId: id, sourceNodeId: id });
+export const sharedAssetSourceSchema = z.object({ dramaId: id, assetId: id, sourceProjectId: id, sourceNodeId: id }).strict();
 export const directorCurrentWorkSchema = z.object({
     workId: id,
     module: z.enum(directorModules),
@@ -148,7 +148,7 @@ const directorProductionBaseSchema = z.object({
         receipt: z.object({ sourceHash: hash, promptHash: hash, engineRuntimeId: id, validator: id }).passthrough(),
     })),
     // Planning drafts may precede canvas node creation and asset approval.
-    assets: z.record(id, z.object({ nodeId: id.optional(), assetId: z.string().optional(), storageKey: z.string().optional(), generationTaskId: id.optional(), sha256: hash.optional(), version: id, status: z.enum(["planned", "generated", "approved", "rejected"]), evidence: z.string().optional(), sharedSource: sharedAssetSourceSchema.optional(), inputOutdated: z.boolean().optional() }).passthrough()),
+    assets: z.record(id, z.object({ nodeId: id.optional(), assetId: z.string().optional(), storageKey: z.string().optional(), generationTaskId: id.optional(), sha256: hash.optional(), version: id, status: z.enum(["planned", "generated", "approved", "rejected"]), evidence: z.string().optional(), inputOutdated: z.boolean().optional() }).passthrough()),
     shotInputs: z.record(id, z.object({ keyframePolicy: z.enum(["new", "reuse", "none"]).default("none"), assetIds: z.array(id).default([]), keyframeAssetId: id.optional() }).passthrough()),
     boundaries: z.array(directorBoundarySchema),
     executionAuthorized: z.boolean().default(false),
@@ -249,6 +249,8 @@ export const productionCompileSchema = z.object({
     director: directorProductionSchema.optional().describe("已废弃并忽略；编译始终使用 Backend 已保存的正式制作稿。"),
     scope: productionCompilationScopeSchema.optional(),
 }).strict();
+/** Execution requests require a stable identity so callers can recover queued work after a lost response. */
+export const productionCompileSubmissionSchema = productionCompileSchema.extend({ operationId: id });
 export const productionApplyCompilationSchema = z.object({ preparedId: z.string().uuid() }).strict();
 export const promptSourceMapSchema = z.object({
     version: z.literal(1), offsetUnit: z.literal("utf16"), segmentId: id, sourceHash: hash, promptHash: hash,
@@ -293,7 +295,7 @@ const shotSubjectUsageSchema = z.object({
     localNotes: z.string().optional(),
 }).strict();
 const shotKeyframeFields = {
-    id, assetId: id, sourceNode: z.object({ projectId: id, nodeId: id }).strict(),
+    id, assetId: id, sourceNode: z.object({ projectId: id, nodeId: id }).strict().optional(),
     selection: z.discriminatedUnion("mode", [
         z.object({ mode: z.literal("node_selection") }).strict(),
         z.object({ mode: z.literal("latest_success") }).strict(),
@@ -322,10 +324,10 @@ const shotReferenceRequirementSchema = z.object({
 }).strict();
 const shotUtteranceRefSchema = z.object({ utteranceId: id, role: z.enum(["speaker", "reaction"]), localStartFrame: z.number().int().nonnegative(), localEndFrame: z.number().int().positive(), textStart: z.number().int().nonnegative(), textEnd: z.number().int().positive() }).strict();
 const utteranceSchema = z.object({
-    id, speakerSubjectId: id, text: z.string().min(1), delivery: z.string().optional(), voiceover: z.boolean().default(false),
+    id, speakerSubjectId: id.optional(), speakerName: z.string().trim().min(1).optional(), text: z.string().min(1), delivery: z.string().optional(), voiceover: z.boolean().default(false),
     start: z.object({ shotId: id, localFrame: z.number().int().nonnegative() }).strict(),
     end: z.object({ shotId: id, localFrame: z.number().int().positive() }).strict(),
-}).strict();
+}).strict().refine(value => Boolean(value.speakerSubjectId) !== Boolean(value.speakerName), "对白说话人须选择已登记 Subject 或填写本镜称呼");
 /** Exact archived audio inputs for a Subject Prompt v2 Clip. Images remain on Subject/keyframe bindings. */
 export const shotAudioBindingSchema = z.object({
     id, label: z.string().trim().min(1), sourceNode: z.object({ projectId: id, nodeId: id }).strict(),
@@ -457,7 +459,7 @@ export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
         }
     }
     if (utterancesResult.success) for (const [index, utterance] of utterances.entries()) {
-        if (!subjectById.has(utterance.speakerSubjectId)) add(["utterances", index, "speakerSubjectId"], "说话 Subject 未登记");
+        if (utterance.speakerSubjectId && !subjectById.has(utterance.speakerSubjectId)) add(["utterances", index, "speakerSubjectId"], "说话 Subject 未登记");
         const startIndex = shotOrder.get(utterance.start.shotId), endIndex = shotOrder.get(utterance.end.shotId);
         const references = shots.flatMap((shot, shotIndex) => rowsForContract(shot.utterance_refs).filter(ref => ref.utteranceId === utterance.id).map(ref => ({ shot, shotIndex, ref })))
             .sort((a, b) => a.shotIndex - b.shotIndex || Number(a.ref.localStartFrame) - Number(b.ref.localStartFrame));
@@ -657,24 +659,24 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("upsert_director_subject"), subject: subjectEntrySchema }).strict(),
     z.object({ type: z.literal("rebind_director_subject"), subjectId: id, sourceProjectId: id, sourceNodeId: id }).strict(),
     z.object({ type: z.literal("repair_director_subject_bindings") }).strict(),
-    z.object({ type: z.literal("delete_director_subject"), id }).strict(),
-    z.object({ type: z.literal("create_manual_director_asset"), assetPlan: z.object({ id, kind: z.enum(["character", "scene", "prop"]), asset_name: z.string().min(1), entity_id: id.optional(), version: id, description: z.string(), purpose: z.string(), depends_on: z.array(id), status: z.literal("planned"), canvas_scope: z.enum(["episode", "shared"]).optional(), sharedSource: z.object({ dramaId: id, assetId: id, sourceProjectId: id, sourceNodeId: id }).strict().optional() }).strict(), assetCard: z.object({ id, asset_id: id, asset_kind: z.enum(["character", "scene", "prop"]), asset_version: id, prompt: z.string(), references: z.array(z.unknown()) }).passthrough(), registryKind: z.enum(["character", "scene"]).optional(), registryEntity: z.record(z.unknown()).optional(), subject: subjectEntrySchema.optional() }).strict(),
+    z.object({ type: z.literal("delete_director_subject"), id, referenceAction: z.enum(["clear", "replace"]).optional(), replacementSubjectId: id.optional() }).strict(),
+    z.object({ type: z.literal("create_manual_director_asset"), assetPlan: z.object({ id, kind: z.enum(["character", "scene", "prop"]), asset_name: z.string().min(1), entity_id: id.optional(), version: id, description: z.string(), purpose: z.string(), depends_on: z.array(id), status: z.literal("planned"), canvas_scope: z.enum(["episode", "shared"]).optional(), sharedSource: sharedAssetSourceSchema.optional() }).strict(), assetCard: z.object({ id, asset_id: id, asset_kind: z.enum(["character", "scene", "prop"]), asset_version: id, prompt: z.string(), references: z.array(z.unknown()) }).passthrough(), registryKind: z.enum(["character", "scene"]).optional(), registryEntity: z.record(z.unknown()).optional(), subject: subjectEntrySchema.optional() }).strict(),
     z.object({ type: z.literal("delete_director_asset"), id, confirmed: z.literal(true) }).strict(),
     z.object({ type: z.literal("remove_shared_director_asset"), id }).strict(),
     z.object({ type: z.literal("set_director_shot_keyframes"), shotId: id, keyframes: z.array(shotKeyframeWriteSchema) }).strict(),
     z.object({
         type: z.literal("set_director_shot_utterances"), shotId: id,
         utterances: z.array(z.object({
-            utteranceId: id.optional(), speakerSubjectId: id, text: z.string().min(1), delivery: z.string().optional(), voiceover: z.boolean(),
+            utteranceId: id.optional(), speakerSubjectId: id.optional(), speakerName: z.string().trim().min(1).optional(), text: z.string().min(1), delivery: z.string().optional(), voiceover: z.boolean(),
             localStartFrame: z.number().int().nonnegative(), localEndFrame: z.number().int().positive(),
             textMode: z.enum(["whole", "segment", "partition"]).optional(), textCuts: z.array(z.number().int().positive()).optional(),
-        }).strict()).max(32),
+        }).strict().refine(value => Boolean(value.speakerSubjectId) !== Boolean(value.speakerName), "对白说话人须选择已登记 Subject 或填写本镜称呼")).max(32),
     }).strict(),
     z.object({ type: z.literal("edit_director_shot"), action: z.enum(["insert", "duplicate", "delete", "move", "split", "merge"]), shotId: id.optional(), targetShotId: id.optional(), newShotId: id.optional(), position: z.enum(["before", "after"]).optional(), splitFrame: z.number().int().positive().optional(), textOffsets: z.record(z.number().int().nonnegative()).optional(), reaction: z.boolean().optional(), shot: z.record(z.unknown()).optional(), firstShotPatch: z.record(z.unknown()).optional(), segment: z.record(z.unknown()).optional(), cameraShotId: id.optional() }).strict(),
     z.object({ type: z.literal("repartition_director_clips"), shotIds: z.array(id).min(1), segments: z.array(z.record(z.unknown())).min(1) }).strict(),
     z.object({ type: z.literal("reverse_sync_director_prompt"), segmentId: id, artifactId: id, sourceHash: hash, basePromptHash: hash, prompt: z.string(), canvasRevision: z.number().int().nonnegative() }).strict(),
     z.object({ type: z.literal("edit_director_continuity"), changes: z.array(z.object({ collection: z.enum(["facts", "timelines", "initial", "events", "requirements", "coverage"]), action: z.enum(["upsert", "delete"]), id, value: z.record(z.unknown()).optional() }).strict()).min(1) }).strict(),
-    z.object({ type: z.literal("replace_director_clip_storyboard"), segmentId: id, segment: z.record(z.unknown()), shots: z.array(z.record(z.unknown())).min(1), shotInputs: z.record(z.unknown()) }).strict(),
+    z.object({ type: z.literal("replace_director_clip_storyboard"), segmentId: id, segment: z.record(z.unknown()), shots: z.array(z.record(z.unknown())).min(1), shotInputs: z.record(z.unknown()), keyframeBindings: z.array(z.object({ shotId: id, assetId: id, bindingId: id, nodeId: id.optional(), containerNodeId: id.optional(), storageKey: id.optional(), label: z.string().optional() }).strict()).optional(), removedStoryboardBindingIds: z.array(id).optional() }).strict(),
     z.object({ type: z.literal("request_director_clip_refresh"), segmentId: id }).strict(),
     z.object({ type: z.literal("set_director_brief"), brief: z.string() }).strict(),
     z.object({ type: z.literal("initialize_director_from_demand") }).strict(),
@@ -684,7 +686,6 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("adopt_director_clip_style"), targetId: id, nodeId: id, segmentId: id, canvasRevision: z.number().int().nonnegative(), styleTemplateId: z.string().nullable() }).strict(),
     z.object({ type: z.literal("set_director_workflow"), patch: directorWorkflowSchema.partial() }).strict(),
     z.object({ type: z.literal("bind_director_asset"), assetId: id, nodeId: id }).strict(),
-    z.object({ type: z.literal("adopt_shared_asset"), assetId: id, approvedId: id, nodeId: id }).strict(),
     z.object({ type: z.literal("bind_director_segment"), targetId: id, nodeId: id, segmentId: id }).strict(),
     z.object({ type: z.literal("set_director_boundary"), boundary: directorBoundarySchema }).strict(),
     z.object({ type: z.literal("set_director_segment_group"), segmentId: id, shotIds: z.array(id).min(1), removeSegmentIds: z.array(id).default([]) }).strict(),

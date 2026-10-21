@@ -4,7 +4,7 @@ import { isH3StyleTemplateId } from "../plugins/minimax-h3/style-templates.js";
 import { currentCompilationArtifact } from "./compilation-scope.js";
 import { toJsonSchemaCompat } from "@modelcontextprotocol/sdk/server/zod-json-schema-compat.js";
 import { z } from "zod";
-import { directorPatchFields, productionContractVersion, productionOperationSchema, productionEditSchema, productionPublishSchema, productionCompileSchema, directorRunStartSchema, canonicalProduction, isSubjectPromptAssembly, scriptBlockSchema, shotAudioBindingSchema, type DirectorProduction, type ProductionDiagnostic } from "./production-contract.js";
+import { directorPatchFields, productionContractVersion, productionOperationSchema, productionEditSchema, productionPublishSchema, productionCompileSchema, productionCompileSubmissionSchema, directorRunStartSchema, canonicalProduction, isSubjectPromptAssembly, scriptBlockSchema, shotAudioBindingSchema, type DirectorProduction, type ProductionDiagnostic } from "./production-contract.js";
 
 const scene = { id: "scene-1", heading: "Interior", location: "Room", timeOfDay: "Day", blocks: [] };
 const block = { id: "block-1", kind: "action", text: "The door opens." };
@@ -37,7 +37,6 @@ const examples: Record<string, unknown> = {
     adopt_director_clip_style: { targetId: "segment-1", nodeId: "h3-node", segmentId: "clip-1", canvasRevision: 1, styleTemplateId: "soft-light" },
     set_director_workflow: { patch: { mediaProductionMode: "per_item" } },
     bind_director_asset: { assetId: "character-1", nodeId: "image-1" },
-    adopt_shared_asset: { assetId: "character-1", approvedId: "approved-version-1", nodeId: "shared-reference-1" },
     bind_director_segment: { targetId: "SEG001", nodeId: "h3-1", segmentId: "clip-1" },
     set_director_boundary: { boundary: { from: "SEG001", to: "SEG002", tailFrame: true, motionContext: false, reason: "Continue the held state." } },
     set_director_segment_group: { segmentId: "SEG001", shotIds: ["shot-1"] },
@@ -61,7 +60,7 @@ export function productionOperationContract(operationType?: string, includeDetai
     return {
         contractVersion: productionContractVersion,
         jsonSchema: toJsonSchemaCompat(operationType ? options[0] : productionOperationSchema),
-        ...(full || includeDetails.requests ? { requests: { edit: toJsonSchemaCompat(productionEditSchema), publish: toJsonSchemaCompat(productionPublishSchema), compile: toJsonSchemaCompat(productionCompileSchema.extend({ operationId: z.string().min(1) })), generate: toJsonSchemaCompat(directorRunStartSchema) } } : {}),
+        ...(full || includeDetails.requests ? { requests: { edit: toJsonSchemaCompat(productionEditSchema), publish: toJsonSchemaCompat(productionPublishSchema), compile: toJsonSchemaCompat(productionCompileSubmissionSchema), generate: toJsonSchemaCompat(directorRunStartSchema) } } : {}),
         ...(full || includeDetails.patchFields ? { patchFields: directorPatchFields } : {}),
         operations: options.map(option => {
             const type = option.shape.type.value;
@@ -345,7 +344,7 @@ export function applyDirectorSourcePatch(director: DirectorProduction, entity: k
             }
             if (entity === "segment" && Object.hasOwn(patch, "styleTemplateId") && patch.styleTemplateId !== null && !(isH3StyleTemplateId(patch.styleTemplateId) || typeof patch.styleTemplateId === "string" && /^[a-z0-9][a-z0-9-]{0,47}$/i.test(patch.styleTemplateId))) throw new Error("无效 H3 风格模板 ID");
             if (entity === "asset" && patch.canvas_scope !== undefined && !["shared", "episode"].includes(String(patch.canvas_scope))) throw new Error("资产画布归属只能是 shared 或 episode");
-            if (entity === "asset" && patch.canvas_scope === "episode" && director.assets[id]?.sharedSource) throw new Error("已采用的剧目共享资产必须保留 shared 归属；需要本集专用版本时请新建分集资产");
+            if (entity === "asset" && patch.canvas_scope === "episode" && resolvedTarget.sharedSource) throw new Error("剧目共享源节点必须保留 shared 归属；需要本集专用版本时请新建分集资产");
             if (entity === "asset" && patch.status !== undefined && !["planned", "approved"].includes(String(patch.status))) throw new Error("资产计划状态只能是 planned 或 approved");
             if (entity === "asset" && patch.status !== undefined && id && Object.hasOwn(director.source, "style_lock")) {
                 // style_lock 与锚点资产的审批状态必须同步：改锚点状态时校验不制造新的不一致。

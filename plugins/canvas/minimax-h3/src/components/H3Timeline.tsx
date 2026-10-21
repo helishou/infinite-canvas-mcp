@@ -27,7 +27,7 @@ import { applyH3GlobalSettings } from "../services/h3-global-settings";
 import { displayReferenceName, inferReferenceRole, refsForSegment, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
 import { addStoryboardShot, assignStoryboardShotRef, H3_STORYBOARD_MIN_DURATION, insertStoryboardShotAfter, isStoryboardModeEnabled, moveStoryboardShotBetweenSegments, reorderStoryboardShots, removeStoryboardShot, setStoryboardBoundary, setStoryboardMode, storyboardRefsForSegment, storyboardTrackItems, supportsStoryboardTrack, swapStoryboardReferences, syncStoryboardPrompt } from "../services/h3-storyboard-track";
 import { sameRef } from "../services/h3-compatibility";
-import { H3_RUNTIME_REF_LIMITS, normalizeDroppedH3Ref, readCharacterGroupFromDrop } from "../services/h3-refs";
+import { H3_RUNTIME_REF_LIMITS, isH3OutputVideoDrop, normalizeDroppedH3Ref, readCharacterGroupFromDrop } from "../services/h3-refs";
 import { H3Icon } from "./H3Icon";
 import { H3ClipCard } from "./H3ClipCard";
 import { h3ThemeVars } from "../h3-theme";
@@ -463,6 +463,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     const clearDropTarget = useCallback(() => setDropTargetKey(null), []);
     // 拖动过程中实时高亮目标槽；用 data-* 找 cell，避免依赖 children 索引
     const onRefRowDragOver = (event: React.DragEvent<HTMLDivElement>) => {
+        if (isH3OutputVideoDrop(event)) { clearDropTarget(); event.stopPropagation(); return; }
         if (!event.dataTransfer.types.includes("application/x-infinite-canvas-ref")) return;
         event.preventDefault();
         event.stopPropagation();

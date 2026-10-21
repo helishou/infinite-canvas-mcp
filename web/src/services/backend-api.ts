@@ -305,13 +305,10 @@ export function ensureSharedAssetCanvas(id: string) { return request<{ ok: boole
 export function prepareProductionTargets(owner: ProductionTarget, expectedRevision: number, targets: string[], operationId: string) { return request<{ ok: boolean; production: EpisodeProduction; mediaSubmitted: false }>("POST", `${productionPath(owner)}/prepare-targets`, { expectedRevision, targets, operationId }); }
 export function arrangeProductionScene(owner: ProductionTarget, expectedRevision: number, sceneId: string, operationId: string) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(owner)}/arrange-scene`, { expectedRevision, sceneId, operationId }); }
 export type ApprovedSharedAsset = { id: string; assetId: string; dramaId: string; sourceProjectId: string; sourceNodeId: string; sourceVersion: number; storageKey: string; sha256: string; snapshot: { title: string }; evidence: string; reviewStatus: "unreviewed" | "approved"; createdAt: string };
-export type SharedAssetUpdate = { id: string; assetId: string; approvedId: string; status: string; error?: string };
-export function fetchProductionSharedAssets(owner: ProductionTarget) { return request<{ ok: boolean; assets: ApprovedSharedAsset[]; versions: ApprovedSharedAsset[]; updates: SharedAssetUpdate[] }>("GET", `${productionPath(owner)}/shared-assets`); }
-export function adoptProductionSharedAsset(owner: ProductionTarget, input: { assetId: string; approvedId: string; expectedRevision: number; operationId: string }) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(owner)}/shared-assets/adopt`, input); }
+export function fetchProductionSharedAssets(owner: ProductionTarget) { return request<{ ok: boolean; assets: ApprovedSharedAsset[]; versions: ApprovedSharedAsset[] }>("GET", `${productionPath(owner)}/shared-assets`); }
 export type SharedAssetPromotionPreview = { episodeId: string; episodeRevision: number; publishedVersion: number; sourceHash: string; sourceCanvasId: string; sourceCanvasRevision: number; sourceNodeId: string; assetId: string; assetName: string; storageKey: string; sha256: string; evidence: string; reviewStatus: "unreviewed" | "approved"; sourceGenerationTaskId: string; dramaId: string; sharedCanvasId: string | null; sharedCanvasRevision: number | null; targetNodeId: string; approvedId: string | null; eligible: true };
 export function previewProductionSharedAssetPromotion(owner: ProductionTarget, assetId: string, expectedRevision: number) { return request<{ ok: boolean; preview: SharedAssetPromotionPreview; mediaSubmitted: false }>("POST", `${productionPath(owner)}/shared-assets/promotions/preview`, { assetId, expectedRevision }); }
 export function promoteExistingProductionSharedAsset(owner: ProductionTarget, input: { assetId: string; expectedRevision: number; expectedSourceCanvasRevision: number; expectedSharedCanvasRevision: number | null; operationId: string }) { return request<{ ok: boolean; promotion: { approvedId: string; canvasId: string; nodeId: string; replayed: boolean }; mediaSubmitted: false }>("POST", `${productionPath(owner)}/shared-assets/promotions`, input); }
-export function retryProductionSharedUpdate(owner: ProductionTarget, id: string, expectedRevision: number) { return request("POST", `${productionPath(owner)}/shared-assets/updates/${encodeURIComponent(id)}/retry`, { expectedRevision }); }
 const productionPath = (target: ProductionTarget) => typeof target === "string"
     ? `/drama/episodes/${encodeURIComponent(target)}/production`
     : "sceneId" in target
@@ -348,7 +345,23 @@ export function fetchProductionCompilation(target: ProductionTarget, operationId
     return request<{ ok: boolean; compilation: ProductionCompilationStatus & { items?: ProductionCompilationDiagnostic[]; total?: number; nextOffset?: number | null } }>("GET", `${productionPath(target)}/compilations/${encodeURIComponent(operationId)}?${query.toString()}`);
 }
 export function applyProductionCompilation(target: ProductionTarget, preparedId: string) {
-    return request<{ ok: boolean; receipt: { revision: number; sourceHash?: string; operationId: string; replayed?: boolean; publishedVersion?: number; referenceSync?: Array<{ targetId: string; status: string; referenceCount?: number }>; mediaSubmitted: false } }>("POST", `${productionPath(target)}/apply-compilation`, { preparedId });
+    const path = `${productionPath(target)}/apply-compilation`;
+    const apply = () => request<{ ok: boolean; receipt: { revision: number; sourceHash?: string; operationId: string; replayed?: boolean; publishedVersion?: number; referenceSync?: Array<{ targetId: string; status: string; referenceCount?: number }>; mediaSubmitted: false } }>("POST", path, { preparedId });
+    return (async () => {
+        // A stable dev proxy's BACKEND_RELOADING response is issued before the
+        // write reaches Backend. Keep the same preparedId and retry briefly so
+        // a watch reload between compile completion and apply does not surface
+        // as a failed compilation. Other 503s (including unknown outcomes) are
+        // never retried here.
+        for (let retry = 0; ; retry++) {
+            try { return await apply(); }
+            catch (error) {
+                if (!(error instanceof BackendApiError) || error.status !== 503
+                    || error.details.code !== "BACKEND_RELOADING" || retry >= 3) throw error;
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+        }
+    })();
 }
 export function fetchEpisodeProductionRun(episodeId: ProductionTarget, version: number) { return request<{ ok: boolean; run: { status: string; submitted: Array<{ kind: "image" | "h3"; id: string; taskId: string }>; error: string | null } | null }>("GET", `${productionPath(episodeId)}/runs/${version}`); }
 export type ProductionReadinessTarget = { id: string; targetId: string; kind: "asset" | "keyframe" | "segment"; title: string; status: "ready" | "blocked" | "needs_review" | "complete"; blockers: string[]; warnings?: string[]; artifactId?: string; executionTargets?: string[]; notice?: string };

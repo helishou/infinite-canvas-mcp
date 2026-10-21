@@ -61,7 +61,6 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
     const framingMissing = !framingValues.includes(String(value.camera.framing || ""));
 
     const attentionSubjectIds = value.camera.attention_subject_ids;
-const attentionMissing = !Array.isArray(attentionSubjectIds) || attentionSubjectIds.length === 0;
     const lensField = Object.prototype.hasOwnProperty.call(value.camera, "lens_mm") || !Object.prototype.hasOwnProperty.call(value.camera, "lens") ? "lens_mm" : "lens";
     const lensValue = value.camera[lensField];
 
@@ -72,10 +71,12 @@ const attentionMissing = !Array.isArray(attentionSubjectIds) || attentionSubject
     const framingErrorId = `shot-editor-framing-error-${id}`;
 
     const editorialReasonErrorId = `shot-editor-editorial-reason-error-${id}`;
-    const cameraFieldsMissing = framingMissing || editorialReasonMissing || attentionMissing;
-    const smartNodes = canvasNodes.filter(node => node.type === "config" && node.metadata?.smart === true && (node.metadata?.generationMode || "image") === "image");
-    const keyframeChoiceValid = Boolean(keyframeNode && (keyframeNode.projectId !== canvasId || smartNodes.some(node => node.id === keyframeNode.nodeId)) && !value.keyframes.some(frame => frame.sourceNode?.projectId === keyframeNode.projectId && frame.sourceNode?.nodeId === keyframeNode.nodeId));
-    const compositionChoiceValid = Boolean(compositionNode && (compositionNode.projectId !== canvasId || smartNodes.some(node => node.id === compositionNode.nodeId)) && !value.reference_requirements.some(reference => reference.sourceNode?.projectId === compositionNode.projectId && reference.sourceNode?.nodeId === compositionNode.nodeId));
+    const cameraFieldsMissing = framingMissing || editorialReasonMissing;
+    // SmartImageNodePicker is the authority for which local and shared image nodes can be selected.
+    // Keep this layer responsible only for preventing duplicate bindings: ordinary image nodes and
+    // registered character/scene/prop nodes are valid picker choices too, not just smart config nodes.
+    const keyframeChoiceValid = Boolean(keyframeNode && !value.keyframes.some(frame => frame.sourceNode?.projectId === keyframeNode.projectId && frame.sourceNode?.nodeId === keyframeNode.nodeId));
+    const compositionChoiceValid = Boolean(compositionNode && !value.reference_requirements.some(reference => reference.sourceNode?.projectId === compositionNode.projectId && reference.sourceNode?.nodeId === compositionNode.nodeId));
     useEffect(() => { if (keyframeNode && !keyframeChoiceValid) setKeyframeNode(undefined); }, [keyframeNode, keyframeChoiceValid]);
     useEffect(() => { if (compositionNode && !compositionChoiceValid) setCompositionNode(undefined); }, [compositionNode, compositionChoiceValid]);
     const fps = Number(source.fps_num || 24) / Number(source.fps_den || 1);
@@ -130,7 +131,8 @@ const attentionMissing = !Array.isArray(attentionSubjectIds) || attentionSubject
     const utterancePatch = (index: number, patch: Record<string, unknown>) => update({ utterances: utteranceRows.map((item, n) => n === index ? { ...item, ...patch } : item) });
     const addUtterance = () => {
         if (!utteranceChoice) return;
-        update({ utterances: [...utteranceRows, { utteranceId: "", speakerSubjectId: utteranceChoice, text: "", delivery: "", voiceover: !speakerOnCamera(value.subject_usages, utteranceChoice), localStartFrame: 0, localEndFrame: Math.min(12, value.duration_frames) }] });
+        const subject = subjects.find(item => String(item.id) === utteranceChoice);
+        update({ utterances: [...utteranceRows, { utteranceId: "", speakerSubjectId: subject ? utteranceChoice : "", ...(!subject ? { speakerName: utteranceChoice } : {}), text: "", delivery: "", voiceover: !speakerOnCamera(value.subject_usages, utteranceChoice), localStartFrame: 0, localEndFrame: Math.min(12, value.duration_frames) }] });
         setUtteranceChoice(undefined);
     };
     const addSubject = () => {
@@ -232,9 +234,8 @@ const attentionMissing = !Array.isArray(attentionSubjectIds) || attentionSubject
                 {framingMissing && <span id={framingErrorId} role="alert" className="text-destructive">{t("director.atomic.framingRequired")}</span>}
             </label>
             <label className="shot-editor-span-all grid gap-1.5 text-xs text-muted-foreground">
-                <span>{t("director.atomic.attention")} <span className="text-destructive" aria-hidden="true">*</span></span>
+                <span>{t("director.atomic.attention")}</span>
                 <Select className="w-full" aria-label={t("director.atomic.attention")} mode="multiple" value={Array.isArray(attentionSubjectIds) ? attentionSubjectIds : []} disabled={disabled} options={value.subject_usages.map(usage => String(usage.subjectId)).filter((subjectId, index, ids) => subjectId && ids.indexOf(subjectId) === index).map(subjectId => ({ value: subjectId, label: subjectDisplayName(source, subjectId) }))} onChange={attention_subject_ids => camera({ attention_subject_ids })} />
-                {attentionMissing && <span role="alert" className="text-destructive">{t("director.atomic.attentionRequired", { defaultValue: "请至少选择一个画面主体" })}</span>}
 
                 <Button className="justify-self-start" size="small" type="text" disabled={disabled} onClick={() => {
                     const visibleSubjectIds = value.subject_usages.filter(item => item.presentation === "visible").map(item => String(item.subjectId));
@@ -261,7 +262,11 @@ const attentionMissing = !Array.isArray(attentionSubjectIds) || attentionSubject
         {section === "sound" && <div className="shot-editor-form-grid">
             {utteranceRows.map((item, index) => <article key={item.utteranceId || `new:${index}`} className="space-y-2 rounded-lg border border-border p-3">
                     <div className="flex items-center gap-2">
-                        <Select className="min-w-0 flex-1" value={item.speakerSubjectId || undefined} disabled={disabled} placeholder={t("director.atomic.dialogueSpeaker")} options={subjects.map(subject => ({ value: String(subject.id), label: subjectDisplayName(source, String(subject.id)) }))} onChange={speakerSubjectId => utterancePatch(index, { speakerSubjectId })} />
+                        <Select className="min-w-0 flex-1" mode="tags" maxCount={1} value={item.speakerSubjectId ? [item.speakerSubjectId] : item.speakerName ? [item.speakerName] : []} disabled={disabled} placeholder={t("director.atomic.dialogueSpeaker")} options={subjects.map(subject => ({ value: String(subject.id), label: subjectDisplayName(source, String(subject.id)) }))} onChange={values => {
+                            const choice = Array.isArray(values) ? String(values[0] || "") : String(values || "");
+                            const subject = subjects.find(item => String(item.id) === choice);
+                            utterancePatch(index, { speakerSubjectId: subject ? choice : "", speakerName: subject ? "" : choice });
+                        }} />
                         <label className="flex shrink-0 cursor-help items-center gap-1 text-xs text-muted-foreground" title={t("director.atomic.offscreenDerived")}><Switch size="small" checked={voiceoverOf(item)} disabled />{t("director.atomic.offscreen")}</label>
                         <Button size="small" type="text" disabled={disabled} onClick={() => update({ utterances: utteranceRows.filter((_, n) => n !== index) })}>{t("common.remove")}</Button>
                     </div>
@@ -304,7 +309,8 @@ const attentionMissing = !Array.isArray(attentionSubjectIds) || attentionSubject
                         <InputNumber className="w-full" min={1} max={value.duration_frames} precision={0} value={item.localEndFrame} disabled={disabled} placeholder={t("director.atomic.dialogueEnd")} onChange={localEndFrame => utterancePatch(index, { localEndFrame: Number(localEndFrame || 0) })} />
                     </div>
                 </article>)}
-                <div className="shot-editor-span-all flex gap-2"><Select className="min-w-0 flex-1" value={utteranceChoice} disabled={disabled} placeholder={t("director.atomic.dialogueAdd")} options={subjects.filter(subject => !utteranceRows.some(item => item.speakerSubjectId === String(subject.id) && !item.text.trim() && !item.utteranceId)).map(subject => ({ value: String(subject.id), label: subjectDisplayName(source, String(subject.id)) }))} onChange={setUtteranceChoice} /><Button disabled={disabled || !utteranceChoice} onClick={addUtterance}>{t("director.atomic.dialogueAdd")}</Button></div>
+                <div className="shot-editor-span-all flex gap-2"><Select className="min-w-0 flex-1" mode="tags" maxCount={1} value={utteranceChoice ? [utteranceChoice] : []} disabled={disabled} placeholder={t("director.atomic.dialogueAdd")} options={subjects.filter(subject => !utteranceRows.some(item => item.speakerSubjectId === String(subject.id) && !item.text.trim() && !item.utteranceId)).map(subject => ({ value: String(subject.id), label: subjectDisplayName(source, String(subject.id)) }))} onChange={values => setUtteranceChoice(Array.isArray(values) ? String(values[0] || "") || undefined : String(values || "") || undefined)} /><Button disabled={disabled || !utteranceChoice} onClick={addUtterance}>{t("director.atomic.dialogueAdd")}</Button></div>
+                <p className="shot-editor-span-all text-xs text-muted-foreground">{t("director.atomic.dialogueCustomSpeakerHint")}</p>
                 {utteranceRows.length > 0 && <p className="shot-editor-span-all text-xs text-muted-foreground">{t("director.atomic.dialogueSourceHint")}</p>}
             <section className="shot-editor-span-all space-y-2"><h4 className="flex items-center gap-2 text-sm font-medium"><Volume2 className="size-4" />{t("director.atomic.sound")}</h4><Input.TextArea value={typeof value.audio === "string" ? value.audio : readableText(value.audio)} autoSize={{ minRows: 2, maxRows: 5 }} disabled={disabled} onChange={event => update({ audio: value.audio && typeof value.audio === "object" && !Array.isArray(value.audio) ? { ...value.audio as Record<string, unknown>, description: event.target.value } : event.target.value })} />
             {/* A 类补齐：结构化声音字段（逐条 foley / 低频约束）原先只能靠上面的自由文本带过，跟随整表单草稿一起保存。 */}

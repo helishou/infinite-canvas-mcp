@@ -201,7 +201,12 @@ def check_asset_plan(payload, base):
         asset_plan.write_text(asset_plan_text, encoding="utf-8")
     continuity = root / "scripts/continuity_v2.py"
     continuity_text = continuity.read_text(encoding="utf-8")
-    replace(continuity, 'current_digest = digest({"scene_id": scene.get("scene_id"), "block": block})', 'current_digest = digest({"scene_id": scene.get("scene_id") or scene.get("id"), "block": block})')
+    normalized_digest = "current_digest = coverage_digest(scene, block)"
+    if normalized_digest not in continuity_text:
+        # Sources that already normalize keep their own digest; older upstream
+        # snapshots still get the scene-id fallback and stay buildable.
+        replace(continuity, 'current_digest = digest({"scene_id": scene.get("scene_id"), "block": block})',
+                'current_digest = digest({"scene_id": scene.get("scene_id") or scene.get("id"), "block": block})')
     continuity_text = continuity.read_text(encoding="utf-8")
     if "_canvas_continuity_base_audit_defaults" not in continuity_text:
         wrapper = """

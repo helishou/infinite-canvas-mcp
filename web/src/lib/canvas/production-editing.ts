@@ -6,7 +6,7 @@ import { applyProductionCompilation, BackendApiError, compileProduction, fetchBa
 
 type Input = Parameters<CanvasProductionEditing["reverseSyncPrompt"]>[0];
 type Handler = CanvasProductionEditing["reverseSyncPrompt"];
-type StoryboardHandler = CanvasProductionEditing["replaceStoryboardTrack"];
+type StoryboardHandler = (input: CanvasProductionStoryboardEditor, previousSegment?: Record<string, unknown>) => Promise<{ sourceSaved: boolean }>;
 type ContinuationBoundaryInput = Parameters<CanvasProductionEditing["setContinuationBoundary"]>[0];
 type ContinuationBoundariesInput = Parameters<CanvasProductionEditing["setContinuationBoundaries"]>[0];
 type ContinuationBoundaryHandler = (input: { boundaries: Array<{ targetId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean }>; requireNext?: boolean }) => Promise<{ sourceSaved: boolean }>;
@@ -92,7 +92,7 @@ export function sourceSegmentForCanvasClip(nodes: Array<{ id: string; metadata?:
     return matches[0].targetId;
 }
 
-export function buildDirectorClipStoryboardOperation(director: DirectorProduction, groupId: string, input: CanvasProductionStoryboardEditor): ProductionOperation {
+export function buildDirectorClipStoryboardOperation(director: DirectorProduction, groupId: string, input: CanvasProductionStoryboardEditor, previousSegment?: Record<string, unknown>, projectId?: string): ProductionOperation {
     const source = director.source as Record<string, any>;
     const planned = (Array.isArray(source.segments) ? source.segments : []).find((segment: Record<string, any>) => segment.id === groupId);
     if (!planned) throw new Error("CLIP_NOT_FOUND: 制作台 Clip 不存在");
@@ -103,7 +103,8 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
     const projection = h3Segment.productionClipProjection as Record<string, unknown> | undefined;
     if (h3Segment.id !== input.segmentId || projection?.targetId !== groupId) throw new Error("CLIP_PROJECTION_MISMATCH: H3 Clip 与制作台绑定不一致");
     const storyboard = Array.isArray(h3Segment.storyboardShots) ? h3Segment.storyboardShots as Array<Record<string, any>> : [];
-    if (!storyboard.length) throw new Error("SHOT_LAST_IN_CLIP: Clip 至少保留一个正式镜头；删除整个 Clip 才能移除最后一镜");
+    const previousRefs = rows(previousSegment?.referenceBindings);
+    if (!storyboard.length) throw new Error("SHOT_LAST_IN_CLIP: Clip 至少保留一个镜头；删除整个 Clip 才能移除最后一镜");
     const v2 = (source.prompt_assembly as Record<string, unknown> | undefined)?.version === 2;
     const fpsNum = Number(source.fps_num || 24), fpsDen = Number(source.fps_den || 1), fps = fpsNum / fpsDen;
     const startFrame = v2 ? 0 : Number(planned.start_frame), endFrame = v2 ? 0 : Number(planned.end_frame);
@@ -119,6 +120,7 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
     const refs = Array.isArray(h3Segment.referenceBindings) ? h3Segment.referenceBindings as Array<Record<string, any>> : [];
     const shots: Record<string, any>[] = [];
     const shotInputs: Record<string, unknown> = {};
+    const keyframeBindings: Array<{ shotId: string; assetId: string; bindingId: string; nodeId?: string; containerNodeId?: string; storageKey?: string; label?: string }> = [];
     const removedKeyframesByShot = new Map<string, Array<Record<string, any>>>();
     const originalById = new Map(oldShots.map(shot => [String(shot.id), shot]));
     const firstOrder = Number(oldShots[0].story_order || 0);
@@ -184,10 +186,29 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
         if (bindingId) {
             const binding = refs.find(ref => String(ref.id || ref.bindingId || "") === bindingId);
             if (!binding || binding.mediaType && binding.mediaType !== "image" || binding.role && binding.role !== "storyboard") throw new Error(`STORYBOARD_BINDING_INVALID: 分镜格 ${slot.id} 引用了无效图片`);
-            const match = Object.entries(director.assets).find(([assetId, asset]) => asset.storageKey === binding.storageKey
-                && (!binding.sourceNodeId || asset.nodeId === binding.sourceNodeId) && (source.asset_plan as Array<Record<string, any>> || []).some(assetPlan => String(assetPlan.asset_id || assetPlan.id) === assetId));
-            if (!match) throw new Error(`STORYBOARD_ASSET_NOT_ADOPTED: 图片 ${binding.storageKey || bindingId} 尚未绑定为正式制作资产`);
-            keyframeAssetId = match[0];
+            const match = Object.entries(director.assets).find(([assetId, asset]) => {
+                const assetPlan = (source.asset_plan as Array<Record<string, any>> || []).find(item => String(item.asset_id || item.id) === assetId);
+                return asset.storageKey === binding.storageKey && (!binding.sourceNodeId || asset.nodeId === binding.sourceNodeId)
+                    && ["keyframe", "storyboard", "frame"].includes(String(assetPlan?.kind || assetPlan?.asset_type || "").toLowerCase());
+            });
+            keyframeAssetId = match?.[0] || `storyboard:${encodeURIComponent(bindingId)}`;
+            keyframeBindings.push({ shotId: String(slot.id), assetId: keyframeAssetId, bindingId,
+                ...(binding.sourceNodeId ? { nodeId: String(binding.sourceNodeId) } : {}),
+                containerNodeId: input.nodeId,
+                ...(binding.storageKey ? { storageKey: String(binding.storageKey) } : {}),
+                ...(binding.label ? { label: String(binding.label) } : {}) });
+            if (v2) {
+                const nodeId = String(binding.sourceNodeId || "");
+                const frameId = slotFrames[0]?.frame.id || `KF:${slot.id}:storyboard`;
+                const previousFrame = slotFrames[0]?.frame || {};
+                const keyframe = { ...previousFrame, id: String(frameId), assetId: keyframeAssetId,
+                    ...(nodeId && projectId ? { sourceNode: { projectId, nodeId } } : { sourceNode: undefined }),
+                    selection: { mode: "node_selection" }, anchor: "opening",
+                    subjectIds: Array.isArray(previousFrame.subjectIds) ? previousFrame.subjectIds : [],
+                    retain: Array.isArray(previousFrame.retain) ? previousFrame.retain : ["分镜图的画面构图"],
+                    exclude: Array.isArray(previousFrame.exclude) ? previousFrame.exclude : [], requiredForSubmission: true };
+                next.keyframes = [...rows(next.keyframes).filter(frame => !storyboardKeyframeForSlot(frame, String(slot.id))), keyframe];
+            }
         } else if (v2 && slotFrames.length) {
             for (const { ownerShot, frame } of slotFrames) {
                 const removed = removedKeyframesByShot.get(String(ownerShot.id)) || [];
@@ -203,8 +224,9 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
         const previousInput = director.shotInputs[String(slot.id)];
         const previousKeyframeAssetId = previousInput?.keyframeAssetId;
         const retainedAssetIds = (previousInput?.assetIds || []).filter(assetId => assetId !== previousKeyframeAssetId);
+        const boundReference = bindingId ? refs.find(ref => String(ref.id || ref.bindingId || "") === bindingId) : undefined;
         shotInputs[String(slot.id)] = keyframeAssetId
-            ? { ...previousInput, keyframePolicy: "reuse", assetIds: [...new Set([...retainedAssetIds, keyframeAssetId])], keyframeAssetId }
+            ? { ...previousInput, keyframePolicy: boundReference?.storageKey ? "reuse" : "new", assetIds: [...new Set([...retainedAssetIds, keyframeAssetId])], keyframeAssetId }
             : { ...previousInput, keyframePolicy: "none", assetIds: retainedAssetIds };
         if (!keyframeAssetId) delete (shotInputs[String(slot.id)] as Record<string, unknown>).keyframeAssetId;
         cursor += frameCounts[index];
@@ -217,7 +239,22 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
     }
     if (!v2 && cursor !== endFrame) throw new Error("STORYBOARD_COVERAGE: 分镜格未覆盖整个 Clip");
     const segment = { ...structuredClone(planned), shot_ids: shots.map(shot => shot.id) };
-    return { type: "replace_director_clip_storyboard", segmentId: groupId, segment, shots, shotInputs };
+    const currentBindingIds = new Set(refs.map(ref => String(ref.id || ref.bindingId || "")));
+    const previousTrackBindingIds = new Set(rows(previousSegment?.storyboardShots).map(shot => String(shot.referenceBindingId || "")).filter(Boolean));
+    const currentTrackBindingIds = new Set(storyboard.map(shot => String(shot.referenceBindingId || "")).filter(Boolean));
+    // Clearing a frame's image leaves its old binding in referenceBindings unless
+    // this boundary removes it too. Track removals are authoritative when the
+    // image is no longer used by another storyboard slot.
+    const removedStoryboardBindingIds = [...new Set([
+        ...previousRefs.filter(ref => ref.mediaType === "image" && String(ref.role || "").toLowerCase() === "storyboard")
+            .map(ref => String(ref.id || ref.bindingId || "")).filter(id => id && !currentBindingIds.has(id)),
+        ...[...previousTrackBindingIds].filter(id => !currentTrackBindingIds.has(id)
+            && refs.some(ref => String(ref.id || ref.bindingId || "") === id
+                && ref.mediaType === "image" && String(ref.role || "").toLowerCase() === "storyboard")),
+    ])];
+    return { type: "replace_director_clip_storyboard", segmentId: groupId, segment, shots, shotInputs,
+        ...(keyframeBindings.length ? { keyframeBindings } : {}),
+        ...(removedStoryboardBindingIds.length ? { removedStoryboardBindingIds: [...new Set(removedStoryboardBindingIds)] } : {}) };
 }
 
 export function createProductionEditing(projectId: string, getNode: (id: string) => CanvasNodeData | null, flush: () => Promise<void>): CanvasProductionEditing {
@@ -333,7 +370,7 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
         if (!clip || typeof projection?.targetId !== "string" || nextProjection.targetId && nextProjection.targetId !== projection.targetId) throw new Error("STORYBOARD_PROJECTION_MISMATCH");
         const editor = storyboardEditors.get(projectId);
         if (!editor) throw new Error("PRODUCTION_EDITOR_NOT_READY");
-        return editor.handler({ ...input, segment: { ...input.segment, productionClipProjection: projection } });
+        return editor.handler({ ...input, segment: { ...input.segment, productionClipProjection: projection } }, clip);
     }, setContinuationBoundary: async (input: ContinuationBoundaryInput) => {
         return setContinuationBoundaries({ nodeId: input.nodeId, boundaries: [{ segmentId: input.segmentId, tailFrameContinuation: input.tailFrameContinuation, motionContextEnabled: input.motionContextEnabled }] }, true);
     }, setContinuationBoundaries: async (input: ContinuationBoundariesInput) => setContinuationBoundaries(input, false) };

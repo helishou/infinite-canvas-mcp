@@ -14,7 +14,7 @@ export function SmartImageNodePicker({ canvasId, canvasNodes, assets = {}, asset
     const { t } = useTranslation();
     const [opened, setOpened] = useState(false), [loading, setLoading] = useState(false), [error, setError] = useState(""), [retry, setRetry] = useState(0);
     const projects = useCanvasStore(state => state.projects);
-    const idsKey = JSON.stringify([...new Set(Object.values(assets).flatMap(asset => asset.sharedSource?.sourceProjectId && asset.sharedSource.sourceProjectId !== canvasId ? [String(asset.sharedSource.sourceProjectId)] : []))].sort());
+    const idsKey = JSON.stringify([...new Set(assetPlan.flatMap(plan => plan.sharedSource?.sourceProjectId && plan.sharedSource.sourceProjectId !== canvasId ? [String(plan.sharedSource.sourceProjectId)] : []))].sort());
     useEffect(() => {
         if (!opened) return;
         let active = true; setLoading(true); setError("");

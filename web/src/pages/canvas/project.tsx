@@ -1431,7 +1431,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const pluginToolbarItems = useMemo(() => (toolbarNode ? buildNodeToolbarItems(toolbarNode) : undefined), [buildNodeToolbarItems, toolbarEditing, toolbarNode]);
     const toolbarObject = toolbarNode && productionContext && productionRecord ? productionObjectForNode(productionContext, productionRecord, toolbarNode, String(getPluginNodeView(projectId, toolbarNode.id).getSnapshot().selectedSegmentId || "")) : null;
     const toolbarAssetId = toolbarObject?.targetKind === "shot" ? productionRecord?.draft.director?.shotInputs[toolbarObject.targetId || ""]?.keyframeAssetId : toolbarObject?.targetId;
-    const toolbarSharedSource = toolbarAssetId ? productionRecord?.draft.director?.assets[toolbarAssetId]?.sharedSource : undefined;
+    const toolbarSharedSource = toolbarAssetId ? (Array.isArray(productionRecord?.draft.director?.source.asset_plan) ? productionRecord.draft.director.source.asset_plan : []).find(item => String(item.id || item.asset_id || "") === toolbarAssetId)?.sharedSource : undefined;
     const toolbarState = toolbarObject && productionRecord && toolbarNode ? productionObjectState(productionRecord, toolbarObject, toolbarNode) : undefined;
     const productionActionBusy = productionCommandBusy || Boolean(toolbarState?.working);
     const productionToolbarItems = toolbarObject ? [

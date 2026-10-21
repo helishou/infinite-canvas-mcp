@@ -301,23 +301,22 @@ function syncSharedProductionOwners(db: BackendDatabase, source: SharedAssetSour
         for (const picture of pictures) {
             if (!picture.assetId) continue;
             const priorAsset = assets[picture.assetId] || {};
+            const { sharedSource: _legacySharedSource, ...singleSourceAsset } = priorAsset;
             if (!picture.storageKey) {
-                const nextAsset = { ...priorAsset, version, nodeId: picture.nodeId, status: "planned", sharedSource: { ...(priorAsset.sharedSource || {}), ...source } };
+                const nextAsset = { ...singleSourceAsset, version, nodeId: picture.nodeId, status: "planned" };
                 delete nextAsset.storageKey; delete nextAsset.sha256; delete nextAsset.generationTaskId; delete nextAsset.selectedResult;
                 if (JSON.stringify(priorAsset) !== JSON.stringify(nextAsset)) { assets[picture.assetId] = nextAsset; changed = true; }
                 continue;
             }
             const file = db.getMediaFile(picture.storageKey);
             if (!file || !fs.existsSync(file.filePath)) {
-                const nextAsset = { ...priorAsset, version, nodeId: picture.nodeId, storageKey: picture.storageKey, status: "planned", sharedSource: { ...(priorAsset.sharedSource || {}), ...source } };
+                const nextAsset = { ...singleSourceAsset, version, nodeId: picture.nodeId, storageKey: picture.storageKey, status: "planned" };
                 delete nextAsset.sha256; delete nextAsset.generationTaskId; delete nextAsset.selectedResult;
                 if (JSON.stringify(priorAsset) !== JSON.stringify(nextAsset)) { assets[picture.assetId] = nextAsset; changed = true; }
                 continue;
             }
             const sha256 = crypto.createHash("sha256").update(fs.readFileSync(file.filePath)).digest("hex");
-            const nextAsset = { ...priorAsset, version: version, nodeId: picture.nodeId, storageKey: picture.storageKey, sha256,
-                status: priorAsset.status === "approved" && priorAsset.sha256 === sha256 ? "approved" : "generated",
-                sharedSource: { ...(priorAsset.sharedSource || {}), ...source },
+            const nextAsset = { ...singleSourceAsset, version, nodeId: picture.nodeId, storageKey: picture.storageKey, sha256, status: "generated",
                 selectedResult: { imageId: picture.resultId, storageKey: picture.storageKey, sha256, projectId: String(episode.canvasId), nodeId: picture.nodeId } };
             delete nextAsset.generationTaskId;
             if (JSON.stringify(nextAsset.selectedResult) !== JSON.stringify(priorAsset.selectedResult)) changed = true;
@@ -458,7 +457,7 @@ export function writeDramaAsset(db: BackendDatabase, asset: Asset, command: Asse
             if (!local) throw new Error("来源节点不存在");
             const episode = db.getDramaEpisodeByCanvasId(command.canvasSource.projectId);
             if (command.canvasSource.projectId !== source.sourceProjectId && episode?.dramaId !== source.dramaId) throw new Error("来源节点不属于目标剧目");
-            if (local.metadata?.sharedAssetOrigin) throw new Error("共享引用请沿正式采用入口更新版本");
+            if (local.metadata?.sharedAssetOrigin) throw new Error("共享引用请在本集主体图片选择器中切换来源节点");
             if (local.metadata?.productionScriptId) throw new Error("正式剧本节点请沿剧本编辑入口保存；可将独立文本素材加入资产库");
             if (local.metadata?.sharedAssetReference?.assetId && local.metadata.sharedAssetReference.assetId !== asset.id) throw new Error("引用不能更新其他共享资产");
         }
@@ -497,7 +496,7 @@ export function writeDramaAsset(db: BackendDatabase, asset: Asset, command: Asse
                 for (const [f, e] of Object.entries(edits)) setAssetField(next, f, e.deleted ? undefined : e.value);
             }
             if (canonical && canonicalContent) {
-                if (canonical.type === "config" && sharedAssetFields(asset.kind).filter(f => f !== "title").some(f => !sameAssetValue(assetField(canonicalContent, f), assetField(next, f)))) throw new Error("正式共享生成资产请在源画布选择或生成媒体，再沿正式采用入口更新；本地修改已保留");
+                if (canonical.type === "config" && sharedAssetFields(asset.kind).filter(f => f !== "title").some(f => !sameAssetValue(assetField(canonicalContent, f), assetField(next, f)))) throw new Error("正式共享生成资产请在源画布选择或生成媒体；本地修改已保留");
                 const patch = changedNodePatch(canonicalContent, { ...next, id: canonical.id });
                 if (patch) db.applyCanvasProjectOperations(source.sourceProjectId, undefined, [patch], { runtimeWrite: true, withinTransaction: true, deferredCommits: commits });
             } else {
@@ -548,8 +547,9 @@ export function migrateDramaAssets(db: BackendDatabase) {
     const commits: CanvasCommit[] = [];
     for (const asset of db.listAssetRecords()) {
         if (!asset.dramaId || !db.isDramaProject(asset.dramaId) || !kinds.has(asset.kind) || sourceOf(asset)) continue;
-        if (asset.source === "production-shared" && asset.metadata?.approvedId) {
-            const approved = db.db.prepare("SELECT source_project_id, source_node_id FROM drama_asset_versions WHERE id=? AND drama_id=?").get(String(asset.metadata.approvedId), asset.dramaId) as { source_project_id: string; source_node_id: string } | undefined;
+        const legacyVersionId = String(asset.metadata?.versionId || asset.metadata?.approvedId || "");
+        if (asset.source === "production-shared" && legacyVersionId) {
+            const approved = db.db.prepare("SELECT source_project_id, source_node_id FROM drama_asset_versions WHERE id=? AND drama_id=?").get(legacyVersionId, asset.dramaId) as { source_project_id: string; source_node_id: string } | undefined;
             if (!approved || approved.source_project_id !== asset.metadata.sourceProjectId || approved.source_node_id !== asset.metadata.sourceNodeId) throw new Error("存量共享批准资产来源无法核验，迁移已回滚");
             const node = nodes(rawProject(db, approved.source_project_id)).find(n => n.id === approved.source_node_id);
             if (!node) throw new Error("存量共享批准资产节点不存在，迁移已回滚");

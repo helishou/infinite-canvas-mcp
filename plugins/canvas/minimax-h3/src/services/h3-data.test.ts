@@ -6,6 +6,7 @@ import {
     displayReferenceName,
     promoteCharacterSourceReferences,
     refsForSegment,
+    refsForSubmission,
     refsFromCharacterGroup,
     syncCharacterGroupFromSource,
     upsertCharacterGroup,
@@ -51,6 +52,25 @@ test("旧角色参考在场景之前时，参考卡与共享编译保留同一�
         id: "old-su", storageKey: "image:old", url: "https://media.test/old",
     });
     assert.deepEqual(refsForSegment(segment).map((ref) => ref.storageKey), ["image:su", "image:scene", "image:shen"]);
+});
+
+test("提示词引用序号与提交序号共用分镜优先顺序", () => {
+    const segment: H3Segment = { id: "prompt-order", taskMode: "ref2va", referenceBindings: [
+        { id: "hongxiao", assetId: "hongxiao", label: "红绡", role: "character_turnaround", subjectId: "hongxiao", mediaType: "image", storageKey: "image:hongxiao" },
+        { id: "cottage", assetId: "cottage", label: "草庐", role: "scene", subjectId: "cottage", mediaType: "image", storageKey: "image:cottage" },
+        { id: "shenyan", assetId: "shenyan", label: "沈砚", role: "character_turnaround", subjectId: "shenyan", mediaType: "image", storageKey: "image:shenyan" },
+        { id: "board-2", assetId: "board-2", label: "Shot 2", role: "storyboard", mediaType: "image", storageKey: "image:board-2" },
+        { id: "board-3", assetId: "board-3", label: "Shot 3", role: "storyboard", mediaType: "image", storageKey: "image:board-3" },
+        { id: "sword", assetId: "sword", label: "佩剑", role: "prop", subjectId: "sword", mediaType: "image", storageKey: "image:sword" },
+    ], storyboardShots: [
+        { id: "SH-1" },
+        { id: "SH-2", referenceBindingId: "board-2" },
+        { id: "SH-3", referenceBindingId: "board-3" },
+        { id: "SH-4" },
+    ] };
+
+    assert.deepEqual(refsForSegment(segment).map((ref) => ref.bindingId), ["hongxiao", "cottage", "shenyan", "board-2", "board-3", "sword"]);
+    assert.deepEqual(refsForSubmission(segment).map((ref) => ref.bindingId), ["board-2", "board-3", "hongxiao", "cottage", "shenyan", "sword"]);
 });
 
 test("历史角色快照由当前组刷新且删除孤儿，手工编辑不双写派生项并保留禁用绑定", () => {

@@ -354,8 +354,10 @@ def project_continuity_source(production):
             segment["start_frame"], segment["end_frame"] = windows[str(ids[0])][0], windows[str(ids[-1])][1]
     for scene in rows(source.get("script_scenes")):
         if not rows(scene.get("blocks")) and isinstance(scene.get("text"), str) and scene.get("id"):
-            # Flat screenplay rows are themselves source blocks; keep their exact content for digests.
-            scene["blocks"] = [deepcopy(scene)]
+            # Coverage is authored against the source block's identity, kind and
+            # text. Copying scene metadata into this synthetic block changes the
+            # digest even though the screenplay itself is unchanged.
+            scene["blocks"] = [{"id": str(scene["id"]), "kind": str(scene.get("kind") or "action"), "text": scene["text"]}]
     return source
 
 
@@ -461,6 +463,15 @@ def audit_subject_continuity(production, target_ids=None):
     report = audit(_subject_continuity_audit_projection(production), target_ids)
     report["sourceDigest"] = digest(production)
     return report
+
+
+def _h3_picture_submission_order(pictures):
+    """Match H3 slots: storyboard/keyframes, subject images, then other refs."""
+    return sorted(pictures, key=lambda picture: (
+        not bool(picture.get("is_keyframe")),
+        not bool(picture.get("subject_ids")),
+        int(picture.get("number") or 0),
+    ))
 
 
 def _infer_segment_mode(source, segment):
@@ -679,10 +690,11 @@ def adapt_production(production, *, draft=False):
                     reference_requirements[shot_id].append({"asset_id": asset_id, "entity_id": entity_id,
                                                             "asset_version": picture["asset_version"], "purpose": "keyframe"})
 
-        # H3 consumes storyboard/keyframe references before general reference
-        # images. Keep the authored Picture numbering in that same order so
-        # compilation does not have to silently rewrite an approved prompt.
-        storyboard_first = sorted(selected_pictures, key=lambda picture: (not picture["is_keyframe"], picture["number"]))
+        # Keep prompt ordinals aligned with H3's actual submission slots:
+        # storyboard/keyframe images, all Subject images, then other references.
+        # Otherwise a composition reference inserted between two Shots can take
+        # a lower Picture number than the later Subject image H3 submits first.
+        storyboard_first = _h3_picture_submission_order(selected_pictures)
         label_map = {}
         for number, picture in enumerate(storyboard_first, 1):
             previous = picture["label"]
@@ -863,12 +875,12 @@ def adapt_production(production, *, draft=False):
                 text = str(utterance.get("text") or "")
                 text_start, text_end = int(ref.get("textStart", 0)), int(ref.get("textEnd", 0))
                 speaker = subject_by_id.get(str(utterance.get("speakerSubjectId")))
-                speaker_entity = str((speaker or {}).get("entityRef", {}).get("id") or utterance.get("speakerSubjectId") or "NARRATOR")
-                speaker_name = entity_text(source, speaker)[0] if speaker else "旁白"
+                speaker_entity = str((speaker or {}).get("entityRef", {}).get("id") or utterance.get("speakerSubjectId") or "UTT_" + str(utterance.get("id") or "UNKNOWN"))
+                speaker_name = entity_text(source, speaker)[0] if speaker else str(utterance.get("speakerName") or "旁白")
                 part = text[text_start:text_end]
                 next_shot["dialogues"].append({"utterance_id": str(utterance["id"]), "_shot_id": shot_id, "source_text": text,
                                                "source_start": text_start, "source_end": text_end,
-                                               "character_id": speaker_entity, "speaker_name": speaker_name, "speaker_id": "SUBJECT_" + str(utterance.get("speakerSubjectId") or speaker_entity),
+                                               "character_id": speaker_entity, "speaker_name": speaker_name, "speaker_id": "SUBJECT_" + str(utterance.get("speakerSubjectId") or utterance.get("id") or speaker_entity),
                                                "text": part, "language": str(utterance.get("language") or ("Chinese" if any("\u4e00" <= char <= "\u9fff" for char in part) else "English")),
                                                "delivery": str(utterance.get("delivery") or "natural, intelligible delivery"),
                                                "voiceover": bool(utterance.get("voiceover")), "start": int(ref["localStartFrame"]), "end": int(ref["localEndFrame"])})
@@ -880,7 +892,10 @@ def adapt_production(production, *, draft=False):
         all_transformed_shots.extend(transformed_shots)
 
         first_shot = transformed_shots[0]
-        summary = str(segment.get("summary") or source.get("story_summary") or source.get("brief") or "")
+        # A production-level brief describes the whole work, not this Clip.
+        # Only an authored Segment summary may populate the Ref2VA summary;
+        # otherwise use a neutral fallback scoped to this Clip's Shots.
+        summary = str(segment.get("summary") or "")
         if not summary:
             summary = "A continuous scene of " + str(len(shot_ids)) + " authored camera Shot(s)."
         if not summary.startswith("["):

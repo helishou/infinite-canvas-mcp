@@ -162,16 +162,22 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
 export function initBackendConnection() {
     if (typeof window === "undefined" || backendMonitorStarted) return;
     backendMonitorStarted = true;
+    let forceFullCheck = false;
+    let poller: ReturnType<typeof startSingleFlightPoller> | undefined;
     window.addEventListener("backend-unavailable", (event) => {
         const code = (event as CustomEvent<{ code?: string }>).detail?.code;
         if (code !== "BACKEND_RELOADING") return;
         stopBackendEvents();
         useBackendStore.setState({ connected: false, checking: false, error: "", businessError: "" });
+        // This is a known temporary state from the stable dev proxy. Probe as
+        // soon as possible so the top banner and SSE recover with the Backend,
+        // instead of waiting for the next periodic interval.
+        forceFullCheck = true;
+        poller?.refreshNow();
     });
     void useBackendStore.getState().checkConnection();
 
-    let forceFullCheck = false;
-    const poller = startSingleFlightPoller({
+    poller = startSingleFlightPoller({
         intervalMs: 10_000,
         initiallyPaused: document.hidden,
         poll: async () => {

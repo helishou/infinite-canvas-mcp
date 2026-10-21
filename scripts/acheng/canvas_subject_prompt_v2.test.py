@@ -9,7 +9,7 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 
-from canvas_subject_prompt_v2 import adapt_production, binding_ids, build_source_map, compile_prompt_v2, entity_text, project_continuity_source, write_prompt_text, _state_start_descriptions, _render_state_end, _plain_text, _infer_segment_mode, _subject_retention_attributes, neutralize_spoken_repetition, repeated_spoken_dialogue
+from canvas_subject_prompt_v2 import adapt_production, binding_ids, build_source_map, compile_prompt_v2, entity_text, project_continuity_source, write_prompt_text, _state_start_descriptions, _render_state_end, _plain_text, _infer_segment_mode, _subject_retention_attributes, _h3_picture_submission_order, neutralize_spoken_repetition, repeated_spoken_dialogue
 
 source_contract_spec = importlib.util.spec_from_file_location("canvas_source_contract", Path(__file__).with_name("source-contract.py"))
 source_contract = importlib.util.module_from_spec(source_contract_spec)
@@ -17,6 +17,17 @@ source_contract_spec.loader.exec_module(source_contract)
 
 
 class SubjectPromptV2ProjectionTest(unittest.TestCase):
+    def test_picture_ordinals_follow_h3_storyboard_subject_other_order(self):
+        pictures = [
+            {"number": 1, "is_keyframe": False, "subject_ids": ["SUB_A"]},
+            {"number": 2, "is_keyframe": False, "subject_ids": []},  # composition reference between Shots
+            {"number": 3, "is_keyframe": False, "subject_ids": ["SUB_B"]},
+            {"number": 4, "is_keyframe": False, "subject_ids": ["SUB_SCENE"]},
+            {"number": 5, "is_keyframe": True, "subject_ids": []},
+        ]
+        ordered = _h3_picture_submission_order(pictures)
+        self.assertEqual([item["number"] for item in ordered], [5, 1, 3, 4, 2])
+
     def test_subject_retention_defaults_follow_entity_kind(self):
         retain, exclude = _subject_retention_attributes(
             "scene",
@@ -432,7 +443,7 @@ class SpokenDialogueRepetitionTest(unittest.TestCase):
 
     line = "道长……妖……生来就该死吗？……"
 
-    def _compile(self, visual, delivery="faint and trembling", dialogue=None):
+    def _compile(self, visual, delivery="faint and trembling", dialogue=None, speaker_name=None):
         dialogue = dialogue or self.line
         with tempfile.TemporaryDirectory() as directory:
             image = Path(directory) / "picture.png"
@@ -474,7 +485,7 @@ class SpokenDialogueRepetitionTest(unittest.TestCase):
                 }],
                 "segments": [{"id": "CLIP_1", "shot_ids": ["SHOT_1"], "mode": "Ref2VA", "mode_lock": "Ref2VA",
                               "mode_selection_reason": "Use the registered identity and road references."}],
-                "utterances": [{"id": "U1", "speakerSubjectId": "SUB_HARE", "text": dialogue, "language": "Chinese",
+                "utterances": [{"id": "U1", **({"speakerSubjectId": "SUB_HARE"} if speaker_name is None else {"speakerName": speaker_name}), "text": dialogue, "language": "Chinese",
                                 "delivery": delivery, "voiceover": False,
                                 "start": {"shotId": "SHOT_1", "localFrame": 20}, "end": {"shotId": "SHOT_1", "localFrame": 60}}],
                 "ledger": {"contract_version": 2, "facts": [], "timelines": [{"id": "main", "start_frame": 0}],
@@ -488,6 +499,11 @@ class SpokenDialogueRepetitionTest(unittest.TestCase):
         self.assertEqual(prompt.count(self.line), 1)
         self.assertIn("<d>[Chinese] " + self.line + "</d>", prompt)
         self.assertIn("该句台词，小小头颅垂下", prompt)
+
+    def test_temporary_speaker_name_reaches_compiled_dialogue(self):
+        prompt = self._compile("窗外传来一声喝止。", speaker_name="窗外的守卫", dialogue="站住！")
+        self.assertIn("窗外的守卫", prompt)
+        self.assertIn("<d>[Chinese] 站住！</d>", prompt)
 
     def test_named_line_drops_the_payload_and_keeps_short_clause_directions(self):
         prompt = self._compile("她带着细弱断续的呼吸说出已确认台词：“" + self.line + "”说到“妖”时她试图看清对方，问到“吗”时眉间松开。")

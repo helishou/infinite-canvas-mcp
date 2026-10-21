@@ -26,6 +26,14 @@ test("a Shot draft survives a source refresh and locates a conflicting update wi
     assert.equal(shotDraftSourceChanged(restored.draft, shot), false);
     assert.equal(readShotFormDraft(JSON.stringify(draft), { ...shot, id: "S2" }).invalid, true);
 });
+test("temporary dialogue speakers persist by name without a registered Subject", () => {
+    const { draft } = readShotFormDraft(undefined, shot);
+    draft.value.utterances = [{ utteranceId: "", speakerSubjectId: "", speakerName: "窗外的守卫", text: "站住！", delivery: "急促", voiceover: true, localStartFrame: 1, localEndFrame: 12 }];
+    const changes = shotFormChanges(draft);
+    assert.equal(changes.utterances?.[0].speakerSubjectId, undefined);
+    assert.equal(changes.utterances?.[0].speakerName, "窗外的守卫");
+    assert.equal(changes.utterances?.[0].voiceover, true);
+});
 test("an empty viewing-object selection remains a valid saved camera field", () => {
     const { draft } = readShotFormDraft(undefined, shot);
     draft.value.camera.attention_subject_ids = [];

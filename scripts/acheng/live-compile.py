@@ -37,6 +37,47 @@ def load_live_reference_bindings(file):
                 file = node_file'''),
         ('        expected = node.get("sha256") if media_status else ref.get("sha256")',
          '        expected = ref.get("sha256") if content_bound else (node.get("sha256") if media_status else ref.get("sha256"))'),
+        ('''        for source in rows:
+            if source["label"] in source_labels:
+                if not set(scope) <= set(source["shot_ids"]):
+                    issues.append("Subject outside media scope: " + label)
+                for sid in scope:
+                    if sid not in shots:
+                        continue
+                    start = max(shots[sid]['start_frame'], subject.get('start_frame', shots[sid]['start_frame']))
+                    end = min(shots[sid]['end_frame'], subject.get('end_frame', shots[sid]['end_frame']))
+                    if start >= end or not any(r['shot_id'] == sid and r['start_frame'] <= start and r['end_frame'] >= end for r in source.get('active_ranges', [])):
+                        issues.append('Subject outside media frame window: ' + label)
+                entities = source.get("entity_ids") or ([source["entity_id"]] if source.get("source_only") and source.get("entity_id") else [])
+                if entities and subject.get("entity_id") not in entities:
+                    issues.append("Subject/source entity conflict: " + label)''', '''        # Subject images can be selected per Shot. A clip-level Subject may use
+        # several images with different Shot windows, so validate their combined
+        # coverage instead of requiring every image to span the entire Subject.
+        subject_media = [source for source in rows if source["label"] in source_labels]
+        for sid in scope:
+            if sid not in shots:
+                continue
+            if not any(sid in source.get("shot_ids", []) for source in subject_media):
+                issues.append("Subject outside media scope: " + label)
+                continue
+            start = max(shots[sid]['start_frame'], subject.get('start_frame', shots[sid]['start_frame']))
+            end = min(shots[sid]['end_frame'], subject.get('end_frame', shots[sid]['end_frame']))
+            ranges = sorted((item['start_frame'], item['end_frame'])
+                            for source in subject_media for item in source.get('active_ranges', [])
+                            if item['shot_id'] == sid)
+            cursor = start
+            for range_start, range_end in ranges:
+                if range_start > cursor:
+                    break
+                cursor = max(cursor, range_end)
+                if cursor >= end:
+                    break
+            if start >= end or cursor < end:
+                issues.append('Subject outside media frame window: ' + label)
+        for source in subject_media:
+            entities = source.get("entity_ids") or ([source["entity_id"]] if source.get("source_only") and source.get("entity_id") else [])
+            if entities and subject.get("entity_id") not in entities:
+                issues.append("Subject/source entity conflict: " + label)'''),
     ]
     for index, (before, after) in enumerate(replacements):
         if after in source:

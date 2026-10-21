@@ -15,7 +15,7 @@ export function clipShots(d: DirectorProduction, id: string) {
     if (!shots.length || shots.some((s: unknown) => !s)) reject("CLIP_SHOTS_MISSING", `segments.${id}.shot_ids`, "Clip 镜头不完整");
     return { segment, shots: shots as Record<string, any>[] };
 }
-export function replaceDirectorClipStoryboard(d: DirectorProduction, op: { segmentId: string; segment: Record<string, unknown>; shots: Record<string, any>[]; shotInputs: Record<string, unknown> }) {
+export function replaceDirectorClipStoryboard(d: DirectorProduction, op: { segmentId: string; segment: Record<string, unknown>; shots: Record<string, any>[]; shotInputs: Record<string, unknown>; keyframeBindings?: Array<{ shotId: string; assetId: string; bindingId: string; nodeId?: string; containerNodeId?: string; storageKey?: string; label?: string }>; removedStoryboardBindingIds?: string[] }) {
     const { segment, shots: old } = clipShots(d, op.segmentId), oldIds = new Set(old.map(s => s.id));
     const v2 = (d.source.prompt_assembly as Record<string, unknown> | undefined)?.version === 2;
     if (op.segment.id !== segment.id || !v2 && (op.segment.start_frame !== segment.start_frame || op.segment.end_frame !== segment.end_frame))
@@ -64,6 +64,40 @@ export function replaceDirectorClipStoryboard(d: DirectorProduction, op: { segme
         timeline && !ids.has(s.id) && s.timeline_id === timeline && s.story_order > lastOrder ? { ...s, story_order: s.story_order + op.shots.length - old.length } : s);
     next.source.segments = rows(d.source.segments).map(s => s.id === segment.id ? op.segment : s);
     next.shotInputs = { ...Object.fromEntries(Object.entries(d.shotInputs).filter(([id]) => !oldIds.has(id))), ...op.shotInputs } as DirectorProduction["shotInputs"];
+    const assetPlans = rows(next.source.asset_plan).map(item => structuredClone(item));
+    for (const binding of op.keyframeBindings || []) {
+        let plan = assetPlans.find(item => String(item.asset_id || item.id || "") === binding.assetId);
+        if (!plan) {
+            plan = { id: binding.assetId, asset_id: binding.assetId, kind: "keyframe", name: binding.label || binding.bindingId, version: "bound", depends_on: [] };
+            assetPlans.push(plan);
+        }
+        const previous = next.assets[binding.assetId];
+        next.assets[binding.assetId] = {
+            ...previous,
+            ...((binding.nodeId || binding.containerNodeId || previous?.nodeId) ? { nodeId: binding.nodeId || binding.containerNodeId || previous?.nodeId } : {}),
+            ...(binding.storageKey ? { storageKey: binding.storageKey } : {}),
+            version: previous?.version || String(plan.version || "bound"),
+            status: binding.storageKey ? "generated" : previous?.status || "planned",
+        };
+    }
+    const subjectAssembly = d.source.version === 2
+        && (d.source.prompt_assembly as Record<string, unknown> | undefined)?.version === 2
+        && (d.source.ledger as Record<string, unknown> | undefined)?.contract_version === 2;
+    if (op.keyframeBindings?.length && !subjectAssembly) next.source.asset_plan = assetPlans;
+    const liveKeyframeIds = new Set([
+        ...Object.values(next.shotInputs).filter(input => input.keyframePolicy !== "none" && input.keyframeAssetId).map(input => input.keyframeAssetId!),
+        ...rows(next.source.shots).flatMap(shot => rows(shot.keyframes).filter(frame => frame.requiredForSubmission && frame.anchor !== "composition").map(frame => String(frame.assetId || frame.id))),
+    ]);
+    const storyboardAssetIds = new Set([
+        ...assetPlans.map(item => String(item.id || item.asset_id || "")),
+        ...Object.keys(next.assets),
+    ].filter(id => id.startsWith("storyboard:")));
+    const obsoleteStoryboardIds = [...storyboardAssetIds].filter(id => !liveKeyframeIds.has(id));
+    if (obsoleteStoryboardIds.length) {
+        const obsolete = new Set(obsoleteStoryboardIds);
+        next.source.asset_plan = assetPlans.filter(item => !obsolete.has(String(item.id || item.asset_id || "")));
+        for (const id of obsolete) delete next.assets[id];
+    }
     next.sourceHash = compilationHash(next.source);
     next.artifacts = next.artifacts.map(a => currentCompilationArtifact(next, a) ? a : { ...a, status: "stale" });
     next.executionAuthorized = false;

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildDirectorClipStoryboardOperation, createProductionEditing, registerProductionBoundaryEditor, registerProductionPromptEditor, registerProductionStoryboardEditor, sourceSegmentForCanvasClip } from "./production-editing";
+import { applyProductionCompilation } from "@/services/backend-api";
 import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import type { CanvasNodeData } from "@/types/canvas";
 const input = { nodeId: "H3", segmentId: "canvas-clip", prompt: "A changed action.", artifactId: "ART", sourceHash: "source", basePromptHash: "prompt" };
@@ -28,6 +29,34 @@ const formalV2Director = (): DirectorProduction => ({
         ],
     }, assets: {}, shotInputs: { v2a: { keyframePolicy: "none", assetIds: [] }, v2b: { keyframePolicy: "none", assetIds: [] } },
 } as unknown as DirectorProduction);
+
+test("compilation apply retries only a pre-forward BACKEND_RELOADING response with the same preparedId", async t => {
+    const originalFetch = globalThis.fetch;
+    t.after(() => { globalThis.fetch = originalFetch; });
+    const attempts: Array<{ path: string; body: unknown }> = [];
+    globalThis.fetch = async (input, init) => {
+        const url = new URL(String(input));
+        attempts.push({ path: url.pathname, body: JSON.parse(String(init?.body)) });
+        if (attempts.length === 1) return Response.json({ ok: false, code: "BACKEND_RELOADING", error: "Backend 正在开发重载" }, { status: 503, headers: { "Retry-After": "1" } });
+        return Response.json({ ok: true, receipt: { revision: 2, operationId: "apply-op", mediaSubmitted: false } });
+    };
+    const result = await applyProductionCompilation("episode", "prepared-stable");
+    assert.equal(result.receipt.operationId, "apply-op");
+    assert.equal(attempts.length, 2);
+    assert.deepEqual(attempts.map(item => item.body), [{ preparedId: "prepared-stable" }, { preparedId: "prepared-stable" }]);
+});
+
+test("compilation apply does not retry an outcome-unknown 503", async t => {
+    const originalFetch = globalThis.fetch;
+    t.after(() => { globalThis.fetch = originalFetch; });
+    let attempts = 0;
+    globalThis.fetch = async () => {
+        attempts++;
+        return Response.json({ ok: false, code: "BACKEND_OUTCOME_UNKNOWN", outcomeUnknown: true, error: "unknown" }, { status: 503 });
+    };
+    await assert.rejects(applyProductionCompilation("episode", "prepared-stable"), /HTTP 503/);
+    assert.equal(attempts, 1);
+});
 test("SDK reverse synchronization awaits canvas persistence and receives an explicit editor receipt", async () => {
     const order: string[] = [], current = node();
     const remove = registerProductionPromptEditor("canvas", async request => { order.push("edit"); assert.deepEqual(request, input); return { sourceSaved: true }; });
@@ -190,13 +219,39 @@ test("H3 storyboard writeback rescales Subject appearance ranges when a rebuilt 
     assert.deepEqual(typedShotB.subject_usages[0], { subjectId: "SUB:1", localStartFrame: 24, localEndFrame: 40 });
 });
 
-test("a production Clip cannot lose its final formal Shot or silently claim an unadopted H3 image", () => {
+test("unbinding a storyboard slot removes its orphan image from the production reference snapshot", () => {
+    const previousStoryboardShots = [
+        { id: "s1", duration: 0.5, referenceBindingId: "orphaned-frame" },
+        { id: "s2", duration: 0.5, referenceBindingId: "still-used" },
+    ];
+    const references = [
+        { id: "orphaned-frame", mediaType: "image", role: "storyboard", storageKey: "deleted-frame.png" },
+        { id: "still-used", mediaType: "image", role: "storyboard", storageKey: "retained-frame.png" },
+    ];
+    const operation = buildDirectorClipStoryboardOperation(formalDirector(), "SOURCE_C4", {
+        nodeId: "H3", segmentId: "canvas-clip", segment: {
+            id: "canvas-clip", productionClipProjection: { targetId: "SOURCE_C4" },
+            storyboardShots: [{ id: "s1", duration: 0.5 }, { id: "s2", duration: 0.5, referenceBindingId: "still-used" }],
+            referenceBindings: references,
+        },
+    }, { storyboardShots: previousStoryboardShots, referenceBindings: references });
+    if (operation.type !== "replace_director_clip_storyboard") throw new Error("wrong operation");
+    assert.deepEqual(operation.removedStoryboardBindingIds, ["orphaned-frame"]);
+    assert.deepEqual(operation.keyframeBindings?.map(binding => binding.bindingId), ["still-used"]);
+});
+
+test("a production Clip keeps its final Shot and accepts any image bound to its storyboard slot", () => {
     const base = { nodeId: "H3", segmentId: "canvas-clip", segment: { id: "canvas-clip", productionClipProjection: { targetId: "SOURCE_C4" }, referenceBindings: [] } };
     assert.throws(() => buildDirectorClipStoryboardOperation(formalDirector(), "SOURCE_C4", { ...base, segment: { ...base.segment, storyboardShots: [] } }), /SHOT_LAST_IN_CLIP/);
-    assert.throws(() => buildDirectorClipStoryboardOperation(formalDirector(), "SOURCE_C4", { ...base, segment: {
+    const operation = buildDirectorClipStoryboardOperation(formalDirector(), "SOURCE_C4", { ...base, segment: {
         ...base.segment, storyboardShots: [{ id: "s1", duration: 1, referenceBindingId: "unadopted" }],
-        referenceBindings: [{ id: "unadopted", mediaType: "image", role: "storyboard", storageKey: "unknown.png", sourceNodeId: "UNKNOWN" }],
-    } }), /STORYBOARD_ASSET_NOT_ADOPTED/);
+        referenceBindings: [{ id: "unadopted", assetId: "IMAGE_ASSET", mediaType: "image", role: "storyboard", storageKey: "image:unknown", sourceNodeId: "IMAGE_NODE" }],
+    } });
+    assert.equal(operation.type, "replace_director_clip_storyboard");
+    if (operation.type !== "replace_director_clip_storyboard") return;
+    assert.equal((operation.shotInputs.s1 as any)?.keyframePolicy, "reuse");
+    assert.equal((operation.shotInputs.s1 as any)?.keyframeAssetId, "storyboard:unadopted");
+    assert.deepEqual(operation.keyframeBindings, [{ shotId: "s1", assetId: "storyboard:unadopted", bindingId: "unadopted", nodeId: "IMAGE_NODE", containerNodeId: "H3", storageKey: "image:unknown" }]);
 });
 
 test("an old editor cleanup cannot unregister a newer owner binding", async () => {

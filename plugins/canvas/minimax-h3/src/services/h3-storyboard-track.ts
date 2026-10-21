@@ -149,14 +149,16 @@ export function removeStoryboardImageReference(segment: H3Segment, reference: H3
     const refs = refsForSegment(segment);
     const target = refs.find((ref) => reference.bindingId ? ref.bindingId === reference.bindingId : sameRef(ref, reference));
     if (!target) return segment;
-    const items = storyboardTrackItems(segment);
-    if (!items.some((item) => item.ref && sameRef(item.ref, target))) return segment;
-    const storyboardShots = items.map(({ id, ref, duration }) => ({
-        id,
-        duration,
-        ...(ref?.bindingId && !sameRef(ref, target) ? { referenceBindingId: ref.bindingId } : {}),
-    }));
-    const updated = withSegmentRefs(segment, refs.filter((ref) => !sameRef(ref, target)));
+    const storyboardShots = segment.storyboardShots
+        ? segment.storyboardShots.map((shot) => shot.referenceBindingId === target.bindingId
+            ? { id: shot.id, duration: shot.duration }
+            : { ...shot })
+        : storyboardTrackItems(segment).filter((item) => !item.ref || !sameRef(item.ref, target)).map(({ id, ref, duration }) => ({
+            id, duration, ...(ref?.bindingId ? { referenceBindingId: ref.bindingId } : {}),
+        }));
+    const storyboardDurations = { ...(segment.storyboardDurations || {}) };
+    if (target.bindingId) delete storyboardDurations[target.bindingId];
+    const updated = withSegmentRefs({ ...segment, storyboardDurations }, refs.filter((ref) => !sameRef(ref, target)));
     return { ...updated, storyboardModeEnabled: true, storyboardShots };
 }
 

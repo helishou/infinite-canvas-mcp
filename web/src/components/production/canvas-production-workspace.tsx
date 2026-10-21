@@ -5,8 +5,8 @@ import { ArrowLeft, Check, ChevronDown, Clapperboard, Pencil, Search } from "luc
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { productionSceneEntries, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
-import { fetchProductionCanvasContext, fetchBackendDramaEpisodes, ensureEpisodeCanvas, ensureSharedAssetCanvas, fetchProductionSharedAssets, retryProductionSharedUpdate,
-    fetchBackendCanvasFolders, type ApprovedSharedAsset, type SharedAssetUpdate, type DramaEpisode } from "@/services/backend-api";
+import { fetchProductionCanvasContext, fetchBackendDramaEpisodes, ensureEpisodeCanvas, ensureSharedAssetCanvas, fetchProductionSharedAssets,
+    fetchBackendCanvasFolders, type ApprovedSharedAsset, type DramaEpisode } from "@/services/backend-api";
 import { productionTarget } from "@/lib/production-navigation";
 import { productionSegments, productionShots, productionSegmentRuntimeMatches, segmentShotIds, shotTitle } from "@/lib/production-source";
 import { MediaImage } from "@/components/media/media-image";
@@ -201,29 +201,12 @@ export function ProductionDirectory({ filter = "", onLocate }: { filter?: string
 }
 
 export function SharedAssetsPicker() {
-    const { context, production } = useProductionWorkspaceStore();
+    const { context } = useProductionWorkspaceStore();
     const { t } = useTranslation(); const { message } = App.useApp();
-    const [assets, setAssets] = useState<ApprovedSharedAsset[]>([]), [updates, setUpdates] = useState<SharedAssetUpdate[]>([]);
     const [versions, setVersions] = useState<ApprovedSharedAsset[]>([]);
     const { search: query } = useCanvasRoute();
-    const [assetId, setAssetId] = useState<string>(), [sharedVersionId, setSharedVersionId] = useState<string>(), [busy, setBusy] = useState(false);
-    const commandBusy = useProductionWorkspaceStore(state => state.commandBusy);
     const owner = context?.owner;
-    const refresh = () => {
-        if (owner) return fetchProductionSharedAssets(productionTarget(owner)).then(result => { setAssets(result.assets); setVersions(result.versions); setUpdates(result.updates); });
-        return Promise.resolve();
-    };
-    useEffect(() => { let active = true; if (owner && ["episode", "shared-assets"].includes(context?.role || "")) void fetchProductionSharedAssets(productionTarget(owner)).then(result => { if (active) { setAssets(result.assets); setVersions(result.versions); setUpdates(result.updates); } }).catch(error => { if (active) message.error(String(error)); }); return () => { active = false; }; }, [owner?.kind, owner?.id, context?.role, production?.revision, message]);
+    useEffect(() => { let active = true; if (owner && context?.role === "shared-assets") void fetchProductionSharedAssets(productionTarget(owner)).then(result => { if (active) setVersions(result.versions); }).catch(error => { if (active) message.error(String(error)); }); return () => { active = false; }; }, [owner?.kind, owner?.id, context?.role, message]);
     if (context?.role === "shared-assets") return <details className="mb-3 border-b border-border pb-3" data-canvas-shortcuts-ignore><summary className="cursor-pointer text-sm">{t("productionCanvas.sharedVersionHistory")}</summary><div className="mt-2 space-y-3">{versions.filter(version => !query.get("target")?.startsWith("asset:") || version.assetId === query.get("target")?.slice(6)).map(version => <article key={version.id} className="flex items-start gap-3 text-xs"><MediaImage className="w-16" src={backendMediaUrl(version.storageKey)} alt={version.snapshot.title} /><div className="min-w-0"><p>{version.snapshot.title} · v{version.sourceVersion}</p></div></article>)}</div></details>;
-    if (context?.role !== "episode" || !owner || !production?.draft.director) return null;
-    const plan = Array.isArray(production.draft.director.source.asset_plan) ? production.draft.director.source.asset_plan as Record<string, any>[] : [];
-    return <section className="mb-3 border-b border-border pb-3" data-canvas-shortcuts-ignore>
-        <p className="mb-2 text-sm font-medium">{t("productionCanvas.adoptShared")}</p>
-        <div className="flex flex-col gap-2">
-            <Select aria-label={t("productionCanvas.targetAsset")} placeholder={t("productionCanvas.targetAsset")} value={assetId} onChange={setAssetId} options={plan.map(asset => ({ value: String(asset.asset_id || asset.id), label: String(asset.asset_name || asset.name || asset.asset_id || asset.id) }))} />
-            <Select aria-label={t("productionCanvas.sharedAssetVersion")} placeholder={t("productionCanvas.sharedAssetVersion")} value={sharedVersionId} onChange={setSharedVersionId} options={assets.map(asset => ({ value: asset.id, label: `${asset.snapshot.title} · v${asset.sourceVersion}` }))} />
-            <Button type="text" disabled={!assetId || !sharedVersionId || busy || commandBusy} onClick={() => window.dispatchEvent(new CustomEvent("production-workspace-command", { detail: { owner, command: { kind: "adopt", assetId: assetId!, approvedId: sharedVersionId! } } }))}>{t("productionCanvas.adopt")}</Button>
-        </div>
-        {updates.filter(update => update.status === "blocked").map(update => <div key={update.id} className="mt-2 text-xs"><Tag>{t("productionCanvas.updateBlocked")}</Tag><p>{update.error}</p><Button type="text" size="small" disabled={busy || commandBusy} onClick={async () => { setBusy(true); try { await retryProductionSharedUpdate(productionTarget(owner), update.id, production.revision); await refresh(); } catch (error) { message.error(String(error)); } finally { setBusy(false); } }}>{t("productionCanvas.retryUpdate")}</Button></div>)}
-    </section>;
+    return null;
 }

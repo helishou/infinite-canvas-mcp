@@ -9,7 +9,9 @@ description: 使用当前激活的 Acheng Director 创作，在真实画布上�
 
 当本轮需要角色身份图时，先在“角色与素材”工作区生成或绑定必需图片，再开始依赖这些身份的镜头制作；只阻止实际消费缺失素材的目标。用户明确要求浏览器操作时，沿制作台页面操作，不切换到 MCP 或 Director Agent 执行同一生产任务。
 
-新合同常规返修使用目标工作包读取和一次结构化编辑，由 Backend 自动校验、编译与同步；H3 编译前按[镜头画面与连续性事实复核 SOP](../../acheng-director/references/120-precompile-shot-visibility-audit.md)完成目标 Shot 复核，具体操作和兼容分支仅维护在[源稿编译与发布](references/canvas-compilation.md)。不手工维护正式 Prompt，不因页面改版迁移旧稿。
+续做或生产 H3 分集前，按目标 Shots 的 `scene_id`/`source_scene_id` 汇总实际使用场景，并逐一核对场景图闭环：正式 `asset_plan` 与 `asset_cards`、真实成功归档的图片媒体、`director.assets` 的 storageKey/sha256、对应场景 Subject 的图片绑定、Shot 的 `subject_usages`。场景文字登记或 `type=scene` 实体节点都不算场景图；单独生成了图、但没有绑定到 Shot 的图也不会进入 H3。默认先复用有效的正式场景图；缺失时补建场景资产并在用户授权后生成，再重编并应用受影响的 Clip。只有用户明确选择纯文字环境描述时才跳过图像锚点。场景图提示词要保留正式场景登记中的空间关系与稳定固定陈设，排除人物和临时剧情道具。加入新图不会授权重生成已有视频。
+
+新合同常规返修使用目标工作包读取和一次结构化编辑，由 Backend 自动校验、编译与同步；H3 编译前按[镜头画面、连续性与提示词可执行性复核 SOP](../../acheng-director/references/120-precompile-shot-visibility-audit.md)复核并优化目标 Shot 的正式源字段，具体操作和兼容分支仅维护在[源稿编译与发布](references/canvas-compilation.md)。不手工维护正式 Prompt，不因页面改版迁移旧稿。
 
 所有最终 H3 编译提示词在生成前都必须经过已配置的翻译 LLM；镜头描述和指令转为英文并轻度润色，对白、歌词及明确引用的画面文字保留原语言（可含中文）。人工流程使用场次页的翻译按钮，MCP/Agent 流程使用 `production_translate_compiled_prompts`；跳过 SHA-256 缓存命中项，其余提示词按顺序每批最多 3 个请求模型，全部完成后一次写回。编译未通过或翻译未完成时不得提交对应 Clip 生成。
 
@@ -23,7 +25,7 @@ description: 使用当前激活的 Acheng Director 创作，在真实画布上�
 | 角色、场景、道具、关键帧；空间设计 | assets / scene-design | 登记图片参考、共享素材或生产图片时读[图片生产](references/canvas-image-production.md)；共享归属见[工作台](references/canvas-workspace.md) |
 | 镜头与 Segment 规划 | shots | 规划 Segment 时读[Clip 规格与连续性](references/canvas-clip-production.md) |
 | 表演、动作、特效与巨构 | performance / effects | 涉及 Segment 边界时读[连续性](references/canvas-clip-production.md#连续性边界) |
-| 编译或局部返修 | model / continuity | [镜头画面与连续性事实复核](../../acheng-director/references/120-precompile-shot-visibility-audit.md)、[源稿编译与发布](references/canvas-compilation.md)，视频另读 Clip 参考，图片另读图片参考 |
+| 编译或局部返修 | model / continuity | [镜头画面、连续性与提示词可执行性复核](../../acheng-director/references/120-precompile-shot-visibility-audit.md)、[源稿编译与发布](references/canvas-compilation.md)，视频另读 Clip 参考，图片另读图片参考 |
 | 准备节点、导航、共享资产 | 当前创作模块 | [工作台与布局](references/canvas-workspace.md) |
 | 提交、跟踪或恢复媒体任务 | 当前创作模块 | [运行与恢复](references/canvas-production-runs.md)，加本次图片或 Clip 参考 |
 | 制作中发现问题或返修 | 当前创作模块 | [问题自动记录](references/agent-problem-log.md) |

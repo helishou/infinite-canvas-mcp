@@ -307,12 +307,16 @@ export class BackendClient {
     }>(`/drama/projects/${encodeURIComponent(dramaId)}/episodes?view=summary&page=${page}&pageSize=${pageSize}`);
   }
 
-  async getDramaEpisode(episodeId: string, view?: "summary" | "full") {
-    const query = view ? `?view=${encodeURIComponent(view)}` : "";
+  async getDramaEpisode(episodeId: string, view?: "summary" | "full", canvasView?: "ref" | "full") {
+    const params = new URLSearchParams();
+    if (view) params.set("view", view);
+    if (view === "full" && canvasView) params.set("canvasView", canvasView);
+    const query = params.size ? `?${params}` : "";
     return this.get<{
       ok: boolean;
       episode?: Record<string, unknown>;
       canvas?: Record<string, unknown> | null;
+      nextAction?: Record<string, unknown>;
     }>(`/drama/episodes/${encodeURIComponent(episodeId)}${query}`);
   }
 

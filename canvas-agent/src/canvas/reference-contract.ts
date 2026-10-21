@@ -266,12 +266,6 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
         return [{ ...merged, mediaType, ordinal, token }];
     });
     const semanticPrompt = String(segment.prompt || "");
-    // Existing Clips keep their saved prompt until an explicit edit. Preserve each Picture's
-    // source image when compiling the storyboard-first execution order.
-    const orderedPrompt = bindings.some((binding, index) => binding.id !== originalBindings[index]?.id)
-        ? remapPictureTags(semanticPrompt, originalBindings.filter((binding) => binding.enabled), bindings.filter((binding) => binding.enabled),
-            (binding) => binding.id, (binding) => (binding.mediaType || inferReferenceMediaType(binding)) === "image")
-        : semanticPrompt;
     const bySubjectId = new Map<string, { reference: CompiledReference; ordinal: number }>();
     let nextSubjectOrdinal = 1;
     const registerSubject = (reference: CompiledReference, ids: Array<string | undefined>) => {
@@ -291,6 +285,16 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
             if (!bySubjectId.has(id)) registerSubject(reference, [id]);
         });
     });
+    // Structured production prompts already name storyboard frames by their local Shot
+    // and entity pictures by Subject. Those declarations are the stable binding map; do
+    // not reinterpret their Picture numbers using a stale referenceBindings array order.
+    // For legacy/free-form prompts without a complete map, retain the historical
+    // binding-identity remap below.
+    const pictureOrderIsExplicit = promptUsesSubmissionPictureOrder(semanticPrompt, segment, references, bySubjectId);
+    const orderedPrompt = !pictureOrderIsExplicit && bindings.some((binding, index) => binding.id !== originalBindings[index]?.id)
+        ? remapPictureTags(semanticPrompt, originalBindings.filter((binding) => binding.enabled), bindings.filter((binding) => binding.enabled),
+            (binding) => binding.id, (binding) => (binding.mediaType || inferReferenceMediaType(binding)) === "image")
+        : semanticPrompt;
     // Subject is a semantic prompt token, not a media-slot reference. It may
     // describe a character, prop, scene, object, or an entity defined elsewhere;
     // never validate it against character bindings or enabled media count.
@@ -301,6 +305,51 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
     const promptWithBoundSubjects = bindLiteralSubjectsToPictures(compiledPrompt, references, bySubjectId);
     validateLimits(segment, semanticPrompt, references, issues);
     return { semanticPrompt, compiledPrompt: promptWithBoundSubjects, bindings, references, issues, migratedLegacyRefs };
+}
+
+function promptUsesSubmissionPictureOrder(
+    prompt: string,
+    segment: Record<string, unknown>,
+    references: CompiledReference[],
+    bySubjectId: Map<string, { reference: CompiledReference; ordinal: number }>,
+) {
+    const images = references.filter((reference) => reference.mediaType === "image");
+    const mapped = new Set<string>();
+    const storyboardShots = Array.isArray(segment.storyboardShots) ? segment.storyboardShots.map(recordOf) : [];
+    const storyboardBindings = images.filter((reference) => reference.role === "storyboard");
+    if (storyboardBindings.length) {
+        if (!storyboardShots.length) return false;
+        for (const [index, shot] of storyboardShots.entries()) {
+            const bindingId = String(shot.referenceBindingId || "");
+            if (!bindingId) continue;
+            const reference = storyboardBindings.find((item) => item.id === bindingId);
+            if (!reference) return false;
+            const shotNumber = index + 1;
+            const anchor = new RegExp(`<Picture\\s+(\\d+)>[^\\n]*\\[Shot\\s+${shotNumber}\\]`, "i").exec(prompt);
+            if (!anchor || Number(anchor[1]) !== reference.ordinal) return false;
+            mapped.add(reference.id);
+        }
+        if (storyboardBindings.some((reference) => !mapped.has(reference.id))) return false;
+    }
+
+    const sourceByOrdinal = new Map<number, { reference: CompiledReference; ordinal: number }>();
+    for (const source of bySubjectId.values()) sourceByOrdinal.set(source.ordinal, source);
+    const subjectSources = [...sourceByOrdinal.values()].sort((a, b) => a.ordinal - b.ordinal);
+    const subjectSection = /(^subject_definitions\s*[:：]\s*\r?\n)([\s\S]*?)(?=^\s*(?:summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music|storyboard_timeline)\s*[:：]|$(?![\s\S]))/im.exec(prompt);
+    const subjectLines = subjectSection ? [...subjectSection[2].matchAll(/<Subject\s+(\d+)>[^\r\n]*/g)] : [];
+    if (subjectLines.length !== subjectSources.length) return false;
+    for (const [index, match] of subjectLines.entries()) {
+        const represented = /represented by <Picture\s+(\d+)>/i.exec(match[0]);
+        const source = subjectSources[index];
+        if (!represented || Number(represented[1]) !== source.reference.ordinal) return false;
+        const reference = source.reference;
+        for (const candidate of images) {
+            if (candidate.id === reference.id || (reference.subjectId && candidate.subjectId === reference.subjectId)
+                || (reference.groupId && candidate.groupId === reference.groupId)) mapped.add(candidate.id);
+        }
+    }
+
+    return images.length > 0 && images.every((reference) => mapped.has(reference.id));
 }
 
 function sourceMediaOf(project: Record<string, unknown>, binding: ReferenceBinding) {
@@ -325,10 +374,21 @@ function sourceMediaOf(project: Record<string, unknown>, binding: ReferenceBindi
 /** Resolve one image for a formal binding. Existing clips retain their legacy primary-image rule. */
 export function selectSmartImageResult(metadataValue: unknown, policy?: NodeImageSelectionPolicy) {
     const metadata = recordOf(metadataValue);
+    let implicitPrimarySelection = false;
     if (policy?.mode === "node_selection") {
         const nodePolicy = recordOf(metadata.smartImageReferenceSelection);
         if (nodePolicy.mode === "selected_result" && typeof nodePolicy.resultId === "string" && nodePolicy.resultId) policy = { mode: "selected_result", resultId: nodePolicy.resultId };
-        else if (nodePolicy.mode === undefined || nodePolicy.mode === "latest_success") policy = { mode: "latest_success" };
+        else if (nodePolicy.mode === undefined) {
+            const primaryImageId = String(metadata.primaryImageId || "");
+            if (primaryImageId) {
+                policy = { mode: "selected_result", resultId: primaryImageId };
+                implicitPrimarySelection = true;
+            }
+            else {
+                policy = { mode: "selected_result", resultId: "" };
+                implicitPrimarySelection = true;
+            }
+        } else if (nodePolicy.mode === "latest_success") policy = { mode: "latest_success" };
         else return { error: "智能节点的引用选择策略无效；不会回退到浏览中的图片。" };
     }
     const images = Array.isArray(metadata.images) ? metadata.images.map(recordOf) : [];
@@ -352,6 +412,10 @@ export function selectSmartImageResult(metadataValue: unknown, policy?: NodeImag
     }
     if (policy?.mode === "selected_result") {
         const image = images.find(item => item.id === policy.resultId && completed(item));
+        if (!image && implicitPrimarySelection) {
+            const firstAvailable = images.find(completed);
+            return firstAvailable ? { image: firstAvailable } : { error: "智能节点没有成功归档的图片结果；不会引用运行中、失败或占位图片。" };
+        }
         return image ? { image } : { error: `选定历史结果 ${policy.resultId} 不存在、未成功或未归档。` };
     }
     const legacy = images.find(item => item.id === metadata.primaryImageId && (item.content || item.storageKey))

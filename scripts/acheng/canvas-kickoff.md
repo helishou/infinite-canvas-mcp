@@ -20,7 +20,7 @@ Subject 图片与关键帧引用固定到 Backend 核验过的成功归档结果
 
 图片生成节点保留参数、任务与结果历史；它与素材身份节点职责分开。图片绑定沿 Subject/Shot 正式操作维护；素材节点消费当前有效图片，智能节点遵循 `node_selection/latest_success/selected_result`。使用已归档媒体，编译与生成冻结本轮输入；不因节点接入自动批准、发布或生成。
 
-剧目资产库是该剧目共享资产画布的目录视图。通用加入／更新复用 `assets_add/assets_upsert_batch` 的稳定 operationId、`canvasSource:{projectId,nodeId}` 与明确资产 ID，Backend 建立唯一源并原位转引用；智能生成只共享选定产物，原任务保持。引用编辑保留为本地字段修改，明确更新原资产才同步共享源，不另建同名资产。删除引用走画布 ops；删除库中源资产先用 `assets_get` 读取稳定来源，再用 `canvas_apply_commands` 删除该 sourceProjectId/sourceNodeId，有引用时按 Backend 返回的使用画布处理，不能绕过保护或删归档媒体。普通资产库沿原行为。正式制作采用共享素材版本仍走 `production_get_shared_assets/production_adopt_shared_asset`，以不可变版本 ID 选择媒体，并展示其真实审核状态。技术可用的 `generated`／`unreviewed` 版本可采用；登记与采用都不伪造批准证据，也不改写历史输入。具体工具参数以当轮 schema 为准。
+剧目资产库是该剧目共享资产画布的目录视图。通用加入／更新复用 `assets_add/assets_upsert_batch` 的稳定 operationId、`canvasSource:{projectId,nodeId}` 与明确资产 ID，Backend 建立唯一源并原位转引用；智能生成只共享选定产物，原任务保持。引用编辑保留为本地字段修改，明确更新原资产才同步共享源，不另建同名资产。删除引用走画布 ops；删除库中源资产先用 `assets_get` 读取稳定来源，再用 `canvas_apply_commands` 删除该 sourceProjectId/sourceNodeId，有引用时按 Backend 返回的使用画布处理，不能绕过保护或删归档媒体。普通资产库沿原行为。正式制作直接选择当前共享画布节点作为来源，并在同一制作稿里保存 `asset_plan.sharedSource` 与 Subject 图片选择；该选择就是本集的共享引用，不再单独写入采用状态或选择版本副本。历史素材版本只用于追溯，不作为当前编译来源。具体工具参数以当轮 schema 为准。
 
 ### Infinite Canvas 集成：制作内容语言
 

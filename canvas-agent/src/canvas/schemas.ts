@@ -4,7 +4,7 @@ import { nodePatchSchema } from "./edit-validation.js";
 export { validateNodeUpdate, validateH3Edit, validateH3Metadata } from "./edit-validation.js";
 import { z } from "zod";
 import { productionWorkspaceSchemas, productionWorkspaceDescriptions, productionWorkspaceToolNames } from "../drama/production-workspace-contract.js";
-import { productionEditSchema, productionOperationSchema, productionPreflightSchema, productionContractQuerySchema, productionCompileSchema, productionApplyCompilationSchema, productionReadSchema, type ProductionOperation } from "../drama/production-contract.js";
+import { productionEditSchema, productionOperationSchema, productionPreflightSchema, productionContractQuerySchema, productionCompileSubmissionSchema, productionApplyCompilationSchema, productionReadSchema, type ProductionOperation } from "../drama/production-contract.js";
 import {
   collaborationDescriptions,
   collaborationSchemas,
@@ -732,7 +732,8 @@ export const toolInputSchemas = {
   }),
   drama_get_episode: z.object({
     episodeId: z.string().min(1).describe("分集 ID"),
-    view: z.enum(["summary", "full"]).default("summary").describe("summary 返回分集身份、标题、梗概和画布 ID；full 额外返回完整剧情与绑定画布数据"),
+    view: z.enum(["summary", "full"]).default("summary").describe("summary 返回分集身份、标题、梗概和画布 ID；full 额外返回完整剧情"),
+    canvasView: z.enum(["ref", "full"]).default("ref").describe("view='full' 时的画布内容：ref 只返回画布 id、revision、节点/连线数并指向 canvas_get_state；full 内联整张画布，大画布可能超过单次输出上限"),
   }),
   drama_create_episode: z.object({
     dramaId: z
@@ -775,7 +776,7 @@ export const toolInputSchemas = {
   ...productionWorkspaceSchemas,
   ...productionToolSchemas,
   director_subagent: directorSubagentSchema,
-  production_compile: productionCompileSchema.omit({ director: true }).extend({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1), operationId: z.string().min(1) }),
+  production_compile: productionCompileSubmissionSchema.omit({ director: true }).extend({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1) }),
   production_get_compilation: z.object({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1), operationId: z.string().min(1), view: z.enum(["status", "targets", "diagnostics"]).default("status"), offset: z.number().int().nonnegative().default(0), pageSize: z.number().int().positive().optional() }).strict(),
   production_apply_compilation: productionApplyCompilationSchema.extend({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1) }),
   production_translate_compiled_prompts: z.object({ kind: z.enum(["canvas", "episode"]), id: z.string().min(1), expectedRevision: z.number().int().nonnegative(), operationId: z.string().min(1), targetIds: z.array(z.string().min(1)).min(1) }).strict(),
@@ -876,7 +877,7 @@ export const toolDescriptions: Record<ToolName, string> = {
   drama_set_active_project:
     "设置当前活动剧目。传 dramaId 会固定本 MCP 会话的剧目；不传则解除固定并跟随网页当前活动画布所属剧目。",
   drama_get_episode:
-    "默认读取单个分集摘要（身份、标题、梗概和画布 ID）；只有需要完整剧情和绑定画布数据时才传 view='full'。",
+    "默认读取单个分集摘要（身份、标题、梗概和画布 ID）。view='full' 额外返回完整剧情；画布默认按 canvasView='ref' 只返回 id、revision、节点/连线数并指向 canvas_get_state，避免整张画布挤爆输出。确需内联整张画布时显式传 canvasView='full'，大画布可能超过单次输出上限。",
   drama_create_episode:
     "创建剧目下的一集。synopsis 和 fullPlot 分别保存梗概与完整剧情；可选绑定一个已有画布。",
   drama_update_episode:
@@ -892,5 +893,5 @@ export const toolDescriptions: Record<ToolName, string> = {
   production_apply_compilation: "用精确 preparedId 原子接入 Backend 编译产物；沿用冻结的 expectedRevision/operationId，重复调用恢复原回执，源稿或绑定冲突拒绝覆盖。保存草稿，不发布或生成。",
   production_translate_compiled_prompts: "把指定且当前有效的正式 H3 编译提示词交给已配置翻译模型。expectedRevision 是读取基线；只要目标的编译提示词哈希、节点归属和当前 H3 提示词快照未变，无关制作稿修订不会阻断翻译写回。调用立即返回 queued；用同一 operationId 调用 mcp_get_command_receipt 查看 translating/applying/committed/retry_required 状态。超时或进程重载后重复提交完全相同的请求可恢复原操作，不创建第二次翻译。跳过 SHA-256 缓存命中项；画面描述、镜头/表演指令和发声指导（声线、情绪、语速、音量、停顿、画外音等）都翻成英文并轻度润色；只保留实际对白、歌词及明确引用的画面文字原文。对白标记外的中文发声指导即使复述对白片段也必须翻译，不能因为邻接对白而保留。目标输入实际变化时整批拒绝写入。不改导演源稿、不发布、不生成媒体。",
   production_diagnose_bindings: "只读核对源资产版本、草稿绑定、发布版本绑定、节点活动媒体、归档字节哈希与消费者；明确指出新旧版本或活动媒体不一致，不修改数据。",
-  production_diagnose_clips: "只读逐段对照 H3 Clip 现场正文与最新发布编译产物：状态（一致/不同/无法比较）、两侧归一哈希、导演源哈希、任务状态、生产版本与只读下一步。一次调用完成排障；不同为信息级提示，不表示生成不可用。nodeId 与 nodeIds 同时出现时以 nodeIds 为准。默认最多返回 200 行，超出时给出 nextOffset。",
+  production_diagnose_clips: "只读逐段对照 H3 Clip 现场正文与当前权威编译产物：已发布且有编译正文时以发布稿为基线（baseline=published），否则以当前制作稿为基线（baseline=draft）；返回状态（一致/不同/无法比较）、两侧归一哈希、导演源哈希、任务状态与只读下一步。一次调用完成排障。nodeId 与 nodeIds 同时出现时以 nodeIds 为准。默认最多返回 200 行，超出时给出 nextOffset。正文「不同」可能来自译文或人工编辑，保持信息级，不单独代表失败；生成是否放行由就绪与执行入口的同一派生新鲜度判定（当前产物有效且现场 Clip 已应用该产物），不以正文相等为前提。",
 };

@@ -252,6 +252,27 @@ test("outgoing motion flags form a complete latent chain including the closing C
     assert.equal(stores.tasks.list().length, 0); assert.equal(JSON.stringify(stores.projects.get("p")), before);
 });
 
+test("自选视频模型忽略保存的 H3 续写与二采开关，也不进入潜空间连续组", t => {
+    const { stores, runner } = fixture(t);
+    stores.projects.applyOperations("p", undefined, [
+        // 上一段仍是开启续写的原生 H3；当前 Clip 已切换为自选视频模型。
+        { type: "update_h3_segment", nodeId: "n", segmentId: "a", patch: { motionContextEnabled: true } },
+        { type: "update_h3_segment", nodeId: "n", segmentId: "b", patch: { selectedVideoModelEnabled: true, selectedVideoModel: "YZ", motionContextEnabled: true, latentUpscaleEnabled: true, latentUpscaleConfirmationMode: true, faceRefineEnabled: true, confirmationMode: true } },
+    ]);
+    const preview = runner.preview({ projectId: "p", nodeId: "n", segmentId: "b" });
+    assert.equal(preview.ready, true);
+    assert.deepEqual(preview.diagnostics.map(issue => issue.code), []);
+    const clip = preview.clips[0];
+    assert.equal(clip.effectiveRuntime.motionContextEnabled, false);
+    assert.equal(clip.effectiveRuntime.latentUpscaleEnabled, false);
+    assert.equal(clip.effectiveRuntime.faceRefineEnabled, false);
+    // 保存值保持不变，切回原生 H3 时仍按原设置执行。
+    assert.equal(clip.savedRuntime.motionContextEnabled, true);
+    const plans = (runner as any).plansFor({ projectId: "p", nodeId: "n", segmentId: "b" });
+    assert.deepEqual(plans, [{ nodeId: "n", segmentId: "b", segmentIndex: 1 }]);
+    assert.equal(stores.tasks.list().length, 0);
+});
+
 test('确认阶段的展开流合同：快照承载的字段不再误报，sigma 真偏差依旧拦得住', async () => {
     const { buildExpandedNanFengV10Workflow, splitH3Confirmation } = await import('../comfyui/bridge.js');
     const sigma = '0.9, 0.85, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0';

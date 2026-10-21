@@ -2,7 +2,7 @@ import { canonicalProduction } from "@basketikun/canvas-agent/drama/production-c
 import { draftFieldConflicts, mergeDraftFields } from "./draft-field-merge";
 
 export type ShotUtteranceValue = {
-    utteranceId: string; speakerSubjectId: string; text: string; delivery: string; voiceover: boolean;
+    utteranceId: string; speakerSubjectId: string; speakerName?: string; text: string; delivery: string; voiceover: boolean;
     localStartFrame: number; localEndFrame: number;
     textMode?: "whole" | "segment"; textCuts?: number[]; utteranceText?: string;
 };
@@ -18,6 +18,8 @@ const object = (value: unknown): value is Record<string, any> => Boolean(value &
 const optionalStrings = (value: unknown) => value === undefined || (Array.isArray(value) && value.every(item => typeof item === "string"));
 const validUtterances = (value: unknown) => value === undefined || (Array.isArray(value) && value.every(item => object(item)
     && typeof item.utteranceId === "string" && typeof item.speakerSubjectId === "string" && typeof item.text === "string"
+    && (item.speakerName === undefined || typeof item.speakerName === "string")
+    && Boolean(item.speakerSubjectId) !== Boolean(String(item.speakerName || "").trim())
     && (item.textCuts === undefined || Array.isArray(item.textCuts) && item.textCuts.every(Number.isInteger))
     && (item.utteranceText === undefined || typeof item.utteranceText === "string")
     && Number.isFinite(item.localStartFrame) && Number.isFinite(item.localEndFrame)));
@@ -52,7 +54,7 @@ export function shotUtteranceRows(shot: Record<string, any>, source: Record<stri
         const references = allShots.flatMap(owner => rows(owner.utterance_refs).filter(item => String(item.utteranceId) === utteranceId).map(item => ({ owner, ref: item })));
         const textCuts = references.slice(0, -1).map(item => Number(item.ref.textEnd));
         return {
-            utteranceId, speakerSubjectId: String(utterance?.speakerSubjectId || ""),
+            utteranceId, speakerSubjectId: String(utterance?.speakerSubjectId || ""), speakerName: String(utterance?.speakerName || ""),
             text: textMode === "whole" ? text : characters.slice(Number(ref.textStart || 0), Number(ref.textEnd || characters.length)).join(""),
             delivery: utterance?.delivery ? String(utterance.delivery) : "", voiceover: Boolean(utterance?.voiceover), textMode, textCuts,
             utteranceText: text,
@@ -150,13 +152,13 @@ export function shotFormChanges(draft: ShotFormDraft) {
         if (canonicalProduction(draft.base[key]) !== canonicalProduction(draft.value[key])) patch[key] = draft.value[key];
     }
     const baseUtterances = draft.base.utterances || [];
-    const submitUtterances = (items: ShotUtteranceValue[]) => items.filter(item => item.speakerSubjectId && item.text.trim())
+    const submitUtterances = (items: ShotUtteranceValue[]) => items.filter(item => (item.speakerSubjectId || item.speakerName?.trim()) && item.text.trim())
         .map(item => {
-            const { utteranceId, delivery, textCuts, utteranceText: _utteranceText, textMode: _textMode, ...rest } = item;
+            const { utteranceId, delivery, speakerSubjectId, speakerName, textCuts, utteranceText: _utteranceText, textMode: _textMode, ...rest } = item;
             const base = baseUtterances.find(row => row.utteranceId === utteranceId);
             const cutsChanged = canonicalProduction(base?.textCuts || []) !== canonicalProduction(textCuts || []);
             const textModeValue = draft.version === 1 ? "whole" : cutsChanged && canonicalProduction(base?.text || "") === canonicalProduction(item.text) ? "partition" : "segment";
-            return { ...rest, textMode: textModeValue, ...(textCuts?.length && (draft.version === 1 || cutsChanged) ? { textCuts } : {}), ...(utteranceId ? { utteranceId } : {}), ...(delivery.trim() ? { delivery } : {}) };
+            return { ...rest, ...(speakerSubjectId ? { speakerSubjectId } : {}), ...(speakerName?.trim() ? { speakerName: speakerName.trim() } : {}), textMode: textModeValue, ...(textCuts?.length && (draft.version === 1 || cutsChanged) ? { textCuts } : {}), ...(utteranceId ? { utteranceId } : {}), ...(delivery.trim() ? { delivery } : {}) };
         });
     const submitted = submitUtterances(draft.value.utterances || []);
     const utterancesChanged = draft.value.utterances !== undefined

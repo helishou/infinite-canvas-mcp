@@ -1,5 +1,6 @@
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToHex } from "@noble/hashes/utils";
+import { productionScriptGroups } from "./production-directory.js";
 import { canonicalProduction, isSubjectPromptAssembly, productionSceneEntries, resolveSubjectPictureBindingIds, type DirectorProduction } from "./production-contract.js";
 
 export type CompilationScope = { sceneId?: string; targetIds?: string[]; output?: "selected" };
@@ -163,7 +164,10 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
         }
     }
     const sceneIds = new Set(productionSceneEntries(source).filter(item => scene ? item.id === scene.id : item.shotIds.some(id => shots.has(id))).map(item => item.id));
-    projected.source.script_scenes = rows(source.script_scenes).filter(item => sceneIds.has(String(item.id || item.scene_id)));
+    const sceneBlockIds = new Set(productionScriptGroups(rows(source.script_scenes))
+        .filter(group => sceneIds.has(group.key) || sceneIds.has(group.sceneId))
+        .flatMap(group => group.blocks.map(block => String(block.id || ""))));
+    projected.source.script_scenes = rows(source.script_scenes).filter(item => sceneBlockIds.has(String(item.id || "")));
     const ledger = source.ledger as Record<string, any> | undefined;
     if (ledger?.contract_version === 2) {
         // Replay may reference registered assets outside the output scope.
@@ -199,7 +203,7 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
             changed = before !== contextShots.size + sceneIds.size;
         }
         projected.source.shots = allShots.filter(item => contextShots.has(stableId(item)));
-        projected.source.script_scenes = rows(source.script_scenes).filter(item => sceneIds.has(String(item.id || item.scene_id)));
+        projected.source.script_scenes = rows(source.script_scenes).filter(item => sceneBlockIds.has(String(item.id || "")));
         const blocks = new Set(rows(projected.source.script_scenes).flatMap(item => rows(Array.isArray(item.blocks) ? item.blocks : typeof item.text === "string" ? [item] : []).map(block => String(block.id))));
         projected.source.ledger = { ...structuredClone(ledger),
             events: rows(ledger.events).filter(item => contextShots.has(String(item.shot_id))),
@@ -228,7 +232,7 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
             // A clipped utterance depends on its registered speaker even when
             // that Subject has no visible picture usage in this Clip (text-only
             // T2VA and dialogue-focused shots are valid examples).
-            for (const utterance of outputUtterances) usedSubjects.add(String(utterance.speakerSubjectId || ""));
+            for (const utterance of outputUtterances) if (utterance.speakerSubjectId) usedSubjects.add(String(utterance.speakerSubjectId));
             const scopedLedger = projected.source.ledger as Record<string, any>;
             if (!subjectAssembly) {
                 for (const req of rows(scopedLedger.requirements)) usedFacts.add(String(req.fact_id || ""));
@@ -317,7 +321,7 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
         ...rows(projected.source.asset_plan).filter(item => item._compiler_registry_media === true).map(key),
         ...rows(projected.source.asset_plan).flatMap(item => (item.depends_on || []).map(String)),
     ]);
-    const inputAssets = Object.fromEntries(Object.entries(projected.assets).filter(([id]) => referenced.has(id) || Boolean(scene && !shots.size)).map(([id, asset]) => [id, { nodeId: asset.nodeId, assetId: asset.assetId, version: asset.version, storageKey: asset.storageKey, sha256: asset.sha256, sharedSource: asset.sharedSource }]));
+    const inputAssets = Object.fromEntries(Object.entries(projected.assets).filter(([id]) => referenced.has(id) || Boolean(scene && !shots.size)).map(([id, asset]) => [id, { nodeId: asset.nodeId, assetId: asset.assetId, version: asset.version, storageKey: asset.storageKey, sha256: asset.sha256 }]));
     const bindings = Object.fromEntries(Object.entries(projected.assets).map(([id, asset]) => [id, { nodeId: asset.nodeId ?? null, assetId: asset.assetId ?? null }]));
     const hashSource = { ...projected.source };
     // Backend compiler isolation markers and the derived continuity asset lookup
@@ -365,6 +369,56 @@ export function compilationArtifactFreshness(director: DirectorProduction, artif
 
 export function currentCompilationArtifact(director: DirectorProduction, artifact: DirectorProduction["artifacts"][number]) {
     return compilationArtifactFreshness(director, artifact).current;
+}
+
+/**
+ * A duration-only edit changes the continuity replay prefix carried by later
+ * Clips, but does not change that prefix's authored continuity facts. Preserve
+ * ready H3 outputs outside the edited Clip and advance their scoped input
+ * receipts. The edited Clip itself remains stale and follows its normal refresh.
+ */
+export function preserveH3ArtifactsAfterShotDurationOnlyEdit(before: DirectorProduction, after: DirectorProduction) {
+    if (!isSubjectPromptAssembly(before.source) || !isSubjectPromptAssembly(after.source)) return [] as string[];
+    const normalize = (director: DirectorProduction) => {
+        const value = structuredClone(director) as Record<string, any>;
+        delete value.sourceHash;
+        delete value.artifacts;
+        delete value.executionAuthorized;
+        for (const shot of rows(value.source.shots)) delete shot.duration_frames;
+        return canonicalProduction(value);
+    };
+    if (normalize(before) !== normalize(after)) return [] as string[];
+    const previousShots = new Map(rows(before.source.shots).map(shot => [stableId(shot), shot]));
+    const changedShotIds = new Set(rows(after.source.shots).filter(shot => {
+        const previous = previousShots.get(stableId(shot));
+        return previous && previous.duration_frames !== shot.duration_frames;
+    }).map(stableId));
+    if (!changedShotIds.size) return [] as string[];
+
+    const previousArtifacts = new Map(before.artifacts.map(artifact => [artifact.id, artifact]));
+    const segmentShots = new Map(rows(after.source.segments).map(segment => [stableId(segment), new Set(values(segment.shot_ids).map(String))]));
+    const preserved: string[] = [];
+    for (const artifact of after.artifacts) {
+        if (artifact.kind !== "h3" || artifact.status !== "stale") continue;
+        const previous = previousArtifacts.get(artifact.id);
+        if (!previous || previous.status !== "ready" || !currentCompilationArtifact(before, previous)) continue;
+        const outputShots = segmentShots.get(String(artifact.targetId));
+        if (!outputShots || [...changedShotIds].some(id => outputShots.has(id))) continue;
+        const scope: CompilationScope = { targetIds: [String(artifact.targetId)], output: "selected" };
+        try {
+            const previousInput = compilationScopeInput(before, scope).inputHash;
+            const nextInput = compilationScopeInput(after, scope).inputHash;
+            if (previousInput === nextInput) continue;
+            const receipt = structuredClone(artifact.receipt) as typeof artifact.receipt & Record<string, any>;
+            const previousScope = receipt.compilationScope as { engine?: DirectorProduction["engine"] } | undefined;
+            const receiptEngine = receipt.engine || (receipt.engineRuntimeId === before.engine.runtimeId ? before.engine : undefined);
+            receipt.compilationScope = { scope, inputHash: nextInput, ...((previousScope?.engine || receiptEngine) ? { engine: previousScope?.engine || receiptEngine } : {}) };
+            artifact.receipt = receipt;
+            artifact.status = "ready";
+            preserved.push(artifact.targetId);
+        } catch { /* A scope that cannot be reconstructed stays stale. */ }
+    }
+    return preserved;
 }
 
 /** Record the existing receipt identity before changing a production's last compiler. */

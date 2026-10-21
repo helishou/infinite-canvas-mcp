@@ -32,8 +32,18 @@ export function patchSelectedSegment(ctx: CanvasNodeContext, metadata: Record<st
         ? liveMetadata.segments as H3Segment[] : segmentsFor(liveMetadata);
     // The control owns the edit target; a later selection must not redirect it.
     const selectedId = String(metadata.selectedSegmentId || liveMetadata.selectedSegmentId || segments[0]?.id || "");
-    if (!segments.some(segment => segment.id === selectedId)) throw new Error("编辑目标 Clip 已不存在，请刷新后重试");
-    ctx.updateMetadata({ selectedSegmentId: selectedId, segments: segments.map((segment) => segment.id === selectedId ? { ...segment, ...withH3ParameterEdits(segment as unknown as Record<string, unknown>, patch) } : segment) });
+    const selectedSegment = segments.find(segment => segment.id === selectedId);
+    if (!selectedSegment) throw new Error("编辑目标 Clip 已不存在，请刷新后重试");
+    const rememberedModel = String(liveMetadata.h3LastSelectedVideoModel || "").trim();
+    const effectivePatch = patch.selectedVideoModelEnabled === true && !String(patch.selectedVideoModel || "").trim() && rememberedModel
+        ? { ...patch, selectedVideoModel: rememberedModel }
+        : patch;
+    const selectedVideoModel = String(effectivePatch.selectedVideoModel || selectedSegment.selectedVideoModel || "").trim();
+    ctx.updateMetadata({
+        selectedSegmentId: selectedId,
+        ...(selectedVideoModel && (Object.hasOwn(effectivePatch, "selectedVideoModel") || Object.hasOwn(effectivePatch, "selectedVideoModelEnabled")) ? { h3LastSelectedVideoModel: selectedVideoModel } : {}),
+        segments: segments.map((segment) => segment.id === selectedId ? { ...segment, ...withH3ParameterEdits(segment as unknown as Record<string, unknown>, effectivePatch) } : segment),
+    });
 }
 
 function editableHistoricalReferences(snapshot: Record<string, unknown> | undefined, segments: H3Segment[], targetSegment?: H3Segment): H3Ref[] | undefined {

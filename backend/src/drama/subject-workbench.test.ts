@@ -409,10 +409,69 @@ test("Subject CRUD edits the original character registry and refuses referenced 
     assert.equal((named.draft.director!.source.character_registry as any[])[0].name, "栓子");
     assert.equal(Object.hasOwn((named.draft.director!.source.subject_registry as any[])[0], "name"), false);
     assert.throws(() => service.edit("ep", { operationId: "crud-remove-used", expectedRevision: named.revision, ops: [{ type: "delete_director_subject", id: "P" }] }), /SUBJECT_STILL_REFERENCED/);
-    const next = service.edit("ep", { operationId: "crud-register-unused", expectedRevision: named.revision, ops: [{ type: "upsert_director_subject", subject: { id: "ENV", kind: "scene", entityRef: { ownerKind: "episode", ownerId: "ep", kind: "scene", id: "SCENE" }, pictureBindings: [] } }] });
+    const replaceSource = named.draft.director!.source as any;
+    replaceSource.character_registry.push({ id: "P2", name: "替代人物" });
+    replaceSource.subject_registry.push({ id: "SUB_P2", kind: "character", entityRef: { ownerKind: "episode", ownerId: "ep", kind: "character", id: "P2" }, pictureBindings: [] });
+    replaceSource.utterances = [{ id: "U1", speakerSubjectId: "P", text: "对白保留", voiceover: false, start: { shotId: "S1", localFrame: 0 }, end: { shotId: "S1", localFrame: 24 } }];
+    replaceSource.shots[0].utterance_refs = [{ utteranceId: "U1", role: "speaker", localStartFrame: 0, localEndFrame: 24, textStart: 0, textEnd: 4 }];
+    replaceSource.shots[0].keyframes = [{ id: "KF1", assetId: "KF1", sourceNode: { projectId: "CANVAS_EP", nodeId: "KF1" }, selection: { mode: "latest_success" }, anchor: "opening", subjectIds: ["P"], subjectPictureBindingIds: { P: [] }, retain: [], exclude: [], requiredForSubmission: false }];
+    replaceSource.shots[0].reference_requirements = [{ id: "REF1", asset_id: "A1", asset_version: "v1", purpose: "构图参考", sourceNode: { projectId: "CANVAS_EP", nodeId: "IMAGE_P" }, selection: { mode: "latest_success" }, retain: [], exclude: [], requiredForSubmission: false, subjectIds: ["P"], subjectPictureBindingIds: { P: ["P_ID"] } }];
+    replaceSource.shots[0].utterance_refs[0].textEnd = Array.from("对白保留").length;
+    replaceSource.shots[0].subject_usages[0].pictureBindingIds = ["P_ID"];
+    named.draft.director!.sourceHash = directorHash(replaceSource);
+    const replacementSaved = service.edit("ep", { operationId: "crud-add-replacement", expectedRevision: named.revision, ops: [{ type: "set_director_production", director: named.draft.director }] });
+    const replacement = service.edit("ep", { operationId: "crud-remove-used-replace", expectedRevision: replacementSaved.revision, ops: [{ type: "delete_director_subject", id: "P", referenceAction: "replace", replacementSubjectId: "SUB_P2" }] });
+    const replacedShot = (replacement.draft.director!.source.shots as any[])[0];
+    assert.equal(replacedShot.subject_usages[0].subjectId, "SUB_P2");
+    assert.deepEqual(replacedShot.subject_usages[0].pictureBindingIds, []);
+    assert.deepEqual(replacedShot.camera.attention_subject_ids, ["SUB_P2"]);
+    assert.deepEqual(replacedShot.keyframes[0].subjectIds, ["SUB_P2"]);
+    assert.equal(Object.hasOwn(replacedShot.keyframes[0].subjectPictureBindingIds, "P"), false);
+    assert.deepEqual(replacedShot.reference_requirements[0].subjectIds, ["SUB_P2"]);
+    assert.equal((replacement.draft.director!.source.utterances as any[])[0].speakerSubjectId, "SUB_P2");
+    assert.equal(((replacement.draft.director!.source.ledger as any).facts as any[])[0].object_id, "P2");
+    assert.ok((replacement.draft.director!.source.subject_registry as any[]).every(row => row.id !== "P"));
+    const cleared = service.edit("ep", { operationId: "crud-remove-replacement-clear", expectedRevision: replacement.revision, ops: [{ type: "delete_director_subject", id: "SUB_P2", referenceAction: "clear" }] });
+    const clearedSource = cleared.draft.director!.source as any;
+    assert.equal(clearedSource.shots[0].subject_usages.length, 0);
+    assert.deepEqual(clearedSource.shots[0].camera.attention_subject_ids, []);
+    assert.equal(clearedSource.shots[0].keyframes[0].subjectIds.length, 0);
+    assert.equal(clearedSource.shots[0].reference_requirements[0].subjectIds.length, 0);
+    assert.equal(clearedSource.utterances.length, 0);
+    assert.equal(clearedSource.shots[0].utterance_refs.length, 0);
+    assert.equal(clearedSource.ledger.facts.length, 0);
+    const next = service.edit("ep", { operationId: "crud-register-unused", expectedRevision: cleared.revision, ops: [{ type: "upsert_director_subject", subject: { id: "ENV", kind: "scene", entityRef: { ownerKind: "episode", ownerId: "ep", kind: "scene", id: "SCENE" }, pictureBindings: [] } }] });
     const deleted = service.edit("ep", { operationId: "crud-remove-unused", expectedRevision: next.revision, ops: [{ type: "delete_director_subject", id: "ENV" }] });
     assert.equal((deleted.draft.director!.source.subject_registry as any[]).some(row => row.id === "ENV"), false);
     assert.equal((deleted.draft.director!.source.scene_registry as any[])[0].id, "SCENE");
+});
+
+test("removing a referenced scene Subject can rebind its Shot and continuity references", t => {
+    const service = fixture(t, true), director = directorV2(), source = director.source as any;
+    source.scene_registry.push({ id: "SCENE2", name: "替代场景" });
+    source.script_scenes.push({ id: "SCENE2", scene_id: "SCENE2", scene_name: "替代场景", text: "", beat_ids: [] });
+    source.subject_registry.push(
+        { id: "SUB_SCENE", kind: "scene", entityRef: { ownerKind: "episode", ownerId: "ep", kind: "scene", id: "SCENE" }, pictureBindings: [] },
+        { id: "SUB_SCENE2", kind: "scene", entityRef: { ownerKind: "episode", ownerId: "ep", kind: "scene", id: "SCENE2" }, pictureBindings: [] },
+    );
+    source.shots[0].subject_usages.push({ subjectId: "SUB_SCENE", presentation: "state_context", pictureBindingIds: [], referencePurpose: [], continuityFactIds: ["F_SCENE"], stateRequirements: [] });
+    source.shots[0].camera.attention_subject_ids.push("SUB_SCENE");
+    source.shots[0].keyframes = [{ id: "KF_SCENE", assetId: "KF_SCENE", sourceNode: { projectId: "CANVAS_EP", nodeId: "KF_SCENE" }, selection: { mode: "latest_success" }, anchor: "opening", subjectIds: ["SUB_SCENE"], retain: [], exclude: [], requiredForSubmission: false }];
+    source.shots[0].reference_requirements = [{ id: "REF_SCENE", asset_id: "A1", asset_version: "v1", purpose: "构图参考", sourceNode: { projectId: "CANVAS_EP", nodeId: "IMAGE_P" }, selection: { mode: "latest_success" }, retain: [], exclude: [], requiredForSubmission: false, subjectIds: ["SUB_SCENE"] }];
+    source.ledger.facts.push({ id: "F_SCENE", object_kind: "scene", object_id: "SCENE", allowed_values: ["intact"], value_descriptions: { intact: "场景完整" } });
+    source.ledger.initial.push({ id: "I_SCENE", timeline_id: "main", fact_id: "F_SCENE", value: "intact" });
+    director.sourceHash = directorHash(source);
+    const saved = service.edit("ep", { operationId: "scene-subject-source", expectedRevision: service.get("ep").revision, ops: [{ type: "set_director_production", director }] });
+    const removed = service.edit("ep", { operationId: "scene-subject-rebind-delete", expectedRevision: saved.revision, ops: [{ type: "delete_director_subject", id: "SUB_SCENE", referenceAction: "replace", replacementSubjectId: "SUB_SCENE2" }] });
+    const result = removed.draft.director!.source as any;
+    assert.ok(result.subject_registry.every((subject: any) => subject.id !== "SUB_SCENE"));
+    assert.equal(result.shots[0].scene_id, "SCENE2");
+    assert.equal(result.shots[0].subject_usages[1].subjectId, "SUB_SCENE2");
+    assert.deepEqual(result.shots[0].camera.attention_subject_ids, ["P", "SUB_SCENE2"]);
+    assert.deepEqual(result.shots[0].keyframes[0].subjectIds, ["SUB_SCENE2"]);
+    assert.deepEqual(result.shots[0].reference_requirements[0].subjectIds, ["SUB_SCENE2"]);
+    assert.equal(result.ledger.facts.find((fact: any) => fact.id === "F_SCENE").object_id, "SCENE2");
+    assert.equal(result.ledger.initial.find((state: any) => state.id === "I_SCENE").fact_id, "F_SCENE");
 });
 
 test("binding reuse deduplicates identical semantics and rejects unknown Shot references", t => {

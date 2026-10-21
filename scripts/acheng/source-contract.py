@@ -44,7 +44,7 @@ def contract():
             "storyboard_policy": {"type": "object", "properties": {"version": {"type": "integer", "enum": [1]}}, "required": ["version"]},
             "prompt_assembly": {"type": "object", "properties": {"version": {"type": "integer", "enum": [2]}}, "required": ["version"]},
             "subject_registry": {"type": "array", "items": {"type": "object", "required": ["id", "entityRef", "pictureBindings"]}},
-            "utterances": {"type": "array", "items": {"type": "object", "required": ["id", "speakerSubjectId", "text", "start", "end"]}},
+            "utterances": {"type": "array", "items": {"type": "object", "required": ["id", "text", "start", "end"], "oneOf": [{"required": ["speakerSubjectId"], "not": {"required": ["speakerName"]}}, {"required": ["speakerName"], "not": {"required": ["speakerSubjectId"]}}]}},
             "segments": {"type": "array", "items": {"type": "object", "properties": {
                 "mode": {"type": "string", "enum": list(MODES)}, "mode_lock": {"type": "string"}, "mode_selection_reason": {"type": "string"},
                 "subjects": {"type": "array", "items": {"type": "object", "properties": {
@@ -66,7 +66,7 @@ def contract():
                     "path": {"type": "string"},
                     "target": {"type": "string"},
                     "focus": {"type": "string"},
-                    "attention_subject_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+                    "attention_subject_ids": {"type": "array", "items": {"type": "string"}},
                     "editorial_reason": prose}},
             }}},
             "asset_cards": {"type": "array", "items": {"type": "object", "properties": {
@@ -81,7 +81,7 @@ def contract():
         "relationships": ["segments[].mode is an execution mode; missing modes are inferred from selected references, and lock/reason fields are optional metadata.", "Full creative and file contracts remain owned by Acheng audit/compiler; this schema covers Canvas source fields."],
         "templates": {"manual_storyboard_override": {"storyboard_policy": {"version": 1}, "camera": {"framing": "MCU", "attention_subject_ids": ["<registered subject id>"], "editorial_reason": "Read the speaker's strategy or listener's changing response."}}, "segment": {"mode": "Ref2VA", "mode_lock": "Ref2VA", "mode_selection_reason": "Use approved identity and scene references."}, "asset_card": {"recipe": "portrait"}, "style_scope": {"preserve_scope": ["Preserve the approved lighting and palette."], "exclude_scope": ["Do not copy the anchor subject identity."]}},
         "continuityLedger": continuity_v2_contract(),
-        "storyboardPolicy": {"version": 1, "defaultForNewProductions": False, "dialogueCoverage": "Temporarily disabled: H3 compilation preserves authored camera design, dialogue text and timing without inserting speaker close-up/reverse/reaction cuts.", "manualOverrideCameraFields": ["framing", "attention_subject_ids", "editorial_reason"], "framingValues": list(FRAMINGS), "explicitManualOverride": "When version 1 is declared, enforce manual framing/attention/reason fields and validate only selected Shot/Segment structure in scoped compilation."},
+        "storyboardPolicy": {"version": 1, "defaultForNewProductions": False, "dialogueCoverage": "Temporarily disabled: H3 compilation preserves authored camera design, dialogue text and timing without inserting speaker close-up/reverse/reaction cuts.", "manualOverrideCameraFields": ["framing", "attention_subject_ids", "editorial_reason"], "framingValues": list(FRAMINGS), "explicitManualOverride": "When version 1 is declared, preserve authored framing/attention/reason fields when present; attention_subject_ids is optional. Validate only selected Shot/Segment structure in scoped compilation."},
         "modelPromptContract": {"version": 1,
             "subjects": "Ref2VA identity/character/scene/environment/prop references require one matching entity/source/Shot Subject. Frame and composition anchors may remain Pictures.",
             "continuity": "Replay snapshots remain report-only. Subject Prompt v2 includes only facts selected in subject_usages[].continuityFactIds; ledger.requirements and events validate and replay state but do not add unselected facts to prompt text. Do not add legacy shots[].continuity_facts or state_description/state_in/state_out/continuity_cues fields to v2 Shots.",
@@ -167,15 +167,17 @@ def validate_subject_prompt_v2(source, stage="edit", validation_scope=None):
         for field in ("framing", "editorial_reason"):
             if not str(camera.get(field) or "").strip():
                 issue("shots." + shot_id + ".camera." + field, "Shot camera contract field is required", shot_id)
-        if not isinstance(camera.get("attention_subject_ids"), list) or not camera["attention_subject_ids"]:
-            issue("shots." + shot_id + ".camera.attention_subject_ids", "At least one registered attention Subject is required", shot_id)
-        else:
+        attention_subject_ids = camera.get("attention_subject_ids", [])
+        if not isinstance(attention_subject_ids, list):
+            issue("shots." + shot_id + ".camera.attention_subject_ids", "Attention Subjects must be a list when provided", shot_id)
+            attention_subject_ids = []
+        if attention_subject_ids:
             visible_subject_ids = {
                 str(usage.get("subjectId"))
                 for usage in shot.get("subject_usages", [])
                 if isinstance(usage, dict) and usage.get("presentation") == "visible" and usage.get("subjectId")
             }
-            attention_subject_ids = {str(value) for value in camera["attention_subject_ids"] if value}
+            attention_subject_ids = {str(value) for value in attention_subject_ids if value}
             shared_attention = visible_subject_ids.intersection(attention_subject_ids)
             close_framings = {"MCU", "CU", "BSCU", "ECU"}
             if str(camera.get("framing") or "").upper() in close_framings and len(shared_attention) > 1:
@@ -295,6 +297,10 @@ def validate_subject_prompt_v2(source, stage="edit", validation_scope=None):
        for diagnostic in replay.get("diagnostics", []):
             issues.append({**diagnostic, "severity": "warning"})
     for utterance in utterances:
+        speaker_id = str(utterance.get("speakerSubjectId") or "").strip()
+        speaker_name = str(utterance.get("speakerName") or "").strip()
+        if bool(speaker_id) == bool(speaker_name):
+            issue("utterances." + str(utterance.get("id")), "Choose one registered speaker Subject or a temporary speaker name")
         if scoped and not any(str(ref.get("utteranceId")) == str(utterance.get("id")) for shot in shots if isinstance(shot, dict) and str(shot.get("id")) in scoped_shot_ids for ref in rows(shot.get("utterance_refs")) if isinstance(ref, dict)):
             continue
         refs = sorted([(position.get(str(shot.get("id")), -1), ref, shot) for shot in shots

@@ -112,23 +112,23 @@ export function ImageSettingsPanel({
                     if (document.activeElement instanceof HTMLInputElement && event.currentTarget.contains(document.activeElement)) document.activeElement.blur();
                 }}
             >
-                {showTitle ? <div className="text-lg font-semibold">{t("settingsPanels.image.title")}</div> : null}
+                {showTitle ? <div className={`${compact ? "text-sm" : "text-lg"} font-semibold`}>{t("settingsPanels.image.title")}</div> : null}
                 {customFields && customFields.length > 0 && onCustomFieldChange ? (
                     <div className="space-y-2.5" role="group" aria-label={t("settingsPanels.image.workflowFields")}>
-                        <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.workflowFields")}</SettingTitle>
+                        <SettingTitle color={theme.node.muted} compact={compact}>{t("settingsPanels.image.workflowFields")}</SettingTitle>
                         <WorkflowCustomFields fields={customFields} values={customFieldValues || {}} onChange={onCustomFieldChange} />
                     </div>
                 ) : null}
                 {workflowParamsMissing ? (
                     <div className="space-y-1">
-                        <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.workflowFields")}</SettingTitle>
-                        <div className="text-xs" style={{ color: theme.node.muted, opacity: 0.75 }}>
+                        <SettingTitle color={theme.node.muted} compact={compact}>{t("settingsPanels.image.workflowFields")}</SettingTitle>
+                    <div className={compact ? "text-[10px]" : "text-xs"} style={{ color: theme.node.muted, opacity: 0.75 }}>
                             {t(workflowParamsBlockedByScenario ? "settingsPanels.image.workflowFieldsScenarioUnsupported" : "settingsPanels.image.workflowFieldsMissing")}
                         </div>
                     </div>
                 ) : null}
                 {debugScenario ? (
-                    <div className="text-xs" style={{ color: theme.node.muted, opacity: 0.6 }}>
+                    <div className={compact ? "text-[10px]" : "text-xs"} style={{ color: theme.node.muted, opacity: 0.6 }}>
                         {debugScenario}
                     </div>
                 ) : null}
@@ -160,9 +160,9 @@ export function ImageSettingsPanel({
                     </div>
                     {!hideStandardImageOptions ? (
                         <>
-                            <div className="space-y-2.5">
-                                <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.aspectRatio")}</SettingTitle>
-                                <div className="grid grid-cols-3 gap-2">
+                            <div className={compact ? "space-y-1.5" : "space-y-2.5"}>
+                                <SettingTitle color={theme.node.muted} compact={compact}>{t("settingsPanels.image.aspectRatio")}</SettingTitle>
+                                <div className={`grid grid-cols-3 ${compact ? "gap-1.5" : "gap-2"}`}>
                                     {aspectOptions
                                         .filter((item) => !item.size)
                                         .map((item) => (
@@ -170,12 +170,12 @@ export function ImageSettingsPanel({
                                                 key={item.value}
                                                 type="button"
                                                 aria-pressed={selectedAspect?.value === item.value}
-                                                className="flex h-[64px] min-w-0 cursor-pointer flex-col items-center justify-center gap-1.5 rounded-xl border bg-transparent text-sm transition hover:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                                                className={`flex min-w-0 cursor-pointer flex-col items-center justify-center rounded-xl border bg-transparent transition hover:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring ${compact ? "h-10 gap-0 text-[11px]" : "h-16 gap-1.5 text-sm"}`}
                                                 style={{ borderColor: selectedAspect?.value === item.value ? theme.node.text : theme.node.stroke, background: "transparent", color: theme.node.text }}
                                                 onMouseDown={(event) => event.stopPropagation()}
                                                 onClick={() => selectAspect(item.value)}
                                             >
-                                                <AspectIcon type={item.icon} width={item.width} height={item.height} color={theme.node.text} />
+                                                <AspectIcon type={item.icon} width={item.width} height={item.height} color={theme.node.text} compact={compact} />
                                                 <span>{item.label}</span>
                                             </button>
                                         ))}
@@ -188,14 +188,15 @@ export function ImageSettingsPanel({
                     title={t("settingsPanels.groups.imageAdvanced")}
                     summary={`${hideStandardImageOptions ? "" : `${imageSizeLabel(activeSize)} · `}${t(transparentBackground ? "settingsPanels.image.transparent" : "settingsPanels.groups.defaultBackground")}`}
                     theme={theme}
+                    compact={compact}
                 >
                     {!hideStandardImageOptions ? (
                         <>
-                            <div className="space-y-2.5">
+                            <div className={compact ? "space-y-1.5" : "space-y-2.5"}>
                                 <div className="flex items-center justify-between gap-3">
-                                    <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.size")}</SettingTitle>
+                                    <SettingTitle color={theme.node.muted} compact={compact}>{t("settingsPanels.image.size")}</SettingTitle>
                                     <div className="flex items-center gap-2">
-                                        <span className="text-xs font-medium" style={{ color: theme.node.muted }}>
+                                        <span className={`${compact ? "text-[10px]" : "text-xs"} font-medium`} style={{ color: theme.node.muted }}>
                                             {t("settingsPanels.image.align16")} · {t("settingsPanels.groups.globalPreference")}
                                         </span>
                                         <span title={t("settingsPanels.image.align16Hint")} onMouseDown={(event) => event.stopPropagation()}>
@@ -204,14 +205,14 @@ export function ImageSettingsPanel({
                                     </div>
                                 </div>
                                 <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2.5">
-                                    <DimensionInput prefix="W" value={dimensions.width} disabled={activeSize === "auto"} theme={theme} alignToStep={snapDimensionToStep} onChange={(value) => updateDimension("width", value)} />
-                                    <span className="text-lg opacity-45">↔</span>
-                                    <DimensionInput prefix="H" value={dimensions.height} disabled={activeSize === "auto"} theme={theme} alignToStep={snapDimensionToStep} onChange={(value) => updateDimension("height", value)} />
+                                    <DimensionInput prefix="W" value={dimensions.width} disabled={activeSize === "auto"} theme={theme} alignToStep={snapDimensionToStep} compact={compact} onChange={(value) => updateDimension("width", value)} />
+                                    <span className={`${compact ? "text-sm" : "text-lg"} opacity-45`}>↔</span>
+                                    <DimensionInput prefix="H" value={dimensions.height} disabled={activeSize === "auto"} theme={theme} alignToStep={snapDimensionToStep} compact={compact} onChange={(value) => updateDimension("height", value)} />
                                 </div>
                             </div>
-                            <div className="space-y-2.5">
-                                <SettingTitle color={theme.node.muted}>{t("settingsPanels.groups.highResolution")}</SettingTitle>
-                                <div className="grid grid-cols-3 gap-2">
+                            <div className={compact ? "space-y-1.5" : "space-y-2.5"}>
+                                <SettingTitle color={theme.node.muted} compact={compact}>{t("settingsPanels.groups.highResolution")}</SettingTitle>
+                                <div className={`grid grid-cols-3 ${compact ? "gap-1" : "gap-2"}`}>
                                     {aspectOptions
                                         .filter((item) => item.size)
                                         .map((item) => (
@@ -219,12 +220,12 @@ export function ImageSettingsPanel({
                                                 key={item.value}
                                                 type="button"
                                                 aria-pressed={selectedAspect?.value === item.value}
-                                                className="flex h-[64px] min-w-0 cursor-pointer flex-col items-center justify-center gap-1.5 rounded-xl border bg-transparent text-sm transition hover:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                                                className={`flex min-w-0 cursor-pointer flex-col items-center justify-center rounded-xl border bg-transparent transition hover:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring ${compact ? "h-10 gap-0 text-[11px]" : "h-16 gap-1.5 text-sm"}`}
                                                 style={{ borderColor: selectedAspect?.value === item.value ? theme.node.text : theme.node.stroke, background: "transparent", color: theme.node.text }}
                                                 onMouseDown={(event) => event.stopPropagation()}
                                                 onClick={() => selectAspect(item.value)}
                                             >
-                                                <AspectIcon type={item.icon} width={item.width} height={item.height} color={theme.node.text} />
+                                                <AspectIcon type={item.icon} width={item.width} height={item.height} color={theme.node.text} compact={compact} />
                                                 <span>{item.label}</span>
                                             </button>
                                         ))}
@@ -234,8 +235,8 @@ export function ImageSettingsPanel({
                     ) : null}
                     <div className="flex items-center justify-between gap-3">
                         <div className="space-y-0.5">
-                            <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.transparent")}</SettingTitle>
-                            <div className="text-xs" style={{ color: theme.node.muted, opacity: 0.75 }}>
+                            <SettingTitle color={theme.node.muted} compact={compact}>{t("settingsPanels.image.transparent")}</SettingTitle>
+                            <div className={compact ? "text-[10px]" : "text-xs"} style={{ color: theme.node.muted, opacity: 0.75 }}>
                                 {t("settingsPanels.image.transparentHint")}
                             </div>
                         </div>
@@ -275,7 +276,7 @@ function OptionPill({ selected, theme, onClick, children, compact = false }: { s
         <button
             type="button"
             aria-pressed={selected}
-            className={`${compact ? "min-h-7 px-1.5 text-xs" : "min-h-9 px-2 text-sm"} min-w-0 cursor-pointer rounded-full border transition hover:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`}
+            className={`${compact ? "min-h-7 px-1 text-[11px]" : "min-h-9 px-2 text-sm"} min-w-0 cursor-pointer rounded-full border transition hover:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`}
             style={{ background: "transparent", borderColor: selected ? theme.node.text : theme.node.stroke, color: theme.node.text }}
             onMouseDown={(event) => event.stopPropagation()}
             onClick={onClick}
@@ -285,7 +286,7 @@ function OptionPill({ selected, theme, onClick, children, compact = false }: { s
     );
 }
 
-function DimensionInput({ prefix, value, disabled, theme, alignToStep, onChange }: { prefix: string; value: number; disabled: boolean; theme: CanvasTheme; alignToStep: boolean; onChange: (value: number | null) => void }) {
+function DimensionInput({ prefix, value, disabled, theme, alignToStep, compact = false, onChange }: { prefix: string; value: number; disabled: boolean; theme: CanvasTheme; alignToStep: boolean; compact?: boolean; onChange: (value: number | null) => void }) {
     const commit = (input: HTMLInputElement) => {
         const next = alignDimension(Math.max(1, Math.floor(Number(input.value) || value || 1024)), alignToStep);
         input.value = String(next);
@@ -293,8 +294,8 @@ function DimensionInput({ prefix, value, disabled, theme, alignToStep, onChange 
     };
 
     return (
-        <label className="flex h-9 overflow-hidden rounded-xl text-sm focus-within:ring-2 focus-within:ring-ring" style={{ background: theme.node.fill, color: theme.node.text, opacity: disabled ? 0.55 : 1 }}>
-            <span className="grid w-9 place-items-center" style={{ color: theme.node.muted }}>
+        <label className={`flex overflow-hidden rounded-xl focus-within:ring-2 focus-within:ring-ring ${compact ? "h-7 text-xs" : "h-9 text-sm"}`} style={{ background: theme.node.fill, color: theme.node.text, opacity: disabled ? 0.55 : 1 }}>
+            <span className={`grid place-items-center ${compact ? "w-6" : "w-9"}`} style={{ color: theme.node.muted }}>
                 {prefix}
             </span>
             <input
@@ -317,7 +318,7 @@ function DimensionInput({ prefix, value, disabled, theme, alignToStep, onChange 
 function CountInput({ value, max, theme, onChange, compact = false }: { value: number; max: number; theme: CanvasTheme; onChange: (value: number | null) => void; compact?: boolean }) {
     const { t } = useTranslation();
     return (
-        <label className={`col-span-2 flex ${compact ? "h-7 text-xs" : "h-9 text-sm"} overflow-hidden rounded-full border focus-within:ring-2 focus-within:ring-ring`} style={{ borderColor: theme.node.stroke, color: theme.node.text }}>
+        <label className={`col-span-2 flex ${compact ? "h-7 text-[11px]" : "h-9 text-sm"} overflow-hidden rounded-full border focus-within:ring-2 focus-within:ring-ring`} style={{ borderColor: theme.node.stroke, color: theme.node.text }}>
             <input
                 type="number"
                 min={1}
@@ -333,21 +334,22 @@ function CountInput({ value, max, theme, onChange, compact = false }: { value: n
     );
 }
 
-function AspectIcon({ type, width, height, color }: { type: string; width: number; height: number; color: string }) {
+function AspectIcon({ type, width, height, color, compact = false }: { type: string; width: number; height: number; color: string; compact?: boolean }) {
     if (type === "auto") return null;
     const ratio = width / Math.max(1, height);
-    const boxWidth = ratio >= 1 ? 24 : Math.max(10, 24 * ratio);
-    const boxHeight = ratio >= 1 ? Math.max(10, 24 / ratio) : 24;
+    const iconSize = compact ? 14 : 24;
+    const boxWidth = ratio >= 1 ? iconSize : Math.max(compact ? 6 : 10, iconSize * ratio);
+    const boxHeight = ratio >= 1 ? Math.max(compact ? 6 : 10, iconSize / ratio) : iconSize;
     return (
-        <span className="grid h-7 w-9 place-items-center">
-            <span className="border-2" style={{ width: boxWidth, height: boxHeight, borderColor: color }} />
+        <span className={`grid place-items-center ${compact ? "h-4 w-6" : "h-7 w-9"}`}>
+            <span className={compact ? "border" : "border-2"} style={{ width: boxWidth, height: boxHeight, borderColor: color }} />
         </span>
     );
 }
 
 export function SettingTitle({ children, color, compact = false }: { children: string; color: string; compact?: boolean }) {
     return (
-        <div className={`${compact ? "text-[11px]" : "text-xs"} font-medium`} style={{ color }}>
+        <div className={`${compact ? "text-[10px]" : "text-xs"} font-medium`} style={{ color }}>
             {children}
         </div>
     );
@@ -369,7 +371,7 @@ function alignDimension(value: number, enabled: boolean) {
 export function SettingsSection({ title, theme, children, compact = false }: { title: string; theme: CanvasTheme; children: ReactNode; compact?: boolean }) {
     return (
         <fieldset className={`min-w-0 ${compact ? "space-y-2" : "space-y-3"} border-0 p-0`}>
-            <legend className={`${compact ? "mb-1 text-xs" : "mb-2 text-sm"} w-full font-semibold`} style={{ color: theme.node.text }}>
+            <legend className={`${compact ? "mb-1 text-[11px]" : "mb-2 text-sm"} w-full font-semibold`} style={{ color: theme.node.text }}>
                 {title}
             </legend>
             {children}
@@ -377,18 +379,18 @@ export function SettingsSection({ title, theme, children, compact = false }: { t
     );
 }
 
-export function SettingsDisclosure({ title, summary, theme, children }: { title: string; summary?: string; theme: CanvasTheme; children: ReactNode }) {
+export function SettingsDisclosure({ title, summary, theme, children, compact = false }: { title: string; summary?: string; theme: CanvasTheme; children: ReactNode; compact?: boolean }) {
     return (
-        <details className="min-w-0 border-t pt-3" style={{ borderColor: theme.node.stroke }}>
-            <summary className="cursor-pointer rounded-sm text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
+        <details className={`min-w-0 border-t ${compact ? "pt-2" : "pt-3"}`} style={{ borderColor: theme.node.stroke }}>
+            <summary className={`cursor-pointer rounded-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring ${compact ? "text-[11px]" : "text-sm"}`}>
                 {title}
                 {summary ? (
-                    <span className="mt-1 block break-words pl-4 text-xs font-normal" style={{ color: theme.node.muted }}>
+                    <span className={`${compact ? "mt-0.5 pl-3 text-[10px]" : "mt-1 pl-4 text-xs"} block break-words font-normal`} style={{ color: theme.node.muted }}>
                         {summary}
                     </span>
                 ) : null}
             </summary>
-            <div className="mt-4 space-y-4">{children}</div>
+            <div className={compact ? "mt-2 space-y-2" : "mt-4 space-y-4"}>{children}</div>
         </details>
     );
 }

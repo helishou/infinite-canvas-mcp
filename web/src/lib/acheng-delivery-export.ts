@@ -1,10 +1,11 @@
 import { Zip, ZipPassThrough } from "fflate";
 
 import { backendMediaUrl, type EpisodeProduction, type ProductionReadiness } from "@/services/backend-api";
-import { productionSegments } from "@/lib/production-source";
+import { productionSegmentRuntimeMatches, productionSegments } from "@/lib/production-source";
+import type { CanvasNodeData } from "@/types/canvas";
 
 type RecordValue = Record<string, unknown>;
-type CanvasNode = { id: string; title?: string; type?: string; metadata?: Record<string, unknown> };
+type CanvasNode = CanvasNodeData;
 type BinaryEntry = Omit<MediaEntry, "included" | "requested" | "missingReason">;
 type ExportOptions = {
     owner: { kind: "canvas" | "episode" | "scene"; id: string };
@@ -57,11 +58,13 @@ export async function exportAchengDeliveryBundle(options: ExportOptions) {
     const actualMedia: BinaryEntry[] = [];
     for (const [assetId, asset] of Object.entries(d?.assets || {})) if (asset.storageKey) actualMedia.push({ key: asset.storageKey, path: `outputs/assets/${safeName(assetId)}.${extensionOf(asset.storageKey)}`, kind: "asset", targetId: assetId, sha256: asset.sha256 });
     for (const [shotId, frame] of Object.entries(snapshot.keyframes)) if (frame.storageKey) actualMedia.push({ key: frame.storageKey, path: `outputs/keyframes/${safeName(shotId)}.${extensionOf(frame.storageKey)}`, kind: "keyframe", targetId: shotId });
+    const lockedClipIds = new Set((Array.isArray(d?.source?.segments) ? d.source.segments : [])
+        .map(record).filter(segment => segment.locked === true).map(segment => String(segment.id || "")).filter(Boolean));
     for (const group of productionSegments({ draft: snapshot as EpisodeProduction["draft"], published: null })) {
-        const node = options.canvasNodes.find(item => item.id === group.nodeId);
-        const segments = Array.isArray(node?.metadata?.segments) ? node.metadata!.segments.map(record) : [];
-        const segment = segments.find(item => String(item.id || "") === String(group.segmentId || ""));
-        const storageKey = String(segment?.resultStorageKey || "");
+        if (!lockedClipIds.has(String(group.id)) && group.locked !== true) continue;
+        const runtime = productionSegmentRuntimeMatches(options.canvasNodes, String(group.id), options.owner)[0]?.segment
+            || options.canvasNodes.find(item => item.id === group.nodeId)?.metadata?.segments?.map(record).find(item => String(item.id || "") === String(group.segmentId || ""));
+        const storageKey = String(runtime?.resultStorageKey || "");
         if (storageKey) actualMedia.push({ key: storageKey, path: `outputs/video/${safeName(group.id)}.${extensionOf(storageKey)}`, kind: "video", targetId: group.id });
     }
     const chosenOutputs = options.includeGeneratedMedia ? actualMedia : [];

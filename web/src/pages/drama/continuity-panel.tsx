@@ -13,15 +13,20 @@ import { continuityPresentation } from "./continuity-presentation";
 import { records } from "./director-display";
 import { continuityEventAnchor, continuityEventFrame } from "./continuity-event-anchor";
 import { readContinuityLedgerDraft, rebaseContinuityLedger, continuityLedgerConflicts } from "./continuity-ledger-draft";
+import { continuityCoverageDigestValue, continuityLegacyDigestValue } from "./continuity-source-digest";
 
 type Row = Record<string, any>;
 const blankLedger = () => ({ contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] });
 const id = () => `C_${crypto.randomUUID()}`;
 const stable = (value: any): string => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object" ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}` : JSON.stringify(value);
 async function sourceDigest(sceneId: string, block: Row) {
-  const bytes = new TextEncoder().encode(stable({ scene_id: sceneId, block }));
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest)).map(value => value.toString(16).padStart(2, "0")).join("");
+  const hash = async (value: any) => {
+    const bytes = new TextEncoder().encode(stable(value));
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(digest)).map(item => item.toString(16).padStart(2, "0")).join("");
+  };
+  const [digest, legacy] = await Promise.all([hash(continuityCoverageDigestValue(sceneId, block)), hash(continuityLegacyDigestValue(sceneId, block))]);
+  return { digest, legacy };
 }
 
 function BoundaryContinuityRow({ from, to, fromLabel, toLabel, boundary, disabled, onSave, summary }: { from: string; to: string; fromLabel: string; toLabel: string; boundary?: Row; disabled: boolean; onSave: (value: Row) => void; summary?: ReactNode }) {
@@ -144,6 +149,13 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
     const current = latestLedger.current, plan = analyzeContinuityDeletion(source, current, collection, entryId);
     const removedRows = plan.removals.flatMap(removal => records(current[removal.collection]).flatMap((item, index) => continuityLedgerEntryId(removal.collection, item) === removal.id ? [{ collection: removal.collection, row: structuredClone(item), index }] : []));
     const snapshot = stable({ plan, rows: removedRows });
+    if (collection === "facts" && plan.allowed) {
+      try {
+        const next = applyContinuityDeletion(source, current, collection, entryId);
+        latestLedger.current = next; setLedger(next); setLastDeletion({ sourceKey, rows: removedRows });
+      } catch { message.warning(t("director.workspace.continuity.crud.deleteChanged")); }
+      return;
+    }
     const rowLabel = (group: string, identity: string) => {
       const item = records(current[group]).find(item => continuityLedgerEntryId(group as ContinuityLedgerCollection, item) === identity);
       if (group === "facts") return display.fact(identity);
@@ -230,11 +242,11 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
     const oldBlock = sourceBlocks.find(row => row.id === event.source_anchor?.block_id);
     if (!oldBlock) { message.warning(t("director.workspace.continuity.subjectTimeline.sharedEvidence")); return false; }
     const oldDigest = await sourceDigest(oldBlock.sceneId, oldBlock.sourceBlock);
-    if (coverage.some(row => row.source_digest !== oldDigest)) { message.warning(t("director.workspace.continuity.subjectTimeline.sharedEvidence")); return false; }
+    if (coverage.some(row => ![oldDigest.digest, oldDigest.legacy].includes(row.source_digest))) { message.warning(t("director.workspace.continuity.subjectTimeline.sharedEvidence")); return false; }
     const digest = await sourceDigest(block.sceneId, block.sourceBlock), source_anchor = { ...event.source_anchor, block_id: blockId };
     if (!activeEditContext.current.alive || !activeEditContext.current.editable || activeEditContext.current.busy || activeEditContext.current.key !== contextKey) { message.warning(t("director.workspace.continuity.subjectTimeline.sourceChanged")); return false; }
     if (stable(latestLedger.current) !== stable(ledger)) { message.warning(t("director.workspace.continuity.subjectTimeline.sharedEvidence")); return false; }
-    setLedger(current => ({ ...current, events: records(current.events).map(row => row.id === eventId ? { ...row, source_anchor } : row), requirements: records(current.requirements).map(row => requirements.some(item => item.id === row.id) ? { ...row, source_anchor } : row), coverage: records(current.coverage).map(row => coverage.some(item => item.id === row.id) ? { ...row, source_anchor, source_digest: digest } : row) }));
+    setLedger(current => ({ ...current, events: records(current.events).map(row => row.id === eventId ? { ...row, source_anchor } : row), requirements: records(current.requirements).map(row => requirements.some(item => item.id === row.id) ? { ...row, source_anchor } : row), coverage: records(current.coverage).map(row => coverage.some(item => item.id === row.id) ? { ...row, source_anchor, source_digest: digest.digest } : row) }));
     message.success(t("director.workspace.continuity.subjectTimeline.evidenceUpdated")); return true;
   };
   const addEvent = () => createChange({ shotId, factId, frame: eventFrame, after: eventAfter, reason: eventReason, sourceBlockId });

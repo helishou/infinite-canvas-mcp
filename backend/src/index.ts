@@ -265,7 +265,7 @@ async function startBackendHttpServer() {
   const nativeProductionGeneration = new NativeProductionGeneration(runtime.db, runtime.stores, episodeProduction, canvasProduction, runtime.events);
   nativeProductionGeneration.start();
   canvasGeneration.observeProduction(nativeProductionGeneration);
-  new SharedAssetCoordinator(runtime.db, episodeProduction, runtime.events, (id, runId) => { void episodeProductionRunner.runBatch(id, runId); }, undefined, id => episodeProductionRunner.syncUnsubmittedInputs(id)).start();
+  new SharedAssetCoordinator(runtime.db).start();
   registerCanvasBrowserScriptRoutes(app, canvasBrowserScriptDispatcher);
   registerCanvasReferenceRoutes(app, canvasReferences);
   registerAgentRuntimeRoutes(

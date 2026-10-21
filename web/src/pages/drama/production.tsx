@@ -37,7 +37,7 @@ import {
   resumeProductionBatch, startProductionRun, type DramaEpisode, type EpisodeProduction,
   type ProductionBatch, type ProductionReadiness, type ProductionTarget, type ProductionCanvasContext,
   compileProduction, fetchProductionCompilation, applyProductionCompilation, type ProductionCompilationStatus, type ProductionCompilationDiagnostic,
-  prepareProductionTargets, arrangeProductionScene, adoptProductionSharedAsset, ensureEpisodeCanvas, ensureSharedAssetCanvas, fetchProductionCanvasContext,
+  prepareProductionTargets, arrangeProductionScene, ensureEpisodeCanvas, ensureSharedAssetCanvas, fetchProductionCanvasContext,
   previewProductionSharedAssetPromotion, promoteExistingProductionSharedAsset,
   backendMediaUrl, startCanvasGeneration, fetchBackendTasks, isBackendAvailabilityError, type BackendRuntimeTask,
 } from "@/services/backend-api";
@@ -55,7 +55,7 @@ import { createManualDirectorAsset } from "./manual-director-assets";
 
 type PendingCommand = { operationId: string; expectedRevision: number; status: "unknown" | "rejected"; error?: string; errorSummary?: string; httpStatus?: number; errorCode?: string; workspace?: DirectorWorkspace } & (
   { kind: "scene"; command: ProductionSceneAction } | { kind: "edit"; ops: ProductionOperation[] } | { kind: "publish"; stage: "director" } | { kind: "restore"; version: number }
-  | { kind: "prepare"; targets: string[] } | { kind: "arrange"; sceneId: string } | { kind: "adopt"; assetId: string; approvedId: string }
+  | { kind: "prepare"; targets: string[] } | { kind: "arrange"; sceneId: string }
 );
 type PendingRunStart = { inputBasis?: "canvas" | "published"; expectedCanvasRevision?: number; expectedPlanHash?: string; runId: string; idempotencyKey: string; workId?: string; expectedRevision: number; version: number; targets: string[]; scope: "selected" | "all_ready" };
 type PendingCompilation = { operationId: string; expectedRevision: number; scope?: { sceneId?: string; targetIds?: string[] } };
@@ -967,7 +967,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     if (command.kind === "prepare") return t("drama.production.pendingCommandPrepare", { targets: command.targets.map(productionTargetLabel).join("、") });
     if (command.kind === "arrange") return t("drama.production.pendingCommandArrange", { scene: productionTargetLabel(command.sceneId) });
     if (command.kind === "scene") return t(`sceneProduction.command.${command.command.action}`);
-    return t("drama.production.pendingCommandAdopt", { asset: productionTargetLabel(command.assetId) });
+    return "";
   };
   const pendingCommandMessage = (command: PendingCommand) => t("drama.production.resolvePending", {
     action: pendingCommandDescription(command),
@@ -992,7 +992,6 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         : command.kind === "publish" ? await publishEpisodeProduction(target, command.expectedRevision, command.stage, command.operationId)
         : command.kind === "prepare" ? await prepareProductionTargets(target, command.expectedRevision, command.targets, command.operationId)
         : command.kind === "arrange" ? await arrangeProductionScene(target, command.expectedRevision, command.sceneId, command.operationId)
-        : command.kind === "adopt" ? await adoptProductionSharedAsset(target, { expectedRevision: command.expectedRevision, assetId: command.assetId, approvedId: command.approvedId, operationId: command.operationId })
         : await restoreEpisodeProduction(target, command.expectedRevision, command.version, command.operationId);
       if (!result.production || !Number.isInteger(result.production.revision)) throw new Error(t("drama.production.receiptMalformed"));
       pendingCommandRef.current = null;
@@ -1037,7 +1036,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   useEffect(() => {
     if ((!embedded && workspace !== "assets") || !owner || !production || !draftKey) return;
     const receive = (event: Event) => {
-      const detail = (event as CustomEvent<{ owner: NonNullable<ProductionCanvasContext["owner"]>; command: { kind: "prepare"; targets: string[] } | { kind: "arrange"; sceneId: string } | { kind: "adopt"; assetId: string; approvedId: string } | { kind: "edit"; ops: ProductionOperation[] } }>).detail;
+      const detail = (event as CustomEvent<{ owner: NonNullable<ProductionCanvasContext["owner"]>; command: { kind: "prepare"; targets: string[] } | { kind: "arrange"; sceneId: string } | { kind: "edit"; ops: ProductionOperation[] } }>).detail;
       if (!detail || detail.owner.kind !== owner.kind || detail.owner.id !== owner.id) return;
       if (pendingCommandRef.current) { warnPendingCommand(); return; }
       if (busy || workspaceCommandInFlight.current) { message.warning(t("drama.production.commandInProgress")); return; }
@@ -1529,7 +1528,27 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     return saved;
   };
   const upsertSubject = async (subject: Extract<ProductionOperation, { type: "upsert_director_subject" }>["subject"]) => edit([{ type: "upsert_director_subject", subject }]);
-  const deleteSubject = async (id: string) => edit([{ type: "delete_director_subject", id }]);
+  const deleteSubject = async (id: string, resolution?: { action: "clear" | "replace"; replacementSubjectId?: string }) => {
+    const operation: ProductionOperation = {
+      type: "delete_director_subject", id,
+      ...(resolution ? { referenceAction: resolution.action, ...(resolution.replacementSubjectId ? { replacementSubjectId: resolution.replacementSubjectId } : {}) } : {}),
+    };
+    // A previous timeout/reload can leave an unknown write receipt in the tab.
+    // Recover that exact command before retrying; if it already removed this Subject,
+    // close the dialog without issuing a second mutation.
+    const pendingBeforeDelete = pendingCommandRef.current;
+    if (pendingBeforeDelete) {
+      if (pendingBeforeDelete.status === "unknown") await recoverPending();
+      else await resolveRejected();
+      if (pendingCommandRef.current) throw new Error(pendingCommandMessage(pendingCommandRef.current));
+      const latest = (await fetchEpisodeProduction(target)).production;
+      setProduction(latest);
+      const subjects = latest.draft.director?.source.subject_registry;
+      const stillRegistered = Array.isArray(subjects) && subjects.some((subject: unknown) => Boolean(subject && typeof subject === "object" && String((subject as Record<string, unknown>).id || "") === id));
+      return stillRegistered ? edit([operation], latest.revision) : true;
+    }
+    return edit([operation]);
+  };
   // 局部保存统一追加 Clip 刷新：Backend 只对输入真正变化的 Clip 跑「校验 → 编译 → 应用」，
   // 进度回到 production.clipRefreshes，由 Clip 状态展示，不再让界面自己假装在编译。
   // 单批只允许一个刷新目标（Backend 对局部编辑有 CLIP_REFRESH_SCOPE 限制），取第一个命中项；
@@ -1953,9 +1972,9 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
 
   useEffect(() => {
     if (!production?.draft.director || !canvasId) return;
-    return registerProductionStoryboardEditor(canvasId, async input => {
+    return registerProductionStoryboardEditor(canvasId, async (input, previousSegment) => {
       const groupId = sourceSegmentForCanvasClip(canvasNodes as any, production.draft.director!.source as Record<string, any>, input.nodeId, input.segmentId);
-      const operation = buildDirectorClipStoryboardOperation(production.draft.director!, groupId, input);
+      const operation = buildDirectorClipStoryboardOperation(production.draft.director!, groupId, input, previousSegment, canvasId);
       const sourceSaved = await edit([operation, ...clipRefreshOps([groupId])]);
       return { sourceSaved };
     });
@@ -2141,8 +2160,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
                     return asset;
                   }).find(asset => String(asset.asset_id || asset.id || "") === styleAnchorAssetId
                     && (String(asset.role || asset.asset_type || "").toUpperCase() === "STYLE_MOTHER" || String(asset.kind || "").toLowerCase() === "style")) : undefined;
-                  const styleAsset = production.draft.director.assets[styleAnchorAssetId];
-                  const styleAnchorScope = String(styleAnchorPlan?.canvas_scope || (styleAsset?.sharedSource || productionContext?.role === "shared-assets" ? "shared" : "episode"));
+                  const styleAnchorScope = String(styleAnchorPlan?.canvas_scope || (styleAnchorPlan?.sharedSource || productionContext?.role === "shared-assets" ? "shared" : "episode"));
                   if (styleAnchorPlan && styleAnchorScope === (productionContext?.role === "shared-assets" ? "shared" : "episode")) targets.push(`asset:${styleAnchorAssetId}`);
                   if (targets.length) await sendCommand({ kind: "prepare", targets, operationId: nanoid(), expectedRevision: production.revision, status: "unknown" });
                   await refreshRemote();
@@ -2152,7 +2170,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
               onSwitchToSharedNode={async (node, subject) => {
                 if (!production?.draft.director || !episode || !sharedCanvasNodes || busy || productionOwner.kind !== "episode") return false;
                 const kind = String(node.type || "") as "character" | "scene" | "prop";
-                if (!["character", "scene", "prop"].includes(kind) || !matchesProductionAssetNode(node, kind, { kind: "canvas", id: sharedCanvasNodes.id })) return false;
+                if (!["character", "scene", "prop"].includes(kind)) return false;
                 const sharedIdentity = `${encodeURIComponent(sharedCanvasNodes.id)}_${encodeURIComponent(node.id)}`;
                 const assetId = `SHARED_${sharedIdentity}`;
                 const entityId = kind === "prop" ? undefined : `${kind === "character" ? "CHAR" : "SCENE"}_${sharedIdentity}`;
@@ -2170,7 +2188,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
               onIncludeSharedNode={async node => {
                 if (!production?.draft.director || !episode || !sharedCanvasNodes || busy || productionOwner.kind !== "episode") return false;
                 const kind = String(node.type || "") as "character" | "scene" | "prop";
-                if (!["character", "scene", "prop"].includes(kind) || !matchesProductionAssetNode(node, kind, { kind: "canvas", id: sharedCanvasNodes.id })) return false;
+                if (!["character", "scene", "prop"].includes(kind)) return false;
                 const sharedIdentity = `${encodeURIComponent(sharedCanvasNodes.id)}_${encodeURIComponent(node.id)}`;
                 const assetId = `SHARED_${sharedIdentity}`;
                 const entityId = kind === "prop" ? undefined : `${kind === "character" ? "CHAR" : "SCENE"}_${sharedIdentity}`;

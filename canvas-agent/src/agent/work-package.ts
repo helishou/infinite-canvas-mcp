@@ -35,7 +35,7 @@ export function directorWorkInput(director: DirectorProduction, scope?: Compilat
     const selected = projection?.director || director;
     const assets = Object.fromEntries(Object.entries(selected.assets).map(([id, asset]) => [id, {
         nodeId: asset.nodeId, assetId: asset.assetId, version: asset.version, status: asset.status,
-        storageKey: asset.storageKey, sha256: asset.sha256, sharedSource: asset.sharedSource, inputOutdated: asset.inputOutdated,
+        storageKey: asset.storageKey, sha256: asset.sha256, inputOutdated: asset.inputOutdated,
     }]));
     const source = { ...selected.source }; delete source._canvas_continuity_asset_registry;
     return { director: structuredClone(selected), inputHash: compilationHash({

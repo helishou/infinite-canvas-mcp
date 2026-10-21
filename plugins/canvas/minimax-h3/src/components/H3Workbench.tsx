@@ -6,7 +6,7 @@ import type { H3CharacterGroupEditPatch, H3Ref, H3Segment } from "../types";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { useH3LocalView } from "../hooks/useH3LocalView";
 import { applyCharacterGroupEdits, inferReferenceRole, promoteCharacterSourceReferences, refsForSegment, removeCharacterGroup, replaceSegmentReference, resultUrl, syncCharacterGroupFromSource, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
-import { CharacterGroupParseError, normalizeDroppedH3Ref, h3RefCandidates, orderedGroupStoryboardRefs, readCharacterGroupFromDrop, readCharacterGroupFromNode, readCharacterImagesFromDrop, readH3Refs, refreshSmartImageReference, storyboardSubjectIdsForNode } from "../services/h3-refs";
+import { CharacterGroupParseError, isH3OutputVideoDrop, normalizeDroppedH3Ref, h3RefCandidates, orderedGroupStoryboardRefs, readCharacterGroupFromDrop, readCharacterGroupFromNode, readCharacterImagesFromDrop, readH3Refs, refreshSmartImageReference, storyboardSubjectIdsForNode } from "../services/h3-refs";
 import { sameRef } from "../services/h3-compatibility";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
 import { patchAllH3Clips } from "../services/h3-global-settings";
@@ -351,16 +351,22 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     const patchAllSettings = useCallback((patch: Partial<H3Segment>, formalBoundaryValues?: Array<{ segmentId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean }>) => {
         const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata;
         const current = Array.isArray(liveMetadata.segments) && liveMetadata.segments.length ? liveMetadata.segments as H3Segment[] : segmentsFor(liveMetadata);
+        const rememberedModel = String(liveMetadata.h3LastSelectedVideoModel || "").trim();
+        const effectivePatch = patch.selectedVideoModelEnabled === true && !String(patch.selectedVideoModel || "").trim() && rememberedModel
+            ? { ...patch, selectedVideoModel: rememberedModel }
+            : patch;
         const next = current.map((segment) => {
-            const updated = { ...segment, ...withH3ParameterEdits(segment as unknown as Record<string, unknown>, patch) } as H3Segment;
-            if ((patch.duration !== undefined || patch.mode !== undefined || patch.taskMode !== undefined) && storyboardTrackItems(segment).length) {
+            const updated = { ...segment, ...withH3ParameterEdits(segment as unknown as Record<string, unknown>, effectivePatch) } as H3Segment;
+            if ((effectivePatch.duration !== undefined || effectivePatch.mode !== undefined || effectivePatch.taskMode !== undefined) && storyboardTrackItems(segment).length) {
                 const withRefs = withSegmentRefs(updated, refsForSegment(segment));
                 void syncStoryboardPrompt(ctx, withRefs, segment);
                 return withRefs;
             }
             return updated;
         });
-        const update = patchAllH3Clips(liveMetadata, next, patch);
+        const update = patchAllH3Clips(liveMetadata, next, effectivePatch);
+        const selectedVideoModel = String(effectivePatch.selectedVideoModel || "").trim();
+        if (selectedVideoModel) update.h3LastSelectedVideoModel = selectedVideoModel;
         if (formalBoundaryValues?.length) {
             const bySegmentId = new Map(formalBoundaryValues.map(value => [value.segmentId, value]));
             update.segments = update.segments.map(segment => {
@@ -551,6 +557,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     };
     const addDroppedReference = (event: React.DragEvent<HTMLElement>) => {
         if ((event.target as HTMLElement).closest(".minimax-ref-track")) return;
+        if (isH3OutputVideoDrop(event)) { event.preventDefault(); event.stopPropagation(); return; }
         event.preventDefault();
         event.stopPropagation();
         if (!selected) return;
@@ -714,11 +721,11 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     if (metadata.productionSceneId && segments.length === 0) return <div className="minimax-canvas-workbench" data-canvas-no-zoom style={themeStyle} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
         <div className="minimax-wb-status">本场暂无 Clip。请先在制作台添加镜头并分配 Clip。</div>
     </div>;
-    return <div ref={workbenchRef} className={`minimax-canvas-workbench${canvasReferenceDragOver ? " is-canvas-ref-drag-over" : ""}`} data-canvas-no-zoom data-canvas-ref-drop-target={ctx.node.id} style={themeStyle} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()} onDragOver={(event) => { event.preventDefault(); event.stopPropagation(); }} onDrop={addDroppedReference}>
+    return <div ref={workbenchRef} className={`minimax-canvas-workbench${canvasReferenceDragOver ? " is-canvas-ref-drag-over" : ""}`} data-canvas-no-zoom data-canvas-ref-drop-target={ctx.node.id} style={themeStyle} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()} onDragOver={(event) => { if (isH3OutputVideoDrop(event)) { event.stopPropagation(); return; } event.preventDefault(); event.stopPropagation(); }} onDrop={addDroppedReference}>
         <H3Runner key="runner" ctx={ctx} />
         <H3PaneHandles key="pane-handles" ctx={ctx} />
         <H3RulerScrubber key="ruler-scrubber" ctx={ctx} segments={segments} total={total} previewH={effPreviewH} />
-        <H3WorkbenchToolbar key="workbench-toolbar" ctx={ctx} metadata={metadata} segments={segments} selected={selected} selectedIndex={selectedIndex} playhead={playhead} total={total} fmt={fmt} onPlayAll={playAll} />
+        <H3WorkbenchToolbar key="workbench-toolbar" ctx={ctx} metadata={metadata} segments={segments} selected={selected} selectedIndex={selectedIndex} playhead={playhead} total={total} fmt={fmt} onPlayAll={playAll} patchSelected={patchSelected} />
         <SmartStoryboardModal key="storyboard-modal" ctx={ctx} metadata={metadata} upstream={upstream} open={smartStoryboardOpen} uploads={smartStoryboardUploads} setUploads={setSmartStoryboardUploads} onClose={() => setSmartStoryboardOpen(false)} />
         {editingRef && currentEditingRef ? <H3ReferenceModal key="reference-modal" ctx={ctx} refItem={currentEditingRef} characters={referencedCharacters} group={editingRefGroup} onApply={applyReferenceEdit} onReplaceFromCanvas={requestCanvasRefReplace} onRemoveRef={removeEditingReference} onRemoveStoryboardImage={removeEditingStoryboardImage} onDeleteGroup={editingRefGroup ? deleteReferenceGroup : undefined} onClose={() => setEditingRef(null)} /> : null}
         <div key="workbench-body" ref={bodyRef} className="minimax-wb-body">

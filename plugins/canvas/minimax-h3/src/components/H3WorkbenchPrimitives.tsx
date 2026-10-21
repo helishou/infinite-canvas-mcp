@@ -371,11 +371,24 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
     const activeRef = useRef(0);
     const [active, setActive] = useState(0);
     const [slotSrc, setSlotSrc] = useState<[string, string]>([url || "", ""]);
+    const [retryNonce, setRetryNonce] = useState<[number, number]>([0, 0]);
+    const [loadFailed, setLoadFailed] = useState<[boolean, boolean]>([false, false]);
+    const loadAttemptsRef = useRef<[number, number]>([0, 0]);
+    const slotIdentityRef = useRef<[string, string]>([url || "", ""]);
     const [preloadIntentUrl, setPreloadIntentUrl] = useState("");
     const lastSelectedUrlRef = useRef(url);
     const playerContentRef = useRef<HTMLDivElement | null>(null);
     const [mediaResolution, setMediaResolution] = useState<{ width: number; height: number } | null>(null);
     const [aspectFrame, setAspectFrame] = useState<{ width: number; height: number } | null>(null);
+    const videoSource = (source: string, retry: number) => {
+        const normalized = resultUrl(source);
+        if (!normalized || retry < 1) return normalized;
+        try {
+            const parsed = new URL(normalized, document.baseURI);
+            parsed.searchParams.set("h3_retry", String(retry));
+            return parsed.href;
+        } catch { return normalized; }
+    };
     const ratioMatch = aspectRatio.match(/(\d+(?:\.\d+)?)\s*[:/x]\s*(\d+(?:\.\d+)?)/i);
     const parsedRatio = ratioMatch ? Number(ratioMatch[1]) / Number(ratioMatch[2]) : 16 / 9;
     const frameRatio = mediaResolution ? mediaResolution.width / mediaResolution.height
@@ -412,6 +425,19 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
         : null;
     // 预览分辨率只属于当前可见媒体；预加载槽可以具有不同的分辨率和画幅。
     useEffect(() => { setMediaResolution(null); }, [url, kind]);
+    useEffect(() => {
+        for (const slot of [0, 1] as const) {
+            if (slotIdentityRef.current[slot] === slotSrc[slot]) continue;
+            slotIdentityRef.current[slot] = slotSrc[slot];
+            loadAttemptsRef.current[slot] = 0;
+            setLoadFailed((current) => {
+                if (!current[slot]) return current;
+                const next = [...current] as [boolean, boolean];
+                next[slot] = false;
+                return next;
+            });
+        }
+    }, [slotSrc]);
     useEffect(() => {
         if (kind !== "video") return;
         const slot = activeRef.current;
@@ -693,7 +719,7 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
                 <video
                     key={slot}
                     ref={(node) => { videosRef.current[slot] = node; }}
-                    src={slotSrc[slot] && (slot === active || livePreview || preloadNext && Boolean(nextUrl) || preloadIntentUrl === slotSrc[slot]) ? resultUrl(slotSrc[slot]) : undefined}
+                    src={slotSrc[slot] && (slot === active || livePreview || preloadNext && Boolean(nextUrl) || preloadIntentUrl === slotSrc[slot]) ? videoSource(slotSrc[slot], retryNonce[slot]) : undefined}
                     controls={active === slot}
                     // 只有生成中的实时视频自动循环；普通成片仍由用户起播，播完停帧或续播下一段。
                     autoPlay={livePreview && active === slot}
@@ -704,10 +730,20 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
                     draggable={false}
                     style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", background: "#0b0c0e", transition: "opacity .15s ease", opacity: active === slot ? 1 : 0, pointerEvents: active === slot ? "auto" : "none" }}
                     onLoadedMetadata={(event) => {
+                        const expected = videoSource(slotSrc[slot], retryNonce[slot]);
+                        const actual = event.currentTarget.currentSrc || event.currentTarget.src;
+                        if (actual && expected && actual !== new URL(expected, document.baseURI).href) return;
                         // 临时预览从头播放，不使用成片时间轴；普通成片的 buffer 槽仍固定在 0。
                         const local = !livePreview && slot === active ? Math.max(0, Math.min(playheadRef.current - timelineOffset, Number(event.currentTarget.duration || Infinity))) : 0;
                         if (Math.abs(event.currentTarget.currentTime - local) > 0.1) event.currentTarget.currentTime = local;
                         if (livePreview && slot === activeRef.current) void event.currentTarget.play().catch(() => undefined);
+                        loadedUrlRef.current[slot] = slotSrc[slot];
+                        setLoadFailed((current) => {
+                            if (!current[slot]) return current;
+                            const next = [...current] as [boolean, boolean];
+                            next[slot] = false;
+                            return next;
+                        });
                         // 下一段的高清预加载不能覆盖当前一采的尺寸标注。
                         const source = resultUrl(slotSrc[slot]);
                         if (slot === activeRef.current && source && event.currentTarget.currentSrc === new URL(source, document.baseURI).href && event.currentTarget.videoWidth && event.currentTarget.videoHeight) setMediaResolution({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight });
@@ -717,6 +753,28 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
                         // 下一帧 rAF tick 触发重渲染时不会把 muted 又强制改回去。
                         const next = Boolean(event.currentTarget.muted);
                         if (next !== isMuted) setIsMuted(next);
+                    }}
+                    onError={(event) => {
+                        const media = event.currentTarget;
+                        const expected = videoSource(slotSrc[slot], retryNonce[slot]);
+                        const actual = media.currentSrc || media.src;
+                        if (actual && expected && actual !== new URL(expected, document.baseURI).href) return;
+                        if (loadedUrlRef.current[slot] === slotSrc[slot]) loadedUrlRef.current[slot] = null;
+                        if (loadAttemptsRef.current[slot] === 0) {
+                            loadAttemptsRef.current[slot] = 1;
+                            setRetryNonce((current) => {
+                                const next = [...current] as [number, number];
+                                next[slot] += 1;
+                                return next;
+                            });
+                        } else {
+                            setLoadFailed((current) => {
+                                if (current[slot]) return current;
+                                const next = [...current] as [boolean, boolean];
+                                next[slot] = true;
+                                return next;
+                            });
+                        }
                     }}
                     onPause={(event) => {
                         if (livePreview || slot !== activeRef.current) return;
@@ -729,6 +787,11 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
                     onPlay={() => { if (slot === activeRef.current) userPausedRef.current = false; }}
                 />
             ))}
+            {loadFailed[active] ? <div className="minimax-player-load-error" role="alert"><span>视频加载失败</span><button type="button" onClick={() => {
+                loadAttemptsRef.current[active] = 0;
+                setLoadFailed((current) => { const next = [...current] as [boolean, boolean]; next[active] = false; return next; });
+                setRetryNonce((current) => { const next = [...current] as [number, number]; next[active] += 1; return next; });
+            }}>重试加载</button></div> : null}
             {aspectGuide}
             {mediaResolution ? <div className="minimax-player-resolution">{mediaResolution.width} × {mediaResolution.height}</div> : null}
             {frameMenuPosition ? <div ref={frameMenuRef} className="minimax-frame-menu" role="menu" style={{ left: frameMenuPosition.x, top: frameMenuPosition.y }}>

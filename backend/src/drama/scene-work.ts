@@ -181,7 +181,7 @@ export class SceneWorkCoordinator {
     }
     private sharedIds(id: string) {
         const director = this.service.get(id).draft.director!;
-        return rows(director.source.asset_plan).filter(item => item.canvas_scope === "shared" || director.assets[objectId(item)]?.sharedSource).map(objectId);
+        return rows(director.source.asset_plan).filter(item => item.canvas_scope === "shared" || item.sharedSource).map(objectId);
     }
     private sharedSelection(id: string) {
         const director = this.service.get(id).draft.director!, ids = this.sharedIds(id);
@@ -206,7 +206,7 @@ export class SceneWorkCoordinator {
         const inputHash = compilationHash({ brief: director.source.brief, story: director.source.story, scripts: director.source.script_scenes, style: director.source.style_lock, characters: director.source.character_registry, scenes: director.source.scene_registry,
             plans: plans.filter(item => closure.has(objectId(item))), cards: cards.filter(item => closure.has(objectId(item))),
             ledger: ledger && { contract_version: ledger.contract_version, facts: ledger.facts, timelines: ledger.timelines, initial: ledger.initial },
-            assets: [...closure].sort().map(assetId => { const asset = director.assets[assetId]; return { assetId, nodeId: asset.nodeId, version: asset.version, storageKey: asset.storageKey, sha256: asset.sha256, sharedSource: asset.sharedSource }; }), media: media.map(({ filePath: _file, ...item }) => item) });
+            assets: [...closure].sort().map(assetId => { const asset = director.assets[assetId]; return { assetId, nodeId: asset.nodeId, version: asset.version, storageKey: asset.storageKey, sha256: asset.sha256 }; }), media: media.map(({ filePath: _file, ...item }) => item) });
         return { director, media, inputHash };
     }
     private saveSharedWork(id: string, work: SharedWork, operationId = `shared-review-state:${work.workId}:${compilationHash(work)}`) {
@@ -529,7 +529,7 @@ export class SceneWorkCoordinator {
             }
             if (["queued", "running"].includes(job.status)) return;
             if (job.status !== "succeeded" || !job.preparedId) throw new Error(`编译 ${job.status}，请按诊断修改源稿`);
-            this.compilations.apply(id, this.owner, job.preparedId);
+            await this.compilations.apply(id, this.owner, job.preparedId);
             current = this.service.get(id); work = current.draft.director!.workflow.sceneWorks![workId];
             this.service.publish(id, { operationId: `scene-publish:${operationId}`, expectedRevision: current.revision, stage: "director", scope: { sceneId: work.sceneId } });
             this.update(id, workId, { stage: work.stage === "assets" ? "review" : "produce", status: "pending", artifactIds: this.service.get(id).draft.director!.artifacts.filter(item => compilationScopeInput(this.service.get(id).draft.director!, { sceneId: work.sceneId }).targetIds.includes(item.targetId)).map(item => item.id) });

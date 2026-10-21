@@ -1428,7 +1428,7 @@ function registerBackendCanvasTools(
     async (rawInput: Record<string, unknown>) => {
       const input = toolInputSchemas.drama_get_episode.parse(rawInput);
       return textResult(
-        await backendApi.getDramaEpisode(input.episodeId.trim(), input.view),
+        await backendApi.getDramaEpisode(input.episodeId.trim(), input.view, input.view === "full" ? input.canvasView : undefined),
       );
     },
   );
@@ -2863,7 +2863,7 @@ class McpPayloadOverflowError extends Error {
   readonly tool: string;
   constructor(bytes: number, chars: number, limitBytes: number, tool: string) {
     super(
-      `工具 ${tool} 的返回体为 ${bytes} 字节（${chars} 字符），超过单次输出上限 ${limitBytes} 字节。${tool === "h3_list_models" ? "使用 view: entries、categories、query 和显式 pageSize 分页读取。" : tool === "director_subagent" ? "使用 action:get、view:summary 获取状态；完整结果通过 view:result、chunkBytes/cursor 分块读取。" : tool === "production_get" ? "摘要使用 production_get；指定章节使用 production_get_source(sourceSection, pageSize/cursor)，产物目录使用 production_get_artifact_index 分页，单个提示词使用 production_get_artifact(targetId, chunkBytes/cursor)。不要请求完整制作稿。" : tool === "production_get_version" ? "摘要使用 production_get_version；历史章节使用 production_get_version_source，产物目录使用 production_get_version_artifact_index 分页，单个提示词使用 production_get_version_artifact(targetId, chunkBytes/cursor)。不要请求完整历史快照。" : /production|scene_version/.test(tool) ? "使用摘要视图；按 sourceSection、targetIds 定向读取，并用 pageSize/cursor 或 chunkBytes 分页和分块。" : tool === "canvas_get_state" ? "使用 nodeIds 定向读取，或 nodeLimit/nodeOffset 分页；H3 正文使用 h3_get_clip 定向工具。" : "请使用该工具 schema 支持的定向读取参数缩小范围。"}`,
+      `工具 ${tool} 的返回体为 ${bytes} 字节（${chars} 字符），超过单次输出上限 ${limitBytes} 字节。${tool === "h3_list_models" ? "使用 view: entries、categories、query 和显式 pageSize 分页读取。" : tool === "director_subagent" ? "使用 action:get、view:summary 获取状态；完整结果通过 view:result、chunkBytes/cursor 分块读取。" : tool === "production_get" ? "摘要使用 production_get；指定章节使用 production_get_source(sourceSection, pageSize/cursor)，产物目录使用 production_get_artifact_index 分页，单个提示词使用 production_get_artifact(targetId, chunkBytes/cursor)。不要请求完整制作稿。" : tool === "production_get_version" ? "摘要使用 production_get_version；历史章节使用 production_get_version_source，产物目录使用 production_get_version_artifact_index 分页，单个提示词使用 production_get_version_artifact(targetId, chunkBytes/cursor)。不要请求完整历史快照。" : /production|scene_version/.test(tool) ? "使用摘要视图；按 sourceSection、targetIds 定向读取，并用 pageSize/cursor 或 chunkBytes 分页和分块。" : tool === "canvas_get_state" ? "使用 nodeIds 定向读取，或 nodeLimit/nodeOffset 分页；H3 正文使用 h3_get_clip 定向工具。" : tool === "drama_get_episode" ? "传 view='summary'，或保持 canvasView='ref' 只读剧情与画布引用；画布节点用 canvas_get_state(nodeIds/nodeLimit/nodeOffset) 分页，协作文本用 canvas_read_text。" : "请使用该工具 schema 支持的定向读取参数缩小范围。"}`,
     );
     this.name = "McpPayloadOverflowError";
     this.bytes = bytes;

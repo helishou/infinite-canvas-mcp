@@ -265,6 +265,14 @@ test("saving a shot's dialogue edits its shared text slice and keeps the other s
     assert.equal(nextSource.utterances.length, 2, "the exclusive line is added without touching the shared record");
     assert.equal(nextSource.utterances.find((line: any) => String(line.id) === "UTT_SH_A_8").text, "她抱紧信封不走。");
     assert.deepEqual(nextSource.shots[1].utterance_refs, before.shots[1].utterance_refs);
+    const temporary = service.edit("episode", { operationId: "add-temporary-speaker", expectedRevision: base(), ops: [{ type: "set_director_shot_utterances", shotId: "SH_A", utterances: [
+        { utteranceId: "UTT_SH_A_8", speakerSubjectId: "SUB_P", text: "她抱紧信封", textMode: "segment", voiceover: true, localStartFrame: 0, localEndFrame: 96 },
+        { speakerName: "窗外的守卫", text: "站住！", voiceover: true, localStartFrame: 70, localEndFrame: 90 },
+    ] }] });
+    const temporarySource = temporary.draft.director!.source as Record<string, any>;
+    const temporaryLine = temporarySource.utterances.find((line: any) => line.speakerName === "窗外的守卫");
+    assert.ok(temporaryLine, "the typed name is saved on the dialogue event");
+    assert.equal(temporaryLine.speakerSubjectId, undefined, "a temporary speaker does not create or reference a registered Subject");
 });
 
 test("one production edit can register precise refreshes for multiple changed Clips", (t) => {

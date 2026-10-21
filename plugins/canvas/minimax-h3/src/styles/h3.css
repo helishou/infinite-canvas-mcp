@@ -40,6 +40,9 @@
 .minimax-player-image,.minimax-player-image img { width:100%; height:100%; object-fit:contain; }
 .minimax-player-stage video,.minimax-player-stage img { width:100%; height:100%; object-fit:contain; background:#0b0c0e; }
 .minimax-player-empty { width:100%; height:100%; display:flex; align-items:center; justify-content:center; color:#64748b; font-size:26px; font-weight:850; }
+.minimax-player-load-error { position:absolute; z-index:7; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; color:#fca5a5; background:rgba(11,12,14,.76); font-size:16px; }
+.minimax-player-load-error button { border:1px solid #64748b; border-radius:6px; padding:6px 12px; color:#e2e8f0; background:#252a31; cursor:pointer; }
+.minimax-player-load-error button:hover { border-color:#94a3b8; background:#303844; }
 /* 预览左下角分辨率角标：图片/视频加载后实时显示真实尺寸（见 H3PreviewPlayer mediaResolution） */
 .minimax-player-resolution { position:absolute; left:8px; bottom:8px; z-index:6; padding:2px 8px; border-radius:5px; background:rgba(15,23,42,.82); color:#e2e8f0; font-size:12px; line-height:1.4; letter-spacing:.02em; pointer-events:none; font-variant-numeric:tabular-nums; box-shadow:0 1px 6px rgba(0,0,0,.4); }
 .minimax-edit-timeline { position:relative; min-width:0; min-height:140px; display:grid; grid-template-columns:36px minmax(0,1fr) 54px; grid-template-rows:36px minmax(0,1fr) 96px 26px; border:1px solid #111827; border-radius:6px; background:#17191c; overflow:hidden; }
@@ -842,3 +845,15 @@
 .nfh3-control:has(.nfh3-select) { height:auto; min-height:76px; align-content:center; gap:8px; }
 .nfh3-control:has(.nfh3-select) > span:first-child { font-size:18px; line-height:24px; }
 .nfh3-control[data-control="视觉风格模板"]:has(.nfh3-select) { grid-template-columns:128px minmax(0,1fr); }
+
+/* 工具栏「原生 H3 / 自选视频模型」快捷开关：与 Clip 设置同源，只切当前 Clip。 */
+.minimax-wb-toolbar .minimax-video-model-toggle { display:inline-flex; align-items:center; gap:8px; min-width:0; max-width:250px; margin-right:4px; }
+.minimax-wb-toolbar .minimax-video-model-toggle .ant-switch { flex:0 0 auto; width:38px; min-width:38px; height:22px; padding:2px; border:0; border-radius:11px; background:color-mix(in srgb,var(--h3-muted) 42%,transparent); }
+.minimax-wb-toolbar .minimax-video-model-toggle .ant-switch:hover { background:color-mix(in srgb,var(--h3-muted) 58%,transparent); }
+.minimax-wb-toolbar .minimax-video-model-toggle .ant-switch.ant-switch-checked,
+.minimax-wb-toolbar .minimax-video-model-toggle .ant-switch.ant-switch-checked:hover { background:var(--h3-active); }
+.minimax-wb-toolbar .minimax-video-model-toggle .ant-switch .ant-switch-handle { width:18px; height:18px; inset-block-start:2px; inset-inline-start:2px; }
+.minimax-wb-toolbar .minimax-video-model-toggle .ant-switch.ant-switch-checked .ant-switch-handle { inset-inline-start:18px; }
+.minimax-wb-toolbar .minimax-video-model-toggle .ant-switch:disabled { opacity:.45; }
+.minimax-wb-toolbar .minimax-video-model-label { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--h3-muted); font-size:16px; font-weight:600; }
+.minimax-wb-toolbar .minimax-video-model-toggle.is-on .minimax-video-model-label { color:var(--h3-active-text); }

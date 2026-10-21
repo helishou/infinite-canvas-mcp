@@ -103,7 +103,7 @@ test("场景参考只提交栅格场景图，不把 SVG 色卡作为图片模型
     assert.deepEqual(resolveCanvasImageReferences(project, "config")?.map((reference) => reference.storageKey), ["image:scene"]);
 });
 
-test("智能生成节点作为参考入边时按引用策略解析：缺省跟随最新成功归档结果", () => {
+test("智能生成节点作为参考入边时默认传递主图", () => {
     const project = {
         id: "project-1",
         nodes: [
@@ -117,10 +117,10 @@ test("智能生成节点作为参考入边时按引用策略解析：缺省跟�
         connections: [{ id: "source-target", fromNodeId: "source", toNodeId: "target", role: "reference" }],
     };
 
-    // 缺省跟随最新成功归档结果，而不是冻结在 primaryImageId 指的那张快照。
+    // 下游输入必须与节点上标记的主图一致。
     const references = resolveCanvasImageReferences(project, "target");
-    assert.deepEqual(references?.map((reference) => reference.storageKey), ["image:third"]);
-    assert.deepEqual(references?.map((reference) => reference.id), ["source:image:image-3"]);
+    assert.deepEqual(references?.map((reference) => reference.storageKey), ["image:second"]);
+    assert.deepEqual(references?.map((reference) => reference.id), ["source:image:image-2"]);
 });
 
 test("智能节点显式钉选历史结果后，新结果归档不会改写引用", () => {

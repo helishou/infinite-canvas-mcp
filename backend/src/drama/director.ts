@@ -3,7 +3,7 @@ import { compilationArtifactFreshness } from "@basketikun/canvas-agent/drama/com
 import fs from "node:fs";
 import { canonicalProduction, productionSceneEntries, type DirectorProduction, type EpisodeProductionData } from "@basketikun/canvas-agent/drama/production-contract";
 import type { BackendDatabase } from "../db.js";
-import { resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
+import { resolveCanvasCharacterImageReferences, resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
 import { resolveAchengEngine } from "@basketikun/canvas-agent/skills/acheng";
 import { isSubjectPromptAssembly, resolveSubjectPictureBindingIds } from "@basketikun/canvas-agent/drama/production-contract";
 import { subjectShotWindows, subjectStateProjection } from "@basketikun/canvas-agent/drama/subject-assembly";
@@ -181,10 +181,10 @@ export function validateDirectorMedia(db: BackendDatabase, projectId: string, d:
         for (const id of dependencies) visit(String(id));
         const consumedAssets = [...new Set([...dependencies, ...(artifact.kind === "image" ? [artifact.targetId] : [])])];
         for (const id of consumedAssets) {
-            const scope = String(plan.get(String(id))?.canvas_scope || (d.assets[String(id)]?.sharedSource || canvasRole === "shared-assets" ? "shared" : "episode"));
+            const scope = String(plan.get(String(id))?.canvas_scope || (plan.get(String(id))?.sharedSource || canvasRole === "shared-assets" ? "shared" : "episode"));
             if (!["shared", "episode"].includes(scope)) throw new Error(`资产 ${id} 的画布归属无效：${scope}`);
             if (canvasRole === "shared-assets" && scope !== "shared") throw new Error(`资产 ${id} 标记为本集专用，不能在剧目共享资产画布生产`);
-            if (canvasRole !== "shared-assets" && scope === "shared" && !d.assets[String(id)]?.sharedSource) throw new Error(`共享资产 ${id} 尚未从共享素材库采用`);
+            if (canvasRole !== "shared-assets" && scope === "shared" && !plan.get(String(id))?.sharedSource) throw new Error(`共享资产 ${id} 尚未选择共享画布节点`);
         }
         for (const id of dependencies) {
             const asset = d.assets[String(id)];
@@ -207,7 +207,11 @@ export function validateDirectorMedia(db: BackendDatabase, projectId: string, d:
         for (const ref of artifact.references) {
             const node = nodes.find(n => n.id === ref.nodeId);
             const meta = obj(node?.metadata);
-            const keys = node ? [...resolveCanvasImageReferenceNode(node).map(r => r.storageKey), node.storageKey, meta.storageKey, meta.resultStorageKey] : [];
+            const boundStoryboardMedia = Boolean(node && String(node.type || "").startsWith("minimax-h3:")
+                && list(meta.segments).some(segment => list(segment.referenceBindings).some(binding => binding.enabled !== false
+                    && ["storyboard", "keyframe"].includes(String(binding.role || "")) && String(binding.storageKey || "") === ref.storageKey)));
+            const keys = node ? [...(node.type === "character" ? resolveCanvasCharacterImageReferences(node) : resolveCanvasImageReferenceNode(node)).map(r => r.storageKey), node.storageKey, meta.storageKey, meta.resultStorageKey,
+                ...(boundStoryboardMedia ? [ref.storageKey] : [])] : [];
             if (!node || !keys.includes(ref.storageKey)) throw new Error(`参考不属于目标画布节点：${ref.label}`);
             const media = db.getMediaFile(ref.storageKey);
             if (!media || !fs.existsSync(media.filePath) || crypto.createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex") !== ref.sha256) throw new Error(`参考媒体字节或版本不一致：${ref.label}`);

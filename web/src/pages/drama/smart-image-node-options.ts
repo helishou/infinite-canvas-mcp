@@ -12,7 +12,8 @@ export function smartImageChoices(canvasId: string, nodes: Row[], assets: Record
                 const source = row.sharedSource as Row | undefined;
                 return source?.sourceProjectId === sharedOrigin.sourceProjectId && source?.sourceNodeId === sharedOrigin.sourceNodeId;
             }));
-        const localAssetId = Object.entries(assets).find(([, asset]) => asset.nodeId === node.id && !asset.sharedSource)?.[0];
+        const localAssetId = Object.entries(assets).find(([assetId, asset]) => asset.nodeId === node.id
+            && !assetPlan.some(row => String(row.id || row.asset_id || "") === assetId && row.sharedSource))?.[0];
         return {
             projectId: canvasId,
             nodeId: node.id,
@@ -21,14 +22,14 @@ export function smartImageChoices(canvasId: string, nodes: Row[], assets: Record
             ...(sharedOrigin && sharedPlan ? { sharedProjection: true } : {}),
         };
     });
-    for (const [assetId, asset] of Object.entries(assets)) {
-        const source = asset.sharedSource;
+    for (const plan of assetPlan) {
+        const assetId = String(plan.id || plan.asset_id || "");
+        const source = plan.sharedSource as Row | undefined;
         if (!source || source.sourceProjectId === canvasId) continue;
         const project = sharedProjects.find(project => project.id === source.sourceProjectId), node = project?.nodes?.find((node: Row) => node.id === source.sourceNodeId);
         if (!project || !node || !valid(node)) continue;
         const key = imageChoiceKey({ projectId: project.id, nodeId: node.id });
         if (result.some(choice => imageChoiceKey(choice) === key)) continue;
-        const plan = assetPlan.find(row => (row.asset_id || row.id) === assetId);
         result.push({ projectId: project.id, nodeId: node.id, assetId, title: plan?.asset_name || plan?.name || node.title, shared: true });
     }
     return result;

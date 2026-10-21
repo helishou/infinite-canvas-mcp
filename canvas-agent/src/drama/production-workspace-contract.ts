@@ -27,9 +27,6 @@ export const productionWorkspaceSchemas = {
     production_get_continuity: owner.extend({ snapshot: z.enum(["draft", "published"]).default("draft"), view: z.enum(["summary", "issues", "timeline", "shot"]).default("summary"), targetId: id.optional(), objectId: id.optional(), pageSize: z.number().int().positive().optional(), cursor: z.string().optional() }),
     production_check_continuity: owner.extend({ expectedRevision: z.number().int().nonnegative(), operationId: id, snapshot: z.enum(["draft", "published"]).optional(), targetIds: z.array(id).optional() }),
     production_get_shared_assets: owner,
-    production_adopt_shared_asset: episodeOwner.extend({ assetId: id, approvedId: id, expectedRevision: z.number().int().nonnegative(), operationId: id }),
-    production_adopt_shared_assets: episodeOwner.extend({ assets: z.array(z.object({ assetId: id, approvedId: id }).strict()).min(1), expectedRevision: z.number().int().nonnegative(), operationId: id }),
-    production_retry_shared_update: episodeOwner.extend({ adoptionId: id, expectedRevision: z.number().int().nonnegative() }),
     production_arrange_scene: owner.extend({ sceneId: id, expectedRevision: z.number().int().nonnegative(), operationId: id }),
 };
 export const productionWorkspaceToolNames = Object.keys(productionWorkspaceSchemas) as Array<keyof typeof productionWorkspaceSchemas>;
@@ -55,10 +52,7 @@ export const productionWorkspaceDescriptions = {
     production_prepare_targets: "在固定画布按 Backend 持久化布局计划准备正式 entity:<character|scene|prop>:<实体ID> 素材节点、scene 剧本文本节点、asset/frame 节点或 segment Clip；返回布局回执，不发布或生成。",
     production_get_continuity: "只读读取正式连续性检查状态、问题、对象轨迹或单镜状态；不会触发检查或修改制作稿。",
     production_check_continuity: "按正式 owner 和 revision 执行 Acheng 固定 runtime 的连续性检查并持久化回执；检查完成不表示 verdict passed，不发布或生成。",
-    production_get_shared_assets: "读取同剧目共享素材版本及当前集持久更新状态；共享画布角色、场景和道具节点无需审核即可进入素材库。",
-    production_adopt_shared_asset: "将同剧目批准资产采用到已登记的集内目标；核验来源、媒体和版本，不生成。",
-    production_adopt_shared_assets: "一次事务批量采用多项同剧目批准资产；后台自动发布推版本时不会逐项冲突，全部核验来源、媒体和版本，不生成。",
-    production_retry_shared_update: "核对当前 revision 后恢复一项被阻塞的共享引用更新；不授权新的生成范围。",
+    production_get_shared_assets: "读取同剧目共享素材版本历史；当前共享来源由正式资产计划的源节点指针确定，选择本集节点时直接写入制作稿。",
     production_arrange_scene: "显式整理一个正式剧本场次的已准备分镜节点；不修改镜头/Segment 或其他场次。",
 };
 export function productionWorkspaceRequest(name: string, raw: unknown) {
@@ -101,7 +95,6 @@ export function productionWorkspaceRequest(name: string, raw: unknown) {
         return { method: "POST" as const, path: `${base}/scene-work/${action}`, body };
     }
     if (name === "production_get_shared_assets") return { method: "GET" as const, path: `${base}/shared-assets` };
-    if (name === "production_retry_shared_update") { const { adoptionId, ...request } = body; return { method: "POST" as const, path: `${base}/shared-assets/updates/${encodeURIComponent(adoptionId)}/retry`, body: request }; }
-    const suffix = name === "production_adopt_shared_asset" ? "shared-assets/adopt" : name === "production_adopt_shared_assets" ? "shared-assets/adopt-batch" : name === "production_arrange_scene" ? "arrange-scene" : "prepare-targets";
+    const suffix = name === "production_arrange_scene" ? "arrange-scene" : "prepare-targets";
     return { method: "POST" as const, path: `${base}/${suffix}`, body };
 }

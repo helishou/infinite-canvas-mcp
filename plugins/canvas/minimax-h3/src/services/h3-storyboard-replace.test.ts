@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { refsForSegment, replaceSegmentReference, withSegmentRefs } from "./h3-data";
-import { assignStoryboardShotRef, assignStoryboardShotRefs, dropUnboundStoryboardReferences, rebindStoryboardShot, reorderStoryboardShots, removeStoryboardShot, storyboardTrackItems } from "./h3-storyboard-track";
+import { assignStoryboardShotRef, assignStoryboardShotRefs, dropUnboundStoryboardReferences, rebindStoryboardShot, reorderStoryboardShots, removeStoryboardImageReference, removeStoryboardShot, storyboardTrackItems } from "./h3-storyboard-track";
 import { remapPictureTags } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
 import type { H3Ref, H3Segment } from "../types";
 
@@ -160,6 +160,22 @@ test("自愈：指向已删引用的分镜卡清掉绑定后变成可绑图的�
     assert.equal(first.duration, 3);
     // 仍然保持一张空卡（可以重新绑图），而不是整格消失。
     assert.deepEqual(boardsOf(healed).map((item) => item.image ?? null), [null, "image:board-b"]);
+});
+
+test("删除已经脱离分镜卡的残留 storyboard 引用时仍从运行参考中移除", () => {
+    const segment = storyboardSegment();
+    const target = refsForSegment(segment).find((ref) => ref.storageKey === "image:board-a")!;
+    const orphaned = { ...segment, storyboardShots: [
+        { id: "shot-1", duration: 3 },
+        { id: "shot-2", referenceBindingId: refsForSegment(segment).find((ref) => ref.storageKey === "image:board-b")!.bindingId, duration: 5 },
+    ] };
+    assert.equal(refsForSegment(orphaned).some((ref) => ref.bindingId === target.bindingId), true);
+    const updated = removeStoryboardImageReference(orphaned, target);
+    assert.equal(refsForSegment(updated).some((ref) => ref.bindingId === target.bindingId), false);
+    assert.deepEqual(boardsOf(updated), [
+        { id: "shot-1", image: undefined, duration: 3 },
+        { id: "shot-2", image: "image:board-b", duration: 5 },
+    ]);
 });
 
 test("删除分镜卡时同步删掉它的参考素材，不该残留在 ref 区", () => {

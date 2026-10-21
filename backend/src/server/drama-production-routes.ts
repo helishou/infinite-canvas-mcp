@@ -7,7 +7,7 @@ import type { EpisodeProductionRunner } from "../drama/production-runner.js";
 import { getProductionContract } from "@basketikun/canvas-agent/skills/acheng";
 import { productionWorkspaceSchemas, productionContractQuerySchema } from "@basketikun/canvas-agent/drama/production-contract";
 import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
-import { productionCompileSchema, productionApplyCompilationSchema, productionReadSchema, projectProductionRead, projectProductionVersion } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionCompileSchema, productionCompileSubmissionSchema, productionApplyCompilationSchema, productionReadSchema, projectProductionRead, projectProductionVersion } from "@basketikun/canvas-agent/drama/production-contract";
 import { compilationArtifactFreshness } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { ProductionCompilationService } from "../drama/compilation.js";
 import { ClipRefreshCoordinator } from "../drama/clip-refresh.js";
@@ -72,9 +72,8 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
     };
     router.post<Record<string, string>>(`${base}/compile`, (req, res) => {
         try {
-            const input = productionCompileSchema.extend({ operationId: z.string().min(1).optional() }).parse(req.body);
-            if (input.scope && !input.operationId) throw new Error("按范围编译必须提供稳定 operationId");
-            res.json({ ok: true, compilation: input.operationId ? compilations.enqueue(req.params.episodeId, base, input.operationId, input.expectedRevision, undefined, input.scope) : compilations.prepare(req.params.episodeId, base, input.expectedRevision) });
+            const input = productionCompileSubmissionSchema.parse(req.body);
+            res.json({ ok: true, compilation: compilations.enqueue(req.params.episodeId, base, input.operationId, input.expectedRevision, undefined, input.scope) });
         } catch (error) { handle(res, error); }
     });
     for (const action of ["start", "resume", "pause", "review"] as const) router.post<Record<string, string>>(`${base}/scene-work/${action}`, async (req, res) => {
@@ -124,10 +123,10 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             res.json({ ok: true, receipt: await service.translateCompiledPrompts(req.params.episodeId, input) });
         } catch (error) { handle(res, error); }
     });
-    router.post<Record<string, string>>(`${base}/apply-compilation`, (req, res) => {
+    router.post<Record<string, string>>(`${base}/apply-compilation`, async (req, res) => {
         try {
             const input = productionApplyCompilationSchema.parse(req.body);
-            res.json({ ok: true, receipt: compilations.apply(req.params.episodeId, base, input.preparedId) });
+            res.json({ ok: true, receipt: await compilations.apply(req.params.episodeId, base, input.preparedId) });
         } catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/bindings`, (req, res) => {
@@ -198,22 +197,6 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             if (!runner) throw new Error("制作执行器不可用");
             res.json({ ok: true, production: publicProductionRecord(runner.arrangeScene(req.params.episodeId, input.sceneId, input.expectedRevision, input.operationId)), mediaSubmitted: false });
         } catch (error) { handle(res, error); }
-    });
-    router.post<Record<string, string>>(`${base}/shared-assets/adopt`, (req, res) => {
-        try {
-            const input = z.object({ assetId: z.string().min(1), approvedId: z.string().min(1), expectedRevision: z.number().int().nonnegative(), operationId: z.string().min(1) }).parse(req.body);
-            res.json({ ok: true, production: publicProductionRecord(service.adoptSharedAsset(req.params.episodeId, input)), mediaSubmitted: false });
-        } catch (error) { handle(res, error); }
-    });
-    router.post<Record<string, string>>(`${base}/shared-assets/adopt-batch`, (req, res) => {
-        try {
-            const input = z.object({ assets: z.array(z.object({ assetId: z.string().min(1), approvedId: z.string().min(1) }).strict()).min(1), expectedRevision: z.number().int().nonnegative(), operationId: z.string().min(1) }).parse(req.body);
-            res.json({ ok: true, production: publicProductionRecord(service.adoptSharedAssets(req.params.episodeId, input)), mediaSubmitted: false });
-        } catch (error) { handle(res, error); }
-    });
-    router.post<Record<string, string>>(`${base}/shared-assets/updates/:adoptionId/retry`, (req, res) => {
-        try { const input = z.object({ expectedRevision: z.number().int().nonnegative() }).parse(req.body); res.json({ ok: true, ...service.retrySharedUpdate(req.params.episodeId, req.params.adoptionId, input.expectedRevision) }); }
-        catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}`, (req, res) => {
         try {

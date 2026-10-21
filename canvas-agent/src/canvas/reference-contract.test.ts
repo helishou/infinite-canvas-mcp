@@ -54,6 +54,47 @@ test("主体绑定图片排在普通场景图前并同步重映射提示词编�
     assert.match(result.compiledPrompt, /<Subject 3> is the cottage interior board, represented by <Picture 3>/);
 });
 
+test("已按 Shot 与 Subject 明确绑定的正式提示词保持实际 Picture 顺序", () => {
+    const binding = (id: string, label: string, role: string, subjectId?: string) => ({
+        id, assetId: id, label, role, subjectId, tags: [], enabled: true, usage: "reference", mediaType: "image", url: `https://example.test/${id}.png`,
+    });
+    const prompt = [
+        "subject_definitions:",
+        "<Picture 1> is the persisted storyboard frame for [Shot 2].",
+        "<Picture 2> is the persisted storyboard frame for [Shot 3].",
+        "<Subject 1> is Hongxiao, represented by <Picture 3>.",
+        "<Subject 2> is the cottage, represented by <Picture 4>.",
+        "<Subject 3> is Shen Yan, represented by <Picture 5>.",
+        "<Subject 4> is his sword, represented by <Picture 6>.",
+        "summary:",
+        "Use the references in the authored shot order.",
+        "detailed_description:",
+        "[Shot 2] Match the serpent frame with <Picture 1>.",
+        "[Shot 3] Continue from the rod frame <Picture 2>.",
+    ].join("\n");
+    const result = compileReferenceSubmission({}, {
+        taskMode: "ref2va",
+        prompt,
+        referenceBindings: [
+            binding("hongxiao", "Hongxiao", "character_turnaround", "hongxiao"),
+            binding("cottage", "Cottage", "scene", "cottage"),
+            binding("shenyan", "Shen Yan", "character_turnaround", "shenyan"),
+            binding("board-2", "Shot 2 frame", "storyboard"),
+            binding("board-3", "Shot 3 frame", "storyboard"),
+            binding("sword", "Sword", "prop", "sword"),
+        ],
+        storyboardShots: [
+            { id: "SH-1" },
+            { id: "SH-2", referenceBindingId: "board-2" },
+            { id: "SH-3", referenceBindingId: "board-3" },
+            { id: "SH-4" },
+        ],
+    });
+
+    assert.deepEqual(result.references.map((reference) => reference.id), ["board-2", "board-3", "hongxiao", "cottage", "shenyan", "sword"]);
+    assert.equal(result.compiledPrompt, prompt);
+});
+
 test("提示词使用公开编号标签，主体定义补入对应图片引用", () => {
     const project = { referenceCatalog: [
         { id: "a", label: "人物", mediaType: "image", role: "character_identity", tags: [], storageKey: "image:a" },

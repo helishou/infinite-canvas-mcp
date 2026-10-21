@@ -118,7 +118,7 @@ test("a bound shared Subject image remains a media dependency without becoming a
     (d.source.shots as any[])[0].subject_usages.push({ subjectId: "SUB_CONTEXT_PROP", presentation: "state_context", pictureBindingIds: [], referencePurpose: [], continuityFactIds: [], stateRequirements: [] });
     d.source.segments = [{ id: "GA", shot_ids: ["SA"], mode: "Ref2VA" }];
     d.sourceHash = compilationHash(d.source);
-    d.assets.SHARED_ASSET = { version: "v1", status: "generated", nodeId: "SHARED_REF", storageKey: "image:shared", sha256: "a".repeat(64), sharedSource: { sourceProjectId: "SHARED_CANVAS", sourceNodeId: "CHAR_NODE" } };
+    d.assets.SHARED_ASSET = { version: "v1", status: "generated", nodeId: "SHARED_REF", storageKey: "image:shared", sha256: "a".repeat(64) };
     d.assets.LOCAL_PROP = { version: "v1", status: "generated", storageKey: "image:local-prop", sha256: "b".repeat(64) };
     d.assets.CONTEXT_PROP = { version: "v1", status: "generated", storageKey: "image:context-prop", sha256: "c".repeat(64) };
     const before = structuredClone(d);

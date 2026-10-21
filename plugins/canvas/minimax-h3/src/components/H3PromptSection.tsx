@@ -5,7 +5,7 @@ import type { H3Ref, H3ReferenceRetention, H3Segment, H3SubjectDefinition } from
 import { H3Icon } from "./H3Icon";
 import { StoryboardDialogueStrip } from "./StoryboardDialogueStrip";
 import type { StoryboardSpeakerOption } from "./StoryboardDialogueStrip";
-import { inferReferenceRole, refsForSegment, segmentRefsPatch, withSegmentRefs } from "../services/h3-data";
+import { inferReferenceRole, refsForSegment, refsForSubmission, segmentRefsPatch, withSegmentRefs } from "../services/h3-data";
 import { sameRef } from "../services/h3-compatibility";
 import { orderedGroupStoryboardRefs } from "../services/h3-refs";
 import { storyboardShotMarkers } from "../services/h3-storyboard-markers";
@@ -783,7 +783,7 @@ export function H3PromptSection({
   type Translation = { segmentId: string; prompt: string; text: string };
   const [translation, setTranslation] = useState<Translation | null>(null);
   const [translating, setTranslating] = useState(false);
-  const [productionTranslating, setProductionTranslating] = useState(false);
+  const [productionPromptTranslating, setProductionPromptTranslating] = useState(false);
   const [isTranslated, setIsTranslated] = useState(false);
   const [translateError, setTranslateError] = useState<string | null>(null);
   type EnglishPromptToggle = { documentId: string; originalPrompt: string; translatedPrompt: string; cached: boolean };
@@ -799,10 +799,10 @@ export function H3PromptSection({
   const englishPromptRequestRef = useRef<{ controller: AbortController; prompt: string; segmentId?: string; documentId: string } | null>(null);
   const translationRequestRef = useRef<{ controller: AbortController; prompt: string; segmentId?: string } | null>(null);
   useEffect(() => {
-    setProductionTranslating(false);
+    setProductionPromptTranslating(false);
     const applyProductionTranslation = (detail?: { projectId?: string; nodeId?: string; segmentId?: string; translating?: boolean }) => {
       if (detail?.projectId !== ctx.projectId || detail.nodeId !== ctx.node.id || detail.segmentId !== selected?.id) return;
-      setProductionTranslating(detail.translating === true);
+      setProductionPromptTranslating(detail.translating === true);
     };
     const onProductionTranslation = (event: Event) => applyProductionTranslation((event as CustomEvent<{ projectId?: string; nodeId?: string; segmentId?: string; translating?: boolean }>).detail);
     const channel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("production-h3-prompt-translation") : null;
@@ -1309,16 +1309,22 @@ export function H3PromptSection({
       const latestMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
       const latestSegment = segmentsFor(latestMetadata).find((item) => item.id === selected?.id);
       if (!latestSegment) throw new Error("当前 Clip 已不存在，无法对齐分镜图顺序。");
-      const previousRefs = refsForSegment(latestSegment);
-      const orderedRefs = orderStoryboardReferencesFirst(previousRefs,
-        storyboardShotsRef.current.flatMap((shot) => shot.pictureBindingId ? [shot.pictureBindingId] : []),
+      const previousRefs = refsForSubmission(latestSegment);
+      const previousTrackBindingIds = new Set((latestSegment.storyboardShots || []).flatMap((shot) => shot.referenceBindingId ? [shot.referenceBindingId] : []));
+      const currentTrackBindingIds = new Set(storyboardShotsRef.current.flatMap((shot) => shot.pictureBindingId ? [shot.pictureBindingId] : []));
+      const removedTrackBindingIds = new Set([...previousTrackBindingIds].filter((id) => !currentTrackBindingIds.has(id)));
+      const currentRefs = previousRefs.filter((ref) => !(ref.bindingId && removedTrackBindingIds.has(ref.bindingId) && isStoryboardPictureRef(ref)));
+      const orderedRefs = orderStoryboardReferencesFirst(currentRefs,
+        [...currentTrackBindingIds],
         (ref) => ref.bindingId, isStoryboardPictureRef);
-      const orderChanged = orderedRefs.some((ref, index) => ref.bindingId !== previousRefs[index]?.bindingId);
+      const orderChanged = orderedRefs.length !== previousRefs.length || orderedRefs.some((ref, index) => ref.bindingId !== previousRefs[index]?.bindingId);
       const shotOrder = orderStoryboardImageReferences(latestSegment.storyboardShots || [],
-        storyboardShotsRef.current.flatMap((shot) => shot.pictureBindingId ? [shot.pictureBindingId] : []),
+        [...currentTrackBindingIds],
         (shot) => shot.referenceBindingId,
-        (shot) => Boolean(shot.referenceBindingId && previousRefs.some((ref) => ref.bindingId === shot.referenceBindingId && isStoryboardPictureRef(ref))));
-      const trackChanged = shotOrder.some((shot, index) => shot.id !== latestSegment.storyboardShots?.[index]?.id);
+        (shot) => Boolean(shot.referenceBindingId && currentRefs.some((ref) => ref.bindingId === shot.referenceBindingId && isStoryboardPictureRef(ref))));
+      const previousTrack = latestSegment.storyboardShots || [];
+      const trackChanged = shotOrder.length !== previousTrack.length || shotOrder.some((shot, index) =>
+        shot.id !== previousTrack[index]?.id || shot.referenceBindingId !== previousTrack[index]?.referenceBindingId || shot.duration !== previousTrack[index]?.duration);
       if (orderChanged || trackChanged) {
         const activeDocument = ctx.textDocument(textTarget);
         await activeDocument.flush();
@@ -1372,7 +1378,7 @@ export function H3PromptSection({
       );
       const targetMode = String(target.mode || target.taskMode || "ref2va");
       const normalizedMode = targetMode === "t2v" ? "t2va" : targetMode === "i2v" ? "i2va" : targetMode === "fl2v" ? "fl2va" : "ref2va";
-      const references = refsForSegment(target);
+       const references = refsForSubmission(target);
       const missingAddress = references.filter((ref) => !ref.url && !ref.storageKey);
       if (missingAddress.length) {
         const names = missingAddress.map((ref) => ref.name || "未命名参考").join("、");
@@ -1798,12 +1804,13 @@ export function H3PromptSection({
             <button
               key="translate-prompt-english"
               type="button"
-              disabled={englishPromptTranslating || enhancing || !textStatus.ready || textStatus.blocked || !prompt.trim()}
+              disabled={productionPromptTranslating || englishPromptTranslating || enhancing || !textStatus.ready || textStatus.blocked || !prompt.trim()}
               onClick={() => void handleEnglishPromptToggle()}
+              aria-label={productionPromptTranslating ? "制作台正在翻译为英文提示词" : undefined}
               aria-pressed={englishPromptApplied}
-              title={englishPromptApplied ? "切回翻译前的原提示词" : "用设置中的翻译模型翻译为英文；再次点击可切回原提示词"}
+              title={productionPromptTranslating ? "制作台正在翻译为英文提示词" : englishPromptApplied ? "切回翻译前的原提示词" : "用设置中的翻译模型翻译为英文；再次点击可切回原提示词"}
             >
-              {englishPromptTranslating ? "翻译中…" : englishPromptApplied ? "切回原文" : "翻译提示词"}
+              {productionPromptTranslating ? "制作台翻译中…" : englishPromptTranslating ? "翻译中…" : englishPromptApplied ? "切回原文" : "翻译提示词"}
             </button>
             {englishPromptApplied && activeEnglishPromptToggle ? <span role="status" aria-live="polite" style={{ fontSize: 12, opacity: 0.75 }}>
               {activeEnglishPromptToggle.cached ? "已复用翻译缓存" : "译文已写回当前 Clip"}
@@ -1985,14 +1992,14 @@ export function H3PromptSection({
           key="prompt-translate"
           type="button"
           onClick={() => void handleTranslateToggle()}
-          disabled={translating || productionTranslating || (!isTranslated && !prompt.trim())}
-          className={`minimax-prompt-translate${isTranslated ? " is-translated" : ""}${productionTranslating ? " is-translating" : ""}`}
-          aria-label={productionTranslating || translating ? "正在翻译" : isTranslated ? "切换回原提示词" : "查看中文翻译"}
-          title={productionTranslating || translating ? "正在翻译" : isTranslated ? "切换回原提示词" : !prompt.trim() ? "请先输入提示词" : "查看中文翻译"}
+          disabled={translating || (!isTranslated && !prompt.trim())}
+          className={`minimax-prompt-translate${isTranslated ? " is-translated" : ""}${translating ? " is-translating" : ""}`}
+          aria-label={translating ? "正在翻译为中文" : isTranslated ? "切换回原提示词" : "查看中文翻译"}
+          title={translating ? "正在翻译为中文" : isTranslated ? "切换回原提示词" : !prompt.trim() ? "请先输入提示词" : "查看中文翻译"}
         >
-          {productionTranslating ? "翻译中" : translating ? "…" : isTranslated ? "EN" : "译"}
+          {translating ? "…" : isTranslated ? "EN" : "译"}
         </button>
-        {translating || productionTranslating ? <div className="minimax-prompt-translate-status" role="status">正在翻译…</div> : null}
+        {translating ? <div className="minimax-prompt-translate-status" role="status">正在翻译为中文…</div> : null}
         {translateError ? <div key="prompt-translate-error" className="minimax-prompt-translate-error" role="alert">翻译失败：{translateError}</div> : null}
       </div>
       <Modal

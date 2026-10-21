@@ -130,19 +130,19 @@ export class CanvasH3Runner {
             const node = (project.nodes as Array<Record<string, unknown>>).find(item => item.id === plan.nodeId)!;
             const metadata = recordOf(node.metadata);
             const segment = (metadata.segments as H3Segment[]).find(item => item.id === plan.segmentId)!;
-            const effective = resolveH3Runtime(segment, normalized.params || {}, metadata, defaults);
+            const effective = effectiveH3Runtime(segment, normalized.params || {}, metadata, defaults);
             const issue = (code: string, message: string) => diagnostics.push({ code, nodeId: plan.nodeId, segmentId: plan.segmentId, message });
             // Director submissions must use the same saved values the Clip UI resolves.
             // Execution controls may travel in params, but cannot silently replace settings.
             if (segment.directorEngine || segment.productionClipProjection) {
-                const saved = resolveH3Runtime(segment, {}, metadata, defaults).params;
+                const saved = effectiveH3Runtime(segment, {}, metadata, defaults).params;
                 const changed = Object.keys(effective.params).filter(key => (H3_PARAM_KEYS as readonly string[]).includes(key)
                     && stableH3Fingerprint(effective.params[key]) !== stableH3Fingerprint(saved[key]));
                 if (changed.length) issue('H3_UI_PARAMETER_MISMATCH', `导演 H3 参数必须与前端 Clip 设置一致：${changed.join('、')}；请先保存 Clip 参数，再重新预检提交`);
             }
             for (const message of effective.parameterIssues) issue('INVALID_H3_PARAMETERS', message);
             if (effective.params.selectedVideoModelEnabled === true && !String(effective.params.selectedVideoModel || "").trim()) issue("SELECTED_VIDEO_MODEL_REQUIRED", "已启用自选视频模型，请先选择一个已配置的视频模型");
-            if (effective.params.selectedVideoModelEnabled === true && h3LocalOnlyReason(effective.params)) issue("SELECTED_VIDEO_MODEL_UNSUPPORTED_MODE", "当前 H3 专用的潜空间连续或分阶段确认功能不能与自选视频模型一起使用");
+
 
 
 
@@ -879,10 +879,14 @@ export class CanvasH3Runner {
         const defaults = input.runPlan?.defaults || recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
         // Group boundaries must match the effective settings shown by the UI,
         // including inherited defaults. Never conceal conflicting saved switches.
+        const isSelectedVideoClip = (index: number) => Boolean(segments[index])
+            && extractParams(segments[index], input.params || {}, metadata, defaults).selectedVideoModelEnabled === true;
         const motionContext = (index: number) => {
             const segment = segments[index];
             const params = extractParams(segment, input.params || {}, metadata, defaults);
             if (params.tailFrameContinuation === true && params.motionContextEnabled === true) throw new Error(`Clip ${String(segment.id)} 尾帧参考与潜空间续写的保存值同时开启，请先选择一种衔接方式并保存`);
+            // 自选视频模型不执行潜空间续写，既不接收也不产出连续组上下文。
+            if (isSelectedVideoClip(index) || isSelectedVideoClip(index + 1)) return false;
             return params.motionContextEnabled === true;
         };
         const resumesGroup = selected > 0 && motionContext(selected - 1);
@@ -991,9 +995,10 @@ export class CanvasH3Runner {
         const refs = compilation.references.map((reference) => ({ ...reference, type: reference.mediaType, name: reference.label } as H3Ref));
         // The segment switch controls its outgoing edge. A group head saves latent at index 1;
         // only index > 1 consumes the previous clip's latent. Standalone runs have no cross-task context.
-        params.motionContextEnabled = Boolean(plan.continuation);
+        const useSelectedVideoModel = params.selectedVideoModelEnabled === true;
+        params.motionContextEnabled = !useSelectedVideoModel && Boolean(plan.continuation);
         if (plan.continuation?.index === 1) params.continuationAudioRefineEnabled = false;
-        if (plan.continuation) {
+        if (plan.continuation && !useSelectedVideoModel) {
             params.motionContextEnabled = true;
             params.continuationTask = buildH3ContinuationTask(String(parent.input.projectId), plan.continuation.group, parent.id, plan.continuation.index);
         }
@@ -1071,13 +1076,16 @@ export class CanvasH3Runner {
         prompt = applyH3StyleTemplate(prompt, taskMode, styleTemplateId as string | null, styleTemplates);
         // Only explicitly bound video references enter model conditioning.
         const referenceVideos = [...videos];
-        const useSelectedVideoModel = params.selectedVideoModelEnabled === true;
         const selectedVideoModel = String(params.selectedVideoModel || "").trim();
         if (useSelectedVideoModel) {
             if (!selectedVideoModel) throw new Error("已启用自选视频模型，请先在参数设置标题旁选择一个模型");
             if (!this.videoDispatcher) throw new Error("自选视频模型执行器未初始化");
-            if (h3LocalOnlyReason(params)) throw new Error("当前 H3 专用的潜空间连续或分阶段确认功能不能与自选视频模型一起使用");
         }
+        const selectedVideoDuration = Number(params.duration || segment.duration || 5);
+        const selectedVideoParams = {
+            mode: runtimeTaskMode, taskMode: runtimeTaskMode, duration: selectedVideoDuration,
+            selectedVideoModelFieldValues: params.selectedVideoModelFieldValues,
+        };
         const requestedEngine = h3ExecutionMode(params.minimaxEngine || params.engine || metadata.minimaxEngine);
         Object.assign(params, {
             taskMode: runtimeTaskMode,
@@ -1120,13 +1128,17 @@ export class CanvasH3Runner {
             warnings: compilation.issues.filter((issue) => issue.severity === "warning"),
             continuation: { tailFrame: useTailFrame, previousVideo: usePreviousAsReference, motionContext: Boolean(plan.continuation), requestedMode: taskMode, runtimeMode: runtimeTaskMode },
         };
+        const generationSettings = useSelectedVideoModel
+            ? this.videoDispatcher!.generationSettings({ model: selectedVideoModel, prompt, seconds: String(selectedVideoDuration), workflowReferenceCount: actualReferences.length, params: selectedVideoParams })
+            : generationSettingsSnapshot(params, {
+                engine, workflow: "MiniMax H3", taskMode: String(params.taskMode || segment.taskMode || "r2v"),
+            });
+        const loggedParams = useSelectedVideoModel ? { submission, generationSettings } : { ...params, submission, generationSettings };
         const log = this.stores.logs.create({
             projectId: String(parent.input.projectId), nodeId: plan.nodeId, segmentId: plan.segmentId,
             status: "queued", platform: engine || "comfyui", workflow: useSelectedVideoModel ? selectedVideoModel : "MiniMax H3", model: useSelectedVideoModel ? selectedVideoModel : String(params.modelName || ""), taskMode: String(params.taskMode || segment.taskMode || "r2v"),
             prompt, references: actualReferences, inputCounts: { image: images.length, video: referenceVideos.length, audio: audios.length }, startedAt: new Date().toISOString(), durationMs: 0, outputs: [],
-            params: { ...params, submission, generationSettings: generationSettingsSnapshot(params, {
-                engine, workflow: useSelectedVideoModel ? selectedVideoModel : "MiniMax H3", taskMode: String(params.taskMode || segment.taskMode || "r2v"),
-            }) },
+            params: loggedParams,
         });
         this.events.publish({ type: "generation-log.created", entityId: log.id, payload: log });
         const childParams = { ...params, canvasInputHash: inputHash(effectiveTargetInput(project as CanvasProject, plan.nodeId, plan.segmentId, input.runPlan?.defaults || {})), canvasInputDefaults: input.runPlan?.defaults || {}, h3ExecutionContract: { version: 1, expectedRuntime: { ...params }, production: input.runPlan?.requirements || null }, ...(compositeTempDir ? { storyboardCompositeTempDir: compositeTempDir } : {}), parentTaskId: parent.id, canvasBinding: { projectId: parent.input.projectId, nodeId: plan.nodeId, segmentId: plan.segmentId, generationLogId: log.id, bindOnStart: false } };
@@ -1153,10 +1165,9 @@ export class CanvasH3Runner {
                     videoReferences: actualReferences.filter((reference) => String(reference.mediaType || reference.type || "").startsWith("video")).map(videoModelReference),
                     audioReferences: actualReferences.filter((reference) => String(reference.mediaType || reference.type || "").startsWith("audio")).map(videoModelReference),
                     workflowReferenceCount: actualReferences.length,
-                    seconds: String(params.duration || segment.duration || 5),
+                    seconds: String(selectedVideoDuration),
                     params: {
-                        mode: runtimeTaskMode, taskMode: runtimeTaskMode, duration: Number(params.duration || segment.duration || 5),
-                        selectedVideoModelFieldValues: params.selectedVideoModelFieldValues,
+                        ...selectedVideoParams,
                         parentTaskId: parent.id,
                         canvasBinding: { projectId: parent.input.projectId, nodeId: plan.nodeId, segmentId: plan.segmentId, generationLogId: log.id },
                     },
@@ -1498,7 +1509,26 @@ function normalizeTaskMode(value: unknown) {
 }
 
 function extractParams(segment: H3Segment, override: Record<string, unknown>, metadata: Record<string, unknown>, defaults: Record<string, unknown>): Record<string, unknown> {
-    return resolveH3Runtime(segment, override, metadata, defaults).params;
+    return effectiveH3Runtime(segment, override, metadata, defaults).params;
+}
+
+/**
+ * 自选视频模型执行的是它自己的工作流，H3 原生的潜空间续写与分阶段二采在上面不会执行。
+ * 这里只关闭本次运行的有效参数，不写回 Clip；切回原生 H3 时仍按原保存值运行。
+ */
+function effectiveH3Runtime(segment: H3Segment, override: Record<string, unknown>, metadata: Record<string, unknown>, defaults: Record<string, unknown>) {
+    const runtime = resolveH3Runtime(segment, override, metadata, defaults);
+    if (runtime.params.selectedVideoModelEnabled !== true) return runtime;
+    const params: Record<string, unknown> = {
+        ...runtime.params,
+        motionContextEnabled: false,
+        latentUpscaleEnabled: false,
+        latentUpscaleConfirmationMode: false,
+        faceRefineEnabled: false,
+        confirmationMode: false,
+    };
+    for (const key of ["continuationTask", "latentConfirmationPhase", "latentCheckpointId", "confirmSecondPass"]) delete params[key];
+    return { ...runtime, params };
 }
 
 function resultVideo(task: RuntimeTask) {

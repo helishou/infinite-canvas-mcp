@@ -97,6 +97,13 @@ test("conflicting saved switches stay visible and are diagnosed instead of hidde
     assert.equal(normalizeH3Params(clip).motionContextEnabled, true);
 });
 
+test("自选视频模型不执行潜空间续写，保存的尾帧与续写开关不互相阻塞", () => {
+    const resolved = resolveH3Runtime({ selectedVideoModelEnabled: true, selectedVideoModel: 'YZ', tailFrameContinuation: true, motionContextEnabled: true }, {}, {}, {});
+    assert.deepEqual(resolved.parameterIssues, []);
+    // 只影响诊断，不改写 Clip 的保存值。
+    assert.equal(resolved.params.motionContextEnabled, true);
+});
+
 test("saved companion false prevents inherited defaults from reopening motion", () => {
     for (const defaults of [{ motionContextEnabled: true }, { motionContextEnabled: true, tailFrameContinuation: true }]) {
         const params = resolveH3Runtime(withH3ParameterEdits({}, { tailFrameContinuation: true }), {}, {}, defaults).params;

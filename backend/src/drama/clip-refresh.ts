@@ -209,6 +209,7 @@ export class ClipRefreshCoordinator {
         this.active.add(key);
         const step = (status: Status) => { job.status = status; store.save(job); };
         const measure = <T>(name: string, fn: () => T): T => { const start = performance.now(); try { return fn(); } finally { job.timings[name] = (job.timings[name] || 0) + performance.now() - start; store.save(job); } };
+        const measureAsync = async <T>(name: string, fn: () => Promise<T>): Promise<T> => { const start = performance.now(); try { return await fn(); } finally { job.timings[name] = (job.timings[name] || 0) + performance.now() - start; store.save(job); } };
         try {
             let compilation: any;
             // Recover original application even if inputs have since changed.
@@ -243,7 +244,7 @@ export class ClipRefreshCoordinator {
                 step("blocked"); return;
             }
             job.preparedId = compilation.preparedId; step("applying");
-            job.application = measure("applyMs", () => this.compilations.apply(id, this.owner, job.preparedId!));
+            job.application = await measureAsync("applyMs", () => this.compilations.apply(id, this.owner, job.preparedId!));
             job.status = this.syncStatus(job);
             job.timings.totalMs = Date.now() - Date.parse(job.createdAt); store.save(job);
             if (job.status === "succeeded") await this.queueCompiledPromptTranslation(id, job, store);

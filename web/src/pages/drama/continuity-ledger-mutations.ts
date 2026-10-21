@@ -6,6 +6,7 @@ export type ContinuityDeletionAnalysis = {
     code: 'allowed' | 'missing' | 'ambiguous' | 'referenced' | 'shared_evidence';
     references: ContinuityDeletionReference[];
     removals: { collection: ContinuityLedgerCollection; id: string }[];
+    updates: { collection: ContinuityLedgerCollection; id: string; value: Row }[];
     affectedShotIds: string[];
 };
 const collections: ContinuityLedgerCollection[] = ['facts', 'timelines', 'initial', 'events', 'requirements', 'coverage'];
@@ -22,7 +23,7 @@ export function continuityLedgerEntryId(collection: ContinuityLedgerCollection, 
 export function analyzeContinuityDeletion(source: Row | undefined, ledger: Row, collection: ContinuityLedgerCollection, entry: Row | string): ContinuityDeletionAnalysis {
     const id = typeof entry === 'string' ? entry : continuityLedgerEntryId(collection, entry);
     const matches = rows(ledger[collection]).filter(row => continuityLedgerEntryId(collection, row) === id);
-    const result: ContinuityDeletionAnalysis = { allowed: false, code: 'missing', references: [], removals: [], affectedShotIds: [] };
+    const result: ContinuityDeletionAnalysis = { allowed: false, code: 'missing', references: [], removals: [], updates: [], affectedShotIds: [] };
     if (!collections.includes(collection) || !id || !matches.length) return result;
     if (matches.length !== 1) return { ...result, code: 'ambiguous' };
     const target = matches[0];
@@ -40,23 +41,37 @@ export function analyzeContinuityDeletion(source: Row | undefined, ledger: Row, 
         result.removals.push({ collection: group, id: rowId }); affect(row);
     };
     remove(collection, target);
-    if (collection === 'facts' || collection === 'timelines') {
+    if (collection === 'facts') {
+        // Removing a fact also removes the ledger assertions that only make
+        // sense while that fact exists. Shot references are cleaned by the
+        // authoritative production edit in Backend.
+        for (const group of ['initial', 'events', 'requirements', 'coverage'] as const) for (const row of rows(ledger[group])) {
+            const linked = row.fact_id === id || strings(row.fact_ids).includes(id);
+            if (linked) {
+                if (row.shot_id) affected.add(row.shot_id);
+                strings(row.shot_ids).forEach(shotId => affected.add(shotId));
+                if (group === 'coverage' && Array.isArray(row.fact_ids) && row.fact_ids.length > 1) {
+                    const rowId = continuityLedgerEntryId(group, row);
+                    result.updates.push({ collection: group, id: rowId, value: { ...row, fact_ids: row.fact_ids.filter((factId: string) => factId !== id) } });
+                } else remove(group, row);
+            }
+        }
+        for (const shot of rows(source?.shots)) {
+            const inLegacy = strings(shot.continuity_facts).includes(id);
+            const inUsage = rows(shot.subject_usages).some(usage => strings(usage.continuityFactIds).includes(id) || rows(usage.stateRequirements).some(row => row.factId === id));
+            if (inLegacy || inUsage) affected.add(String(shot.id));
+        }
+        for (const subject of rows(source?.subject_registry)) for (const binding of rows(subject.pictureBindings)) {
+            if (binding.applicableState && Object.prototype.hasOwnProperty.call(binding.applicableState, id)) affected.add(String(subject.id));
+        }
+    } else if (collection === 'timelines') {
         for (const group of collections) for (const row of rows(ledger[group])) {
             if (group === collection && row === target) continue;
-            if (collection === 'facts' ? row.fact_id === id || strings(row.fact_ids).includes(id) : row.timeline_id === id) reference(group, row, 'ledger_reference');
+            if (row.timeline_id === id) reference(group, row, 'ledger_reference');
         }
         if (!source) reference('source', { id: '' }, 'source_unavailable');
         for (const shot of rows(source?.shots)) {
-            if (collection === 'timelines' && shot.timeline_id === id) reference('shots', shot, 'shot_timeline', shot.id);
-            if (collection === 'facts') {
-                if (strings(shot.continuity_facts).includes(id)) reference('shots', shot, 'shot_fact', shot.id);
-                for (const usage of rows(shot.subject_usages)) {
-                    if (strings(usage.continuityFactIds).includes(id) || rows(usage.stateRequirements).some(row => row.factId === id)) reference('subject_usages', usage, 'subject_state', shot.id);
-                }
-            }
-        }
-        if (collection === 'facts') for (const subject of rows(source?.subject_registry)) for (const binding of rows(subject.pictureBindings)) {
-            if (binding.applicableState && Object.prototype.hasOwnProperty.call(binding.applicableState, id)) reference('pictureBindings', binding, 'picture_state');
+            if (shot.timeline_id === id) reference('shots', shot, 'shot_timeline', shot.id);
         }
         if (result.references.length) result.code = 'referenced';
     } else if (collection === 'initial') {
@@ -125,6 +140,9 @@ export function applyContinuityDeletion(source: Row | undefined, ledger: Row, co
     for (const group of collections) {
         const ids = new Set(analysis.removals.filter(row => row.collection === group).map(row => row.id));
         if (ids.size) next[group] = ledger[group].filter((row: Row) => !ids.has(continuityLedgerEntryId(group, row)));
+        for (const update of analysis.updates.filter(row => row.collection === group)) {
+            next[group] = (next[group] || ledger[group]).map((row: Row) => continuityLedgerEntryId(group, row) === update.id ? structuredClone(update.value) : row);
+        }
     }
     return next;
 }

@@ -4,6 +4,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
+import express from "express";
+import express from "express";
 import { BackendDatabase } from "../db.js";
 import { startServer } from "../server.js";
 import { EpisodeProductionService } from "../drama/production.js";
@@ -11,6 +13,22 @@ import { registerDramaProductionRoutes } from "./drama-production-routes.js";
 import { registerBackendMcpHttpRoutes } from "../mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+
+test("HTTP production compilation rejects requests without a stable operationId", async t => {
+    const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "compile-operation-id-"));
+    const db = new BackendDatabase(path.join(temporary, "fixture.sqlite"));
+    const app = express(); app.use(express.json());
+    registerDramaProductionRoutes(app, new EpisodeProductionService(db, undefined, temporary));
+    const server = app.listen(0, "127.0.0.1"); await once(server, "listening");
+    t.after(async () => {
+        server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+        db.close(); await fs.rm(temporary, { recursive: true, force: true });
+    });
+    const response = await fetch(`http://127.0.0.1:${(server.address() as any).port}/drama/episodes/missing/production/compile`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: 0 }),
+    });
+    assert.equal(response.status, 400);
+});
 
 test("unified MCP keeps same-ID owners isolated across sessions and completes edit/check/publish/read/recover without generation", async t => {
     const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "unified-production-"));

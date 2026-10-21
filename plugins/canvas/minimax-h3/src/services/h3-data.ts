@@ -1,6 +1,7 @@
 import type { H3CharacterGroup, H3CharacterGroupEditPatch, H3CharacterOutfit, H3CharacterVoice, H3Ref, H3ReferenceBinding, H3ReferenceRole, H3Segment } from "../types";
 import { sameRef } from "./h3-compatibility";
 import { characterGroupBindings, resolveCharacterGroupBindings, syncH3CharacterGroupSource } from "../../../../../canvas-agent/src/canvas/reference-contract";
+import { orderReferencesForSubmission } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
 
 function sameReferenceEntry(left: H3Ref, right: H3Ref) {
     if (left.bindingId && right.bindingId) return left.bindingId === right.bindingId;
@@ -49,6 +50,17 @@ export function refsForSegment(segment: H3Segment): H3Ref[] {
         return ref ? [ref] : [];
     });
     return refs.filter((ref, index) => refs.findIndex((other) => sameReferenceEntry(other, ref)) === index);
+}
+
+/** Prompt Picture ordinals follow the same storyboard-first order used by H3 submission. */
+export function refsForSubmission(segment: H3Segment): H3Ref[] {
+    return orderReferencesForSubmission(
+        refsForSegment(segment),
+        (segment.storyboardShots || []).map((shot) => String(shot.referenceBindingId || "")).filter(Boolean),
+        (ref) => ref.bindingId,
+        (ref) => ref.enabled !== false && ref.type === "image" && inferReferenceRole(ref) === "storyboard",
+        (ref) => ref.enabled !== false && ref.type === "image" && inferReferenceRole(ref) !== "storyboard" && Boolean(ref.subjectId || ref.groupId),
+    );
 }
 
 export function segmentRefsPatch(refs: H3Ref[], previous?: H3Segment): Pick<H3Segment, "referenceBindings" | "refItems" | "refs"> {

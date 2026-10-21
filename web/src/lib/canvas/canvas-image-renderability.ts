@@ -2,8 +2,8 @@ import { selectSmartImageResult } from "@basketikun/canvas-agent/reference-contr
 import { CanvasNodeType, type CanvasNodeData, type CanvasNodeImage } from "@/types/canvas";
 
 /**
- * 智能图片节点被引用的那张图必须是一个「引用」而不是快照：缺省跟随最新成功归档结果，
- * 用户在历史里显式钉选某张时锁定那张（`smartImageReferenceSelection`），失效选择回落最新。
+ * 智能图片节点被引用的图片跟随当前主图；显式的节点引用策略可以锁定历史结果或跟随最新。
+ * 主图失效时回落到最新成功归档结果。
  * 解析交给共享的 `selectSmartImageResult`，保证预览和真正提交的字节是同一张。
  * 字段缺失（只有顶层 content/storageKey 的旧画布）继续走顶层兜底。
  */
@@ -29,8 +29,7 @@ export function canvasNodeImage(node: CanvasNodeData) {
     const isSmartImage = node.type === CanvasNodeType.Config && node.metadata?.smart === true && (node.metadata.generationMode || "image") === "image";
     if (node.type !== CanvasNodeType.Image && !isSmartImage) return null;
     const metadata = node.metadata;
-    // 有归档结果集合时（智能节点，或带 images[] 的图片节点）：由引用选择策略解析当前
-    // 真正被引用的那张结果，缺省跟随最新成功归档结果，而不是停在 primaryImageId 快照。
+    // 有归档结果集合时（智能节点，或带 images[] 的图片节点）：由共享策略解析当前主图。
     if (node.metadata?.images?.length) {
         const resolved = resolveSmartImageReference(metadata);
         if (resolved) return resolved;

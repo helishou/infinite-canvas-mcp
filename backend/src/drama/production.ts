@@ -12,7 +12,7 @@ import { adoptedDirectorFields } from "./input-merge.js";
 import crypto from "node:crypto";
 import { assertDirectorWorkScope, directorArtifact, directorAdoption, type DirectorWorkPackage } from "@basketikun/canvas-agent/agent/work-package";
 import { DIRECTOR_SUBAGENT_KIND } from "@basketikun/canvas-agent/agent/delegation";
-import { currentCompilationArtifact, compilationScopeInput, preserveCompilationProvenance, scopedCompilerInput, productionReviewHash } from "@basketikun/canvas-agent/drama/compilation-scope";
+import { currentCompilationArtifact, compilationScopeInput, preserveCompilationProvenance, preserveH3ArtifactsAfterShotDurationOnlyEdit, scopedCompilerInput, productionReviewHash } from "@basketikun/canvas-agent/drama/compilation-scope";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -66,7 +66,7 @@ import type { BackendDatabase } from "../db.js";
 import type { BackendEventBus } from "../events.js";
 import type { CanvasCommit } from "../canvas/collaboration.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
-import { approvedSharedAsset, listApprovedSharedAssets, prepareSharedAssetProjection, registerSharedAssetVersion, sharedAssetHistory, sharedProjectionNodeId, sharedAssetNodeMatchesSource, validateSharedAssetSource, type ApprovedSharedAsset } from "./shared-assets.js";
+import { listApprovedSharedAssets, registerSharedAssetVersion, sharedAssetHistory, sharedAssetNodeMatchesSource, validateSharedAssetSourceIdentity, type ApprovedSharedAsset, type SharedAssetIdentity } from "./shared-assets.js";
 import { ensureProductionCanvas, productionCanvasContext } from "./production-canvas.js";
 import { explicitShotCueCount, importDemandScriptBlocks } from "./script-demand-import.js";
 import { scriptNodeOperations } from "./script-nodes.js";
@@ -144,6 +144,28 @@ function remapSubjectEntityReferences(source: Record<string, any>, kind: string,
         if (String(scene.sceneId || "") === fromId) scene.sceneId = toId;
     }
 }
+function clearSubjectEntityLedgerReferences(source: Record<string, any>, subject: Record<string, any>) {
+    const entityRef = record(subject.entityRef);
+    const kind = String(entityRef.kind || "");
+    const entityId = String(entityRef.id || "");
+    if (!kind || !entityId) return;
+    const objectKinds = kind === "asset" ? new Set(["asset", "prop"]) : new Set([kind]);
+    const ledger = record(source.ledger);
+    const removedFacts = new Set(clipRows(ledger.facts).filter(fact => objectKinds.has(String(fact.object_kind || "")) && String(fact.object_id || "") === entityId)
+        .map(fact => String(fact.id || "")).filter(Boolean));
+    if (!removedFacts.size) return;
+    const removedEvents = new Set(clipRows(ledger.events).filter(event => removedFacts.has(String(event.fact_id || ""))).map(event => String(event.id || "")).filter(Boolean));
+    if (Array.isArray(ledger.facts)) ledger.facts = ledger.facts.filter((fact: Record<string, any>) => !removedFacts.has(String(fact.id || "")));
+    if (Array.isArray(ledger.initial)) ledger.initial = ledger.initial.filter((item: Record<string, any>) => !removedFacts.has(String(item.fact_id || "")));
+    if (Array.isArray(ledger.events)) ledger.events = ledger.events.filter((item: Record<string, any>) => !removedFacts.has(String(item.fact_id || "")));
+    if (Array.isArray(ledger.requirements)) ledger.requirements = ledger.requirements.filter((item: Record<string, any>) => !removedFacts.has(String(item.fact_id || "")))
+        .map((item: Record<string, any>) => ({ ...item, event_ids: Array.isArray(item.event_ids) ? item.event_ids.filter((id: unknown) => !removedEvents.has(String(id))) : item.event_ids }));
+    if (Array.isArray(ledger.coverage)) ledger.coverage = ledger.coverage.map((item: Record<string, any>) => ({
+        ...item,
+        fact_ids: Array.isArray(item.fact_ids) ? item.fact_ids.filter((id: unknown) => !removedFacts.has(String(id))) : item.fact_ids,
+        event_ids: Array.isArray(item.event_ids) ? item.event_ids.filter((id: unknown) => !removedEvents.has(String(id))) : item.event_ids,
+    }));
+}
 function ensureSharedSubjectPictureBinding(director: DirectorProduction, episodeId: string, canvasId: string, assetPlan: Record<string, any>, subjectId: string): boolean {
     const kind = String(assetPlan.kind || "");
     const assetId = String(assetPlan.id || assetPlan.asset_id || "");
@@ -183,6 +205,19 @@ function ensureSharedSubjectPictureBinding(director: DirectorProduction, episode
     director.artifacts = director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));
     if (director.workflow.currentWork) director.workflow.currentWork = { ...director.workflow.currentWork, sourceHash: director.sourceHash };
     return true;
+}
+function validateSharedAssetPlanSources(db: BackendDatabase, canvasId: string, director: DirectorProduction) {
+    for (const plan of clipRows(director.source.asset_plan)) {
+        const source = plan.sharedSource;
+        if (source && typeof source === "object") {
+            validateSharedAssetSourceIdentity(db, canvasId, source as SharedAssetIdentity);
+        }
+        else if (String(plan.canvas_scope || "episode") === "shared") throw new Error(`共享素材 ${String(plan.id || plan.asset_id || "")} 尚未选择共享画布来源`);
+    }
+}
+function stripLegacySharedAssetPointers(director?: DirectorProduction) {
+    if (!director) return;
+    for (const asset of Object.values(director.assets) as Array<Record<string, any>>) delete asset.sharedSource;
 }
 const batchRequestHash = (input: DirectorRunStart) => fingerprint({ idempotencyKey: input.idempotencyKey, workId: input.workId, expectedRevision: input.expectedRevision, version: input.version, targets: input.targets, scope: input.scope, inputBasis: input.inputBasis, expectedCanvasRevision: input.expectedCanvasRevision, expectedPlanHash: input.expectedPlanHash });
 const promptHashBytes = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
@@ -345,6 +380,7 @@ export class EpisodeProductionService {
         if (linked) return linked.service.resolveSubjectPictureInputs(linked.id, input, targetIds, forCompilation, previewSubjectIds, compileInputDiagnostics);
         if (!isSubjectPromptAssembly(input.source)) return structuredClone(input);
         const director = structuredClone(input), productionCanvasId = this.episodeInfo(id).canvasId;
+        stripLegacySharedAssetPointers(director);
         this.validateSubjectEntityOwnership(id, director);
         if (!productionCanvasId) throw new Error("SUBJECT_IMAGE_PRODUCTION_CANVAS_MISSING: 制作对象尚未绑定画布");
         const assetPlans = clipRows(director.source.asset_plan), subjects = clipRows(director.source.subject_registry);
@@ -455,12 +491,9 @@ export class EpisodeProductionService {
             const node = (project?.nodes as Array<Record<string, any>> | undefined)?.find(item => item.id === nodeId);
             const old = director.assets[assetId], metadata = node?.metadata || {};
             const planSharedSource = plan?.sharedSource && typeof plan.sharedSource === "object" ? plan.sharedSource as Record<string, any> : undefined;
-            const adoptedSharedSource = old?.sharedSource && typeof old.sharedSource === "object" ? old.sharedSource as Record<string, any> : undefined;
-            const sharedIdentityFields = ["dramaId", "assetId", "sourceProjectId", "sourceNodeId"] as const;
-            const sameSharedIdentity = (left?: Record<string, any>, right?: Record<string, any>) =>
-                Boolean(left && right && sharedIdentityFields.every(field => String(left[field] || "") === String(right[field] || "")));
-            const sharedSource = adoptedSharedSource || planSharedSource;
+            const sharedSource = planSharedSource;
             const isSharedAsset = Boolean(sharedSource || String(plan?.canvas_scope || "episode") === "shared");
+            const directStoredMedia = !projectId && !nodeId && Boolean(old?.storageKey) && !isSharedAsset;
             const sharedBindingError = (stage: NonNullable<ProductionDiagnostic["details"]>["stage"], reason: string, message: string): never => {
                 throw new ProductionValidationError([{
                     code: "SHARED_ASSET_BINDING_INVALID", path: `${bindingPath}.sourceNode`, targetId: bindingId, message, severity: "error",
@@ -469,6 +502,16 @@ export class EpisodeProductionService {
                         expectedSourceProjectId: sharedSource?.sourceProjectId, expectedSourceNodeId: sharedSource?.sourceNodeId },
                 }]);
             };
+            if (directStoredMedia) {
+                const storageKey = String(old!.storageKey);
+                const media = this.db.getMediaFile(storageKey);
+                if (!media || !fs.existsSync(media.filePath)) throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_NOT_ARCHIVED", path: `${bindingPath}.selection`, targetId: bindingId, message: "所选图片尚未归档，不能作为模型参考", severity: "error" }]);
+                if (media.mimeType && !String(media.mimeType).toLowerCase().startsWith("image/")) throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_TYPE_INVALID", path: `${bindingPath}.selection`, targetId: bindingId, message: "所选归档素材不是受支持的图片类型", severity: "error" }]);
+                const digest = promptHashBytes(media.filePath);
+                director.assets[assetId] = { ...old, storageKey, sha256: digest, status: old.status === "approved" ? "approved" : "generated",
+                    selectedResult: { imageId: bindingId, taskId: old.generationTaskId, storageKey, sha256: digest, projectId: "", nodeId: "" } };
+                continue;
+            }
             const smartImageNode = node?.type === "config" && metadata.smart === true && (metadata.generationMode || "image") === "image";
             // Generated media can remain in a typed asset/reference node after its canvas node
             // changes. Resolve a matching formal projection directly; otherwise use the canvas
@@ -483,14 +526,10 @@ export class EpisodeProductionService {
                 throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_SOURCE_MISSING", path: `${bindingPath}.sourceNode`, targetId: bindingId, message: "图片参考来源画布或节点不存在", severity: "error" }]);
             }
             if (isSharedAsset) {
-                if (planSharedSource && adoptedSharedSource && !sameSharedIdentity(planSharedSource, adoptedSharedSource)) {
-                    sharedBindingError("adoption_validation", "shared_source_conflict", "共享资产计划来源与已采用来源不一致");
-                }
-                if (!adoptedSharedSource) sharedBindingError("adoption_validation", "shared_asset_adoption_missing", "共享素材尚未通过正式采用流程登记到当前分集");
-                if (!sharedSource) sharedBindingError("adoption_validation", "shared_source_missing", "共享素材缺少正式来源身份");
+                if (!sharedSource) sharedBindingError("source_resolution", "shared_source_missing", "共享素材计划缺少正式来源身份");
                 const expectedSharedSource = sharedSource!;
                 try {
-                    validateSharedAssetSource(this.db, productionCanvasId, { ...old!, nodeId: String(old!.nodeId || ""), sharedSource: expectedSharedSource } as DirectorProduction["assets"][string]);
+                    validateSharedAssetSourceIdentity(this.db, productionCanvasId, expectedSharedSource as any);
                 } catch (error) {
                     sharedBindingError("projection_validation", "production_projection_invalid", error instanceof Error ? error.message : String(error));
                 }
@@ -501,10 +540,8 @@ export class EpisodeProductionService {
                 } else if (projectId !== expectedSharedSource.sourceProjectId || nodeId !== expectedSharedSource.sourceNodeId) {
                     sharedBindingError("source_resolution", "canonical_source_mismatch", "共享图片绑定必须指向正式共享来源节点或其有效分集投影");
                 }
-                // Both nodes are validated independently: the binding source supplies media,
-                // while the adopted local projection remains the compiler-facing asset node.
             } else if (projectId !== productionCanvasId) {
-                throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_NODE_OWNER", path: `${bindingPath}.sourceNode.projectId`, targetId: bindingId, message: "跨画布图片必须来自当前剧目的已采用共享资产", severity: "error" }]);
+                throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_NODE_OWNER", path: `${bindingPath}.sourceNode.projectId`, targetId: bindingId, message: "跨画布图片必须通过本集的共享素材选择入口绑定", severity: "error" }]);
             }
             const recordedSingleResult = smartImageNode && metadata.status === "success" && metadata.storageKey && metadata.generationTaskId
                 ? [{ id: String(metadata.generationTaskId), storageKey: String(metadata.storageKey), generationTaskId: String(metadata.generationTaskId), status: "success" }]
@@ -583,11 +620,11 @@ export class EpisodeProductionService {
                 const outputs = [...(task?.outputs || []), ...(Array.isArray(task?.result?.media) ? task.result.media as Array<Record<string, any>> : [])];
                 if (!task || task.status !== "succeeded" || task.projectId !== projectId || task.nodeId !== nodeId || !outputs.some(output => output.storageKey === storageKey)) throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_PROVENANCE_INVALID", path: `${bindingPath}.selection`, targetId: bindingId, message: "节点图片缺少对应的成功任务和归档结果记录", severity: "error" }]);
             }
-            // Cross-canvas adopted shared assets must keep the local projection node: compilation
-            // binding checks resolve nodes against the production canvas, and the local projection
-            // carries the same approved media. The source canvas node stays in selectedResult.
-            const boundNodeId = isSharedAsset ? String(old!.nodeId) : projectId === productionCanvasId ? nodeId : (old?.nodeId || nodeId);
-            director.assets[assetId] = { ...(old || { version: String(plan?.version || `node:${nodeId}`), status: "planned" as const }), nodeId: boundNodeId, storageKey,
+            // Keep the compiler manifest node on the production canvas; the picture binding remains
+            // the source of truth for the shared node and the exact image selected in the UI.
+            const boundNodeId = projectId === productionCanvasId ? nodeId : (old?.nodeId || nodeId);
+            const { sharedSource: _legacySharedSource, ...priorAsset } = (old || {}) as Record<string, any>;
+            director.assets[assetId] = { ...priorAsset, version: String(priorAsset.version || plan?.version || `node:${nodeId}`), nodeId: boundNodeId, storageKey,
                 generationTaskId: generationTaskId || undefined, sha256: digest, status: old?.status === "approved" && old.sha256 === digest ? "approved" : "generated",
                 ...(old?.evidence && old.sha256 === digest ? { evidence: old.evidence } : {}), selectedResult: { imageId: String(slot.id || ""), taskId: generationTaskId || undefined, storageKey, sha256: digest, projectId, nodeId } };
         }
@@ -1129,138 +1166,11 @@ export class EpisodeProductionService {
     }
 
     /** 归属切到剧目共享后自动迁移：发布版本里 scope=shared 且媒体已归档时直接接入共享画布，失败只广播不阻断触发动作。 */
-    private autoPromoteSharedAssets(episodeId: string, assetIds?: string[]) {
-        if (this.ownerKind !== "episode" || this.projectScope) return;
-        const current = this.get(episodeId);
-        const director = current.published?.director;
-        if (!director) return;
-        const plans = (Array.isArray(director.source.asset_plan) ? director.source.asset_plan : []).map(record);
-        const wanted = new Set(assetIds?.length ? assetIds : plans.map(item => String(item.asset_id || item.id || "")));
-        for (const assetId of wanted) {
-            if (!assetId) continue;
-            const plan = plans.find(item => String(item.asset_id || item.id || "") === assetId);
-            if (!plan || String(plan.canvas_scope || "episode") !== "shared") continue;
-            if (director.assets[assetId]?.sharedSource) continue;
-            try {
-                const preview = this.previewSharedAssetPromotion(episodeId, assetId, current.revision);
-                if (preview.approvedId) continue;
-                this.promoteExistingSharedAsset(episodeId, { assetId, expectedRevision: preview.episodeRevision,
-                    expectedSourceCanvasRevision: preview.sourceCanvasRevision, expectedSharedCanvasRevision: preview.sharedCanvasRevision,
-                    operationId: `shared-auto-promote:${crypto.createHash("sha256").update([episodeId, assetId, preview.sha256].join("\0")).digest("hex").slice(0, 24)}` });
-            } catch (error) {
-                this.events?.publish({ type: "drama-production.updated", entityId: episodeId,
-                    payload: { sharedAssetAutoPromote: { assetId, error: error instanceof Error ? error.message : String(error) } } });
-            }
-        }
-    }
-
-    sharedAssets(id: string): { assets: ApprovedSharedAsset[]; versions: ApprovedSharedAsset[]; updates: Record<string, unknown>[] } {
+    sharedAssets(id: string): { assets: ApprovedSharedAsset[]; versions: ApprovedSharedAsset[] } {
         const linked = this.linked(id); if (linked) return linked.service.sharedAssets(linked.id);
         const canvasId = this.episodeInfo(id).canvasId;
         const context = canvasId ? productionCanvasContext(this.db, canvasId) : undefined;
-        const updates = this.ownerKind === "canvas" ? []
-            : this.db.db.prepare("SELECT id, approved_id AS approvedId, target_asset_id AS assetId, status, error FROM drama_asset_adoptions WHERE episode_id=? ORDER BY rowid DESC").all(id);
-        return { assets: context?.dramaId ? listApprovedSharedAssets(this.db, context.dramaId) : [], versions: context?.dramaId ? sharedAssetHistory(this.db, context.dramaId) : [], updates };
-    }
-
-    adoptSharedAsset(id: string, input: { assetId: string; approvedId: string; expectedRevision: number; operationId: string }): ProductionRecord & { replayed?: boolean; impact?: ProductionImpact } {
-        const linked = this.linked(id); if (linked) return linked.service.adoptSharedAsset(linked.id, input);
-        if (this.ownerKind !== "episode") throw new Error("共享资产采用目前仅支持剧目分集，场次级采用链尚未启用");
-        const prior = this.prepare("SELECT receipt_json FROM episode_production_operations WHERE operation_id=?").get(input.operationId) as { receipt_json: StoredReceipt } | undefined;
-        if (prior) {
-            const priorRecord = decodeReceipt<ProductionRecord>(prior.receipt_json);
-            const nodeId = priorRecord.draft.director?.assets[input.assetId]?.nodeId || sharedProjectionNodeId(id, input.assetId);
-            return this.edit(id, { operationId: input.operationId, expectedRevision: input.expectedRevision,
-                ops: [{ type: "adopt_shared_asset", assetId: input.assetId, approvedId: input.approvedId, nodeId }] });
-        }
-        const current = this.get(id);
-        if (current.archivedAt) throw new ProductionArchivedError(id);
-        // 乐观锁放行（last-write-wins）：客户端过期 revision 不再拦截，版本号继续自增。
-        const previousLayout = this.ensureLayoutPlan(id, current);
-        const episodeCanvasId = this.episodeInfo(id).canvasId;
-        const canvas = episodeCanvasId && this.db.getCanvasProject(episodeCanvasId);
-        if (!canvas || !current.draft.director) throw new Error("共享资产采用缺少正式制作画布或源稿");
-        const planned = structuredClone(current.draft);
-        const targetPlan = (Array.isArray(planned.director!.source.asset_plan) ? planned.director!.source.asset_plan : []).find((item: any) => String(item.asset_id || item.id) === input.assetId) as Record<string, any> | undefined;
-        if (!targetPlan) throw new Error(`正式资产计划中不存在 ${input.assetId}`);
-        targetPlan.canvas_scope = "shared";
-        const layout = compileProductionLayout({ h3Defaults: record(this.db.getSetting("plugin:minimax-h3:defaults:v1")), canvasId: episodeCanvasId!, owner: { kind: "episode", id }, production: planned, project: canvas, previous: previousLayout });
-        const layoutUnit = layout.units.find(unit => unit.targets.includes(`asset:${input.assetId}`) && unit.members.some(member => member.role === "asset"));
-        const layoutNodeId = layoutUnit?.members.find(member => member.role === "asset")?.nodeId;
-        if (!layoutUnit || !layoutNodeId) throw new Error(`共享资产 ${input.assetId} 缺少正式布局预留`);
-        const request = { operationId: input.operationId, expectedRevision: input.expectedRevision,
-            ops: [{ type: "adopt_shared_asset", assetId: input.assetId, approvedId: input.approvedId, nodeId: layoutNodeId }] };
-        if (this.prepare("SELECT 1 FROM episode_production_operations WHERE operation_id=?").get(input.operationId)) return this.edit(id, request);
-        // 审批门禁已移除：不再要求共享素材已审批版本，直接采用。
-        // const approved = approvedSharedAsset(this.db, input.approvedId);
-        // if (listApprovedSharedAssets(this.db, approved.dramaId).find(asset => asset.assetId === approved.assetId)?.id !== approved.id) throw new Error("共享素材已有更新版本，请回读后采用");
-        const episode = this.db.getDramaEpisode(id);
-        if (!episode || !current.draft.director || !(Array.isArray(current.draft.director.source.asset_plan) ? current.draft.director.source.asset_plan : []).some((item: any) => String(item.asset_id || item.id) === input.assetId)) throw new Error("共享资产或目标不属于当前制作");
-        this.validateSource(current.draft.director, "edit");
-        this.validateGraph(current.draft);
-        prepareSharedAssetProjection(this.db, id, input.assetId, input.approvedId, layout);
-        return this.edit(id, request);
-    }
-
-    adoptSharedAssets(id: string, input: { assets: Array<{ assetId: string; approvedId: string }>; expectedRevision: number; operationId: string }): ProductionRecord & { replayed?: boolean; impact?: ProductionImpact } {
-        const linked = this.linked(id); if (linked) return linked.service.adoptSharedAssets(linked.id, input);
-        if (this.ownerKind !== "episode") throw new Error("共享资产采用目前仅支持剧目分集，场次级采用链尚未启用");
-        if (!input.assets.length) throw new Error("批量采用至少需要一个资产");
-        if (new Set(input.assets.map(item => item.assetId)).size !== input.assets.length) throw new Error("批量采用资产 ID 不能重复");
-        const prior = this.prepare("SELECT receipt_json FROM episode_production_operations WHERE operation_id=?").get(input.operationId) as { receipt_json: StoredReceipt } | undefined;
-        if (prior) {
-            const priorRecord = decodeReceipt<ProductionRecord>(prior.receipt_json);
-            const ops = input.assets.map(item => ({ type: "adopt_shared_asset" as const, assetId: item.assetId, approvedId: item.approvedId,
-                nodeId: priorRecord.draft.director?.assets[item.assetId]?.nodeId || sharedProjectionNodeId(id, item.assetId) }));
-            return this.edit(id, { operationId: input.operationId, expectedRevision: input.expectedRevision, ops });
-        }
-        const current = this.get(id);
-        if (current.archivedAt) throw new ProductionArchivedError(id);
-        // 乐观锁放行（last-write-wins）：客户端过期 revision 不再拦截，版本号继续自增。
-        const previousLayout = this.ensureLayoutPlan(id, current);
-        const episodeCanvasId = this.episodeInfo(id).canvasId;
-        const canvas = episodeCanvasId && this.db.getCanvasProject(episodeCanvasId);
-        if (!canvas || !current.draft.director) throw new Error("共享资产采用缺少正式制作画布或源稿");
-        const planned = structuredClone(current.draft);
-        const plans = (Array.isArray(planned.director!.source.asset_plan) ? planned.director!.source.asset_plan : []) as Record<string, any>[];
-        for (const item of input.assets) {
-            const targetPlan = plans.find(entry => String(entry.asset_id || entry.id) === item.assetId);
-            if (!targetPlan) throw new Error(`正式资产计划中不存在 ${item.assetId}`);
-            targetPlan.canvas_scope = "shared";
-        }
-        const layout = compileProductionLayout({ h3Defaults: record(this.db.getSetting("plugin:minimax-h3:defaults:v1")), canvasId: episodeCanvasId!, owner: { kind: "episode", id }, production: planned, project: canvas, previous: previousLayout });
-        const ops = input.assets.map(item => {
-            const layoutUnit = layout.units.find(unit => unit.targets.includes(`asset:${item.assetId}`) && unit.members.some(member => member.role === "asset"));
-            const layoutNodeId = layoutUnit?.members.find(member => member.role === "asset")?.nodeId;
-            if (!layoutUnit || !layoutNodeId) throw new Error(`共享资产 ${item.assetId} 缺少正式布局预留`);
-            return { type: "adopt_shared_asset" as const, assetId: item.assetId, approvedId: item.approvedId, nodeId: layoutNodeId };
-        });
-        if (this.prepare("SELECT 1 FROM episode_production_operations WHERE operation_id=?").get(input.operationId)) return this.edit(id, { operationId: input.operationId, expectedRevision: input.expectedRevision, ops });
-        const episode = this.db.getDramaEpisode(id);
-        for (const item of input.assets) {
-            const approved = approvedSharedAsset(this.db, item.approvedId);
-            if (listApprovedSharedAssets(this.db, approved.dramaId).find(asset => asset.assetId === approved.assetId)?.id !== approved.id) throw new Error(`共享素材 ${item.assetId} 已有更新版本，请回读后采用`);
-            if (episode?.dramaId !== approved.dramaId || !(Array.isArray(current.draft.director.source.asset_plan) ? current.draft.director.source.asset_plan : []).some((entry: any) => String(entry.asset_id || entry.id) === item.assetId)) throw new Error("共享资产或目标不属于当前制作");
-        }
-        this.validateSource(current.draft.director, "edit");
-        this.validateGraph(current.draft);
-        for (const item of input.assets) prepareSharedAssetProjection(this.db, id, item.assetId, item.approvedId, layout);
-        return this.edit(id, { operationId: input.operationId, expectedRevision: input.expectedRevision, ops });
-    }
-
-    retrySharedUpdate(id: string, adoptionId: string, expectedRevision: number): ReturnType<EpisodeProductionService["sharedAssets"]> {
-        const linked = this.linked(id); if (linked) return linked.service.retrySharedUpdate(linked.id, adoptionId, expectedRevision);
-        if (this.ownerKind !== "episode") throw new Error("共享资产更新恢复目前仅支持剧目分集，场次级采用链尚未启用");
-        const current = this.get(id);
-        if (current.archivedAt) throw new ProductionArchivedError(id);
-        // 乐观锁放行（last-write-wins）：客户端过期 revision 不再拦截，版本号继续自增。
-        const job = this.db.db.prepare("SELECT * FROM drama_asset_adoptions WHERE id=? AND episode_id=? AND status='blocked'").get(adoptionId, id) as Record<string, any> | undefined;
-        if (!job) throw new Error("没有可恢复的共享资产更新");
-        const installed = current.draft.director?.assets[job.target_asset_id]?.sharedSource?.approvedId === job.approved_id;
-        this.db.db.prepare("UPDATE drama_asset_adoptions SET status=?, expected_revision=?, error=NULL, updated_at=? WHERE id=?")
-            .run(installed ? "compiling" : "pending", expectedRevision, new Date().toISOString(), adoptionId);
-        this.events?.publish({ type: "drama-production.updated", entityId: id, payload: { sharedAssetUpdate: "pending" } });
-        return this.sharedAssets(id);
+        return { assets: context?.dramaId ? listApprovedSharedAssets(this.db, context.dramaId) : [], versions: context?.dramaId ? sharedAssetHistory(this.db, context.dramaId) : [] };
     }
 
     listArchivedScenes(episodeId: string): ReturnType<typeof listArchivedDirectorScenes> {
@@ -1298,7 +1208,7 @@ export class EpisodeProductionService {
         const rawNodes = canvasId ? this.db.getCanvasProject(canvasId)?.nodes : undefined;
         if (!Array.isArray(rawNodes)) throw new Error("Production canvas does not exist");
         const nodes = rawNodes as Array<Record<string, any>>;
-        for (const asset of Object.values(director.assets)) validateSharedAssetSource(this.db, canvasId!, asset);
+        validateSharedAssetPlanSources(this.db, canvasId!, director);
         for (const segment of clipRows(director.source.segments)) for (const binding of clipRows(segment.audio_bindings)) {
             const nodeId = String(binding.sourceNode?.nodeId || ""), storageKey = String(binding.storageKey || "");
             const node = nodes.find(item => String(item.id || "") === nodeId), metadata = record(node?.metadata);
@@ -1438,8 +1348,7 @@ export class EpisodeProductionService {
         const canvasId = this.episodeInfo(episodeId).canvasId;
         if (!canvasId) throw new Error("制作稿未绑定画布");
         const selected = record.published.director.artifacts.filter(item => !targetIds || targetIds.includes(item.targetId));
-        const referencedNodes = new Set(selected.flatMap(item => item.references.map(reference => reference.nodeId)));
-        for (const asset of Object.values(record.published.director.assets)) if (!targetIds || referencedNodes.has(asset.nodeId || "")) validateSharedAssetSource(this.db, canvasId, asset);
+        validateSharedAssetPlanSources(this.db, canvasId, record.published.director);
         validateDirectorMedia(this.db, canvasId, record.published.director, targetIds);
         const project = this.db.getCanvasProject(canvasId)!;
         for (const artifact of selected) if (artifact.kind === "image" && artifact.status === "ready") {
@@ -2105,6 +2014,8 @@ export class EpisodeProductionService {
         const ids = [...Object.keys(data.director.assets).filter(id => !keyframeIds.has(id)).map(id => `asset:${id}`), ...Object.keys(data.director.shotInputs).filter(id => data.director!.shotInputs[id].keyframeAssetId).map(id => `frame:${id}`), ...data.clipGroups.map(group => `segment:${group.id}`)];
         try {
             const checked = this.canvasExecution(episodeId, ids);
+            const project = checked.canvasId ? this.db.getCanvasProject(checked.canvasId) : null;
+            const nodes = (project?.nodes || []) as Array<Record<string, any>>;
             const ready = new Set(checked.targets.map(target => target.id));
             const dependencyBlocked = new Map(checked.targets.filter(target => target.dependencies.length && data.director!.workflow.mediaProductionMode !== "automatic").map(target => [target.id, target.dependencies.map(dependency => dependency.targetId)]));
             const targets = ids.map(id => {
@@ -2114,9 +2025,11 @@ export class EpisodeProductionService {
                 // contract. Keep the formal Ref2VA image requirement visible when the
                 // workbench overlays its current-canvas readiness snapshot.
                 const referenceModeBlockers = previous?.blockers.filter(message => message.startsWith("Ref2VA")) || [];
+                const segmentId = id.startsWith("segment:") ? id.slice("segment:".length) : "";
+                const canvasBlockers = checked.blockedTargets.filter(target => target.targetId === id).map(target => target.message);
                 const blockers = [...new Set([
                     ...referenceModeBlockers,
-                    ...checked.blockedTargets.filter(target => target.targetId === id).map(target => target.message),
+                    ...canvasBlockers,
                     ...mediaBlockers,
                     ...(dependencyBlocked.has(id) ? [`请先生成前置目标：${dependencyBlocked.get(id)!.join(", ")}`] : []),
                 ])];
@@ -2251,12 +2164,12 @@ export class EpisodeProductionService {
         };
         const imageModelFor = (id: string, nodeId?: string) => productionImageModel(data.settings, director.source, id, Object.values(director.shotInputs).some(input => input.keyframeAssetId === id) ? "keyframe" : undefined) || nodeModel(nodeId);
         const h3ModelFor = (id: string, nodeId?: string) => data.settings.h3Models[id] || data.settings.h3Model || nodeModel(nodeId);
-        const assetScope = (id: string) => String(planById.get(id)?.canvas_scope || (director.assets[id]?.sharedSource || canvasRole === "shared-assets" ? "shared" : "episode"));
+        const assetScope = (id: string) => String(planById.get(id)?.canvas_scope || (planById.get(id)?.sharedSource || canvasRole === "shared-assets" ? "shared" : "episode"));
         const assetScopeBlockers = (id: string) => {
             const scope = assetScope(id);
             if (!["shared", "episode"].includes(scope)) return [`资产 ${id} 的画布归属无效：${scope}`];
             if (canvasRole === "shared-assets" && scope !== "shared") return [`资产 ${id} 标记为本集专用，不能在剧目共享资产画布生产`];
-            if (canvasRole !== "shared-assets" && scope === "shared" && !director.assets[id]?.sharedSource) return [`共享素材 ${id} 尚未采用同剧目版本；请从共享素材库选择`];
+            if (canvasRole !== "shared-assets" && scope === "shared" && !planById.get(id)?.sharedSource) return [`共享素材 ${id} 尚未选择同剧目共享节点`];
             return [];
         };
         const compiled = (artifact: NonNullable<ReturnType<typeof artifactFor>> | undefined, id: string) => {
@@ -2328,7 +2241,7 @@ export class EpisodeProductionService {
             if (!segmentId) continue;
             const shotIds = Array.isArray(segment.shot_ids) ? segment.shot_ids.map(String) : [];
             const artifact = artifactFor("h3", segmentId);
-            const blockers = [...(canvasRole === "shared-assets" ? ["剧目共享资产画布不能生产分集视频 Clip"] : []), ...compiled(artifact, `Segment ${segmentId}`)];
+            const blockers = [...(canvasRole === "shared-assets" ? ["剧目共享资产画布不能生产分集视频 Clip"] : [])];
             const continuityWarnings = hasContinuityV2 ? continuityTargetBlockers(continuityReport, [segmentId]).map(item => `${item.code}: ${item.message}`) : [];
             const group = data.clipGroups.find(item => item.id === segmentId);
             const sceneIds = productionSceneIdsForShots(registeredSceneEntries, shotIds);
@@ -2341,6 +2254,9 @@ export class EpisodeProductionService {
                 });
             });
             const hasSceneReference = artifact?.references.some(reference => ["scene", "environment"].includes(String(reference.role).toLowerCase())) || false;
+            if (sceneIds.length === 1 && !declaresEnvironmentUsage && !hasSceneReference) {
+                continuityWarnings.push("Segment 使用了正式场景，但 Shot 未声明 scene/environment Subject；场景空间不会进入 H3 图片参考。需要环境锚点时，先生成并绑定场景图，再编译当前 Segment。");
+            }
             if (declaresEnvironmentUsage && artifact && !hasSceneReference) {
                 continuityWarnings.push("Shot 已声明场景环境参考，但当前 H3 产物未绑定对应场景图；独立生成时环境布局缺少图像锚点");
             }
@@ -2651,9 +2567,9 @@ export class EpisodeProductionService {
             for (const blocked of snapshot.blockedTargets) {
                 const assetId = blocked.targetId.startsWith("asset:") ? blocked.targetId.slice("asset:".length) : "";
                 const plan = plans.get(assetId);
-                if (assetId && plan?.canvas_scope === "shared" && !current.draft.director.assets[assetId]?.sharedSource) {
-                    blocked.code = "SHARED_ASSET_NOT_ADOPTED";
-                    blocked.message = `共享资产 ${assetId} 尚未采用同剧目版本；请从共享素材库选择`;
+                if (assetId && plan?.canvas_scope === "shared" && !plan?.sharedSource) {
+                    blocked.code = "SHARED_SOURCE_REQUIRED";
+                    blocked.message = `共享资产 ${assetId} 尚未选择同剧目共享节点`;
                 }
             }
         }
@@ -3221,7 +3137,7 @@ export class EpisodeProductionService {
                measure("acheng_source_validation", () => this.validateSource(draft.director!, "edit", this.sourceShotValidationScope(input.ops)));
                 measure("subject_entity_ownership", () => this.validateSubjectEntityOwnership(episodeId, draft.director!));
                const projectId = this.episodeInfo(episodeId).canvasId;
-                if (projectId) measure("shared_asset_validation", () => { for (const asset of Object.values(draft.director!.assets)) validateSharedAssetSource(this.db, projectId, asset); });
+                if (projectId) measure("shared_asset_validation", () => validateSharedAssetPlanSources(this.db, projectId, draft.director!));
             }
             return { draft, published };
     }
@@ -3379,6 +3295,10 @@ export class EpisodeProductionService {
                 }
             }
             const { draft, published } = this.editedCandidate(episodeId, record, input, canvasCommits, sceneRuntime, onStage, overwriteCompiledPromptTargets);
+            if (record.draft.director && draft.director) {
+                preserveH3ArtifactsAfterShotDurationOnlyEdit(record.draft.director, draft.director);
+            }
+            stripLegacySharedAssetPointers(draft.director);
             for (const operation of input.ops) if (operation.type === "set_director_shot_utterances") {
                 for (const utterance of operation.utterances) {
                     if (!utterance.utteranceId || utterance.delivery === undefined) continue;
@@ -3414,12 +3334,6 @@ export class EpisodeProductionService {
                 if (!draft.director || !record.draft.director) throw new Error("ADOPTION_SOURCE_MISSING");
                 if (fingerprint(draft.settings) !== fingerprint(record.draft.settings) || fingerprint(published) !== fingerprint(record.published)) throw new Error("ADOPTION_PROTECTED_FIELDS");
                 assertDirectorWorkScope(record.draft.director, draft.director, packets.map(packet => packet.scope));
-            }
-            for (const operation of input.ops) if (operation.type === "adopt_shared_asset") {
-                this.db.db.prepare(`INSERT OR IGNORE INTO drama_asset_adoptions (id, approved_id, episode_id, target_asset_id, expected_revision, status, updated_at)
-                    VALUES (?, ?, ?, ?, ?, 'compiling', ?)`).run(input.operationId, operation.approvedId, episodeId, operation.assetId, record.revision + 1, new Date().toISOString());
-                this.db.db.prepare("UPDATE drama_asset_adoptions SET status='compiling', expected_revision=?, updated_at=? WHERE id=? AND status='pending'")
-                    .run(record.revision + 1, new Date().toISOString(), input.operationId);
             }
             if (published && input.ops.some((operation) => operation.type === "review_keyframe" || operation.type === "review_director_asset")) this.prepare("UPDATE episode_production_versions SET snapshot_json=? WHERE episode_id=? AND version=?").run(JSON.stringify(withoutDirectorProjection(published)), episodeId, record.publishedVersion);
             return { ...record, revision: record.revision + 1, draft, published, updatedAt: new Date().toISOString() };
@@ -3485,7 +3399,6 @@ export class EpisodeProductionService {
             if (input.stage !== "script") draft.clipGroups = candidate.clipGroups;
             return { ...record, revision: record.revision + 1, draft, published: candidate, publishedVersion, updatedAt, impact };
         });
-        if (input.stage === "director" && !result.replayed) this.autoPromoteSharedAssets(episodeId);
         return result;
     }
 
@@ -3906,8 +3819,7 @@ export class EpisodeProductionService {
             const targetNodeId = String(group.nodeId || "");
             const targetNode = targetNodeId ? byId.get(targetNodeId) : undefined;
             const expectedNodeId = productionLayoutStableId("production-h3-scene", episodeId, sceneId);
-            const expectedGroupId = productionLayoutStableId("production-scene", episodeId, sceneId);
-            if (!targetNode || targetNodeId !== expectedNodeId || !isH3NodeType(String(targetNode.type)) || String(record(targetNode.metadata).groupId || "") !== expectedGroupId) {
+            if (!targetNode || targetNodeId !== expectedNodeId || !isH3NodeType(String(targetNode.type)) || String(record(targetNode.metadata).productionSceneId || "") !== sceneId) {
                 throw new Error(`Clip ${group.id} 没有绑定到场次 ${sceneId} 的正式 H3 节点`);
             }
             const targetClip = (Array.isArray(record(targetNode.metadata).segments) ? record(targetNode.metadata).segments as Array<Record<string, any>> : []).find(clip => String(clip.id || "") === segmentId);
@@ -4031,7 +3943,8 @@ export class EpisodeProductionService {
             if (binding.target_id !== op.targetId || !String(media.mimeType).startsWith("image/")) throw new Error("历史图片不属于这个正式资产或关键帧");
             const assetId = op.targetKind === "keyframe" ? director.shotInputs[op.targetId]?.keyframeAssetId : op.targetId;
             const asset = assetId && director.assets[assetId];
-            if (!assetId || !asset || asset.nodeId !== op.nodeId || asset.sharedSource) throw new Error("请在原资产画布选择版本，不能修改共享引用");
+            const plan = assetId ? clipRows(director.source.asset_plan).find(item => String(item.asset_id || item.id || "") === assetId) : undefined;
+            if (!assetId || !asset || asset.nodeId !== op.nodeId || plan?.sharedSource) throw new Error("请在原资产画布选择版本，不能修改共享引用");
             const priorKey = asset.storageKey;
             const selected = { ...asset, storageKey: op.storageKey, sha256, status: "generated" as const, evidence: "", inputOutdated: staleInput, selectedResult };
             director.assets[assetId] = selected;
@@ -4096,71 +4009,6 @@ export class EpisodeProductionService {
                     const occupied = this.targetOccupancy(episodeId, targets);
                     if (occupied.length) throw new Error(`CLIP_DELETE_TARGET_OCCUPIED: ${occupied.map(item => `${item.targetId}:${item.status}`).join("；")}`);
                 } });
-        }
-        if (op.type === "adopt_shared_asset") {
-            if (!draft.director) throw new Error("缺少 Acheng 制作稿");
-            const approved = approvedSharedAsset(this.db, op.approvedId);
-            const episode = this.db.getDramaEpisode(episodeId);
-            if (this.projectScope || episode?.dramaId !== approved.dramaId) throw new Error("共享资产必须属于当前集的剧目");
-            if (Object.values(draft.director.shotInputs).some(input => input.keyframeAssetId === op.assetId)) throw new Error("关键帧属于本集，不能采用为剧目共享资产");
-            const entry = (Array.isArray(draft.director.source.asset_plan) ? draft.director.source.asset_plan : []).map(record).find(item => String(item.asset_id || item.id || "") === op.assetId);
-            if (!entry) throw new Error("共享资产目标未登记到制作源稿");
-            const sharedSource = { dramaId: approved.dramaId, assetId: approved.assetId, sourceProjectId: approved.sourceProjectId, sourceNodeId: approved.sourceNodeId };
-            const existingPlanSource = record(entry.sharedSource);
-            if (entry.sharedSource && ["dramaId", "assetId", "sourceProjectId", "sourceNodeId"].some(field => String(existingPlanSource[field] || "") !== String(sharedSource[field as keyof typeof sharedSource] || ""))) {
-                throw new Error("共享资产计划与待采用来源身份冲突，不能覆盖已有关系");
-            }
-            // Keep the canonical shared identity in the existing source field as well as
-            // the adopted asset record. Entity-node projection and picture binding then
-            // consume the same Backend-owned relationship in this edit transaction.
-            entry.sharedSource = sharedSource;
-            entry.canvas_scope = "shared";
-            const assetStatus = "generated" as const;
-            // Keep the source and frozen media identity aligned; the file is only a
-            // verified compiler input and does not imply a visual approval.
-            entry.status = assetStatus;
-            entry.sha256 = approved.sha256;
-            const adoptedMedia = this.db.getMediaFile(approved.storageKey);
-            entry.file = `shared/${op.assetId}${adoptedMedia && path.extname(adoptedMedia.filePath) ? path.extname(adoptedMedia.filePath).toLowerCase() : ".png"}`;
-            if (String(record(draft.director.source.style_lock).anchor_asset_id || "") === op.assetId) draft.director.source.style_lock = { ...record(draft.director.source.style_lock), status: assetStatus };
-            const prior = draft.director.assets[op.assetId];
-            const next = { nodeId: op.nodeId, version: String(entry.version || prior?.version || approved.snapshot.version), storageKey: approved.storageKey, sha256: approved.sha256,
-                status: assetStatus, ...(approved.evidence ? { evidence: approved.evidence } : {}), sharedSource: { ...sharedSource, approvedId: approved.id } };
-            validateSharedAssetSource(this.db, episode!.canvasId!, next);
-            draft.director.assets[op.assetId] = next;
-            const entityRefKind = String(entry.kind || "") === "prop" ? "asset" : String(entry.kind || "");
-            const entityId = String(entry.entity_id || entry.id || entry.asset_id || op.assetId);
-            for (const subject of clipRows(draft.director.source.subject_registry)) {
-                if (subject.entityRef?.ownerKind === "episode" && subject.entityRef?.ownerId === episodeId
-                    && subject.entityRef?.kind === entityRefKind && String(subject.entityRef?.id || "") === entityId) {
-                    ensureSharedSubjectPictureBinding(draft.director, episodeId, episode!.canvasId!, entry, String(subject.id || ""));
-                }
-            }
-            draft.director.sourceHash = directorHash(draft.director.source);
-            draft.director.executionAuthorized = false;
-            const inputChanged = prior?.storageKey !== approved.storageKey || prior?.sha256 !== approved.sha256;
-            const plans = (Array.isArray(draft.director.source.asset_plan) ? draft.director.source.asset_plan : []).map(record);
-            const dependsOn = (id: string, seen = new Set<string>()): boolean => {
-                if (id === op.assetId) return true;
-                if (seen.has(id)) return false;
-                seen.add(id);
-                const plan = plans.find(item => String(item.asset_id || item.id) === id);
-                return (Array.isArray(plan?.depends_on) ? plan.depends_on : []).some((dependency: unknown) => dependsOn(String(dependency), seen));
-            };
-            if (inputChanged) for (const [id, asset] of Object.entries(draft.director.assets)) if (id !== op.assetId && asset.storageKey && dependsOn(id)) asset.inputOutdated = true;
-            if (inputChanged) for (const group of draft.clipGroups) if (group.shotIds.some(id => {
-                const shot = Array.isArray(draft.director!.source.shots) ? draft.director!.source.shots.map(record).find(item => String(item.id || "") === id) : undefined;
-                const required = Array.isArray(shot?.required_assets) ? shot.required_assets.map(String) : [];
-                return [...(draft.director!.shotInputs[id]?.assetIds || []), ...required].some(assetId => dependsOn(assetId));
-            })) {
-                const node = (this.db.getCanvasProject(episode!.canvasId!)?.nodes as Record<string, any>[] || []).find(node => node.id === group.nodeId);
-                if ((record(node?.metadata).segments as Record<string, any>[] || []).some(segment => segment.id === group.segmentId && segment.resultStorageKey)) group.inputOutdated = true;
-            }
-            draft.director.artifacts = draft.director.artifacts.map(item => {
-                const references = item.references.map(ref => ref.nodeId === prior?.nodeId ? { ...ref, nodeId: op.nodeId, storageKey: approved.storageKey, sha256: approved.sha256 } : ref);
-                return { ...item, references, status: "stale" as const };
-            });
-            return;
         }
         if (op.type === "bind_director_segment") {
             const group = draft.clipGroups.find(item => item.id === op.targetId);
@@ -4346,6 +4194,22 @@ export class EpisodeProductionService {
                 }
             }
             const bindings = clipRows(incoming.pictureBindings);
+            // One Subject can bind multiple selected images from the same shared
+            // character node. `director.assets` is keyed by assetId, so distinct
+            // selections cannot share that key or the later image overwrites the
+            // earlier one during prompt compilation.
+            const selectionByAssetId = new Map<string, string>();
+            for (const binding of bindings) {
+                const assetId = String(binding.assetId || "");
+                if (!assetId) continue;
+                const selectionKey = canonicalProduction({ sourceNode: binding.sourceNode, selection: binding.selection });
+                const previousSelection = selectionByAssetId.get(assetId);
+                if (previousSelection && previousSelection !== selectionKey) {
+                    const suffix = crypto.createHash("sha256").update(`${binding.id}\0${selectionKey}`).digest("hex").slice(0, 12);
+                    binding.assetId = `${assetId}:selection:${suffix}`;
+                    selectionByAssetId.set(String(binding.assetId), selectionKey);
+                } else selectionByAssetId.set(assetId, selectionKey);
+            }
             const canonicalByKey = new Map<string, string>();
             const bindingRemap = new Map<string, string>();
             const deduped = bindings.filter(binding => {
@@ -4370,6 +4234,22 @@ export class EpisodeProductionService {
                 usage.pictureBindingIds = [...new Set((Array.isArray(usage.pictureBindingIds) ? usage.pictureBindingIds : []).map(id => bindingRemap.get(String(id)) || String(id)))];
             }
             incoming.pictureBindings = deduped as typeof incoming.pictureBindings;
+            const episodeCanvasId = this.episodeInfo(episodeId).canvasId;
+            if (episodeCanvasId) {
+                const episodeProject = this.db.getCanvasProject(episodeCanvasId);
+                const projectNodes = clipRows(episodeProject?.nodes);
+                for (const binding of incoming.pictureBindings) {
+                    const assetId = String(binding.assetId || ""), sourcePlan = clipRows(draft.director.source.asset_plan).find(item => String(item.id || item.asset_id || "") === assetId);
+                    if (!sourcePlan?.sharedSource || binding.sourceNode?.projectId !== episodeCanvasId) continue;
+                    const sourceNode = projectNodes.find(node => String(node.id || "") === String(binding.sourceNode?.nodeId || ""));
+                    if (!sourceNode || !sharedAssetNodeMatchesSource(sourceNode, sourcePlan.sharedSource)) continue;
+                    const previousAsset = draft.director.assets[assetId];
+                    if (!previousAsset) continue;
+                    const singleSourceAsset = { ...previousAsset } as DirectorProduction["assets"][string] & { sharedSource?: unknown };
+                    delete singleSourceAsset.sharedSource;
+                    draft.director.assets[assetId] = { ...singleSourceAsset, nodeId: String(sourceNode.id) };
+                }
+            }
             if (rebindIdentityChanged) {
                 const validBindingIds = new Set(incoming.pictureBindings.map(binding => String(binding.id)));
                 const defaultIdentity = incoming.pictureBindings.find(binding => Array.isArray(binding.defaultFor) && binding.defaultFor.includes("identity"));
@@ -4435,10 +4315,8 @@ export class EpisodeProductionService {
                     const drama = episode?.dramaId ? this.db.listCanvasFolders().find(folder => folder.id === episode.dramaId && folder.isDrama) : undefined;
                     const shared = this.db.getCanvasProject(sharedSource.sourceProjectId);
                     const sourceNode = (shared?.nodes as Array<Record<string, any>> || []).find(node => node.id === sharedSource.sourceNodeId);
-                    const binding = record(sourceNode?.metadata?.productionEntity);
                     if (!episode?.canvasId || !drama || drama.sharedAssetCanvasId !== sharedSource.sourceProjectId || !sourceNode
-                        || sourceNode.type !== existingPlan.kind || binding.kind !== existingPlan.kind || binding.ownerKind !== "canvas"
-                        || binding.ownerId !== sharedSource.sourceProjectId || !String(binding.entityId || "")) throw new Error("共享节点已变化或不属于当前共享资产画布");
+                        || sourceNode.type !== existingPlan.kind) throw new Error("共享节点已变化或不属于当前共享资产画布");
                     if (ensureSharedSubjectPictureBinding(draft.director, episodeId, episode.canvasId, existingPlan, String(op.subject?.id || ""))) projectDirector(draft);
                     return;
                 }
@@ -4447,8 +4325,7 @@ export class EpisodeProductionService {
                 if (!episode?.canvasId || !drama || drama.sharedAssetCanvasId !== sharedSource.sourceProjectId || sharedSource.assetId !== op.assetPlan.id) throw new Error("共享节点来源与当前剧目不匹配");
                 const shared = this.db.getCanvasProject(sharedSource.sourceProjectId);
                 const sourceNode = (shared?.nodes as Array<Record<string, any>> || []).find(node => node.id === sharedSource.sourceNodeId);
-                const binding = record(sourceNode?.metadata?.productionEntity);
-                if (!sourceNode || sourceNode.type !== op.assetPlan.kind || binding.kind !== op.assetPlan.kind || binding.ownerKind !== "canvas" || binding.ownerId !== sharedSource.sourceProjectId || !String(binding.entityId || "")) throw new Error("共享节点已变化或不属于当前共享资产画布");
+                if (!sourceNode || sourceNode.type !== op.assetPlan.kind || !["character", "scene", "prop"].includes(String(sourceNode.type || ""))) throw new Error("共享节点已变化或不属于当前共享资产画布");
                 const source = { dramaId: episode.dramaId, assetId: op.assetPlan.id, sourceProjectId: sharedSource.sourceProjectId, sourceNodeId: sharedSource.sourceNodeId };
                 if (this.db.getAssetRecord(source.assetId)) {
                     const current = this.db.getAssetRecord(source.assetId)!;
@@ -4482,7 +4359,7 @@ export class EpisodeProductionService {
             if (!plan) return;
             const kind = String(plan.kind || ""), entityId = String(plan.entity_id || op.id);
             const entityRefKind = kind === "prop" ? "asset" : kind;
-            // Subject ownership is not always episode-scoped: shared assets adopted from the drama
+            // Subject ownership is not always episode-scoped: shared assets selected from the drama
             // canvas register `ownerKind: "drama"` (or `"canvas"`). Match the stable entity identity
             // and any picture binding that points at this asset instead of the owner, otherwise this
             // guard is skipped for those registrations and the removal silently detaches Shot
@@ -4515,10 +4392,66 @@ export class EpisodeProductionService {
         if (op.type === "delete_director_subject") {
             if (!draft.director || !isSubjectPromptAssembly(draft.director.source)) throw new Error("SUBJECT_SOURCE_VERSION_REQUIRED");
             const source = draft.director.source;
-            if (clipRows(source.shots).some(shot => clipRows(shot.subject_usages).some(usage => usage.subjectId === op.id)
-                || (shot.camera?.attention_subject_ids || []).includes(op.id) || clipRows(shot.keyframes).some(frame => (frame.subjectIds || []).includes(op.id))
-                || clipRows(shot.reference_requirements).some(reference => (reference.subjectIds || []).includes(op.id)))
-                || clipRows(source.utterances).some(line => line.speakerSubjectId === op.id)) throw new Error("SUBJECT_STILL_REFERENCED: 该主体仍被镜头或对白使用，请先解除引用");
+            const subject = clipRows(source.subject_registry).find(item => String(item.id || "") === op.id);
+            if (!subject) return;
+            const shots = clipRows(source.shots);
+            const utterances = clipRows(source.utterances);
+            const usedUtterances = new Set(utterances.filter(line => String(line.speakerSubjectId || "") === op.id).map(line => String(line.id || "")));
+            const entityRef = record(subject.entityRef);
+            const entityKind = String(entityRef.kind || "");
+            const entityId = String(entityRef.id || "");
+            const objectKinds = entityKind === "asset" ? new Set(["asset", "prop"]) : new Set([entityKind]);
+            const ledgerFacts = clipRows(record(source.ledger).facts).filter(fact => objectKinds.has(String(fact.object_kind || "")) && String(fact.object_id || "") === entityId);
+            const hasReferences = ledgerFacts.length > 0 || shots.some(shot => clipRows(shot.subject_usages).some(usage => String(usage.subjectId || "") === op.id)
+                || (Array.isArray(shot.camera?.attention_subject_ids) && shot.camera.attention_subject_ids.some((id: unknown) => String(id) === op.id))
+                || clipRows(shot.keyframes).some(frame => clipRows(frame.subjectIds).some(id => String(id) === op.id))
+                || clipRows(shot.reference_requirements).some(reference => clipRows(reference.subjectIds).some(id => String(id) === op.id))
+                || clipRows(shot.utterance_refs).some(reference => usedUtterances.has(String(reference.utteranceId || ""))));
+            if (hasReferences && !op.referenceAction) throw new Error("SUBJECT_STILL_REFERENCED: 删除前请选择清除引用或改绑主体");
+            let replacement: Record<string, any> | undefined;
+            if (op.referenceAction === "replace") {
+                replacement = clipRows(source.subject_registry).find(item => String(item.id || "") === String(op.replacementSubjectId || ""));
+                if (!replacement || replacement.id === op.id || replacement.kind !== subject.kind) throw new Error("SUBJECT_REPLACEMENT_INVALID: 请选择另一个同类型主体");
+                const replacementEntityId = String(replacement.entityRef?.id || "");
+                remapSubjectEntityReferences(source, subject.kind === "prop" ? "prop" : entityKind, entityId, replacementEntityId);
+            } else if (op.referenceAction === "clear") {
+                clearSubjectEntityLedgerReferences(source, subject);
+            }
+            const subjectId = String(op.id);
+            for (const shot of shots) {
+                if (Array.isArray(shot.subject_usages)) shot.subject_usages = shot.subject_usages.flatMap((usage: Record<string, any>) => {
+                    if (String(usage.subjectId || "") !== subjectId) return [usage];
+                    if (!replacement) return [];
+                    // Picture bindings belong to the original Subject. Let the replacement's
+                    // default binding resolve instead of carrying stale binding IDs across.
+                    return [{ ...usage, subjectId: replacement.id, pictureBindingMode: "default", pictureBindingIds: [] }];
+                });
+                if (shot.camera && Array.isArray(shot.camera.attention_subject_ids)) {
+                    shot.camera.attention_subject_ids = shot.camera.attention_subject_ids.flatMap((id: unknown) => String(id) === subjectId ? replacement ? [replacement.id] : [] : [id]);
+                }
+                if (Array.isArray(shot.keyframes)) for (const frame of shot.keyframes) {
+                    if (Array.isArray(frame.subjectIds)) frame.subjectIds = [...new Set(frame.subjectIds.map(String).flatMap((id: string) => id === subjectId ? replacement ? [String(replacement.id)] : [] : [id]))];
+                    if (frame.subjectPictureBindingIds && typeof frame.subjectPictureBindingIds === "object") {
+                        const mappings = { ...frame.subjectPictureBindingIds };
+                        delete mappings[subjectId];
+                        frame.subjectPictureBindingIds = mappings;
+                    }
+                }
+                if (Array.isArray(shot.reference_requirements)) for (const reference of shot.reference_requirements) {
+                    if (Array.isArray(reference.subjectIds)) reference.subjectIds = [...new Set(reference.subjectIds.map(String).flatMap((id: string) => id === subjectId ? replacement ? [String(replacement.id)] : [] : [id]))];
+                    if (reference.subjectPictureBindingIds && typeof reference.subjectPictureBindingIds === "object") {
+                        const mappings = { ...reference.subjectPictureBindingIds };
+                        delete mappings[subjectId];
+                        reference.subjectPictureBindingIds = mappings;
+                    }
+                }
+                if (!replacement && usedUtterances.size && Array.isArray(shot.utterance_refs)) shot.utterance_refs = shot.utterance_refs.filter((reference: Record<string, any>) => !usedUtterances.has(String(reference.utteranceId || "")));
+            }
+            if (replacement) {
+                for (const line of utterances) if (String(line.speakerSubjectId || "") === subjectId) line.speakerSubjectId = replacement.id;
+            } else if (usedUtterances.size) {
+                source.utterances = utterances.filter(line => !usedUtterances.has(String(line.id || "")));
+            }
             source.subject_registry = clipRows(source.subject_registry).filter(subject => subject.id !== op.id);
             draft.director.sourceHash = directorHash(source);
             draft.director.artifacts = draft.director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));
@@ -4580,7 +4513,8 @@ export class EpisodeProductionService {
                         : candidate.textMode === "partition" ? oldCharacters : Array.from(candidate.text);
                     const newText = newCharacters.join("");
                     const unchanged = candidate && priorRef
-                        && String(candidate.speakerSubjectId) === String(utterance.speakerSubjectId)
+                        && String(candidate.speakerSubjectId || "") === String(utterance.speakerSubjectId || "")
+                        && String(candidate.speakerName || "") === String(utterance.speakerName || "")
                         && (candidate.textMode === "segment" ? String(candidate.text) === oldSegment : String(candidate.text) === String(utterance.text))
                         && Number(candidate.localStartFrame) === Number(priorRef.localStartFrame)
                         && Number(candidate.localEndFrame) === Number(priorRef.localEndFrame)
@@ -4629,7 +4563,10 @@ export class EpisodeProductionService {
             for (const [utteranceId, edit] of editedShared) {
                 const record = next.find((item: any) => String(item.id) === utteranceId);
                 if (!record) throw new Error(`共享对白 ${utteranceId} 不存在`);
-                record.speakerSubjectId = edit.item.speakerSubjectId;
+                if (edit.item.speakerSubjectId) record.speakerSubjectId = edit.item.speakerSubjectId;
+                else delete record.speakerSubjectId;
+                if (edit.item.speakerName) record.speakerName = edit.item.speakerName;
+                else delete record.speakerName;
                 record.text = edit.text;
                 if (edit.item.delivery) record.delivery = edit.item.delivery;
                 else delete record.delivery;
@@ -4647,7 +4584,7 @@ export class EpisodeProductionService {
             const duration = Number(shot.duration_frames);
             const refs: Array<Record<string, unknown>> = [];
             for (const [index, item] of op.utterances.entries()) {
-                if (!subjects.has(item.speakerSubjectId)) throw new Error(`对白 ${index + 1} 的说话 Subject 未登记`);
+                if (item.speakerSubjectId ? !subjects.has(item.speakerSubjectId) || Boolean(item.speakerName) : !String(item.speakerName || "").trim()) throw new Error(`对白 ${index + 1} 请指定已登记说话主体或填写临时说话人称呼`);
                 if (item.localEndFrame <= item.localStartFrame || item.localEndFrame > duration) throw new Error(`对白 ${index + 1} 的时间窗须位于镜头时长内且起止递增`);
                 const textLength = Array.from(item.text).length;
                 const utteranceId = item.utteranceId || `UTT:${op.shotId}:${index + 1}`;
@@ -4658,7 +4595,7 @@ export class EpisodeProductionService {
                 const sharedRef = editedShared.get(String(item.utteranceId))?.refs.find(ref => ref.shotId === op.shotId)?.ref;
                 if (sharedRef) { refs.push(structuredClone(sharedRef)); continue; }
                 const existing = next.findIndex((utterance: any) => String(utterance.id) === utteranceId);
-                const record: Record<string, unknown> = { id: utteranceId, speakerSubjectId: item.speakerSubjectId, text: item.text, ...(item.delivery ? { delivery: item.delivery } : {}), voiceover: Boolean(item.voiceover), start: { shotId: op.shotId, localFrame: item.localStartFrame }, end: { shotId: op.shotId, localFrame: item.localEndFrame } };
+                const record: Record<string, unknown> = { id: utteranceId, ...(item.speakerSubjectId ? { speakerSubjectId: item.speakerSubjectId } : {}), ...(item.speakerName ? { speakerName: item.speakerName.trim() } : {}), text: item.text, ...(item.delivery ? { delivery: item.delivery } : {}), voiceover: Boolean(item.voiceover), start: { shotId: op.shotId, localFrame: item.localStartFrame }, end: { shotId: op.shotId, localFrame: item.localEndFrame } };
                 if (existing >= 0) next[existing] = record; else next.push(record);
                 refs.push({ utteranceId, role: "speaker", localStartFrame: item.localStartFrame, localEndFrame: item.localEndFrame, textStart: 0, textEnd: textLength });
             }
@@ -4685,7 +4622,26 @@ export class EpisodeProductionService {
                 const index = collection.findIndex((entry: any) => String(entry.id || `${entry.timeline_id}:${entry.fact_id}`) === change.id);
                 if (change.action === "delete") {
                     if (index < 0) throw new Error(`连续性条目 ${change.id} 不存在`);
+                    const removed = collection[index];
                     collection.splice(index, 1);
+                    if (change.collection === "facts") {
+                        const factId = String(removed.id || "");
+                        for (const shot of clipRows(draft.director.source.shots)) {
+                            if (Array.isArray(shot.continuity_facts)) shot.continuity_facts = shot.continuity_facts.filter((id: unknown) => id !== factId);
+                            if (Array.isArray(shot.subject_usages)) shot.subject_usages = shot.subject_usages.map((usage: Record<string, any>) => ({
+                                ...usage,
+                                ...(Array.isArray(usage.continuityFactIds) ? { continuityFactIds: usage.continuityFactIds.filter((id: unknown) => id !== factId) } : {}),
+                                ...(Array.isArray(usage.stateRequirements) ? { stateRequirements: usage.stateRequirements.filter((requirement: Record<string, any>) => requirement.factId !== factId) } : {}),
+                            }));
+                        }
+                        for (const subject of clipRows(draft.director.source.subject_registry)) for (const binding of clipRows(subject.pictureBindings)) {
+                            if (binding.applicableState && Object.prototype.hasOwnProperty.call(binding.applicableState, factId)) {
+                                const applicableState = { ...binding.applicableState };
+                                delete applicableState[factId];
+                                binding.applicableState = applicableState;
+                            }
+                        }
+                    }
                 } else {
                     if (!change.value) throw new Error(`连续性条目 ${change.id} 缺少 value`);
                     if (String(change.value.id || `${change.value.timeline_id}:${change.value.fact_id}`) !== change.id) throw new Error("连续性条目 ID 与变更目标不符");
@@ -4701,6 +4657,31 @@ export class EpisodeProductionService {
         if (op.type === "replace_director_clip_storyboard") {
             if (!draft.director) throw new Error("缺少 Acheng 制作稿");
             replaceDirectorClipStoryboard(draft.director, op);
+            for (const binding of op.keyframeBindings || []) {
+                if (!binding.storageKey) continue;
+                const media = this.db.getMediaFile(binding.storageKey);
+                if (!media || !fs.existsSync(media.filePath)) continue;
+                const asset = draft.director.assets[binding.assetId];
+                if (asset) {
+                    asset.sha256 = promptHashBytes(media.filePath);
+                    asset.status = "generated";
+                }
+            }
+            if (!isSubjectPromptAssembly(draft.director.source)) {
+                const group = draft.clipGroups.find(item => item.id === op.segmentId);
+                for (const shotId of group?.shotIds || []) {
+                    const binding = op.keyframeBindings?.find(item => item.shotId === shotId);
+                    const input = draft.director.shotInputs[shotId];
+                    const nodeId = binding?.nodeId || binding?.containerNodeId || group?.nodeId;
+                    if (binding?.storageKey && nodeId) {
+                        draft.keyframes[shotId] = { nodeId, storageKey: binding.storageKey, sourceVersion: 0 };
+                        delete draft.keyframeReviews[shotId];
+                    } else if (binding || input?.keyframePolicy === "none" || !input?.keyframeAssetId) {
+                        delete draft.keyframes[shotId];
+                        delete draft.keyframeReviews[shotId];
+                    }
+                }
+            }
             projectDirector(draft);
             const group = draft.clipGroups.find(item => item.id === op.segmentId);
             const projectId = this.projectScope ? episodeId : this.episodeInfo(episodeId).canvasId;
@@ -4709,11 +4690,16 @@ export class EpisodeProductionService {
             const node = (project.nodes as Array<Record<string, any>> || []).find(item => item.id === group.nodeId);
             const existing = (node?.metadata?.segments as Array<Record<string, any>> | undefined)?.find(item => item.id === group.segmentId);
             if (!existing || existing.productionClipProjection?.targetId !== group.id) throw new Error("CLIP_STORYBOARD_CANVAS_BINDING_MISMATCH: H3 Clip 与制作台绑定不一致");
-            const storyboard = formalStoryboardTrack(draft, group, existing);
+            const removedStoryboardBindingIds = new Set(op.removedStoryboardBindingIds || []);
+            const referenceBindings = (Array.isArray(existing.referenceBindings) ? existing.referenceBindings : []).filter((ref: Record<string, unknown>) =>
+                !(removedStoryboardBindingIds.has(String(ref.id || "")) && ref.mediaType === "image" && ref.role === "storyboard"));
+            const storyboard = formalStoryboardTrack(draft, group, removedStoryboardBindingIds.size ? { ...existing, referenceBindings } : existing);
             if (!storyboard) throw new Error("CLIP_STORYBOARD_SOURCE_INVALID: 无法从正式 Shot 生成 H3 分镜轨");
+            const storyboardPatch = { ...storyboard, ...(referenceBindings.length !== (Array.isArray(existing.referenceBindings) ? existing.referenceBindings.length : 0) ? { referenceBindings } : {}) };
             if (canonicalProduction(existing.storyboardShots || []) !== canonicalProduction(storyboard.storyboardShots)
-                || Number(existing.duration || 0) !== storyboard.duration || existing.storyboardModeEnabled !== true) {
-                this.db.applyCanvasProjectOperations(projectId, Number(project.revision || 0), [{ type: "update_h3_segment", nodeId: group.nodeId, segmentId: group.segmentId, patch: storyboard }], {
+                || Number(existing.duration || 0) !== storyboard.duration || existing.storyboardModeEnabled !== true
+                || referenceBindings.length !== (Array.isArray(existing.referenceBindings) ? existing.referenceBindings.length : 0)) {
+                this.db.applyCanvasProjectOperations(projectId, Number(project.revision || 0), [{ type: "update_h3_segment", nodeId: group.nodeId, segmentId: group.segmentId, patch: storyboardPatch }], {
                     operationId: `${crypto.randomUUID()}:clip-storyboard-writeback`, runtimeWrite: true, withinTransaction: true, deferredCommits: canvasCommits || [],
                     source: { kind: "system", clientId: "production:clip-storyboard", label: "同步制作分镜轨" },
                 });

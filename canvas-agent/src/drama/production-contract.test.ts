@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { applyDirectorSourcePatch, productionOperationContract, ref2vaPromptDiagnostics, SHOT_FRAME_VALUES, readShotFraming } from "./production-validation.js";
 import { productionEntities } from "./production-entities.js";
-import { diagnosticBlocksAction, dramaProductionPlanSchema, productionEditSchema, productionSettingsSchema, resolveSubjectPictureBindingIds, type DirectorProduction, type ProductionDiagnostic } from "./production-contract.js";
+import { diagnosticBlocksAction, dramaProductionPlanSchema, productionCompileSchema, productionCompileSubmissionSchema, productionEditSchema, productionSettingsSchema, resolveSubjectPictureBindingIds, type DirectorProduction, type ProductionDiagnostic } from "./production-contract.js";
 import { toolInputSchemas } from "../canvas/schemas.js";
 
 test("all published operation examples use the actual edit contract", () => {
@@ -74,7 +74,7 @@ test("asset canvas scope is a formal, validated source field that invalidates ol
     assert.notEqual(director.sourceHash, priorHash);
     assert.equal(director.artifacts.every(artifact => artifact.status === "stale"), true);
     assert.throws(() => applyDirectorSourcePatch(director, "asset", "ROLE", { canvas_scope: "other" }), /shared 或 episode/);
-    director.assets.ROLE = { version: "v1", status: "approved", sharedSource: { dramaId: "drama", assetId: "ROLE", approvedId: "approved-v1", sourceProjectId: "shared", sourceNodeId: "source-role" } };
+    (director.source.asset_plan as Array<Record<string, any>>)[0].sharedSource = { dramaId: "drama", assetId: "ROLE", sourceProjectId: "shared", sourceNodeId: "source-role" };
     assert.throws(() => applyDirectorSourcePatch(director, "asset", "ROLE", { canvas_scope: "episode" }), /必须保留 shared/);
 });
 
@@ -211,6 +211,8 @@ test("a retained Ref2VA receipt uses its original compiler policy after scoped c
 test("production compilation tools have explicit owner, revision and frozen handle contracts", () => {
     assert.ok(toolInputSchemas.production_compile.safeParse({ kind: "canvas", id: "canvas", expectedRevision: 1, operationId: "compile-1" }).success);
     assert.equal(toolInputSchemas.production_compile.safeParse({ kind: "canvas", id: "canvas" }).success, false);
+    assert.equal(productionCompileSubmissionSchema.safeParse({ expectedRevision: 1 }).success, false);
+    assert.equal(productionCompileSchema.safeParse({ expectedRevision: 1 }).success, true, "read-only preflight keeps its operationId-free input");
     assert.equal(toolInputSchemas.production_apply_compilation.safeParse({ kind: "episode", id: "episode", preparedId: "../../packet" }).success, false);
     assert.ok(toolInputSchemas.production_preflight.safeParse({ kind: "episode", id: "episode", action: "compile", request: { expectedRevision: 1 } }).success);
     assert.ok((productionOperationContract().requests.compile as any).required.includes("operationId"));
