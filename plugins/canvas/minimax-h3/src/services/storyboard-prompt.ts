@@ -220,10 +220,11 @@ export function buildStoryboardPromptSections(subjects: StoryboardPromptSubject[
         const livePictures = subjectPictures(subject);
         const identityPictures = livePictures.filter((tag) => !blockingTags.has(tag));
         const blockingPictures = livePictures.filter((tag) => blockingTags.has(tag));
-        if (identityPictures.length) details.unshift(`visual identity defined by reference(s) ${identityPictures.join(", ")}`);
-        if (blockingPictures.length) details.push(`spatial blocking guided by ${blockingPictures.join(", ")}`);
-        if (!details.length) details.push("visual features follow the linked reference");
-        return `${subjectMarker(subject)} is ${identity || subject.id}. ${details.join("; ")}.`;
+        const pictureLinks = [
+            ...(identityPictures.length ? [`identity: ${identityPictures.join(", ")}`] : []),
+            ...(blockingPictures.length ? [`blocking: ${blockingPictures.join(", ")}`] : []),
+        ];
+        return `${subjectMarker(subject)} is ${identity || subject.id}${pictureLinks.length ? `; ${pictureLinks.join("; ")}` : ""}${details.length ? `. ${details.join("; ")}` : "."}`;
     }).join("\n");
 
     const referenceDefinitions = standaloneReferences.map((reference) => {

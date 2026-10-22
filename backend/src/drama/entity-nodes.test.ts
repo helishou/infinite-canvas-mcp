@@ -50,6 +50,16 @@ test("source creates one typed node per registry identity, excludes style, and p
     assert.equal((f.db.getCanvasProject("canvas")!.nodes as any[]).filter(node => node.metadata?.productionEntity).length, 4);
 });
 
+test("deleting an episode Subject also removes its bound canvas entity node", t => {
+    const f = fixture(t), current = f.service.get("ep"), source = structuredClone(current.draft.director!.source) as any;
+    source.subject_registry.push({ id: "SUB_C1", kind: "character", entityRef: { ownerKind: "episode", ownerId: "ep", kind: "character", id: "C1" }, pictureBindings: [] });
+    const registered = f.service.edit("ep", { operationId: "register-delete-subject", expectedRevision: current.revision, ops: [{ type: "set_director_production", director: { ...current.draft.director!, source, sourceHash: directorHash(source) } }] });
+    const nodeId = entity(f.db, "C1").id;
+    f.service.edit("ep", { operationId: "delete-subject-and-node", expectedRevision: registered.revision, ops: [{ type: "delete_director_subject", id: "SUB_C1" }] });
+    assert.equal((f.db.getCanvasProject("canvas")!.nodes as any[]).some(node => node.id === nodeId), false);
+    assert.equal((f.service.get("ep").draft.director!.source.subject_registry as any[]).some(subject => subject.id === "SUB_C1"), false);
+});
+
 test("node edits and workbench edits share the draft, retain structured fields, geometry and adjacent entities", t => {
     const f = fixture(t), node = entity(f.db, "C1"), before = f.service.get("ep");
     const ops = [{ type: "update_node", id: node.id, patch: { title: "铆钉", position: { x: 123, y: 456 } }, metadata: { characterName: "铆钉", characterDescription: "蓝色机械人" } }];

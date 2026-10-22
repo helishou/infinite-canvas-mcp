@@ -49,6 +49,19 @@ export function orderReferencesForSubmission<T extends object>(
     ];
 }
 
+/** Apply the Clip's persisted slot order before semantic submission grouping. */
+export function applyReferenceOrder<T extends object>(
+    references: T[],
+    referenceOrder: unknown,
+    bindingIdOf: (reference: T) => string | undefined,
+): T[] {
+    if (!Array.isArray(referenceOrder) || !referenceOrder.length) return references;
+    const positions = new Map(referenceOrder.filter((id): id is string => typeof id === "string").map((id, index) => [id, index]));
+    return references.map((reference, index) => ({ reference, index, position: positions.get(bindingIdOf(reference) || "") ?? Number.POSITIVE_INFINITY }))
+        .sort((left, right) => left.position - right.position || left.index - right.index)
+        .map(({ reference }) => reference);
+}
+
 /** Rebase numeric Picture tags when image bindings move to different slots. */
 export function remapPictureTags<T>(
     text: string,

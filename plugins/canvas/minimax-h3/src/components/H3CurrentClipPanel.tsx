@@ -3,6 +3,7 @@ import type { H3Ref, H3Segment } from "../types";
 import { message } from "antd";
 import { H3Icon } from "./H3Icon";
 import { H3PromptSection } from "./H3PromptSection";
+import { QuickStoryboardPanel } from "./QuickStoryboardPanel";
 import { refsForSubmission } from "../services/h3-data";
 
 export function H3CurrentClipPanel({ ctx, selected, selectedIndex, imageRefs, videoRefs, audioRefs, patchSelected, fmt, onOpenStoryboard }: { ctx: CanvasNodeContext; selected?: H3Segment; selectedIndex: number; imageRefs: H3Ref[]; videoRefs: H3Ref[]; audioRefs: H3Ref[]; patchSelected: (patch: Partial<H3Segment>) => void; fmt: (value: number) => string; onOpenStoryboard: () => void }) {
@@ -29,6 +30,7 @@ export function H3CurrentClipPanel({ ctx, selected, selectedIndex, imageRefs, vi
         </div>
         <div className="minimax-current-main">
             <H3PromptSection ctx={ctx} selected={selected} imageRefs={visibleImages} videoRefs={visibleVideos} audioRefs={visibleAudios} patchSelected={patchSelected} onOpenStoryboard={onOpenStoryboard} />
+            <QuickStoryboardPanel key={`quick-storyboard-${selected?.id || "none"}`} ctx={ctx} selected={selected} patchSelected={patchSelected} />
         </div>
     </section>;
 }

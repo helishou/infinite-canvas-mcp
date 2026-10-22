@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { productionEditSchema, productionOperationSchema, productionPreflightSchema, type ProductionOperation } from "./production-contract.js";
+import { productionEditSchema, productionOperationSchema, productionPreflightSchema, productionSplitSceneSchema, type ProductionOperation } from "./production-contract.js";
 import { productionReadQuery, productionSourceSectionSchema, productionWriteReceipt } from "./production-read.js";
 import { productionOwnerPath } from "./production-owner.js";
 export { productionOwnerPath } from "./production-owner.js";
@@ -32,6 +32,7 @@ export const productionToolSchemas = {
         expectedCanvasRevision: z.number().int().nonnegative().optional(), expectedPlanHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
         targets: z.array(z.string().min(1)).min(1), scope: z.enum(["selected", "all_ready"]).optional() }),
     production_get_batch: run, production_pause_run: run, production_resume_run: run,
+    production_retire_run: run.extend({ reason: z.string().trim().min(8).max(400) }),
     production_list_versions: identity,
     production_get_version: version.extend(readSnapshot).strict(),
     production_get_version_source: versionSourceRead,
@@ -39,6 +40,7 @@ export const productionToolSchemas = {
     production_get_version_artifact: versionArtifactRead,
     production_preview_impact: identity.extend({ stage }),
     production_edit: edit,
+    production_split_scene: productionSplitSceneSchema.extend(owner).strict(),
     production_publish: identity.extend({ ...write, stage }),
     production_restore: version.extend(write),
     production_sync_clips: identity,
@@ -60,6 +62,7 @@ export const productionToolDescriptions: Record<ProductionToolName, string> = {
     production_get_batch: "按 kind/id/runId 读取固定生产范围、状态与任务 ID。",
     production_pause_run: "暂停 kind/id/runId；在途任务完成后停在边界。",
     production_resume_run: "继续原 kind/id/runId，复用原快照和任务，不自动重生成失败任务。",
+    production_retire_run: "结束已暂停或待审核的 kind/id/runId，释放其未执行目标；必须提供原因。仅当批次没有在途或状态未知的任务时接受，已完成任务和媒体保留。",
     production_list_versions: "列出 kind/id 的历史发布版本。",
     production_get_version: "只读取 kind/id/version 历史摘要。历史源稿、产物目录、单个提示词和工作台内容使用对应的 production_get_version_* 工具。",
     production_get_version_source: "分页读取指定历史版本的 sourceSection；默认每页 50 条，最多 100 条。",
@@ -67,6 +70,7 @@ export const productionToolDescriptions: Record<ProductionToolName, string> = {
     production_get_version_artifact: "按 targetId 分块读取历史正式编译提示词及引用绑定；Picture 编号对应该产物引用列表。Clip 应用时若画布参考顺序不同，Backend 按绑定身份同步重编号。使用 cursor 读完并核对 sha256。",
     production_preview_impact: "按 kind/id/stage 预览发布影响，不提交媒体。",
     production_edit: "以 operationId/expectedRevision 原子编辑 Subject Prompt Assembly v2 + continuity ledger v2 制作稿。expectedRevision 是基线游标，旧于当前 revision 时 patch 仍按事务顺序应用到 Backend 读取的最新稿；不同字段自动保留，同字段后提交的写入生效。revision 增长本身不要求重读全部分区。set_director_production 将 source 作为整体原子字段，只有基于当前稿重建的完整 source 才可用于替换，不能提交旧快照覆盖后来编辑。patch_director_source 的 patch 字段按 entity 校验，可读取 production_get_contract.patchFields 查看 allowlist；Shot 的 camera/performance 对象按嵌套字段合并，数组、null 和标量按提交值替换。写入的新模型指令文本会检查注册的 Shot/Segment/连续性内部 ID，命中时返回 INTERNAL_ID_IN_PROMPT 并拒绝本次编辑；对白和带引号的可见文字沿用编译校验的豁免规则。Shot、局部帧事件、Subject 图片绑定、关键帧、对白与 Clip 分区均写入唯一当前格式；Clip 音频引用使用 audio_bindings。人工 Prompt 仅在编译器 SourceMap 可唯一定位时用 reverse_sync_director_prompt 回写，否则保留画布文本并返回诊断。选择正式历史媒体时可传精确 generationLogId 或 canvas_task_status 返回的 taskId。一次编辑可登记多个明确 Clip 目标的后台局部编译同步，不提交媒体或发布；回执汇总目标状态并提供 production_get_compilation 单次查询入口。阻塞/冲突目标会在 syncIssues 中返回 targetId 与首条诊断。响应丢失恢复原 operationId 回执。",
+    production_split_scene: "原子拆分一条正式导演场次：缩减原场次正文/节拍，新增独立 script_scenes 场次，把连续镜头段迁到指定场景环境，并绑定该环境 Subject 的指定图片。要求先按 production_get_source 读取当前 source、revision、镜头、Clip 边界和 Subject 图片绑定；shotIds 必须连续且属于原场次，不能跨 Segment/Clip。不会生成媒体。",
     production_publish: "按 kind/id 发布指定制作阶段；保留 operationId、expectedRevision，返回短回执。",
     production_restore: "按 kind/id 恢复历史版本为草稿；保留 operationId 和 expectedRevision，不修改历史快照。",
     production_sync_clips: "同步 kind/id 当前发布 Clip 输入，不提交媒体；相同输入、绑定和顺序不推进版本。",
@@ -92,6 +96,7 @@ export function productionToolRequest(name: ProductionToolName, raw: unknown) {
         case "production_get_batch": return get(`${base}/batches/${encodeURIComponent(input.runId)}`);
         case "production_pause_run": return post(`${base}/batches/${encodeURIComponent(input.runId)}/pause`, {});
         case "production_resume_run": return post(`${base}/batches/${encodeURIComponent(input.runId)}/resume`, {});
+        case "production_retire_run": return post(`${base}/batches/${encodeURIComponent(input.runId)}/retire`, { reason: input.reason });
         case "production_list_versions": return get(base + "/versions");
         case "production_get_version": return get(`${base}/versions/${input.version}${productionReadQuery({ ...input, view: "summary" })}`);
         case "production_get_version_source": return get(`${base}/versions/${input.version}${productionReadQuery({ ...input, view: "source" })}`);
@@ -99,6 +104,10 @@ export function productionToolRequest(name: ProductionToolName, raw: unknown) {
         case "production_get_version_artifact": return get(`${base}/versions/${input.version}${productionReadQuery({ ...input, view: "artifacts", targetIds: [input.targetId] })}`);
         case "production_preview_impact": return get(`${base}/impact?stage=${input.stage}`);
         case "production_edit": return post(base + "/ops", input);
+        case "production_split_scene": {
+            const { operationId, expectedRevision, ...operation } = input;
+            return post(base + "/ops", { operationId, expectedRevision, ops: [{ type: "split_director_scene", ...operation }] });
+        }
         case "production_publish": return post(base + "/publish", input);
         case "production_restore": return post(base + "/restore", input);
         case "production_sync_clips": return post(base + "/sync-clips", {});
@@ -109,7 +118,7 @@ export function productionToolRequest(name: ProductionToolName, raw: unknown) {
 export async function executeProductionTool(api: { get(path: string): Promise<unknown>; post(path: string, body: unknown): Promise<unknown> }, name: ProductionToolName, raw: unknown) {
     const request = productionToolRequest(name, raw);
     const result = request.method === "GET" ? await api.get(request.path) : await api.post(request.path, request.body);
-    const projected = ["production_edit", "production_publish", "production_restore", "production_sync_clips"].includes(name)
+    const projected = ["production_edit", "production_split_scene", "production_publish", "production_restore", "production_sync_clips"].includes(name)
         ? productionWriteReceipt(result, { tool: name, input: raw as Record<string, any> }) : result;
     return projected;
 }

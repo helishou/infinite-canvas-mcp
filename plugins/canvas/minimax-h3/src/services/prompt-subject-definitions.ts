@@ -42,7 +42,7 @@ export function bindLiteralSubjectsToReferences(
             id,
             name,
             pictures: [],
-            ...(/appearance follows the reference images exclusively/iu.test(subject.description) ? { role: "character_identity" } : {}),
+            ...(/\bidentity\s*:/iu.test(subject.description) ? { role: "character_identity" } : {}),
         };
     });
 }

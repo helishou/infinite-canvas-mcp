@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { saveAs } from "file-saver";
+import { createPortal } from "react-dom";
 import type { H3Ref } from "../types";
 import { H3Icon } from "./H3Icon";
 import { h3Label, type H3Locale } from "../h3-locale";
@@ -11,7 +12,9 @@ export function H3MaterialCard({ ctx, ref, locale, compact = false, removable = 
     // 旧输出可能叫“H3 输出”，但同样应该显示下载/还原按钮。
     const isOutput = compact && removable;
     const cardRef = useRef<HTMLDivElement | null>(null);
+    const captureMenuRef = useRef<HTMLDivElement | null>(null);
     const [previewReady, setPreviewReady] = useState(false);
+    const [captureMenu, setCaptureMenu] = useState<{ x: number; y: number } | null>(null);
     useEffect(() => {
         if (!isOutput) return;
         const card = cardRef.current;
@@ -27,6 +30,16 @@ export function H3MaterialCard({ ctx, ref, locale, compact = false, removable = 
         observer.observe(card);
         return () => observer.disconnect();
     }, [isOutput]);
+    useEffect(() => {
+        if (!captureMenu) return;
+        const close = (event: PointerEvent) => {
+            if (!(event.target instanceof Node) || !captureMenuRef.current?.contains(event.target)) setCaptureMenu(null);
+        };
+        const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setCaptureMenu(null); };
+        document.addEventListener("pointerdown", close, true);
+        window.addEventListener("keydown", onKey);
+        return () => { document.removeEventListener("pointerdown", close, true); window.removeEventListener("keydown", onKey); };
+    }, [captureMenu]);
     const mediaUrl = ref.storageKey ? ctx.mediaUrl(ref.storageKey) : ref.url;
     const cardClass = isOutput ? "minimax-material-card minimax-output-item" : compact ? "minimax-material-card minimax-asset-item" : "minimax-material-card";
     const dragStart = (event: React.DragEvent<HTMLDivElement>) => {
@@ -36,11 +49,16 @@ export function H3MaterialCard({ ctx, ref, locale, compact = false, removable = 
         event.dataTransfer.setData("text/plain", payload);
         if (isOutput && ref.type === "video") event.dataTransfer.setData("application/x-h3-output-video", "1");
     };
-    return <div ref={cardRef} className={cardClass} draggable onDragStart={dragStart} onDoubleClick={(event) => { event.stopPropagation(); onOpenPreview?.(); }} title={onOpenPreview ? "双击放大预览" : undefined} style={{ position: "relative", flex: `0 0 ${compact ? 82 : 118}px`, height: compact ? (isOutput ? 78 : 58) : 64, overflow: "hidden", border: `1px solid ${ctx.theme.node.stroke}`, borderRadius: 5, background: ctx.theme.node.fill, cursor: "grab" }}>
+    return <div ref={cardRef} className={cardClass} draggable onDragStart={dragStart} onContextMenu={(event) => {
+        if (!isOutput || ref.type !== "video") return;
+        event.preventDefault(); event.stopPropagation();
+        setCaptureMenu({ x: event.clientX, y: event.clientY });
+    }} onDoubleClick={(event) => { event.stopPropagation(); onOpenPreview?.(); }} title={onOpenPreview ? "双击放大预览" : undefined} style={{ position: "relative", flex: `0 0 ${compact ? 82 : 118}px`, height: compact ? (isOutput ? 78 : 58) : 64, overflow: "hidden", border: `1px solid ${ctx.theme.node.stroke}`, borderRadius: 5, background: ctx.theme.node.fill, cursor: "grab" }}>
         {ref.type === "video" ? compactMedia || isOutput && !previewReady ? <H3Icon name="clapperboard" /> : <video src={mediaUrl} muted playsInline preload="metadata" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : ref.type === "image" ? <img src={mediaUrl} alt={ref.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ padding: 16, fontSize: 22 }}>♫ {ref.name}</span>}
         {/* Output 卡片必须显示名字：历史输出同属一个 Clip 但有 N 个版本，类型标签无法区分。 */}
         {isOutput ? <span className="minimax-output-name" title={ref.name}>{ref.name}</span> : <span>{h3Label(locale, ref.type === "image" ? "image" : ref.type === "video" ? "video" : "audio")}</span>}
         {isOutput ? <span style={{ position: "absolute", right: 4, top: 4, display: "flex", gap: 3 }}><button type="button" title="放大预览" aria-label="放大预览" onClick={(event) => { event.stopPropagation(); onOpenPreview?.(); }}><H3Icon name="zoom" /></button><button type="button" title="下载输出视频" aria-label="下载输出视频" onClick={(event) => { event.stopPropagation(); saveAs(mediaUrl, ref.name || "h3-output"); }}><H3Icon name="download" /></button>{onRestore ? <button type="button" title={restoreTitle || "设为当前 Clip（还原提示词与参数）"} aria-label={restoreTitle || "设为当前 Clip（还原提示词与参数）"} onClick={(event) => { event.stopPropagation(); onRestore(); }}><H3Icon name="restore" /></button> : null}</span> : null}
         {removable && onRemove && !isOutput ? <button type="button" onClick={(event) => { event.stopPropagation(); onRemove(); }} style={{ position: "absolute", top: 2, right: 2, zIndex: 4 }}>×</button> : null}
+        {captureMenu ? createPortal(<div ref={captureMenuRef} role="menu" style={{ position: "fixed", zIndex: 9999, left: captureMenu.x, top: captureMenu.y, padding: 4, background: "var(--h3-panel-bg, #fff)", border: "1px solid var(--h3-border, #888)", borderRadius: 5 }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}><button type="button" role="menuitem" onClick={(event) => { event.stopPropagation(); window.dispatchEvent(new CustomEvent("minimax-h3-quick-storyboard-capture", { detail: { nodeId: ctx.node.id, url: mediaUrl, storageKey: ref.storageKey, name: ref.name || "H3 输出视频", duration: 0 } })); setCaptureMenu(null); }}>提取全部分镜帧到快速分镜</button></div>, document.body) : null}
     </div>;
 }

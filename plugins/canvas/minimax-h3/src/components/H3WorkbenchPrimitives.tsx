@@ -510,6 +510,9 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
     // 用于在 Clip 边界拦截「暂停竞态」：用户在片段结尾瞬间点暂停时，ended 仍会触发换段，
     // 把画面切成下一段的首帧——表现为「点暂停后跳到首帧」。该标记让换段机器让位于用户暂停。
     const userPausedRef = useRef(false);
+    const resumeAfterVisibilityRef = useRef<HTMLMediaElement | null>(null);
+    const playbackAllRef = useRef(ctx.node.metadata?.h3PlaybackAll === true);
+    playbackAllRef.current = ctx.node.metadata?.h3PlaybackAll === true;
     // 断流早退重试标记：弱网/后端不支持 Range 时媒体会在中途触发 ended（currentTime << duration），
     // 对同一 src 只自动重试一次，避免死循环。
     const endedRetrySrcRef = useRef<string | null>(null);
@@ -558,13 +561,25 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
         media.addEventListener("ended", handler);
         return () => media.removeEventListener("ended", handler);
     }, [active, livePreview]);
-    // 页面切到后台时强制 pause 双槽视频：浏览器可能在隐藏标签里继续跑 video，
-    // 切回来时已经播过一段，看上去像"自动播放"。窗口短暂失焦不暂停，避免系统浮层/切换应用打断连续播放。
+    // 页面切到后台时暂停双槽视频，避免隐藏页面继续播放；若这是用户主动开始的连续播放，
+    // 回到页面后从暂停位置续播。窗口短暂失焦不暂停，避免系统浮层/切换应用打断连续播放。
     useEffect(() => {
         const pauseBoth = () => {
+            const active = videosRef.current[activeRef.current];
+            resumeAfterVisibilityRef.current = playbackAllRef.current && active && !active.paused && !active.ended ? active : null;
             for (const v of videosRef.current) if (v && !v.paused) v.pause();
         };
-        const onVisibility = () => { if (document.visibilityState === "hidden") pauseBoth(); };
+        const onVisibility = () => {
+            if (document.visibilityState === "hidden") {
+                pauseBoth();
+                return;
+            }
+            const resume = resumeAfterVisibilityRef.current;
+            resumeAfterVisibilityRef.current = null;
+            if (!playbackAllRef.current || !resume || resume !== videosRef.current[activeRef.current] || resume.ended || !resume.paused) return;
+            userPausedRef.current = false;
+            void resume.play().catch(() => undefined);
+        };
         document.addEventListener("visibilitychange", onVisibility);
         return () => document.removeEventListener("visibilitychange", onVisibility);
     }, []);
@@ -795,6 +810,11 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
             {aspectGuide}
             {mediaResolution ? <div className="minimax-player-resolution">{mediaResolution.width} × {mediaResolution.height}</div> : null}
             {frameMenuPosition ? <div ref={frameMenuRef} className="minimax-frame-menu" role="menu" style={{ left: frameMenuPosition.x, top: frameMenuPosition.y }}>
+                <button type="button" role="menuitem" onClick={() => {
+                    const video = videosRef.current[activeRef.current];
+                    window.dispatchEvent(new CustomEvent("minimax-h3-quick-storyboard-capture", { detail: { nodeId: ctx.node.id, url, storageKey, name: name || "H3 视频", duration: Number(video?.duration || clipDuration || 0) } }));
+                    setFrameMenuPosition(null);
+                }}>提取全部分镜帧到快速分镜</button>
                 <button type="button" role="menuitem" onClick={() => void captureVideoFrame("current")}>截取当前帧</button>
                 <button type="button" role="menuitem" onClick={() => void captureVideoFrame("last")}>截取尾帧</button>
                 <button type="button" role="menuitem" onClick={() => void captureVideoFrame("first")}>截取首帧</button>

@@ -1,13 +1,13 @@
 import { ProductionPageHeading } from "./production-page-heading";
 import { canBindSubjectImage, manualWorkspaceProgress, manualTargetRecovery } from "./manual-production-guide";
-import { productionEntities, productionEntityBinding } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionEntities, productionEntityBinding, productionSceneEntries } from "@basketikun/canvas-agent/drama/production-contract";
 import { productionSegmentRuntimeMatches } from "@/lib/production-source";
 import { ProductionInputDiff } from "./production-input-diff";
 import { matchesProductionAssetNode, subjectProductionKind } from "./production-asset-identity";
 import { currentClipRefreshes, groupedRefreshIssues } from "./production-refresh-display";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Alert, App, Button, Input, InputNumber, Modal, Radio, Select, Switch, Tag } from "antd";
-import { ArrowRight, ArrowLeft, ArrowUp, ArrowDown, ArrowDownToLine, Check, Pause, Play, RotateCcw, WandSparkles, Users, MapPin, Image as ImageIcon, Film, Pencil, BookOpen, Search, ChevronDown, Plus, Trash2, TriangleAlert, Volume2, Share2 } from "lucide-react";
+import { ArrowRight, ArrowLeft, ArrowUp, ArrowDown, ArrowDownToLine, Check, Pause, Play, RotateCcw, WandSparkles, Users, MapPin, Image as ImageIcon, Film, Pencil, BookOpen, Search, ChevronDown, Plus, Trash2, TriangleAlert, Volume2, Share2, Split } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { directorModules, resolveSubjectPictureBindingIds, directorProductionSchema, isSubjectPromptAssembly, canonicalProduction, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 import { backendMediaUrl, fetchBackendGenerationLogs, fetchProductionWorkbench, type BackendGenerationLog, type ProductionCompilationDiagnostic, type ProductionTarget, type ProductionSceneAction, type BackendRuntimeTask, type EpisodeProduction, type ProductionBatch, type ProductionReadiness } from "@/services/backend-api";
@@ -47,6 +47,12 @@ import { CanvasAssetEditModal, type CanvasAssetEditPayload } from "./canvas-asse
 export type DirectorWorkspace = "series" | "overview" | "story" | "assets" | "shots" | "continuity" | "clips" | "production" | "advanced";
 type CanvasNodeOption = { id: string; title?: string; type?: string; metadata?: Record<string, unknown> };
 type ProductionVersion = { version: number; stage: string; createdAt: string };
+type DirectorSceneSplitDraft = {
+  startShotId: string; endShotId: string; boundary: number;
+  retainedSceneName: string; retainedHeading: string; retainedLocation: string; retainedTimeOfDay: string;
+  newSceneName: string; newSceneLocation: string; newSceneTimeOfDay: string;
+  environmentId: string; environmentPictureBindingId: string;
+};
 type DirectorDecision = NonNullable<DirectorProduction["workflow"]["pendingDecisions"]>[number];
 const objectWorkspaces: Array<{ key: Exclude<DirectorWorkspace, "overview" | "advanced" | "series">; modules: Array<(typeof directorModules)[number]>; targetKinds: Array<"asset" | "keyframe" | "segment"> }> = [
   { key: "story", modules: ["story"], targetKinds: [] },
@@ -644,8 +650,8 @@ export function DirectorPanel({
   briefDraft, onBriefDraftChange, onOpenSharedAsset, onPromoteExistingSharedAsset,
   onPrepareEntities, onUpsertSubject, onSwitchToSharedNode, onDeleteSubject, onDeleteScene, onDeleteAsset, onRemoveCanvasAsset, onPatchCanvasAsset, onCreateManualAsset, onIncludeSharedNode, onRemoveSharedAsset, onSaveV2Shot, onRepartitionClips, onEditShot,
   compact = false, navigationTitleVisible = false, onSaveScript, generationSupported = true, assetScopeHint,
-  onBrief, onPatch, onEditCanvasClip, onAdoptDirectorFields, onAdoptClipStyle, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onH3Boundary, onPublish, onReplace, onAskDirector, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRestore, onRefresh, onSceneCommand, sceneCommandPending, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onCheckContinuity, onContinuitySnapshot,
-  onCompile, onGenerateClip, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets,
+  onBrief, onPatch, onEditCanvasClip, onAdoptDirectorFields, onAdoptClipStyle, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onH3Boundary, onPublish, onReplace, onAskDirector, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRetire, onRestore, onRefresh, onSceneCommand, sceneCommandPending, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onCheckContinuity, onContinuitySnapshot,
+  onCompile, onGenerateClip, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets, onSplitScene,
   onApplyTranslatedPrompts, autoTranslateCompilation, readOnly = false, onArchive,
 }: {
   workspace: DirectorWorkspace; director?: DirectorProduction; production: EpisodeProduction; readiness?: ProductionReadiness; run?: ProductionBatch | null;
@@ -660,6 +666,7 @@ export function DirectorPanel({
   generationSupported?: boolean;
   assetScopeHint?: string;
   onSaveScript?: (ids: string[]) => Promise<boolean>;
+  onSplitScene?: (operation: Extract<ProductionOperation, { type: "split_director_scene" }>) => Promise<boolean>;
   batches: ProductionBatch[]; canvasNodes: CanvasNodeOption[]; versions: ProductionVersion[]; busy: boolean; canvasId: string;
   /** 同一剧目的共享资产画布节点；风格锚点等跨画布选择需要它，分集页本身不持有这些节点。 */
   sharedCanvasNodes?: CanvasNodeOption[];
@@ -708,6 +715,7 @@ export function DirectorPanel({
   onStart: (targetIds: string[], scope?: "selected" | "all_ready") => void;
   onPause: (runId: string) => void;
   onResume: (runId: string) => void;
+  onRetire?: (runId: string) => void;
   onRestore: (version: number) => void;
   onRefresh: () => void;
   sceneCommandPending?: boolean;
@@ -734,6 +742,8 @@ export function DirectorPanel({
   const { t } = useTranslation();
   const { message } = App.useApp();
   const [activeSceneKey, setActiveSceneKey] = useState('');
+  const [sceneSplitDraft, setSceneSplitDraft] = useState<DirectorSceneSplitDraft | null>(null);
+  const [sceneSplitPending, setSceneSplitPending] = useState(false);
   const [overviewShotId, setOverviewShotId] = useState('');
   const [overviewMediaErrors, setOverviewMediaErrors] = useState<Record<string, boolean>>({});
   const [lastGeneratedPrompts, setLastGeneratedPrompts] = useState<Record<string, { status: "loading" | "ready" | "missing" | "error"; log?: BackendGenerationLog }>>({});
@@ -820,6 +830,15 @@ export function DirectorPanel({
   useEffect(() => { if (focusTarget?.startsWith('asset:') || focusTarget?.startsWith('frame:')) { setAssetFilter('all'); setAssetSearch(''); } }, [focusTarget]);
   const activeSceneIndex = Math.max(0, sceneGroups.findIndex(group => group.key === activeSceneKey));
   const activeScene = sceneGroups[activeSceneIndex];
+  const activeSceneRow = activeScene?.blocks.length === 1 ? activeScene.blocks[0] : undefined;
+  const activeSceneEntry = activeScene ? productionSceneEntries(source).find(entry => entry.id === activeScene.key) : undefined;
+  const activeSceneShots = (activeSceneEntry?.shotIds || []).map(id => sourceShots.find(shot => String(shot.id || "") === String(id))).filter((shot): shot is Record<string, any> => Boolean(shot));
+  const nestedSceneScriptBlocks = records(activeSceneRow?.blocks);
+  const sceneSplitContentParts: Array<{ label: string; text: string; block?: Record<string, any> }> = nestedSceneScriptBlocks.length
+    ? nestedSceneScriptBlocks.map(block => ({ label: String(block.text || block.id || ""), text: String(block.text || ""), block }))
+    : typeof activeSceneRow?.text === "string"
+      ? activeSceneRow.text.split(/\r?\n\s*\r?\n/).map(text => ({ label: text, text }))
+      : [];
   const fps = Number(source.fps_num || 24) / Number(source.fps_den || 1);
   const shotTitle = (id: string) => {
     const index = sourceShots.findIndex(shot => String(shot.id) === id);
@@ -889,6 +908,111 @@ export function DirectorPanel({
     const nextDirector = { ...d, source: nextSource, sourceHash, artifacts: d.artifacts.map(item => ({ ...item, status: "stale" as const })), executionAuthorized: false, workflow };
     const saved = await onReplace(nextDirector);
     if (saved !== false) setActiveSceneKey(created.occurrence.id);
+  };
+  const splitEnvironmentBindings = sceneSplitDraft
+    ? records(source.subject_registry).find(subject => subject.entityRef?.kind === "scene" && String(subject.entityRef?.id || "") === sceneSplitDraft.environmentId)?.pictureBindings
+    : undefined;
+  const splitBindingOptions = records(splitEnvironmentBindings).filter(binding => Array.isArray(binding.provides) && binding.provides.map(String).includes("environment"));
+  const defaultSplitBinding = splitBindingOptions.find(binding => Array.isArray(binding.defaultFor) && binding.defaultFor.map(String).includes("environment"))
+    || (splitBindingOptions.length === 1 ? splitBindingOptions[0] : undefined);
+  const selectedSplitBindingId = sceneSplitDraft?.environmentPictureBindingId || String(defaultSplitBinding?.id || "");
+  const openSceneSplit = () => {
+    if (!activeScene || !activeSceneRow || activeScene.blocks.length !== 1 || sceneSplitContentParts.length < 2) return;
+    const currentEnvironmentId = String(activeSceneRow.scene_id || activeScene.sceneId || "");
+    const differentEnvironmentIndex = activeSceneShots.findIndex(shot => String(shot.scene_id || "") !== currentEnvironmentId);
+    const startIndex = differentEnvironmentIndex >= 0 ? differentEnvironmentIndex : -1;
+    const selectedEnvironmentId = startIndex >= 0 ? String(activeSceneShots[startIndex].scene_id || "") : currentEnvironmentId;
+    let endIndex = startIndex;
+    if (startIndex >= 0) while (endIndex + 1 < activeSceneShots.length && String(activeSceneShots[endIndex + 1].scene_id || "") === selectedEnvironmentId) endIndex += 1;
+    const environment = locations.find(row => String(row.id || "") === selectedEnvironmentId);
+    const transitionBoundary = sceneSplitContentParts.findIndex(part => /转至|转到|移到饭桌|来到饭桌/.test(part.text));
+    setSceneSplitDraft({
+      startShotId: startIndex >= 0 ? String(activeSceneShots[startIndex].id || "") : "",
+      endShotId: endIndex >= startIndex && startIndex >= 0 ? String(activeSceneShots[endIndex].id || "") : "",
+      boundary: transitionBoundary > 0 ? transitionBoundary : 1,
+      retainedSceneName: String(activeSceneRow.scene_name || activeSceneRow.heading || activeScene.title || ""),
+      retainedHeading: String(activeSceneRow.heading || activeSceneRow.scene_name || activeScene.title || ""),
+      retainedLocation: String(activeSceneRow.location || activeScene.title || environment?.name || "场景"),
+      retainedTimeOfDay: String(activeSceneRow.time_of_day || "白天"),
+      newSceneName: String(environment?.name || environment?.scene_name || ""),
+      newSceneLocation: String(environment?.name || environment?.scene_name || activeSceneRow.location || ""),
+      newSceneTimeOfDay: String(activeSceneRow.time_of_day || "白天"),
+      environmentId: selectedEnvironmentId,
+      environmentPictureBindingId: "",
+    });
+  };
+  const submitSceneSplit = async () => {
+    if (!d || !activeScene || !activeSceneRow || !sceneSplitDraft || !onSplitScene) return;
+    const startIndex = activeSceneShots.findIndex(shot => String(shot.id || "") === sceneSplitDraft.startShotId);
+    const endIndex = activeSceneShots.findIndex(shot => String(shot.id || "") === sceneSplitDraft.endShotId);
+    if (startIndex < 0 || endIndex < startIndex) { message.error(t("director.workspace.sceneSplitChooseShotRange")); return; }
+    if (sceneSplitDraft.boundary <= 0 || sceneSplitDraft.boundary >= sceneSplitContentParts.length) { message.error(t("director.workspace.sceneSplitChooseTextBoundary")); return; }
+    if (!sceneSplitDraft.retainedSceneName.trim() || !sceneSplitDraft.newSceneName.trim() || !sceneSplitDraft.retainedLocation.trim() || !sceneSplitDraft.newSceneLocation.trim() || !sceneSplitDraft.environmentId || !selectedSplitBindingId) {
+      message.error(t("director.workspace.sceneSplitRequiredFields")); return;
+    }
+    const movedShots = activeSceneShots.slice(startIndex, endIndex + 1);
+    const movedIds = new Set(movedShots.map(shot => String(shot.id || "")));
+    const crossingClip = segments.find(segment => (Array.isArray(segment.shot_ids) ? segment.shot_ids : []).some((id: unknown) => movedIds.has(String(id)))
+      && (Array.isArray(segment.shot_ids) ? segment.shot_ids : []).some((id: unknown) => !movedIds.has(String(id))));
+    if (crossingClip) { message.error(t("director.workspace.sceneSplitCrossesClip", { clip: String(crossingClip.id || "") })); return; }
+    const retainedShots = activeSceneShots.filter(shot => !movedIds.has(String(shot.id || "")));
+    const selectedBeats = [...new Set(movedShots.flatMap(shot => Array.isArray(shot.story_beat_ids) ? shot.story_beat_ids.map(String) : []))];
+    const retainedShotBeats = new Set(retainedShots.flatMap(shot => Array.isArray(shot.story_beat_ids) ? shot.story_beat_ids.map(String) : []));
+    const crossingBeat = selectedBeats.find(id => retainedShotBeats.has(id));
+    if (crossingBeat) { message.error(t("director.workspace.sceneSplitCrossesBeat", { beat: crossingBeat })); return; }
+
+    const originalBeatIds = [...new Set([
+      ...(Array.isArray(activeSceneRow.beat_ids) ? activeSceneRow.beat_ids.map(String) : []),
+      ...records(activeSceneRow.blocks).flatMap(block => Array.isArray(block.beat_ids) ? block.beat_ids.map(String) : []),
+    ])];
+    if (originalBeatIds.length && selectedBeats.some(id => !originalBeatIds.includes(id))) { message.error(t("director.workspace.sceneSplitBeatMismatch")); return; }
+    const retainedBeatIds = originalBeatIds.filter(id => !selectedBeats.includes(id));
+    const selectedParts = sceneSplitContentParts.slice(sceneSplitDraft.boundary);
+    const retainedParts = sceneSplitContentParts.slice(0, sceneSplitDraft.boundary);
+    const sourceScenePatch: Record<string, unknown> = {
+      scene_name: sceneSplitDraft.retainedSceneName.trim(),
+      heading: sceneSplitDraft.retainedHeading.trim() || sceneSplitDraft.retainedSceneName.trim(),
+      location: sceneSplitDraft.retainedLocation.trim(),
+      time_of_day: sceneSplitDraft.retainedTimeOfDay.trim(),
+      text: retainedParts.map(part => part.text).join("\n\n"),
+      beat_ids: retainedBeatIds,
+    };
+    const newScene: Record<string, unknown> = {
+      id: `SCENE_${nanoid()}`,
+      scene_id: sceneSplitDraft.environmentId,
+      scene_name: sceneSplitDraft.newSceneName.trim(),
+      heading: sceneSplitDraft.newSceneName.trim(),
+      location: sceneSplitDraft.newSceneLocation.trim(),
+      time_of_day: sceneSplitDraft.newSceneTimeOfDay.trim(),
+      kind: activeSceneRow.kind || "action",
+      text: selectedParts.map(part => part.text).join("\n\n"),
+      beat_ids: selectedBeats,
+    };
+    if (nestedSceneScriptBlocks.length) {
+      const clonedBlocks = selectedParts.flatMap(part => part.block ? [{ ...part.block, id: `SCRIPT_${nanoid()}` }] : []);
+      const retainedBlocks = retainedParts.flatMap(part => part.block ? [part.block] : []);
+      sourceScenePatch.blocks = retainedBlocks;
+      newScene.blocks = clonedBlocks;
+    }
+    const operation = {
+      type: "split_director_scene" as const,
+      sourceSceneId: activeScene.key,
+      sourceScenePatch,
+      newScene,
+      shotIds: [...movedIds],
+      environmentSubjectId: String(records(source.subject_registry).find(subject => subject.entityRef?.kind === "scene" && String(subject.entityRef?.id || "") === sceneSplitDraft.environmentId)?.id || ""),
+      environmentPictureBindingId: selectedSplitBindingId,
+    } as Extract<ProductionOperation, { type: "split_director_scene" }>;
+    if (!operation.environmentSubjectId) { message.error(t("director.workspace.sceneSplitMissingEnvironmentSubject")); return; }
+    setSceneSplitPending(true);
+    try {
+      const saved = await onSplitScene(operation);
+      if (saved) {
+        setSceneSplitDraft(null);
+        setActiveSceneKey(String(newScene.id));
+        message.success(t("director.workspace.sceneSplitSaved"));
+      }
+    } finally { setSceneSplitPending(false); }
   };
   const deleteScene = (group: ReturnType<typeof groupScriptScenes>[number], index: number) => {
     Modal.confirm({
@@ -1357,7 +1481,12 @@ export function DirectorPanel({
   };
 
   const renderStoryWorkspace = () => <div className="space-y-3">
-    <ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t("director.studio.script")} summary={t("director.studio.scriptSummary", { scenes: sceneGroups.length, characters: characters.length })} actions={<> <Button icon={<Plus className="size-4" />} disabled={busy || !d} onClick={() => void addScene()}>{t("director.workspace.addScene")}</Button><Button icon={editingScript ? <BookOpen className="size-4" /> : <Pencil className="size-4" />} disabled={!activeScene} onClick={() => setEditingScript(value => !value)}>{t(editingScript ? "director.studio.readScript" : "director.studio.editScript")}</Button><Button icon={<WandSparkles className="size-4" />} disabled={busy} onClick={() => onAskDirector({ workspace: "story", targetId: activeScene?.key })}>{t("director.studio.collaborate")}</Button> </>} />
+    <ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t("director.studio.script")} summary={t("director.studio.scriptSummary", { scenes: sceneGroups.length, characters: characters.length })} actions={<>
+      <Button icon={<Plus className="size-4" />} disabled={busy || !d} onClick={() => void addScene()}>{t("director.workspace.addScene")}</Button>
+      <Button icon={<Split className="size-4" />} disabled={busy || !activeScene || activeScene.blocks.length !== 1 || sceneSplitContentParts.length < 2 || activeSceneShots.length < 2 || !onSplitScene} onClick={openSceneSplit}>{t("director.workspace.splitScene")}</Button>
+      <Button icon={editingScript ? <BookOpen className="size-4" /> : <Pencil className="size-4" />} disabled={!activeScene} onClick={() => setEditingScript(value => !value)}>{t(editingScript ? "director.studio.readScript" : "director.studio.editScript")}</Button>
+      <Button icon={<WandSparkles className="size-4" />} disabled={busy} onClick={() => onAskDirector({ workspace: "story", targetId: activeScene?.key })}>{t("director.studio.collaborate")}</Button>
+    </>} />
     <details className="border-b border-border pb-2">
       <summary className="cursor-pointer text-sm font-medium">{t("director.studio.creativeNotes")}</summary>
       <div className="mt-3 space-y-3">
@@ -1430,6 +1559,48 @@ export function DirectorPanel({
         {storyBeatCards(records(story.beats), activeScene?.sceneId).length > 0 && <section><h3 className="mb-3 text-xs font-medium text-muted-foreground">{t("director.studio.storyBeats")}</h3>{storyBeatCards(records(story.beats), activeScene?.sceneId).map(({ beat, text, repeatedFields }, index) => <article key={beat.id || index} className="mb-4 border-b border-border pb-3"><p className="text-sm leading-6">{text || t("director.canvasOverlay.beatNeedsDesign")}</p>{!text && <Button size="small" type="text" onClick={() => onAskDirector({ workspace: "story", targetId: String(beat.id || "") })}>{t("productionCanvas.discussObject")}</Button>}<details className="mt-2 text-xs text-muted-foreground"><summary className="cursor-pointer">{t("director.studio.beatAnalysis")}</summary>{["goal", "obstacle", "choice", "cost", "result"].map(field => beat[field] ? <p key={field} className="mt-2 leading-5"><strong>{t("director.studio.beatField." + field)}：</strong>{readableText(beat[field], nameMap)}</p> : null)}</details></article>)}</section>}
       </aside>
     </div>}
+    <Modal
+      open={Boolean(sceneSplitDraft)}
+      title={t("director.workspace.splitScene")}
+      onCancel={() => { if (!sceneSplitPending) setSceneSplitDraft(null); }}
+      onOk={() => void submitSceneSplit()}
+      okText={t("director.workspace.splitSceneConfirm")}
+      cancelText={t("common.cancel")}
+      confirmLoading={sceneSplitPending}
+      okButtonProps={{ disabled: busy || sceneSplitPending || !sceneSplitDraft || !sceneSplitDraft.startShotId || !sceneSplitDraft.endShotId || !sceneSplitDraft.environmentId || !selectedSplitBindingId }}
+    >
+      {sceneSplitDraft && <div className="space-y-4">
+        <Alert type="info" showIcon message={t("director.workspace.sceneSplitHint")} />
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="grid gap-1 text-xs"><span>{t("director.workspace.sceneSplitStartShot")}</span><Select value={sceneSplitDraft.startShotId || undefined} placeholder={t("director.workspace.sceneSplitChooseShot")} options={activeSceneShots.map(shot => ({ value: String(shot.id), label: `${shotTitle(String(shot.id))} · ${String(shot.id)}` }))} onChange={startShotId => setSceneSplitDraft(current => current ? { ...current, startShotId } : current)} /></label>
+          <label className="grid gap-1 text-xs"><span>{t("director.workspace.sceneSplitEndShot")}</span><Select value={sceneSplitDraft.endShotId || undefined} placeholder={t("director.workspace.sceneSplitChooseShot")} options={activeSceneShots.map(shot => ({ value: String(shot.id), label: `${shotTitle(String(shot.id))} · ${String(shot.id)}` }))} onChange={endShotId => setSceneSplitDraft(current => current ? { ...current, endShotId } : current)} /></label>
+        </div>
+        <label className="grid gap-1 text-xs"><span>{t("director.workspace.sceneSplitTextBoundary")}</span><Select value={sceneSplitDraft.boundary} options={sceneSplitContentParts.slice(1).map((part, index) => ({ value: index + 1, label: `${index + 1}. ${part.label.replace(/\s+/g, " ").slice(0, 76)}` }))} onChange={boundary => setSceneSplitDraft(current => current ? { ...current, boundary } : current)} /></label>
+        <details className="rounded-md border border-border px-3 py-2 text-xs">
+          <summary className="cursor-pointer font-medium">{t("director.workspace.sceneSplitPreview")}</summary>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <div><p className="mb-1 font-medium">{sceneSplitDraft.retainedSceneName}</p><p className="max-h-40 overflow-auto whitespace-pre-wrap text-muted-foreground">{sceneSplitContentParts.slice(0, sceneSplitDraft.boundary).map(part => part.text).join("\n\n")}</p></div>
+            <div><p className="mb-1 font-medium">{sceneSplitDraft.newSceneName || t("director.workspace.untitledScene")}</p><p className="max-h-40 overflow-auto whitespace-pre-wrap text-muted-foreground">{sceneSplitContentParts.slice(sceneSplitDraft.boundary).map(part => part.text).join("\n\n")}</p></div>
+          </div>
+        </details>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="grid gap-1 text-xs"><span>{t("director.workspace.sceneSplitRetainedName")}</span><Input value={sceneSplitDraft.retainedSceneName} onChange={event => setSceneSplitDraft(current => current ? { ...current, retainedSceneName: event.target.value } : current)} /></label>
+          <label className="grid gap-1 text-xs"><span>{t("director.workspace.sceneSplitRetainedHeading")}</span><Input value={sceneSplitDraft.retainedHeading} onChange={event => setSceneSplitDraft(current => current ? { ...current, retainedHeading: event.target.value } : current)} /></label>
+          <label className="grid gap-1 text-xs"><span>{t("director.workspace.sceneSplitNewName")}</span><Input value={sceneSplitDraft.newSceneName} onChange={event => setSceneSplitDraft(current => current ? { ...current, newSceneName: event.target.value } : current)} /></label>
+          <label className="grid gap-1 text-xs"><span>{t("director.workspace.sceneSplitNewEnvironment")}</span><Select value={sceneSplitDraft.environmentId || undefined} placeholder={t("director.workspace.sceneSplitChooseEnvironment")} options={locations.map(location => ({ value: String(location.id), label: String(location.name || location.scene_name || location.id) }))} onChange={environmentId => {
+            const environment = locations.find(item => String(item.id || "") === environmentId);
+            const environmentName = String(environment?.name || environment?.scene_name || environmentId);
+            setSceneSplitDraft(current => current ? { ...current, environmentId, environmentPictureBindingId: "", newSceneName: environmentName, newSceneLocation: environmentName } : current);
+          }} /></label>
+          <label className="grid gap-1 text-xs"><span>{t("director.workspace.sceneSplitRetainedLocation")}</span><Input value={sceneSplitDraft.retainedLocation} onChange={event => setSceneSplitDraft(current => current ? { ...current, retainedLocation: event.target.value } : current)} /></label>
+          <label className="grid gap-1 text-xs"><span>{t("director.workspace.sceneSplitNewLocation")}</span><Input value={sceneSplitDraft.newSceneLocation} onChange={event => setSceneSplitDraft(current => current ? { ...current, newSceneLocation: event.target.value } : current)} /></label>
+          <label className="grid gap-1 text-xs"><span>{t("director.workspace.sceneSplitRetainedTime")}</span><Input value={sceneSplitDraft.retainedTimeOfDay} onChange={event => setSceneSplitDraft(current => current ? { ...current, retainedTimeOfDay: event.target.value } : current)} /></label>
+          <label className="grid gap-1 text-xs"><span>{t("director.workspace.sceneSplitNewTime")}</span><Input value={sceneSplitDraft.newSceneTimeOfDay} onChange={event => setSceneSplitDraft(current => current ? { ...current, newSceneTimeOfDay: event.target.value } : current)} /></label>
+        </div>
+        {splitBindingOptions.length > 0 && <label className="grid gap-1 text-xs"><span>{t("director.workspace.sceneSplitEnvironmentImage")}</span><Select value={selectedSplitBindingId || undefined} disabled={splitBindingOptions.length === 1} placeholder={t("director.workspace.sceneSplitChooseEnvironmentImage")} options={splitBindingOptions.map(binding => ({ value: String(binding.id || ""), label: `${assetName(String(binding.assetId || ""))} · ${String(binding.sourceNode?.nodeId || binding.id || "")}` }))} onChange={environmentPictureBindingId => setSceneSplitDraft(current => current ? { ...current, environmentPictureBindingId } : current)} /></label>}
+        {(!sceneSplitDraft.environmentId || !splitBindingOptions.length) && <Alert type="warning" showIcon message={t("director.workspace.sceneSplitMissingEnvironmentImage")} />}
+      </div>}
+    </Modal>
   </div>;
 
   // 结构化剧本场次把段落嵌在 .blocks[]（acheng v2 产物）；旧版把每个场次条目本身当作一个段落。
@@ -1956,7 +2127,7 @@ export function DirectorPanel({
       {readOnly && <Alert className="mt-3" type="info" showIcon message={t("director.workspace.archive.notice")} />}
     </section>}
     {productionSummary}
-    {run && <section className="rounded-lg border border-border bg-card p-4" data-production-active-run><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs uppercase tracking-wide text-muted-foreground">{t("director.workspace.activeRun")}</p><h3 className="mt-1 font-semibold">{t(`director.studio.runStatus.${run.status}`, { defaultValue: run.status })}</h3></div><div className="flex gap-2">{["pending", "running"].includes(run.status) && <Button size="small" icon={<Pause className="size-3" />} onClick={() => onPause(run.runId)}>{t("director.workspace.pause")}</Button>}{["paused", "awaiting_review"].includes(run.status) && <Button size="small" type="primary" icon={<Play className="size-3" />} onClick={() => onResume(run.runId)}>{t("director.workspace.resume")}</Button>}</div></div><p className="mt-2 text-sm text-muted-foreground">{run.executionSnapshot?.inputBasis === "canvas" ? t("director.workspace.canvasRunSummary", { count: run.targets.length }) : t("director.studio.runSummary", { version: run.version, count: run.targets.length })}</p>{run.error && <Alert className="mt-3" type={run.status === "failed" ? "error" : "warning"} showIcon message={run.error} />}</section>}
+    {run && <section className="rounded-lg border border-border bg-card p-4" data-production-active-run><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs uppercase tracking-wide text-muted-foreground">{t("director.workspace.activeRun")}</p><h3 className="mt-1 font-semibold">{t(`director.studio.runStatus.${run.status}`, { defaultValue: run.status })}</h3></div><div className="flex gap-2">{["pending", "running"].includes(run.status) && <Button size="small" icon={<Pause className="size-3" />} onClick={() => onPause(run.runId)}>{t("director.workspace.pause")}</Button>}{["paused", "awaiting_review"].includes(run.status) && <><Button size="small" type="primary" icon={<Play className="size-3" />} onClick={() => onResume(run.runId)}>{t("director.workspace.resume")}</Button>{onRetire && <Button size="small" danger onClick={() => onRetire(run.runId)}>{t("director.workspace.retireRun")}</Button>}</>}</div></div><p className="mt-2 text-sm text-muted-foreground">{run.executionSnapshot?.inputBasis === "canvas" ? t("director.workspace.canvasRunSummary", { count: run.targets.length }) : t("director.studio.runSummary", { version: run.version, count: run.targets.length })}</p>{run.error && <Alert className="mt-3" type={run.status === "failed" ? "error" : "warning"} showIcon message={run.error} />}</section>}
     {blockedArtifacts.length > 0 && <Alert type="warning" showIcon message={t("director.atomic.compileFailed")} description={<ul className="list-disc space-y-1 pl-5">{blockedArtifacts.map(artifact => { const diagnostics = (artifact.receipt as Record<string, any>).diagnostics as Record<string, any>; return <li key={artifact.id}>{targetName(artifact.kind === "h3" ? "segment" : "asset", artifact.targetId)} · {String(diagnostics.blockers[0])}</li>; })}</ul>} />}
     {compileError && <Alert type="error" showIcon message={t("director.atomic.compileFailed")} description={compileError} style={{ whiteSpace: "pre-line" }} />}
     {compileNotice && <Alert type="success" showIcon message={compileNotice} style={{ whiteSpace: "pre-line" }} />}
@@ -2014,7 +2185,7 @@ export function DirectorPanel({
     <section className="space-y-5" data-production-section="history" tabIndex={-1}>
       <div><h3 className="font-semibold">{t("director.micro.versionsHistory")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("director.micro.versionsHistoryHint")}</p></div>
     <section className="space-y-2"><h3 className="font-semibold">{t("director.workspace.history")}</h3>{versions.length ? versions.map(item => <article key={item.version} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-card p-3"><span>v{item.version} · {item.stage} · {new Date(item.createdAt).toLocaleString()}</span><Button size="small" icon={<RotateCcw className="size-3" />} disabled={busy} onClick={() => onRestore(item.version)}>{t("director.workspace.restore")}</Button></article>) : <p className="text-sm text-muted-foreground">{t("director.workspace.noHistory")}</p>}</section>
-    {batches.length > 0 && <section className="space-y-2"><h3 className="font-semibold">{t("director.workspace.runHistory")}</h3>{batches.map(item => <article key={item.runId} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-card p-3"><div className="min-w-0"><p className="font-medium">{item.status} · {item.runId}</p><p className="break-all text-xs text-muted-foreground">{item.targets.join(", ")} · {item.submitted.length} {t("director.workspace.submittedTasks")}</p></div>{["paused", "awaiting_review"].includes(item.status) && <Button size="small" onClick={() => onResume(item.runId)}>{t("director.workspace.resume")}</Button>}</article>)}</section>}
+    {batches.length > 0 && <section className="space-y-2"><h3 className="font-semibold">{t("director.workspace.runHistory")}</h3>{batches.map(item => <article key={item.runId} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-card p-3"><div className="min-w-0"><p className="font-medium">{t(`director.studio.runStatus.${item.status}`, { defaultValue: item.status })} · {item.runId}</p><p className="break-all text-xs text-muted-foreground">{item.targets.join(", ")} · {item.submitted.length} {t("director.workspace.submittedTasks")}</p></div>{["paused", "awaiting_review"].includes(item.status) && <div className="flex gap-2"><Button size="small" onClick={() => onResume(item.runId)}>{t("director.workspace.resume")}</Button>{onRetire && <Button size="small" danger onClick={() => onRetire(item.runId)}>{t("director.workspace.retireRun")}</Button>}</div>}</article>)}</section>}
     {!!production.clipRefreshes?.length && <details className="border-b border-border pb-3"><summary className="cursor-pointer text-sm">{t("director.workspace.refreshHistory", { count: production.clipRefreshes.length })}</summary><div className="mt-3 space-y-2">{production.clipRefreshes.map(job => <details key={job.operationId} className="text-xs text-muted-foreground"><summary className="cursor-pointer">{segmentTitle(job.segmentId)} · {t("director.atomic.clipRefreshPhase." + job.status)} · {job.savedRevision}</summary>{job.blockingDiagnostic && <p className="mt-1 whitespace-pre-wrap">{job.blockingDiagnostic.message}</p>}</details>)}</div></details>}
     </section>
     <section className="space-y-4 border-t border-border pt-5" data-production-section="technical" tabIndex={-1}>
@@ -2042,7 +2213,7 @@ export function DirectorPanel({
     {!activeScene ? <div className="space-y-4"><p className="text-sm text-muted-foreground">{t("productionCanvas.scriptEmpty")}</p><Input.TextArea aria-label={t("productionCanvas.story")} value={briefDraft} onChange={event => onBriefDraftChange(event.target.value)} autoSize={{ minRows: 5, maxRows: 12 }} disabled={busy} /><div className="flex justify-end gap-2"><Button disabled={busy} onClick={() => onAskDirector({ workspace: "story", brief: briefDraft })}>{t("productionCanvas.discussObject")}</Button><Button type="primary" disabled={busy || !briefDraft.trim()} onClick={() => void onBrief(briefDraft)}>{t("director.workspace.saveBrief")}</Button></div></div> : <>
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
         <Select variant="borderless" aria-label={t("productionCanvas.chooseScene")} value={activeScene.key} onChange={key => { setActiveSceneKey(key); onNavigate("story", { kind: "scene", id: key }); }} className="min-w-44 max-w-full" options={sceneGroups.map((group, index) => ({ value: group.key, label: `${t("director.studio.sceneNumber", { number: index + 1 })} · ${sceneTitle(group, index)}` }))} />
-        <Button type="text" icon={editingScript ? <BookOpen className="size-4" /> : <Pencil className="size-4" />} onClick={() => setEditingScript(value => !value)}>{t(editingScript ? "director.studio.readScript" : "director.studio.editScript")}</Button>
+        <span className="flex flex-wrap items-center gap-2"><Button size="small" icon={<Split className="size-4" />} disabled={busy || activeScene.blocks.length !== 1 || sceneSplitContentParts.length < 2 || activeSceneShots.length < 2 || !onSplitScene} onClick={openSceneSplit}>{t("director.workspace.splitScene")}</Button><Button type="text" icon={editingScript ? <BookOpen className="size-4" /> : <Pencil className="size-4" />} onClick={() => setEditingScript(value => !value)}>{t(editingScript ? "director.studio.readScript" : "director.studio.editScript")}</Button></span>
       </div>
       {(activeScene.blocks[0].location || activeScene.blocks[0].time_of_day) && <p className="text-sm text-muted-foreground">{[readableText(activeScene.blocks[0].location, nameMap), readableText(activeScene.blocks[0].time_of_day)].filter(Boolean).join(" · ")}</p>}
       <div className="space-y-5 py-3">{scriptParagraphList()}</div>
@@ -2145,7 +2316,7 @@ export function DirectorPanel({
   const currentTasks = standaloneTasks.filter(task => { const key = `${task.nodeId || task.input?.nodeId}:${task.segmentId || task.input?.segmentId || ""}`; if (currentTaskKeys.has(key)) return false; currentTaskKeys.add(key); return true; });
   if (compact && workspace === "production" && !focusTarget) return <section data-production-tasks-panel className="space-y-6">
     <div className="flex flex-wrap items-center justify-between gap-2"><span /><div className="flex gap-2"><Button size="small" type="text" onClick={onRefresh}>{t("director.workspace.refresh")}</Button><Button size="small" type="text" onClick={() => onNavigate("advanced")}>{t("productionCanvas.advanced")}</Button></div></div>
-    {batches.length > 0 && <div className="space-y-3">{batches.map(batch => <article key={batch.runId} className="rounded-lg border border-border p-4"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{t(`director.studio.runStatus.${batch.status}`, { defaultValue: batch.status })}</span><div className="flex gap-2">{["pending", "running"].includes(batch.status) && <Button size="small" onClick={() => onPause(batch.runId)}>{t("director.workspace.pause")}</Button>}{["paused", "awaiting_review"].includes(batch.status) && <Button size="small" onClick={() => onResume(batch.runId)}>{t("director.workspace.resume")}</Button>}</div></div><p className="mt-2 text-xs text-muted-foreground">{t("productionCanvas.taskCount", { count: batch.targets.length, submitted: batch.submitted.length })}</p>{batch.error && <p className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">{humanMessage(batch.error)}</p>}<div className="mt-3 flex flex-wrap gap-2">{batch.targets.map(key => { const [kind, ...ids] = key.split(":"); const id = ids.join(":"); return <Button key={key} size="small" type="text" onClick={() => onLocateTarget?.(kind, id)}>{targetName(kind === "frame" ? "keyframe" : kind, id)}</Button>; })}</div></article>)}</div>}
+    {batches.length > 0 && <div className="space-y-3">{batches.map(batch => <article key={batch.runId} className="rounded-lg border border-border p-4"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{t(`director.studio.runStatus.${batch.status}`, { defaultValue: batch.status })}</span><div className="flex gap-2">{["pending", "running"].includes(batch.status) && <Button size="small" onClick={() => onPause(batch.runId)}>{t("director.workspace.pause")}</Button>}{["paused", "awaiting_review"].includes(batch.status) && <><Button size="small" onClick={() => onResume(batch.runId)}>{t("director.workspace.resume")}</Button>{onRetire && <Button size="small" danger onClick={() => onRetire(batch.runId)}>{t("director.workspace.retireRun")}</Button>}</>}</div></div><p className="mt-2 text-xs text-muted-foreground">{t("productionCanvas.taskCount", { count: batch.targets.length, submitted: batch.submitted.length })}</p>{batch.error && <p className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">{humanMessage(batch.error)}</p>}<div className="mt-3 flex flex-wrap gap-2">{batch.targets.map(key => { const [kind, ...ids] = key.split(":"); const id = ids.join(":"); return <Button key={key} size="small" type="text" onClick={() => onLocateTarget?.(kind, id)}>{targetName(kind === "frame" ? "keyframe" : kind, id)}</Button>; })}</div></article>)}</div>}
     {currentTasks.map(task => { const nodeId = String(task.nodeId || task.input?.nodeId || ""), segmentId = String(task.segmentId || task.input?.segmentId || ""); const sourceSegment = segments.find(segment => { const runtime = clipRuntime(String(segment.id)); return runtime?.node.id === nodeId && String(runtime.segment.id) === segmentId; }); const frame = Object.entries(production.draft.keyframes).find(([, frame]) => frame.nodeId === nodeId); const asset = Object.entries(d?.assets || {}).find(([, asset]) => asset.nodeId === nodeId); const kind = sourceSegment ? "segment" : frame ? "keyframe" : "asset", id = sourceSegment?.id || frame?.[0] || asset?.[0]; return <article key={task.id} className="rounded-lg border border-border p-4"><div className="flex flex-wrap items-center justify-between gap-2"><span>{id ? targetName(kind, String(id)) : t("productionCanvas.videoTarget")}</span><Tag>{t(`productionCanvas.historyStatus.${task.status === "succeeded" ? "success" : task.status === "awaiting_confirmation" ? "confirmation" : task.status}`)}</Tag></div>{task.status === "running" && <p className="mt-2 text-xs text-muted-foreground">{Math.round((task.progress || 0) * 100)}%</p>}{task.error && <p className="mt-2 whitespace-pre-wrap text-sm text-muted-foreground">{humanMessage(task.error)}</p>}{id && <Button className="mt-2" type="text" size="small" onClick={() => onLocateTarget?.(kind, String(id))}>{t("productionCanvas.locateResult")}</Button>}</article>; })}
     {!batches.length && !currentTasks.length && <p className="text-sm text-muted-foreground">{t("productionCanvas.noTasks")}</p>}
     {attentionTargets.length > 0 && <details className="border-t border-border pt-4" data-production-attention-list><summary className="cursor-pointer text-sm">{t("productionCanvas.needsAttention")}</summary><div className="mt-3 space-y-3">{attentionTargets.map(target => <div key={target.id}><Button size="small" type="text" onClick={() => onLocateTarget?.(target.kind, target.targetId)}>{targetName(target.kind, target.targetId, target.title)}</Button><p className="mt-1 text-sm text-muted-foreground">{humanMessage(target.blockers[0] || target.warnings?.[0] || target.notice || t(`director.workspace.targetStatus.${target.status}`))}</p></div>)}</div></details>}

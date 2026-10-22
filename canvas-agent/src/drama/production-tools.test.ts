@@ -26,6 +26,7 @@ const cases: Record<string, { input?: Record<string, unknown>; method: string; s
     production_get_batch: { input: { runId: "r" }, method: "GET", suffix: "/batches/r" },
     production_pause_run: { input: { runId: "r" }, method: "POST", suffix: "/batches/r/pause" },
     production_resume_run: { input: { runId: "r" }, method: "POST", suffix: "/batches/r/resume" },
+    production_retire_run: { input: { runId: "r", reason: "user ended paused batch" }, method: "POST", suffix: "/batches/r/retire" },
     production_list_versions: { method: "GET", suffix: "/versions" },
     production_get_version: { input: { version: 2 }, method: "GET", suffix: "/versions/2?view=summary&snapshot=draft" },
     production_get_version_source: { input: { version: 2, sourceSection: "shots" }, method: "GET", suffix: "/versions/2?view=source&snapshot=published&sourceSection=shots&pageSize=50" },
@@ -33,21 +34,28 @@ const cases: Record<string, { input?: Record<string, unknown>; method: string; s
     production_get_version_artifact: { input: { version: 2, targetId: "seg/1" }, method: "GET", suffix: "/versions/2?view=artifacts&snapshot=published&targetIds=seg%2F1&chunkBytes=32768" },
     production_preview_impact: { input: { stage: "director" }, method: "GET", suffix: "/impact?stage=director" },
     production_edit: { input: { operationId: "original", expectedRevision: 2, ops: [{ type: "set_director_brief", brief: "中文\n原文" }] }, method: "POST", suffix: "/ops" },
+    production_split_scene: { input: { operationId: "original", expectedRevision: 2, sourceSceneId: "SCENE1", sourceScenePatch: { text: "Remaining." }, newScene: { id: "SCENE2", scene_id: "ENV2", scene_name: "Dining room", location: "Dining room", time_of_day: "Morning", text: "Moved scene.", beat_ids: [] }, shotIds: ["SHOT2"], environmentSubjectId: "SUBJECT2", environmentPictureBindingId: "BINDING2" }, method: "POST", suffix: "/ops" },
     production_publish: { input: { operationId: "original", expectedRevision: 2, stage: "director" }, method: "POST", suffix: "/publish" },
     production_restore: { input: { operationId: "original", expectedRevision: 2, version: 1 }, method: "POST", suffix: "/restore" },
     production_sync_clips: { method: "POST", suffix: "/sync-clips" },
     production_get_run: { input: { version: 2 }, method: "GET", suffix: "/runs/2" },
     production_export_markdown: { input: { stage: "shots", version: 2 }, method: "GET", suffix: "/export?stage=shots&version=2" },
 };
-test("23 unified contracts route same IDs by explicit owner and reject mixed identities", () => {
-    assert.equal(productionToolNames.length, 23);
+test("25 unified contracts route same IDs by explicit owner and reject mixed identities", () => {
+    assert.equal(productionToolNames.length, 25);
     for (const name of productionToolNames) for (const kind of ["episode", "canvas"] as const) {
         const c = cases[name], raw = { kind, id: "same:id", ...c.input };
         const request = productionToolRequest(name, raw);
         assert.equal(request.method, c.method);
         assert.equal(request.path, `${kind === "episode" ? "/drama/episodes" : "/canvas/projects"}/same%3Aid/production${c.suffix}`);
         for (const invalid of [{ ...raw, projectId: "other" }, { ...raw, episodeId: "other" }, { ...raw, kind: "scene" }, { ...raw, id: undefined }]) assert.equal(productionToolSchemas[name].safeParse(invalid).success, false);
-        if (request.method === "POST" && !["production_pause_run", "production_resume_run", "production_sync_clips"].includes(name)) assert.deepEqual(request.body, c.input);
+        if (request.method === "POST" && !["production_pause_run", "production_resume_run", "production_sync_clips"].includes(name)) {
+            if (name === "production_split_scene") {
+                const { operationId, expectedRevision, ...operation } = c.input!;
+                assert.deepEqual(request.body, { operationId, expectedRevision, ops: [{ type: "split_director_scene", ...operation }] });
+            } else if (name === "production_retire_run") assert.deepEqual(request.body, { reason: c.input!.reason });
+            else assert.deepEqual(request.body, c.input);
+        }
     }
 });
 test("retired production names are absent and current guidance is not rewritten", () => {

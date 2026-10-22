@@ -21,6 +21,17 @@ export function registerAgentRuntimeRoutes(app: Express, stores: Stores, running
     app.get("/agent/ffmpeg/status", async (_req, res) => res.json({ ok: true, ...(await videoConcat.status()) }));
     app.post("/agent/video-concat/tasks", async (req, res) => { const task = await videoConcat.run(Array.isArray(req.body?.videos) ? req.body.videos.map(String) : [], String(req.body?.output || ""), req.body?.longEdge === "auto" || req.body?.longEdge === undefined ? "auto" : Number(req.body.longEdge), undefined, undefined, req.body?.layout); events?.publish({ type: "task.created", entityId: task.id, payload: task }); res.status(202).json({ ok: true, task }); });
     app.post("/agent/video-concat/tasks/:id/cancel", (req, res) => { const task = videoConcat.cancel(req.params.id); events?.publish({ type: "task.updated", entityId: task.id, payload: task }); res.json({ ok: true, task }); });
+    app.post("/agent/video-audio-extract/tasks", async (req, res) => {
+        const storageKey = String(req.body?.storageKey || "").trim();
+        const clientTaskId = String(req.body?.clientTaskId || "").trim();
+        const projectId = String(req.body?.projectId || "").trim();
+        const nodeId = String(req.body?.nodeId || "").trim();
+        if (!storageKey || !clientTaskId || !projectId || !nodeId) return res.status(400).json({ ok: false, error: "storageKey、clientTaskId、projectId 与 nodeId 必填", code: "INVALID_AUDIO_EXTRACTION_INPUT" });
+        const task = await videoConcat.extractAudio(storageKey, String(req.body?.name || "video"), clientTaskId, projectId, nodeId);
+        events?.publish({ type: "task.created", entityId: task.id, payload: task });
+        res.status(202).json({ ok: true, task });
+    });
+    app.post("/agent/video-audio-extract/tasks/:id/cancel", (req, res) => { const task = videoConcat.cancel(req.params.id); events?.publish({ type: "task.updated", entityId: task.id, payload: task }); res.json({ ok: true, task }); });
     app.get("/agent/runtime/tasks/:id", (req, res) => taskResponse(req.params.id, "", stores, req, res));
 }
 

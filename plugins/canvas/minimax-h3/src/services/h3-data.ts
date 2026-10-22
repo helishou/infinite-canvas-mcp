@@ -1,7 +1,7 @@
 import type { H3CharacterGroup, H3CharacterGroupEditPatch, H3CharacterOutfit, H3CharacterVoice, H3Ref, H3ReferenceBinding, H3ReferenceRole, H3Segment } from "../types";
 import { sameRef } from "./h3-compatibility";
 import { characterGroupBindings, resolveCharacterGroupBindings, syncH3CharacterGroupSource } from "../../../../../canvas-agent/src/canvas/reference-contract";
-import { orderReferencesForSubmission } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
+import { applyReferenceOrder, orderReferencesForSubmission } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
 
 function sameReferenceEntry(left: H3Ref, right: H3Ref) {
     if (left.bindingId && right.bindingId) return left.bindingId === right.bindingId;
@@ -20,7 +20,7 @@ function storedRefsForSegment(segment: H3Segment): H3Ref[] {
         return segment.referenceBindings.filter((binding) => (binding.url || binding.storageKey)).map((binding) => ({
             url: binding.url || "", type: inferH3ReferenceMediaType(binding), name: binding.label,
             storageKey: binding.storageKey, mimeType: binding.mimeType, nodeId: binding.sourceNodeId, role: binding.role,
-            subjectId: binding.subjectId, storyboardSubjectIds: binding.storyboardSubjectIds, bindingId: binding.id, assetId: binding.assetId, tags: binding.tags, description: binding.description, enabled: binding.enabled, usage: binding.usage, retentionLevel: binding.retentionLevel,
+            subjectId: binding.subjectId, storyboardSubjectIds: binding.storyboardSubjectIds, bindingId: binding.id, assetId: binding.assetId, tags: binding.tags, picturePurpose: binding.picturePurpose, description: binding.description, enabled: binding.enabled, usage: binding.usage, retentionLevel: binding.retentionLevel,
             groupId: binding.groupId, outfitId: binding.outfitId,
         } as H3Ref));
     }
@@ -49,7 +49,8 @@ export function refsForSegment(segment: H3Segment): H3Ref[] {
             : stored.find((item) => item.bindingId === binding.id);
         return ref ? [ref] : [];
     });
-    return refs.filter((ref, index) => refs.findIndex((other) => sameReferenceEntry(other, ref)) === index);
+    const unique = refs.filter((ref, index) => refs.findIndex((other) => sameReferenceEntry(other, ref)) === index);
+    return applyReferenceOrder(unique, segment.referenceOrder, (ref) => ref.bindingId);
 }
 
 /** Prompt Picture ordinals follow the same storyboard-first order used by H3 submission. */
@@ -96,7 +97,7 @@ export function inferReferenceRole(ref: Pick<H3Ref, "name" | "role" | "type">): 
 }
 
 function refToBinding(ref: H3Ref): H3ReferenceBinding {
-    return { id: ref.bindingId!, assetId: ref.assetId!, label: ref.name, role: inferReferenceRole(ref), tags: ref.tags || [], description: ref.description, enabled: ref.enabled !== false, usage: ref.usage || "reference", retentionLevel: ref.retentionLevel, subjectId: ref.subjectId, storyboardSubjectIds: ref.storyboardSubjectIds, mediaType: ref.type, url: ref.url, storageKey: ref.storageKey, mimeType: ref.mimeType, sourceNodeId: ref.nodeId, groupId: ref.groupId, outfitId: ref.outfitId };
+    return { id: ref.bindingId!, assetId: ref.assetId!, label: ref.name, role: inferReferenceRole(ref), tags: ref.tags || [], picturePurpose: ref.picturePurpose, description: ref.description, enabled: ref.enabled !== false, usage: ref.usage || "reference", retentionLevel: ref.retentionLevel, subjectId: ref.subjectId, storyboardSubjectIds: ref.storyboardSubjectIds, mediaType: ref.type, url: ref.url, storageKey: ref.storageKey, mimeType: ref.mimeType, sourceNodeId: ref.nodeId, groupId: ref.groupId, outfitId: ref.outfitId };
 }
 
 function ensureReferenceIdentity(ref: H3Ref, index: number): H3Ref {
@@ -307,7 +308,7 @@ export function refsFromCharacterGroup(group: H3CharacterGroup): H3Ref[] {
     return bindings.map((binding) => ({
         url: binding.url || "", type: binding.mediaType || "image", name: binding.label,
         storageKey: binding.storageKey, mimeType: binding.mimeType, nodeId: binding.sourceNodeId,
-        role: binding.role, subjectId: binding.subjectId, groupId: binding.groupId, outfitId: binding.outfitId,
+        role: binding.role, picturePurpose: binding.picturePurpose, subjectId: binding.subjectId, groupId: binding.groupId, outfitId: binding.outfitId,
         bindingId: binding.id, assetId: binding.assetId, tags: binding.tags, enabled: binding.enabled, usage: binding.usage,
     }));
 }

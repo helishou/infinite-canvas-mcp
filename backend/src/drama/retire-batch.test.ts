@@ -23,7 +23,7 @@ test("retirement releases only stopped batches, preserves submissions and is ide
     assert.throws(() => service.retireBatch("ep", "run", "用户跳过旧分镜批次"), /未知/);
     db.getTask = (() => ({ status: "succeeded" })) as unknown as typeof db.getTask;
     const closed = service.retireBatch("ep", "run", "用户跳过旧分镜批次");
-    assert.equal(closed.status, "failed");
+    assert.equal(closed.status, "retired");
     assert.deepEqual(closed.submitted, submitted);
     assert.deepEqual(service.retireBatch("ep", "run", "用户跳过旧分镜批次"), closed);
     assert.throws(() => service.retireBatch("ep", "missing", "用户跳过旧分镜批次"), /找不到/);

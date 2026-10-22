@@ -637,8 +637,12 @@ export class CanvasH3Runner {
             const plans = this.plansForTask(task);
             if (!plans.length) throw new Error("没有符合条件的 H3 Clip");
             const effectiveFingerprints = new Map<string, string>();
-            const completedByKey = new Map(this.stores.tasks.events(task.id)
-                .filter((event) => event.type === "clip_completed" || event.type === "clip_reused")
+            const parentEvents = this.stores.tasks.events(task.id);
+            const completedByKey = new Map(parentEvents
+                .filter((event) => event.type === "clip_completed" || event.type === "clip_reused" || event.type === "specification_mismatch")
+                .map((event) => [`${event.payload.nodeId}:${event.payload.segmentId}`, event.payload]));
+            const specificationMismatches = new Map(parentEvents
+                .filter((event) => event.type === "specification_mismatch")
                 .map((event) => [`${event.payload.nodeId}:${event.payload.segmentId}`, event.payload]));
             const completedOutput = () => plans.flatMap((item) => {
                 const output = recordOf(completedByKey.get(`${item.nodeId}:${item.segmentId}`)?.output);
@@ -743,9 +747,26 @@ export class CanvasH3Runner {
                 }
                 const output = resultVideo(child);
                 if (recordOf(child.result?.specification).status === 'mismatch') {
-                    this.stores.tasks.addEvent(task.id, 'specification_mismatch', { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: child.id, specification: child.result?.specification });
-                    this.update(task.id, { result: { ...recordOf(task.result), phase: 'specification_mismatch', failedChildTaskId: child.id, media: [...completedOutput(), ...(output ? [output] : [])], specification: child.result?.specification } });
-                    throw new Error(`Clip ${plan.segmentIndex + 1} 媒体规格不符，剩余提交已停止：${child.error || ''}`);
+                    const mismatch = {
+                        nodeId: plan.nodeId,
+                        segmentId: plan.segmentId,
+                        segmentIndex: plan.segmentIndex,
+                        childTaskId: child.id,
+                        fingerprint: cache.fingerprint,
+                        specification: child.result?.specification,
+                        error: child.error || '',
+                        ...(output ? { output } : {}),
+                    };
+                    await writeBackH3Task(this.stores, this.events, child);
+                    this.stores.tasks.addEvent(task.id, 'specification_mismatch', mismatch);
+                    specificationMismatches.set(key, mismatch);
+                    completedByKey.set(key, mismatch);
+                    effectiveFingerprints.set(key, cache.fingerprint);
+                    task = this.update(task.id, {
+                        progress: Math.min(0.99, (planIndex + 1) / plans.length),
+                        result: { ...recordOf(task.result), phase: 'remaining', specificationMismatches: [...specificationMismatches.values()], media: completedOutput() },
+                    });
+                    continue;
                 }
                 if (child.status !== "succeeded" || !output) throw new Error(child.error || `Clip ${plan.segmentIndex + 1} 生成失败或缺少视频`);
                 const segment = this.segmentFor(input.projectId, plan);
@@ -772,6 +793,25 @@ export class CanvasH3Runner {
             const finished = this.stores.tasks.get(initial.id)!;
             if (finished.status !== "running" || confirmationOf(finished).pending.length) return;
             const result = recordOf(finished.result);
+            if (specificationMismatches.size) {
+                const mismatches = [...specificationMismatches.values()];
+                const mismatchSummary = mismatches.map((item) => `Clip ${Number(item.segmentIndex || 0) + 1} ${String(item.error || '媒体规格不符')}`).join('；');
+                const completedCount = Math.max(0, plans.length - mismatches.length);
+                const error = completedCount
+                    ? `${mismatchSummary}；其余 ${completedCount} 个 Clip 已继续完成。`
+                    : `${mismatchSummary}。`;
+                task = this.stores.tasks.transitionH3(finished.id, "running", confirmationOf(finished).revision, {
+                    status: "failed",
+                    progress: 1,
+                    error,
+                    result: { ...result, phase: "complete_with_specification_mismatches", specificationMismatches: mismatches, media: completedOutput() },
+                }, { type: "h3_completed_with_specification_mismatches", payload: { taskId: finished.id, specificationMismatches: mismatches.map(({ output: _output, ...item }) => item) } })!;
+                if (!task) throw new Error("H3 规格不符收口状态冲突");
+                this.publish(task, "task.failed");
+                this.finishParentNode(task, "error", error);
+                this.cancelled.delete(task.id);
+                return;
+            }
             task = this.stores.tasks.transitionH3(finished.id, "running", confirmationOf(finished).revision, { status: "succeeded", progress: 1, result: { ...result, phase: "complete" } }, { type: "h3_completed", payload: { taskId: finished.id } })!;
             if (!task) throw new Error("H3 终态决议冲突");
             this.publish(task, "task.completed");

@@ -197,7 +197,7 @@ def _state_start_descriptions(source, report, shot, subjects):
         owner = subject_by_entity.get((str(fact.get("object_kind")), str(fact.get("object_id"))))
         name = entity_text(source, owner)[0] if owner else "The registered subject"
         values.append(name + " " + str(fact.get("property") or fact.get("name") or "state") + ": " + str(description))
-    return "; ".join(values) if values else "No structured continuity facts are registered for this Shot's opening."
+    return "; ".join(values) if values else ""
 
 
 def _render_state_end(source, report, shot, subjects):
@@ -220,7 +220,7 @@ def _render_state_end(source, report, shot, subjects):
         owner = subject_by_entity.get((str(fact.get("object_kind")), str(fact.get("object_id"))))
         name = entity_text(source, owner)[0] if owner else "The registered subject"
         chunks.append(name + " " + str(fact.get("property") or fact.get("name") or "state") + " remains: " + str(description))
-    return "; ".join(chunks) if chunks else "No structured continuity state changes are registered for this Shot's ending."
+    return "; ".join(chunks) if chunks else ""
 
 
 def _state_snapshot(source, report, shot, subjects, edge):
@@ -821,12 +821,21 @@ def adapt_production(production, *, draft=False):
             retain, exclude = _subject_retention_attributes(entity_kind, retain, exclude)
             retention_scope, visually_present = _subject_retention_scope(subject_id, shot_ids, shots)
             label = subject_labels[subject_id]
-            # BCF 铁律 7: reference images are the sole visual authority for character subjects.
-            # When picture references exist, no textual appearance descriptor may leak into the definition.
             if str((subject.get("entityRef") or {}).get("kind") or "") == "character" and labels:
-                _core_def = name + "; appearance follows the reference images exclusively — no textual appearance descriptor overrides them."
+                picture_roles = []
+                for _sid, picture_label, binding in uses:
+                    purpose = str(binding.get("role") or binding.get("purpose") or "")
+                    if not purpose:
+                        purpose_values = binding.get("provides") if isinstance(binding.get("provides"), list) else []
+                        purpose = str(purpose_values[0]) if purpose_values else "reference"
+                    purpose_label = {"wardrobe": "outfit", "clothing": "outfit", "costume": "outfit"}.get(purpose, purpose)
+                    entry = purpose_label + ": " + picture_label
+                    if entry not in picture_roles:
+                        picture_roles.append(entry)
+                definition = label + " is " + name + "; " + ", ".join(picture_roles) + "."
             else:
                 _core_def = description or name
+                definition = label + " is " + _core_def + ", represented by " + ", ".join(labels) + "."
             if visually_present:
                 retention_level = "partially_preserved"
                 retention_detail = "retain " + ", ".join(retain) + "; exclude " + ", ".join(exclude)
@@ -837,10 +846,12 @@ def adapt_production(production, *, draft=False):
                 retention_detail = "the reference informs continuity without showing the referenced appearance in these Shots"
             if not retention_scope:
                 retention_scope = "reference context for this Clip"
+            subject_retention = (label + " (" + retention_scope + "): " + retention_level + " - " + ", ".join(labels) + "."
+                                 if str((subject.get("entityRef") or {}).get("kind") or "") == "character" and labels else
+                                 label + " (" + retention_scope + "): " + retention_level + " - " + retention_detail + ".")
             subject_entries.append({"label": label, "entity_id": str(subject.get("entityRef", {}).get("id") or subject_id),
-                                    "definition": label + " is " + _core_def + ", represented by " + ", ".join(labels) + ".",
-                                    "retention": label + " (" + retention_scope
-                                    + "): " + retention_level + " - " + retention_detail + ".",
+                                    "definition": definition,
+                                    "retention": subject_retention,
                                     "shot_ids": shot_scope, "start_frame": start_frame, "end_frame": end_frame})
 
         transformed_shots = []
@@ -1653,7 +1664,7 @@ def compile_prompt_v2(production, segment, *, draft=False):
         for item in references:
             if not item.get("source_only", False):
                 retention_lines.append(str(item.get("retention") or ""))
-        retention_lines.extend(str(subject.get("retention") or "") for subject in segment.get("subjects", []))
+        retention_lines.extend(str(subject.get("retention") or "") for subject in segment.get("subjects", []) if subject.get("retention"))
         retention = "\n".join(retention_lines)
         fields = [
             ("subject_definitions", definitions),

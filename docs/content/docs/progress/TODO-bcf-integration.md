@@ -1,19 +1,18 @@
 # 编译器 × BCF 对接 — 待办清单
 
-> 最后更新：2025-10-15（BCF 铁律 7 修复 + retention_analysis 英文归一化完成后记录）
+> 旧记录：2025-10-15。Subject/Picture 提示词规则已由下方新版取代。
 
 ## ✅ 已完成
 
-### subject_definitions · 铁律 7（角色定义去描写）
-- **位置** `scripts/acheng/canvas_subject_prompt_v2.py` 第 ~734–739 行
-- character subject 且有参考图绑定时，definition 不再嵌入 registry 里的 `prompt_description` / `appearance` / `description`
-- 改为图片权威声明：`name + "; appearance follows the reference images exclusively — no textual appearance descriptor overrides them."`
-- 无图的 character 及 scene / asset / audio subject 保留原有描述（非角色不受铁律 7 管辖）
-- 测试：`canvas_subject_prompt_v2.test.py::test_clip_compiles_...` 新增断言锁住行为 ✓
+### subject_definitions · Picture 直接绑定（取代旧“图片权威声明”）
+- 有图片绑定的人物定义只输出角色名及其 `<Picture N>` 职责，例如 `identity: <Picture 1>`、`outfit: <Picture 2>`。
+- 不在 `subject_definitions` 或 `retention_analysis` 重复外貌/形态，也不追加否定式防错声明；Shot 已有稳定外观事实若只重复图片内容，不挂入 `subject_usages` 投影到提示词。
+- 无图片绑定的 Subject 沿其正式源字段处理，不用空泛的参考图兜底句。
+- 测试断言检查 Picture 职责标签，并确保没有旧的外观声明。
 
-### retention_analysis · 中文占位文案 → 英文（治标）
-- **已知遗留值翻译表**在 `_shot_prompt_v2` 调用前的循环里硬编码（第 ~730 行附近），处理已入库的旧绑定数据
-- 映射：跟随共享主体节点当前图片 → `"character identity and costume as defined by the reference image"` 等
+### retention_analysis · 人物只列 Picture 标签
+- 人物只列镜头作用范围和 `<Picture N>` 标签，不输出 `retain/exclude` 外观清单。
+- 场景、道具或不在画面内的连续性参考按其正式职责保留必要文字。
 
 ### 写入源头 · 中文字符串清零（治本）
 | 文件 | 改动 |

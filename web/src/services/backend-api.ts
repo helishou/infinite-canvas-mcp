@@ -392,6 +392,7 @@ export function startProductionRun(target: ProductionTarget, input: { inputBasis
 export function fetchProductionBatch(target: ProductionTarget, runId: string) { return request<{ ok: boolean; run: ProductionBatch | null }>("GET", `${productionPath(target)}/batches/${encodeURIComponent(runId)}`); }
 export function pauseProductionBatch(target: ProductionTarget, runId: string) { return request<{ ok: boolean; run: ProductionBatch }>("POST", `${productionPath(target)}/batches/${encodeURIComponent(runId)}/pause`, {}); }
 export function resumeProductionBatch(target: ProductionTarget, runId: string) { return request<{ ok: boolean; run: ProductionBatch }>("POST", `${productionPath(target)}/batches/${encodeURIComponent(runId)}/resume`, {}); }
+export function retireProductionBatch(target: ProductionTarget, runId: string, reason: string) { return request<{ ok: boolean; run: ProductionBatch; mediaSubmitted: false }>("POST", `${productionPath(target)}/batches/${encodeURIComponent(runId)}/retire`, { reason }); }
 export function exportEpisodeProductionMarkdown(episodeId: ProductionTarget, stage: "script" | "shots" | "director", version?: number) { return request<{ ok: boolean; fileName: string; markdown: string }>("GET", `${productionPath(episodeId)}/export?stage=${stage}${version ? `&version=${version}` : ""}`); }
 
 export type DramaCustomAsset = {

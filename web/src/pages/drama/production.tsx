@@ -32,7 +32,7 @@ import {
   submitProductionSceneAction, type ProductionSceneAction, BackendApiError, editEpisodeProduction, previewEpisodeProductionImpact,
   applyBackendCanvasOperations, fetchBackendCanvasDrama, fetchBackendDramaEpisode, fetchBackendDramaEpisodes, fetchBackendProject, fetchEpisodeProduction,
   fetchEpisodeProductionVersions, fetchProductionBatch, fetchProductionBatches,
-  fetchProductionReadiness, fetchProductionOperationReceipt, pauseProductionBatch, publishEpisodeProduction, restoreEpisodeProduction,
+  fetchProductionReadiness, fetchProductionOperationReceipt, pauseProductionBatch, publishEpisodeProduction, restoreEpisodeProduction, retireProductionBatch,
   checkProductionContinuity, fetchProductionContinuity, type ProductionContinuity,
   resumeProductionBatch, startProductionRun, type DramaEpisode, type EpisodeProduction,
   type ProductionBatch, type ProductionReadiness, type ProductionTarget, type ProductionCanvasContext,
@@ -1496,6 +1496,21 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     catch (error) { fail(error); }
   };
 
+  const retireRun = (runId: string) => modal.confirm({
+    title: t("director.workspace.retireRunTitle"),
+    content: t("director.workspace.retireRunDescription"),
+    okText: t("director.workspace.retireRunConfirm"),
+    cancelText: t("common.cancel"),
+    okButtonProps: { danger: true },
+    onOk: async () => {
+      try {
+        const result = await retireProductionBatch(target, runId, t("director.workspace.retireRunReason"));
+        setBatches(current => current.map(item => item.runId === runId ? result.run : item));
+        message.success(t("director.workspace.retireRunComplete"));
+      } catch (error) { fail(error); }
+    },
+  });
+
   const bindAsset = async (assetId: string, nodeId: string) => {
     if (!production || busy) return false;
     const latest = await fetchEpisodeProduction(target).then(value => value.production);
@@ -2218,6 +2233,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
               sourceDrafts={sourceDrafts} onSourceDraftChange={setSourceDraft}
               briefDraft={briefDraft} onBriefDraftChange={setBriefDraft}
               onBrief={saveBrief} onEditCanvasClip={editCanvasClip} onAdoptDirectorFields={adoptDirectorFields} onPatch={patchSource} onAdoptClipStyle={adoptClipStyle} onRegroup={regroupSegment} onWorkflow={setWorkflow} onSettings={patch => void edit([{ type: 'set_settings', patch }])} onBindAsset={bindAsset}
+              onSplitScene={productionOwner.kind === "episode" ? operation => edit([operation]) : undefined}
               onPrepareEntities={async () => {
                 if (!production.draft.director || busy || pendingCommandRef.current) return;
                 setBusy(true);
@@ -2297,7 +2313,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
               }}
               onAnswerDecision={answerDecision}
               onExport={exportBundle} exporting={exporting}
-              onStart={(targets, scope) => void startRun(targets, scope)} onGenerateClip={productionOwner.kind === "scene" ? undefined : generateClip} onPause={runId => void pauseRun(runId)} onResume={runId => void resumeRun(runId)}
+              onStart={(targets, scope) => void startRun(targets, scope)} onGenerateClip={productionOwner.kind === "scene" ? undefined : generateClip} onPause={runId => void pauseRun(runId)} onResume={runId => void resumeRun(runId)} onRetire={retireRun}
               runStartPending={Boolean(pendingRunStart)} activeTargetIds={activeTargetIds}
               onRestore={restoreVersion} onSceneCommand={sendSceneCommand} sceneCommandPending={Boolean(pendingCommand || pendingRunStart)} onRefresh={() => void load(() => true, true).catch(fail)}
             />

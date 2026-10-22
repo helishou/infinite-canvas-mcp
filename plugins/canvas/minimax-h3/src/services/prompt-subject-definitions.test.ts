@@ -18,8 +18,8 @@ test("不把正文引用或未完成定义当作有效 Subject", () => {
 
 test("正式提示词的主体标签按定义名称显示，图片序号不决定主体身份", () => {
     const subjects = literalPromptSubjects(`subject_definitions:
-<Subject 1> is 沈砚; appearance follows the reference images exclusively, represented by <Picture 2>.
-<Subject 2> is 红绡; appearance follows the reference images exclusively, represented by <Picture 3>.
+<Subject 1> is 沈砚; identity: <Picture 2>.
+<Subject 2> is 红绡; identity: <Picture 3>.
 <Subject 3> is 草庐室内, represented by <Picture 1>.
 
 summary:

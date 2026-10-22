@@ -411,7 +411,7 @@ function setCanvasCommandConflict(id: string, remote: CanvasProject, message: st
     const canRetryStoryboardDurations = rejected && commands.some(command => command.rejected && storyboardDurationRejection(command.rejected))
         && commands.every(command => !command.rejected || storyboardDurationRejection(command.rejected));
     const legacyFormalRejection = (message: string) => /字段 (prompt|referenceBindings|h3CharacterGroups|storyboardShots|tailFrameContinuation|motionContextEnabled) 属于正式编译产物/.test(message)
-        || /INVALID_CLIP_FIELD: patch\.(h3CharacterGroups|storyboardDurations|storyboardModeEnabled|storyboardCompositeEnabled|storyboardPromptCache|subjectDefinitions) 不属于可编辑 Clip 配置/.test(message);
+        || /INVALID_CLIP_FIELD: patch\.(h3CharacterGroups|referenceOrder|storyboardDurations|storyboardModeEnabled|storyboardCompositeEnabled|storyboardPromptCache|subjectDefinitions) 不属于可编辑 Clip 配置/.test(message);
     const canRetryFormalClip = rejected && commands.some(command => command.rejected && legacyFormalRejection(command.rejected))
         && commands.every(command => !command.rejected || legacyFormalRejection(command.rejected));
     // This fixed hashing failure rolled back the entire ops transaction. Keep the

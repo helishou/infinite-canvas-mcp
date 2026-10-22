@@ -13,6 +13,7 @@ export function buildNodeContext(host: CanvasPluginHost, node: CanvasNodeData, t
     const storage = createPluginStorage(getNodePluginId(node.type));
     return {
         mediaUrl: host.mediaUrl,
+        uploadImage: host.uploadImage,
         TextEditor: CanvasCollaborativeText,
         textDocument: (target) => getCanvasTextSession(host.projectId, target),
         textSuggestions: (target) => getCanvasTextSuggestions(host.projectId, target),

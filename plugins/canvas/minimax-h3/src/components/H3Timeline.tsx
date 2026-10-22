@@ -21,6 +21,12 @@ const REFERENCE_ROLE_LABELS: Record<string, string> = {
     prop: "道具",
     other: "未分类",
 };
+const PICTURE_PURPOSE_LABELS: Record<string, string> = {
+    identity: "身份",
+    wardrobe: "服装",
+    environment: "环境",
+    prop: "道具",
+};
 import { defaultPrompt } from "../constants";
 import { compactSegmentStarts } from "../hooks/useH3Segments";
 import { applyH3GlobalSettings } from "../services/h3-global-settings";
@@ -37,6 +43,26 @@ import { useDefaultParams } from "../services/h3-defaults";
 function newClipId() {
     const randomUUID = typeof globalThis.crypto?.randomUUID === "function" ? globalThis.crypto.randomUUID.bind(globalThis.crypto) : undefined;
     return `segment-${randomUUID ? randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+}
+
+function reorderStoryboardShotsWithReferences(segment: H3Segment, refs: H3Ref[]) {
+    const existingShotBindings = new Set(storyboardTrackItems(segment).flatMap((item) => item.referenceBindingId ? [item.referenceBindingId] : []));
+    const storyboardRefs = refs.filter((ref) => ref.type === "image" && ref.bindingId
+        && (existingShotBindings.has(ref.bindingId) || inferReferenceRole(ref) === "storyboard"));
+    if (storyboardRefs.length < 2) return segment;
+    const items = storyboardTrackItems(segment);
+    const itemByBindingId = new Map(items.flatMap((item) => item.referenceBindingId ? [[item.referenceBindingId, item] as const] : []));
+    const orderedItems = storyboardRefs.flatMap((ref) => {
+        const item = itemByBindingId.get(ref.bindingId!);
+        return item ? [item] : [];
+    });
+    if (orderedItems.length < 2) return segment;
+    let index = 0;
+    const storyboardShots = items.map((item) => {
+        const next = item.referenceBindingId ? orderedItems[index++] || item : item;
+        return { id: next.id, duration: next.duration, ...(next.referenceBindingId ? { referenceBindingId: next.referenceBindingId } : {}) };
+    });
+    return { ...segment, storyboardShots };
 }
 
 function TimelineReferenceMedia({ ctx, refItem, compactMedia }: { ctx: CanvasNodeContext; refItem: H3Ref; compactMedia: boolean }) {
@@ -561,7 +587,9 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
             const [moved] = targetRefs.splice(sourceIndex, 1);
             const insertAt = targetIndex >= 0 && targetIndex <= targetRefs.length ? targetIndex : targetRefs.length;
             targetRefs.splice(insertAt, 0, moved);
-            onSegmentChange(withSegmentRefs(target, targetRefs));
+            const updated = reorderStoryboardShotsWithReferences(withSegmentRefs(target, targetRefs), targetRefs);
+            updated.referenceOrder = targetRefs.flatMap((item) => item.bindingId ? [item.bindingId] : []);
+            onSegmentChange(updated);
             return;
         }
         // 跨 clip / 外部拖入：copy 语义。
@@ -648,6 +676,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
             const entry = refs[index];
             const ref = entry?.ref;
             const refIndex = entry?.index ?? allRefs.length;
+            const picturePurpose = ref?.picturePurpose?.map(value => PICTURE_PURPOSE_LABELS[value]).filter(Boolean).join(" · ");
             const label = mode === "i2v" ? "首帧" : mode === "fl2v" ? index === 0 ? "首帧" : "尾帧" : `Ref ${index + 1}`;
             const isGrouped = ref?.groupId;
             const limit = ref ? H3_RUNTIME_REF_LIMITS[ref.type] : 0;
@@ -676,7 +705,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                 }}
                 className={`minimax-ref-clip ${ref ? "has-ref" : "is-empty"} ${isAddSlot ? "is-add-slot" : ""} ${pickingKey === `${segment.id}:${refIndex}` ? "is-picking" : ""} ${isGrouped ? "is-character-group" : ""} ${ref?.role === "character_voice" ? "is-character-voice" : ""} ${overLimit ? "is-over-limit" : ""} ${dropTargetKey === `${segment.id}:${refIndex}` ? "is-drop-target" : ""}`}
                 title={ref ? `双击编辑参考素材职责${overLimit ? `（已超出 H3 运行上限：图片最多 ${H3_RUNTIME_REF_LIMITS.image} 张、视频/音频最多 ${H3_RUNTIME_REF_LIMITS.video} 个，运行会报错）` : ""}` : pickingKey === `${segment.id}:${refIndex}` ? "在画布上点选节点作为参考（Esc 取消）" : "点击进入画布选节点模式，挑一个节点作为参考（也可直接拖素材进来）"}
-            >{ref ? <><TimelineReferenceMedia ctx={ctx} refItem={ref} compactMedia={compactMedia} /><span className="minimax-ref-role" title="参考职责">{REFERENCE_ROLE_LABELS[ref.role || "other"] || "未分类"}</span><span className="minimax-ref-counts">{displayReferenceName(ref, entry?.ordinal || index + 1, label)}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }} onDoubleClick={(event) => event.stopPropagation()}>×</button></> : <><H3Icon name={isAddSlot ? "plus" : "paperclip"} /><span>{pickingKey === `${segment.id}:${index}` ? "选择中…" : label}</span></>}</div>;
+            >{ref ? <><TimelineReferenceMedia ctx={ctx} refItem={ref} compactMedia={compactMedia} /><span className="minimax-ref-role" title={picturePurpose ? `正式图片用途：${picturePurpose}` : "参考职责"}>{picturePurpose || REFERENCE_ROLE_LABELS[ref.role || "other"] || "未分类"}</span><span className="minimax-ref-counts">{displayReferenceName(ref, entry?.ordinal || index + 1, label)}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }} onDoubleClick={(event) => event.stopPropagation()}>×</button></> : <><H3Icon name={isAddSlot ? "plus" : "paperclip"} /><span>{pickingKey === `${segment.id}:${index}` ? "选择中…" : label}</span></>}</div>;
         })}</div>;
     };
     const renderStoryboardTrack = (segment: H3Segment) => {

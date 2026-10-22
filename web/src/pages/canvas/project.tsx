@@ -17,7 +17,7 @@ import { Suspense, startTransition, useCallback, useEffect, useLayoutEffect, use
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { Navigate, useLocation, useParams } from "react-router-dom";
 import { ExternalLink, Group, History, MessageSquare, Pencil, Video } from "lucide-react";
-import { isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
+import { isProtectedSceneBoundH3Node } from "@/lib/canvas/scene-node-deletion";
 import { productionImageInput } from "@basketikun/canvas-agent/reference-contract";
 import copyToClipboard from "copy-to-clipboard";
 import { saveAs } from "file-saver";
@@ -25,7 +25,7 @@ import { useTranslation } from "react-i18next";
 
 import { defaultConfig, resolveModelChannel, resolveModelWorkflow, useConfigStore, useEffectiveConfig, VIDEO_CONCAT_MODEL } from "@/stores/use-config-store";
 import { fetchWorkflowDetail, isWorkflowImageField } from "@/services/api/workflows";
-import { resolveComfyImageSize } from "@/services/api/comfyui";
+import { resolveBackendAgentEndpoint, resolveComfyImageSize, runVideoAudioExtractTask } from "@/services/api/comfyui";
 import { uploadImage, resolveImageUrl, isImageFile, isSvgFile, type UploadedImage } from "@/services/image-storage";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { BackendApiError, isBackendAvailabilityError, updateBackendAsset, backendMediaUrl, cancelBackendTask, createBackendGenerationLog, createBackendTask, editEpisodeProduction, fetchBackendCanvasDrama, fetchEpisodeProduction, fetchProductionCanvasContext, prepareCanvasLoop, request, resolveComfyMediaUrl, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
@@ -106,6 +106,7 @@ import { buildCanvasNodeDragCommit } from "@/lib/canvas/canvas-node-drag-commit"
 import { buildCanvasNodeDragSelection, buildCanvasReferenceDragPayload, canvasNodeDragOffset, canvasNodeDragPreviewPositions, hasCanvasNodeDragMoved, type AnyReferenceDrag, type CanvasReferenceDrag, type CharacterReferenceDrag } from "@/lib/canvas/canvas-node-drag";
 import { canvasSelectionOverlayBounds } from "@/lib/canvas/canvas-selection";
 import { clearCanvasDragPreview, clearCanvasResizePreview, writeCanvasDragPreview, writeCanvasResizePreview, type CanvasResizePreviewBounds } from "@/lib/canvas/canvas-drag-preview";
+import { isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import {
     audioExtension,
     buildAngleLabel,
@@ -397,10 +398,6 @@ function findOrderedGroupDrop(nodes: CanvasNodeData[], point: Position) {
     return drop ? { group, drop } : null;
 }
 
-function isSceneBoundH3Node(node: CanvasNodeData | undefined | null) {
-    return Boolean(node && isH3NodeType(node.type) && String(node.metadata?.productionSceneId || "").trim());
-}
-
 export function CanvasSurface({ projectId }: { projectId: string }) {
     const { message, modal } = App.useApp();
     const { t } = useTranslation();
@@ -541,6 +538,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const [projectLoadError, setProjectLoadError] = useState("");
     const [projectLoadAttempt, setProjectLoadAttempt] = useState(0);
     const [toolbarNodeId, setToolbarNodeId] = useState<string | null>(null);
+    const [extractingAudioNodeIds, setExtractingAudioNodeIds] = useState<Set<string>>(() => new Set());
+    const extractingAudioNodeIdsRef = useRef(new Set<string>());
     const [nodeImageSettingsOpen, setNodeImageSettingsOpen] = useState(false);
     const [dialogNodeId, setDialogNodeId] = useState<string | null>(null);
     const [generationLogsOpen, setGenerationLogsOpen] = useState(false);
@@ -584,6 +583,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const [propCanvasImagePick, setPropCanvasImagePick] = useState<{ id: string; image: NonNullable<CanvasNodeMetadata["propImage"]> } | null>(null);
 
     const nodesRef = useRef(nodes);
+    const orderedGroupCollageBusyRef = useRef(new Set<string>());
     const previousNodeMetadataRef = useRef(new Map(nodes.map((node) => [node.id, node.metadata])));
     const connectionsRef = useRef(connections);
     const selectedNodeIdsRef = useRef(selectedNodeIds);
@@ -1182,7 +1182,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         () => nodes.reduce((count, node) => (selectedNodeIds.has(node.id) && node.type !== CanvasNodeType.Group ? count + 1 : count), 0),
         [nodes, selectedNodeIds],
     );
-    const hasDeletableSelectedNode = nodes.some(node => selectedNodeIds.has(node.id) && !isSceneBoundH3Node(node));
+    const hasDeletableSelectedNode = nodes.some(node => selectedNodeIds.has(node.id) && !isProtectedSceneBoundH3Node(node, connections));
     const previewNode = previewNodeId ? nodeById.get(previewNodeId) || null : null;
     const previewImage = previewImageId ? previewNode?.metadata?.images?.find((image) => image.id === previewImageId) : undefined;
     const previewStorageKey = previewImage?.storageKey || previewNode?.metadata?.storageKey;
@@ -1523,7 +1523,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const deleteNodes = useCallback(
         (ids: Set<string>) => {
             if (!ids.size) return;
-            const protectedIds = new Set(nodesRef.current.filter((node) => ids.has(node.id) && isSceneBoundH3Node(node)).map((node) => node.id));
+            const protectedIds = new Set(nodesRef.current.filter((node) => ids.has(node.id) && isProtectedSceneBoundH3Node(node, connectionsRef.current)).map((node) => node.id));
             const allIds = new Set([...ids].filter((id) => !protectedIds.has(id)));
             if (!allIds.size) return;
             setNodes((prev) => {
@@ -1666,6 +1666,110 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             }),
         );
     }, []);
+
+    const createOrderedGroupCollage = useCallback(async (node: CanvasNodeData) => {
+        const group = nodesRef.current.find((item) => item.id === node.id && item.type === CanvasNodeType.Group && item.metadata?.orderedGroup);
+        if (!group) return;
+        if (orderedGroupCollageBusyRef.current.has(group.id)) {
+            message.info(t("canvas.orderedGroup.collageRunning"));
+            return;
+        }
+        orderedGroupCollageBusyRef.current.add(group.id);
+        let bitmaps: ImageBitmap[] = [];
+        let collageNodeId: string | null = null;
+        try {
+            const members = orderedGroupSlots(group, nodesRef.current)
+                .filter((id): id is string => typeof id === "string")
+                .map((id) => nodesRef.current.find((item) => item.id === id))
+                .filter((item): item is CanvasNodeData => Boolean(item && item.type === CanvasNodeType.Image))
+                .map((item) => ({ node: item, image: canvasNodeImage(item) }))
+                .filter((item): item is { node: CanvasNodeData; image: NonNullable<ReturnType<typeof canvasNodeImage>> } => Boolean(item.image));
+            if (members.length < 2) throw new Error(t("canvas.orderedGroup.collageNeedTwo"));
+            if (members.length > 9) throw new Error(t("canvas.orderedGroup.collageTooMany"));
+
+            const safeTitle = (group.title || t("canvas.node.group")).replace(/[\\/:*?"<>|]/gu, "_");
+            const placeholderSize = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+            const collageTitle = `${safeTitle}-${t("canvas.orderedGroup.collageSuffix")}.png`;
+            const id = `image-collage-${nanoid()}`;
+            collageNodeId = id;
+            const placeholder: CanvasNodeData = {
+                id,
+                type: CanvasNodeType.Image,
+                title: collageTitle,
+                position: { x: group.position.x + group.width + 120, y: group.position.y + (group.height - placeholderSize.height) / 2 },
+                width: placeholderSize.width,
+                height: placeholderSize.height,
+                metadata: { status: NODE_STATUS_LOADING, runProgress: 0, mimeType: "image/png" },
+            };
+            setNodes((prev) => [...prev, placeholder]);
+            setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: group.id, toNodeId: id }]);
+            setSelectedNodeIds(new Set([id]));
+            setSelectedConnectionId(null);
+
+            const decodedImages = await Promise.allSettled(members.map(async ({ image }) => {
+                const url = await resolveImageUrl(image.storageKey, image.content || "");
+                if (!url) throw new Error(t("common.imageReadFailed"));
+                const response = await fetch(url);
+                if (!response.ok) throw new Error(t("common.imageReadFailed"));
+                return createImageBitmap(await response.blob());
+            }));
+            bitmaps = decodedImages.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+            const decodeFailure = decodedImages.find((result) => result.status === "rejected");
+            if (decodeFailure?.status === "rejected") throw decodeFailure.reason;
+            setNodes((prev) => prev.map((item) => item.id === id ? { ...item, metadata: { ...item.metadata, runProgress: 0.45 } } : item));
+
+            const layouts: Record<number, { rows: number; columns: number }> = {
+                2: { rows: 1, columns: 2 }, 3: { rows: 1, columns: 3 }, 4: { rows: 2, columns: 2 },
+                5: { rows: 1, columns: 5 }, 6: { rows: 2, columns: 3 }, 7: { rows: 2, columns: 4 },
+                8: { rows: 2, columns: 4 }, 9: { rows: 3, columns: 3 },
+            };
+            const landscapeCount = bitmaps.filter((bitmap) => bitmap.width > bitmap.height).length;
+            const portraitCount = bitmaps.filter((bitmap) => bitmap.height > bitmap.width).length;
+            const defaultLayout = layouts[bitmaps.length];
+            const layout = landscapeCount > portraitCount
+                ? { rows: defaultLayout.columns, columns: defaultLayout.rows }
+                : defaultLayout;
+            const { rows, columns } = layout;
+            const targetShortEdge = Math.min(...bitmaps.map((bitmap) => Math.min(bitmap.width, bitmap.height)));
+            const sized = bitmaps.map((bitmap) => {
+                const scale = Math.min(1, targetShortEdge / Math.min(bitmap.width, bitmap.height));
+                return { bitmap, width: Math.max(1, Math.round(bitmap.width * scale)), height: Math.max(1, Math.round(bitmap.height * scale)) };
+            });
+            const cellWidth = Math.max(...sized.map((item) => item.width));
+            const cellHeight = Math.max(...sized.map((item) => item.height));
+            const canvas = document.createElement("canvas");
+            canvas.width = columns * cellWidth;
+            canvas.height = rows * cellHeight;
+            const context = canvas.getContext("2d");
+            if (!context) throw new Error(t("common.imageReadFailed"));
+            context.fillStyle = "#fff";
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            sized.forEach(({ bitmap, width, height }, index) => {
+                const row = Math.floor(index / columns);
+                const column = index % columns;
+                context.drawImage(bitmap, column * cellWidth + Math.floor((cellWidth - width) / 2), row * cellHeight + Math.floor((cellHeight - height) / 2), width, height);
+            });
+            setNodes((prev) => prev.map((item) => item.id === id ? { ...item, metadata: { ...item.metadata, runProgress: 0.75 } } : item));
+            const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((result) => result ? resolve(result) : reject(new Error(t("common.imageReadFailed"))), "image/png"));
+            const uploaded = await uploadImage(blob);
+            const size = fitNodeSize(uploaded.width, uploaded.height);
+            setNodes((prev) => prev.map((item) => item.id === id ? {
+                ...item,
+                width: size.width,
+                height: size.height,
+                position: { x: placeholder.position.x, y: placeholder.position.y + (placeholder.height - size.height) / 2 },
+                metadata: { ...item.metadata, ...imageMetadata(uploaded), runProgress: undefined, errorDetails: undefined },
+            } : item));
+            message.success(t("canvas.orderedGroup.collageCreated", { count: members.length }));
+        } catch (error) {
+            const errorDetails = error instanceof Error ? error.message : t("canvas.orderedGroup.collageFailed");
+            if (collageNodeId) setNodes((prev) => prev.map((item) => item.id === collageNodeId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, runProgress: undefined, errorDetails } } : item));
+            message.error(errorDetails);
+        } finally {
+            bitmaps.forEach((bitmap) => bitmap.close());
+            orderedGroupCollageBusyRef.current.delete(group.id);
+        }
+    }, [message, setConnections, setNodes, setSelectedConnectionId, setSelectedNodeIds, t]);
 
     const deleteConnection = useCallback((connectionId: string) => {
         const connection = connectionsRef.current.find((item) => item.id === connectionId);
@@ -3109,7 +3213,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 } else if (event.key === "Delete" && selectedNodeIdsRef.current.size) {
                     event.preventDefault();
                     const selected = selectedNodeIdsRef.current;
-                    const deletableIds = new Set(nodesRef.current.filter((node) => selected.has(node.id) && !isSceneBoundH3Node(node)).map((node) => node.id));
+                    const deletableIds = new Set(nodesRef.current.filter((node) => selected.has(node.id) && !isProtectedSceneBoundH3Node(node, connectionsRef.current)).map((node) => node.id));
                     if (deletableIds.size) {
                         deleteNodes(deletableIds);
                         setSelectedNodeIds(new Set([...selected].filter((id) => !deletableIds.has(id))));
@@ -5817,6 +5921,66 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         setDialogNodeId(null);
         setContextMenu(null);
     }, [message, t]);
+    const extractVideoAudio = useCallback(async (sourceNode: CanvasNodeData) => {
+        if (extractingAudioNodeIdsRef.current.has(sourceNode.id)) return;
+        const latest = sourceNode.metadata?.loopOutputHistory?.at(-1);
+        const storageKey = sourceNode.metadata?.storageKey || latest?.storageKey || "";
+        const videoElement = Array.from(containerRef.current?.querySelectorAll<HTMLVideoElement>("video[data-canvas-video]") || [])
+            .find((video) => video.dataset.canvasVideo === sourceNode.id);
+        const content = sourceNode.metadata?.content || sourceNode.metadata?.url || latest?.content || latest?.url || "";
+        const url = storageKey ? backendMediaUrl(storageKey) : videoElement?.currentSrc || videoElement?.src || resolveComfyMediaUrl(content);
+        if (!url) {
+            message.error(t("canvas.videoAudioExtract.failed", { error: t("canvas.videoAudioExtract.missingVideo") }));
+            return;
+        }
+
+        extractingAudioNodeIdsRef.current.add(sourceNode.id);
+        setExtractingAudioNodeIds(new Set(extractingAudioNodeIdsRef.current));
+        videoElement?.pause();
+        try {
+            const { endpoint, token } = resolveBackendAgentEndpoint();
+            const result = await runVideoAudioExtractTask(endpoint, token, {
+                storageKey: storageKey || undefined,
+                url,
+                name: sourceNode.title || t("assets.kinds.video"),
+                projectId,
+                nodeId: sourceNode.id,
+                taskId: `canvas-video-audio-${nanoid()}`,
+            });
+            const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Audio];
+            const position = { x: sourceNode.position.x + sourceNode.width + 96, y: sourceNode.position.y + sourceNode.height / 2 - spec.height / 2 };
+            while (nodesRef.current.some((node) => node.position.x < position.x + spec.width && node.position.x + node.width > position.x && node.position.y < position.y + spec.height && node.position.y + node.height > position.y)) {
+                position.y += spec.height + 24;
+            }
+            const id = `audio-${nanoid()}`;
+            const baseName = (sourceNode.title || t("assets.kinds.video")).replace(/\.[^.]+$/, "");
+            setNodes((previous) => [...previous, {
+                id,
+                type: CanvasNodeType.Audio,
+                title: `${baseName}.mp3`,
+                position,
+                width: spec.width,
+                height: spec.height,
+                metadata: {
+                    content: result.url,
+                    storageKey: result.storageKey,
+                    status: "success",
+                    bytes: result.bytes || 0,
+                    mimeType: result.mimeType,
+                    durationMs: result.durationMs,
+                },
+            }]);
+            setSelectedNodeIds(new Set([id]));
+            setSelectedConnectionId(null);
+            setToolbarNodeId(id);
+            message.success(t("canvas.videoAudioExtract.done"));
+        } catch (error) {
+            message.error(t("canvas.videoAudioExtract.failed", { error: error instanceof Error ? error.message : String(error) }));
+        } finally {
+            extractingAudioNodeIdsRef.current.delete(sourceNode.id);
+            setExtractingAudioNodeIds(new Set(extractingAudioNodeIdsRef.current));
+        }
+    }, [message, projectId, t]);
     const handleNodeRetry = useCallback(
         (node: CanvasNodeData) => {
             if (node.type === CanvasNodeType.Text && (node.metadata?.textCount || 1) > 1) {
@@ -6318,6 +6482,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
 
                 <CanvasNodeHoverToolbar
                     savingAsset={Boolean(toolbarNode && savingAssetNodes.has(`${projectId}:${toolbarNode.id}`))}
+                    canDeleteNode={!isProtectedSceneBoundH3Node(toolbarNode, connections)}
                     node={selectedNodeIds.size > 1 || isNodeDragging || isNodeResizing || nodeImageSettingsOpen || Boolean(referencePickerNodeId) || expandedBatchNodeIds.has(toolbarNode?.id || "") ? null : toolbarNode}
                     viewport={viewport}
                     extraTools={[...productionMoreActions, ...(pluginToolbarItems || [])]}
@@ -6338,6 +6503,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onSaveAsset={(node) => void saveNodeAsset(node).catch(error => message.error(libraryErrorText(error)))}
                     onCompareVideo={openVideoComparison}
                     onTrimVideo={openVideoTrim}
+                    onExtractAudio={(node) => void extractVideoAudio(node)}
+                    extractingAudio={Boolean(toolbarNode && extractingAudioNodeIds.has(toolbarNode.id))}
                     onConvertToCharacter={convertImageNodeToCharacter}
                     onConvertToScene={convertImageNodeToScene}
                     onConvertToProp={convertImageNodeToProp}
@@ -6355,6 +6522,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onRetry={(node) => void handleRetryNode(node)}
                     onToggleFreeResize={(node) => toggleNodeFreeResize(node.id)}
                     onArrangeGroup={arrangeGroupNodes}
+                    onCreateOrderedGroupCollage={createOrderedGroupCollage}
                     onToggleOrderedGroup={(node) => toggleOrderedGroup(node.id)}
                     onToggleGroupLock={(node) => setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, groupLocked: !item.metadata?.groupLocked } } : item)))}
                     onDelete={(node) => deleteNodes(new Set([node.id]))}
@@ -6400,7 +6568,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 {contextMenu ? (
                     <CanvasNodeContextMenu
                         menu={contextMenu}
-                        canDelete={contextMenu.type === "connection" || !isSceneBoundH3Node(contextMenuNode)}
+                        canDelete={contextMenu.type === "connection" || !isProtectedSceneBoundH3Node(contextMenuNode, connections)}
                         canCaptureVideoFrame={contextMenuNode?.type === CanvasNodeType.Video && Boolean(contextMenuNode.metadata?.content)}
                         canGroup={contextMenu.type === "node" && selectedNodeIds.has(contextMenu.nodeId) && groupableSelectedCount > 1}
                         canCopyContent={Boolean(contextMenuText)}

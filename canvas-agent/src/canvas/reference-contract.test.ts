@@ -105,7 +105,7 @@ test("提示词使用公开编号标签，主体定义补入对应图片引用",
         { id: "bind-a", assetId: "a", label: "人物", role: "character_identity", tags: [], enabled: true, usage: "reference", subjectId: "person-a" },
     ] };
     const result = compileReferenceSubmission(project, segment);
-    assert.equal(result.compiledPrompt, "subject_definitions:\n<Subject 1> 人物定义 The source appearance and costume are referenced from <Picture 2>.\nsummary:\n对照 <Picture 1>");
+    assert.equal(result.compiledPrompt, "subject_definitions:\n<Subject 1> 人物定义 (<Picture 2>).\nsummary:\n对照 <Picture 1>");
     assert.deepEqual(result.references.map((ref) => ref.role), ["storyboard", "character_identity"]);
     assert.equal(result.issues.filter((issue) => issue.severity === "error").length, 0);
 });

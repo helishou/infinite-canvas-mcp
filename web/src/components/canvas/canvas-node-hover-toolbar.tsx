@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { App, Dropdown, Input, Modal, Segmented, Tooltip, type MenuProps } from "antd";
-import { Columns2, Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, LayoutGrid, ListOrdered, LoaderCircle, Lock, MapPinned, MessageSquare, Minus, Music2, Package, Plus, RefreshCw, Scissors, Settings2, Trash2, Unlock, Upload, User, Video } from "lucide-react";
+import { AudioLines, Columns2, Download, Ellipsis, FolderPlus, Image as ImageIcon, Images, Info, LayoutGrid, ListOrdered, LoaderCircle, Lock, MapPinned, MessageSquare, Minus, Music2, Package, Plus, RefreshCw, Scissors, Settings2, Trash2, Unlock, Upload, User, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -13,7 +13,6 @@ import { CanvasNodeType, type CanvasNodeData, type ViewportTransform } from "@/t
 import { canvasNodePrimaryImage } from "@/lib/canvas/canvas-image-renderability";
 import { propNodeAssetImage } from "@/lib/canvas/prop-node-asset";
 import type { CanvasNodeToolbarItem } from "@/types/canvas-plugin";
-import { isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { ImageToolSettingsModal, type ImageToolbarSettingsTool } from "./canvas-image-toolbar-settings-modal";
 import { canvasNodeDropdownActions, groupCanvasNodeActions, nearbyCanvasNodeActions } from "./canvas-node-action-groups";
 import { buildImageToolbarTools, type ImageQuickToolId } from "./canvas-image-toolbar-tools";
@@ -35,6 +34,8 @@ type CanvasNodeHoverToolbarProps = {
     onDiscardSharedEdits?: (node: CanvasNodeData) => void;
     onCompareVideo: (node: CanvasNodeData) => void;
     onTrimVideo: (node: CanvasNodeData) => void;
+    onExtractAudio: (node: CanvasNodeData) => void;
+    extractingAudio?: boolean;
     onMaskEdit: (node: CanvasNodeData) => void;
     onCrop: (node: CanvasNodeData) => void;
     onSplit: (node: CanvasNodeData) => void;
@@ -52,9 +53,11 @@ type CanvasNodeHoverToolbarProps = {
     onSaveSceneToAsset: (node: CanvasNodeData) => void;
     onToggleFreeResize: (node: CanvasNodeData) => void;
     onArrangeGroup: (node: CanvasNodeData) => void;
+    onCreateOrderedGroupCollage: (node: CanvasNodeData) => void;
     onToggleOrderedGroup: (node: CanvasNodeData) => void;
     onToggleGroupLock: (node: CanvasNodeData) => void;
     onDelete: (node: CanvasNodeData) => void;
+    canDeleteNode?: boolean;
     extraTools?: CanvasNodeToolbarItem[];
     productionActions?: CanvasNodeToolbarItem[];
     productionSelected?: boolean;
@@ -91,6 +94,8 @@ export function CanvasNodeHoverToolbar({
     onDiscardSharedEdits,
     onCompareVideo,
     onTrimVideo,
+    onExtractAudio,
+    extractingAudio = false,
     onMaskEdit,
     onCrop,
     onSplit,
@@ -108,9 +113,11 @@ export function CanvasNodeHoverToolbar({
     onSaveSceneToAsset,
     onToggleFreeResize,
     onArrangeGroup,
+    onCreateOrderedGroupCollage,
     onToggleOrderedGroup,
     onToggleGroupLock,
     onDelete,
+    canDeleteNode = true,
     extraTools = [],
     productionActions,
     productionSelected = false,
@@ -180,7 +187,6 @@ export function CanvasNodeHoverToolbar({
     const hasText = isText && Boolean(node.metadata?.content?.trim());
     const isConfig = node.type === CanvasNodeType.Config && !isSmartGenerationNode;
     const isGroup = node.type === CanvasNodeType.Group;
-    const isSceneBoundH3 = isH3NodeType(node.type) && Boolean(String(node.metadata?.productionSceneId || "").trim());
     const canRetry = node.metadata?.status === "error";
     const quickImageToolIdSet = new Set(quickImageToolIds);
     const copyImagePrompt = (target: CanvasNodeData) => {
@@ -204,8 +210,9 @@ export function CanvasNodeHoverToolbar({
     const baseToolbarTools: ToolbarTool[] = [
         { id: "info", title: t("canvas.nodeToolbar.infoTitle"), label: t("canvas.nodeToolbar.info"), icon: <Info className="size-4" />, onClick: () => onInfo(node) },
         ...(isGroup ? [{ id: "arrangeGroup", title: t("canvas.nodeToolbar.arrangeGroupTitle"), label: t("canvas.nodeToolbar.arrangeGroup"), icon: <LayoutGrid className="size-4" />, onClick: () => onArrangeGroup(node) }] : []),
+        ...(isGroup && node.metadata?.orderedGroup ? [{ id: "createOrderedGroupCollage", title: t("canvas.nodeToolbar.createOrderedGroupCollage"), label: t("canvas.nodeToolbar.createOrderedGroupCollage"), icon: <Images className="size-4" />, onClick: () => onCreateOrderedGroupCollage(node) }] : []),
         ...(isGroup ? [{ id: "toggleOrderedGroup", title: t(node.metadata?.orderedGroup ? "canvas.nodeActions.unorderedGroup" : "canvas.nodeActions.orderedGroup"), label: t(node.metadata?.orderedGroup ? "canvas.nodeActions.unorderedGroup" : "canvas.nodeActions.orderedGroup"), icon: <ListOrdered className="size-4" />, onClick: () => onToggleOrderedGroup(node), active: Boolean(node.metadata?.orderedGroup) }] : []),
-        ...(!isSceneBoundH3 ? [{ id: "delete", title: t("canvas.nodeToolbar.removeTitle"), label: t("common.delete"), icon: <Trash2 className="size-4" />, onClick: () => onDelete(node), danger: true }] : []),
+        ...(canDeleteNode ? [{ id: "delete", title: t("canvas.nodeToolbar.removeTitle"), label: t("common.delete"), icon: <Trash2 className="size-4" />, onClick: () => onDelete(node), danger: true }] : []),
         ...(isGroup ? [{ id: "groupLock", title: t(node.metadata?.groupLocked ? "canvas.nodeActions.unlockGroup" : "canvas.nodeActions.lockGroup"), label: t(node.metadata?.groupLocked ? "canvas.nodeActions.unlockGroup" : "canvas.nodeActions.lockGroup"), icon: node.metadata?.groupLocked ? <Unlock className="size-4" /> : <Lock className="size-4" />, onClick: () => onToggleGroupLock(node), active: Boolean(node.metadata?.groupLocked) }] : []),
     ];
     const nodeToolbarTools: ToolbarTool[] = [
@@ -214,6 +221,7 @@ export function CanvasNodeHoverToolbar({
         ...(hasImage || hasVideo || hasAudio || hasText ? [{ id: "download", title: hasAudio ? t("canvas.nodeToolbar.downloadAudio") : hasVideo ? t("canvas.nodeToolbar.downloadVideo") : hasImage ? t("canvas.nodeToolbar.downloadImage") : t("common.download"), label: t("common.download"), icon: <Download className="size-4" />, onClick: () => onDownload(node) }] : []),
         ...(hasVideo ? [{ id: "compareVideo", title: t("canvas.videoCompare.title"), label: t("canvas.videoCompare.open"), icon: <Columns2 className="size-4" />, onClick: () => onCompareVideo(node) }] : []),
         ...(hasVideo ? [{ id: "trimVideo", title: t("canvas.videoTrim.range"), label: t("canvas.videoTrim.open"), icon: <Scissors className="size-4" />, onClick: () => onTrimVideo(node) }] : []),
+        ...(hasVideo ? [{ id: "extractAudio", title: t("canvas.videoAudioExtract.title"), label: t("canvas.videoAudioExtract.extract"), icon: <AudioLines className="size-4" />, onClick: () => onExtractAudio(node), loading: extractingAudio, disabled: extractingAudio }] : []),
         ...(isVideo && !isSmartGenerationNode ? [{ id: "edit", title: t("common.edit"), label: t("common.edit"), icon: <MessageSquare className="size-4" />, onClick: () => onToggleDialog(node) }] : []),
         ...(isText && !isSmartGenerationNode ? [{ id: "generateImage", title: t("canvas.node.generateImage"), label: t("canvas.node.generate"), icon: <ImageIcon className="size-4" />, onClick: () => onGenerateImage(node) }] : []),
         ...(isConfig ? [{ id: "config", title: t("canvas.configNode.title"), label: t("canvas.configNode.title"), icon: <Settings2 className="size-4" />, onClick: () => onToggleDialog(node) }] : []),

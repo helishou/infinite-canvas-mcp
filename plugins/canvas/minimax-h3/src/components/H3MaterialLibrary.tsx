@@ -139,7 +139,8 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
         const seenUrls = new Set<string>();
         const seenStorageKeys = new Set<string>();
         const unique: H3Ref[] = [];
-        for (const item of [...historyOutputs, ...outputs]) {
+        // 当前节点结果通常就是最新一轮；先展示它们，再追加按日志时间返回的历史结果。
+        for (const item of [...outputs, ...historyOutputs]) {
             if (seenUrls.has(item.url) || item.storageKey && seenStorageKeys.has(item.storageKey)) continue;
             seenUrls.add(item.url);
             if (item.storageKey) seenStorageKeys.add(item.storageKey);

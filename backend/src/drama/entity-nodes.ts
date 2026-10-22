@@ -132,6 +132,25 @@ export function removedSharedEntityNodeOperations(project: Record<string, any>, 
     });
 }
 
+/** Delete the episode-owned entity node when its Subject registration is removed. */
+export function removedSubjectEntityNodeOperations(project: Record<string, any>, before: EpisodeProductionData | undefined, after: EpisodeProductionData, owner: Owner): CanvasOperation[] {
+    if (!before?.director || !after.director) return [];
+    const nextSubjects = new Set((Array.isArray(after.director.source.subject_registry) ? after.director.source.subject_registry : []).map((subject: Record<string, any>) => String(subject.id || "")));
+    return (Array.isArray(before.director.source.subject_registry) ? before.director.source.subject_registry : []).flatMap((subject: Record<string, any>): CanvasOperation[] => {
+        if (nextSubjects.has(String(subject.id || ""))) return [];
+        const reference = subject.entityRef || {};
+        if (reference.ownerKind !== owner.kind || String(reference.ownerId || "") !== owner.id) return [];
+        const kind = reference.kind === "asset" ? "prop" : String(reference.kind || "");
+        const binding: ProductionEntityBinding = { ownerKind: owner.kind as ProductionEntityBinding["ownerKind"], ownerId: owner.id, kind: kind as ProductionEntityBinding["kind"], entityId: String(reference.id || "") };
+        if (!binding.entityId || !["character", "scene", "prop"].includes(binding.kind)) return [];
+        const node = nodes(project).find(item => {
+            const existing = item.metadata?.productionEntity;
+            return existing?.ownerKind === binding.ownerKind && existing?.ownerId === binding.ownerId && existing?.kind === binding.kind && existing?.entityId === binding.entityId;
+        });
+        return node ? [{ type: "delete_node", id: node.id }] : [];
+    });
+}
+
 /** Reverse edits to definitions in the same ops transaction; media remains on its canvas node. */
 export function syncEntityNodeEdits(db: BackendDatabase, projectId: string, before: Record<string, any>, after: Record<string, any>) {
     const empty = { updates: [] as Array<{ entityId: string; revision: number }>, operations: [] as CanvasOperation[] };

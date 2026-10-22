@@ -338,12 +338,18 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
             {value.subject_usages.map((usage, index) => {
             const subject = subjects.find(item => item.id === usage.subjectId);
             const referencePurpose = subjectReferencePurpose(subject);
-            const displayedPurpose = referencePurpose.length ? referencePurpose : (usage.referencePurpose || []);
+            const displayedPurpose: string[] = referencePurpose.length ? referencePurpose : (Array.isArray(usage.referencePurpose) ? usage.referencePurpose.map(String) : []);
             const subjectBindings = records(subject?.pictureBindings);
+            const sceneEnvironmentUsage = subject?.entityRef?.kind === "scene" && displayedPurpose.includes("environment");
+            const canSelectPictureBindings = usage.presentation === "visible"
+                || usage.presentation === "state_context" && sceneEnvironmentUsage;
+            const availablePictureBindings = sceneEnvironmentUsage
+                ? subjectBindings.filter(binding => Array.isArray(binding.provides) && binding.provides.map(String).includes("environment"))
+                : subjectBindings;
             const pictureBindingOptions = [{
                 value: String(subject?.id || usage.subjectId),
                 label: subjectDisplayName(source, String(usage.subjectId)),
-                children: subjectBindings.map(binding => ({
+                children: availablePictureBindings.map(binding => ({
                     value: String(binding.id || ""),
                     label: outfitBindingLabel(subject!, binding, false),
                 })),
@@ -352,7 +358,7 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
             return <article key={usage.subjectId} className="space-y-3 rounded-lg border border-border p-4"><div className="flex items-center justify-between gap-3"><h4 className="text-sm font-medium">{subjectDisplayName(source, String(usage.subjectId))}</h4><Button size="small" type="text" disabled={disabled} onClick={() => removeSubjectUsage(index)}>{t("common.remove")}</Button></div>
                 <Select className="w-full" value={String(usage.presentation)} disabled={disabled} options={["visible", "offscreen_voice", "state_context"].map(key => ({ value: key, label: t("director.workspace.subjectPresentation." + key) }))} onChange={presentation => usagePatch(index, { presentation })} />
                 <label className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.workspace.pictureBindingMode")}</span><Select value={shotPictureBindingMode(usage)} disabled={disabled} options={["default", "explicit"].map(mode => ({ value: mode, label: t(`director.workspace.pictureBindingMode${mode === "default" ? "Default" : "Explicit"}`) }))} onChange={mode => usagePatch(index, setShotPictureBindingMode(subject, usage, mode as "default" | "explicit"))} /></label>
-                <label className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.workspace.pictureBindingsForShot")}</span><Cascader className="w-full" multiple showCheckedStrategy={Cascader.SHOW_CHILD} value={pictureBindingValues} disabled={disabled || shotPictureBindingMode(usage) === "default" || usage.presentation !== "visible"} placeholder={subjectBindings.length ? t("director.atomic.chooseShotOutfits") : t("director.atomic.noShotOutfits")} options={pictureBindingOptions} displayRender={labels => labels.slice(-1).join("")} onChange={paths => {
+                <label className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.workspace.pictureBindingsForShot")}</span><Cascader className="w-full" multiple showCheckedStrategy={Cascader.SHOW_CHILD} value={pictureBindingValues} disabled={disabled || shotPictureBindingMode(usage) === "default" || !canSelectPictureBindings} placeholder={sceneEnvironmentUsage ? t(availablePictureBindings.length ? "director.workspace.chooseSceneEnvironment" : "director.workspace.noSceneEnvironment") : subjectBindings.length ? t("director.atomic.chooseShotOutfits") : t("director.atomic.noShotOutfits")} options={pictureBindingOptions} displayRender={labels => labels.slice(-1).join("")} onChange={paths => {
                     const pictureBindingIds = (paths as Array<Array<string | number>>).flatMap(path => path.length > 1 ? [String(path[1])] : []);
                     usagePatch(index, setShotPictureBindingIds(usage, pictureBindingIds));
                 }} /></label>

@@ -28,7 +28,7 @@ source 原样保存 Acheng production 数据。sourceHash 是递归键排序、�
 
 ### 编译后由程序承接
 
-Agent 负责编译前的创作和结构化源稿。自动刷新已登记时消费其短回执，不再另发 `production_compile` 或重复应用。明确独立编译或旧兼容流程才调用 `production_compile`，使用稳定 `operationId` 和 `production_get_compilation` 恢复原状态。只有 `status:"succeeded"` 且回执含 `preparedId` 才应用；其中 `verdict:"passed_with_warnings"` 表示编译可应用，直接应用该 `preparedId`，不为查看非阻塞提示再拉整页诊断。应用后从该次 apply 回执检查目标 `referenceSync`。`status:"blocked"` 才先读取 `view:"diagnostics", offset:0, pageSize:1`，按需继续分页定位阻塞。`failed` 或 `interrupted` 不得应用；沿原 `operationId` 和回执 `nextAction`／首条诊断恢复，不换 ID 重跑。
+Agent 负责编译前的创作和结构化源稿。自动刷新已登记时消费其短回执，不再另发 `production_compile` 或重复应用。明确独立编译或旧兼容流程才调用 `production_compile`，使用稳定 `operationId` 和 `production_get_compilation` 恢复原状态。只有 `status:"succeeded"` 且回执含 `preparedId` 才应用；其中 `verdict:"passed_with_warnings"` 可含目标级局部阻塞，须同时看目标索引中的 ready/draft 状态，不能据此说整批全 ready。Backend 只有在本范围至少有一个 ready 产物时才把部分成功标为 `succeeded`；本范围没有 ready 目标时应为 `blocked`，不得给出可应用回执。部分成功时应用精确 `preparedId`，应用后从该次 apply 回执检查目标 `referenceSync`。`status:"blocked"` 先读取 `view:"diagnostics", offset:0, pageSize:1`，按需继续分页定位阻塞。`failed` 或 `interrupted` 不得应用；沿原 `operationId` 和回执 `nextAction`／首条诊断恢复，不换 ID 重跑。
 
 编译器与 Backend 的校验回执是编译结果的技术依据。Agent 不独立审阅或创作性改写编译正文；本项目新增的唯一固定后处理是 LLM 批量翻译：正式编译已应用后，对当前范围内所有编译状态为 ready 的 Clip 调用 `production_translate_compiled_prompts`。Backend 使用已配置翻译模型，跳过 SHA-256 缓存命中的 Prompt，其余按顺序每批最多 3 条请求模型，再按 Clip ID 拆分结果并原子写回 H3 Clip。镜头描述和指令译成英文并轻度优化；对白、歌词和明确引用的画面文字保留原语言（可含中文）。保留事实、动作、时间、镜头结构、引用标签及约束，不添加或删减内容。手工工作台对应“翻译已编译提示词（英文）”按钮；两种入口共用 Backend 的 SHA-256 译文缓存，相同源内容不会再请求 LLM。任一目标未 ready、编译基线失效、翻译返回缺项或提示词在翻译期间被并发修改时，整批不写入，也不生成该批 Clip。
 
@@ -48,7 +48,7 @@ Agent 负责编译前的创作和结构化源稿。自动刷新已登记时消�
 
 ## 编译受阻的定位与恢复
 
-`production_compile` 的请求完成不代表编译成功；消费 `compilation.status`。`queued/running` 沿原 operationId 查询。`succeeded` 包括 `passed` 与 `passed_with_warnings`，按上文应用精确 `preparedId`；`blocked` 先读一条诊断，再按需分页。`failed/interrupted` 不应用，按原 operationId 的 `nextAction` 与首条诊断恢复，不继续轮询同一终态。`PROMPT_EXTERNAL_CONTEXT` 表示模型提示词含“同上／沿用前段”等外部文字依赖，不表示缺少前段视频或连续性事实。按 targetId、shotId、path 和 matchedText 定向展开原字段；origin=compiler 时修编译器，不要求导演改创作稿。
+`production_compile` 的请求完成不代表编译成功；消费 `compilation.status`。`queued/running` 沿原 operationId 查询。`succeeded` 包括 `passed` 与 `passed_with_warnings`；后者可表示部分目标 ready、部分目标保留 draft。若有 target-scoped `blockingDiagnostic`，核对其 targetId 对应的目标状态；没有 ready 目标时 Backend 应返回 `blocked` 且不返回可应用 preparedId。`blocked` 先读一条诊断，再按需分页。`failed/interrupted` 不应用，按原 operationId 的 `nextAction` 与首条诊断恢复，不继续轮询同一终态。`PROMPT_EXTERNAL_CONTEXT` 表示模型提示词含“同上／沿用前段”等外部文字依赖，不表示缺少前段视频或连续性事实。按 targetId、shotId、path 和 matchedText 定向展开原字段；origin=compiler 时修编译器，不要求导演改创作稿。
 
 相同有效编译输入、范围、参考内容身份和 runtime 的可定位源稿独立性阻塞，可跨操作 ID 返回原阻塞回执。`reused=true` 与 `reusedFromOperationId` 表示本次没有重跑编译器；同 operationId 的 `replayed` 仍表示原命令重放。改变确实影响编译的输入后再提交，不靠换 ID 或扩大范围试错。旧回执没有定位信息时不猜字段，不把单独的 revision 或 sourceHash 变化作为问题已解决的证据。
 

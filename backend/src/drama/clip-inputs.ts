@@ -15,7 +15,7 @@ import type { CanvasOperation } from "../canvas/project-ops.js";
 const stableId = (kind: string, ...parts: string[]) => `${kind}-${crypto.createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24)}`;
 const object = (value: any): Record<string, any> => value && typeof value === "object" && !Array.isArray(value) ? value : {};
 export type ReferenceSync = { targetId: string; status: "ready" | "blocked"; referenceCount: number; inputHash?: string; diagnostics: Array<{ code: string; message: string }> };
-export const CLIP_PROJECTION_FIELDS = ["sourceShotId", "title", "duration", "taskMode", "prompt", "referenceBindings", "tailFrameContinuation", "motionContextEnabled", "directorEngine", "directorSourceHash", "styleTemplateId", "h3CharacterGroups", "storyboardShots", "aspectRatio", "modelName"];
+export const CLIP_PROJECTION_FIELDS = ["sourceShotId", "title", "duration", "taskMode", "prompt", "referenceBindings", "referenceOrder", "tailFrameContinuation", "motionContextEnabled", "directorEngine", "directorSourceHash", "styleTemplateId", "h3CharacterGroups", "storyboardShots", "aspectRatio", "modelName"];
 const ACTIVE_H3_SEGMENT_STATUSES = new Set(["pending", "queued", "loading", "running", "generating", "awaiting_confirmation", "awaiting_review", "paused", "cancelling"]);
 const TERMINAL_H3_SEGMENT_STATUSES = new Set(["idle", "success", "succeeded", "failed", "error", "cancelled", "canceled", "complete", "completed"]);
 type SharedClipImage = { storageKey?: string; url?: string; mimeType?: string; name?: string; bindingId?: string };
@@ -389,19 +389,21 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
             ids.add(String(subject.id)); subjectIdsByAsset.set(assetId, ids);
         }
     }
-    const pictureBindingIdFor = (ref: Record<string, any>, subjectId: string | undefined) => {
+    const pictureBindingFor = (ref: Record<string, any>, subjectId: string | undefined) => {
         if (!subjectId) return undefined;
         const subject = (Array.isArray(d.source.subject_registry) ? d.source.subject_registry : [])
             .map(object).find(item => String(item.id || "") === subjectId);
         const matches = (Array.isArray(subject?.pictureBindings) ? subject.pictureBindings : []).map(object)
             .filter(binding => String(object(binding.sourceNode).nodeId || "") === String(ref.nodeId || "")
                 && String(binding.assetId || "") === String(ref.assetId || ""));
-        return matches.length === 1 ? String(matches[0].id || "") || undefined : undefined;
+        return matches.length === 1 ? matches[0] : undefined;
     };
     const bindings: Array<Record<string, unknown>> = authored.references.map((ref, index) => {
         const subjectIds = subjectIdsByAsset.get(String(ref.assetId || ""));
         const subjectId = ref.role === "keyframe" || ref.role === "storyboard" || subjectIds?.size !== 1 ? undefined : [...subjectIds][0];
-        const pictureBindingId = pictureBindingIdFor(ref, subjectId);
+        const pictureBinding = pictureBindingFor(ref, subjectId);
+        const pictureBindingId = String(pictureBinding?.id || "") || undefined;
+        const picturePurpose = Array.isArray(pictureBinding?.provides) ? pictureBinding.provides.map(String) : undefined;
         return {
             id: stableId("binding", group.id, ref.label), assetId: stableId("asset", ref.nodeId, ref.storageKey),
             label: ref.label, role: ref.role === "environment" ? "scene" : ref.role, tags: [], enabled: true, usage: "reference",
@@ -409,6 +411,7 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
             storageKey: ref.storageKey, sourceNodeId: ref.nodeId, order: index,
             ...(ref.subjectId || subjectId ? { subjectId: ref.subjectId || subjectId } : {}),
             ...(pictureBindingId ? { pictureBindingId } : {}),
+            ...(picturePurpose?.length ? { picturePurpose } : {}),
         };
     });
     const characterGroups: Record<string, unknown> = {};
@@ -435,12 +438,16 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
         const groupOutfits = built.group.outfits.map(outfit => {
             const projectedReference = bindings.find(ref => ref.sourceNodeId === characterNodeId && ref.storageKey === outfit.storageKey);
             const pictureBindingId = String(projectedReference?.pictureBindingId || "") || undefined;
-            return pictureBindingId ? { ...outfit, pictureBindingId } : outfit;
+            const picturePurpose = Array.isArray(projectedReference?.picturePurpose) ? projectedReference.picturePurpose.map(String) : undefined;
+            return pictureBindingId || picturePurpose?.length ? { ...outfit, ...(pictureBindingId ? { pictureBindingId } : {}), ...(picturePurpose?.length ? { picturePurpose } : {}) } : outfit;
         });
         characterGroups[built.group.id] = { ...built.group, outfits: groupOutfits };
         bindings.forEach((binding, index) => {
             const groupRef = built.refs.find(ref => ref.storageKey === binding.storageKey && ref.sourceNodeId === binding.sourceNodeId);
-            if (groupRef) bindings[index] = { ...groupRef, order: index, ...(binding.pictureBindingId ? { pictureBindingId: binding.pictureBindingId } : {}) };
+            if (groupRef) bindings[index] = { ...groupRef, order: index,
+                ...(binding.pictureBindingId ? { pictureBindingId: binding.pictureBindingId } : {}),
+                ...(Array.isArray(binding.picturePurpose) ? { picturePurpose: binding.picturePurpose } : {}),
+                ...(Array.isArray(binding.picturePurpose) ? { tags: [...new Set([...groupRef.tags, ...binding.picturePurpose.map(String)])] } : {}) };
         });
     }
     const taskMode = ({ T2VA: "t2v", I2VA: "i2v", FL2VA: "fl2v", L2VA: "l2v", Ref2VA: "ref2va" } as Record<string, string>)[String(planned.mode)];

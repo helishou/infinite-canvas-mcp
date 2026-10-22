@@ -212,7 +212,7 @@ test('unavailable VAE and enabled LoRA fail capability resolution instead of sel
     await assert.rejects(resolveNanFengWorkflowParams('http://mock', { ...params, loraSlots: [{ name: 'missing', enabled: true }] }, new AbortController().signal), /LoRA 不可用/);
 });
 
-test('a frozen batch keeps its default snapshot after a settings update; a specification failure stops the next Clip', async t => {
+test('a frozen batch keeps its default snapshot after a settings update; a specification failure does not block the next Clip', async t => {
     const { stores } = fixture(t);
     const submitted: Record<string, unknown>[] = [];
     let release!: () => void;
@@ -232,9 +232,13 @@ test('a frozen batch keeps its default snapshot after a settings update; a speci
     release();
     for (let i = 0; i < 50 && stores.tasks.get(parent.id)!.status !== 'failed'; i++) await new Promise(resolve => setTimeout(resolve, 5));
     assert.equal(stores.tasks.get(parent.id)!.status, 'failed');
-    assert.equal(stores.tasks.get(parent.id)!.result!.phase, 'specification_mismatch');
-    assert.equal(submitted.length, 1);
+    assert.equal(stores.tasks.get(parent.id)!.result!.phase, 'complete_with_specification_mismatches');
+    assert.equal(submitted.length, 2);
     assert.equal(stores.tasks.get(parent.id)!.result!.media instanceof Array, true);
+    assert.equal(stores.tasks.get(parent.id)!.result!.specificationMismatches.length, 2);
+    const projectSegments = (stores.projects.get('p')!.nodes as any[])[0].metadata.segments;
+    assert.equal(projectSegments[0].status, 'error');
+    assert.equal(projectSegments[1].status, 'error');
 });
 
 test("outgoing motion flags form a complete latent chain including the closing Clip without creating tasks", t => {

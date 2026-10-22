@@ -2,7 +2,7 @@ import { validateH3CharacterGroups } from "./character-reference-contract.js";
 export { productionImageInput, type ProductionImageInput, type ProductionImageReference } from "./production-image-input.js";
 export { characterImageKey, resolveCharacterImageKeys, characterReferenceUpdates, h3CharacterSourceFromNode, syncH3CharacterGroupSource, type CharacterImageSelection, type H3CharacterSource } from "./character-image-selection.js";
 
-import { orderReferencesForSubmission, remapPictureTags } from "./storyboard-reference-order.js";
+import { applyReferenceOrder, orderReferencesForSubmission, remapPictureTags } from "./storyboard-reference-order.js";
 
 export const REFERENCE_ROLES = [
     "character_identity", "character_turnaround", "scene", "blocking", "storyboard",
@@ -54,6 +54,8 @@ export type ReferenceBinding = {
     sourceNodeId?: string;
     /** Stable link to the formal Subject picture binding that produced this H3 reference. */
     pictureBindingId?: string;
+    /** Formal Subject picture purposes, preserved independently of the generic H3 role. */
+    picturePurpose?: string[];
     groupId?: string;
     outfitId?: string;
     resultSelectionPolicy?: NodeImageSelectionPolicy;
@@ -167,7 +169,8 @@ export function characterGroupBindings(group: Record<string, unknown>): Referenc
             assetId: stableReferenceId("asset", `${characterNodeId}:${key}`),
             label: `${characterName} · ${String(outfit.name || "outfit")}`,
             role: inferReferenceRole(outfit),
-            tags: ["character-group", String(outfit.role || "character_turnaround")],
+            tags: ["character-group", String(outfit.role || "character_turnaround"), ...(Array.isArray(outfit.picturePurpose) ? outfit.picturePurpose.map(String) : [])],
+            ...(Array.isArray(outfit.picturePurpose) && outfit.picturePurpose.length ? { picturePurpose: outfit.picturePurpose.map(String) } : {}),
             enabled: true,
             usage: "reference",
             subjectId,
@@ -217,7 +220,8 @@ export function resolveCharacterGroupBindings(bindings: ReferenceBinding[], segm
         used.add(current.id);
         return [current];
     });
-    return [...ordered, ...derived.filter((binding) => !used.has(binding.id))];
+    return applyReferenceOrder([...ordered, ...derived.filter((binding) => !used.has(binding.id))], segment.referenceOrder,
+        (binding) => binding.id);
 }
 
 export function compileReferenceSubmission(project: Record<string, unknown>, segment: Record<string, unknown>): ReferenceCompilation {
@@ -468,7 +472,7 @@ function bindLiteralSubjectsToPictures(
         const pictureList = missingPictures.length === 1
             ? missingPictures[0]
             : `${missingPictures.slice(0, -1).join(", ")} and ${missingPictures.at(-1)}`;
-        return `${line.trimEnd()} The source appearance and costume are referenced from ${pictureList}.`;
+        return `${line.trimEnd().replace(/[.。]+$/u, "")} (${pictureList}).`;
     });
     const withLinkedDefinitions = `${prompt.slice(0, section.index)}${section[1]}${linkedSection}${prompt.slice(section.index + section[0].length)}`;
     return withLinkedDefinitions.replace(/<Subject\s+(\d+)>/g, (marker, labelText: string) => {

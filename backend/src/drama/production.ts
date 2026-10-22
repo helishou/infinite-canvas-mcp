@@ -1,5 +1,5 @@
 // probe-reload-trigger-1
-import { entityNodeOperations, removedSharedEntityNodeOperations } from "./entity-nodes.js";
+import { entityNodeOperations, removedSharedEntityNodeOperations, removedSubjectEntityNodeOperations } from "./entity-nodes.js";
 import { captureCanvasInputs, effectiveTargetInput, inputHash, type CanvasExecutionSnapshot } from "./canvas-inputs.js";
 import { replaceDirectorSceneStoryboard } from "./scene-storyboard.js";
 import { editDirectorShot } from "./shot-edit.js";
@@ -2194,13 +2194,13 @@ export class EpisodeProductionService {
         const pushAsset = (id: string, title: string, blockers: string[]) => {
             const artifact = artifactFor("image", id);
             const asset = director.assets[id];
+            const reusable = Boolean(asset && usableAssetMedia(asset));
             const all = [...blockers, ...assetScopeBlockers(id), ...compiled(artifact, `资产 ${id}`)];
-            if (!imageModelFor(id, asset?.nodeId)) all.push("缺少图片模型；请在现有模型设置中选择模型");
+            if (!reusable && !imageModelFor(id, asset?.nodeId)) all.push("缺少图片模型；请在现有模型设置中选择模型");
             if (artifact?.status === "ready" && canvasId) {
                 try { validateDirectorMedia(this.db, canvasId, director, [id]); }
                 catch (error) { all.push(error instanceof Error ? error.message : String(error)); }
             } else if (!canvasId) all.push("制作对象尚未关联画布");
-            const reusable = Boolean(asset && usableAssetMedia(asset));
             const status = reusable ? "complete" : all.length ? "blocked" : "ready";
             addTarget({ id: `asset:${id}`, targetId: id, kind: "asset", title, status, blockers: reusable ? [] : [...new Set(all)], ...(asset?.inputOutdated ? { notice: "沿用已绑定媒体；其源输入版本较早" } : {}), ...(artifact ? { artifactId: artifact.id } : {}) });
         };
@@ -2217,21 +2217,21 @@ export class EpisodeProductionService {
             const input = director.shotInputs[shotId];
             if (skipStoryboardImages || !input || input.keyframePolicy === "none") continue;
             const assetId = input.keyframeAssetId || "";
+            const frame = data.keyframes[shotId];
+            const frameAsset = director.assets[assetId];
+            const frameUsable = Boolean(frame?.storageKey && frameAsset?.storageKey === frame.storageKey && usableAssetMedia(frameAsset));
             const artifact = assetId ? artifactFor("image", assetId) : undefined;
             const deps = [...(input.assetIds || []), ...idList(shot.required_assets)].filter(Boolean);
             const blockers = [...(canvasRole === "shared-assets" ? ["剧目共享资产画布只生产可复用资产；关键帧应在分集画布生成"] : []), ...(assetId ? assetScopeBlockers(assetId) : ["关键帧未绑定 Acheng 图像资产"]), ...dependencyBlockers(deps), ...compiled(artifact, `镜头 ${shotId} 的关键帧`)];
-            if (!imageModelFor(assetId || shotId, director.assets[assetId]?.nodeId || data.keyframes[shotId]?.nodeId)) blockers.push("缺少图片模型；请在现有模型设置中选择模型");
+            if (!frameUsable && !imageModelFor(assetId || shotId, frameAsset?.nodeId || frame?.nodeId)) blockers.push("缺少图片模型；请在现有模型设置中选择模型");
             if (!canvasId) blockers.push("制作对象尚未关联画布");
             if (artifact?.status === "ready" && canvasId) {
                 try { validateDirectorMedia(this.db, canvasId, director, [assetId]); }
                 catch (error) { blockers.push(error instanceof Error ? error.message : String(error)); }
             }
-            const frame = data.keyframes[shotId];
-            const frameAsset = director.assets[assetId];
-            const frameUsable = Boolean(frame?.storageKey && frameAsset?.storageKey === frame.storageKey && usableAssetMedia(frameAsset));
             if (input.keyframePolicy === "reuse" && !frameUsable) blockers.push("复用关键帧的绑定媒体不可用");
             const status = frameUsable ? "complete" : blockers.length ? "blocked" : "ready";
-            addTarget({ id: `frame:${shotId}`, targetId: shotId, kind: "keyframe", title: String(shot.title || shotId), status, blockers: [...new Set(blockers)], ...(artifact ? { artifactId: artifact.id } : {}) });
+            addTarget({ id: `frame:${shotId}`, targetId: shotId, kind: "keyframe", title: String(shot.title || shotId), status, blockers: frameUsable ? [] : [...new Set(blockers)], ...(artifact ? { artifactId: artifact.id } : {}) });
         }
         const boundaryByFrom = new Map(director.boundaries.map(boundary => [boundary.from, boundary]));
         const registeredSceneEntries = productionSceneEntries(director.source);
@@ -2843,7 +2843,7 @@ export class EpisodeProductionService {
         try {
             const batch = this.getBatch(episodeId, runId);
             if (!batch) throw new Error(`找不到生产运行 ${runId}`);
-            if (["succeeded", "failed"].includes(batch.status)) { this.db.db.exec("COMMIT"); return batch; }
+            if (["succeeded", "failed", "retired"].includes(batch.status)) { this.db.db.exec("COMMIT"); return batch; }
             if (!["paused", "awaiting_review"].includes(batch.status)) throw new Error("只能结束已暂停或待审核的历史批次");
             for (const item of batch.submitted) {
                 const task = this.db.getTask(item.taskId);
@@ -2851,7 +2851,7 @@ export class EpisodeProductionService {
             }
             const run = this.batchForRun(episodeId, runId);
             if (!run) throw new Error(`找不到生产运行 ${runId}`);
-            this.updateBatch(run, { status: "failed", pauseRequested: false, error: `用户结束历史批次：${reason}` });
+            this.updateBatch(run, { status: "retired", pauseRequested: false, error: `用户结束历史批次：${reason}` });
             const result = this.getBatch(episodeId, runId)!;
             this.db.db.exec("COMMIT");
             return result;
@@ -3247,13 +3247,15 @@ export class EpisodeProductionService {
         const shotProjectionIds = (() => {
             if (!input.ops.length) return undefined;
             const ids = new Set<string>();
+            let hasSubjectBindingEdit = false;
             for (const operation of input.ops) {
                 if (operation.type === "patch_director_source" && operation.entity === "shot" && operation.id) ids.add(operation.id);
                 else if (operation.type === "set_director_shot_keyframes" || operation.type === "set_director_shot_utterances") ids.add(operation.shotId);
                 else if (operation.type === "request_director_clip_refresh") continue;
+                else if (operation.type === "upsert_director_subject") hasSubjectBindingEdit = true;
                 else return undefined;
             }
-            return ids.size ? ids : undefined;
+            return ids.size || hasSubjectBindingEdit ? ids : undefined;
         })();
         const refreshes = input.ops.filter(op => op.type === "request_director_clip_refresh");
         const refreshTargetIds = refreshes.map(op => op.type === "request_director_clip_refresh" ? op.segmentId : "");
@@ -3352,7 +3354,43 @@ export class EpisodeProductionService {
                 for (const task of adoptedTasks) this.db.updateTask(task.taskId, { result: { ...task.result, adoption: directorAdoption(input.operationId, record.revision, record.draft.director!.sourceHash, input.ops, String(task.result.artifactHash)) } });
                 beforeCommit?.(record);
             },
-            onStage, shotProjectionIds, shotDependencyFreeEdit: shotDependencyFreeEdit || Boolean(archiveOp), maintenanceLegacyRead: false,
+            onStage,
+            shotProjectionIds: input.ops.some(op => op.type === "upsert_director_subject") && shotProjectionIds
+                ? (current, next) => {
+                    const currentSource = current.draft.director?.source as Record<string, any> | undefined;
+                    const nextSource = next.draft.director?.source as Record<string, any> | undefined;
+                    if (!currentSource || !nextSource || !isSubjectPromptAssembly(currentSource) || !isSubjectPromptAssembly(nextSource)) return undefined;
+                    const changedSubjectIds = new Set<string>();
+                    for (const operation of input.ops) {
+                        if (operation.type !== "upsert_director_subject") continue;
+                        const subjectId = String(operation.subject.id || "");
+                        const before = clipRows(currentSource.subject_registry).find(subject => String(subject.id || "") === subjectId);
+                        const after = clipRows(nextSource.subject_registry).find(subject => String(subject.id || "") === subjectId);
+                        if (!before || !after) return undefined;
+                        const withoutPictures = (subject: Record<string, any>) => {
+                            const copy = structuredClone(subject);
+                            delete copy.pictureBindings;
+                            return copy;
+                        };
+                        // Editing Subject identity/description also updates entity nodes and
+                        // keeps the complete projection path. Picture-binding-only changes
+                        // can target just the Shots that consume the changed Subject.
+                        if (canonicalProduction(withoutPictures(before)) !== canonicalProduction(withoutPictures(after))) return undefined;
+                        if (canonicalProduction(before.pictureBindings || []) !== canonicalProduction(after.pictureBindings || [])) changedSubjectIds.add(subjectId);
+                    }
+                    const ids = new Set(shotProjectionIds);
+                    for (const shot of clipRows(nextSource.shots)) {
+                        const referencedByUsage = clipRows(shot.subject_usages).some(usage => changedSubjectIds.has(String(usage.subjectId || "")));
+                        const referencedByKeyframe = clipRows(shot.keyframes).some(frame =>
+                            (Array.isArray(frame.subjectIds) && frame.subjectIds.some((id: unknown) => changedSubjectIds.has(String(id))))
+                            || Object.keys(record(frame.subjectPictureBindingIds)).some(id => changedSubjectIds.has(id)));
+                        if (referencedByUsage || referencedByKeyframe) ids.add(String(shot.id || ""));
+                    }
+                    ids.delete("");
+                    return ids.size ? ids : undefined;
+                }
+                : shotProjectionIds,
+            shotDependencyFreeEdit: shotDependencyFreeEdit || Boolean(archiveOp), maintenanceLegacyRead: false,
             overwriteCompiledPromptTargets, forceBoundaryTargets, allowArchived: Boolean(archiveOp), skipCanvasProjection: Boolean(archiveOp),
         });
         canvasCommits.forEach(commit => this.db.notifyCanvasCommit(commit));
@@ -3567,7 +3605,7 @@ export class EpisodeProductionService {
         beforeMutation?: (record: ProductionRecord, canvasCommits: CanvasCommit[]) => void;
         beforeCommit?: (record: ProductionRecord) => void;
         onStage?: (name: string, durationMs: number) => void;
-        shotProjectionIds?: ReadonlySet<string>;
+        shotProjectionIds?: ReadonlySet<string> | ((current: ProductionRecord, next: ProductionRecord) => ReadonlySet<string> | undefined);
         shotDependencyFreeEdit?: boolean;
         maintenanceLegacyRead?: boolean;
         overwriteCompiledPromptTargets?: ReadonlySet<string>;
@@ -3615,6 +3653,9 @@ export class EpisodeProductionService {
             // 乐观锁放行（last-write-wins）：客户端过期 revision 不再拦截，版本号继续自增。
             measure("pre_mutation_hook", () => options.beforeMutation?.(current, scriptCommits));
             const next = measure("source_validation_and_mutation", () => mutate(current));
+            const shotProjectionIds = typeof options.shotProjectionIds === "function"
+                ? options.shotProjectionIds(current, next)
+                : options.shotProjectionIds;
             const candidateSource = next.draft.director?.source;
             if (candidateSource && isSubjectPromptAssembly(candidateSource)) {
                 const previousSource = current.draft.director?.source;
@@ -3645,20 +3686,35 @@ export class EpisodeProductionService {
                     const createdSceneSet = new Set(createdSceneIds);
                     const previousClipIds = new Set(current.draft.clipGroups.map(group => group.id));
                     const materializeClipIds = new Set<string>();
+                    const sceneNodes = (canvas.nodes as any[]).filter(node => node.type === "minimax-h3:video"
+                        && node.metadata?.productionOwnerKind === owner.kind
+                        && node.metadata?.productionOwnerId === owner.id
+                        && !node.metadata?.productionArchiveLabel);
                     for (const group of next.draft.clipGroups) {
                         const sceneIds = productionSceneIdsForShots(nextScenes, group.shotIds);
                         if (sceneIds.length !== 1) continue;
+                        const scene = nextScenes.find(item => item.id === sceneIds[0]);
                         const isNewGroup = !previousClipIds.has(group.id);
-                        if (!isNewGroup && !createdSceneSet.has(sceneIds[0])) continue;
+                        const currentSceneNode = sceneNodes.find(node => String(node.id || "") === String(group.nodeId || ""));
+                        const targetSceneNode = sceneNodes.find(node => String(node.metadata?.productionSceneId || "") === sceneIds[0])
+                            || (!createdSceneSet.has(sceneIds[0])
+                                ? sceneNodes.find(node => String(node.metadata?.productionSceneId || "") === String(scene?.environmentId || ""))
+                                : undefined);
+                        const currentSceneId = String(currentSceneNode?.metadata?.productionSceneId || "");
+                        const sceneAssignmentChanged = Boolean(currentSceneNode?.metadata?.productionSceneId
+                            && currentSceneId !== sceneIds[0] && currentSceneId !== String(scene?.environmentId || ""));
+                        if (!isNewGroup && !createdSceneSet.has(sceneIds[0]) && !sceneAssignmentChanged) continue;
                         materializeClipIds.add(group.id);
-                        group.nodeId ||= existingProductionSceneH3NodeId(canvas, next.draft, owner, sceneIds[0])
-                            || productionLayoutStableId("production-h3-scene", owner.id, sceneIds[0]);
+                        group.nodeId = targetSceneNode?.id || (sceneAssignmentChanged
+                            ? productionLayoutStableId("production-h3-scene", owner.id, sceneIds[0])
+                            : group.nodeId || existingProductionSceneH3NodeId(canvas, next.draft, owner, sceneIds[0])
+                                || productionLayoutStableId("production-h3-scene", owner.id, sceneIds[0]));
                         group.segmentId ||= `clip-${crypto.createHash("sha256").update([owner.id, group.id].join(String.fromCharCode(0))).digest("hex").slice(0, 24)}`;
                     }
                     const h3Defaults = record(this.db.getSetting("plugin:minimax-h3:defaults:v1"));
                     const previousLayout = this.db.getProductionLayoutPlan(canvas.id);
-                    const shotTargets = options.shotProjectionIds
-                        ? new Set(next.draft.clipGroups.filter(group => group.shotIds.some(shotId => options.shotProjectionIds!.has(shotId))).map(group => group.id))
+                    const shotTargets = shotProjectionIds
+                        ? new Set(next.draft.clipGroups.filter(group => group.shotIds.some(shotId => shotProjectionIds.has(shotId))).map(group => group.id))
                         : options.overwriteCompiledPromptTargets?.size
                             ? new Set(next.draft.clipGroups.filter(group => options.overwriteCompiledPromptTargets!.has(group.id)).map(group => group.id))
                             : undefined;
@@ -3677,7 +3733,7 @@ export class EpisodeProductionService {
                         const projection = record(record(op.patch).productionClipProjection);
                         return readyClips.has(String(projection.targetId || "")) || forcedBoundarySegments.has(String(op.segmentId || ""));
                     });
-                    const operations = measure("canvas_operation_plan", () => scopedShotProjection ? clipOperations : [...entityNodeOperations(canvas, next.draft, owner, current.draft, layout), ...removedSharedEntityNodeOperations(canvas, current.draft, next.draft, owner), ...sceneOperations, ...scriptNodeOperations(canvas, next.draft, owner, current.draft), ...imageInputOperations(canvas, next.draft, episodeId, current.draft, layout), ...clipOperations]);
+                    const operations = measure("canvas_operation_plan", () => scopedShotProjection ? clipOperations : [...entityNodeOperations(canvas, next.draft, owner, current.draft, layout), ...removedSharedEntityNodeOperations(canvas, current.draft, next.draft, owner), ...sceneOperations, ...scriptNodeOperations(canvas, next.draft, owner, current.draft), ...imageInputOperations(canvas, next.draft, episodeId, current.draft, layout), ...clipOperations, ...removedSubjectEntityNodeOperations(canvas, current.draft, next.draft, owner)]);
                     if (operations.length) measure("canvas_operation_apply", () => this.db.applyCanvasProjectOperations(canvasId!, Number(canvas.revision || 0), operations, { operationId: projectionOperationId, runtimeWrite: true, withinTransaction: true, deferredCommits: scriptCommits, source: { kind: "system", clientId: "production:scripts", label: "同步正式制作节点输入" } }));
                 } else {
                     const operations = scriptNodeOperations(canvas, next.draft, { kind: this.ownerKind, id: episodeId }, current.draft);
@@ -4762,6 +4818,159 @@ export class EpisodeProductionService {
             director.sourceHash = directorHash(source);
             director.artifacts = director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));
             director.executionAuthorized = false;
+            projectDirector(draft);
+            return;
+        }
+        if (op.type === "split_director_scene") {
+            const director = draft.director;
+            if (!director || !isSubjectPromptAssembly(director.source)) throw new Error("场次拆分仅支持 Subject Prompt Assembly v2 正式源稿");
+            const source = director.source as Record<string, any>;
+            const scriptScenes = clipRows(source.script_scenes);
+            const groups = productionScriptGroups(scriptScenes);
+            const group = groups.find(item => item.key === op.sourceSceneId);
+            if (!group) throw new Error(`原场次不存在：${op.sourceSceneId}`);
+            if (group.blocks.length !== 1) throw new Error("当前专用拆分工具要求原场次对应单条正式剧本记录；多块场次请先按块拆分后再迁镜头");
+            if (scriptScenes.some(row => String(row.id || "") === String(op.newScene.id))) throw new Error(`新场次 ID 已存在：${op.newScene.id}`);
+            const environment = clipRows(source.scene_registry).find(row => String(row.id || "") === String(op.newScene.scene_id));
+            if (!environment) throw new Error(`新场景环境未登记：${op.newScene.scene_id}`);
+            const subjects = clipRows(source.subject_registry);
+            const environmentSubject = subjects.find(row => String(row.id || "") === op.environmentSubjectId);
+            if (!environmentSubject || environmentSubject.kind !== "scene" || environmentSubject.entityRef?.kind !== "scene"
+                || String(environmentSubject.entityRef?.id || "") !== String(op.newScene.scene_id)) {
+                throw new Error("环境 Subject 必须是新场景环境对应的已登记场景 Subject");
+            }
+            const binding = clipRows(environmentSubject.pictureBindings).find(row => String(row.id || "") === op.environmentPictureBindingId);
+            if (!binding || !(Array.isArray(binding.provides) ? binding.provides : []).map(String).includes("environment")) throw new Error("指定图片绑定不属于新环境 Subject 或未提供 environment 用途");
+
+            const originalRow = group.blocks[0];
+            const entry = productionSceneEntries(source).find(item => item.id === op.sourceSceneId);
+            if (!entry) throw new Error("原场次无法解析对应镜头");
+            const allShots = clipRows(source.shots);
+            const existingShotIds = new Set(allShots.map(shot => String(shot.id || "")));
+            const movedIds = new Set(op.shotIds.map(String));
+            if (movedIds.size !== op.shotIds.length) throw new Error("shotIds 包含重复镜头");
+            if (op.shotIds.some((id: string) => !existingShotIds.has(id) || !entry.shotIds.includes(id))) throw new Error("所有待迁镜头必须属于原场次且存在于正式源稿");
+            const incomingBlocks = Array.isArray(op.newScene.blocks) ? op.newScene.blocks : [];
+            const incomingBlockIds = incomingBlocks.length ? incomingBlocks.map((block: Record<string, any>) => String(block.id || "")) : [String(op.newScene.id)];
+            if (incomingBlockIds.some((id: string) => !id) || new Set(incomingBlockIds).size !== incomingBlockIds.length) throw new Error("新场次正文块必须提供互不重复的稳定 ID");
+            const existingBlockIds = new Set(scriptScenes.flatMap(row => Array.isArray(row.blocks) ? row.blocks.map((block: Record<string, any>) => String(block.id || "")) : [String(row.id || "")]).filter(Boolean));
+            if (incomingBlockIds.some((id: string) => existingBlockIds.has(id))) throw new Error("新场次正文块 ID 必须与现有正文块不同");
+            const entryOrder = entry.shotIds;
+            const selectedPositions = op.shotIds.map((id: string) => entryOrder.indexOf(id)).sort((a: number, b: number) => a - b);
+            if (selectedPositions.some((position: number, index: number) => index > 0 && position !== selectedPositions[index - 1] + 1)) throw new Error("待迁镜头必须是原场次中的一个连续镜头段");
+            const occurrenceBeatIds = (row: Record<string, any>) => [...new Set([
+                ...(Array.isArray(row.beat_ids) ? row.beat_ids.map(String) : []),
+                ...(Array.isArray(row.blocks) ? row.blocks.flatMap((block: Record<string, any>) => Array.isArray(block.beat_ids) ? block.beat_ids.map(String) : []) : []),
+            ])];
+            const originalBeatIds = occurrenceBeatIds(originalRow);
+            const movedBeatIds = occurrenceBeatIds(op.newScene);
+            const retainedBeatIds = occurrenceBeatIds({ ...originalRow, ...op.sourceScenePatch });
+            if (originalBeatIds.length) {
+                const combined = [...retainedBeatIds, ...movedBeatIds];
+                if (new Set(combined).size !== combined.length || combined.length !== originalBeatIds.length || originalBeatIds.some((id: string) => !combined.includes(id))) {
+                    throw new Error("原场次节拍必须无重复、无遗漏地拆分到 sourceScenePatch.beat_ids 与 newScene.beat_ids");
+                }
+                const beatSet = new Set(movedBeatIds);
+                const retainedBeatSet = new Set(retainedBeatIds);
+                for (const shot of allShots.filter(item => entry.shotIds.includes(String(item.id || "")))) {
+                    const allowedBeats = movedIds.has(String(shot.id || "")) ? beatSet : retainedBeatSet;
+                    if ((Array.isArray(shot.story_beat_ids) ? shot.story_beat_ids : []).some((id: unknown) => !allowedBeats.has(String(id)))) throw new Error(`镜头 ${String(shot.id)} 的 story_beat_ids 与拆分后的场次 beat_ids 不一致`);
+                }
+            }
+            const segments = clipRows(source.segments);
+            for (const segment of segments) {
+                const members = (Array.isArray(segment.shot_ids) ? segment.shot_ids : []).map(String);
+                const movedCount = members.filter((id: string) => movedIds.has(id)).length;
+                if (movedCount > 0 && movedCount !== members.length) throw new Error(`待迁镜头会拆开 Clip ${String(segment.id || "")}; 请先调整 Clip 边界`);
+            }
+            Object.assign(originalRow, op.sourceScenePatch);
+            const originalIndex = scriptScenes.findIndex(row => String(row.id || "") === String(originalRow.id || ""));
+            source.script_scenes = [...scriptScenes.slice(0, originalIndex + 1), structuredClone(op.newScene), ...scriptScenes.slice(originalIndex + 1)];
+            source.shots = allShots.map(shot => {
+                if (!movedIds.has(String(shot.id || ""))) return shot;
+                const usages = clipRows(shot.subject_usages);
+                const priorEnvironmentUsage = usages.find(usage => {
+                    const subject = subjects.find(row => String(row.id || "") === String(usage.subjectId || ""));
+                    return subject?.entityRef?.kind === "scene" && (Array.isArray(usage.referencePurpose) ? usage.referencePurpose : []).map(String).includes("environment");
+                });
+                const nextUsage = { ...(priorEnvironmentUsage || {}), subjectId: op.environmentSubjectId, presentation: "state_context",
+                    pictureBindingMode: "explicit", pictureBindingIds: [op.environmentPictureBindingId], referencePurpose: ["environment"],
+                    continuityFactIds: [], stateRequirements: [] };
+                const resolvedEnvironment = resolveSubjectPictureBindingIds(environmentSubject, nextUsage);
+                if (resolvedEnvironment.issues.length || !resolvedEnvironment.bindingIds.includes(op.environmentPictureBindingId)) {
+                    throw new Error(`新环境图片绑定无法用于镜头 ${String(shot.id)}：${resolvedEnvironment.issues.join("；") || "指定绑定未解析"}`);
+                }
+                const nextUsages = usages.filter(usage => usage !== priorEnvironmentUsage);
+                nextUsages.push(nextUsage);
+                const oldEnvironmentSubjectId = priorEnvironmentUsage ? String(priorEnvironmentUsage.subjectId || "") : "";
+                const keyframes = clipRows(shot.keyframes).map(frame => {
+                    const mapping = record(frame.subjectPictureBindingIds);
+                    if (oldEnvironmentSubjectId && Array.isArray(mapping[oldEnvironmentSubjectId])) {
+                        const next = { ...mapping };
+                        delete next[oldEnvironmentSubjectId];
+                        next[op.environmentSubjectId] = [op.environmentPictureBindingId];
+                        return { ...frame, subjectPictureBindingIds: next };
+                    }
+                    return frame;
+                });
+                return { ...shot, source_scene_id: op.newScene.id, scene_id: op.newScene.scene_id, subject_usages: nextUsages, keyframes };
+            });
+            const oldBlocks = Array.isArray(originalRow.blocks) ? originalRow.blocks : [originalRow];
+            const oldBlockIds = new Set(oldBlocks.map((block: Record<string, any>) => String(block.id || "")).filter(Boolean));
+            const anchorRemap = new Map<string, string>();
+            if (!incomingBlocks.length) anchorRemap.set(String(originalRow.id || ""), String(op.newScene.id));
+            for (const oldBlock of oldBlocks) {
+                const oldBlockId = String(oldBlock.id || "");
+                if (!oldBlockId || oldBlockId === String(originalRow.id || "") && !incomingBlocks.length) continue;
+                const oldBeats = new Set(Array.isArray(oldBlock.beat_ids) ? oldBlock.beat_ids.map(String) : []);
+                if (!oldBeats.size) continue;
+                const matches = incomingBlocks.filter((block: Record<string, any>) => Array.isArray(block.beat_ids) && block.beat_ids.some((id: unknown) => oldBeats.has(String(id))));
+                if (matches.length === 1) anchorRemap.set(oldBlockId, String(matches[0].id || ""));
+            }
+            for (const event of clipRows(source.ledger?.events)) {
+                if (!movedIds.has(String(event.shot_id || ""))) continue;
+                const anchor = record(event.source_anchor), oldBlockId = String(anchor.block_id || "");
+                if (!oldBlockId || !oldBlockIds.has(oldBlockId)) continue;
+                if (!anchorRemap.has(oldBlockId)) throw new Error(`连续性事件 ${String(event.id || "")} 的来源正文块 ${oldBlockId} 无法映射到新场次正文块`);
+                event.source_anchor = { ...anchor, block_id: anchorRemap.get(oldBlockId) };
+            }
+            const story = record(source.story);
+            if (Array.isArray(story.beats)) story.beats = story.beats.map((beat: Record<string, any>) => movedBeatIds.includes(String(beat.id || ""))
+                ? { ...beat, scene_id: op.newScene.scene_id }
+                : beat);
+            const ledger = record(source.ledger);
+            const digestSceneBlock = (scene: Record<string, any>) => {
+                const block = { ...scene };
+                for (const key of Object.keys(block)) if (key.startsWith("display_") || ["note", "notes", "color", "layout", "bounds", "collapsed", "hidden"].includes(key)) delete block[key];
+                if (typeof block.text === "string") block.text = block.text.replace(/\r\n?/g, "\n").split("\n").map((line: string) => line.replace(/[ \t]+$/g, "")).join("\n").trim();
+                return crypto.createHash("sha256").update(canonicalProduction({ scene_id: String(scene.scene_id || scene.id || ""), block })).digest("hex");
+            };
+            if (Array.isArray(ledger.coverage)) {
+                const movedEventIds = new Set(clipRows(ledger.events).filter(event => movedIds.has(String(event.shot_id || ""))).map(event => String(event.id || "")));
+                const retainedEventIds = new Set(clipRows(ledger.events).filter(event => !movedIds.has(String(event.shot_id || ""))).map(event => String(event.id || "")));
+                const rows: Record<string, any>[] = [];
+                for (const coverage of clipRows(ledger.coverage)) {
+                    if (String(coverage.source_anchor?.block_id || "") !== String(originalRow.id || "")) { rows.push(coverage); continue; }
+                    const coverageShots = Array.isArray(coverage.shot_ids) ? coverage.shot_ids.map(String) : [];
+                    const retainedShots = coverageShots.filter((id: string) => !movedIds.has(id));
+                    const movedShots = coverageShots.filter((id: string) => movedIds.has(id));
+                    const retainedEvents = Array.isArray(coverage.event_ids) ? coverage.event_ids.filter((id: unknown) => retainedEventIds.has(String(id))) : coverage.event_ids;
+                    const movedEvents = Array.isArray(coverage.event_ids) ? coverage.event_ids.filter((id: unknown) => movedEventIds.has(String(id))) : coverage.event_ids;
+                    if (retainedShots.length) rows.push({ ...coverage, source_digest: digestSceneBlock(originalRow), shot_ids: retainedShots, event_ids: retainedEvents });
+                    if (movedShots.length) {
+                        const anchorBlockId = incomingBlocks.length ? String(anchorRemap.get(String(originalRow.id || "")) || "") : String(op.newScene.id);
+                        if (!anchorBlockId) throw new Error(`连续性覆盖 ${String(coverage.id || "")} 无法映射到新场次正文块`);
+                        rows.push({ ...coverage, id: retainedShots.length ? `${String(coverage.id || "COV")}:${String(op.newScene.id)}` : coverage.id,
+                            source_anchor: { ...record(coverage.source_anchor), block_id: anchorBlockId }, source_digest: digestSceneBlock(op.newScene), shot_ids: movedShots, event_ids: movedEvents });
+                    }
+                    if (!retainedShots.length && !movedShots.length) rows.push(coverage);
+                }
+                ledger.coverage = rows;
+            }
+            director.sourceHash = directorHash(source);
+            director.executionAuthorized = false;
+            director.artifacts = director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));
+            if (director.workflow.currentWork) director.workflow.currentWork = { ...director.workflow.currentWork, sourceHash: director.sourceHash };
             projectDirector(draft);
             return;
         }

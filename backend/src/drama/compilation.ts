@@ -58,8 +58,16 @@ const diagnosticForAction = (item: DiagnosticLike, action: ProductionBlockingAct
 }, action);
 const isGlobalCompilationBlocker = (item: DiagnosticLike) =>
     !item.targetId && diagnosticForAction(item, "compile") && GLOBAL_COMPILE_BLOCKER_CODES.includes(item.code as typeof GLOBAL_COMPILE_BLOCKER_CODES[number]);
-const hasUnusableCompilerResult = (exitCode: number, artifacts: unknown) =>
-    exitCode !== 0 && Array.isArray(artifacts) && artifacts.length === 0;
+const hasUnusableCompilerResult = (exitCode: number, artifacts: unknown, scope?: CompilationScope) => {
+    const rows = Array.isArray(artifacts) ? artifacts as Array<Record<string, unknown>> : [];
+    if (exitCode !== 0 && rows.length === 0) return true;
+    const targetIds = scope?.targetIds?.map(String).filter(Boolean);
+    if (!targetIds?.length) return false;
+    const scoped = rows.filter(item => targetIds.includes(String(item.targetId || "")));
+    // A scoped run may partially succeed, but a packet with no ready output in its
+    // requested range cannot be presented as an applicable compilation.
+    return !scoped.some(item => item.status === "ready");
+};
 const hasBlockingArtifactDiagnostics = (value: unknown) => {
     if (Array.isArray(value)) return value.some(item => item && typeof item === "object" && diagnosticForAction(item as DiagnosticLike, "compile"));
     if (!value || typeof value !== "object") return false;
@@ -566,7 +574,7 @@ export class ProductionCompilationService {
                         job.result = this.shortResult(job.preparedId, packet);
                         job.diagnostics = packet.diagnostics;
                         job.continuityReceipt = packet.continuityReceipt;
-                        job.status = hasFatalCompilationError(job.diagnostics) || hasUnusableCompilerResult(packet.exitCode, packet.director?.artifacts) ? "blocked" : "succeeded";
+                        job.status = hasFatalCompilationError(job.diagnostics) || hasUnusableCompilerResult(packet.exitCode, packet.director?.artifacts, job.scope) ? "blocked" : "succeeded";
                     } else {
                         job.status = "interrupted";
                         job.diagnostics = [{ code: "COMPILATION_INTERRUPTED", severity: "error", message: "服务重启中断编译；已确认未完成，不自动重跑" }];
@@ -587,7 +595,7 @@ export class ProductionCompilationService {
                 if (fs.existsSync(this.file(job.preparedId))) {
                     const { packetHash, ...packet } = JSON.parse(fs.readFileSync(this.file(job.preparedId), "utf8"));
                     if (hash(packet) === packetHash && packet.owner === owner && packet.id === job.id) {
-                        job.result = this.shortResult(job.preparedId, packet); job.diagnostics = packet.diagnostics; job.continuityReceipt = packet.continuityReceipt; job.status = hasFatalCompilationError(job.diagnostics) || hasUnusableCompilerResult(packet.exitCode, packet.director?.artifacts) ? "blocked" : "succeeded";
+                        job.result = this.shortResult(job.preparedId, packet); job.diagnostics = packet.diagnostics; job.continuityReceipt = packet.continuityReceipt; job.status = hasFatalCompilationError(job.diagnostics) || hasUnusableCompilerResult(packet.exitCode, packet.director?.artifacts, job.scope) ? "blocked" : "succeeded";
                     } else { job.status = "interrupted"; job.diagnostics = [{ code: "INVALID_COMPILATION_PACKET", severity: "error", message: "恢复的编译包完整性校验失败" }]; }
                 } else { job.status = "interrupted"; job.diagnostics = [{ code: "COMPILATION_INTERRUPTED", severity: "error", message: "服务重启中断编译；已确认未完成，不自动重跑" }]; }
                 this.saveJob(job);
@@ -790,7 +798,7 @@ export class ProductionCompilationService {
                     fs.writeFileSync(temporary, JSON.stringify({ ...packet, packetHash: hash(packet) }), "utf8"); fs.renameSync(temporary, this.file(job.preparedId));
                 }
                 job.result = this.shortResult(job.preparedId, packet); job.diagnostics = compiled.diagnostics;
-                job.status = hasFatalCompilationError(compiled.diagnostics) || hasUnusableCompilerResult(compiled.exitCode, compiled.director?.artifacts) ? "blocked" : "succeeded";
+                job.status = hasFatalCompilationError(compiled.diagnostics) || hasUnusableCompilerResult(compiled.exitCode, compiled.director?.artifacts, job.scope) ? "blocked" : "succeeded";
             } catch (error) {
                 const superseded = this.cancelledJobs.has(key) || (error as any)?.code === "COMPILATION_SUPERSEDED";
                 const errorCode = String((error as any)?.code || "");

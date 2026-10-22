@@ -191,9 +191,10 @@ class SubjectPromptV2ProjectionTest(unittest.TestCase):
             self.assertLess(prompt.index("subject_definitions:"), prompt.index("summary:"))
             self.assertIn("[Shot 1]", prompt)
             self.assertIn("Scene setting: Chicken coop: A mud-brick coop with a straw nest behind a small opening.", prompt)
-            # BCF 铁律 7: character subjects with picture references must strip appearance text.
+            # Picture-bound character definitions stay label-based without appearance disclaimers.
             char_entry = next(item for item in segment["subjects"] if item.get("entity_id") == "CHILD")
-            self.assertIn("appearance follows the reference images exclusively", char_entry["definition"])
+            self.assertEqual(char_entry["definition"], "<Subject 1> is Child; identity: <Picture 1>.")
+            self.assertEqual(char_entry["retention"], "<Subject 1> (appears in [Shot 1]): partially_preserved - <Picture 1>.")
             self.assertNotIn("blue cotton shirt", char_entry["definition"])
             scene_entry = next(item for item in segment["subjects"] if item.get("entity_id") != "CHILD")
             self.assertIn("A mud-brick coop with a straw nest", scene_entry["definition"])

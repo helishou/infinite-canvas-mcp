@@ -211,9 +211,13 @@ export function resolveSubjectPictureBindingIds(subjectValue: unknown, usageValu
         ] };
     }
     const purposes = [...new Set((Array.isArray(usage.referencePurpose) && usage.referencePurpose.length ? usage.referencePurpose : ["identity"]).map(String))];
-    if (usage.presentation !== "visible") return { bindingIds: [] as string[], issues: [] as string[] };
-    // Visible scene Subjects may inherit their matching environment default.
-    // State-context usages remain explicit-only via the visibility check above.
+    const sceneEnvironment = subject.entityRef?.kind === "scene" && purposes.includes("environment");
+    // Scene environment references are visible background inputs even when the
+    // Subject itself is carried as state context rather than a foreground subject.
+    // Other non-visible usages remain excluded from default bindings.
+    if (usage.presentation !== "visible" && !(usage.presentation === "state_context" && sceneEnvironment)) {
+        return { bindingIds: [] as string[], issues: [] as string[] };
+    }
     if (subject.entityRef?.kind === "scene" && !purposes.includes("environment")) return { bindingIds: [] as string[], issues: [] as string[] };
     // Older prop bindings were authored as identity. Keep them usable until a Subject has
     // purpose-specific prop bindings, while new prop bindings use the explicit prop purpose.
@@ -569,6 +573,30 @@ export const productionSceneSchema = z.object({
     blocks: z.array(scriptBlockSchema),
 });
 
+const directorSceneOccurrenceFields = z.object({
+    id,
+    scene_id: id,
+    scene_name: z.string().trim().min(1),
+    heading: z.string().optional(),
+    location: z.string().trim().min(1),
+    time_of_day: z.string().trim().min(1),
+    text: z.string().optional(),
+    beat_ids: z.array(id),
+    blocks: z.array(z.record(z.unknown())).optional(),
+}).passthrough();
+const directorSceneOccurrenceSchema = directorSceneOccurrenceFields.refine(scene => typeof scene.text === "string" || Boolean(scene.blocks?.length), "新场次必须提供 text 或 blocks");
+const directorScenePatchSchema = directorSceneOccurrenceFields.partial().omit({ id: true, scene_id: true }).strict();
+export const productionSplitSceneSchema = z.object({
+    operationId: id,
+    expectedRevision: z.number().int().nonnegative(),
+    sourceSceneId: id,
+    sourceScenePatch: directorScenePatchSchema.default({}),
+    newScene: directorSceneOccurrenceSchema,
+    shotIds: z.array(id).min(1),
+    environmentSubjectId: id,
+    environmentPictureBindingId: id,
+}).strict();
+
 export const productionShotSchema = z.object({
     id,
     sceneId: id,
@@ -682,6 +710,7 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("initialize_director_from_demand") }).strict(),
     z.object({ type: z.literal("patch_director_source"), entity: z.enum(directorPatchSourceEntities), id: id.optional(), patch: directorPatchObjectSchema }).strict(),
     z.object({ type: z.literal("set_director_scene_environment"), sceneId: id, environmentId: id }).strict(),
+    z.object({ type: z.literal("split_director_scene"), sourceSceneId: id, sourceScenePatch: directorScenePatchSchema.default({}), newScene: directorSceneOccurrenceSchema, shotIds: z.array(id).min(1), environmentSubjectId: id, environmentPictureBindingId: id }).strict(),
     z.object({ type: z.literal("adopt_director_fields"), targetId: id, nodeId: id, segmentId: id.optional(), canvasRevision: z.number().int().nonnegative(), fields: z.array(id).min(1) }).strict(),
     z.object({ type: z.literal("adopt_director_clip_style"), targetId: id, nodeId: id, segmentId: id, canvasRevision: z.number().int().nonnegative(), styleTemplateId: z.string().nullable() }).strict(),
     z.object({ type: z.literal("set_director_workflow"), patch: directorWorkflowSchema.partial() }).strict(),

@@ -15,6 +15,7 @@ import { decodeChannelModel, modelOptionLabel, resolveModelWorkflow, resolveMode
 import { buildGenerationConfig } from "@/lib/canvas/canvas-generation-helpers";
 import { createCanvasReferenceService } from "@/lib/canvas/reference-service";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
+import { uploadImage as uploadCanvasImage } from "@/services/image-storage";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { ensurePluginsLoaded } from "@/lib/canvas/plugin-loader";
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -254,6 +255,10 @@ export function usePluginHost(params: PluginHostParams) {
         () => ({
             projectId,
             mediaUrl: backendMediaUrl,
+            uploadImage: async (blob) => {
+                const uploaded = await uploadCanvasImage(blob, { category: "input" });
+                return { url: uploaded.url, storageKey: uploaded.storageKey, mimeType: uploaded.mimeType };
+            },
             ...graphAccess,
             updateNode: (nodeId, patch) => {
                 setNodes((nodes) => {

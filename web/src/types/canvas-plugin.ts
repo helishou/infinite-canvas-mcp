@@ -157,6 +157,7 @@ export type CanvasProductionEditing = {
 };
 export type CanvasNodeContext = {
     mediaUrl: (storageKey: string) => string;
+    uploadImage: (blob: Blob) => Promise<{ url: string; storageKey?: string; mimeType: string }>;
     TextEditor: ComponentType<CanvasTextEditorProps>;
     textDocument: (target: CanvasTextTarget) => CanvasTextDocument;
     textSuggestions: (target: CanvasTextTarget) => CanvasTextSuggestions;
@@ -215,6 +216,7 @@ export type PluginStorage = {
 // Node-independent host capabilities constructed by the canvas page and injected into the render chain.
 export type CanvasPluginHost = {
     mediaUrl: (storageKey: string) => string;
+    uploadImage: (blob: Blob) => Promise<{ url: string; storageKey?: string; mimeType: string }>;
     projectId: string;
     getNode: (id: string) => CanvasNodeData | null;
     getNodes: () => CanvasNodeData[];

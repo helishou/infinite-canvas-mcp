@@ -350,6 +350,7 @@ export type CanvasProductionEditing = {
 };
 export type CanvasNodeContext = {
     mediaUrl: (storageKey: string) => string;
+    uploadImage: (blob: Blob) => Promise<{ url: string; storageKey?: string; mimeType: string }>;
     TextEditor: ComponentType<CanvasTextEditorProps>;
     textDocument: (target: CanvasTextTarget) => CanvasTextDocument;
     textSuggestions: (target: CanvasTextTarget) => CanvasTextSuggestions;
