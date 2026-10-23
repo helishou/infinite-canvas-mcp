@@ -8,14 +8,53 @@ import { defaultDirectorBoundary } from "./continuity-defaults.js";
 type Row = Record<string, any>;
 type Edit = Extract<ProductionOperation, { type: "edit_director_shot" }>;
 const rows = (value: unknown): Row[] => Array.isArray(value) ? value : [];
+const isRecord = (value: unknown): value is Row => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 function reject(code: string, path: string, message: string): never { throw new ProductionValidationError([{ code, path, targetId: path.split(".")[1], message, severity: "error" }]); }
 const clip = (source: Row, id: string) => rows(source.segments).find(segment => (segment.shot_ids || []).includes(id));
 const patchFields = new Set(["title", "visual", "camera", "audio", "performance", "subject_usages"]);
+function mergeNestedRecord(base: unknown, patch: unknown): Row {
+    const merged: Row = isRecord(base) ? { ...base } : {};
+    if (!isRecord(patch)) return merged;
+    for (const [key, value] of Object.entries(patch)) {
+        merged[key] = isRecord(value) && isRecord(merged[key]) ? mergeNestedRecord(merged[key], value) : value;
+    }
+    return merged;
+}
+function mergeAttentionIds(...cameras: unknown[]): string[] | undefined {
+    const arrays = cameras.filter(isRecord).map(camera => camera.attention_subject_ids).filter(Array.isArray) as unknown[][];
+    return arrays.length ? [...new Set(arrays.flat().map(String))] : undefined;
+}
+function cameraMergeConflicts(left: unknown, right: unknown, parent = "camera"): string[] {
+    if (!isRecord(left) || !isRecord(right)) return canonicalProduction(left) === canonicalProduction(right) ? [] : [parent];
+    const conflicts: string[] = [];
+    for (const key of Object.keys(left)) {
+        if (key === "attention_subject_ids" || !Object.hasOwn(right, key)) continue;
+        const a = left[key], b = right[key], path = `${parent}.${key}`;
+        if (isRecord(a) && isRecord(b)) conflicts.push(...cameraMergeConflicts(a, b, path));
+        else if (canonicalProduction(a) !== canonicalProduction(b)) conflicts.push(path);
+    }
+    return conflicts;
+}
 function patch(shot: Row, value?: Row) {
     if (!value) return;
     for (const key of Object.keys(value)) if (!patchFields.has(key)) reject("SHOT_PATCH_FIELD", `shots.${shot.id}.${key}`, "拆镜补丁只接受名称、画面、摄影、声音和表演字段");
-    requireShotFraming(value.camera, String(shot.id));
-    Object.assign(shot, value);
+    const next = { ...value };
+    if (Object.hasOwn(value, "camera")) {
+        next.camera = mergeNestedRecord(shot.camera, value.camera);
+        requireShotFraming(next.camera, String(shot.id));
+    }
+    if (isRecord(value.performance)) next.performance = mergeNestedRecord(shot.performance, value.performance);
+    Object.assign(shot, next);
+}
+function mergeCamera(left: unknown, right: unknown, preferRight: boolean): Row {
+    const a = isRecord(left) ? left : {};
+    const b = isRecord(right) ? right : {};
+    const preferred = preferRight ? b : a;
+    const fallback = preferRight ? a : b;
+    const merged = mergeNestedRecord(fallback, preferred);
+    const attentionIds = mergeAttentionIds(preferred, fallback);
+    if (attentionIds) merged.attention_subject_ids = attentionIds;
+    return merged;
 }
 function sound(source: Row) {
     const windows = subjectShotWindows(source), order = rows(source.utterances).map(utterance => {
@@ -277,7 +316,7 @@ export function editDirectorShot(director: DirectorProduction, operation: Edit) 
     } else if (operation.action === "merge") {
         const left = requireSelected(), right = shots[index + 1];
         if (!right || right.id !== operation.targetShotId || clip(source, right.id)?.id !== group!.id) reject("SHOT_MERGE_SCOPE", `shots.${left.id}`, "只能合并同一片段内的相邻镜头");
-        if (canonicalProduction(left.camera) !== canonicalProduction(right.camera) && ![left.id, right.id].includes(operation.cameraShotId!)) reject("SHOT_MERGE_CAMERA", `shots.${left.id}.camera`, "两镜摄影不同，请明确选择合并后使用哪一个摄影方案");
+        if (cameraMergeConflicts(left.camera, right.camera).length && ![left.id, right.id].includes(operation.cameraShotId!)) reject("SHOT_MERGE_CAMERA", `shots.${left.id}.camera`, "两镜摄影存在相互冲突的字段，请明确选择合并后优先使用哪一个摄影方案");
         const offset = Number(left.duration_frames), rightDuration = Number(right.duration_frames);
         if (right.title && right.title !== left.title) left.title = [left.title, right.title].filter(Boolean).join(" / ");
         const leftUsages = sliceUsages(left, 0, offset), rightUsages = sliceUsages(right, 0, rightDuration).map(usage => ({ ...usage, localStartFrame: usage.localStartFrame + offset, localEndFrame: usage.localEndFrame + offset }));
@@ -288,7 +327,7 @@ export function editDirectorShot(director: DirectorProduction, operation: Edit) 
             if (previous) previous.localEndFrame = usage.localEndFrame; else usages.push(usage);
         }
         left.subject_usages = usages;
-        left.camera = structuredClone(operation.cameraShotId === right.id ? right.camera : left.camera);
+        left.camera = mergeCamera(left.camera, right.camera, operation.cameraShotId === right.id);
         left.visual = `[0–${offset}帧] ${left.visual || ""}\n[${offset}–${offset + rightDuration}帧] ${right.visual || ""}`;
         left.duration_frames = offset + rightDuration;
         const mergedAudio = mergeAudio(left.audio, right.audio, offset, rightDuration);
@@ -328,6 +367,8 @@ export function editDirectorShot(director: DirectorProduction, operation: Edit) 
         const mergedInput = mergeShotInputs(next.shotInputs[left.id], next.shotInputs[right.id], left.id, right.id, isSubjectPromptAssembly(source));
         if (mergedInput) next.shotInputs[left.id] = mergedInput;
         patch(left, operation.firstShotPatch);
+        const attentionIds = mergeAttentionIds(left.camera, right.camera, operation.firstShotPatch?.camera);
+        if (attentionIds) left.camera.attention_subject_ids = attentionIds;
         shots.splice(index + 1, 1); group!.shot_ids = group!.shot_ids.filter((id: string) => id !== right.id); delete next.shotInputs[right.id];
     }
     const counters = new Map<string, number>();

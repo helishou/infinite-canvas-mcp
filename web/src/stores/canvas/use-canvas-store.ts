@@ -1412,7 +1412,7 @@ export function applyBackendCanvasEvent(event: unknown, preservePendingLocalChan
 }
 
 onCanvasTextCommit(applyBackendCanvasEvent);
-prepareCanvasTextWith(flushCanvasSyncNow);
+prepareCanvasTextWith(flushCanvasSyncNow, projectId => useCanvasStore.getState().projects.find(project => project.id === projectId));
 
 if (typeof window !== "undefined") {
     window.addEventListener("canvas-storage-recovered", () => {

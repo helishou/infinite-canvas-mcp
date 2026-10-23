@@ -31,3 +31,18 @@ summary:
         { id: "prompt-subject-3", name: "草庐室内", pictures: [], role: undefined },
     ]);
 });
+
+test("正文只描述图片内容时，引用块名称回落到被引用素材名", () => {
+    const subjects = literalPromptSubjects(`subject_definitions:
+<Subject 1> is the person shown in <Picture 1>. Use this person's appearance to replace the red mannequin.
+<Subject 2> is the complete target scene shown in <Picture 2>, including its environment.
+
+summary:
+...`);
+    const names = bindLiteralSubjectsToReferences(subjects, {
+        referenceName: (subject) => subject.pictureOrdinal === 1 ? "image.png" : "智能生成",
+    }).map(({ name }) => name);
+    assert.deepEqual(names, ["image.png", "智能生成"]);
+    // 没有可用的素材名时也不能把带引用标签的描述当成名称。
+    assert.equal(bindLiteralSubjectsToReferences(subjects)[0].name, "Subject 1");
+});

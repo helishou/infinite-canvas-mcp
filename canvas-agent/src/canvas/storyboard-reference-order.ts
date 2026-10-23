@@ -38,14 +38,17 @@ export function orderReferencesForSubmission<T extends object>(
     bindingIdOf: (reference: T) => string | undefined,
     isEnabledStoryboardImage: (reference: T) => boolean,
     isEnabledSubjectImage: (reference: T) => boolean,
+    referenceOrder?: unknown,
 ): T[] {
     const storyboardFirst = orderStoryboardReferencesFirst(references, shotBindingIds, bindingIdOf, isEnabledStoryboardImage);
     const subjects = storyboardFirst.filter(isEnabledSubjectImage);
     const subjectIds = new Set(subjects.map(bindingIdOf));
     return [
         ...storyboardFirst.filter(isEnabledStoryboardImage),
-        ...subjects,
-        ...storyboardFirst.filter((reference) => !subjectIds.has(bindingIdOf(reference)) && !isEnabledStoryboardImage(reference)),
+        ...applyReferenceOrder([
+            ...subjects,
+            ...storyboardFirst.filter((reference) => !subjectIds.has(bindingIdOf(reference)) && !isEnabledStoryboardImage(reference)),
+        ], referenceOrder, bindingIdOf),
     ];
 }
 

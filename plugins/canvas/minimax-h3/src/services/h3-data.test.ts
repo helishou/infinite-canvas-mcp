@@ -16,7 +16,7 @@ import {
 } from "./h3-data";
 import type { H3CharacterGroup, H3Ref, H3Segment } from "../types";
 
-import { characterGroupBindings } from "../../../../../canvas-agent/src/canvas/reference-contract";
+import { characterGroupBindings, compileReferenceSubmission } from "../../../../../canvas-agent/src/canvas/reference-contract";
 
 test("ordinal-only H3 reference labels follow the current Clip order without renaming descriptive references", () => {
     assert.equal(displayReferenceName({ type: "image", name: "<Picture 6>" } as H3Ref, 5, "Ref 5"), "<Picture 5>");
@@ -36,6 +36,16 @@ function derivedFixture(): H3Segment {
         { id: "disabled", assetId: "disabled-asset", label: "保留", role: "other", mediaType: "image", storageKey: "image:disabled", enabled: false, tags: ["keep"] },
     ] };
 }
+
+test("manual character Ref order agrees in the editor, prompt ordinals and actual submission", () => {
+    const segment = derivedFixture();
+    const refs = refsForSegment(segment);
+    segment.referenceOrder = [refs[2].bindingId!, refs[0].bindingId!, refs[1].bindingId!];
+    const expected = ["image:shen", "image:scene", "image:su"];
+    assert.deepEqual(refsForSubmission(segment).map(ref => ref.storageKey), expected);
+    assert.deepEqual(compileReferenceSubmission({}, segment).references.map(ref => ref.storageKey), expected);
+    assert.equal(segment.referenceBindings?.find(binding => binding.id === "disabled")?.enabled, false);
+});
 
 test("手工场景与两个角色组共享解析得到三张参考，ID 来源顺序对齐后台", () => {
     const segment = derivedFixture();

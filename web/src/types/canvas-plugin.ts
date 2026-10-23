@@ -246,6 +246,8 @@ export type CanvasMediaPreviewSource = {
     name?: string;
     type?: "image" | "video" | "audio";
     beforeUrl?: string;
+    canvasNodeId?: string;
+    storyboardFrameTimes?: number[];
 };
 export type CanvasMediaPreview = CanvasMediaPreviewSource & {
     gallery?: CanvasMediaPreviewSource[];

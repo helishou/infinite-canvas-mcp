@@ -202,6 +202,13 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
             for (const entry of entries) if (entry.shotIds.some(id => contextShots.has(id))) sceneIds.add(entry.id);
             changed = before !== contextShots.size + sceneIds.size;
         }
+        // Replay can expand into earlier scene occurrences. Retain their script
+        // blocks as well, so preserved events still resolve their authored anchors.
+        for (const group of productionScriptGroups(rows(source.script_scenes))) {
+            if (sceneIds.has(group.key) || sceneIds.has(group.sceneId)) {
+                for (const block of group.blocks) sceneBlockIds.add(String(block.id || ""));
+            }
+        }
         projected.source.shots = allShots.filter(item => contextShots.has(stableId(item)));
         projected.source.script_scenes = rows(source.script_scenes).filter(item => sceneBlockIds.has(String(item.id || "")));
         const blocks = new Set(rows(projected.source.script_scenes).flatMap(item => rows(Array.isArray(item.blocks) ? item.blocks : typeof item.text === "string" ? [item] : []).map(block => String(block.id))));

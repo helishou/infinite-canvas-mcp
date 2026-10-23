@@ -111,6 +111,10 @@ function agentErrorState(error: unknown) {
     return error instanceof AgentApiError ? (error.response as { state?: AgentConversationState }).state : undefined;
 }
 
+function modelNeedsNewConversation(model: AgentModel | undefined, threadId: string) {
+    return Boolean(model?.runtime && threadId && model.runtime !== (threadId.startsWith("llm-") ? "llm" : "codex"));
+}
+
 function conversationBootstrapView(conversation: AgentConversationState) {
     const mcpStartupStatuses: Record<string, AgentBootstrapStatus> = Object.fromEntries(Object.entries(conversation.mcpStatuses).map(([name, item]) => {
         const view: AgentBootstrapStatus = item.status === "starting"
@@ -812,6 +816,12 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         const requestPrompt = object ? `${basePrompt}\n\n${productionObjectPrompt(object)}` : basePrompt;
         const canSend = currentState.connected && Boolean(requestPrompt) && !currentState.sending && !currentState.waiting && !currentState.codexRuntime.busy && !currentState.loadingThreads && ["ready", "warning"].includes(currentState.conversation.status) && !((launch || scopedTaskInput) && !selectedSkill);
         if (!canSend) return queuedItem ? currentState.codexRuntime.busy || currentState.waiting || currentState.conversation.status === "running" ? { status: "busy" } : { status: "failed", error: t("agent.queue.sendFailed") } : false;
+        // Recover an already-selected incompatible model before consuming the draft.
+        // Queued and scoped tasks remain bound to their original conversation.
+        if (!queuedItem && !scopedTaskInput && !launch && modelNeedsNewConversation(currentState.models.find((item) => item.model === currentState.model), currentState.activeThreadId)) {
+            if (await startNewThread({ preserveSkill: true })) message.info(rt("modelConversationCreated"));
+            return false;
+        }
         let referenceImages: AgentAttachment[] = [];
         if (canvasReferences.some((item) => item.kind === "image")) {
             setAgentState({ sending: true, activity: rt("readingCanvasImages") });
@@ -1431,13 +1441,13 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         setAgentState({ loadingThreads: false });
     };
 
-    const startNewThread = async (): Promise<boolean> => {
+    const startNewThread = async ({ preserveSkill = false }: { preserveSkill?: boolean } = {}): Promise<boolean> => {
         const current = useAgentStore.getState();
-        if (!current.connected || current.sending || current.waiting || current.loadingThreads || ["preparing", "running"].includes(current.conversation.status)) return false;
+        if (!current.connected || current.sending || current.waiting || current.codexRuntime.busy || current.loadingThreads || ["preparing", "running"].includes(current.conversation.status)) return false;
         const previousThreadId = current.activeThreadId;
         const previousConversationId = current.conversation.conversationId;
         const operation = beginThreadOperation();
-        clearSkillSelection();
+        if (!preserveSkill) clearSkillSelection();
         setAgentState({ activeTab: "chat", activity: rt("creatingConversation") });
         try {
             legacyHistoryRef.current = false;
@@ -1470,6 +1480,20 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         } finally {
             finishThreadOperation(operation);
         }
+    };
+
+    const changeModel = async (model: string) => {
+        const current = useAgentStore.getState();
+        const selected = current.models.find((item) => item.model === model);
+        if (!selected || current.loadingThreads) return;
+        const needsConversation = modelNeedsNewConversation(selected, current.activeThreadId);
+        if (needsConversation && (current.sending || current.waiting || current.codexRuntime.busy || ["preparing", "running"].includes(current.conversation.status))) {
+            message.info(rt("modelSwitchWhenIdle"));
+            return;
+        }
+        const effort = selected.defaultReasoningEffort || selected.supportedReasoningEfforts[0]?.reasoningEffort;
+        setAgentState({ model, reasoningEffort: effort || "" });
+        if (needsConversation && await startNewThread({ preserveSkill: true })) message.info(rt("modelConversationCreated"));
     };
 
     const resumeThread = async (threadId: string) => {
@@ -1824,7 +1848,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                 right={
                     <>
                         <Tooltip title={t("agent.history.newThread")} placement="bottom">
-                            <Button size="small" type="text" className="!h-8 !w-8 !min-w-8 !px-0" aria-label={t("agent.history.newThread")} disabled={!connected || loadingThreads || sending || waiting || conversationBusy || Boolean(creativeLaunch)} icon={<Plus className="size-3.5" />} onClick={startNewThread} />
+                            <Button size="small" type="text" className="!h-8 !w-8 !min-w-8 !px-0" aria-label={t("agent.history.newThread")} disabled={!connected || loadingThreads || sending || waiting || conversationBusy || Boolean(creativeLaunch)} icon={<Plus className="size-3.5" />} onClick={() => void startNewThread()} />
                         </Tooltip>
                     </>
                 }
@@ -1910,13 +1934,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                         models={models}
                         model={model}
                         reasoningEffort={reasoningEffort}
-                        onModelChange={(model) => {
-                            const selected = models.find((item) => item.model === model);
-                            if (!selected) return;
-                            const effort = selected.defaultReasoningEffort || selected.supportedReasoningEfforts[0]?.reasoningEffort;
-                            setAgentState({ model, reasoningEffort: effort || "" });
-                            if (selected.runtime && Boolean(activeThreadId) && (activeThreadId.startsWith("llm-") ? selected.runtime === "codex" : selected.runtime === "llm")) message.info(t("agent.runtime.modelNeedsNewConversation"));
-                        }}
+                        onModelChange={changeModel}
                         onReasoningEffortChange={(reasoningEffort) => {
                             setAgentState({ reasoningEffort });
                         }}

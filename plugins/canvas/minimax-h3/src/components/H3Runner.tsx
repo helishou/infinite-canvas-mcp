@@ -3,7 +3,7 @@ import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { useH3RunEvents } from "../hooks/useH3RunEvents";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { clipRuntimeState } from "../services/h3-clip-runtime";
-import { refsForSegment } from "../services/h3-data";
+import { quickStoryboardRuntimeKey, refsForSegment } from "../services/h3-data";
 import { message } from "antd";
 
 export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
@@ -59,9 +59,15 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                     throw new Error(audioRefs.length ? "请先在“驱动音频”中选择当前 Clip 的参考音频" : "请先为当前 Clip 添加参考音频，再选择驱动音频");
                 }
             }
+            const quickStoryboard = selected?.quickStoryboardEnabled === true
+                ? await ctx.storage.get<{ storageKey?: string; panelCount?: number }>(quickStoryboardRuntimeKey(ctx.projectId, ctx.node.id, selectedId))
+                : null;
+            const quickStoryboardRuntime = quickStoryboard?.storageKey && Number.isInteger(quickStoryboard.panelCount) && Number(quickStoryboard.panelCount) > 0
+                ? { quickStoryboard: { storageKey: quickStoryboard.storageKey, panelCount: Number(quickStoryboard.panelCount) } }
+                : undefined;
             // The host's runCanvasGeneration path flushes the canvas before submitting this H3 command.
             if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("minimax-h3:submit-pending", { detail: { nodeId: ctx.node.id, segmentId: selectedId, pending: true } }));
-            await ctx.ai.runCanvasGeneration({ mode: "video", operation: "h3-run", projectId: ctx.projectId, nodeId: ctx.node.id, segmentId: selectedId, runFromCurrent, forceRegenerate });
+            await ctx.ai.runCanvasGeneration({ mode: "video", operation: "h3-run", projectId: ctx.projectId, nodeId: ctx.node.id, segmentId: selectedId, runFromCurrent, forceRegenerate, ...(quickStoryboardRuntime ? { h3RuntimeOverrides: quickStoryboardRuntime } : {}) });
         } catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
             const readable = clipNumber > 0

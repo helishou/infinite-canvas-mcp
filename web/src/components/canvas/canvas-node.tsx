@@ -792,6 +792,35 @@ export const CanvasNode = React.memo(function CanvasNode({
     const panelContent = showPanel && !isGroup && renderPanel ? renderPanel(data) : null;
     useCanvasTransientEscape(Boolean(panelContent && panelContainer), () => onClosePanel?.(), true);
     const compact = scale < 0.24 && !isSelected && !hovered && !showPanel && !referenceSelectionState;
+    // Drag/resize previews update the shell every frame. Reuse unchanged content so
+    // Markdown and plugin editors do not rerender just because the shell moved.
+    const nodeContent = useMemo(() => (
+        <NodeContent
+            node={data}
+            theme={theme}
+            scale={scale}
+            onEditEntity={data.type === CanvasNodeType.Character ? onEditCharacter : data.type === CanvasNodeType.Scene ? onEditScene : data.type === CanvasNodeType.Prop ? onEditProp : undefined}
+            isEditingContent={isEditingContent}
+            textareaRef={textareaRef}
+            isBatchRoot={isBatchRoot}
+            batchCount={batchCount}
+            batchExpanded={batchExpanded}
+            renderNodeContent={renderNodeContent}
+            pluginContext={pluginContext}
+            mentionReferences={mentionReferences}
+            onStopEditing={() => setIsEditingContent(false)}
+            onRetry={onRetry}
+            onToggleBatch={() => onToggleBatch?.(data.id)}
+            onSetBatchPrimary={(itemId) => onSetBatchPrimary?.(data.id, itemId)}
+            onDuplicateBatchImage={(imageId) => onDuplicateBatchImage?.(data, imageId)}
+            onDownloadBatchImage={(imageId) => onDownloadBatchImage?.(data, imageId)}
+            onRetryBatchImage={(imageId) => onRetryBatchImage?.(data, imageId)}
+            onDeleteBatchImage={(imageId) => onDeleteBatchImage?.(data.id, imageId)}
+            onViewBatchImage={(imageId) => onViewImage?.(data, imageId)}
+            groupChildCount={groupChildCount}
+            compact={compact}
+        />
+    ), [data, theme, scale, onEditCharacter, onEditScene, onEditProp, isEditingContent, isBatchRoot, batchCount, batchExpanded, renderNodeContent, pluginContext, mentionReferences, onRetry, onToggleBatch, onSetBatchPrimary, onDuplicateBatchImage, onDownloadBatchImage, onRetryBatchImage, onDeleteBatchImage, onViewImage, groupChildCount, compact]);
 
     return (
         <div
@@ -1005,31 +1034,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 >
                     {data.metadata?.sharedAssetReference && <SharedReferenceSource origin={data.metadata.sharedAssetReference} theme={theme} localChanges={Boolean(Object.keys(data.metadata.sharedAssetReference.edits || {}).length)} />}
                     {data.metadata?.sharedAssetOrigin && <SharedReferenceSource origin={data.metadata.sharedAssetOrigin as { sourceProjectId: string; sourceNodeId: string }} theme={theme} />}
-                    <NodeContent
-                        node={data}
-                        theme={theme}
-                        scale={scale}
-                        onEditEntity={data.type === CanvasNodeType.Character ? onEditCharacter : data.type === CanvasNodeType.Scene ? onEditScene : data.type === CanvasNodeType.Prop ? onEditProp : undefined}
-                        isEditingContent={isEditingContent}
-                        textareaRef={textareaRef}
-                        isBatchRoot={isBatchRoot}
-                        batchCount={batchCount}
-                        batchExpanded={batchExpanded}
-                        renderNodeContent={renderNodeContent}
-                        pluginContext={pluginContext}
-                        mentionReferences={mentionReferences}
-                        onStopEditing={() => setIsEditingContent(false)}
-                        onRetry={onRetry}
-                        onToggleBatch={() => onToggleBatch?.(data.id)}
-                        onSetBatchPrimary={(itemId) => onSetBatchPrimary?.(data.id, itemId)}
-                        onDuplicateBatchImage={(imageId) => onDuplicateBatchImage?.(data, imageId)}
-                        onDownloadBatchImage={(imageId) => onDownloadBatchImage?.(data, imageId)}
-                        onRetryBatchImage={(imageId) => onRetryBatchImage?.(data, imageId)}
-                        onDeleteBatchImage={(imageId) => onDeleteBatchImage?.(data.id, imageId)}
-                        onViewBatchImage={(imageId) => onViewImage?.(data, imageId)}
-                        groupChildCount={groupChildCount}
-                        compact={compact}
-                    />
+                    {nodeContent}
                 </div>
 
                 {showImageInfo && hasImageContent ? <ImageInfoBar node={data} /> : null}

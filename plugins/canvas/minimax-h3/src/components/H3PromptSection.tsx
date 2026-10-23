@@ -1640,10 +1640,27 @@ export function H3PromptSection({
       if (group?.[1].subjectId) aliases.add(group[1].subjectId);
       subjects.set(canonicalId, aliases);
     };
-    const promptOwnedSubjects = structuredPromptV2 && literalSubjects.length
-      ? bindLiteralSubjectsToReferences(literalSubjects)
+    // 正文自带 subject_definitions 时，`<Subject N>` 的含义由正文定义。若 Clip 上保存的
+    // 实体清单整份都来自已被替换的参考（仍按旧序号贴 沈砚/红绡 这类名字），引用块改按正文
+    // 渲染；清单仍有当前参考/角色组认领时保持原语义（说话人名册、@ 插入形态不变）。
+    const promptOwnedSubjects = literalSubjects.length
+      ? bindLiteralSubjectsToReferences(literalSubjects, {
+        // 正文只写了“图片里的人物”这类描述时，引用块显示被引用素材自己的名字。
+        referenceName: (subject) => subject.pictureOrdinal ? imageRefs[subject.pictureOrdinal - 1]?.name : undefined,
+      })
       : undefined;
-    const definedSubjects = promptOwnedSubjects?.length ? promptOwnedSubjects : subjectDefinitions.length ? subjectDefinitions : null;
+    const liveSubjectIds = new Set<string>();
+    mentionItems.forEach(({ ref }) => {
+      [ref.bindingId, ref.subjectId, ref.groupId, ...(ref.storyboardSubjectIds || [])]
+        .forEach((id) => { if (id) liveSubjectIds.add(id); });
+    });
+    Object.entries(selected?.h3CharacterGroups || {}).forEach(([groupId, group]) => {
+      [groupId, group.id, group.subjectId, group.characterNodeId].forEach((id) => { if (id) liveSubjectIds.add(id); });
+    });
+    const savedDefinitionsBacked = subjectDefinitions.some((definition) => liveSubjectIds.has(definition.id));
+    const definedSubjects = promptOwnedSubjects?.length && subjectDefinitions.length && !savedDefinitionsBacked
+      ? promptOwnedSubjects
+      : subjectDefinitions.length ? subjectDefinitions : null;
     mentionItems.filter(({ ref }) => ref.type === "image").forEach(({ ref }) => {
       addSubject(subjectIdForRef(ref));
       addSubject(ref.groupId);
@@ -1830,12 +1847,11 @@ export function H3PromptSection({
             </label>
           </> : null}
         </span>
-        {selected?.id && !storyboardMode ? <>
-          <Button size="small" title={!hasProductionCompileTarget ? "当前 Clip 未关联正式制作源稿，无法从制作源稿编译" : "按当前正式制作源稿重新编译并应用此 Clip 的 Prompt"}
-            disabled={!hasProductionCompileTarget || !textStatus.ready || textStatus.blocked || promptCompileBusy} loading={promptCompileBusy} onClick={() => void compileCurrentPrompt()}>
+        {selected?.id && !storyboardMode && hasProductionCompileTarget ? <>
+          <Button size="small" title="按当前正式制作源稿重新编译并应用此 Clip 的 Prompt"
+            disabled={!textStatus.ready || textStatus.blocked || promptCompileBusy} loading={promptCompileBusy} onClick={() => void compileCurrentPrompt()}>
             {promptCompileBusy ? "正在编译…" : "生成编译 Prompt"}
           </Button>
-          {!hasProductionCompileTarget ? <span style={{ fontSize: 12, opacity: 0.7 }}>未关联制作源稿</span> : null}
         </> : null}
         {mode === "ref2va" && !structuredPromptV2 ? <button type="button" className="nfh3-prompt-view-toggle" title="打开结构化分镜提示词编辑器" onClick={openStoryboard}>
           {storyboardSaving ? "保存中…" : "分镜编辑"}

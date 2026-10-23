@@ -5,7 +5,7 @@ import { message } from "antd";
 import type { H3CharacterGroupEditPatch, H3Ref, H3Segment } from "../types";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { useH3LocalView } from "../hooks/useH3LocalView";
-import { applyCharacterGroupEdits, inferReferenceRole, promoteCharacterSourceReferences, refsForSegment, removeCharacterGroup, replaceSegmentReference, resultUrl, syncCharacterGroupFromSource, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
+import { applyCharacterGroupEdits, h3OutputName, inferReferenceRole, promoteCharacterSourceReferences, refsForSegment, removeCharacterGroup, replaceSegmentReference, resultUrl, syncCharacterGroupFromSource, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
 import { CharacterGroupParseError, isH3OutputVideoDrop, normalizeDroppedH3Ref, h3RefCandidates, orderedGroupStoryboardRefs, readCharacterGroupFromDrop, readCharacterGroupFromNode, readCharacterImagesFromDrop, readH3Refs, refreshSmartImageReference, storyboardSubjectIdsForNode } from "../services/h3-refs";
 import { sameRef } from "../services/h3-compatibility";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
@@ -71,7 +71,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             }
             const url = resultUrl(segment.result);
             if (url) {
-                rawOutputs.push({ url, type: "video", name: `Clip ${segmentIndex + 1}`, storageKey: segment.resultStorageKey, segmentId: segment.id });
+                rawOutputs.push({ url, type: "video", name: h3OutputName(ctx.node, segmentIndex + 1), storageKey: segment.resultStorageKey, segmentId: segment.id });
                 if (!segmentByUrl.has(url)) segmentByUrl.set(url, segment.id);
             }
         }
@@ -94,8 +94,21 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
                 params: value.params && typeof value.params === "object" ? value.params as Record<string, unknown> : undefined,
             } as H3Ref);
         }
-        return result.reverse();
-    }, [segments]);
+        const videoCounts = new Map<string, number>();
+        for (const item of result) {
+            if (item.type === "video" && item.segmentId) videoCounts.set(item.segmentId, (videoCounts.get(item.segmentId) || 0) + 1);
+        }
+        const videoOrdinals = new Map<string, number>();
+        const named = result.map((item) => {
+            if (item.type !== "video" || !item.segmentId) return item;
+            const clipNumber = segments.findIndex((segment) => segment.id === item.segmentId) + 1;
+            if (clipNumber < 1) return item;
+            const ordinal = (videoOrdinals.get(item.segmentId) || 0) + 1;
+            videoOrdinals.set(item.segmentId, ordinal);
+            return { ...item, name: h3OutputName(ctx.node, clipNumber, (videoCounts.get(item.segmentId) || 0) > 1 ? ordinal : undefined) };
+        });
+        return named.reverse();
+    }, [ctx.node.id, ctx.node.title, segments]);
     const total = Math.max(1, segments.reduce((sum, item) => sum + Math.max(0.5, Number(item.duration || 1)), 0));
     const playhead = Math.max(0, Math.min(total, Number(metadata.playhead || 0)));
     const fmt = (value: number) => `${Number(value || 0).toFixed(Number(value || 0) % 1 ? 1 : 0)}s`;
@@ -727,7 +740,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         <H3RulerScrubber key="ruler-scrubber" ctx={ctx} segments={segments} total={total} previewH={effPreviewH} />
         <H3WorkbenchToolbar key="workbench-toolbar" ctx={ctx} metadata={metadata} segments={segments} selected={selected} selectedIndex={selectedIndex} playhead={playhead} total={total} fmt={fmt} onPlayAll={playAll} patchSelected={patchSelected} />
         <SmartStoryboardModal key="storyboard-modal" ctx={ctx} metadata={metadata} upstream={upstream} open={smartStoryboardOpen} uploads={smartStoryboardUploads} setUploads={setSmartStoryboardUploads} onClose={() => setSmartStoryboardOpen(false)} />
-        {editingRef && currentEditingRef ? <H3ReferenceModal key="reference-modal" ctx={ctx} refItem={currentEditingRef} characters={referencedCharacters} group={editingRefGroup} onApply={applyReferenceEdit} onReplaceFromCanvas={requestCanvasRefReplace} onRemoveRef={removeEditingReference} onRemoveStoryboardImage={removeEditingStoryboardImage} onDeleteGroup={editingRefGroup ? deleteReferenceGroup : undefined} onClose={() => setEditingRef(null)} /> : null}
+        {editingRef && currentEditingRef ? <H3ReferenceModal key={`reference-modal:${editingRef.segmentId}:${currentEditingRef.bindingId || currentEditingRef.assetId || currentEditingRef.url}`} ctx={ctx} refItem={currentEditingRef} characters={referencedCharacters} group={editingRefGroup} onApply={applyReferenceEdit} onReplaceFromCanvas={requestCanvasRefReplace} onRemoveRef={removeEditingReference} onRemoveStoryboardImage={removeEditingStoryboardImage} onDeleteGroup={editingRefGroup ? deleteReferenceGroup : undefined} onClose={() => setEditingRef(null)} /> : null}
         <div key="workbench-body" ref={bodyRef} className="minimax-wb-body">
             <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer key={`${showLivePreview ? "live" : "result"}-${previewKind}`} ctx={ctx} url={previewStorageKey ? ctx.mediaUrl(previewStorageKey) : preview} kind={previewKind} aspectRatio={String(selected?.aspectRatio || metadata.aspectRatio || "16:9 (Widescreen)")} storageKey={previewStorageKey} name={previewName} livePreview={showLivePreview} playhead={playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playToken={playToken} playRequest={playRequest} nextUrl={nextUrl} preloadNext={preloadNext} onEnded={advancePlayback} onPlayheadTick={livePlayheadTick} /></div>
             <div key="prompt-side" className="minimax-prompt-side"><H3ClipSettingsPanel ctx={ctx} metadata={metadata} selected={selected} submitting={submittingSegments.has(String(selected?.id || ""))} patchSelected={patchSelected} patchAllSettings={patchAllSettings} /></div>

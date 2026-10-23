@@ -18,7 +18,7 @@
 
 `patch_director_source` 的 `scene` 修改剧本场次 `script_scenes`，`environment` 修改编译引用的 `scene_registry`，`asset` 修改 `asset_plan`，`asset_card` 修改 `asset_cards` 的提示词与七步正文。环境文字返修须定向检查登记与资产卡中实际被消费的文字，不能把修改资产计划当作已更新环境正文。
 
-旧合同的拆镜返修可用 `replace_director_scene_storyboard` 在现有 `production_edit.ops` 中提交场次 ID、完整本场 Shots、原 Segment ID 集合及对应 shotInputs；保留场次起止帧和其他场次正文，按原剧情顺序顺延同一时间线的 story_order。连续性事件和覆盖用同批 `patch_director_continuity` 保存，边界决定沿现有操作更新。Clip-only 编译不自动包含已明确跳过的关键帧资产；显式指定关键帧目标仍按其完整合同校验。
+新合同的场次分镜登记与整场替换使用 `replace_director_scene_storyboard`：在现有 `production_edit.ops` 中提交场次 ID、本场完整 Shots、Clip 及对应 shotInputs。剧本场次已登记但还没有镜头时，用同一操作建立首版分镜；新镜头使用正整数 `duration_frames`、同一叙事时间线和连续 `story_order`，并以 `source_scene_id` 或唯一环境／节拍明确归属本场。Backend 按场次位置确定顺序、顺延同一时间线后续镜头，并为新相邻 Clip 补齐默认边界。替换已有场次须保留原 Clip ID 集合，调整 Clip 分组用 `repartition_director_clips`，不要借整场替换重排分组。连续性事件和覆盖用同批 `patch_director_continuity` 保存。Clip-only 编译不自动包含已明确跳过的关键帧资产；显式指定关键帧目标仍按其完整合同校验。
 
 按对象、snapshot、读取范围和 revision 复用已完整读取的内容；仅核验版本时携带 `ifRevision`，返回 `unchanged` 后继续使用原内容。不能把写回执的新 revision 当成尚未读过的数据版本，也不能把第一页当全集；续页沿原 cursor 完成，不带 ifRevision。冲突或版本改变时只补读任务涉及的章节／目标；任务状态使用 readiness 或精确 runId/taskId 查询。成功写回执已确认保存，nextRead 是缺字段时的入口，不要求保存后整稿回读；编译可直接消费已保存稿。
 

@@ -26,6 +26,14 @@ test("asset deletion requires explicit confirmation in the revision-checked oper
     assert.equal(productionEditSchema.safeParse({ operationId: "delete-asset", expectedRevision: 1, ops: [{ type: "delete_director_asset", id: "PROP1", confirmed: false }] }).success, false);
 });
 
+test("shot merge contract documents automatic camera and nested patch handling", () => {
+    const preconditions = productionOperationContract("edit_director_shot").operations[0].preconditions?.join(" ") || "";
+    assert.match(preconditions, /automatically combines complementary camera fields/);
+    assert.match(preconditions, /unions\/deduplicates attention_subject_ids/);
+    assert.match(preconditions, /when the same camera field conflicts, cameraShotId/);
+    assert.match(preconditions, /nested patches: omitted fields are preserved/);
+});
+
 test("MCP edit schemas reject formerly opaque invalid operations", () => {
     for (const schema of [toolInputSchemas.production_edit]) {
         for (const op of [{ type: "set_director_brief", brief: {} }, { type: "patch_director_source", patch: {} }]) {

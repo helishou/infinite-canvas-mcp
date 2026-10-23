@@ -311,6 +311,10 @@ export type CanvasMediaPreviewSource = {
     name?: string;
     type?: "image" | "video" | "audio";
     beforeUrl?: string;
+    /** H3 output previews may route a captured frame back to their source node. */
+    canvasNodeId?: string;
+    /** Relative start times for the storyboard shots associated with this H3 output. */
+    storyboardFrameTimes?: number[];
 };
 export type CanvasMediaPreview = CanvasMediaPreviewSource & {
     /** Ordered, transient preview playlist. Browsing never changes active canvas outputs. */

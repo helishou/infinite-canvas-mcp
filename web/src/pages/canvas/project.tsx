@@ -5869,6 +5869,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     // CanvasNode uses React.memo, but new prop references would invalidate it on every render and rerender every node
     // during click, hover, or viewport changes, which is especially expensive for Markdown. These useCallback values
     // and their memoized map/handler dependencies remain stable during interaction, so unchanged nodes do not rerender.
+    const closeNodePanel = useCallback(() => setDialogNodeId(null), []);
     const handleNodeHoverStart = useCallback((nodeId: string) => {
         if (nodeDraggingRef.current) return;
         setHoveredNodeId(nodeId);
@@ -6368,7 +6369,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                                 // 图片/视频/音频/文本节点不会消费这些渲染器；不传无用函数，
                                 // 避免生成状态或面板回调变化时让所有媒体节点失去 React.memo 命中。
                                 panelContainer={showPanel && node.type === CanvasNodeType.Config && node.metadata?.smart !== true ? containerRef.current : undefined}
-                                onClosePanel={() => setDialogNodeId(null)}
+                                onClosePanel={showPanel ? closeNodePanel : undefined}
                                 renderPanel={showPanel ? renderNodePanel : undefined}
                                 renderNodeContent={node.type === CanvasNodeType.Config || node.type === CanvasNodeType.Loop ? renderNodeContentPanel : undefined}
                                 onMouseDown={handleNodeMouseDown}

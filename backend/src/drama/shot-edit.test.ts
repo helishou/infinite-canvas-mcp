@@ -39,6 +39,40 @@ test("split and merge preserve original dialogue, event frame, keyframe and time
     assert.equal(merged.subject_usages.length, 1);
     assert.deepEqual((d.source as any).utterances[0].end, { shotId: "S1", localFrame: 48 }); assert.equal((d.source as any).ledger.events[0].local_frame, 36);
 });
+test("merge automatically combines camera fields and preserves omitted nested patch fields", () => {
+    const d = fixture(), source = d.source as any;
+    const secondSubject = structuredClone(source.subject_registry[0]);
+    secondSubject.id = "SUB2"; secondSubject.entityRef = { ...secondSubject.entityRef, id: "P2" };
+    secondSubject.pictureBindings = secondSubject.pictureBindings.map((binding: any) => ({ ...binding, id: "PB2" }));
+    source.character_registry.push({ id: "P2", name: "同框人物" }); source.subject_registry.push(secondSubject);
+    source.shots[0].camera = {
+        framing: "CU", attention_subject_ids: ["SUB"], editorial_reason: "保持左镜的观看重点",
+        previs_id: "004", sensor_basis: "full_frame", shutter_angle: 180, angle: "床侧机位",
+    };
+    source.shots[1].camera = {
+        framing: "CU", attention_subject_ids: ["SUB2", "SUB"], editorial_reason: "保持左镜的观看重点",
+        lens_mm: 75, height_m: 0.85,
+    };
+
+    editDirectorShot(d, {
+        type: "edit_director_shot", action: "merge", shotId: "S1", targetShotId: "S2",
+        firstShotPatch: {
+            camera: { attention_subject_ids: ["SUB"], path: "沿腿外侧上移至大腿。" },
+            performance: { tracks: { body_hands: { cue: "指腹轻轻滑过一次。" } } },
+        },
+    });
+
+    const merged = (d.source as any).shots[0];
+    assert.deepEqual(merged.camera, {
+        framing: "CU", attention_subject_ids: ["SUB", "SUB2"], editorial_reason: "保持左镜的观看重点",
+        previs_id: "004", sensor_basis: "full_frame", shutter_angle: 180, angle: "床侧机位",
+        lens_mm: 75, height_m: 0.85, path: "沿腿外侧上移至大腿。",
+    });
+    assert.equal(merged.performance.source_beat_id, "B");
+    assert.equal(merged.performance.events[0].cue, "孩子抬头");
+    assert.equal(merged.performance.tracks.body_hands.cue, "指腹轻轻滑过一次。");
+});
+
 test("merging adjacent Shots coalesces contiguous pieces of the same utterance", () => {
     const d = fixture(), source = d.source as any;
     source.utterances[0].text = "回来先问蛋你";
@@ -135,7 +169,8 @@ test("automatic split allocation and split/merge event and dependency mappings s
     assert.equal(splitSource.utterances[0].text, "回来先问蛋");
     editDirectorShot(d, { type: "edit_director_shot", action: "merge", shotId: "N", targetShotId: "S2", cameraShotId: "N" });
     assert.deepEqual(d.shotInputs.N.assetIds, ["RIGHT"]);
-    assert.equal(d.shotInputs.N.keyframeAssetId, "RIGHT");
+    assert.equal(d.shotInputs.N.keyframePolicy, "none", "v2 关键帧真值保存在 source.shots[].keyframes，shotInputs 不保留旧槽位");
+    assert.equal((d.source as any).shots.find((shot: any) => shot.id === "N").keyframes[0].localFrame, 12);
     assert.deepEqual((d.source as any).shots[1].outcome_events, ["E"]);
 });
 test("whole-Clip cleanup keeps shared coverage and unrelated ledger facts, then creates a safe new boundary", () => {
@@ -153,7 +188,7 @@ test("whole-Clip cleanup keeps shared coverage and unrelated ledger facts, then 
     reconcileShotClipBoundaries(d, ["A", "B", "C"]);
     assert.equal(d.boundaries.length, 1);
     assert.equal(d.boundaries[0].from, "A"); assert.equal(d.boundaries[0].to, "C");
-    assert.equal(d.boundaries[0].tailFrame, false); assert.equal(d.boundaries[0].motionContext, false);
+    assert.equal(d.boundaries[0].tailFrame, true); assert.equal(d.boundaries[0].motionContext, false);
 });
 test("insert and reorder keep Clip and existing Shot IDs stable", () => {
     const d = fixture();
@@ -172,7 +207,7 @@ test("insert and split reject transition labels in camera.framing and leave the 
     editDirectorShot(valid, { type: "edit_director_shot", action: "insert", shotId: "S2", shot: { id: "N", duration_frames: 24, title: "新镜头", visual: "听者反应", camera: { framing: "MCU" }, subject_usages: [], utterance_refs: [], keyframes: [] } });
     assert.equal((valid.source as any).shots.find((shot: any) => shot.id === "N").camera.framing, "MCU");
 });
-test("production transaction replays structural edits once, keeps other episodes and rejects stale revisions", t => {
+test("production transaction replays structural edits once, keeps other episodes and refuses future revisions", t => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "shot-edit-")), db = new BackendDatabase(path.join(directory, "db.sqlite"));
     t.after(() => { db.close(); for (const entry of fs.readdirSync(directory)) fs.unlinkSync(path.join(directory, entry)); fs.rmdirSync(directory); });
     db.upsertCanvasFolder({ id: "drama", name: "测试剧目", isDrama: true, createdAt: new Date().toISOString() });
@@ -185,9 +220,9 @@ test("production transaction replays structural edits once, keeps other episodes
     assert.equal(replay.revision, saved.revision); assert.equal((service.get("ep").draft.director!.source.shots as any[]).length, 3);
     assert.equal(directorHash(service.get("ep").draft.director!.source), service.get("ep").draft.director!.sourceHash);
     assert.deepEqual(service.get("other"), other);
-    assert.throws(() => service.edit("ep", { ...request, operationId: "stale", ops: [{ type: "edit_director_shot", action: "duplicate", shotId: "S1", newShotId: "COPY" }] }), /版本|REVISION/);
+    assert.throws(() => service.edit("ep", { ...request, operationId: "future", expectedRevision: saved.revision + 1, ops: [{ type: "edit_director_shot", action: "duplicate", shotId: "S1", newShotId: "COPY" }] }), /版本|REVISION/);
     const receipts = service.clipRefreshStore("ep").byEditAll("split-once");
-    assert.equal(receipts.length, 1); assert.equal(receipts[0].segmentId, "C");
+    assert.equal(receipts.length, 0, "结构镜头编辑不隐式登记 Clip 刷新；需要刷新时在同批 ops 显式登记 request_director_clip_refresh");
     let current = saved;
     for (const shotId of ["S1", "N", "S2"]) {
         const deleting = { operationId: `delete-${shotId}`, expectedRevision: current.revision, ops: [{ type: "edit_director_shot" as const, action: "delete" as const, shotId }] };

@@ -284,6 +284,8 @@ export type H3Segment = {
     /** 快速分镜区引用稳定 ID 清单，媒体保存在 Backend 参考资产中。 */
     quickStoryboardDrafts?: Array<{ bindingId: string; name: string; sourceTime: number; fingerprint?: string }>;
     quickStoryboardArrangement?: Array<{ bindingId: string; name: string; sourceTime: number; fingerprint?: string }>;
+    /** Stable frame assignment for each H3 storyboard track slot; null leaves the slot empty. */
+    quickStoryboardSlotBindings?: Array<string | null>;
     /** 当前 Clip 是否显示分镜时间轨；每段独立保存。 */
     storyboardModeEnabled?: boolean;
     /** 以稳定 reference binding ID 为键的 Clip 本地分镜时长（秒）。 */

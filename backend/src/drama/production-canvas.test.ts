@@ -346,7 +346,7 @@ test("switching a Subject directly to an unregistered shared node includes it an
     assert.equal(f.episode.subjectWorkbench("ep", "SUBJECT_LOCAL").subjectWorkbench.pictureBindings[0].assetId, "SHARED_CANON_PERSON");
 });
 
-test("scene storyboard replacement replays once and refuses stale revisions without changing other scenes", t => {
+test("scene storyboard replacement replays once without changing other scenes and refuses future revisions", t => {
     const f = fixture(t), d = director();
     (d.source.shots as any[])[0].source_scene_id = "morning";
     (d.source.shots as any[])[1].source_scene_id = "night";
@@ -361,8 +361,11 @@ test("scene storyboard replacement replays once and refuses stale revisions with
     assert.equal(saved.revision, before.revision + 1);
     assert.equal(f.episode.edit("ep", request).replayed, true);
     assert.equal(f.episode.get("ep").revision, saved.revision);
-    assert.deepEqual((saved.draft.director!.source.shots as any[]).find(shot => shot.id === "s2"), (before.draft.director!.source.shots as any[]).find(shot => shot.id === "s2"));
-    assert.throws(() => f.episode.edit("ep", { ...request, operationId: "stale-replacement" }), /版本已变化/);
+    const savedOther = (saved.draft.director!.source.shots as any[]).find(shot => shot.id === "s2");
+    const beforeOther = (before.draft.director!.source.shots as any[]).find(shot => shot.id === "s2");
+    assert.equal(savedOther.story_order, 2, "later Shots shift to keep the timeline order contiguous");
+    assert.deepEqual({ ...savedOther, story_order: 0 }, { ...beforeOther, story_order: 0 });
+    assert.throws(() => f.episode.edit("ep", { ...request, operationId: "future-revision", expectedRevision: saved.revision + 1 }), /版本已变化/);
 });
 
 test("Clip storyboard edits replace formal Shots and immediately reproject H3 track cells", t => {

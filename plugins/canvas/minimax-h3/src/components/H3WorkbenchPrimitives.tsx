@@ -1,12 +1,21 @@
 import { useEffect, useRef, useState } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
+import { message } from "antd";
 import { resultUrl } from "../services/h3-data";
 import { clipRuntimeState } from "../services/h3-clip-runtime";
+import { storyboardTrackItems } from "../services/h3-storyboard-track";
 import type { H3Ref, H3Segment } from "../types";
 
 function selectedSegment(metadata: Record<string, unknown>) {
     const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
     return segments.find((segment) => segment.id === String(metadata.selectedSegmentId || "")) || segments[0];
+}
+
+function selectedStoryboardFrameTimes(ctx: CanvasNodeContext) {
+    const metadata = ctx.node.metadata || {};
+    const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
+    const segment = segments.find((item) => item.id === String(metadata.selectedSegmentId || "")) || segments[0];
+    return segment ? storyboardTrackItems(segment).map((item) => item.start) : [];
 }
 
 export function requestH3Run(ctx: CanvasNodeContext, all = false, forceRegenerate = false, segmentId?: string) {
@@ -452,6 +461,7 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
     // 否则预览源在「视频 ↔ 空/图片/音频」之间切换时（如选中有结果/无结果的 Clip）会直接抛
     // "Rendered more/fewer hooks than during the previous render"，整棵节点树被错误边界拆掉。
     const [isMuted, setIsMuted] = useState(true);
+    const storyboardFrameTimes = selectedStoryboardFrameTimes(ctx);
     const [frameMenuPosition, setFrameMenuPosition] = useState<{ x: number; y: number } | null>(null);
     const frameMenuOpen = frameMenuPosition !== null;
     const frameMenuRef = useRef<HTMLDivElement | null>(null);
@@ -463,9 +473,9 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
         document.addEventListener("pointerdown", close, true);
         return () => document.removeEventListener("pointerdown", close, true);
     }, [frameMenuOpen]);
-    const captureVideoFrame = async (position: "current" | "first" | "last") => {
+    const readVideoFrame = async (position: "current" | "first" | "last") => {
         const video = videosRef.current[activeRef.current] as HTMLVideoElement | null;
-        if (!video || video.readyState < 2 || !video.videoWidth || !video.videoHeight) return;
+        if (!video || video.readyState < 2 || !video.videoWidth || !video.videoHeight) return null;
         const wasPlaying = !video.paused;
         if (wasPlaying) video.pause();
         try {
@@ -487,16 +497,40 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
             const context = canvas.getContext("2d");
-            if (!context) return;
+            if (!context) return null;
             context.drawImage(video, 0, 0, canvas.width, canvas.height);
             const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
-            if (!blob) return;
+            return blob ? { blob, sourceTime: Number(video.currentTime || 0) } : null;
+        } finally {
+            if (wasPlaying) void video.play().catch(() => undefined);
+        }
+    };
+    const captureVideoFrame = async (position: "current" | "first" | "last") => {
+        try {
+            const captured = await readVideoFrame(position);
+            if (!captured) return;
             if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
                 throw new Error("当前浏览器不支持将图片复制到剪贴板");
             }
-            await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+            await navigator.clipboard.write([new ClipboardItem({ "image/png": captured.blob })]);
         } finally {
-            if (wasPlaying) void video.play().catch(() => undefined);
+            setFrameMenuPosition(null);
+        }
+    };
+    const captureFrameToStoryboard = async (position: "current" | "first" | "last") => {
+        try {
+            const captured = await readVideoFrame(position);
+            if (!captured) { message.error("当前视频帧尚未加载完成，无法截取。"); return; }
+            window.dispatchEvent(new CustomEvent("minimax-h3-quick-storyboard-add-frame", { detail: {
+                nodeId: ctx.node.id,
+                blob: captured.blob,
+                sourceTime: captured.sourceTime,
+                name: name || "H3 视频",
+                position,
+            } }));
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : String(error));
+        } finally {
             setFrameMenuPosition(null);
         }
     };
@@ -810,11 +844,14 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
             {aspectGuide}
             {mediaResolution ? <div className="minimax-player-resolution">{mediaResolution.width} × {mediaResolution.height}</div> : null}
             {frameMenuPosition ? <div ref={frameMenuRef} className="minimax-frame-menu" role="menu" style={{ left: frameMenuPosition.x, top: frameMenuPosition.y }}>
-                <button type="button" role="menuitem" onClick={() => {
+                {storyboardFrameTimes.length ? <button type="button" role="menuitem" onClick={() => {
                     const video = videosRef.current[activeRef.current];
-                    window.dispatchEvent(new CustomEvent("minimax-h3-quick-storyboard-capture", { detail: { nodeId: ctx.node.id, url, storageKey, name: name || "H3 视频", duration: Number(video?.duration || clipDuration || 0) } }));
+                    window.dispatchEvent(new CustomEvent("minimax-h3-quick-storyboard-capture", { detail: { nodeId: ctx.node.id, url, storageKey, name: name || "H3 视频", duration: Number(video?.duration || clipDuration || 0), times: storyboardFrameTimes } }));
                     setFrameMenuPosition(null);
-                }}>提取全部分镜帧到快速分镜</button>
+                }}>截取全部分镜首帧到快速分镜</button> : null}
+                <button type="button" role="menuitem" onClick={() => void captureFrameToStoryboard("first")}>首帧截取到分镜板</button>
+                <button type="button" role="menuitem" onClick={() => void captureFrameToStoryboard("last")}>尾帧截取到分镜板</button>
+                <button type="button" role="menuitem" onClick={() => void captureFrameToStoryboard("current")}>当前帧截取到分镜板</button>
                 <button type="button" role="menuitem" onClick={() => void captureVideoFrame("current")}>截取当前帧</button>
                 <button type="button" role="menuitem" onClick={() => void captureVideoFrame("last")}>截取尾帧</button>
                 <button type="button" role="menuitem" onClick={() => void captureVideoFrame("first")}>截取首帧</button>

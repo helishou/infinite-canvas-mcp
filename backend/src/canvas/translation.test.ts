@@ -11,6 +11,8 @@ test("H3 English translation preserves only actual dialogue", () => {
 test("H3 English translation preserves prompt structure and shot logic", () => {
   assert.match(H3_PROMPT_TRANSLATION_SYSTEM_PROMPT, /Do not change the actual shot logic/);
   assert.match(H3_PROMPT_TRANSLATION_SYSTEM_PROMPT, /Preserve the original meaning, facts, action, timing, constraints, and level of detail/);
+  assert.match(H3_PROMPT_TRANSLATION_SYSTEM_PROMPT, /Render every person's name in Hanyu Pinyin/);
+  assert.match(H3_PROMPT_TRANSLATION_SYSTEM_PROMPT, /Never translate a name by meaning or replace it with another name/);
   assert.match(H3_PROMPT_TRANSLATION_SYSTEM_PROMPT, /opaque tokens beginning ZXQH3LOCK.*Copy every token exactly once, unchanged, and in the same order/);
   assert.match(H3_PROMPT_TRANSLATION_SYSTEM_PROMPT, /Keep the section and paragraph layout/);
 });

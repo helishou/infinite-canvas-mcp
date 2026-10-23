@@ -1,6 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { deletesCanvasTextTarget, evictDeletedCanvasTextSessions, flushCurrentCanvasTextSessions } from "./canvas-text-lifecycle";
+import { deletesCanvasTextTarget, evictDeletedCanvasTextSessions, flushCurrentCanvasTextSessions, hasCurrentCanvasTextTarget } from "./canvas-text-lifecycle";
+
+test("持久文本草稿仅在当前目标仍存在时参与同步，未知画布不被当作已删除", () => {
+    const project = { nodes: [{ id: "config" }, { id: "h3", metadata: { segments: [{ id: "clip" }] } }, { id: "text", metadata: { texts: [{ id: "item" }] } }] };
+    assert.equal(hasCurrentCanvasTextTarget(project, { nodeId: "deleted", field: "composerContent" }), false);
+    assert.equal(hasCurrentCanvasTextTarget(project, { nodeId: "config", field: "composerContent" }), true);
+    assert.equal(hasCurrentCanvasTextTarget(project, { nodeId: "h3", segmentId: "deleted", field: "prompt" }), false);
+    assert.equal(hasCurrentCanvasTextTarget(project, { nodeId: "h3", segmentId: "clip", field: "prompt" }), true);
+    assert.equal(hasCurrentCanvasTextTarget(project, { nodeId: "text", textItemId: "deleted", field: "content" }), false);
+    assert.equal(hasCurrentCanvasTextTarget(project, { nodeId: "text", textItemId: "item", field: "content" }), true);
+    assert.equal(hasCurrentCanvasTextTarget(project, { field: "globalPrompt" }), true);
+    assert.equal(hasCurrentCanvasTextTarget(undefined, { nodeId: "unknown", field: "composerContent" }), true);
+    assert.equal(hasCurrentCanvasTextTarget({ summary: { nodeCount: 10 }, nodes: [] }, { nodeId: "unknown", field: "composerContent" }), true);
+});
 
 test("删除 Clip 只使该 Clip 的提示词会话失效，撤销后可建立新文本会话", () => {
     const deleted = { type: "delete_h3_segment", nodeId: "h3", segmentId: "Clip 1" };

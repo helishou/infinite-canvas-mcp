@@ -101,10 +101,12 @@ def _subject_retention_attributes(kind, retain, exclude):
     return selected_retain or [default_retain], selected_exclude or [default_exclude]
 
 
-def _subject_retention_scope(subject_id, clip_shot_ids, shots):
+def _subject_retention_scope(subject_id, clip_shot_ids, shots, reference_shot_ids=None):
     """Report visible appearances separately from off-screen continuity uses."""
     visible, context, offscreen_voice = [], [], []
     for shot_number, shot_id in enumerate(clip_shot_ids, 1):
+        if reference_shot_ids is not None and shot_id not in reference_shot_ids:
+            continue
         shot = next((item for item in shots if str(item.get("id")) == str(shot_id)), {})
         presentations = [str(usage.get("presentation") or "") for usage in rows(shot.get("subject_usages"))
                          if str(usage.get("subjectId") or "") == str(subject_id)]
@@ -819,7 +821,7 @@ def adapt_production(production, *, draft=False):
             exclude = [_LEGACY_EXCLUDE.get(v, v) for v in exclude]
             entity_kind = str((subject.get("entityRef") or {}).get("kind") or "asset")
             retain, exclude = _subject_retention_attributes(entity_kind, retain, exclude)
-            retention_scope, visually_present = _subject_retention_scope(subject_id, shot_ids, shots)
+            retention_scope, visually_present = _subject_retention_scope(subject_id, shot_ids, shots, shot_scope)
             label = subject_labels[subject_id]
             if str((subject.get("entityRef") or {}).get("kind") or "") == "character" and labels:
                 picture_roles = []

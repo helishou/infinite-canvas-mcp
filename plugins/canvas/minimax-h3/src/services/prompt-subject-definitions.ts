@@ -28,16 +28,23 @@ export function literalPromptSubjects(prompt: string): LiteralPromptSubject[] {
 /**
  * Formal v2 prompt definitions own the Subject ordinal and display name.
  * Picture ordinals remain independent and never decide Subject identity.
+ *
+ * 正文只写“the person shown in <Picture 1>”这类描述时，引号里不是实体名，
+ * 直接当名称显示会让编辑器的引用块写成一句描述。此时用被引用的素材名兜底。
  */
 export function bindLiteralSubjectsToReferences(
     subjects: LiteralPromptSubject[],
+    options: { referenceName?: (subject: LiteralPromptSubject) => string | undefined } = {},
 ) {
     return subjects.map((subject) => {
         // Subject and Picture ordinals are independent. A cited Picture can be
         // an environment, a character image, or another kind of visual source;
         // it does not determine the identity or type of the Subject token.
         const id = `prompt-subject-${subject.ordinal}`;
-        const name = subject.description.replace(/^is\s+/iu, "").split(/[;,，。]/u, 1)[0]?.trim() || id;
+        const identity = subject.description.replace(/^is\s+/iu, "").split(/[;,，。]/u, 1)[0]?.trim() || id;
+        const name = /<(?:Subject|Picture|Video|Audio)\s+\d+>/iu.test(identity)
+            ? options.referenceName?.(subject)?.trim() || `Subject ${subject.ordinal}`
+            : identity;
         return {
             id,
             name,

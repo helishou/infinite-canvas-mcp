@@ -5,6 +5,18 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- Deleted text targets: keep an unsent prompt draft, delete its node (or Clip/text item), then refresh and generate from another node. The deleted target must not receive `/text` reads or block the current node; its original local draft remains recoverable. A current target's actual save failure must still stop generation. Also check reconnect and Undo with a new document identity.
+
+- Canvas interaction performance: hovering, selecting and panning should no longer rerender unrelated nodes, and moving or resizing a node should reuse unchanged content. Verify ordinary and H3 nodes, content editing, panel closing, rapid panning, pointer-centered zoom and culling coverage at 5% zoom on a large canvas.
+
+- H3 reference edits survive parent refreshes until applied or cancelled. Verify changing a smart-image reference role and description, and toggling character clothing/voice while the node updates. Drag character references before/after ordinary references: visible slots, prompt Picture ordinals and submitted inputs must agree; storyboard images still lead in shot order, and other Clips and historical outputs remain unchanged.
+
+- H3 submission preserves explicit Picture citations in Subject definitions without adding another image by character order or renumbering Subjects. Prompts already aligned to submission order also retain their numbering when character and ordinary environment images are mixed. Verify two-person video replacement, a single character from a character group, environment images, storyboard-first ordering and legacy prompt ordering; compare the logged prompt with the actual reference order.
+
+- Switching between Codex CLI and API models automatically creates a matching conversation while keeping the composer text, images, canvas references and selected Skill ready to send. Switching models within the same runtime keeps the conversation. Verify both directions, readable previous history, draft preservation and retry after creation failure, no conversation switch during an active task, and recovery of an already-incompatible selection before sending without automatic submission.
+
+- A Clip-only compilation retains script blocks needed by continuity events from earlier scene occurrences. Character reference retention also stays limited to Shots that consume the image, while dialogue-only off-screen appearances retain their original Shot numbers. Verify a later-scene Clip compiles independently and a dialogue reverse shot does not report a missing script block or a Subject retention-scope mismatch.
+
 - Formal production compilation always requires a stable `operationId` and immediately returns a recoverable queued receipt; input manifests and SHA-256 media checks run in the bounded background pool using streaming reads. Verify a missing ID returns HTTP 400 while compile preflight remains ID-free, same-ID replay reuses the job, media changes block apply, and `/health` stays responsive with a large-media compile in progress. Apply retries only the stable proxy's pre-forward `BACKEND_RELOADING` response, and the top connection banner rechecks immediately after that known transient state.
 
 - MCP query defaults now return a drama project preview, paginated episode summaries without legacy `fullPlot`, paginated model names, a ComfyUI task status summary without event payloads, and at most 50 H3 history materials unless a limit is supplied. Verify the next model/episode pages and full drama/ComfyUI reads, ensure status/errors remain actionable, and confirm the Agent compatibility route uses the same projections.

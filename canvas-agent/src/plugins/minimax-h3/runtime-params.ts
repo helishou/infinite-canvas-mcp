@@ -122,7 +122,6 @@ export function h3StoryboardIssues(segment: Record<string, unknown>, expected?: 
         if (JSON.stringify(ids) !== JSON.stringify(expected.map(shot => shot.id))) issues.push('分镜轨镜头顺序或覆盖范围与正式镜头表不一致');
         for (const shot of expected) if (Math.abs(Number(shots.find(item => item.id === shot.id)?.duration) - shot.duration) > 1e-6) issues.push(`镜头 ${shot.id} 的分镜轨时长与正式镜头表不一致`);
     }
-    if (shots.length && Math.abs(shots.reduce((sum, shot) => sum + Number(shot.duration || 0), 0) - Number(segment.duration)) > 1e-6) issues.push('分镜轨总时长与 Clip 时长不一致');
     return issues;
 }
 

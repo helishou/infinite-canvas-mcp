@@ -37,6 +37,7 @@ type H3RunInput = {
     forceRegenerate?: boolean;
     expectedPlanHash?: string;
     params?: Record<string, unknown>;
+    h3RuntimeOverrides?: { quickStoryboard?: { storageKey: string; panelCount: number } };
     runPlan?: H3RunPlan;
 };
 
@@ -77,16 +78,33 @@ export function boundH3ParentTaskIds(projects: CanvasProject[]): Set<string> {
 const H3_OUTGOING_CONTEXT_KEYS = ["contextLength", "audioContextLength", "continuationSeamNoiseEnabled", "continuationSeamNoiseMode", "continuationSeamNoise", "continuationSeamNoiseSeed", "continuationSeamNoiseRamp", "continuationAudioRefineEnabled", "continuationAudioDenoise", "continuationAudioSteps", "continuationAudioSampler", "continuationAudioScheduler"] as const;
 
 function compileH3Submission(project: Record<string, unknown>, segment: H3Segment, taskMode: string) {
-    const original = compileReferenceSubmission(project, { ...segment, taskMode });
-    const composite = storyboardCompositePlan({ ...segment, taskMode });
+    const cleaned = withoutLegacyQuickStoryboard(segment);
+    const original = compileReferenceSubmission(project, { ...cleaned, taskMode });
+    const composite = storyboardCompositePlan({ ...cleaned, taskMode });
     if (!composite) return { compilation: original, composite: null, editableReferences: original.references };
-    const effectiveSegment = { ...segment, taskMode, referenceBindings: composite.bindings };
+    const effectiveSegment = { ...cleaned, taskMode, referenceBindings: composite.bindings };
     const collapsed = compileReferenceSubmission(project, effectiveSegment);
-    const mappedPrompt = remapCompositePrompt(String(segment.prompt || ""), composite, original.references, collapsed.references);
+    const mappedPrompt = remapCompositePrompt(String(cleaned.prompt || ""), composite, original.references, collapsed.references);
     const prompt = mappedPrompt.includes("A single submitted image is a composite storyboard sheet")
         ? mappedPrompt
         : appendToSection(mappedPrompt, "detailed_description", storyboardCompositeDirective(composite));
     return { compilation: compileReferenceSubmission(project, { ...effectiveSegment, prompt }), composite, editableReferences: original.references };
+}
+
+function withoutLegacyQuickStoryboard(segment: H3Segment): H3Segment {
+    const isLegacyCollage = (value: unknown) => {
+        const reference = recordOf(value);
+        const tags = Array.isArray(reference.tags) ? reference.tags.map(String) : [];
+        const bindingId = String(reference.id || reference.bindingId || "");
+        const label = String(reference.label || reference.name || "");
+        return String(reference.role || "") === "other" && label === "快速分镜宫格"
+            && (tags.includes("quick-storyboard") || bindingId.startsWith("quick-storyboard-"));
+    };
+    const prompt = String(segment.prompt || "").replace(/^Quick storyboard order: It contains exactly \d+ storyboard panels arranged .*?Do not reproduce the storyboard panels as a collage\.$/gim, "").trim();
+    const referenceBindings = Array.isArray(segment.referenceBindings) ? segment.referenceBindings.filter((item) => !isLegacyCollage(item)) : segment.referenceBindings;
+    const refItems = Array.isArray(segment.refItems) ? segment.refItems.filter((item) => !isLegacyCollage(item)) : segment.refItems;
+    const refs = segment.refs ? Object.fromEntries(Object.entries(segment.refs).map(([key, value]) => [key, Array.isArray(value) ? value.filter((item) => !isLegacyCollage(item)) : value])) : segment.refs;
+    return { ...segment, prompt, referenceBindings, refItems, refs };
 }
 
 export class H3IdempotencyConflictError extends Error {
@@ -211,6 +229,7 @@ export class CanvasH3Runner {
         const planner = new CanvasH3Runner(stores, this.events, this.comfy, this.runningHub, this.videoDispatcher);
         const normalized = normalizeInput(input);
         const inspectedReferenceDigests = new Map<string, string>();
+        planner.validateRuntimeOverrides(snapshot, normalized);
         const checked = planner.preview(normalized, inspectedReferenceDigests);
         if (!checked.ready || checked.diagnostics.some(issue => issue.code === 'H3_UI_PARAMETER_MISMATCH')) throw new Error(checked.diagnostics.map(issue => issue.message).join("；"));
         if (normalized.expectedPlanHash && normalized.expectedPlanHash !== checked.planHash) throw new Error("所选生成输入已变化，请刷新预览");
@@ -232,6 +251,7 @@ export class CanvasH3Runner {
         if (normalized.params?.confirmSecondPass === true) throw new Error("请通过 H3 确认接口继续原任务，不能另建二采任务");
         const project = this.stores.projects.get(normalized.projectId);
         if (!project) throw new Error(`画布不存在: ${normalized.projectId}`);
+        this.validateRuntimeOverrides(project, normalized);
         const preview = preparedPlan ? { diagnostics: [], planHash: "" } : this.preview(normalized);
         if (normalized.expectedPlanHash && normalized.expectedPlanHash !== preview.planHash) throw Object.assign(new Error('生成预检已过期，请重新读取参数与预检'), { code: 'STALE_H3_PREVIEW', preview });
         const blocking = preview.diagnostics.filter(issue => issue.code !== 'REFERENCE_INVALID');
@@ -292,6 +312,22 @@ export class CanvasH3Runner {
             }
         }
         return blocked;
+    }
+
+    private validateRuntimeOverrides(project: Record<string, unknown>, input: H3RunInput) {
+        const quickStoryboard = input.h3RuntimeOverrides?.quickStoryboard;
+        if (!quickStoryboard) return;
+        if (!input.nodeId || !input.segmentId) throw new Error("快速分镜运行参数必须指定一个 Clip");
+        const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
+        const node = nodes.find((item) => String(item.id || "") === input.nodeId);
+        const metadata = recordOf(node?.metadata);
+        const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
+        const segment = segments.find((item) => String(item.id || "") === input.segmentId);
+        if (!segment) throw new Error("快速分镜对应的 Clip 已不存在");
+        const taskMode = normalizeTaskMode(segment.mode || segment.taskMode || metadata.taskMode || metadata.mode);
+        if (taskMode !== "ref2va") throw new Error("快速分镜仅支持 Ref2VA，请先切换当前 Clip 模式");
+        const media = this.stores.media.meta(quickStoryboard.storageKey);
+        if (!media || !/^image\//iu.test(String(media.mimeType || "")) || !fs.existsSync(media.filePath)) throw new Error("快速分镜宫格媒体不存在或不是有效图片，请重新生成宫格");
     }
 
     /**
@@ -546,13 +582,16 @@ export class CanvasH3Runner {
         }
         const catalog = Array.isArray(project.referenceCatalog) ? project.referenceCatalog as Array<Record<string, unknown>> : [];
         for (const asset of catalog) if (assetIds.has(String(asset.id)) && asset.sourceNodeId) sourceNodeIds.add(String(asset.sourceNodeId));
-        const referenceKeys = [...new Set([...assetIds].map(id => String(catalog.find(asset => asset.id === id)?.storageKey || "")).filter(Boolean))];
-        const referenceDigests = (before as any).canvasReferenceDigests || Object.fromEntries(referenceKeys.flatMap(key => {
+        const quickStoryboardKey = plans.some((plan) => plan.nodeId === input.nodeId && plan.segmentId === input.segmentId)
+            ? String(input.h3RuntimeOverrides?.quickStoryboard?.storageKey || "") : "";
+        const referenceKeys = [...new Set([...assetIds].map(id => String(catalog.find(asset => asset.id === id)?.storageKey || "")).concat(quickStoryboardKey).filter(Boolean))];
+        const referenceDigests = Object.fromEntries(referenceKeys.flatMap(key => {
             const inspected = inspectedReferenceDigests?.get(key);
             if (inspected) return [[key, inspected]];
             const media = this.stores.media.meta(key);
             return media && fs.existsSync(media.filePath) ? [[key, createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex")]] : [];
         }));
+        Object.assign(referenceDigests, recordOf((before as any).canvasReferenceDigests));
         return structuredClone({
             version: 1, plans,
             referenceDigests,
@@ -843,7 +882,9 @@ export class CanvasH3Runner {
         // is only a default and can differ when one H3 node contains mixed modes.
         const taskMode = normalizeTaskMode(segment.taskMode || segment.mode || params.taskMode || params.mode);
         const { compilation } = compileH3Submission(project, segment, taskMode);
-        const scenePrompt = segment.directorEngine ? compilation.compiledPrompt : appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
+        const quickStoryboard = quickStoryboardFor(input, plan, compilation.references);
+        const scenePromptBase = segment.directorEngine ? compilation.compiledPrompt : appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
+        const scenePrompt = quickStoryboard ? `${scenePromptBase}\n\n${quickStoryboard.promptAppend}` : scenePromptBase;
         const previous = plan.segmentIndex > 0 ? segments[plan.segmentIndex - 1] : undefined;
         const previousFingerprint = previous ? fingerprints.get(`${plan.nodeId}:${String(previous.id || "")}`) || String(previous.cacheFingerprint || "") : "";
         const confirming = override.confirmSecondPass === true;
@@ -854,7 +895,7 @@ export class CanvasH3Runner {
             && stableH3Fingerprint(stableReferenceInputs(firstPassReferences)) === stableH3Fingerprint(stableReferenceInputs(compilation.references));
         const segmentFingerprintInput = { ...segment, previousTailFrameContinuation: previous?.tailFrameContinuation === true };
         const fingerprintInput = { segment: segmentFingerprintInput, params: h3ConfirmationFingerprintParams(segment, params), compiledPrompt: scenePrompt, previousFingerprint };
-        const fingerprint = h3ClipCacheFingerprint({ ...fingerprintInput, styleTemplates: defaults.styleTemplates, references: referenceFingerprintInputs(compilation.references) });
+        const fingerprint = h3ClipCacheFingerprint({ ...fingerprintInput, styleTemplates: defaults.styleTemplates, references: referenceFingerprintInputs(quickStoryboard ? [...compilation.references, quickStoryboard.reference] : compilation.references) });
         // v1 first-pass caches were fingerprinted from the raw params and complete
         // CompiledReference objects. Keep both exact historical inputs and the
         // log-backed reference snapshot so settings/timestamp normalization updates
@@ -1024,7 +1065,11 @@ export class CanvasH3Runner {
         const taskMode = normalizeTaskMode(params.mode || params.taskMode || segment.mode || segment.taskMode);
         const { compilation, composite, editableReferences } = compileH3Submission(project, segment, taskMode);
         assertReferenceCompilation(compilation);
-        const scenePrompt = segment.directorEngine ? compilation.compiledPrompt : appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
+        const quickStoryboard = quickStoryboardFor(input, plan, compilation.references);
+        if (quickStoryboard && taskMode !== "ref2va") throw new Error("快速分镜仅支持 Ref2VA，请先切换当前 Clip 模式");
+        const submittedCompilationReferences = quickStoryboard ? [...compilation.references, quickStoryboard.reference] : compilation.references;
+        const scenePromptBase = segment.directorEngine ? compilation.compiledPrompt : appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
+        const scenePrompt = quickStoryboard ? `${scenePromptBase}\n\n${quickStoryboard.promptAppend}` : scenePromptBase;
         const styleTemplates = defaults.styleTemplates;
         const styleTemplateId = params.styleTemplateId === undefined ? styleTemplateFromPrompt(scenePrompt, taskMode, styleTemplates) : params.styleTemplateId;
         if (styleTemplateId && !isH3StyleTemplateId(styleTemplateId, styleTemplates)) throw new Error(`无效的 H3 视觉风格模板：${styleTemplateId}`);
@@ -1032,7 +1077,7 @@ export class CanvasH3Runner {
         // 实时预览节点靠 target_node_id 把帧推回画布上的 H3 节点；不传就是空串，
         // 帧无处可去，预览功能等于没开。节点 id 在这里才确定，必须在提交前注入。
         params.targetNodeId = plan.nodeId;
-        const refs = compilation.references.map((reference) => ({ ...reference, type: reference.mediaType, name: reference.label } as H3Ref));
+        const refs = submittedCompilationReferences.map((reference) => ({ ...reference, type: reference.mediaType, name: reference.label } as H3Ref));
         // The segment switch controls its outgoing edge. A group head saves latent at index 1;
         // only index > 1 consumes the previous clip's latent. Standalone runs have no cross-task context.
         const useSelectedVideoModel = params.selectedVideoModelEnabled === true;
@@ -1151,7 +1196,7 @@ export class CanvasH3Runner {
         params.requestedEngine = requestedEngine;
         params.resolvedEngine = engine;
         if (localOnlyReason && requestedEngine === "auto") params.routingReason = localOnlyReason;
-        for (const reference of compilation.references) {
+        for (const reference of submittedCompilationReferences) {
             const key = String(reference.storageKey || ""), digest = input.runPlan?.referenceDigests?.[key];
             const media = key && this.stores.media.meta(key);
             if (digest && (!media || !fs.existsSync(media.filePath) || await sha256File(media.filePath) !== digest)) throw new Error(`参考文件在提交前已变化：${key}`);
@@ -1161,7 +1206,7 @@ export class CanvasH3Runner {
             editableReferences,
             semanticPrompt: compilation.semanticPrompt,
             compiledPrompt: prompt,
-            bindingMap: compilation.references.map((reference) => ({ id: reference.id, assetId: reference.assetId, label: reference.label, role: reference.role, mediaType: reference.mediaType, ordinal: reference.ordinal, token: reference.token, usage: reference.usage })),
+            bindingMap: submittedCompilationReferences.map((reference) => ({ id: reference.id, assetId: reference.assetId, label: reference.label, role: reference.role, mediaType: reference.mediaType, ordinal: reference.ordinal, token: reference.token, usage: reference.usage, ...("runtime" in reference && reference.runtime ? { runtime: true } : {}) })),
             actualReferences,
             ...(composite ? { storyboardComposite: { rows: composite.rows, columns: composite.columns, sourceBindingIds: composite.sourceBindingIds, panels: composite.panels } } : {}),
             sourceHash: String(segment.directorSourceHash || ""), authoredPromptHash: stableH3Fingerprint(segment.prompt || ""), compiledPromptHash: stableH3Fingerprint(prompt),
@@ -1506,7 +1551,36 @@ function normalizeInput(input: H3RunInput): H3RunInput {
     // would give the whole batch one seed and override unrelated fixed seeds.
     return { projectId, nodeId: input.nodeId ? String(input.nodeId) : undefined, nodeIds: input.nodeIds?.map(String), segmentId: input.segmentId ? String(input.segmentId) : undefined,
         endSegmentId: input.endSegmentId, segmentIndex: input.segmentIndex, runFromCurrent: input.runFromCurrent === true, skipCompleted: input.skipCompleted === true, forceRegenerate: input.forceRegenerate === true,
-        ...(input.expectedPlanHash ? { expectedPlanHash: input.expectedPlanHash } : {}), ...(input.runPlan ? { runPlan: input.runPlan } : {}), params: rawParams };
+        ...(input.expectedPlanHash ? { expectedPlanHash: input.expectedPlanHash } : {}), ...(input.h3RuntimeOverrides ? { h3RuntimeOverrides: normalizeH3RuntimeOverrides(input.h3RuntimeOverrides) } : {}), ...(input.runPlan ? { runPlan: input.runPlan } : {}), params: rawParams };
+}
+
+function normalizeH3RuntimeOverrides(value: unknown): NonNullable<H3RunInput["h3RuntimeOverrides"]> {
+    const quickStoryboard = recordOf(recordOf(value).quickStoryboard);
+    if (!Object.keys(quickStoryboard).length) return {};
+    const storageKey = String(quickStoryboard.storageKey || "");
+    const panelCount = Number(quickStoryboard.panelCount);
+    if (!storageKey || !Number.isInteger(panelCount) || panelCount < 1 || panelCount > 12) throw new Error("快速分镜运行参数无效");
+    return { quickStoryboard: { storageKey, panelCount } };
+}
+
+function quickStoryboardFor(input: H3RunInput, plan: H3Plan, references: Array<Record<string, unknown>>) {
+    const selected = input.h3RuntimeOverrides?.quickStoryboard;
+    if (!selected || (input.nodeId && plan.nodeId !== input.nodeId) || (input.segmentId && plan.segmentId !== input.segmentId)) return null;
+    const ordinal = references.filter((reference) => reference.mediaType === "image").length + 1;
+    const panelCount = selected.panelCount;
+    const arrangement = panelCount <= 3 ? "vertically from top to bottom" : "in reading order from top to bottom and left to right";
+    const shots = Array.from({ length: panelCount }, (_, index) => `Shot ${index + 1}`).join(", ");
+    const bindingId = `runtime-quick-storyboard-${plan.nodeId}-${plan.segmentId}`;
+    const reference = {
+        id: bindingId, bindingId, assetId: bindingId,
+        label: "快速分镜宫格", name: "快速分镜宫格", mediaType: "image", type: "image",
+        mimeType: "image/jpeg", role: "other", usage: "reference", enabled: true,
+        runtime: true, storageKey: selected.storageKey, ordinal, token: `<Picture ${ordinal}>`,
+    };
+    return {
+        reference,
+        promptAppend: `Quick storyboard order: It contains exactly ${panelCount} storyboard panels arranged ${arrangement}: ${shots}. Each panel guides only its corresponding shot's composition, camera angle, framing, character blocking and action. Use Picture ${ordinal} to guide the shot sequence. Do not reproduce the storyboard panels as a collage.`,
+    };
 }
 
 function recordOf(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }

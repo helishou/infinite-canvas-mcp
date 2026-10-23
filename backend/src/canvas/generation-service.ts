@@ -144,6 +144,7 @@ export class CanvasGenerationService {
             ...(command.forceRegenerate !== undefined ? { forceRegenerate: command.forceRegenerate } : {}),
             ...(command.expectedPlanHash ? { expectedPlanHash: command.expectedPlanHash } : {}),
             ...(command.params ? { params: command.params } : {}),
+            ...(command.h3RuntimeOverrides ? { h3RuntimeOverrides: command.h3RuntimeOverrides } : {}),
         }, command.idempotencyKey || command.clientTaskId);
         return { task, taskId: task.id, executor: "h3" };
     }

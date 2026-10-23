@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3Segment } from "../types";
 import { compactSegmentStarts } from "../hooks/useH3Segments";
-import { refsForSegment, resultUrl, withSegmentRefs } from "../services/h3-data";
+import { h3OutputName, refsForSegment, resultUrl, withSegmentRefs } from "../services/h3-data";
 import { normalizeDroppedH3Ref } from "../services/h3-refs";
 import { H3Icon } from "./H3Icon";
 import { useH3Locale } from "../h3-locale";
@@ -58,7 +58,7 @@ export function H3ClipCard({ ctx, segment, index, segments, selectedId, fmt, mot
                 origin: "h3-output",
                 url,
                 storageKey: segment.resultStorageKey || result?.storageKey,
-                name: `H3 Clip ${index + 1}`,
+                name: h3OutputName(ctx.node, index + 1),
                 mimeType: result?.mimeType || "video/mp4",
             });
             event.dataTransfer.setData("application/x-infinite-canvas-ref", payload);

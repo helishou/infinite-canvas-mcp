@@ -236,7 +236,7 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
         (binding) => binding.enabled
         && binding.role !== "storyboard"
         && (binding.mediaType || inferReferenceMediaType(binding)) === "image"
-        && Boolean(binding.subjectId || binding.groupId));
+        && Boolean(binding.subjectId || binding.groupId), segment.referenceOrder);
     const issues: ReferenceIssue[] = [...validateH3CharacterGroups(project, { ...segment, referenceBindings: bindings })];
     const counters: Record<ReferenceMediaType, number> = { image: 0, video: 0, audio: 0 };
     const references = bindings.filter((binding) => binding.enabled).flatMap((binding): CompiledReference[] => {
@@ -338,18 +338,38 @@ function promptUsesSubmissionPictureOrder(
 
     const sourceByOrdinal = new Map<number, { reference: CompiledReference; ordinal: number }>();
     for (const source of bySubjectId.values()) sourceByOrdinal.set(source.ordinal, source);
-    const subjectSources = [...sourceByOrdinal.values()].sort((a, b) => a.ordinal - b.ordinal);
     const subjectSection = /(^subject_definitions\s*[:：]\s*\r?\n)([\s\S]*?)(?=^\s*(?:summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music|storyboard_timeline)\s*[:：]|$(?![\s\S]))/im.exec(prompt);
     const subjectLines = subjectSection ? [...subjectSection[2].matchAll(/<Subject\s+(\d+)>[^\r\n]*/g)] : [];
-    if (subjectLines.length !== subjectSources.length) return false;
-    for (const [index, match] of subjectLines.entries()) {
-        const represented = /represented by <Picture\s+(\d+)>/i.exec(match[0]);
-        const source = subjectSources[index];
-        if (!represented || Number(represented[1]) !== source.reference.ordinal) return false;
-        const reference = source.reference;
-        for (const candidate of images) {
-            if (candidate.id === reference.id || (reference.subjectId && candidate.subjectId === reference.subjectId)
-                || (reference.groupId && candidate.groupId === reference.groupId)) mapped.add(candidate.id);
+    if (!subjectLines.length) return false;
+    const subjectReferenceIds = new Set([...bySubjectId.values()].map((source) => source.reference.id));
+    const explicitlyUsedPictures = new Set<number>();
+    for (const match of subjectLines) {
+        const source = sourceByOrdinal.get(Number(match[1]));
+        const pictureNumbers = [...new Set([...match[0].matchAll(/<Picture\s+(\d+)>/gi)].map((picture) => Number(picture[1])))];
+        if (!pictureNumbers.length) return false;
+        for (const pictureNumber of pictureNumbers) {
+            if (!Number.isSafeInteger(pictureNumber) || explicitlyUsedPictures.has(pictureNumber)) return false;
+            explicitlyUsedPictures.add(pictureNumber);
+            if (source) {
+                // A bound Subject explicitly names the same Picture slot that its
+                // stable subject binding occupies in the final submission order.
+                // In that case an older persisted referenceOrder must not rebase it.
+                const reference = source.reference;
+                const candidate = images[pictureNumber - 1];
+                if (!candidate || !(candidate.id === reference.id
+                    || (reference.subjectId && candidate.subjectId === reference.subjectId)
+                    || (reference.groupId && candidate.groupId === reference.groupId))) return false;
+                for (const candidate of images) {
+                    if (candidate.id === reference.id || (reference.subjectId && candidate.subjectId === reference.subjectId)
+                        || (reference.groupId && candidate.groupId === reference.groupId)) mapped.add(candidate.id);
+                }
+            } else {
+                // Non-entity references such as an environment image can be
+                // explicitly assigned to their final Picture slot as well.
+                const reference = images[pictureNumber - 1];
+                if (!reference || subjectReferenceIds.has(reference.id) || reference.role === "storyboard") return false;
+                mapped.add(reference.id);
+            }
         }
     }
 
@@ -464,6 +484,10 @@ function bindLiteralSubjectsToPictures(
     if (!subjectMap.size) return prompt;
 
     const linkedSection = section[2].replace(/<Subject\s+(\d+)>[^\r\n]*/g, (line, labelText: string) => {
+        // An authored Picture citation owns this definition, including non-character
+        // Subjects such as environments. Only fill a definition with no image anchor;
+        // a partial character registry must not add a conflicting positional guess.
+        if (/<Picture\s+\d+>/u.test(line)) return line;
         const source = subjectMap.get(Number(labelText));
         if (!source) return line;
         const existingPictures = new Set([...line.matchAll(/<Picture\s+(\d+)>/g)].map((match) => `<Picture ${match[1]}>`));
@@ -474,11 +498,8 @@ function bindLiteralSubjectsToPictures(
             : `${missingPictures.slice(0, -1).join(", ")} and ${missingPictures.at(-1)}`;
         return `${line.trimEnd().replace(/[.。]+$/u, "")} (${pictureList}).`;
     });
-    const withLinkedDefinitions = `${prompt.slice(0, section.index)}${section[1]}${linkedSection}${prompt.slice(section.index + section[0].length)}`;
-    return withLinkedDefinitions.replace(/<Subject\s+(\d+)>/g, (marker, labelText: string) => {
-        const source = subjectMap.get(Number(labelText));
-        return source ? `<Subject ${source.ordinal}>` : marker;
-    });
+    // Subject labels are semantic identities, independent of Picture slot numbers.
+    return `${prompt.slice(0, section.index)}${section[1]}${linkedSection}${prompt.slice(section.index + section[0].length)}`;
 }
 
 export class ReferenceCompilationError extends Error {

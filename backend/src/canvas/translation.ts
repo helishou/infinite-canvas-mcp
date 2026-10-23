@@ -8,7 +8,7 @@ export type CanvasTranslationMode = "default" | "h3-prompt";
 export const CANVAS_TRANSLATION_TARGETS: CanvasTranslationTarget[] = ["zh-CN", "en"];
 // Bump when translation rules change so prior cache entries cannot bypass the
 // updated H3 instruction/dialogue separation.
-const H3_TRANSLATION_CACHE_PREFIX = "translation:h3-en:v7:";
+const H3_TRANSLATION_CACHE_PREFIX = "translation:h3-en:v8:";
 const H3_TRANSLATION_BATCH_SIZE = 3;
 const h3TranslationsInFlight = new Map<string, { promise: Promise<string>; signal?: AbortSignal }>();
 const sharedTranslationCancelled = () => Object.assign(new Error("正在复用的翻译已取消"), { code: "SHARED_TRANSLATION_CANCELLED" });
@@ -36,7 +36,7 @@ export const H3_PROMPT_TRANSLATION_SYSTEM_PROMPT = [
   "Translate all Chinese text into English except the actual spoken dialogue payload. This includes lyrics and explicitly quoted on-screen text; do not treat them as dialogue unless they are spoken lines.",
   "In H3 prompts, preserve dialogue wrapped in tags such as <d>[Chinese]spoken words</d> exactly in its original language, including its dialogue language label. Translate all prose outside that dialogue payload.",
   "Never leave Chinese voice or performance directions untranslated just because they sit beside dialogue, repeat part of a line in quotation marks, or describe how that line is spoken. Translate the direction; for dialogue references use the concise phrases 'the opening clause', 'the following clause', or 'the line'. Do not repeat dialogue fragments or use vague phrases such as 'the specified portion of the line'. Keep only the actual dialogue payload in its original language.",
-  "Use established English names in translated descriptions when present; otherwise romanize Chinese proper names into Pinyin.",
+  "Render every person's name in Hanyu Pinyin: preserve names already written in Pinyin exactly, and romanize Chinese names into Pinyin. Never translate a name by meaning or replace it with another name or form of address.",
   "Lightly improve English grammar and phrasing so video generation models can understand the prompt more easily. Do not change the actual shot logic. Preserve the original meaning, facts, action, timing, constraints, and level of detail; do not add, omit, summarize, or creatively expand anything.",
   "Some source spans are replaced with opaque tokens beginning ZXQH3LOCK and ending QXZ. Copy every token exactly once, unchanged, and in the same order. Do not translate, edit, or omit tokens. They stand for protected H3 structure, reference tags, timing, numbers, units, speaker IDs, or the complete spoken-dialogue block.",
   "Keep the section and paragraph layout.",

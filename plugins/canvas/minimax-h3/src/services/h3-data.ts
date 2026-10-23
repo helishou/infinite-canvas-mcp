@@ -3,6 +3,15 @@ import { sameRef } from "./h3-compatibility";
 import { characterGroupBindings, resolveCharacterGroupBindings, syncH3CharacterGroupSource } from "../../../../../canvas-agent/src/canvas/reference-contract";
 import { applyReferenceOrder, orderReferencesForSubmission } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
 
+export function quickStoryboardRuntimeKey(projectId: string, nodeId: string, segmentId: string) {
+    return `quick-storyboard-runtime:${projectId}:${nodeId}:${segmentId}`;
+}
+
+export function h3OutputName(node: { id?: string }, clipNumber: number, version?: number) {
+    const source = String(node.id || "").trim().slice(-6);
+    return `H3 Clip ${clipNumber}${source ? ` · ${source}` : ""}${version ? ` · v${version}` : ""}`;
+}
+
 function sameReferenceEntry(left: H3Ref, right: H3Ref) {
     if (left.bindingId && right.bindingId) return left.bindingId === right.bindingId;
     return sameRef(left, right);
@@ -61,6 +70,7 @@ export function refsForSubmission(segment: H3Segment): H3Ref[] {
         (ref) => ref.bindingId,
         (ref) => ref.enabled !== false && ref.type === "image" && inferReferenceRole(ref) === "storyboard",
         (ref) => ref.enabled !== false && ref.type === "image" && inferReferenceRole(ref) !== "storyboard" && Boolean(ref.subjectId || ref.groupId),
+        segment.referenceOrder,
     );
 }
 

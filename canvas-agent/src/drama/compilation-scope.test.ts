@@ -227,6 +227,36 @@ test("one Clip keeps shared-block coverage, event references and replay context 
     assert.throws(() => compilationScopeInput(d, { targetIds: ["MISSING"] }), /UNKNOWN_TARGET/);
 });
 
+test("V2 Clip replay retains script anchors from earlier scene occurrences", () => {
+    for (const nested of [false, true]) {
+        const d = scopedDirector();
+        d.source.version = 2;
+        d.source.prompt_assembly = { version: 2 };
+        d.source.character_registry = [{ id: "CHAR", name: "Alex" }];
+        d.source.scene_registry = [{ id: "ROOM", name: "Room" }];
+        d.source.subject_registry = [{ id: "P", kind: "character", entityRef: { ownerKind: "episode", ownerId: "EP", kind: "character", id: "CHAR" }, pictureBindings: [] }];
+        const blocks = [{ id: "A_BLOCK", kind: "action", text: "Alex sees blood." }, { id: "B_BLOCK", kind: "action", text: "Alex controls the impulse." }];
+        d.source.script_scenes = ["A", "B"].map((id, index) => nested
+            ? { id, scene_id: "ROOM", scene_name: id, blocks: [blocks[index]] }
+            : { ...blocks[index], id, scene_id: "ROOM", scene_name: id });
+        d.source.shots = ["SA", "SB"].map((id, order) => ({ id, source_scene_id: order ? "B" : "A", scene_id: "ROOM", timeline_id: "T", story_order: order, duration_frames: 96,
+            visual: "Alex reacts.", subject_usages: [{ subjectId: "P", presentation: "visible", pictureBindingMode: "explicit", pictureBindingIds: [], referencePurpose: [], continuityFactIds: ["F"], stateRequirements: [] }], utterance_refs: [] }));
+        d.source.segments = [{ id: "GA", shot_ids: ["SA"], mode: "T2VA" }, { id: "GB", shot_ids: ["SB"], mode: "T2VA" }];
+        const anchor = nested ? "A_BLOCK" : "A";
+        d.source.ledger = { contract_version: 2, facts: [{ id: "F", object_kind: "character", object_id: "CHAR", allowed_values: ["normal", "active"] }], timelines: [{ id: "T" }], initial: [{ timeline_id: "T", fact_id: "F", value: "normal" }],
+            events: [{ id: "E", shot_id: "SA", timeline_id: "T", fact_id: "F", local_frame: 48, before: "normal", after: "active", reason: "Blood triggers the impulse.", source_anchor: { block_id: anchor } }],
+            requirements: [{ id: "R", shot_id: "SB", timeline_id: "T", fact_id: "F", kind: "hold", value: "active" }], coverage: [] };
+        const before = structuredClone(d);
+        const scoped = compilationScopeInput(d, { targetIds: ["GB"], output: "selected" });
+        assert.deepEqual((scoped.director.source.script_scenes as any[]).map(scene => scene.id), ["A", "B"]);
+        assert.deepEqual((scoped.director.source.ledger as any).events.map(event => event.source_anchor.block_id), [anchor]);
+        assert.deepEqual((scoped.director.source.shots as any[]).map(shot => shot.id), ["SA", "SB"]);
+        assert.deepEqual(scoped.targetIds, ["GB"]);
+        assert.deepEqual((scoped.director.source.segments as any[]).map(segment => segment.id), ["GB"]);
+        assert.deepEqual(d, before);
+    }
+});
+
 test("Subject Prompt v2 scope ignores continuity facts not selected by its output Shots", () => {
     const d = scopedDirector();
     d.source.version = 2;

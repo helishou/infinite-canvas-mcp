@@ -73,6 +73,13 @@ export const canvasGenerationCommandSchema = z
     model: z.string().optional(),
     prompt: z.string().optional(),
     references: z.array(z.record(z.string(), z.unknown())).optional(),
+    /** Per-run H3-only additions; kept in the frozen task input and never written to the Clip. */
+    h3RuntimeOverrides: z.object({
+      quickStoryboard: z.object({
+        storageKey: z.string().min(1),
+        panelCount: z.number().int().min(1).max(12),
+      }).optional(),
+    }).optional(),
     /** Current loop round's image input; fixed reference images remain in references. */
     loopInputImages: z.array(z.record(z.string(), z.unknown())).optional(),
     /** 标记画布蒙版局部编辑；工作流执行器需确保第二张输入图接入活动图像分支。 */

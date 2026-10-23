@@ -17,6 +17,14 @@ source_contract_spec.loader.exec_module(source_contract)
 
 
 class SubjectPromptV2ProjectionTest(unittest.TestCase):
+    def test_retention_excludes_voice_only_shots_without_renumbering_visual_scope(self):
+        from canvas_subject_prompt_v2 import _subject_retention_scope
+        shots = [{"id": sid, "subject_usages": [{"subjectId": "P", "presentation": presentation}]}
+                 for sid, presentation in [("A", "visible"), ("B", "offscreen_voice"), ("C", "visible")]]
+        retention, visible = _subject_retention_scope("P", ["A", "B", "C"], shots, ["A", "C"])
+        self.assertEqual(retention, "appears in [Shot 1], [Shot 3]")
+        self.assertTrue(visible)
+
     def test_picture_ordinals_follow_h3_storyboard_subject_other_order(self):
         pictures = [
             {"number": 1, "is_keyframe": False, "subject_ids": ["SUB_A"]},

@@ -30,7 +30,7 @@ const PICTURE_PURPOSE_LABELS: Record<string, string> = {
 import { defaultPrompt } from "../constants";
 import { compactSegmentStarts } from "../hooks/useH3Segments";
 import { applyH3GlobalSettings } from "../services/h3-global-settings";
-import { displayReferenceName, inferReferenceRole, refsForSegment, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
+import { displayReferenceName, inferReferenceRole, refsForSegment, refsForSubmission, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
 import { addStoryboardShot, assignStoryboardShotRef, H3_STORYBOARD_MIN_DURATION, insertStoryboardShotAfter, isStoryboardModeEnabled, moveStoryboardShotBetweenSegments, reorderStoryboardShots, removeStoryboardShot, setStoryboardBoundary, setStoryboardMode, storyboardRefsForSegment, storyboardTrackItems, supportsStoryboardTrack, swapStoryboardReferences, syncStoryboardPrompt } from "../services/h3-storyboard-track";
 import { sameRef } from "../services/h3-compatibility";
 import { H3_RUNTIME_REF_LIMITS, isH3OutputVideoDrop, normalizeDroppedH3Ref, readCharacterGroupFromDrop } from "../services/h3-refs";
@@ -568,23 +568,29 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
             : normalizeDroppedH3Ref(event);
         if (!ref) return;
         if (mode !== "ref2va" && ref.type !== "image") return;
-        const targetRefs = [...refsForSegment(target)];
+        // Resolve source/target by binding, then move in the order the user sees.
+        // The stored order can differ because submission groups storyboard/subject images.
+        const storedTargetRefs = refsForSegment(target);
+        const targetSlotRef = storedTargetRefs[targetIndex];
+        const targetRefs = [...refsForSubmission(target)];
+        targetIndex = targetSlotRef ? targetRefs.findIndex((item) => item.bindingId === targetSlotRef.bindingId) : targetIndex >= 0 ? targetRefs.length : -1;
         // ref2va 的槽位不设数量上限（图片可无限增加）；i2v / fl2v 的图片槽位是固定语义（首帧 / 首尾帧）才受限。
         const maxImages = mode === "i2v" ? 1 : mode === "fl2v" ? 2 : Number.POSITIVE_INFINITY;
         // 同 Clip 的普通素材仍按 move 处理；两张分镜图落到彼此槽位时交换图片、分镜记录和时长。
         if (sourceSegment && sourceSegment.id === target.id && sourceIndex >= 0 && sourceIndex < targetRefs.length) {
-            const sourceRef = targetRefs[sourceIndex];
+            const sourceRef = storedTargetRefs[sourceIndex];
+            const orderedSourceIndex = targetRefs.findIndex((item) => item.bindingId === sourceRef.bindingId);
             const targetRef = targetIndex >= 0 ? targetRefs[targetIndex] : undefined;
-            if (sourceIndex !== targetIndex && sourceRef?.type === "image" && targetRef?.type === "image"
+            if (orderedSourceIndex !== targetIndex && sourceRef?.type === "image" && targetRef?.type === "image"
                 && inferReferenceRole(sourceRef) === "storyboard" && inferReferenceRole(targetRef) === "storyboard"
                 && sourceRef.bindingId && targetRef.bindingId) {
                 const swapped = [...targetRefs];
-                [swapped[sourceIndex], swapped[targetIndex]] = [swapped[targetIndex], swapped[sourceIndex]];
+                [swapped[orderedSourceIndex], swapped[targetIndex]] = [swapped[targetIndex], swapped[orderedSourceIndex]];
                 const updated = swapStoryboardReferences(target, sourceRef.bindingId, targetRef.bindingId);
                 onSegmentChange(withSegmentRefs(updated, swapped));
                 return;
             }
-            const [moved] = targetRefs.splice(sourceIndex, 1);
+            const [moved] = targetRefs.splice(orderedSourceIndex, 1);
             const insertAt = targetIndex >= 0 && targetIndex <= targetRefs.length ? targetIndex : targetRefs.length;
             targetRefs.splice(insertAt, 0, moved);
             const updated = reorderStoryboardShotsWithReferences(withSegmentRefs(target, targetRefs), targetRefs);
@@ -659,7 +665,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
             (segment.storyboardShots || []).map((shot) => String(shot.referenceBindingId || "")).filter(Boolean),
             (entry) => entry.ref.bindingId,
             (entry) => entry.ref.enabled !== false && entry.ref.type === "image" && inferReferenceRole(entry.ref) === "storyboard",
-            (entry) => entry.ref.enabled !== false && entry.ref.type === "image" && inferReferenceRole(entry.ref) !== "storyboard" && Boolean(entry.ref.subjectId || entry.ref.groupId));
+            (entry) => entry.ref.enabled !== false && entry.ref.type === "image" && inferReferenceRole(entry.ref) !== "storyboard" && Boolean(entry.ref.subjectId || entry.ref.groupId), segment.referenceOrder);
         const typeCounts: Record<H3Ref["type"], number> = { image: 0, video: 0, audio: 0 };
         const indexedRefs = orderedEntries.map((entry) => ({ ...entry, ordinal: ++typeCounts[entry.ref.type] }));
         const refs = indexedRefs.filter(({ ref }) => !storyboardMode || ref.type !== "image" || inferReferenceRole(ref) !== "storyboard");
